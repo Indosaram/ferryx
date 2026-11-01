@@ -42,7 +42,11 @@ pub const MANIFEST_URL: &str =
 /// Public keys (base64 of the 32 key bytes) whose manifest signatures this build accepts.
 /// `scripts/browser-engine/release-engine.mjs keygen` prints the line to add here; the private
 /// key never enters the repository. Keep the previous key listed for one release when rotating.
-pub const TRUSTED_MANIFEST_KEYS: &[&str] = &[];
+///
+/// The release key (2026-11-02): private half at
+/// `~/ferryx-releases/engine-signing/engine-release-ed25519.pem` on the owner's Mac; SHA-256 of
+/// the 32 raw public key bytes `0ea02f0520f6f2554d110ad9e5c236919642b62fbb034280a6578f0b95f2465c`.
+pub const TRUSTED_MANIFEST_KEYS: &[&str] = &["E4hDSjwJ9pydchacNAataX+j2/nWHaZ3csiXV7VrTKs="];
 
 /// A debug build may trust one more key from this variable, so QA can install an engine signed
 /// with a throwaway key. Release builds ignore it.
@@ -772,6 +776,30 @@ mod tests {
         assert_eq!(parse_public_key(&format!(" {encoded}\n")), Some(key));
         assert_eq!(parse_public_key(&encoded[..20]), None);
         assert_eq!(parse_public_key("@@@"), None);
+    }
+
+    #[test]
+    fn the_shipped_release_key_parses() {
+        assert!(!TRUSTED_MANIFEST_KEYS.is_empty());
+        for encoded in TRUSTED_MANIFEST_KEYS {
+            assert!(parse_public_key(encoded).is_some(), "{encoded} is not an ed25519 public key");
+        }
+    }
+
+    #[test]
+    fn a_manifest_signed_with_the_release_key_verifies_with_the_shipped_key() {
+        // Written by `release-engine.mjs manifest` over CI-built engine zips and signed with the
+        // release private key (which stays off the repository); checked against the compiled-in
+        // public key only.
+        let manifest = include_bytes!("fixtures/engine-release/manifest.json");
+        let signature = include_str!("fixtures/engine-release/manifest.json.sig");
+        let shipped: Vec<VerifyingKey> = TRUSTED_MANIFEST_KEYS.iter().filter_map(|key| parse_public_key(key)).collect();
+        let parsed = verify_manifest(manifest, signature, &shipped).expect("release signature verifies");
+        assert_eq!(parsed.version, ENGINE_VERSION);
+        assert!(!parsed.platforms.is_empty());
+        let mut tampered = manifest.to_vec();
+        tampered.push(b'\n');
+        assert_eq!(verify_manifest(&tampered, signature, &shipped), Err(InstallError::BadSignature));
     }
 
     #[test]

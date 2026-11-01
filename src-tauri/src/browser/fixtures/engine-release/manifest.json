@@ -1,0 +1,15 @@
+{
+  "version": "156.2.0-ferryx.1",
+  "platforms": {
+    "macos-aarch64": {
+      "url": "https://github.com/Indosaram/ferryx/releases/download/browser-engine-156.2.0-ferryx.1/engine-macos-aarch64.zip",
+      "sha256": "b17d6143bab9db8ecb152139882730caa10bc2f39c0bb3287f108f6665975b04",
+      "size": 150855055
+    },
+    "windows-x86_64": {
+      "url": "https://github.com/Indosaram/ferryx/releases/download/browser-engine-156.2.0-ferryx.1/engine-windows-x86_64.zip",
+      "sha256": "a9ece565c21f148b85c3466118a60129075b4e1037eef62041abce1f3fce7691",
+      "size": 189244449
+    }
+  }
+}

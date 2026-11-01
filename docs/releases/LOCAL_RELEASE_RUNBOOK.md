@@ -682,6 +682,25 @@ What the app checks before it installs an engine (`src-tauri/src/browser/engine_
 
 ### One-time: the manifest signing key
 
+The release key exists (created 2026-11-02 with `openssl genpkey -algorithm ed25519`) and its
+public half is already in `TRUSTED_MANIFEST_KEYS`:
+
+- private key: `~/ferryx-releases/engine-signing/engine-release-ed25519.pem` on the owner's Mac
+  (PKCS#8 PEM, file mode 0600, directory 0700). Never commit it or copy it into a log.
+- public key (base64 of the 32 raw bytes, also in `engine-release-ed25519.pub` beside it):
+  `E4hDSjwJ9pydchacNAataX+j2/nWHaZ3csiXV7VrTKs=`
+- fingerprint (SHA-256 of those 32 bytes):
+  `0ea02f0520f6f2554d110ad9e5c236919642b62fbb034280a6578f0b95f2465c`
+
+Check that a key file matches the fingerprint with
+`openssl pkey -in <pem> -pubout -outform DER | tail -c 32 | shasum -a 256`. The test
+`a_manifest_signed_with_the_release_key_verifies_with_the_shipped_key` checks a manifest that
+this key signed (`src-tauri/src/browser/fixtures/engine-release/`) against the compiled-in key.
+Pass the `.pem` path as `--key` to `manifest` below. Only an app release that carries this key
+accepts engines that it signed, so ship the app before you publish the engine.
+
+To make a new key instead (rotation):
+
 ```bash
 bun scripts/browser-engine/release-engine.mjs keygen --out "$HOME/.config/ferryx/engine-key"
 ```
@@ -725,12 +744,12 @@ into the same `$ENGINE_OUT` on the Mac, then sign the manifest and check it as t
 
 ```bash
 bun scripts/browser-engine/release-engine.mjs manifest --dir "$ENGINE_OUT" \
-  --key "$HOME/.config/ferryx/engine-key/engine-manifest.key"
+  --key "$HOME/ferryx-releases/engine-signing/engine-release-ed25519.pem"
 bun scripts/browser-engine/release-engine.mjs verify --dir "$ENGINE_OUT" \
-  --public-key "$(cat "$HOME/.config/ferryx/engine-key/engine-manifest.pub")"
+  --public-key "$(cat "$HOME/ferryx-releases/engine-signing/engine-release-ed25519.pub")"
 # the app's own verifier, same check in Rust:
 cargo run --manifest-path src-tauri/Cargo.toml --example verify_engine_manifest -- \
-  "$ENGINE_OUT" "$(cat "$HOME/.config/ferryx/engine-key/engine-manifest.pub")"
+  "$ENGINE_OUT" "$(cat "$HOME/ferryx-releases/engine-signing/engine-release-ed25519.pub")"
 ```
 
 Publishing is a separate, owner-approved step. Without `--publish` the command only prints the
@@ -741,8 +760,13 @@ to run under CI and fails if the release already exists (no `--clobber`).
 
 ```bash
 bun scripts/browser-engine/release-engine.mjs publish --dir "$ENGINE_OUT" \
-  --public-key "$(cat "$HOME/.config/ferryx/engine-key/engine-manifest.pub")" --publish
+  --public-key "$(cat "$HOME/ferryx-releases/engine-signing/engine-release-ed25519.pub")" --publish
 ```
+
+Nothing has been published yet: the release key was created and wired in, and signing was
+proved in CI on test zips, but publishing `browser-engine-<ENGINE_VERSION>` is left to the
+owner. Publish it only after an app release that contains the key is out, with the `build`,
+`manifest`, `verify` and `publish ... --publish` commands above on the owner's machines.
 
 Then install from a released app build on each OS (Settings > Browser > Chromium Engine >
 Download) and open a browser tab. If a published engine is bad, publish a fixed one under a new

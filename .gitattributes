@@ -1,2 +1,4 @@
 # Agent skills are shipped byte-for-byte (include_str!), so keep them LF on every checkout.
 src-tauri/resources/agent-skills/**/*.md text eol=lf
+# Signed engine manifest fixture: the signature covers these exact bytes, so never convert them.
+src-tauri/src/browser/fixtures/engine-release/** -text
