@@ -741,6 +741,17 @@ describe("Remote UI Components", () => {
     expect(shell).not.toHaveClass("min-h-screen");
   });
 
+  it("pins the shell to the visual viewport offset when iOS scrolls the layout viewport under the keyboard", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const viewport = Object.assign(new EventTarget(), { height: 720, offsetTop: 0 });
+    vi.stubGlobal("visualViewport", viewport);
+    vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(focusedState))));
+    await act(async () => { render(<RemoteApp />); });
+    const shell = screen.getByLabelText("Current desktop context").closest("header")?.parentElement;
+    act(() => { viewport.height = 380; viewport.offsetTop = 260; viewport.dispatchEvent(new Event("scroll")); });
+    expect(shell).toHaveStyle({ position: "fixed", top: "260px", height: "380px" });
+  });
+
   it("keeps long workspace identifiers within the vertical worktree picker", async () => {
     localStorage.setItem("ferryx_remote_token", "test-token");
     const workspaceId = "workspace-" + "unbroken".repeat(40);
@@ -774,14 +785,14 @@ describe("Remote UI Components", () => {
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Machines" })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Remove pairing" })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Confirm disconnect" })); });
-    expect(screen.getByRole("heading", { name: "Sign In to Ferryx" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Sign in to Ferryx" })).toBeInTheDocument();
     expect(screen.queryByTestId("remote-terminal")).toBeNull();
   });
 
   it("PairingPage renders the Ferryx Desktop PIN flow", () => {
     render(<PairingPage onPaired={vi.fn()} />);
 
-    const input = screen.getByPlaceholderText(/6-digit PIN/i);
+    const input = screen.getByLabelText("Pairing code");
     expect(input).toHaveAttribute("maxLength", "6");
     expect(screen.getByText(/Ferryx Desktop settings/i)).toBeInTheDocument();
   });
@@ -1732,7 +1743,7 @@ describe("Remote UI Components", () => {
     render(<RemoteApp />);
 
     // Must navigate to account sign-in surface and clear token
-    expect(await screen.findByRole("heading", { name: /Sign In to Ferryx/i })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /Sign in to Ferryx/i })).toBeInTheDocument();
     expect(screen.getByPlaceholderText("name@example.com")).toBeInTheDocument();
     expect(localStorage.getItem("ferryx_remote_token")).toBeNull();
   });
@@ -2528,13 +2539,13 @@ describe("Remote UI Components", () => {
     fireEvent.click(screen.getByRole("button", { name: "Machines" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove pairing" }));
 
-    expect(screen.queryByRole("heading", { name: /Sign In to Ferryx/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /Sign in to Ferryx/i })).not.toBeInTheDocument();
     expect(screen.getByTestId("remote-terminal")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Confirm disconnect" }));
 
     expect(screen.queryByTestId("remote-terminal")).not.toBeInTheDocument();
-    expect(await screen.findByRole("heading", { name: /Sign In to Ferryx/i })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /Sign in to Ferryx/i })).toBeInTheDocument();
     expect(screen.getByPlaceholderText("name@example.com")).toBeInTheDocument();
   });
 

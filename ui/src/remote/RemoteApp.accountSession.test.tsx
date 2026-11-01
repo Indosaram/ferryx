@@ -1002,7 +1002,8 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     await waitFor(() => {
       const alert = screen.getByRole("alert");
       expect(alert).toBeDefined();
-      expect(alert.textContent).toMatch(/Selection failed \(500\)|Machine sessions query failed \(500\)|Selection request failed/i);
+      expect(alert.textContent).toMatch(/Try again/);
+      expect(alert.textContent).not.toMatch(/500|Machine sessions|Selection failed/);
     });
 
     expect(screen.queryByTestId("remote-terminal-grid")).toBeNull();
@@ -1255,7 +1256,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
 
       const alert = screen.getByRole("alert");
       expect(alert).toBeDefined();
-      expect(alert.textContent).toMatch(/did not confirm|retry/i);
+      expect(alert.textContent).toMatch(/didn't confirm|try again/i);
       expect(screen.queryByTestId("remote-terminal-grid")).toBeNull();
     } finally {
       vi.useRealTimers();
@@ -1296,7 +1297,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
   it("names an offline desktop instead of the generic empty picker line", async () => {
     const picker = await openPickerWith([pickerMachine(false)]);
     await waitFor(() => {
-      expect(within(picker).getByText("Desktop is offline. Open Ferryx on your computer.")).toBeDefined();
+      expect(within(picker).getByText("Your computer is offline. Open Ferryx on it, then try again.")).toBeDefined();
     });
     expect(picker.textContent).not.toContain("No selectable desktop worktrees");
     expect(picker.textContent).not.toContain("Work MacBook Pro");
@@ -1305,7 +1306,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
   it("says no desktops are linked when the account has no machines", async () => {
     const picker = await openPickerWith([]);
     await waitFor(() => {
-      expect(within(picker).getByText("No desktops linked to this account.")).toBeDefined();
+      expect(within(picker).getByText(/No computers linked to this account yet/)).toBeDefined();
     });
     expect(picker.textContent).not.toContain("No selectable desktop worktrees");
   });
@@ -1812,19 +1813,19 @@ describe("RemoteApp - Account Session Phone Flow", () => {
 
       // When eight seconds pass before the answer arrives, the selection still times out on schedule
       await act(async () => { await vi.advanceTimersByTimeAsync(8000); });
-      expect(screen.queryByText(/did not confirm/i)).not.toBeNull();
+      expect(screen.queryByText(/didn't confirm/i)).not.toBeNull();
       // and no retry loop stood behind the timeout
       expect(selectionLookups).toBe(lookupsBeforeTimeout);
       sessionsGate.resolve();
       await act(async () => { await vi.advanceTimersByTimeAsync(0); });
 
       // Then the late answer completes the selection and replaces the stale "did not confirm" error
-      expect(screen.queryByText(/did not confirm/i)).toBeNull();
+      expect(screen.queryByText(/didn't confirm/i)).toBeNull();
     } finally {
       vi.useRealTimers();
     }
     await waitFor(() => expect(screen.getByTestId("remote-view-mode-terminal")).toBeInTheDocument());
-    expect(screen.queryByText(/did not confirm/i)).toBeNull();
+    expect(screen.queryByText(/didn't confirm/i)).toBeNull();
   });
 
   it("never lets a timed-out lookup overwrite a newer selection when its answer lands late", async () => {
@@ -1899,7 +1900,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
       const staleLookups = selectionLookups;
       expect(staleLookups).toBeGreaterThan(0);
       await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
-      expect(screen.queryByText(/did not confirm/i)).not.toBeNull();
+      expect(screen.queryByText(/didn't confirm/i)).not.toBeNull();
       expect(selectionLookups).toBe(staleLookups);
     } finally {
       vi.useRealTimers();
@@ -1919,16 +1920,16 @@ describe("RemoteApp - Account Session Phone Flow", () => {
 
     // Then it neither records its session nor settles the newer selection
     expect(storedSessionIds()).not.toContain("machine-sess-stale");
-    expect(screen.queryByText("Activating Selected Worktree")).not.toBeNull();
+    expect(screen.queryByTestId("remote-connecting")).not.toBeNull();
     // and its late answer issues no further lookup: requests stay bounded per attempt
     expect(selectionLookups).toBe(lookupsAfterRetry);
 
     // And the newer selection still completes with its own answer
     await act(async () => { freshGate.resolve(); await freshGate.promise; });
-    await waitFor(() => expect(screen.queryByText("Activating Selected Worktree")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("remote-connecting")).toBeNull());
     expect(storedSessionIds()).toContain("machine-sess-1");
     expect(storedSessionIds()).not.toContain("machine-sess-stale");
-    expect(screen.queryByText(/did not confirm/i)).toBeNull();
+    expect(screen.queryByText(/didn't confirm/i)).toBeNull();
   });
 
   it("drops a timed-out desktop follow once the desktop refocuses the session already on screen", async () => {
@@ -2463,7 +2464,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     expect(decoded).not.toContain("test-account-session-token");
   });
 
-  it("shows the structured relay error code and message with retry when discovery fails", async () => {
+  it("shows a plain discovery failure with retry and never the relay error code", async () => {
     const picker = await openPickerWith(
       [pickerMachine(true)],
       new Response(
@@ -2472,7 +2473,8 @@ describe("RemoteApp - Account Session Phone Flow", () => {
       ),
     );
     const alert = await waitFor(() => within(picker).getByRole("alert"));
-    expect(alert.textContent).toContain("GRANT_DELIVERY_FAILED");
+    expect(alert.textContent).not.toContain("GRANT_DELIVERY_FAILED");
+    expect(alert.textContent).toMatch(/Couldn't (load|reach)/);
     expect(within(picker).getByRole("button", { name: "Retry loading worktrees" })).toBeDefined();
     expect(picker.textContent).not.toContain("No selectable desktop worktrees");
   });

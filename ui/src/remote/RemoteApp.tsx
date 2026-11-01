@@ -1,4 +1,4 @@
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, LoaderCircle } from "lucide-react";
 import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Toaster } from "../components/ui/sonner";
 import { createCoalescedRunner } from "./coalescedRunner";
@@ -28,6 +28,7 @@ import {
   type RemoteWorkspaceModel,
 } from "./RemoteSessionList";
 import { BUILD_STAMP } from "../lib/buildStamp";
+import { isMobileCompanion } from "../lib/clientRuntime";
 import { MobileTopBar, type MobileTopBarActivityState } from "./chat/MobileTopBar";
 import { MobileSessionSwitcherSheet } from "./chat/MobileSessionSwitcherSheet";
 import { MobileOverflowSheet } from "./chat/MobileOverflowSheet";
@@ -64,7 +65,6 @@ import {
 import {
   referenceAnswerFromText,
   referenceAnswerHint,
-  REFERENCE_PROMPT_STALE_MESSAGE,
 } from "./chat/referencePromptAnswer";
 import {
   REFERENCE_OUTCOME_UNKNOWN_CODE,
@@ -106,7 +106,7 @@ import {
 
 import { AccountLoginPage } from "./AccountLoginPage";
 import { ApprovePage, isApproveRoute } from "./ApprovePage";
-import { isPairRoute, PairingPage } from "./PairingPage";
+import { isPairRoute, PAIR_ROUTE_PATH, PairingPage } from "./PairingPage";
 import {
   useAccountWorktrees,
   type AccountWorktreeOption,
@@ -177,17 +177,128 @@ import type { TunnelTransport, TunnelWebSocket } from "./attachTunnel";
 import { getOrCreateAttachKey } from "./accountAttach";
 import {
   openRelayE2ETransport,
-  RELAY_REPAIR_MESSAGE,
   registerRelayE2E,
   RelayRepairRequiredError,
   relayE2EState,
   REPAIR_REQUIRED,
 } from "./relayE2E";
+import { userFacingError } from "./userFacingError";
+
+type SelectionFailureCode =
+  | "LIST_FAILED"
+  | "SERVER"
+  | "SESSION_GONE"
+  | "EPOCH_CHANGED"
+  | "EPOCH_UNKNOWN"
+  | "SSH_NO_TERMINAL"
+  | "INVENTORY_INCOMPLETE"
+  | "CREATE_FAILED"
+  | "SELECT_FAILED";
+
+/** A selection refusal with its cause as a code; the status stays for diagnostics only. */
+class SelectionFailure extends Error {
+  constructor(readonly code: SelectionFailureCode, readonly status?: number) {
+    super(status === undefined ? code : `${code} (${status})`);
+    this.name = "SelectionFailure";
+  }
+}
+
+const SELECTION_FAILURE_COPY: Record<SelectionFailureCode, string> = {
+  LIST_FAILED: "Your computer didn't answer. Try again.",
+  SERVER: "Your computer had a problem answering. Try again in a moment.",
+  SESSION_GONE: "That terminal has closed. Pick another session or start a new one.",
+  EPOCH_CHANGED: "That terminal was restarted on your computer. Open it again to continue.",
+  EPOCH_UNKNOWN: "Couldn't attach to that terminal yet. Try again in a moment.",
+  SSH_NO_TERMINAL: "No terminal is running in this SSH project. Open one on your computer first.",
+  INVENTORY_INCOMPLETE: "Your computer is still listing its terminals. Try again in a moment.",
+  CREATE_FAILED: "Couldn't start a new terminal on your computer. Try again.",
+  SELECT_FAILED: "Your computer didn't accept that choice. Try again.",
+};
+
+function selectionErrorMessage(error: unknown): string {
+  if (error instanceof SelectionFailure) return SELECTION_FAILURE_COPY[error.code];
+  return userFacingError(error, { action: "open this worktree" });
+}
+
+/** One plain sentence per picker failure cause; machine codes never reach the picker. */
+function pickerFailureMessage(status: { errorCode?: string; error?: string }): string {
+  const code = status.errorCode ?? null;
+  if (code === "UNAUTHORIZED") return "You were signed out. Sign in again to see your worktrees.";
+  return userFacingError({ code: code ?? undefined }, { action: "load worktrees from your computer" });
+}
+
+/** The worktree name a typed label becomes: lowercase letters, numbers and single dashes. */
+function worktreeSlugFrom(entered: string): string {
+  return entered.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/** How long a connection may take before the screen says the computer may be asleep. */
+const SLOW_CONNECT_MS = 10000;
+
+/** The Session screen while a worktree is being opened: progress, a way out, and the cause on failure. */
+function ConnectingBody({ label, error, onRetry, onCancel }: {
+  readonly label: string;
+  readonly error: string | null;
+  readonly onRetry?: () => void;
+  readonly onCancel: () => void;
+}) {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    if (error) return;
+    setSlow(false);
+    const timer = setTimeout(() => setSlow(true), SLOW_CONNECT_MS);
+    return () => clearTimeout(timer);
+  }, [error, label]);
+  return (
+    <div data-testid="remote-connecting" className="flex flex-1 flex-col items-center justify-center gap-4 bg-background p-6 text-center text-foreground">
+      <div className="space-y-2">
+        <h2 className="text-base font-semibold tracking-tight">{error ? `Couldn't open ${label}` : `Opening ${label}...`}</h2>
+        {error ? null : (
+          <div role="status" className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
+            <LoaderCircle aria-hidden="true" className="size-4 animate-spin motion-reduce:animate-none" />
+            <span>{slow ? "Still connecting... your computer may be asleep." : "Connecting to your computer..."}</span>
+          </div>
+        )}
+      </div>
+      {error ? (
+        <p role="alert" className="max-w-sm rounded-lg bg-destructive/10 p-3.5 text-left text-sm leading-relaxed text-foreground">
+          {error}
+        </p>
+      ) : null}
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        {error && onRetry ? (
+          <button
+            type="button"
+            onClick={onRetry}
+            className="flex h-11 items-center rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            Try again
+          </button>
+        ) : null}
+        <button
+          type="button"
+          onClick={onCancel}
+          className="flex h-11 items-center rounded-lg border border-border px-4 text-sm font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          {error ? "Back to worktrees" : "Cancel"}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 const REMOTE_ACTIVE_SELECTION_CHANGED_EVENT = "remote_active_selection_changed";
 /// How long a selection may stay unconfirmed before the picker is released for
 /// a retry. The desktop normally republishes within one refresh round-trip.
 const CONFIRMATION_TIMEOUT_MS = 6000;
+/** How long the foreground probe of the account tunnel may take before it counts as dead. */
+const TUNNEL_PROBE_TIMEOUT_MS = 5000;
+/** A dropped events socket is shown only once it stays down this long; brief blips stay quiet. */
+const CONNECTION_STRIP_DELAY_MS = 3000;
+/** The key a shell overlay's history entry carries; the phone screens use their own key. */
+const OVERLAY_HISTORY_KEY = "ferryxOverlay";
+/** How long a tapped phone alert waits for its session before it is reported as gone. */
+const ALERT_TAP_TIMEOUT_MS = 10000;
 
 type RemoteActiveSelectionEvent = {
   readonly workspaceId: string | null;
@@ -409,11 +520,17 @@ const CANDIDATE_PRIORITY: Record<CandidateEndpointType, number> = {
   tailscale: 20,
   relay: 10,
 };
+/** Transport detail, shown only behind the health label: how this phone reaches the computer. */
 const CONNECTION_BADGE_LABEL: Record<CandidateEndpointType, string> = {
-  relay: "Relay (Proxy)",
-  lan: "LAN (Direct)",
-  tailscale: "Tailscale (Direct)",
+  relay: "through Ferryx relay",
+  lan: "on your local network",
+  tailscale: "over Tailscale",
 };
+const CONNECTION_HEALTH_LABEL = {
+  connected: "Connected",
+  reconnecting: "Reconnecting...",
+  offline: "Offline",
+} as const;
 
 function directCandidate(type: "lan" | "tailscale", value: unknown): CandidateEndpoint | null {
   const url = normalizeDirectCandidateOrigin(value);
@@ -680,25 +797,37 @@ export async function fetchChatSessionRows(args: {
   }
 }
 
-const CHAT_REFRESH_WARNING = "Could not refresh the transcript; showing the last known state.";
-const CHAT_UNAVAILABLE_WARNING = "This session's transcript is not available to this device.";
+const CHAT_REFRESH_WARNING = "Couldn't refresh the chat. Showing the last messages received.";
+const CHAT_UNAVAILABLE_WARNING = "This session's chat can't be shown on this phone.";
 const CHAT_NO_READER_WARNING =
-  "This pane runs no agent, so there is no transcript reader for it. Open the terminal to see its output.";
+  "No agent is running in this terminal, so there is no chat to show. Open the terminal to see its output.";
 
 const CHAT_RETENTION_WARNING = "Older messages are hidden to keep the phone view responsive.";
 const CHAT_SEND_FAILED_WARNING = "That message was not delivered. It is back in the message box.";
 const CHAT_VIEW_ONLY_WARNING =
-  "View-only access: this device cannot type into a pane. That message was not delivered. It is back in the message box.";
+  "This phone can only view this session, so that message wasn't sent. It is back in the message box.";
 const CHAT_OUTCOME_UNKNOWN_WARNING =
-  "That message may have reached the session, but the host did not confirm it. It is back in the message box and will not be sent again on its own.";
+  "That message may have reached the session, but your computer didn't confirm it. It is back in the message box and won't be sent again on its own.";
 const CHAT_STOP_REFUSED_WARNING =
-  "The chat does not know how to stop this pane, so nothing was sent. Open the terminal if you need to interrupt it.";
+  "Stop isn't available for this agent here, so nothing was sent. Open the terminal and press Ctrl-C to interrupt it.";
 const CHAT_STOP_FAILED_WARNING = "The stop request was not delivered.";
-const CHAT_HELD_WARNING = "Held: this prompt takes one of its own options, so nothing was sent.";
+const CHAT_HELD_WARNING = "Not sent: answer with one of the options above.";
 const CHAT_AMBIGUOUS_ANSWER_WARNING = "That answer did not name exactly one option, so it was not sent.";
 const CHAT_NO_SESSION_WARNING = "This session is not attached yet, so nothing was sent.";
 const CHAT_SUBMIT_TOO_LONG_WARNING = "That message is longer than the composer allows, so it was not sent.";
 const CHAT_OLDER_FAILED_WARNING = "Could not load earlier messages.";
+const CHAT_PROMPT_CHANGED_MESSAGE = "The question changed on your computer. Check it and answer again.";
+const CHAT_HELD_REMOVED_NOTICE = "Held message removed.";
+/** How long a removed held message can be brought back. */
+const CHAT_HELD_UNDO_MS = 5000;
+
+/** A file refusal as one plain sentence: the limit codes name the limit, nothing else leaks. */
+function chatAttachErrorMessage(error: unknown): string {
+  const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+  if (code === "PAYLOAD_TOO_LARGE") return "That file is over the size limit for one message, so it wasn't attached.";
+  if (code === "UNSUPPORTED_MEDIA_TYPE") return "That kind of file can't be attached here.";
+  return userFacingError(error, { action: "attach that file" });
+}
 
 /** The reference-chat page size for the newest read and for an older page. */
 const CHAT_HISTORY_PAGE_LIMIT = 200;
@@ -1116,6 +1245,10 @@ export const RemoteApp: React.FC = () => {
     return (
       <PairingPage
         transportUrl={origin}
+        onUseAccount={() => {
+          window.history.replaceState(null, "", "/");
+          setPairRoute(false);
+        }}
         onPaired={(token, metadata) => {
           const machineId = optionalString(metadata?.machineId);
           const displayName = optionalString(metadata?.displayName);
@@ -1155,6 +1288,10 @@ export const RemoteApp: React.FC = () => {
       viewMode={viewMode}
       onViewModeChange={setViewMode}
       initialMagicLinkRequested={magicLinkOverridden}
+      onPairWithCode={() => {
+        window.history.pushState(null, "", PAIR_ROUTE_PATH);
+        setPairRoute(true);
+      }}
       onMagicLinkConsumed={() => {
         remoteHostStore.setActiveHost(null);
         setMagicLinkOverridden(false);
@@ -1216,7 +1353,8 @@ export const RemoteHostConnection: React.FC<{
   onViewModeChange?: (mode: "chat" | "terminal" | "browser") => void;
   initialMagicLinkRequested?: boolean;
   onMagicLinkConsumed?: () => void;
-}> = ({ hostId, relayUrl, readUrlHints, viewMode: controlledViewMode, onViewModeChange, initialMagicLinkRequested = false, onMagicLinkConsumed }) => {
+  onPairWithCode?: () => void;
+}> = ({ hostId, relayUrl, readUrlHints, viewMode: controlledViewMode, onViewModeChange, initialMagicLinkRequested = false, onMagicLinkConsumed, onPairWithCode }) => {
   const desktopSidebar = useRemoteDesktopSidebar();
   const [magicLinkActive, setMagicLinkActive] = useState(initialMagicLinkRequested);
   const [token, setToken] = useState<string | null>(() => {
@@ -1263,14 +1401,26 @@ export const RemoteHostConnection: React.FC<{
   const [menuOpen, setMenuOpen] = useState(false);
   const [phoneAlertsOpen, setPhoneAlertsOpen] = useState(false);
   const [creationError, setCreationError] = useState<string | null>(null);
+  const [signedOutNotice, setSignedOutNotice] = useState<string | null>(null);
+  /** When the shell's events socket last went down; null while it is up. */
+  const [eventsDownSince, setEventsDownSince] = useState<number | null>(null);
   const creationSessionsRef = useRef<Set<string> | null>(null);
-  const [viewportHeight, setViewportHeight] = useState(() => window.visualViewport?.height);
+  /* The one owner of the soft-keyboard layout: the root follows the visual viewport's height and
+     its offset, so iOS scrolling the layout viewport under the keyboard never hides the top bar or
+     the composer. No focused-field scrolling: the composer docks above the keyboard by layout. */
+  const [visualViewportBox, setVisualViewportBox] = useState(() =>
+    window.visualViewport ? { height: window.visualViewport.height, top: window.visualViewport.offsetTop } : null,
+  );
   useEffect(() => {
     const viewport = window.visualViewport;
     if (!viewport) return;
-    const resize = () => setViewportHeight(viewport.height);
-    viewport.addEventListener("resize", resize);
-    return () => viewport.removeEventListener("resize", resize);
+    const update = () => setVisualViewportBox({ height: viewport.height, top: viewport.offsetTop });
+    viewport.addEventListener("resize", update);
+    viewport.addEventListener("scroll", update);
+    return () => {
+      viewport.removeEventListener("resize", update);
+      viewport.removeEventListener("scroll", update);
+    };
   }, []);
   const [hostDrawerOpen, setHostDrawerOpen] = useState(false);
   // Chat is the default at EVERY width: the terminal is a mode the user asks for, never the
@@ -1342,6 +1492,7 @@ export const RemoteHostConnection: React.FC<{
 
   const [browserSessions, setBrowserSessions] = useState<Array<{ browserId: string; title?: string; url?: string }>>([]);
   const [selectedBrowserId, setSelectedBrowserId] = useState<string | null>(null);
+  const [browserListFailed, setBrowserListFailed] = useState(false);
   // First render always speaks to the relay; a verified probe swaps this for a direct endpoint.
   const [transport, setTransport] = useState<CandidateEndpoint>(() => relayEndpoint(relayUrl));
   const remoteHostState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
@@ -1455,6 +1606,7 @@ export const RemoteHostConnection: React.FC<{
   // A relay that refused plaintext (E2E_REQUIRED) for this base; reconnecting stops until re-pair.
   const [relayRepairErrorBase, setRelayRepairErrorBase] = useState<string | null>(null);
   const [relayRepairDismissedBase, setRelayRepairDismissedBase] = useState<string | null>(null);
+  const [relayRepairConfirming, setRelayRepairConfirming] = useState(false);
   const relayRepairError = relayRepairErrorBase !== null && relayRepairErrorBase === transportBaseUrl;
   const showRelayRepairNotice = relayRepairError
     || (relayE2EMode === REPAIR_REQUIRED && relayRepairDismissedBase !== transportBaseUrl);
@@ -1875,10 +2027,22 @@ export const RemoteHostConnection: React.FC<{
           }
         }
       }
-    } catch {
-      // Ignore network errors
+      setBrowserListFailed(!response.ok && response.status !== 404);
+    } catch (error) {
+      console.warn("Browser session list failed", error);
+      setBrowserListFailed(true);
     }
   }, [token, model.context.workspaceId, model.context.worktreeSlug, transportBaseUrl, selectedBrowserId]);
+  // A host that publishes browser sessions for this worktree makes the browser view reachable.
+  // Read through a ref: picking a browser must not refetch the list.
+  const fetchBrowserSessionsRef = useRef(fetchBrowserSessions);
+  fetchBrowserSessionsRef.current = fetchBrowserSessions;
+  const browserContextWorkspace = model.context.workspaceId;
+  const browserContextWorktree = model.context.worktreeSlug;
+  useEffect(() => {
+    if (!token || !browserContextWorkspace) return;
+    void fetchBrowserSessionsRef.current();
+  }, [token, browserContextWorkspace, browserContextWorktree, transportBaseUrl]);
 
   useEffect(() => () => {
     workspaceRefreshVersionRef.current += 1;
@@ -2049,6 +2213,7 @@ export const RemoteHostConnection: React.FC<{
       });
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
+          setSignedOutNotice("This phone was signed out of your computer. Pair it again or sign in to continue.");
           disconnect();
         }
         return null;
@@ -2339,6 +2504,7 @@ export const RemoteHostConnection: React.FC<{
         if (!activeTunnelConnection && transport.url !== relayUrl) rollbackTransport();
         else {
           console.warn("Event socket connection failed", error);
+          setEventsDownSince((since) => since ?? Date.now());
           retry = setTimeout(connect, Math.min(10000, 1000 * 2 ** attempt) * (1 - 0.5 * Math.random()));
           attempt = Math.min(attempt + 1, 4);
         }
@@ -2356,6 +2522,7 @@ export const RemoteHostConnection: React.FC<{
       current.onopen = () => {
         if (disposed || socket !== current) return;
         attempt = 0;
+        setEventsDownSince(null);
         workspaceRefreshVersionRef.current += 1;
         // Pushes missed while the socket was down: every Inbox row reads its card again.
         inboxRefreshRef.current?.();
@@ -2376,6 +2543,7 @@ export const RemoteHostConnection: React.FC<{
       current.onclose = (event?: unknown) => {
         if (disposed || socket !== current) return;
         socket = null;
+        setEventsDownSince((since) => since ?? Date.now());
         const limitState = planLimitStateFromCloseEvent(event);
         if (limitState) {
           handlePlanLimit(limitState);
@@ -2405,6 +2573,7 @@ export const RemoteHostConnection: React.FC<{
       disposed = true;
       abort.abort();
       if (retry !== null) clearTimeout(retry);
+      setEventsDownSince(null);
       socket?.close();
       window.removeEventListener("online", recover);
       document.removeEventListener("visibilitychange", recover);
@@ -2423,9 +2592,9 @@ export const RemoteHostConnection: React.FC<{
       confirmationTimeoutRef.current = null;
       if (pendingSelectionRef.current !== option) return;
       if (creationSessionsRef.current) {
-        setCreationError("Desktop did not confirm a new terminal. Check the desktop before retrying.");
+        setCreationError("Your computer didn't confirm the new terminal. Check it before trying again.");
       } else if (initialAccountTargetRef.current) {
-        setCreationError("Desktop did not confirm the selected worktree. Please retry or go back.");
+        setCreationError("Your computer didn't confirm this worktree. It may be asleep. Try again or go back.");
       }
       clearPendingSelection();
       // The picker is released, but the attempt's own bounded request may still answer.
@@ -2481,12 +2650,12 @@ export const RemoteHostConnection: React.FC<{
         if (!attemptIsCurrent()) return false;
 
         if (sessListRes.status < 200 || sessListRes.status >= 300) {
-          throw new Error(`Machine sessions query failed (${sessListRes.status})`);
+          throw new SelectionFailure(sessListRes.status >= 500 ? "SERVER" : "LIST_FAILED", sessListRes.status);
         }
 
         const sessListData = JSON.parse(new TextDecoder().decode(sessListRes.body));
         if (!sessListData || typeof sessListData !== "object" || !Array.isArray(sessListData.sessions)) {
-          throw new Error("Machine sessions query returned invalid payload");
+          throw new SelectionFailure("LIST_FAILED");
         }
         const isComplete = sessListData.completeness === "complete";
         const rows: MinimalMachineSession[] = sessListData.sessions;
@@ -2500,7 +2669,7 @@ export const RemoteHostConnection: React.FC<{
           : accountDiscoveryRef.current.sessionInventories[machineId] ?? null;
 
         if (option.machineId && option.machineId !== machineId) {
-          throw new Error("Selected session belongs to a different machine");
+          throw new SelectionFailure("SESSION_GONE");
         }
 
         if (!createTerminal) {
@@ -2532,12 +2701,12 @@ export const RemoteHostConnection: React.FC<{
               null;
             const rowEpoch = exact?.target?.daemonEpoch ?? exact?.daemonEpoch ?? null;
             if (exact && expectedEpoch && rowEpoch !== null && rowEpoch !== undefined && String(rowEpoch) !== expectedEpoch) {
-              throw new Error(`Machine session ${option.sessionId} was replaced (daemon epoch changed)`);
+              throw new SelectionFailure("EPOCH_CHANGED");
             }
             if (exact) {
               targetSession = exact;
             } else {
-              throw new Error(`Requested machine session ${option.sessionId} is unavailable`);
+              throw new SelectionFailure("SESSION_GONE");
             }
           } else {
             const cachedId = getAccountPreferredSessionId(relayUrl, machineId, option.workspaceId, option.worktreeSlug);
@@ -2589,10 +2758,10 @@ export const RemoteHostConnection: React.FC<{
           /* The machine API cannot start a terminal on an SSH-host project (the desktop
              answers INVALID_PATH); say so instead of surfacing a bare status code. */
           if (option.workspaceId.startsWith("ssh:")) {
-            throw new Error("No running terminal on this SSH project. Open one from the desktop first.");
+            throw new SelectionFailure("SSH_NO_TERMINAL");
           }
           if (!isComplete) {
-            throw new Error("Cannot create machine session: session inventory is incomplete");
+            throw new SelectionFailure("INVENTORY_INCOMPLETE");
           }
           const createPayload = {
             requestId: crypto.randomUUID(),
@@ -2620,7 +2789,7 @@ export const RemoteHostConnection: React.FC<{
             targetSession = JSON.parse(new TextDecoder().decode(createRes.body));
           } else {
             status = createRes.status;
-            throw new Error(`Failed to create machine session (${createRes.status})`);
+            throw new SelectionFailure(createRes.status >= 500 ? "SERVER" : "CREATE_FAILED", createRes.status);
           }
         }
 
@@ -2699,15 +2868,15 @@ export const RemoteHostConnection: React.FC<{
         status = response.status;
       }
       if (pendingSelectionRef.current !== option) return false;
-      if (!ok) throw new Error(`Selection failed (${status})`);
+      if (!ok) throw new SelectionFailure(status >= 500 ? "SERVER" : "SELECT_FAILED", status);
 
       selectionRequestAcceptedRef.current = true;
       if (initialAccountTargetRef.current || selectionEventReceivedRef.current) void confirmSelection(option);
       return true;
     } catch (error) {
       if (!attemptIsCurrent()) return false;
-      const message = error instanceof Error ? error.message : "Selection request failed";
-      setCreationError(message);
+      console.warn("Selection failed", error);
+      setCreationError(selectionErrorMessage(error));
       clearPendingSelection();
       return false;
     }
@@ -2919,10 +3088,132 @@ export const RemoteHostConnection: React.FC<{
     // Enabled only without a plan-limit notice, so the notice this sets closes every socket.
     onPlanLimit: handlePlanLimit,
   });
+  /* A relay drops an idle tunnel (about 2 minutes) and a suspended phone can come back to a
+     socket that died silently. Coming back to the foreground or back online probes the active
+     tunnel and replaces a dead one before the user's next action meets STREAM_CLOSED. */
+  const [tunnelResume, setTunnelResume] = useState<"idle" | "reconnecting" | "failed">("idle");
+  const tunnelResumeInFlightRef = useRef(false);
+  const resumeTunnel = useCallback(async (force: boolean) => {
+    const current = activeTunnelConnection;
+    if (!current || !accountSessionToken || tunnelResumeInFlightRef.current) return;
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    tunnelResumeInFlightRef.current = true;
+    try {
+      let alive = !current.isClosed;
+      if (alive && !force) {
+        alive = await Promise.race([
+          current.transport
+            .fetchLike("/api/v1/workspace/projects", { headers: { Authorization: `Bearer ${current.deviceToken}` } })
+            .then(() => true, () => false),
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), TUNNEL_PROBE_TIMEOUT_MS)),
+        ]);
+      }
+      if (alive && !force) return;
+      setTunnelResume("reconnecting");
+      const machineId = current.machine.machineId;
+      const conn = await accountDiscoveryRef.current.acquireConnection(machineId);
+      if (accountSessionTokenRef.current !== accountSessionToken) {
+        conn?.close();
+        return;
+      }
+      if (!conn) {
+        setTunnelResume("failed");
+        return;
+      }
+      setActiveTunnelConnection(createAccountConnection({
+        relayUrl,
+        accountSessionToken,
+        machine: conn.machine,
+        deviceToken: conn.deviceToken,
+        httpTransport: conn.transport,
+        httpClose: conn.close,
+      }));
+      setToken(conn.deviceToken);
+      setTerminalRetryGeneration((generation) => generation + 1);
+      setTunnelResume("idle");
+    } finally {
+      tunnelResumeInFlightRef.current = false;
+    }
+  }, [activeTunnelConnection, accountSessionToken, relayUrl]);
+  useEffect(() => {
+    if (!activeTunnelConnection) {
+      setTunnelResume("idle");
+      return;
+    }
+    const onResume = () => void resumeTunnel(false);
+    document.addEventListener("visibilitychange", onResume);
+    window.addEventListener("online", onResume);
+    return () => {
+      document.removeEventListener("visibilitychange", onResume);
+      window.removeEventListener("online", onResume);
+    };
+  }, [activeTunnelConnection, resumeTunnel]);
+  const [browserOnline, setBrowserOnline] = useState(() => typeof navigator === "undefined" || navigator.onLine !== false);
+  useEffect(() => {
+    const update = () => setBrowserOnline(navigator.onLine !== false);
+    window.addEventListener("online", update);
+    window.addEventListener("offline", update);
+    return () => {
+      window.removeEventListener("online", update);
+      window.removeEventListener("offline", update);
+    };
+  }, []);
+  const [eventsDownLong, setEventsDownLong] = useState(false);
+  useEffect(() => {
+    if (eventsDownSince === null) {
+      setEventsDownLong(false);
+      return;
+    }
+    const timer = setTimeout(() => setEventsDownLong(true), CONNECTION_STRIP_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [eventsDownSince]);
+  const connectionHealth: "connected" | "reconnecting" | "offline" = !browserOnline
+    ? "offline"
+    : tunnelResume !== "idle" || eventsDownLong
+      ? "reconnecting"
+      : "connected";
   const phoneBack = phoneNav.back;
   // A selection backed out of on the Session screen ("Back to Worktrees") leaves no session to
   // show, so the screen returns to the home it came from.
-  const phoneSessionLost = phoneHome && phoneNav.screen.kind === "session" && !token && !initialAccountTarget;
+  /* Platform back closes the topmost shell overlay before it walks the phone screens: an open
+     sheet, drawer or picker owns one history entry, and a popstate while it is open closes it.
+     Closing it any other way pops that entry so back never revisits a closed overlay. */
+  const overlayOpen = !desktopSidebar
+    && (selectorOpen || switcherOpen || menuOpen || phoneAlertsOpen || hostDrawerOpen || inboxOpen || accountSheetOpen);
+  const overlayEntryRef = useRef(false);
+  useEffect(() => {
+    if (!overlayOpen) {
+      if (overlayEntryRef.current) {
+        overlayEntryRef.current = false;
+        if (window.history.state?.[OVERLAY_HISTORY_KEY]) window.history.back();
+      }
+      return;
+    }
+    if (!overlayEntryRef.current) {
+      overlayEntryRef.current = true;
+      const base = window.history.state && typeof window.history.state === "object" ? window.history.state : {};
+      window.history.pushState({ ...base, [OVERLAY_HISTORY_KEY]: true }, "");
+    }
+    const onPop = (event: PopStateEvent) => {
+      if ((event.state as Record<string, unknown> | null)?.[OVERLAY_HISTORY_KEY]) return;
+      overlayEntryRef.current = false;
+      setSelectorOpen(false);
+      setSwitcherOpen(false);
+      setMenuOpen(false);
+      setPhoneAlertsOpen(false);
+      setHostDrawerOpen(false);
+      setInboxOpen(false);
+      setAccountSheetOpen(false);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [overlayOpen]);
+  /** The worktree a phone tap is opening while its tunnel is acquired; shown at once on the Session screen. */
+  const [phoneOpening, setPhoneOpening] = useState<string | null>(null);
+  const openPhoneSessionRef = useRef<(option: AccountWorktreeOption) => void>(() => {});
+  /** Inbox rows a tap could not open, marked on the row itself as well as in the toast. */
+  const [unopenableRowIds, setUnopenableRowIds] = useState<ReadonlySet<string>>(() => new Set());
+  const phoneSessionLost = phoneHome && phoneNav.screen.kind === "session" && !token && !initialAccountTarget && phoneOpening === null;
   useEffect(() => {
     if (phoneSessionLost) phoneBack();
   }, [phoneBack, phoneSessionLost]);
@@ -3252,9 +3543,7 @@ export const RemoteHostConnection: React.FC<{
       if (!targetPath.includes("daemonEpoch=") && effectiveSessionId) {
         const epoch = await getSessionDaemonEpoch(effectiveSessionId);
         if (!epoch) {
-          throw new Error(
-            `Cannot connect terminal: daemonEpoch is missing for session ${effectiveSessionId}`,
-          );
+          throw new SelectionFailure("EPOCH_UNKNOWN");
         }
         const sep = targetPath.includes("?") ? "&" : "?";
         targetPath = `${targetPath}${sep}daemonEpoch=${encodeURIComponent(epoch)}`;
@@ -4142,7 +4431,8 @@ export const RemoteHostConnection: React.FC<{
         return true;
       }
       if (!outcome.ok) {
-        setChatPromptError(outcome.message);
+        console.warn("Prompt answer refused", outcome.code);
+        setChatPromptError(userFacingError({ code: outcome.code }, { action: "send that answer" }));
         throw new ReferencePromptRefused(outcome.code, outcome.message);
       }
       setChatTypedAnswer(null);
@@ -4249,7 +4539,8 @@ export const RemoteHostConnection: React.FC<{
           );
           staged.push(receipt);
         } catch (error) {
-          failure = error instanceof Error ? error.message : String(error);
+          console.warn("Staging a chat file failed", error);
+          failure = chatAttachErrorMessage(error);
           break;
         }
         if (!chatTargetIsCurrent(target)) break;
@@ -4293,13 +4584,13 @@ export const RemoteHostConnection: React.FC<{
       const entry = chatStagedFiles.find((file) => file.receipt.attachmentId === attachmentId);
       if (!entry) return;
       if (heldChatFileIsReferenced(target, entry)) {
-        setChatAttachError("Edit or remove the held messages referencing this file before removing it.");
+        setChatAttachError("A held message uses this file. Edit or remove that message first.");
         return;
       }
       const cleaned = await cancelReferenceChatFile({ transport: chatFileTransport }, target, entry);
       const stillCurrent = chatTargetIsCurrent(target);
       if (!cleaned.cleaned) {
-        if (stillCurrent) setChatAttachError("The host did not confirm that the staged file was removed.");
+        if (stillCurrent) setChatAttachError("Your computer didn't confirm the file was removed. Try again.");
         return;
       }
       if (stillCurrent) {
@@ -4340,12 +4631,42 @@ export const RemoteHostConnection: React.FC<{
     setChatHeld([...referenceQueues.read(target)]);
   }, []);
 
+  /* Removing a held message is undoable for a few seconds: the row leaves the list at once and
+     is written back (as a new held entry with the same text) if the user taps Undo in time. */
+  const chatHeldUndoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (chatHeldUndoTimerRef.current !== null) clearTimeout(chatHeldUndoTimerRef.current);
+  }, []);
   const removeChatHeld = useCallback((id: string) => {
     const target = chatTargetRef.current;
     if (!target) return;
+    const removed = referenceQueues.read(target).find((message) => message.id === id);
     referenceQueues.remove(target, id);
     setChatHeld([...referenceQueues.read(target)]);
-  }, []);
+    if (!removed) return;
+    if (chatHeldUndoTimerRef.current !== null) clearTimeout(chatHeldUndoTimerRef.current);
+    setChatComposerNotice(CHAT_HELD_REMOVED_NOTICE);
+    const toastId = toast(CHAT_HELD_REMOVED_NOTICE, {
+      duration: CHAT_HELD_UNDO_MS,
+      action: {
+        label: "Undo",
+        onClick: () => {
+          if (chatHeldUndoTimerRef.current !== null) clearTimeout(chatHeldUndoTimerRef.current);
+          chatHeldUndoTimerRef.current = null;
+          referenceQueues.add(target, removed.text);
+          if (chatTargetIsCurrent(target)) {
+            setChatHeld([...referenceQueues.read(target)]);
+            setChatComposerNotice(null);
+          }
+        },
+      },
+    });
+    chatHeldUndoTimerRef.current = setTimeout(() => {
+      chatHeldUndoTimerRef.current = null;
+      toast.dismiss(toastId);
+      setChatComposerNotice((notice) => (notice === CHAT_HELD_REMOVED_NOTICE ? null : notice));
+    }, CHAT_HELD_UNDO_MS);
+  }, [chatTargetIsCurrent]);
 
   /** The composer's own send: a prompt turns the text into an answer, or holds it. */
   const handleChatComposerSend = useCallback(
@@ -4376,7 +4697,7 @@ export const RemoteHostConnection: React.FC<{
         }
         const revision = chatScreenRevision;
         if (revision === null) {
-          setChatPromptError(REFERENCE_PROMPT_STALE_MESSAGE);
+          setChatPromptError(CHAT_PROMPT_CHANGED_MESSAGE);
           return false;
         }
         const target = chatTargetRef.current;
@@ -4459,7 +4780,7 @@ export const RemoteHostConnection: React.FC<{
         onAnswer={answerChatPrompt}
         onPromptChanged={() => {
           // The screen moved under the answer: say so and re-read it before anything else.
-          setChatPromptError(REFERENCE_PROMPT_STALE_MESSAGE);
+          setChatPromptError(CHAT_PROMPT_CHANGED_MESSAGE);
           setChatPromptRefresh((generation) => generation + 1);
         }}
         onAnswered={(toMessageBox) => {
@@ -4490,17 +4811,28 @@ export const RemoteHostConnection: React.FC<{
   const chatComposerPlaceholder =
     chatPrompt !== null ? referenceAnswerHint(chatPrompt) : undefined;
 
-  const createWorktree = useCallback(async () => {
+  const [newWorktreeOpen, setNewWorktreeOpen] = useState(false);
+  const [newWorktreeName, setNewWorktreeName] = useState("");
+  const [newWorktreeError, setNewWorktreeError] = useState<string | null>(null);
+  const [newWorktreeBusy, setNewWorktreeBusy] = useState(false);
+  const newWorktreeSlug = worktreeSlugFrom(newWorktreeName);
+  const createWorktree = useCallback(() => {
+    if (!model.context.workspaceId || !token) return;
+    setNewWorktreeName("");
+    setNewWorktreeError(null);
+    setNewWorktreeOpen(true);
+  }, [model.context.workspaceId, token]);
+  const submitNewWorktree = useCallback(async () => {
     const workspaceId = model.context.workspaceId;
-    if (!workspaceId || !token) return;
-    const entered = window.prompt("New worktree slug (letters, numbers and dashes)");
-    if (!entered) return;
-    const slug = entered.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+    if (!workspaceId || !token || newWorktreeBusy) return;
+    const slug = worktreeSlugFrom(newWorktreeName);
     if (!slug) {
-      setCreationError("Enter a slug using letters, numbers or dashes.");
+      setNewWorktreeError("Use letters, numbers or dashes.");
       return;
     }
+    setNewWorktreeError(null);
     setCreationError(null);
+    setNewWorktreeBusy(true);
     try {
       const response = await remoteFetch(transportBaseUrl, "/api/v1/workspace/worktrees", {
         method: "POST",
@@ -4512,15 +4844,23 @@ export const RemoteHostConnection: React.FC<{
         }),
       });
       if (!response.ok) {
-        const reason = (await response.text()).replace(/\/[^\s"]+/g, "<path>").slice(0, 140);
-        setCreationError(`Could not create worktree (HTTP ${response.status}). ${reason}`);
+        console.warn("Worktree creation refused", response.status);
+        setNewWorktreeError(
+          response.status === 409
+            ? "A worktree with that name already exists."
+            : userFacingError({ status: response.status }, { action: "create the worktree" }),
+        );
         return;
       }
+      setNewWorktreeOpen(false);
       await selectContext({ workspaceId, worktreeSlug: slug, worktreeLabel: null });
     } catch (error) {
-      setCreationError(error instanceof Error ? error.message : "Worktree creation request failed");
+      console.warn("Worktree creation failed", error);
+      setNewWorktreeError(userFacingError(error, { action: "create the worktree" }));
+    } finally {
+      setNewWorktreeBusy(false);
     }
-  }, [model.context.workspaceId, token, transportBaseUrl, selectContext]);
+  }, [model.context.workspaceId, newWorktreeBusy, newWorktreeName, token, transportBaseUrl, selectContext]);
 
   /* Phone alerts speak to the paired gateway with this device's bearer. */
   const phonePushRequest = useCallback<PushRequest>((path, init = {}) => {
@@ -4555,6 +4895,30 @@ export const RemoteHostConnection: React.FC<{
     worker.addEventListener("message", onMessage);
     return () => worker.removeEventListener("message", onMessage);
   }, []);
+  /* Account mode has no device token until a worktree opens: a tap there resolves through the
+     account inventory and opens the Session screen. A tap that matches nothing is reported once
+     its wait runs out instead of firing later on an unrelated refresh. */
+  const openPhoneScreen = phoneNav.openSession;
+  const alertTapSessionRef = useRef<string | null>(null);
+  alertTapSessionRef.current = alertSessionId;
+  useEffect(() => {
+    if (!alertSessionId) return;
+    const timer = setTimeout(() => {
+      if (alertTapSessionRef.current !== alertSessionId) return;
+      setAlertSessionId(null);
+      toast.error("That session isn't available anymore", {
+        description: "It may have ended, or its computer is offline.",
+      });
+    }, ALERT_TAP_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [alertSessionId]);
+  useEffect(() => {
+    if (!alertSessionId || token || !accountSessionToken) return;
+    const option = accountDiscovery.accountOptions.find((row) => row.sessionId === alertSessionId && !row.unavailable);
+    if (!option) return;
+    setAlertSessionId(null);
+    openPhoneSessionRef.current(option);
+  }, [alertSessionId, token, accountSessionToken, accountDiscovery.accountOptions]);
   useEffect(() => {
     if (!alertSessionId || !token || pending) return;
     const workspaceId = model.context.workspaceId;
@@ -4576,14 +4940,19 @@ export const RemoteHostConnection: React.FC<{
         : null);
     if (!target) return;
     setAlertSessionId(null);
-    void selectContext(target);
-  }, [alertSessionId, token, pending, model, selectContext]);
+    void selectContext(target).then((ok) => {
+      if (ok && phoneHome) openPhoneScreen();
+    });
+  }, [alertSessionId, token, pending, model, selectContext, phoneHome, openPhoneScreen]);
 
   if ((!token && !accountSessionToken) || magicLinkActive) {
     return (
       <AccountLoginPage
         relayUrl={relayUrl}
+        onPairWithCode={onPairWithCode}
+        notice={signedOutNotice}
         onLoginSuccess={(tok, email) => {
+          setSignedOutNotice(null);
           storeAccountEmail(email);
           setAccountEmail(email || null);
           setAccountSessionToken(tok);
@@ -4613,9 +4982,7 @@ export const RemoteHostConnection: React.FC<{
   const failedMachineIds = failedStatuses.map((status) => status.machine.machineId);
   const failureMessages = [
     ...new Set(
-      failedStatuses.map((status) =>
-        status.errorCode ? `${status.errorCode}: ${status.error ?? ""}` : (status.error ?? "Worktrees could not be loaded."),
-      ),
+      failedStatuses.map((status) => pickerFailureMessage(status)),
     ),
   ];
   const accountInventorySettled =
@@ -4624,27 +4991,31 @@ export const RemoteHostConnection: React.FC<{
   const accountEmptyReason = !accountInventorySettled || failedMachineIds.length > 0
     ? null
     : accountDiscovery.machines.length === 0
-      ? "No desktops linked to this account."
+      ? "No computers linked to this account yet. Open Ferryx on your computer and sign in with the same email."
       : accountStatuses.some((status) => status.status === "offline")
-        ? "Desktop is offline. Open Ferryx on your computer."
+        ? "Your computer is offline. Open Ferryx on it, then try again."
         : null;
   const accountPickerStatus =
     isAccountMode &&
     (accountInventoryLoading || accountDiscovery.error || failedMachineIds.length > 0 || accountEmptyReason) ? (
-    <div data-testid="remote-account-inventory-status" className="space-y-0.5 pb-1">
+    <div data-testid="remote-account-inventory-status" className="space-y-1 pb-1">
       {accountInventoryLoading ? (
-        <p className="px-2 py-1 text-[11px] text-muted-foreground">Loading worktrees...</p>
+        <div role="status" aria-label="Loading worktrees" className="space-y-1.5 px-2 py-1">
+          {[0, 1, 2].map((row) => (
+            <div key={row} aria-hidden="true" className="h-11 rounded-lg bg-chat-surface-raised animate-pulse motion-reduce:animate-none" />
+          ))}
+        </div>
       ) : null}
       {accountDiscovery.error ? (
-        <p role="alert" className="px-2 py-1 text-[11px] text-destructive">{accountDiscovery.error}</p>
+        <p role="alert" className="px-2 py-1 text-sm text-chat-foreground">{accountDiscovery.error}</p>
       ) : null}
       {accountEmptyReason ? (
-        <p className="px-2 py-6 text-center text-[11px] text-muted-foreground">{accountEmptyReason}</p>
+        <p className="px-2 py-6 text-center text-sm text-chat-foreground-secondary">{accountEmptyReason}</p>
       ) : null}
       {failedMachineIds.length > 0 ? (
-        <div className="flex min-h-[24px] items-center gap-1.5 px-2 text-[11px] text-muted-foreground">
-          <span role="alert" className="min-w-0 flex-1 break-words text-destructive">
-            {failureMessages.join(" / ")}
+        <div className="flex items-center gap-2 px-2 text-sm text-chat-foreground">
+          <span role="alert" className="min-w-0 flex-1 break-words">
+            {failureMessages.join(" ")}
           </span>
           <button
             type="button"
@@ -4652,7 +5023,7 @@ export const RemoteHostConnection: React.FC<{
             onClick={() => {
               for (const machineId of failedMachineIds) void accountDiscovery.retryMachine(machineId);
             }}
-            className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium text-worktree-sidebar-foreground hover:bg-worktree-sidebar-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            className="flex h-11 shrink-0 items-center rounded-lg px-3 text-sm font-medium text-worktree-sidebar-foreground transition-colors hover:bg-worktree-sidebar-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           >
             Retry
           </button>
@@ -4729,8 +5100,7 @@ export const RemoteHostConnection: React.FC<{
     }
 
     if (!conn) {
-      const worktree = accountOpt.worktreeLabel ?? accountOpt.worktreeSlug;
-      setCreationError(`Could not open ${worktree ? `${accountOpt.workspaceId} / ${worktree}` : accountOpt.workspaceId}. Try again.`);
+      setCreationError(`Couldn't reach ${accountOpt.machineDisplayName || "your computer"}. Check that Ferryx is running on it, then try again.`);
       return false;
     }
 
@@ -4767,11 +5137,8 @@ export const RemoteHostConnection: React.FC<{
           aria-live="polite"
           className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-2 bg-background text-foreground"
         >
-          <div className="flex items-center space-x-2">
-            <span className="px-2 py-0.5 text-[11px] font-medium bg-muted text-muted-foreground rounded animate-pulse">
-              Loading workspace...
-            </span>
-          </div>
+          <LoaderCircle aria-hidden="true" className="size-5 animate-spin text-muted-foreground motion-reduce:animate-none" />
+          <span className="text-sm text-muted-foreground">Loading...</span>
         </div>
       }
     >
@@ -4779,6 +5146,19 @@ export const RemoteHostConnection: React.FC<{
     </Suspense>
   );
 
+  /* The last worktree an automatic restore is waiting on because its computer is offline or
+     failed its probe: the home says so instead of silently landing on Supervisor. */
+  const storedLastTarget = isAccountMode && !token ? getAccountLastSelectedTarget(relayUrl) : null;
+  const storedLastMachine = storedLastTarget
+    ? accountDiscovery.machines.find((machine) => machine.machineId === storedLastTarget.machineId) ?? null
+    : null;
+  const storedLastStatus = storedLastTarget ? accountDiscovery.machineStatuses[storedLastTarget.machineId]?.status : undefined;
+  const offlineLastTarget = storedLastTarget && storedLastMachine
+    && (storedLastMachine.online === false || storedLastStatus === "offline" || storedLastStatus === "error")
+    ? { ...storedLastTarget, machineName: storedLastMachine.displayName || "Your computer" }
+    : null;
+  const canOpenBrowser = Boolean(token) && browserSessions.length > 0;
+  const phoneAlertsSupported = !isMobileCompanion() && typeof navigator !== "undefined" && "serviceWorker" in navigator;
   const CONNECTION_SHORT: Record<string, string> = {
     relay: "Relay",
     lan: "LAN",
@@ -4806,7 +5186,7 @@ export const RemoteHostConnection: React.FC<{
           CONNECTION_SHORT[transport.type] ||
           transport.type,
         transport: transport.type,
-        ariaLabel: `Connection: ${CONNECTION_BADGE_LABEL[transport.type]}`,
+        ariaLabel: `${CONNECTION_HEALTH_LABEL[connectionHealth]} ${CONNECTION_BADGE_LABEL[transport.type]}`,
       };
   const mobileAttention = firstWaiting
     ? {
@@ -4822,22 +5202,49 @@ export const RemoteHostConnection: React.FC<{
             tabId: firstWaiting.tabId,
             sessionId: firstWaiting.sessionId,
           });
-          document
-            .querySelector<HTMLTextAreaElement>(
-              'textarea[data-testid="remote-terminal-input-sink"]',
-            )
-            ?.focus({ preventScroll: true });
+          focusSessionInput();
         },
       }
     : null;
 
   /* Phone home wiring. Every destination opens a session through the same account selection
      the worktree picker uses, then pushes the Session screen once the selection is under way. */
-  const showPhoneHome = phoneHome && (phoneNav.screen.kind === "home" || (!token && !initialAccountTarget));
+  const showPhoneHome = phoneHome
+    && (phoneNav.screen.kind === "home" || (!token && !initialAccountTarget && phoneOpening === null));
   const openPhoneSession = (option: AccountWorktreeOption) => {
-    void selectAccountOption(option).then((ok) => {
-      if (ok) phoneNav.openSession();
+    if (phoneOpening !== null) return;
+    setPhoneOpening(option.worktreeLabel ?? option.worktreeSlug ?? option.machineDisplayName ?? "your worktree");
+    phoneNav.openSession();
+    const generationBefore = accountSelectionGenerationRef.current;
+    const attempt = selectAccountOption(option);
+    const generation = accountSelectionGenerationRef.current;
+    void attempt.then((ok) => {
+      setPhoneOpening(null);
+      // A refused start leaves no target, so phoneSessionLost returns the screen to home.
+      if (generation === generationBefore) return;
+      if (!ok && accountSelectionGenerationRef.current === generation) {
+        toast.error("Couldn't open that session", {
+          description: `Check that ${option.machineDisplayName || "your computer"} is awake and running Ferryx, then try again.`,
+        });
+      }
     });
+  };
+  openPhoneSessionRef.current = openPhoneSession;
+  const cancelOpening = () => {
+    accountSelectionGenerationRef.current += 1;
+    setPhoneOpening(null);
+    setCreationError(null);
+    setInitialAccountTarget(null);
+    clearPendingSelection();
+    workspaceRefreshVersionRef.current += 1;
+    setModel(EMPTY_MODEL);
+    if (activeTunnelConnection) {
+      activeTunnelConnection.close();
+      setActiveTunnelConnection(null);
+    }
+    setToken(null);
+    if (phoneHome) phoneNav.back();
+    else setSelectorOpen(true);
   };
   const phoneNeedsYou = new Set(
     accountDiscovery.accountOptions
@@ -4859,6 +5266,7 @@ export const RemoteHostConnection: React.FC<{
       ? optionForSession(accountDiscovery.accountOptions, entry.machineId, entry.sessionId)
       : null;
     if (!option) {
+      setUnopenableRowIds((previous) => new Set(previous).add(row.id));
       toast.error("This session can't be opened from here right now", {
         description: entry.machineId
           ? "Its computer is offline or has not listed it yet."
@@ -4869,6 +5277,18 @@ export const RemoteHostConnection: React.FC<{
     openPhoneSession(option);
     return true;
   };
+  /* Rows whose computer cannot open them here say so on the row before any tap; the model already
+     knows: no mirrored tab and no account option for that machine's session. */
+  const inboxRows = remoteInbox.rows.map((row) => {
+    const entry = inboxEntries.find((candidate) => candidate.key === row.id);
+    if (!entry) return row;
+    const openable = (entry.tabId && terminalTabs.some((candidate) => candidate.id === entry.tabId))
+      || (entry.machineId ? optionForSession(accountDiscovery.accountOptions, entry.machineId, entry.sessionId) !== null : false);
+    if (openable && !unopenableRowIds.has(row.id)) return row;
+    if (!entry.machineId && !unopenableRowIds.has(row.id)) return row;
+    const note = entry.machineId ? "Computer offline. Can't open it from here right now." : "Answer it here, or pick its worktree to open it.";
+    return { ...row, text: row.text ? `${note} ${row.text}` : note };
+  });
   const activeSupervisorSnapshot = phoneHome && activeMachineId
     ? phoneSupervisor.machines.find((machine) => machine.machineId === activeMachineId)?.snapshot ?? null
     : null;
@@ -4921,7 +5341,7 @@ export const RemoteHostConnection: React.FC<{
   );
 
   return (
-    <div className="flex h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden remote-app-root bg-background text-foreground" style={viewportHeight ? { height: viewportHeight } : undefined}>
+    <div className="flex h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden remote-app-root bg-background text-foreground" style={visualViewportBox ? { position: "fixed", insetInline: 0, top: visualViewportBox.top, height: visualViewportBox.height } : undefined}>
       <Toaster />
       {showPhoneHome ? (
         <PhoneHomeView
@@ -4946,7 +5366,7 @@ export const RemoteHostConnection: React.FC<{
             },
           }}
           inbox={{
-            rows: remoteInbox.rows,
+            rows: inboxRows,
             prompts: remoteInbox.prompts,
             loading: accountInventoryLoading,
             onOpen: (row) => {
@@ -4957,25 +5377,34 @@ export const RemoteHostConnection: React.FC<{
           resume={
             token && model.context.workspaceId
               ? { title: mobileTitle, subtitle: contextName(model.context), onOpen: phoneNav.openSession }
-              : null
+              : offlineLastTarget
+                ? {
+                    title: offlineLastTarget.worktreeLabel ?? offlineLastTarget.worktreeSlug ?? "Your last worktree",
+                    subtitle: `${offlineLastTarget.machineName} is offline. Open Ferryx on it to continue.`,
+                    onOpen: () => {
+                      void accountDiscovery.retryMachine(offlineLastTarget.machineId);
+                      phoneNav.selectTab("worktrees");
+                    },
+                  }
+                : null
           }
         />
       ) : (
       <>
       {desktopSidebar ? (
-      <header className="flex h-7 shrink-0 items-center justify-between border-b border-chat-border bg-chat-surface px-2.5">
+      <header className="flex h-7 [@media(pointer:coarse)]:h-14 shrink-0 items-center justify-between border-b border-chat-border bg-chat-surface px-2.5">
         <button
           type="button"
           aria-label="Change workspace context"
           aria-expanded={selectorOpen}
           onClick={() => setSelectorOpen((open) => !open)}
-          className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden rounded px-1 py-0.5 -mx-1 text-left transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden rounded px-1 py-0.5 -mx-1 [@media(pointer:coarse)]:min-h-11 text-left transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           <img src="/icon-192.png" alt="Ferryx" width={16} height={16} className="size-4 shrink-0 rounded object-contain" />
           {/* The brand word is the first thing to go when the status cluster grows;
               the workspace context stays legible longer than the app name. */}
           <span className="hidden shrink-0 text-xs font-semibold leading-none sm:inline">Ferryx Remote</span>
-          <span className="min-w-0 truncate font-mono text-[11px] leading-none text-chat-foreground-secondary" aria-label="Current desktop context">{contextName(model.context)}</span>
+          <span className="min-w-0 truncate font-mono text-xs leading-none text-chat-foreground-secondary [@media(pointer:coarse)]:text-sm" aria-label="Current desktop context">{contextName(model.context)}</span>
           <ChevronDown aria-hidden="true" className={`size-3 shrink-0 text-chat-foreground-secondary transition-transform ${selectorOpen ? "rotate-180" : ""}`} />
         </button>
         {accountPreselection ? null : (
@@ -4983,24 +5412,18 @@ export const RemoteHostConnection: React.FC<{
           <span
             data-testid="remote-connection-badge"
             data-connection={transport.type}
-            aria-label={`Connection: ${CONNECTION_BADGE_LABEL[transport.type]}`}
-            title={`Connection: ${CONNECTION_BADGE_LABEL[transport.type]}`}
-            className={`hidden h-5 shrink-0 items-center gap-1 rounded px-1.5 text-[11px] font-medium leading-none sm:flex ${
-              transport.type === "relay"
-                ? "bg-status-idle/15 text-chat-foreground-secondary"
-                : "bg-status-success/15 text-status-success"
-            }`}
+            data-health={connectionHealth}
+            title={`${CONNECTION_HEALTH_LABEL[connectionHealth]} ${CONNECTION_BADGE_LABEL[transport.type]}`}
+            className="hidden h-5 shrink-0 items-center gap-1 rounded px-1.5 text-xs font-medium leading-none text-chat-foreground-secondary sm:flex"
           >
             <span
               className={`size-1.5 shrink-0 rounded-full ${
-                transport.type === "relay" ? "bg-status-idle" : "bg-status-success"
+                connectionHealth === "connected" ? "bg-status-success" : connectionHealth === "offline" ? "bg-destructive" : "bg-status-warning"
               }`}
               aria-hidden="true"
             />
-            <span className="hidden sm:inline">{CONNECTION_BADGE_LABEL[transport.type]}</span>
-            <span className="sm:hidden">
-              {transport.type === "relay" ? "Relay" : transport.type === "lan" ? "LAN" : "Tailscale"}
-            </span>
+            <span>{CONNECTION_HEALTH_LABEL[connectionHealth]}</span>
+            <span className="sr-only">{CONNECTION_BADGE_LABEL[transport.type]}</span>
           </span>
           {firstWaiting ? (
             <button
@@ -5016,26 +5439,27 @@ export const RemoteHostConnection: React.FC<{
                   tabId: firstWaiting.tabId,
                   sessionId: firstWaiting.sessionId,
                 });
-                document.querySelector<HTMLTextAreaElement>('textarea[data-testid="remote-terminal-input-sink"]')?.focus({ preventScroll: true });
+                focusSessionInput();
               }}
-              className="flex h-5 items-center gap-1 rounded bg-status-warning/15 px-1.5 text-[11px] font-medium text-status-warning transition-colors hover:bg-status-warning/25 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
+              className="flex h-5 [@media(pointer:coarse)]:h-11 items-center gap-1 rounded bg-status-warning/15 px-1.5 [@media(pointer:coarse)]:px-3 text-xs font-medium text-status-warning transition-colors hover:bg-status-warning/25 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
             >
-              <span className="size-1.5 rounded-full bg-status-warning ring-2 ring-status-warning/20 motion-reduce:animate-none" aria-hidden="true" />
+              <span className="size-1.5 rounded-full bg-status-warning" aria-hidden="true" />
               <span className="truncate max-w-28 sm:max-w-40">{firstWaiting.label}</span>
               {waitingCount > 1 ? (
-                <span className="rounded bg-status-warning/20 px-1 text-[10px] font-mono leading-tight">
+                <span className="rounded bg-status-warning/20 px-1 text-xs font-mono leading-tight">
                   {waitingCount}
                 </span>
               ) : null}
             </button>
           ) : null}
 
-          <div className="flex items-center gap-1 border-l border-chat-border/40 pl-2">
+          <div role="group" aria-label="View" className="flex items-center gap-1 [@media(pointer:coarse)]:gap-2 border-l border-chat-border/40 pl-2">
             <button
               type="button"
               data-testid="remote-view-mode-chat"
+              aria-pressed={viewMode === "chat"}
               onClick={() => setViewMode("chat")}
-              className={`flex h-5 items-center rounded px-1.5 text-[11px] font-medium transition-colors ${
+              className={`flex h-5 [@media(pointer:coarse)]:h-11 items-center rounded px-1.5 [@media(pointer:coarse)]:px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
                 viewMode === "chat"
                   ? "bg-chat-surface-raised text-chat-foreground"
                   : "text-chat-foreground-secondary hover:text-chat-foreground"
@@ -5046,8 +5470,9 @@ export const RemoteHostConnection: React.FC<{
             <button
               type="button"
               data-testid="remote-view-mode-terminal"
+              aria-pressed={viewMode === "terminal"}
               onClick={() => setViewMode("terminal")}
-              className={`flex h-5 items-center rounded px-1.5 text-[11px] font-medium transition-colors ${
+              className={`flex h-5 [@media(pointer:coarse)]:h-11 items-center rounded px-1.5 [@media(pointer:coarse)]:px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
                 viewMode === "terminal"
                   ? "bg-chat-surface-raised text-chat-foreground"
                   : "text-chat-foreground-secondary hover:text-chat-foreground"
@@ -5055,6 +5480,21 @@ export const RemoteHostConnection: React.FC<{
             >
               Terminal
             </button>
+            {canOpenBrowser ? (
+              <button
+                type="button"
+                data-testid="remote-view-mode-browser"
+                aria-pressed={viewMode === "browser"}
+                onClick={() => setViewMode("browser")}
+                className={`flex h-5 [@media(pointer:coarse)]:h-11 items-center rounded px-1.5 [@media(pointer:coarse)]:px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+                  viewMode === "browser"
+                    ? "bg-chat-surface-raised text-chat-foreground"
+                    : "text-chat-foreground-secondary hover:text-chat-foreground"
+                }`}
+              >
+                Browser
+              </button>
+            ) : null}
           </div>
         </div>
         )}
@@ -5069,10 +5509,15 @@ export const RemoteHostConnection: React.FC<{
           pickerOpen={selectorOpen}
           onTogglePicker={() => setSelectorOpen((open) => !open)}
           attention={mobileAttention}
-          viewMode={viewMode as "chat" | "terminal"}
+          viewMode={viewMode === "browser" ? "chat" : viewMode}
           onViewModeChange={setViewMode}
           sessionCount={terminalTabs.length >= 1 ? terminalTabs.length : undefined}
-          inbox={model.context.workspaceId ? { count: remoteInbox.needsYou, open: inboxOpen, onOpen: () => setInboxOpen(true) } : undefined}
+          inbox={{
+            count: remoteInbox.needsYou,
+            open: inboxOpen,
+            // The phone home's Inbox is the one Inbox: the Session screen links back to it.
+            onOpen: phoneHome ? () => phoneNav.selectTab("inbox") : () => setInboxOpen(true),
+          }}
           switcherOpen={switcherOpen}
           onOpenSwitcher={() => setSwitcherOpen(true)}
           menuOpen={menuOpen}
@@ -5090,29 +5535,73 @@ export const RemoteHostConnection: React.FC<{
         />
       ) : null}
 
+      {connectionHealth !== "connected" && token ? (
+        <div
+          data-testid="remote-connection-strip"
+          data-health={connectionHealth}
+          role="status"
+          className="mx-3 mt-2 flex min-h-11 items-center gap-3 rounded-lg bg-chat-surface-raised px-3 py-2 text-sm text-chat-foreground"
+        >
+          <span className="min-w-0 flex-1">
+            {connectionHealth === "offline"
+              ? "You're offline. Ferryx reconnects when you're back online."
+              : tunnelResume === "failed"
+                ? `Couldn't reconnect to ${activeTunnelConnection?.machine.displayName || "your computer"}.`
+                : `Reconnecting to ${activeTunnelConnection?.machine.displayName || "your computer"}...`}
+          </span>
+          {tunnelResume === "failed" ? (
+            <button
+              type="button"
+              data-testid="remote-connection-reconnect"
+              onClick={() => void resumeTunnel(true)}
+              className="flex h-11 shrink-0 items-center rounded-lg px-3 text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              Reconnect
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
       {showRelayRepairNotice ? (
         <div
           data-testid="relay-repair-notice"
           role={relayRepairError ? "alert" : "status"}
           data-code={REPAIR_REQUIRED}
-          className={`mx-3 mt-2 rounded-md border px-3 py-2 text-xs ${relayRepairError ? "border-destructive/50 text-destructive" : "border-border text-muted-foreground"}`}
+          className="mx-3 mt-2 rounded-lg bg-chat-surface-raised px-3 py-2 text-sm text-chat-foreground"
         >
-          <p>{RELAY_REPAIR_MESSAGE}</p>
-          <div className="mt-2 flex gap-2">
+          <p>
+            {relayRepairConfirming
+              ? "Signing in again removes this phone's current pairing. You'll pick your computer again after you sign in."
+              : "This phone's connection to your computer isn't fully encrypted. Sign in to your account to secure it."}
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
             <button
               type="button"
-              className="rounded border border-border px-2 py-1 font-medium text-foreground"
+              className="flex h-11 items-center rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               onClick={() => {
+                if (!relayRepairConfirming) {
+                  setRelayRepairConfirming(true);
+                  return;
+                }
+                setRelayRepairConfirming(false);
                 setRelayRepairErrorBase(null);
                 disconnect();
               }}
             >
-              Re-pair through account
+              {relayRepairConfirming ? "Sign in again" : "Secure this phone"}
             </button>
-            {!relayRepairError ? (
+            {relayRepairConfirming ? (
               <button
                 type="button"
-                className="rounded px-2 py-1"
+                className="flex h-11 items-center rounded-lg px-4 text-sm font-medium text-chat-foreground-secondary transition-colors hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                onClick={() => setRelayRepairConfirming(false)}
+              >
+                Cancel
+              </button>
+            ) : !relayRepairError ? (
+              <button
+                type="button"
+                className="flex h-11 items-center rounded-lg px-4 text-sm font-medium text-chat-foreground-secondary transition-colors hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 onClick={() => setRelayRepairDismissedBase(transportBaseUrl)}
               >
                 Not now
@@ -5136,7 +5625,7 @@ export const RemoteHostConnection: React.FC<{
           accountPreselection && creationError ? (
             <>
               {accountPickerStatus}
-              <p role="alert" className="px-2 py-1 text-[11px] text-destructive">{creationError}</p>
+              <p role="alert" className="px-2 py-1 text-sm text-chat-foreground">{creationError}</p>
             </>
           ) : accountPickerStatus
         }
@@ -5169,66 +5658,41 @@ export const RemoteHostConnection: React.FC<{
               setPlanLimitNotice(null);
               workspaceRefreshVersionRef.current += 1;
             }}
+            onSignOut={handleSignOut}
           />
         ) : accountPreselection ? (
-          <div data-testid="remote-account-empty-body" className="flex-1 flex flex-col items-center justify-center gap-2 p-6 text-center">
-            <p className="text-xs text-muted-foreground">
-              Choose a worktree to open its terminal.
-            </p>
+          <div data-testid="remote-account-empty-body" className="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
+            {accountEmptyReason || accountInventoryLoading ? null : (
+              <>
+                <p className="text-sm text-muted-foreground">Pick a worktree to follow its agent.</p>
+                <button
+                  type="button"
+                  onClick={() => setSelectorOpen(true)}
+                  className="flex h-11 items-center rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  Choose a worktree
+                </button>
+              </>
+            )}
             {accountPickerStatus}
           </div>
-        ) : initialAccountTarget ? (
-            <div className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-4 bg-background text-foreground">
-              <div className="space-y-1">
-                <h3 className="text-sm font-semibold tracking-tight">Activating Selected Worktree</h3>
-                <p className="text-xs text-muted-foreground">
-                  Connecting to {initialAccountTarget.worktreeLabel ?? initialAccountTarget.worktreeSlug ?? initialAccountTarget.workspaceId}...
-                </p>
-              </div>
-              {creationError && (
-                <div role="alert" className="p-3 text-xs bg-destructive/10 text-destructive rounded-lg max-w-sm text-left space-y-2">
-                  <p>{creationError}</p>
-                  <div className="flex items-center gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setCreationError(null);
-                        initialAccountSelectionAttemptedRef.current = false;
-                        void selectContext({
-                          workspaceId: initialAccountTarget.workspaceId,
-                          worktreeSlug: initialAccountTarget.worktreeSlug,
-                          worktreeLabel: initialAccountTarget.worktreeLabel,
-                          ...(initialAccountTarget.sessionId ? { sessionId: initialAccountTarget.sessionId } : {}),
-                          ...(initialAccountTarget.daemonEpoch ? { daemonEpoch: initialAccountTarget.daemonEpoch } : {}),
-                        });
-                      }}
-                      className="px-2.5 py-1 text-[11px] font-medium bg-primary text-primary-foreground rounded hover:bg-primary/90 transition-colors"
-                    >
-                      Retry Selection
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setCreationError(null);
-                        setInitialAccountTarget(null);
-                        clearPendingSelection();
-                        workspaceRefreshVersionRef.current += 1;
-                        setModel(EMPTY_MODEL);
-                        if (activeTunnelConnection) {
-                          activeTunnelConnection.close();
-                          setActiveTunnelConnection(null);
-                        }
-                        setToken(null);
-                        setSelectorOpen(true);
-                      }}
-                      className="px-2.5 py-1 text-[11px] font-medium border border-border text-muted-foreground hover:text-foreground rounded transition-colors"
-                    >
-                      Back to Worktrees
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
+        ) : initialAccountTarget || phoneOpening !== null ? (
+            <ConnectingBody
+              label={initialAccountTarget?.worktreeLabel ?? initialAccountTarget?.worktreeSlug ?? phoneOpening ?? initialAccountTarget?.workspaceId ?? "your worktree"}
+              error={creationError}
+              onRetry={initialAccountTarget ? () => {
+                setCreationError(null);
+                initialAccountSelectionAttemptedRef.current = false;
+                void selectContext({
+                  workspaceId: initialAccountTarget.workspaceId,
+                  worktreeSlug: initialAccountTarget.worktreeSlug,
+                  worktreeLabel: initialAccountTarget.worktreeLabel,
+                  ...(initialAccountTarget.sessionId ? { sessionId: initialAccountTarget.sessionId } : {}),
+                  ...(initialAccountTarget.daemonEpoch ? { daemonEpoch: initialAccountTarget.daemonEpoch } : {}),
+                });
+              } : undefined}
+              onCancel={cancelOpening}
+            />
           ) : viewMode === "chat" ? renderLazy(
             <div className="flex-1 flex flex-col min-h-0 bg-chat-screen overflow-hidden">
               <MobileChatWorkspace
@@ -5283,31 +5747,24 @@ export const RemoteHostConnection: React.FC<{
             </div>
           ) : viewMode === "browser" ? renderLazy(
             <div className="flex-1 flex flex-col min-h-0 bg-chat-screen overflow-hidden">
-              {browserSessions.length > 0 && (
-                <div className="flex items-center gap-1.5 px-2 py-1 bg-chat-surface border-b border-chat-border text-xs overflow-x-auto shrink-0">
-                  <span className="text-chat-foreground-secondary text-[11px] shrink-0">Browsers:</span>
-                  {browserSessions.map((s) => (
+              {browserSessions.length > 1 && (
+                <div role="group" aria-label="Browsers" className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-chat-border bg-chat-surface px-2 py-1">
+                  {browserSessions.map((session) => (
                     <button
-                      key={s.browserId}
+                      key={session.browserId}
                       type="button"
-                      data-testid={`select-browser-${s.browserId}`}
-                      onClick={() => setSelectedBrowserId(s.browserId)}
-                      className={`px-2 py-0.5 rounded text-[11px] font-medium transition shrink-0 ${
-                        selectedBrowserId === s.browserId
-                          ? "bg-chat-primary text-white"
-                          : "bg-chat-surface-raised text-chat-foreground-secondary hover:bg-chat-surface-hover hover:text-chat-foreground"
+                      data-testid={`select-browser-${session.browserId}`}
+                      aria-pressed={selectedBrowserId === session.browserId}
+                      onClick={() => setSelectedBrowserId(session.browserId)}
+                      className={`flex h-11 shrink-0 items-center rounded-lg px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+                        selectedBrowserId === session.browserId
+                          ? "bg-chat-surface-raised text-chat-foreground"
+                          : "text-chat-foreground-secondary hover:bg-chat-surface-hover hover:text-chat-foreground"
                       }`}
                     >
-                      {s.title || s.browserId}
+                      {session.title || "Browser"}
                     </button>
                   ))}
-                  <button
-                    type="button"
-                    onClick={() => void fetchBrowserSessions()}
-                    className="ml-auto text-[11px] text-chat-foreground-secondary hover:text-chat-foreground"
-                  >
-                    Refresh
-                  </button>
                 </div>
               )}
 
@@ -5316,30 +5773,30 @@ export const RemoteHostConnection: React.FC<{
                   baseUrl={transportBaseUrl}
                   browserId={selectedBrowserId}
                   deviceToken={token}
-                  onBack={() => setViewMode("terminal")}
+                  onBack={() => setViewMode("chat")}
                 />
               ) : (
-                <div className="flex flex-col items-center justify-center flex-1 p-4 text-center text-chat-foreground-secondary gap-3">
-                  <p className="text-sm font-medium">No active browser session selected</p>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="text"
-                      placeholder="Enter browser ID..."
-                      data-testid="remote-manual-browser-id-input"
-                      className="px-2 py-1 text-xs rounded bg-chat-surface border border-chat-border text-chat-foreground font-mono"
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229 && (e.target as HTMLInputElement).value.trim()) {
-                          setSelectedBrowserId((e.target as HTMLInputElement).value.trim());
-                        }
-                      }}
-                    />
+                <div className="flex flex-1 flex-col items-center justify-center gap-4 p-6 text-center text-chat-foreground">
+                  <p className="text-sm">
+                    {browserListFailed
+                      ? "Couldn't load the browsers open on your computer."
+                      : "No browser is open in this worktree on your computer."}
+                  </p>
+                  <div className="flex flex-wrap items-center justify-center gap-2">
                     <button
                       type="button"
                       data-testid="remote-fetch-browsers-btn"
                       onClick={() => void fetchBrowserSessions()}
-                      className="px-2.5 py-1 text-xs rounded bg-chat-surface-raised text-chat-foreground font-medium hover:bg-chat-surface-hover transition"
+                      className="flex h-11 items-center rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                     >
-                      Refresh Sessions
+                      Check again
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setViewMode("chat")}
+                      className="flex h-11 items-center rounded-lg border border-chat-border px-4 text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    >
+                      Back to chat
                     </button>
                   </div>
                 </div>
@@ -5366,18 +5823,46 @@ export const RemoteHostConnection: React.FC<{
               onAgentStateFrame={handleMachineAgentStateFrame}
               createWebSocket={terminalCreateWebSocket}
             />
-          ) : null}
+          ) : (
+            <div data-testid="remote-terminal-empty" className="flex flex-1 flex-col items-center justify-center gap-4 bg-chat-screen p-6 text-center text-chat-foreground">
+              <p className="text-sm">
+                No terminal running in {model.context.worktreeLabel ?? model.context.workspaceId ?? "this worktree"}.
+              </p>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <button
+                  type="button"
+                  disabled={pending !== null || !model.context.workspaceId}
+                  onClick={() => {
+                    if (!model.context.workspaceId) return;
+                    void selectContext({ workspaceId: model.context.workspaceId, worktreeSlug: model.context.worktreeSlug, worktreeLabel: model.context.worktreeLabel }, true);
+                  }}
+                  className="flex h-11 items-center rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
+                >
+                  New terminal
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode("chat")}
+                  className="flex h-11 items-center rounded-lg border border-chat-border px-4 text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  Back to chat
+                </button>
+              </div>
+            </div>
+          )}
       </RemoteWorkspaceMirror>
       </>
       )}
 
-      <MobileHostDrawer
-        open={hostDrawerOpen}
-        onOpenChange={setHostDrawerOpen}
-        onDisconnect={disconnect}
-        onSignOut={handleSignOut}
-        isAccountSession={Boolean(activeTunnelConnection)}
-      />
+      {isAccountMode ? null : (
+        <MobileHostDrawer
+          open={hostDrawerOpen}
+          onOpenChange={setHostDrawerOpen}
+          onDisconnect={disconnect}
+          onSignOut={handleSignOut}
+          isAccountSession={false}
+        />
+      )}
 
       <MobileSessionSwitcherSheet
         open={switcherOpen}
@@ -5416,7 +5901,7 @@ export const RemoteHostConnection: React.FC<{
       >
         <AttentionInbox
           compact
-          rows={remoteInbox.rows}
+          rows={inboxRows}
           prompts={remoteInbox.prompts}
           onOpen={(row) => {
             if (openInboxRow(row)) setInboxOpen(false);
@@ -5438,11 +5923,10 @@ export const RemoteHostConnection: React.FC<{
             true,
           );
         }}
-        onNewWorktree={() => {
-          void createWorktree();
-        }}
+        onNewWorktree={createWorktree}
         onOpenMachines={isAccountMode ? undefined : () => setHostDrawerOpen(true)}
-        onOpenPhoneAlerts={token ? () => setPhoneAlertsOpen(true) : undefined}
+        onOpenBrowser={canOpenBrowser ? () => setViewMode("browser") : undefined}
+        onOpenPhoneAlerts={token && phoneAlertsSupported ? () => setPhoneAlertsOpen(true) : undefined}
         onSignOut={isAccountMode ? handleSignOut : undefined}
         connectionLabel={
           accountPreselection
@@ -5468,6 +5952,52 @@ export const RemoteHostConnection: React.FC<{
           </div>
         </MobileSheet>
       ) : null}
+
+      <MobileSheet
+        open={newWorktreeOpen}
+        onOpenChange={setNewWorktreeOpen}
+        title="New worktree"
+        ariaLabel="New worktree"
+        testId="new-worktree-sheet"
+      >
+        <form
+          className="space-y-3 px-2 pb-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submitNewWorktree();
+          }}
+        >
+          <label htmlFor="new-worktree-name" className="block text-sm font-medium text-chat-foreground">
+            Worktree name
+          </label>
+          <input
+            id="new-worktree-name"
+            type="text"
+            value={newWorktreeName}
+            onChange={(event) => setNewWorktreeName(event.target.value)}
+            autoCapitalize="none"
+            autoComplete="off"
+            spellCheck={false}
+            aria-describedby="new-worktree-hint"
+            aria-invalid={newWorktreeError !== null}
+            disabled={newWorktreeBusy}
+            className="h-11 w-full rounded-lg border border-chat-border bg-chat-surface px-3.5 text-base text-chat-foreground focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+          />
+          <p id="new-worktree-hint" className="text-sm text-chat-foreground-secondary">
+            {newWorktreeSlug ? `Will be created as ${newWorktreeSlug}` : "Letters, numbers and dashes."}
+          </p>
+          {newWorktreeError ? (
+            <p role="alert" className="rounded-lg bg-destructive/10 p-3 text-sm text-chat-foreground">{newWorktreeError}</p>
+          ) : null}
+          <button
+            type="submit"
+            disabled={newWorktreeBusy || !newWorktreeSlug}
+            className="flex h-11 w-full items-center justify-center rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
+          >
+            {newWorktreeBusy ? "Creating..." : "Create worktree"}
+          </button>
+        </form>
+      </MobileSheet>
 
       {isAccountMode ? (
         <AccountSheet
