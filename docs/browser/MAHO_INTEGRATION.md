@@ -15,13 +15,15 @@ The Maho browser source is owned by the Ferryx owner. The owner granted reuse of
 | Grant | "maho 코드: 내가 maho 소유자, 그대로 써" |
 | Translation | "Maho code: I am the owner of Maho, use it as is" |
 | Date | 2026-11-01 |
-| Source tree | `maho/crates/maho-core`, `maho/crates/maho-import`, `maho-chromium` |
+| Source tree | `maho/crates/maho-core`, `maho/crates/maho-types`, `maho/crates/maho-import`, `maho/crates/maho-browser-mcp`, `maho/crates/maho-cli`, `maho-chromium` |
 | Source repo and commit | `Project-Maho/maho-browser@c2830251` |
+| Recorded in | `maho-source-manifest.json` `ownerGrant`; `rights.compatible` is true because of it |
 
 ### What follows from the grant
 
 - Code from these paths may be copied into Ferryx without a separate license review.
 - Each ported file gets a row in `docs/browser/maho-source-manifest.json` with `reuseMode` set to `"owner-granted-copy"` and the source commit `Project-Maho/maho-browser@c2830251`.
+- A row's `verbatim` is true when the Ferryx file's git blob equals the Maho blob, false when the copy was adapted afterwards.
 - A ported file keeps a header comment that names its Maho source path.
 
 ### What the grant doesn't cover
@@ -36,6 +38,22 @@ clean reimplementation: its manifest rows are `behavior-reference` (behavior was
 reimplemented in Ferryx code; no Maho source text, tests, fixtures or catalog prose were
 copied). Files ported later under the grant use `owner-granted-copy`.
 
+### Code ported under the grant
+
+| Maho source | Ferryx destination | Rows |
+| --- | --- | --- |
+| `maho-core` `vault_crypto/*`, `maho-types` `vault.rs` | `src-tauri/src/browser/vault/crypto.rs`, `crypto_tests.rs` | Record envelope and its tests. The passphrase KDF (`kdf.rs`, `metadata.rs`) is `not-imported`: the OS keystore holds the key |
+| `maho-core` `vault_generator.rs` and `wordlist.txt`, `maho-types` `vault_generator.rs` | `vault/generator.rs`, `vault/wordlist.txt` | Wordlist adapted (yo-yo becomes yolk) |
+| `maho-core` `vault_manager/origin.rs` | `vault/origin.rs` | Exact-origin policy only |
+| `maho-core` `vault_manager/record.rs`, `maho_core/vault_items.rs` | `vault/store.rs` | Reduced to logins |
+| `maho-core` `bookmark_manager.rs` | `src-tauri/src/browser/library/bookmarks.rs` | Adapted |
+| `maho-import` (whole crate) | `crates/ferryx-browser-import` | One row per file: 46 verbatim, 33 adapted. Two example probes and `tests/safari_fda_paths.rs` are `not-imported`. `src/sqlite_snapshot.rs` is Ferryx-only |
+
+The agent rows that pointed at `browser/agent/mcp.rs`, `pipe.rs` and `ownership.rs` were
+corrected: those files were never created. The MCP client/server and pipe sources are now
+`not-imported` (Ferryx has no browser MCP or pipe adapter yet), and the task-space ownership
+policy points at `browser/agent/authority.rs` (tab leases and desktop reclaim).
+
 ## Imported behavior
 
 - Paired controllers with per-origin read / interact / eval grants.
@@ -46,8 +64,8 @@ copied). Files ported later under the grant use `owner-granted-copy`.
 
 ## Not imported
 
-Vault, passkeys, mail, sync, Maho's own agent/LLM runtime, memory CLI, CSS
-boosts, notes, reading list, site scripts, Chromium patches and mobile shells.
+Passkeys, the vault's passphrase KDF and sync, mail, Maho's own agent/LLM runtime, memory
+CLI, CSS boosts, notes, reading list, site scripts, Chromium patches and mobile shells.
 
 ## Behavior baseline (before integration)
 

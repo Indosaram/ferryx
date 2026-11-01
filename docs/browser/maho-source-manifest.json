@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "recordedAt": "2026-10-31",
+  "recordedAt": "2026-11-02",
   "ferryxBaseline": "4231e6a51b4ec301b30c4e2f9448901b7227b91d",
   "upstream": {
     "repository": "Project-Maho/maho-browser",
@@ -16,13 +16,14 @@
       "holder": "Maho"
     },
     "ferryxLicense": "Ferryx License 1.0 (LICENSE)",
-    "compatible": false,
-    "reason": "SUL limits use to internal business, non-commercial or personal purposes; Ferryx permits commercial use. No documented owner grant covers relicensing.",
-    "defaultReuseMode": "behavior-reference"
+    "compatible": true,
+    "reason": "The Sustainable Use License alone would not allow commercial use in Ferryx, but the owner of Maho (who also owns Ferryx) granted reuse of Maho code in Ferryx as is (see ownerGrant). The SUL does not bind the copyright holder's own grant.",
+    "defaultReuseMode": "owner-granted-copy"
   },
   "reuseModes": {
-    "behavior-reference": "Behavior read from the source and reimplemented in Ferryx code; no source text, tests, fixtures or catalog prose copied.",
-    "not-imported": "Inspected and deliberately excluded."
+    "owner-granted-copy": "Maho source copied into Ferryx under the owner grant. `verbatim: true` means the destination file's git blob equals the upstream blob; `verbatim: false` means it was copied and then adapted (renamed crate paths, removed features, Ferryx fixes).",
+    "behavior-reference": "Behavior read from the source and reimplemented in Ferryx code; no source text, tests, fixtures or catalog prose copied. Used for the agent automation work written before the grant was recorded.",
+    "not-imported": "Inspected and deliberately excluded; `destination` is null."
   },
   "sources": [
     {
@@ -36,22 +37,25 @@
       "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
       "path": "maho/crates/maho-browser-mcp/src/client.rs",
       "blob": "8729d16e5202aa6718654acdbc85bc848f6f983c",
-      "destination": "src-tauri/src/browser/agent/mcp.rs",
-      "reuseMode": "behavior-reference"
+      "destination": null,
+      "reuseMode": "not-imported",
+      "note": "Planned destination (browser/agent/mcp.rs or pipe.rs, plan T6) was never created: Ferryx has no browser MCP or pipe adapter yet. Recorded so the source stays traceable."
     },
     {
       "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
       "path": "maho/crates/maho-browser-mcp/src/server.rs",
       "blob": "abf87ab32e8f9013140a080589e315f9399d6247",
-      "destination": "src-tauri/src/browser/agent/mcp.rs",
-      "reuseMode": "behavior-reference"
+      "destination": null,
+      "reuseMode": "not-imported",
+      "note": "Planned destination (browser/agent/mcp.rs or pipe.rs, plan T6) was never created: Ferryx has no browser MCP or pipe adapter yet. Recorded so the source stays traceable."
     },
     {
       "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
       "path": "maho/crates/maho-cli/src/browser_pipe.rs",
       "blob": "e6798962fccf8d921c6fb21891424229123a6688",
-      "destination": "src-tauri/src/browser/agent/pipe.rs",
-      "reuseMode": "behavior-reference"
+      "destination": null,
+      "reuseMode": "not-imported",
+      "note": "Planned destination (browser/agent/mcp.rs or pipe.rs, plan T6) was never created: Ferryx has no browser MCP or pipe adapter yet. Recorded so the source stays traceable."
     },
     {
       "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
@@ -71,15 +75,17 @@
       "commit": "a7896ab86424188849b4212e2ac7a51d3496095d",
       "path": "maho-chromium/browser/mcp/maho_mcp_agent_policy.h",
       "blob": "2f6d6ffaa41a9f0b0d7f37c517e02be11347f607",
-      "destination": "src-tauri/src/browser/agent/ownership.rs",
-      "reuseMode": "behavior-reference"
+      "destination": "src-tauri/src/browser/agent/authority.rs",
+      "reuseMode": "behavior-reference",
+      "note": "Task-space ownership (agent vs user, take back before mutating) became the tab leases and desktop reclaim in authority.rs; the planned ownership.rs was never created."
     },
     {
       "commit": "a7896ab86424188849b4212e2ac7a51d3496095d",
       "path": "maho-chromium/browser/mcp/maho_mcp_agent_policy.cc",
       "blob": "2fb80bc73dbec5ac0600d8fe8da8b2ff32ed5450",
-      "destination": "src-tauri/src/browser/agent/ownership.rs",
-      "reuseMode": "behavior-reference"
+      "destination": "src-tauri/src/browser/agent/authority.rs",
+      "reuseMode": "behavior-reference",
+      "note": "Task-space ownership (agent vs user, take back before mutating) became the tab leases and desktop reclaim in authority.rs; the planned ownership.rs was never created."
     },
     {
       "commit": "a7896ab86424188849b4212e2ac7a51d3496095d",
@@ -95,6 +101,796 @@
       "blob": "26ce956a865c8937bebff7cf9c060e958dd86a55",
       "destination": "src-tauri/src/browser/agent/catalog.rs",
       "reuseMode": "behavior-reference"
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-core/src/vault_crypto.rs",
+      "blob": "edce4482076152c232b875c585b95809e4711ec8",
+      "destination": "src-tauri/src/browser/vault/crypto.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-core/src/vault_crypto/bounded_bytes.rs",
+      "blob": "09980c3549a8919174246e5b45372e4c530cc682",
+      "destination": "src-tauri/src/browser/vault/crypto.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-core/src/vault_crypto/envelope.rs",
+      "blob": "f016a136bc7c8e402729ddf499ae3bada05bbf6f",
+      "destination": "src-tauri/src/browser/vault/crypto.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-core/src/vault_crypto/keys.rs",
+      "blob": "255d5f65c735bc94424b73332007ccbe61c248f7",
+      "destination": "src-tauri/src/browser/vault/crypto.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-core/src/vault_crypto/validation.rs",
+      "blob": "e5ffe38138635d63c54f0b29db78706edac0e105",
+      "destination": "src-tauri/src/browser/vault/crypto.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-types/src/vault.rs",
+      "blob": "caa09b44667462c35d32f58dcd9759bc78d9c791",
+      "destination": "src-tauri/src/browser/vault/crypto.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false,
+      "note": "Envelope types only."
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-core/src/vault_crypto/tests.rs",
+      "blob": "68737a0b270c4cfad335e0f230f764ba34139e69",
+      "destination": "src-tauri/src/browser/vault/crypto_tests.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false,
+      "note": "Record-envelope cases only."
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-core/src/vault_crypto/kdf.rs",
+      "blob": "522f86daa0f38a1768ffd40bfdeee6e04860c858",
+      "destination": null,
+      "reuseMode": "not-imported",
+      "note": "Passphrase KDF and its metadata: Ferryx keeps the vault key in the OS keystore instead."
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-core/src/vault_crypto/metadata.rs",
+      "blob": "32917977815716fd7304dbf959069a1c811918cf",
+      "destination": null,
+      "reuseMode": "not-imported",
+      "note": "Passphrase KDF and its metadata: Ferryx keeps the vault key in the OS keystore instead."
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-core/src/vault_generator.rs",
+      "blob": "e4ed075ccbe4932e41a711e72dd742e2869f42f9",
+      "destination": "src-tauri/src/browser/vault/generator.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-types/src/vault_generator.rs",
+      "blob": "e5979d14ea6de0376f43261e2cdf013a80966686",
+      "destination": "src-tauri/src/browser/vault/generator.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-core/src/vault_generator/wordlist.txt",
+      "blob": "4c8baa4ce99d371d90fbf9d2249034aab90307a1",
+      "destination": "src-tauri/src/browser/vault/wordlist.txt",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false,
+      "note": "Ferryx swaps yo-yo for yolk so all 1296 words are letters only (0b517d50)."
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-core/src/vault_manager/origin.rs",
+      "blob": "1f9fbabb9d2f2d858fdfb57d2fad38fd76cda2d1",
+      "destination": "src-tauri/src/browser/vault/origin.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false,
+      "note": "Exact origin policy only."
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-core/src/vault_manager/record.rs",
+      "blob": "9bdd7f63e67223857a807f4842f5e1bf87e1d1a7",
+      "destination": "src-tauri/src/browser/vault/store.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false,
+      "note": "Record payload shape, reduced to logins."
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-core/src/maho_core/vault_items.rs",
+      "blob": "4ba7cee47dab66576896e22fffd9cf50101958f8",
+      "destination": "src-tauri/src/browser/vault/store.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false,
+      "note": "Item shape, reduced to logins."
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-core/src/bookmark_manager.rs",
+      "blob": "fa799d8d06bc63bea40783c7ce9739cf57234654",
+      "destination": "src-tauri/src/browser/library/bookmarks.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/Cargo.toml",
+      "blob": "fa20cd60be33dc6db88dd5a0519c6b1a7dc50fba",
+      "destination": "crates/ferryx-browser-import/Cargo.toml",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/INVARIANTS-rust.md",
+      "blob": "686dd859727a510514aa46f5c84610252fbc6994",
+      "destination": "crates/ferryx-browser-import/INVARIANTS-rust.md",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/examples/favicon_count_probe.rs",
+      "blob": "ddc852e63943c306359e110c1f548f3c0aac0017",
+      "destination": null,
+      "reuseMode": "not-imported",
+      "note": "Not copied: Maho-specific example probes and macOS Full Disk Access path tests."
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/examples/favicon_worker_probe.rs",
+      "blob": "a4fd8c1317518e5f83029540391df560c24c792c",
+      "destination": null,
+      "reuseMode": "not-imported",
+      "note": "Not copied: Maho-specific example probes and macOS Full Disk Access path tests."
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/decrypt/asn1.rs",
+      "blob": "5a2c1dd792b7d1cc4ec4253cf0923dd7a4105995",
+      "destination": "crates/ferryx-browser-import/src/decrypt/asn1.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/decrypt/chromium_keychain.rs",
+      "blob": "808918997f8548f571cf85a5a8613b33a5f003ae",
+      "destination": "crates/ferryx-browser-import/src/decrypt/chromium_keychain.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/decrypt/firefox_nss.rs",
+      "blob": "b62ca9a10de38ffb484b1ed27725865b17d2f516",
+      "destination": "crates/ferryx-browser-import/src/decrypt/firefox_nss.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/decrypt/linux_keyring.rs",
+      "blob": "8cf4f5aeb6884c50722375c860b3ddc13b08787b",
+      "destination": "crates/ferryx-browser-import/src/decrypt/linux_keyring.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/decrypt/mod.rs",
+      "blob": "ed10b6aa928d9484ecc1b8b20454b850561832c1",
+      "destination": "crates/ferryx-browser-import/src/decrypt/mod.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/decrypt/win_app_bound.rs",
+      "blob": "d408e91659aa5777615225423fc23caa5e92ffe1",
+      "destination": "crates/ferryx-browser-import/src/decrypt/win_app_bound.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/detect.rs",
+      "blob": "e4d16e75160cabcad3f66d1c32bd84bf00a3aca9",
+      "destination": "crates/ferryx-browser-import/src/detect.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/lib.rs",
+      "blob": "e65fc553782bac10454389d5484c59ba8faf4f77",
+      "destination": "crates/ferryx-browser-import/src/lib.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/orchestrator.rs",
+      "blob": "4aa7441c6bfc685819978d356029139bf630fcee",
+      "destination": "crates/ferryx-browser-import/src/orchestrator.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/arc/mod.rs",
+      "blob": "e16f8daeb2835a42198227ff5cfb6608201eabd8",
+      "destination": "crates/ferryx-browser-import/src/parsers/arc/mod.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/arc/sidebar.rs",
+      "blob": "72710541e37ae33f1e6f5e6f855cde95c0ae549c",
+      "destination": "crates/ferryx-browser-import/src/parsers/arc/sidebar.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/chromium/autofill.rs",
+      "blob": "0d3643f547e64124ea95e79e36d8f45b33e50417",
+      "destination": "crates/ferryx-browser-import/src/parsers/chromium/autofill.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/chromium/bookmarks.rs",
+      "blob": "d981ebe13f908e6802c7cf86911711a5f30fcab3",
+      "destination": "crates/ferryx-browser-import/src/parsers/chromium/bookmarks.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/chromium/cookies.rs",
+      "blob": "dcbaeec521403c6fb74f024ea96333439ebc3988",
+      "destination": "crates/ferryx-browser-import/src/parsers/chromium/cookies.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/chromium/favicons.rs",
+      "blob": "1fef7dcba9fefd8f3c9bd532a48ef1bf7ba09aa5",
+      "destination": "crates/ferryx-browser-import/src/parsers/chromium/favicons.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/chromium/history.rs",
+      "blob": "c62e88329b1ac4d83f46d673f40e54b484281d1f",
+      "destination": "crates/ferryx-browser-import/src/parsers/chromium/history.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/chromium/mod.rs",
+      "blob": "443800f0ce2b4302a879fac8788097339d11fa42",
+      "destination": "crates/ferryx-browser-import/src/parsers/chromium/mod.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/chromium/passwords.rs",
+      "blob": "26c94dda141d4b7baab5cc4cdc67ea6e3e6065a3",
+      "destination": "crates/ferryx-browser-import/src/parsers/chromium/passwords.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/csv.rs",
+      "blob": "d846b093d7ecde8658665625c86fffdbe9adcff9",
+      "destination": "crates/ferryx-browser-import/src/parsers/csv.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/firefox/autofill.rs",
+      "blob": "6998aaf7c8357b0f987ce7f7f810ab80b527d37a",
+      "destination": "crates/ferryx-browser-import/src/parsers/firefox/autofill.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/firefox/bookmarks.rs",
+      "blob": "30deaf502f3d6645d65d837823eb8843efa2cea1",
+      "destination": "crates/ferryx-browser-import/src/parsers/firefox/bookmarks.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/firefox/cookies.rs",
+      "blob": "65c9708ef6595b2a9978476d4c8d52e4d05574ae",
+      "destination": "crates/ferryx-browser-import/src/parsers/firefox/cookies.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/firefox/favicon.rs",
+      "blob": "8cbb0984a222ccbec2bb1cdd623606b93e10b7ed",
+      "destination": "crates/ferryx-browser-import/src/parsers/firefox/favicon.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/firefox/history.rs",
+      "blob": "5ef0c08651106745148bc0d311639f3c7e3d2b38",
+      "destination": "crates/ferryx-browser-import/src/parsers/firefox/history.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/firefox/mod.rs",
+      "blob": "64324dd6ca75e5da7e0fafc028a613bf3d077aea",
+      "destination": "crates/ferryx-browser-import/src/parsers/firefox/mod.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/firefox/passwords.rs",
+      "blob": "aaeae787584fe6e1ed0852016137829cf4f5bd29",
+      "destination": "crates/ferryx-browser-import/src/parsers/firefox/passwords.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/mod.rs",
+      "blob": "51589180f7fa90918a0c6afc4c9b1e11e9a767d5",
+      "destination": "crates/ferryx-browser-import/src/parsers/mod.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/password_import_sources/bitwarden_json.rs",
+      "blob": "e6c471d37875352f2b30bdcbae2cafe524703a23",
+      "destination": "crates/ferryx-browser-import/src/parsers/password_import_sources/bitwarden_json.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/password_import_sources/csv_sources.rs",
+      "blob": "3c0387c967d3c81609815fc5bff3163e88c959a8",
+      "destination": "crates/ferryx-browser-import/src/parsers/password_import_sources/csv_sources.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/password_import_sources/mod.rs",
+      "blob": "a91848a0e7c9f7f19e34651e29fb357cc888ce5e",
+      "destination": "crates/ferryx-browser-import/src/parsers/password_import_sources/mod.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/password_import_sources/onepux.rs",
+      "blob": "bd56617c98b6dc6ff2e104a217f6be8e037d31c1",
+      "destination": "crates/ferryx-browser-import/src/parsers/password_import_sources/onepux.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/safari/bookmarks.rs",
+      "blob": "0a954e2cece31593395ad7e9105d7c0426a237db",
+      "destination": "crates/ferryx-browser-import/src/parsers/safari/bookmarks.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/safari/cookies.rs",
+      "blob": "d0528fd181e27355abf2166ce6e711c355b38cdf",
+      "destination": "crates/ferryx-browser-import/src/parsers/safari/cookies.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/safari/favicon.rs",
+      "blob": "b6536ebad9977a0afd6534105ceacf0f991fd8b2",
+      "destination": "crates/ferryx-browser-import/src/parsers/safari/favicon.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/safari/history.rs",
+      "blob": "ce55a72ff5ce0c66cd5de2ee5dc85db5898205d6",
+      "destination": "crates/ferryx-browser-import/src/parsers/safari/history.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/safari/mod.rs",
+      "blob": "5ab313f8e3df4c8c510142750de8bc78873c15ae",
+      "destination": "crates/ferryx-browser-import/src/parsers/safari/mod.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/safari/passwords_csv.rs",
+      "blob": "57f1b69a7348ee1638c3ae2c8e235f3ba144c881",
+      "destination": "crates/ferryx-browser-import/src/parsers/safari/passwords_csv.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/zen/mod.rs",
+      "blob": "04e3ecc7923366ceb5c090d578499a5282fc827b",
+      "destination": "crates/ferryx-browser-import/src/parsers/zen/mod.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/parsers/zen/workspaces.rs",
+      "blob": "49c9ab527dc36bbee618f6d3561639403157886b",
+      "destination": "crates/ferryx-browser-import/src/parsers/zen/workspaces.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/password_import_job.rs",
+      "blob": "b065f7476a963f3a6d19c2fb3833f5a83189dded",
+      "destination": "crates/ferryx-browser-import/src/password_import_job.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/password_import_job_tests.rs",
+      "blob": "0932149ec90d9a3495d2d19ef4b14a4059e7eb1d",
+      "destination": "crates/ferryx-browser-import/src/password_import_job_tests.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/password_import_sources_contract_tests.rs",
+      "blob": "f14c7d9c2382116c370f6305a3f4f4c5501effc2",
+      "destination": "crates/ferryx-browser-import/src/password_import_sources_contract_tests.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/workers/autofill.rs",
+      "blob": "d6202ac5d8027572a6eae4b6ad0bf4c52c8be36e",
+      "destination": "crates/ferryx-browser-import/src/workers/autofill.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/workers/bookmark.rs",
+      "blob": "c4b4042a63efbb1ed35804438034f2899cdd6b18",
+      "destination": "crates/ferryx-browser-import/src/workers/bookmark.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/workers/cookie.rs",
+      "blob": "5008782dda1109792c5432263a377a4d89787fb1",
+      "destination": "crates/ferryx-browser-import/src/workers/cookie.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/workers/essential.rs",
+      "blob": "0f2769fa9050b8a3012784e874cb912ab9098b89",
+      "destination": "crates/ferryx-browser-import/src/workers/essential.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/workers/favicon.rs",
+      "blob": "13319512e74e73bb41d05fcd9fba96fb413759ae",
+      "destination": "crates/ferryx-browser-import/src/workers/favicon.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/workers/history.rs",
+      "blob": "77ed87794f89bad9ef6ed6d5511ca7b916732f82",
+      "destination": "crates/ferryx-browser-import/src/workers/history.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/workers/mod.rs",
+      "blob": "7cd35127384ef8aa8b6f2c213c104dfac67206b6",
+      "destination": "crates/ferryx-browser-import/src/workers/mod.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/workers/password.rs",
+      "blob": "0eb133ff9600580f962c84a0d746dd5f2bb7518d",
+      "destination": "crates/ferryx-browser-import/src/workers/password.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/workers/workspace.rs",
+      "blob": "bbeb2b348a0241f53b4f441f2288248a2142456d",
+      "destination": "crates/ferryx-browser-import/src/workers/workspace.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/src/workers/workspace_folders.rs",
+      "blob": "1b047a3d51bfab32baf1456cb1caee342c2b9301",
+      "destination": "crates/ferryx-browser-import/src/workers/workspace_folders.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/README.md",
+      "blob": "748d8b7e87938f3d89ae847fc39e36ac3b990cad",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/README.md",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/apple/malformed_unclosed_quote.csv",
+      "blob": "503c961dc325d30adee72c5591820998385e4199",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/apple/malformed_unclosed_quote.csv",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/apple/missing_required_columns.csv",
+      "blob": "14c3bbde9fa7797fe06abc9a92f1474c724fd906",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/apple/missing_required_columns.csv",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/apple/valid_mixed.csv",
+      "blob": "23eac6b934c73a187c885fe106e2330dbe7b5920",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/apple/valid_mixed.csv",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/bitwarden/individual_malformed_unclosed_quote.csv",
+      "blob": "dc37c6c99077a21fc38a5d9b298b180ebae28b5f",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/bitwarden/individual_malformed_unclosed_quote.csv",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/bitwarden/individual_missing_required_columns.csv",
+      "blob": "f35eb935e0981e76b80026f5a248b56a339243ad",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/bitwarden/individual_missing_required_columns.csv",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/bitwarden/individual_valid_mixed.csv",
+      "blob": "774d2f0206fdb4a0d383fc43c2ef49486a824e89",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/bitwarden/individual_valid_mixed.csv",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/bitwarden/malformed_json.txt",
+      "blob": "22a27cc42cb62991bca53933489c85433b105820",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/bitwarden/malformed_json.txt",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/bitwarden/missing_required_password.json",
+      "blob": "baadbc02e8e925ce948919cdfdf9fb6fa5ea292f",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/bitwarden/missing_required_password.json",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/bitwarden/organization_malformed_unclosed_quote.csv",
+      "blob": "c497c228079ba6fcdb2deb552c6eb4fa73399260",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/bitwarden/organization_malformed_unclosed_quote.csv",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/bitwarden/organization_missing_required_columns.csv",
+      "blob": "b221013ec5fc8eba340e065f3113a82f36fd52a7",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/bitwarden/organization_missing_required_columns.csv",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/bitwarden/organization_valid_mixed.csv",
+      "blob": "0768700130997c9b534172a7bdd42912d352ba7a",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/bitwarden/organization_valid_mixed.csv",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/bitwarden/valid_mixed.json",
+      "blob": "bd7f9bc64ad3eb38b35d02120ffea949e4ac435f",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/bitwarden/valid_mixed.json",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/keepass/keepass_classic_malformed_unclosed_quote.csv",
+      "blob": "66f8ba2e26d608f93926ea63c8fa48b0e5424c6e",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/keepass/keepass_classic_malformed_unclosed_quote.csv",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/keepass/keepass_classic_missing_required_columns.csv",
+      "blob": "a02f4c74bc10239ba512f0ede6adf0e057051aef",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/keepass/keepass_classic_missing_required_columns.csv",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/keepass/keepass_classic_valid_mixed.csv",
+      "blob": "350a0343dfef046326730bc829a724b444f13624",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/keepass/keepass_classic_valid_mixed.csv",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/keepass/keepassxc_malformed_unclosed_quote.csv",
+      "blob": "bd74274469491ab70b5ad4c64737461ce8a108b0",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/keepass/keepassxc_malformed_unclosed_quote.csv",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/keepass/keepassxc_missing_required_columns.csv",
+      "blob": "e3158bd58b64affd41b2654859412e0c945ca5cc",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/keepass/keepassxc_missing_required_columns.csv",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/keepass/keepassxc_valid_mixed.csv",
+      "blob": "349fa3cd10fb9a74f635eafcce308426f1b94152",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/keepass/keepassxc_valid_mixed.csv",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/onepassword/malformed_unclosed_quote.csv",
+      "blob": "ec093f1141b72bb40cf2f886879502d660ca60e5",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/onepassword/malformed_unclosed_quote.csv",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/onepassword/missing_required_columns.csv",
+      "blob": "805df36d0ef31a647c15cd4cbc0a020ba717e186",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/onepassword/missing_required_columns.csv",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/onepassword/valid.1pux.base64",
+      "blob": "0be82736ae7a7ebb4753f199c16dc78e7bba10d8",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/onepassword/valid.1pux.base64",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/test_data/fixtures/password_import_sources/onepassword/valid_mixed.csv",
+      "blob": "7399cc9ea725dc3f5bed69a198f5b6083f830da9",
+      "destination": "crates/ferryx-browser-import/test_data/fixtures/password_import_sources/onepassword/valid_mixed.csv",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/tests/arc_zen_workspace_import.rs",
+      "blob": "3377d51011cc34d4eb0052d7fbfdddf383bf0c0a",
+      "destination": "crates/ferryx-browser-import/tests/arc_zen_workspace_import.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": false
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/tests/chrome_multi_profile.rs",
+      "blob": "50d1cbd2af636beccbc46b343a00b1f04cb83f9a",
+      "destination": "crates/ferryx-browser-import/tests/chrome_multi_profile.rs",
+      "reuseMode": "owner-granted-copy",
+      "verbatim": true
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-import/tests/safari_fda_paths.rs",
+      "blob": "8bd9f74c3b1da990d0aaa9361f7890bd5f950993",
+      "destination": null,
+      "reuseMode": "not-imported",
+      "note": "Not copied: Maho-specific example probes and macOS Full Disk Access path tests."
     }
   ],
   "inspectedNotImported": [
@@ -115,5 +911,22 @@
       "scope": "Windows archive; cfg(unix) test skip not adopted"
     }
   ],
-  "notAudited": "Other archive branches are preserved upstream and not claimed audited or merged."
+  "notAudited": "Other archive branches are preserved upstream and not claimed audited or merged.",
+  "ownerGrant": {
+    "grantor": "Owner of Maho and of Ferryx (the same person)",
+    "text": "maho 코드: 내가 maho 소유자, 그대로 써",
+    "translation": "Maho code: I am the owner of Maho, use it as is",
+    "date": "2026-11-01",
+    "scope": [
+      "maho/crates/maho-core",
+      "maho/crates/maho-types",
+      "maho/crates/maho-import",
+      "maho/crates/maho-browser-mcp",
+      "maho/crates/maho-cli",
+      "maho-chromium (Maho-authored files only)"
+    ],
+    "covers": "Copying Maho-authored source into Ferryx verbatim or adapted, and distributing it under the Ferryx License.",
+    "excludes": "Third-party code vendored inside Maho, and Chromium/CEF binaries, which keep their own licenses.",
+    "record": "docs/browser/MAHO_INTEGRATION.md#owner-grant"
+  }
 }
