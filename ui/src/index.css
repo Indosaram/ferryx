@@ -211,6 +211,23 @@ body {
   -webkit-user-select: none;
 }
 
+/* Native touch feel: no page rubber-band or pull-to-reload, no grey tap flash, no
+   double-tap-zoom wait or long-press callout on controls. Text selection is untouched.
+   `:where` keeps these at zero specificity so utilities such as `touch-none` still win. */
+html,
+body {
+  overscroll-behavior: none;
+}
+
+:where(*) {
+  -webkit-tap-highlight-color: transparent;
+}
+
+:where(button, a, [role="button"], [role="tab"], [role="menuitem"], summary, label) {
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+}
+
 @layer utilities {
   /* Re-enable text selection inside read-only content regions while the
      app shell keeps `user-select: none` (see body above). Apply the
