@@ -3587,7 +3587,14 @@ fn parse_http_response_within(
     let body = if head || status == StatusCode::NO_CONTENT || status == StatusCode::NOT_MODIFIED {
         Vec::new()
     } else if let Some(encoding) = headers.get("transfer-encoding") {
-        if encoding != "chunked" {
+        // Coding names are case-insensitive. Only plain chunked is accepted: the relay cannot
+        // undo another transfer coding, and stripping the hop header would leave the client
+        // with bytes it cannot decode.
+        let encoding = encoding.to_str().map_err(|_| bad)?;
+        let mut codings = encoding.split(',').map(str::trim);
+        if !(codings.next().is_some_and(|coding| coding.eq_ignore_ascii_case("chunked"))
+            && codings.next().is_none())
+        {
             return Err(bad);
         }
         let mut remaining = data;
@@ -5860,6 +5867,17 @@ mod tests {
         let (_newer, _rx, _g) = state.register_control_channel("pool".into());
         assert!(state.take_pooled_data("pool", None).is_none());
         server.abort();
+    }
+
+    #[test]
+    fn chunked_transfer_coding_is_matched_case_insensitively() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n";
+        let parsed = parse_http_response(raw, false, false).unwrap().unwrap();
+        assert_eq!(parsed.status(), StatusCode::OK);
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding:  CHUNKED \r\n\r\n0\r\n\r\n";
+        assert!(parse_http_response(raw, false, false).unwrap().is_some());
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n";
+        assert_eq!(parse_http_response(raw, false, false).err(), Some(StatusCode::BAD_GATEWAY));
     }
 
     #[test]
