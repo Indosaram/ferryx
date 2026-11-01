@@ -920,6 +920,49 @@ async fn an_engine_exit_mid_turn_is_never_retransmitted_and_an_early_exit_backs_
     assert_eq!(supervisor.health().generation, 2);
 }
 
+/// Health alone tells the Slack gate (`chat::slack_supervisor::engine_ready`) whether an
+/// exited engine may take a turn, since it lets an exit without a fault through: an early
+/// exit keeps its fault there until the backoff ends and the supervising loop relaunches the
+/// engine, while an exit after STABLE_UPTIME has no fault, so its next use relaunches it.
+#[tokio::test(start_paused = true)]
+async fn an_early_exit_keeps_slack_turns_off_the_engine_until_the_backoff_relaunch() {
+    let harness = Harness::new("early-exit-gate", all_capabilities());
+    let supervisor = harness.supervisor();
+    let mut health = supervisor.subscribe_health();
+    let generation = tokio::spawn(supervisor.clone().supervise());
+    assert_eq!(supervisor.decide("first").await.unwrap(), "answer:first");
+
+    harness.peer.disconnect();
+    let early = tokio::time::timeout(WAIT, health.wait_for(|health| health.state == HealthState::Exited))
+        .await
+        .expect("the early exit is observed")
+        .unwrap()
+        .clone();
+    assert_eq!(early.fault.as_ref().map(SupervisorFault::code), Some("MHC_ENGINE_EXITED"));
+    assert!(retry_in(&supervisor).await > Duration::ZERO, "the exit is inside its backoff");
+
+    let relaunched = tokio::time::timeout(
+        WAIT,
+        health.wait_for(|health| health.state == HealthState::Ready && health.generation == 2),
+    )
+    .await
+    .expect("the supervising loop relaunches the engine once the backoff ends")
+    .unwrap()
+    .clone();
+    assert_eq!(relaunched.fault, None);
+    assert_eq!(harness.launcher.launches.load(Ordering::SeqCst), 2);
+
+    tokio::time::advance(STABLE_UPTIME).await;
+    harness.peer.disconnect();
+    let stable = tokio::time::timeout(WAIT, health.wait_for(|health| health.state == HealthState::Exited))
+        .await
+        .expect("the stable exit is observed")
+        .unwrap()
+        .clone();
+    assert_eq!(stable.fault, None, "the next use relaunches a stable engine");
+    generation.abort();
+}
+
 #[derive(Default)]
 struct RecordingWork {
     calls: Mutex<Vec<WorkToolRequest>>,
