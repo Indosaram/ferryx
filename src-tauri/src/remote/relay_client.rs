@@ -405,6 +405,30 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// backoff. A relay that accepts and then drops at once must not cause a reconnect storm.
 const HEALTHY_SESSION_UPTIME: Duration = Duration::from_secs(30);
 
+/// The relay's close reason when an owner's remote access is suspended.
+const REMOTE_SUSPENDED: &str = "REMOTE_SUSPENDED";
+
+/// A rejection that retrying soon cannot fix: the account is suspended or the relay refused
+/// this machine's credentials. The client keeps retrying, but at [`MAX_BACKOFF`].
+fn is_terminal_rejection(reason: &str) -> bool {
+    reason.contains(REMOTE_SUSPENDED) || reason.contains("Relay authentication rejected")
+}
+
+/// Text recorded for status when a control session fails.
+fn describe_control_failure(err: &anyhow::Error) -> String {
+    if let Some(tokio_tungstenite::tungstenite::Error::Http(response)) =
+        err.downcast_ref::<tokio_tungstenite::tungstenite::Error>()
+    {
+        let status = response.status();
+        if status == tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED
+            || status == tokio_tungstenite::tungstenite::http::StatusCode::FORBIDDEN
+        {
+            return format!("Relay authentication rejected: machine token refused (HTTP {status})");
+        }
+    }
+    format!("{err:#}")
+}
+
 /// A random delay in `[backoff / 2, backoff]`, so daemons dropped by one relay restart do not
 /// reconnect in lockstep and trip the relay's admission limit together.
 fn jittered(backoff: Duration, rng: &mut impl Rng) -> Duration {
@@ -454,6 +478,9 @@ pub struct RelayClient {
     /// True only while a control session has passed authentication and has not dropped.
     /// Shared across clones so status reads the client the gateway published, not a copy.
     control_accepted: Arc<std::sync::atomic::AtomicBool>,
+    /// Why the last control session ended or was refused (the relay's close reason, or the
+    /// authentication rejection text). Cleared once a session is accepted again.
+    last_close_reason: Arc<parking_lot::Mutex<Option<String>>>,
 }
 
 /// Holds `control_accepted` for one live control session and clears it on every exit.
@@ -515,6 +542,7 @@ impl RelayClient {
             attach_tx,
             attach_rx: Arc::new(Mutex::new(attach_rx)),
             control_accepted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_close_reason: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -565,6 +593,7 @@ impl RelayClient {
             attach_tx,
             attach_rx: Arc::new(Mutex::new(attach_rx)),
             control_accepted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_close_reason: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -643,6 +672,18 @@ impl RelayClient {
     pub fn control_channel_accepted(&self) -> bool {
         self.control_accepted
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Why the relay last closed or refused the control channel, e.g. `REMOTE_SUSPENDED` or
+    /// `Relay authentication rejected: ...`. `None` while a session is accepted or before
+    /// the first attempt ends, so status can tell "suspended" or "bad credentials" apart
+    /// from a plain network drop.
+    pub fn last_control_close_reason(&self) -> Option<String> {
+        self.last_close_reason.lock().clone()
+    }
+
+    fn record_close_reason(&self, reason: Option<String>) {
+        *self.last_close_reason.lock() = reason;
     }
 
     #[cfg(test)]
@@ -742,7 +783,7 @@ impl RelayClient {
         loop {
             let started = tokio::time::Instant::now();
             let result = self.run_control_session().await;
-            backoff = self.next_backoff(started.elapsed(), backoff);
+            backoff = self.backoff_after_session(started.elapsed(), backoff);
             match result {
                 // Still reconnect - the daemon is expected to stay tunneled for as long
                 // as it runs.
@@ -761,6 +802,21 @@ impl RelayClient {
             let delay = jittered(backoff, &mut rand::thread_rng());
             tokio::time::sleep(delay).await;
             backoff = std::cmp::min(backoff * 2, MAX_BACKOFF);
+        }
+    }
+
+    /// [`Self::next_backoff`], except that a terminal rejection (suspension, refused
+    /// credentials) always waits the longest: hammering the relay cannot fix it.
+    fn backoff_after_session(&self, uptime: Duration, backoff: Duration) -> Duration {
+        let next = self.next_backoff(uptime, backoff);
+        let terminal = self
+            .last_control_close_reason()
+            .is_some_and(|reason| is_terminal_rejection(&reason));
+        if terminal {
+            tracing::warn!("relay refused this machine; backing off for {}s", MAX_BACKOFF.as_secs());
+            MAX_BACKOFF
+        } else {
+            next
         }
     }
 
@@ -811,14 +867,21 @@ impl RelayClient {
     }
 
     async fn run_control_session(&self) -> anyhow::Result<()> {
-        let socket = self.connect_control().await?;
-        self.serve_control_session(socket).await
+        let result = match self.connect_control().await {
+            Ok(socket) => self.serve_control_session(socket).await,
+            Err(err) => Err(err),
+        };
+        if let Err(err) = &result {
+            self.record_close_reason(Some(describe_control_failure(err)));
+        }
+        result
     }
 
     /// Services an authenticated control socket until it closes or errors.
     async fn serve_control_session(&self, socket: ControlSocket) -> anyhow::Result<()> {
         // Set only after authentication succeeds. Drop clears every exit, including a later reject.
         let _admitted = ControlChannelAdmission::admit(&self.control_accepted);
+        self.record_close_reason(None);
         let mut registrations = self.register_rx.lock().await;
         let mut attachments = self.attach_rx.lock().await;
         let mut pending: Option<RegisterPairingPinRequest> = None;
@@ -981,7 +1044,19 @@ impl RelayClient {
                 Some(Ok(Message::Ping(payload))) => {
                     send_control(&mut write, Message::Pong(payload)).await?;
                 }
-                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(Message::Close(frame))) => {
+                    let reason = frame
+                        .map(|frame| frame.reason.to_string())
+                        .filter(|reason| !reason.is_empty())
+                        .unwrap_or_else(|| "relay closed the control channel".into());
+                    tracing::info!("relay closed the control channel: {reason}");
+                    self.record_close_reason(Some(reason));
+                    break;
+                }
+                None => {
+                    self.record_close_reason(Some("relay control connection ended".into()));
+                    break;
+                }
                 Some(Ok(_)) => {
                     // Binary/Pong/Frame - control channel has no other
                     // traffic; ignore.
@@ -1707,6 +1782,65 @@ mod tests {
         .expect("accepted flag stayed set after the session dropped");
         let _ = task.await;
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_suspension_close_is_recorded_and_backs_off_to_the_maximum() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = RelayClient::new(format!("http://{}", listener.local_addr().unwrap()), "tok");
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            socket
+                .close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                    code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy,
+                    reason: REMOTE_SUSPENDED.into(),
+                }))
+                .await
+                .unwrap();
+            while socket.next().await.is_some() {}
+        });
+        tokio::time::timeout(Duration::from_secs(5), client.run_control_session())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            client.last_control_close_reason().as_deref(),
+            Some(REMOTE_SUSPENDED)
+        );
+        assert_eq!(
+            client.backoff_after_session(Duration::from_secs(1), INITIAL_BACKOFF),
+            MAX_BACKOFF
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_authentication_rejection_is_recorded_and_backs_off_to_the_maximum() {
+        let (client, server) = auth_fixture(false).await;
+        let error = tokio::time::timeout(Duration::from_secs(5), client.run_control_session())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("denied"), "{error}");
+        let reason = client.last_control_close_reason().unwrap();
+        assert!(reason.contains("Relay authentication rejected"), "{reason}");
+        assert!(reason.contains("denied"), "{reason}");
+        assert_eq!(
+            client.backoff_after_session(Duration::from_secs(1), INITIAL_BACKOFF),
+            MAX_BACKOFF
+        );
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn a_plain_network_drop_keeps_the_normal_backoff() {
+        let client = RelayClient::new("https://relay.example.com", "tok");
+        client.record_close_reason(Some("relay control connection ended".into()));
+        assert_eq!(
+            client.backoff_after_session(Duration::from_secs(1), INITIAL_BACKOFF),
+            INITIAL_BACKOFF
+        );
     }
 
     #[test]
