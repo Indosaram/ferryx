@@ -886,13 +886,13 @@ mod spawn_owner_tests {
         assert_eq!(HandoverManager::recorded_supervisor_lease(&legacy), Some(lease));
     }
 
-    /// A failed decision write followed by an unreadable record hands nothing over, so the
-    /// frozen lease client thaws; only a readable decision on disk keeps it frozen.
+    /// A failed decision write thaws the frozen lease client only when no record reached the
+    /// disk; an unreadable or readable record keeps it frozen.
     #[test]
-    fn an_unreadable_record_after_a_failed_decision_write_resumes_renewing() {
+    fn only_a_missing_record_after_a_failed_decision_write_resumes_renewing() {
         use super::super::handover_transaction::HandoverState;
         assert!(HandoverManager::decision_missing(&Ok(None)));
-        assert!(HandoverManager::decision_missing(&Err("unreadable record".into())), "nothing was handed over");
+        assert!(!HandoverManager::decision_missing(&Err("unreadable record".into())), "it may be the commit");
         assert!(!HandoverManager::decision_missing(&Ok(Some(HandoverState::Retired))), "the commit landed");
         assert!(!HandoverManager::decision_missing(&Ok(Some(HandoverState::Active))));
     }
@@ -1300,11 +1300,11 @@ impl HandoverManager {
         written
     }
 
-    /// After a failed decision write: true unless a decision is known to be on disk. An
-    /// unreadable record hands nothing over either (the successor cannot read a lease from it),
-    /// so the frozen lease client must renew again rather than stay frozen for good.
+    /// After a failed decision write: true only when no decision is on disk. An unreadable
+    /// record may still be a commit the successor reads, so the lease client stays frozen and
+    /// its hub stands down at the lease deadline rather than risk two holders of one fence.
     fn decision_missing(recorded: &Result<Option<super::handover_transaction::HandoverState>, String>) -> bool {
-        !matches!(recorded, Ok(Some(_)))
+        matches!(recorded, Ok(None))
     }
 
     fn write_decision(
