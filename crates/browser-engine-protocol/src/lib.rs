@@ -11,6 +11,57 @@
 /// Marks an engine stdout line as a protocol event.
 pub const EVENT_PREFIX: &str = "@ferryx ";
 
+/// What a site asks to use. On the wire a comma-separated list of the names below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PermissionKind {
+    Camera,
+    Microphone,
+    /// Screen, window or tab capture (getDisplayMedia).
+    Screen,
+    Notifications,
+    Geolocation,
+    /// Reading the clipboard.
+    Clipboard,
+    /// Anything else the engine asked about in the same request.
+    Other,
+}
+
+impl PermissionKind {
+    pub const ALL: [Self; 7] = [
+        Self::Camera,
+        Self::Microphone,
+        Self::Screen,
+        Self::Notifications,
+        Self::Geolocation,
+        Self::Clipboard,
+        Self::Other,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Camera => "camera",
+            Self::Microphone => "microphone",
+            Self::Screen => "screen",
+            Self::Notifications => "notifications",
+            Self::Geolocation => "geolocation",
+            Self::Clipboard => "clipboard",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    }
+}
+
+fn kinds_field(kinds: &[PermissionKind]) -> String {
+    kinds.iter().map(|kind| kind.as_str()).collect::<Vec<_>>().join(",")
+}
+
+fn parse_kinds(field: &str) -> Option<Vec<PermissionKind>> {
+    field.split(',').map(PermissionKind::parse).collect()
+}
+
 /// A pane rectangle: pixels inside the Ferryx window on Windows, screen points from the
 /// top-left on macOS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -38,6 +89,8 @@ pub enum Command {
     Back { tab: String },
     Forward { tab: String },
     Reload { tab: String, ignore_cache: bool },
+    /// Answers [`Event::PermissionRequest`] `request`: allow or deny everything it asked for.
+    Permission { request: u64, allow: bool },
 }
 
 /// Engine to Ferryx.
@@ -53,6 +106,13 @@ pub enum Event {
     Loading { tab: String, loading: bool, can_go_back: bool, can_go_forward: bool },
     /// The tab's browser closed inside the engine (the page, a shortcut, a crash).
     Closed { tab: String },
+    /// A page in `tab` asks to use `kinds`; the engine holds the request until Ferryx answers
+    /// with [`Command::Permission`]. Nothing is granted without that answer.
+    PermissionRequest { tab: String, request: u64, kinds: Vec<PermissionKind>, origin: String },
+    /// The engine dropped an unanswered request (navigation, the tab closed): the prompt goes.
+    PermissionDismissed { tab: String, request: u64 },
+    /// The page in `tab` started or stopped capturing the camera (`video`) or microphone (`audio`).
+    MediaAccess { tab: String, video: bool, audio: bool },
 }
 
 fn one_line(text: &str) -> String {
@@ -122,6 +182,7 @@ impl Command {
             Self::Back { tab } => format!("back {tab}"),
             Self::Forward { tab } => format!("forward {tab}"),
             Self::Reload { tab, ignore_cache } => format!("reload {tab} {}", flag(*ignore_cache)),
+            Self::Permission { request, allow } => format!("permission {request} {}", flag(*allow)),
         }
     }
 
@@ -160,6 +221,10 @@ impl Command {
                 let (parts, _) = fields(rest, 2)?;
                 Some(Self::Reload { tab: parts[0].to_string(), ignore_cache: parse_flag(parts[1])? })
             }
+            "permission" => {
+                let (parts, _) = fields(rest, 2)?;
+                Some(Self::Permission { request: parts[0].parse().ok()?, allow: parse_flag(parts[1])? })
+            }
             _ => None,
         }
     }
@@ -179,6 +244,13 @@ impl Event {
                 flag(*can_go_forward)
             ),
             Self::Closed { tab } => format!("closed {tab}"),
+            Self::PermissionRequest { tab, request, kinds, origin } => {
+                format!("permission-request {tab} {request} {} {}", kinds_field(kinds), one_line(origin))
+            }
+            Self::PermissionDismissed { tab, request } => format!("permission-dismissed {tab} {request}"),
+            Self::MediaAccess { tab, video, audio } => {
+                format!("media-access {tab} {} {}", flag(*video), flag(*audio))
+            }
         };
         format!("{EVENT_PREFIX}{body}")
     }
@@ -218,6 +290,27 @@ impl Event {
                 })
             }
             "closed" => Some(Self::Closed { tab: fields(rest, 1)?.0[0].to_string() }),
+            "permission-request" => {
+                let (parts, origin) = fields(rest, 3)?;
+                Some(Self::PermissionRequest {
+                    tab: parts[0].to_string(),
+                    request: parts[1].parse().ok()?,
+                    kinds: parse_kinds(parts[2])?,
+                    origin: origin.to_string(),
+                })
+            }
+            "permission-dismissed" => {
+                let (parts, _) = fields(rest, 2)?;
+                Some(Self::PermissionDismissed { tab: parts[0].to_string(), request: parts[1].parse().ok()? })
+            }
+            "media-access" => {
+                let (parts, _) = fields(rest, 3)?;
+                Some(Self::MediaAccess {
+                    tab: parts[0].to_string(),
+                    video: parse_flag(parts[1])?,
+                    audio: parse_flag(parts[2])?,
+                })
+            }
             _ => None,
         }
     }
@@ -252,6 +345,8 @@ mod tests {
             Command::Forward { tab: tab.clone() },
             Command::Reload { tab: tab.clone(), ignore_cache: true },
             Command::Raise,
+            Command::Permission { request: u64::MAX, allow: true },
+            Command::Permission { request: 0, allow: false },
         ];
         for command in commands {
             assert_eq!(Command::parse(&command.to_line()), Some(command));
@@ -267,6 +362,20 @@ mod tests {
             Event::Address { tab: tab.clone(), url: "https://a.test/".into() },
             Event::Title { tab: tab.clone(), title: "Inbox (3) - mail".into() },
             Event::Loading { tab: tab.clone(), loading: false, can_go_back: true, can_go_forward: false },
+            Event::PermissionRequest {
+                tab: tab.clone(),
+                request: 42,
+                kinds: vec![PermissionKind::Camera, PermissionKind::Microphone],
+                origin: "https://meet.example.com:8443".into(),
+            },
+            Event::PermissionRequest {
+                tab: tab.clone(),
+                request: 43,
+                kinds: PermissionKind::ALL.to_vec(),
+                origin: "https://a.test".into(),
+            },
+            Event::PermissionDismissed { tab: tab.clone(), request: 42 },
+            Event::MediaAccess { tab: tab.clone(), video: true, audio: false },
             Event::Closed { tab },
         ];
         for event in events {
@@ -295,6 +404,10 @@ mod tests {
         assert_eq!(Command::parse("open b1 0 0 800"), None);
         assert_eq!(Command::parse("show"), None);
         assert_eq!(Command::parse("dance b1"), None);
+        assert_eq!(Command::parse("permission 7 yes"), None);
+        assert_eq!(Command::parse("permission x 1"), None);
+        assert_eq!(Event::parse("@ferryx permission-request b1 7 camera,teleport https://a.test"), None);
+        assert_eq!(Event::parse("@ferryx media-access b1 1"), None);
     }
 
     #[test]

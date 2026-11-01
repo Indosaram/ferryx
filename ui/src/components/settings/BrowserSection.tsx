@@ -44,6 +44,7 @@ import {
 } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { BrowserEngineGroup } from "./BrowserEngineGroup";
+import { SiteSettingsGroup } from "./SiteSettingsGroup";
 import { SettingRow, SettingsGroup, SettingsHeading } from "./primitives";
 
 export function BrowserSection() {
@@ -342,6 +343,8 @@ export function BrowserSection() {
       </SettingsGroup>
 
       <BrowserEngineGroup />
+
+      <SiteSettingsGroup />
 
       <SettingsGroup title="Link Routing">
         <div className="border-b border-border">

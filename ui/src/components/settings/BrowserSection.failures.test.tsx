@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserSection } from "./BrowserSection";
 
+vi.mock("./SiteSettingsGroup", () => ({ SiteSettingsGroup: () => null }));
 vi.mock("../../lib/browserTauri", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/browserTauri")>()),
   listBrowsers: vi.fn(async () => [

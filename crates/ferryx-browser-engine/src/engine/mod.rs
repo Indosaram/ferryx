@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
 mod platform;
+mod permissions;
 
 #[cfg(target_os = "macos")]
 pub mod mac_app;
@@ -235,6 +236,8 @@ fn adopt(tab: String, popup: u32) {
 }
 
 fn close(tab: &str) {
+    // Ferryx closed the tab: requests it held are denied (dropped) and their prompts go.
+    permissions::forget_tab(tab);
     if let Some(pane) = TABS.with_borrow_mut(|tabs| tabs.remove(tab))
         && let Some(browser) = pane.view.browser()
         && let Some(host) = browser.host()
@@ -297,6 +300,7 @@ fn execute(command: Command) {
                 }
             }
         }
+        Command::Permission { request, allow } => permissions::answer(request, allow),
     }
 }
 
@@ -527,6 +531,10 @@ wrap_client! {
         fn load_handler(&self) -> Option<LoadHandler> {
             Some(EngineLoadHandler::new())
         }
+
+        fn permission_handler(&self) -> Option<PermissionHandler> {
+            Some(permissions::EnginePermissionHandler::new())
+        }
     }
 }
 
@@ -566,6 +574,18 @@ wrap_display_handler! {
             with_pane(&key, |pane| pane.title = title.clone());
             if let Key::Tab(tab) = key {
                 emit(Event::Title { tab, title });
+            }
+        }
+
+        fn on_media_access_change(
+            &self,
+            browser: Option<&mut Browser>,
+            has_video_access: ::std::os::raw::c_int,
+            has_audio_access: ::std::os::raw::c_int,
+        ) {
+            let Some(browser) = browser else { return };
+            if let Some(Key::Tab(tab)) = key_of(browser) {
+                emit(Event::MediaAccess { tab, video: has_video_access != 0, audio: has_audio_access != 0 });
             }
         }
     }
@@ -616,6 +636,7 @@ wrap_life_span_handler! {
                 match key_of(browser) {
                     Some(Key::Tab(tab)) => {
                         TABS.with_borrow_mut(|tabs| tabs.remove(&tab));
+                        permissions::forget_tab(&tab);
                         emit(Event::Closed { tab });
                     }
                     Some(Key::Popup(id)) => {

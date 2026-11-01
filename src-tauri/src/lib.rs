@@ -1437,6 +1437,10 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 app.handle(),
                 app.state::<Arc<browser::BrowserManager>>().inner(),
             );
+            crate::browser::site_permissions::init(
+                app.handle(),
+                Arc::clone(app.state::<Arc<browser::BrowserManager>>().inner()),
+            );
             #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
             if let Some(profile) = QA_PRIMARY_WINDOW_PROFILE.with(|slot| slot.borrow_mut().take()) {
                 let window_config = app
@@ -1860,6 +1864,11 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_browser_open_external,
         cmd_browser_remote_reclaim,
         cmd_browser_remote_revoke,
+        crate::browser::site_permissions::cmd_browser_permission_decide,
+        crate::browser::site_permissions::cmd_browser_permission_pending,
+        crate::browser::site_permissions::cmd_browser_media_capture,
+        crate::browser::site_permissions::cmd_browser_site_permissions_list,
+        crate::browser::site_permissions::cmd_browser_site_permission_revoke,
         cmd_open_file_path,
         dag_list_runs,
         dag_get_run,

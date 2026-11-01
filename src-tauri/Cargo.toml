@@ -258,6 +258,7 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKFrameInfo",
     "WKSecurityOrigin",
     "WKWebViewConfiguration",
+    "WKUIDelegate",
 ] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
     "std",

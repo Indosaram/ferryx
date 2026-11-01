@@ -1662,6 +1662,9 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
                         Ok(()) => 'kept: {
                             let _ = child.eval(&eval_bridge_script);
                             let _ = child.set_zoom(zoom_factor);
+                            // Camera, microphone and other site permissions ask the user
+                            // instead of the engine's default (wry grants media on macOS).
+                            crate::browser::site_permissions::install_webview(&child, &browser_id);
                             let bridge_kind =
                                 crate::browser::bridge::install(&child, &install_ctx);
                             if let Err(error) =
@@ -1947,6 +1950,18 @@ fn cef_event_sink<R: tauri::Runtime>(
             }
             Event::Popup { popup, url, .. } => {
                 adopt_cef_popup(&app, &manager, profile, popup, url);
+                return;
+            }
+            Event::PermissionRequest { tab, request, kinds, origin } => {
+                crate::browser::site_permissions::cef_request(profile, tab, request, kinds, origin);
+                return;
+            }
+            Event::PermissionDismissed { request, .. } => {
+                crate::browser::site_permissions::cef_dismissed(profile, request);
+                return;
+            }
+            Event::MediaAccess { tab, video, audio } => {
+                crate::browser::site_permissions::cef_media_access(&tab, video, audio);
                 return;
             }
         };
@@ -3680,6 +3695,7 @@ pub async fn close_browser_session<R: tauri::Runtime>(
         .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
     crate::browser::bridge::forget_webview(app, &session.webview_label);
     CREATED_SESSION_IDS.lock().retain(|id| id != browser_id);
+    crate::browser::site_permissions::forget_browser(browser_id);
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     if crate::browser::cef_engine::close(browser_id) {
         crate::browser::popup::forget_opener(browser_id);

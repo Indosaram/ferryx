@@ -25,6 +25,7 @@ mod remote_service_tests;
 #[cfg(feature = "desktop")]
 pub mod screenshot;
 pub mod security;
+pub mod site_permissions;
 pub mod snapshot_source;
 #[cfg(test)]
 mod snapshot_source_tests;
