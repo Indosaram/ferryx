@@ -16,6 +16,11 @@ vi.mock("../../lib/browserTauri", async (importOriginal) => {
   return { ...actual, ...browserMocks };
 });
 
+vi.mock("../../lib/browserExtensions", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/browserExtensions")>()),
+  listBrowserExtensions: vi.fn(async () => ({ profile: "default", engineInstalled: false, supported: false, extensions: [] })),
+}));
+
 const activeBrowser = {
   browserId: "browser-1",
   webviewLabel: "browser-browser-1",

@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   ArrowLeft,
@@ -19,11 +19,15 @@ import {
   Library as LibraryIcon,
   Printer,
   FileDown,
+  MoreHorizontal,
+  Puzzle,
+  type LucideIcon,
 } from "lucide-react";
 import {
   BROWSER_SHORTCUT_EVENT,
   extractBrowserErrorCode,
   focusBrowser,
+  getBrowserEngineStatus,
   getBrowserState,
   getBrowserSnapshotCapability,
   goBackBrowser,
@@ -37,6 +41,7 @@ import {
   removeBrowserElementPicker,
   openExternalUrl,
   setBrowserZoom,
+  type BrowserEngineStatus,
   type BrowserDesignSnapshot,
   type BrowserReloadOptions,
   type BrowserShortcutAction,
@@ -62,6 +67,8 @@ import {
 } from "../lib/browserLibrary";
 import { requestSwitchToBrowserTab } from "../lib/browserLibrarySync";
 import { BROWSER_ZOOM_LEVELS, normalizeBrowserAddress, searchUrlFor, useBrowserSettings } from "../lib/browserSettings";
+import { openSettingsSection } from "../lib/browserExtensions";
+import { isMacHost } from "../lib/platform";
 import { isHardReloadSupportedPlatform } from "../lib/shortcuts";
 import type { BrowserTab } from "../lib/types";
 
@@ -69,6 +76,70 @@ import type { BrowserTab } from "../lib/types";
 // (BROWSER_ZOOM_LEVELS percentages), so a zoom restored by the backend stays reachable.
 const BROWSER_ZOOM_MIN = Math.min(...BROWSER_ZOOM_LEVELS) / 100;
 const BROWSER_ZOOM_MAX = Math.max(...BROWSER_ZOOM_LEVELS) / 100;
+
+/** Below this toolbar width the secondary actions move into the "More" row. */
+export const BROWSER_TOOLBAR_COMPACT_WIDTH = 720;
+
+const TOOLBAR_BUTTON_BASE =
+  "inline-flex shrink-0 items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground";
+/** The one class set every icon-only toolbar button shares. */
+export const TOOLBAR_ICON_BUTTON = `${TOOLBAR_BUTTON_BASE} size-7 justify-center`;
+const TOOLBAR_ROW_BUTTON = `${TOOLBAR_BUTTON_BASE} h-7 gap-1.5 px-2 text-[11px]`;
+
+type ToolbarButtonProps = {
+  icon: LucideIcon;
+  label: string;
+  title: string;
+  onClick: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  variant?: "icon" | "row";
+  disabled?: boolean;
+  pressed?: boolean;
+  expanded?: boolean;
+  hasPopup?: boolean;
+  controls?: string;
+  testId?: string;
+  shortcut?: string;
+  iconClassName?: string;
+};
+
+/** Icon button (toolbar) or icon + text button (inline rows): same label, tooltip and focus ring. */
+function ToolbarButton({
+  icon: Icon,
+  label,
+  title,
+  onClick,
+  variant = "icon",
+  disabled,
+  pressed,
+  expanded,
+  hasPopup,
+  controls,
+  testId,
+  shortcut,
+  iconClassName = "",
+}: ToolbarButtonProps) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      aria-label={label}
+      aria-pressed={pressed}
+      aria-expanded={expanded}
+      aria-haspopup={hasPopup ? "true" : undefined}
+      aria-controls={controls}
+      data-testid={testId}
+      data-shortcut={shortcut}
+      className={`${variant === "row" ? TOOLBAR_ROW_BUTTON : TOOLBAR_ICON_BUTTON} ${pressed ? "bg-muted text-foreground" : ""}`}
+    >
+      <Icon className={`size-3.5 ${iconClassName}`} />
+      {variant === "row" ? <span>{label}</span> : null}
+    </button>
+  );
+}
+
+type ExtensionsStatus = "loading" | "error" | BrowserEngineStatus;
 
 /** Every toolbar failure names the action the user took plus the backend's structured code, so a
  * failed action can never read as a successful one. The code comes from the IPC error contract,
@@ -106,8 +177,17 @@ export function BrowserToolbar({
   openTabs = [],
 }: BrowserToolbarProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const omniboxId = useId();
   const omniboxListId = `${omniboxId}-history`;
+  const moreRowId = `${omniboxId}-more`;
+  const extensionsRowId = `${omniboxId}-extensions`;
+  // 0 means "not measured yet" (first paint, jsdom): treated as wide so nothing is hidden blindly.
+  const [toolbarWidth, setToolbarWidth] = useState(0);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [extensionsOpen, setExtensionsOpen] = useState(false);
+  const [extensionsStatus, setExtensionsStatus] = useState<ExtensionsStatus>("loading");
+  const [extensionsErrorCode, setExtensionsErrorCode] = useState<string | null>(null);
   const [inputUrl, setInputUrl] = useState(tab.url);
   // Set while the user has typed into the omnibox and not yet submitted, blurred or escaped, so
   // a live URL update from the page cannot overwrite half-typed text.
@@ -132,6 +212,41 @@ export function BrowserToolbar({
   // without a parent; a parent that passes `elementPicking` still drives it.
   const [elementPicking, setElementPicking] = useState(elementPickingProp ?? false);
   const { settings, updateSettings } = useBrowserSettings();
+
+  // The toolbar measures its own width (not the window's): panes can be split narrower than the
+  // viewport, and the right cluster must yield to the address bar at the pane's width.
+  useLayoutEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const measure = () => setToolbarWidth(el.getBoundingClientRect().width);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  const compact = toolbarWidth > 0 && toolbarWidth < BROWSER_TOOLBAR_COMPACT_WIDTH;
+  const moreRowOpen = compact && moreOpen;
+
+  // Engine status is only needed once the user opens the row, so it is fetched lazily then.
+  useEffect(() => {
+    if (!extensionsOpen) return;
+    let disposed = false;
+    setExtensionsStatus("loading");
+    setExtensionsErrorCode(null);
+    void Promise.resolve()
+      .then(() => getBrowserEngineStatus())
+      .then((status) => {
+        if (!disposed) setExtensionsStatus(status);
+      })
+      .catch((error: unknown) => {
+        if (disposed) return;
+        setExtensionsErrorCode(extractBrowserErrorCode(error));
+        setExtensionsStatus("error");
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [extensionsOpen]);
 
   // Picking needs native snapshot capture AND this tab's isolated-world bridge, which the
   // backend reports as `pick`. An unknown capability (an older backend without the command)
@@ -546,6 +661,8 @@ export function BrowserToolbar({
   };
 
   const hardReloadSupported = isHardReloadSupportedPlatform();
+  const modKey = isMacHost() ? "Cmd" : "Ctrl";
+  const hasOpenableUrl = Boolean(tab.url) && tab.url !== "about:blank";
   const omniboxListOpen = omniboxOpen && omniboxEntries.length > 0;
   const omniboxOptionId = (index: number) => `${omniboxId}-option-${index}`;
 
@@ -557,43 +674,132 @@ export function BrowserToolbar({
     onReload();
   };
 
+  const handleDevtools = () => {
+    // A rejected devtools open is otherwise an unhandled rejection: the user clicks and
+    // nothing happens, with no reason shown anywhere.
+    void openBrowserDevtools(tab.browserId)
+      .then(() => setActionError(null))
+      .catch((error: unknown) => setActionError(actionFailureMessage("DevTools", error)));
+  };
+
+  const handleTogglePicker = () => {
+    // Arming the picker is the user's action; a rejection here would otherwise leave the
+    // button pressed with nothing listening for a pick.
+    const nextPicking = !elementPicking;
+    const togglePicker = elementPicking
+      ? removeBrowserElementPicker(tab.browserId)
+      : injectBrowserElementPicker(tab.browserId);
+    setElementPicking(nextPicking);
+    void togglePicker
+      .then(() => setActionError(null))
+      .catch((error: unknown) => {
+        // The page kept its previous picker state, so the button does too.
+        setElementPicking(!nextPicking);
+        setActionError(actionFailureMessage("Element picker", error));
+      });
+    onToggleElementPick?.();
+  };
+
+  const openChromiumTab = () => {
+    window.dispatchEvent(
+      new CustomEvent("ferryx:open-browser-url", { detail: { url: tab.url, profileId: tab.profileId } }),
+    );
+  };
+
+  // The same four actions render as icon buttons (wide) or icon + text buttons (More row).
+  const secondaryActionButtons = (variant: "icon" | "row") => (
+    <>
+      <ToolbarButton
+        icon={Target}
+        label="Focus webview"
+        title="Focus webview: send keyboard input to the page"
+        variant={variant}
+        onClick={() => void handleFocus()}
+      />
+      <ToolbarButton
+        icon={RefreshCw}
+        label="Sync browser state"
+        title="Sync browser state: re-read the page URL and zoom"
+        variant={variant}
+        onClick={() => void handleSyncState()}
+      />
+      <ToolbarButton icon={Bug} label="DevTools" title="Open DevTools for this page" variant={variant} onClick={handleDevtools} />
+      <ToolbarButton
+        icon={MousePointer2}
+        label="Select element"
+        title={elementPickSupported ? "Select element on the page" : "Element picking is unavailable for this tab"}
+        variant={variant}
+        disabled={!elementPickSupported}
+        pressed={elementPicking}
+        onClick={handleTogglePicker}
+      />
+      {/* Print and Save as PDF (the shortcut is Cmd/Ctrl+P). */}
+      <ToolbarButton
+        icon={Printer}
+        label="Print page"
+        title={`Print (${modKey}+P)`}
+        variant={variant}
+        onClick={() => {
+          void printBrowser(tab.browserId)
+            .then(() => setActionError(null))
+            .catch((error: unknown) => setActionError(actionFailureMessage("Print", error)));
+        }}
+      />
+      <ToolbarButton
+        icon={FileDown}
+        label="Save page as PDF"
+        title="Save as PDF"
+        variant={variant}
+        onClick={() => {
+          void saveBrowserPdf(tab.browserId)
+            .then(() => setActionError(null))
+            .catch((error: unknown) => setActionError(actionFailureMessage("Save as PDF", error)));
+        }}
+      />
+    </>
+  );
+
+  const zoomControls = (variant: "icon" | "row") => (
+    <>
+      <ToolbarButton icon={ZoomOut} label="Zoom out" title="Zoom out" variant={variant} onClick={() => void handleZoomOut()} />
+      <span className="w-9 text-center font-mono text-[10px] text-muted-foreground" data-testid="browser-zoom-readout">
+        {Math.round(zoomFactor * 100)}%
+      </span>
+      <ToolbarButton icon={ZoomIn} label="Zoom in" title="Zoom in" variant={variant} onClick={() => void handleZoomIn()} />
+    </>
+  );
+
   return (
-    <div className="relative z-10 shrink-0 bg-[#4b4b4b] border-b border-border text-xs text-foreground select-none">
+    <div ref={rootRef} data-testid="browser-toolbar-root" data-compact={compact ? "true" : "false"} className="relative z-10 shrink-0 border-b border-border bg-card text-xs text-foreground select-none">
       <div className="flex items-center gap-2 px-3 py-1.5">
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
+        <div className="flex shrink-0 items-center gap-0.5">
+          <ToolbarButton
+            icon={ArrowLeft}
+            label="Back"
+            title={tab.canGoBack ? `Back (${modKey}+[)` : "No previous page"}
             disabled={!tab.canGoBack}
             onClick={() => void handleGoBack()}
-            aria-label="Back"
-            data-shortcut="browser.back"
-            className="p-1 rounded hover:bg-muted disabled:opacity-30 transition-colors"
-          >
-            <ArrowLeft className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
+            shortcut="browser.back"
+          />
+          <ToolbarButton
+            icon={ArrowRight}
+            label="Forward"
+            title={tab.canGoForward ? `Forward (${modKey}+])` : "No next page"}
             disabled={!tab.canGoForward}
             onClick={() => void handleGoForward()}
-            aria-label="Forward"
-            data-shortcut="browser.forward"
-            className="p-1 rounded hover:bg-muted disabled:opacity-30 transition-colors"
-          >
-            <ArrowRight className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
+            shortcut="browser.forward"
+          />
+          <ToolbarButton
+            icon={RotateCw}
+            label="Reload"
+            title={`Reload (${modKey}+R${hardReloadSupported ? ", Shift+Click bypasses the cache" : ""})`}
             onClick={handleReload}
-            aria-label="Reload"
-            title={hardReloadSupported ? "Reload (Shift+Click bypasses the cache)" : "Reload"}
-            data-shortcut="browser.reload"
-            className="p-1 rounded hover:bg-muted transition-colors"
-          >
-            <RotateCw className={`w-3.5 h-3.5 ${tab.loading ? "animate-spin" : ""}`} />
-          </button>
+            shortcut="browser.reload"
+            iconClassName={tab.loading ? "animate-spin" : ""}
+          />
         </div>
 
-        <form onSubmit={handleSubmit} className="flex-1 flex items-center">
+        <form onSubmit={handleSubmit} className="flex min-w-0 flex-1 items-center">
           <input
             ref={inputRef}
             type="text"
@@ -617,6 +823,7 @@ export function BrowserToolbar({
             onKeyDown={handleAddressKeyDown}
             placeholder="Search or enter URL"
             aria-label="URL address bar"
+            title={`Address bar (${modKey}+L)`}
             data-shortcut="browser.focusAddress"
             role="combobox"
             aria-autocomplete="list"
@@ -627,7 +834,7 @@ export function BrowserToolbar({
                 ? omniboxOptionId(selectedHistoryIndex)
                 : undefined
             }
-            className="w-full bg-background border border-border rounded px-2.5 py-1 text-xs text-foreground focus:outline-none focus:border-primary font-mono"
+            className="h-7 w-full min-w-0 rounded border border-border bg-background px-2.5 font-mono text-xs text-foreground focus:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
           <button
             type="button"
@@ -643,100 +850,82 @@ export function BrowserToolbar({
           </button>
         </form>
 
-        <div className="flex items-center gap-0.5 border-l border-border/70 pl-1.5">
-          <button type="button" onClick={handleZoomOut} title="Zoom out" aria-label="Zoom out" className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
-            <ZoomOut className="w-3.5 h-3.5" />
-          </button>
-          <span className="font-mono text-[10px] text-muted-foreground w-8 text-center">{Math.round(zoomFactor * 100)}%</span>
-          <button type="button" onClick={handleZoomIn} title="Zoom in" aria-label="Zoom in" className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
-            <ZoomIn className="w-3.5 h-3.5" />
-          </button>
-        </div>
+        {compact ? null : (
+          <div className="flex shrink-0 items-center gap-0.5 border-l border-border/70 pl-1.5" data-testid="browser-toolbar-zoom">
+            {zoomControls("icon")}
+          </div>
+        )}
 
-        <div className="flex items-center gap-0.5 border-l border-border/70 pl-1.5">
-          <button type="button" onClick={toggleHistory} title="History" aria-label="History" aria-expanded={historyOpen} className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
-            <HistoryIcon className="w-3.5 h-3.5" />
-          </button>
-          <button type="button" onClick={handleFocus} title="Focus webview" aria-label="Focus webview" className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
-            <Target className="w-3.5 h-3.5" />
-          </button>
-          <button type="button" onClick={handleSyncState} title="Sync browser state" aria-label="Sync browser state" className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
-            <RefreshCw className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              // A rejected devtools open is otherwise an unhandled rejection: the user clicks and
-              // nothing happens, with no reason shown anywhere.
-              void openBrowserDevtools(tab.browserId)
-                .then(() => setActionError(null))
-                .catch((error: unknown) => setActionError(actionFailureMessage("DevTools", error)));
-            }}
-            title="DevTools"
-            aria-label="DevTools"
-            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <Bug className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
-            disabled={!elementPickSupported}
-            onClick={() => {
-              // Arming the picker is the user's action; a rejection here would otherwise leave the
-              // button pressed with nothing listening for a pick.
-              const nextPicking = !elementPicking;
-              const togglePicker = elementPicking
-                ? removeBrowserElementPicker(tab.browserId)
-                : injectBrowserElementPicker(tab.browserId);
-              setElementPicking(nextPicking);
-              void togglePicker
-                .then(() => setActionError(null))
-                .catch((error: unknown) => {
-                  // The page kept its previous picker state, so the button does too.
-                  setElementPicking(!nextPicking);
-                  setActionError(actionFailureMessage("Element picker", error));
-                });
-              onToggleElementPick?.();
-            }}
-            title={elementPickSupported ? "Select element" : "Select element (unavailable on this platform)"}
-            aria-label="Select element"
-            aria-pressed={elementPicking}
-            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-30"
-          >
-            <MousePointer2 className="w-3.5 h-3.5" />
-          </button>
-          <button type="button" onClick={handleExternalOpen} title="Open in default browser" aria-label="Open in external browser" className="p-1 rounded hover:bg-muted transition-colors">
-            <ExternalLink className="w-3.5 h-3.5 text-muted-foreground" />
-          </button>
-          {/* Print and Save as PDF (the shortcut is Cmd/Ctrl+P). */}
-          <button
-            type="button"
-            onClick={() => {
-              void printBrowser(tab.browserId)
-                .then(() => setActionError(null))
-                .catch((error: unknown) => setActionError(actionFailureMessage("Print", error)));
-            }}
-            title="Print"
-            aria-label="Print page"
-            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <Printer className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              void saveBrowserPdf(tab.browserId)
-                .then(() => setActionError(null))
-                .catch((error: unknown) => setActionError(actionFailureMessage("Save as PDF", error)));
-            }}
-            title="Save as PDF"
-            aria-label="Save page as PDF"
-            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <FileDown className="w-3.5 h-3.5" />
-          </button>
+        <div className="flex shrink-0 items-center gap-0.5 border-l border-border/70 pl-1.5">
+          <ToolbarButton
+            icon={HistoryIcon}
+            label="History"
+            title="Browsing history"
+            expanded={historyOpen}
+            onClick={toggleHistory}
+          />
+          {compact ? null : secondaryActionButtons("icon")}
+          <ToolbarButton
+            icon={Puzzle}
+            label="Extensions"
+            title="Extensions"
+            expanded={extensionsOpen}
+            controls={extensionsOpen ? extensionsRowId : undefined}
+            testId="browser-toolbar-extensions"
+            onClick={() => setExtensionsOpen((open) => !open)}
+          />
+          <ToolbarButton
+            icon={ExternalLink}
+            label="Open in external browser"
+            title={hasOpenableUrl ? "Open in default browser" : "Nothing to open yet: this tab has no page"}
+            disabled={!hasOpenableUrl}
+            onClick={handleExternalOpen}
+          />
+          {compact ? (
+            <ToolbarButton
+              icon={MoreHorizontal}
+              label="More"
+              title="More actions: zoom, focus, sync, DevTools, select element, print, save as PDF"
+              hasPopup
+              expanded={moreRowOpen}
+              controls={moreRowOpen ? moreRowId : undefined}
+              testId="browser-toolbar-more"
+              onClick={() => setMoreOpen((open) => !open)}
+            />
+          ) : null}
         </div>
       </div>
+
+      {moreRowOpen ? (
+        <div id={moreRowId} data-testid="browser-toolbar-more-row" className="flex flex-wrap items-center gap-1 border-t border-border/70 px-3 py-1.5">
+          {zoomControls("row")}
+          <span aria-hidden="true" className="mx-1 h-4 w-px bg-border/70" />
+          {secondaryActionButtons("row")}
+        </div>
+      ) : null}
+
+      {extensionsOpen ? (
+        <div id={extensionsRowId} data-testid="browser-extensions-row" className="flex flex-wrap items-center gap-2 border-t border-border/70 px-3 py-1.5 text-[11px] text-muted-foreground">
+          <Puzzle className="size-3.5 shrink-0" />
+          {extensionsStatus === "loading" ? (
+            <span role="status">Checking the browser engine…</span>
+          ) : extensionsStatus === "error" ? (
+            <span role="alert" className="text-destructive">Couldn't check the browser engine: {extensionsErrorCode}</span>
+          ) : extensionsStatus.state === "installed" ? (
+            <>
+              <span>This tab uses the system webview. New tabs open in Chromium with extensions.</span>
+              <button type="button" onClick={openChromiumTab} className={TOOLBAR_ROW_BUTTON}>Open new Chromium tab</button>
+            </>
+          ) : extensionsStatus.state === "unsupported" ? (
+            <span>Extensions need the Chromium engine, which is not available on this platform yet.</span>
+          ) : (
+            <>
+              <span>Extensions need the full browser engine.</span>
+              <button type="button" onClick={() => openSettingsSection("browser", "browser-engine")} className={TOOLBAR_ROW_BUTTON}>Install engine</button>
+            </>
+          )}
+        </div>
+      ) : null}
 
       {actionError ? (
         <div role="alert" data-testid="browser-toolbar-error" className="border-t border-border/70 px-3 py-1 text-[10px] text-destructive">

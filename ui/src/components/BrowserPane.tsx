@@ -451,8 +451,19 @@ export function BrowserPane({
   };
 
   return (
-    <div className="flex flex-col w-full h-full bg-[#4b4b4b] overflow-hidden">
-      <div ref={toolbarRef}>
+    <div className="flex flex-col w-full h-full bg-background overflow-hidden">
+      <div ref={toolbarRef} className="relative">
+        {liveTab.loading && liveTab.engine !== "chromium" ? (
+          <div
+            role="progressbar"
+            aria-label="Loading page"
+            aria-busy="true"
+            data-testid="browser-loading-bar"
+            className="pointer-events-none absolute inset-x-0 top-0 z-20 h-0.5 overflow-hidden bg-primary/15"
+          >
+            <div className="h-full w-1/3 animate-pulse rounded-full bg-primary" />
+          </div>
+        ) : null}
         {/* A Chromium tab draws its own toolbar (address bar, extensions, menu) inside the pane. */}
         {liveTab.engine === "chromium" ? null : (
           <BrowserToolbar tab={liveTab} onNavigate={onNavigate} onReload={onReload} designFeedbackTargets={designFeedbackTargets} openTabs={openTabs} />
@@ -532,7 +543,7 @@ export function BrowserPane({
           >
             <CircleAlert className="size-3.5 shrink-0" />
             <span className="min-w-0 flex-1 truncate">
-              표시 실패: {displayError.code} ({displayError.operation})
+              Couldn't show the page: {displayError.code} ({displayError.operation})
             </span>
             <button
               type="button"
@@ -580,13 +591,26 @@ export function BrowserPane({
         ) : null}
         {liveTab.loadError ? (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-background p-8" data-testid="browser-load-error">
-            <div className="max-w-lg rounded-lg border border-border bg-card p-5 shadow-lg">
-              <div className="text-sm font-semibold">This page could not be loaded</div>
-              <div className="mt-2 break-all font-mono text-[11px] text-muted-foreground">{liveTab.url}</div>
-              <div className="mt-2 text-xs text-destructive">{liveTab.loadError}</div>
-              <button type="button" onClick={() => onReload()} className="mt-4 flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs hover:bg-accent">
-                <RefreshCw className="size-3.5" /> Retry
-              </button>
+            <div className="w-full max-w-lg rounded-lg border border-border bg-card p-5 text-card-foreground shadow-lg">
+              <div className="flex items-center gap-2 text-sm font-semibold">
+                <CircleAlert className="size-4 shrink-0 text-destructive" />
+                This page could not be loaded
+              </div>
+              <div className="mt-2 truncate font-mono text-[11px] text-muted-foreground" title={liveTab.url}>{liveTab.url}</div>
+              <div className="mt-2 break-words text-xs text-destructive">{liveTab.loadError}</div>
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <button type="button" onClick={() => onReload()} className="flex items-center gap-1.5 rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                  <RefreshCw className="size-3.5" /> Retry
+                </button>
+                <button
+                  type="button"
+                  onClick={() => openDownloadExternally(liveTab.url)}
+                  data-testid="browser-load-error-open-external"
+                  className="flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs text-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <ExternalLink className="size-3.5" /> Open in system browser
+                </button>
+              </div>
             </div>
           </div>
         ) : null}

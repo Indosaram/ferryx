@@ -172,7 +172,7 @@ describe("BrowserToolbar", () => {
     );
 
     const reloadBtn = screen.getByLabelText("Reload");
-    expect(reloadBtn.getAttribute("title")).toBe("Reload (Shift+Click bypasses the cache)");
+    expect(reloadBtn.getAttribute("title")).toContain("Shift+Click");
 
     fireEvent.click(reloadBtn);
     expect(onReload).toHaveBeenLastCalledWith();
@@ -193,7 +193,7 @@ describe("BrowserToolbar", () => {
     );
 
     const reloadBtn = screen.getByLabelText("Reload");
-    expect(reloadBtn.getAttribute("title")).toBe("Reload");
+    expect(reloadBtn.getAttribute("title")).not.toContain("Shift+Click");
 
     fireEvent.click(reloadBtn, { shiftKey: true });
     expect(onReload).toHaveBeenLastCalledWith();

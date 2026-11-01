@@ -14,6 +14,8 @@ pub mod browser;
 pub mod browser_library;
 #[cfg(feature = "desktop")]
 pub mod browser_system;
+#[cfg(feature = "desktop")]
+pub mod browser_extensions;
 pub mod browser_cli;
 #[cfg(feature = "desktop")]
 pub mod browser_engine;

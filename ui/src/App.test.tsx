@@ -266,7 +266,7 @@ vi.mock("./lib/tauri", () => ({
   takeNotificationActivations: native.takeNotificationActivations,
   bootTrace: vi.fn(async () => undefined),
   toIpcError: (error: unknown) => error,
-  isStructuredIpcError: (_error: unknown) => false,
+  isStructuredIpcError: vi.fn((_error: unknown) => false),
 }));
 
 vi.mock("./lib/updater", async (importOriginal) => {
@@ -501,7 +501,7 @@ function seedSidebarBrowserTab(workspaceId: string) {
   });
 }
 
-const { App, ensureLocalProjectsRegistered, createDesktopLocalProjectSync } = await import("./App");
+const { App, ensureLocalProjectsRegistered, reportLocalRegistrationFailure, createDesktopLocalProjectSync } = await import("./App");
 const { resetWorkspaceRestore } = await import("./state/workspaceRestore");
 
 afterEach(() => {
@@ -790,6 +790,25 @@ describe("App project workspace flow", () => {
     options.action.onClick();
     await vi.waitFor(() => expect(native.registerProject).toHaveBeenCalledTimes(2));
     expect(toastMocks.error).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders the message of a structured IPC error in the registration failure toast", async () => {
+    const tauri = await import("./lib/tauri");
+    const structured = { code: "WORKSPACE_NOT_FOUND", message: "repository is not registered", details: {} };
+    vi.mocked(tauri.isStructuredIpcError).mockImplementation(
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error && "message" in error,
+    );
+    toastMocks.error.mockClear();
+    try {
+      reportLocalRegistrationFailure({ workspaceId: "heal-struct-a", repoRoot: "/repo/heal-struct-a", gitRoot: null }, structured);
+    } finally {
+      vi.mocked(tauri.isStructuredIpcError).mockImplementation(() => false);
+    }
+
+    expect(toastMocks.error).toHaveBeenCalledTimes(1);
+    const [, options] = toastMocks.error.mock.calls[0] as [string, { description: string }];
+    expect(options.description).not.toContain("[object Object]");
+    expect(options.description).toContain(structured.message);
   });
 
   describe("P05 focused browser shortcut targeting on Windows", () => {

@@ -1400,7 +1400,7 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
     let state = match cef_engine_dir {
         Some(engine_dir) => {
             let browser_id = state.browser_id.clone();
-            match create_cef_browser_session(app, manager, state, engine_dir).await {
+            match create_cef_browser_session(app, manager, state, engine_dir, None).await {
                 Ok(state) => return Ok(state),
                 // The engine could not open the tab: it opens on the system webview instead,
                 // and its pane says why.
@@ -1882,11 +1882,12 @@ fn emit_session_state<R: tauri::Runtime>(app: &AppHandle<R>, state: &BrowserStat
 /// Opens the tab in its profile's Chromium engine, whose browser window sits over the pane.
 /// The engine reports the page's address, title and loading state as events.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-async fn create_cef_browser_session<R: tauri::Runtime>(
+pub(crate) async fn create_cef_browser_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
     manager: &Arc<BrowserManager>,
     state: BrowserState,
     engine_dir: std::path::PathBuf,
+    engine_url: Option<String>,
 ) -> Result<BrowserState, IpcError> {
     use crate::browser::cef_engine;
     let browser_id = state.browser_id.clone();
@@ -1935,7 +1936,7 @@ async fn create_cef_browser_session<R: tauri::Runtime>(
     };
     let sink = cef_event_sink(app.clone(), Arc::clone(manager));
     let open_id = browser_id.clone();
-    let url = state.url.clone();
+    let url = engine_url.unwrap_or_else(|| state.url.clone());
     let visible = state.visible;
     if let Err(error) = crate::ipc::run_blocking(move || {
         let launch = cef_engine::EngineLaunch {

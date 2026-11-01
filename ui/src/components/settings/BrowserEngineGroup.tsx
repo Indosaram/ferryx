@@ -1,16 +1,32 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { AlertCircle, Check, Download, HardDrive, Loader2, RotateCcw, Trash2 } from "lucide-react";
 
 import {
+  extractBrowserErrorCode,
   getBrowserEngineStatus,
   installBrowserEngine,
   parseBrowserEngineFailure,
   removeBrowserEngine,
   rollbackBrowserEngine,
-  type BrowserEngineFailure,
   type BrowserEngineStatus,
 } from "../../lib/browserTauri";
+import {
+  BROWSER_ENGINE_CHANGED_EVENT,
+  getBrowserEnginePaths,
+  type BrowserEnginePaths,
+} from "../../lib/browserExtensions";
+import { getHostPlatform } from "../../lib/platform";
+import { isStructuredIpcError } from "../../lib/tauri";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { SettingRow, SettingsGroup } from "./primitives";
+
+export const BROWSER_ENGINE_INSTALL_PROGRESS_EVENT = "browser_engine_install_progress";
+
+type InstallProgress = { receivedBytes: number; totalBytes: number | null };
+type EngineAction = "install" | "remove" | "rollback";
+type EngineFailure = { code: string; reason: string | null; message: string; retry: EngineAction | "status" };
 
 /** What the user can do about each install failure reason the backend reports. */
 const FAILURE_TEXT: Record<string, string> = {
@@ -30,19 +46,52 @@ const FAILURE_TEXT: Record<string, string> = {
   io: "The engine could not be written to disk.",
 };
 
-function failureText(failure: BrowserEngineFailure): string {
-  const known = failure.reason ? FAILURE_TEXT[failure.reason] : undefined;
-  if (known) return known;
-  return failure.message ? `${failure.code}: ${failure.message}` : failure.code;
+const INSTALL_ERROR_MESSAGES: Record<string, string> = {
+  IO_ERROR: "Couldn't write the engine to disk",
+  UNSUPPORTED_CAPABILITY: "No engine is published for this platform yet",
+};
+
+function fallbackMessage(retry: EngineFailure["retry"]): string {
+  if (retry === "remove") return "The engine could not be removed";
+  if (retry === "rollback") return "The earlier engine could not be restored";
+  if (retry === "status") return "The engine status could not be read";
+  return "The engine download failed";
 }
 
-type Action = "install" | "remove" | "rollback";
+function describeFailure(failure: unknown, retry: EngineFailure["retry"]): EngineFailure {
+  // A typed install failure (details.reason) gets a sentence saying what to do about it.
+  const { reason } = parseBrowserEngineFailure(failure);
+  const known = reason ? FAILURE_TEXT[reason] : undefined;
+  if (isStructuredIpcError(failure)) {
+    const message = failure.message.trim();
+    const fallback = INSTALL_ERROR_MESSAGES[failure.code] ?? fallbackMessage(retry);
+    return { code: failure.code, reason, message: known ?? (message || fallback), retry };
+  }
+  return { code: extractBrowserErrorCode(failure), reason, message: known ?? fallbackMessage(retry), retry };
+}
 
-/** Installs, updates, rolls back or removes the on-demand Chromium engine that new browser tabs use. */
+function engineSizes(): { download: string; disk: string } {
+  return { download: "about 150 MB", disk: getHostPlatform() === "windows" ? "about 460 MB" : "about 330 MB" };
+}
+
+function percentOf(progress: InstallProgress | null): number | null {
+  if (!progress || !progress.totalBytes || progress.totalBytes <= 0) return null;
+  return Math.max(0, Math.min(100, Math.floor((progress.receivedBytes / progress.totalBytes) * 100)));
+}
+
+/** Installs or removes the on-demand Chromium engine that new browser tabs use when present. */
 export function BrowserEngineGroup() {
   const [status, setStatus] = useState<BrowserEngineStatus | null>(null);
-  const [busy, setBusy] = useState<Action | null>(null);
-  const [failure, setFailure] = useState<{ action: Action; failure: BrowserEngineFailure } | null>(null);
+  const [busyAction, setBusyAction] = useState<EngineAction | null>(null);
+  const [failure, setFailure] = useState<EngineFailure | null>(null);
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const [progress, setProgress] = useState<InstallProgress | null>(null);
+  const [paths, setPaths] = useState<BrowserEnginePaths | null>(null);
+
+  const loadStatus = useCallback(() => {
+    setFailure(null);
+    return getBrowserEngineStatus().then(setStatus, (error: unknown) => setFailure(describeFailure(error, "status")));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -51,7 +100,7 @@ export function BrowserEngineGroup() {
         if (!cancelled) setStatus(next);
       },
       (error: unknown) => {
-        if (!cancelled) setFailure({ action: "install", failure: parseBrowserEngineFailure(error) });
+        if (!cancelled) setFailure(describeFailure(error, "status"));
       },
     );
     return () => {
@@ -59,78 +108,261 @@ export function BrowserEngineGroup() {
     };
   }, []);
 
+  const installedState = status?.state === "installed";
+  useEffect(() => {
+    if (!installedState) {
+      setPaths(null);
+      return;
+    }
+    let cancelled = false;
+    // The location line is informational: when the command fails it is simply not shown.
+    void getBrowserEnginePaths().then(
+      (next) => {
+        if (!cancelled) setPaths(next);
+      },
+      () => {
+        if (!cancelled) setPaths(null);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [installedState]);
+
+  const installing = busyAction === "install";
+  useEffect(() => {
+    if (!installing) {
+      setProgress(null);
+      return;
+    }
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    // Progress events are optional: when the subscription fails the bar stays indeterminate,
+    // which is still an accurate picture of an install in flight.
+    void listen<InstallProgress>(BROWSER_ENGINE_INSTALL_PROGRESS_EVENT, (event) => setProgress(event.payload)).then(
+      (stop) => {
+        if (cancelled) stop();
+        else unlisten = stop;
+      },
+      () => undefined,
+    );
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [installing]);
+
   if (status?.state === "unsupported") return null;
 
-  const run = (action: Action) => {
-    const call = action === "install" ? installBrowserEngine : action === "remove" ? removeBrowserEngine : rollbackBrowserEngine;
-    setBusy(action);
+  const run = (action: EngineAction) => {
+    setBusyAction(action);
     setFailure(null);
-    void call()
-      .then(setStatus, (error: unknown) => setFailure({ action, failure: parseBrowserEngineFailure(error) }))
-      .finally(() => setBusy(null));
+    setConfirmingRemove(false);
+    const operation =
+      action === "install" ? installBrowserEngine : action === "remove" ? removeBrowserEngine : rollbackBrowserEngine;
+    void operation()
+      .then(
+        (next) => {
+          setStatus(next);
+          window.dispatchEvent(new CustomEvent(BROWSER_ENGINE_CHANGED_EVENT));
+        },
+        (error: unknown) => setFailure(describeFailure(error, action)),
+      )
+      .finally(() => setBusyAction(null));
   };
 
-  const installed = status?.state === "installed" ? status : null;
-  const label = busy === "install" ? "Downloading..." : busy === "remove" ? "Removing..." : installed ? "Remove" : "Download";
+  const retry = () => {
+    if (!failure) return;
+    if (failure.retry === "status") void loadStatus();
+    else run(failure.retry);
+  };
+
+  const percent = percentOf(progress);
+  const sizes = engineSizes();
+  const stateKey = busyAction === "install"
+    ? "downloading"
+    : busyAction === "remove"
+      ? "removing"
+      : busyAction === "rollback"
+        ? "switching"
+        : status == null
+        ? "checking"
+        : status.state;
+  const stateLabel =
+    stateKey === "downloading"
+      ? "Downloading..."
+      : stateKey === "removing"
+        ? "Removing..."
+        : stateKey === "switching"
+          ? "Switching..."
+          : stateKey === "installed" && status?.state === "installed"
+          ? `Installed ${status.version}`
+          : stateKey === "checking"
+            ? "Checking..."
+            : "Not installed";
+  const busy = busyAction !== null;
+  const installed = status?.state === "installed";
+  const previous = status?.state === "installed" ? status.previous ?? null : null;
+
   return (
-    <SettingsGroup title="Chromium Engine">
-      <SettingRow
-        label="Full browser engine"
-        description={
-          installed
-            ? `Installed (${installed.version}). New browser tabs use Chromium, with Chrome Web Store extensions, saved passwords and Chrome's own menus.`
-            : "Download Chromium so browser tabs run Chrome Web Store extensions, save passwords and play protected video. Without it, tabs use the system webview."
-        }
-      >
-        <div className="flex flex-col items-end gap-1">
-          <div className="flex gap-1">
-            {installed?.previous ? (
+    <div id="browser-engine" className="scroll-mt-4">
+      <SettingsGroup title="Chromium Engine">
+        <SettingRow
+          label="Full browser engine"
+          description="Adds Chrome Web Store extensions, Chrome's own menus and password manager, and shared logins across a profile's tabs. New tabs use it; tabs that are already open keep their engine. Without it, tabs use the system webview."
+        >
+          <div className="flex items-center gap-2">
+            <Badge
+              variant={installed ? "secondary" : "outline"}
+              className="max-w-[200px] gap-1 text-[11px] font-medium"
+              data-testid="browser-engine-state"
+              data-state={stateKey}
+              title={stateLabel}
+            >
+              {busy || stateKey === "checking" ? (
+                <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden="true" />
+              ) : installed ? (
+                <Check className="size-3 shrink-0" aria-hidden="true" />
+              ) : null}
+              <span className="truncate">{stateLabel}</span>
+            </Badge>
+            {previous ? (
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
-                disabled={busy !== null}
+                disabled={busy}
                 onClick={() => run("rollback")}
                 className="h-7 px-2 text-[11px]"
+                title="Go back to the engine that was installed before this one"
                 data-testid="browser-engine-rollback"
               >
-                {busy === "rollback" ? "Switching..." : `Use ${installed.previous}`}
+                {busyAction === "rollback" ? "Switching..." : `Use ${previous}`}
               </Button>
             ) : null}
             <Button
               type="button"
               variant="outline"
               size="sm"
-              disabled={busy !== null || status === null}
-              onClick={() => run(installed ? "remove" : "install")}
-              className="h-7 px-2 text-[11px]"
+              disabled={busy || status == null}
+              onClick={() => (installed ? setConfirmingRemove(true) : run("install"))}
+              className="h-7 gap-1.5 px-2 text-[11px]"
               data-testid="browser-engine-action"
             >
-              {label}
+              {installed ? (
+                <Trash2 className="size-3.5" aria-hidden="true" />
+              ) : (
+                <Download className="size-3.5" aria-hidden="true" />
+              )}
+              {installed ? "Remove" : "Download"}
             </Button>
           </div>
-          {failure ? (
-            <div className="flex max-w-xs items-center gap-2" data-testid="browser-engine-failure" data-reason={failure.failure.reason ?? undefined}>
-              <span role="alert" className="text-[11px] text-destructive">
-                {failureText(failure.failure)}
-              </span>
-              {failure.action === "install" && status !== null ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={busy !== null}
-                  onClick={() => run("install")}
-                  className="h-6 px-2 text-[11px]"
-                  data-testid="browser-engine-retry"
-                >
-                  Retry
-                </Button>
-              ) : null}
-            </div>
+        </SettingRow>
+
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 border-b border-border/40 py-3 text-[11px]">
+          <dt className="text-muted-foreground">Download size</dt>
+          <dd className="text-foreground" data-testid="browser-engine-download-size">{sizes.download}</dd>
+          <dt className="text-muted-foreground">Disk use</dt>
+          <dd className="text-foreground" data-testid="browser-engine-disk-size">{sizes.disk}</dd>
+          {installed && paths ? (
+            <>
+              <dt className="text-muted-foreground">Location</dt>
+              <dd
+                className="flex min-w-0 items-center gap-1.5 text-foreground"
+                data-testid="browser-engine-location"
+              >
+                <HardDrive className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                <span className="truncate" title={paths.installDir}>{paths.installDir}</span>
+              </dd>
+            </>
           ) : null}
-        </div>
-      </SettingRow>
-    </SettingsGroup>
+        </dl>
+
+        {installing ? (
+          <div className="space-y-1 py-3" data-testid="browser-engine-progress">
+            <div
+              role="progressbar"
+              aria-label="Engine download progress"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={percent ?? undefined}
+              className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
+            >
+              <div
+                className={percent === null ? "h-full w-1/3 animate-pulse rounded-full bg-primary" : "h-full rounded-full bg-primary transition-[width]"}
+                style={percent === null ? undefined : { width: `${percent}%` }}
+              />
+            </div>
+            {percent !== null ? (
+              <p className="text-[11px] text-muted-foreground" data-testid="browser-engine-percent">{percent}%</p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {confirmingRemove ? (
+          <div
+            className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-muted/40 px-3 py-2"
+            data-testid="browser-engine-remove-confirm"
+          >
+            <p className="min-w-0 text-[12px] text-foreground">
+              Remove engine? Open Chromium tabs keep running until closed.
+            </p>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="destructive"
+                size="sm"
+                className="h-7 px-2 text-[11px]"
+                onClick={() => run("remove")}
+                data-testid="browser-engine-remove-confirm-yes"
+              >
+                Remove
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 text-[11px]"
+                onClick={() => setConfirmingRemove(false)}
+                data-testid="browser-engine-remove-confirm-cancel"
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        ) : null}
+
+        {failure ? (
+          <div
+            role="alert"
+            data-testid="browser-engine-failure"
+            data-reason={failure.reason ?? undefined}
+            className="mt-3 flex items-start justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2"
+          >
+            <div className="flex min-w-0 items-start gap-2">
+              <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-destructive" aria-hidden="true" />
+              <div className="min-w-0">
+                <p className="text-[12px] text-foreground" data-testid="browser-engine-error-message">{failure.message}</p>
+                <p className="truncate text-[11px] text-muted-foreground" title={failure.code} data-testid="browser-engine-error-code">
+                  {failure.code}
+                </p>
+              </div>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={busy}
+              onClick={retry}
+              className="h-7 shrink-0 gap-1.5 px-2 text-[11px]"
+              data-testid="browser-engine-retry"
+            >
+              <RotateCcw className="size-3.5" aria-hidden="true" />
+              Retry
+            </Button>
+          </div>
+        ) : null}
+      </SettingsGroup>
+    </div>
   );
 }
