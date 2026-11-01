@@ -4696,41 +4696,68 @@ async fn pump_relay_direction(
     deadline: Option<tokio::time::Instant>,
     #[cfg(test)] tap: Option<&Arc<Mutex<Vec<u8>>>>,
 ) -> anyhow::Result<()> {
+    use futures_util::FutureExt as _;
+    // Frames are queued with `feed` and flushed only when the next frame is not already
+    // waiting, so a burst of small frames costs one write rather than one per frame.
+    // A burst is capped so a peer that never pauses still gets flushed and the suspension and
+    // lifetime signals are still observed.
+    const MAX_UNFLUSHED_FRAMES: usize = 32;
+    let mut unflushed = 0usize;
     loop {
-        tokio::select! {
-            incoming = rx.next() => {
-                let Some(msg) = incoming else { return Ok(()) };
-                let msg = msg?;
-                let is_close = matches!(msg, Message::Close(_));
-                #[cfg(test)]
-                if let Some(tap) = tap {
-                    match &msg {
-                        Message::Binary(bytes) => tap.lock().extend_from_slice(bytes),
-                        Message::Text(text) => tap.lock().extend_from_slice(text.as_bytes()),
-                        _ => {}
+        let ready = if unflushed < MAX_UNFLUSHED_FRAMES {
+            rx.next().now_or_never()
+        } else {
+            None
+        };
+        let incoming = match ready {
+            Some(incoming) => incoming,
+            None => {
+                if unflushed > 0 {
+                    timeout(TRANSFER_TIMEOUT, tx.flush()).await??;
+                    unflushed = 0;
+                }
+                tokio::select! {
+                    incoming = rx.next() => incoming,
+                    reason = await_suspension(suspension) => {
+                        let frame = axum::extract::ws::CloseFrame {
+                            code: axum::extract::ws::close_code::POLICY,
+                            reason: reason.into(),
+                        };
+                        timeout(TRANSFER_TIMEOUT, tx.send(Message::Close(Some(frame)))).await??;
+                        return Ok(());
+                    }
+                    _ = async { tokio::time::sleep_until(deadline.unwrap_or_else(tokio::time::Instant::now)).await }, if deadline.is_some() => {
+                        let frame = axum::extract::ws::CloseFrame {
+                            code: axum::extract::ws::close_code::AWAY,
+                            reason: "session lifetime exceeded".into(),
+                        };
+                        timeout(TRANSFER_TIMEOUT, tx.send(Message::Close(Some(frame)))).await??;
+                        return Ok(());
                     }
                 }
-                timeout(TRANSFER_TIMEOUT, tx.send(msg)).await??;
-                if is_close {
-                    return Ok(());
-                }
             }
-            reason = await_suspension(suspension) => {
-                let frame = axum::extract::ws::CloseFrame {
-                    code: axum::extract::ws::close_code::POLICY,
-                    reason: reason.into(),
-                };
-                timeout(TRANSFER_TIMEOUT, tx.send(Message::Close(Some(frame)))).await??;
-                return Ok(());
+        };
+        let Some(msg) = incoming else {
+            if unflushed > 0 {
+                timeout(TRANSFER_TIMEOUT, tx.flush()).await??;
             }
-            _ = async { tokio::time::sleep_until(deadline.unwrap_or_else(tokio::time::Instant::now)).await }, if deadline.is_some() => {
-                let frame = axum::extract::ws::CloseFrame {
-                    code: axum::extract::ws::close_code::AWAY,
-                    reason: "session lifetime exceeded".into(),
-                };
-                timeout(TRANSFER_TIMEOUT, tx.send(Message::Close(Some(frame)))).await??;
-                return Ok(());
+            return Ok(());
+        };
+        let msg = msg?;
+        let is_close = matches!(msg, Message::Close(_));
+        #[cfg(test)]
+        if let Some(tap) = tap {
+            match &msg {
+                Message::Binary(bytes) => tap.lock().extend_from_slice(bytes),
+                Message::Text(text) => tap.lock().extend_from_slice(text.as_bytes()),
+                _ => {}
             }
+        }
+        timeout(TRANSFER_TIMEOUT, tx.feed(msg)).await??;
+        unflushed += 1;
+        if is_close {
+            timeout(TRANSFER_TIMEOUT, tx.flush()).await??;
+            return Ok(());
         }
     }
 }
@@ -9038,6 +9065,39 @@ mod tests {
             timeout(Duration::from_secs(5), browser.next()).await.unwrap(),
             1011,
             "host disconnected",
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_frames_crosses_the_splice_intact_and_in_order() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (_generation, mut notices, _grants) = state.register_control_channel("burst".into());
+        assert!(state.notify_incoming_session("burst", "burst-session"));
+        notices.try_recv().unwrap();
+        let (mut client, _) =
+            tokio_tungstenite::connect_async(format!("{base}/tunnel/client/burst-session"))
+                .await
+                .unwrap();
+        let (mut data, _) =
+            tokio_tungstenite::connect_async(format!("{base}/tunnel/data/burst-session"))
+                .await
+                .unwrap();
+        // More frames than one unflushed batch, queued before any is read.
+        for n in 0..200u32 {
+            client.feed(TMessage::Binary(n.to_be_bytes().to_vec().into())).await.unwrap();
+        }
+        client.flush().await.unwrap();
+        for n in 0..200u32 {
+            let frame = timeout(Duration::from_secs(5), data.next()).await.unwrap().unwrap().unwrap();
+            assert_eq!(frame.into_data().as_ref(), n.to_be_bytes().as_slice());
+        }
+        // A lone frame after the burst is flushed without another frame behind it.
+        client.send(TMessage::Text("tail".into())).await.unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(5), data.next()).await.unwrap().unwrap().unwrap(),
+            TMessage::Text("tail".into())
         );
         server.abort();
     }
