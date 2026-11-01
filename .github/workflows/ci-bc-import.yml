@@ -1,0 +1,81 @@
+name: ci-bc-import
+on:
+  push:
+    branches: ['ci/bc-import-full']
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+jobs:
+  gate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev
+      - name: Windows OpenSSL perl
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe" >> "$GITHUB_ENV"
+      - name: git identity
+        shell: bash
+        run: |
+          git config --global user.name ferryx-ci
+          git config --global user.email ferryx-ci@users.noreply.github.com
+      - name: Install JS deps
+        shell: bash
+        run: |
+          bun install --frozen-lockfile || bun install
+          bun install --cwd ui --frozen-lockfile || bun install --cwd ui
+      - name: UI build
+        run: bun run --cwd ui build
+      - name: UI typecheck (tests)
+        if: runner.os == 'Linux'
+        run: bun run --cwd ui typecheck:test
+      - name: UI tests (scoped)
+        if: runner.os == 'Linux'
+        run: "bun run --cwd ui test -- browserImport ImportBrowserDataDialog BrowserSection"
+      - name: Clippy src-tauri -D warnings
+        id: clippy
+        if: always()
+        shell: bash
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --lib --tests -- -D warnings
+      - name: Import crate clippy+test
+        if: always()
+        shell: bash
+        run: cargo clippy --manifest-path crates/ferryx-browser-import/Cargo.toml --all-targets -- -D warnings && cargo test --manifest-path crates/ferryx-browser-import/Cargo.toml
+      - name: Protocol crate test
+        if: always()
+        shell: bash
+        run: cargo test --manifest-path crates/browser-engine-protocol/Cargo.toml
+      - name: Rust tests (scoped)
+        shell: bash
+        if: always() && steps.clippy.outcome == 'success'
+        run: "cargo test --manifest-path src-tauri/Cargo.toml --lib -- browser::import ipc::browser_import --test-threads=2"
+      - name: Upload resolved Cargo.lock
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-lock-${{ matrix.os }}
+          path: src-tauri/Cargo.lock
