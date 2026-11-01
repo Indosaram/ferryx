@@ -262,7 +262,10 @@ export const PhoneHomeQaState: React.FC<{ state: string; model: RemoteWorkspaceM
           rows: inbox.rows,
           prompts: inbox.prompts,
           loading: state === "home-inbox-loading-partial",
-          onOpen: () => undefined,
+          onOpen: () => {
+            const qaWindow = window as typeof window & { __qaInboxOpenCount?: number };
+            qaWindow.__qaInboxOpenCount = (qaWindow.__qaInboxOpenCount ?? 0) + 1;
+          },
         }}
         worktrees={
           <WorktreesHome headerAction={accountAction}>
