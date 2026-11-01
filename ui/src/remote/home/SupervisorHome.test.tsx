@@ -51,6 +51,8 @@ describe("SupervisorHome", () => {
     const { rerender, props } = renderHome({ discovering: true });
     expect(screen.getByTestId("supervisor-home-discovering")).toBeInTheDocument();
     expect(screen.queryByTestId("supervisor-home-empty")).toBeNull();
+    expect(screen.getByTestId("supervisor-home")).toHaveAttribute("data-headline", "checking");
+    expect(screen.getByTestId("supervisor-home-headline")).not.toHaveTextContent(/can't reach/i);
     rerender(<SupervisorHome {...props} discovering={false} />);
     expect(screen.getByTestId("supervisor-home-empty")).toBeInTheDocument();
   });

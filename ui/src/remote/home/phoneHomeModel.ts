@@ -15,8 +15,10 @@ export type SupervisorMachineView = {
   readonly error: { code: string; message: string } | null;
 };
 
-/** What the top of the Supervisor home says. `unknown` means no computer could be read. */
+/** What the top of the Supervisor home says. `checking` means a read is still in flight;
+ * `unknown` means every read settled and none succeeded. */
 export type SupervisorHeadline =
+  | { readonly kind: "checking" }
   | { readonly kind: "unknown" }
   | { readonly kind: "off" }
   | { readonly kind: "paused"; readonly lanes: number }
@@ -24,9 +26,13 @@ export type SupervisorHeadline =
   | { readonly kind: "active"; readonly lanes: number; readonly watched: number };
 
 /** The SupervisorPanelView headline, over every machine whose snapshot is readable. */
-export function supervisorHeadline(machines: readonly SupervisorMachineView[], now: number): SupervisorHeadline {
+export function supervisorHeadline(machines: readonly SupervisorMachineView[], now: number, discovering = false): SupervisorHeadline {
   const snapshots = machines.flatMap((m) => (m.snapshot ? [m.snapshot] : []));
-  if (snapshots.length === 0) return { kind: "unknown" };
+  if (snapshots.length === 0) {
+    // Never claim "can't reach" while the answer is still coming (H-03).
+    const pending = (discovering && machines.length === 0) || machines.some((m) => m.state === "loading");
+    return { kind: pending ? "checking" : "unknown" };
+  }
   const lanes = snapshots.flatMap((s) => s.lanes);
   if (!snapshots.some((s) => s.hub.running)) return { kind: "off" };
   if (lanes.length > 0 && lanes.every((lane) => lane.paused)) return { kind: "paused", lanes: lanes.length };
@@ -44,6 +50,8 @@ function plural(count: number, word: string): string {
 
 export function headlineSentence(headline: SupervisorHeadline): string {
   switch (headline.kind) {
+    case "checking":
+      return "Checking your computers…";
     case "unknown":
       return "Can't reach the supervisor on your computers right now.";
     case "off":

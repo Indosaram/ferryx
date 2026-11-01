@@ -228,7 +228,7 @@ export function SupervisorHome({
       return copy;
     });
   }, [machines, optimistic]);
-  const headline = supervisorHeadline(machines, now);
+  const headline = supervisorHeadline(machines, now, discovering);
   const recent = recentActions(machines);
   const shownRecent = recentExpanded ? recent : recent.slice(0, RECENT_COLLAPSED);
   const readable = machines.filter((machine) => machine.snapshot);

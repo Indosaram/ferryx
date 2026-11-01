@@ -17,6 +17,20 @@ describe("supervisorHeadline", () => {
     expect(headlineSentence({ kind: "unknown" })).not.toMatch(/isn't running/);
   });
 
+  it("is checking, not unknown, while a machine's read is still loading", () => {
+    const machines = [
+      fixtureMachine({ machineId: "m1", state: "loading", snapshot: null }),
+      fixtureMachine({ machineId: "m2", state: "offline", snapshot: null }),
+    ];
+    expect(supervisorHeadline(machines, NOW)).toEqual({ kind: "checking" });
+    expect(headlineSentence({ kind: "checking" })).not.toMatch(/can't reach/i);
+  });
+
+  it("is checking while account discovery has not returned any machine yet", () => {
+    expect(supervisorHeadline([], NOW, true)).toEqual({ kind: "checking" });
+    expect(supervisorHeadline([], NOW, false)).toEqual({ kind: "unknown" });
+  });
+
   it("is paused when every lane on every machine is paused", () => {
     const machines = [
       fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "a", paused: true })] }) }),
