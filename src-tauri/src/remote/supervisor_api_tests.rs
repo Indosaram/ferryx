@@ -220,6 +220,22 @@ async fn a_start_without_an_open_hub_is_supervisor_unavailable() {
 }
 
 #[tokio::test]
+async fn a_start_on_standby_is_409_supervisor_standby_naming_the_holder() {
+    let refused = start_refusal(&HubStartError::Standby {
+        holder_machine_id: Some("mach-b".into()),
+        holder_label: Some("Laptop B".into()),
+    });
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(refused.into_body(), 64 * 1024).await.expect("body"),
+    )
+    .expect("json");
+    assert_eq!(body["error"]["code"], SUPERVISOR_STANDBY_CODE);
+    assert_eq!(body["error"]["details"]["holderMachineId"], "mach-b");
+    assert_eq!(body["error"]["details"]["holderLabel"], "Laptop B");
+}
+
+#[tokio::test]
 async fn only_an_admitted_machine_control_device_may_start_the_hub() {
     let gateway = Gateway::start().await;
     let mirror = gateway.token(DevicePermission::Control, DeviceAccessScope::Mirror);

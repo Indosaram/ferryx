@@ -18,6 +18,9 @@ pub(crate) const SUPERVISOR_INVALID_STATE_CODE: &str = "INVALID_STATE";
 /// The wire code a daemon without an open hub answers with, as the desktop's own request does.
 pub(crate) const SUPERVISOR_UNAVAILABLE_CODE: &str = "SUPERVISOR_UNAVAILABLE";
 
+/// The wire code a standby daemon answers with: another machine holds the supervisor lease.
+pub(crate) const SUPERVISOR_STANDBY_CODE: &str = "SUPERVISOR_STANDBY";
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct PauseBody {
@@ -105,17 +108,25 @@ pub(crate) async fn http_start(
             Json(serde_json::json!({ "started": started })),
         )
             .into_response(),
-        Err(error) => {
-            let (status, code) = match error {
-                HubStartError::Unavailable => {
-                    (StatusCode::SERVICE_UNAVAILABLE, SUPERVISOR_UNAVAILABLE_CODE)
-                }
-                HubStartError::HandedOver => (StatusCode::CONFLICT, SUPERVISOR_INVALID_STATE_CODE),
-                HubStartError::Storage(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
-            };
-            machine_error_with_details(status, code, &error.to_string(), serde_json::Map::new())
-        }
+        Err(error) => start_refusal(&error),
     }
+}
+
+/// The machine error envelope one start refusal answers with. A standby names the holder in
+/// `details` as `{holderMachineId, holderLabel}`.
+fn start_refusal(error: &HubStartError) -> Response {
+    let mut details = serde_json::Map::new();
+    let (status, code) = match error {
+        HubStartError::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, SUPERVISOR_UNAVAILABLE_CODE),
+        HubStartError::HandedOver => (StatusCode::CONFLICT, SUPERVISOR_INVALID_STATE_CODE),
+        HubStartError::Storage(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
+        HubStartError::Standby { holder_machine_id, holder_label } => {
+            details.insert("holderMachineId".into(), serde_json::json!(holder_machine_id));
+            details.insert("holderLabel".into(), serde_json::json!(holder_label));
+            (StatusCode::CONFLICT, SUPERVISOR_STANDBY_CODE)
+        }
+    };
+    machine_error_with_details(status, code, &error.to_string(), details)
 }
 
 /// The machine error envelope a shared supervisor service refusal answers with: its own HTTP

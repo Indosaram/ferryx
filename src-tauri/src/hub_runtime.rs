@@ -786,8 +786,26 @@ static HUB_TASKS: ferryx_hub::lifecycle::TaskRegistry = ferryx_hub::lifecycle::T
 /// The opened hub and its running generation, for the desktop's Supervisor view.
 type SupervisorView = (Arc<Hub>, Arc<tokio::sync::Mutex<Option<Generation>>>);
 
-/// The opened hub and its running generation, for the desktop's Supervisor view.
-static SUPERVISOR_VIEW: std::sync::OnceLock<SupervisorView> = std::sync::OnceLock::new();
+/// The opened hub and its running generation, for the desktop's Supervisor view. Swappable:
+/// a promotion that imports a staged hub database replaces the hub (see [`promote_generation`]).
+static SUPERVISOR_VIEW: std::sync::RwLock<Option<SupervisorView>> = std::sync::RwLock::new(None);
+
+/// The current hub and running slot, `None` until this daemon opened the hub.
+fn supervisor_view() -> Option<SupervisorView> {
+    SUPERVISOR_VIEW.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// What a start needs besides the running slot, swapped together with [`SUPERVISOR_VIEW`].
+fn supervisor_launch() -> Option<HubLaunch> {
+    SUPERVISOR_LAUNCH.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Publishes the hub and launch inputs the view, the phone and control.sock act on.
+fn publish_hub(launch: &HubLaunch, running: &Arc<tokio::sync::Mutex<Option<Generation>>>) {
+    *SUPERVISOR_VIEW.write().unwrap_or_else(|e| e.into_inner()) =
+        Some((Arc::clone(&launch.hub), Arc::clone(running)));
+    *SUPERVISOR_LAUNCH.write().unwrap_or_else(|e| e.into_inner()) = Some(launch.clone());
+}
 
 /// Supervisor input lines the snapshot carries, newest first.
 const SUPERVISOR_ACTIONS_MAX: usize = 50;
@@ -809,7 +827,7 @@ pub async fn supervisor_snapshot(state: &RemoteGatewayState) -> Value {
         })
         .take(SUPERVISOR_ACTIONS_MAX)
         .collect();
-    let Some((hub, running)) = SUPERVISOR_VIEW.get() else {
+    let Some((hub, running)) = supervisor_view() else {
         #[cfg(test)]
         let test_hub = state.supervisor_test_hub.read().clone();
         #[cfg(test)]
@@ -879,7 +897,7 @@ async fn record_human_keystrokes(
 /// A person typed raw keys into `session_id`. When the pane belongs to a lane, the hub records
 /// one human_correction turn per typing burst. The keys themselves are never stored.
 pub(crate) fn note_lane_keystrokes(session_id: &str, now_ms: u64) {
-    let Some((hub, _)) = SUPERVISOR_VIEW.get() else { return };
+    let Some((hub, _)) = supervisor_view() else { return };
     let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
     let pool = hub.pool.clone();
     let session_id = session_id.to_owned();
@@ -924,7 +942,7 @@ pub(crate) fn note_agent_control_input(op: &AgentControlOp) {
     if ferryx_hub::goals::turns::records_own_turn(request_id.as_deref()) {
         return;
     }
-    let Some((hub, _)) = SUPERVISOR_VIEW.get() else { return };
+    let Some((hub, _)) = supervisor_view() else { return };
     let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
     let pool = hub.pool.clone();
     let op = op.clone();
@@ -940,7 +958,7 @@ pub(crate) fn note_agent_control_input(op: &AgentControlOp) {
 /// event path ([`ferryx_hub::lanes::dispatch::report_from_worker`]). The reply is one JSON
 /// value: `{ok:true, ...}` or `{ok:false, code, message}`.
 pub async fn supervisor_worker_report((session_id, event_id, body): (String, String, String)) -> Value {
-    let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
+    let Some((hub, _)) = supervisor_view() else {
         return json!({"ok": false, "code": "SUPERVISOR_UNAVAILABLE", "message": "the supervisor hub is not open in this daemon"});
     };
     match ferryx_hub::lanes::dispatch::report_from_worker(
@@ -963,11 +981,11 @@ pub async fn supervisor_worker_report((session_id, event_id, body): (String, Str
 
 /// True once this daemon opened the hub, so the Supervisor view has lanes to show.
 pub fn supervisor_available() -> bool {
-    SUPERVISOR_VIEW.get().is_some()
+    supervisor_view().is_some()
 }
 
 /// What a start needs besides the running slot: the hub, its config and its bridge.
-static SUPERVISOR_LAUNCH: std::sync::OnceLock<HubLaunch> = std::sync::OnceLock::new();
+static SUPERVISOR_LAUNCH: std::sync::RwLock<Option<HubLaunch>> = std::sync::RwLock::new(None);
 
 /// Why the hub was not started.
 #[derive(Debug, thiserror::Error)]
@@ -978,6 +996,12 @@ pub enum HubStartError {
     HandedOver,
     #[error("hub start was not persisted: {0}")]
     Storage(String),
+    /// Another machine holds the supervisor lease; this daemon stays on standby.
+    #[error("another machine runs the supervisor")]
+    Standby {
+        holder_machine_id: Option<String>,
+        holder_label: Option<String>,
+    },
 }
 
 /// Clears the persisted stop and runs a generation unless one already runs. Returns whether
@@ -986,10 +1010,92 @@ async fn start_generation(
     running: &tokio::sync::Mutex<Option<Generation>>,
     launch: &HubLaunch,
 ) -> Result<bool, HubStartError> {
+    let lease = lease_gate();
+    gated_start(running, &launch.hub.pool, lease.as_deref(), || open_generation(launch)).await
+}
+
+/// The supervisor lease as the hub start gate sees it. `None` (no lease client) is today's
+/// unleased behaviour: every start runs.
+#[async_trait]
+trait LeaseGate: Send + Sync {
+    /// Holder or Provisional, re-checked against both clocks now.
+    fn allows_hub(&self) -> bool;
+    fn current_role(&self) -> crate::daemon::supervisor_lease_role::Role;
+    /// One non-forced acquire; the role once it settled, `None` when the client ended.
+    async fn try_acquire(&self) -> Option<crate::daemon::supervisor_lease_role::Role>;
+}
+
+#[async_trait]
+impl LeaseGate for crate::daemon::supervisor_lease_client::SupervisorLeaseHandle {
+    fn allows_hub(&self) -> bool {
+        self.state().may_act_now()
+    }
+
+    fn current_role(&self) -> crate::daemon::supervisor_lease_role::Role {
+        self.state().role()
+    }
+
+    async fn try_acquire(&self) -> Option<crate::daemon::supervisor_lease_role::Role> {
+        self.acquire(false).await
+    }
+}
+
+/// The lease client this daemon runs, installed by [`start`].
+static LEASE_GATE: std::sync::RwLock<Option<Arc<dyn LeaseGate>>> = std::sync::RwLock::new(None);
+
+fn lease_gate() -> Option<Arc<dyn LeaseGate>> {
+    LEASE_GATE.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn standby_error(role: &crate::daemon::supervisor_lease_role::Role) -> HubStartError {
+    use crate::daemon::supervisor_lease_role::Role;
+    match role {
+        Role::Standby { holder_machine_id, holder_label, .. } => HubStartError::Standby {
+            holder_machine_id: holder_machine_id.clone(),
+            holder_label: holder_label.clone(),
+        },
+        _ => HubStartError::Standby { holder_machine_id: None, holder_label: None },
+    }
+}
+
+/// The control.sock answer to a start refused on standby: `{"status":"standby","holder":...}`.
+/// `holder` is the holder's label (its machine id when it has none, null when unknown).
+#[cfg(any(unix, test))]
+fn standby_reply(error: &HubStartError) -> Value {
+    let holder = match error {
+        HubStartError::Standby { holder_machine_id, holder_label } => {
+            holder_label.clone().or_else(|| holder_machine_id.clone())
+        }
+        _ => None,
+    };
+    json!({ "status": "standby", "op": "start", "holder": holder })
+}
+
+/// Clears the persisted stop and runs `spawn` into the empty slot, but only on the lease holder:
+/// a standby first asks for the lease (never forced) and is refused with the holder when the
+/// relay says no, before anything is written.
+async fn gated_start<F, Fut>(
+    running: &tokio::sync::Mutex<Option<Generation>>,
+    pool: &ferryx_hub::goals::SqlitePool,
+    lease: Option<&dyn LeaseGate>,
+    spawn: F,
+) -> Result<bool, HubStartError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Generation>,
+{
     if HUB_TASKS.is_retired() {
         return Err(HubStartError::HandedOver);
     }
-    if let Err(error) = ferryx_hub::control::clear_stopped(&launch.hub.pool).await {
+    if let Some(lease) = lease {
+        if !lease.allows_hub() {
+            let role = lease.try_acquire().await.unwrap_or_else(|| lease.current_role());
+            if !lease.allows_hub() {
+                return Err(standby_error(&role));
+            }
+        }
+    }
+    if let Err(error) = ferryx_hub::control::clear_stopped(pool).await {
         tracing::warn!(%error, "hub start did not clear the stopped flag");
         return Err(HubStartError::Storage(error.to_string()));
     }
@@ -997,17 +1103,185 @@ async fn start_generation(
     if slot.is_some() {
         return Ok(false);
     }
-    *slot = Some(spawn_generation(launch).await);
+    *slot = Some(spawn().await);
     Ok(true)
+}
+
+/// The side effects of a running hub that must never run on a standby: stored chat replies
+/// are posted and the supervisor pane is launched, then the generation's tasks start.
+async fn open_generation(launch: &HubLaunch) -> Generation {
+    if let Err(error) = ferryx_hub::chat::reply::flush_pending(&launch.hub.pool).await {
+        tracing::warn!(%error, "stored chat replies were not flushed");
+    }
+    if launch.config.supervisor_pane {
+        let preset = ferryx_hub::meta::pane::SupervisorPanePreset::from_parts(
+            launch.config.supervisor_cwd.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
+            Vec::new(),
+        );
+        tracing::info!(title = %preset.title, "supervisor pane preset is armed");
+        if !preset.command.is_empty() {
+            if let Err(error) = launch.bridge.launch_pane(&preset.cwd.to_string_lossy(), &preset.command).await {
+                tracing::warn!(%error, "supervisor pane was not launched");
+            }
+        }
+    }
+    spawn_generation(launch).await
+}
+
+/// Lease loss: aborts the running generation and waits for its tasks. Unlike `hub stop` it
+/// never writes hub_stopped, which stays the owner's choice. Returns whether one ran.
+async fn stand_down(running: &tokio::sync::Mutex<Option<Generation>>) -> bool {
+    let Some(generation) = running.lock().await.take() else {
+        return false;
+    };
+    for task in &generation.tasks {
+        task.abort();
+    }
+    for task in generation.tasks {
+        let _ = task.await;
+    }
+    true
+}
+
+/// Follows the lease client's start/stop decisions: `false` stands the generation down,
+/// `true` (promotion) runs `promote` into the empty slot.
+async fn follow_lease<F, Fut>(
+    mut wanted: tokio::sync::watch::Receiver<bool>,
+    running: Arc<tokio::sync::Mutex<Option<Generation>>>,
+    mut promote: F,
+) where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Option<Generation>> + Send,
+{
+    while wanted.changed().await.is_ok() {
+        let run = *wanted.borrow_and_update();
+        if run {
+            let mut slot = running.lock().await;
+            if slot.is_none() {
+                *slot = promote().await;
+                if slot.is_some() {
+                    tracing::info!("supervisor lease held; hub generation started");
+                }
+            }
+        } else if stand_down(&running).await {
+            tracing::info!("supervisor lease lost; hub generation stopped, hub_stopped unchanged");
+        }
+    }
+}
+
+/// `<hub.sqlite>.incoming`: a hub database staged by an import for the next promotion.
+fn staged_database(database: &std::path::Path) -> std::path::PathBuf {
+    let mut name = database.as_os_str().to_owned();
+    name.push(".incoming");
+    std::path::PathBuf::from(name)
+}
+
+/// Closes `pool` and moves a staged database over `database`. Returns whether one was staged.
+/// Only called while no generation runs, so nothing else writes the closed pool.
+async fn swap_staged_database(
+    pool: &ferryx_hub::goals::SqlitePool,
+    database: &std::path::Path,
+) -> Result<bool, HubError> {
+    let incoming = staged_database(database);
+    if !tokio::fs::try_exists(&incoming).await.unwrap_or(false) {
+        return Ok(false);
+    }
+    pool.close().await;
+    for suffix in ["-wal", "-shm"] {
+        let mut name = database.as_os_str().to_owned();
+        name.push(suffix);
+        let _ = tokio::fs::remove_file(std::path::PathBuf::from(name)).await;
+    }
+    tokio::fs::rename(&incoming, database).await?;
+    Ok(true)
+}
+
+/// Promotion (Standby -> Holder): reopens the hub on a staged database first, then runs a
+/// generation when the owner has not stopped the hub (or FERRYX_HUB=on).
+async fn promote_generation() -> Option<Generation> {
+    let (_, running) = supervisor_view()?;
+    let mut launch = supervisor_launch()?;
+    let database = launch
+        .config
+        .database_path
+        .clone()
+        .unwrap_or_else(ferryx_hub::hub::default_database_path);
+    match swap_staged_database(&launch.hub.pool, &database).await {
+        Ok(false) => {}
+        Ok(true) => match Hub::open(launch.config.clone(), launch.bridge.clone()).await {
+            Ok(hub) => {
+                if let Err(error) = ferryx_hub::lanes::kibitzer::ensure_schema(&hub.pool).await {
+                    tracing::warn!(%error, "kibitzer schema was not created");
+                }
+                launch.hub = hub;
+                publish_hub(&launch, &running);
+                tracing::info!(path = %database.display(), "hub reopened on the staged database");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "hub did not reopen on the staged database");
+                return None;
+            }
+        },
+        Err(error) => {
+            tracing::warn!(%error, "staged hub database was not swapped in");
+            return None;
+        }
+    }
+    let forced_on = std::env::var("FERRYX_HUB").ok().as_deref() == Some("on");
+    if !forced_on && ferryx_hub::control::is_stopped(&launch.hub.pool).await.unwrap_or(true) {
+        tracing::info!("supervisor lease held; hub stays stopped until hub start");
+        return None;
+    }
+    Some(open_generation(&launch).await)
+}
+
+/// The lease client's [`crate::daemon::supervisor_lease_client::HubSwitch`]: its start/stop decisions, followed by [`follow_lease`].
+struct HubLeaseSwitch {
+    wanted: tokio::sync::watch::Sender<bool>,
+}
+
+impl crate::daemon::supervisor_lease_client::HubSwitch for HubLeaseSwitch {
+    fn start_hub(&self) {
+        self.wanted.send_replace(true);
+    }
+
+    fn stop_hub(&self, reason: crate::daemon::supervisor_lease_role::StandDownReason) {
+        tracing::info!(?reason, "supervisor lease stand-down");
+        self.wanted.send_replace(false);
+    }
+}
+
+/// Starts the lease client over this daemon's relay control channel. `None` without a relay
+/// client: the hub runs unleased, as before the lease.
+async fn spawn_lease_client(
+    server: &DaemonServer,
+    wanted: tokio::sync::watch::Sender<bool>,
+) -> Option<Arc<dyn LeaseGate>> {
+    use crate::daemon::supervisor_lease_client::{spawn_supervisor_lease_client, LeaseClientConfig};
+    let relay = server.remote_state().relay_client.read().clone()?;
+    let enrollment = crate::ipc::run_blocking(|| Ok(crate::account::enroll_client::load_enrollment_record()))
+        .await
+        .ok()
+        .flatten();
+    let (machine_id, account) = match enrollment {
+        Some(record) => (record.machine_record_id, Some(record.account_id)),
+        None => ("local".to_owned(), None),
+    };
+    let config = LeaseClientConfig::system(machine_id, account);
+    let (handle, task) =
+        spawn_supervisor_lease_client(config, Arc::new(relay), Arc::new(HubLeaseSwitch { wanted })).await;
+    HUB_TASKS.track(&task);
+    let gate: Arc<dyn LeaseGate> = Arc::new(handle);
+    Some(gate)
 }
 
 /// A person starts the stopped hub from another surface. `by` names who, as for a lane pause.
 /// Like `ferryx hub start`, it never restarts the daemon, so live PTY sessions stay up.
 pub async fn start_supervisor(state: &RemoteGatewayState, by: &str) -> Result<bool, HubStartError> {
-    let (Some((_, running)), Some(launch)) = (SUPERVISOR_VIEW.get(), SUPERVISOR_LAUNCH.get()) else {
+    let (Some((_, running)), Some(launch)) = (supervisor_view(), supervisor_launch()) else {
         return Err(HubStartError::Unavailable);
     };
-    let started = start_generation(running, launch).await?;
+    let started = start_generation(&running, &launch).await?;
     tracing::info!(by, started, "supervisor hub start requested");
     crate::remote::server::agent_control_service::publish_supervisor_changed(
         state,
@@ -1107,7 +1381,7 @@ pub async fn set_lane_paused_gated(
             }
         }
     }
-    let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
+    let Some((hub, _)) = supervisor_view() else {
         return Err(LanePauseError::Unavailable);
     };
     let status = ferryx_hub::lanes::state::status_of(&hub.pool, lane_key)
@@ -1303,8 +1577,8 @@ pub async fn supervisor_engine(
     state: &RemoteGatewayState,
     action: crate::daemon::protocol::SupervisorEngineAction,
 ) -> Result<Value, SupervisorEngineError> {
-    let pool = SUPERVISOR_VIEW.get().map(|(hub, _)| hub.pool.clone());
-    let control = SUPERVISOR_VIEW.get().map(|(hub, _)| Arc::clone(&hub.control));
+    let pool = supervisor_view().map(|(hub, _)| hub.pool.clone());
+    let control = supervisor_view().map(|(hub, _)| Arc::clone(&hub.control));
     let hub_open = pool.is_some();
     // engine_view refuses first (MHC_NOT_RUNNING) when no engine is installed, so the identity
     // rows are read only for a view that is returned.
@@ -1350,7 +1624,7 @@ async fn supervisor_service(
         return Ok((pool, Some(owner), None));
     }
     let _ = state;
-    let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
+    let Some((hub, _)) = supervisor_view() else {
         return Err(RequestFailure::new(
             "SUPERVISOR_UNAVAILABLE",
             "the supervisor hub is not open in this daemon",
@@ -1556,7 +1830,7 @@ pub async fn supervisor_goal(
     state: &RemoteGatewayState,
     action: crate::daemon::protocol::SupervisorGoalAction,
 ) -> Result<Value, SupervisorGoalError> {
-    let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
+    let Some((hub, _)) = supervisor_view() else {
         return Err(SupervisorGoalError::Unavailable);
     };
     let mutates = action.mutates();
@@ -1620,7 +1894,7 @@ pub async fn supervisor_dispatch(
     state: &RemoteGatewayState,
     action: crate::daemon::protocol::SupervisorDispatchAction,
 ) -> Result<Value, SupervisorDispatchError> {
-    let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
+    let Some((hub, _)) = supervisor_view() else {
         return Err(SupervisorDispatchError::Unavailable);
     };
     let result = apply_dispatch_action(&hub.pool, action).await?;
@@ -1834,21 +2108,8 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
         gateway: Some(Arc::clone(server.remote_state())),
     });
     let hub = Hub::open(config.clone(), bridge.clone()).await.map_err(|error| error.to_string())?;
-    if let Err(error) = ferryx_hub::chat::reply::flush_pending(&hub.pool).await {
-        tracing::warn!(%error, "stored chat replies were not flushed");
-    }
-    if config.supervisor_pane {
-        let preset = ferryx_hub::meta::pane::SupervisorPanePreset::from_parts(
-            config.supervisor_cwd.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
-            Vec::new(),
-        );
-        tracing::info!(title = %preset.title, "supervisor pane preset is armed");
-        if !preset.command.is_empty() {
-            if let Err(error) = bridge.launch_pane(&preset.cwd.to_string_lossy(), &preset.command).await {
-                tracing::warn!(%error, "supervisor pane was not launched");
-            }
-        }
-    }
+    // Stored replies and the supervisor pane are side effects of a running hub: they happen in
+    // `open_generation`, on the lease holder only.
     if let Err(error) = ferryx_hub::lanes::kibitzer::ensure_schema(&hub.pool).await {
         tracing::warn!(%error, "kibitzer schema was not created");
     }
@@ -1858,6 +2119,12 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     let stopped = !forced_on && persisted_stop;
     // This daemon owns the hub from here; a later handover commit ends it again.
     server.handover_manager.on_commit(retire_for_handover);
+    // The supervisor lease decides which of the owner's machines runs the hub. Without a relay
+    // client there is no lease client and the hub runs unleased, as before.
+    let (wanted, lease_decisions) = tokio::sync::watch::channel(false);
+    let lease = spawn_lease_client(&server, wanted).await;
+    *LEASE_GATE.write().unwrap_or_else(|e| e.into_inner()) = lease.clone();
+    let standby = lease.as_ref().is_some_and(|lease| !lease.allows_hub());
     // A predecessor from before 2026.1022.7 keeps its hub through the drain. Stop it over
     // control.sock; its stop persists hub_stopped=1, so the value read above is put back.
     #[cfg(unix)]
@@ -1880,16 +2147,21 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
         #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
         meta_session_id,
     };
-    let generation = if stopped {
+    let generation = if stopped || standby {
         None
     } else {
-        Some(spawn_generation(&launch).await)
+        Some(open_generation(&launch).await)
     };
     let running = Arc::new(tokio::sync::Mutex::new(generation));
-    let _ = SUPERVISOR_VIEW.set((Arc::clone(&launch.hub), Arc::clone(&running)));
-    let _ = SUPERVISOR_LAUNCH.set(launch.clone());
+    publish_hub(&launch, &running);
+    if lease.is_some() {
+        let follower = tokio::spawn(follow_lease(lease_decisions, Arc::clone(&running), promote_generation));
+        HUB_TASKS.track(&follower);
+    }
     serve_control(running, launch);
-    if stopped {
+    if standby {
+        tracing::info!("ferryx hub is on standby: another machine holds the supervisor lease");
+    } else if stopped {
         tracing::info!("ferryx hub stayed stopped until hub start (or FERRYX_HUB=on)");
     } else {
         tracing::info!("ferryx hub is up");
@@ -1951,7 +2223,6 @@ fn live_hub(running: bool, config: &HubConfig) -> ferryx_hub::control::LiveHub {
 }
 
 struct Generation {
-    #[cfg(unix)]
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -2444,10 +2715,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     for task in &tasks {
         HUB_TASKS.track(task);
     }
-    Generation {
-        #[cfg(unix)]
-        tasks,
-    }
+    Generation { tasks }
 }
 
 async fn post_cron_delivery(item: &ferryx_hub::schedule::DueDelivery) -> Option<String> {
@@ -2534,7 +2802,8 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                     }
                 };
                 let running = Arc::clone(&running);
-                let launch = launch.clone();
+                // A promotion may have reopened the hub on an imported database since bind.
+                let launch = supervisor_launch().unwrap_or_else(|| launch.clone());
                 tokio::spawn(async move {
                     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
                     let mut reader = tokio::io::BufReader::new(stream);
@@ -2570,6 +2839,11 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                             Ok(_) => "{\"status\":\"ok\",\"op\":\"start\"}\n",
                             Err(HubStartError::HandedOver) => {
                                 "{\"status\":\"failed\",\"error\":\"this daemon handed the hub over to its successor\"}\n"
+                            }
+                            Err(error @ HubStartError::Standby { .. }) => {
+                                let mut stream = reader.into_inner();
+                                let _ = stream.write_all(format!("{}\n", standby_reply(&error)).as_bytes()).await;
+                                return;
                             }
                             Err(_) => "{\"status\":\"failed\",\"error\":\"hub start was not persisted\"}\n",
                         },
@@ -3183,5 +3457,177 @@ mod tests {
             assert!(refused.to_string().starts_with("MHC_NOT_RUNNING:"), "{refused}");
         }
         assert_eq!(SupervisorEngineError::Unavailable.code(), "SUPERVISOR_UNAVAILABLE");
+    }
+
+    use crate::daemon::supervisor_lease_role::Role;
+
+    /// A lease client stub: whether the hub may run now, and what an acquire turns it into.
+    struct FakeLease {
+        allows: std::sync::atomic::AtomicBool,
+        acquire_grants: bool,
+        acquires: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FakeLease {
+        fn new(allows: bool, acquire_grants: bool) -> Self {
+            Self {
+                allows: std::sync::atomic::AtomicBool::new(allows),
+                acquire_grants,
+                acquires: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    fn held_by_b() -> Role {
+        Role::Standby {
+            holder_machine_id: Some("mach-b".into()),
+            holder_label: Some("Laptop B".into()),
+            fence: Some(7),
+        }
+    }
+
+    #[async_trait]
+    impl LeaseGate for FakeLease {
+        fn allows_hub(&self) -> bool {
+            self.allows.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn current_role(&self) -> Role {
+            if self.allows_hub() { Role::Holder { fence: 7 } } else { held_by_b() }
+        }
+
+        async fn try_acquire(&self) -> Option<Role> {
+            self.acquires.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.acquire_grants {
+                self.allows.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Some(self.current_role())
+        }
+    }
+
+    /// One generation task that never ends on its own; the receiver errors once it is aborted.
+    fn pending_generation() -> (Generation, tokio::sync::oneshot::Receiver<()>) {
+        let (alive, ended) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _alive = alive;
+            std::future::pending::<()>().await;
+        });
+        (Generation { tasks: vec![task] }, ended)
+    }
+
+    /// Stands in for `open_generation` (stored replies, supervisor pane, then the tasks):
+    /// counts how often a start reached it.
+    fn counting_spawn(calls: &std::sync::atomic::AtomicUsize) -> impl std::future::Future<Output = Generation> + '_ {
+        async move {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Generation { tasks: Vec::new() }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_start_on_standby_is_refused_with_the_holder_and_spawns_nothing() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::control::mark_stopped(&pool).await.unwrap();
+        let running = tokio::sync::Mutex::new(None);
+        let lease = FakeLease::new(false, false);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+
+        let refused = gated_start(&running, &pool, Some(&lease as &dyn LeaseGate), || counting_spawn(&calls)).await.unwrap_err();
+
+        assert!(
+            matches!(&refused, HubStartError::Standby { holder_machine_id, holder_label }
+                if holder_machine_id.as_deref() == Some("mach-b") && holder_label.as_deref() == Some("Laptop B")),
+            "{refused:?}"
+        );
+        assert_eq!(lease.acquires.load(std::sync::atomic::Ordering::SeqCst), 1, "asked for the lease once, unforced");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "no replies flushed, no pane, no tasks");
+        assert!(running.lock().await.is_none());
+        assert_eq!(HUB_TASKS.live(), 0);
+        assert!(ferryx_hub::control::is_stopped(&pool).await.unwrap(), "a refused start writes nothing");
+        assert_eq!(
+            standby_reply(&refused),
+            json!({"status": "standby", "op": "start", "holder": "Laptop B"})
+        );
+        assert!(!ferryx_hub::control::reply_ok(&standby_reply(&refused).to_string()), "the CLI exits non-zero");
+    }
+
+    #[tokio::test]
+    async fn a_standby_start_that_wins_the_lease_runs_the_generation() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::control::mark_stopped(&pool).await.unwrap();
+        let running = tokio::sync::Mutex::new(None);
+        let lease = FakeLease::new(false, true);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+
+        let started = gated_start(&running, &pool, Some(&lease as &dyn LeaseGate), || counting_spawn(&calls)).await.unwrap();
+
+        assert!(started);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(running.lock().await.is_some());
+        assert!(!ferryx_hub::control::is_stopped(&pool).await.unwrap(), "start clears the owner's stop");
+    }
+
+    #[tokio::test]
+    async fn an_unleased_daemon_starts_as_before() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let running = tokio::sync::Mutex::new(None);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        assert!(gated_start(&running, &pool, None, || counting_spawn(&calls)).await.unwrap());
+        assert!(!gated_start(&running, &pool, None, || counting_spawn(&calls)).await.unwrap(), "already running");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Not cfg(unix): the stand-down must stop the hub on Windows too.
+    #[tokio::test]
+    async fn losing_the_lease_aborts_the_generation_and_regaining_runs_it_again() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::control::clear_stopped(&pool).await.unwrap();
+        let (generation, ended) = pending_generation();
+        let running = Arc::new(tokio::sync::Mutex::new(Some(generation)));
+        let (wanted, decisions) = tokio::sync::watch::channel(true);
+        let (promoted_tx, mut promoted) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let follower = tokio::spawn(follow_lease(decisions, Arc::clone(&running), move || {
+            let promoted_tx = promoted_tx.clone();
+            async move {
+                let _ = promoted_tx.send(());
+                Some(Generation { tasks: Vec::new() })
+            }
+        }));
+        let limit = std::time::Duration::from_secs(10);
+
+        wanted.send_replace(false);
+        assert!(tokio::time::timeout(limit, ended).await.expect("bounded").is_err(), "the task was aborted");
+        // The stand-down takes the generation out of the slot before it aborts the tasks.
+        assert!(running.lock().await.is_none());
+        assert!(!ferryx_hub::control::is_stopped(&pool).await.unwrap(), "lease loss leaves hub_stopped as it was");
+
+        wanted.send_replace(true);
+        tokio::time::timeout(limit, promoted.recv()).await.expect("bounded").expect("promoted");
+        // The follower assigns the slot under the lock it held while promoting.
+        assert!(running.lock().await.is_some(), "regaining the lease runs a generation again");
+        follower.abort();
+    }
+
+    #[tokio::test]
+    async fn a_staged_database_replaces_the_hub_database_on_promotion() {
+        use ferryx_hub::supervisor as sv;
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("hub.sqlite");
+        let local = ferryx_hub::storage::connect(&database).await.unwrap();
+        assert!(sv::identities(&local).await.unwrap().is_empty());
+        let incoming = staged_database(&database);
+        let imported = ferryx_hub::storage::connect(&incoming).await.unwrap();
+        sv::provision_owner(&imported, "slack:T1:U-owner", "ferryx", "github.com/example/ferryx", "host-b", "/repo/.git")
+            .await
+            .unwrap();
+        imported.close().await;
+
+        assert!(swap_staged_database(&local, &database).await.unwrap());
+        assert!(local.is_closed(), "the old pool is closed before the swap");
+        assert!(!incoming.exists());
+        let reopened = ferryx_hub::storage::connect(&database).await.unwrap();
+        assert_eq!(sv::identities(&reopened).await.unwrap().len(), 1, "the imported supervisor is there");
+        assert!(!swap_staged_database(&reopened, &database).await.unwrap(), "nothing staged: nothing swapped");
+        assert!(!reopened.is_closed());
     }
 }
