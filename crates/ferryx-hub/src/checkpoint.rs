@@ -19,8 +19,14 @@ use sqlx::SqlitePool;
 
 /// Maximum compressed checkpoint size.
 pub const CHECKPOINT_MAX_COMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
+/// Upper bound for a decompressed checkpoint, so a small archive cannot expand without limit.
+pub const CHECKPOINT_MAX_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
 /// Error code surfaced in status when the archive exceeds the budget.
 pub const CHECKPOINT_TOO_LARGE: &str = "CHECKPOINT_TOO_LARGE";
+/// Import refused: the target hub holds a different supervisor.
+pub const SUPERVISOR_IDENTITY_MISMATCH: &str = "SUPERVISOR_IDENTITY_MISMATCH";
+/// `held_detail` of a goal whose host has no mapping on the importing machine.
+pub const REMOTE_HOST_UNMAPPED: &str = "REMOTE_HOST_UNMAPPED";
 /// Manifest format version.
 pub const CHECKPOINT_FORMAT_VERSION: u32 = 1;
 /// omo memory agent used by the supervisor.
@@ -443,7 +449,7 @@ fn export_env(path: Option<&Path>) -> Result<BTreeMap<String, String>, Checkpoin
     Ok(out)
 }
 
-fn render_env(entries: &BTreeMap<String, String>) -> String {
+pub(crate) fn render_env(entries: &BTreeMap<String, String>) -> String {
     let mut text = String::new();
     for (key, value) in entries {
         if value.contains('\n') || value.contains('\r') {
@@ -516,7 +522,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, CheckpointError> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn build_archive(entries: &[(&str, &[u8])]) -> Result<Vec<u8>, CheckpointError> {
+pub(crate) fn build_archive(entries: &[(&str, &[u8])]) -> Result<Vec<u8>, CheckpointError> {
     let encoder = zstd::stream::write::Encoder::new(Vec::new(), ZSTD_LEVEL)?;
     let mut builder = tar::Builder::new(encoder);
     for (name, data) in entries {
@@ -533,7 +539,10 @@ fn build_archive(entries: &[(&str, &[u8])]) -> Result<Vec<u8>, CheckpointError> 
 /// Every file of a checkpoint archive by its archive path. Blocking.
 pub fn read_archive(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, CheckpointError> {
     let decoder = zstd::stream::read::Decoder::new(bytes)?;
-    let mut archive = tar::Archive::new(decoder);
+    let mut archive = tar::Archive::new(BoundedReader {
+        inner: decoder,
+        left: CHECKPOINT_MAX_ARCHIVE_BYTES,
+    });
     let mut files = BTreeMap::new();
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -545,7 +554,26 @@ pub fn read_archive(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, Checkpoin
     Ok(files)
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+/// Fails a read once more than `left` bytes came through.
+struct BoundedReader<R> {
+    inner: R,
+    left: u64,
+}
+
+impl<R: Read> Read for BoundedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.left = self.left.checked_sub(n as u64).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("decompressed checkpoint exceeds {CHECKPOINT_MAX_ARCHIVE_BYTES} bytes"),
+            )
+        })?;
+        Ok(n)
+    }
+}
+
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))

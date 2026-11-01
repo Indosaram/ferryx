@@ -1,82 +1,32 @@
 //! Import side of the portable supervisor checkpoint (plan todo 7, part B).
 //!
-//! Import verifies the checkpoint manifest and size budget, unpacks the
-//! zstd-compressed tar into a staging directory, maps host ids back to this
-//! machine's view, and stages the database as `hub.sqlite.incoming`. The swap
-//! into `hub.sqlite` happens only at the next hub open, before any pool is
-//! created (see [`apply_staged_swap`]); the previous file is kept as
-//! `hub.sqlite.pre-move-<ts>`.
+//! Import reads an archive written by [`crate::checkpoint::export`] through the same manifest
+//! types and archive names, checks the size budget and the target's supervisor identity, maps
+//! host ids back to this machine's view, and stages the database as `hub.sqlite.incoming`. The
+//! swap into `hub.sqlite` happens only at the next hub open, before any pool is created (see
+//! [`apply_staged_swap`]); the previous file is kept as `hub.sqlite.pre-move-<ts>`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
-use manifest_contract::{
-    CheckpointManifest, CHECKPOINT_FORMAT_VERSION, CHECKPOINT_MAX_COMPRESSED_BYTES,
-    CHECKPOINT_TOO_LARGE, HUB_DB_ENTRY, MACHINE_HOST_PREFIX, MANIFEST_ENTRY, MEMORY_BUNDLE_ENTRY,
-    REMOTE_HOST_UNMAPPED, SECRETS_PREFIX, SUPERVISOR_IDENTITY_MISMATCH,
+use crate::checkpoint::{
+    env_key_exported, memory_agent_dir, read_archive, render_env, sha256_hex, CheckpointError,
+    CheckpointManifest, MemorySource, PairedHostMapping, PrivateFileWriter, ARCHIVE_DATABASE,
+    ARCHIVE_ENV, ARCHIVE_MANIFEST, ARCHIVE_MEMORY_BUNDLE, ARCHIVE_PROFILE,
+    CHECKPOINT_FORMAT_VERSION, CHECKPOINT_MAX_COMPRESSED_BYTES, HOST_ID_TABLES, LOCAL_HOST_ID,
+    MACHINE_HOST_PREFIX, REMOTE_HOST_UNMAPPED, SUPERVISOR_IDENTITY_MISMATCH,
 };
 
-/// Manifest types shared with the export side.
-///
-/// Part A's `checkpoint.rs` owns the canonical types; these mirror them with
-/// the field names used by the plan text and the orchestrator dedupes the two
-/// definitions on merge.
-pub mod manifest_contract {
-    use serde::{Deserialize, Serialize};
-
-    /// Size budget for one compressed checkpoint (64 MiB).
-    pub const CHECKPOINT_MAX_COMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
-    pub const CHECKPOINT_TOO_LARGE: &str = "CHECKPOINT_TOO_LARGE";
-    pub const SUPERVISOR_IDENTITY_MISMATCH: &str = "SUPERVISOR_IDENTITY_MISMATCH";
-    pub const REMOTE_HOST_UNMAPPED: &str = "REMOTE_HOST_UNMAPPED";
-    pub const CHECKPOINT_FORMAT_VERSION: u32 = 1;
-    /// Archive entries. Anything else (a sessions json in particular) is ignored on import.
-    pub const MANIFEST_ENTRY: &str = "manifest.json";
-    pub const HUB_DB_ENTRY: &str = "hub.sqlite";
-    pub const MEMORY_BUNDLE_ENTRY: &str = "memory.bundle";
-    /// Secret files travel under this prefix and are only ever written owner-only.
-    pub const SECRETS_PREFIX: &str = "secrets/";
-    /// Export writes every host id as `machine:<machine_id>`: `local` as the exporting
-    /// machine and each paired host as the machine it points at.
-    pub const MACHINE_HOST_PREFIX: &str = "machine:";
-
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-    pub struct CheckpointManifest {
-        pub format_version: u32,
-        pub supervisor_id: String,
-        pub owner_principal: String,
-        pub source_machine_id: String,
-        pub created_at: String,
-        /// sha256 (hex) of the `hub.sqlite` entry.
-        pub hub_db_sha256: String,
-        pub memory: MemoryManifest,
-        /// File names under `secrets/`.
-        #[serde(default)]
-        pub secret_files: Vec<String>,
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-    pub struct MemoryManifest {
-        /// `memory.agent` of the supervisor profile (`ferryx-supervisor`).
-        pub agent: String,
-        /// `memory.sync.remote` when set: import pulls from it and no bundle travels.
-        #[serde(default)]
-        pub sync_remote: Option<String>,
-        /// sha256 (hex) of the `memory.bundle` entry when the history travels as a bundle.
-        #[serde(default)]
-        pub bundle_sha256: Option<String>,
-    }
-}
-
+/// The live hub database file name.
+const LIVE_DB: &str = "hub.sqlite";
 /// Staged database, swapped into `hub.sqlite` at the next hub open.
 pub const INCOMING_DB: &str = "hub.sqlite.incoming";
 const INCOMING_TMP: &str = "hub.sqlite.incoming.tmp";
@@ -84,14 +34,6 @@ const INCOMING_TMP: &str = "hub.sqlite.incoming.tmp";
 pub const IMPORT_STATUS_FILE: &str = "checkpoint-import-status.json";
 /// A `hub.sqlite.pre-lease-<ts>` file marks an archived (handed-over) hub: it counts as fresh.
 const ARCHIVED_PREFIX: &str = "hub.sqlite.pre-lease-";
-/// Upper bound for the decompressed tar, so a small archive cannot expand without limit.
-const MAX_TAR_BYTES: u64 = 1024 * 1024 * 1024;
-const HOST_ID_TABLES: [&str; 4] = [
-    "supervisor_project_hosts",
-    "supervisor_execution_bindings",
-    "lanes",
-    "fleet_inventory_cache",
-];
 /// Run states a hold may interrupt (the `held_from` CHECK of migration 0024).
 const HOLDABLE_STATES: &str = "'ready','dispatching','running','waiting_children',\
     'waiting_event','awaiting_owner','verifying','degraded','delivery_uncertain'";
@@ -99,8 +41,9 @@ const HOLDABLE_STATES: &str = "'ready','dispatching','running','waiting_children
 /// Errors returned by checkpoint import.
 #[derive(Debug, thiserror::Error)]
 pub enum ImportError {
-    #[error("CHECKPOINT_TOO_LARGE: {bytes} bytes exceeds the {limit} byte budget")]
-    TooLarge { bytes: u64, limit: u64 },
+    /// Archive budget, decompression and archive-format failures, with the export side's codes.
+    #[error(transparent)]
+    Checkpoint(#[from] CheckpointError),
     #[error("SUPERVISOR_IDENTITY_MISMATCH: target holds {target}, checkpoint carries {incoming}")]
     IdentityMismatch { target: String, incoming: String },
     #[error("checkpoint manifest: {0}")]
@@ -119,7 +62,7 @@ impl ImportError {
     /// Stable machine-readable code.
     pub fn code(&self) -> &'static str {
         match self {
-            Self::TooLarge { .. } => CHECKPOINT_TOO_LARGE,
+            Self::Checkpoint(error) => error.code(),
             Self::IdentityMismatch { .. } => SUPERVISOR_IDENTITY_MISMATCH,
             Self::Manifest(_) => "CHECKPOINT_MANIFEST_INVALID",
             Self::Memory(_) => "CHECKPOINT_MEMORY_RESTORE_FAILED",
@@ -128,12 +71,9 @@ impl ImportError {
     }
 }
 
-/// Writes one file readable by its owner only. ferryx-hub cannot depend on src-tauri, so the
-/// caller passes its private-file writer (owner-only ACL on Windows); see
-/// [`default_private_writer`] for the unix-mode fallback.
-pub type PrivateWriter = Arc<dyn Fn(&Path, &[u8]) -> io::Result<()> + Send + Sync>;
-
-/// Creates `path` (never overwriting) with mode 0600 on unix and writes `bytes`.
+/// Creates `path` (never overwriting) with mode 0600 on unix and writes `bytes`. ferryx-hub
+/// cannot depend on src-tauri, so production callers pass their own private-file writer
+/// (owner-only ACL on Windows); this is the unix-mode fallback.
 pub fn write_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -147,16 +87,22 @@ pub fn write_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
-pub fn default_private_writer() -> PrivateWriter {
+pub fn default_private_writer() -> PrivateFileWriter {
     Arc::new(write_private_file)
 }
 
 pub struct ImportOptions {
-    /// `<memory agents root>/<agent>-<h8>/repo`; see [`memory_repo_dir`].
-    pub memory_repo_dir: PathBuf,
+    /// `~/.omo/memory/agents`: the repo lands in `<root>/<agent>-<h8>/repo`
+    /// ([`memory_agent_dir`]) for the manifest's `memory_agent`.
+    pub memory_root: PathBuf,
+    /// Hub env file (`~/.ferryx/hub/env`) the exported keys are merged into, owner-only.
+    pub env_file: PathBuf,
+    /// The mhc profile `.omo/omo.jsonc` to restore from the checkpoint; `None` keeps the
+    /// target's profile untouched.
+    pub profile_omo_jsonc: Option<PathBuf>,
     /// Unix seconds used for `pre-move-<ts>` names and hold timestamps.
     pub now_ts: i64,
-    pub write_private: PrivateWriter,
+    pub write_private: PrivateFileWriter,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -171,15 +117,17 @@ pub enum MemoryRestore {
 /// Result of a staged import.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportOutcome {
-    /// sha256 (hex) of the decompressed tar.
+    /// sha256 (hex) of the compressed archive, the export side's `checkpoint_id`.
     pub checkpoint_id: String,
-    pub supervisor_id: String,
+    pub supervisor_id: Option<String>,
     pub staged_db: PathBuf,
     pub unmapped_hosts: Vec<String>,
     pub held_goals: Vec<String>,
     pub released_dispatches: u64,
     pub memory: MemoryRestore,
+    /// Owner-only files written: the merged hub env file when the checkpoint carried keys.
     pub secrets: Vec<PathBuf>,
+    pub profile: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -191,34 +139,21 @@ pub struct HostMapping {
     pub released_dispatches: u64,
 }
 
-/// Where mhc keeps the memory repo of `agent`: `<root>/<agent>-<sha256(agent)[..8]>/repo`.
-pub fn memory_repo_dir(memory_agents_root: &Path, agent: &str) -> PathBuf {
-    let digest = sha256_hex(agent.as_bytes());
-    memory_agents_root
-        .join(format!("{agent}-{}", &digest[..8]))
-        .join("repo")
-}
-
 /// The local host id for an exported `machine:<id>` host id: `local` for this machine, the
 /// paired host id for a paired machine, `None` when that machine is not paired here.
 pub fn local_host_id(
     host_id: &str,
     own_machine_id: &str,
-    paired: &[(String, String)],
+    paired: &[PairedHostMapping],
 ) -> Option<String> {
     let machine = host_id.strip_prefix(MACHINE_HOST_PREFIX)?;
     if machine == own_machine_id {
-        return Some("local".to_owned());
+        return Some(LOCAL_HOST_ID.to_owned());
     }
     paired
         .iter()
-        .find(|(paired_machine, _)| paired_machine == machine)
-        .map(|(_, host)| host.clone())
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+        .find(|host| host.machine_id == machine)
+        .map(|host| host.host_id.clone())
 }
 
 fn timestamp(now_ts: i64) -> String {
@@ -227,139 +162,115 @@ fn timestamp(now_ts: i64) -> String {
         .to_rfc3339()
 }
 
-/// Hashes and bounds everything read from the decompressed tar.
-struct HashingReader<R> {
-    inner: R,
-    hasher: Sha256,
-    read: u64,
-}
-
-impl<R: Read> Read for HashingReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        self.read += n as u64;
-        if self.read > MAX_TAR_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("decompressed checkpoint exceeds {MAX_TAR_BYTES} bytes"),
-            ));
-        }
-        self.hasher.update(&buf[..n]);
-        Ok(n)
-    }
-}
-
 struct Unpacked {
     checkpoint_id: String,
     manifest: CheckpointManifest,
     hub_db: PathBuf,
     memory_bundle: Option<PathBuf>,
-    /// Secret bytes stay in memory until the private writer stores them.
-    secrets: Vec<(String, Vec<u8>)>,
+    /// Exported env entries; stay in memory until the private writer stores them.
+    env: BTreeMap<String, String>,
+    profile: Option<Vec<u8>>,
 }
 
-fn safe_secret_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.contains(['/', '\\', ':'])
+/// A single path component: safe to join under a directory.
+fn safe_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', ':'])
 }
 
-/// Checks the size budget, unpacks the archive into `staging` and verifies the manifest.
+fn invalid(message: impl Into<String>) -> ImportError {
+    ImportError::Manifest(message.into())
+}
+
+/// Checks the size budget, reads the archive, verifies the manifest and unpacks the database
+/// and memory bundle into `staging`. Blocking.
 fn unpack(archive: &Path, staging: &Path) -> Result<Unpacked, ImportError> {
-    let file = fs::File::open(archive)?;
-    let bytes = file.metadata()?.len();
+    let bytes = fs::metadata(archive)?.len();
     if bytes > CHECKPOINT_MAX_COMPRESSED_BYTES {
-        return Err(ImportError::TooLarge {
+        return Err(CheckpointError::TooLarge {
             bytes,
-            limit: CHECKPOINT_MAX_COMPRESSED_BYTES,
-        });
-    }
-    let reader = HashingReader {
-        inner: zstd::stream::read::Decoder::new(file)?,
-        hasher: Sha256::new(),
-        read: 0,
-    };
-    let mut tar = tar::Archive::new(reader);
-    let mut manifest = None;
-    let mut hub_db = None;
-    let mut memory_bundle = None;
-    let mut secrets = Vec::new();
-    for entry in tar.entries()? {
-        let mut entry = entry?;
-        if !entry.header().entry_type().is_file() {
-            continue;
+            budget: CHECKPOINT_MAX_COMPRESSED_BYTES,
         }
-        let name = entry.path()?.to_string_lossy().replace('\\', "/");
-        let mut body = Vec::new();
-        entry.read_to_end(&mut body)?;
-        if name == MANIFEST_ENTRY {
-            let parsed: CheckpointManifest = serde_json::from_slice(&body)
-                .map_err(|error| ImportError::Manifest(error.to_string()))?;
-            manifest = Some(parsed);
-        } else if name == HUB_DB_ENTRY {
-            let path = staging.join(HUB_DB_ENTRY);
-            fs::write(&path, &body)?;
-            hub_db = Some((path, sha256_hex(&body)));
-        } else if name == MEMORY_BUNDLE_ENTRY {
-            let path = staging.join(MEMORY_BUNDLE_ENTRY);
-            fs::write(&path, &body)?;
-            memory_bundle = Some((path, sha256_hex(&body)));
-        } else if let Some(secret) = name.strip_prefix(SECRETS_PREFIX) {
-            if !safe_secret_name(secret) {
-                return Err(ImportError::Manifest(format!("unsafe secret entry {name}")));
-            }
-            secrets.push((secret.to_owned(), body));
-        }
-        // Anything else (a sessions json in particular) is ignored: sessions start fresh.
+        .into());
     }
-    let mut reader = tar.into_inner();
-    io::copy(&mut reader, &mut io::sink())?;
-    let checkpoint_id: String = reader
-        .hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let compressed = fs::read(archive)?;
+    let checkpoint_id = sha256_hex(&compressed);
+    // Unknown entries (a sessions json in particular) are ignored: sessions start fresh.
+    let mut files = read_archive(&compressed)?;
+    drop(compressed);
 
-    let manifest = manifest.ok_or_else(|| ImportError::Manifest("missing manifest.json".into()))?;
+    let manifest = files
+        .remove(ARCHIVE_MANIFEST)
+        .ok_or_else(|| invalid(format!("missing {ARCHIVE_MANIFEST}")))?;
+    let manifest: CheckpointManifest =
+        serde_json::from_slice(&manifest).map_err(|error| invalid(error.to_string()))?;
     if manifest.format_version != CHECKPOINT_FORMAT_VERSION {
-        return Err(ImportError::Manifest(format!(
+        return Err(invalid(format!(
             "unsupported format_version {}",
             manifest.format_version
         )));
     }
-    if manifest.supervisor_id.len() != 36 {
-        return Err(ImportError::Manifest("supervisor_id is not a uuid".into()));
+    if manifest
+        .supervisor_id
+        .as_ref()
+        .is_some_and(|id| id.len() != 36)
+    {
+        return Err(invalid("supervisor_id is not a uuid"));
     }
-    let (hub_db, hub_sha) =
-        hub_db.ok_or_else(|| ImportError::Manifest("missing hub.sqlite".into()))?;
-    if hub_sha != manifest.hub_db_sha256 {
-        return Err(ImportError::Manifest("hub.sqlite sha256 does not match".into()));
+    if !safe_name(&manifest.memory_agent) {
+        return Err(invalid(format!(
+            "unsafe memory agent {:?}",
+            manifest.memory_agent
+        )));
     }
-    let memory_bundle = match (&manifest.memory.bundle_sha256, memory_bundle) {
-        (Some(expected), Some((path, actual))) if *expected == actual => Some(path),
-        (None, None) => None,
-        _ => return Err(ImportError::Manifest("memory.bundle does not match the manifest".into())),
+
+    let db = files
+        .remove(ARCHIVE_DATABASE)
+        .ok_or_else(|| invalid(format!("missing {ARCHIVE_DATABASE}")))?;
+    let hub_db = staging.join(ARCHIVE_DATABASE);
+    fs::write(&hub_db, db)?;
+
+    let memory_bundle = match &manifest.memory {
+        MemorySource::Bundle { .. } => {
+            let bundle = files
+                .remove(ARCHIVE_MEMORY_BUNDLE)
+                .ok_or_else(|| invalid(format!("missing {ARCHIVE_MEMORY_BUNDLE}")))?;
+            let path = staging.join("supervisor.bundle");
+            fs::write(&path, bundle)?;
+            Some(path)
+        }
+        MemorySource::Absent | MemorySource::Remote { .. } => None,
     };
-    let mut listed: Vec<&str> = manifest.secret_files.iter().map(String::as_str).collect();
-    let mut found: Vec<&str> = secrets.iter().map(|(name, _)| name.as_str()).collect();
-    listed.sort_unstable();
-    found.sort_unstable();
-    if listed != found {
-        return Err(ImportError::Manifest("secret files do not match the manifest".into()));
-    }
+
+    // Only keys the manifest lists and the export allowlist admits: a machine-local key such
+    // as FERRYX_HUB_DB never lands in the target env, even from a hand-made archive.
+    let env = files
+        .remove(ARCHIVE_ENV)
+        .map(|body| crate::hub_env::parse_env_file(&String::from_utf8_lossy(&body)))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(key, _)| manifest.env_keys.contains(key) && env_key_exported(key))
+        .collect();
+
+    let profile = if manifest.has_profile {
+        let profile = files
+            .remove(ARCHIVE_PROFILE)
+            .ok_or_else(|| invalid(format!("missing {ARCHIVE_PROFILE}")))?;
+        Some(profile)
+    } else {
+        None
+    };
     Ok(Unpacked {
         checkpoint_id,
         manifest,
         hub_db,
         memory_bundle,
-        secrets,
+        env,
+        profile,
     })
 }
 
 /// Refuses unless the target is fresh, archived, or holds the same supervisor.
-async fn check_identity(target_hub_dir: &Path, incoming: &str) -> Result<(), ImportError> {
+async fn check_identity(target_hub_dir: &Path, incoming: Option<&str>) -> Result<(), ImportError> {
     let dir = target_hub_dir.to_owned();
     let archived = tokio::task::spawn_blocking(move || -> io::Result<bool> {
         match fs::read_dir(&dir) {
@@ -377,7 +288,7 @@ async fn check_identity(target_hub_dir: &Path, incoming: &str) -> Result<(), Imp
     })
     .await
     .map_err(io::Error::other)??;
-    let db = target_hub_dir.join(HUB_DB_ENTRY);
+    let db = target_hub_dir.join(LIVE_DB);
     if archived || !tokio::fs::try_exists(&db).await? {
         return Ok(());
     }
@@ -397,10 +308,13 @@ async fn check_identity(target_hub_dir: &Path, incoming: &str) -> Result<(), Imp
     }
     .await;
     pool.close().await;
-    match held?.into_iter().find(|target| target != incoming) {
+    match held?
+        .into_iter()
+        .find(|target| Some(target.as_str()) != incoming)
+    {
         Some(target) => Err(ImportError::IdentityMismatch {
             target,
-            incoming: incoming.to_owned(),
+            incoming: incoming.unwrap_or("<none>").to_owned(),
         }),
         None => Ok(()),
     }
@@ -432,16 +346,31 @@ async fn open_staged(path: &Path) -> Result<SqlitePool, sqlx::Error> {
 pub async fn map_host_ids(
     pool: &SqlitePool,
     own_machine_id: &str,
-    paired: &[(String, String)],
+    paired: &[PairedHostMapping],
     now_ts: i64,
 ) -> Result<HostMapping, sqlx::Error> {
     let now = timestamp(now_ts);
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    // Export rewrites `host_id` only in tables that have the column; so does import.
+    let mut tables = Vec::new();
+    for &table in HOST_ID_TABLES {
+        let columns: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pragma_table_info(?) WHERE name = 'host_id'",
+        )
+        .bind(table)
+        .fetch_one(&mut *tx)
+        .await?;
+        if columns > 0 {
+            tables.push(table);
+        }
+    }
     let mut hosts = BTreeSet::new();
-    for table in HOST_ID_TABLES {
+    for &table in &tables {
         let rows: Vec<String> = sqlx::query_scalar(&format!(
-            "SELECT DISTINCT host_id FROM {table} WHERE substr(host_id, 1, 8) = 'machine:'"
+            "SELECT DISTINCT host_id FROM {table} WHERE substr(host_id, 1, ?) = ?"
         ))
+        .bind(MACHINE_HOST_PREFIX.len() as i64)
+        .bind(MACHINE_HOST_PREFIX)
         .fetch_all(&mut *tx)
         .await?;
         hosts.extend(rows);
@@ -450,7 +379,7 @@ pub async fn map_host_ids(
     let mut blocked = BTreeSet::new();
     for host in hosts {
         if let Some(local) = local_host_id(&host, own_machine_id, paired) {
-            for table in HOST_ID_TABLES {
+            for &table in &tables {
                 // The fleet cache is keyed by host: a stale local row yields to the import.
                 let verb = if table == "fleet_inventory_cache" {
                     "UPDATE OR REPLACE"
@@ -565,7 +494,7 @@ struct Undo {
     memory_repo: Option<PathBuf>,
     memory_aside: Option<PathBuf>,
     /// (installed path, previous file moved aside)
-    secrets: Vec<(PathBuf, Option<PathBuf>)>,
+    files: Vec<(PathBuf, Option<PathBuf>)>,
     staged_tmp: Option<PathBuf>,
 }
 
@@ -574,12 +503,12 @@ impl Undo {
         if let Some(tmp) = self.staged_tmp {
             let _ = fs::remove_file(tmp);
         }
-        for (installed, aside) in self.secrets.into_iter().rev() {
+        for (installed, aside) in self.files.into_iter().rev() {
             let _ = fs::remove_file(&installed);
             if let Some(aside) = aside {
                 if let Err(error) = fs::rename(&aside, &installed) {
                     let path = installed.display();
-                    tracing::warn!(%error, %path, "checkpoint rollback: secret not restored");
+                    tracing::warn!(%error, %path, "checkpoint rollback: file not restored");
                 }
             }
         }
@@ -595,51 +524,49 @@ impl Undo {
     }
 }
 
-/// Clones the memory repo from the recorded remote or the travelling bundle. An existing repo
-/// is moved aside to `repo.pre-move-<ts>`, never merged.
+/// Clones the memory repo from the recorded remote or the travelling bundle into
+/// `<memory_root>/<agent>-<h8>/repo`. An existing repo is moved aside to `repo.pre-move-<ts>`,
+/// never merged.
 fn restore_memory(
     manifest: &CheckpointManifest,
     bundle: Option<&Path>,
-    repo: &Path,
+    memory_root: &Path,
     now_ts: i64,
     undo: &mut Undo,
 ) -> Result<MemoryRestore, ImportError> {
-    let source: PathBuf;
-    let restore = match (&manifest.memory.sync_remote, bundle) {
-        (Some(remote), _) => {
-            source = PathBuf::from(remote);
-            MemoryRestore::Remote(remote.clone())
+    let (source, restore) = match (&manifest.memory, bundle) {
+        (MemorySource::Remote { remote }, _) => {
+            (PathBuf::from(remote), MemoryRestore::Remote(remote.clone()))
         }
-        (None, Some(bundle)) => {
-            source = bundle.to_owned();
-            MemoryRestore::Bundle
+        (MemorySource::Bundle { .. }, Some(bundle)) => (bundle.to_owned(), MemoryRestore::Bundle),
+        (MemorySource::Bundle { .. }, None) => {
+            return Err(invalid(format!("missing {ARCHIVE_MEMORY_BUNDLE}")))
         }
-        (None, None) => return Ok(MemoryRestore::None),
+        (MemorySource::Absent, _) => return Ok(MemoryRestore::None),
     };
-    if let Some(parent) = repo.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    let agent_dir = memory_agent_dir(memory_root, &manifest.memory_agent);
+    let repo = agent_dir.join("repo");
+    fs::create_dir_all(&agent_dir)?;
     if repo.exists() {
-        let aside = suffixed(repo, &format!(".pre-move-{now_ts}"));
-        fs::rename(repo, &aside)?;
+        let aside = suffixed(&repo, &format!(".pre-move-{now_ts}"));
+        fs::rename(&repo, &aside)?;
         undo.memory_aside = Some(aside);
     }
-    undo.memory_repo = Some(repo.to_owned());
+    undo.memory_repo = Some(repo.clone());
     run_git(
         Command::new("git")
             .arg("clone")
             .arg("--quiet")
             .arg(&source)
-            .arg(repo),
+            .arg(&repo),
     )?;
-    let agent_dir = repo
-        .parent()
-        .and_then(Path::file_name)
+    let agent_id = agent_dir
+        .file_name()
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| manifest.memory.agent.clone());
-    let email = format!("{agent_dir}@omo.local");
+        .unwrap_or_else(|| manifest.memory_agent.clone());
+    let email = format!("{agent_id}@omo.local");
     let config = [
-        ("omo.agentid", agent_dir.as_str()),
+        ("omo.agentid", agent_id.as_str()),
         ("user.name", "OmO Agent"),
         ("user.email", email.as_str()),
         ("commit.gpgsign", "false"),
@@ -649,62 +576,93 @@ fn restore_memory(
         run_git(
             Command::new("git")
                 .arg("-C")
-                .arg(repo)
+                .arg(&repo)
                 .args(["config", "--local", key, value]),
         )?;
     }
     Ok(restore)
 }
 
-/// Installs each secret owner-only through `write_private`: written as `<name>.incoming`, the
-/// previous file kept as `<name>.pre-move-<ts>`, then renamed into place.
-fn install_secrets(
-    secrets: &[(String, Vec<u8>)],
-    target_hub_dir: &Path,
-    write_private: &PrivateWriter,
+/// Installs `body` at `dest` owner-only through `write_private`: written as
+/// `<dest>.incoming`, the previous file kept as `<dest>.pre-move-<ts>`, then renamed into place.
+fn install_private(
+    dest: &Path,
+    body: &[u8],
+    write_private: &PrivateFileWriter,
+    now_ts: i64,
+    undo: &mut Undo,
+) -> Result<(), ImportError> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let incoming = suffixed(dest, ".incoming");
+    let _ = fs::remove_file(&incoming);
+    (**write_private)(&incoming, body)?;
+    let aside = if dest.exists() {
+        let aside = suffixed(dest, &format!(".pre-move-{now_ts}"));
+        fs::rename(dest, &aside)?;
+        Some(aside)
+    } else {
+        None
+    };
+    undo.files.push((dest.to_owned(), aside));
+    fs::rename(&incoming, dest)?;
+    Ok(())
+}
+
+/// Merges the exported env entries over the target env file (machine-local keys there stay)
+/// and installs the result owner-only. Nothing is written when the checkpoint has no keys.
+fn install_env(
+    env: &BTreeMap<String, String>,
+    env_file: &Path,
+    write_private: &PrivateFileWriter,
     now_ts: i64,
     undo: &mut Undo,
 ) -> Result<Vec<PathBuf>, ImportError> {
-    let mut installed = Vec::new();
-    for (name, body) in secrets {
-        let dest = target_hub_dir.join(name);
-        let incoming = suffixed(&dest, ".incoming");
-        let _ = fs::remove_file(&incoming);
-        (**write_private)(&incoming, body.as_slice())?;
-        let aside = if dest.exists() {
-            let aside = suffixed(&dest, &format!(".pre-move-{now_ts}"));
-            fs::rename(&dest, &aside)?;
-            Some(aside)
-        } else {
-            None
-        };
-        undo.secrets.push((dest.clone(), aside));
-        fs::rename(&incoming, &dest)?;
-        installed.push(dest);
+    if env.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(installed)
+    let mut merged = match fs::read_to_string(env_file) {
+        Ok(text) => crate::hub_env::parse_env_file(&text),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(error) => return Err(error.into()),
+    };
+    for (key, value) in env {
+        // The imported value replaces a local `<KEY>_FILE` pointer to the same secret.
+        merged.remove(&format!("{key}_FILE"));
+        merged.insert(key.clone(), value.clone());
+    }
+    install_private(
+        env_file,
+        render_env(&merged).as_bytes(),
+        write_private,
+        now_ts,
+        undo,
+    )?;
+    Ok(vec![env_file.to_owned()])
 }
 
 #[derive(Serialize)]
 struct ImportStatus<'a> {
     checkpoint_id: &'a str,
-    supervisor_id: &'a str,
+    supervisor_id: Option<&'a str>,
     imported_at: String,
     unmapped_hosts: &'a [String],
     held_goals: &'a [String],
     memory: &'a MemoryRestore,
 }
 
-/// Import a checkpoint archive into `target_hub_dir`, staging the database.
+/// Import a checkpoint archive written by [`crate::checkpoint::export`] into `target_hub_dir`,
+/// staging the database.
 ///
-/// `paired` lists `(machine_id, host_id)` for every machine paired with this one. Nothing is
-/// live until the next hub open calls [`apply_staged_swap`]; any failure here rolls back the
-/// memory repo, the secrets and the staged file.
+/// `paired` lists every machine paired with this one (its local host id and machine id).
+/// Nothing is live until the next hub open calls [`apply_staged_swap`]; any failure here
+/// rolls back the memory repo, the env file, the profile and the staged file.
 pub async fn import(
     archive: &Path,
     target_hub_dir: &Path,
     own_machine_id: &str,
-    paired: &[(String, String)],
+    paired: &[PairedHostMapping],
     options: ImportOptions,
 ) -> Result<ImportOutcome, ImportError> {
     let staging = target_hub_dir.join(format!(".checkpoint-staging-{}", uuid::Uuid::new_v4()));
@@ -719,7 +677,7 @@ async fn import_staged(
     archive: &Path,
     target_hub_dir: &Path,
     own_machine_id: &str,
-    paired: &[(String, String)],
+    paired: &[PairedHostMapping],
     options: ImportOptions,
     staging: &Path,
 ) -> Result<ImportOutcome, ImportError> {
@@ -732,9 +690,11 @@ async fn import_staged(
         .await
         .map_err(io::Error::other)??
     };
-    check_identity(target_hub_dir, &unpacked.manifest.supervisor_id).await?;
+    check_identity(target_hub_dir, unpacked.manifest.supervisor_id.as_deref()).await?;
     let ImportOptions {
-        memory_repo_dir,
+        memory_root,
+        env_file,
+        profile_omo_jsonc,
         now_ts,
         write_private,
     } = options;
@@ -752,26 +712,28 @@ async fn import_staged(
 
     let manifest = unpacked.manifest.clone();
     let bundle = unpacked.memory_bundle.clone();
-    let secrets = unpacked.secrets.clone();
+    let env = unpacked.env.clone();
+    let profile = unpacked.profile.clone();
     let target = target_hub_dir.to_owned();
-    let (memory, secrets) = tokio::task::spawn_blocking(move || {
+    let (memory, secrets, profile) = tokio::task::spawn_blocking(move || {
         let mut undo = Undo {
             staged_tmp: Some(tmp.clone()),
             ..Undo::default()
         };
-        let restored = restore_memory(
-            &manifest,
-            bundle.as_deref(),
-            &memory_repo_dir,
-            now_ts,
-            &mut undo,
-        )
-        .and_then(|memory| {
-            let paths = install_secrets(&secrets, &target, &write_private, now_ts, &mut undo)?;
-            // Commit point: the staged file becomes visible to the next open.
-            fs::rename(&tmp, target.join(INCOMING_DB))?;
-            Ok((memory, paths))
-        });
+        let restored = restore_memory(&manifest, bundle.as_deref(), &memory_root, now_ts, &mut undo)
+            .and_then(|memory| {
+                let secrets = install_env(&env, &env_file, &write_private, now_ts, &mut undo)?;
+                let profile = match (profile, profile_omo_jsonc) {
+                    (Some(body), Some(dest)) => {
+                        install_private(&dest, &body, &write_private, now_ts, &mut undo)?;
+                        Some(dest)
+                    }
+                    _ => None,
+                };
+                // Commit point: the staged file becomes visible to the next open.
+                fs::rename(&tmp, target.join(INCOMING_DB))?;
+                Ok((memory, secrets, profile))
+            });
         if restored.is_err() {
             undo.rollback();
         }
@@ -789,10 +751,11 @@ async fn import_staged(
         released_dispatches: mapping.released_dispatches,
         memory,
         secrets,
+        profile,
     };
     let status = ImportStatus {
         checkpoint_id: &outcome.checkpoint_id,
-        supervisor_id: &outcome.supervisor_id,
+        supervisor_id: outcome.supervisor_id.as_deref(),
         imported_at: timestamp(now_ts),
         unmapped_hosts: &outcome.unmapped_hosts,
         held_goals: &outcome.held_goals,
@@ -815,8 +778,8 @@ pub fn apply_staged_swap(hub_dir: &Path, now_ts: i64) -> io::Result<Option<PathB
     if !incoming.exists() {
         return Ok(None);
     }
-    let live = hub_dir.join(HUB_DB_ENTRY);
-    let backup = hub_dir.join(format!("{HUB_DB_ENTRY}.pre-move-{now_ts}"));
+    let live = hub_dir.join(LIVE_DB);
+    let backup = hub_dir.join(format!("{LIVE_DB}.pre-move-{now_ts}"));
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
     for suffix in ["", "-wal", "-shm"] {
         let from = suffixed(&live, suffix);
@@ -850,7 +813,7 @@ async fn stage_database(
     unpacked_db: &Path,
     tmp: &Path,
     own_machine_id: &str,
-    paired: &[(String, String)],
+    paired: &[PairedHostMapping],
     now_ts: i64,
 ) -> Result<HostMapping, ImportError> {
     let (from, to) = (unpacked_db.to_owned(), tmp.to_owned());
@@ -885,7 +848,9 @@ pub async fn open_with_staged_swap(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::manifest_contract::MemoryManifest;
+    use crate::checkpoint::{
+        build_archive, export, ExportRequest, CHECKPOINT_TOO_LARGE, SUPERVISOR_MEMORY_AGENT,
+    };
 
     const SUP: &str = "aaaaaaaa-0000-4000-8000-000000000001";
     const OTHER_SUP: &str = "bbbbbbbb-0000-4000-8000-000000000002";
@@ -896,7 +861,8 @@ mod tests {
     const SEEN: [&str; 3] = ["1700000000.000100", "1700000000.000200", "1700000000.000300"];
 
     fn temp_root(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("ferryx-checkpoint-{name}-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir()
+            .join(format!("ferryx-checkpoint-{name}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         root
     }
@@ -907,12 +873,17 @@ mod tests {
             .args(args)
             .output()
             .unwrap();
-        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
 
     /// A memory repo with one commit; returns its HEAD.
     fn memory_source(dir: &Path) -> String {
+        fs::create_dir_all(dir).unwrap();
         let repo = dir.to_str().unwrap();
         git_ok(&["init", "-q", repo]);
         fs::write(dir.join("facts.md"), "owner prefers small diffs\n").unwrap();
@@ -938,9 +909,17 @@ mod tests {
         .await;
     }
 
-    /// An exported hub database: every host id is `machine:<id>`. Returns the file bytes.
-    async fn source_db(dir: &Path, goals: &[(&str, &str, &str)]) -> Vec<u8> {
-        let pool = crate::storage::connect(&dir.join("source.sqlite")).await.unwrap();
+    fn paired(host_id: &str, machine_id: &str) -> PairedHostMapping {
+        PairedHostMapping {
+            host_id: host_id.to_owned(),
+            machine_id: machine_id.to_owned(),
+        }
+    }
+
+    /// The hub of machine-a. Host ids are as machine-a sees them: `local`, or its paired host
+    /// ids `mac-b` (machine-b) and `mac-c` (machine-c).
+    async fn source_hub(dir: &Path, goals: &[(&str, &str, &str)]) -> SqlitePool {
+        let pool = crate::storage::connect(&dir.join(LIVE_DB)).await.unwrap();
         seed_identity(&pool, SUP).await;
         exec(
             &pool,
@@ -1012,7 +991,12 @@ mod tests {
         )
         .await;
         for ts in SEEN {
-            exec(&pool, "INSERT INTO slack_inbound_seen(id, seen_at) VALUES(?, ?)", &[&format!("C1/{ts}"), NOW]).await;
+            exec(
+                &pool,
+                "INSERT INTO slack_inbound_seen(id, seen_at) VALUES(?, ?)",
+                &[&format!("C1/{ts}"), NOW],
+            )
+            .await;
         }
         exec(
             &pool,
@@ -1020,88 +1004,93 @@ mod tests {
             &[NOW],
         )
         .await;
-        let out = dir.join("export.sqlite");
-        let sql = format!("VACUUM INTO '{}'", out.display().to_string().replace('\'', "''"));
-        exec(&pool, &sql, &[]).await;
-        pool.close().await;
-        fs::read(out).unwrap()
+        pool
     }
 
     struct Fixture {
         root: PathBuf,
         archive: PathBuf,
+        checkpoint_id: String,
         memory_head: String,
+        profile: Vec<u8>,
     }
 
-    fn append(builder: &mut tar::Builder<Vec<u8>>, name: &str, body: &[u8]) {
-        let mut header = tar::Header::new_gnu();
-        header.set_size(body.len() as u64);
-        header.set_mode(0o600);
-        header.set_cksum();
-        builder.append_data(&mut header, name, body).unwrap();
-    }
-
-    /// An archive as part A writes it. `remote` records `memory.sync.remote` instead of a bundle.
+    /// Machine-a exports its hub through [`crate::checkpoint::export`]. `remote` configures
+    /// `memory.sync.remote` in the profile, so the memory is recorded instead of bundled.
     async fn fixture(name: &str, goals: &[(&str, &str, &str)], remote: bool) -> Fixture {
         let root = temp_root(name);
         let source = root.join("source");
         fs::create_dir_all(&source).unwrap();
-        let db = source_db(&source, goals).await;
-        let memory = source.join("memory-repo");
-        let memory_head = memory_source(&memory);
-        let bundle_path = source.join("memory.bundle");
-        let mut builder = tar::Builder::new(Vec::new());
-        let mut manifest = CheckpointManifest {
-            format_version: CHECKPOINT_FORMAT_VERSION,
-            supervisor_id: SUP.to_owned(),
-            owner_principal: "owner:u1".to_owned(),
-            source_machine_id: "machine-a".to_owned(),
-            created_at: NOW.to_owned(),
-            hub_db_sha256: sha256_hex(&db),
-            memory: MemoryManifest {
-                agent: "ferryx-supervisor".to_owned(),
-                sync_remote: None,
-                bundle_sha256: None,
-            },
-            secret_files: vec!["env".to_owned()],
-        };
-        if remote {
-            manifest.memory.sync_remote = Some(memory.to_str().unwrap().to_owned());
+        let pool = source_hub(&source, goals).await;
+        let memory_root = source.join("memory-agents");
+        let (memory_head, profile) = if remote {
+            let remote = source.join("memory-remote");
+            let head = memory_source(&remote);
+            let profile = serde_json::json!({
+                "memory": {"agent": SUPERVISOR_MEMORY_AGENT, "sync": {"remote": remote}}
+            });
+            (head, format!("{profile}\n"))
         } else {
-            let (repo, bundle) = (memory.to_str().unwrap(), bundle_path.to_str().unwrap());
-            git_ok(&["-C", repo, "bundle", "create", bundle, "--all"]);
-            let bundle = fs::read(&bundle_path).unwrap();
-            manifest.memory.bundle_sha256 = Some(sha256_hex(&bundle));
-            append(&mut builder, MEMORY_BUNDLE_ENTRY, &bundle);
-        }
-        append(&mut builder, MANIFEST_ENTRY, &serde_json::to_vec(&manifest).unwrap());
-        append(&mut builder, HUB_DB_ENTRY, &db);
-        append(&mut builder, "secrets/env", b"SLACK_BOT_TOKEN=xoxb-secret\n");
-        append(&mut builder, "sessions.json", b"{\"lead\":\"stale-session\"}");
-        let tar = builder.into_inner().unwrap();
+            let repo = memory_agent_dir(&memory_root, SUPERVISOR_MEMORY_AGENT).join("repo");
+            let head = memory_source(&repo);
+            (head, crate::meta::mhc_profile::memory_identity_config())
+        };
+        let profile_path = source.join(".omo").join("omo.jsonc");
+        fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+        fs::write(&profile_path, &profile).unwrap();
+        let env = source.join("env");
+        fs::write(&env, b"FERRYX_HUB_DB=/Users/a/.ferryx/hub/hub.sqlite\nSLACK_BOT_TOKEN=xoxb-secret\n")
+            .unwrap();
+        // Machine-local provider sessions: never part of a checkpoint.
+        fs::write(
+            source.join("mhc-supervisor-sessions.json"),
+            br#"{"lead":"stale-session"}"#,
+        )
+        .unwrap();
+
         let archive = root.join("checkpoint.tar.zst");
-        fs::write(&archive, zstd::encode_all(tar.as_slice(), 3).unwrap()).unwrap();
+        let mut request = ExportRequest::new(
+            source.clone(),
+            "machine-a".to_owned(),
+            archive.clone(),
+            default_private_writer(),
+        );
+        request.paired = vec![paired("mac-b", "machine-b"), paired("mac-c", "machine-c")];
+        request.env_file = Some(env);
+        request.profile_omo_jsonc = Some(profile_path);
+        request.memory_root = Some(memory_root);
+        let exported = export(&pool, &request).await.unwrap();
+        pool.close().await;
         Fixture {
             root,
             archive,
+            checkpoint_id: exported.checkpoint_id,
             memory_head,
+            profile: profile.into_bytes(),
         }
     }
 
-    fn options(root: &Path, now_ts: i64) -> ImportOptions {
+    /// Import options for a target machine rooted at `root` with its hub in `hub`.
+    fn options(root: &Path, hub: &Path, now_ts: i64) -> ImportOptions {
         ImportOptions {
-            memory_repo_dir: memory_repo_dir(&root.join("memory-agents"), "ferryx-supervisor"),
+            memory_root: root.join("memory-agents"),
+            env_file: hub.join("env"),
+            profile_omo_jsonc: Some(profile_path(root)),
             now_ts,
             write_private: default_private_writer(),
         }
     }
 
-    fn pair(machine: &str, host: &str) -> (String, String) {
-        (machine.to_owned(), host.to_owned())
+    fn profile_path(root: &Path) -> PathBuf {
+        root.join("profile").join(".omo").join("omo.jsonc")
+    }
+
+    fn memory_repo(root: &Path) -> PathBuf {
+        memory_agent_dir(&root.join("memory-agents"), SUPERVISOR_MEMORY_AGENT).join("repo")
     }
 
     async fn open_target(hub: &Path) -> SqlitePool {
-        open_with_staged_swap(&hub.join(HUB_DB_ENTRY), 1_800_000_000).await.unwrap()
+        open_with_staged_swap(&hub.join(LIVE_DB), 1_800_000_000).await.unwrap()
     }
 
     async fn host_of(pool: &SqlitePool, table: &str, key_sql: &str, key: &str) -> String {
@@ -1114,18 +1103,21 @@ mod tests {
 
     #[tokio::test]
     async fn round_trip_preserves_goal_identity_memory_and_starts_fresh_sessions() {
-        let fx = fixture("round-trip", &[("lane-a", G1, "machine:machine-a")], false).await;
+        let fx = fixture("round-trip", &[("lane-a", G1, "local")], false).await;
+        let files = read_archive(&fs::read(&fx.archive).unwrap()).unwrap();
+        assert!(files.keys().all(|name| !name.contains("sessions")));
         let hub = fx.root.join("hub");
-        let outcome = import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, 1_800_000_000))
+        let outcome = import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, &hub, 1_800_000_000))
             .await
             .unwrap();
 
-        let tar = zstd::decode_all(fs::File::open(&fx.archive).unwrap()).unwrap();
-        assert_eq!(outcome.checkpoint_id, sha256_hex(&tar));
-        assert_eq!(outcome.supervisor_id, SUP);
+        assert_eq!(outcome.checkpoint_id, fx.checkpoint_id);
+        assert_eq!(outcome.supervisor_id.as_deref(), Some(SUP));
         assert_eq!(outcome.memory, MemoryRestore::Bundle);
         assert!(outcome.unmapped_hosts.is_empty());
-        assert!(!hub.join("sessions.json").exists(), "sessions start fresh");
+        assert_eq!(outcome.profile, Some(profile_path(&fx.root)));
+        assert_eq!(fs::read(profile_path(&fx.root)).unwrap(), fx.profile);
+        assert!(!hub.join("mhc-supervisor-sessions.json").exists(), "sessions start fresh");
         let staging: Vec<_> = fs::read_dir(&hub)
             .unwrap()
             .filter_map(|entry| entry.ok())
@@ -1146,9 +1138,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(goal, ("lane-a".to_owned(), "ready".to_owned()));
+        assert_eq!(host_of(&pool, "lanes", "key", "lane-a").await, LOCAL_HOST_ID);
         pool.close().await;
 
-        let repo = options(&fx.root, 0).memory_repo_dir;
+        let repo = memory_repo(&fx.root);
         assert!(repo.ends_with("ferryx-supervisor-d08240e6/repo"));
         let repo = repo.to_str().unwrap().to_owned();
         assert_eq!(git_ok(&["-C", &repo, "rev-parse", "HEAD"]), fx.memory_head);
@@ -1158,27 +1151,29 @@ mod tests {
 
     #[tokio::test]
     async fn a_recorded_sync_remote_is_pulled_instead_of_a_bundle() {
-        let fx = fixture("remote", &[("lane-a", G1, "machine:machine-a")], true).await;
+        let fx = fixture("remote", &[("lane-a", G1, "local")], true).await;
+        let files = read_archive(&fs::read(&fx.archive).unwrap()).unwrap();
+        assert!(!files.contains_key(ARCHIVE_MEMORY_BUNDLE));
         let hub = fx.root.join("hub");
-        let outcome = import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, 1_800_000_000))
+        let outcome = import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, &hub, 1_800_000_000))
             .await
             .unwrap();
-        let remote = fx.root.join("source").join("memory-repo");
+        let remote = fx.root.join("source").join("memory-remote");
         assert_eq!(outcome.memory, MemoryRestore::Remote(remote.to_str().unwrap().to_owned()));
-        let repo = options(&fx.root, 0).memory_repo_dir;
+        let repo = memory_repo(&fx.root);
         assert_eq!(git_ok(&["-C", repo.to_str().unwrap(), "rev-parse", "HEAD"]), fx.memory_head);
         fs::remove_dir_all(&fx.root).unwrap();
     }
 
     #[tokio::test]
     async fn local_and_paired_host_ids_map_in_both_directions() {
-        let goals = [("lane-a", G1, "machine:machine-a"), ("lane-b", G2, "machine:machine-b")];
+        let goals = [("lane-a", G1, "local"), ("lane-b", G2, "mac-b")];
         let fx = fixture("map", &goals, false).await;
 
-        // On machine-a: its own rows become local, machine-b's become machine-a's pairing of b.
-        let hub_a = fx.root.join("hub-a");
-        let paired_a = [pair("machine-b", "paired-b")];
-        let outcome = import(&fx.archive, &hub_a, "machine-a", &paired_a, options(&fx.root.join("a"), 1_800_000_000))
+        // Back on machine-a: its own rows become local, machine-b's become machine-a's pairing.
+        let (root_a, hub_a) = (fx.root.join("a"), fx.root.join("hub-a"));
+        let paired_a = [paired("paired-b", "machine-b")];
+        let outcome = import(&fx.archive, &hub_a, "machine-a", &paired_a, options(&root_a, &hub_a, 1_800_000_000))
             .await
             .unwrap();
         assert!(outcome.unmapped_hosts.is_empty() && outcome.held_goals.is_empty());
@@ -1200,10 +1195,10 @@ mod tests {
         assert_eq!(cached, ["local", "paired-b"]);
         pool.close().await;
 
-        // On machine-b: the mapping runs the other way.
-        let hub_b = fx.root.join("hub-b");
-        let paired_b = [pair("machine-a", "paired-a")];
-        import(&fx.archive, &hub_b, "machine-b", &paired_b, options(&fx.root.join("b"), 1_800_000_000))
+        // On machine-b: 'local' of machine-a becomes b's pairing of a, and b's own rows local.
+        let (root_b, hub_b) = (fx.root.join("b"), fx.root.join("hub-b"));
+        let paired_b = [paired("paired-a", "machine-a")];
+        import(&fx.archive, &hub_b, "machine-b", &paired_b, options(&root_b, &hub_b, 1_800_000_000))
             .await
             .unwrap();
         let pool = open_target(&hub_b).await;
@@ -1217,10 +1212,10 @@ mod tests {
 
     #[tokio::test]
     async fn an_unmapped_host_holds_its_goal_visibly_until_that_machine_is_paired() {
-        let goals = [("lane-a", G1, "machine:machine-a"), ("lane-c", G2, "machine:machine-c")];
+        let goals = [("lane-a", G1, "local"), ("lane-c", G2, "mac-c")];
         let fx = fixture("unmapped", &goals, false).await;
         let hub = fx.root.join("hub");
-        let outcome = import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, 1_800_000_000))
+        let outcome = import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, &hub, 1_800_000_000))
             .await
             .unwrap();
         assert_eq!(outcome.unmapped_hosts, ["machine:machine-c"]);
@@ -1257,7 +1252,7 @@ mod tests {
         assert_eq!(mapped_goal, "ready");
 
         // Once machine-c is paired, the next mapping pass maps it and lifts the hold.
-        let later = map_host_ids(&pool, "machine-a", &[pair("machine-c", "paired-c")], 1_800_000_100)
+        let later = map_host_ids(&pool, "machine-a", &[paired("paired-c", "machine-c")], 1_800_000_100)
             .await
             .unwrap();
         assert!(later.unmapped_hosts.is_empty());
@@ -1276,34 +1271,35 @@ mod tests {
 
     #[tokio::test]
     async fn a_target_holding_another_supervisor_is_refused_and_an_archived_one_is_fresh() {
-        let fx = fixture("identity", &[("lane-a", G1, "machine:machine-a")], false).await;
+        let fx = fixture("identity", &[("lane-a", G1, "local")], false).await;
         let hub = fx.root.join("hub");
         fs::create_dir_all(&hub).unwrap();
-        let pool = crate::storage::connect(&hub.join(HUB_DB_ENTRY)).await.unwrap();
+        let pool = crate::storage::connect(&hub.join(LIVE_DB)).await.unwrap();
         seed_identity(&pool, OTHER_SUP).await;
         pool.close().await;
 
-        let error = import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, 1_800_000_000))
+        let error = import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, &hub, 1_800_000_000))
             .await
             .unwrap_err();
         assert_eq!(error.code(), SUPERVISOR_IDENTITY_MISMATCH);
         assert!(!hub.join(INCOMING_DB).exists(), "nothing staged");
         assert!(!hub.join("env").exists(), "no secret installed");
-        assert!(!options(&fx.root, 0).memory_repo_dir.exists(), "no memory restored");
+        assert!(!profile_path(&fx.root).exists(), "no profile installed");
+        assert!(!memory_repo(&fx.root).exists(), "no memory restored");
 
         // The same supervisor is accepted.
         let same = fx.root.join("hub-same");
         fs::create_dir_all(&same).unwrap();
-        let pool = crate::storage::connect(&same.join(HUB_DB_ENTRY)).await.unwrap();
+        let pool = crate::storage::connect(&same.join(LIVE_DB)).await.unwrap();
         seed_identity(&pool, SUP).await;
         pool.close().await;
-        import(&fx.archive, &same, "machine-a", &[], options(&fx.root.join("same"), 1_800_000_000))
+        import(&fx.archive, &same, "machine-a", &[], options(&fx.root.join("same"), &same, 1_800_000_000))
             .await
             .unwrap();
 
         // An archived target (a pre-lease copy exists) counts as fresh.
         fs::write(hub.join("hub.sqlite.pre-lease-1799999999"), b"").unwrap();
-        import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, 1_800_000_000))
+        import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, &hub, 1_800_000_000))
             .await
             .unwrap();
         assert!(hub.join(INCOMING_DB).exists());
@@ -1317,7 +1313,8 @@ mod tests {
         let file = fs::File::create(&archive).unwrap();
         file.set_len(CHECKPOINT_MAX_COMPRESSED_BYTES + 1).unwrap();
         drop(file);
-        let error = import(&archive, &root.join("hub"), "machine-a", &[], options(&root, 1_800_000_000))
+        let hub = root.join("hub");
+        let error = import(&archive, &hub, "machine-a", &[], options(&root, &hub, 1_800_000_000))
             .await
             .unwrap_err();
         assert_eq!(error.code(), CHECKPOINT_TOO_LARGE);
@@ -1328,17 +1325,22 @@ mod tests {
     #[tokio::test]
     async fn secrets_are_owner_only_after_import() {
         use std::os::unix::fs::PermissionsExt;
-        let fx = fixture("secrets", &[("lane-a", G1, "machine:machine-a")], false).await;
+        let fx = fixture("secrets", &[("lane-a", G1, "local")], false).await;
         let hub = fx.root.join("hub");
         fs::create_dir_all(&hub).unwrap();
         fs::write(hub.join("env"), b"OLD=1\n").unwrap();
-        let outcome = import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, 1_800_000_000))
+        let outcome = import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, &hub, 1_800_000_000))
             .await
             .unwrap();
         assert_eq!(outcome.secrets, [hub.join("env")]);
-        let mode = fs::metadata(hub.join("env")).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-        assert_eq!(fs::read(hub.join("env")).unwrap(), b"SLACK_BOT_TOKEN=xoxb-secret\n");
+        for path in [hub.join("env"), profile_path(&fx.root)] {
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{}", path.display());
+        }
+        let env = crate::hub_env::parse_env_file(&fs::read_to_string(hub.join("env")).unwrap());
+        assert_eq!(env.get("SLACK_BOT_TOKEN").map(String::as_str), Some("xoxb-secret"));
+        assert_eq!(env.get("OLD").map(String::as_str), Some("1"), "local keys stay");
+        assert!(!env.contains_key("FERRYX_HUB_DB"), "machine-local keys never travel");
         assert_eq!(fs::read(hub.join("env.pre-move-1800000000")).unwrap(), b"OLD=1\n");
         fs::remove_dir_all(&fx.root).unwrap();
     }
@@ -1348,19 +1350,21 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn secrets_are_created_through_the_private_writer_on_windows() {
-        let fx = fixture("secrets-win", &[("lane-a", G1, "machine:machine-a")], false).await;
+        let fx = fixture("secrets-win", &[("lane-a", G1, "local")], false).await;
         let hub = fx.root.join("hub");
         let created = Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
         let seen = Arc::clone(&created);
-        let writer: PrivateWriter = Arc::new(move |path: &Path, bytes: &[u8]| {
+        let writer: PrivateFileWriter = Arc::new(move |path: &Path, bytes: &[u8]| {
             seen.lock().unwrap().push(path.to_owned());
             write_private_file(path, bytes)
         });
-        let mut opts = options(&fx.root, 1_800_000_000);
+        let mut opts = options(&fx.root, &hub, 1_800_000_000);
         opts.write_private = writer;
         import(&fx.archive, &hub, "machine-a", &[], opts).await.unwrap();
-        assert_eq!(*created.lock().unwrap(), [hub.join("env.incoming")]);
-        assert_eq!(fs::read(hub.join("env")).unwrap(), b"SLACK_BOT_TOKEN=xoxb-secret\n");
+        let profile_incoming = profile_path(&fx.root).with_file_name("omo.jsonc.incoming");
+        assert_eq!(*created.lock().unwrap(), [hub.join("env.incoming"), profile_incoming]);
+        let env = crate::hub_env::parse_env_file(&fs::read_to_string(hub.join("env")).unwrap());
+        assert_eq!(env.get("SLACK_BOT_TOKEN").map(String::as_str), Some("xoxb-secret"));
         // The private creation path never overwrites: an existing file is an error.
         let error = write_private_file(&hub.join("env"), b"x").unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
@@ -1369,16 +1373,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_staged_import_swaps_only_at_the_next_open() {
-        let fx = fixture("swap", &[("lane-a", G1, "machine:machine-a")], false).await;
+        let fx = fixture("swap", &[("lane-a", G1, "local")], false).await;
         let hub = fx.root.join("hub");
-        let live = hub.join(HUB_DB_ENTRY);
+        let live = hub.join(LIVE_DB);
         fs::create_dir_all(&hub).unwrap();
         let pool = crate::storage::connect(&live).await.unwrap();
         seed_identity(&pool, SUP).await;
         pool.close().await;
         let before = fs::read(&live).unwrap();
 
-        import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, 1_800_000_000))
+        import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, &hub, 1_800_000_000))
             .await
             .unwrap();
         assert_eq!(fs::read(&live).unwrap(), before, "the live database is untouched by import");
@@ -1401,9 +1405,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_backfill_sweep_after_the_round_trip_posts_no_reply() {
-        let fx = fixture("dedupe", &[("lane-a", G1, "machine:machine-a")], false).await;
+        let fx = fixture("dedupe", &[("lane-a", G1, "local")], false).await;
         let hub = fx.root.join("hub");
-        import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, 1_800_000_000))
+        import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, &hub, 1_800_000_000))
             .await
             .unwrap();
         let pool = open_target(&hub).await;
@@ -1440,30 +1444,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_tampered_database_is_refused_and_nothing_is_staged() {
-        let root = temp_root("tampered");
-        let mut builder = tar::Builder::new(Vec::new());
+    async fn an_archive_without_its_database_is_refused_and_nothing_is_staged() {
+        let root = temp_root("no-db");
         let manifest = CheckpointManifest {
             format_version: CHECKPOINT_FORMAT_VERSION,
-            supervisor_id: SUP.to_owned(),
-            owner_principal: "owner:u1".to_owned(),
-            source_machine_id: "machine-a".to_owned(),
             created_at: NOW.to_owned(),
-            hub_db_sha256: sha256_hex(b"original"),
-            memory: MemoryManifest {
-                agent: "ferryx-supervisor".to_owned(),
-                sync_remote: None,
-                bundle_sha256: None,
-            },
-            secret_files: Vec::new(),
+            source_machine_id: "machine-a".to_owned(),
+            supervisor_id: Some(SUP.to_owned()),
+            memory_agent: SUPERVISOR_MEMORY_AGENT.to_owned(),
+            memory: MemorySource::Absent,
+            env_keys: Vec::new(),
+            excluded_tables: Vec::new(),
+            host_map: BTreeMap::new(),
+            has_profile: false,
         };
-        append(&mut builder, MANIFEST_ENTRY, &serde_json::to_vec(&manifest).unwrap());
-        append(&mut builder, HUB_DB_ENTRY, b"tampered");
-        let tar = builder.into_inner().unwrap();
+        let manifest = serde_json::to_vec(&manifest).unwrap();
         let archive = root.join("checkpoint.tar.zst");
-        fs::write(&archive, zstd::encode_all(tar.as_slice(), 3).unwrap()).unwrap();
+        fs::write(&archive, build_archive(&[(ARCHIVE_MANIFEST, manifest.as_slice())]).unwrap()).unwrap();
         let hub = root.join("hub");
-        let error = import(&archive, &hub, "machine-a", &[], options(&root, 1_800_000_000))
+        let error = import(&archive, &hub, "machine-a", &[], options(&root, &hub, 1_800_000_000))
             .await
             .unwrap_err();
         assert_eq!(error.code(), "CHECKPOINT_MANIFEST_INVALID");
