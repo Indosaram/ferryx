@@ -1,6 +1,6 @@
 pub mod adoption;
 pub mod bridge;
-#[cfg(all(feature = "desktop", any(target_os = "windows", target_os = "macos")))]
+#[cfg(all(feature = "desktop", any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub mod cef_engine;
 pub mod chromium_cookie_source;
 pub mod chromium_cookies;

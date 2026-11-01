@@ -40,7 +40,13 @@ pub enum EngineStatus {
     /// No engine for this platform.
     Unsupported,
     NotInstalled,
-    Installed { version: String },
+    Installed {
+        version: String,
+        /// Set when the installed engine cannot run in this session, e.g. `"wayland-session"`
+        /// (a native Wayland window cannot host it); tabs then stay on the system webview.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        inactive: Option<String>,
+    },
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -74,6 +80,8 @@ pub fn platform_key() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("windows", "x86_64") => Some("windows-x86_64"),
         ("macos", "aarch64") => Some("macos-aarch64"),
+        ("linux", "x86_64") => Some("linux-x86_64"),
+        ("linux", "aarch64") => Some("linux-aarch64"),
         _ => None,
     }
 }
@@ -89,9 +97,21 @@ pub fn status(data_dir: &Path, executable: &str) -> EngineStatus {
     if install_dir(data_dir).join(executable).is_file() {
         EngineStatus::Installed {
             version: ENGINE_VERSION.to_string(),
+            inactive: None,
         }
     } else {
         EngineStatus::NotInstalled
+    }
+}
+
+/// Marks an installed engine that this session cannot run (`reason`, e.g. `"wayland-session"`).
+pub fn mark_inactive(status: EngineStatus, reason: Option<&str>) -> EngineStatus {
+    match (status, reason) {
+        (EngineStatus::Installed { version, .. }, Some(reason)) => EngineStatus::Installed {
+            version,
+            inactive: Some(reason.to_string()),
+        },
+        (status, _) => status,
     }
 }
 
@@ -266,6 +286,22 @@ mod tests {
             verify(&bytes[1..], &artifact),
             Err(InstallError::SizeMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn an_engine_this_session_cannot_run_is_reported_inactive() {
+        let installed = EngineStatus::Installed { version: ENGINE_VERSION.into(), inactive: None };
+        assert_eq!(
+            serde_json::to_value(&installed).expect("json"),
+            serde_json::json!({ "state": "installed", "version": ENGINE_VERSION })
+        );
+        let inactive = mark_inactive(installed.clone(), Some("wayland-session"));
+        assert_eq!(
+            serde_json::to_value(&inactive).expect("json"),
+            serde_json::json!({ "state": "installed", "version": ENGINE_VERSION, "inactive": "wayland-session" })
+        );
+        assert_eq!(mark_inactive(installed.clone(), None), installed);
+        assert_eq!(mark_inactive(EngineStatus::NotInstalled, Some("wayland-session")), EngineStatus::NotInstalled);
     }
 
     #[test]

@@ -10,6 +10,13 @@ import {
 import { Button } from "../ui/button";
 import { SettingRow, SettingsGroup } from "./primitives";
 
+function installedDescription(status: Extract<BrowserEngineStatus, { state: "installed" }>): string {
+  if (status.inactive === "wayland-session") {
+    return `Installed (${status.version}), but not used in this Wayland session: Chromium tabs need an X11 window. Start Ferryx with GDK_BACKEND=x11 to use it; until then browser tabs use the system webview.`;
+  }
+  return `Installed (${status.version}). New browser tabs use Chromium, with Chrome Web Store extensions, saved passwords and Chrome's own menus.`;
+}
+
 /** Installs or removes the on-demand Chromium engine that new browser tabs use when present. */
 export function BrowserEngineGroup() {
   const [status, setStatus] = useState<BrowserEngineStatus | null>(null);
@@ -48,7 +55,7 @@ export function BrowserEngineGroup() {
         label="Full browser engine"
         description={
           status?.state === "installed"
-            ? `Installed (${status.version}). New browser tabs use Chromium, with Chrome Web Store extensions, saved passwords and Chrome's own menus.`
+            ? installedDescription(status)
             : "Download Chromium so browser tabs run Chrome Web Store extensions, save passwords and play protected video. Without it, tabs use the system webview."
         }
       >

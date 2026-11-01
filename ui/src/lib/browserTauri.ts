@@ -427,11 +427,15 @@ export async function listBrowsers(): Promise<BrowserSessionSummary[]> {
   return invoke<BrowserSessionSummary[]>("cmd_browser_list");
 }
 
-/** The on-demand Chromium engine: "unsupported" on platforms without a build. */
+/**
+ * The on-demand Chromium engine: "unsupported" on platforms without a build. `inactive` names
+ * why an installed engine cannot run in this session ("wayland-session": a native Wayland
+ * window cannot host it), in which case tabs stay on the system webview.
+ */
 export type BrowserEngineStatus =
   | { state: "unsupported" }
   | { state: "notInstalled" }
-  | { state: "installed"; version: string };
+  | { state: "installed"; version: string; inactive?: string };
 
 export async function getBrowserEngineStatus(): Promise<BrowserEngineStatus> {
   return invoke<BrowserEngineStatus>("cmd_browser_engine_status");

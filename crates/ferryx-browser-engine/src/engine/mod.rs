@@ -14,6 +14,9 @@ use std::io::{BufRead, Write};
 
 mod platform;
 
+#[cfg(target_os = "linux")]
+mod linux_sandbox;
+
 #[cfg(target_os = "macos")]
 pub mod mac_app;
 
@@ -62,8 +65,14 @@ pub fn run(main_args: &MainArgs, cmd_line: &CommandLine, sandbox_info: *mut u8) 
         }
     }
     let cache = cache_dir.map(|dir| CefString::from(dir.as_str())).unwrap_or_default();
+    // Linux installs live in the user's data dir, where the setuid sandbox cannot exist: the
+    // namespace sandbox is used, and only a kernel without user namespaces runs unsandboxed.
+    #[cfg(target_os = "linux")]
+    let sandboxed = cfg!(feature = "sandbox") && linux_sandbox::sandbox_usable();
+    #[cfg(not(target_os = "linux"))]
+    let sandboxed = cfg!(feature = "sandbox");
     let settings = Settings {
-        no_sandbox: (!cfg!(feature = "sandbox")) as _,
+        no_sandbox: (!sandboxed) as _,
         persist_session_cookies: 1,
         root_cache_path: cache.clone(),
         cache_path: cache,
@@ -369,6 +378,15 @@ wrap_app! {
             if let (true, Some(command_line)) = (browser_process, command_line) {
                 for switch in ["no-startup-window", "disable-session-crashed-bubble", "hide-crash-restore-bubble"] {
                     command_line.append_switch(Some(&CefString::from(switch)));
+                }
+                // Linux: the pane windows are reparented into Ferryx's X window, so Chromium
+                // must use X11 (XWayland in a Wayland session), never its Wayland backend.
+                #[cfg(target_os = "linux")]
+                if command_line.has_switch(Some(&CefString::from("ferryx-parent-xid"))) == 1 {
+                    command_line.append_switch_with_value(
+                        Some(&CefString::from("ozone-platform")),
+                        Some(&CefString::from("x11")),
+                    );
                 }
             }
         }
