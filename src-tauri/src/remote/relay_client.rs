@@ -41,6 +41,8 @@ const CONTROL_PING_INTERVAL: Duration = Duration::from_secs(15);
 /// Three missed ping intervals with no inbound frame at all (pong, notice, ACK) means the
 /// socket is half-open; the session fails so status flips and the client reconnects.
 const CONTROL_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+/// Upper bound on a local opaque-session allocation, queueing included.
+const ALLOCATE_SESSION_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Sends one control frame, bounded by [`CONTROL_WRITE_TIMEOUT`]. Expiry is an error so a
 /// relay that stops reading cannot stall every notice, ACK and attach reply behind it.
@@ -704,17 +706,27 @@ impl RelayClient {
     /// returns its id. The relay mints the id; the daemon only carries the request and the
     /// answer, so the client learns the id from the machine it is attaching to.
     pub async fn allocate_opaque_session(&self) -> anyhow::Result<String> {
-        let (ack, wait) = oneshot::channel::<Result<String, String>>();
-        self.attach_tx
-            .send(AttachSessionRequest { opaque: true, ack })
-            .await
-            .map_err(|_| anyhow::anyhow!("relay control channel is not running"))?;
-        match tokio::time::timeout(Duration::from_secs(10), wait).await {
-            Ok(Ok(Ok(session_id))) => Ok(session_id),
-            Ok(Ok(Err(error))) => Err(anyhow::anyhow!(error)),
-            Ok(Err(_)) => Err(anyhow::anyhow!("relay control channel dropped the request")),
-            Err(_) => Err(anyhow::anyhow!("relay did not allocate a session in time")),
+        if !self.control_channel_accepted() {
+            anyhow::bail!("relay not connected");
         }
+        let (ack, wait) = oneshot::channel::<Result<String, String>>();
+        // One deadline covers queueing behind another allocation and the relay's answer:
+        // the request channel holds one entry and its receiver is never dropped, so an
+        // unbounded send could wait forever behind a stuck request.
+        let allocation = async {
+            self.attach_tx
+                .send(AttachSessionRequest { opaque: true, ack })
+                .await
+                .map_err(|_| anyhow::anyhow!("relay control channel is not running"))?;
+            match wait.await {
+                Ok(Ok(session_id)) => Ok(session_id),
+                Ok(Err(error)) => Err(anyhow::anyhow!(error)),
+                Err(_) => Err(anyhow::anyhow!("relay control channel dropped the request")),
+            }
+        };
+        tokio::time::timeout(ALLOCATE_SESSION_TIMEOUT, allocation)
+            .await
+            .map_err(|_| anyhow::anyhow!("relay did not allocate a session in time"))?
     }
 
     async fn run_control_session(&self) -> anyhow::Result<()> {
@@ -773,6 +785,12 @@ impl RelayClient {
                 }
                 _ = async { pending.as_mut().unwrap().ack.closed().await }, if pending.is_some() => {
                     pending = None;
+                    continue;
+                }
+                // A caller that gave up must not keep the slot: the next opaque notice
+                // would be handed to its dead receiver instead of opening a data channel.
+                _ = async { pending_attach.as_mut().unwrap().ack.closed().await }, if pending_attach.is_some() => {
+                    pending_attach = None;
                     continue;
                 }
                 message = read.next() => {
@@ -844,10 +862,20 @@ impl RelayClient {
                     }
                     match serde_json::from_str::<SessionRequest>(&text) {
                         Ok(SessionRequest { session_id, opaque }) => {
+                            // The notice carries no request id, so an opaque notice for a
+                            // browser attach can arrive while a local allocation is pending
+                            // and be reported to that caller. The notice still means "open
+                            // the data half", so it is always honoured: whichever peer owns
+                            // the id finds the daemon's half waiting, and no session is
+                            // swallowed. Exact correlation needs a request id echoed by the
+                            // relay (AllocateSession -> IncomingSessionNotice).
                             if opaque {
                                 if let Some(request) = pending_attach.take() {
-                                    let _ = request.ack.send(Ok(session_id));
-                                    continue;
+                                    if request.ack.send(Ok(session_id.clone())).is_err() {
+                                        tracing::debug!(
+                                            "opaque session allocated after its caller gave up"
+                                        );
+                                    }
                                 }
                             }
                             let client = self.clone();
@@ -1303,11 +1331,111 @@ mod tests {
             let client = client.clone();
             async move { client.run_control_session().await }
         });
+        // Allocation is refused outright while the relay is not connected; hold the flag
+        // so the request queues for the control loop instead of racing its admission.
+        let _connected = client.test_admit_control_channel();
         let id = tokio::time::timeout(Duration::from_secs(5), client.allocate_opaque_session())
             .await
             .expect("bounded allocation")
             .expect("session id");
         assert_eq!(id, "opaque-1");
+        control.abort();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn allocation_fails_fast_while_the_relay_is_not_connected() {
+        let client = RelayClient::new("https://relay.example.com", "tok");
+        let error = client.allocate_opaque_session().await.unwrap_err();
+        assert_eq!(error.to_string(), "relay not connected");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn allocation_is_bounded_while_queued_behind_a_stuck_request() {
+        // No control loop drains the queue: the first request fills its single slot.
+        let client = RelayClient::new("https://relay.example.com", "tok");
+        let _connected = client.test_admit_control_channel();
+        let (stuck, _never_answered) = oneshot::channel();
+        client
+            .attach_tx
+            .send(AttachSessionRequest { opaque: true, ack: stuck })
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(ALLOCATE_SESSION_TIMEOUT * 3, client.allocate_opaque_session())
+            .await
+            .expect("a queued allocation must give up on its own")
+            .unwrap_err();
+        assert!(error.to_string().contains("in time"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_opaque_notice_after_the_caller_gave_up_still_opens_a_data_channel() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = RelayClient::new(format!("http://{}", listener.local_addr().unwrap()), "machine");
+        let (requested_tx, requested_rx) = oneshot::channel::<()>();
+        let (gave_up_tx, gave_up_rx) = oneshot::channel::<()>();
+        let (data_tx, data_rx) = oneshot::channel::<String>();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut control = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            loop {
+                if let Message::Text(text) = control.next().await.unwrap().unwrap() {
+                    let request: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    assert_eq!(request["type"], "AllocateSession");
+                    break;
+                }
+            }
+            requested_tx.send(()).unwrap();
+            gave_up_rx.await.unwrap();
+            // An opaque notice the abandoned caller can no longer receive (or a browser
+            // attach): the daemon must still open its data half.
+            control
+                .send(Message::Text(
+                    serde_json::json!({"session_id": "browser-1", "opaque": true})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            let (tcp, _) = listener.accept().await.unwrap();
+            // Read the upgrade request line and never answer it: the daemon's data half has
+            // been dialed, and it stops before loading any on-disk attach identity.
+            let mut request_line = String::new();
+            tokio::io::AsyncBufReadExt::read_line(
+                &mut tokio::io::BufReader::new(tcp),
+                &mut request_line,
+            )
+            .await
+            .unwrap();
+            let path = request_line.split_whitespace().nth(1).unwrap_or_default().to_owned();
+            data_tx.send(path).unwrap();
+            while let Some(message) = control.next().await {
+                if message.is_err() {
+                    break;
+                }
+            }
+        });
+        let control = tokio::spawn({
+            let client = client.clone();
+            async move { client.run_control_session().await }
+        });
+        let _connected = client.test_admit_control_channel();
+        let caller = tokio::spawn({
+            let client = client.clone();
+            async move { client.allocate_opaque_session().await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), requested_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        gave_up_tx.send(()).unwrap();
+        let path = tokio::time::timeout(Duration::from_secs(5), data_rx)
+            .await
+            .expect("the notice must open a data channel, not vanish into the dead request")
+            .unwrap();
+        assert_eq!(path, "/tunnel/data/browser-1");
         control.abort();
         server.abort();
     }
