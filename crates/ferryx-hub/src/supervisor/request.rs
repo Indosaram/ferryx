@@ -276,6 +276,10 @@ impl Action {
 struct SubmitPayload {
     request: String,
     work: SubmitWork,
+    /// Repository identity of the work's project, sent by an archived goal's adoption
+    /// (`crate::adoption`): the holder files the goal under its own project for it.
+    #[serde(default, rename = "repoIdentity")]
+    repo_identity: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -503,9 +507,23 @@ async fn admit(
     envelope: &Envelope,
     action: Action,
 ) -> Result<Value, RequestFailure> {
+    // An archived goal's adoption (`archived:<supervisor>:<goal>`) is one source whichever
+    // adapter re-sends it: the first adapter's dedupe row answers every replay.
+    let mut adapter = context.adapter;
+    if crate::adoption::parse_archived_source(&envelope.request_id).is_some() {
+        let earlier: Option<String> = sqlx::query_scalar(
+            "SELECT source_adapter FROM supervisor_requests WHERE source_message_id = ? LIMIT 1",
+        )
+        .bind(&envelope.request_id)
+        .fetch_optional(pool)
+        .await?;
+        if let Some(earlier) = earlier {
+            adapter = earlier.parse::<ChannelProvider>()?;
+        }
+    }
     let actor = |source_body: String| ActorContext {
         principal: context.principal.clone(),
-        source_adapter: context.adapter,
+        source_adapter: adapter,
         source_message_id: envelope.request_id.clone(),
         source_body,
         channel_binding_id: context.channel_binding_id.clone(),
@@ -516,6 +534,18 @@ async fn admit(
         Action::Submit => {
             let mut submit: SubmitPayload = payload(&envelope.payload)?;
             with_project(&mut submit.work.project_id, project)?;
+            let repo = submit.repo_identity.clone();
+            if let (true, Some(repo)) = (submit.work.project_id.is_none(), repo) {
+                let identity = owner_identity(pool, context).await?;
+                submit.work.project_id = sqlx::query_scalar(
+                    "SELECT project_id FROM supervisor_projects
+                     WHERE supervisor_id = ? AND repo_identity = ?",
+                )
+                .bind(&identity.supervisor_id)
+                .bind(repo)
+                .fetch_optional(pool)
+                .await?;
+            }
             admission::submit_work(pool, &actor(submit.request), &submit.work).await?
         }
         Action::Message => {

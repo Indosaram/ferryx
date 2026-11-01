@@ -1800,6 +1800,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::agent_control_settings::cmd_agent_control_set,
         ipc::supervisor::cmd_supervisor_goal,
         ipc::supervisor::cmd_supervisor_request,
+        ipc::supervisor::cmd_supervisor_adopt_archived,
+        ipc::supervisor::cmd_supervisor_adoptable,
         ipc::supervisor::cmd_supervisor_read,
         cmd_browser_create,
         cmd_browser_open_devtools,
