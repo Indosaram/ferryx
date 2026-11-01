@@ -992,9 +992,12 @@ impl RelayClient {
         }
     }
 
-    /// Opens the loopback gateway connection a data channel is proxied to.
+    /// Opens the loopback gateway connection a data channel is proxied to. Nagle is off:
+    /// terminal echoes and other small frames must not wait on delayed ACKs.
     async fn connect_gateway(&self) -> anyhow::Result<TcpStream> {
-        Ok(TcpStream::connect(&self.gateway_addr).await?)
+        let gateway = TcpStream::connect(&self.gateway_addr).await?;
+        gateway.set_nodelay(true)?;
+        Ok(gateway)
     }
 }
 
@@ -2057,6 +2060,17 @@ mod tests {
         peer.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn the_gateway_connection_disables_nagle() {
+        let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = RelayClient::with_gateway(
+            "http://127.0.0.1:1",
+            "tok",
+            gateway.local_addr().unwrap().to_string(),
+        );
+        let stream = client.connect_gateway().await.unwrap();
+        assert!(stream.nodelay().unwrap());
+    }
 
     #[tokio::test]
     async fn proxies_frames_between_data_channel_and_local_gateway() {
