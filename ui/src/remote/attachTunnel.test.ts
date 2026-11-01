@@ -349,6 +349,48 @@ describe("attachTunnel RFC 6455 WebSocket transport", () => {
     expect(message).toBe("hello world");
   });
 
+  it("assembles a large frame arriving in many chunks with a linear amount of copying", async () => {
+    // Given an established WebSocket and a 1 MiB binary frame split into 64 chunks
+    const stream = new ScriptedByteStream();
+    const ws = await establishTestWebSocket(createTunnelTransport(stream), stream);
+    const payloadSize = 1024 * 1024;
+    const payload = new Uint8Array(payloadSize);
+    for (let i = 0; i < payloadSize; i++) payload[i] = i & 0xff;
+    const header = new Uint8Array(10);
+    header[0] = 0x82;
+    header[1] = 127;
+    new DataView(header.buffer).setBigUint64(2, BigInt(payloadSize), false);
+    const frame = concatAll([header, payload]);
+    const chunkSize = frame.length / 64;
+    const received = new Promise<Uint8Array>((resolve) => {
+      ws.onmessage = (event) => resolve(event.data as Uint8Array);
+    });
+    const copied = { bytes: 0 };
+    const originalSet = Uint8Array.prototype.set;
+    const setSpy = vi.spyOn(Uint8Array.prototype, "set").mockImplementation(function (
+      this: Uint8Array,
+      source: ArrayLike<number>,
+      offset?: number,
+    ) {
+      copied.bytes += source.length;
+      return originalSet.call(this, source, offset);
+    });
+    try {
+      // When the chunks arrive one by one
+      for (let at = 0; at < frame.length; at += chunkSize) {
+        stream.pushIncoming(frame.slice(at, Math.min(frame.length, at + chunkSize)));
+        await Promise.resolve();
+      }
+      const message = await received;
+
+      // Then the payload is intact and was copied a bounded number of times, not once per chunk
+      expect(message).toEqual(payload);
+      expect(copied.bytes).toBeLessThan(payloadSize * 4);
+    } finally {
+      setSpy.mockRestore();
+    }
+  });
+
   it("masks client frames and uses extended lengths for 126+ and 65536+ payloads", async () => {
     // Given an established WebSocket
     const stream = new ScriptedByteStream();

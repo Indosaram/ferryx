@@ -836,15 +836,33 @@ function createTunnelWebSocketInstance(
     let fragmentedPayloads: Uint8Array[] = [];
     let fragmentedBytes = 0;
 
+    /**
+     * Reads until `buffer` holds at least `minLength` bytes, collecting chunks and joining them
+     * once, so a large frame arriving in many chunks is copied once instead of once per chunk.
+     * Returns false on EOF.
+     */
+    const fillBuffer = async (minLength: number): Promise<boolean> => {
+      if (buffer.length >= minLength) return true;
+      const parts: Uint8Array[] = [buffer];
+      let total = buffer.length;
+      try {
+        while (total < minLength) {
+          const chunk = await stream.read();
+          if (chunk.length === 0) return false;
+          parts.push(chunk);
+          total += chunk.length;
+        }
+        return true;
+      } finally {
+        buffer = parts.length === 1 ? parts[0] : concatBytes(...parts);
+      }
+    };
+
     try {
       while (readyState !== WS_CLOSED) {
-        while (buffer.length < 2) {
-          const chunk = await stream.read();
-          if (chunk.length === 0) {
-            handleClose(1006, "Abnormal closure", false);
-            return;
-          }
-          buffer = concatBytes(buffer, chunk);
+        if (!(await fillBuffer(2))) {
+          handleClose(1006, "Abnormal closure", false);
+          return;
         }
 
         const byte0 = buffer[0];
@@ -879,13 +897,9 @@ function createTunnelWebSocketInstance(
           headerSize += 4;
         }
 
-        while (buffer.length < headerSize) {
-          const chunk = await stream.read();
-          if (chunk.length === 0) {
-            handleClose(1006, "Abnormal closure", false);
-            return;
-          }
-          buffer = concatBytes(buffer, chunk);
+        if (!(await fillBuffer(headerSize))) {
+          handleClose(1006, "Abnormal closure", false);
+          return;
         }
 
         let offset = 2;
@@ -924,17 +938,15 @@ function createTunnelWebSocketInstance(
         }
 
         const frameTotalSize = headerSize + payloadLen;
-        while (buffer.length < frameTotalSize) {
-          const chunk = await stream.read();
-          if (chunk.length === 0) {
-            handleClose(1006, "Abnormal closure", false);
-            return;
-          }
-          buffer = concatBytes(buffer, chunk);
+        if (!(await fillBuffer(frameTotalSize))) {
+          handleClose(1006, "Abnormal closure", false);
+          return;
         }
 
+        // The payload is copied out (callers may keep or read its whole .buffer); the remainder
+        // is a view, never another copy.
         const rawPayload = sliceBytes(buffer, offset, offset + payloadLen);
-        buffer = sliceBytes(buffer, frameTotalSize);
+        buffer = buffer.subarray(frameTotalSize);
 
         let payload: Uint8Array;
         if (hasMask && maskKey) {
