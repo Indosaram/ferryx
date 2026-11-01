@@ -162,7 +162,9 @@ pub fn latest_archive(hub_dir: &Path) -> io::Result<Option<PathBuf>> {
 /// Copies `<hub_dir>/hub.sqlite` (and its `-wal`) to `hub.sqlite.pre-lease-<now>` once.
 /// Returns the archive written now; `None` when the hub was archived before (idempotent) or
 /// has no database. The live database is left in place and nothing is ever deleted. Called on
-/// the first Standby for another holder and before a `--replace-local` import. Blocking.
+/// the first Standby for another holder, and by a supervisor move/promotion import whose
+/// target refused with `SUPERVISOR_IDENTITY_MISMATCH` (it holds another local supervisor)
+/// before that import is retried. Blocking.
 pub fn archive_before_replace(hub_dir: &Path, now: i64) -> io::Result<Option<PathBuf>> {
     if latest_archive(hub_dir)?.is_some() {
         return Ok(None);

@@ -1230,6 +1230,9 @@ mod tests {
     /// The client is stopped before the jump: on paused time the runtime auto-advances while
     /// sqlx waits on its worker thread, and a tick would renew the lease (a renew the relay
     /// grants makes this machine the holder again). Only the re-check at use is left to deny.
+    /// Time is resumed once the client is gone: on paused time that same auto-advance runs
+    /// out sqlx's pool acquire timeout while SQLite opens (slow on Windows), and with no
+    /// client left, real time can no longer renew anything.
     /// The reply goes to a fake transport, so a post that skipped the check would be seen.
     #[tokio::test(start_paused = true)]
     async fn past_the_deadline_without_a_tick_a_reply_stays_queued_and_no_goal_settles() {
@@ -1241,6 +1244,7 @@ mod tests {
         wait_role(&handle, |r| *r == Role::Holder { fence: 7 }).await;
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled(), "no tick can run from here on");
+        tokio::time::resume();
         let state = handle.state().clone();
         let gate: ferryx_hub::holder::HolderGate = Arc::new(move || state.may_act_now());
         assert!(gate(), "the holder may act before the jump");

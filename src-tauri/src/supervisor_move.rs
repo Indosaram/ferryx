@@ -322,19 +322,25 @@ mod tests {
             now_ts: NOW,
             write_private: ferryx_hub::checkpoint_import::default_private_writer(),
         };
+        // The archive is the main file plus, when the hub left one behind, its `-wal`.
         let archives = || {
             std::fs::read_dir(&target)
                 .unwrap()
-                .filter(|entry| {
-                    entry.as_ref().unwrap().file_name().to_string_lossy().starts_with(ferryx_hub::adoption::ARCHIVE_PREFIX)
-                })
-                .count()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with(ferryx_hub::adoption::ARCHIVE_PREFIX))
+                .collect::<std::collections::BTreeSet<_>>()
         };
+        let archive = format!("{}{NOW}", ferryx_hub::adoption::ARCHIVE_PREFIX);
 
         import_replacing_local(&exported.path, &target, "machine-b", &[], options).await.unwrap();
 
-        assert!(target.join(format!("{}{NOW}", ferryx_hub::adoption::ARCHIVE_PREFIX)).is_file(), "archived first");
+        assert!(target.join(&archive).is_file(), "archived first");
         assert!(target.join(ferryx_hub::checkpoint_import::INCOMING_DB).exists(), "the checkpoint is staged");
-        assert_eq!(archives(), 1);
+        let archived = archives();
+        let wal = format!("{archive}-wal");
+        assert!(
+            archived.iter().all(|name| *name == archive || *name == wal),
+            "one archive (and its -wal), got {archived:?}"
+        );
     }
 }
