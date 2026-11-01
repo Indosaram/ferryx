@@ -206,6 +206,28 @@ impl SupervisorLeaseState {
     }
 }
 
+/// The fence supervisor inputs are stamped with: asked of the lease right before each send.
+impl crate::agent_control::fence::SupervisorFenceSource for SupervisorLeaseState {
+    fn account(&self) -> Option<String> {
+        SupervisorLeaseState::account(self)
+    }
+
+    /// Both clocks read at the call, never a cached flag.
+    fn is_holder_now(&self) -> bool {
+        SupervisorLeaseState::is_holder_now(self)
+    }
+
+    /// 0 when this machine is not the holder.
+    fn current_fence(&self) -> u64 {
+        SupervisorLeaseState::current_fence(self)
+    }
+
+    /// A daemon refused this holder's fence: the hub stands down through the lease's own stop.
+    fn stand_down(&self) {
+        crate::hub_runtime::stand_down_now();
+    }
+}
+
 /// Requests other daemon tasks make of the lease client.
 enum LeaseCommand {
     Acquire { force: bool, reply: oneshot::Sender<Role> },
@@ -865,5 +887,62 @@ mod tests {
         assert!(!lease.lease_capable);
         assert_eq!(lease.account_machine_count, Some(3));
         assert!(dir.path().join(RESET_CAPABILITY_MARKER).exists());
+    }
+
+    /// Lease state on a clock the test sets: both clocks at `base + secs`.
+    fn state_at(account: Option<&str>, persisted: Option<PersistedLease>) -> (SupervisorLeaseState, Arc<Mutex<u64>>) {
+        let base = Now {
+            mono: std::time::Instant::now(),
+            wall: SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+        };
+        let secs = Arc::new(Mutex::new(0_u64));
+        let reader = Arc::clone(&secs);
+        let clock: LeaseClock = Arc::new(move || {
+            let offset = Duration::from_secs(*reader.lock());
+            Now { mono: base.mono + offset, wall: base.wall + offset }
+        });
+        let (machine, _) = RoleMachine::new(RoleConfig::default(), "mach-a", account.is_some(), persisted, clock());
+        (SupervisorLeaseState::new(account.map(str::to_owned), machine, clock), secs)
+    }
+
+    #[test]
+    fn a_fence_source_past_its_deadline_refuses_the_send() {
+        use crate::agent_control::fence::{stamp, FenceRefusal, SupervisorFence, SupervisorFenceSource};
+        let latched = PersistedLease { last_role: LastRole::Standby, lease_capable: true, ..Default::default() };
+        let (state, secs) = state_at(Some("acct"), Some(latched));
+        state.handle(Event::SessionOpened { lease_capable: true });
+        let sent_at = (state.inner.clock)();
+        state.handle(Event::AcquireAck {
+            sent_at,
+            ack: LeaseAck::Granted { fence: 5, account_machine_count: Some(2) },
+        });
+        let source: &dyn SupervisorFenceSource = &state;
+        assert!(source.is_holder_now());
+        assert_eq!(stamp(Some(source)), Ok(Some(SupervisorFence { account: "acct".into(), fence: 5 })));
+        // Past send + TTL - margin with no tick fed since: the source answers from the clocks.
+        *secs.lock() = VALID_FOR.as_secs();
+        assert!(!source.is_holder_now());
+        assert_eq!(stamp(Some(source)), Err(FenceRefusal::NotHolder));
+        assert_eq!(state.role(), Role::Holder { fence: 5 }, "no tick ran; the role is not what refused");
+    }
+
+    #[test]
+    fn a_fence_gate_stand_down_reaches_the_hub_stop_signal() {
+        use crate::agent_control::fence::{dispatcher_fence_gate, install_source, SupervisorFenceSource};
+        // Account-less, so every other stamp stays unfenced while this source is installed.
+        let (state, _) = state_at(None, None);
+        let (wanted, mut decisions) = watch::channel(true);
+        crate::hub_runtime::install_lease_stop(Some(Arc::new(wanted)));
+        let source: Arc<dyn SupervisorFenceSource> = Arc::new(state);
+        install_source(Some(source));
+        let gate = dispatcher_fence_gate(crate::daemon::client::DaemonClient::new(), None);
+
+        gate.stand_down();
+
+        assert!(decisions.has_changed().expect("stop signal alive"));
+        assert!(!*decisions.borrow_and_update(), "the hub was told to stop");
+        assert!(gate.stood_down());
+        install_source(None);
+        crate::hub_runtime::install_lease_stop(None);
     }
 }

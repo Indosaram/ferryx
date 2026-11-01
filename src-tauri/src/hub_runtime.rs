@@ -1075,6 +1075,26 @@ fn lease_gate() -> Option<Arc<dyn LeaseGate>> {
     LEASE_GATE.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+/// The lease client's stop signal (the `wanted` watch [`follow_lease`] follows), installed by
+/// [`spawn_lease_client`].
+static LEASE_STOP: std::sync::RwLock<Option<Arc<tokio::sync::watch::Sender<bool>>>> =
+    std::sync::RwLock::new(None);
+
+/// Installs (or clears) the stop signal [`stand_down_now`] sends on.
+pub(crate) fn install_lease_stop(stop: Option<Arc<tokio::sync::watch::Sender<bool>>>) {
+    *LEASE_STOP.write().unwrap_or_else(|e| e.into_inner()) = stop;
+}
+
+/// Stands the hub down through the lease's own path: the same `false` the lease client's
+/// stop sends, so [`follow_lease`] aborts the generation. A no-op without a lease client.
+pub(crate) fn stand_down_now() {
+    let stop = LEASE_STOP.read().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(stop) = stop {
+        tracing::info!("supervisor fence refused; standing the hub down");
+        stop.send_replace(false);
+    }
+}
+
 fn standby_error(role: &crate::daemon::supervisor_lease_role::Role) -> HubStartError {
     use crate::daemon::supervisor_lease_role::Role;
     match role {
@@ -1265,7 +1285,7 @@ async fn promote_generation() -> Option<Generation> {
 
 /// The lease client's [`crate::daemon::supervisor_lease_client::HubSwitch`]: its start/stop decisions, followed by [`follow_lease`].
 struct HubLeaseSwitch {
-    wanted: tokio::sync::watch::Sender<bool>,
+    wanted: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 impl crate::daemon::supervisor_lease_client::HubSwitch for HubLeaseSwitch {
@@ -1283,7 +1303,7 @@ impl crate::daemon::supervisor_lease_client::HubSwitch for HubLeaseSwitch {
 /// client: the hub runs unleased, as before the lease.
 async fn spawn_lease_client(
     server: &DaemonServer,
-    wanted: tokio::sync::watch::Sender<bool>,
+    wanted: Arc<tokio::sync::watch::Sender<bool>>,
 ) -> Option<Arc<dyn LeaseGate>> {
     use crate::daemon::supervisor_lease_client::{spawn_supervisor_lease_client, LeaseClientConfig};
     let relay = server.remote_state().relay_client.read().clone()?;
@@ -1296,9 +1316,13 @@ async fn spawn_lease_client(
         None => ("local".to_owned(), None),
     };
     let config = LeaseClientConfig::system(machine_id, account);
+    install_lease_stop(Some(Arc::clone(&wanted)));
     let (handle, task) =
         spawn_supervisor_lease_client(config, Arc::new(relay), Arc::new(HubLeaseSwitch { wanted })).await;
     HUB_TASKS.track(&task);
+    // Supervisor inputs are stamped with this lease's fence, checked right before each send.
+    let source: Arc<dyn crate::agent_control::fence::SupervisorFenceSource> = Arc::new(handle.state().clone());
+    crate::agent_control::fence::install_source(Some(source));
     let gate: Arc<dyn LeaseGate> = Arc::new(handle);
     Some(gate)
 }
@@ -2150,7 +2174,7 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     // The supervisor lease decides which of the owner's machines runs the hub. Without a relay
     // client there is no lease client and the hub runs unleased, as before.
     let (wanted, lease_decisions) = tokio::sync::watch::channel(false);
-    let lease = spawn_lease_client(&server, wanted).await;
+    let lease = spawn_lease_client(&server, Arc::new(wanted)).await;
     *LEASE_GATE.write().unwrap_or_else(|e| e.into_inner()) = lease.clone();
     let standby = lease.as_ref().is_some_and(|lease| !lease.allows_hub());
     // A predecessor from before 2026.1022.7 keeps its hub through the drain. Stop it over
