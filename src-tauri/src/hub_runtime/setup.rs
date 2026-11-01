@@ -895,7 +895,7 @@ mod tests {
 
         let answer = run_setup_on(
             &pool,
-            &env_file,
+            &env_at(&env_file),
             SetupRunRequest { import_memory: true, projects: Vec::new() },
             &SlackOwner::default(),
             "tester",
@@ -912,7 +912,7 @@ mod tests {
         assert_eq!(after.legacy, ferryx_hub::supervisor::cutover::LegacyIntake::Stopped);
 
         // Idempotent: a second run moves nothing.
-        let again = run_setup_on(&pool, &env_file, SetupRunRequest::default(), &SlackOwner::default(), "tester", false, Some(ready_health()))
+        let again = run_setup_on(&pool, &env_at(&env_file), SetupRunRequest::default(), &SlackOwner::default(), "tester", false, Some(ready_health()))
             .await
             .unwrap();
         assert_eq!(again["cutOver"], false);
