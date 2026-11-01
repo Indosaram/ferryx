@@ -78,9 +78,9 @@ describe("ios patches", () => {
     expect(patchInfoPlist(existing)).toMatch(/<key>ITSAppUsesNonExemptEncryption<\/key>\n\t<false\/>/);
   });
 
-  test("launch screen uses #23262D instead of the system background", () => {
+  test("launch screen uses #0a0a0a instead of the system background", () => {
     const out = patchLaunchScreen(fixture("LaunchScreen.storyboard"));
-    expect(out).toContain(`<color key="backgroundColor" red="0.1373" green="0.1490" blue="0.1765" alpha="1"`);
+    expect(out).toContain(`<color key="backgroundColor" red="0.0392" green="0.0392" blue="0.0392" alpha="1"`);
     expect(out).not.toContain(`<color key="backgroundColor" systemColor="systemBackgroundColor"/>`);
   });
 

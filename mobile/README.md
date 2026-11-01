@@ -57,8 +57,8 @@ scripts, never by hand. Rerun them after deleting `gen/`; never run raw
 - Release signing from `keystore.properties` (see below); without it Gradle logs
   a `WARNING: Ferryx release signing disabled` line and release outputs are unsigned.
 - `versionCode` from `FERRYX_ANDROID_VERSION_CODE`.
-- Window/splash/system bar background `#23262D`, edge-to-edge `MainActivity` with keyboard padding.
-- Committed launcher icons (`src-tauri/icons/android`, incl. adaptive icon on `#23262D`) copied into `res/`.
+- Window/splash/system bar background `#0a0a0a`, edge-to-edge `MainActivity` with keyboard padding.
+- Committed launcher icons (`src-tauri/icons/android`, incl. adaptive icon on `#0a0a0a`) copied into `res/`.
 
 `bun run ios:init` (`scripts/init-ios.mjs`, transforms in `ios-patches.mjs`) runs
 `tauri ios init --ci` only when `gen/apple` is missing (project generation, no compile), then:
@@ -67,7 +67,7 @@ scripts, never by hand. Rerun them after deleting `gen/`; never run raw
 - `ITSAppUsesNonExemptEncryption = false` (only OS-provided HTTPS/WSS).
 - Copies `ios-templates/PrivacyInfo.xcprivacy` (no tracking; email address collected,
   linked, for app functionality; UserDefaults reason `CA92.1` for WebKit storage) and bundles it.
-- LaunchScreen background `#23262D`; committed alpha-free AppIcon set copied into `Assets.xcassets`.
+- LaunchScreen background `#0a0a0a`; committed alpha-free AppIcon set copied into `Assets.xcassets`.
 - Regenerates the Xcode project with `xcodegen`.
 
 `bun run --cwd mobile test` checks every transform against the tauri-cli 2.11.4
@@ -80,7 +80,7 @@ cd mobile && bun run icons
 ```
 
 Runs `tauri icon icons.json` (source `ui/public/ferryx-icon.png`, background
-`#23262D`), then flattens the iOS set with ImageMagick and checks that
+`#0a0a0a`), then flattens the iOS set with ImageMagick and checks that
 `AppIcon-512@2x.png` (the 1024 marketing icon) has no alpha. App Store Connect
 rejects marketing icons that have an alpha channel. The output is committed.
 

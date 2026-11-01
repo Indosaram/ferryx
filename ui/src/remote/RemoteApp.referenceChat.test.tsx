@@ -687,9 +687,10 @@ describe("reference chat lane (task 12)", () => {
     expect(screen.getByTestId("chat-composer-warning")).toHaveTextContent("Held message removed.");
 
     await act(async () => {
-      fireEvent.click(await screen.findByRole("button", { name: "Undo" }));
+      fireEvent.click(within(screen.getByTestId("chat-composer-warning")).getByRole("button", { name: "Undo" }));
     });
     expect(await screen.findByTestId("chat-composer-held")).toHaveTextContent("keep me");
+    expect(screen.queryByTestId("chat-composer-warning")).not.toBeInTheDocument();
   });
 
   it("QA-07: a staged file becomes an editable mention through /files", async () => {

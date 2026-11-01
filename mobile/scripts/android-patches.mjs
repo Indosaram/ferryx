@@ -10,7 +10,7 @@ export const AGP_VERSION = "8.13.2";
 export const GRADLE_VERSION = "8.14.3";
 // r28+ links native libraries with 16 KB ELF alignment (Play requirement for API 35+).
 export const NDK_VERSION = "28.2.13676358";
-export const SHELL_BACKGROUND = "#23262D";
+export const SHELL_BACKGROUND = "#0a0a0a";
 
 function replaceRequired(source, pattern, replacement, label) {
   if (!pattern.test(source)) throw new Error(`android patch anchor missing: ${label}`);
@@ -108,11 +108,11 @@ import androidx.core.view.WindowInsetsCompat
 
 class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
-    enableEdgeToEdge(SystemBarStyle.dark(0xFF23262D.toInt()), SystemBarStyle.dark(0xFF23262D.toInt()))
+    enableEdgeToEdge(SystemBarStyle.dark(0xFF0A0A0A.toInt()), SystemBarStyle.dark(0xFF0A0A0A.toInt()))
     super.onCreate(savedInstanceState)
     val content = findViewById<android.view.View>(android.R.id.content)
     // Inset padding exposes the window background; match the app shell instead of a light strip.
-    content.setBackgroundColor(0xFF23262D.toInt())
+    content.setBackgroundColor(0xFF0A0A0A.toInt())
     // Edge-to-edge keeps the WebView full height under the soft keyboard; pad by the
     // IME/system-bar insets so the visual viewport tracks the keyboard.
     ViewCompat.setOnApplyWindowInsetsListener(content) { view, insets ->

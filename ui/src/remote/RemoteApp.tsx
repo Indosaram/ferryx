@@ -1483,6 +1483,7 @@ export const RemoteHostConnection: React.FC<{
   /** Bumped when a history read is refused TARGET_EXPIRED, so the pane's session rows are re-read. */
   const [chatSessionRowsTick, setChatSessionRowsTick] = useState(0);
   const [chatComposerNotice, setChatComposerNotice] = useState<string | null>(null);
+  const [chatComposerNoticeAction, setChatComposerNoticeAction] = useState<{ readonly label: string; readonly onAction: () => void } | null>(null);
   // The fence the newest read was issued under: a response for another one is dropped.
   const chatFenceRef = useRef<ReferenceHistoryFence | null>(null);
   const chatRetentionTruncatedRef = useRef(false);
@@ -4646,24 +4647,22 @@ export const RemoteHostConnection: React.FC<{
     if (!removed) return;
     if (chatHeldUndoTimerRef.current !== null) clearTimeout(chatHeldUndoTimerRef.current);
     setChatComposerNotice(CHAT_HELD_REMOVED_NOTICE);
-    const toastId = toast(CHAT_HELD_REMOVED_NOTICE, {
-      duration: CHAT_HELD_UNDO_MS,
-      action: {
-        label: "Undo",
-        onClick: () => {
-          if (chatHeldUndoTimerRef.current !== null) clearTimeout(chatHeldUndoTimerRef.current);
-          chatHeldUndoTimerRef.current = null;
-          referenceQueues.add(target, removed.text);
-          if (chatTargetIsCurrent(target)) {
-            setChatHeld([...referenceQueues.read(target)]);
-            setChatComposerNotice(null);
-          }
-        },
+    setChatComposerNoticeAction({
+      label: "Undo",
+      onAction: () => {
+        if (chatHeldUndoTimerRef.current !== null) clearTimeout(chatHeldUndoTimerRef.current);
+        chatHeldUndoTimerRef.current = null;
+        referenceQueues.add(target, removed.text);
+        setChatComposerNoticeAction(null);
+        if (chatTargetIsCurrent(target)) {
+          setChatHeld([...referenceQueues.read(target)]);
+          setChatComposerNotice(null);
+        }
       },
     });
     chatHeldUndoTimerRef.current = setTimeout(() => {
       chatHeldUndoTimerRef.current = null;
-      toast.dismiss(toastId);
+      setChatComposerNoticeAction(null);
       setChatComposerNotice((notice) => (notice === CHAT_HELD_REMOVED_NOTICE ? null : notice));
     }, CHAT_HELD_UNDO_MS);
   }, [chatTargetIsCurrent]);
@@ -5741,6 +5740,7 @@ export const RemoteHostConnection: React.FC<{
                 promptCard={chatPromptCard}
                 composerHandleRef={chatComposerRef}
                 composerWarning={chatComposerNotice}
+                composerWarningAction={chatComposerNotice === CHAT_HELD_REMOVED_NOTICE ? chatComposerNoticeAction : null}
                 composerPlaceholder={chatComposerPlaceholder}
                 referenceContext={chatPartContext}
               />

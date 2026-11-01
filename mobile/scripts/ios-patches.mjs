@@ -1,7 +1,7 @@
 // Pure transforms applied to the `tauri ios init` output (gen/apple is gitignored).
 // Each throws when its anchor is missing so template drift fails loudly.
 
-export const LAUNCH_BACKGROUND = { red: 35 / 255, green: 38 / 255, blue: 45 / 255 }; // #23262D
+export const LAUNCH_BACKGROUND = { red: 10 / 255, green: 10 / 255, blue: 10 / 255 }; // #0a0a0a
 
 function replaceRequired(source, pattern, replacement, label) {
   if (!pattern.test(source)) throw new Error(`ios patch anchor missing: ${label}`);
