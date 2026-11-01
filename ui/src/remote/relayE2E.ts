@@ -2,7 +2,7 @@ import type { HostEndpoint } from "../state/remoteHostStore";
 import type { AttachKeyPair } from "./accountAttach";
 import type { OpenTunnelParams } from "./accountSession";
 import type { FetchLikeInit, TunnelResponse, TunnelTransport, TunnelWebSocket } from "./attachTunnel";
-import { remoteApiUrl, remoteSocketUrl, SocketTicketError } from "./remoteClient";
+import { fetchWithDeadline, remoteApiUrl, remoteSocketUrl, SocketTicketError } from "./remoteClient";
 
 /** Typed code for a relay host this client cannot encrypt to (no attach key, e.g. paired by PIN). */
 export const REPAIR_REQUIRED = "REPAIR_REQUIRED";
@@ -192,7 +192,7 @@ export async function remoteFetch(baseUrl: string, path: string, init: RequestIn
     }
   }
   const url = remoteApiUrl(baseUrl, path);
-  const response = await fetch(url, isRelayHostUrl(url) ? { ...init, headers: withClientBuild(init.headers) } : init);
+  const response = await fetchWithDeadline(url, isRelayHostUrl(url) ? { ...init, headers: withClientBuild(init.headers) } : init);
   await throwIfE2ERequired(response);
   return response;
 }

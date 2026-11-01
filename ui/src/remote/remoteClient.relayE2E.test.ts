@@ -14,7 +14,7 @@ import {
   relayE2EState,
   resetRelayE2EFallbacks,
 } from "./relayE2E";
-import { remoteFetch, remoteOpenSocket } from "./remoteClient";
+import { remoteFetch, remoteOpenSocket, remoteSocketUrl, RemoteRequestTimeoutError, REMOTE_REQUEST_TIMEOUT_MS } from "./remoteClient";
 
 const RELAY = "https://relay.example.test";
 const MACHINE = "machine-1";
@@ -249,5 +249,39 @@ describe("relay end-to-end encryption", () => {
     // Then encryption is tried again instead of staying on plaintext
     expect(relayE2EState(host, RELAY)).toBe("e2e");
     await expect(remoteFetch(BASE, "/api/v1/health")).rejects.toMatchObject({ code: "MACHINE_OFFLINE" });
+  });
+});
+
+describe("plain host request deadlines", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  function hangingFetch() {
+    return vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    }));
+  }
+
+  it.each([
+    ["socket ticket", () => remoteSocketUrl(BASE, "/api/v1/events", "device-token", new AbortController().signal)],
+    ["plaintext remoteFetch", () => remoteFetch(BASE, "/api/v1/workspace/state", { signal: new AbortController().signal })],
+  ])("bounds a %s request that never answers", async (_label, start) => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", hangingFetch());
+    const result = expect(start()).rejects.toBeInstanceOf(RemoteRequestTimeoutError);
+    await vi.advanceTimersByTimeAsync(REMOTE_REQUEST_TIMEOUT_MS);
+    await result;
+  });
+
+  it("still honours the caller's own abort before the deadline", async () => {
+    vi.stubGlobal("fetch", hangingFetch());
+    const controller = new AbortController();
+    const pending = remoteFetch(BASE, "/api/v1/workspace/state", { signal: controller.signal });
+    controller.abort();
+    const error = await pending.then(() => null, (err: unknown) => err);
+    expect(error).not.toBeInstanceOf(RemoteRequestTimeoutError);
+    expect((error as Error).name).toBe("AbortError");
   });
 });

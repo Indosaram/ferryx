@@ -146,6 +146,8 @@ it("routes shared-relay hosts with isolated credentials and fresh event tickets"
   expect(fetcher).toHaveBeenCalledWith("https://relay.example/host/machine-b/api/v1/workspace/state", {
     // Relay `/host/` requests carry the client build so the relay can count plaintext clients.
     headers: { Authorization: "Bearer machine-b-token", "X-Ferryx-Client-Build": "dev" },
+    // Plaintext host requests are bounded by a deadline signal.
+    signal: expect.any(AbortSignal),
   });
   expect(EventSocket.instances.at(-1)?.url).toBe("wss://relay.example/host/machine-b/api/v1/events?ticket=machine-b-ticket");
   const restored = createRemoteHostStore().getState();
@@ -165,7 +167,7 @@ it("requests a new target-bound ticket for every terminal dial without exposing 
   expect(second).toContain("ticket=ticket-2");
   expect(fetcher).toHaveBeenCalledWith(`${base}/api/v1/socket-ticket`, {
     method: "POST", headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
-    body: JSON.stringify({ target: "/api/v1/terminal/session-a" }), signal: undefined,
+    body: JSON.stringify({ target: "/api/v1/terminal/session-a" }), signal: expect.any(AbortSignal),
   });
 });
 

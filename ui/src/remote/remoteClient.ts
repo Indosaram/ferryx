@@ -24,6 +24,49 @@ export class SocketTicketError extends Error {
   }
 }
 
+/** Deadline for a plain host request (socket ticket, plaintext relay/host API call). */
+export const REMOTE_REQUEST_TIMEOUT_MS = 15_000;
+
+/** A plain host request that got no response within its deadline. */
+export class RemoteRequestTimeoutError extends Error {
+  readonly code = "REQUEST_TIMEOUT";
+  constructor(timeoutMs: number) {
+    super(`Remote request timed out after ${timeoutMs}ms`);
+    this.name = "RemoteRequestTimeoutError";
+  }
+}
+
+/**
+ * `fetch` bounded by `timeoutMs` and the caller's signal (combined by hand: AbortSignal.any is
+ * missing on older Safari and some test environments). A caller abort rejects as fetch does;
+ * the deadline rejects with RemoteRequestTimeoutError.
+ */
+export async function fetchWithDeadline(
+  input: string,
+  init: RequestInit = {},
+  timeoutMs: number = REMOTE_REQUEST_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  const callerSignal = init.signal ?? null;
+  const onCallerAbort = () => controller.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) controller.abort(callerSignal.reason);
+  else callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (timedOut) throw new RemoteRequestTimeoutError(timeoutMs);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    callerSignal?.removeEventListener("abort", onCallerAbort);
+  }
+}
+
 /** Response header carrying the host's replacement bearer token after a transparent rotation. */
 export const ROTATED_TOKEN_HEADER = "x-ferryx-rotated-token";
 
@@ -60,7 +103,7 @@ export async function remoteSocketUrl(
   const base = new URL(baseUrl);
   const socket = new URL(`${baseUrl}${target}`);
   socket.protocol = base.protocol === "https:" ? "wss:" : "ws:";
-  const response = await fetch(`${baseUrl}/api/v1/socket-ticket`, {
+  const response = await fetchWithDeadline(`${baseUrl}/api/v1/socket-ticket`, {
     method: "POST",
     headers: { Authorization: `Bearer ${deviceToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({ target }),
