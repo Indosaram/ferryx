@@ -1484,7 +1484,7 @@ pub async fn release_supervisor_to(target: &str) -> Result<Option<String>, crate
     if !handle.release_to(target).await {
         return Err(MoveError::new(503, "SUPERVISOR_UNAVAILABLE", "the relay did not release the supervisor lease"));
     }
-    tracing::info!(target, checkpoint = %id, "supervisor released to another machine");
+    tracing::info!(target_machine = target, checkpoint = %id, "supervisor released to another machine");
     Ok(Some(id))
 }
 
