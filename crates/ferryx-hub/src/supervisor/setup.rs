@@ -309,6 +309,21 @@ pub async fn set_setup_flags(
     Ok(())
 }
 
+/// The Slack team (workspace) id this hub has stored a Slack conversation for, when exactly
+/// one is known; automatic setup uses it for the owner principal `slack:<team>:<user>`.
+pub async fn known_slack_team(pool: &SqlitePool) -> Result<Option<String>, SupervisorError> {
+    let teams: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT guild_id FROM sessions
+          WHERE platform = 'slack' AND guild_id IS NOT NULL AND guild_id <> '' LIMIT 2",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(match teams.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
+    })
+}
+
 /// `text` without surrounding whitespace or control characters; `None` when nothing is left.
 fn principal_part(text: Option<&str>) -> Option<String> {
     let cleaned: String = text?.chars().filter(|c| !c.is_control()).collect();

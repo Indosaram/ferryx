@@ -208,6 +208,34 @@ fn the_default_owner_is_the_slack_owner_else_the_local_account() {
 }
 
 mod status {
+    #[tokio::test]
+    async fn the_known_slack_team_is_the_one_stored_slack_workspace() {
+        use crate::supervisor::setup::known_slack_team;
+        let pool = crate::storage::memory().await.unwrap();
+        assert_eq!(known_slack_team(&pool).await.unwrap(), None);
+        for (key, platform, team) in [("s1", "slack", "T1"), ("s2", "discord", "G1")] {
+            sqlx::query(
+                "INSERT INTO sessions (session_key, platform, guild_id, channel_id, user_id)
+                 VALUES (?, ?, ?, 'C1', 'U1')",
+            )
+            .bind(key)
+            .bind(platform)
+            .bind(team)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        assert_eq!(known_slack_team(&pool).await.unwrap().as_deref(), Some("T1"));
+        sqlx::query(
+            "INSERT INTO sessions (session_key, platform, guild_id, channel_id, user_id)
+             VALUES ('s3', 'slack', 'T2', 'C2', 'U1')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(known_slack_team(&pool).await.unwrap(), None);
+    }
+
     use super::*;
     use crate::meta::mhc_fault::SupervisorFault;
     use crate::meta::mhc_profile::REQUIRED_CAPABILITIES;

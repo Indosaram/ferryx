@@ -18,6 +18,9 @@ use crate::daemon::server::DaemonServer;
 use crate::remote::state::RemoteGatewayState;
 use crate::remote::reference_chat::types::{ReferencePart, ReferencePromptAnswer, ReferenceTurn};
 
+mod setup;
+pub use setup::{supervisor_setup_run, supervisor_setup_status, SetupError, SetupProject, SetupRunRequest};
+
 /// Maps a hub operation onto the daemon's agent-control request.
 /// The request id is the one the caller supplied. A lost answer is not given a new id.
 pub fn to_agent_control_op(op: &AgentOp) -> Result<AgentControlOp, String> {
@@ -226,7 +229,7 @@ impl AgentControl for DaemonBridge {
 }
 
 /// A git remote URL in a form two checkouts of one repository share.
-fn remote_key(url: &str) -> String {
+pub(crate) fn remote_key(url: &str) -> String {
     let url = url.trim().trim_end_matches('/');
     url.strip_suffix(".git").unwrap_or(url).to_ascii_lowercase()
 }
@@ -1929,6 +1932,22 @@ struct Generation {
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
+impl Generation {
+    /// Aborts the generation's tasks and waits for them to end, so a following start
+    /// reconciles only after the predecessor dispatcher stopped.
+    async fn end(self) {
+        #[cfg(unix)]
+        {
+            for task in &self.tasks {
+                task.abort();
+            }
+            for task in self.tasks {
+                let _ = task.await;
+            }
+        }
+    }
+}
+
 /// The supervisor's dispatcher for this hub generation. It drains committed ready intents at
 /// start (the startup drain), then on every in-process admission wake and on a bounded rescan
 /// that picks up admissions committed by `ferryx-cli mcp`. Only this daemon transmits: the
@@ -2521,15 +2540,9 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                     let reply = match ferryx_hub::control::parse_control(&line) {
                         Ok(ferryx_hub::control::ControlOp::Stop) => {
                             let persisted = ferryx_hub::control::mark_stopped(&launch.hub.pool).await;
-                            if let Some(generation) = running.lock().await.take() {
-                                for task in &generation.tasks {
-                                    task.abort();
-                                }
-                                // Wait for the aborted tasks to end, so a later `hub start`
-                                // reconciles only after the predecessor dispatcher stopped.
-                                for task in generation.tasks {
-                                    let _ = task.await;
-                                }
+                            let previous = running.lock().await.take();
+                            if let Some(generation) = previous {
+                                generation.end().await;
                             }
                             match persisted {
                                 Ok(()) => "{\"status\":\"ok\",\"op\":\"stop\"}\n",
