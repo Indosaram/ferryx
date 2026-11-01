@@ -1,6 +1,7 @@
 // Pure derivations for the phone home: the supervisor headline across machines, lane status,
 // the cross-machine Inbox, and the merged audit list. No React, no transport.
 import { actingSessionIds, type SupervisorAction, type SupervisorLane, type SupervisorSnapshot } from "../../lib/supervisorModel";
+import { setupNeedsAttention } from "../../lib/supervisorSetupModel";
 import type { RemoteSupervisorEntry, RemoteSupervisorLane } from "../remoteSupervisor";
 import type { RemoteSessionInventory } from "../remoteSessionInventory";
 import type { AccountWorktreeOption } from "../useAccountWorktrees";
@@ -14,13 +15,23 @@ export type SupervisorMachineView = {
   readonly error: { code: string; message: string } | null;
 };
 
-export type SupervisorHeadline = "off" | "paused" | "typing" | `watching ${number}`;
+export type SupervisorHeadline = "off" | "needs_setup" | "paused" | "typing" | `watching ${number}`;
 
-/** The SupervisorPanelView headline, over every machine whose snapshot is readable. */
+/** The first readable machine whose supervisor setup needs the person, or null. */
+export function setupMachine(machines: readonly SupervisorMachineView[]): SupervisorMachineView | null {
+  return machines.find((m) => setupNeedsAttention(m.snapshot?.setup ?? null)) ?? null;
+}
+
+/**
+ * The SupervisorPanelView headline, over every machine whose snapshot is readable:
+ * off > needs setup > paused > typing > watching. A machine that does not report setup
+ * (older daemon) never reads as needing it.
+ */
 export function supervisorHeadline(machines: readonly SupervisorMachineView[], now: number): SupervisorHeadline {
   const snapshots = machines.flatMap((m) => (m.snapshot ? [m.snapshot] : []));
   const lanes = snapshots.flatMap((s) => s.lanes);
   if (!snapshots.some((s) => s.hub.running)) return "off";
+  if (setupMachine(machines)) return "needs_setup";
   if (lanes.length > 0 && lanes.every((lane) => lane.paused)) return "paused";
   if (snapshots.some((s) => {
     const acting = actingSessionIds(s, now);
@@ -30,8 +41,10 @@ export function supervisorHeadline(machines: readonly SupervisorMachineView[], n
   return `watching ${lanes.length + watched}`;
 }
 
-export function headlineSentence(headline: SupervisorHeadline): string {
+/** `machine` names the computer for "needs_setup"; the other headlines ignore it. */
+export function headlineSentence(headline: SupervisorHeadline, machine?: string): string {
   if (headline === "off") return "Nothing is typed into your sessions. Start it on a computer with ferryx hub start.";
+  if (headline === "needs_setup") return `Supervisor setup isn't finished on ${machine || "your computer"}`;
   if (headline === "paused") return "Paused. It still reads your sessions but sends nothing until you resume.";
   if (headline === "typing") return "It is typing in a lane right now. Open the lane to take over.";
   return "Acts only in the lanes below and holds input while you type.";
