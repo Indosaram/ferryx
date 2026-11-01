@@ -2,11 +2,18 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { groupSitePermissions, SiteSettingsGroup } from "./SiteSettingsGroup";
-import type { SitePermission } from "../../lib/browserSitePermissions";
+import type { SitePermission, SitePermissionKind } from "../../lib/browserSitePermissions";
 
-const ipc = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock("@tauri-apps/api/core", () => ({ invoke: ipc.invoke }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => undefined) }));
+const sites = vi.hoisted(() => ({
+  listSitePermissions: vi.fn(),
+  revokeSitePermission: vi.fn(),
+  onSitePermissionsChanged: vi.fn(),
+}));
+
+vi.mock("../../lib/browserSitePermissions", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/browserSitePermissions")>()),
+  ...sites,
+}));
 
 const entries: SitePermission[] = [
   { profile: "default", origin: "https://meet.test", kind: "camera", decision: "allow" },
@@ -15,7 +22,10 @@ const entries: SitePermission[] = [
 ];
 
 describe("SiteSettingsGroup", () => {
-  beforeEach(() => ipc.invoke.mockReset());
+  beforeEach(() => {
+    vi.resetAllMocks();
+    sites.onSitePermissionsChanged.mockResolvedValue(() => undefined);
+  });
   afterEach(cleanup);
 
   it("groups decisions by site", () => {
@@ -27,37 +37,32 @@ describe("SiteSettingsGroup", () => {
 
   it("forgets one decision or resets a whole site", async () => {
     let list = entries;
-    ipc.invoke.mockImplementation(async (command: string, args?: { origin: string; kind: string | null }) => {
-      if (command === "cmd_browser_site_permissions_list") return list;
-      if (command === "cmd_browser_site_permission_revoke") {
-        list = list.filter((entry) => !(entry.origin === args?.origin && (args?.kind === null || entry.kind === args?.kind)));
+    sites.listSitePermissions.mockImplementation(async () => list);
+    sites.revokeSitePermission.mockImplementation(
+      async (_profile: string, origin: string, kind?: SitePermissionKind) => {
+        list = list.filter((entry) => !(entry.origin === origin && (kind === undefined || entry.kind === kind)));
         return true;
-      }
-      throw new Error(`unexpected ${command}`);
-    });
+      },
+    );
     render(<SiteSettingsGroup />);
     fireEvent.click(await screen.findByRole("button", { name: "Forget Camera for https://meet.test" }));
-    expect(ipc.invoke).toHaveBeenCalledWith("cmd_browser_site_permission_revoke", {
-      profile: "default",
-      origin: "https://meet.test",
-      kind: "camera",
-    });
-    await vi.waitFor(() => expect(screen.queryByRole("button", { name: "Forget Camera for https://meet.test" })).toBeNull());
+    expect(sites.revokeSitePermission).toHaveBeenCalledWith("default", "https://meet.test", "camera");
+    await vi.waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Forget Camera for https://meet.test" })).toBeNull(),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Reset permissions for https://ads.test" }));
-    expect(ipc.invoke).toHaveBeenCalledWith("cmd_browser_site_permission_revoke", {
-      profile: "default",
-      origin: "https://ads.test",
-      kind: null,
-    });
+    expect(sites.revokeSitePermission).toHaveBeenLastCalledWith("default", "https://ads.test", undefined);
     await vi.waitFor(() => expect(screen.getAllByTestId("site-settings-site")).toHaveLength(1));
   });
 
-  it("says when nothing is remembered and shows a load error code", async () => {
-    ipc.invoke.mockResolvedValueOnce([]);
+  it("says when nothing is remembered", async () => {
+    sites.listSitePermissions.mockResolvedValue([]);
     render(<SiteSettingsGroup />);
     expect(await screen.findByTestId("site-settings-empty")).toBeInTheDocument();
-    cleanup();
-    ipc.invoke.mockRejectedValueOnce({ code: "IO_ERROR", message: "disk" });
+  });
+
+  it("shows the structured error code when the list cannot be read", async () => {
+    sites.listSitePermissions.mockRejectedValue({ code: "IO_ERROR", message: "disk" });
     render(<SiteSettingsGroup />);
     expect(await screen.findByRole("alert")).toHaveTextContent("IO_ERROR");
   });
