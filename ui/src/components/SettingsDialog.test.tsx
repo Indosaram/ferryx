@@ -80,6 +80,8 @@ vi.mock(import("../lib/tauri"), async (importOriginal) => {
     installCliLauncher: native.installCliLauncher,
   };
 });
+// The agent access group has its own tests and subscribes to backend events on mount.
+vi.mock("./settings/BrowserAgentAccessGroup", () => ({ BrowserAgentAccessGroup: () => null }));
 
 afterEach(cleanup);
 beforeEach(() => {
@@ -468,7 +470,8 @@ describe("SettingsDialog", () => {
     expect(screen.getByRole("combobox", { name: "Default search engine" })).toHaveTextContent(/duckduckgo/i);
     expect(screen.getByRole("combobox", { name: "Default zoom level" })).toHaveTextContent(/100%/i);
     const restoreToggle = screen.getByRole("switch", { name: "Restore tabs on launch" });
-    expect(restoreToggle).not.toBeChecked();
+    // Restoring tabs on launch is the default; the user turns it off here.
+    expect(restoreToggle).toBeChecked();
 
     await selectRadixOption("Default search engine", /google/i);
     await selectRadixOption("Default zoom level", /125%/i);
@@ -478,7 +481,7 @@ describe("SettingsDialog", () => {
     expect(stored).toEqual({
       searchEngine: "google",
       defaultZoom: 125,
-      restoreTabsOnLaunch: true,
+      restoreTabsOnLaunch: false,
     });
 
     unmount();
@@ -486,12 +489,12 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Browser" }));
     expect(screen.getByRole("combobox", { name: "Default search engine" })).toHaveTextContent(/google/i);
     expect(screen.getByRole("combobox", { name: "Default zoom level" })).toHaveTextContent(/125%/i);
-    expect(screen.getByRole("switch", { name: "Restore tabs on launch" })).toBeChecked();
+    expect(screen.getByRole("switch", { name: "Restore tabs on launch" })).not.toBeChecked();
 
     fireEvent.click(screen.getByRole("button", { name: "Reset to defaults" }));
     expect(screen.getByRole("combobox", { name: "Default search engine" })).toHaveTextContent(/duckduckgo/i);
     expect(screen.getByRole("combobox", { name: "Default zoom level" })).toHaveTextContent(/100%/i);
-    expect(screen.getByRole("switch", { name: "Restore tabs on launch" })).not.toBeChecked();
+    expect(screen.getByRole("switch", { name: "Restore tabs on launch" })).toBeChecked();
     expect(localStorage.getItem("ferryx.settings.browser")).toBeNull();
   });
 

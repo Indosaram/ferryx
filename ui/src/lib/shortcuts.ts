@@ -614,6 +614,10 @@ export function findConflict(
   if (reserved) return { kind: "reserved", chord: reserved };
   for (const shortcut of resolvedShortcuts(overrides, preset, isMac)) {
     if (shortcut.id === actionId || surfacesAreExclusive(actionId, shortcut.id)) continue;
+    // Browser actions fire only while a browser tab owns shortcuts and there deliberately
+    // pre-empt app/terminal chords (browser.print over the palette's Mod+P, bookmarkPage over
+    // Mod+D), so they shadow a non-browser action in that tab instead of taking its chord.
+    if (shortcut.id.startsWith("browser.") && !actionId.startsWith("browser.")) continue;
     if ([shortcut.binding, ...(shortcut.aliases ?? [])].some((candidate) => effectiveChord(candidate, isMac) === chord)) {
       return { kind: "action", actionId: shortcut.id, title: shortcut.title };
     }

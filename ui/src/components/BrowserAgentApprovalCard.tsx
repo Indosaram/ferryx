@@ -34,7 +34,7 @@ export function BrowserAgentApprovalCard() {
     const refresh = () =>
       getBrowserAgentOverview().then(
         (overview) => {
-          if (cancelled) return;
+          if (cancelled || !overview) return;
           if (!heardEvent) setPending(overview.pending);
           setControllers(overview.controllers);
         },

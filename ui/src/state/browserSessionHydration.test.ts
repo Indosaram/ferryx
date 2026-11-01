@@ -215,6 +215,8 @@ describe("browser session hydration", () => {
   });
 
   it("does not materialize persisted browser tabs when launch restore is disabled", async () => {
+    // Restore defaults on, so the user has to turn it off.
+    saveBrowserSettings({ restoreTabsOnLaunch: false });
     const state = workspaceWithBrowser({
       kind: "browser",
       id: "tab-browser",

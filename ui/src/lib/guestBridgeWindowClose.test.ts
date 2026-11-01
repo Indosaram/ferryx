@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 // non-popup tab (the window.close body is read from guest.rs as well) and runs the result
 // as sloppy-mode script, as the engines do, against a fake window, location and console.
 const GUEST_PATH = resolve(__dirname, '../../../src-tauri/src/browser/guest.rs');
+const NOTIFICATION_SHIM_PATH = resolve(__dirname, '../../../crates/browser-engine-protocol/src/notification_shim.js');
 
 function between(source: string, start: string, end: string): string {
   const from = source.indexOf(start);
@@ -21,12 +22,17 @@ function nonPopupBridgeScript(): string {
   const source = readFileSync(GUEST_PATH, 'utf8');
   const template = between(source, 'const BRIDGE_SCRIPT_TEMPLATE: &str = r#"', '"#;');
   const closeBody = JSON.parse(between(source, 'const TAB_WINDOW_CLOSE_BODY: &str =\n    ', ';\n'));
+  // guest.rs fills the notification placeholder with the protocol crate's shim, whose own
+  // post placeholder gets the route expression passed to notification_shim().
+  const notifyPost = JSON.parse(between(source, 'ferryx_browser_engine_protocol::notification_shim(\n        ', ',\n    )'));
+  const notificationShim = readFileSync(NOTIFICATION_SHIM_PATH, 'utf8').replaceAll('__FERRYX_NOTIFY_POST__', notifyPost);
   return template
     .replaceAll(PLACEHOLDERS[0], JSON.stringify('test-nonce'))
     .replaceAll(PLACEHOLDERS[1], '')
     .replaceAll(PLACEHOLDERS[2], closeBody)
     .replaceAll(PLACEHOLDERS[3], 'false')
-    .replaceAll(PLACEHOLDERS[4], 'false');
+    .replaceAll(PLACEHOLDERS[4], 'false')
+    .replaceAll(PLACEHOLDERS[5], notificationShim);
 }
 
 const PLACEHOLDERS = [
@@ -35,6 +41,8 @@ const PLACEHOLDERS = [
   '__FERRYX_WINDOW_CLOSE_BODY__',
   '__FERRYX_BROWSER_BRIDGE_HARD_RELOAD__',
   '__FERRYX_BROWSER_BRIDGE_NATIVE_OPEN__',
+  '__FERRYX_NOTIFICATION_SHIM__',
+  '__FERRYX_NOTIFY_POST__',
 ];
 
 type Ring = { level: string; text: string }[];

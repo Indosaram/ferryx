@@ -6,6 +6,10 @@ import * as browserImport from "../../lib/browserImport";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+// These groups have their own tests and talk to the backend on mount.
+vi.mock("./SiteSettingsGroup", () => ({ SiteSettingsGroup: () => null }));
+vi.mock("./BrowserAgentAccessGroup", () => ({ BrowserAgentAccessGroup: () => null }));
+vi.mock("./DefaultBrowserGroup", () => ({ DefaultBrowserGroup: () => null }));
 vi.mock("../../lib/browserTauri", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/browserTauri")>()),
   listBrowsers: vi.fn(async () => []),

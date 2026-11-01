@@ -144,7 +144,8 @@ export function BrowserMediaCaptureIndicator({ browserId }: { browserId: string 
     let cancelled = false;
     void getBrowserMediaCapture(browserId).then(
       (current) => {
-        if (!cancelled) setCapture(current);
+        // An IPC result without capture state (older host, unmocked invoke) means nothing known in use.
+        if (!cancelled) setCapture(current ?? EMPTY_CAPTURE);
       },
       (error: unknown) => {
         if (!cancelled) setFailure(extractBrowserErrorCode(error));
