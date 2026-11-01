@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
 mod platform;
+mod system;
 
 #[cfg(target_os = "macos")]
 pub mod mac_app;
@@ -297,6 +298,17 @@ fn execute(command: Command) {
                 }
             }
         }
+        Command::Find { tab, query, forward, match_case, find_next } => {
+            system::find(&tab, &query, forward, match_case, find_next)
+        }
+        Command::StopFind { tab, clear_selection } => system::stop_find(&tab, clear_selection),
+        Command::Zoom { tab, percent } => system::zoom(&tab, percent),
+        Command::Print { tab } => system::print(&tab),
+        Command::PrintPdf { tab, path } => system::print_pdf(&tab, &path),
+        Command::DownloadPath { download, path } => system::download_path(download, &path),
+        Command::DownloadControl { download, action } => system::download_control(download, action),
+        Command::FileChosen { request, paths } => system::file_chosen(request, &paths),
+        Command::NotificationPermission { tab, state } => system::notification_permission(&tab, state),
     }
 }
 
@@ -527,6 +539,18 @@ wrap_client! {
         fn load_handler(&self) -> Option<LoadHandler> {
             Some(EngineLoadHandler::new())
         }
+
+        fn download_handler(&self) -> Option<DownloadHandler> {
+            Some(system::EngineDownloadHandler::new())
+        }
+
+        fn find_handler(&self) -> Option<FindHandler> {
+            Some(system::EngineFindHandler::new())
+        }
+
+        fn dialog_handler(&self) -> Option<DialogHandler> {
+            Some(system::EngineDialogHandler::new())
+        }
     }
 }
 
@@ -568,6 +592,18 @@ wrap_display_handler! {
                 emit(Event::Title { tab, title });
             }
         }
+
+        fn on_console_message(
+            &self,
+            browser: Option<&mut Browser>,
+            _level: LogSeverity,
+            message: Option<&CefString>,
+            _source: Option<&CefString>,
+            _line: ::std::os::raw::c_int,
+        ) -> ::std::os::raw::c_int {
+            // The Notification shim's messages are protocol traffic, not page console output.
+            system::on_console_message(browser, message) as _
+        }
     }
 }
 
@@ -575,6 +611,15 @@ wrap_load_handler! {
     struct EngineLoadHandler;
 
     impl LoadHandler {
+        fn on_load_start(
+            &self,
+            browser: Option<&mut Browser>,
+            frame: Option<&mut Frame>,
+            _transition_type: TransitionType,
+        ) {
+            system::on_load_start(browser, frame);
+        }
+
         fn on_loading_state_change(
             &self,
             browser: Option<&mut Browser>,

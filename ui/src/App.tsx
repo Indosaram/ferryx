@@ -34,7 +34,8 @@ import { useApplyAppearanceSettings } from "./lib/appearanceSettings";
 import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots, isLocalDagProject, remoteProjectsWatchKey } from "./lib/dagWatchRoots";
 import { loadBrowserSettings, newBrowserTabUrl } from "./lib/browserSettings";
-import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, getBrowserState, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, openExternalUrl, popupOpenerLink, reportBrowserAdoption, setBrowserZoom, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
+import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, openExternalUrl, popupOpenerLink, reportBrowserAdoption, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
+import { printBrowser, stepBrowserZoom, useBrowserDownloadPreferencesSync } from "./lib/browserSystem";
 import { listen } from "@tauri-apps/api/event";
 import { CLI_OPEN_FILE_EVENT, parseCliOpenFilePayload } from "./lib/cliOpenFile";
 import { registerBuiltInBrowserLinkOpener, registerWorktreePathOpener } from "./lib/linkRouting";
@@ -2932,22 +2933,22 @@ function WorkspaceApp({
   const handleBrowserZoom = useCallback(
     async (browserId: string, direction: "in" | "out" | "reset") => {
       try {
-        if (direction === "reset") {
-          await setBrowserZoom(browserId, 1.0);
-          return;
-        }
-        const state = await getBrowserState(browserId);
-        const current = typeof state?.zoomFactor === "number" && !isNaN(state.zoomFactor) ? state.zoomFactor : 1.0;
-        const next = direction === "in"
-          ? Math.min(5.0, Number((current + 0.1).toFixed(2)))
-          : Math.max(0.25, Number((current - 0.1).toFixed(2)));
-        await setBrowserZoom(browserId, next);
+        // The host steps the zoom, remembers it for the page's site and applies it on either engine.
+        await stepBrowserZoom(browserId, direction);
       } catch (err) {
         reportRuntimeError(err);
       }
     },
     [reportRuntimeError],
   );
+
+  const handleBrowserPrint = useCallback(
+    (browserId: string) => {
+      void printBrowser(browserId).catch(reportRuntimeError);
+    },
+    [reportRuntimeError],
+  );
+  useBrowserDownloadPreferencesSync(reportRuntimeError);
 
   const handleClosePane = useCallback(
     (tabId: string, leafId: string) => {
@@ -3935,6 +3936,11 @@ function WorkspaceApp({
         if (targetId) void handleBrowserZoom(targetId, "reset");
         return;
       }
+      if ((action as string) === "print") {
+        const targetId = payload.browserId || shortcutBrowserId;
+        if (targetId) handleBrowserPrint(targetId);
+        return;
+      }
       if (action === "tab-close") {
         handleCloseActiveSurface();
         return;
@@ -3987,6 +3993,7 @@ function WorkspaceApp({
     handleSelectWorktreeByIndex,
     handleReopenClosedBrowserTab,
     handleBrowserZoom,
+    handleBrowserPrint,
     createBrowserTab,
     shortcutBrowserId,
     reportRuntimeError,
@@ -4012,6 +4019,7 @@ function WorkspaceApp({
         "browser.back": browserShortcutsActive ? () => dispatchBrowserShortcut("back") : undefined,
         "browser.forward": browserShortcutsActive ? () => dispatchBrowserShortcut("forward") : undefined,
         "browser.find": browserShortcutsActive ? () => dispatchBrowserShortcut("find") : undefined,
+        "browser.print": browserShortcutsActive && shortcutBrowserId ? () => handleBrowserPrint(shortcutBrowserId) : undefined,
         "tab.next": () => handleCycleTab(1),
         "tab.previous": () => handleCycleTab(-1),
         "tab.select1": () => handleSelectTerminalTabByIndex(0),

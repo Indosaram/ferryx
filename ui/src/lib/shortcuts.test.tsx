@@ -112,6 +112,7 @@ describe("shortcut registry", () => {
       "browser.back",
       "browser.forward",
       "browser.find",
+      "browser.print",
       "tab.next",
       "tab.previous",
       "tab.select1",
@@ -544,6 +545,25 @@ function collectShortcutCollisions(): Record<string, string[]> {
 }
 
 describe("shortcut chord collision invariants", () => {
+  it("Mod+P prints in a browser tab and opens the palette elsewhere", () => {
+    const print = vi.fn();
+    const palette = vi.fn();
+    const inBrowser = renderHook(() =>
+      useShortcuts({ "browser.print": print, "commandPalette.open": palette }, { isMac: true }),
+    );
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", code: "KeyP", metaKey: true, bubbles: true, cancelable: true }));
+    expect(print).toHaveBeenCalledOnce();
+    expect(palette).not.toHaveBeenCalled();
+    inBrowser.unmount();
+
+    const elsewhere = renderHook(() =>
+      useShortcuts({ "browser.print": undefined, "commandPalette.open": palette }, { isMac: false }),
+    );
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", code: "KeyP", ctrlKey: true, bubbles: true, cancelable: true }));
+    expect(palette).toHaveBeenCalledOnce();
+    elsewhere.unmount();
+  });
+
   it("collision inventory is exactly the known colliding pairs", () => {
     const collisions = collectShortcutCollisions();
     expect(collisions).toEqual({

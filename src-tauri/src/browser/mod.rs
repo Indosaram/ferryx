@@ -29,6 +29,9 @@ pub mod snapshot_source;
 #[cfg(test)]
 mod snapshot_source_tests;
 pub mod state_cookies;
+// Downloads, print, find, zoom, file chooser and page notifications (both engines).
+pub mod site_permissions;
+pub mod system;
 #[cfg(test)]
 pub mod tests;
 

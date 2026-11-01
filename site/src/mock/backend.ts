@@ -110,6 +110,11 @@ export async function invoke(command: string, rawArgs?: unknown): Promise<unknow
     case 'cmd_browser_open_external': return undefined;
     case 'cmd_browser_download_list': return [];
     case 'cmd_browser_download_cancel': return false;
+    case 'cmd_browser_download_pause': return false;
+    case 'cmd_browser_set_download_preferences': return undefined;
+    case 'cmd_browser_print': return undefined;
+    case 'cmd_browser_save_pdf': return false;
+    case 'cmd_browser_zoom_step': { const b = browsers.get(a.browserId); if (!b) return 1; const steps = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 3, 5]; const i = steps.findIndex((s) => s >= b.zoomFactor - 0.001); b.zoomFactor = a.direction === 'reset' ? 1 : steps[Math.max(0, Math.min(steps.length - 1, (i < 0 ? steps.length - 1 : i) + (a.direction === 'in' ? 1 : -1)))]; return b.zoomFactor; }
     case 'cmd_remote_status': return { enabled: false, mode: 'off', port: 43821, boundAddress: null, localIp: null, tailscale: { installed: false, running: false, tailnetName: null, selfDns: null, serveActive: false } };
     case 'cmd_remote_enable': case 'cmd_remote_disable': return invoke('cmd_remote_status');
     case 'cmd_remote_pairing_create': return { code: '4F2A-91', expiresInSeconds: 300 };

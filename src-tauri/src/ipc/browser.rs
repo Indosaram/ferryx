@@ -1411,6 +1411,7 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
         let new_window_browser_id = browser_id.clone();
         let page_browser_id = browser_id.clone();
         let title_browser_id = browser_id.clone();
+        let download_browser_id = browser_id.clone();
 
         let guest_bridge_nonce = uuid::Uuid::new_v4().to_string();
         let nonce = guest_bridge_nonce.clone();
@@ -1469,6 +1470,8 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
                 .incognito(incognito)
                 .devtools(true)
                 .initialization_script(browser_guest_bridge_script(&guest_bridge_nonce, is_popup))
+                // Native downloads (WKDownload / WebView2 / WebKitDownload) feed the shelf.
+                .on_download(crate::ipc::browser_system::webview_download_handler(download_browser_id))
                 // Native new windows never open. In an Isolated tab the broker owns
                 // window.open; in an Unavailable tab nothing can attest the request, so it is
                 // denied visibly instead of vanishing (design 3.5, "as implemented").
@@ -1571,6 +1574,20 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
                             });
                             false
                         }
+                        Some(BrowserGuestAction::PageNotification { message }) => {
+                            let page_url = bridge_manager
+                                .get_state(&bridge_browser_id)
+                                .map(|state| state.url)
+                                .unwrap_or_default();
+                            crate::ipc::browser_system::handle_page_notification(
+                                &bridge_app,
+                                &bridge_manager,
+                                &bridge_browser_id,
+                                &page_url,
+                                &message,
+                            );
+                            false
+                        }
                         None => true,
                     },
                 )
@@ -1600,6 +1617,7 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
                         )
                     });
                     let navigation_url = (!fallback_to_blank).then_some(page_url);
+                    let loaded_url = navigation_url.clone().filter(|_| !loading);
                     update_webview_state(
                         &webview,
                         Arc::clone(&page_manager),
@@ -1609,6 +1627,14 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
                         Some(loading),
                         error,
                     );
+                    if let Some(url) = loaded_url {
+                        crate::ipc::browser_system::on_webview_page_loaded(
+                            webview.app_handle(),
+                            &page_manager,
+                            &page_browser_id,
+                            &url,
+                        );
+                    }
                 })
                 .on_document_title_changed(move |webview, title| {
                     update_webview_state(
@@ -1913,6 +1939,10 @@ fn cef_event_sink<R: tauri::Runtime>(
 ) -> crate::browser::cef_engine::EventSink {
     use crate::browser::cef_engine::{self, Event};
     Arc::new(move |profile: &str, event: Event| {
+        // Downloads, find, PDF, file chooser and page notifications.
+        let Some(event) = crate::ipc::browser_system::handle_cef_event(&app, &manager, profile, event) else {
+            return;
+        };
         let (browser_id, update) = match event {
             Event::Created { tab, .. } => {
                 cef_engine::repaint(&tab);
@@ -1949,6 +1979,7 @@ fn cef_event_sink<R: tauri::Runtime>(
                 adopt_cef_popup(&app, &manager, profile, popup, url);
                 return;
             }
+            _ => return,
         };
         if let Ok(state) = update {
             emit_session_state(&app, &state);
@@ -2934,6 +2965,12 @@ pub async fn cmd_browser_set_zoom<R: tauri::Runtime>(
     browser_id: String,
     zoom_factor: f64,
 ) -> Result<f64, IpcError> {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if crate::browser::cef_engine::is_cef_tab(&browser_id) {
+        let clamped = manager.set_zoom(&browser_id, zoom_factor)?;
+        crate::browser::cef_engine::system::set_zoom(&browser_id, clamped)?;
+        return Ok(clamped);
+    }
     let clamped = manager.set_zoom(&browser_id, zoom_factor)?;
     let state = manager.get_state(&browser_id)?;
     let webview = app
@@ -2999,6 +3036,11 @@ pub async fn cmd_browser_find<R: tauri::Runtime>(
     query: String,
     backwards: bool,
 ) -> Result<BrowserFindResult, IpcError> {
+    // Chromium tabs search natively; the count follows as `browser_find_result` events.
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if crate::browser::cef_engine::is_cef_tab(&browser_id) {
+        return crate::ipc::browser_system::cef_find(&browser_id, &query, backwards);
+    }
     let state = manager.get_state(&browser_id)?;
     let webview = app
         .get_webview(&state.webview_label)
@@ -3022,6 +3064,10 @@ pub async fn cmd_browser_clear_find<R: tauri::Runtime>(
     manager: State<'_, Arc<BrowserManager>>,
     browser_id: String,
 ) -> Result<(), IpcError> {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if crate::browser::cef_engine::is_cef_tab(&browser_id) {
+        return crate::ipc::browser_system::cef_clear_find(&browser_id);
+    }
     let state = manager.get_state(&browser_id)?;
     let webview = app
         .get_webview(&state.webview_label)

@@ -28,6 +28,8 @@ const DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(60);
 pub enum DownloadStatus {
     Pending,
     InProgress,
+    /// Held by the engine; it can be resumed (native engine downloads only).
+    Paused,
     Completed,
     Failed,
     Cancelled,
@@ -37,6 +39,34 @@ impl DownloadStatus {
     fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
+}
+
+/// Why a download failed, for the shelf to show something actionable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DownloadFailureKind {
+    DiskFull,
+    AccessDenied,
+    Network,
+    Server,
+    Other,
+}
+
+impl DownloadFailureKind {
+    /// Classifies a local write error; a full disk is the one the user can act on.
+    pub fn of_io(error: &std::io::Error) -> Self {
+        match error.kind() {
+            std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded => Self::DiskFull,
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem => {
+                Self::AccessDenied
+            }
+            _ => Self::Other,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +81,14 @@ pub struct DownloadRecord {
     pub error: Option<String>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+    /// Whether Cancel reaches the download (a system-webview download cannot be stopped).
+    #[serde(default = "default_true")]
+    pub can_cancel: bool,
+    /// Whether the engine can pause and resume it.
+    #[serde(default)]
+    pub can_pause: bool,
+    #[serde(default)]
+    pub failure: Option<DownloadFailureKind>,
 }
 
 fn current_time_ms() -> u64 {
@@ -74,9 +112,17 @@ struct CancelHandle {
     notify: Arc<Notify>,
 }
 
+/// Steers a download the engine itself performs (Chromium, or a system webview).
+pub trait DownloadControl: Send + Sync {
+    fn cancel(&self);
+    fn pause(&self);
+    fn resume(&self);
+}
+
 pub struct DownloadRegistry {
     records: RwLock<HashMap<String, DownloadRecord>>,
     cancellations: RwLock<HashMap<String, CancelHandle>>,
+    controls: RwLock<HashMap<String, Arc<dyn DownloadControl>>>,
     progress_states: RwLock<HashMap<String, ProgressEmissionState>>,
     /// Ids of finished records, oldest first; bounded to `FINISHED_RECORD_CAP`.
     finished_order: RwLock<VecDeque<String>>,
@@ -95,6 +141,7 @@ impl DownloadRegistry {
         Self {
             records: RwLock::new(HashMap::new()),
             cancellations: RwLock::new(HashMap::new()),
+            controls: RwLock::new(HashMap::new()),
             progress_states: RwLock::new(HashMap::new()),
             finished_order: RwLock::new(VecDeque::new()),
             broadcaster,
@@ -144,7 +191,16 @@ impl DownloadRegistry {
             error: None,
             created_at_ms: now,
             updated_at_ms: now,
+            can_cancel: true,
+            can_pause: false,
+            failure: None,
         };
+        self.insert_live(record);
+        (cancel_flag, cancel_notify)
+    }
+
+    fn insert_live(&self, record: DownloadRecord) {
+        let id = record.id.clone();
         self.records.write().insert(id.clone(), record.clone());
         self.progress_states.write().insert(
             id,
@@ -155,7 +211,112 @@ impl DownloadRegistry {
             },
         );
         self.notify(record);
-        (cancel_flag, cancel_notify)
+    }
+
+    /// Registers a download the engine performs. With a `control`, Cancel (and Pause/Resume
+    /// when `can_pause`) reach the engine; without one the record only reports progress.
+    pub fn register_native(
+        &self,
+        id: String,
+        url: String,
+        file_path: String,
+        total_bytes: Option<u64>,
+        control: Option<Arc<dyn DownloadControl>>,
+        can_pause: bool,
+    ) {
+        let now = current_time_ms();
+        self.finished_order.write().retain(|finished| finished != &id);
+        let can_cancel = control.is_some();
+        match control {
+            Some(control) => {
+                self.controls.write().insert(id.clone(), control);
+            }
+            None => {
+                self.controls.write().remove(&id);
+            }
+        }
+        self.insert_live(DownloadRecord {
+            id,
+            url,
+            file_path,
+            status: DownloadStatus::InProgress,
+            total_bytes,
+            received_bytes: 0,
+            error: None,
+            created_at_ms: now,
+            updated_at_ms: now,
+            can_cancel,
+            can_pause: can_pause && can_cancel,
+            failure: None,
+        });
+    }
+
+    /// Engine-reported progress: unlike [`Self::update_progress`] it also carries the total
+    /// and the destination the engine settled on.
+    pub fn update_native(&self, id: &str, received_bytes: u64, total_bytes: Option<u64>, file_path: Option<&str>) {
+        {
+            let mut records = self.records.write();
+            if let Some(record) = records.get_mut(id).filter(|r| !r.status.is_terminal()) {
+                if total_bytes.is_some() {
+                    record.total_bytes = total_bytes;
+                }
+                if let Some(path) = file_path.filter(|path| !path.is_empty()) {
+                    record.file_path = path.to_string();
+                }
+            }
+        }
+        self.update_progress(id, received_bytes);
+    }
+
+    /// Moves a live record between InProgress and Paused; emits only on a change.
+    pub fn set_paused(&self, id: &str, paused: bool) {
+        let target = if paused { DownloadStatus::Paused } else { DownloadStatus::InProgress };
+        let updated = {
+            let mut records = self.records.write();
+            match records.get_mut(id) {
+                Some(record) if !record.status.is_terminal() && record.status != target => {
+                    record.status = target;
+                    record.updated_at_ms = current_time_ms();
+                    Some(record.clone())
+                }
+                _ => None,
+            }
+        };
+        if let Some(record) = updated {
+            self.notify(record);
+        }
+    }
+
+    /// Asks the engine to pause or resume; the record changes when the engine reports it.
+    /// False when the download has no engine control or cannot pause.
+    pub fn request_pause(&self, id: &str, pause: bool) -> bool {
+        let pausable = self
+            .records
+            .read()
+            .get(id)
+            .is_some_and(|record| record.can_pause && !record.status.is_terminal());
+        let control = self.controls.read().get(id).cloned();
+        match control {
+            Some(control) if pausable => {
+                if pause {
+                    control.pause();
+                } else {
+                    control.resume();
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn set_failed_kind(&self, id: &str, kind: DownloadFailureKind, error: String) {
+        {
+            let mut records = self.records.write();
+            if let Some(record) = records.get_mut(id).filter(|r| !r.status.is_terminal()) {
+                record.failure = Some(kind);
+            }
+        }
+        self.set_failed(id, error);
     }
 
     pub fn set_started(&self, id: &str, total_bytes: Option<u64>) {
@@ -265,6 +426,7 @@ impl DownloadRegistry {
             return;
         };
         self.cancellations.write().remove(id);
+        self.controls.write().remove(id);
         self.progress_states.write().remove(id);
         self.record_finished(id);
         self.notify(record);
@@ -327,6 +489,12 @@ impl DownloadRegistry {
     }
 
     pub fn cancel(&self, id: &str) -> bool {
+        let control = self.controls.read().get(id).cloned();
+        if let Some(control) = control {
+            control.cancel();
+            self.set_cancelled(id);
+            return true;
+        }
         let found = {
             let map = self.cancellations.read();
             match map.get(id) {
@@ -405,6 +573,15 @@ pub fn cancel_download(id: &str) -> bool {
     DOWNLOAD_REGISTRY.cancel(id)
 }
 
+pub fn pause_download(id: &str, pause: bool) -> bool {
+    DOWNLOAD_REGISTRY.request_pause(id, pause)
+}
+
+/// The process-wide registry the shelf reads; native engine downloads report here too.
+pub fn registry() -> &'static DownloadRegistry {
+    &DOWNLOAD_REGISTRY
+}
+
 /// Sibling temp file (`<path>.<download-id>.part`) the body streams into before the
 /// final rename; the id keeps concurrent downloads to one destination apart.
 fn part_path_for(path: &Path, download_id: &str) -> PathBuf {
@@ -440,6 +617,16 @@ async fn abort_failed(id: &str, part_path: Option<&Path>, err_msg: String) -> Br
     }
     DOWNLOAD_REGISTRY.set_failed(id, err_msg.clone());
     BrowserError::DownloadFailed(err_msg)
+}
+
+/// Ends a download as failed by a local write error, keeping a full disk recognisable.
+async fn abort_io(id: &str, part_path: Option<&Path>, error: std::io::Error) -> BrowserError {
+    if let Some(part) = part_path {
+        remove_part_file(part).await;
+    }
+    let message = error.to_string();
+    DOWNLOAD_REGISTRY.set_failed_kind(id, DownloadFailureKind::of_io(&error), message.clone());
+    BrowserError::DownloadFailed(message)
 }
 
 /// Ids become part of the `<path>.<id>.part` file name, so they must stay one plain file-name
@@ -538,7 +725,7 @@ pub async fn download_url_with_cookies(
 
     if let Some(parent) = path.parent() {
         if let Err(e) = tokio::fs::create_dir_all(parent).await {
-            return Err(abort_failed(&id, None, e.to_string()).await);
+            return Err(abort_io(&id, None, e).await);
         }
     }
 
@@ -548,7 +735,7 @@ pub async fn download_url_with_cookies(
     let mut file = match tokio::fs::File::create(&part_path).await {
         Ok(f) => f,
         Err(e) => {
-            return Err(abort_failed(&id, Some(&part_path), e.to_string()).await);
+            return Err(abort_io(&id, Some(&part_path), e).await);
         }
     };
 
@@ -579,14 +766,14 @@ pub async fn download_url_with_cookies(
         received += chunk.len() as u64;
         if let Err(e) = file.write_all(&chunk).await {
             drop(file);
-            return Err(abort_failed(&id, Some(&part_path), e.to_string()).await);
+            return Err(abort_io(&id, Some(&part_path), e).await);
         }
         DOWNLOAD_REGISTRY.update_progress(&id, received);
     }
 
     if let Err(e) = file.flush().await {
         drop(file);
-        return Err(abort_failed(&id, Some(&part_path), e.to_string()).await);
+        return Err(abort_io(&id, Some(&part_path), e).await);
     }
     drop(file);
 
@@ -595,7 +782,7 @@ pub async fn download_url_with_cookies(
         return Err(abort_cancelled(&id, Some(&part_path)).await);
     }
     if let Err(e) = tokio::fs::rename(&part_path, path).await {
-        return Err(abort_failed(&id, Some(&part_path), e.to_string()).await);
+        return Err(abort_io(&id, Some(&part_path), e).await);
     }
 
     DOWNLOAD_REGISTRY.set_committed(&id);
@@ -688,6 +875,9 @@ mod tests {
             error: None,
             created_at_ms: 1000,
             updated_at_ms: 1050,
+            can_cancel: true,
+            can_pause: false,
+            failure: None,
         };
 
         let json = serde_json::to_string(&rec).unwrap();
@@ -1217,5 +1407,97 @@ mod tests {
         assert!(rx.try_recv().is_err());
         registry.update_progress_at("dl-clock", 40, base + Duration::from_millis(500));
         assert_eq!(rx.try_recv().expect("second window").received_bytes, 40);
+    }
+
+    #[derive(Default)]
+    struct RecordingControl {
+        calls: parking_lot::Mutex<Vec<&'static str>>,
+    }
+
+    impl DownloadControl for RecordingControl {
+        fn cancel(&self) {
+            self.calls.lock().push("cancel");
+        }
+        fn pause(&self) {
+            self.calls.lock().push("pause");
+        }
+        fn resume(&self) {
+            self.calls.lock().push("resume");
+        }
+    }
+
+    /// An engine download: pause/resume reach the engine, the record follows what the engine
+    /// reports, and cancel goes to the engine and is terminal.
+    #[test]
+    fn native_download_pause_resume_and_cancel_reach_the_engine() {
+        let registry = DownloadRegistry::new();
+        let control = Arc::new(RecordingControl::default());
+        registry.register_native(
+            "cef:1:7".into(),
+            "https://a.test/big.iso".into(),
+            "/tmp/big.iso".into(),
+            Some(1000),
+            Some(control.clone()),
+            true,
+        );
+        let record = registry.get("cef:1:7").unwrap();
+        assert_eq!(record.status, DownloadStatus::InProgress);
+        assert!(record.can_cancel && record.can_pause);
+
+        assert!(registry.request_pause("cef:1:7", true));
+        assert_eq!(registry.get("cef:1:7").unwrap().status, DownloadStatus::InProgress);
+        registry.set_paused("cef:1:7", true);
+        assert_eq!(registry.get("cef:1:7").unwrap().status, DownloadStatus::Paused);
+        registry.update_native("cef:1:7", 500, Some(1000), Some("/tmp/big (1).iso"));
+        let record = registry.get("cef:1:7").unwrap();
+        assert_eq!((record.received_bytes, record.file_path.as_str()), (500, "/tmp/big (1).iso"));
+
+        assert!(registry.request_pause("cef:1:7", false));
+        registry.set_paused("cef:1:7", false);
+        assert_eq!(registry.get("cef:1:7").unwrap().status, DownloadStatus::InProgress);
+
+        assert!(registry.cancel("cef:1:7"));
+        assert_eq!(registry.get("cef:1:7").unwrap().status, DownloadStatus::Cancelled);
+        assert!(!registry.request_pause("cef:1:7", true), "a finished download cannot pause");
+        registry.set_paused("cef:1:7", true);
+        assert_eq!(registry.get("cef:1:7").unwrap().status, DownloadStatus::Cancelled);
+        assert_eq!(*control.calls.lock(), vec!["pause", "resume", "cancel"]);
+    }
+
+    /// A system-webview download cannot be steered: no cancel, no pause, and cancel is refused.
+    #[test]
+    fn native_download_without_a_control_only_reports() {
+        let registry = DownloadRegistry::new();
+        registry.register_native(
+            "wv:1".into(),
+            "https://a.test/f".into(),
+            "/tmp/f".into(),
+            None,
+            None,
+            true,
+        );
+        let record = registry.get("wv:1").unwrap();
+        assert!(!record.can_cancel && !record.can_pause);
+        assert!(!registry.request_pause("wv:1", true));
+        assert!(!registry.cancel("wv:1"));
+        registry.set_committed("wv:1");
+        assert_eq!(registry.get("wv:1").unwrap().status, DownloadStatus::Completed);
+    }
+
+    #[test]
+    fn a_full_disk_is_reported_as_disk_full() {
+        let registry = DownloadRegistry::new();
+        registry.register("dl-full".into(), "https://a.test/f".into(), "/tmp/f".into());
+        let error = std::io::Error::from(std::io::ErrorKind::StorageFull);
+        registry.set_failed_kind("dl-full", DownloadFailureKind::of_io(&error), error.to_string());
+        let record = registry.get("dl-full").unwrap();
+        assert_eq!(record.status, DownloadStatus::Failed);
+        assert_eq!(record.failure, Some(DownloadFailureKind::DiskFull));
+        assert_eq!(
+            DownloadFailureKind::of_io(&std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            DownloadFailureKind::AccessDenied
+        );
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(json.contains("\"failure\":\"diskFull\""));
     }
 }

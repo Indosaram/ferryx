@@ -8534,6 +8534,9 @@ mod tests {
             error: None,
             created_at_ms: 1,
             updated_at_ms: 2,
+            can_cancel: true,
+            can_pause: false,
+            failure: None,
         };
         let list_output = format_browser_cli_response(
             &BrowserCliCommand::Download {

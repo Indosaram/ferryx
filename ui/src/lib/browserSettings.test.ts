@@ -99,6 +99,12 @@ describe("browser settings", () => {
       .toBe("localhost:3000");
   });
 
+  it("keeps ask-where-to-save off unless a boolean turns it on", () => {
+    expect(normalizeBrowserSettings({}).askWhereToSave).toBe(false);
+    expect(normalizeBrowserSettings({ askWhereToSave: true }).askWhereToSave).toBe(true);
+    expect(normalizeBrowserSettings({ askWhereToSave: "yes" }).askWhereToSave).toBe(false);
+  });
+
   it("keeps the built-in default profile and falls back deterministically when the selected default is missing", () => {
     const normalized = normalizeBrowserSettings({
       profiles: [{ id: "work", name: "Work" }],

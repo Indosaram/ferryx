@@ -26,6 +26,7 @@ import { PRIVATE_BROWSER_PROFILE } from "../lib/browserSettings";
 import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
 import { BrowserToolbar } from "./BrowserToolbar";
 import { BrowserDownloadsShelf } from "./BrowserDownloadsShelf";
+import { onBrowserFindResult } from "../lib/browserSystem";
 import type { BrowserTab } from "../lib/types";
 
 interface BrowserPaneProps {
@@ -148,6 +149,27 @@ export function BrowserPane({
     setDisplayError(null);
     return () => {
       findRequestSeqRef.current += 1;
+    };
+  }, [tab.browserId]);
+
+  useEffect(() => {
+    // A Chromium tab finds natively and reports the count afterwards, as events.
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    void onBrowserFindResult((payload) => {
+      if (payload.browserId !== tab.browserId) return;
+      setFindResult({ matchCount: payload.matchCount, found: payload.matchCount > 0 });
+    })
+      .then((unlisten) => {
+        if (disposed) unlisten();
+        else cleanup = unlisten;
+      })
+      .catch((error: unknown) => {
+        if (!disposed) setPaneAlert({ action: "Find listener", code: parseErrorCode(error) });
+      });
+    return () => {
+      disposed = true;
+      cleanup?.();
     };
   }, [tab.browserId]);
 

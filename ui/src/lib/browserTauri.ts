@@ -55,7 +55,8 @@ export type BrowserDownloadRequestedPayload = {
   requiresConfirmation?: boolean;
 };
 
-export type DownloadStatus = "pending" | "inProgress" | "completed" | "failed" | "cancelled";
+export type DownloadStatus = "pending" | "inProgress" | "paused" | "completed" | "failed" | "cancelled";
+export type DownloadFailureKind = "diskFull" | "accessDenied" | "network" | "server" | "other";
 
 export interface DownloadRecord {
   id: string;
@@ -67,6 +68,10 @@ export interface DownloadRecord {
   error?: string | null;
   createdAtMs: number;
   updatedAtMs: number;
+  /** False for a system-webview download, which the engine gives no way to stop. */
+  canCancel?: boolean;
+  canPause?: boolean;
+  failure?: DownloadFailureKind | null;
 }
 
 export type BrowserShortcutAction =

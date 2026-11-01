@@ -142,7 +142,7 @@ fn with_native_overrides<T>(read: impl FnOnce(Option<&NativeOverrides>) -> T) ->
 }
 
 /// The single mapping between TS action ids and the ids [`chord_to_action`] returns.
-pub const BROWSER_ACTION_IDS: [(&str, &str); 33] = [
+pub const BROWSER_ACTION_IDS: [(&str, &str); 34] = [
     ("tab.newBrowser", "tab-new-browser"),
     ("tab.close", "tab-close"),
     ("commandPalette.open", "command-palette"),
@@ -176,6 +176,7 @@ pub const BROWSER_ACTION_IDS: [(&str, &str); 33] = [
     ("tab.select7", "tab-select-7"),
     ("tab.select8", "tab-select-8"),
     ("tab.select9", "tab-select-9"),
+    ("browser.print", "print"),
 ];
 
 /// TS action id -> the shortcut_dispatch event (and digit payload) the macOS key monitor
@@ -260,6 +261,7 @@ fn default_chords(consumer: NativeConsumer, id: &str, platform: KeyPlatform) -> 
         "zoom.reset" if browser => vec![p(Digit(0), false)],
         "browser.focusAddress" if browser => vec![p(Letter('l'), false)],
         "browser.find" if browser => vec![p(Letter('f'), false)],
+        "browser.print" if browser => vec![p(Letter('p'), false)],
         "tab.reopenClosed" if browser => vec![p(Letter('t'), true)],
         // The legacy guest table ignored Shift on Ctrl+PageUp/PageDown.
         "tab.next" if browser => vec![
@@ -460,6 +462,7 @@ fn legacy_chord_to_action(chord: Chord, platform: KeyPlatform) -> Option<&'stati
                 KeyId::Digit(0) => Some("zoom-reset"),
                 KeyId::Letter('l') => Some("focus-address"),
                 KeyId::Letter('f') => Some("find"),
+                KeyId::Letter('p') => Some("print"),
                 _ => None,
             }
         } else {
@@ -551,7 +554,7 @@ mod tests {
 
     #[test]
     fn primary_chords_map_identically_on_every_platform() {
-        let table: [(KeyId, bool, &str); 16] = [
+        let table: [(KeyId, bool, &str); 17] = [
             (KeyId::Letter('t'), false, "tab-new-browser"),
             (KeyId::Letter('w'), false, "tab-close"),
             (KeyId::Letter('k'), false, "command-palette"),
@@ -563,6 +566,7 @@ mod tests {
             (KeyId::Digit(0), false, "zoom-reset"),
             (KeyId::Letter('l'), false, "focus-address"),
             (KeyId::Letter('f'), false, "find"),
+            (KeyId::Letter('p'), false, "print"),
             (KeyId::Letter('t'), true, "tab-reopen-closed"),
             (KeyId::Letter('d'), true, "split-down"),
             (KeyId::Equal, true, "zoom-in"),
@@ -674,10 +678,10 @@ mod tests {
         entries.iter().map(|(id, b)| (id.to_string(), b.clone())).collect()
     }
 
-    const ALL_KEYS: [KeyId; 22] = [
+    const ALL_KEYS: [KeyId; 23] = [
         KeyId::Letter('t'), KeyId::Letter('w'), KeyId::Letter('k'), KeyId::Letter('b'),
         KeyId::Letter('d'), KeyId::Letter('l'), KeyId::Letter('f'), KeyId::Letter('r'),
-        KeyId::Letter('x'), KeyId::Digit(0), KeyId::Digit(1), KeyId::Digit(5), KeyId::Digit(9),
+        KeyId::Letter('x'), KeyId::Letter('p'), KeyId::Digit(0), KeyId::Digit(1), KeyId::Digit(5), KeyId::Digit(9),
         KeyId::Comma, KeyId::Equal, KeyId::Minus, KeyId::BracketLeft, KeyId::BracketRight,
         KeyId::Tab, KeyId::PageUp, KeyId::PageDown, KeyId::Other,
     ];

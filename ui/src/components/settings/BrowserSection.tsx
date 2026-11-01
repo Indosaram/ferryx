@@ -403,6 +403,14 @@ export function BrowserSection() {
               onCheckedChange={(checked) => void update({ localhostWorktreeLabels: checked })}
             />
           </SettingRow>
+          <SettingRow label="Ask where to save downloads" description="Choose a folder for each download instead of saving it to the Downloads folder.">
+            <Switch
+              id="browser-ask-where-to-save"
+              aria-label="Ask where to save downloads"
+              checked={settings.askWhereToSave}
+              onCheckedChange={(checked) => void update({ askWhereToSave: checked })}
+            />
+          </SettingRow>
         </div>
       </SettingsGroup>
 
