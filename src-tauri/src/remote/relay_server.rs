@@ -600,6 +600,9 @@ struct RelayInner {
     /// tunnel resolves to the same live registration no matter which name the sweeper matched.
     control_suspensions: Mutex<HashMap<u64, SuspensionSignal>>,
     pending_socket_tickets: Mutex<HashMap<String, (String, String, String, u64)>>,
+    /// Device tokens a machine recently refused, keyed by (machine, token), so a repeated bad
+    /// bearer is answered without opening another data channel to the host.
+    rejected_device_tokens: Mutex<HashMap<(String, String), Instant>>,
     /// Lock order: always after `control_channels`.
     data_pool: Mutex<HashMap<String, Vec<PooledDataSocket>>>,
     /// Refuse plaintext relay proxy routes (`FERRYX_RELAY_REQUIRE_E2E=1`).
@@ -626,6 +629,8 @@ const ADMISSION_WINDOW: Duration = Duration::from_secs(60);
 const CONTROL_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 const DEVICE_TOKEN_CACHE_TTL: Duration = Duration::from_secs(30);
 const MAX_CACHED_DEVICE_TOKENS: usize = 1_000;
+const REJECTED_DEVICE_TOKEN_TTL: Duration = Duration::from_secs(30);
+const MAX_REJECTED_DEVICE_TOKENS: usize = 1_000;
 
 struct AttemptTracker {
     started: Instant,
@@ -704,6 +709,7 @@ impl RelayState {
                 pending_sessions: Mutex::new(HashMap::new()),
                 control_suspensions: Mutex::new(HashMap::new()),
                 pending_socket_tickets: Mutex::new(HashMap::new()),
+                rejected_device_tokens: Mutex::new(HashMap::new()),
                 data_pool: Mutex::new(HashMap::new()),
                 require_e2e: require_e2e_from_env(),
                 #[cfg(test)]
@@ -760,6 +766,7 @@ impl RelayState {
                 pending_sessions: Mutex::new(HashMap::new()),
                 control_suspensions: Mutex::new(HashMap::new()),
                 pending_socket_tickets: Mutex::new(HashMap::new()),
+                rejected_device_tokens: Mutex::new(HashMap::new()),
                 data_pool: Mutex::new(HashMap::new()),
                 require_e2e: require_e2e_from_env(),
                 #[cfg(test)]
@@ -848,6 +855,10 @@ impl RelayState {
     }
 
     pub fn register_device_token(&self, machine_id: &str, token: &str) {
+        self.inner
+            .rejected_device_tokens
+            .lock()
+            .remove(&(machine_id.to_owned(), token.to_owned()));
         let mut tokens = self.paired_tokens.lock();
         let now = Instant::now();
         tokens.retain(|_, cached| now.duration_since(cached.validated_at) < DEVICE_TOKEN_CACHE_TTL);
@@ -888,6 +899,16 @@ impl RelayState {
         if self.has_fresh_device_token(machine_id, token) {
             return Ok(true);
         }
+        let key = (machine_id.to_owned(), token.to_owned());
+        if self
+            .inner
+            .rejected_device_tokens
+            .lock()
+            .get(&key)
+            .is_some_and(|rejected_at| rejected_at.elapsed() < REJECTED_DEVICE_TOKEN_TTL)
+        {
+            return Ok(false);
+        }
         let mut headers = HeaderMap::new();
         let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}")) else {
             return Ok(false);
@@ -909,6 +930,14 @@ impl RelayState {
         } else if response.status() == StatusCode::UNAUTHORIZED
             || response.status() == StatusCode::FORBIDDEN
         {
+            let now = Instant::now();
+            let mut rejected = self.inner.rejected_device_tokens.lock();
+            if rejected.len() >= MAX_REJECTED_DEVICE_TOKENS {
+                rejected.retain(|_, at| now.duration_since(*at) < REJECTED_DEVICE_TOKEN_TTL);
+            }
+            if rejected.len() < MAX_REJECTED_DEVICE_TOKENS {
+                rejected.insert(key, now);
+            }
             Ok(false)
         } else {
             Err(response.status())
@@ -1078,16 +1107,36 @@ impl RelayState {
     }
 
     fn record_auth(&self, ip: IpAddr, success: bool) {
-        if let Some(tracker) = self.inner.admission.lock().get_mut(&ip) {
-            if success {
+        let mut admission = self.inner.admission.lock();
+        if success {
+            if let Some(tracker) = admission.get_mut(&ip) {
                 tracker.failures = 0;
-            } else {
-                tracker.failures += 1;
-                if tracker.failures >= 5 {
-                    tracker.locked_until = Some(Instant::now() + ADMISSION_WINDOW);
-                }
             }
+            return;
         }
+        // A failure is recorded even for an address that never went through `admit` (the
+        // device-token routes), so repeated bad bearers reach the same lockout.
+        let now = Instant::now();
+        let tracker = admission.entry(ip).or_insert(AttemptTracker {
+            started: now,
+            attempts: 0,
+            failures: 0,
+            locked_until: None,
+        });
+        tracker.failures += 1;
+        if tracker.failures >= 5 {
+            tracker.locked_until = Some(now + ADMISSION_WINDOW);
+        }
+    }
+
+    /// True while `ip` is locked out by repeated authentication failures.
+    fn locked_out(&self, ip: IpAddr) -> bool {
+        let now = Instant::now();
+        self.inner
+            .admission
+            .lock()
+            .get(&ip)
+            .is_some_and(|tracker| tracker.locked_until.is_some_and(|until| now < until))
     }
 
     fn validate_machine_token(&self, token: &str) -> bool {
@@ -1438,6 +1487,10 @@ impl RelayState {
             .lock()
             .retain(|_, cached| now.duration_since(cached.validated_at) < DEVICE_TOKEN_CACHE_TTL);
         self.inner
+            .rejected_device_tokens
+            .lock()
+            .retain(|_, at| now.duration_since(*at) < REJECTED_DEVICE_TOKEN_TTL);
+        self.inner
             .pairings
             .lock()
             .retain(|_, p| p.registration.expires_at > now_secs);
@@ -1751,9 +1804,11 @@ const MAX_PAIRING_LEASE: u64 = 600;
 async fn socket_ticket_handler(
     State(state): State<RelayState>,
     AxumPath(machine): AxumPath<String>,
+    peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     Json(mut body): Json<serde_json::Value>,
 ) -> Result<Response, StatusCode> {
+    let ip = peer_ip(peer);
     if let Err(refusal) = plaintext_gate(&state, &headers, &machine, "/api/v1/socket-ticket") {
         return Ok(refusal);
     }
@@ -1789,9 +1844,14 @@ async fn socket_ticket_handler(
     {
         return Err(StatusCode::NOT_FOUND);
     }
+    // A locked-out address is refused before its bearer is probed against the host.
+    if state.locked_out(ip) {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
     match state.authorize_device_token(&machine, &device_token).await {
         Ok(true) => {}
         Ok(false) => {
+            state.record_auth(ip, false);
             return Ok((
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({
@@ -2574,9 +2634,17 @@ async fn host_http_handler(
                 .and_then(|value| value.strip_prefix("Bearer "))
                 .map(str::trim)
                 .filter(|token| !token.is_empty());
+            let ip = peer_ip(peer);
+            if bearer_token.is_some() && state.locked_out(ip) {
+                return Err(StatusCode::TOO_MANY_REQUESTS);
+            }
             let device_authorized = match bearer_token {
                 Some(token) => match state.authorize_device_token(&machine, token).await {
-                    Ok(authorized) => authorized,
+                    Ok(true) => true,
+                    Ok(false) => {
+                        state.record_auth(ip, false);
+                        false
+                    }
                     Err(status) => return Ok(device_token_unconfirmed(status)),
                 },
                 None => false,
@@ -5527,6 +5595,7 @@ mod tests {
         let response = socket_ticket_handler(
             State(state.clone()),
             AxumPath("browser-machine".into()),
+            None,
             headers,
             Json(serde_json::json!({"target": target})),
         )
@@ -6193,6 +6262,41 @@ mod tests {
         let (status, ()) = tokio::join!(request, authority);
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert!(!state.has_fresh_device_token("authority-machine", "revoked-device"));
+        relay.abort();
+    }
+
+    #[tokio::test]
+    async fn a_refused_device_token_is_not_probed_again_and_repeated_refusals_lock_out() {
+        let state = test_state(vec![]);
+        let (base, relay) = spawn_test_relay_with_state(state.clone()).await;
+        let (mut control, auth) =
+            authenticate(&base, &identity(44, "authority-machine"), false, false).await;
+        assert!(auth.success);
+        let request = ticket_status(&base, "authority-machine", "refused-device");
+        let authority =
+            answer_token_authority(&mut control, &base, "refused-device", StatusCode::UNAUTHORIZED);
+        let (status, ()) = tokio::join!(request, authority);
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // The same bearer is refused from the negative cache: no session notice reaches the
+        // machine. The barrier proves the control loop would have forwarded one by now.
+        for _ in 0..3 {
+            assert_eq!(
+                ticket_status(&base, "authority-machine", "refused-device").await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        control_barrier(&mut control).await;
+        assert!(state.inner.pending_sessions.lock().is_empty());
+        // Every refusal counted toward the per-IP lockout (1 probed + 3 cached = 4); the
+        // fifth locks the address and the sixth is refused before any probe.
+        assert_eq!(
+            ticket_status(&base, "authority-machine", "refused-device").await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            ticket_status(&base, "authority-machine", "another-device").await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
         relay.abort();
     }
 
