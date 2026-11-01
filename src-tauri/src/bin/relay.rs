@@ -96,7 +96,17 @@ fn parse_args_with(
     let deployment_mode = deployment_mode_with(&env)
         .map_err(|err| format!("configuration error: {}", err.message))?;
 
-    let mut port: Option<u16> = env("FERRYX_RELAY_PORT").and_then(|value| value.parse().ok());
+    // A set but unparseable port is a startup error: silently binding the default sends the
+    // operator chasing "connection refused" on the port they asked for.
+    let mut port: Option<u16> = match non_empty(env("FERRYX_RELAY_PORT")) {
+        Some(value) => Some(
+            value
+                .trim()
+                .parse()
+                .map_err(|_| format!("invalid FERRYX_RELAY_PORT value: {value:?}"))?,
+        ),
+        None => None,
+    };
     let mut machine_tokens: Vec<String> = env("FERRYX_RELAY_MACHINE_TOKENS")
         .map(|value| split_list(&value).collect())
         .unwrap_or_default();
@@ -267,7 +277,8 @@ async fn main() {
     if config.machine_tokens.is_empty() {
         eprintln!(
             "ferryx-relay: no Machine Tokens configured; set FERRYX_RELAY_MACHINE_TOKENS \
-             or pass --machine-token, otherwise no daemon will be able to authenticate"
+             or pass --machine-token to make this relay private. Until then self-enrollment \
+             is open: any daemon can register a new Ed25519 machine key"
         );
     }
 
@@ -411,6 +422,20 @@ mod tests {
         assert_eq!(config.tls, TlsConfig::Off);
         assert_eq!(config.port, 8787);
         assert_eq!(parse(&["--port", "9000"], &[]).unwrap().port, 9000);
+    }
+
+    #[test]
+    fn an_invalid_relay_port_env_is_a_startup_error() {
+        assert_eq!(
+            parse(&[], &[("FERRYX_RELAY_PORT", " 8443 ")]).unwrap().port,
+            8443
+        );
+        assert!(parse(&[], &[("FERRYX_RELAY_PORT", "https")])
+            .unwrap_err()
+            .contains("FERRYX_RELAY_PORT"));
+        assert!(parse(&[], &[("FERRYX_RELAY_PORT", "70000")]).is_err());
+        // An empty value is the same as unset.
+        assert_eq!(parse(&[], &[("FERRYX_RELAY_PORT", "")]).unwrap().port, 8787);
     }
 
     #[test]
