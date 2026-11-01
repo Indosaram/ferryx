@@ -45,10 +45,20 @@ boosts, notes, reading list, site scripts, Chromium patches and mobile shells.
 | Redaction | `agent/redact.rs` | Snapshot URL, title and element names: bearer/JWT/API-key shapes, opaque tokens, URL userinfo and secret query/fragment parameters. Form values and passwords are never read |
 | CLI | `ferryx browser controllers pair --name <label>`, `grant --origin <url> --scopes read,interact`, `grant --tool <browser.tool>`, `list`, `revoke`; `--controller <uuid>` on any browser command | Credential in `<data>/browser/controllers/` (0600) |
 
-Admission: a request carrying `controllerAuth` always goes through the policy. A request with
-the transport token only keeps today's behavior until `requirePairing` is turned on
-(`cmd_browser_agent_set_settings`). That switch stays off until the consent card (plan T5)
-ships, because the GUI is the only place a pairing can be approved.
+Admission: a request carrying `controllerAuth` always goes through the policy. With
+`requirePairing` on (the default), a request carrying only the transport token is refused with
+`BROWSER_CONTROLLER_PAIRING_REQUIRED`, whose message names the pair command and the approval
+card. Exceptions: `open-file` (editor policy) and `remoteAttach` (the remote gateway's own
+connection, authorized per framed command for its paired device; a separate gateway token is
+plan T3). Settings > Browser > Agent access can turn the requirement off.
+
+Consent UI: `BrowserAgentApprovalCard` (app chrome, top centre, above any Chromium window)
+shows the oldest pending pairing, site grant or one-time capability from
+`cmd_browser_agent_overview` / `browser_agent_approvals_changed`, and resolves it with
+`cmd_browser_agent_resolve` (`approveOnce`, `approvePersistent` only with the "keep after
+restart" box, `deny`). `BrowserAgentAccessGroup` in Settings > Browser lists paired
+controllers and their sites, revokes a site or a whole controller, and holds the
+`requirePairing` switch.
 
 Trusted input differs by engine: Chromium tabs get real clicks and keys (`isTrusted` true) on
 macOS and Windows; webview tabs keep the synthetic DOM path (trusted keypress only on macOS).

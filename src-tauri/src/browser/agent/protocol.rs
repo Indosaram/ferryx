@@ -221,7 +221,7 @@ pub enum ApprovalResolution {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AuthorityError {
     #[error(
-        "browser controller pairing required: run `{}` and approve it in the Ferryx app",
+        "browser controller pairing required: run `{}` and click Allow on the approval card in the Ferryx app (Settings > Browser > Agent access can turn this requirement off)",
         PAIRING_COMMAND
     )]
     PairingRequired,

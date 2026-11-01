@@ -313,16 +313,22 @@ const PENDING = {
 };
 
 /**
- * Answers the newest consent card in the real app. The card (plan T5) is not built yet, so the
- * step is NOT_IMPLEMENTED and the caller's flow stops: nothing approves consent off the GUI.
- * When the card ships, locate its button on a MahoRD screenshot and click those coordinates.
+ * Answers the consent card in the real app. The card sits top-centre of the Ferryx window;
+ * its Allow/Approve button position on this host comes from `config.consentCard.approve`
+ * (screen pixels, read once from a screenshot). Without it the step is NOT_IMPLEMENTED and
+ * the flow stops: nothing approves consent off the GUI.
  */
 async function approveInGui(ctx, label) {
   const gui = await ctx.gui();
-  const shot = await gui.screenshot();
-  if (shot) ctx.ev.writePng(`approval-${label}.png`, shot);
-  ctx.ev.notImplemented(`approve consent card (${label}) in the app`, 'T5');
-  return false;
+  const before = await gui.screenshot();
+  if (before) ctx.ev.writePng(`approval-${label}-card.png`, before);
+  const point = ctx.config.consentCard?.approve;
+  if (!point) {
+    ctx.ev.notImplemented(`approve consent card (${label}): set consentCard.approve for this host`, 'T5');
+    return false;
+  }
+  await gui.click(point.x, point.y);
+  return true;
 }
 
 /** Pairs qa-a through the CLI, approving the card in the GUI. Returns the controller id. */
@@ -401,11 +407,18 @@ const SCENARIO_BODIES = {
 
     const form = await openForm(ctx, fixtures.origins.a);
     const submit = form.ref((e) => e.tagName === 'button');
-    // The desktop user withdraws the grant in the app (consent UI, plan T5).
-    ctx.ev.notImplemented('revoke the origin grant in the app', 'T5');
-    const blocked = await runCli(ctx.binaries.cli, ['click', '--browser-id', form.browserId, '--generation', String(form.generation), '--ref', submit], ctx.cliOptions());
-    ev.assert('revoked-grant:act-blocked', blocked.code !== 0 && cliErrorCode(blocked) === 'BROWSER_FORBIDDEN', { expected: 'BROWSER_FORBIDDEN', observed: blocked.stderr });
-    ev.assert('revoked-grant:no-submission', fixtures.state().formSubmits.length === 0, { expected: 'no submit', observed: fixtures.state().formSubmits });
+    // The desktop user withdraws the grant in Settings > Browser > Agent access ("Revoke
+    // access"). Reaching that row takes host-specific navigation the harness does not script
+    // yet, so the step stays pending and the act check below runs only after a real revoke.
+    const revokePoint = ctx.config.consentCard?.revokeGrant;
+    if (revokePoint) {
+      await (await ctx.gui()).click(revokePoint.x, revokePoint.y);
+      const blocked = await runCli(ctx.binaries.cli, ['click', '--browser-id', form.browserId, '--generation', String(form.generation), '--ref', submit], ctx.cliOptions());
+      ev.assert('revoked-grant:act-blocked', blocked.code !== 0 && cliErrorCode(blocked) === 'BROWSER_FORBIDDEN', { expected: 'BROWSER_FORBIDDEN', observed: blocked.stderr });
+      ev.assert('revoked-grant:no-submission', fixtures.state().formSubmits.length === 0, { expected: 'no submit', observed: fixtures.state().formSubmits });
+    } else {
+      ev.notImplemented('revoke the origin grant in Settings > Browser > Agent access: set consentCard.revokeGrant (Settings open on that row)', 'QA');
+    }
 
     const revoke = await runCli(ctx.binaries.cli, ['controllers', 'revoke'], ctx.cliOptions());
     ev.assert('controller:revoked', revoke.code === 0, { expected: 'revoked', observed: revoke.json ?? revoke.stderr });

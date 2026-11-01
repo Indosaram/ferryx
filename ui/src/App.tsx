@@ -28,6 +28,7 @@ import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { TerminalLinkActions } from "./components/TerminalLinkActions";
 import { TerminalFileLinkActions } from "./components/TerminalFileLinkActions";
 import { Toaster, toast } from "./components/ui/sonner";
+import { BrowserAgentApprovalCard } from "./components/BrowserAgentApprovalCard";
 import { IconButton } from "./components/ui/IconButton";
 import { copyTextToClipboard } from "./lib/clipboard";
 import { useApplyAppearanceSettings } from "./lib/appearanceSettings";
@@ -4109,6 +4110,7 @@ function WorkspaceApp({
   return (
     <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
       <Toaster />
+      {isNativeRuntime ? <BrowserAgentApprovalCard /> : null}
       <ShortcutHints
         preset={shortcutPreset}
         enabledActions={resolvedShortcuts(shortcutOverrides, shortcutPreset).filter((shortcut) => shortcutHandlers[shortcut.id]).map((shortcut) => shortcut.id)}

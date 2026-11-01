@@ -162,9 +162,28 @@
     "engineDir": {
       "description": "Chromium engine directory (contains ferryx_engine); required when engine is chromium.",
       "$ref": "#/$defs/absolutePath"
+    },
+    "consentCard": {
+      "description": "Screen position of the consent card's Allow/Approve button on this host.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approve"],
+      "properties": {
+        "approve": { "$ref": "#/$defs/screenPoint" },
+        "revokeGrant": {
+          "description": "The first grant's Revoke access button, with Settings > Browser already open on Agent access.",
+          "$ref": "#/$defs/screenPoint"
+        }
+      }
     }
   },
   "$defs": {
+    "screenPoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y"],
+      "properties": { "x": { "type": "integer", "minimum": 0 }, "y": { "type": "integer", "minimum": 0 } }
+    },
     "absolutePath": {
       "type": "string",
       "minLength": 2,

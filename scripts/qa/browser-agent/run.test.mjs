@@ -62,3 +62,9 @@ test('runCli reports exit code, output and parsed JSON; a hung child is killed a
   const hung = await runCli('/bin/ferryx', ['list'], { spawn: spawnStub(0, '', '', true), timeoutMs: 20 });
   assert.equal(hung.code, null);
 });
+
+test('the consent card button position is optional and must be whole screen pixels', () => {
+  assert.deepEqual(load(config({ consentCard: { approve: { x: 720, y: 96 } } })).consentCard.approve, { x: 720, y: 96 });
+  assert.throws(() => load(config({ consentCard: { approve: { x: -1, y: 96 } } })), UsageError);
+  assert.throws(() => load(config({ consentCard: {} })), UsageError);
+});
