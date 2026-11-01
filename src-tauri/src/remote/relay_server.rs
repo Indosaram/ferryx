@@ -4171,9 +4171,22 @@ async fn handle_control_socket(
                         }) {
                             Ok(ControlRequest::AllocateSession { opaque }) => {
                                 let id = uuid::Uuid::new_v4().to_string();
-                                if !state.issue_session(&machine_token, &id, Some(generation), opaque) {
-                                    tracing::warn!("relay session allocation rejected");
-                                    break;
+                                match state.try_issue_session_of_kind(&machine_token, &id, Some(generation), opaque, SessionKind::Http) {
+                                    Ok(()) => {}
+                                    // A full budget is transient: tell the daemon and keep its
+                                    // control channel, or every busy moment becomes a reconnect.
+                                    Err(IssueRejection::Busy) => {
+                                        tracing::warn!("relay session allocation rejected: busy");
+                                        let payload = serde_json::json!({"type": "AllocateSessionRejected", "reason": "busy"}).to_string();
+                                        if !matches!(timeout(TRANSFER_TIMEOUT, socket.send(Message::Text(payload.into()))).await, Ok(Ok(()))) {
+                                            tracing::warn!("relay allocation rejection send failed or timed out");
+                                            break;
+                                        }
+                                    }
+                                    Err(rejection) => {
+                                        tracing::warn!(?rejection, "relay session allocation rejected");
+                                        break;
+                                    }
                                 }
                             }
                             Ok(ControlRequest::RegisterPairingPin(registration)) => {
@@ -5732,6 +5745,28 @@ mod tests {
             victim_generation
         );
         assert!(state.inner.pairings.lock().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_busy_allocation_is_answered_without_dropping_the_control_socket() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (mut daemon, auth) = authenticate(&base, &identity(36, "busy_machine"), false, false).await;
+        assert!(auth.success);
+        for _ in 0..MAX_PENDING_SESSIONS_PER_MACHINE {
+            allocate(&mut daemon).await;
+        }
+        daemon
+            .send(TMessage::Text(r#"{"type":"AllocateSession"}"#.into()))
+            .await
+            .unwrap();
+        let rejected: serde_json::Value = receive_json(&mut daemon).await;
+        assert_eq!(rejected["type"], "AllocateSessionRejected");
+        assert_eq!(rejected["reason"], "busy");
+        // The control socket survives and keeps its registration.
+        control_barrier(&mut daemon).await;
+        assert!(state.inner.control_channels.lock().contains_key("busy_machine"));
         server.abort();
     }
 
