@@ -15,6 +15,12 @@ vi.mock("../../lib/browserTauri", async (importOriginal) => {
   return { ...actual, ...browserMocks };
 });
 
+vi.mock("../../lib/browserVault", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/browserVault")>()),
+  getVaultStatus: vi.fn(async () => ({ available: true, backend: "keychain" as const })),
+  listVaultItems: vi.fn(async () => []),
+}));
+
 const activeBrowser = {
   browserId: "browser-1",
   webviewLabel: "browser-browser-1",

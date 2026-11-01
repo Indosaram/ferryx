@@ -31,6 +31,7 @@ mod snapshot_source_tests;
 pub mod state_cookies;
 #[cfg(test)]
 pub mod tests;
+pub mod vault;
 
 pub use cookies::{cookie_from_imported, parse_cookie_file, ImportedCookie};
 pub use bridge::{TrustedAction, TrustedBridgeKind};

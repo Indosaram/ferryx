@@ -26,6 +26,7 @@ import { PRIVATE_BROWSER_PROFILE } from "../lib/browserSettings";
 import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
 import { BrowserToolbar } from "./BrowserToolbar";
 import { BrowserDownloadsShelf } from "./BrowserDownloadsShelf";
+import { BrowserVaultBar } from "./BrowserVaultBar";
 import type { BrowserTab } from "../lib/types";
 
 interface BrowserPaneProps {
@@ -451,6 +452,7 @@ export function BrowserPane({
             <button type="button" aria-label="Dismiss download" onClick={() => { setDownloadUrl(null); setDownloadStatus(null); setDownloadNeedsConfirmation(false); }} className="rounded p-1 hover:bg-accent"><X className="size-3.5" /></button>
           </div>
         ) : null}
+        <BrowserVaultBar browserId={liveTab.browserId} url={liveTab.url} />
         {paneAlert ? (
           <div
             role="alert"

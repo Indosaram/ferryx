@@ -14,6 +14,12 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
 }));
 
+vi.mock("../../lib/browserVault", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/browserVault")>()),
+  getVaultStatus: vi.fn(async () => ({ available: true, backend: "keychain" as const })),
+  listVaultItems: vi.fn(async () => []),
+}));
+
 vi.mock("../../lib/browserTauri", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../lib/browserTauri")>();
   return {

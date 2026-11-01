@@ -46,6 +46,7 @@ const browserMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: eventMocks.listen }));
+vi.mock("./BrowserVaultBar", () => ({ BrowserVaultBar: () => null }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: dialogMocks.save }));
 vi.mock("../lib/browserTauri", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/browserTauri")>();
