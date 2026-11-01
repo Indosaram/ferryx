@@ -535,7 +535,7 @@ test("remote builders: generated scripts enforce exact isolated build and artifa
   assert.match(windows, /-ExePath/);
   assert.match(windows, /-SkipSigning/);
   assert.match(windows, /--bundles nsis/);
-  assert.match(windows, /--bundles nsis -c '{"build":{"beforeBuildCommand":""}}'; if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/);
+  assert.match(windows, /--bundles nsis -c \$nsisConfigPath; if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/);
   assert.doesNotMatch(windows, /signer sign/);
   assert.doesNotMatch(windows, /signer --help/);
   // Every package carries the pinned, verified mhc + bun for its target before bundling.
@@ -772,6 +772,11 @@ test("createLinuxBuildScript: executes end-to-end against isolated git bundles a
       join(repoA, "scripts", "sync-version.mjs"),
       "console.log('stamped');\n",
     );
+    // Every release builds FFmpeg first; the stub records its arguments and writes a receipt.
+    writeFileSync(
+      join(repoA, "scripts", "build-ffmpeg-lgpl.sh"),
+      'mkdir -p "$1" && printf "OPENH264=%s\\n" "$FERRYX_FFMPEG_OPENH264" > "$1/build-receipt.txt"\n',
+    );
     mkdirSync(join(repoA, "ui"));
     writeFileSync(join(repoA, "ui", "package.json"), "{}");
     execFileSync("git", ["add", "."], { cwd: repoA });
@@ -817,6 +822,15 @@ fi
     // Mock rustc
     writeFileSync(join(binDir, "rustc"), "#!/usr/bin/env bash\necho 'rustc 1.92.0 (mock)'\n");
     chmodSync(join(binDir, "rustc"), 0o755);
+
+    // Mock sha256sum (FFmpeg cache key) and dpkg-deb (bundled-library check of the .deb)
+    writeFileSync(join(binDir, "sha256sum"), "#!/usr/bin/env bash\necho '0123456789abcdef0123  $1'\n");
+    chmodSync(join(binDir, "sha256sum"), 0o755);
+    writeFileSync(
+      join(binDir, "dpkg-deb"),
+      "#!/usr/bin/env bash\nprintf '%s\\n' './usr/lib/Ferryx/ffmpeg/libavcodec.so.63' './usr/lib/Ferryx/ffmpeg-legal/build-receipt.txt'\n",
+    );
+    chmodSync(join(binDir, "dpkg-deb"), 0o755);
 
     // Mock cargo
     const cargoScript = `#!/usr/bin/env bash
@@ -865,6 +879,9 @@ fi
     // The standalone Linux CLI must build without the desktop feature, so it links no GTK/WebKit.
     const cargoBuildArgs = readFileSync(join(workspaceDir, "cargo-target", "cargo-build-args.log"), "utf8");
     assert.match(cargoBuildArgs, /--release --no-default-features --bin ferryx-cli/);
+    // The FFmpeg prefix is built without OpenH264 and cached under the workspace.
+    const receipt = readFileSync(join(workspaceDir, "ffmpeg-cache", "lgpl-0123456789abcdef-noopenh264-" + execFileSync("uname", ["-m"], { encoding: "utf8" }).trim(), "build-receipt.txt"), "utf8");
+    assert.equal(receipt, "OPENH264=0\n");
     assert.match(runRes, /---BUILD_RESULT---/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -1406,28 +1423,25 @@ test("machoEntitlements: only Contents/Resources/mhc/<triple>/bun/bun gets the b
   }
 });
 
-test("remote builders: default builds carry no FFmpeg step, remote-desktop builds stage and check it first", () => {
+test("remote builders: every release builds, stages and checks the LGPL FFmpeg payload first", () => {
   const plan = {
     commitSha: "5d5499806a1b207849778f488b4e3e7b821a751b",
     tag: "v2026.09.08.1", msixVersion: "2026.908.1.0", sourceDateEpoch: 1788868800,
     channels: { nsisMigration: true },
   };
   const args = { workspaceDir: "/tmp/run", plan, hostConfig: { root: "/srv/rel" } };
-  for (const script of [createLinuxBuildScript(args), createWindowsBuildScript(args)]) {
-    assert.doesNotMatch(script, /ffmpeg|remote-desktop|FFMPEG_DIR/i);
-  }
-  assert.match(createLinuxBuildScript(args), /bun tauri build --bundles appimage,deb\n/);
-
-  const linux = createLinuxBuildScript({ ...args, features: ["remote-desktop"] });
+  const linux = createLinuxBuildScript(args);
   assert.match(linux, /FERRYX_FFMPEG_OPENH264=0 bash "\$source_dir\/scripts\/build-ffmpeg-lgpl\.sh"/);
   assert.match(linux, /stage-ffmpeg\.mjs" --target x86_64-unknown-linux-gnu --check/);
-  assert.match(linux, /bun tauri build --bundles appimage,deb --features remote-desktop -c "\$ffmpeg_overlay"/);
+  assert.match(linux, /export FFMPEG_DIR="\$ffmpeg_prefix"/);
+  assert.match(linux, /bun tauri build --bundles appimage,deb -c "\$ffmpeg_overlay"/);
+  assert.doesNotMatch(linux, /--features/);
   assert.ok(linux.indexOf("--check") < linux.indexOf("bun tauri build"), "payload check precedes the build");
   assert.match(linux, /dpkg-deb -c /);
   assert.match(linux, /grep 'usr\/lib\/Ferryx\/ffmpeg\/libavcodec/);
   assert.match(linux, /'\/srv\/rel\/ffmpeg-cache'/);
 
-  const windows = createWindowsBuildScript({ ...args, features: ["remote-desktop"] });
+  const windows = createWindowsBuildScript(args);
   assert.match(windows, /\$ffmpegScript = Join-Path \$sourceDir 'scripts\/build-ffmpeg-lgpl\.sh'/);
   assert.match(windows, /& \$msysBash -lc \$ffmpegCmd ferryx-ffmpeg \$ffmpegScript \$ffmpegPrefix/);
   assert.match(windows, /vcvars64\.bat/);
@@ -1436,9 +1450,10 @@ test("remote builders: default builds carry no FFmpeg step, remote-desktop build
   assert.ok(windows.indexOf("build-ffmpeg-lgpl.sh") < windows.indexOf("stage-ffmpeg.mjs"), "build precedes staging");
   assert.match(windows, /stage-ffmpeg\.mjs'\) --target x86_64-pc-windows-msvc --check; if \(\$LASTEXITCODE -ne 0\)/);
   assert.match(windows, /\$env:FFMPEG_DIR = Join-Path \$ffmpegPayload 'sdk'/);
-  assert.match(windows, /bun tauri build --no-bundle --features remote-desktop;/);
+  assert.match(windows, /bun tauri build --no-bundle;/);
   assert.match(windows, /-SkipSigning -FfmpegPayloadDir \$ffmpegPayload/);
-  assert.match(windows, /bun tauri build --bundles nsis --features remote-desktop -c \$nsisConfigPath;/);
+  assert.match(windows, /bun tauri build --bundles nsis -c \$nsisConfigPath;/);
+  assert.doesNotMatch(windows, /--features/);
   assert.ok(windows.indexOf("--check") < windows.indexOf("tauri build"), "payload check precedes the build");
 });
 

@@ -21,7 +21,10 @@ Ferryx is source-available under the license in [`LICENSE`](LICENSE). It is not 
 - [Tauri CLI v2](https://v2.tauri.app/start/prerequisites/)
 
 On Linux, install the GTK 3, WebKitGTK 4.1, and other system libraries required by
-[Tauri](https://v2.tauri.app/start/prerequisites/) before compiling the desktop or CLI binary.
+[Tauri](https://v2.tauri.app/start/prerequisites/) before compiling the desktop binary, plus the
+remote desktop headers listed in the README's Linux prerequisites. The headless binaries
+(`ferryx-cli`, `ferryx-relay`, `ferryx-account`) build with `--no-default-features` and need
+neither.
 
 Clone and install:
 
@@ -32,6 +35,13 @@ git submodule update --init --recursive
 bun install
 bun install --cwd ui
 bun install --cwd site
+```
+
+Fetch the pinned LGPL FFmpeg 9 SDK that the default `remote-desktop` feature links (no system
+FFmpeg needed; `cargo tauri dev`/`build` also run this):
+
+```bash
+bun scripts/fetch-ffmpeg.mjs
 ```
 
 ## Tests

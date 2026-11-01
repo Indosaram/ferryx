@@ -33,7 +33,7 @@
 
 .PARAMETER FfmpegPayloadDir
     Optional staged FFmpeg payload (src-tauri/resources/ffmpeg/payload/x86_64-pc-windows-msvc, from
-    scripts/stage-ffmpeg.mjs) for a --features remote-desktop build. Its DLLs are placed beside
+    scripts/stage-ffmpeg.mjs); every release passes it (remote desktop is a default feature). Its DLLs are placed beside
     ferryx.exe and its legal files under ffmpeg-legal/, each verified against stage.json.
 #>
 param (

@@ -19,16 +19,8 @@ import { join } from "node:path";
 
 import { msixWithVersion } from "./fixtures/msix-fixture.mjs";
 import { writeSurvivalFixture } from "./fixtures/survival-fixture.mjs";
-import { parseReleaseFeatures } from "./release-local.mjs";
 
 const SCRIPT_PATH = join(process.cwd(), "scripts", "release-local.mjs");
-
-test("parseReleaseFeatures: only remote-desktop is accepted; empty means a default release", () => {
-  assert.deepEqual(parseReleaseFeatures(undefined), []);
-  assert.deepEqual(parseReleaseFeatures(""), []);
-  assert.deepEqual(parseReleaseFeatures("remote-desktop,remote-desktop"), ["remote-desktop"]);
-  assert.throws(() => parseReleaseFeatures("remote-desktop,gpl"), /Unsupported release feature 'gpl'/);
-});
 
 function writeMsix(path, version, options = {}) {
   writeFileSync(path, msixWithVersion(version, options));
@@ -238,7 +230,6 @@ test("prepare: creates deterministic plan, prepare-state, and fails closed on cl
     assert.match(state.planDigest, /^[0-9a-f]{64}$/);
     assert.match(state.configDigest, /^[0-9a-f]{64}$/);
     assert.equal(state.commitSha, plan.commitSha);
-    assert.equal("cargoFeatures" in state, false, "default releases record no optional features");
 
     // Re-running prepare on same outDir must fail closed without touching files
     const resClobber = spawnSync(
