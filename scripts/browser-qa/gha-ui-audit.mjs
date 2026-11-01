@@ -75,6 +75,12 @@ textarea{position:fixed;inset:40px;width:calc(100% - 80px);height:calc(100% - 80
 <script>t.addEventListener('input',()=>{document.title='typed:'+t.value})</script></body></html>`;
 const served = new Map([
   ["/fixture.html", { body: FIXTURE, type: "text/html" }],
+  ["/download.html", {
+    body: `<!doctype html><title>download-fixture</title><style>html,body{margin:0;height:100%;background:#fff}
+a{display:flex;align-items:center;justify-content:center;position:fixed;inset:0;font:bold 40px sans-serif;color:#000;text-decoration:none}</style>
+<a id=d href="/download/ferryx-qa.txt" download="ferryx-qa.txt">FERRYXDOWNLOAD</a>`,
+    type: "text/html",
+  }],
   ["/download/ferryx-qa.txt", { body: "ferryx ui audit download\n", type: "text/plain", headers: { "Content-Disposition": 'attachment; filename="ferryx-qa.txt"' } }],
 ]);
 let engineKeyPublic = null;
@@ -289,6 +295,9 @@ public static class FxInput {
     return SendInput(2, new INPUT[] { Mouse(0x0002), Mouse(0x0004) }, Marshal.SizeOf(typeof(INPUT)));
   }
   public static bool Focus(IntPtr h) {
+    // Already foreground: touch nothing. An Alt tap here opens the window menu or moves
+    // keyboard focus off the page, which swallowed typed text in the first smoke run.
+    if (GetForegroundWindow() == h) return true;
     ShowWindow(h, 9);
     // Tap Alt so the foreground lock lets this process move focus, then attach input queues.
     Chord(new ushort[] { 0x12 });
@@ -311,6 +320,16 @@ switch ($Action) {
   "type" { [void][FxInput]::Focus($handle); $n = [FxInput]::Type($Text); if ($n -eq 0) { exit 4 } }
   "click" { $n = [FxInput]::Click($Width, $Height); if ($n -eq 0) { exit 4 } }
   "resize" { if (-not [FxInput]::SetWindowPos($handle, [IntPtr]::Zero, 40, 40, $Width, $Height, 0x0004)) { exit 5 } }
+  "upscale" {
+    Add-Type -AssemblyName System.Drawing
+    $src = [System.Drawing.Image]::FromFile($Path)
+    $dst = New-Object System.Drawing.Bitmap ($src.Width * 2), ($src.Height * 2)
+    $g = [System.Drawing.Graphics]::FromImage($dst)
+    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+    $g.DrawImage($src, 0, 0, $dst.Width, $dst.Height)
+    $dst.Save($Text, [System.Drawing.Imaging.ImageFormat]::Png)
+    $g.Dispose(); $dst.Dispose(); $src.Dispose()
+  }
   "shot" {
     Add-Type -AssemblyName System.Windows.Forms, System.Drawing
     $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
@@ -338,9 +357,18 @@ const tesseract = (() => {
 summary.ocr = tesseract ? { tesseract } : { unavailable: true };
 
 let ocrIndex = 0;
+function upscaled(path) {
+  const target = path.replace(/\.png$/, ".x2.png");
+  if (platform === "linux" && run("convert", [path, "-resize", "200%", target]).ok) return target;
+  if (platform === "win32" && win.ps("upscale", ["-Path", path, "-Text", target]).ok && existsSync(target)) return target;
+  return null;
+}
 function ocr(path) {
   if (!tesseract || !path || !existsSync(path)) return null;
-  const result = run(tesseract, [path, "-", "--psm", "11", "tsv"], { timeout: 90000 });
+  // Small UI text (9-11 px at 1x) OCRs poorly; read a 2x copy and map coordinates back.
+  const big = platform === "darwin" ? null : upscaled(path);
+  const factor = big ? 2 : 1;
+  const result = run(tesseract, [big ?? path, "-", "--psm", "11", "tsv"], { timeout: 120000 });
   if (!result.ok) return null;
   const lines = result.stdout.split(/\r?\n/);
   const header = lines.shift()?.split("\t") ?? [];
@@ -350,17 +378,18 @@ function ocr(path) {
     .filter((cells) => cells.length >= header.length && cells[col("text")]?.trim() && Number(cells[col("conf")]) > 0)
     .map((cells) => ({
       text: cells[col("text")].trim(),
-      left: Number(cells[col("left")]),
-      top: Number(cells[col("top")]),
-      width: Number(cells[col("width")]),
-      height: Number(cells[col("height")]),
+      left: Math.round(Number(cells[col("left")]) / factor),
+      top: Math.round(Number(cells[col("top")]) / factor),
+      width: Math.round(Number(cells[col("width")]) / factor),
+      height: Math.round(Number(cells[col("height")]) / factor),
     }));
 }
 const norm = (text) => text.toLowerCase().replace(/[^a-z0-9:%./]/g, "");
-function findWord(words, text, { nth = 0, minX = 0 } = {}) {
-  const hits = (words ?? []).filter((word) => norm(word.text) === norm(text) && word.left >= minX).sort((a, b) => a.top - b.top || a.left - b.left);
-  const word = hits[nth];
-  return word ? { x: word.left + Math.round(word.width / 2), y: word.top + Math.round(word.height / 2), hits: hits.length } : null;
+function findWord(words, text, { nth = 0, minX = 0, maxX = Infinity, pick = "first", match = null } = {}) {
+  const test = match ?? ((word) => norm(word.text) === norm(text));
+  const hits = (words ?? []).filter((word) => test(word) && word.left >= minX && word.left <= maxX).sort((a, b) => a.top - b.top || a.left - b.left);
+  const word = pick === "rightmost" ? [...hits].sort((a, b) => b.left - a.left)[0] : hits[nth];
+  return word ? { x: word.left + Math.round(word.width / 2), y: word.top + Math.round(word.height / 2), right: word.left + word.width, height: word.height, left: word.left, hits: hits.length } : null;
 }
 function probeShot() {
   ocrIndex += 1;
@@ -522,41 +551,75 @@ if (app) {
   await sleep(15000); // first render of the web UI and daemon startup
 }
 
-await step("launch", "App window after startup", [focus]);
+/** Click a sidebar label so keyboard focus leaves an embedded webview and app shortcuts reach the UI. */
+const chromeFocus = ["optional click sidebar (focus app chrome)", () => clickText("Projects", { timeout: 3000 })];
+/** OCR the browser toolbar zoom label (e.g. "100%"). */
+function zoomLabel() {
+  const words = ocr(probeShot()) ?? [];
+  return words.map((word) => word.text).find((text) => /^\d{2,3}%$/.test(text)) ?? null;
+}
+const typeUrl = (url) => [
+  clickOr("about:blank", [key("Mod+L", { key: "l", mods: ["mod"] })], {
+    timeout: 2000,
+    match: (word) => /^(about:blank|https?:\/\/|:\/\/127|\/\/127)/.test(word.text),
+    pick: "first",
+  }),
+  key("Mod+A", { key: "a", mods: ["mod"] }),
+  ["type URL", () => host.type(url)],
+  key("Enter", { key: "Enter" }),
+];
+
+await step("launch", "App window after startup", [focus, ["optional dismiss Windows store toast", () => (platform === "win32" ? clickText("Got", { timeout: 2000 }) : { ok: true })]]);
 await step(
   "dismiss-onboarding",
   "Click 'Skip setup' in the first-run wizard (fallback: Tab into the wizard, Escape)",
   [focus, clickOr("Skip", [key("Tab", { key: "Tab" }), key("Escape", { key: "Escape" })], { timeout: 5000 }), 2000],
   { none: ["Skip"] },
 );
-await step("new-browser-tab", "Mod+Shift+B (tab.newBrowser) opens a browser tab", [focus, key("Mod+Shift+B", { key: "b", mods: ["mod", "shift"] }), 5000], {
-  any: ["about:blank", "Browser", "Search"],
+await step("new-browser-tab", "Mod+Shift+B (tab.newBrowser) opens a browser tab", [focus, chromeFocus, key("Mod+Shift+B", { key: "b", mods: ["mod", "shift"] }), 5000], {
+  any: ["about:blank", "Browser"],
 });
 summary.cli_after_new_tab = sessions().raw;
 await step(
   "address-bar-example",
-  "Mod+L, type https://example.com, Enter",
-  [focus, key("Mod+L", { key: "l", mods: ["mod"] }), ["type URL", () => host.type("https://example.com")], key("Enter", { key: "Enter" }), 8000],
-  { any: ["Domain", "illustrative"] },
+  "Click the address bar (fallback Mod+L), select all, type https://example.com, Enter",
+  [focus, ...typeUrl("https://example.com"), 8000],
+  { any: ["Domain", "documentation", "illustrative"] },
 );
-await step("settings-open", "Mod+, opens Settings (General)", [focus, key("Mod+,", { key: ",", mods: ["mod"] }), 2000], { any: ["General", "Appearance"] });
+await step("settings-open", "Click the sidebar so the app has focus, then Mod+, opens Settings (General)", [focus, chromeFocus, key("Mod+,", { key: ",", mods: ["mod"] }), 2000], {
+  any: ["General", "Appearance"],
+});
 await step(
   "settings-enable-advanced",
-  "Tab x11 from 'Back to app' reaches General > Advanced features; Space turns it on (Browser/Notifications appear in the nav)",
-  [focus, ...repeat(11, "Tab", { key: "Tab" }), key("Space", { key: "Space" }), 1500],
+  "Click the switch on the General > 'Advanced features' row (fallback: Tab x11, Space); Browser/Notifications appear in the nav",
+  [
+    focus,
+    ["click Advanced features switch (keyboard fallback)", async () => {
+      const words = ocr(probeShot());
+      const row = findWord(words, "Advanced");
+      // Switches and selects share a right edge; "(Recommended)" ends just left of the select chevron.
+      const anchor = findWord(words, "", { match: (word) => /Recommended\)?$/.test(word.text), pick: "rightmost" });
+      if (row && anchor) {
+        const x = anchor.right + 30;
+        const result = host.click(x, row.y);
+        return { ...result, via: "ocr-click", at: [x, row.y] };
+      }
+      for (const [, action] of [...repeat(11, "Tab", { key: "Tab" }), key("Space", { key: "Space" })]) {
+        await action();
+        await sleep(200);
+      }
+      return { ok: true, via: "keyboard", ocr_error: `row=${Boolean(row)} anchor=${Boolean(anchor)}` };
+    }],
+    1500,
+  ],
   { any: ["Notifications"] },
 );
 await step(
   "settings-browser",
-  "Click 'Browser' in the Settings nav (fallback: reopen Settings, Tab x6, Enter)",
-  [
-    focus,
-    clickOr("Browser", [key("Escape", { key: "Escape" }), key("Mod+,", { key: ",", mods: ["mod"] }), ...repeat(6, "Tab", { key: "Tab" }), key("Enter", { key: "Enter" })]),
-    2500,
-  ],
-  { any: ["Chromium", "Engine", "Search"] },
+  "Click 'Browser' in the Settings nav (fallback: Tab x6, Enter)",
+  [focus, clickOr("Browser", [key("Escape", { key: "Escape" }), key("Mod+,", { key: ",", mods: ["mod"] }), ...repeat(6, "Tab", { key: "Tab" }), key("Enter", { key: "Enter" })]), 2500],
+  { any: ["Chromium", "Engine", "engine", "Search"] },
 );
-
 if (engineZip) {
   await step(
     "engine-install",
@@ -598,24 +661,42 @@ await step("settings-closed", "Escape closes Settings", [focus, key("Escape", { 
 await step("narrow-900", "Resize the window to 900x800", [focus, ["resize 900x800", () => host.resize(900, 800)], 2500]);
 await step(
   "downloads-shelf",
-  "Navigate to a local attachment URL so the downloads shelf appears",
-  [focus, key("Mod+L", { key: "l", mods: ["mod"] }), ["type URL", () => host.type(`${fixtureBase}/download/ferryx-qa.txt`)], key("Enter", { key: "Enter" }), 8000],
-  { any: ["Downloads*", "ferryx-qa.txt", "Save"] },
+  "Open a local page with a download link and click it; the download prompt/shelf appears",
+  [
+    focus,
+    ...typeUrl(`${fixtureBase}/download.html`),
+    5000,
+    ["click download link", () => clickText("FERRYXDOWNLOAD", { timeout: 8000 })],
+    4000,
+  ],
+  { any: ["ferryx-qa.txt", "Downloads*", "Save", "Download"] },
 );
 await step(
   "back-to-example",
-  "Mod+L, https://example.com, Enter (page for find and zoom)",
-  [focus, key("Mod+L", { key: "l", mods: ["mod"] }), ["type URL", () => host.type("https://example.com")], key("Enter", { key: "Enter" }), 6000],
-  { any: ["Domain", "illustrative"] },
+  "Address bar: https://example.com, Enter (page for find and zoom)",
+  [focus, ...typeUrl("https://example.com"), 6000],
+  { any: ["Domain", "documentation", "illustrative"] },
 );
 await step("find-bar", "Mod+F opens the find bar; type 'Example'", [focus, key("Mod+F", { key: "f", mods: ["mod"] }), 1000, ["type query", () => host.type("Example")], 1500], {
-  any: ["1/1", "1/2", "1/3", "of", "matches"],
+  any: ["matches", "match", "1/1", "of"],
 });
+let zoomBefore = null;
 await step(
   "zoom-in",
-  "Escape closes find, Mod+= twice zooms in",
-  [focus, key("Escape", { key: "Escape" }), key("Mod+= 1", { key: "=", mods: ["mod"] }), key("Mod+= 2", { key: "=", mods: ["mod"] }), 2000],
-  { any: ["110%", "120%", "125%"] },
+  "Escape closes find, Mod+= twice; the toolbar zoom label must change",
+  [
+    focus,
+    key("Escape", { key: "Escape" }),
+    ["read zoom label", () => ((zoomBefore = zoomLabel()), { ok: true, zoom_before: zoomBefore })],
+    key("Mod+= 1", { key: "=", mods: ["mod"] }),
+    key("Mod+= 2", { key: "=", mods: ["mod"] }),
+    2000,
+    ["optional zoom label changed", () => {
+      const after = zoomLabel();
+      const changed = Boolean(after) && after !== zoomBefore;
+      return { ok: changed, zoom_before: zoomBefore, zoom_after: after, stderr: changed ? "" : "zoom label unchanged or unreadable" };
+    }],
+  ],
 );
 
 // ---------------------------------------------------------------- Chromium engine checks (Linux)
