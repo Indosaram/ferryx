@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { TunnelError } from "./attachTunnel";
 import { userFacingCode, userFacingError } from "./userFacingError";
 
 class Coded extends Error {
@@ -37,5 +38,16 @@ describe("userFacingError", () => {
   it("falls back to generic copy for unknown errors without echoing them", () => {
     const text = userFacingError(new Error("daemon epoch changed for 7f3a"), { action: "open this worktree" });
     expect(text).toBe("Couldn't open this worktree. Something went wrong. Try again.");
+  });
+
+  it("maps structured tunnel errors to plain copy", () => {
+    expect(userFacingCode(new TunnelError("STREAM_CLOSED", "transport has been closed"))).toBe("STREAM_CLOSED");
+    expect(userFacingCode(new TunnelError("PREMATURE_CLOSE", "socket closed before handshake completed"))).toBe("STREAM_CLOSED");
+    expect(userFacingCode(new TunnelError("HTTP_TIMEOUT", "no complete response"))).toBe("TIMEOUT");
+    expect(userFacingCode(new TunnelError("HANDSHAKE_TIMEOUT", "handshake timed out"))).toBe("TIMEOUT");
+    expect(userFacingCode(new TunnelError("WEBSOCKET_UPGRADE_FAILED", "server returned status 401", 401))).toBe("UNAUTHORIZED");
+    expect(userFacingError(new TunnelError("STREAM_CLOSED", "transport has been closed"))).toBe(
+      "The connection to your computer dropped. Reconnecting usually fixes this.",
+    );
   });
 });

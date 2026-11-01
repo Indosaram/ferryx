@@ -110,6 +110,18 @@ export interface TunnelErrorEvent {
   message?: string;
 }
 
+/** Structured tunnel failure: callers branch on `code` (and `status` for an HTTP upgrade refusal). */
+export class TunnelError extends Error {
+  readonly code: string;
+  readonly status?: number;
+  constructor(code: string, message: string, status?: number) {
+    super(`${code}: ${message}`);
+    this.name = "TunnelError";
+    this.code = code;
+    this.status = status;
+  }
+}
+
 export interface TunnelWebSocket {
   send(data: Uint8Array | string): void;
   close(code?: number, reason?: string): void;
@@ -323,7 +335,7 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
         return Promise.reject(new Error("STREAM_UPGRADED: stream has been handed over to WebSocket"));
       }
       if (isClosed) {
-        return Promise.reject(new Error("STREAM_CLOSED: transport has been closed"));
+        return Promise.reject(new TunnelError("STREAM_CLOSED", "transport has been closed"));
       }
       return fn();
     };
@@ -368,7 +380,7 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
         });
       const onAbort = () => fail(new Error("HTTP_ABORTED: request aborted; tunnel stream closed"));
       const timer = setTimeout(
-        () => fail(new Error(`HTTP_TIMEOUT: no complete response within ${timeoutMs}ms; tunnel stream closed`)),
+        () => fail(new TunnelError("HTTP_TIMEOUT", `no complete response within ${timeoutMs}ms; tunnel stream closed`)),
         timeoutMs,
       );
       signal?.addEventListener("abort", onAbort, { once: true });
@@ -672,7 +684,7 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
 
     const { status, headers: resHeaders } = await parseHeaders();
     if (status !== 101) {
-      throw new Error(`WEBSOCKET_UPGRADE_FAILED: server returned status ${status}`);
+      throw new TunnelError("WEBSOCKET_UPGRADE_FAILED", `server returned status ${status}`, status);
     }
 
     const acceptExpectedRaw = new TextEncoder().encode(secWebSocketKey + WS_GUID);
@@ -1157,7 +1169,7 @@ export async function openAccountTunnel(
     timeoutId = setTimeout(() => {
       if (!handshakeComplete) {
         ws.close();
-        reject(new Error("HANDSHAKE_TIMEOUT: handshake timed out after 10000ms"));
+        reject(new TunnelError("HANDSHAKE_TIMEOUT", "handshake timed out after 10000ms"));
       }
     }, HANDSHAKE_TIMEOUT_MS);
 
@@ -1257,7 +1269,7 @@ export async function openAccountTunnel(
         reject(
           refusal
             ? new AttachTunnelRefusedError(refusal)
-            : new Error("PREMATURE_CLOSE: socket closed before handshake completed"),
+            : new TunnelError("PREMATURE_CLOSE", "socket closed before handshake completed"),
         );
         return;
       }
@@ -1271,7 +1283,7 @@ export async function openAccountTunnel(
     },
     async write(plaintext: Uint8Array): Promise<void> {
       if (isClosed) {
-        throw new Error("STREAM_CLOSED: cannot write to closed stream");
+        throw new TunnelError("STREAM_CLOSED", "cannot write to closed stream");
       }
       if (plaintext.length === 0) return;
 

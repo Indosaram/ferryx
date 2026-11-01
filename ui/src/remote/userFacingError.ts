@@ -69,7 +69,7 @@ export function userFacingCode(error: unknown): string | null {
   const code = readCode(error);
   if (code) {
     if (CODE_COPY[code]) return code;
-    if (code.endsWith("_CLOSED") || code.includes("STREAM")) return "STREAM_CLOSED";
+    if (code.endsWith("_CLOSED") || code.endsWith("_CLOSE") || code.includes("STREAM")) return "STREAM_CLOSED";
     if (code.includes("TIMEOUT")) return "TIMEOUT";
     if (code.includes("OFFLINE")) return "MACHINE_OFFLINE";
     if (code.includes("EPOCH")) return "EPOCH_CHANGED";

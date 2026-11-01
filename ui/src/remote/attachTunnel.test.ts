@@ -6,6 +6,7 @@ import {
   openAccountTunnel,
   attachTunnelRefusalCode,
   AttachTunnelRefusedError,
+  TunnelError,
   WS_OPEN,
   WS_CLOSED,
   MAX_TUNNEL_WS_MESSAGE_BYTES,
@@ -1207,6 +1208,15 @@ describe("attachTunnel closed-state reporting", () => {
     expect(transport.isClosed).toBe(false);
     transport.close();
     expect(transport.isClosed).toBe(true);
+  });
+
+  it("rejects requests on a closed transport with a structured STREAM_CLOSED code", async () => {
+    const transport = createTunnelTransport(new ScriptedByteStream());
+    transport.close();
+    const error = await transport.fetchLike("/api/v1/sessions").then(() => null, (err: unknown) => err);
+    expect(error).toBeInstanceOf(TunnelError);
+    expect(error).toMatchObject({ code: "STREAM_CLOSED" });
+    expect((error as Error).message).toMatch(/^STREAM_CLOSED: /);
   });
 });
 
