@@ -33,6 +33,24 @@ const REGISTER_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 /// Upper bound on one whole control connect: TCP, TLS, WebSocket upgrade and the signed
 /// challenge exchange. A blackholed primary must give way to `fallback_urls` quickly.
 const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Matches the relay's `TRANSFER_TIMEOUT`: a control write that cannot complete in this
+/// long means the relay stopped reading, and the session is treated as failed.
+const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Sends one control frame, bounded by [`CONTROL_WRITE_TIMEOUT`]. Expiry is an error so a
+/// relay that stops reading cannot stall every notice, ACK and attach reply behind it.
+async fn send_control<S>(write: &mut S, message: Message) -> anyhow::Result<()>
+where
+    S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    match tokio::time::timeout(CONTROL_WRITE_TIMEOUT, write.send(message)).await {
+        Ok(result) => result.map_err(anyhow::Error::from),
+        Err(_) => Err(anyhow::anyhow!(
+            "relay control write timed out after {}s",
+            CONTROL_WRITE_TIMEOUT.as_secs()
+        )),
+    }
+}
 
 pub struct RegisterPairingPinRequest {
     pub registration: RegisterPairingPin,
@@ -689,7 +707,7 @@ impl RelayClient {
         loop {
             let message = tokio::select! {
                 _ = ping_interval.tick() => {
-                    if let Err(err) = write.send(Message::Ping(Vec::new().into())).await {
+                    if let Err(err) = send_control(&mut write, Message::Ping(Vec::new().into())).await {
                         tracing::warn!("relay control ping failed: {err}");
                         break;
                     }
@@ -699,7 +717,7 @@ impl RelayClient {
                     if let Some(request) = request {
                         if request.ack.is_closed() { continue; }
                         let payload = serde_json::json!({"type": "AllocateSession", "opaque": request.opaque});
-                        if let Err(err) = write.send(Message::Text(payload.to_string().into())).await {
+                        if let Err(err) = send_control(&mut write, Message::Text(payload.to_string().into())).await {
                             tracing::warn!("relay attach allocation failed: {err}");
                             break;
                         }
@@ -710,7 +728,7 @@ impl RelayClient {
                 registration = registrations.recv(), if pending.is_none() => {
                     if let Some(registration) = registration {
                         if registration.ack.is_closed() { continue; }
-                        write.send(Message::Text(serde_json::to_string(&registration.registration)?.into())).await?;
+                        send_control(&mut write, Message::Text(serde_json::to_string(&registration.registration)?.into())).await?;
                         pending = Some(registration);
                     }
                     continue;
@@ -779,7 +797,7 @@ impl RelayClient {
                                 }
                             };
                             let encoded = serde_json::to_string(&ack)?;
-                            write.send(Message::Text(encoded.into())).await?;
+                            send_control(&mut write, Message::Text(encoded.into())).await?;
                         }
                         continue;
                     }
@@ -811,7 +829,7 @@ impl RelayClient {
                     }
                 }
                 Some(Ok(Message::Ping(payload))) => {
-                    write.send(Message::Pong(payload)).await?;
+                    send_control(&mut write, Message::Pong(payload)).await?;
                 }
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Ok(_)) => {
@@ -1264,6 +1282,23 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("timed out"), "{error}");
         drop(listener);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_control_write_the_relay_never_reads_fails_instead_of_hanging() {
+        // A sink that accepts the frame but never finishes flushing it, like a relay whose
+        // TCP window stays open while it stops reading.
+        let mut stalled = std::pin::pin!(futures_util::sink::unfold((), |(), _message: Message| {
+            futures_util::future::pending::<Result<(), tokio_tungstenite::tungstenite::Error>>()
+        }));
+        let error = tokio::time::timeout(
+            CONTROL_WRITE_TIMEOUT * 2,
+            send_control(&mut stalled, Message::Ping(Vec::new().into())),
+        )
+        .await
+        .expect("the write must give up on its own")
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error}");
     }
 
     #[tokio::test]
