@@ -452,6 +452,7 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
         Some("cron") => return hub_cron_cli(&args[3.min(args.len())..]),
         Some("lease") => return hub_lease_cli(&args[3.min(args.len())..]),
         Some("move-here") => return hub_move_here_cli(&args[3.min(args.len())..]),
+        Some("adopt-archived") => return hub_adopt_archived_cli(&args[3.min(args.len())..]),
         Some("migrate") => {}
         _ => {
             eprintln!("usage: ferryx hub migrate [--from-omo <db>] [--cwd <dir>] [--imported-from <db>] [--dry-run]");
@@ -463,6 +464,7 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
             eprintln!("       ferryx hub cron list | ferryx hub cron model <job-id> <provider/model | --clear> | ferryx hub cron approve-rerun <problem-id>");
             eprintln!("       ferryx hub lease reset-capability");
             eprintln!("       ferryx hub move-here [--force [--confirm]]");
+            eprintln!("       ferryx hub adopt-archived [--goal <id> | --all]");
             return 2;
         }
     }
@@ -1377,7 +1379,7 @@ fn checkpoint_status_fields(
 }
 
 /// Open goals of this machine's archived supervisor. Filled by the adoption code.
-fn adoptable_goals() -> Option<Vec<ferryx_hub::control::AdoptableGoal>> {
+fn status_adoptable_goals() -> Option<Vec<ferryx_hub::control::AdoptableGoal>> {
     None
 }
 
@@ -1422,7 +1424,7 @@ fn lease_status_with(
         checkpoint_id,
         checkpoint_age,
         promotion_block_reason,
-        adoptable: adoptable_goals(),
+        adoptable: status_adoptable_goals(),
         observe_dropped: observe_dropped(),
         ..LiveLease::default()
     };
@@ -1980,6 +1982,7 @@ async fn spawn_lease_client(
     };
     // A handover successor renews the lease its predecessor handed over at commit (same
     // machine id and fence) instead of acquiring a new one; a rebind finds it already taken.
+    let own_machine_id = machine_id.clone();
     let config = lease_client_config(machine_id, account, &handover_manager);
     // One Arc for the switch and the stop signal: `stand_down_now` sends on the watch the
     // switch drives (clones of a watch sender share its channel, so `follow_relay`'s too).
@@ -1996,11 +1999,134 @@ async fn spawn_lease_client(
     crate::agent_control::fence::install_source(Some(source));
     // A move drives this client; a rebound client replaces the previous client's handle.
     *LEASE_HANDLE.write().unwrap_or_else(|e| e.into_inner()) = Some(handle.clone());
+    let roles = handle.subscribe();
     let gate: Arc<dyn LeaseGate> = Arc::new(handle);
     // The hub crate's holder predicate (chat sends, goal settles) follows this client; a
     // rebound client replaces the previous client's gate.
     install_holder_gate(Some(Arc::clone(&gate)));
+    let archiving = tokio::spawn(archive_on_first_standby(roles, own_machine_id));
+    HUB_TASKS.track(&archiving);
     (gate, task)
+}
+
+/// The hub directory: the directory of the hub database this daemon opens (the open hub's,
+/// else the configured one before it opened).
+fn daemon_hub_dir() -> std::path::PathBuf {
+    let database = match supervisor_launch() {
+        Some(launch) => launch.config.database_path.clone(),
+        None => HubConfig::load().ok().and_then(|config| config.database_path),
+    }
+    .unwrap_or_else(ferryx_hub::hub::default_database_path);
+    database.parent().map(std::path::Path::to_path_buf).unwrap_or_default()
+}
+
+/// First-rollout adoption (plan todo 13): the first time this daemon learns another machine
+/// holds the supervisor lease, it archives its own hub database once as
+/// `hub.sqlite.pre-lease-<ts>` (a copy; nothing is deleted), so its open goals become
+/// adoptable into the holder by an owner action. Later standbys are no-ops.
+async fn archive_on_first_standby(
+    mut roles: tokio::sync::watch::Receiver<crate::daemon::supervisor_lease_role::Role>,
+    own_machine_id: String,
+) {
+    use crate::daemon::supervisor_lease_role::Role;
+    loop {
+        let other_holder = matches!(
+            &*roles.borrow_and_update(),
+            Role::Standby { holder_machine_id: Some(holder), .. } if *holder != own_machine_id
+        );
+        if other_holder {
+            let dir = daemon_hub_dir();
+            match tokio::task::spawn_blocking(move || {
+                ferryx_hub::adoption::archive_before_replace(&dir, unix_now() as i64)
+            })
+            .await
+            {
+                Ok(Ok(Some(archive))) => {
+                    tracing::info!(archive = %archive.display(), "standby for another holder: hub database archived; its open goals are adoptable");
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "the hub database was not archived on standby"),
+                Err(error) => tracing::warn!(%error, "the hub database archive task failed"),
+            }
+            return;
+        }
+        if roles.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// This machine's name in "Adoptable from <machine>": its account machine id, or `local`.
+fn own_machine_label() -> String {
+    crate::account::enroll_client::load_enrollment_record()
+        .map(|record| record.machine_record_id)
+        .unwrap_or_else(|| "local".to_owned())
+}
+
+/// Open goals of this machine's archived hub not yet adopted into the holder, for the status
+/// snapshot's `adoptable` field and the standby UI ("Adoptable from <fromMachine>"). Empty
+/// when this hub was never archived; a read failure is logged and reported as empty.
+pub async fn adoptable_goals() -> Vec<ferryx_hub::adoption::AdoptableGoal> {
+    let from = crate::ipc::run_blocking(|| Ok(own_machine_label()))
+        .await
+        .unwrap_or_else(|_| "local".to_owned());
+    match ferryx_hub::adoption::adoptable_goals(&daemon_hub_dir(), &from).await {
+        Ok(goals) => goals,
+        Err(error) => {
+            tracing::warn!(%error, "adoptable archived goals could not be read");
+            Vec::new()
+        }
+    }
+}
+
+/// The owner's Adopt action (`ferryx hub adopt-archived`, the desktop/phone button): sends
+/// the selected archived goals to the holder through this daemon's `SupervisorRequestV1`
+/// (a standby forwards it to the holder over the paired channel) and records each adopted one
+/// in `adopted-goals.json`. `goal_id` `None` adopts every goal not adopted yet.
+pub async fn adopt_archived(
+    goal_id: Option<String>,
+) -> Result<Vec<ferryx_hub::adoption::AdoptReport>, ferryx_hub::supervisor::request::RequestFailure> {
+    use ferryx_hub::adoption::AdoptSelection;
+    use ferryx_hub::supervisor::request::RequestFailure;
+    let selection = goal_id.map_or(AdoptSelection::All, AdoptSelection::Goal);
+    ferryx_hub::adoption::adopt_archived(&daemon_hub_dir(), &selection, |envelope| {
+        forward_to_daemon(envelope, false)
+    })
+    .await
+    .map_err(|error| RequestFailure::new(error.code(), error.to_string()))
+}
+
+/// `ferryx hub adopt-archived [--goal <id> | --all]`.
+fn hub_adopt_archived_cli(args: &[String]) -> i32 {
+    let goal_id = match args {
+        [] => None,
+        [flag] if flag == "--all" => None,
+        [flag, goal] if flag == "--goal" => Some(goal.clone()),
+        _ => {
+            eprintln!("usage: ferryx hub adopt-archived [--goal <id> | --all]");
+            return 2;
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("runtime: {error}");
+            return 1;
+        }
+    };
+    runtime.block_on(async move {
+        match adopt_archived(goal_id).await {
+            Ok(reports) => {
+                let failed = reports.iter().any(|report| !report.adopted);
+                println!("{}", json!({ "adopted": reports }));
+                i32::from(failed)
+            }
+            Err(failure) => {
+                eprintln!("{}", failure.to_json());
+                1
+            }
+        }
+    })
 }
 
 /// Bumped each time a relay client is published (the gateway's start, `replace_relay`).
@@ -4142,12 +4268,24 @@ impl ferryx_hub::mcp::OwnerRoute for DaemonOwnerRoute {
         &self,
         envelope: Value,
     ) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+        forward_to_daemon(envelope, true).await
+    }
+}
+
+/// Sends one supervisor request envelope to this machine's daemon (`SupervisorRequestV1` as
+/// the owner's CLI, `mcp` when `ferryx-cli mcp` forwards it), under the daemon's pane peer
+/// check. On standby the daemon forwards it to the holder.
+async fn forward_to_daemon(
+    envelope: Value,
+    mcp: bool,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    {
         use crate::daemon::protocol::{DaemonRequest, DaemonResponse};
         use ferryx_hub::supervisor::request::RequestFailure;
         let request = DaemonRequest::SupervisorRequestV1 {
             envelope,
             cli: true,
-            mcp: true,
+            mcp,
         };
         let exchange = crate::cli::supervisor_goal::exchange_once(
             SUPERVISOR_REQUEST_CAPABILITY,

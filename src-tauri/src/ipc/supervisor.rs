@@ -111,6 +111,29 @@ pub async fn cmd_supervisor_request(
     )
 }
 
+/// The owner's Adopt action on this machine's archived goals (plan todo 13): `goalId` adopts
+/// one, none adopts every goal not adopted yet. Each goal goes to the lease holder as a
+/// `submit` keyed `archived:<supervisor>:<goal>`, so a repeated Adopt is idempotent.
+#[tauri::command]
+pub async fn cmd_supervisor_adopt_archived(goal_id: Option<String>) -> Result<serde_json::Value, IpcError> {
+    crate::hub_runtime::adopt_archived(goal_id)
+        .await
+        .map(|reports| serde_json::json!({ "adopted": reports }))
+        .map_err(|failure| failure_with_details(failure.message.clone(), failure.code.clone(), failure.to_json()))
+}
+
+/// The open goals of this machine's archived hub that the owner can adopt.
+#[tauri::command]
+pub async fn cmd_supervisor_adoptable() -> Result<serde_json::Value, IpcError> {
+    Ok(serde_json::json!({ "adoptable": crate::hub_runtime::adoptable_goals().await }))
+}
+
+fn failure_with_details(message: String, code: String, details: serde_json::Value) -> IpcError {
+    let mut error = failure(message, Some(code));
+    error.details = Some(details);
+    error
+}
+
 fn read_from(response: DaemonResponse) -> Result<serde_json::Value, IpcError> {
     match response {
         DaemonResponse::SupervisorReadV1Ok { value } => Ok(value),

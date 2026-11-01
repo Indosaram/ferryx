@@ -5,6 +5,7 @@
 #![deny(clippy::print_stdout)]
 
 pub mod agent_control;
+pub mod adoption;
 pub mod autonomy;
 pub mod browser;
 pub mod chat;
