@@ -353,11 +353,11 @@ pub async fn await_coordinator_completion(
 #[cfg(feature = "desktop")]
 /// Production snapshot source backed by Tauri's AppHandle and webviews.
 pub struct TauriBrowserSnapshotSource<R: tauri::Runtime> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     app: AppHandle<R>,
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     _app: AppHandle<R>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     timeout: Duration,
 }
 
@@ -368,11 +368,11 @@ impl<R: tauri::Runtime> TauriBrowserSnapshotSource<R> {
     }
 
     pub fn with_timeout(app: AppHandle<R>, timeout: Duration) -> Self {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             Self { app, timeout }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = timeout;
             Self { _app: app }
@@ -413,7 +413,83 @@ impl<R: tauri::Runtime> BrowserSnapshotSource for TauriBrowserSnapshotSource<R> 
 }
 
 #[cfg(feature = "desktop")]
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+impl<R: tauri::Runtime> BrowserSnapshotSource for TauriBrowserSnapshotSource<R> {
+    fn capture_snapshot<'a>(
+        &'a self,
+        webview_label: &'a str,
+        options: SnapshotOptions,
+    ) -> Pin<Box<dyn Future<Output = Result<BrowserSnapshot, IpcError>> + Send + 'a>> {
+        Box::pin(async move {
+            crate::browser::agent::platform::windows::capture_webview_snapshot(
+                &self.app,
+                webview_label,
+                options,
+                self.timeout,
+            )
+            .await
+        })
+    }
+
+    fn take_snapshot_coordinated<'a>(
+        &'a self,
+        webview_label: &'a str,
+        options: SnapshotOptions,
+        coordinator: SnapshotCallbackCoordinator,
+    ) -> Pin<Box<dyn Future<Output = Result<BrowserSnapshot, IpcError>> + Send + 'a>> {
+        Box::pin(async move {
+            crate::browser::agent::platform::windows::capture_webview_snapshot_with_coordinator(
+                &self.app,
+                webview_label,
+                options,
+                self.timeout,
+                Some(coordinator),
+            )
+            .await
+        })
+    }
+}
+
+#[cfg(feature = "desktop")]
+#[cfg(target_os = "linux")]
+impl<R: tauri::Runtime> BrowserSnapshotSource for TauriBrowserSnapshotSource<R> {
+    fn capture_snapshot<'a>(
+        &'a self,
+        webview_label: &'a str,
+        options: SnapshotOptions,
+    ) -> Pin<Box<dyn Future<Output = Result<BrowserSnapshot, IpcError>> + Send + 'a>> {
+        Box::pin(async move {
+            crate::browser::agent::platform::linux::capture_webview_snapshot(
+                &self.app,
+                webview_label,
+                options,
+                self.timeout,
+            )
+            .await
+        })
+    }
+
+    fn take_snapshot_coordinated<'a>(
+        &'a self,
+        webview_label: &'a str,
+        options: SnapshotOptions,
+        coordinator: SnapshotCallbackCoordinator,
+    ) -> Pin<Box<dyn Future<Output = Result<BrowserSnapshot, IpcError>> + Send + 'a>> {
+        Box::pin(async move {
+            crate::browser::agent::platform::linux::capture_webview_snapshot_with_coordinator(
+                &self.app,
+                webview_label,
+                options,
+                self.timeout,
+                Some(coordinator),
+            )
+            .await
+        })
+    }
+}
+
+#[cfg(feature = "desktop")]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 impl<R: tauri::Runtime> BrowserSnapshotSource for TauriBrowserSnapshotSource<R> {
     fn is_supported(&self) -> bool {
         false
@@ -431,7 +507,7 @@ impl<R: tauri::Runtime> BrowserSnapshotSource for TauriBrowserSnapshotSource<R> 
         Box::pin(async move {
             Err(IpcError::new(
                 IpcErrorCode::Unsupported,
-                "screenshots are unavailable on this platform: native webview capture is macOS-only in this build",
+                "screenshots are unavailable on this platform: native webview capture supports macOS, Windows and Linux only",
             ))
         })
     }
@@ -654,7 +730,7 @@ impl BrowserSnapshotSource for UnsupportedSnapshotSource {
         Box::pin(async move {
             Err(IpcError::new(
                 IpcErrorCode::Unsupported,
-                "screenshots are unavailable on this platform: native webview capture is macOS-only in this build",
+                "screenshots are unavailable on this platform: native webview capture supports macOS, Windows and Linux only",
             ))
         })
     }
@@ -1163,7 +1239,7 @@ mod tests {
             .expect_err("Unsupported platform source must fail capture");
         assert_eq!(stub_error.code, IpcErrorCode::Unsupported);
         assert!(
-            stub_error.message.contains("macOS-only"),
+            stub_error.message.contains("unavailable on this platform"),
             "Unsupported capture must name the platform limitation: {}",
             stub_error.message
         );

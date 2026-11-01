@@ -1869,6 +1869,12 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         dag_watch_ssh_project,
         dag_unwatch_project,
         dag_discover_watch_roots,
+        // Browser agent consent (app chrome only; guest pages are refused).
+        crate::browser::agent::service::cmd_browser_agent_overview,
+        crate::browser::agent::service::cmd_browser_agent_resolve,
+        crate::browser::agent::service::cmd_browser_agent_revoke,
+        crate::browser::agent::service::cmd_browser_agent_reclaim,
+        crate::browser::agent::service::cmd_browser_agent_set_settings,
     ]);
     builder.invoke_handler(move |invoke: tauri::ipc::Invoke<R>| {
         if invoke.message.command() == "cmd_retry_paired_session" {

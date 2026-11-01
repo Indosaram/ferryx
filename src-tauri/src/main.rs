@@ -75,7 +75,11 @@ fn main() {
         }
     }
     if args.get(1).is_some_and(|arg| arg == "browser") {
-        match parse_browser_cli(&args).and_then(run_browser_cli) {
+        let outcome = match ferryx_lib::cli::parse_browser_controllers_cli(&args) {
+            Some(parsed) => parsed.and_then(ferryx_lib::cli::run_browser_controllers_cli),
+            None => parse_browser_cli(&args).and_then(run_browser_cli),
+        };
+        match outcome {
             Ok(()) => return,
             Err(error) => {
                 print_browser_cli_error("BROWSER_CLI_INVALID_OR_UNAVAILABLE", error);

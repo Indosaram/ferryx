@@ -38,6 +38,10 @@ pub enum Command {
     Back { tab: String },
     Forward { tab: String },
     Reload { tab: String, ignore_cache: bool },
+    /// Sends one Chrome DevTools Protocol call to the tab's browser through CEF's in-process
+    /// DevTools message API (no TCP port). `params` is a JSON object on one line; the answer
+    /// is [`Event::Devtools`] with the same `id`.
+    Devtools { tab: String, id: u32, method: String, params: String },
 }
 
 /// Engine to Ferryx.
@@ -53,6 +57,9 @@ pub enum Event {
     Loading { tab: String, loading: bool, can_go_back: bool, can_go_forward: bool },
     /// The tab's browser closed inside the engine (the page, a shortcut, a crash).
     Closed { tab: String },
+    /// The answer to [`Command::Devtools`]: `result` is the CDP result object on success, the
+    /// CDP error object (or `{"message":...}` when the call could not be sent) otherwise.
+    Devtools { tab: String, id: u32, ok: bool, result: String },
 }
 
 fn one_line(text: &str) -> String {
@@ -122,6 +129,9 @@ impl Command {
             Self::Back { tab } => format!("back {tab}"),
             Self::Forward { tab } => format!("forward {tab}"),
             Self::Reload { tab, ignore_cache } => format!("reload {tab} {}", flag(*ignore_cache)),
+            Self::Devtools { tab, id, method, params } => {
+                format!("devtools {tab} {id} {method} {}", one_line(params))
+            }
         }
     }
 
@@ -160,6 +170,15 @@ impl Command {
                 let (parts, _) = fields(rest, 2)?;
                 Some(Self::Reload { tab: parts[0].to_string(), ignore_cache: parse_flag(parts[1])? })
             }
+            "devtools" => {
+                let (parts, params) = fields(rest, 3)?;
+                Some(Self::Devtools {
+                    tab: parts[0].to_string(),
+                    id: parts[1].parse().ok()?,
+                    method: parts[2].to_string(),
+                    params: if params.is_empty() { "{}".to_string() } else { params.to_string() },
+                })
+            }
             _ => None,
         }
     }
@@ -179,6 +198,9 @@ impl Event {
                 flag(*can_go_forward)
             ),
             Self::Closed { tab } => format!("closed {tab}"),
+            Self::Devtools { tab, id, ok, result } => {
+                format!("devtools {tab} {id} {} {}", flag(*ok), one_line(result))
+            }
         };
         format!("{EVENT_PREFIX}{body}")
     }
@@ -218,6 +240,15 @@ impl Event {
                 })
             }
             "closed" => Some(Self::Closed { tab: fields(rest, 1)?.0[0].to_string() }),
+            "devtools" => {
+                let (parts, result) = fields(rest, 3)?;
+                Some(Self::Devtools {
+                    tab: parts[0].to_string(),
+                    id: parts[1].parse().ok()?,
+                    ok: parse_flag(parts[2])?,
+                    result: result.to_string(),
+                })
+            }
             _ => None,
         }
     }
@@ -252,6 +283,12 @@ mod tests {
             Command::Forward { tab: tab.clone() },
             Command::Reload { tab: tab.clone(), ignore_cache: true },
             Command::Raise,
+            Command::Devtools {
+                tab: tab.clone(),
+                id: 42,
+                method: "Runtime.evaluate".into(),
+                params: r#"{"expression":"document.title + ' x'","returnByValue":true}"#.into(),
+            },
         ];
         for command in commands {
             assert_eq!(Command::parse(&command.to_line()), Some(command));
@@ -267,6 +304,13 @@ mod tests {
             Event::Address { tab: tab.clone(), url: "https://a.test/".into() },
             Event::Title { tab: tab.clone(), title: "Inbox (3) - mail".into() },
             Event::Loading { tab: tab.clone(), loading: false, can_go_back: true, can_go_forward: false },
+            Event::Devtools {
+                tab: tab.clone(),
+                id: 9,
+                ok: true,
+                result: r#"{"result":{"type":"string","value":"a b"}}"#.into(),
+            },
+            Event::Devtools { tab: tab.clone(), id: 10, ok: false, result: r#"{"message":"no browser"}"#.into() },
             Event::Closed { tab },
         ];
         for event in events {
@@ -304,5 +348,20 @@ mod tests {
             Some(Event::Closed { tab: "b1".into() })
         );
         assert_eq!(Command::parse("hide b1\r"), Some(Command::Hide { tab: "b1".into() }));
+    }
+
+    #[test]
+    fn a_devtools_call_without_params_gets_an_empty_object_and_a_bad_id_is_refused() {
+        assert_eq!(
+            Command::parse("devtools b1 3 Page.captureScreenshot"),
+            Some(Command::Devtools {
+                tab: "b1".into(),
+                id: 3,
+                method: "Page.captureScreenshot".into(),
+                params: "{}".into(),
+            })
+        );
+        assert_eq!(Command::parse("devtools b1 x Page.enable {}"), None);
+        assert_eq!(Event::parse("@ferryx devtools b1 3 2 {}"), None);
     }
 }

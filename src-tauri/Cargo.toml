@@ -124,7 +124,7 @@ tokio = { version = "1.53", features = ["full"] }
 tokio-util = "0.7"
 portable-pty = { version = "0.9", path = "vendor/portable-pty" }
 base64 = "0.23"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 bytes = "1.12"
 libc = "0.2"
 # kimi keys its session folders by md5(cwd); the history reader re-derives it to recover the cwd.
@@ -298,7 +298,12 @@ windows-sys = { version = "0.59", default-features = false, features = [
 # Trusted browser bridge (src/browser/bridge/windows.rs). Same versions wry 0.55 already
 # pulls in (Cargo.lock: webview2-com 0.38.2, windows 0.61.3), so no second copy is built.
 webview2-com = "0.38"
-windows = { version = "0.61", default-features = false, features = ["Win32_UI_Input_KeyboardAndMouse"] }
+windows = { version = "0.61", default-features = false, features = [
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", default-features = false, optional = true }

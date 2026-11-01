@@ -1949,6 +1949,8 @@ fn cef_event_sink<R: tauri::Runtime>(
                 adopt_cef_popup(&app, &manager, profile, popup, url);
                 return;
             }
+            // DevTools answers go to their caller in `cef_engine`, never to the sink.
+            Event::Devtools { .. } => return,
         };
         if let Ok(state) = update {
             emit_session_state(&app, &state);
@@ -2501,6 +2503,8 @@ pub async fn cmd_browser_navigate<R: tauri::Runtime>(
     url: String,
 ) -> Result<(), IpcError> {
     let state = manager.get_state(&browser_id)?;
+    // The desktop user navigating a tab takes it back from any agent holding it.
+    crate::browser::agent::service::desktop_touched(&browser_id);
     // A Chromium-engine tab has no Tauri webview; its engine process takes the navigation.
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     let has_view = crate::browser::cef_engine::is_cef_tab(&browser_id)
@@ -3277,10 +3281,14 @@ pub async fn browser_automation_snapshot<R: tauri::Runtime>(
     browser_id: String,
 ) -> Result<BrowserAutomationSnapshot, IpcError> {
     let state = manager.get_state(&browser_id)?;
-    let webview = app
-        .get_webview(&state.webview_label)
-        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
-    let result = eval_webview(webview, AUTOMATION_SNAPSHOT_SCRIPT.to_string()).await?;
+    // Both engines: the Chromium engine over its DevTools API, the system webview directly.
+    let result = crate::browser::agent::page::eval(
+        &app,
+        manager,
+        &browser_id,
+        AUTOMATION_SNAPSHOT_SCRIPT.to_string(),
+    )
+    .await?;
     let snapshot_json: String = serde_json::from_str(&result).map_err(|error| {
         BrowserError::AutomationFailed(format!("invalid snapshot callback result: {error}"))
     })?;
@@ -3301,15 +3309,16 @@ pub async fn browser_automation_snapshot<R: tauri::Runtime>(
     Ok(BrowserAutomationSnapshot {
         browser_id,
         generation: state.generation,
-        url: snapshot.url,
-        title: snapshot.title,
+        // What an agent observes never carries credentials the page shows or the URL holds.
+        url: crate::browser::agent::redact::redact_url(&snapshot.url),
+        title: crate::browser::agent::redact::redact_text(&snapshot.title).into_owned(),
         elements: snapshot
             .elements
             .into_iter()
             .map(|element| BrowserAutomationElement {
                 reference: element.reference,
                 role: element.role,
-                name: element.name,
+                name: crate::browser::agent::redact::redact_text(&element.name).into_owned(),
                 tag_name: element.tag_name,
             })
             .collect(),
@@ -3378,18 +3387,33 @@ pub async fn browser_automation_act<R: tauri::Runtime>(
         | BrowserAutomationAction::Type { reference: None, .. }
         | BrowserAutomationAction::Keypress { .. } => {
             manager.assert_automation_generation(&request.browser_id, request.generation)?;
+            // A Chromium engine tab has trusted key input on every platform.
+            let engine_tab = crate::browser::agent::page::is_engine_tab(&request.browser_id);
             #[cfg(target_os = "windows")]
-            if matches!(request.action, BrowserAutomationAction::Keypress { .. }) {
+            if !engine_tab && matches!(request.action, BrowserAutomationAction::Keypress { .. }) {
                 windows_keypress_capability()?;
             }
             #[cfg(target_os = "linux")]
-            if matches!(request.action, BrowserAutomationAction::Keypress { .. }) {
+            if !engine_tab && matches!(request.action, BrowserAutomationAction::Keypress { .. }) {
                 linux_keypress_capability()?;
             }
+            #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+            let _ = engine_tab;
             None
         }
     };
     let state = manager.get_state(&request.browser_id)?;
+    // Chromium engine tabs: trusted input over the engine's DevTools API (clicks, keys,
+    // typing); anything else runs the same DOM script as the system webview.
+    if crate::browser::agent::page::is_engine_tab(&request.browser_id) {
+        if !crate::browser::agent::page::trusted_act(&request.browser_id, &request.action, selector.as_deref())
+            .await?
+        {
+            let script = automation_script(&request.action, selector.as_deref())?;
+            crate::browser::agent::page::eval(&app, manager, &request.browser_id, script).await?;
+        }
+        return Ok(());
+    }
     let webview = app
         .get_webview(&state.webview_label)
         .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
@@ -3678,6 +3702,7 @@ pub async fn close_browser_session<R: tauri::Runtime>(
     let session = manager
         .remove_session(browser_id)
         .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+    crate::browser::agent::service::tab_closed(browser_id);
     crate::browser::bridge::forget_webview(app, &session.webview_label);
     CREATED_SESSION_IDS.lock().retain(|id| id != browser_id);
     #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -5160,6 +5185,11 @@ pub async fn eval_browser_session<R: tauri::Runtime>(
     browser_id: &str,
     script: &str,
 ) -> Result<(Option<String>, bool), IpcError> {
+    if crate::browser::agent::page::is_engine_tab(browser_id) {
+        let raw = crate::browser::agent::page::eval(app, manager, browser_id, script.to_string()).await?;
+        let (truncated_str, truncated) = truncate_eval_result(raw);
+        return Ok(((truncated_str != "undefined").then_some(truncated_str), truncated));
+    }
     let state = manager.get_state(browser_id)?;
     let webview = app
         .get_webview(&state.webview_label)
@@ -5208,6 +5238,9 @@ pub async fn wait_browser_session_with_timeout<R: tauri::Runtime>(
     condition: crate::browser::model::BrowserWaitCondition,
     timeout: Option<std::time::Duration>,
 ) -> Result<(), IpcError> {
+    if crate::browser::agent::page::is_engine_tab(browser_id) {
+        return wait_engine_tab(app, manager, browser_id, &condition, timeout).await;
+    }
     let state = manager.get_state(browser_id)?;
     let webview = app
         .get_webview(&state.webview_label)
@@ -5280,8 +5313,44 @@ pub async fn screenshot_browser_session<R: tauri::Runtime>(
     browser_id: &str,
     out_path: &str,
 ) -> Result<String, IpcError> {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if crate::browser::agent::page::is_engine_tab(browser_id) {
+        let target = crate::browser::screenshot::resolve_screenshot_path(out_path)?;
+        let source = crate::browser::agent::cef_backend::EngineSnapshotSource { browser_id };
+        return crate::browser::screenshot::take_browser_screenshot_with_source(&source, browser_id, target)
+            .await;
+    }
     let state = manager.get_state(browser_id)?;
     crate::browser::screenshot::take_browser_screenshot(app, &state.webview_label, out_path).await
+}
+
+/// `wait` for a Chromium engine tab: the same condition scripts, evaluated over the engine's
+/// DevTools API until true or the deadline. Like the webview path it re-evaluates on a short
+/// interval, because a page condition has no event to subscribe to.
+async fn wait_engine_tab<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &BrowserManager,
+    browser_id: &str,
+    condition: &crate::browser::model::BrowserWaitCondition,
+    timeout: Option<std::time::Duration>,
+) -> Result<(), IpcError> {
+    let script = build_wait_condition_script(condition);
+    let deadline = wait_deadline(tokio::time::Instant::now(), timeout);
+    let interval = std::time::Duration::from_millis(250);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(IpcError::new(IpcErrorCode::BrowserWaitTimeout, "browser wait condition timed out"));
+        }
+        match crate::browser::agent::page::eval(app, manager, browser_id, script.clone()).await {
+            Ok(raw) if parse_eval_boolean(&raw) => return Ok(()),
+            Ok(_) => {}
+            // A closed tab ends the wait at once; a navigating page is retried.
+            Err(BrowserError::NotFound(id)) => return Err(BrowserError::NotFound(id).into()),
+            Err(_) => {}
+        }
+        tokio::time::sleep(interval.min(deadline.saturating_duration_since(tokio::time::Instant::now()))).await;
+    }
 }
 
 pub async fn highlight_browser_session<R: tauri::Runtime>(

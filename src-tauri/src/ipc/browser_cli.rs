@@ -1370,11 +1370,11 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
         }
         RemoteBrowserOperation::Snapshot { browser_id } => {
             let state = manager.get_state(&browser_id)?;
-            let webview = app
-                .get_webview(&state.webview_label)
-                .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
-            let result = crate::ipc::browser::eval_webview(
-                webview,
+            // Both engines: the Chromium engine over its DevTools API, the webview directly.
+            let result = crate::browser::agent::page::eval(
+                app,
+                manager,
+                &browser_id,
                 crate::ipc::browser::AUTOMATION_SNAPSHOT_SCRIPT.to_string(),
             )
             .await?;
@@ -1440,6 +1440,32 @@ pub struct BrowserCliEnvelope {
     pub token: String,
     #[serde(flatten)]
     pub request: BrowserCliRequest,
+}
+
+/// A paired controller's credential, sent beside the transport token
+/// (`ferryx browser controllers pair`). Never logged or echoed.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControllerAuth {
+    pub id: String,
+    pub secret: String,
+}
+
+impl std::fmt::Debug for ControllerAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControllerAuth").field("id", &self.id).field("secret", &"[redacted]").finish()
+    }
+}
+
+/// Optional fields of a CLI envelope read beside the request: the controller credential and
+/// the controller management sub-protocol (pairing, grants), which is not a browser request.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserCliEnvelopeExtras {
+    #[serde(default)]
+    pub controller_auth: Option<ControllerAuth>,
+    #[serde(default)]
+    pub agent: Option<crate::browser::agent::wire::AgentRequest>,
 }
 
 pub const BROWSER_CLI_UNAUTHORIZED: &str = "BROWSER_CLI_UNAUTHORIZED";
@@ -2109,12 +2135,42 @@ where
             // Authorization is decided before the command is interpreted, so an
             // unauthorized peer learns nothing about which commands exist or
             // whether its arguments named a real browser session.
+            let extras = serde_json::from_str::<serde_json::Value>(line.trim())
+                .ok()
+                .filter(|value| {
+                    value
+                        .get("token")
+                        .and_then(|token| token.as_str())
+                        .is_some_and(|token| tokens_match(expected_token.as_str(), token))
+                })
+                .map(|value| serde_json::from_value::<BrowserCliEnvelopeExtras>(value).unwrap_or_default());
+            if let Some(agent) = extras.as_ref().and_then(|extras| extras.agent.clone()) {
+                let auth = extras.as_ref().and_then(|extras| extras.controller_auth.clone());
+                let response = crate::browser::agent::wire::execute(&app, auth.as_ref(), agent).await;
+                let mut text = serde_json::to_string(&response)
+                    .map_err(|error| BrowserError::Internal(error.to_string()))?;
+                text.push('\n');
+                writer.write_all(text.as_bytes()).await.map_err(|error| BrowserError::Internal(error.to_string()))?;
+                writer.flush().await.map_err(|error| BrowserError::Internal(error.to_string()))?;
+                return Ok(());
+            }
             match serde_json::from_str::<BrowserCliEnvelope>(line.trim()) {
                 Ok(envelope) if tokens_match(expected_token.as_str(), &envelope.token) => {
-                    if matches!(envelope.request, BrowserCliRequest::RemoteAttach { .. }) {
-                        is_remote_attach = true;
+                    let auth = extras.and_then(|extras| extras.controller_auth);
+                    match crate::browser::agent::service::admit_cli(&manager, auth.as_ref(), &envelope.request).await {
+                        crate::browser::agent::service::Admission::Refused(error) => error_response(error),
+                        crate::browser::agent::service::Admission::Allowed(controller) => {
+                            if matches!(envelope.request, BrowserCliRequest::RemoteAttach { .. }) {
+                                is_remote_attach = true;
+                            }
+                            match execute_request(&app, &manager, envelope.request).await {
+                                BrowserCliResponse::List { sessions } => BrowserCliResponse::List {
+                                    sessions: crate::browser::agent::service::filter_sessions(controller, sessions),
+                                },
+                                other => other,
+                            }
+                        }
                     }
-                    execute_request(&app, &manager, envelope.request).await
                 }
                 Ok(_) => unauthorized(),
                 Err(error) => {
@@ -2960,6 +3016,7 @@ async fn execute_request<R: tauri::Runtime>(
     }
 }
 
+#[cfg(test)]
 async fn send_over_stream<S>(
     stream: S,
     request: BrowserCliRequest,
@@ -2968,10 +3025,57 @@ async fn send_over_stream<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    send_over_stream_as(stream, request, token, None).await
+}
+
+/// Sends a request with the paired controller credential beside the token (never in the
+/// request itself).
+async fn send_over_stream_as<S>(
+    stream: S,
+    request: BrowserCliRequest,
+    token: String,
+    auth: Option<ControllerAuth>,
+) -> Result<BrowserCliResponse, BrowserError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut envelope = serde_json::to_value(&BrowserCliEnvelope { token, request })
+        .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
+    if let Some(auth) = auth {
+        envelope["controllerAuth"] = serde_json::to_value(auth)
+            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
+    }
+    let response = send_envelope_over_stream(stream, envelope).await?;
+    serde_json::from_str(response.trim())
+        .map_err(|error| BrowserError::AutomationFailed(error.to_string()))
+}
+
+/// The controller the CLI acts as: `--controller`/`FERRYX_BROWSER_CONTROLLER`, else the
+/// default selection; none until the user pairs one.
+async fn cli_controller_auth() -> Result<Option<ControllerAuth>, BrowserError> {
+    let explicit = CLI_CONTROLLER.lock().clone();
+    crate::ipc::run_blocking(move || {
+        let Some(dir) = crate::browser::agent::client::store_dir() else { return Ok(Ok(None)) };
+        Ok(crate::browser::agent::client::load_auth(&dir, explicit.as_deref()))
+    })
+    .await
+    .map_err(|error| BrowserError::Internal(error.to_string()))?
+    .map_err(BrowserError::CliUnavailable)
+}
+
+/// `--controller <uuid>` of the running CLI invocation.
+pub static CLI_CONTROLLER: std::sync::LazyLock<parking_lot::Mutex<Option<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Writes one JSON envelope line and reads one response line.
+async fn send_envelope_over_stream<S>(stream: S, envelope: serde_json::Value) -> Result<String, BrowserError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     use tokio::io::AsyncWriteExt;
 
     let (reader, mut writer) = tokio::io::split(stream);
-    let mut request_json = serde_json::to_string(&BrowserCliEnvelope { token, request })
+    let mut request_json = serde_json::to_string(&envelope)
         .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
     request_json.push('\n');
     writer
@@ -3003,21 +3107,74 @@ where
         Ok(Ok(RequestLine::Eof)) => String::new(),
         Ok(Ok(RequestLine::Line(line))) => line,
     };
-    serde_json::from_str(response.trim())
-        .map_err(|error| BrowserError::AutomationFailed(error.to_string()))
+    Ok(response)
+}
+
+/// Sends one controller management request (`browser controllers ...`) to the running app.
+pub async fn send_agent_request(
+    auth: Option<ControllerAuth>,
+    request: crate::browser::agent::wire::AgentRequest,
+) -> Result<crate::browser::agent::wire::AgentResponse, String> {
+    let (stream, token) = connect_browser_endpoint().await.map_err(|error| error.to_string())?;
+    let mut envelope = serde_json::json!({ "token": token, "agent": request });
+    if let Some(auth) = auth {
+        envelope["controllerAuth"] = serde_json::to_value(auth).map_err(|error| error.to_string())?;
+    }
+    let response = send_envelope_over_stream(stream, envelope).await.map_err(|error| error.to_string())?;
+    serde_json::from_str(response.trim()).map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
+async fn connect_browser_endpoint() -> Result<(tokio::net::UnixStream, String), BrowserError> {
+    let socket_path = browser_cli_socket_path();
+    let token_path = token_path_for(&socket_path);
+    let token = crate::ipc::run_blocking(move || Ok::<_, IpcError>(read_token_file(&token_path)))
+        .await
+        .map_err(|e| BrowserError::Internal(e.to_string()))??;
+    let stream = tokio::net::UnixStream::connect(&socket_path).await.map_err(|error| {
+        BrowserError::CliUnavailable(format!("Ferryx desktop app is not running: {error}"))
+    })?;
+    Ok((stream, token))
+}
+
+#[cfg(not(unix))]
+async fn connect_browser_endpoint() -> Result<(tokio::net::TcpStream, String), BrowserError> {
+    let port_path = browser_cli_socket_path();
+    let token_path = token_path_for(&port_path);
+    let port = crate::ipc::run_blocking(move || Ok::<_, IpcError>(read_port_from_file(&port_path)))
+        .await
+        .map_err(|e| BrowserError::Internal(e.to_string()))??;
+    let token = crate::ipc::run_blocking(move || Ok::<_, IpcError>(read_token_file(&token_path)))
+        .await
+        .map_err(|e| BrowserError::Internal(e.to_string()))??;
+    let stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await.map_err(|error| {
+        BrowserError::CliUnavailable(format!("Ferryx desktop app is not running: {error}"))
+    })?;
+    Ok((stream, token))
 }
 
 #[cfg(unix)]
 pub async fn send_browser_cli_request(
     request: BrowserCliRequest,
 ) -> Result<BrowserCliResponse, BrowserError> {
-    send_browser_cli_request_at_path(request, &browser_cli_socket_path()).await
+    let auth = cli_controller_auth().await?;
+    send_browser_cli_request_at_path_as(request, &browser_cli_socket_path(), auth).await
 }
 
+#[cfg(test)]
 #[cfg(unix)]
 async fn send_browser_cli_request_at_path(
     request: BrowserCliRequest,
     socket_path: &Path,
+) -> Result<BrowserCliResponse, BrowserError> {
+    send_browser_cli_request_at_path_as(request, socket_path, None).await
+}
+
+#[cfg(unix)]
+async fn send_browser_cli_request_at_path_as(
+    request: BrowserCliRequest,
+    socket_path: &Path,
+    auth: Option<ControllerAuth>,
 ) -> Result<BrowserCliResponse, BrowserError> {
     use tokio::net::UnixStream;
 
@@ -3030,20 +3187,31 @@ async fn send_browser_cli_request_at_path(
     let stream = UnixStream::connect(socket_path).await.map_err(|error| {
         BrowserError::CliUnavailable(format!("Ferryx desktop app is not running: {error}"))
     })?;
-    send_over_stream(stream, request, token).await
+    send_over_stream_as(stream, request, token, auth).await
 }
 
 #[cfg(not(unix))]
 pub async fn send_browser_cli_request(
     request: BrowserCliRequest,
 ) -> Result<BrowserCliResponse, BrowserError> {
-    send_browser_cli_request_at_path(request, &browser_cli_socket_path()).await
+    let auth = cli_controller_auth().await?;
+    send_browser_cli_request_at_path_as(request, &browser_cli_socket_path(), auth).await
 }
 
+#[cfg(test)]
 #[cfg(not(unix))]
 async fn send_browser_cli_request_at_path(
     request: BrowserCliRequest,
     port_path: &Path,
+) -> Result<BrowserCliResponse, BrowserError> {
+    send_browser_cli_request_at_path_as(request, port_path, None).await
+}
+
+#[cfg(not(unix))]
+async fn send_browser_cli_request_at_path_as(
+    request: BrowserCliRequest,
+    port_path: &Path,
+    auth: Option<ControllerAuth>,
 ) -> Result<BrowserCliResponse, BrowserError> {
     use tokio::net::TcpStream;
 
@@ -3064,7 +3232,7 @@ async fn send_browser_cli_request_at_path(
         .map_err(|error| {
             BrowserError::CliUnavailable(format!("Ferryx desktop app is not running: {error}"))
         })?;
-    send_over_stream(stream, request, token).await
+    send_over_stream_as(stream, request, token, auth).await
 }
 
 /// Maps a decoded click failure onto the IPC surface by variant only.
