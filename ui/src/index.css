@@ -125,12 +125,12 @@
   --chat-user-bubble-rgb: 22 22 22;
   --chat-foreground: #f5f5f5;
   --chat-foreground-rgb: 245 245 245;
-  --chat-foreground-secondary: #838383;
-  --chat-foreground-secondary-rgb: 131 131 131;
-  --chat-foreground-tertiary: #818181;
-  --chat-foreground-tertiary-rgb: 129 129 129;
-  --chat-border: #191919;
-  --chat-border-rgb: 25 25 25;
+  --chat-foreground-secondary: #a1a1a1;
+  --chat-foreground-secondary-rgb: 161 161 161;
+  --chat-foreground-tertiary: #858585;
+  --chat-foreground-tertiary-rgb: 133 133 133;
+  --chat-border: #363636;
+  --chat-border-rgb: 54 54 54;
   --chat-primary: #346bf1;
   --chat-primary-rgb: 52 107 241;
   --chat-primary-foreground: #ffffff;
@@ -145,11 +145,11 @@
   --chat-row-hover: rgba(255, 255, 255, 0.04);
   --chat-composer-panel: rgba(10, 10, 10, 0.92);
   --chat-composer-surface: rgba(26, 27, 27, 0.9);
-  --chat-composer-border: rgba(25, 25, 25, 0.8);
+  --chat-composer-border: #6b6b6b;
   /* Mobile chat header tokens (t3code generated-uniwind-themes.css:223 parity) */
   --chat-header: rgba(10, 10, 10, 0.97);
-  --chat-header-border: #191919;
-  --chat-header-border-rgb: 25 25 25;
+  --chat-header-border: #363636;
+  --chat-header-border-rgb: 54 54 54;
 }
 
 :root[data-theme="light"] {
@@ -168,10 +168,10 @@
   --chat-foreground-rgb: 10 10 10;
   --chat-foreground-secondary: #52525b;
   --chat-foreground-secondary-rgb: 82 82 91;
-  --chat-foreground-tertiary: #686873;
-  --chat-foreground-tertiary-rgb: 104 104 115;
-  --chat-border: #71717a;
-  --chat-border-rgb: 113 113 122;
+  --chat-foreground-tertiary: #63636d;
+  --chat-foreground-tertiary-rgb: 99 99 109;
+  --chat-border: #bdbdc3;
+  --chat-border-rgb: 189 189 195;
   --chat-primary: #1d4ed8;
   --chat-primary-rgb: 29 78 216;
   --chat-primary-foreground: #ffffff;
@@ -186,11 +186,11 @@
   --chat-row-hover: rgba(0, 0, 0, 0.04);
   --chat-composer-panel: rgba(255, 255, 255, 0.92);
   --chat-composer-surface: rgba(244, 244, 245, 0.9);
-  --chat-composer-border: rgba(113, 113, 122, 0.8);
+  --chat-composer-border: #85858e;
   /* Mobile chat header tokens */
   --chat-header: rgba(255, 255, 255, 0.97);
-  --chat-header-border: #71717a;
-  --chat-header-border-rgb: 113 113 122;
+  --chat-header-border: #bdbdc3;
+  --chat-header-border-rgb: 189 189 195;
 }
 
 html,
@@ -203,6 +203,7 @@ body,
 body {
   margin: 0;
   min-height: 100vh;
+  min-height: 100dvh;
   background: var(--background);
   color: var(--foreground);
   font-family: "Geist", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -250,6 +251,24 @@ body {
 
   .pb-safe {
     padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .pl-safe {
+    padding-left: env(safe-area-inset-left);
+  }
+
+  .pr-safe {
+    padding-right: env(safe-area-inset-right);
+  }
+
+  .px-safe {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  .px-safe-4 {
+    padding-left: max(1rem, env(safe-area-inset-left));
+    padding-right: max(1rem, env(safe-area-inset-right));
   }
 
   .pt-safe-header {
@@ -351,14 +370,23 @@ html.platform-macos [data-testid="native-terminal-pane"][data-native-terminal-pr
   --card-rgb: 20 20 20;
   --secondary: #1a1b1b;
   --secondary-rgb: 26 27 27;
-  --muted-foreground: #838383;
-  --muted-foreground-rgb: 131 131 131;
-  --border: #191919;
-  --border-rgb: 25 25 25;
+  --muted-foreground: #a1a1a1;
+  --muted-foreground-rgb: 161 161 161;
+  --border: #363636;
+  --border-rgb: 54 54 54;
   --border-alpha: 1;
-  --input: #111111;
-  --input-rgb: 17 17 17;
+  --input: #6b6b6b;
+  --input-rgb: 107 107 107;
   --input-alpha: 1;
+  --status-idle: #8a8a8a;
+  --status-idle-rgb: 138 138 138;
+}
+
+/* The remote client is a reading surface: transcript, errors and paths stay copyable even
+   though the desktop shell disables selection on body. Controls keep the shell default. */
+.remote-app-root :where(p, li, pre, code, blockquote, td, th, dd, dt, h1, h2, h3, h4, h5, h6, [role="alert"], [role="status"], [role="log"]) {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 :root[data-theme="light"] .remote-app-root {
@@ -372,17 +400,21 @@ html.platform-macos [data-testid="native-terminal-pane"][data-native-terminal-pr
   --secondary-rgb: 228 228 231;
   --muted-foreground: #52525b;
   --muted-foreground-rgb: 82 82 91;
-  --border: #71717a;
-  --border-rgb: 113 113 122;
+  --border: #bdbdc3;
+  --border-rgb: 189 189 195;
   --border-alpha: 1;
-  --input: #e4e4e7;
-  --input-rgb: 228 228 231;
+  --input: #85858e;
+  --input-rgb: 133 133 142;
   --input-alpha: 1;
 
   --status-working: #1e40af;
   --status-working-rgb: 30 64 175;
   --status-warning: #92400e;
   --status-warning-rgb: 146 64 14;
+  --status-success: #166534;
+  --status-success-rgb: 22 101 52;
+  --status-idle: #5b6472;
+  --status-idle-rgb: 91 100 114;
 }
 
 @keyframes pane-inbox-flash {
@@ -391,30 +423,28 @@ html.platform-macos [data-testid="native-terminal-pane"][data-native-terminal-pr
 }
 
 .pane-inbox-flash {
-  box-shadow: inset 0 0 0 2px rgba(253, 230, 138, 0.95), inset 0 0 18px rgba(253, 230, 138, 0.35);
+  box-shadow: inset 0 0 0 2px rgb(var(--status-warning-rgb) / 0.95), inset 0 0 18px rgb(var(--status-warning-rgb) / 0.35);
   animation: pane-inbox-flash 1400ms ease-out forwards;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .pane-inbox-flash {
-    animation-duration: 600ms;
+    animation-duration: 900ms;
+    animation-timing-function: step-end;
   }
 }
 
-@keyframes work-shimmer {
-  0% { background-position: 100% 0; }
-  100% { background-position: -100% 0; }
+@keyframes work-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.75; }
+}
+
+.work-shimmer-text {
+  color: rgb(var(--chat-foreground-secondary-rgb));
 }
 
 @media (prefers-reduced-motion: no-preference) {
   .work-shimmer-text {
-    background: linear-gradient(90deg, #838383 0%, #f5f5f5 50%, #838383 100%);
-    background-size: 200% 100%;
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-    color: transparent;
-    animation: work-shimmer 1.35s infinite linear;
+    animation: work-pulse 1.6s ease-in-out infinite;
   }
 }
-
