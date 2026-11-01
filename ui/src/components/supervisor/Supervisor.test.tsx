@@ -367,6 +367,47 @@ describe("SupervisorPanelView standby", () => {
     expect(ipc.invoke).toHaveBeenCalledWith("cmd_supervisor_adopt_archived", { goalIds: ["old-1"] });
   });
 
+  it("keeps a structured or plain refusal of the adopt command an error result, never a throw", async () => {
+    ipc.invoke.mockImplementation(async (command: string) => {
+      if (command === "cmd_supervisor_adopt_archived") {
+        throw { code: "SUPERVISOR_GOAL_NOT_ADOPTABLE", message: "goal old-1 is already adopted", details: { status: 409 } };
+      }
+      return undefined;
+    });
+    await expect(adoptArchivedGoals(["old-1"])).resolves.toEqual({
+      kind: "error", code: "SUPERVISOR_GOAL_NOT_ADOPTABLE", message: "goal old-1 is already adopted", status: 409,
+    });
+    // A daemon without the command yet rejects with a bare string.
+    ipc.invoke.mockImplementation(async (command: string) => {
+      if (command === "cmd_supervisor_adopt_archived") throw "command cmd_supervisor_adopt_archived not found";
+      return undefined;
+    });
+    await expect(adoptArchivedGoals(["old-1"])).resolves.toEqual({
+      kind: "error", code: "INTERNAL_ERROR", message: "command cmd_supervisor_adopt_archived not found", status: null,
+    });
+  });
+
+  it("shows a structured adopt refusal as a toast and re-enables Adopt", async () => {
+    ipc.invoke.mockImplementation(async (command: string) => {
+      if (command === "cmd_supervisor_adopt_archived") {
+        throw { code: "SUPERVISOR_GOAL_NOT_ADOPTABLE", message: "goal old-1 is already adopted", details: { status: 409 } };
+      }
+      return undefined;
+    });
+    const snapshot = standby({ adoptable: [{ goalId: "old-1", title: "Fix the flaky test", supervisorId: "s-old", fromMachine: "Laptop" }] });
+    render(<SupervisorPanelView snapshot={snapshot} now={now} />);
+    const adopt = screen.getByRole("button", { name: "Adopt Fix the flaky test" }) as HTMLButtonElement;
+    const toastShown = new Promise<void>((resolve) => toasts.error.mockImplementationOnce(() => resolve()));
+    await act(async () => {
+      fireEvent.click(adopt);
+      await toastShown;
+    });
+    expect(ipc.invoke).toHaveBeenCalledWith("cmd_supervisor_adopt_archived", { goalIds: ["old-1"] });
+    expect(toasts.error).toHaveBeenCalledWith("Could not adopt the goal", { description: "goal old-1 is already adopted" });
+    expect(screen.getByTestId("supervisor-adoptable-goal")).toBeTruthy();
+    expect(adopt.disabled).toBe(false);
+  });
+
   it("keeps a SUPERVISOR_STANDBY refusal of the move command a plain error by its code", async () => {
     ipc.invoke.mockImplementation(async (command: string) => {
       if (command === "cmd_supervisor_move_here") {
