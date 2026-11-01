@@ -55,13 +55,19 @@ export type TerminalInputMode = "direct" | "line";
 /** Shrink of the visual viewport below the layout viewport that counts as an open soft keyboard. */
 const KEYBOARD_MIN_SHRINK_PX = 120;
 
-/** True while a soft keyboard covers part of the layout viewport. */
+/** True while a soft keyboard covers part of the layout viewport; read at call time. */
+export function isSoftKeyboardOpen(): boolean {
+  const viewport = window.visualViewport;
+  return viewport !== null && viewport !== undefined && window.innerHeight - viewport.height > KEYBOARD_MIN_SHRINK_PX;
+}
+
+/** Re-renders when the soft keyboard opens or closes. */
 export function useSoftKeyboardOpen(): boolean {
   const [open, setOpen] = useState(false);
   useEffect(() => {
     const viewport = window.visualViewport;
     if (!viewport) return;
-    const update = () => setOpen(window.innerHeight - viewport.height > KEYBOARD_MIN_SHRINK_PX);
+    const update = () => setOpen(isSoftKeyboardOpen());
     update();
     viewport.addEventListener("resize", update);
     return () => viewport.removeEventListener("resize", update);
