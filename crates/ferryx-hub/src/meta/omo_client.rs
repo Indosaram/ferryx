@@ -175,10 +175,12 @@ pub fn final_reply(outcome: &TurnOutcome) -> Result<Option<String>> {
         if outcome.messages_delivered > 0 {
             return Ok(None);
         }
-        return Ok(Some(format!(
-            "⚠️ 작업은 실행됐지만(도구 {}회) 최종 답변을 만들지 못했어요. \"결과 알려줘\"라고 보내 주시면 정리해 드릴게요.",
-            outcome.tool_calls
-        )));
+        let tools = outcome.tool_calls;
+        return Ok(Some(if crate::locale::current().is_korean() {
+            format!("⚠️ 작업은 실행됐지만(도구 {tools}회) 최종 답변을 만들지 못했어요.")
+        } else {
+            format!("⚠️ The work ran ({tools} tool calls), but no final answer was written.")
+        }));
     }
     Ok(Some(outcome.text.clone()))
 }
@@ -204,8 +206,9 @@ pub fn is_model_switch_rejection(result: &Result<TurnOutcome>) -> bool {
     })
 }
 
-/// The model a failed turn is retried on: the hub's background model.
-pub fn fallback_model() -> String {
+/// The model a failed turn is retried on: the hub's background model, or `None` to retry on
+/// the turn's own model.
+pub fn fallback_model() -> Option<String> {
     crate::model_policy::background_model()
 }
 
@@ -220,15 +223,82 @@ pub fn fallback_eligible(result: &Result<TurnOutcome>) -> bool {
     }
 }
 
-/// omo-gateway's owner-facing Korean line for a failed turn; the raw error stays in the logs.
+/// Why an attempt of a turn did not produce an answer, or `None` when it did (or was stopped
+/// by the owner, which is not a failure to retry): an error, an empty outcome, or a turn that
+/// ran tools but wrote and relayed nothing.
+pub fn attempt_failure(result: &Result<TurnOutcome>) -> Option<String> {
+    match result {
+        Err(error) if error.to_string().contains(STOPPED) => None,
+        Err(error) => Some(error.to_string()),
+        Ok(_) if needs_final_answer(result) => Some("turn ran tools but wrote no answer".into()),
+        Ok(outcome) => final_reply(outcome).err().map(|error| error.to_string()),
+    }
+}
+
+/// The error of a turn ended because the owner or policy declined too many tool requests.
+pub const DENIAL_LIMIT: &str = "mhc approval denial limit reached";
+
+/// True when a failed attempt is retried: every failure except one that ended on declined
+/// approvals, which a retry would only put to the owner again.
+pub fn retry_eligible(result: &Result<TurnOutcome>) -> bool {
+    attempt_failure(result).is_some_and(|error| !error.contains(DENIAL_LIMIT))
+}
+
+/// Sentinel the retry of an attempt that failed after it started work begins with.
+pub const RETRY_PREAMBLE: &str = "[hub retry] The previous attempt at the message below stopped with an error after it had started work. Continue from where it stopped and answer the message; do not repeat actions that already completed.";
+
+/// The one automatic retry of a failed attempt, so the owner never has to resend. It resumes
+/// the attempt's engine session and runs on `fallback` (the background model) when one is
+/// configured, else on the turn's own model. A turn that ran tools but wrote nothing is asked
+/// for its final answer; a failure after side effects is told to continue without repeating
+/// finished actions; a failure before any side effect replays the request unchanged.
+pub fn retry_request(
+    request: &TurnRequest,
+    first: &Result<TurnOutcome>,
+    fallback: Option<String>,
+) -> TurnRequest {
+    let text = if needs_final_answer(first) {
+        FINAL_ANSWER_PROMPT.to_owned()
+    } else if fallback_eligible(first) {
+        request.text.clone()
+    } else {
+        format!("{RETRY_PREAMBLE}\n\n{}", request.text)
+    };
+    TurnRequest {
+        thread_id: match first {
+            Ok(outcome) => Some(outcome.thread_id.clone()),
+            Err(_) => request.thread_id.clone(),
+        },
+        model: fallback.or_else(|| request.model.clone()),
+        text,
+        ..request.clone()
+    }
+}
+
+/// The owner-facing line for a turn that failed with no automatic resume left (the raw error
+/// stays in the logs). It never asks the owner to resend.
 pub fn owner_failure_text(error: &str) -> String {
-    format!(
-        "⚠️ 응답을 만들지 못했어요 ({}). 같은 메시지를 다시 보내 주시면 이어서 할게요.",
-        owner_failure_reason(error)
-    )
+    let reason = owner_failure_reason(error);
+    if crate::locale::current().is_korean() {
+        format!("⚠️ 응답을 만들지 못했어요 ({reason}). 원인은 hub 로그에 남겼어요.")
+    } else {
+        format!("⚠️ I couldn't produce an answer ({reason}). The cause is in the hub log.")
+    }
+}
+
+/// The owner-facing line for a turn whose automatic retry also failed: the hub resumes the
+/// request by itself after `minutes`.
+pub fn owner_resume_text(error: &str, minutes: i64) -> String {
+    let reason = owner_failure_reason(error);
+    if crate::locale::current().is_korean() {
+        format!("⚠️ 응답을 만들지 못했어요 ({reason}). {minutes}분 뒤 hub가 이 요청을 직접 이어서 처리할게요. 다시 보내지 않으셔도 돼요.")
+    } else {
+        format!("⚠️ I couldn't produce an answer ({reason}). The hub will resume this request by itself in {minutes} minutes; no need to resend it.")
+    }
 }
 
 fn owner_failure_reason(error: &str) -> &'static str {
+    let locale = crate::locale::current();
     let lower = error.to_ascii_lowercase();
     if [
         "no output within",
@@ -238,16 +308,16 @@ fn owner_failure_reason(error: &str) -> &'static str {
     .iter()
     .any(|needle| lower.contains(needle))
     {
-        "모델이 응답하지 않았어요"
+        locale.pick("모델이 응답하지 않았어요", "the model did not respond")
     } else if lower.contains("timed out waiting for the turn to finish") {
-        "작업이 턴 시간 제한을 넘겨 중단됐어요"
+        locale.pick("작업이 턴 시간 제한을 넘겨 중단됐어요", "the work hit the turn time limit")
     } else if ["quota", "429", "rate limit"]
         .iter()
         .any(|needle| lower.contains(needle))
     {
-        "모델 사용량 한도에 걸렸어요"
+        locale.pick("모델 사용량 한도에 걸렸어요", "the model usage limit was reached")
     } else {
-        "처리 중 오류가 났어요"
+        locale.pick("처리 중 오류가 났어요", "an error occurred while processing")
     }
 }
 
@@ -458,7 +528,7 @@ impl Rpc {
     }
     fn denial_limit(&self) -> Result<()> {
         if self.denied >= APPROVAL_DENIAL_TURN_LIMIT {
-            return Err(HubError::message("mhc approval denial limit reached"));
+            return Err(HubError::message(DENIAL_LIMIT));
         }
         Ok(())
     }
@@ -952,7 +1022,8 @@ fn relay(pending: &mut String, progress: &Option<UnboundedSender<String>>, deliv
     }
 }
 /// The workspace omo-gateway gives Slack turns: `<root>/agents/bot-<persona>` plus
-/// `<root>/shared`, where root is `OMON_WORKSPACE_ROOT` or `~/.ferryx/hub/workspace`. Absent when the
+/// `<root>/shared`, where root is `OMON_WORKSPACE_ROOT` or `~/.ferryx/hub/workspace` and the
+/// persona is `OMON_SLACK_PERSONA_FROM`. Absent when no persona is configured or the
 /// directory does not exist, so the engine keeps its own default.
 pub fn slack_workspace() -> Option<protocol::Workspace> {
     let root = crate::hub_env::var("OMON_WORKSPACE_ROOT")
@@ -963,11 +1034,11 @@ pub fn slack_workspace() -> Option<protocol::Workspace> {
             crate::hub_env::var_os("HOME")
                 .map(|home| PathBuf::from(home).join(".ferryx/hub/workspace"))
         })?;
-    let persona = crate::hub_env::var("OMON_SLACK_PERSONA_FROM")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "1465631383862120451".into());
+    workspace_in(&root, crate::hub_env::var("OMON_SLACK_PERSONA_FROM").ok().as_deref())
+}
+
+fn workspace_in(root: &std::path::Path, persona: Option<&str>) -> Option<protocol::Workspace> {
+    let persona = persona.map(str::trim).filter(|value| !value.is_empty())?;
     let cwd = root.join("agents").join(format!("bot-{persona}"));
     if !cwd.is_dir() {
         return None;
@@ -1113,7 +1184,7 @@ for line in sys.stdin:
                 &TurnRequest {
                     text: text.into(),
                     thread_id,
-                    model: Some("mahoquot/gpt-6-luna".into()),
+                    model: Some("test/model-a".into()),
                     ..Default::default()
                 },
                 progress,
@@ -1202,7 +1273,7 @@ for line in sys.stdin:
                 .position(|arg| arg == name)
                 .map(|index| argv[index + 1].clone())
         };
-        assert_eq!(flag("--model").as_deref(), Some("mahoquot/gpt-6-luna"));
+        assert_eq!(flag("--model").as_deref(), Some("test/model-a"));
         assert_eq!(flag("--thinking"), Some(protocol::default_effort()));
         assert!(!script.commands().iter().any(|c| matches!(
             c["type"].as_str(),
@@ -1460,5 +1531,97 @@ for line in sys.stdin:
             "LIVE_SESSION_FILE={}",
             outcome.thread_id
         );
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    fn outcome(text: &str, tool_calls: usize, messages_delivered: usize) -> TurnOutcome {
+        TurnOutcome {
+            thread_id: "/sessions/s1.jsonl".into(),
+            resumed: false,
+            turn_id: "t1".into(),
+            text: text.into(),
+            approvals_allowed: 0,
+            approvals_denied: 0,
+            messages_delivered,
+            tool_calls,
+        }
+    }
+
+    fn request() -> TurnRequest {
+        TurnRequest {
+            thread_id: Some("/sessions/s0.jsonl".into()),
+            model: Some("test/session-model".into()),
+            text: "배포 상태 알려줘".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn every_unanswered_attempt_is_a_failure_to_retry_but_a_stop_is_not() {
+        assert_eq!(attempt_failure(&Ok(outcome("done", 0, 0))), None);
+        assert_eq!(attempt_failure(&Ok(outcome("", 0, 1))), None);
+        assert!(attempt_failure(&Ok(outcome("", 0, 0))).is_some());
+        assert!(attempt_failure(&Ok(outcome("", 3, 0))).is_some());
+        assert!(attempt_failure(&Err(HubError::message("mhc turn failed: boom"))).is_some());
+        assert_eq!(attempt_failure(&Err(HubError::message(STOPPED))), None);
+        assert!(retry_eligible(&Err(HubError::message("mhc turn failed: boom"))));
+        assert!(!retry_eligible(&Err(HubError::message(DENIAL_LIMIT))));
+        assert!(!retry_eligible(&Ok(outcome("done", 0, 0))));
+    }
+
+    #[test]
+    fn the_retry_resumes_the_attempt_on_the_fallback_or_the_session_model() {
+        // Side-effect-free failure: the same request, on the background model when configured.
+        let clean = Ok(outcome("", 0, 0));
+        let retry = retry_request(&request(), &clean, Some("test/background".into()));
+        assert_eq!(retry.text, "배포 상태 알려줘");
+        assert_eq!(retry.thread_id.as_deref(), Some("/sessions/s1.jsonl"));
+        assert_eq!(retry.model.as_deref(), Some("test/background"));
+        // No background model: the retry still runs, on the turn's own model.
+        assert_eq!(retry_request(&request(), &clean, None).model.as_deref(), Some("test/session-model"));
+        // Tools ran but nothing was written: ask for the final answer only.
+        let silent = Ok(outcome("", 2, 0));
+        assert_eq!(retry_request(&request(), &silent, None).text, FINAL_ANSWER_PROMPT);
+        // A failure after side effects continues instead of replaying blindly.
+        let failed = Err(HubError::message("mhc turn failed: socket closed"));
+        let retry = retry_request(&request(), &failed, None);
+        assert!(retry.text.starts_with(RETRY_PREAMBLE));
+        assert!(retry.text.ends_with("배포 상태 알려줘"));
+        assert_eq!(retry.thread_id.as_deref(), Some("/sessions/s0.jsonl"));
+    }
+
+    #[test]
+    fn failure_notices_never_ask_the_owner_to_resend() {
+        let korean = owner_resume_text("mhc no output within idle timeout", 5);
+        assert!(korean.contains("모델이 응답하지 않았어요"), "{korean}");
+        assert!(korean.contains("5분 뒤"), "{korean}");
+        assert!(!korean.contains("다시 보내 주시면"), "{korean}");
+        assert!(!owner_failure_text("boom").contains("다시 보내 주시면"));
+        crate::locale::with(crate::locale::OwnerLocale::english_utc(), || {
+            let english = owner_resume_text("429 quota", 5);
+            assert_eq!(
+                english,
+                "⚠️ I couldn't produce an answer (the model usage limit was reached). The hub will resume this request by itself in 5 minutes; no need to resend it."
+            );
+            assert!(!crate::locale::current().is_foreign_prose(&owner_failure_text("boom")));
+            let silent = final_reply(&outcome("", 2, 0)).unwrap().unwrap();
+            assert!(silent.contains("2 tool calls"), "{silent}");
+        });
+    }
+
+    #[test]
+    fn the_workspace_persona_comes_only_from_configuration() {
+        let root = std::env::temp_dir().join(format!("ferryx-ws-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("agents/bot-P1")).unwrap();
+        assert!(workspace_in(&root, None).is_none());
+        assert!(workspace_in(&root, Some("  ")).is_none());
+        assert!(workspace_in(&root, Some("missing")).is_none());
+        let workspace = workspace_in(&root, Some("P1")).unwrap();
+        assert!(workspace.cwd.ends_with("agents/bot-P1"), "{}", workspace.cwd);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

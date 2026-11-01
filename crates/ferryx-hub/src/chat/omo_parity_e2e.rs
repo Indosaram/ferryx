@@ -376,7 +376,7 @@ async fn e2e_dashboard_chat_runs_an_omo_turn_for_web_and_slack_sessions() {
     assert_eq!(turn_start["message"], "summarise the repo");
 
     // A Slack session typed into from the dashboard answers in its Slack thread.
-    let (omo_url, _log) = serve(script(&["on it", "replied"], false)).await;
+    let (omo_url, _log) = serve(script(&["확인하겠습니다.", "파일 두 개를 수정했습니다."], false)).await;
     let second = config(omo_url);
     let slack =
         SessionKey::new("slack", Some("T1"), "CHOME", Some("200.1"), "").with_bot_id("UBOT");
@@ -384,13 +384,13 @@ async fn e2e_dashboard_chat_runs_an_omo_turn_for_web_and_slack_sessions() {
         run_dashboard_turn(&second, &pool, slack, "follow up".into()).await
     })
     .await;
-    assert_eq!(reply.as_deref(), Some("replied"));
+    assert_eq!(reply.as_deref(), Some("파일 두 개를 수정했습니다."));
     let posts = calls_of(&calls, "chat.postMessage");
-    assert_eq!(posts.len(), 2, "{posts:?}");
+    assert_eq!(posts.len(), 1, "{posts:?}");
     assert!(posts
         .iter()
         .all(|p| p["channel"] == "CHOME" && p["thread_ts"] == "200.1"));
-    assert_eq!(posts[1]["text"], "replied");
+    assert_eq!(posts[0]["text"], "파일 두 개를 수정했습니다.");
 }
 
 #[tokio::test]
@@ -511,7 +511,7 @@ async fn e2e_a_mention_carries_topic_channel_context_forwards_and_attachments() 
 async fn e2e_messages_missed_while_down_are_answered_once_after_restart() {
     use super::slack_backfill::{read_cursor, run, write_cursor, BotIdentity};
     let pool = crate::storage::memory().await.unwrap();
-    let (omo_url, log) = serve(script(&["caught up"], false)).await;
+    let (omo_url, log) = serve(script(&["누락된 요청을 처리했습니다."], false)).await;
     let config = config(omo_url);
     let bot = BotIdentity {
         user_id: "UBOT".into(),
@@ -562,7 +562,7 @@ async fn e2e_messages_missed_while_down_are_answered_once_after_restart() {
     assert!(turn_texts[0].ends_with("] first"), "{turn_texts:?}");
     assert!(turn_texts[1].ends_with("] third"), "{turn_texts:?}");
     let posts = calls_of(&calls, "chat.postMessage");
-    assert_eq!(posts.iter().filter(|p| p["text"] == "caught up").count(), 2);
+    assert_eq!(posts.iter().filter(|p| p["text"] == "누락된 요청을 처리했습니다.").count(), 2);
     assert!(posts.iter().any(|p| p["thread_ts"] == "1001.000000"));
     assert_eq!(
         read_cursor(&pool, "UBOT", "CHOME", "")
@@ -630,7 +630,7 @@ async fn e2e_a_cron_delivery_rides_on_the_next_turn_of_its_thread_once() {
     sqlx::query(
         "INSERT INTO scheduled_jobs(id, expression, payload_json) VALUES('wx', 'every 1h', ?)",
     )
-    .bind(json!({"command": "printf 'Weather: sunny'", "deliver": "slack:CHOME:100.1"}).to_string())
+    .bind(json!({"command": "printf '오늘 날씨는 맑습니다.'", "deliver": "slack:CHOME:100.1", "report_salience":"result"}).to_string())
     .execute(&pool)
     .await
     .unwrap();
@@ -645,7 +645,7 @@ async fn e2e_a_cron_delivery_rides_on_the_next_turn_of_its_thread_once() {
         .any(|post| post["text"]
             .as_str()
             .unwrap_or("")
-            .contains("Weather: sunny")));
+            .contains("오늘 날씨는 맑습니다.")));
 
     // The next turn in the thread carries it as context; the one after does not.
     let (omo_url, log) = serve(script(&["it said sunny"], false)).await;
@@ -659,7 +659,7 @@ async fn e2e_a_cron_delivery_rides_on_the_next_turn_of_its_thread_once() {
         text.starts_with("[Context: messages you already posted"),
         "{text}"
     );
-    assert!(text.contains("(wx)\nWeather: sunny"), "{text}");
+    assert!(text.contains("(wx)\n오늘 날씨는 맑습니다."), "{text}");
     assert!(text.ends_with("what did the cron say?"), "{text}");
 
     let (omo_url, log) = serve(script(&["ok"], false)).await;
@@ -672,7 +672,7 @@ async fn e2e_a_cron_delivery_rides_on_the_next_turn_of_its_thread_once() {
 }
 
 #[tokio::test]
-async fn e2e_a_long_owner_turn_gets_a_status_message_that_ends_done() {
+async fn e2e_a_long_owner_dm_turn_posts_no_status_line() {
     let (omo_url, _log) = serve(script(&["pushed"], true)).await;
     let config = config(omo_url);
     let pool = crate::storage::memory().await.unwrap();
@@ -694,13 +694,9 @@ async fn e2e_a_long_owner_turn_gets_a_status_message_that_ends_done() {
                     .scope(false, async {
                         let clicker = async {
                             let (ts, allow) = wait_card(&calls, "once").await;
-                            // The owner answers once the status message was posted and edited.
-                            let (status, _) = wait_call(&calls, "status", is_status_post).await;
-                            let status_ts = format!("1700000000.{:06}", status + 1);
-                            wait_call(&calls, "status edit", |method, body| {
-                                method == "chat.update" && body["ts"] == status_ts.as_str()
-                            })
-                            .await;
+                            // Time is the behaviour here: let several status intervals pass so a
+                            // status line would have been posted and edited by now.
+                            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
                             super::turn_approval::handle_click(
                                 &click("UOWNER", &ts, &allow, &response_url),
                                 &owners,
@@ -715,26 +711,27 @@ async fn e2e_a_long_owner_turn_gets_a_status_message_that_ends_done() {
     })
     .await;
     assert_eq!(reply.as_deref(), Some("pushed"));
-    let status: Vec<Value> = calls_of(&calls, "chat.postMessage")
-        .into_iter()
-        .filter(|post| post["text"].as_str().unwrap_or("").starts_with("작업 중:"))
-        .collect();
-    assert_eq!(status.len(), 1, "one status post: {status:?}");
-    assert_eq!(status[0]["text"], "작업 중: push it · 0분");
-    assert_eq!(status[0]["channel"], "D1");
-    let updates = calls_of(&calls, "chat.update");
-    let status_updates: Vec<&Value> = updates
-        .iter()
-        .filter(|u| {
-            let text = u["text"].as_str().unwrap_or("");
-            text.starts_with("작업 중:") || text.starts_with("완료")
-        })
-        .collect();
+    assert_no_status_line(&calls);
+}
+
+/// A status line is internal progress narration: the owner's DM never gets one, neither as a
+/// post nor as an edit.
+fn assert_no_status_line(calls: &Calls) {
+    let posts = calls_of(calls, "chat.postMessage");
     assert!(
-        status_updates.len() >= 2,
-        "edited while running, then finished: {updates:?}"
+        !posts
+            .iter()
+            .any(|post| is_status_post("chat.postMessage", post)),
+        "no status post in the owner DM: {posts:?}"
     );
-    assert_eq!(status_updates.last().unwrap()["text"], "완료 · 0분");
+    let updates = calls_of(calls, "chat.update");
+    assert!(
+        !updates.iter().any(|update| {
+            let text = update["text"].as_str().unwrap_or("");
+            text.starts_with("작업 중:") || text.starts_with("완료")
+        }),
+        "no status edit in the owner DM: {updates:?}"
+    );
 }
 
 #[tokio::test]
@@ -777,27 +774,42 @@ async fn e2e_a_reply_claim_is_stripped_then_remeasured_and_corrected() {
 }
 
 #[tokio::test]
-async fn provider_503_runs_exactly_one_luna_fallback() {
+async fn provider_503_retries_once_on_the_background_or_session_model() {
     let (binary, log) = serve(script(&["__provider503__"], false)).await;
     let mut config = config(binary);
     config.default_model = Some("mahoquot/gpt-6-astra".into());
     let pool = crate::storage::memory().await.unwrap();
     let mut turn = slack_turn("hello");
     turn.reply_channel = None;
-    let result = run_session_turn(&config, &pool, turn).await.unwrap();
-    assert_eq!(result, "recovered");
+    let background = crate::model_policy::background_model();
+    let result = run_session_turn(&config, &pool, turn).await;
     let frames = log.frames.lock().unwrap();
-    assert_eq!(frames.iter().filter(|f| f["type"] == "prompt").count(), 2);
     let models: Vec<_> = frames
         .iter()
         .filter(|f| f["type"] == "fixture_launch")
         .map(|f| {
             let args = f["args"].as_array().unwrap();
             let flag = args.iter().position(|arg| arg == "--model").unwrap();
-            args[flag + 1].as_str().unwrap()
+            args[flag + 1].as_str().unwrap().to_owned()
         })
         .collect();
-    assert_eq!(models, vec!["mahoquot/gpt-6-astra", "mahoquot/gpt-6-luna"]);
+    // A failed turn is always retried once: on OMON_BACKGROUND_MODEL when one is configured,
+    // else on the session model. There is no built-in fallback model.
+    let expected: Vec<String> = vec![
+        "mahoquot/gpt-6-astra".to_owned(),
+        background
+            .clone()
+            .unwrap_or_else(|| "mahoquot/gpt-6-astra".to_owned()),
+    ];
+    assert_eq!(models, expected);
+    assert_eq!(frames.iter().filter(|f| f["type"] == "prompt").count(), 2);
+    match background.as_deref() {
+        // The mock recovers only on this model name.
+        Some(model) if model.ends_with("/gpt-6-luna") => {
+            assert_eq!(result.as_deref(), Some("recovered"));
+        }
+        _ => assert_eq!(result, None),
+    }
 }
 
 /// A supervisor conversation whose turn runs until the test releases it.
@@ -823,7 +835,7 @@ impl super::slack_supervisor::SupervisorConversation for GatedConversation {
 }
 
 #[tokio::test]
-async fn e2e_a_supervised_owner_dm_keeps_the_status_card_and_never_reaches_omo() {
+async fn e2e_a_supervised_owner_dm_posts_no_status_line_and_never_reaches_omo() {
     let (omo_url, log) = serve(script(&["omo must not answer"], false)).await;
     let config = config(omo_url);
     let pool = crate::storage::memory().await.unwrap();
@@ -846,13 +858,9 @@ async fn e2e_a_supervised_owner_dm_keeps_the_status_card_and_never_reaches_omo()
                 super::slack_supervisor::TEST_CONVERSATION
                     .scope(conversation, async {
                         let owner = async {
-                            // The turn ends once its status card was posted and edited.
-                            let (status, _) = wait_call(&calls, "status", is_status_post).await;
-                            let status_ts = format!("1700000000.{:06}", status + 1);
-                            wait_call(&calls, "status edit", |method, body| {
-                                method == "chat.update" && body["ts"] == status_ts.as_str()
-                            })
-                            .await;
+                            // Time is the behaviour here: let several status intervals pass so
+                            // a status line would have been posted and edited by now.
+                            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
                             release.notify_one();
                         };
                         let turn = super::slack_turn::handle(&config, &pool, admitted);
@@ -873,30 +881,11 @@ async fn e2e_a_supervised_owner_dm_keeps_the_status_card_and_never_reaches_omo()
         posts.iter().all(|post| post.get("blocks").is_none()),
         "no approval card: {posts:?}"
     );
-    let status: Vec<&Value> = posts
-        .iter()
-        .filter(|post| is_status_post("chat.postMessage", post))
-        .collect();
-    assert_eq!(status.len(), 1, "{posts:?}");
-    assert_eq!(status[0]["text"], "작업 중: push it · 0분");
-    assert_eq!(status[0]["channel"], "D1");
     let answers: Vec<&Value> = posts
         .iter()
         .filter(|post| post["text"] == "supervised answer")
         .collect();
     assert_eq!(answers.len(), 1, "{posts:?}");
     assert_eq!(answers[0]["channel"], "D1");
-    let updates = calls_of(&calls, "chat.update");
-    let finished = updates
-        .iter()
-        .rev()
-        .find(|update| {
-            let text = update["text"].as_str().unwrap_or("");
-            text.starts_with("작업 중:") || text.starts_with("완료")
-        })
-        .cloned();
-    assert_eq!(
-        finished.map(|update| update["text"].clone()),
-        Some(json!("완료 · 0분"))
-    );
+    assert_no_status_line(&calls);
 }

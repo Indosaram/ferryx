@@ -1,14 +1,22 @@
 //! omo-gateway's turn status message (report/status.rs): while an owner turn runs, a status
 //! message appears in its Slack thread after 3 minutes ("작업 중: <headline> · N분 · <tool>"),
-//! is edited every 3 minutes, and ends as "완료 · N분" or "실패 · <reason>". KST 00:00-07:59
-//! holds new posts and interim edits unless the owner wrote within the last 10 minutes.
+//! is edited every 3 minutes and whenever the turn writes an interim progress note, and is
+//! deleted when the turn ends with an answer or failure notice in the same conversation, so the
+//! owner never keeps a bare "완료 · N분" line. Only a turn that ended without any message (a
+//! stop) leaves its final line ("실패 · <reason>"). Lines are in the owner's language. The
+//! owner's local 00:00-07:59 holds new posts and interim edits unless the owner wrote within
+//! the last 10 minutes.
 //! `OMON_STATUS_MESSAGE_ENABLED=0|false|no|off` turns it off. Only the owner's lead sessions
 //! get one: a DM with the owner, or a `SLACK_HOME_CHANNEL` conversation.
+//!
+//! A status line is progress narration, an `internal` report
+//! (docs/design/hub-owner-reporting.md section 4): it is never posted to the owner's DM. Only
+//! home-channel conversations still show it.
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Timelike, Utc};
+use chrono::{DateTime, Utc};
 
 use super::session::SessionKey;
 
@@ -28,6 +36,7 @@ pub const TOOL_ACTIVITY_TTL: Duration = Duration::from_secs(600);
 const OWNER_RECENT_SECS: i64 = 10 * 60;
 const HEADLINE_CHARS: usize = 80;
 const REASON_CHARS: usize = 200;
+const PROGRESS_CHARS: usize = 300;
 
 pub fn enabled() -> bool {
     !matches!(
@@ -39,7 +48,7 @@ pub fn enabled() -> bool {
 }
 
 pub fn in_quiet_hours(now: DateTime<Utc>) -> bool {
-    now.with_timezone(&chrono_tz::Asia::Seoul).hour() < 8
+    crate::locale::current().local_hour(now) < 8
 }
 
 /// omo's `is_slack_owner_lead_session`.
@@ -99,7 +108,8 @@ fn headline(owner_text: &str) -> String {
         if let Some(events) = text.strip_prefix("[LANE_EVENT]") {
             let first = events.trim_start().lines().next().unwrap_or_default();
             let body = first.split_once(": ").map_or(first, |(_, body)| body);
-            return clip(&format!("받은 알림 처리: {body}"));
+            let label = crate::locale::current().pick("받은 알림 처리", "Handling alert");
+            return clip(&format!("{label}: {body}"));
         }
         match text.find(']') {
             Some(end) => text = text[end + 1..].trim_start(),
@@ -118,6 +128,64 @@ fn clip(text: &str) -> String {
         .collect()
 }
 
+/// The running line: `작업 중: <headline> · N분[ · <tool>]` (English `Working on: ... · N min`),
+/// then the turn's latest progress note on its own line.
+fn working_line(headline: &str, minutes: i64, tool: Option<&str>, progress: Option<&str>) -> String {
+    let mut body = if crate::locale::current().is_korean() {
+        format!("작업 중: {headline} · {minutes}분")
+    } else {
+        format!("Working on: {headline} · {minutes} min")
+    };
+    if let Some(tool) = tool {
+        body.push_str(&format!(" · {tool}"));
+    }
+    if let Some(progress) = progress {
+        body.push('\n');
+        body.push_str(progress);
+    }
+    body
+}
+
+/// The closing line a status message keeps when it is not deleted.
+fn final_line(minutes: i64, outcome: &Result<(), String>) -> String {
+    let korean = crate::locale::current().is_korean();
+    match outcome {
+        Ok(()) if korean => format!("완료 · {minutes}분"),
+        Ok(()) => format!("Done · {minutes} min"),
+        Err(reason) => {
+            let reason: String = reason.chars().take(REASON_CHARS).collect();
+            if korean { format!("실패 · {reason}") } else { format!("Failed · {reason}") }
+        }
+    }
+}
+
+/// A finished turn's status message is deleted when the turn succeeded or posted a message of
+/// its own (answer or failure notice): a closing line next to it would be a bare status post.
+fn deleted_on_finish(outcome: &Result<(), String>, answered: bool) -> bool {
+    outcome.is_ok() || answered
+}
+
+/// The gate report for one status line: always `internal`.
+pub fn status_report(storage_key: &str, body: &str) -> crate::report_gate::Report {
+    crate::report_gate::Report::new(
+        format!("turn-status:{storage_key}"),
+        "turn_status",
+        format!("turn-status:{storage_key}"),
+        crate::report_gate::Salience::Internal,
+        body,
+    )
+}
+
+/// True when the status line may be posted: the gate keeps internal reports out of the owner
+/// DM (a conversation with no guild).
+fn may_post(storage_key: &str, body: &str) -> bool {
+    let owner_dm =
+        SessionKey::from_storage_key(storage_key).is_ok_and(|key| key.guild_id.is_none());
+    !owner_dm
+        || crate::report_gate::decide(&status_report(storage_key, body), None, None, false)
+            == crate::report_gate::Decision::Sent
+}
+
 pub struct StatusMessage {
     storage_key: String,
     channel: String,
@@ -128,6 +196,7 @@ pub struct StatusMessage {
     interval: chrono::Duration,
     ts: Option<String>,
     next_tick: i64,
+    progress: Option<String>,
 }
 
 impl StatusMessage {
@@ -151,6 +220,7 @@ impl StatusMessage {
                 .unwrap_or_else(|_| chrono::Duration::seconds(180)),
             ts: None,
             next_tick: 1,
+            progress: None,
         }
     }
 
@@ -160,6 +230,32 @@ impl StatusMessage {
 
     fn held(&self, now: DateTime<Utc>) -> bool {
         in_quiet_hours(now) && (now - self.owner_message_at).num_seconds() > OWNER_RECENT_SECS
+    }
+
+    /// An interim progress note of the turn: it replaces the previous note in the status
+    /// message instead of becoming a message of its own. A posted status message is edited at
+    /// once (outside quiet hours); otherwise the next tick shows it.
+    pub async fn note_progress(&mut self, text: &str, now: DateTime<Utc>) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        self.progress = Some(text.chars().take(PROGRESS_CHARS).collect());
+        let Some(ts) = self.ts.clone() else {
+            return;
+        };
+        if self.held(now) {
+            return;
+        }
+        let minutes = (now - self.started_at).num_minutes().max(0);
+        let tool = last_tool(&self.storage_key);
+        let body = working_line(&self.headline, minutes, tool.as_deref(), self.progress.as_deref());
+        if !may_post(&self.storage_key, &body) {
+            return;
+        }
+        if let Err(error) = super::slack_web::update_message(&self.channel, &ts, &body).await {
+            tracing::warn!(%error, "turn status message was not edited with progress");
+        }
     }
 
     pub async fn tick(&mut self, now: DateTime<Utc>) {
@@ -172,9 +268,12 @@ impl StatusMessage {
             return;
         }
         let minutes = (now - self.started_at).num_minutes().max(0);
-        let mut body = format!("작업 중: {} · {minutes}분", self.headline);
         match self.ts.clone() {
             None => {
+                let body = working_line(&self.headline, minutes, None, self.progress.as_deref());
+                if !may_post(&self.storage_key, &body) {
+                    return;
+                }
                 let mut message = serde_json::json!({"channel": self.channel, "text": body});
                 if let Some(thread) = &self.thread {
                     message["thread_ts"] = serde_json::json!(thread);
@@ -190,8 +289,10 @@ impl StatusMessage {
                 }
             }
             Some(ts) => {
-                if let Some(tool) = last_tool(&self.storage_key) {
-                    body.push_str(&format!(" · {tool}"));
+                let tool = last_tool(&self.storage_key);
+                let body = working_line(&self.headline, minutes, tool.as_deref(), self.progress.as_deref());
+                if !may_post(&self.storage_key, &body) {
+                    return;
                 }
                 if let Err(error) =
                     super::slack_web::update_message(&self.channel, &ts, &body).await
@@ -202,20 +303,24 @@ impl StatusMessage {
         }
     }
 
-    /// The final edit; a turn that never posted sends nothing. Allowed in quiet hours.
-    pub async fn finish(self, now: DateTime<Utc>, outcome: Result<(), String>) {
+    /// Ends the status message; a turn that never posted sends nothing. When `answered` (the
+    /// turn posted its answer or a failure notice) or the turn succeeded, the message is
+    /// deleted; otherwise, or when the delete fails, it is edited to its closing line. Allowed
+    /// in quiet hours.
+    pub async fn finish(self, now: DateTime<Utc>, outcome: Result<(), String>, answered: bool) {
         clear_tool_activity(&self.storage_key);
         let Some(ts) = self.ts else {
             return;
         };
+        if deleted_on_finish(&outcome, answered) {
+            let message = serde_json::json!({"channel": self.channel, "ts": ts});
+            match super::slack_web::post_json("chat.delete", &message).await {
+                Ok(_) => return,
+                Err(error) => tracing::warn!(%error, "turn status message was not deleted"),
+            }
+        }
         let minutes = (now - self.started_at).num_minutes().max(0);
-        let body = match outcome {
-            Ok(()) => format!("완료 · {minutes}분"),
-            Err(reason) => format!(
-                "실패 · {}",
-                reason.chars().take(REASON_CHARS).collect::<String>()
-            ),
-        };
+        let body = final_line(minutes, &outcome);
         if let Err(error) = super::slack_web::update_message(&self.channel, &ts, &body).await {
             tracing::warn!(%error, "turn status message was not finished");
         }
@@ -252,5 +357,71 @@ mod tests {
         assert_eq!(last_tool("k").as_deref(), Some("commandExecution"));
         clear_tool_activity("k");
         assert_eq!(last_tool("k"), None);
+    }
+
+    #[test]
+    fn status_lines_are_internal_and_stay_out_of_the_owner_dm() {
+        let dm = SessionKey::new("slack", None::<String>, "D1", None::<String>, "UOWNER");
+        let home = SessionKey::new("slack", Some("T1"), "CHOME", Some("1.1"), "UOWNER");
+        let body = "작업 중: deploy the hub · 3분";
+        assert_eq!(
+            crate::report_gate::decide(&status_report(&dm.storage_key(), body), None, None, false),
+            crate::report_gate::Decision::Internal
+        );
+        assert!(!may_post(&dm.storage_key(), body));
+        assert!(may_post(&home.storage_key(), body));
+    }
+
+    #[test]
+    fn status_lines_follow_the_owner_locale_and_end_without_a_bare_status_post() {
+        assert_eq!(working_line("deploy", 3, Some("read"), None), "작업 중: deploy · 3분 · read");
+        assert_eq!(final_line(5, &Ok(())), "완료 · 5분");
+        assert_eq!(final_line(5, &Err("boom".into())), "실패 · boom");
+        // A succeeded turn, or one that posted its own answer or notice, deletes the line.
+        assert!(deleted_on_finish(&Ok(()), false));
+        assert!(deleted_on_finish(&Err("boom".into()), true));
+        assert!(!deleted_on_finish(&Err("stopped by the owner".into()), false));
+        crate::locale::with(crate::locale::OwnerLocale::english_utc(), || {
+            assert_eq!(
+                working_line("deploy", 3, None, Some("Checking the logs.")),
+                "Working on: deploy · 3 min\nChecking the logs."
+            );
+            assert_eq!(final_line(5, &Ok(())), "Done · 5 min");
+            assert_eq!(final_line(5, &Err("boom".into())), "Failed · boom");
+            assert_eq!(
+                headline("[LANE_EVENT]\n- action_loop: CI failed"),
+                "Handling alert: CI failed"
+            );
+            // Quiet hours follow the owner's zone: 03:00 UTC is quiet in UTC, not in Seoul.
+            let at = DateTime::parse_from_rfc3339("2026-10-23T03:00:00Z").unwrap().with_timezone(&Utc);
+            assert!(in_quiet_hours(at));
+        });
+        let at = DateTime::parse_from_rfc3339("2026-10-23T03:00:00Z").unwrap().with_timezone(&Utc);
+        assert!(!in_quiet_hours(at));
+    }
+
+    #[tokio::test]
+    async fn progress_notes_edit_the_status_message_instead_of_posting() {
+        let (base, calls) = super::super::slack_web::mock::serve("UBOT").await;
+        let home = SessionKey::new("slack", Some("T1"), "CHOME", Some("1.1"), "");
+        let start = DateTime::parse_from_rfc3339("2026-10-23T12:00:00+09:00").unwrap().with_timezone(&Utc);
+        super::super::slack::with_test_api(base, "xoxb-test".into(), async {
+            let mut status = StatusMessage::new(&home.storage_key(), "CHOME", Some("1.1"), "find page 18", start, STATUS_INTERVAL);
+            // Before the status message exists, a note is only remembered.
+            status.note_progress("찾아보겠습니다.", start).await;
+            assert!(calls.lock().unwrap().is_empty());
+            status.tick(start + chrono::Duration::minutes(3)).await;
+            for note in ["확인하겠습니다.", "검색 중입니다."] {
+                status.note_progress(note, start + chrono::Duration::minutes(4)).await;
+            }
+            status.finish(start + chrono::Duration::minutes(6), Ok(()), true).await;
+        })
+        .await;
+        let calls = calls.lock().unwrap().clone();
+        let methods: Vec<&str> = calls.iter().map(|(method, _)| method.as_str()).collect();
+        assert_eq!(methods, ["chat.postMessage", "chat.update", "chat.update", "chat.delete"], "{calls:?}");
+        assert_eq!(calls[0].1["text"], "작업 중: find page 18 · 3분\n찾아보겠습니다.");
+        assert_eq!(calls[2].1["text"], "작업 중: find page 18 · 4분\n검색 중입니다.");
+        assert_eq!(calls[3].1["ts"], calls[1].1["ts"]);
     }
 }

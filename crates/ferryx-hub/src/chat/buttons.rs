@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::error::{HubError, Result};
 
 pub const BUTTON_PREFIX: &str = "omon:btn:";
-const NOT_AUTHORIZED: &str = "이 버튼을 누를 권한이 없습니다.";
+const NOT_AUTHORIZED: (&str, &str) = ("이 버튼을 누를 권한이 없습니다.", "You are not allowed to press this button.");
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,7 +174,7 @@ pub async fn run_button_clicks(
             .iter()
             .any(|id| id == user)
     {
-        return Err(HubError::message(NOT_AUTHORIZED));
+        return Err(HubError::message(crate::locale::text(NOT_AUTHORIZED.0, NOT_AUTHORIZED.1)));
     }
     let channel = payload
         .pointer("/channel/id")
@@ -201,10 +201,12 @@ pub async fn run_button_clicks(
             continue;
         };
         let Some(config) = load_button_action(actions_path, &click.namespace)? else {
-            lines.push(format!(
-                "`{}` 버튼 동작이 설정되어 있지 않습니다.",
-                click.namespace
-            ));
+            let namespace = &click.namespace;
+            lines.push(if crate::locale::current().is_korean() {
+                format!("`{namespace}` 버튼 동작이 설정되어 있지 않습니다.")
+            } else {
+                format!("No action is configured for the `{namespace}` button.")
+            });
             continue;
         };
         let extra = vec![
@@ -231,7 +233,7 @@ fn outcome_text(action: &str, outcome: &ActionOutcome) -> String {
     let stdout = clean(&outcome.stdout);
     if outcome.success {
         return if stdout.is_empty() {
-            "완료했습니다.".to_owned()
+            crate::locale::text("완료했습니다.", "Done.")
         } else {
             cap(&stdout)
         };
@@ -245,13 +247,15 @@ fn outcome_text(action: &str, outcome: &ActionOutcome) -> String {
     let code = outcome
         .code
         .map_or_else(|| "signal".to_owned(), |code| code.to_string());
-    if tail.is_empty() {
+    let headline = if crate::locale::current().is_korean() {
         format!("⚠️ {action} 실패 (exit {code})")
     } else {
-        cap(&format!(
-            "⚠️ {action} 실패 (exit {code})\n{}",
-            tail.join("\n")
-        ))
+        format!("⚠️ {action} failed (exit {code})")
+    };
+    if tail.is_empty() {
+        headline
+    } else {
+        cap(&format!("{headline}\n{}", tail.join("\n")))
     }
 }
 
@@ -288,7 +292,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("ferryx-buttons-{}.json", std::process::id()));
         std::fs::write(
             &path,
-            r#"{"content-intel":{"command":["printf","ok%s\n%s"],"timeout_secs":5}}"#,
+            r#"{"content-intel":{"command":["printf","ok%s\\n%s"],"timeout_secs":5}}"#,
         )
         .unwrap();
         let payload = serde_json::json!({
@@ -308,13 +312,12 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(refused.contains("권한이 없습니다"));
-        // 2026-10-23 05:05Z: with no owner configured, omo-gateway's owner still may click.
-        let mut owner_click = payload.clone();
-        owner_click["user"]["id"] = serde_json::json!("U04M1JNJM8T");
-        assert_eq!(
-            run_button_clicks(&owner_click, "", &path).await.unwrap(),
-            vec!["okpublish\n86".to_owned()]
-        );
+        // With no owner configured nobody may click: there is no built-in owner.
+        let unconfigured = run_button_clicks(&payload, "", &path)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(unconfigured.contains("권한이 없습니다"), "{unconfigured}");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -356,6 +359,10 @@ mod tests {
             outcome_text("send", &outcome(true, "  \n", "")),
             "완료했습니다."
         );
+        crate::locale::with(crate::locale::OwnerLocale::english_utc(), || {
+            assert_eq!(outcome_text("send", &outcome(true, "", "")), "Done.");
+            assert_eq!(outcome_text("bid", &outcome(false, "", "")), "⚠️ bid failed (exit 1)");
+        });
         let long = outcome_text("send", &outcome(true, &"가".repeat(2000), ""));
         assert_eq!(long.chars().count(), MAX_REPLY_CHARS);
         assert!(long.ends_with('…'));

@@ -271,6 +271,28 @@ pub(crate) async fn apply_frame_routed(
     let frame_value: Value = serde_json::from_str(text)
         .map_err(|error| HubError::message(format!("slack frame: {error}")))?;
     if frame_value.get("type").and_then(Value::as_str) == Some("interactive") {
+        // An inbox approval card is answered from its proposal row, so it works after a restart.
+        if let (Some(pool), Some(payload)) = (pool, frame_value.get("payload")) {
+            if !crate::report_mutation::click_is_current(pool, payload).await? {
+                let target = click_target(payload, None);
+                let user = payload.pointer("/user/id").and_then(Value::as_str).unwrap_or("");
+                let _ = post_ephemeral(&target, user, "This card is out of date. Please try again after it refreshes.").await;
+                return Ok(SlackFrame::Ignore);
+            }
+            if let Some(reply) =
+                crate::inbox_cards::approval::handle_click(pool, payload, owner_id).await?
+            {
+                let target = click_target(payload, None);
+                let user = payload.pointer("/user/id").and_then(Value::as_str).unwrap_or("");
+                if let Some(line) = &reply.card_line {
+                    let _ = update_card(&target, line).await;
+                }
+                if let Some(text) = &reply.ephemeral {
+                    let _ = post_ephemeral(&target, user, text).await;
+                }
+                return Ok(SlackFrame::Ignore);
+            }
+        }
         #[cfg(feature = "hub-slack")]
         if let (Some(turns), Some(payload)) = (turns, frame_value.get("payload")) {
             if super::turn_approval::handle_click(payload, &turns.allowed_users).await {
@@ -729,8 +751,20 @@ async fn post_message(
     text: &str,
     blocks: Option<Value>,
 ) -> Result<bool> {
+    Ok(post_message_posted(session, text, blocks).await?.is_some())
+}
+
+/// [`post_message`] that returns where the message landed: the channel Slack reports (a DM
+/// addressed by user id comes back as its `D…` channel) and the message `ts`. `None` when no
+/// token is configured.
+#[cfg(feature = "hub-slack")]
+async fn post_message_posted(
+    session: &super::session::SessionKey,
+    text: &str,
+    blocks: Option<Value>,
+) -> Result<Option<super::reply::PostedMessage>> {
     if bot_token().is_none() {
-        return Ok(false);
+        return Ok(None);
     }
     let (text, tables) = if blocks.is_none() {
         crate::table_image::transform_markdown_tables(text)
@@ -744,18 +778,27 @@ async fn post_message(
     if let Some(thread) = &session.thread_id {
         body["thread_ts"] = json!(thread);
     }
-    let posted = slack_method("chat.postMessage", body).await?;
-    if posted {
-        let _ = attach_voice_reply(
-            &session.channel_id,
-            session.thread_id.as_deref(),
-            session.thread_id.as_deref(),
-            &text,
-        )
-        .await;
-        upload_tables(session, &tables).await?;
+    let Some(response) = slack_call("chat.postMessage", body).await? else {
+        return Ok(None);
+    };
+    let _ = attach_voice_reply(
+        &session.channel_id,
+        session.thread_id.as_deref(),
+        session.thread_id.as_deref(),
+        &text,
+    )
+    .await;
+    if let Err(error) = upload_tables(session, &tables).await {
+        tracing::warn!(%error, "table attachment failed after Slack message was posted");
     }
-    Ok(posted)
+    Ok(Some(super::reply::PostedMessage {
+        channel: response
+            .get("channel")
+            .and_then(Value::as_str)
+            .unwrap_or(session.channel_id.as_str())
+            .to_owned(),
+        ts: response.get("ts").and_then(Value::as_str).map(str::to_owned),
+    }))
 }
 
 #[cfg(feature = "hub-slack")]
@@ -799,6 +842,9 @@ pub async fn upload_external(
     if bot_token().is_none() || bytes.is_empty() {
         return Ok(false);
     }
+    // Uploading bytes alone does not publish a message. Only completion below
+    // can leave an ambiguous channel-visible result.
+    let file_id = async {
     let ticket = slack_form(
         "files.getUploadURLExternal",
         &[("filename", filename), ("length", &bytes.len().to_string())],
@@ -842,6 +888,8 @@ pub async fn upload_external(
             uploaded.status()
         )));
     }
+    Ok::<_, HubError>(file_id)
+    }.await.map_err(|error| HubError::SlackNotShared(error.to_string()))?;
     let mut body = json!({
         "files": [{ "id": file_id, "title": title }],
         "channel_id": channel,
@@ -873,6 +921,105 @@ pub async fn open_owner_dm(owner: &str) -> Option<(String, String)> {
         .and_then(Value::as_str)?
         .to_owned();
     Some((channel, bot))
+}
+
+/// One Slack message exactly as Slack returns it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SlackMessage {
+    pub channel: String,
+    pub ts: String,
+    pub text: String,
+    pub blocks: Option<Vec<Value>>,
+}
+
+/// What [`read_own_message`] found at an exact channel and `ts`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OwnMessage {
+    /// No bot token is configured; nothing was asked.
+    Unconfigured,
+    /// No message at exactly that channel and `ts` is visible to the bot.
+    NotFound,
+    /// The message exists but this bot (`auth.test`) did not post it.
+    NotOwn,
+    Found(SlackMessage),
+}
+
+/// Reads the exact message `ts` in `channel` and checks this bot posted it. Read-only: only
+/// `auth.test` and `conversations.history` are called; nothing is posted or updated.
+pub async fn read_own_message(channel: &str, ts: &str) -> Result<OwnMessage> {
+    #[cfg(feature = "hub-slack")]
+    {
+        return fetch_own_message(channel, ts).await;
+    }
+    #[cfg(not(feature = "hub-slack"))]
+    {
+        let _ = (channel, ts);
+        Ok(OwnMessage::Unconfigured)
+    }
+}
+
+/// [`read_own_message`] for a message that may be a thread reply: reads the exact `ts` in the
+/// thread rooted at `root_ts` (`conversations.replies`) with the same own-bot check. `root_ts`
+/// equal to `ts` reads the root itself. Read-only: only `auth.test` and
+/// `conversations.replies` are called.
+pub async fn read_own_thread_message(channel: &str, root_ts: &str, ts: &str) -> Result<OwnMessage> {
+    #[cfg(feature = "hub-slack")]
+    {
+        return fetch_own(channel, ts, Some(root_ts)).await;
+    }
+    #[cfg(not(feature = "hub-slack"))]
+    {
+        let _ = (channel, root_ts, ts);
+        Ok(OwnMessage::Unconfigured)
+    }
+}
+
+#[cfg(feature = "hub-slack")]
+async fn fetch_own_message(channel: &str, ts: &str) -> Result<OwnMessage> {
+    fetch_own(channel, ts, None).await
+}
+
+/// The exact message `ts`, from channel history or (with `root`) from that thread's replies.
+#[cfg(feature = "hub-slack")]
+async fn fetch_own(channel: &str, ts: &str, root: Option<&str>) -> Result<OwnMessage> {
+    if bot_token().is_none() {
+        return Ok(OwnMessage::Unconfigured);
+    }
+    let auth = slack_form("auth.test", &[]).await?;
+    let user = auth.get("user_id").and_then(Value::as_str).filter(|_| auth["ok"] == true)
+        .ok_or_else(|| HubError::message(format!("slack auth.test failed: {}",
+            auth.get("error").and_then(Value::as_str).unwrap_or("no bot identity"))))?;
+    let bot = auth.get("bot_id").and_then(Value::as_str);
+    let (method, history) = match root {
+        // replies always lists the root first, so the page must hold the root and the target.
+        Some(root) => ("conversations.replies", slack_form("conversations.replies", &[("channel", channel),
+            ("ts", root), ("latest", ts), ("oldest", ts), ("inclusive", "true"), ("limit", "2")]).await?),
+        None => ("conversations.history", slack_form("conversations.history", &[("channel", channel),
+            ("latest", ts), ("oldest", ts), ("inclusive", "true"), ("limit", "1")]).await?),
+    };
+    if history.get("ok").and_then(Value::as_bool) != Some(true) {
+        return match history.get("error").and_then(Value::as_str) {
+            Some("channel_not_found" | "not_in_channel" | "message_not_found" | "thread_not_found") => Ok(OwnMessage::NotFound),
+            error => Err(HubError::message(format!("slack {method} failed: {}",
+                error.unwrap_or("unknown_error")))),
+        };
+    }
+    let Some(message) = history.get("messages").and_then(Value::as_array)
+        .and_then(|messages| messages.iter().find(|m| m.get("ts").and_then(Value::as_str) == Some(ts)))
+    else {
+        return Ok(OwnMessage::NotFound);
+    };
+    let own = message.get("user").and_then(Value::as_str) == Some(user)
+        || bot.is_some_and(|bot| message.get("bot_id").and_then(Value::as_str) == Some(bot));
+    if !own {
+        return Ok(OwnMessage::NotOwn);
+    }
+    Ok(OwnMessage::Found(SlackMessage {
+        channel: channel.to_owned(),
+        ts: ts.to_owned(),
+        text: message.get("text").and_then(Value::as_str).unwrap_or_default().to_owned(),
+        blocks: message.get("blocks").and_then(Value::as_array).filter(|b| !b.is_empty()).cloned(),
+    }))
 }
 
 #[cfg(feature = "hub-slack")]
@@ -955,8 +1102,46 @@ pub(crate) async fn call_method(method: &str, body: Value) -> Result<bool> {
 
 #[cfg(feature = "hub-slack")]
 async fn slack_method(method: &str, body: Value) -> Result<bool> {
+    Ok(slack_call(method, body).await?.is_some())
+}
+
+/// Why a Slack Web API call did not return `ok`.
+#[cfg(feature = "hub-slack")]
+enum CallFailure {
+    /// Slack did not act on it: the request never left (no connection) or Slack refused it.
+    Definite(HubError),
+    /// Slack may have acted on it: a timeout or dropped connection after the request was
+    /// sent, an unreadable answer, or an error Slack documents as possibly partly applied.
+    Uncertain(HubError),
+}
+
+#[cfg(feature = "hub-slack")]
+impl CallFailure {
+    fn into_error(self) -> HubError {
+        match self {
+            Self::Definite(error) | Self::Uncertain(error) => error,
+        }
+    }
+}
+
+/// Slack error codes documented as "it's possible some aspect of the operation succeeded".
+#[cfg(feature = "hub-slack")]
+const POSSIBLY_APPLIED_ERRORS: &[&str] = &["fatal_error", "internal_error"];
+
+/// One Slack Web API call; the `ok` response, or `None` when no token is configured.
+#[cfg(feature = "hub-slack")]
+async fn slack_call(method: &str, body: Value) -> Result<Option<Value>> {
+    slack_call_checked(method, body).await.map_err(CallFailure::into_error)
+}
+
+/// [`slack_call`] that says whether a failed call may still have taken effect.
+#[cfg(feature = "hub-slack")]
+async fn slack_call_checked(
+    method: &str,
+    body: Value,
+) -> std::result::Result<Option<Value>, CallFailure> {
     let Some(token) = bot_token() else {
-        return Ok(false);
+        return Ok(None);
     };
     let base = api_base();
     let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(15));
@@ -965,22 +1150,118 @@ async fn slack_method(method: &str, body: Value) -> Result<bool> {
     }
     let client = builder
         .build()
-        .map_err(|error| HubError::message(error.to_string()))?;
+        .map_err(|error| CallFailure::Definite(HubError::message(error.to_string())))?;
     let response = client
         .post(format!("{base}/{method}"))
         .bearer_auth(token)
         .json(&body)
         .send()
         .await
-        .map_err(|error| HubError::message(error.to_string()))?;
+        .map_err(|error| {
+            // Only a failed connection or an unbuildable request certainly never reached Slack.
+            let definite = error.is_connect() || error.is_builder();
+            let error = HubError::message(error.to_string());
+            if definite { CallFailure::Definite(error) } else { CallFailure::Uncertain(error) }
+        })?;
     let value: Value = response
         .json()
         .await
-        .map_err(|error| HubError::message(error.to_string()))?;
+        .map_err(|error| CallFailure::Uncertain(HubError::message(error.to_string())))?;
     if value.get("ok").and_then(Value::as_bool) != Some(true) {
-        return Err(HubError::message(format!("slack {method} failed: {value}")));
+        if value.get("ok").and_then(Value::as_bool) == Some(false) {
+            let code = value.get("error").and_then(Value::as_str).unwrap_or("unknown").to_owned();
+            if POSSIBLY_APPLIED_ERRORS.contains(&code.as_str()) {
+                return Err(CallFailure::Uncertain(HubError::message(format!(
+                    "slack {method} outcome unknown: {code}"
+                ))));
+            }
+            return Err(CallFailure::Definite(HubError::SlackRejected {
+                method: method.to_owned(),
+                code,
+            }));
+        }
+        return Err(CallFailure::Uncertain(HubError::message(format!(
+            "slack {method} invalid response: {value}"
+        ))));
     }
-    Ok(true)
+    Ok(Some(value))
+}
+
+/// The outcome of one outbox post to Slack, as far as a retry is concerned.
+#[derive(Debug)]
+pub enum SlackSend {
+    /// No bot token is configured; nothing was sent.
+    NotConfigured,
+    Posted(super::reply::PostedMessage),
+    /// Slack certainly did not post it; a retry may send it.
+    Rejected(HubError),
+    /// Slack may have posted it; a retry could duplicate it.
+    Uncertain(HubError),
+}
+
+/// The Slack messages an outbox text posts as: tables become image placeholders, then
+/// omo-gateway's mrkdwn conversion and 3900-byte split ([`super::mrkdwn::render`]).
+pub fn outbox_chunks(text: &str) -> Vec<String> {
+    let (text, _) = crate::table_image::transform_markdown_tables(text);
+    super::mrkdwn::render(&text)
+}
+
+/// Posts one outbox chunk (with its blocks, for a card) into the session's channel/thread.
+pub async fn post_chunk(
+    session: &super::session::SessionKey,
+    text: &str,
+    blocks: Option<Value>,
+) -> SlackSend {
+    #[cfg(feature = "hub-slack")]
+    {
+        let mut body = json!({ "channel": session.channel_id, "text": text });
+        if let Some(blocks) = blocks {
+            body["blocks"] = blocks;
+        }
+        if let Some(thread) = &session.thread_id {
+            body["thread_ts"] = json!(thread);
+        }
+        return match slack_call_checked("chat.postMessage", body).await {
+            Ok(None) => SlackSend::NotConfigured,
+            Ok(Some(response)) => SlackSend::Posted(super::reply::PostedMessage {
+                channel: response
+                    .get("channel")
+                    .and_then(Value::as_str)
+                    .unwrap_or(session.channel_id.as_str())
+                    .to_owned(),
+                ts: response.get("ts").and_then(Value::as_str).map(str::to_owned),
+            }),
+            Err(CallFailure::Definite(error)) => SlackSend::Rejected(error),
+            Err(CallFailure::Uncertain(error)) => SlackSend::Uncertain(error),
+        };
+    }
+    #[cfg(not(feature = "hub-slack"))]
+    {
+        let _ = (session, text, blocks);
+        SlackSend::NotConfigured
+    }
+}
+
+/// What follows a fully posted outbox text: the voice reply and, for plain text, its table
+/// images. Best effort: the text is already delivered, so a failure here is only logged.
+pub async fn finish_outbox_post(session: &super::session::SessionKey, text: &str, tables: bool) {
+    #[cfg(feature = "hub-slack")]
+    {
+        let (text, rendered) = if tables {
+            crate::table_image::transform_markdown_tables(text)
+        } else {
+            (text.to_owned(), Vec::new())
+        };
+        let thread = session.thread_id.as_deref();
+        let _ = attach_voice_reply(&session.channel_id, thread, thread, &text).await;
+        if let Err(error) = upload_tables(session, &rendered).await {
+            tracing::warn!(%error, "table attachment failed after Slack message was posted");
+        }
+    }
+    #[cfg(not(feature = "hub-slack"))]
+    {
+        let _ = (session, text, tables);
+    }
 }
 
 /// omo-gateway's Slack send (`egress::send`): tables become images first, then each
@@ -1024,6 +1305,30 @@ pub async fn deliver(channel: &str, thread: Option<&str>, text: &str) -> Result<
         "cron",
     );
     post_message(&session, text, None).await
+}
+
+/// [`publish`] that returns the posted channel and `ts`; `None` when nothing was posted.
+pub async fn publish_posted(
+    session: &super::session::SessionKey,
+    text: &str,
+) -> Result<Option<super::reply::PostedMessage>> {
+    publish_blocks_posted(session, text, None).await
+}
+
+pub async fn publish_blocks_posted(
+    session: &super::session::SessionKey,
+    text: &str,
+    blocks: Option<Value>,
+) -> Result<Option<super::reply::PostedMessage>> {
+    #[cfg(feature = "hub-slack")]
+    {
+        return post_message_posted(session, text, blocks).await;
+    }
+    #[cfg(not(feature = "hub-slack"))]
+    {
+        let _ = (session, text, blocks);
+        Ok(None)
+    }
 }
 
 pub async fn publish(session: &super::session::SessionKey, text: &str) -> Result<bool> {
@@ -1551,6 +1856,76 @@ pub fn is_disconnect(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "hub-slack")]
+    #[tokio::test]
+    async fn table_upload_failure_preserves_the_posted_report_receipt() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let posts = Arc::new(AtomicUsize::new(0));
+        let uploads = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new()
+            .route("/chat.postMessage", axum::routing::post({
+                let posts = posts.clone();
+                move || { let posts = posts.clone(); async move {
+                    posts.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(json!({"ok":true,"channel":"C1","ts":"1.0"}))
+                }}
+            }))
+            .route("/files.getUploadURLExternal", axum::routing::post({
+                let uploads = uploads.clone();
+                move || { let uploads = uploads.clone(); async move {
+                    uploads.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(json!({"ok":false,"error":"missing_scope"}))
+                }}
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let pool = crate::storage::memory().await.unwrap();
+        let session = super::super::session::SessionKey::new("slack", None::<String>, "C1", None::<String>, "owner");
+        let key = session.storage_key();
+        let text = "승인이 필요합니다.\n\n| 항목 | 값 |\n|---|---|\n| 요청 | 확인 |";
+        let report = crate::report_gate::Report::new("table-report", "fixture", "table",
+            crate::report_gate::Salience::Decision, text);
+        let id = crate::report_gate::queue(&pool, &key, &report, false).await.unwrap().1.unwrap();
+        with_test_api(base, "test-token".into(), async {
+            assert!(super::super::reply::deliver_stored_posted(&pool, id, &key, text).await.unwrap().is_some());
+            let sent = posts.load(Ordering::SeqCst);
+            assert!(super::super::reply::deliver_stored_posted(&pool, id, &key, text).await.unwrap().is_none());
+            assert_eq!(posts.load(Ordering::SeqCst), sent);
+        }).await;
+        assert_eq!(uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(posts.load(Ordering::SeqCst), 2); // report plus plain-text table fallback
+        server.abort();
+    }
+
+    #[cfg(feature = "hub-slack")]
+    #[tokio::test]
+    async fn a_thread_reply_is_read_by_exact_ts_with_the_own_bot_check() {
+        let replies = json!({"ok": true, "messages": [
+            {"ts": "100.1", "user": "UBOT", "text": "root"},
+            {"ts": "100.2", "user": "UBOT", "text": "card", "blocks": [{"type": "section", "block_id": "m1"}]},
+            {"ts": "100.3", "user": "USOMEONE", "text": "owner"},
+        ]});
+        let (base, calls) = super::super::slack_web::mock::serve_scripted("UBOT", vec![
+            ("auth.test", vec![json!({"ok": true, "user_id": "UBOT", "bot_id": "B1"})]),
+            ("conversations.replies", vec![replies]),
+        ]).await;
+        let (own, other, missing) = with_test_api(base, "xoxb-test".into(), async {
+            (read_own_thread_message("C1", "100.1", "100.2").await.unwrap(),
+             read_own_thread_message("C1", "100.1", "100.3").await.unwrap(),
+             read_own_thread_message("C1", "100.1", "100.9").await.unwrap())
+        }).await;
+        assert_eq!(own, OwnMessage::Found(SlackMessage { channel: "C1".into(), ts: "100.2".into(),
+            text: "card".into(), blocks: Some(vec![json!({"type": "section", "block_id": "m1"})]) }));
+        assert_eq!(other, OwnMessage::NotOwn);
+        assert_eq!(missing, OwnMessage::NotFound);
+        let calls = calls.lock().unwrap();
+        let reads: Vec<_> = calls.iter().filter(|(method, _)| method == "conversations.replies").collect();
+        assert_eq!(reads.len(), 3);
+        assert!(reads.iter().all(|(_, body)| body["ts"] == "100.1" && body["channel"] == "C1"));
+        assert!(calls.iter().all(|(method, _)| matches!(method.as_str(), "auth.test" | "conversations.replies")));
+    }
     use crate::agent_control::RecordingControl;
 
     #[test]
@@ -1689,6 +2064,33 @@ mod tests {
         .unwrap();
         assert!(matches!(parsed, SlackFrame::Approval(_)));
         assert!(matches!(control.ops()[0].1, AgentOp::Answer { .. }));
+    }
+
+    #[tokio::test]
+    async fn stale_report_card_cannot_execute_an_approval() {
+        let pool = crate::storage::memory().await.unwrap();
+        let report = crate::report_gate::Report::new("card", "producer", "card:stale",
+            crate::report_gate::Salience::Decision, "Choose an action");
+        let id = crate::report_gate::queue(&pool, "owner", &report, false).await.unwrap().1.unwrap();
+        sqlx::query("UPDATE chat_outbox SET delivered_at='receipt',posted_channel='C1',posted_ts='1.0' WHERE id=?")
+            .bind(id).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO report_cards(outbox_id,desired_gen,desired_mutation_id) VALUES(?,2,'new-card')")
+            .bind(id).execute(&pool).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new().route("/chat.postEphemeral",
+                axum::routing::post(|| async { axum::Json(serde_json::json!({"ok":true})) }))).await.unwrap();
+        });
+        let control = RecordingControl::default();
+        let frame = r#"{"envelope_id":"stale","type":"interactive","payload":{"type":"block_actions","container":{"channel_id":"C1","message_ts":"1.0"},"user":{"id":"UOWNER"},"actions":[{"block_id":"old-card","value":"ferryx:approval:pane-1:prompt-9:rev-42:0:once"}]}}"#;
+        with_test_api(base, "isolated".into(), async {
+            let result = apply_frame_routed(frame, "UOWNER", "meta",
+                &crate::chat::router::ProfileRouter::new(vec![]), &control, Some(&pool), None, None).await.unwrap();
+            assert!(matches!(result, SlackFrame::Ignore));
+        }).await;
+        assert!(control.ops().is_empty());
+        server.abort();
     }
 
     #[tokio::test]
@@ -1878,7 +2280,7 @@ mod tests {
 
         // An executable mhc JSONL peer produces interim and final assistant messages.
         let (binary, omo) = serve(Script {
-            messages: vec!["looking now".into(), "**All good**: 3 items".into()],
+            messages: vec!["확인하겠습니다.".into(), "항목 3개를 수정했습니다.".into()],
             approval: true,
             live: false,
         }).await;
@@ -1925,7 +2327,7 @@ mod tests {
                     loop {
                         if posts(&calls).len() >= n && calls.0.lock().unwrap().iter()
                             .filter(|(m, b)| m == "reactions.add" && b["name"] == "white_check_mark")
-                            .count() >= n / 2 { return; }
+                            .count() >= n { return; }
                         changed.changed().await.unwrap();
                     }
                 }).await.expect("Slack replies and completion reactions arrived");
@@ -1949,15 +2351,14 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                    // Two posts (interim + final) and the eyes / check reactions.
-                    wait_posts(2).await;
+                    // Only the final result is posted; progress remains internal.
+                    wait_posts(1).await;
                     let replies = posts(&calls);
-                    assert_eq!(replies.len(), 2, "{replies:?}");
+                    assert_eq!(replies.len(), 1, "{replies:?}");
                     assert!(replies
                         .iter()
                         .all(|r| r["channel"] == "CHOME" && r["thread_ts"] == "100.1"));
-                    assert_eq!(replies[0]["text"], "looking now");
-                    assert_eq!(replies[1]["text"], "*All good*: 3 items");
+                    assert_eq!(replies[0]["text"], "항목 3개를 수정했습니다.");
                     let log = calls.0.lock().unwrap().clone();
                     assert!(log.iter().any(|(m, b)| m == "reactions.add"
                         && b["name"] == "eyes"
@@ -2010,12 +2411,12 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                    wait_posts(4).await;
+                    wait_posts(2).await;
                 },
             )
             .await;
 
-        assert_eq!(posts(&calls).len(), 4);
+        assert_eq!(posts(&calls).len(), 2);
         assert!(
             control.ops().is_empty(),
             "no pane was used: {:?}",
