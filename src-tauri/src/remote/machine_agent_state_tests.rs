@@ -435,6 +435,7 @@ async fn loopback_relay_round_trips_agent_control_list_send_and_read() {
                     generation: host_view.generation,
                     operation: Operation::AgentControl {
                         op: crate::agent_control::AgentControlOp::List,
+                        fence: None,
                     },
                 },
             )
@@ -464,6 +465,7 @@ async fn loopback_relay_round_trips_agent_control_list_send_and_read() {
                             text: "echo ferryx-agent-control".into(),
                             request_id: Some("relay-agent-send-1".into()),
                         },
+                        fence: None,
                     },
                 },
             )
@@ -486,6 +488,7 @@ async fn loopback_relay_round_trips_agent_control_list_send_and_read() {
                         op: crate::agent_control::AgentControlOp::Read {
                             session_id: session.target.session_id.clone(),
                         },
+                        fence: None,
                     },
                 },
             )
@@ -612,7 +615,7 @@ impl ferryx_hub::agent_control::AgentControl for LiveAndFakeHosts<'_> {
                 OperationRequest {
                     host_id: self.live_host.clone(),
                     generation: self.generation,
-                    operation: Operation::AgentControl { op: request },
+                    operation: Operation::AgentControl { op: request, fence: None },
                 },
             )
             .await

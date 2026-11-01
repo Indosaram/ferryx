@@ -3688,6 +3688,7 @@ pub mod completion;
 pub mod cutover;
 pub mod delivery;
 pub mod dispatcher;
+pub mod fence_gate;
 pub mod memory;
 pub mod receipts;
 pub mod request;

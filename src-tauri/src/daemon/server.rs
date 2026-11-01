@@ -8223,12 +8223,11 @@ impl DaemonServer {
                         Err(message) => daemon_error(message),
                     }
                 }
-                Ok(DaemonRequest::AgentControl { request, host_id }) => {
-                    match host_id {
-                        None => match crate::remote::server::agent_control_service::handle(&self.remote_state, request).await {
-                            Ok(result) => DaemonResponse::AgentControlOk { result },
-                            Err(error) => crate::remote::server::agent_control_service::error_response(error),
-                        },
+                Ok(DaemonRequest::AgentControl { request, host_id, supervisor_fence, supervisor_account }) => {
+                    match crate::agent_control::fence::SupervisorFence::from_wire(supervisor_fence, supervisor_account) {
+                    Err(refusal) => crate::remote::server::agent_control_service::fence_response(&refusal),
+                    Ok(fence) => match host_id {
+                        None => crate::remote::server::agent_control_service::handle_fenced(&self.remote_state, request, fence).await,
                         // One execute, on the caller's request id. A lost answer stays outcome-unknown
                         // and is not issued again.
                         Some(host_id) => {
@@ -8237,9 +8236,11 @@ impl DaemonServer {
                                 &self.paired_hosts,
                                 host_id,
                                 request,
+                                fence,
                             )
                             .await
                         }
+                    },
                     }
                 }
                 Err(e) => daemon_error(format!("Malformed request: {e}"),),

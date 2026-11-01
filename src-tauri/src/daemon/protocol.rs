@@ -1121,11 +1121,20 @@ pub enum DaemonRequest {
     ///
     /// `host_id` absent runs the operation on this daemon (`agentControlV1`). `host_id` set
     /// forwards it to that paired host (`agentControlRemoteV1`). Older peers omit the field.
+    ///
+    /// `supervisor_fence` and `supervisor_account` mark a supervisor request: the executing
+    /// daemon refuses a fence below the highest it has seen for that account
+    /// (`STALE_SUPERVISOR_FENCE`) and raises its maximum on a higher one. Requests without them
+    /// (manual, user, older hubs) are never fenced. Older peers omit both.
     #[serde(rename_all = "camelCase")]
     AgentControl {
         request: crate::agent_control::AgentControlOp,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supervisor_fence: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supervisor_account: Option<String>,
     },
     /// The Settings card: the agent-control switch, excluded devices and the newest audit lines.
     AgentControlSettingsGet,

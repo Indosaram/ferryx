@@ -17,6 +17,7 @@ use crate::remote::reference_chat::types::ReferencePromptAnswer;
 
 pub mod delivery;
 pub mod events;
+pub mod fence;
 pub mod policy;
 
 /// Capability string the daemon advertises in `GetCapabilities` for local agent control.
@@ -515,6 +516,8 @@ pub async fn request_daemon(op: AgentControlOp, host_id: Option<String>) -> (Val
         &DaemonRequest::AgentControl {
             request: op,
             host_id,
+            supervisor_fence: None,
+            supervisor_account: None,
         },
     )
     .await
@@ -592,19 +595,37 @@ mod tests {
                 request_id: Some("r".into()),
             },
             host_id: None,
+            supervisor_fence: None,
+            supervisor_account: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert_eq!(json, r#"{"type":"agentControl","request":{"op":"send","sessionId":"s-1","text":"hi","requestId":"r"}}"#);
         let back: crate::daemon::protocol::DaemonRequest = serde_json::from_str(&json).unwrap();
         assert!(
-            matches!(back, crate::daemon::protocol::DaemonRequest::AgentControl { request, host_id: None } if request == AgentControlOp::Send { session_id: "s-1".into(), text: "hi".into(), request_id: Some("r".into()) })
+            matches!(back, crate::daemon::protocol::DaemonRequest::AgentControl { request, host_id: None, .. } if request == AgentControlOp::Send { session_id: "s-1".into(), text: "hi".into(), request_id: Some("r".into()) })
         );
         let remote: crate::daemon::protocol::DaemonRequest = serde_json::from_str(
             r#"{"type":"agentControl","request":{"op":"list"},"hostId":"host-a"}"#,
         )
         .unwrap();
+        // An older hub's request carries no fence and is never fenced; a supervisor's carries both.
+        assert!(matches!(
+            &remote,
+            crate::daemon::protocol::DaemonRequest::AgentControl { supervisor_fence: None, supervisor_account: None, .. }
+        ));
         assert!(
             matches!(remote, crate::daemon::protocol::DaemonRequest::AgentControl { host_id: Some(host), .. } if host == "host-a")
+        );
+        let fenced = crate::daemon::protocol::DaemonRequest::AgentControl {
+            request: AgentControlOp::List,
+            host_id: None,
+            supervisor_fence: Some(3),
+            supervisor_account: Some("user-1".into()),
+        };
+        let json = serde_json::to_string(&fenced).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"agentControl","request":{"op":"list"},"supervisorFence":3,"supervisorAccount":"user-1"}"#
         );
     }
 

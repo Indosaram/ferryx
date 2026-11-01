@@ -2188,6 +2188,7 @@ impl DaemonClient {
             DaemonRequest::PairedHostOperation { request: op } => {
                 if let crate::paired_host::client::Operation::AgentControl {
                     op: crate::agent_control::AgentControlOp::Wait { timeout_ms, .. },
+                    ..
                 } = &op.operation
                 {
                     std::time::Duration::from_millis(
@@ -2456,7 +2457,9 @@ impl DaemonClient {
             | Operation::FileRead { .. }
             | Operation::Resources
             | Operation::Operation { .. } => None,
-            Operation::AgentControl { op } => op.mutation_request_id(),
+            // Idempotent: a holder's fence push raises a maximum and never types anything.
+            Operation::SupervisorFence { .. } => None,
+            Operation::AgentControl { op, .. } => op.mutation_request_id(),
         };
         let transport_error = |error: crate::paired_host::service::ServiceError| ClientError {
             code: error.code,

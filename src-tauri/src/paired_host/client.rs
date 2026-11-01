@@ -87,11 +87,18 @@ pub enum Operation {
         workspace_id: String,
     },
     /// Agent control on the paired host. Send/Answer/Stop are mutations and are not retried.
+    /// `fence` marks a supervisor's input: it rides the send/answer/stop body and the host
+    /// refuses it when stale (`STALE_SUPERVISOR_FENCE`). A person's control carries none.
     AgentControl {
         op: crate::agent_control::AgentControlOp,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fence: Option<crate::agent_control::fence::SupervisorFence>,
     },
     /// Host and per-session resource sample (`resourceUsageV1`); read-only.
     Resources,
+    /// A new supervisor lease holder raises the host's fence for its account
+    /// (`POST supervisor/fence`, `supervisorFenceV1`).
+    SupervisorFence { account: String, fence: u64 },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -366,7 +373,7 @@ struct Route {
 }
 impl Operation {
     pub fn is_mutation(&self) -> bool {
-        if let Self::AgentControl { op } = self {
+        if let Self::AgentControl { op, .. } = self {
             return op.is_input_mutation();
         }
         matches!(
@@ -386,7 +393,7 @@ impl Operation {
     /// pending record there becomes an `OutcomeUnknown` workspace operation on restart.
     pub fn agent_control_mutation_id(&self) -> Option<String> {
         match self {
-            Self::AgentControl { op } if op.is_input_mutation() => op.mutation_request_id(),
+            Self::AgentControl { op, .. } if op.is_input_mutation() => op.mutation_request_id(),
             _ => None,
         }
     }
@@ -503,7 +510,11 @@ impl Operation {
                 path = "capabilities";
                 r.capability = Some(crate::remote::dag_api::DAG_STREAM_CAPABILITY);
             }
-            Self::AgentControl { op } => {
+            Self::SupervisorFence { .. } => {
+                path = "supervisor/fence";
+                r.capability = Some(crate::agent_control::fence::SUPERVISOR_FENCE_CAPABILITY);
+            }
+            Self::AgentControl { op, .. } => {
                 path = "agent-control/sessions";
                 r.capability = Some(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
                 match op {
@@ -568,7 +579,7 @@ impl Operation {
             Self::Session { session_id, .. } | Self::CloseSession { session_id, .. } => {
                 r.segments.push(session_id.clone())
             }
-            Self::AgentControl { op } => match op {
+            Self::AgentControl { op, .. } => match op {
                 crate::agent_control::AgentControlOp::Read { session_id }
                 | crate::agent_control::AgentControlOp::Send { session_id, .. }
                 | crate::agent_control::AgentControlOp::Deliver { session_id, .. }
@@ -626,12 +637,19 @@ impl Operation {
                         .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
                 );
             }
-            Self::AgentControl { op } if op.is_input_mutation() => {
+            Self::AgentControl { op, fence } if op.is_input_mutation() => {
                 r.method = Method::POST;
                 // The request id stays off `route.request_id` so the workspace journal is not
                 // consulted. Transport loss is relabeled from `agent_control_mutation_id`.
                 r.body = Some(
-                    serde_json::to_vec(&agent_control_body(op))
+                    serde_json::to_vec(&agent_control_body(op, fence.as_ref()))
+                        .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
+                );
+            }
+            Self::SupervisorFence { account, fence } => {
+                r.method = Method::POST;
+                r.body = Some(
+                    serde_json::to_vec(&serde_json::json!({ "account": account, "fence": fence }))
                         .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
                 );
             }
@@ -1944,12 +1962,16 @@ fn map_result(host: &HostView, operation: &Operation, bytes: &[u8]) -> Result<Op
         // is opened separately over a socket.
         Operation::DagStream { .. } => OperationResult::Capabilities(decode(bytes)?),
         Operation::AgentControl { .. } => OperationResult::AgentControl(decode(bytes)?),
+        Operation::SupervisorFence { .. } => OperationResult::AgentControl(decode(bytes)?),
         Operation::Resources => OperationResult::Resources(decode(bytes)?),
     })
 }
 
-fn agent_control_body(op: &crate::agent_control::AgentControlOp) -> serde_json::Value {
-    match op {
+fn agent_control_body(
+    op: &crate::agent_control::AgentControlOp,
+    fence: Option<&crate::agent_control::fence::SupervisorFence>,
+) -> serde_json::Value {
+    let mut body = match op {
         crate::agent_control::AgentControlOp::Send {
             text, request_id, ..
         } => {
@@ -1982,7 +2004,12 @@ fn agent_control_body(op: &crate::agent_control::AgentControlOp) -> serde_json::
             serde_json::json!({ "requestId": request_id })
         }
         _ => serde_json::Value::Null,
+    };
+    if let (Some(fence), Some(fields)) = (fence, body.as_object_mut()) {
+        fields.insert("supervisorFence".into(), serde_json::json!(fence.fence));
+        fields.insert("supervisorAccount".into(), serde_json::json!(fence.account));
     }
+    body
 }
 #[cfg(test)]
 #[path = "client_tests.rs"]

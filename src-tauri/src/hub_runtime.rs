@@ -110,9 +110,21 @@ impl AgentControl for DaemonBridge {
         let host_id = host_id
             .filter(|host| *host != ferryx_hub::agent_control::LOCAL_HOST_ID && !host.is_empty())
             .map(str::to_owned);
+        // A supervisor input carries this machine's lease fence, asked right before the send;
+        // a machine that is not the lease holder now sends nothing.
+        let (supervisor_fence, supervisor_account) = crate::agent_control::fence::wire(
+            crate::agent_control::fence::stamp_for(&request).map_err(|refusal| {
+                HubError::message(format!("{} {}", refusal.code(), refusal.message()))
+            })?,
+        );
         let response = self
             .client
-            .send_request(DaemonRequest::AgentControl { request, host_id })
+            .send_request(DaemonRequest::AgentControl {
+                request,
+                host_id,
+                supervisor_fence,
+                supervisor_account,
+            })
             .await
             .map_err(|error| HubError::message(error.to_string()))?;
         match response {
@@ -152,6 +164,11 @@ impl AgentControl for DaemonBridge {
             };
             return self.deliver(&send).await.send_outcome(&send);
         };
+        if let Err(refusal) = crate::agent_control::fence::admit_stamped(gateway).await {
+            return ferryx_hub::goals::SendOutcome::Refused {
+                code: refusal.code().to_owned(),
+            };
+        }
         hub_send_outcome(
             crate::agent_control::delivery::send_confirmed(
                 gateway,
@@ -194,6 +211,10 @@ impl AgentControl for DaemonBridge {
             // the first byte: a pause, cancel or correction that landed while the delivery
             // waited for the pane refuses it with a code that proves nothing was typed. It is
             // one-shot: once the first byte is allowed, the ask before Enter always passes.
+            // The lease fence is ratcheted on this machine's daemon before that.
+            if let Err(refusal) = crate::agent_control::fence::admit_stamped(gateway).await {
+                return Delivery::from_error_code(Some(refusal.code()));
+            }
             let fence = crate::agent_control::delivery::supervisor_fence(&send.request_id);
             return match crate::remote::server::agent_control_service::handle_as(
                 gateway,
@@ -207,9 +228,16 @@ impl AgentControl for DaemonBridge {
                 Err(error) => crate::agent_control::delivery::hub_delivery(Err(error)),
             };
         };
+        let (supervisor_fence, supervisor_account) =
+            match crate::agent_control::fence::stamp_for(&op) {
+                Ok(fence) => crate::agent_control::fence::wire(fence),
+                Err(refusal) => return Delivery::from_error_code(Some(refusal.code())),
+            };
         let request = DaemonRequest::AgentControl {
             request: op,
             host_id: Some(host_id.to_owned()),
+            supervisor_fence,
+            supervisor_account,
         };
         match self.client.send_request(request).await {
             Ok(DaemonResponse::AgentControlOk { result }) => {
@@ -2241,7 +2269,12 @@ fn spawn_supervisor_dispatcher(
         launch.bridge.clone(),
         ferryx_hub::agent_control::LOCAL_HOST_ID,
     )
-    .with_idle_ledger(idle);
+    .with_idle_ledger(idle)
+    // Each generation is one holder term: its fence reaches every daemon before a dispatch.
+    .with_fence_gate(crate::agent_control::fence::dispatcher_fence_gate(
+        launch.bridge.client.clone(),
+        launch.bridge.gateway.clone(),
+    ));
     tokio::spawn(dispatcher.run(ferryx_hub::supervisor::dispatcher::dispatch_wake()))
 }
 

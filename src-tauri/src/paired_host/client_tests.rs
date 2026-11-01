@@ -1746,11 +1746,14 @@ fn agent_control_routes_require_the_remote_capability_and_skip_the_journal() {
             text: "hi".into(),
             request_id: Some("same-id".into()),
         },
+        fence: None,
     };
     assert!(send.is_mutation());
     assert_eq!(send.agent_control_mutation_id().as_deref(), Some("same-id"));
     let route = send.route().expect("send route");
     assert_eq!(route.capability, Some("agentControlRemoteV1"));
+    let body: serde_json::Value = serde_json::from_slice(route.body.as_ref().unwrap()).unwrap();
+    assert!(body.get("supervisorFence").is_none(), "a person's send carries no fence");
     assert_eq!(
         route.segments,
         vec!["agent-control", "sessions", "s-1", "send"]
@@ -1762,6 +1765,36 @@ fn agent_control_routes_require_the_remote_capability_and_skip_the_journal() {
     );
     assert!(!route.idempotent);
 
+    // A supervisor's send carries its lease fence and account in the body.
+    let fenced = Operation::AgentControl {
+        op: AgentControlOp::Send {
+            session_id: "s-1".into(),
+            text: "hi".into(),
+            request_id: Some("fenced-id".into()),
+        },
+        fence: Some(crate::agent_control::fence::SupervisorFence {
+            account: "user-1".into(),
+            fence: 7,
+        }),
+    };
+    let route = fenced.route().expect("fenced send route");
+    let body: serde_json::Value = serde_json::from_slice(route.body.as_ref().unwrap()).unwrap();
+    assert_eq!(body["supervisorFence"], 7);
+    assert_eq!(body["supervisorAccount"], "user-1");
+    assert_eq!(body["requestId"], "fenced-id");
+
+    // A new holder's fence push rides POST supervisor/fence behind its own capability.
+    let push = Operation::SupervisorFence {
+        account: "user-1".into(),
+        fence: 8,
+    };
+    let route = push.route().expect("fence push route");
+    assert_eq!(route.capability, Some("supervisorFenceV1"));
+    assert_eq!(route.segments, vec!["supervisor", "fence"]);
+    assert_eq!(route.method, Method::POST);
+    let body: serde_json::Value = serde_json::from_slice(route.body.as_ref().unwrap()).unwrap();
+    assert_eq!(body, serde_json::json!({ "account": "user-1", "fence": 8 }));
+
     let wait = Operation::AgentControl {
         op: AgentControlOp::Wait {
             session_id: "s-1".into(),
@@ -1770,6 +1803,7 @@ fn agent_control_routes_require_the_remote_capability_and_skip_the_journal() {
             after: 4,
             timeout_ms: 300_000,
         },
+        fence: None,
     };
     assert!(!wait.is_mutation());
     let route = wait.route().expect("wait route");
@@ -1799,6 +1833,7 @@ fn a_delivery_rides_the_send_route_only_to_a_host_with_receipts() {
             request_id: "sv-goal-r1-d1".into(),
             observe_ms: 20_000,
         },
+        fence: None,
     };
     assert!(deliver.is_mutation());
     assert_eq!(deliver.agent_control_mutation_id().as_deref(), Some("sv-goal-r1-d1"));
@@ -1850,6 +1885,7 @@ async fn a_delivery_to_a_host_without_receipts_reaches_nothing_and_is_a_capabili
                         request_id: "sv-goal-r1-d1".into(),
                         observe_ms: 20_000,
                     },
+                    fence: None,
                 },
             ),
         )

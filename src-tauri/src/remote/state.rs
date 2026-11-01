@@ -824,6 +824,9 @@ pub struct RemoteGatewayState {
     agent_control_path: Option<PathBuf>,
     /// Bounded audit of agent-control calls, including the device id. Not the workspace journal.
     pub agent_control_audit: Arc<crate::agent_control::policy::AgentControlAudit>,
+    /// Highest supervisor lease fence seen per account (`supervisor-fence.json`, beside the
+    /// auth store); a fenced agent-control request below it is refused.
+    pub supervisor_fence: Arc<crate::agent_control::fence::FenceRatchet>,
     /// Phone push: VAPID keys and subscriptions keyed by paired device, beside the auth store.
     pub push: Arc<crate::remote::push::PushService>,
     /// Last desktop window-focus report from the GUI and when it arrived. Selection is not
@@ -1042,6 +1045,11 @@ impl RemoteGatewayState {
         ));
         let agent_control_audit =
             Arc::new(crate::agent_control::policy::AgentControlAudit::default());
+        let supervisor_fence = Arc::new(crate::agent_control::fence::FenceRatchet::load(
+            identity_dir
+                .as_ref()
+                .map(|dir| dir.join(crate::agent_control::fence::SUPERVISOR_FENCE_FILE)),
+        ));
         let push = Arc::new(crate::remote::push::PushService::new(identity_dir.as_deref()));
         // A device pruned while the daemon was down (idle expiry, revocation journal) must not
         // keep receiving pushes after a restart.
@@ -1084,6 +1092,7 @@ impl RemoteGatewayState {
             agent_control_policy,
             agent_control_path,
             agent_control_audit,
+            supervisor_fence,
             push,
             desktop_window_focus: RwLock::new(None),
             push_dispatch_started: std::sync::atomic::AtomicBool::new(false),

@@ -128,6 +128,15 @@ pub const RECEIPT_MISMATCH: &str = "RECEIPT_MISMATCH";
 /// send, so a start could not be attributed to it; nothing was typed.
 pub const PANE_NOT_READY: &str = "PANE_NOT_READY";
 
+/// The executing daemon refused a supervisor request whose lease fence is below the highest
+/// it has seen for the account, or the sending machine does not hold the supervisor lease
+/// now. Decided before anything runs: nothing was typed.
+pub const STALE_SUPERVISOR_FENCE: &str = "STALE_SUPERVISOR_FENCE";
+
+/// A higher supervisor fence could not be stored by the executing daemon, so the request was
+/// not executed: nothing was typed.
+pub const SUPERVISOR_FENCE_UNAVAILABLE: &str = "SUPERVISOR_FENCE_UNAVAILABLE";
+
 /// Refusal codes that prove nothing was typed: each is decided before the first byte is
 /// written. Only these release a dispatch; any other failure code may follow a write.
 pub const PRE_WRITE_REFUSALS: &[&str] = &[
@@ -138,6 +147,8 @@ pub const PRE_WRITE_REFUSALS: &[&str] = &[
     // paired host without the capability (forwarded as UNSUPPORTED).
     "UNSUPPORTED",
     PANE_NOT_READY,
+    STALE_SUPERVISOR_FENCE,
+    SUPERVISOR_FENCE_UNAVAILABLE,
 ];
 
 /// One supervisor dispatch to a bound worker: the stable request id, transmitted once, the

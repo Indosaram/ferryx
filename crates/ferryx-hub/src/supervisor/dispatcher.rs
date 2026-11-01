@@ -49,6 +49,7 @@ use sqlx::SqlitePool;
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use super::admission::goal_grant;
+use super::fence_gate::{FenceGate, SUPERVISOR_FENCE_PENDING};
 use super::receipts::{
     record_pty_settle, watch_paired_settle, IdleLedger, PtySettle, PtyWorker, SettleReport,
     SettleWatch, WorkerTransport,
@@ -61,9 +62,11 @@ use super::{
 };
 use crate::agent_control::{
     AgentControl, AgentOp, Delivery, StartReceipt, TaskLauncher, WorkerSend, RECEIPT_MISMATCH,
+    STALE_SUPERVISOR_FENCE,
 };
 use crate::goals::types::{GoalMode, SendOutcome};
 use crate::lanes::state::LaneStatus;
+use crate::storage::WriteTx;
 
 /// How often the dispatcher rereads durable ready intents when nothing wakes it: the path by
 /// which an admission committed in another process is picked up.
@@ -181,6 +184,9 @@ pub struct Dispatcher {
     /// Idle readings the hub's observer saw on this machine, for runs whose start commits
     /// after their ending reading arrived.
     idle: Arc<IdleLedger>,
+    /// This holder term's supervisor fence pushes (plan task 6). `None` dispatches without
+    /// pushing a fence (account-less installs, tests).
+    fence: Option<Arc<FenceGate>>,
 }
 
 impl Dispatcher {
@@ -202,7 +208,15 @@ impl Dispatcher {
             drained: None,
             settled: None,
             idle: Arc::new(IdleLedger::default()),
+            fence: None,
         }
+    }
+
+    /// Pushes this holder's lease fence before the first dispatch and to each host before its
+    /// bindings are dispatched; a stale fence refusal stands this hub down.
+    pub fn with_fence_gate(mut self, gate: Arc<FenceGate>) -> Self {
+        self.fence = Some(gate);
+        self
     }
 
     /// Shares the hub observer's idle readings of this machine's panes (see [`IdleLedger`]).
@@ -252,6 +266,10 @@ impl Dispatcher {
     /// wake and on each rescan. Started once per hub generation, after the previous
     /// generation's tasks were aborted, so no other dispatcher of this hub is running.
     pub async fn run(self, wake: Arc<Notify>) {
+        // A new holder term: no machine it reaches may accept the previous holder's fence.
+        if let Some(gate) = &self.fence {
+            gate.push_on_start().await;
+        }
         self.reconcile_at_start().await;
         self.census_started_runs().await;
         loop {
@@ -493,6 +511,15 @@ impl Dispatcher {
         }
         if self.lane_paused(&goal).await {
             return Ok(skipped(request_id, LANE_PAUSED));
+        }
+        // The target host must hold this holder's fence before anything is claimed for it;
+        // until its push succeeds the intent stays ready.
+        if let Some(gate) = &self.fence {
+            let host = (binding.host_id != self.local_host_id).then_some(binding.host_id.as_str());
+            if let Err(why) = gate.ensure(host).await {
+                tracing::warn!(request_id, host = %binding.host_id, %why, "the supervisor fence is not on the target host yet; the dispatch waits");
+                return Ok(skipped(request_id, SUPERVISOR_FENCE_PENDING));
+            }
         }
         let claimed = match claim_dispatch(
             &self.pool,
@@ -812,6 +839,66 @@ impl Dispatcher {
         })
     }
 
+    /// The executing daemon refused this dispatch's fence: another machine holds the lease.
+    /// Nothing was typed. The goal is held `paused` with the state it was claimed from
+    /// (`held_from` = `ready`) and `held_detail` [`STALE_SUPERVISOR_FENCE`], so a resume on the
+    /// holder queues it again; the claim is released (never settled or completed), and this
+    /// hub stands down.
+    async fn hold_stale_fence(&self, claimed: &Dispatch) -> Result<DispatchResult, SupervisorError> {
+        let detail = format!(
+            "{STALE_SUPERVISOR_FENCE}: another machine holds the supervisor lease; nothing was typed for {}",
+            claimed.request_id
+        );
+        let mut tx = self.pool.begin_write().await?;
+        let held = match super::transition_goal_in(
+            &mut tx,
+            &claimed.goal_id,
+            claimed.goal_revision,
+            RunState::Dispatching,
+            RunState::Paused,
+            Some(&detail),
+        )
+        .await
+        {
+            Ok(_) => {
+                sqlx::query(
+                    "UPDATE supervisor_goals SET held_from = ?, held_detail = ? WHERE goal_id = ?",
+                )
+                .bind(RunState::Ready.as_str())
+                .bind(STALE_SUPERVISOR_FENCE)
+                .bind(&claimed.goal_id)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                true
+            }
+            Err(SupervisorError::Sql(error)) => return Err(SupervisorError::Sql(error)),
+            Err(error) => {
+                tracing::debug!(%error, request_id = %claimed.request_id, "goal moved before the stale fence hold");
+                false
+            }
+        };
+        if held {
+            super::changes::announce(&claimed.goal_id);
+            super::wakes::poke();
+        }
+        match confirm_claim_before_transmit(&self.pool, &claimed.request_id).await {
+            Ok(_) => {
+                tracing::warn!(request_id = %claimed.request_id, "a stale-fence dispatch is still claimed; it is not transmitted");
+            }
+            Err(SupervisorError::Sql(error)) => return Err(SupervisorError::Sql(error)),
+            Err(_) => {}
+        }
+        if let Some(gate) = &self.fence {
+            gate.stand_down();
+        }
+        Ok(DispatchResult::Held {
+            request_id: claimed.request_id.clone(),
+            state: RunState::Paused,
+            detail,
+        })
+    }
+
     /// Records what the transmission produced, each stage as its own receipt.
     ///
     /// - Nothing sent ([`Delivery::Unsupported`]: no causal observer for this worker) holds the
@@ -845,6 +932,9 @@ impl Dispatcher {
                     sent.request_id
                 );
                 self.hold_claimed(sent, RunState::Degraded, detail).await
+            }
+            Delivery::Refused { code } if code == STALE_SUPERVISOR_FENCE => {
+                self.hold_stale_fence(sent).await
             }
             Delivery::Refused { code } => {
                 let detail = format!(
