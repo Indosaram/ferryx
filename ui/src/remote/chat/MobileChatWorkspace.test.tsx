@@ -336,7 +336,7 @@ describe("MobileChatWorkspace", () => {
     expect(screen.getByTestId("assistant-reference-body")).toHaveTextContent("rich turn body");
   });
 
-  it("15. draws the prompt card above the message box", () => {
+  it("15. draws the prompt card in the message stream, not the composer footer", () => {
     render(
       <MobileChatWorkspace
         messages={[]}
@@ -344,7 +344,11 @@ describe("MobileChatWorkspace", () => {
         promptCard={<div data-testid="stub-prompt-card">waiting</div>}
       />
     );
-    expect(screen.getByTestId("chat-composer-prompt")).toHaveTextContent("waiting");
+    expect(screen.getByTestId("chat-stream-prompt")).toHaveTextContent("waiting");
+    expect(screen.getByTestId("chat-message-stream")).toContainElement(screen.getByTestId("stub-prompt-card"));
+    expect(screen.getByTestId("mobile-chat-composer")).not.toContainElement(screen.getByTestId("stub-prompt-card"));
+    // the box still answers the prompt: Send stays beside Stop
+    expect(screen.getByTestId("send-button")).toBeInTheDocument();
   });
 
   it("16. keeps the reader's place when an older page lands above them", () => {

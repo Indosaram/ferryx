@@ -73,7 +73,10 @@ export interface MobileChatWorkspaceProps {
   readonly onSendHeld?: (id: string) => void;
   readonly onRemoveHeld?: (id: string) => void;
 
-  /** A prompt waiting on the original pane, drawn above the message box. */
+  /**
+   * A prompt waiting on the original pane. It is drawn at the end of the message stream, not in
+   * the composer footer, so the message box stays reachable with the keyboard open.
+   */
   readonly promptCard?: React.ReactNode;
   /** The owner's handle on the message box, so an answered prompt can pass the focus on to it. */
   readonly composerHandleRef?: React.MutableRefObject<MobileChatComposerHandle | null>;
@@ -317,7 +320,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
     if (isAtBottom) {
       scrollToBottom(false);
     }
-  }, [messages, isRunning, activityState, isAtBottom, scrollToBottom]);
+  }, [messages, isRunning, activityState, isAtBottom, scrollToBottom, promptCard]);
 
   const hasMessages = messages.length > 0;
   const starterPrompts = chatStarterPrompts(agentType, worktreeLabel);
@@ -491,6 +494,12 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
           </>
         )}
 
+        {promptCard !== undefined && promptCard !== null ? (
+          <div data-testid="chat-stream-prompt" className="w-full">
+            {promptCard}
+          </div>
+        ) : null}
+
         <div ref={messagesEndRef} className="h-2 w-full" />
       </div>
 
@@ -528,7 +537,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             onEditHeld={onEditHeld}
             onSendHeld={onSendHeld}
             onRemoveHeld={onRemoveHeld}
-            promptCard={promptCard}
+            promptOpen={promptCard !== undefined && promptCard !== null}
             warning={composerWarning}
             warningAction={composerWarningAction}
             onSend={onSendMessage}

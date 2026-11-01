@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useImperativeHandle, useRef, useState } 
 import {
   AlertCircle,
   ArrowUp,
+  ChevronDown,
   FileText,
   Loader2,
   Pencil,
@@ -56,8 +57,12 @@ export interface MobileChatComposerProps {
   readonly onEditHeld?: (id: string, text: string) => void;
   readonly onSendHeld?: (id: string) => void;
   readonly onRemoveHeld?: (id: string) => void;
-  /** A prompt waiting on the original pane, drawn directly above the message box. */
-  readonly promptCard?: React.ReactNode;
+  /**
+   * A prompt is waiting on the original pane. The card itself is drawn in the message stream by
+   * the owner, never here, so the message box stays reachable with the keyboard open; this box
+   * only keeps Send beside Stop while the prompt is up.
+   */
+  readonly promptOpen?: boolean;
   /** Something the user must know about this lane (a refused Stop, a held send, a lost host). */
   readonly warning?: string | null;
   /** One thing the user can do about the warning (retry, reconnect), drawn beside it. */
@@ -109,7 +114,7 @@ export const MobileChatComposer = React.forwardRef<
   onEditHeld,
   onSendHeld,
   onRemoveHeld,
-  promptCard,
+  promptOpen = false,
   warning = null,
   warningAction = null,
   onSend,
@@ -125,6 +130,9 @@ export const MobileChatComposer = React.forwardRef<
   const text = isControlled ? value : internalText;
   const [editingHeldId, setEditingHeldId] = useState<string | null>(null);
   const [editingHeldText, setEditingHeldText] = useState("");
+  // Staged files and held rows fold behind count chips so they never push the box off screen.
+  const [filesOpen, setFilesOpen] = useState(false);
+  const [heldOpen, setHeldOpen] = useState(false);
   const isComposingRef = useRef(false);
   // On a touch screen Stop takes two taps: the first arms it, so a slip never ends a turn.
   const [stopArmed, setStopArmed] = useState(false);
@@ -260,7 +268,7 @@ export const MobileChatComposer = React.forwardRef<
   const canSubmit = text.trim().length > 0 && !disabled && !attaching;
   // A prompt waiting on the original pane is a question this box answers, so the box keeps Send
   // beside Stop while one is up. Without a prompt, a running pane shows Stop alone.
-  const answersWaitingPrompt = promptCard !== undefined && promptCard !== null;
+  const answersWaitingPrompt = promptOpen;
   const showsSend = !isRunning || answersWaitingPrompt;
   const textareaLabel = placeholder.replace(/…$/, "");
   const hasExtras =
@@ -268,8 +276,9 @@ export const MobileChatComposer = React.forwardRef<
     warning !== null ||
     attachError !== null ||
     attachments.length > 0 ||
-    heldMessages.length > 0 ||
-    answersWaitingPrompt;
+    heldMessages.length > 0;
+  const fileCountLabel = `${attachments.length} ${attachments.length === 1 ? "file" : "files"}`;
+  const heldCountLabel = `${heldMessages.length} held`;
 
   return (
     <div
@@ -280,8 +289,8 @@ export const MobileChatComposer = React.forwardRef<
       )}
     >
       {hasExtras && (
-      // Banners, files, held rows and the prompt scroll on their own, so the message box always
-      // stays on screen above the keyboard.
+      // Banners, files and held rows scroll on their own, so the message box always stays on
+      // screen above the keyboard.
       <div
         data-testid="chat-composer-extras"
         className="max-h-[45dvh] overflow-y-auto overscroll-contain scrollbar-sleek"
@@ -325,10 +334,46 @@ export const MobileChatComposer = React.forwardRef<
           <span>{attachError}</span>
         </div>
       )}
+      {(attachments.length > 0 || heldMessages.length > 0) && (
+        <div className="flex items-center gap-2 px-3 pt-2 pb-1">
+          {attachments.length > 0 && (
+            <button
+              type="button"
+              data-testid="chat-composer-files-toggle"
+              aria-expanded={filesOpen}
+              aria-controls="chat-composer-attachments"
+              onClick={() => setFilesOpen((open) => !open)}
+              className="flex min-h-11 items-center gap-1.5 rounded-full border border-chat-border bg-chat-surface px-3 text-sm text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <FileText aria-hidden="true" className="size-4" />
+              <span>{fileCountLabel}</span>
+              <ChevronDown aria-hidden="true" className={cn("size-4 transition-transform motion-reduce:transition-none", filesOpen && "rotate-180")} />
+            </button>
+          )}
+          {heldMessages.length > 0 && (
+            <button
+              type="button"
+              data-testid="chat-composer-held-toggle"
+              aria-expanded={heldOpen || editingHeldId !== null}
+              aria-controls="chat-composer-held"
+              onClick={() => setHeldOpen((open) => !open)}
+              className={cn(
+                "flex min-h-11 items-center gap-1.5 rounded-full border border-chat-border bg-chat-surface px-3 text-sm transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                heldUnsaved ? "text-chat-danger" : "text-chat-foreground",
+              )}
+            >
+              <span>{heldCountLabel}</span>
+              <ChevronDown aria-hidden="true" className={cn("size-4 transition-transform motion-reduce:transition-none", (heldOpen || editingHeldId !== null) && "rotate-180")} />
+            </button>
+          )}
+        </div>
+      )}
       {attachments.length > 0 && (
         <div
+          id="chat-composer-attachments"
           data-testid="chat-composer-attachments"
-          className="flex items-center gap-2 px-3 pt-2 pb-1 overflow-x-auto scrollbar-none"
+          hidden={!filesOpen}
+          className={cn("flex items-center gap-2 px-3 pt-2 pb-1 overflow-x-auto scrollbar-none", !filesOpen && "hidden")}
         >
           {attachments.map((att) => {
             const id = att.receipt.attachmentId;
@@ -365,10 +410,12 @@ export const MobileChatComposer = React.forwardRef<
       )}
       {heldMessages.length > 0 && (
         <div
+          id="chat-composer-held"
           data-testid="chat-composer-held"
+          hidden={!heldOpen && editingHeldId === null}
           role="group"
           aria-label="Held messages"
-          className="flex flex-col gap-1 px-3 pt-2 pb-1 border-b border-chat-border"
+          className={cn("flex flex-col gap-1 px-3 pt-2 pb-1 border-b border-chat-border", !heldOpen && editingHeldId === null && "hidden")}
         >
           <span className="text-xs text-chat-foreground-secondary">
             {heldUnsaved
@@ -442,11 +489,6 @@ export const MobileChatComposer = React.forwardRef<
               </div>
             );
           })}
-        </div>
-      )}
-      {promptCard !== undefined && promptCard !== null && (
-        <div data-testid="chat-composer-prompt" className="px-3 pt-2">
-          {promptCard}
         </div>
       )}
       </div>

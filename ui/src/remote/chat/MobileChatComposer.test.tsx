@@ -43,7 +43,7 @@ describe("MobileChatComposer touch safety", () => {
 
   it("puts Stop at the opposite edge from Send while a prompt is open", () => {
     render(
-      <MobileChatComposer onSend={vi.fn()} onStop={vi.fn()} isRunning promptCard={<div>q</div>} value="1" />,
+      <MobileChatComposer onSend={vi.fn()} onStop={vi.fn()} isRunning promptOpen value="1" />,
     );
     const stop = screen.getByTestId("stop-button");
     const send = screen.getByTestId("send-button");
@@ -111,10 +111,42 @@ describe("MobileChatComposer touch safety", () => {
     }
   });
 
-  it("caps the banners, held rows and prompt in their own scroller so the message box stays reachable", () => {
-    render(<MobileChatComposer onSend={vi.fn()} promptCard={<div>q</div>} warning="w" />);
+  it("caps the banners and held rows in their own scroller and never draws a prompt card in the footer", () => {
+    render(
+      <MobileChatComposer onSend={vi.fn()} promptOpen warning="w" heldMessages={[{ id: "h", text: "later" }]} />,
+    );
     expect(screen.getByTestId("chat-composer-extras")).toHaveClass("overflow-y-auto");
-    expect(screen.getByTestId("chat-composer-extras")).toContainElement(screen.getByTestId("chat-composer-prompt"));
+    expect(screen.getByTestId("chat-composer-extras")).toContainElement(screen.getByTestId("chat-composer-held-toggle"));
+    expect(screen.queryByTestId("chat-composer-prompt")).not.toBeInTheDocument();
+  });
+
+  it("folds staged files and held rows behind count chips that expand on tap", () => {
+    render(
+      <MobileChatComposer
+        onSend={vi.fn()}
+        attachments={[stagedFile(), stagedFile({ receipt: { ...stagedFile().receipt, attachmentId: "att-2" } })]}
+        heldMessages={[{ id: "h", text: "later" }]}
+      />,
+    );
+    const files = screen.getByTestId("chat-composer-files-toggle");
+    const held = screen.getByTestId("chat-composer-held-toggle");
+    expect(files).toHaveTextContent("2 files");
+    expect(held).toHaveTextContent("1 held");
+    expect(files).toHaveClass("min-h-11");
+    expect(held).toHaveClass("min-h-11");
+    expect(files).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByTestId("chat-composer-attachments")).not.toBeVisible();
+    expect(screen.getByTestId("chat-composer-held")).not.toBeVisible();
+
+    fireEvent.click(files);
+    expect(files).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("chat-composer-attachments")).toBeVisible();
+    expect(screen.getByTestId("chat-composer-held")).not.toBeVisible();
+
+    fireEvent.click(held);
+    expect(held).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("chat-composer-held")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Send held message later" })).toBeInTheDocument();
   });
 });
 
@@ -355,18 +387,19 @@ describe("MobileChatComposer", () => {
     expect(onEditHeld).toHaveBeenCalledWith("held-1", "안녕");
   });
 
-  it("draws the prompt card above the input row and reports attach progress", () => {
+  it("keeps Send while a prompt is open and reports attach progress", () => {
     render(
       <MobileChatComposer
         onSend={vi.fn()}
-        promptCard={<div data-testid="stub-card">approve?</div>}
+        promptOpen
+        isRunning
         attaching={true}
         attachError="the host refused the file"
         warning="The stop request was not delivered."
       />
     );
 
-    expect(screen.getByTestId("chat-composer-prompt")).toHaveTextContent("approve?");
+    expect(screen.getByTestId("send-button")).toBeInTheDocument();
     expect(screen.getByTestId("attach-file-button")).toBeDisabled();
     expect(screen.getByTestId("chat-composer-attach-error")).toHaveTextContent("refused");
     expect(screen.getByTestId("chat-composer-warning")).toHaveTextContent("stop request");

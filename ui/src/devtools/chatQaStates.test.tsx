@@ -15,9 +15,9 @@ function renderState(state: string) {
 describe("mobile chat QA states", () => {
   afterEach(cleanup);
 
-  it("seeds the production ReferencePromptCard in the composer for a two-option approval", () => {
+  it("seeds the production ReferencePromptCard in the message stream for a two-option approval", () => {
     renderState("prompt-approval");
-    expect(screen.getByTestId("chat-composer-prompt")).toContainElement(screen.getByTestId("reference-prompt-card"));
+    expect(screen.getByTestId("chat-stream-prompt")).toContainElement(screen.getByTestId("reference-prompt-card"));
     expect(screen.getByTestId("reference-prompt-option-0")).toBeInTheDocument();
     expect(screen.getByTestId("reference-prompt-option-1")).toBeInTheDocument();
     expect(screen.queryByTestId("reference-prompt-option-2")).not.toBeInTheDocument();
