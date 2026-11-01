@@ -356,7 +356,7 @@ impl BookmarkStore {
             })
             .cloned()
             .collect();
-        hits.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        hits.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         hits.truncate(limit);
         hits
     }
