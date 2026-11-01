@@ -620,6 +620,9 @@ async fn a_move_without_an_open_hub_is_unavailable() {
 
     assert_eq!(status, 503, "{body}");
     assert_eq!(body["error"]["code"], "SUPERVISOR_UNAVAILABLE");
+    let replace = r#"{"force":true,"replaceLocal":true}"#;
+    let (status, _, body) = gateway.post_to("/api/v1/supervisor/move", &token, replace).await;
+    assert_eq!((status, body["error"]["code"].as_str()), (503, Some("SUPERVISOR_UNAVAILABLE")), "replaceLocal is a move field");
     let (status, _, body) = gateway.post_to("/api/v1/supervisor/move", &token, r#"{"forced":true}"#).await;
     assert_eq!(status, 400, "{body}");
     gateway.stop().await;

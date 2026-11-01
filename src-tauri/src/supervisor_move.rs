@@ -27,10 +27,15 @@ pub(crate) async fn paired_host_views() -> Vec<crate::paired_host::inventory::Ho
 }
 
 /// [`move_supervisor_here`] with the installed inventory.
-pub async fn move_here_installed(state: &RemoteGatewayState, force: bool, by: &str) -> Result<bool, MoveError> {
+pub async fn move_here_installed(
+    state: &RemoteGatewayState,
+    force: bool,
+    replace_local: bool,
+    by: &str,
+) -> Result<bool, MoveError> {
     let hosts = HOSTS.read().unwrap_or_else(|e| e.into_inner()).clone();
     let hosts = hosts.ok_or_else(|| MoveError::new(503, "SUPERVISOR_UNAVAILABLE", "the supervisor hub is not open in this daemon"))?;
-    move_supervisor_here(state, &hosts, force, by).await
+    move_supervisor_here(state, &hosts, force, replace_local, by).await
 }
 
 /// The holder over [`crate::paired_host::client::supervisor_secure_request`].
@@ -93,11 +98,14 @@ impl cp::MovePeer for PairedMovePeer<'_> {
     }
 }
 
-/// Todo 7's staged import into this machine's hub directory.
+/// Todo 7's staged import into this machine's hub directory. `replace_local` is the owner's
+/// explicit `--replace-local`: only then is a hub holding another supervisor archived and
+/// replaced; otherwise its `SUPERVISOR_IDENTITY_MISMATCH` refusal stands.
 struct HubMoveImport {
     hub_dir: std::path::PathBuf,
     machine_id: String,
     paired: Vec<ferryx_hub::checkpoint::PairedHostMapping>,
+    replace_local: bool,
 }
 
 #[async_trait]
@@ -111,7 +119,7 @@ impl cp::MoveImport for HubMoveImport {
             now_ts: crate::hub_runtime::unix_now() as i64,
             write_private: ferryx_hub::checkpoint_import::default_private_writer(),
         };
-        import_replacing_local(archive, &self.hub_dir, &self.machine_id, &self.paired, options)
+        stage_import(archive, &self.hub_dir, &self.machine_id, &self.paired, self.replace_local, options)
             .await
             .map_err(|error| MoveError::new(409, &error.code, error.message))
     }
@@ -132,14 +140,16 @@ struct ReplaceError {
 }
 
 /// Todo 7's staged import into `hub_dir`. When this hub holds another supervisor (the import
-/// refuses `SUPERVISOR_IDENTITY_MISMATCH`), the local one is replaced: its database is first
-/// archived as `hub.sqlite.pre-lease-<ts>` (plan todo 13, its open goals stay adoptable),
-/// then the import runs once more. A matching identity imports without an archive.
-async fn import_replacing_local(
+/// refuses `SUPERVISOR_IDENTITY_MISMATCH`), that refusal stands unless `replace_local` (the
+/// owner's explicit `--replace-local`, plan todo 13): then the local database is first
+/// archived as `hub.sqlite.pre-lease-<ts>` (its open goals stay adoptable) and the import
+/// runs once more. A matching identity imports without an archive.
+async fn stage_import(
     archive: &std::path::Path,
     hub_dir: &std::path::Path,
     machine_id: &str,
     paired: &[ferryx_hub::checkpoint::PairedHostMapping],
+    replace_local: bool,
     options: impl Fn() -> ferryx_hub::checkpoint_import::ImportOptions,
 ) -> Result<(), ReplaceError> {
     use ferryx_hub::checkpoint_import::import;
@@ -149,7 +159,7 @@ async fn import_replacing_local(
     };
     let refused = match import(archive, hub_dir, machine_id, paired, options()).await {
         Ok(_) => return Ok(()),
-        Err(error) if error.code() == ferryx_hub::checkpoint::SUPERVISOR_IDENTITY_MISMATCH => error,
+        Err(error) if replace_local && error.code() == ferryx_hub::checkpoint::SUPERVISOR_IDENTITY_MISMATCH => error,
         Err(error) => return Err(failed(error)),
     };
     let dir = hub_dir.to_owned();
@@ -190,10 +200,13 @@ impl cp::MoveLease for HandleMoveLease {
 
 /// Moves the supervisor to this machine: `ferryx hub move-here`, the phone's
 /// `POST /api/v1/supervisor/move` and the desktop's move button. `by` names who asked.
+/// `replace_local` (the owner's explicit `--replace-local`) archives and replaces a local
+/// supervisor with another identity; without it that import is refused.
 pub async fn move_supervisor_here(
     state: &RemoteGatewayState,
     hosts: &PairedHostService,
     force: bool,
+    replace_local: bool,
     by: &str,
 ) -> Result<bool, MoveError> {
     let unavailable = || MoveError::new(503, "SUPERVISOR_UNAVAILABLE", "the supervisor hub is not open in this daemon");
@@ -213,18 +226,19 @@ pub async fn move_supervisor_here(
         })
         .unwrap_or_default();
     let lease = HandleMoveLease { handle, machine_id: machine_id.clone() };
-    let importer = HubMoveImport { hub_dir, machine_id, paired };
+    let importer = HubMoveImport { hub_dir, machine_id, paired, replace_local };
     let peer = PairedMovePeer { hosts };
     let store = cp::CheckpointStore::new(dir);
     let moved = cp::move_here(&lease, &peer, &importer, &store, &cp::shared(), force, crate::hub_runtime::unix_now()).await?;
-    tracing::info!(by, moved, force, "supervisor move requested");
+    tracing::info!(by, moved, force, replace_local, "supervisor move requested");
     crate::remote::server::agent_control_service::publish_supervisor_changed(state, json!({ "hub": "moved" }));
     Ok(moved)
 }
 
 /// Auto-promotion's import: the takeover the relay granted against this machine's newest
 /// pulled checkpoint is staged before the hub reopens. A failed import is logged; the hub then
-/// reopens on its own database, as the import never touched it.
+/// reopens on its own database, as the import never touched it. Promotion never replaces a
+/// local supervisor with another identity (only an owner's `--replace-local` move does).
 pub async fn import_pending(hub_dir: &std::path::Path) {
     let state = cp::shared();
     let Some(id) = state.take_pending_import() else { return };
@@ -243,7 +257,12 @@ pub async fn import_pending(hub_dir: &std::path::Path) {
             .unwrap_or_default(),
         None => Vec::new(),
     };
-    let importer = HubMoveImport { hub_dir: hub_dir.to_owned(), machine_id: crate::hub_runtime::lease_machine_id().await, paired };
+    let importer = HubMoveImport {
+        hub_dir: hub_dir.to_owned(),
+        machine_id: crate::hub_runtime::lease_machine_id().await,
+        paired,
+        replace_local: false,
+    };
     if let Err(error) = import_checkpoint(&state, &cp::CheckpointStore::new(dir), &importer, &id).await {
         tracing::warn!(code = %error.code, "promotion did not import the synced checkpoint: {}", error.message);
     }
@@ -306,48 +325,76 @@ mod tests {
         pool
     }
 
-    /// Replacing a local supervisor that has another identity archives it before the
-    /// import (todo 13's `archive_before_replace`), then stages the checkpoint.
-    #[tokio::test]
-    async fn a_move_onto_another_local_supervisor_archives_it_before_the_import() {
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("source");
+    /// Machine A's hub (same owner, its own supervisor id) exported to a checkpoint archive.
+    async fn exported_checkpoint(root: &Path) -> PathBuf {
+        let source = root.join("source");
         let pool = hub_with_owner(&source, "owner:u1").await;
         let exported = ferryx_hub::checkpoint::export(
             &pool,
             &ferryx_hub::checkpoint::ExportRequest::new(
                 source.clone(),
                 "machine-a".into(),
-                root.path().join("checkpoint.tar.zst"),
+                root.join("checkpoint.tar.zst"),
                 ferryx_hub::checkpoint_import::default_private_writer(),
             ),
         )
         .await
         .unwrap();
         pool.close().await;
-        let target = root.path().join("target");
-        hub_with_owner(&target, "owner:u1").await.close().await;
-        let options = || ferryx_hub::checkpoint_import::ImportOptions {
-            memory_root: root.path().join("memory-agents"),
-            env_file: target.join("env"),
+        exported.path
+    }
+
+    fn import_options(root: &Path, target: &Path) -> impl Fn() -> ferryx_hub::checkpoint_import::ImportOptions {
+        let (memory_root, env_file) = (root.join("memory-agents"), target.join("env"));
+        move || ferryx_hub::checkpoint_import::ImportOptions {
+            memory_root: memory_root.clone(),
+            env_file: env_file.clone(),
             profile_omo_jsonc: None,
             now_ts: NOW,
             write_private: ferryx_hub::checkpoint_import::default_private_writer(),
-        };
-        let archives = || {
-            std::fs::read_dir(&target)
-                .unwrap()
-                .filter(|entry| {
-                    entry.as_ref().unwrap().file_name().to_string_lossy().starts_with(ferryx_hub::adoption::ARCHIVE_PREFIX)
-                })
-                .count()
-        };
+        }
+    }
 
-        import_replacing_local(&exported.path, &target, "machine-b", &[], options).await.unwrap();
+    /// The main archive files in `dir` (an archive's `-wal` copy is not another archive).
+    fn archives(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(ferryx_hub::adoption::ARCHIVE_PREFIX) && !name.ends_with("-wal"))
+            .count()
+    }
+
+    /// The owner's `--replace-local`: a local supervisor that has another identity is archived
+    /// before the import (todo 13's `archive_before_replace`), then the checkpoint is staged.
+    #[tokio::test]
+    async fn a_replace_local_move_onto_another_local_supervisor_archives_it_before_the_import() {
+        let root = tempfile::tempdir().unwrap();
+        let exported = exported_checkpoint(root.path()).await;
+        let target = root.path().join("target");
+        hub_with_owner(&target, "owner:u1").await.close().await;
+
+        stage_import(&exported, &target, "machine-b", &[], true, import_options(root.path(), &target)).await.unwrap();
 
         assert!(target.join(format!("{}{NOW}", ferryx_hub::adoption::ARCHIVE_PREFIX)).is_file(), "archived first");
         assert!(target.join(ferryx_hub::checkpoint_import::INCOMING_DB).exists(), "the checkpoint is staged");
-        assert_eq!(archives(), 1);
+        assert_eq!(archives(&target), 1);
+    }
+
+    /// Without `--replace-local` todo 7's identity refusal stands: nothing archived or staged.
+    #[tokio::test]
+    async fn a_move_onto_another_local_supervisor_without_replace_local_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let exported = exported_checkpoint(root.path()).await;
+        let target = root.path().join("target");
+        hub_with_owner(&target, "owner:u1").await.close().await;
+
+        let error = stage_import(&exported, &target, "machine-b", &[], false, import_options(root.path(), &target))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, ferryx_hub::checkpoint::SUPERVISOR_IDENTITY_MISMATCH);
+        assert_eq!(archives(&target), 0, "nothing archived");
+        assert!(!target.join(ferryx_hub::checkpoint_import::INCOMING_DB).exists(), "nothing staged");
     }
 
     /// Machine A's hub exported and stored as a pulled checkpoint; returns its id.
@@ -367,7 +414,7 @@ mod tests {
     }
 
     fn importer(hub_dir: PathBuf) -> HubMoveImport {
-        HubMoveImport { hub_dir, machine_id: "mach-b".to_owned(), paired: Vec::new() }
+        HubMoveImport { hub_dir, machine_id: "mach-b".to_owned(), paired: Vec::new(), replace_local: false }
     }
 
     #[tokio::test]

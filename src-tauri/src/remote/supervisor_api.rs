@@ -323,10 +323,15 @@ fn move_refusal(error: crate::supervisor_checkpoint::MoveError) -> Response {
 pub(crate) struct MoveBody {
     #[serde(default)]
     force: bool,
+    /// The owner's explicit consent to archive and replace a local supervisor with another
+    /// identity (`--replace-local`); without it that move is refused.
+    #[serde(default)]
+    replace_local: bool,
 }
 
-/// `POST /api/v1/supervisor/move` on the target machine: `{force}` -> `{moved}`. Only a
-/// machine Control device the agent-control policy admits may move the supervisor.
+/// `POST /api/v1/supervisor/move` on the target machine: `{force, replaceLocal?}` ->
+/// `{moved}`. Only a machine Control device the agent-control policy admits may move the
+/// supervisor.
 pub(crate) async fn http_move(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
@@ -337,10 +342,10 @@ pub(crate) async fn http_move(
         Err(response) => return response,
     };
     let Ok(Json(body)) = body else {
-        return reference_chat_error(ScopeErrorCode::InvalidRequest, "the move body must be {force}");
+        return reference_chat_error(ScopeErrorCode::InvalidRequest, "the move body must be {force, replaceLocal?}");
     };
     let by = format!("remote:{}", device.id);
-    match crate::supervisor_move::move_here_installed(&state, body.force, &by).await {
+    match crate::supervisor_move::move_here_installed(&state, body.force, body.replace_local, &by).await {
         Ok(moved) => no_store(serde_json::json!({ "moved": moved })),
         Err(error) => move_refusal(error),
     }

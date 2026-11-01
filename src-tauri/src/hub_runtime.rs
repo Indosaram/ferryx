@@ -463,7 +463,7 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
             );
             eprintln!("       ferryx hub cron list | ferryx hub cron model <job-id> <provider/model | --clear> | ferryx hub cron approve-rerun <problem-id>");
             eprintln!("       ferryx hub lease reset-capability");
-            eprintln!("       ferryx hub move-here [--force [--confirm]]");
+            eprintln!("       ferryx hub move-here [--force [--confirm]] [--replace-local]");
             eprintln!("       ferryx hub adopt-archived [--goal <id> | --all]");
             return 2;
         }
@@ -695,31 +695,36 @@ fn hub_lease_cli(args: &[String]) -> i32 {
 }
 
 /// Parses `move-here` flags: `--force` alone is refused; it needs `--confirm` (the person
-/// read what a forced takeover loses). `Err` is the usage exit.
-fn move_here_flags(args: &[String]) -> Result<(bool, bool), String> {
-    let (mut force, mut confirm) = (false, false);
+/// read what a forced takeover loses). `--replace-local` is the owner's explicit consent to
+/// archive and replace a local supervisor with another identity. Returns
+/// `(force, confirm, replace_local)`; `Err` is the usage exit.
+fn move_here_flags(args: &[String]) -> Result<(bool, bool, bool), String> {
+    let (mut force, mut confirm, mut replace_local) = (false, false, false);
     for arg in args {
         match arg.as_str() {
             "--force" => force = true,
             "--confirm" => confirm = true,
+            "--replace-local" => replace_local = true,
             other => return Err(format!("unknown argument {other}")),
         }
     }
     if confirm && !force {
         return Err("--confirm only confirms --force".to_owned());
     }
-    Ok((force, confirm))
+    Ok((force, confirm, replace_local))
 }
 
-/// `ferryx hub move-here [--force [--confirm]]`: moves the supervisor to this machine. A
-/// forced takeover is only sent after `--confirm`; without it the daemon is asked unforced
-/// and its `SUPERVISOR_FORCE_REQUIRED` warning (what will be lost) is printed.
+/// `ferryx hub move-here [--force [--confirm]] [--replace-local]`: moves the supervisor to
+/// this machine. A forced takeover is only sent after `--confirm`; without it the daemon is
+/// asked unforced and its `SUPERVISOR_FORCE_REQUIRED` warning (what will be lost) is printed.
+/// A hub holding another supervisor refuses `SUPERVISOR_IDENTITY_MISMATCH` unless
+/// `--replace-local` is given (that local supervisor is then archived first).
 fn hub_move_here_cli(args: &[String]) -> i32 {
-    let (force, confirm) = match move_here_flags(args) {
+    let (force, confirm, replace_local) = match move_here_flags(args) {
         Ok(flags) => flags,
         Err(message) => {
             eprintln!("{message}");
-            eprintln!("usage: ferryx hub move-here [--force [--confirm]]");
+            eprintln!("usage: ferryx hub move-here [--force [--confirm]] [--replace-local]");
             return 2;
         }
     };
@@ -730,7 +735,7 @@ fn hub_move_here_cli(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let request = DaemonRequest::SupervisorMoveHere { force: force && confirm };
+    let request = DaemonRequest::SupervisorMoveHere { force: force && confirm, replace_local };
     match runtime.block_on(DaemonClient::new().send_request(request)) {
         Ok(DaemonResponse::SupervisorMoveHereOk { moved: true }) => {
             println!("the supervisor runs on this machine now");
@@ -744,6 +749,9 @@ fn hub_move_here_cli(args: &[String]) -> i32 {
             eprintln!("{}: {message}", code.as_deref().unwrap_or("ERROR"));
             if code.as_deref() == Some(crate::supervisor_checkpoint::SUPERVISOR_FORCE_REQUIRED) {
                 eprintln!("run 'ferryx hub move-here --force --confirm' to take over anyway");
+            }
+            if code.as_deref() == Some(ferryx_hub::checkpoint::SUPERVISOR_IDENTITY_MISMATCH) {
+                eprintln!("this machine runs another supervisor; add --replace-local to archive and replace it");
             }
             1
         }
@@ -5386,9 +5394,14 @@ mod tests {
     #[test]
     fn move_here_force_needs_the_explicit_confirm() {
         let args = |list: &[&str]| list.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
-        assert_eq!(move_here_flags(&args(&[])), Ok((false, false)));
-        assert_eq!(move_here_flags(&args(&["--force"])), Ok((true, false)), "force alone is not sent forced");
-        assert_eq!(move_here_flags(&args(&["--force", "--confirm"])), Ok((true, true)));
+        assert_eq!(move_here_flags(&args(&[])), Ok((false, false, false)));
+        assert_eq!(move_here_flags(&args(&["--force"])), Ok((true, false, false)), "force alone is not sent forced");
+        assert_eq!(move_here_flags(&args(&["--force", "--confirm"])), Ok((true, true, false)));
+        assert_eq!(
+            move_here_flags(&args(&["--force", "--confirm", "--replace-local"])),
+            Ok((true, true, true)),
+            "replacing the local supervisor is its own explicit flag"
+        );
         assert!(move_here_flags(&args(&["--confirm"])).is_err());
         assert!(move_here_flags(&args(&["--yes"])).is_err());
     }

@@ -899,9 +899,14 @@ pub enum DaemonRequest {
     },
     /// Move the supervisor to this machine (`ferryx hub move-here`, the desktop move button).
     /// `force` takes over from an unreachable holder whose last checkpoint this machine lacks.
+    /// `replace_local` (the owner's `--replace-local`) archives and replaces a local
+    /// supervisor with another identity; without it that move is refused.
+    #[serde(rename_all = "camelCase")]
     SupervisorMoveHere {
         #[serde(default)]
         force: bool,
+        #[serde(default)]
+        replace_local: bool,
     },
     /// One unified supervisor request envelope `{requestId, projectId?, goalId?,
     /// expectedRevision?, action, payload}`, served by the hub's shared request service.

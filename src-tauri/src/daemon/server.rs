@@ -7631,8 +7631,16 @@ impl DaemonServer {
                         },
                     }
                 }
-                Ok(DaemonRequest::SupervisorMoveHere { force }) => {
-                    match crate::supervisor_move::move_supervisor_here(self.remote_state(), &self.paired_hosts, force, "desktop").await {
+                Ok(DaemonRequest::SupervisorMoveHere { force, replace_local }) => {
+                    match crate::supervisor_move::move_supervisor_here(
+                        self.remote_state(),
+                        &self.paired_hosts,
+                        force,
+                        replace_local,
+                        "desktop",
+                    )
+                    .await
+                    {
                         Ok(moved) => DaemonResponse::SupervisorMoveHereOk { moved },
                         Err(error) => DaemonResponse::Error {
                             message: error.message,

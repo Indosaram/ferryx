@@ -172,14 +172,17 @@ fn moved_from(response: DaemonResponse) -> Result<serde_json::Value, IpcError> {
     }
 }
 
-/// Move the supervisor to this machine: `{force}` -> `{moved}`. Refusals keep their wire code
-/// (`SUPERVISOR_STANDBY`, `SUPERVISOR_FORCE_REQUIRED` with `{holderLabel, checkpointAt}`, ...).
+/// Move the supervisor to this machine: `{force, replaceLocal?}` -> `{moved}`. Refusals keep
+/// their wire code (`SUPERVISOR_STANDBY`, `SUPERVISOR_FORCE_REQUIRED` with
+/// `{holderLabel, checkpointAt}`, `SUPERVISOR_IDENTITY_MISMATCH` without `replaceLocal`, ...).
 #[tauri::command]
 pub async fn cmd_supervisor_move_here(
     daemon_client: tauri::State<'_, Arc<DaemonClient>>,
     force: bool,
+    replace_local: Option<bool>,
 ) -> Result<serde_json::Value, IpcError> {
-    moved_from(daemon_client.send_request(DaemonRequest::SupervisorMoveHere { force }).await?)
+    let replace_local = replace_local.unwrap_or(false);
+    moved_from(daemon_client.send_request(DaemonRequest::SupervisorMoveHere { force, replace_local }).await?)
 }
 
 #[cfg(test)]
