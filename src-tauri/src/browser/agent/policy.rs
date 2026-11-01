@@ -186,6 +186,7 @@ pub fn classify_cli(request: &BrowserCliRequest) -> Result<Classification, Autho
         R::Snapshot { browser_id } => Classification::new(ToolId::Snapshot, browser(browser_id)),
         R::Act { request } => Classification::new(ToolId::Act, browser(&request.browser_id)),
         R::OpenFile { .. } => Classification::new(ToolId::OpenFile, Target::Global),
+        R::OpenInboundUrl { .. } => Classification::new(ToolId::OpenInboundUrl, Target::Global),
         R::Open { url, .. } => {
             Classification::new(ToolId::Open, Target::Global).with_destination(Some(url.as_str()))
         }
@@ -434,9 +435,10 @@ pub fn authorize(
     let tool = classification.tool;
     let spec = tool.spec();
 
-    // OpenFile is an editor operation under its existing policy. It neither
-    // needs nor manufactures a browser principal.
-    if tool == ToolId::OpenFile {
+    // OpenFile is an editor operation under its existing policy, and OpenInboundUrl is the
+    // OS handing a clicked link to the running app (a second Ferryx process, no controller).
+    // Neither needs nor manufactures a browser principal.
+    if matches!(tool, ToolId::OpenFile | ToolId::OpenInboundUrl) {
         return Ok(Authorization {
             principal: match caller {
                 Caller::TransportOnly => None,
@@ -571,7 +573,8 @@ pub fn authorize(
                 | ToolId::StateExport
                 | ToolId::StateImport
                 | ToolId::DownloadStart
-                | ToolId::OpenFile => {
+                | ToolId::OpenFile
+                | ToolId::OpenInboundUrl => {
                     return Err(forbidden(
                         tool,
                         "operation is not exposed to remote devices",
@@ -700,6 +703,10 @@ mod tests {
                     col: None,
                 },
                 ToolId::OpenFile,
+            ),
+            (
+                BrowserCliRequest::OpenInboundUrl { url: "https://a.test".into() },
+                ToolId::OpenInboundUrl,
             ),
             (
                 BrowserCliRequest::Open {
@@ -1098,9 +1105,9 @@ mod tests {
         let ctx = context(&directory, Platform::MacOs);
         for (request, tool) in every_cli_request() {
             let result = authorize_cli(&Caller::TransportOnly, &request, &ctx);
-            if tool == ToolId::OpenFile {
+            if matches!(tool, ToolId::OpenFile | ToolId::OpenInboundUrl) {
                 assert_eq!(
-                    result.expect("open-file keeps its policy").obligations,
+                    result.expect("open-file and inbound links keep their policy").obligations,
                     vec![Obligation::NonBrowserPolicy]
                 );
             } else {
@@ -1128,7 +1135,7 @@ mod tests {
             session_epoch: SessionEpoch(1),
         });
         for (request, tool) in every_cli_request() {
-            if tool == ToolId::OpenFile {
+            if matches!(tool, ToolId::OpenFile | ToolId::OpenInboundUrl) {
                 continue;
             }
             let error = authorize_cli(&unpaired, &request, &ctx).expect_err("unpaired denied");

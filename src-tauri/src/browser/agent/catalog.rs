@@ -142,6 +142,7 @@ tool_ids! {
     StateImport => "browser.state.import",
     DownloadStart => "browser.download.start",
     OpenFile => "editor.open_file",
+    OpenInboundUrl => "app.open_inbound_url",
 }
 
 impl fmt::Display for ToolId {
@@ -261,6 +262,8 @@ impl ToolId {
             Self::StateImport => spec(self, S::File, true, Some(G::Eval), true),
             Self::DownloadStart => spec(self, S::File, true, Some(G::Read), false),
             Self::OpenFile => spec(self, S::File, false, None, false),
+            // The OS handing a link to the running app (Ferryx as the default browser).
+            Self::OpenInboundUrl => spec(self, S::Interact, false, None, false),
         }
     }
 }
