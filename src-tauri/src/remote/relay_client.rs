@@ -43,6 +43,11 @@ const CONTROL_PING_INTERVAL: Duration = Duration::from_secs(15);
 const CONTROL_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 /// Upper bound on a local opaque-session allocation, queueing included.
 const ALLOCATE_SESSION_TIMEOUT: Duration = Duration::from_secs(10);
+/// Upper bound on opening a data channel: the relay WebSocket connect, and separately the
+/// attach handshake a peer must finish before the local gateway is touched. The handshake
+/// bound covers the relay's 30s wait for the peer's half plus the handshake itself.
+const DATA_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const DATA_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Sends one control frame, bounded by [`CONTROL_WRITE_TIMEOUT`]. Expiry is an error so a
 /// relay that stops reading cannot stall every notice, ACK and attach reply behind it.
@@ -916,10 +921,13 @@ impl RelayClient {
     /// frames bidirectionally between it and the local loopback gateway
     /// until either side disconnects.
     async fn handle_session(&self, session_id: &str, opaque: bool) -> anyhow::Result<()> {
-        let (ws, _response) = tokio_tungstenite::connect_async(self.data_url(session_id)?).await?;
-        let gateway = TcpStream::connect(&self.gateway_addr).await?;
+        let url = self.data_url(session_id)?;
+        let (ws, _response) =
+            tokio::time::timeout(DATA_CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url))
+                .await
+                .map_err(|_| anyhow::anyhow!("relay data channel connect timed out"))??;
         if !opaque {
-            return proxy_ws_to_tcp(ws, gateway).await;
+            return proxy_ws_to_tcp(ws, self.connect_gateway().await?).await;
         }
 
         let (attach, enrollment_record) = crate::ipc::run_blocking(|| {
@@ -931,37 +939,62 @@ impl RelayClient {
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let attach = attach.map_err(|error| anyhow::anyhow!(error))?;
-        // The browser binds the account machine id into the prologue; a token-authenticated
-        // client has no identity here and must still bind the id it announced.
-        let machine_id = self.machine_id().to_owned();
         let enrollment_epoch = enrollment_record
             .map(|record| record.enrollment_epoch)
             .unwrap_or_default();
+        self.serve_opaque_session(ws, session_id, attach, enrollment_epoch)
+            .await
+    }
+
+    /// Runs the attach handshake on an opaque data channel and, once the peer is
+    /// authorized, proxies it to the local gateway.
+    async fn serve_opaque_session(
+        &self,
+        ws: ControlSocket,
+        session_id: &str,
+        attach: crate::remote::attach_identity::AttachIdentity,
+        enrollment_epoch: String,
+    ) -> anyhow::Result<()> {
+        // The browser binds the account machine id into the prologue; a token-authenticated
+        // client has no identity here and must still bind the id it announced.
+        let machine_id = self.machine_id().to_owned();
         let auth = self.pairing.auth.clone();
 
         let stream = crate::remote::attach_crypto::WebSocketByteStream::new(ws);
-        let transport = crate::remote::session_transport::establish_session(
-            stream,
-            true,
-            Some(&attach),
-            &machine_id,
-            session_id,
-            &enrollment_epoch,
-            move |key: &[u8; 32]| auth.authorizes_attach_key_bytes(key),
+        // A peer that never completes the handshake must not pin this task, and the local
+        // gateway is only reached once the peer is authorized.
+        let transport = tokio::time::timeout(
+            DATA_HANDSHAKE_TIMEOUT,
+            crate::remote::session_transport::establish_session(
+                stream,
+                true,
+                Some(&attach),
+                &machine_id,
+                session_id,
+                &enrollment_epoch,
+                move |key: &[u8; 32]| auth.authorizes_attach_key_bytes(key),
+            ),
         )
         .await
+        .map_err(|_| anyhow::anyhow!("attach handshake timed out"))?
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
         match transport {
             crate::remote::session_transport::SessionTransport::Attached(secure) => {
+                let gateway = self.connect_gateway().await?;
                 crate::remote::session_transport::proxy_secure_to_gateway(secure, gateway)
                     .await
                     .map_err(|error| anyhow::anyhow!(error.to_string()))
             }
             crate::remote::session_transport::SessionTransport::Plain(stream) => {
-                proxy_ws_to_tcp(stream.into_inner(), gateway).await
+                proxy_ws_to_tcp(stream.into_inner(), self.connect_gateway().await?).await
             }
         }
+    }
+
+    /// Opens the loopback gateway connection a data channel is proxied to.
+    async fn connect_gateway(&self) -> anyhow::Result<TcpStream> {
+        Ok(TcpStream::connect(&self.gateway_addr).await?)
     }
 }
 
@@ -1984,6 +2017,46 @@ mod tests {
             LOCAL_GATEWAY_ADDR
         );
     }
+
+    #[tokio::test]
+    async fn a_peer_that_never_handshakes_times_out_before_the_gateway_is_dialed() {
+        // A gateway address nothing listens on: dialing it before authorization would fail
+        // with a connect error instead of the handshake deadline.
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_addr = closed.local_addr().unwrap().to_string();
+        drop(closed);
+        let client = RelayClient::with_gateway("http://127.0.0.1:1", "tok", gateway_addr);
+
+        // A data channel whose peer accepts the WebSocket and then never speaks.
+        let relay = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let peer = tokio::spawn(async move {
+            let (tcp, _) = relay.accept().await.unwrap();
+            let socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let _ = release_rx.await;
+            drop(socket);
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{relay_addr}/tunnel/data/s"))
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let attach =
+            crate::remote::attach_identity::load_or_generate_attach_identity(dir.path()).unwrap();
+
+        tokio::time::pause();
+        let error = tokio::time::timeout(
+            DATA_HANDSHAKE_TIMEOUT * 4,
+            client.serve_opaque_session(ws, "s", attach, String::new()),
+        )
+        .await
+        .expect("a silent peer must not pin the data task")
+        .unwrap_err();
+        assert!(error.to_string().contains("handshake timed out"), "{error}");
+        release_tx.send(()).ok();
+        peer.await.unwrap();
+    }
+
 
     #[tokio::test]
     async fn proxies_frames_between_data_channel_and_local_gateway() {
