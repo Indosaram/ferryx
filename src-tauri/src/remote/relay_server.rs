@@ -1935,15 +1935,35 @@ fn canonical_socket_dimension<'de, D: serde::Deserializer<'de>>(
     Ok(Some(number))
 }
 
+/// Status for a socket query the handler could not parse. A missing ticket or a key that
+/// carries a credential is an authorization failure (401); anything else is a malformed
+/// request (400), so a client bug in a resize parameter never reads as a revoked device.
+fn socket_query_rejection(raw: Option<&str>) -> StatusCode {
+    let mut ticket = false;
+    for (key, _) in url::form_urlencoded::parse(raw.unwrap_or_default().as_bytes()) {
+        let key = key.to_ascii_lowercase();
+        if matches!(key.as_str(), "token" | "access_token" | "authorization") {
+            return StatusCode::UNAUTHORIZED;
+        }
+        ticket |= key == "ticket";
+    }
+    if ticket {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::UNAUTHORIZED
+    }
+}
+
 fn consume_socket_ticket(
     state: &RelayState,
     query: Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection>,
+    raw_query: Option<&str>,
     machine: &str,
     target: &str,
 ) -> Result<String, StatusCode> {
     // Unknown query keys (including token/access_token/authorization) are
     // forbidden, even when accompanied by a valid one-time ticket.
-    let Query(query) = query.map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let Query(query) = query.map_err(|_| socket_query_rejection(raw_query))?;
     let ticket = query.ticket.ok_or(StatusCode::UNAUTHORIZED)?;
     let (issued_machine, issued_target, device_token, expiry) = state
         .inner
@@ -1961,6 +1981,7 @@ async fn browser_events_handler(
     State(state): State<RelayState>,
     AxumPath(machine): AxumPath<String>,
     query: Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection>,
+    RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
@@ -1968,7 +1989,7 @@ async fn browser_events_handler(
     if let Err(refusal) = plaintext_gate(&state, &headers, &machine, target) {
         return Ok(refusal);
     }
-    let device_token = consume_socket_ticket(&state, query, &machine, target)?;
+    let device_token = consume_socket_ticket(&state, query, raw_query.as_deref(), &machine, target)?;
     browser_socket(state, machine, target.into(), device_token, ws).await
 }
 
@@ -1976,6 +1997,7 @@ async fn browser_screencast_handler(
     State(state): State<RelayState>,
     AxumPath((machine, browser_id)): AxumPath<(String, String)>,
     query: Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection>,
+    RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
@@ -1986,7 +2008,8 @@ async fn browser_screencast_handler(
     if !valid_socket_target(&target) {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let device_token = consume_socket_ticket(&state, query, &machine, &target)?;
+    let device_token =
+        consume_socket_ticket(&state, query, raw_query.as_deref(), &machine, &target)?;
     browser_socket(state, machine, target, device_token, ws).await
 }
 
@@ -1996,6 +2019,7 @@ async fn dag_stream_handler(
     State(state): State<RelayState>,
     AxumPath(machine): AxumPath<String>,
     query: Result<Query<DagSocketQuery>, axum::extract::rejection::QueryRejection>,
+    RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
@@ -2007,7 +2031,7 @@ async fn dag_stream_handler(
     ) {
         return Ok(refusal);
     }
-    let Query(query) = query.map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let Query(query) = query.map_err(|_| socket_query_rejection(raw_query.as_deref()))?;
     if query.workspace_id.is_empty()
         || query.workspace_id.len() > 256
         || !query
@@ -2023,6 +2047,7 @@ async fn dag_stream_handler(
         Ok(Query(SocketQuery {
             ticket: Some(query.ticket),
         })),
+        None,
         &machine,
         base,
     )?;
@@ -2034,13 +2059,14 @@ async fn browser_terminal_handler(
     State(state): State<RelayState>,
     AxumPath((machine, terminal)): AxumPath<(String, String)>,
     query: Result<Query<TerminalSocketQuery>, axum::extract::rejection::QueryRejection>,
+    RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
     if let Err(refusal) = plaintext_gate(&state, &headers, &machine, "/api/v1/terminal") {
         return Ok(refusal);
     }
-    let Query(query) = query.map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let Query(query) = query.map_err(|_| socket_query_rejection(raw_query.as_deref()))?;
     let target = format!("/api/v1/terminal/{terminal}");
     if !valid_socket_target(&target)
         || query
@@ -2055,6 +2081,7 @@ async fn browser_terminal_handler(
         Ok(Query(SocketQuery {
             ticket: Some(query.ticket),
         })),
+        None,
         &machine,
         &target,
     )?;
@@ -6445,6 +6472,33 @@ mod tests {
         relay.abort();
     }
 
+    #[test]
+    fn a_malformed_socket_query_is_a_bad_request_not_an_auth_failure() {
+        assert_eq!(socket_query_rejection(Some("ticket=t&cols=080")), StatusCode::BAD_REQUEST);
+        assert_eq!(socket_query_rejection(Some("ticket=t&rows=70000")), StatusCode::BAD_REQUEST);
+        assert_eq!(socket_query_rejection(Some("ticket=t&unknown=1")), StatusCode::BAD_REQUEST);
+        // A missing ticket or a credential-carrying key stays an authorization failure.
+        assert_eq!(socket_query_rejection(None), StatusCode::UNAUTHORIZED);
+        assert_eq!(socket_query_rejection(Some("cols=80")), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            socket_query_rejection(Some("ticket=t&access_token=permanent")),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(socket_query_rejection(Some("token=permanent")), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_terminal_socket_with_a_noncanonical_dimension_answers_400() {
+        let (base, server) = spawn_test_relay().await;
+        assert_socket_rejected(
+            &base,
+            "/host/browser-machine/api/v1/terminal/t1?ticket=t&cols=080",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        server.abort();
+    }
+
     #[tokio::test]
     async fn test_relay_socket_ticket_issuance_and_single_use() {
         let state = test_state(vec![]);
@@ -6462,6 +6516,7 @@ mod tests {
             consume_socket_ticket(
                 &state,
                 ticket_query(&ticket.ticket),
+                None,
                 "browser-machine",
                 "/api/v1/events"
             ),
@@ -6471,6 +6526,7 @@ mod tests {
             consume_socket_ticket(
                 &state,
                 ticket_query(&ticket.ticket),
+                None,
                 "browser-machine",
                 "/api/v1/events"
             ),
@@ -6482,7 +6538,7 @@ mod tests {
         ] {
             let ticket = issue_test_ticket(&state, "/api/v1/events").await;
             assert_eq!(
-                consume_socket_ticket(&state, ticket_query(&ticket.ticket), machine, target),
+                consume_socket_ticket(&state, ticket_query(&ticket.ticket), None, machine, target),
                 Err(StatusCode::UNAUTHORIZED)
             );
             assert!(!state
@@ -6509,6 +6565,7 @@ mod tests {
             consume_socket_ticket(
                 &state,
                 ticket_query(&ticket.ticket),
+                None,
                 "browser-machine",
                 "/api/v1/events"
             ),
