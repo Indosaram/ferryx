@@ -56,8 +56,8 @@ export interface FetchLikeInit {
   headers?: Record<string, string>;
   body?: Uint8Array | string;
   /**
-   * Aborts the request. HTTP/1.1 cannot cancel one response on a shared stream, so an
-   * abort after the request was written closes the tunnel stream.
+   * Aborts the request. HTTP/1.1 cannot cancel one response on a shared stream, so an abort
+   * after the request was written rejects the caller while the response is drained and dropped.
    */
   signal?: AbortSignal;
   /** Deadline in ms; defaults to DEFAULT_TUNNEL_REQUEST_TIMEOUT_MS. */
@@ -350,8 +350,9 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
   /**
    * Queues one request on the shared stream. Its deadline and abort listener start at enqueue,
    * so time spent behind other requests counts: a request still waiting when either fires is
-   * rejected and skipped (never sent); one already on the wire closes the stream, since its
-   * response framing is then unknown.
+   * rejected and skipped (never sent). An abort of a request already on the wire rejects the
+   * caller only: its response is still read and discarded so the shared stream stays in sync.
+   * Only the deadline (or a parse failure) closes the stream, since its framing is then unknown.
    */
   function schedule<T>(
     work: () => Promise<T>,
@@ -364,23 +365,29 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
     return new Promise<T>((resolve, reject) => {
       let settled = false;
       let started = false;
+      let workDone = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const finish = (complete: () => void) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
         signal?.removeEventListener("abort", onAbort);
+        // An in-flight request keeps its deadline until the response has drained.
+        if (!started || workDone) clearTimeout(timer);
         complete();
       };
-      const fail = (err: Error) =>
-        finish(() => {
-          if (started) failTransport();
-          reject(err);
-        });
       const onAbort = () =>
-        fail(new TunnelError("HTTP_ABORTED", started ? "request aborted; tunnel stream closed" : "request aborted before it was sent"));
-      const timer = setTimeout(
-        () =>
-          fail(
+        finish(() =>
+          reject(
+            new TunnelError(
+              "HTTP_ABORTED",
+              started ? "request aborted; its response is discarded" : "request aborted before it was sent",
+            ),
+          ),
+        );
+      timer = setTimeout(() => {
+        if (started && !workDone) failTransport();
+        finish(() =>
+          reject(
             new TunnelError(
               "HTTP_TIMEOUT",
               started
@@ -388,8 +395,8 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
                 : `request waited ${timeoutMs}ms behind earlier requests`,
             ),
           ),
-        timeoutMs,
-      );
+        );
+      }, timeoutMs);
       signal?.addEventListener("abort", onAbort, { once: true });
       const run = async (): Promise<void> => {
         if (settled) return;
@@ -404,9 +411,18 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
         started = true;
         const outcome = work();
         outcome.then(
-          (value) => finish(() => resolve(value)),
-          // Any failure mid-response leaves unknown bytes in the buffer; never reuse the stream.
-          (err) => fail(err instanceof Error ? err : new Error(String(err))),
+          (value) => {
+            workDone = true;
+            clearTimeout(timer);
+            finish(() => resolve(value));
+          },
+          (err) => {
+            workDone = true;
+            clearTimeout(timer);
+            // Any failure mid-response leaves unknown bytes in the buffer; never reuse the stream.
+            failTransport();
+            finish(() => reject(err instanceof Error ? err : new Error(String(err))));
+          },
         );
         await Promise.race([outcome.then(() => {}, () => {}), closedSignal]);
       };

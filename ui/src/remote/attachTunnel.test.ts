@@ -611,6 +611,47 @@ describe("attachTunnel HTTP shim deadlines and caps", () => {
     await expect(req).rejects.toThrow(/HTTP_ABORTED/);
   });
 
+  it("drains an aborted in-flight response instead of closing the shared tunnel", async () => {
+    // Given an in-flight request and another queued behind it
+    const stream = new ScriptedByteStream();
+    const transport = createTunnelTransport(stream);
+    const controller = new AbortController();
+    const aborted = transport.fetchLike("/switched-away", { signal: controller.signal });
+    const next = transport.fetchLike("/next");
+    await stream.waitForWrites(1);
+
+    // When the caller aborts before the response arrives
+    controller.abort();
+    await expect(aborted).rejects.toThrow(/HTTP_ABORTED/);
+    expect(stream.closed).toBe(false);
+
+    // Then its response is read and dropped, and the queued request gets its own response
+    stream.pushIncoming("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nSTALE");
+    await stream.waitForWrites(2);
+    stream.pushIncoming("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nFRESH");
+    const res = await next;
+    expect(new TextDecoder().decode(res.body)).toBe("FRESH");
+    expect(stream.closed).toBe(false);
+  });
+
+  it("still closes the tunnel when an aborted request's response never drains", async () => {
+    vi.useFakeTimers();
+    try {
+      const stream = new ScriptedByteStream();
+      const transport = createTunnelTransport(stream);
+      const controller = new AbortController();
+      const aborted = transport.fetchLike("/hung", { signal: controller.signal });
+      const abortedResult = expect(aborted).rejects.toThrow(/HTTP_ABORTED/);
+      await stream.waitForWrites(1);
+      controller.abort();
+      await abortedResult;
+      await vi.advanceTimersByTimeAsync(DEFAULT_TUNNEL_REQUEST_TIMEOUT_MS);
+      expect(stream.closed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects oversized headers and an oversized Content-Length body", async () => {
     const stream = new ScriptedByteStream();
     const transport = createTunnelTransport(stream);
