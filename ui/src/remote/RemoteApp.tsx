@@ -1394,13 +1394,22 @@ export const RemoteHostConnection: React.FC<{
   /** When the shell's events socket last went down; null while it is up. */
   const [eventsDownSince, setEventsDownSince] = useState<number | null>(null);
   const creationSessionsRef = useRef<Set<string> | null>(null);
-  const [viewportHeight, setViewportHeight] = useState(() => window.visualViewport?.height);
+  /* The one owner of the soft-keyboard layout: the root follows the visual viewport's height and
+     its offset, so iOS scrolling the layout viewport under the keyboard never hides the top bar or
+     the composer. No focused-field scrolling: the composer docks above the keyboard by layout. */
+  const [visualViewportBox, setVisualViewportBox] = useState(() =>
+    window.visualViewport ? { height: window.visualViewport.height, top: window.visualViewport.offsetTop } : null,
+  );
   useEffect(() => {
     const viewport = window.visualViewport;
     if (!viewport) return;
-    const resize = () => setViewportHeight(viewport.height);
-    viewport.addEventListener("resize", resize);
-    return () => viewport.removeEventListener("resize", resize);
+    const update = () => setVisualViewportBox({ height: viewport.height, top: viewport.offsetTop });
+    viewport.addEventListener("resize", update);
+    viewport.addEventListener("scroll", update);
+    return () => {
+      viewport.removeEventListener("resize", update);
+      viewport.removeEventListener("scroll", update);
+    };
   }, []);
   const [hostDrawerOpen, setHostDrawerOpen] = useState(false);
   // Chat is the default at EVERY width: the terminal is a mode the user asks for, never the
@@ -5280,7 +5289,7 @@ export const RemoteHostConnection: React.FC<{
   );
 
   return (
-    <div className="flex h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden remote-app-root bg-background text-foreground" style={viewportHeight ? { height: viewportHeight } : undefined}>
+    <div className="flex h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden remote-app-root bg-background text-foreground" style={visualViewportBox ? { position: "fixed", insetInline: 0, top: visualViewportBox.top, height: visualViewportBox.height } : undefined}>
       <Toaster />
       {showPhoneHome ? (
         <PhoneHomeView

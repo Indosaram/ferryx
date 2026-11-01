@@ -12,6 +12,38 @@ describe("web manifest and service worker assets", () => {
     expect(manifest.short_name).toBe("Ferryx");
   });
 
+  it("uses one launch colour and keeps the maskable icon separate from the any-purpose icons", () => {
+    const manifest = JSON.parse(readFileSync(resolve(process.cwd(), "public/manifest.webmanifest"), "utf8"));
+    const html = readFileSync(resolve(process.cwd(), "index.html"), "utf8");
+    expect(manifest.background_color).toBe(manifest.theme_color);
+    expect(html).toContain(`<meta name="theme-color" content="${manifest.theme_color}" />`);
+    expect(html).toContain(`background: ${manifest.background_color};`);
+    for (const icon of manifest.icons) expect(icon.purpose === "any" || icon.purpose === "maskable").toBe(true);
+  });
+
+  it("caches hashed /assets responses so the shell boots offline", async () => {
+    const swPath = resolve(process.cwd(), "public/sw.js");
+    const listeners: Record<string, (event: unknown) => void> = {};
+    const store = new Map<string, Response>();
+    const cache = { put: async (request: Request, response: Response) => { store.set(request.url, response); }, addAll: async () => {} };
+    const scope = {
+      location: { origin: "https://ferryx.test" },
+      addEventListener: (type: string, listener: (event: unknown) => void) => { listeners[type] = listener; },
+      skipWaiting: () => {},
+      clients: { claim: () => {} },
+    };
+    const caches = { open: async () => cache, match: async (request: Request) => store.get(request.url), keys: async () => [] };
+    const network = async () => new Response("bundle", { status: 200 });
+    new Function("self", "caches", "fetch", readFileSync(swPath, "utf8"))(scope, caches, network);
+
+    const request = new Request("https://ferryx.test/assets/index-abc123.js");
+    let responded: Promise<Response> | null = null;
+    listeners.fetch?.({ request, respondWith: (value: Promise<Response>) => { responded = value; } });
+    expect(responded).not.toBeNull();
+    await responded;
+    expect(store.has(request.url)).toBe(true);
+  });
+
   it("every icon path in manifest exists on disk", () => {
     const manifestPath = resolve(process.cwd(), "public/manifest.webmanifest");
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
