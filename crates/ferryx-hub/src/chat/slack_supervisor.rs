@@ -922,17 +922,24 @@ pub async fn refuse_without_engine(
     refuse_without_engine_in(pool, admitted, engine_enabled).await
 }
 
-/// Whether the hub env file turns the engine on, read on the blocking pool so a slow disk
-/// never stalls a runtime worker. A read that cannot finish counts as off.
+/// Whether the engine is on as [`crate::supervisor::setup::EngineView::enabled_for`] decides
+/// it (the hub env file, unless this process turns it off), read on the blocking pool so a
+/// slow disk never stalls a runtime worker. A read that cannot finish counts as off.
 async fn engine_flag_on() -> bool {
     tokio::task::spawn_blocking(|| {
-        crate::meta::mhc_profile::MhcProfileConfig::enabled_in(&crate::hub_env::read_file_env())
+        let process = std::env::var(crate::meta::mhc_profile::ENABLE_KEY).ok();
+        engine_flag(&crate::hub_env::read_file_env(), process.as_deref())
     })
     .await
     .unwrap_or_else(|error| {
         tracing::warn!(%error, "the hub env file was not read; the supervisor engine counts as off");
         false
     })
+}
+
+/// [`engine_flag_on`] for given hub env file entries and process value.
+fn engine_flag(shared: &std::collections::BTreeMap<String, String>, process: Option<&str>) -> bool {
+    crate::supervisor::setup::EngineView::enabled_for(shared, process)
 }
 
 /// [`refuse_without_engine`] with whether the hub env file turns the engine on.
@@ -2042,6 +2049,16 @@ mod tests {
             ..exited
         };
         assert!(!engine_ready(Some(&faulted)));
+    }
+
+    /// The Slack engine flag reads through the same rule as setup: the hub env file turns
+    /// the engine on and this process's own value can only turn it off.
+    #[test]
+    fn a_process_override_turns_the_slack_engine_flag_off() {
+        let file: std::collections::BTreeMap<String, String> =
+            [(crate::meta::mhc_profile::ENABLE_KEY.to_owned(), "1".to_owned())].into();
+        assert!(engine_flag(&file, None));
+        assert!(!engine_flag(&file, Some("0")));
     }
 
     #[tokio::test]
