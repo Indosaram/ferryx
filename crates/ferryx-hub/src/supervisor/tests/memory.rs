@@ -575,6 +575,42 @@ mod import {
     }
 
     #[tokio::test]
+    async fn an_import_that_finds_nothing_still_completes_setup_memory_step() {
+        use crate::meta::mhc_profile::REQUIRED_CAPABILITIES;
+        use crate::meta::mhc_supervisor::{HealthState, SupervisorHealth};
+        use crate::supervisor::setup::{set_setup_flags, setup_status, EngineView, NextAction};
+
+        let fixture = fixture().await;
+        let engine = || EngineView {
+            enabled: true,
+            installed: true,
+            health: Some(SupervisorHealth {
+                state: HealthState::Ready,
+                generation: 1,
+                pid: None,
+                capabilities: REQUIRED_CAPABILITIES.iter().map(|c| (*c).to_owned()).collect(),
+                server_version: None,
+                fault: None,
+                detail: None,
+                queued_decisions: 0,
+            }),
+        };
+        set_setup_flags(&fixture.pool, Some(true), Some(true)).await.unwrap();
+        let before = setup_status(&fixture.pool, engine()).await.unwrap();
+        assert_eq!(before.next_action, NextAction::ImportMemory);
+
+        let report =
+            import_sessions(&fixture.pool, fixture.memory.as_ref(), OWNER, Vec::new(), ImportBounds::default())
+                .await
+                .unwrap();
+        assert_eq!((report.sessions, report.turns_ingested), (0, 0));
+        let after = setup_status(&fixture.pool, engine()).await.unwrap();
+        assert_ne!(after.next_action, NextAction::ImportMemory);
+        assert_eq!((after.memory_import.sessions, after.memory_import.turns), (0, 0));
+        assert!(after.memory_import.last_at.is_some());
+    }
+
+    #[tokio::test]
     async fn hub_driven_sessions_and_worker_text_never_teach() {
         let fixture = fixture().await;
         // The owner chose an existing pane for a goal: the hub drives that session.
