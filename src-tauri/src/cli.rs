@@ -3905,10 +3905,7 @@ where
 }
 
 pub fn run_open_cli(command: OpenFileCliCommand) -> Result<(), String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .build()
-        .map_err(|error| error.to_string())?;
+    let runtime = browser_cli_runtime()?;
     let request = BrowserCliRequest::OpenFile {
         path: command.path,
         line: command.line,
@@ -4025,13 +4022,19 @@ pub fn run_browser_controllers_cli(
     Ok(())
 }
 
+/// Runtime for one request to the running app. The request waits under `tokio::time::timeout`,
+/// so the runtime needs timers as well as IO.
+fn browser_cli_runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())
+}
+
 /// Hands a URL the OS launched this process with to an already running Ferryx, which opens
 /// it in a browser tab. `Err` means no running app took it; the caller then starts the app.
 pub fn forward_inbound_url(url: String) -> Result<(), String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .build()
-        .map_err(|error| error.to_string())?;
+    let runtime = browser_cli_runtime()?;
     let response = runtime
         .block_on(send_browser_cli_request(BrowserCliRequest::OpenInboundUrl { url }))
         .map_err(|error| error.to_string())?;
@@ -4043,10 +4046,7 @@ pub fn forward_inbound_url(url: String) -> Result<(), String> {
 }
 
 pub fn run_browser_cli(command: BrowserCliCommand) -> Result<(), String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .build()
-        .map_err(|error| error.to_string())?;
+    let runtime = browser_cli_runtime()?;
     let cwd = std::env::current_dir()
         .map_err(|error| format!("failed to read current directory: {error}"))?;
     let home = cli_home_dir();
@@ -4409,6 +4409,16 @@ pub fn run_daemon_headless(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_cli_runtime_has_timers_for_the_response_timeout() {
+        let runtime = browser_cli_runtime().expect("runtime");
+        let waited = runtime.block_on(tokio::time::timeout(
+            std::time::Duration::from_millis(1),
+            std::future::pending::<()>(),
+        ));
+        assert!(waited.is_err());
+    }
 
     fn up_args(extra: &[&str]) -> Vec<String> {
         ["ferryx-cli", "up"]
