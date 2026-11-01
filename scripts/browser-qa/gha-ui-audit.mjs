@@ -40,10 +40,6 @@ mkdirSync(ocrDir, { recursive: true });
 const isolation = join(process.env.RUNNER_TEMP ?? out, "ferryx-ui-audit-isolation");
 const dirs = Object.fromEntries(["data", "runtime", "session", "tmp", "home"].map((name) => [name, join(isolation, name)]));
 for (const dir of Object.values(dirs)) mkdirSync(dir, { recursive: true });
-// Token-only CLI access, the documented Settings > Browser > Agent access switch: pairing needs
-// a click on an approval card per controller, which this run does not exercise.
-mkdirSync(join(dirs.data, "browser"), { recursive: true });
-writeFileSync(join(dirs.data, "browser", "agent-authority.json"), JSON.stringify({ settings: { requirePairing: false } }));
 
 const engineZip = process.env.FERRYX_UI_AUDIT_ENGINE_ZIP && existsSync(process.env.FERRYX_UI_AUDIT_ENGINE_ZIP)
   ? resolve(process.env.FERRYX_UI_AUDIT_ENGINE_ZIP)
@@ -768,9 +764,21 @@ async function agentQa(engine, browserId) {
     return { ok: result.ok, status: result.status, outcome, code: result.ok ? null : cliCode(result), stderr: result.ok ? undefined : result.stderr.slice(0, 500) };
   };
 
-  const navigated = cli("navigate", ...id, "--url", `${fixtureBase}/agent.html`);
-  record.navigate = navigated.ok ? "ok" : { status: navigated.status, code: cliCode(navigated), stderr: navigated.stderr.slice(0, 500) };
-  record.checks.fixture_loaded = navigated.ok && load("wait_loaded");
+  // `navigate` returns once the load is requested; a navigation still settling from the UI
+  // steps can replace it, so a page that did not arrive is navigated once more.
+  const navigate = (label) => {
+    const navigated = cli("navigate", ...id, "--url", `${fixtureBase}/agent.html`);
+    record[label] = navigated.ok ? "ok" : { status: navigated.status, code: cliCode(navigated), stderr: navigated.stderr.slice(0, 500) };
+    return navigated.ok;
+  };
+  const loaded = (label) => {
+    const waited = cli("wait", ...id, "--url-contains", "/agent.html", "--timeout-ms", "10000");
+    record[label] = waited.ok ? "ok" : { status: waited.status, code: cliCode(waited) };
+    return waited.ok;
+  };
+  let arrived = navigate("navigate") && loaded("wait_url");
+  if (!arrived) arrived = navigate("navigate_retry") && loaded("wait_url_retry");
+  record.checks.fixture_loaded = arrived && load("wait_loaded");
   // What the page script sees when the wait does not match: where it runs and what it reads.
   if (!record.checks.fixture_loaded) {
     const probe = cli("eval", ...id, "--script", "JSON.stringify({href: location.href, title: document.title, ready: document.readyState, text: (document.body && document.body.innerText || '').slice(0, 120)})");
