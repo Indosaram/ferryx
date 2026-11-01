@@ -443,7 +443,8 @@ describe("RemoteAttention Affordance", () => {
       expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "tab-3-session");
     });
     expect(fetchMock.mock.calls.slice(before).some(([input]) => String(input).includes("/api/v1/workspace/select"))).toBe(false);
-    expect(screen.queryByRole("dialog", { name: "Inbox" })).not.toBeInTheDocument();
+    // The sheet plays its exit animation before it unmounts.
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Inbox" })).not.toBeInTheDocument());
   });
 
   it("offers no Dismiss on its own Inbox rows when no desktop publishes any", async () => {

@@ -919,7 +919,8 @@ describe("Remote UI Components", () => {
     });
     expect(screen.queryByTestId("remote-terminal")).not.toBeInTheDocument();
     expect(screen.getByText("No focused terminal")).toBeInTheDocument();
-    expect(screen.getByText(/mirror it here/i)).toBeInTheDocument();
+    // The phone shows the mirror's one empty state (e81e38ea), with its own phone copy.
+    expect(screen.getByTestId("remote-terminal-empty")).toHaveTextContent(/Pick a terminal from the tabs above|no terminal open in this worktree/);
     expect(document.body).not.toHaveTextContent("background-terminal");
   });
 
