@@ -4205,6 +4205,7 @@ async fn get_capabilities(
             capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
             if crate::hub_runtime::supervisor_available() {
                 capabilities.push(supervisor_api::SUPERVISOR_CAPABILITY);
+                capabilities.push(supervisor_api::SUPERVISOR_OBSERVE_CAPABILITY);
             }
             capabilities
         } else { vec![] },
@@ -7919,6 +7920,12 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route(
             "/api/v1/supervisor/pause",
             post(supervisor_api::http_pause).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+            )),
+        )
+        .route(
+            "/api/v1/supervisor/observe",
+            post(supervisor_api::http_observe).layer(axum::extract::DefaultBodyLimit::max(
                 crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
             )),
         )

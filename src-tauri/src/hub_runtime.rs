@@ -5,6 +5,8 @@
 //! which uses the shared reference-chat input queue and refuses a pane a person just typed in.
 use std::sync::Arc;
 
+mod holder_link;
+
 use async_trait::async_trait;
 use ferryx_hub::agent_control::{AgentControl, AgentOp, TaskLauncher};
 use ferryx_hub::sessions::watch::Observation;
@@ -832,9 +834,9 @@ pub async fn supervisor_snapshot(state: &RemoteGatewayState) -> Value {
         let test_hub = state.supervisor_test_hub.read().clone();
         #[cfg(test)]
         if let Some((pool, _)) = test_hub {
-            return json!({ "hub": { "available": true, "running": true, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": unified_snapshot(&pool).await });
+            return json!({ "hub": { "available": true, "running": true, "error": null, "holderPaired": holder_paired() }, "lanes": [], "watched": [], "actions": actions, "supervisor": unified_snapshot(&pool).await });
         }
-        return json!({ "hub": { "available": false, "running": false, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": null });
+        return json!({ "hub": { "available": false, "running": false, "error": null, "holderPaired": holder_paired() }, "lanes": [], "watched": [], "actions": actions, "supervisor": null });
     };
     // A daemon that handed the hub to its successor no longer drives anything.
     let running = running.lock().await.is_some() && !HUB_TASKS.is_retired();
@@ -842,7 +844,7 @@ pub async fn supervisor_snapshot(state: &RemoteGatewayState) -> Value {
     let watched = ferryx_hub::lanes::supervised::watched_local_sessions(&hub.pool).await;
     let error = lanes.as_ref().err().or(watched.as_ref().err()).map(ToString::to_string);
     json!({
-        "hub": { "available": true, "running": running, "error": error },
+        "hub": { "available": true, "running": running, "error": error, "holderPaired": holder_paired() },
         "lanes": lanes.unwrap_or_default(),
         "watched": watched.unwrap_or_default(),
         "actions": actions,
@@ -897,7 +899,9 @@ async fn record_human_keystrokes(
 /// A person typed raw keys into `session_id`. When the pane belongs to a lane, the hub records
 /// one human_correction turn per typing burst. The keys themselves are never stored.
 pub(crate) fn note_lane_keystrokes(session_id: &str, now_ms: u64) {
-    if drop_observation_on_standby("keystrokes") {
+    if drop_observation_on_standby("keystrokes", || {
+        json!({ "kind": "keystrokes", "sessionId": session_id, "nowMs": now_ms })
+    }) {
         return;
     }
     let Some((hub, _)) = supervisor_view() else { return };
@@ -945,7 +949,9 @@ pub(crate) fn note_agent_control_input(op: &AgentControlOp) {
     if ferryx_hub::goals::turns::records_own_turn(request_id.as_deref()) {
         return;
     }
-    if drop_observation_on_standby("agent control input") {
+    if drop_observation_on_standby("agent control input", || {
+        json!({ "kind": "agentControlInput", "op": op })
+    }) {
         return;
     }
     let Some((hub, _)) = supervisor_view() else { return };
@@ -964,11 +970,22 @@ pub(crate) fn note_agent_control_input(op: &AgentControlOp) {
 /// event path ([`ferryx_hub::lanes::dispatch::report_from_worker`]). The reply is one JSON
 /// value: `{ok:true, ...}` or `{ok:false, code, message}`.
 pub async fn supervisor_worker_report((session_id, event_id, body): (String, String, String)) -> Value {
-    if let Some(refusal) = standby_refusal() {
-        OBSERVE_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let (holder_machine_id, holder_label) = refusal.holder.clone().unwrap_or_default();
-        return json!({"ok": false, "code": refusal.code, "message": refusal.message,
-            "holderMachineId": holder_machine_id, "holderLabel": holder_label});
+    // On standby the worker's report goes to the holder, which supervises its goal.
+    if let Some(holder) = current_holder() {
+        let observation = json!({ "kind": "workerReport", "sessionId": session_id, "eventId": event_id, "body": body });
+        let hosts = holder_link::DaemonPairedHosts(DaemonClient::new());
+        return match holder_link::LINK
+            .forward(&holder, &hosts, &holder_link::AccountService, holder_observe(observation))
+            .await
+        {
+            Ok(answer) => answer,
+            Err(refusal) => {
+                note_dropped("worker report", &holder);
+                let (holder_machine_id, holder_label) = refusal.holder.clone().unwrap_or_default();
+                json!({"ok": false, "code": refusal.code, "message": refusal.message,
+                    "holderMachineId": holder_machine_id, "holderLabel": holder_label})
+            }
+        };
     }
     let Some((hub, _)) = supervisor_view() else {
         return json!({"ok": false, "code": "SUPERVISOR_UNAVAILABLE", "message": "the supervisor hub is not open in this daemon"});
@@ -1109,15 +1126,122 @@ pub fn observe_dropped() -> u64 {
     OBSERVE_DROPPED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// True when this daemon is on standby: the observation is counted and dropped with a warning
-/// rather than written to a hub database the holder does not read.
-fn drop_observation_on_standby(what: &str) -> bool {
+/// True when this daemon is on standby: the observation goes to the paired holder (which
+/// supervises this machine's panes) instead of a hub database nobody reads; an unknown or
+/// unpaired holder drops it with a warning and the `observe_dropped` counter.
+fn drop_observation_on_standby(what: &str, observation: impl FnOnce() -> Value) -> bool {
     let Some((holder_machine_id, holder_label)) = standby_holder() else {
         return false;
     };
-    OBSERVE_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    tracing::warn!(what, holder = ?holder_label.or(holder_machine_id), "standby dropped a supervisor observation");
+    let holder = holder_link::Holder { machine_id: holder_machine_id, label: holder_label };
+    if holder.machine_id.is_none() && holder.label.is_none() {
+        note_dropped(what, &holder);
+        return true;
+    }
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        note_dropped(what, &holder);
+        return true;
+    };
+    let observation = observation();
+    let what = what.to_owned();
+    runtime.spawn(async move {
+        let hosts = holder_link::DaemonPairedHosts(DaemonClient::new());
+        let sent = holder_link::LINK
+            .forward(&holder, &hosts, &holder_link::AccountService, holder_observe(observation))
+            .await;
+        if let Err(failure) = sent {
+            tracing::debug!(code = %failure.code, "observation not forwarded");
+            note_dropped(&what, &holder);
+        }
+    });
     true
+}
+
+/// An observation this standby could not hand to the holder: counted and logged.
+fn note_dropped(what: &str, holder: &holder_link::Holder) {
+    OBSERVE_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    tracing::warn!(what, holder = ?holder.label.as_ref().or(holder.machine_id.as_ref()), "standby dropped a supervisor observation");
+}
+
+fn holder_observe(observation: Value) -> crate::paired_host::client::Operation {
+    crate::paired_host::client::Operation::SupervisorObserve { observation }
+}
+
+/// Whether this machine holds a usable agent-control grant on the supervisor holder (the
+/// snapshot's `hub.holderPaired`, read by status).
+pub fn holder_paired() -> bool {
+    holder_link::LINK.holder_paired()
+}
+
+/// `"paired"`, `"not paired to holder"` or `"no holder"`.
+pub fn holder_pairing_state() -> &'static str {
+    holder_link::LINK.pairing_state()
+}
+
+/// The holder, when this daemon is on standby.
+fn current_holder() -> Option<holder_link::Holder> {
+    standby_holder().map(|(machine_id, label)| holder_link::Holder { machine_id, label })
+}
+
+/// The holder applies a standby's observation of its own panes as if local, with `host_id`
+/// the sender machine: a keystroke burst, a relayed input, or a worker report.
+pub async fn apply_observation(
+    host_id: &str,
+    observation: Value,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    use ferryx_hub::supervisor::request::RequestFailure;
+    if let Some(refusal) = standby_refusal() {
+        return Err(refusal);
+    }
+    let Some((hub, _)) = supervisor_view() else {
+        return Err(RequestFailure::new("SUPERVISOR_UNAVAILABLE", "the supervisor hub is not open in this daemon"));
+    };
+    apply_observation_to(&hub.pool, host_id, observation).await
+}
+
+async fn apply_observation_to(
+    pool: &ferryx_hub::goals::SqlitePool,
+    host_id: &str,
+    observation: Value,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    use ferryx_hub::supervisor::request::RequestFailure;
+    let invalid = |what: &str| RequestFailure::new("INVALID_REQUEST", format!("observation: {what}"));
+    let text = |key: &str| observation[key].as_str().map(str::to_owned).ok_or_else(|| invalid(key));
+    let storage = |error: HubError| RequestFailure::new("STORAGE", error.to_string());
+    match observation["kind"].as_str() {
+        Some("keystrokes") => {
+            let now_ms = observation["nowMs"].as_u64().ok_or_else(|| invalid("nowMs"))?;
+            let recorded = record_human_keystrokes(pool, &KEYSTROKE_BURSTS, &text("sessionId")?, now_ms)
+                .await
+                .map_err(storage)?;
+            Ok(json!({ "ok": true, "recorded": recorded, "hostId": host_id }))
+        }
+        Some("agentControlInput") => {
+            let op: AgentControlOp =
+                serde_json::from_value(observation["op"].clone()).map_err(|_| invalid("op"))?;
+            let recorded = record_control_turn(pool, &op).await.map_err(storage)?;
+            Ok(json!({ "ok": true, "recorded": recorded, "hostId": host_id }))
+        }
+        Some("workerReport") => {
+            match ferryx_hub::lanes::dispatch::report_from_worker(
+                pool,
+                host_id,
+                &text("sessionId")?,
+                &text("eventId")?,
+                &text("body")?,
+            )
+            .await
+            {
+                Ok(report) => {
+                    let mut value = json!(report);
+                    value["ok"] = json!(true);
+                    Ok(value)
+                }
+                Err(error) => Err(RequestFailure::new(error.code(), error.to_string())),
+            }
+        }
+        _ => Err(invalid("kind")),
+    }
 }
 
 fn standby_error(role: &crate::daemon::supervisor_lease_role::Role) -> HubStartError {
@@ -1728,6 +1852,19 @@ pub async fn supervisor_request(
     use ferryx_hub::supervisor::request::{self, RequestContext, RequestFailure};
     // A malformed envelope is refused before the hub is even consulted.
     request::parse_envelope(envelope.clone())?;
+    // On standby the owner's CLI/MCP request runs on the holder over the paired channel; a
+    // phone is answered 409 with the holder instead, so it switches to it.
+    if let (Some(holder), false) = (current_holder(), matches!(caller, SupervisorCaller::Remote { .. })) {
+        let hosts = holder_link::DaemonPairedHosts(DaemonClient::new());
+        return holder_link::LINK
+            .forward(
+                &holder,
+                &hosts,
+                &holder_link::AccountService,
+                crate::paired_host::client::Operation::SupervisorRequest { envelope },
+            )
+            .await;
+    }
     let (pool, owner, control) = supervisor_service(state).await?;
     let owner = owner.ok_or_else(|| {
         RequestFailure::new(
@@ -3525,6 +3662,25 @@ mod tests {
         let excerpt = rows[0].1.clone().unwrap();
         assert!(excerpt.starts_with("please also fix the docs"));
         assert!(excerpt.chars().count() <= 240);
+    }
+
+    /// The holder applies a standby's forwarded keystroke note to its own hub DB, attributed to
+    /// the sender machine; an unknown kind writes nothing.
+    #[tokio::test]
+    async fn a_forwarded_keystroke_note_lands_in_the_holders_hub_db_with_the_sender_host() {
+        let pool = lane_pool().await;
+        let applied = apply_observation_to(
+            &pool,
+            "mach-a",
+            json!({"kind": "keystrokes", "sessionId": "pane-1", "nowMs": 9_000_000_u64}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(applied, json!({"ok": true, "recorded": true, "hostId": "mach-a"}));
+        assert_eq!(turn_rows(&pool).await, vec![("human_correction".to_owned(), None)]);
+        let refused = apply_observation_to(&pool, "mach-a", json!({"kind": "other"})).await.unwrap_err();
+        assert_eq!(refused.code, "INVALID_REQUEST");
+        assert_eq!(turn_rows(&pool).await.len(), 1);
     }
 
     #[tokio::test]

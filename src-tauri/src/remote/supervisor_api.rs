@@ -21,6 +21,32 @@ pub(crate) const SUPERVISOR_UNAVAILABLE_CODE: &str = "SUPERVISOR_UNAVAILABLE";
 /// The wire code a standby daemon answers with: another machine holds the supervisor lease.
 pub(crate) const SUPERVISOR_STANDBY_CODE: &str = "SUPERVISOR_STANDBY";
 
+/// Capability of a holder that applies a standby's pane observations (`POST supervisor/observe`).
+pub(crate) const SUPERVISOR_OBSERVE_CAPABILITY: &str = "supervisorObserveV1";
+
+/// `POST /api/v1/supervisor/observe`: a standby's observation of its own panes (keystrokes,
+/// relayed input, worker report), applied here as if local with `host_id` the sender machine.
+/// Same grant as agent control: a machine Control device the policy admits. The sender is the
+/// device's machine (its installation id), never a body field.
+pub(crate) async fn http_observe(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let device = match agent_control_service::http_device(&state, &headers, true) {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+    let Ok(Json(observation)) = body else {
+        return reference_chat_error(ScopeErrorCode::InvalidRequest, "the body must be one observation");
+    };
+    let host_id = device.installation_id.clone().unwrap_or_else(|| device.id.clone());
+    match crate::hub_runtime::apply_observation(&host_id, observation).await {
+        Ok(value) => no_store(value),
+        Err(failure) => service_refusal(&failure),
+    }
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct PauseBody {

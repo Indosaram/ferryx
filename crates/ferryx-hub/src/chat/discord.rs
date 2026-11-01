@@ -678,6 +678,10 @@ async fn answer_sessions(
 /// Posts `text` when `DISCORD_TOKEN` is set. No token reports that nothing was sent.
 #[cfg(feature = "hub-discord")]
 pub async fn post_if_configured(session: &super::session::SessionKey, text: &str) -> Result<bool> {
+    // Only the lease holder posts; a standby reports nothing sent and the caller keeps it queued.
+    if !crate::holder::is_holder_now() {
+        return Ok(false);
+    }
     let Some(token) = bot_token() else {
         return Ok(false);
     };
