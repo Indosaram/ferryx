@@ -91,6 +91,27 @@ pub struct PairingCoordinator {
     register_tx: mpsc::Sender<RegisterPairingPinRequest>,
     machine_id: String,
     auth: AuthManager,
+    /// The owning relay client's connection state; `None` for a standalone coordinator.
+    relay_link: Option<RelayLink>,
+}
+
+/// What a coordinator needs to know about its relay client's control channel.
+#[derive(Clone)]
+struct RelayLink {
+    accepted: Arc<std::sync::atomic::AtomicBool>,
+    last_close_reason: Arc<parking_lot::Mutex<Option<String>>>,
+}
+
+impl RelayLink {
+    /// `Some` once a control attempt has ended and no session is accepted now. Before the
+    /// first attempt finishes, a registration still waits for it: callers that start the
+    /// client and pair at once use the registration ACK as their readiness barrier.
+    fn offline_reason(&self) -> Option<String> {
+        if self.accepted.load(std::sync::atomic::Ordering::Acquire) {
+            return None;
+        }
+        self.last_close_reason.lock().clone()
+    }
 }
 
 impl PairingCoordinator {
@@ -106,6 +127,7 @@ impl PairingCoordinator {
             register_tx,
             machine_id: machine_id.into(),
             auth: AuthManager::with_persistence(canonical_auth_path()),
+            relay_link: None,
         }
     }
 
@@ -127,6 +149,7 @@ impl PairingCoordinator {
             register_tx,
             machine_id: machine_id.into(),
             auth,
+            relay_link: None,
         }
     }
 
@@ -223,6 +246,9 @@ impl PairingCoordinator {
             && permission != DevicePermission::Control
         {
             return Err("Machine access requires Control permission".into());
+        }
+        if let Some(reason) = self.relay_link.as_ref().and_then(RelayLink::offline_reason) {
+            return Err(format!("Relay not connected ({reason})"));
         }
         // Gateway (phone mirror) pairing codes are typed into the paired browser
         // within seconds of being shown, so they stay at sixty seconds.
@@ -544,6 +570,7 @@ impl RelayClient {
             control_accepted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_close_reason: Arc::new(parking_lot::Mutex::new(None)),
         }
+        .link_pairing()
     }
 
     pub fn with_machine_id(mut self, machine_id: impl Into<String>) -> Self {
@@ -595,6 +622,17 @@ impl RelayClient {
             control_accepted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_close_reason: Arc::new(parking_lot::Mutex::new(None)),
         }
+        .link_pairing()
+    }
+
+    /// Lets the pairing coordinator see this client's control channel, so pairing while
+    /// the relay is offline fails at once with the reason instead of a vague timeout.
+    fn link_pairing(mut self) -> Self {
+        self.pairing.relay_link = Some(RelayLink {
+            accepted: Arc::clone(&self.control_accepted),
+            last_close_reason: Arc::clone(&self.last_close_reason),
+        });
+        self
     }
 
     /// Supplies the private relay's enrollment credential for key-based authentication.
@@ -1841,6 +1879,29 @@ mod tests {
             client.backoff_after_session(Duration::from_secs(1), INITIAL_BACKOFF),
             INITIAL_BACKOFF
         );
+    }
+
+    #[tokio::test]
+    async fn pairing_while_the_relay_is_offline_fails_at_once_with_the_reason() {
+        let client = RelayClient::new("https://relay.example.com", "tok");
+        let mut coordinator = client.pairing_coordinator();
+        coordinator.auth = AuthManager::with_persistence(None);
+        client.record_close_reason(Some("relay control connection ended".into()));
+        // No deadline wrapper is needed: an offline relay must not reach the 5s ACK wait.
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let error = coordinator
+            .generate_pairing(Duration::from_secs(60))
+            .await
+            .unwrap_err();
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert_eq!(error, "Relay not connected (relay control connection ended)");
+        // Nothing was issued or changed for a request that never reached the relay.
+        assert_eq!(coordinator.state(), PairingState::Created);
+
+        // Once a session is accepted again, pairing proceeds to the relay.
+        let _connected = client.test_admit_control_channel();
+        assert!(coordinator.relay_link.as_ref().unwrap().offline_reason().is_none());
     }
 
     #[test]
