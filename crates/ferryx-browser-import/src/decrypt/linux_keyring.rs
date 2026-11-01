@@ -60,20 +60,17 @@ fn secret_service_secret(service_name: &str) -> Option<zeroize::Zeroizing<Vec<u8
     use secret_service::blocking::SecretService;
     use secret_service::EncryptionType;
     let ss = SecretService::connect(EncryptionType::Dh).ok()?;
-    let items = ss
-        .search_items(std::collections::HashMap::from([("application", service_name)]))
-        .ok()?;
-    // The items borrow `ss`; collect the secret into an owned value before the session drops.
-    let mut secret = None;
-    for item in items.unlocked.into_iter().chain(items.locked) {
-        let _ = item.unlock();
-        if let Some(found) = item.get_secret().ok().filter(|secret| !secret.is_empty()) {
-            secret = Some(zeroize::Zeroizing::new(found));
-            break;
-        }
-    }
-    drop(ss);
-    secret
+    // The items borrow `ss`, so they live in this inner block and only the owned secret leaves.
+    let found = {
+        let items = ss
+            .search_items(std::collections::HashMap::from([("application", service_name)]))
+            .ok()?;
+        items.unlocked.into_iter().chain(items.locked).find_map(|item| {
+            let _ = item.unlock();
+            item.get_secret().ok().filter(|secret| !secret.is_empty())
+        })
+    };
+    found.map(zeroize::Zeroizing::new)
 }
 
 #[cfg(target_os = "linux")]

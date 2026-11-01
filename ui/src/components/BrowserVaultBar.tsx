@@ -58,7 +58,7 @@ export function BrowserVaultBar({ browserId, url }: { browserId: string; url: st
     if (!isWebUrl(url)) return;
     void vaultMatchesForBrowser(browserId).then(
       (next) => {
-        if (seq === matchSeq.current) setMatches(next);
+        if (seq === matchSeq.current) setMatches(next ?? []);
       },
       (failure: unknown) => {
         if (seq === matchSeq.current) setFillError(extractBrowserErrorCode(failure));
