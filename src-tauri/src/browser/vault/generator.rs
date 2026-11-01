@@ -255,9 +255,7 @@ pub fn get_wordlist() -> &'static [&'static str] {
         WORDLIST_RAW
             .lines()
             .map(|s| s.trim())
-            // Words are joined with a user-chosen separator, so a word must be letters only:
-            // `yo-yo` would read as two words with the default `-`.
-            .filter(|s| !s.is_empty() && s.chars().all(|ch| ch.is_ascii_alphabetic()))
+            .filter(|s| !s.is_empty())
             .collect()
     })
 }
@@ -957,6 +955,8 @@ mod tests {
         assert_eq!(words.len(), 1296);
         assert_eq!(words[0], "acid");
         assert_eq!(words[words.len() - 1], "zoom");
+        // Words are joined with a user-chosen separator, so each one must be letters only.
+        assert!(words.iter().all(|word| word.chars().all(|ch| ch.is_ascii_lowercase())));
     }
 
     #[test]
