@@ -13,6 +13,8 @@ pub mod browser;
 pub mod browser_cli;
 pub mod cli_install;
 #[cfg(feature = "desktop")]
+pub mod default_browser;
+#[cfg(feature = "desktop")]
 pub mod dag;
 #[cfg(feature = "desktop")]
 pub mod daemon_update;

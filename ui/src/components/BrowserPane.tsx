@@ -25,6 +25,7 @@ import { recordBrowserHistory } from "../lib/browserHistory";
 import { PRIVATE_BROWSER_PROFILE } from "../lib/browserSettings";
 import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
 import { BrowserToolbar } from "./BrowserToolbar";
+import { BrowserSignInHandoffBar } from "./BrowserSignInHandoffBar";
 import { BrowserDownloadsShelf } from "./BrowserDownloadsShelf";
 import type { BrowserTab } from "../lib/types";
 
@@ -404,6 +405,7 @@ export function BrowserPane({
         {liveTab.engine === "chromium" ? null : (
           <BrowserToolbar tab={liveTab} onNavigate={onNavigate} onReload={onReload} designFeedbackTargets={designFeedbackTargets} />
         )}
+        <BrowserSignInHandoffBar tab={liveTab} />
         {findOpen ? (
           <div className="flex items-center gap-1.5 border-b border-border bg-popover px-3 py-1.5" data-testid="browser-find-bar">
             <input

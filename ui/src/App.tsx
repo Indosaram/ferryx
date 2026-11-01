@@ -34,7 +34,7 @@ import { useApplyAppearanceSettings } from "./lib/appearanceSettings";
 import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots, isLocalDagProject, remoteProjectsWatchKey } from "./lib/dagWatchRoots";
 import { loadBrowserSettings, newBrowserTabUrl } from "./lib/browserSettings";
-import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, getBrowserState, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, openExternalUrl, popupOpenerLink, reportBrowserAdoption, setBrowserZoom, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
+import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, getBrowserState, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, onInboundUrls, openExternalUrl, SIGN_IN_HANDOFF_EVENT, takeInboundUrls, type SignInHandoffDetail, popupOpenerLink, reportBrowserAdoption, setBrowserZoom, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
 import { listen } from "@tauri-apps/api/event";
 import { CLI_OPEN_FILE_EVENT, parseCliOpenFilePayload } from "./lib/cliOpenFile";
 import { registerBuiltInBrowserLinkOpener, registerWorktreePathOpener } from "./lib/linkRouting";
@@ -3740,6 +3740,39 @@ function WorkspaceApp({
       if (activeRemoteHostRef.current) return;
       void createBrowserTab(url).catch(reportRuntimeError);
     });
+  }, [createBrowserTab, reportRuntimeError]);
+
+  // Links the OS handed Ferryx as the default browser: queued in the backend until drained, so a
+  // cold launch's URL (queued before this listener existed) opens too.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const drain = () => {
+      void takeInboundUrls().then((urls) => {
+        for (const url of urls) void createBrowserTab(url).catch(reportRuntimeError);
+      }, reportRuntimeError);
+    };
+    void onInboundUrls(drain).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+      drain();
+    }).catch(reportRuntimeError);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [createBrowserTab, reportRuntimeError]);
+
+  // A system-webview tab Google refused to sign in hands the sign-in to a Chromium tab of the
+  // same profile (new tabs use the Chromium engine once it is installed).
+  useEffect(() => {
+    const onHandoff = (event: Event) => {
+      const detail = (event as CustomEvent<SignInHandoffDetail>).detail;
+      if (!detail?.url) return;
+      void createBrowserTab(detail.url, undefined, detail.profileId ? { profileId: detail.profileId } : undefined).catch(reportRuntimeError);
+    };
+    window.addEventListener(SIGN_IN_HANDOFF_EVENT, onHandoff);
+    return () => window.removeEventListener(SIGN_IN_HANDOFF_EVENT, onHandoff);
   }, [createBrowserTab, reportRuntimeError]);
 
   useEffect(() => {

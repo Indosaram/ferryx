@@ -654,3 +654,43 @@ export function onBrowserTabSwitch(
 ): Promise<UnlistenFn> {
   return listen<BrowserTabSwitchPayload>(BROWSER_TAB_SWITCH_EVENT, (event) => listener(event.payload));
 }
+
+/** Whether Ferryx is the system default browser (Settings > Browser > Default Browser). */
+export type DefaultBrowserStatus =
+  | { state: "default" }
+  | { state: "notDefault"; current: string | null }
+  | { state: "unsupported" };
+
+export type MakeDefaultBrowserOutcome = { outcome: "requested" } | { outcome: "openedSystemSettings" };
+
+export async function getDefaultBrowserStatus(): Promise<DefaultBrowserStatus> {
+  return invoke<DefaultBrowserStatus>("cmd_default_browser_status");
+}
+
+export async function makeDefaultBrowser(): Promise<MakeDefaultBrowserOutcome> {
+  return invoke<MakeDefaultBrowserOutcome>("cmd_default_browser_make_default");
+}
+
+/** Emitted (empty payload) when the OS handed Ferryx http(s) URLs; drain them with takeInboundUrls. */
+export const INBOUND_URL_EVENT = "ferryx:inbound-url";
+
+export async function takeInboundUrls(): Promise<string[]> {
+  const urls: unknown = await invoke("cmd_default_browser_take_inbound_urls");
+  return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string") : [];
+}
+
+export function onInboundUrls(listener: () => void): Promise<UnlistenFn> {
+  return listen(INBOUND_URL_EVENT, () => listener());
+}
+
+export type SignInBlock = { kind: "googleBlocked"; retryUrl: string } | { kind: "notBlocked" };
+
+/** Classifies a page as Google's "this browser or app may not be secure" sign-in block. */
+export async function detectSignInBlock(url: string, title?: string | null): Promise<SignInBlock> {
+  return invoke<SignInBlock>("cmd_browser_detect_sign_in_block", { url, title: title ?? null });
+}
+
+/** Window event asking the app to reopen a blocked sign-in in a Chromium tab of the same profile. */
+export const SIGN_IN_HANDOFF_EVENT = "ferryx:browser-sign-in-handoff";
+
+export type SignInHandoffDetail = { url: string; profileId?: string };

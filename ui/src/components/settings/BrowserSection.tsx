@@ -44,6 +44,7 @@ import {
 } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { BrowserEngineGroup } from "./BrowserEngineGroup";
+import { DefaultBrowserGroup } from "./DefaultBrowserGroup";
 import { SettingRow, SettingsGroup, SettingsHeading } from "./primitives";
 
 export function BrowserSection() {
@@ -340,6 +341,8 @@ export function BrowserSection() {
           </SettingRow>
         </div>
       </SettingsGroup>
+
+      <DefaultBrowserGroup />
 
       <BrowserEngineGroup />
 

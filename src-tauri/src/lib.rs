@@ -1857,6 +1857,10 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_browser_engine_status,
         cmd_browser_engine_install,
         cmd_browser_engine_remove,
+        crate::ipc::default_browser::cmd_default_browser_status,
+        crate::ipc::default_browser::cmd_default_browser_make_default,
+        crate::ipc::default_browser::cmd_default_browser_take_inbound_urls,
+        crate::ipc::default_browser::cmd_browser_detect_sign_in_block,
         cmd_browser_open_external,
         cmd_browser_remote_reclaim,
         cmd_browser_remote_revoke,
@@ -2779,6 +2783,14 @@ fn handle_window_destroyed<R: tauri::Runtime>(window: &tauri::Window<R>) {
 /// App run-loop hook. Quitting the GUI stops only the GUI's own watchdog; it never stops,
 /// unloads or signals the daemon, which owns every PTY (pinned by `quit_path_tests`).
 fn handle_run_event<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, event: &tauri::RunEvent) {
+    // macOS hands http(s) links to the running app (Ferryx as the default browser) as an
+    // Apple Event instead of argv, both on a cold launch and while it runs.
+    #[cfg(target_os = "macos")]
+    if let tauri::RunEvent::Opened { urls } = event {
+        for url in urls {
+            crate::ipc::default_browser::deliver_inbound_url(app_handle, url.as_str());
+        }
+    }
     if let tauri::RunEvent::Exit = event {
         if let Some(watchdog) = app_handle.try_state::<crate::watchdog::WatchdogHandle>() {
             watchdog.stop();
