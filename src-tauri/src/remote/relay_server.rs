@@ -1052,11 +1052,9 @@ impl RelayState {
     }
 
     fn admit(&self, ip: IpAddr, now: Instant) -> bool {
+        // Expired trackers are pruned by the session sweeper, not on every request: a full
+        // scan per admission is O(n) under the global lock.
         let mut admission = self.inner.admission.lock();
-        admission.retain(|_, tracker| {
-            now.duration_since(tracker.started) < ADMISSION_WINDOW
-                || tracker.locked_until.is_some_and(|until| now < until)
-        });
         let tracker = admission.entry(ip).or_insert(AttemptTracker {
             started: now,
             attempts: 0,
@@ -1431,21 +1429,27 @@ impl RelayState {
     /// `rx.await` to resolve to an error so it can close its socket.
     fn sweep_expired_sessions(&self) {
         let now = Instant::now();
+        let now_secs = current_time_secs();
         self.inner
             .pending_socket_tickets
             .lock()
-            .retain(|_, (_, _, _, expiry)| *expiry > current_time_secs());
+            .retain(|_, (_, _, _, expiry)| *expiry > now_secs);
         self.paired_tokens
             .lock()
             .retain(|_, cached| now.duration_since(cached.validated_at) < DEVICE_TOKEN_CACHE_TTL);
         self.inner
             .pairings
             .lock()
-            .retain(|_, p| p.registration.expires_at > current_time_secs());
-        self.inner.admission.lock().retain(|_, tracker| {
+            .retain(|_, p| p.registration.expires_at > now_secs);
+        let live = |tracker: &AttemptTracker| {
             now.duration_since(tracker.started) < ADMISSION_WINDOW
                 || tracker.locked_until.is_some_and(|until| now < until)
-        });
+        };
+        self.inner.admission.lock().retain(|_, tracker| live(tracker));
+        self.inner
+            .pairing_admission
+            .lock()
+            .retain(|_, tracker| live(tracker));
         let mut sessions = self.inner.pending_sessions.lock();
         sessions.retain(|_, waiting| {
             waiting.active || waiting.created_at.elapsed() < SESSION_PAIRING_TIMEOUT
@@ -1568,11 +1572,8 @@ impl RelayState {
         machine: Option<&str>,
     ) -> Result<PairingClaimGuard, StatusCode> {
         let now = Instant::now();
+        // Expired trackers are pruned by the session sweeper; a stale one is reset here.
         let mut admission = self.inner.pairing_admission.lock();
-        admission.retain(|_, t| {
-            now.duration_since(t.started) < ADMISSION_WINDOW
-                || t.locked_until.is_some_and(|until| now < until)
-        });
         let tracker = admission.entry(ip).or_insert(AttemptTracker {
             started: now,
             attempts: 0,
@@ -1581,6 +1582,14 @@ impl RelayState {
         });
         if tracker.locked_until.is_some_and(|until| now < until) {
             return Err(StatusCode::UNAUTHORIZED);
+        }
+        if now.duration_since(tracker.started) >= ADMISSION_WINDOW {
+            *tracker = AttemptTracker {
+                started: now,
+                attempts: 0,
+                failures: 0,
+                locked_until: None,
+            };
         }
         // Snapshot live control generations first. register_pairing takes
         // control_channels before pairings, so acquiring them in that same order here
@@ -8656,6 +8665,32 @@ mod tests {
         let (a, b) = tokio::join!(allocate(&mut first), allocate(&mut second));
         assert_ne!(a.session_id, b.session_id);
         server.abort();
+    }
+
+    #[test]
+    fn the_sweeper_prunes_expired_pairing_admission_trackers() {
+        let state = test_state(vec![]);
+        let ip: IpAddr = "192.0.2.9".parse().unwrap();
+        let expired = Instant::now()
+            .checked_sub(ADMISSION_WINDOW + Duration::from_secs(1))
+            .unwrap();
+        for map in [&state.inner.admission, &state.inner.pairing_admission] {
+            map.lock().insert(
+                ip,
+                AttemptTracker {
+                    started: expired,
+                    attempts: 3,
+                    failures: 3,
+                    locked_until: None,
+                },
+            );
+        }
+        // Admitting another address no longer scans the map; the sweeper owns pruning.
+        assert!(state.admit("192.0.2.10".parse().unwrap(), Instant::now()));
+        assert!(state.inner.admission.lock().contains_key(&ip));
+        state.sweep_expired_sessions();
+        assert!(!state.inner.admission.lock().contains_key(&ip));
+        assert!(!state.inner.pairing_admission.lock().contains_key(&ip));
     }
 
     #[tokio::test]
