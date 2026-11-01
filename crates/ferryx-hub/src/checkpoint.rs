@@ -194,6 +194,19 @@ pub enum CheckpointError {
     Other(String),
 }
 
+impl CheckpointError {
+    /// Stable code shown in status.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::TooLarge { .. } => CHECKPOINT_TOO_LARGE,
+            Self::Io(_) => "CHECKPOINT_IO",
+            Self::Sql(_) => "CHECKPOINT_SQL",
+            Self::Integrity(_) => "CHECKPOINT_INTEGRITY",
+            Self::Other(_) => "CHECKPOINT_FAILED",
+        }
+    }
+}
+
 /// `<memory_root>/<agent>-<sha256(agent)[..8]>`: how omo names a memory agent dir.
 pub fn memory_agent_dir(memory_root: &Path, agent: &str) -> PathBuf {
     memory_root.join(format!("{agent}-{}", &sha256_hex(agent.as_bytes())[..8]))
@@ -1020,19 +1033,6 @@ mod tests {
             "PATH",
         ] {
             assert!(!env_key_exported(key), "{key}");
-        }
-    }
-}
-
-impl CheckpointError {
-    /// Stable code shown in status.
-    pub fn code(&self) -> &'static str {
-        match self {
-            Self::TooLarge { .. } => CHECKPOINT_TOO_LARGE,
-            Self::Io(_) => "CHECKPOINT_IO",
-            Self::Sql(_) => "CHECKPOINT_SQL",
-            Self::Integrity(_) => "CHECKPOINT_INTEGRITY",
-            Self::Other(_) => "CHECKPOINT_FAILED",
         }
     }
 }
