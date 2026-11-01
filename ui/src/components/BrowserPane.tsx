@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
-import { ChevronDown, ChevronUp, CircleAlert, Download, ExternalLink, Folder, MoreHorizontal, RefreshCw, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, ChevronDown, ChevronUp, CircleAlert, Download, ExternalLink, Folder, MoreHorizontal, RefreshCw, X } from "lucide-react";
 
 import {
   BROWSER_SHORTCUT_EVENT,
@@ -31,6 +31,7 @@ import {
   type BrowserLibraryOpenDetail,
 } from "../lib/browserLibrary";
 import { PRIVATE_BROWSER_PROFILE, useBrowserSettings } from "../lib/browserSettings";
+import { goBackInBrowserTab, goForwardInBrowserTab, useBrowserTabNavigation } from "../lib/browserTabNavigation";
 import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 import { BrowserToolbar } from "./BrowserToolbar";
@@ -154,6 +155,20 @@ export function BrowserPane({
   // be restored only if this owner is itself visible. Mirrors NativeTerminalPane's occlusion fix.
   const surfaceVisible = useNativeTerminalVisibility();
   const maskAwareVisible = visible && surfaceVisible && libraryView === null;
+  // A Chromium tab draws its own toolbar, whose back/forward only knows the engine's history.
+  // After a restart that history is empty, so the tab's saved stack is offered here and the
+  // back/forward shortcuts (which the hidden Ferryx toolbar would handle) are served by the pane.
+  const chromiumEngine = liveTab.engine === "chromium";
+  const chromiumEngineRef = useRef(chromiumEngine);
+  chromiumEngineRef.current = chromiumEngine;
+  const navigation = useBrowserTabNavigation(tab.browserId, Boolean(liveTab.canGoBack), Boolean(liveTab.canGoForward));
+  const runHistoryStep = (forward: boolean) => {
+    void (forward ? goForwardInBrowserTab(tab.browserId) : goBackInBrowserTab(tab.browserId)).catch((error: unknown) => {
+      setPaneAlert({ action: forward ? "Forward" : "Back", code: parseErrorCode(error) });
+    });
+  };
+  const runHistoryStepRef = useRef(runHistoryStep);
+  runHistoryStepRef.current = runHistoryStep;
 
   useEffect(() => {
     const previous = previousTabRef.current;
@@ -247,6 +262,10 @@ export function BrowserPane({
 
   useEffect(() => {
     const openFind = (action: BrowserShortcutAction) => {
+      if ((action === "back" || action === "forward") && chromiumEngineRef.current) {
+        runHistoryStepRef.current(action === "forward");
+        return;
+      }
       if (action !== "find") return;
       setFindOpen(true);
       setFindError(null);
@@ -556,6 +575,33 @@ export function BrowserPane({
         {liveTab.engine === "chromium" || !browserSettings.showBookmarkBar ? null : (
           <BrowserBookmarkBar tree={bookmarkTree} onOpen={onNavigate} />
         )}
+        {chromiumEngine && (navigation.restoredBack || navigation.restoredForward) ? (
+          <div className="flex items-center gap-1 border-b border-border bg-card px-3 py-1 text-xs" data-testid="browser-restored-history">
+            <span className="text-muted-foreground">Earlier pages in this tab</span>
+            {navigation.restoredBack ? (
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-muted"
+                aria-label="Back"
+                onClick={() => runHistoryStep(false)}
+              >
+                <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
+                Back
+              </button>
+            ) : null}
+            {navigation.restoredForward ? (
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-muted"
+                aria-label="Forward"
+                onClick={() => runHistoryStep(true)}
+              >
+                Forward
+                <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         {/* Shown for both engines: the Chromium tab hides the Ferryx toolbar. */}
         <div className="flex justify-end px-3 empty:hidden">
           <BrowserMediaCaptureIndicator browserId={tab.browserId} />

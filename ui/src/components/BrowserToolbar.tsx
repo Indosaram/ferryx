@@ -30,8 +30,6 @@ import {
   getBrowserEngineStatus,
   getBrowserState,
   getBrowserSnapshotCapability,
-  goBackBrowser,
-  goForwardBrowser,
   deliverDesignFeedback,
   finishBrowserElementPick,
   injectBrowserElementPicker,
@@ -66,6 +64,7 @@ import {
   type OmniboxSuggestion,
 } from "../lib/browserLibrary";
 import { requestSwitchToBrowserTab } from "../lib/browserLibrarySync";
+import { goBackInBrowserTab, goForwardInBrowserTab, useBrowserTabNavigation } from "../lib/browserTabNavigation";
 import { BROWSER_ZOOM_LEVELS, normalizeBrowserAddress, searchUrlFor, useBrowserSettings } from "../lib/browserSettings";
 import { openSettingsSection } from "../lib/browserExtensions";
 import { isMacHost } from "../lib/platform";
@@ -212,6 +211,7 @@ export function BrowserToolbar({
   // without a parent; a parent that passes `elementPicking` still drives it.
   const [elementPicking, setElementPicking] = useState(elementPickingProp ?? false);
   const { settings, updateSettings } = useBrowserSettings();
+  const navigation = useBrowserTabNavigation(tab.browserId, Boolean(tab.canGoBack), Boolean(tab.canGoForward));
 
   // The toolbar measures its own width (not the window's): panes can be split narrower than the
   // viewport, and the right cluster must yield to the address bar at the pane's width.
@@ -430,7 +430,8 @@ export function BrowserToolbar({
 
   const handleGoBack = async () => {
     try {
-      await goBackBrowser(tab.browserId);
+      // After a restart the engine's own history is empty; the tab's saved stack takes over.
+      await goBackInBrowserTab(tab.browserId);
       setActionError(null);
       onGoBack?.();
     } catch (error) {
@@ -441,7 +442,7 @@ export function BrowserToolbar({
 
   const handleGoForward = async () => {
     try {
-      await goForwardBrowser(tab.browserId);
+      await goForwardInBrowserTab(tab.browserId);
       setActionError(null);
       onGoForward?.();
     } catch (error) {
@@ -821,16 +822,16 @@ export function BrowserToolbar({
           <ToolbarButton
             icon={ArrowLeft}
             label="Back"
-            title={tab.canGoBack ? `Back (${modKey}+[)` : "No previous page"}
-            disabled={!tab.canGoBack}
+            title={navigation.canGoBack ? `Back (${modKey}+[)` : "No previous page"}
+            disabled={!navigation.canGoBack}
             onClick={() => void handleGoBack()}
             shortcut="browser.back"
           />
           <ToolbarButton
             icon={ArrowRight}
             label="Forward"
-            title={tab.canGoForward ? `Forward (${modKey}+])` : "No next page"}
-            disabled={!tab.canGoForward}
+            title={navigation.canGoForward ? `Forward (${modKey}+])` : "No next page"}
+            disabled={!navigation.canGoForward}
             onClick={() => void handleGoForward()}
             shortcut="browser.forward"
           />

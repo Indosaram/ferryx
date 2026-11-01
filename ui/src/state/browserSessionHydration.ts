@@ -5,6 +5,7 @@ import {
   loadBrowserSettings,
 } from "../lib/browserSettings";
 import { getBrowserScroll, recordBrowserScroll, type BrowserScrollPosition } from "../lib/browserHistory";
+import { browserTabNavigation } from "../lib/browserTabNavigation";
 import { ensureBrowser } from "../lib/browserTauri";
 import { isPrivateBrowserProfileId, readScrollPosition } from "../lib/sessionPersistence";
 import type { BrowserPaneState, BrowserTab, LayoutState } from "../lib/types";
@@ -179,7 +180,14 @@ export async function hydrateRestoredBrowserSessions(
       zoomFactor: target.zoomFactor,
       visible: false,
     })
-      .then(() => {
+      .then((browserState) => {
+        // The engine starts with an empty history, so the tab's saved back/forward stack
+        // takes over; a tab that survived in the host keeps its engine history.
+        browserTabNavigation.restore(
+          target.browserId,
+          target.url,
+          Boolean(browserState?.canGoBack || browserState?.canGoForward),
+        );
         // Restore scroll position if previously recorded or present in history
         const effectiveScroll = target.scrollPosition ?? (
           typeof target.scrollX === "number" || typeof target.scrollY === "number"

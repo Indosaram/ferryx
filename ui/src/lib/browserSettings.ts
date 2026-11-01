@@ -382,6 +382,12 @@ export function isFileUrl(url: string): boolean {
   return /^file:\/\//i.test(url.trim());
 }
 
+/** Profiles whose tabs never reach disk: no restore, no saved back/forward stack. */
+export function isPrivateBrowserProfileId(profileId: string | null | undefined): boolean {
+  const trimmed = profileId?.trim();
+  return trimmed === PRIVATE_BROWSER_PROFILE.id || trimmed === "private" || trimmed === "remote";
+}
+
 export function isNavigableBrowserUrl(url: string): boolean {
   const trimmed = url.trim();
   return isHttpUrl(trimmed) || isFileUrl(trimmed) || trimmed === "about:blank";

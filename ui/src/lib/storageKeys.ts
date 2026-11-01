@@ -13,6 +13,8 @@ export const BROWSER_HISTORY_STORAGE_KEY = "ferryx.browser.history";
 export const BROWSER_HISTORY_ENABLED_STORAGE_KEY = "ferryx.browser.history.enabled";
 /** URL-keyed scroll positions restored on revisit; cleared together with browsing history. */
 export const BROWSER_SCROLL_STORAGE_KEY = "ferryx.browser.scroll-positions";
+/** Per-tab back/forward stacks (browser id -> entries), restored with the tab; never private tabs. */
+export const BROWSER_TAB_NAVIGATION_STORAGE_KEY = "ferryx.browser.tab-navigation";
 export const GENERAL_SETTINGS_STORAGE_KEY = "ferryx.settings.general";
 export const SHORTCUT_OVERRIDES_STORAGE_KEY = "ferryx.settings.shortcuts";
 export const SHORTCUT_PRESET_STORAGE_KEY = "ferryx.shortcuts.preset";

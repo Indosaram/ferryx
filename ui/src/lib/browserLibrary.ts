@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { clearBrowserHistory, fuzzyMatchScore, isSupportedHistoryUrl, loadBrowserHistory } from "./browserHistory";
+import { browserTabNavigation } from "./browserTabNavigation";
 import { BROWSER_HISTORY_STORAGE_KEY } from "./storageKeys";
 
 /** Host-side bookmarks and history (src-tauri/src/ipc/browser_library.rs). */
@@ -79,6 +80,8 @@ export function openBrowserLibrary(detail: BrowserLibraryOpenDetail): void {
 /** Clears every trace of history: the host store and the legacy local copy with scroll positions. */
 export async function clearAllBrowserHistory(): Promise<void> {
   clearBrowserHistory();
+  // Saved per-tab back/forward stacks are browsing history too.
+  browserTabNavigation.clear();
   await clearHostHistory();
 }
 
