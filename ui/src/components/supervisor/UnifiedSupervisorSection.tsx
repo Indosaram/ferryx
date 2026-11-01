@@ -5,6 +5,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 
 import { cn } from "../../lib/cn";
+import type { SetupActions, SetupProject, SetupStatus } from "../../lib/supervisorSetupModel";
+import { SupervisorSetupBanner } from "./SupervisorSetupBanner";
 import {
   adoptEnvelope,
   CLOSED_RUN_STATES,
@@ -47,6 +49,13 @@ export type UnifiedSupervisorSectionProps = {
   readonly client: UnifiedSupervisorClient | null;
   /** Legacy lanes the owner may adopt explicitly. */
   readonly adoptable?: readonly AdoptableLane[];
+  /** The host's setup progress and how this surface may act on it; absent shows no setup banner. */
+  readonly setup?: {
+    readonly status: SetupStatus | null;
+    readonly actions: SetupActions | null;
+    readonly projects?: readonly SetupProject[];
+    readonly runLabel?: string;
+  };
 };
 
 type Notice = { kind: "conflict" | "error" | "info"; goalId: string | null; text: string; code: string | null };
@@ -87,7 +96,7 @@ function errorText(result: Extract<SupervisorCallResult, { kind: "error" }>): st
   return `${result.code}: ${result.message}`;
 }
 
-export function UnifiedSupervisorSection({ surface, hostLabel, connection, connectionError, view, client, adoptable = [] }: UnifiedSupervisorSectionProps) {
+export function UnifiedSupervisorSection({ surface, hostLabel, connection, connectionError, view, client, adoptable = [], setup }: UnifiedSupervisorSectionProps) {
   const touch = surface === "phone";
   const live = connection === "live" && client !== null;
   const engine = engineStatus(view.health);
@@ -174,6 +183,15 @@ export function UnifiedSupervisorSection({ surface, hostLabel, connection, conne
       aria-label={`Supervisor on ${hostLabel}`}
       className={cn("flex min-w-0 flex-col gap-2", touch ? "text-[14px]" : "text-[11px]")}
     >
+      {setup ? (
+        <SupervisorSetupBanner
+          surface={surface}
+          status={setup.status}
+          actions={live ? setup.actions : null}
+          projects={setup.projects}
+          runLabel={setup.runLabel}
+        />
+      ) : null}
       <ConnectionBanner connection={connection} hostLabel={hostLabel} error={connectionError ?? null} touch={touch} />
       <div
         data-testid="supervisor-engine"
@@ -194,7 +212,12 @@ export function UnifiedSupervisorSection({ surface, hostLabel, connection, conne
       ) : null}
       {!view.identity ? (
         <p data-testid="supervisor-no-identity" className="rounded-md bg-card px-2 py-1.5 text-muted-foreground">
-          This hub has no single supervisor owner yet, so it accepts no requests. Set it up with <span className="font-mono text-foreground">ferryx-cli supervisor setup</span>.
+          This hub has no single supervisor owner yet, so it accepts no requests.
+          {setup?.status ? (
+            " Finish supervisor setup above."
+          ) : (
+            <> Set it up with <span className="font-mono text-foreground">ferryx-cli supervisor setup</span>.</>
+          )}
         </p>
       ) : null}
 

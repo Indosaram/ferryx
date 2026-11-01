@@ -1,9 +1,16 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ResolvedAgent } from "../../lib/agentsSettings";
 import { ONBOARDING_STEP_ORDER, type OnboardingStepId } from "../../lib/onboarding";
+import { EMPTY_SNAPSHOT, setSupervisorSnapshotForTest } from "../../lib/supervisor";
 import { WelcomeWizard, type WelcomeWizardProps } from "./WelcomeWizard";
+
+const ipc = vi.hoisted(() => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tauri-apps/api/core")>()),
+  invoke: ipc.invoke,
+}));
 
 vi.mock("./FeaturesStep", () => ({
   FeaturesStep: () => <div data-testid="mock-features-step" />,
@@ -782,6 +789,160 @@ describe("WelcomeWizard", () => {
       await act(async () => {
         resolve(created);
       });
+    });
+  });
+
+  describe("supervisor step", () => {
+    const steps = ["project", "supervisor", "try"] as readonly OnboardingStepId[];
+    const projects = [
+      { name: "ferryx", path: "/code/ferryx" },
+      { name: "mhc", path: "/code/mhc" },
+    ];
+    const setup = (nextAction: string, over: Record<string, unknown> = {}) => ({
+      engineEnabled: nextAction !== "enable_engine",
+      engineInstalled: true,
+      engineState: nextAction === "none" ? "ready" : "absent",
+      engineFault: null,
+      missingCapabilities: [],
+      restartRequired: false,
+      owner: null,
+      projects: 0,
+      intake: { unifiedOpen: false, legacy: "open", origin: "upgrade", legacyHistory: true },
+      autoCutover: true,
+      memoryImport: { enabled: false, sessions: 0, turns: 0, lastAt: null },
+      adoptable: 0,
+      nextAction,
+      ...over,
+    });
+
+    /** The daemon: setup reads `current`; run moves it to `afterRun`; the snapshot carries it. */
+    function daemon(initial: Record<string, unknown>, afterRun: Record<string, unknown>) {
+      let current = initial;
+      ipc.invoke.mockImplementation(async (command: string) => {
+        switch (command) {
+          case "cmd_supervisor_setup_status":
+            return current;
+          case "cmd_supervisor_setup_run":
+            current = afterRun;
+            return current;
+          case "cmd_supervisor_adopt_all":
+            current = setup("none");
+            return { adopted: ["a", "b"], refused: [{ lane: "c", code: "LEGACY_GOAL_OFF", message: "off" }] };
+          case "cmd_supervisor_snapshot":
+            return { hub: { available: true, running: true }, lanes: [], watched: [], actions: [], setup: current };
+          default:
+            return null;
+        }
+      });
+    }
+
+    afterEach(() => {
+      ipc.invoke.mockReset();
+      setSupervisorSnapshotForTest(EMPTY_SNAPSHOT);
+    });
+
+    it("turns the supervisor on with the memory opt-in and checked projects, then completes when ready", async () => {
+      daemon(setup("enable_engine"), setup("none"));
+      const onStepCompleted = vi.fn();
+      await act(async () => {
+        render(<WelcomeWizard {...createDefaultProps({ steps, initialStepIndex: 1, onStepCompleted, supervisorProjects: projects })} />);
+      });
+
+      expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Let the supervisor run your work");
+      expect(screen.getByTestId("onboarding-supervisor-label").textContent).toBe("Turn on the supervisor");
+      const memory = screen.getByLabelText("Learn from my recent Claude, Codex and Ferryx sessions (only what I typed)");
+      expect((memory as HTMLInputElement).checked).toBe(true);
+      const boxes = screen.getAllByTestId("onboarding-supervisor-project") as HTMLInputElement[];
+      expect(boxes.map((box) => box.checked)).toEqual([true, true]);
+      expect(screen.getByTestId("onboarding-next").textContent).toBe("Skip");
+
+      fireEvent.click(boxes[1]!);
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("onboarding-supervisor-run"));
+      });
+
+      expect(ipc.invoke).toHaveBeenCalledWith("cmd_supervisor_setup_run", { importMemory: true, projects: [projects[0]] });
+      expect(onStepCompleted).toHaveBeenCalledWith("supervisor");
+      expect(screen.getByTestId("onboarding-supervisor").getAttribute("data-readiness")).toBe("ready");
+      expect(screen.getByTestId("onboarding-next").textContent).toBe("Continue");
+    });
+
+    it("shows the engine fault instead of spinning when setup is blocked", async () => {
+      daemon(
+        setup("enable_engine"),
+        setup("fix_engine", { engineFault: { code: "MHC_CAPABILITY_MISSING", message: "Engine is too old." }, missingCapabilities: ["memory_receipts"] }),
+      );
+      const onStepCompleted = vi.fn();
+      await act(async () => {
+        render(<WelcomeWizard {...createDefaultProps({ steps, initialStepIndex: 1, onStepCompleted })} />);
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("onboarding-supervisor-run"));
+      });
+
+      const box = screen.getByTestId("onboarding-supervisor-status");
+      expect(box.getAttribute("role")).toBe("alert");
+      expect(box.textContent).toContain("The supervisor engine needs attention");
+      expect(screen.getByTestId("onboarding-supervisor-description").textContent).toContain("memory_receipts");
+      expect(screen.getByTestId("onboarding-supervisor-description").textContent).toContain("MHC_CAPABILITY_MISSING");
+      expect(onStepCompleted).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByTestId("onboarding-next"));
+      expect(onStepCompleted).not.toHaveBeenCalled();
+    });
+
+    it("shows every setup stage as a checklist under the status box", async () => {
+      daemon(setup("enable_engine"), setup("enable_engine"));
+      await act(async () => {
+        render(<WelcomeWizard {...createDefaultProps({ steps, initialStepIndex: 1, supervisorProjects: [] })} />);
+      });
+      const list = within(screen.getByTestId("onboarding-supervisor-status")).getByRole("list", { name: "Supervisor setup steps" });
+      const states = within(list)
+        .getAllByRole("listitem")
+        .map((item) => [item.getAttribute("data-testid"), item.getAttribute("data-state")]);
+      expect(states).toEqual([
+        ["setup-checklist-engine_on", "pending"],
+        ["setup-checklist-engine_ready", "pending"],
+        ["setup-checklist-owner", "pending"],
+        ["setup-checklist-projects", "pending"],
+        ["setup-checklist-cutover", "pending"],
+        ["setup-checklist-earlier_jobs", "done"],
+      ]);
+      expect(screen.getByText("No projects yet. Run setup again after adding a project.")).toBeDefined();
+    });
+
+    it("offers to adopt earlier jobs once the supervisor runs and summarises the result", async () => {
+      daemon(setup("adopt", { adoptable: 3, engineState: "ready" }), setup("none"));
+      const onStepCompleted = vi.fn();
+      await act(async () => {
+        render(<WelcomeWizard {...createDefaultProps({ steps, initialStepIndex: 1, onStepCompleted })} />);
+      });
+      expect(onStepCompleted).toHaveBeenCalledWith("supervisor");
+      const jobsRow = screen.getByTestId("setup-checklist-earlier_jobs");
+      expect(jobsRow.getAttribute("data-state")).toBe("pending");
+      expect(within(jobsRow).getByTestId("setup-checklist-earlier_jobs-detail").textContent).toBe("3 can be handed over");
+      await act(async () => {
+        fireEvent.click(within(jobsRow).getByRole("button", { name: "Adopt 3 earlier jobs" }));
+      });
+      expect(ipc.invoke).toHaveBeenCalledWith("cmd_supervisor_adopt_all");
+      expect(screen.getByTestId("onboarding-supervisor-notice").textContent).toBe(
+        "Handed 2 jobs to the supervisor. 1 could not be handed over (LEGACY_GOAL_OFF).",
+      );
+      expect(screen.getByTestId("setup-checklist-earlier_jobs").getAttribute("data-state")).toBe("done");
+    });
+
+    it("says setup is unavailable on an older daemon and lets the person skip", async () => {
+      ipc.invoke.mockImplementation(async (command: string) => {
+        if (command === "cmd_supervisor_setup_status") throw { code: "UNKNOWN_COMMAND", message: "unknown command", details: null };
+        return { hub: { available: true, running: true } };
+      });
+      const onStepCompleted = vi.fn();
+      await act(async () => {
+        render(<WelcomeWizard {...createDefaultProps({ steps, initialStepIndex: 1, onStepCompleted })} />);
+      });
+      expect(screen.getByTestId("onboarding-supervisor-unknown").textContent).toContain("UNKNOWN_COMMAND");
+      fireEvent.click(screen.getByTestId("onboarding-next"));
+      expect(onStepCompleted).not.toHaveBeenCalled();
+      expect(screen.getByTestId("onboarding-rail-try").getAttribute("aria-current")).toBe("step");
     });
   });
 });

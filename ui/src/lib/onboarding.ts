@@ -11,6 +11,7 @@ export type OnboardingStepId =
   | "agents"
   | "cli"
   | "project"
+  | "supervisor"
   | "try"
   | "phone";
 
@@ -31,6 +32,7 @@ export const ONBOARDING_STEP_ORDER: readonly OnboardingStepId[] = [
   "agents",
   "cli",
   "project",
+  "supervisor",
   "try",
   "phone",
   "account",
@@ -55,6 +57,8 @@ export type OnboardingContext = {
   accountLinked?: boolean;
   /** Paired remote devices, when known; unknown never nags. */
   pairedDeviceCount?: number | null;
+  /** True once supervisor setup is finished; null or absent (unknown, older daemon) never nags. */
+  supervisorReady?: boolean | null;
 };
 
 function browserStorage(): Storage | null {
@@ -250,6 +254,8 @@ export function isOnboardingStepSatisfied(
       return true;
     case "phone":
       return ctx.pairedDeviceCount == null || ctx.pairedDeviceCount > 0;
+    case "supervisor":
+      return ctx.supervisorReady == null || ctx.supervisorReady;
   }
 }
 
@@ -311,8 +317,15 @@ export function shouldAutoOpenOnboarding(
     // (users who finished the flow before it existed have no "cli" entry), so
     // neither may be the sole reason the wizard pops back open after an upgrade.
     pendingOnboardingSteps(state, ctx).some(
-      // "try", "account" and "phone" are optional for existing users too: none may force the wizard open.
-      (step) => step !== "features" && step !== "cli" && step !== "try" && step !== "account" && step !== "phone"
+      // "try", "account", "phone" and "supervisor" are optional for existing users too: none may
+      // force the wizard open (already-onboarded users get the supervisor setup banner instead).
+      (step) =>
+        step !== "features" &&
+        step !== "cli" &&
+        step !== "try" &&
+        step !== "account" &&
+        step !== "phone" &&
+        step !== "supervisor"
     )
   );
 }

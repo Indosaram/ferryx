@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import { fixtureAction, fixtureInventory, fixtureLane, fixtureMachine, fixtureOption, fixtureSnapshot } from "./phoneHomeFixtures";
-import { buildInboxRows, laneName, laneStatus, optionForSession, recentActions, supervisorHeadline } from "./phoneHomeModel";
+import { normalizeSetupStatus, type SetupNextAction } from "../../lib/supervisorSetupModel";
+import { buildInboxRows, headlineSentence, laneName, laneStatus, optionForSession, recentActions, supervisorHeadline } from "./phoneHomeModel";
 
 const NOW = 1_000_000;
+
+const setup = (nextAction: SetupNextAction) => normalizeSetupStatus({ nextAction })!;
 
 describe("supervisorHeadline", () => {
   it("is off when no readable machine runs a hub", () => {
@@ -32,6 +35,38 @@ describe("supervisorHeadline", () => {
       fixtureMachine({ machineId: "m3", state: "offline", snapshot: null }),
     ];
     expect(supervisorHeadline(machines, NOW)).toBe("watching 3");
+  });
+
+  it("ranks needs_setup after off and before paused", () => {
+    const pausedNeedsSetup = fixtureSnapshot({ lanes: [fixtureLane({ key: "a", paused: true })], setup: setup("enable_engine") });
+    expect(supervisorHeadline([fixtureMachine({ machineId: "m1", snapshot: pausedNeedsSetup })], NOW)).toBe("needs_setup");
+    const offNeedsSetup = fixtureSnapshot({ hub: { available: true, running: false }, setup: setup("enable_engine") });
+    expect(supervisorHeadline([fixtureMachine({ machineId: "m1", snapshot: offNeedsSetup })], NOW)).toBe("off");
+  });
+
+  it.each<SetupNextAction>(["enable_engine", "fix_engine", "create_owner", "map_projects", "cutover", "adopt"])(
+    "needs setup when a machine reports %s",
+    (kind) => {
+      const machines = [
+        fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "a" })] }) }),
+        fixtureMachine({ machineId: "m2", snapshot: fixtureSnapshot({ setup: setup(kind) }) }),
+      ];
+      expect(supervisorHeadline(machines, NOW)).toBe("needs_setup");
+    },
+  );
+
+  it.each<SetupNextAction>(["none", "wait_engine", "restart_required", "import_memory"])("does not need setup for %s", (kind) => {
+    const machines = [fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "a" })], setup: setup(kind) }) })];
+    expect(supervisorHeadline(machines, NOW)).toBe("watching 1");
+  });
+
+  it("never needs setup for an older machine that does not report it", () => {
+    const machines = [fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "a", paused: true })] }) })];
+    expect(supervisorHeadline(machines, NOW)).toBe("paused");
+  });
+
+  it("names the machine in the needs_setup sentence", () => {
+    expect(headlineSentence("needs_setup", "Studio Mac")).toBe("Supervisor setup isn't finished on Studio Mac");
   });
 });
 

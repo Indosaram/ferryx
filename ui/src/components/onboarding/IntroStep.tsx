@@ -20,6 +20,10 @@ const OVERVIEW_ROWS: Record<OverviewStepId, { title: string; description: string
     title: "First project",
     description: "Open a folder on this computer or pair another machine.",
   },
+  supervisor: {
+    title: "Supervisor",
+    description: "Optionally let the supervisor take requests and run them in your projects.",
+  },
   try: {
     title: "First worktree",
     description: "Optionally create a worktree and start your default agent in it.",
