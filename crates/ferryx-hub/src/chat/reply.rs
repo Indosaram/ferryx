@@ -1,4 +1,6 @@
 //! Outbound chat replies. The text is what the caller supplies. Nothing here reads a pane.
+use std::sync::Arc;
+
 use sqlx::SqlitePool;
 
 use super::router::{Outbound, PlatformRouter};
@@ -6,13 +8,28 @@ use super::session::SessionKey;
 use crate::error::Result;
 use crate::storage::now_rfc3339;
 
+tokio::task_local! {
+    static TRANSPORT: Arc<dyn Outbound>;
+}
+
+/// Runs `future` with `transport` taking every reply this task publishes, in place of the
+/// Slack and Discord clients. The holder check still runs first, so a fake transport shows
+/// exactly what a standby would have posted (tests outside this crate).
+pub async fn with_transport<F: std::future::Future>(
+    transport: Arc<dyn Outbound>,
+    future: F,
+) -> F::Output {
+    TRANSPORT.scope(transport, future).await
+}
+
 pub async fn chat_reply(
     pool: &SqlitePool,
     session: &SessionKey,
     text: &str,
     platforms: Option<&PlatformRouter>,
 ) -> Result<i64> {
-    if let Some(platforms) = platforms {
+    // Only the lease holder sends; on a standby the stored row waits for the holder.
+    if let Some(platforms) = platforms.filter(|_| crate::holder::is_holder_now()) {
         platforms.send(session, text).await?;
     }
     let inserted = sqlx::query(
@@ -69,6 +86,10 @@ async fn publish(session: &SessionKey, text: &str) -> Result<bool> {
     // Only the lease holder posts; on a standby the row stays queued for the holder's flush.
     if !crate::holder::is_holder_now() {
         return Ok(false);
+    }
+    if let Ok(transport) = TRANSPORT.try_with(Arc::clone) {
+        transport.send(session, text).await?;
+        return Ok(true);
     }
     if session.platform.eq_ignore_ascii_case("slack") {
         return super::slack::publish(session, text).await;
@@ -188,6 +209,44 @@ mod tests {
         assert_eq!(queued[0].0, id);
         assert_eq!(queued[0].2, "shipped");
         mark_delivered(&pool, id).await.unwrap();
+        assert!(pending(&pool).await.unwrap().is_empty());
+    }
+
+    struct Counting(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl Outbound for Counting {
+        async fn send(&self, _session: &SessionKey, _text: &str) -> Result<()> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// The lease is asked right before the transport: a standby leaves the row queued and the
+    /// transport untouched; the holder's flush then posts it once.
+    #[tokio::test]
+    async fn a_standby_reply_stays_queued_and_the_holder_posts_it() {
+        let pool = crate::storage::memory().await.unwrap();
+        let session = SessionKey::new("slack", None::<String>, "C1", None::<String>, "U1");
+        let transport = Arc::new(Counting(std::sync::atomic::AtomicUsize::new(0)));
+        let standby: crate::holder::HolderGate = Arc::new(|| false);
+        let holder: crate::holder::HolderGate = Arc::new(|| true);
+        with_transport(transport.clone(), async {
+            crate::holder::scope(standby, chat_reply(&pool, &session, "shipped", None))
+                .await
+                .unwrap();
+        })
+        .await;
+        assert_eq!(transport.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(pending(&pool).await.unwrap().len(), 1, "queued for the holder");
+        let flushed = with_transport(
+            transport.clone(),
+            crate::holder::scope(holder, flush_pending(&pool)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(flushed, 1);
+        assert_eq!(transport.0.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(pending(&pool).await.unwrap().is_empty());
     }
 }

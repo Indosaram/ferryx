@@ -1222,6 +1222,10 @@ mod tests {
     /// The acceptance case for holder-only side effects: the wall clock jumps past the lease
     /// deadline and no tick runs. A queued chat reply is not posted (it stays queued) and a
     /// goal settle is held, because each side effect re-checks the lease right before it.
+    /// The client is stopped before the jump: on paused time the runtime auto-advances while
+    /// sqlx waits on its worker thread, and a tick would renew the lease (a renew the relay
+    /// grants makes this machine the holder again). Only the re-check at use is left to deny.
+    /// The reply goes to a fake transport, so a post that skipped the check would be seen.
     #[tokio::test(start_paused = true)]
     async fn past_the_deadline_without_a_tick_a_reply_stays_queued_and_no_goal_settles() {
         let relay = FakeRelay::new(Some(true));
@@ -1230,12 +1234,16 @@ mod tests {
         let (handle, task) =
             spawn_supervisor_lease_client(config(clock, Some("acct"), None), Arc::clone(&relay), Arc::clone(&hub)).await;
         wait_role(&handle, |r| *r == Role::Holder { fence: 7 }).await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled(), "no tick can run from here on");
         let state = handle.state().clone();
         let gate: ferryx_hub::holder::HolderGate = Arc::new(move || state.may_act_now());
+        assert!(gate(), "the holder may act before the jump");
         let pool = ferryx_hub::storage::memory().await.unwrap();
         let session = ferryx_hub::chat::session::SessionKey::new("slack", None::<String>, "C1", None::<String>, "U1");
+        let transport = Arc::new(FakeChat::default());
         *jump.lock() = VALID_FOR * 2;
-        let (queued, settle) = ferryx_hub::holder::scope(gate, async {
+        let work = ferryx_hub::holder::scope(gate, async {
             let id = ferryx_hub::chat::reply::chat_reply(&pool, &session, "done", None).await.unwrap();
             let delivered = ferryx_hub::chat::reply::deliver_stored(&pool, id, &session.storage_key(), "done")
                 .await
@@ -1243,11 +1251,25 @@ mod tests {
             assert!(!delivered, "a standby posts nothing");
             let settle = ferryx_hub::supervisor::receipts::record_pty_settle(&pool, "local", "pane-1", "i1", 1).await;
             (ferryx_hub::chat::reply::pending(&pool).await.unwrap(), settle)
-        })
-        .await;
+        });
+        let (queued, settle) = ferryx_hub::chat::reply::with_transport(transport.clone(), work).await;
         assert_eq!(queued.len(), 1, "the reply stays queued for the holder");
+        assert_eq!(*transport.sent.lock(), 0, "nothing reached the chat transport");
         assert_eq!(settle.unwrap_err().code(), ferryx_hub::holder::SUPERVISOR_STANDBY);
-        task.abort();
+    }
+
+    /// Chat transport that counts what it was asked to post.
+    #[derive(Default)]
+    struct FakeChat {
+        sent: Mutex<usize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ferryx_hub::chat::router::Outbound for FakeChat {
+        async fn send(&self, _session: &ferryx_hub::chat::session::SessionKey, _text: &str) -> ferryx_hub::error::Result<()> {
+            *self.sent.lock() += 1;
+            Ok(())
+        }
     }
 
     #[tokio::test(start_paused = true)]

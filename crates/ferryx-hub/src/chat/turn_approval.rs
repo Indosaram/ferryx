@@ -330,7 +330,11 @@ pub async fn handle_click(payload: &Value, allowed_users: &[String]) -> bool {
     }
     if user.is_empty() || !allowed_users.iter().any(|id| id == user) {
         tracing::warn!(user, "rejected Slack approval click from unauthorized user");
-        if let Some(url) = payload.get("response_url").and_then(Value::as_str) {
+        let url = payload
+            .get("response_url")
+            .and_then(Value::as_str)
+            .filter(|_| crate::holder::is_holder_now());
+        if let Some(url) = url {
             let _ = reqwest::Client::new()
                 .post(url)
                 .json(&json!({"response_type": "ephemeral", "replace_original": false, "text": NOT_AUTHORIZED}))
