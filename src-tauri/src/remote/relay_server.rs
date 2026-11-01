@@ -1803,6 +1803,17 @@ const MAX_ACTIVE_PAIRING_PINS_PER_MACHINE: usize = 5;
 /// rather than trusting the client-supplied `expires_at`.
 const MAX_PAIRING_LEASE: u64 = 600;
 
+/// The bearer a device presents, trimmed. Every device-token route parses it the same way,
+/// so a token that works over HTTP also works for a socket ticket.
+fn device_bearer(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+}
+
 async fn socket_ticket_handler(
     State(state): State<RelayState>,
     AxumPath(machine): AxumPath<String>,
@@ -1814,16 +1825,7 @@ async fn socket_ticket_handler(
     if let Err(refusal) = plaintext_gate(&state, &headers, &machine, "/api/v1/socket-ticket") {
         return Ok(refusal);
     }
-    let device_token = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|token| {
-            !token.is_empty()
-                && token
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"-._~+/=".contains(&b))
-        })
+    let device_token = device_bearer(&headers)
         .ok_or(StatusCode::UNAUTHORIZED)?
         .to_owned();
     // The public route supplies machineId; the shared wire type also supports
@@ -2505,14 +2507,7 @@ async fn attach_session_handler(
             )
             .into_response()
         };
-        let Some(token) = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
-            .map(str::to_owned)
-        else {
+        let Some(token) = device_bearer(&headers).map(str::to_owned) else {
             return unauthorized();
         };
         match state.authorize_device_token(&request.machine_id, &token).await {
@@ -2704,13 +2699,7 @@ async fn host_http_handler(
         let billing_owner = if let Some(owner) = session_owner {
             Some(owner)
         } else {
-            let bearer_token = parts
-                .headers
-                .get(axum::http::header::AUTHORIZATION)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.strip_prefix("Bearer "))
-                .map(str::trim)
-                .filter(|token| !token.is_empty());
+            let bearer_token = device_bearer(&parts.headers);
             let ip = peer_ip(peer);
             if bearer_token.is_some() && state.locked_out(ip) {
                 return Err(StatusCode::TOO_MANY_REQUESTS);
@@ -6497,6 +6486,37 @@ mod tests {
         )
         .await;
         server.abort();
+    }
+
+    #[test]
+    fn every_device_route_trims_the_bearer_the_same_way() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer  padded-token ".parse().unwrap());
+        assert_eq!(device_bearer(&headers), Some("padded-token"));
+        headers.insert("authorization", "Bearer    ".parse().unwrap());
+        assert_eq!(device_bearer(&headers), None);
+        headers.insert("authorization", "Basic abc".parse().unwrap());
+        assert_eq!(device_bearer(&headers), None);
+    }
+
+    #[tokio::test]
+    async fn a_socket_ticket_accepts_a_bearer_with_surrounding_whitespace() {
+        let state = test_state(vec![]);
+        let (_generation, _notices, _grants) =
+            state.register_control_channel("browser-machine".into());
+        state.register_device_token("browser-machine", "padded-token");
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer padded-token ".parse().unwrap());
+        let response = socket_ticket_handler(
+            State(state.clone()),
+            AxumPath("browser-machine".into()),
+            None,
+            headers,
+            Json(serde_json::json!({"target": "/api/v1/events"})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
