@@ -1305,7 +1305,7 @@ async fn spawn_lease_client(
     server: &DaemonServer,
     wanted: Arc<tokio::sync::watch::Sender<bool>>,
 ) -> Option<Arc<dyn LeaseGate>> {
-    use crate::daemon::supervisor_lease_client::{spawn_supervisor_lease_client, LeaseClientConfig};
+    use crate::daemon::supervisor_lease_client::spawn_supervisor_lease_client;
     let relay = server.remote_state().relay_client.read().clone()?;
     let enrollment = crate::ipc::run_blocking(|| Ok(crate::account::enroll_client::load_enrollment_record()))
         .await
@@ -1315,10 +1315,7 @@ async fn spawn_lease_client(
         Some(record) => (record.machine_record_id, Some(record.account_id)),
         None => ("local".to_owned(), None),
     };
-    let mut config = LeaseClientConfig::system(machine_id, account);
-    // A handover successor renews the lease its predecessor handed over at commit (same
-    // machine id and fence) instead of acquiring a new one.
-    config.handed_over = server.handover_manager.take_handed_supervisor_lease();
+    let config = lease_client_config(machine_id, account, &server.handover_manager);
     install_lease_stop(Some(Arc::clone(&wanted)));
     let (handle, task) =
         spawn_supervisor_lease_client(config, Arc::new(relay), Arc::new(HubLeaseSwitch { wanted })).await;
@@ -1331,6 +1328,18 @@ async fn spawn_lease_client(
     crate::agent_control::fence::install_source(Some(source));
     let gate: Arc<dyn LeaseGate> = Arc::new(handle);
     Some(gate)
+}
+
+/// Production lease client settings. A handover successor renews the lease its predecessor
+/// handed over at commit (same machine id and fence) instead of acquiring a new one.
+fn lease_client_config(
+    machine_id: String,
+    account: Option<String>,
+    handover_manager: &crate::daemon::handover::HandoverManager,
+) -> crate::daemon::supervisor_lease_client::LeaseClientConfig {
+    let mut config = crate::daemon::supervisor_lease_client::LeaseClientConfig::system(machine_id, account);
+    config.handed_over = handover_manager.take_handed_supervisor_lease();
+    config
 }
 
 /// A person starts the stopped hub from another surface. `by` names who, as for a lane pause.
@@ -3196,6 +3205,30 @@ pub fn run_mcp() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Plan todo 9 wiring: the lease a committed predecessor recorded reaches the successor's
+    /// lease client config exactly once; a later client (a hub restart) acquires normally.
+    #[test]
+    fn the_lease_client_config_carries_the_lease_handed_over_at_commit() {
+        use crate::daemon::handover::HandoverManager;
+        use crate::daemon::handover_transaction::{HandoverState, HandoverTransaction, SupervisorLeaseTransfer};
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("legacy.sock");
+        let identity = legacy.to_string_lossy().into_owned();
+        let lease = SupervisorLeaseTransfer { machine_id: "rec-a".into(), fence: 7, deadline_unix_ms: 1_800_000_105_000 };
+        let mut record = HandoverTransaction::new_simple(&identity, &identity, 1, 0, 0, 0, &identity);
+        record.state = HandoverState::Retired;
+        record.supervisor_lease = Some(lease.clone());
+        std::fs::write(legacy.with_extension("transaction"), serde_json::to_vec(&record).unwrap()).unwrap();
+
+        let successor = HandoverManager::new(root.path().join("successor.sock"));
+        successor.adopt_recorded_supervisor_lease(&legacy);
+        let config = lease_client_config("rec-a".to_owned(), Some("acct".to_owned()), &successor);
+        assert_eq!(config.handed_over, Some(lease));
+        assert_eq!((config.machine_id.as_str(), config.account.as_deref()), ("rec-a", Some("acct")));
+        let again = lease_client_config("rec-a".to_owned(), Some("acct".to_owned()), &successor);
+        assert_eq!(again.handed_over, None, "handed over once");
+    }
 
     #[test]
     fn each_hub_pane_launch_gets_its_own_spawn_request_id() {
