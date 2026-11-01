@@ -19,6 +19,8 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import { AlertCircle, Check, Loader2, Send } from "lucide-react";
 import { cn } from "../../lib/cn";
+import { userFacingError } from "../userFacingError";
+import { isImeConfirmingKey } from "./imeKeys";
 import { ApprovalActionCard } from "./MobileChatComponents";
 import {
   REFERENCE_PROMPT_STALE_MESSAGE,
@@ -62,12 +64,32 @@ export interface ReferencePromptCardProps {
   readonly className?: string;
 }
 
-const QUEUED_OPEN =
-  "Codex keeps working meanwhile. Answer here; the question holds the terminal's input until it is answered or closed.";
-const QUEUED_COLLAPSED =
-  "Codex keeps working meanwhile. Answer here; the message box still talks to Codex.";
+/** The agent by the name the user knows it by; anything unknown is just "the agent". */
+function agentName(agent: string): string {
+  switch (agent.toLowerCase()) {
+    case "claude":
+      return "Claude";
+    case "codex":
+      return "Codex";
+    case "omo":
+      return "OmO";
+    default:
+      return "The agent";
+  }
+}
+
+function queuedCopy(agent: string, queued: "open" | "collapsed"): string {
+  const name = agentName(agent);
+  return queued === "open"
+    ? `${name} keeps working meanwhile. Answer here; the question holds the terminal's input until it is answered or closed.`
+    : `${name} keeps working meanwhile. Answer here; the message box still talks to ${name === "The agent" ? "the agent" : name}.`;
+}
+
+/** An option that turns a one-off answer into a standing permission. */
+const REMEMBERS_CHOICE = /\b(always|don'?t ask again|for this session|remember)\b/i;
+
 const FALLBACK_HINT =
-  "This pane is waiting and no reader knows its prompt: answer it in the terminal.";
+  "This session is waiting, but Ferryx can't read its question. Answer it in the terminal.";
 
 export function ReferencePromptCard({
   prompt,
@@ -84,8 +106,11 @@ export function ReferencePromptCard({
   const [custom, setCustom] = useState("");
   const [pending, setPending] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  // the option a tap picked: nothing is sent until "Send answer"
+  const [picked, setPicked] = useState<number | null>(null);
   const cardRef = useRef<HTMLElement | null>(null);
-  const confirmRef = useRef<HTMLDivElement | null>(null);
+  const confirmButtonRef = useRef<HTMLButtonElement | null>(null);
+  const composing = useRef(false);
   // the control Enter or Space last went down on: the click that follows on it is that key's
   const keyed = useRef<EventTarget | null>(null);
   // and the button a pointer last went down on, with what it was: a click can misname its pointer
@@ -99,11 +124,11 @@ export function ReferencePromptCard({
     };
   }, []);
 
-  // the question to confirm stays on the card's fold; a card scrolled past it comes back to it,
-  // and nothing outside the card moves
+  // a typed pick waits on Confirm: the focus goes there, so the reader is not scrolled away
+  const typedIndex = typedAnswer?.optionIndex ?? null;
   useEffect(() => {
-    confirmRef.current?.scrollIntoView({ block: "nearest" });
-  }, [typedAnswer]);
+    if (typedIndex !== null) confirmButtonRef.current?.focus({ preventScroll: true });
+  }, [typedIndex]);
 
   const answer = useCallback(
     async (choice: ReferencePromptAnswer, press?: ReferencePromptPress): Promise<boolean> => {
@@ -154,7 +179,7 @@ export function ReferencePromptCard({
           setLocalError(REFERENCE_PROMPT_STALE_MESSAGE);
           onPromptChanged?.();
         } else {
-          setLocalError(cause instanceof Error ? cause.message : String(cause));
+          setLocalError(userFacingError(cause, { action: "send your answer" }));
           // a transport failure keeps a typed pick for a retry
           setPending(false);
           return false;
@@ -174,6 +199,7 @@ export function ReferencePromptCard({
 
   const titleId = useId();
   const customLabelId = useId();
+  const confirmLabelId = useId();
   const selectableIndices = referenceSelectableIndices(prompt);
   const customIndex = prompt.customOptionIndex != null ? prompt.customOptionIndex : null;
   const hasChoices = selectableIndices.length > 0;
@@ -187,32 +213,35 @@ export function ReferencePromptCard({
     const { text, recommended } = labelOf(option?.label ?? "");
     return (
       <span className="min-w-0 flex-1">
-        <span className="flex items-baseline gap-1.5">
+        <span className="flex flex-wrap items-baseline gap-x-1.5">
           <span className="break-words">{text}</span>
           {recommended && (
-            <span className="shrink-0 rounded border border-chat-border px-1 text-[10px] text-chat-foreground-tertiary">
+            <span className="shrink-0 rounded border border-chat-border px-1 text-xs text-chat-foreground-secondary">
               Recommended
             </span>
           )}
         </span>
         {option?.description != null && (
-          <span className="block text-[11px] text-chat-foreground-tertiary break-words">
+          <span className="block text-xs text-chat-foreground-secondary break-words">
             {option.description}
           </span>
+        )}
+        {REMEMBERS_CHOICE.test(text) && (
+          <span className="block text-xs text-status-warning">Remembered for later requests</span>
         )}
       </span>
     );
   };
   const optionNumber = (index: number): React.ReactNode => (
-    <span className="shrink-0 pt-0.5 font-mono text-[10px] text-chat-foreground-tertiary">
+    <span className="shrink-0 pt-0.5 font-mono text-xs text-chat-foreground-secondary">
       <span aria-hidden="true">{index + 1}</span>
       <span className="sr-only">{index + 1}.</span>
     </span>
   );
 
-  // The existing approval shell models one shape: two options, no custom row, a single pick.
-  // Anything richer (Codex's three-option approval, a plan with a "tell Claude what to change"
-  // row, a multi-select) is the ported option list below, which the shell cannot express.
+  // The two-option approval keeps its own Approve / Decline pair. Anything richer (Codex's
+  // three-option approval, a plan with a "tell Claude what to change" row, a multi-select) is the
+  // option list below: a tap only picks, and "Send answer" sends.
   const twoOptionApproval =
     prompt.kind === "approval" &&
     !prompt.multiSelect &&
@@ -221,8 +250,15 @@ export function ReferencePromptCard({
       ? selectableIndices
       : null;
   const approvalQuestion = prompt.question === prompt.title ? null : prompt.question;
-  const approvalDescription = approvalQuestion ?? prompt.body ?? prompt.title;
   const shownError = localError ?? error ?? null;
+  const pickedIndex = picked ?? typedAnswer?.optionIndex ?? null;
+
+  const bodyBlock =
+    prompt.body != null && prompt.body.length > 0 ? (
+      <pre className="rounded-lg border border-chat-border bg-chat-screen p-3 font-mono text-[0.8125rem] leading-relaxed text-chat-foreground whitespace-pre-wrap break-words">
+        {prompt.body}
+      </pre>
+    ) : null;
 
   return (
     <section
@@ -232,7 +268,7 @@ export function ReferencePromptCard({
       aria-busy={pending}
       data-testid="reference-prompt-card"
       className={cn(
-        "rounded-xl border border-status-warning/30 bg-chat-surface/95 shadow-md p-3.5 backdrop-blur-md my-2.5 space-y-3 select-none",
+        "rounded-xl border border-chat-border bg-chat-surface p-3.5 my-2.5 space-y-3",
         className,
       )}
       onKeyDown={(event) => {
@@ -246,19 +282,15 @@ export function ReferencePromptCard({
           button === null ? null : { target: button, pointerType: event.pointerType };
       }}
     >
-      <header className="flex items-start gap-2.5">
-        <div className="p-1 rounded-lg bg-status-warning/10 border border-status-warning/20 text-status-warning shrink-0 mt-0.5">
-          <AlertCircle className="w-4 h-4" aria-hidden="true" />
-        </div>
-        <div className="min-w-0 flex-1 space-y-0.5">
-          <span className="sr-only">input needed</span>
-          <h2
-            id={titleId}
-            className="text-xs font-semibold text-chat-foreground tracking-tight break-words"
-          >
-            {prompt.title}
-          </h2>
-        </div>
+      <header>
+        <span className="sr-only">Input needed: </span>
+        <h2
+          id={titleId}
+          className="flex items-start gap-2 text-base font-semibold text-chat-foreground break-words"
+        >
+          <AlertCircle aria-hidden="true" className="mt-1 size-4 shrink-0 text-status-warning" />
+          <span className="min-w-0">{prompt.title}</span>
+        </h2>
       </header>
 
       {prompt.steps != null && prompt.steps.length > 0 && (
@@ -268,16 +300,16 @@ export function ReferencePromptCard({
               key={index}
               aria-current={step.current ? "step" : undefined}
               className={cn(
-                "flex items-center gap-1.5 text-xs",
+                "flex items-center gap-2 text-sm",
                 step.answered ? "text-chat-foreground-secondary" : "text-chat-foreground",
                 step.current && "font-medium",
               )}
             >
               <span
                 aria-hidden="true"
-                className="flex size-4 shrink-0 items-center justify-center rounded-full border border-chat-border font-mono text-[10px]"
+                className="flex size-5 shrink-0 items-center justify-center rounded-full border border-chat-border font-mono text-xs"
               >
-                {step.answered ? <Check className="size-2.5" /> : index + 1}
+                {step.answered ? <Check className="size-3" /> : index + 1}
               </span>
               <span className="truncate">{step.label}</span>
               {step.answered && <span className="sr-only">(answered)</span>}
@@ -286,93 +318,110 @@ export function ReferencePromptCard({
         </ol>
       )}
 
+      {approvalQuestion !== null && (
+        <p className="text-[0.9375rem] text-chat-foreground leading-relaxed break-words">
+          {approvalQuestion}
+        </p>
+      )}
+      {prompt.queued != null && (
+        <p className="text-xs text-chat-foreground-secondary leading-relaxed">
+          {queuedCopy(prompt.agent, prompt.queued)}
+        </p>
+      )}
+      {bodyBlock}
+
       {twoOptionApproval !== null ? (
-        <>
-          {/* the reference text (a command, a diff) is what the reader must see before approving */}
-          {approvalQuestion !== null && prompt.body != null && prompt.body.length > 0 && (
-            <pre className="rounded-lg border border-chat-border bg-chat-screen/60 p-2 font-mono text-[11px] text-chat-foreground-secondary whitespace-pre-wrap break-words max-h-60 overflow-y-auto select-text">
-              {prompt.body}
-            </pre>
-          )}
-          <ApprovalActionCard
-            title={prompt.title}
-            description={approvalDescription}
-            confirmLabel={prompt.options[twoOptionApproval[0] ?? 0]?.label ?? "Approve"}
-            declineLabel={prompt.options[twoOptionApproval[1] ?? 1]?.label ?? "Decline"}
-            allowCustomFeedback={false}
-            onAccept={(_feedback, event) =>
-              void answer({ optionIndex: twoOptionApproval[0] ?? 0 }, event)
-            }
-            onDecline={(_feedback, event) =>
-              void answer({ optionIndex: twoOptionApproval[1] ?? 1 }, event)
-            }
-            isSubmitting={pending}
-          />
-        </>
+        <ApprovalActionCard
+          bare
+          description={approvalQuestion ?? prompt.body ?? prompt.title}
+          confirmLabel={prompt.options[twoOptionApproval[0] ?? 0]?.label ?? "Approve"}
+          declineLabel={prompt.options[twoOptionApproval[1] ?? 1]?.label ?? "Decline"}
+          allowCustomFeedback={false}
+          onAccept={(_feedback, event) =>
+            void answer({ optionIndex: twoOptionApproval[0] ?? 0 }, event)
+          }
+          onDecline={(_feedback, event) =>
+            void answer({ optionIndex: twoOptionApproval[1] ?? 1 }, event)
+          }
+          isSubmitting={pending}
+        />
       ) : (
         <>
-          {approvalQuestion !== null && (
-            <p className="text-xs text-chat-foreground-secondary leading-relaxed break-words">
-              {approvalQuestion}
-            </p>
+          {hasChoices && prompt.multiSelect && (
+            <div className="flex flex-col gap-2" role="group" aria-label={prompt.question}>
+              {prompt.options.map((_, index) => {
+                if (index === customIndex) return null;
+                const checked = selected.includes(index);
+                return (
+                  <label
+                    key={index}
+                    data-testid={`reference-prompt-multi-${index}`}
+                    className={cn(
+                      "flex min-h-11 cursor-pointer items-start gap-2.5 rounded-lg border border-chat-border px-3 py-2.5 text-sm transition-colors has-[:focus-visible]:ring-1 has-[:focus-visible]:ring-ring",
+                      checked
+                        ? "bg-chat-surface-raised text-chat-foreground"
+                        : "bg-chat-surface text-chat-foreground hover:bg-chat-surface-hover",
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={pending}
+                      onChange={() => toggle(index)}
+                      className="sr-only"
+                    />
+                    <span
+                      aria-hidden="true"
+                      className={cn(
+                        "mt-px flex size-5 shrink-0 items-center justify-center rounded border",
+                        checked
+                          ? "border-chat-foreground bg-chat-foreground text-chat-screen"
+                          : "border-chat-foreground-secondary",
+                      )}
+                    >
+                      {checked && <Check className="size-3.5" />}
+                    </span>
+                    {optionNumber(index)}
+                    {optionContent(index)}
+                  </label>
+                );
+              })}
+            </div>
           )}
-          {prompt.queued != null && (
-            <p className="text-[11px] text-chat-foreground-tertiary leading-relaxed">
-              {prompt.queued === "open" ? QUEUED_OPEN : QUEUED_COLLAPSED}
-            </p>
-          )}
-          {prompt.body != null && prompt.body.length > 0 && (
-            <pre className="rounded-lg border border-chat-border bg-chat-screen/60 p-2 font-mono text-[11px] text-chat-foreground-secondary whitespace-pre-wrap break-words max-h-60 overflow-y-auto select-text">
-              {prompt.body}
-            </pre>
-          )}
-          {hasChoices && (
+          {hasChoices && !prompt.multiSelect && (
             <div
-              className="space-y-1"
-              role={prompt.multiSelect ? "group" : undefined}
-              aria-label={prompt.multiSelect ? prompt.question : undefined}
+              className="flex flex-col gap-2"
+              role="radiogroup"
+              aria-label={prompt.question}
             >
               {prompt.options.map((_, index) => {
                 if (index === customIndex) return null;
-                if (prompt.multiSelect) {
-                  const checked = selected.includes(index);
-                  return (
-                    <label
-                      key={index}
-                      data-testid={`reference-prompt-multi-${index}`}
-                      className={cn(
-                        "flex min-h-[32px] cursor-pointer items-start gap-2 rounded-lg border px-2.5 py-1.5 text-xs transition-colors",
-                        checked
-                          ? "border-status-warning/40 bg-status-warning/10 text-chat-foreground"
-                          : "border-chat-foreground/10 bg-chat-surface/60 text-chat-foreground-secondary hover:bg-chat-surface-hover",
-                      )}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        disabled={pending}
-                        onChange={() => toggle(index)}
-                        className="mt-0.5 size-3.5 shrink-0 accent-chat-primary"
-                      />
-                      {optionNumber(index)}
-                      {optionContent(index)}
-                    </label>
-                  );
-                }
+                const checked = pickedIndex === index;
                 return (
                   <button
                     key={index}
                     type="button"
+                    role="radio"
+                    aria-checked={checked}
                     data-testid={`reference-prompt-option-${index}`}
                     disabled={pending}
                     className={cn(
-                      "flex w-full min-h-[32px] items-start gap-2 rounded-lg border px-2.5 py-1.5 text-left text-xs transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                      typedAnswer?.optionIndex === index
-                        ? "border-status-warning/40 bg-status-warning/10 text-chat-foreground"
-                        : "border-chat-foreground/10 bg-chat-surface/60 text-chat-foreground-secondary hover:bg-chat-surface-hover hover:text-chat-foreground",
+                      "flex w-full min-h-11 items-start gap-2.5 rounded-lg border border-chat-border px-3 py-2.5 text-left text-sm text-chat-foreground transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                      checked ? "bg-chat-surface-raised" : "bg-chat-surface hover:bg-chat-surface-hover",
                     )}
-                    onClick={(event) => void answer({ optionIndex: index }, event)}
+                    onClick={() => setPicked(index)}
                   >
+                    <span
+                      aria-hidden="true"
+                      className={cn(
+                        "mt-px flex size-5 shrink-0 items-center justify-center rounded-full border",
+                        checked
+                          ? "border-chat-foreground bg-chat-foreground text-chat-screen"
+                          : "border-chat-foreground-secondary",
+                      )}
+                    >
+                      {checked && <Check className="size-3.5" />}
+                    </span>
                     {optionNumber(index)}
                     {optionContent(index)}
                   </button>
@@ -380,64 +429,74 @@ export function ReferencePromptCard({
               })}
             </div>
           )}
-          {prompt.multiSelect && (
+          {hasChoices && (
             <button
               type="button"
               data-testid="reference-prompt-submit"
-              disabled={pending || selected.length === 0}
-              className={cn(
-                "px-3 py-1.5 rounded-lg border text-xs font-medium transition-all disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                selected.length > 0
-                  ? "border-status-warning/40 bg-status-warning/20 text-status-warning hover:text-chat-foreground"
-                  : "border-chat-foreground/10 bg-chat-surface-raised text-chat-foreground-secondary",
-              )}
-              onClick={(event) =>
-                void answer(
-                  { optionIndices: [...selected].sort((a, b) => a - b) },
-                  event,
-                )
+              disabled={
+                pending || (prompt.multiSelect ? selected.length === 0 : pickedIndex === null)
               }
+              className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-chat-primary px-4 text-sm font-medium text-chat-primary-foreground transition-colors hover:bg-chat-primary/90 disabled:bg-chat-surface-raised disabled:text-chat-foreground-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              onClick={(event) => {
+                if (prompt.multiSelect) {
+                  void answer({ optionIndices: [...selected].sort((a, b) => a - b) }, event);
+                } else if (pickedIndex !== null) {
+                  void answer({ optionIndex: pickedIndex }, event).then((current) => {
+                    if (current && typedAnswer != null) onTypedAnswerDone?.();
+                  });
+                }
+              }}
             >
-              {selected.length > 0 ? `Submit (${selected.length})` : "Submit"}
+              {pending ? (
+                <Loader2 aria-hidden="true" className="size-4 animate-spin motion-reduce:animate-none" />
+              ) : (
+                <Send aria-hidden="true" className="size-4" />
+              )}
+              <span>
+                {prompt.multiSelect && selected.length > 0
+                  ? `Send answer (${selected.length})`
+                  : "Send answer"}
+              </span>
             </button>
           )}
           {customIndex !== null && (
             <div className="space-y-1.5">
               {hasChoices && (
-                <span id={customLabelId} className="text-[11px] text-chat-foreground-tertiary">
+                <span id={customLabelId} className="block text-xs text-chat-foreground-secondary">
                   Or type your own answer
                 </span>
               )}
               <div className="flex items-center gap-2">
                 <input
                   data-testid="reference-prompt-custom-input"
-                  className="min-w-0 flex-1 rounded-lg border border-chat-foreground/10 bg-chat-screen/50 px-2.5 py-1.5 text-xs text-chat-foreground placeholder:text-chat-foreground-tertiary focus:outline-none focus:border-status-warning/50 focus:ring-1 focus:ring-status-warning/30 transition-all"
+                  className="min-h-11 min-w-0 flex-1 rounded-lg border border-chat-border bg-chat-screen px-3 py-2 text-base text-chat-foreground placeholder:text-chat-foreground-tertiary transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   value={custom}
                   disabled={pending}
+                  enterKeyHint="send"
                   placeholder={prompt.options[customIndex]?.label ?? "Type an answer"}
-                  aria-label={hasChoices ? undefined : "Custom answer"}
+                  aria-label={hasChoices ? undefined : "Your answer"}
                   aria-labelledby={hasChoices ? customLabelId : undefined}
                   onChange={(event) => setCustom(event.currentTarget.value)}
+                  onCompositionStart={() => {
+                    composing.current = true;
+                  }}
+                  onCompositionEnd={() => {
+                    composing.current = false;
+                  }}
                   onKeyDown={(event) => {
-                    // an IME's Enter commits the candidate; WebKit can send it after compositionend, as key code 229
-                    if (
-                      event.key === "Enter" &&
-                      !event.nativeEvent.isComposing &&
-                      event.nativeEvent.keyCode !== 229 &&
-                      custom.trim().length > 0
-                    ) {
-                      void answer({ customText: custom.trim() });
-                    }
+                    if (event.key !== "Enter" || isImeConfirmingKey(event, composing.current)) return;
+                    event.preventDefault();
+                    if (custom.trim().length > 0) void answer({ customText: custom.trim() });
                   }}
                 />
                 <button
                   type="button"
                   data-testid="reference-prompt-custom-send"
                   disabled={pending || custom.trim().length === 0}
-                  className="flex shrink-0 items-center gap-1.5 rounded-lg border border-chat-foreground/10 bg-chat-surface-raised px-3 py-1.5 text-xs font-medium text-chat-foreground-secondary transition-all hover:text-chat-foreground disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  className="flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg border border-chat-border bg-chat-surface-raised px-4 text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   onClick={(event) => void answer({ customText: custom.trim() }, event)}
                 >
-                  <Send className="size-3.5" aria-hidden="true" />
+                  <Send className="size-4" aria-hidden="true" />
                   <span>Send</span>
                 </button>
               </div>
@@ -448,22 +507,27 @@ export function ReferencePromptCard({
 
       {typedAnswer?.optionIndex != null && (
         <div
-          ref={confirmRef}
-          role="alert"
+          role="group"
+          aria-labelledby={confirmLabelId}
           data-testid="reference-prompt-confirm"
-          className="space-y-2 rounded-lg border border-status-warning/30 bg-status-warning/10 p-2.5"
+          className="space-y-3 rounded-lg bg-chat-surface-raised p-3"
         >
           {/* an option's label can run to pages (a review to approve): it wraps and scrolls in
               itself, and the two buttons stay whole */}
-          <span className="block max-h-24 overflow-y-auto text-xs text-chat-foreground break-words select-text">
+          <span
+            id={confirmLabelId}
+            aria-live="polite"
+            className="block max-h-24 overflow-y-auto text-sm text-chat-foreground break-words"
+          >
             {`Send ${typedAnswer.optionIndex + 1}. ${prompt.options[typedAnswer.optionIndex]?.label ?? ""}?`}
           </span>
-          <span className="flex items-center gap-2">
+          <span className="flex flex-col gap-3">
             <button
+              ref={confirmButtonRef}
               type="button"
               data-testid="reference-prompt-confirm-send"
               disabled={pending}
-              className="flex items-center gap-1.5 rounded-lg border border-status-warning/40 bg-status-warning/20 px-3 py-1.5 text-xs font-medium text-status-warning shadow-xs transition-all hover:text-chat-foreground disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-chat-primary px-4 text-sm font-medium text-chat-primary-foreground transition-colors hover:bg-chat-primary/90 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               onClick={(event) =>
                 void answer(typedAnswer, event).then((current) => {
                   if (current) onTypedAnswerDone?.();
@@ -471,9 +535,9 @@ export function ReferencePromptCard({
               }
             >
               {pending ? (
-                <Loader2 className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                <Loader2 className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
               ) : (
-                <Check className="size-3.5" aria-hidden="true" />
+                <Check className="size-4" aria-hidden="true" />
               )}
               <span>Confirm</span>
             </button>
@@ -481,7 +545,7 @@ export function ReferencePromptCard({
               type="button"
               data-testid="reference-prompt-confirm-cancel"
               disabled={pending}
-              className="rounded-lg border border-chat-foreground/10 bg-chat-surface-raised px-3 py-1.5 text-xs font-medium text-chat-foreground-secondary transition-all hover:text-chat-foreground disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              className="flex min-h-11 w-full items-center justify-center rounded-lg border border-chat-border bg-chat-surface px-4 text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               onClick={() => onTypedAnswerDone?.()}
             >
               Cancel
@@ -491,7 +555,7 @@ export function ReferencePromptCard({
       )}
 
       {prompt.fallback === true && (
-        <p data-testid="reference-prompt-fallback" className="text-[11px] text-chat-foreground-tertiary">
+        <p data-testid="reference-prompt-fallback" className="text-sm text-chat-foreground-secondary">
           {FALLBACK_HINT}
         </p>
       )}
@@ -500,7 +564,7 @@ export function ReferencePromptCard({
         <p
           role="alert"
           data-testid="reference-prompt-error"
-          className="text-xs text-chat-danger leading-relaxed break-words"
+          className="text-sm text-chat-danger leading-relaxed break-words"
         >
           {shownError}
         </p>

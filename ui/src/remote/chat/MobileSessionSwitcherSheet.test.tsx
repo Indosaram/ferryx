@@ -75,7 +75,7 @@ describe("MobileSessionSwitcherSheet", () => {
     expect(screen.queryAllByText("main")).toHaveLength(0);
   });
 
-  it("renders status labels: Working and Approval", () => {
+  it("renders status labels: Working and Needs approval", () => {
     render(
       <MobileSessionSwitcherSheet
         open
@@ -89,7 +89,7 @@ describe("MobileSessionSwitcherSheet", () => {
     );
 
     expect(screen.getByText("Working")).toHaveClass("text-status-working");
-    expect(screen.getByText("Approval")).toHaveClass("text-status-warning");
+    expect(screen.getByText("Needs approval")).toHaveClass("text-status-warning");
     expect(screen.queryByText("Done")).not.toBeInTheDocument();
   });
 

@@ -234,6 +234,8 @@ describe("a stale screen", () => {
   });
 
   it("says what the card tells the user", () => {
-    expect(REFERENCE_PROMPT_STALE_MESSAGE).toBe("the prompt changed — re-read");
+    expect(REFERENCE_PROMPT_STALE_MESSAGE).toBe(
+      "The question changed on your computer. Read it again before you answer.",
+    );
   });
 });

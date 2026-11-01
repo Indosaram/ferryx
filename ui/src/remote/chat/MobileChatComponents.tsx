@@ -20,7 +20,7 @@ import {
   SquarePen,
   Search,
   Globe,
-  Sparkles,
+  Users,
   ListChecks,
   Wrench,
   Brain,
@@ -54,67 +54,20 @@ export const ActivityIndicator: React.FC<ActivityIndicatorProps> = ({
   if (state === "idle") return null;
 
   const config = {
-    thinking: {
-      text: label || "Thinking...",
-      textColor: "text-status-warning",
-      bgColor: "bg-status-warning/10",
-      borderColor: "border-status-warning/20",
-      dotColor: "bg-status-warning",
-      icon: Loader2,
-      spin: true,
-    },
-    running_tool: {
-      text: label || "Running tool...",
-      textColor: "text-status-working",
-      bgColor: "bg-status-working/10",
-      borderColor: "border-status-working/20",
-      dotColor: "bg-status-working",
-      icon: Terminal,
-      spin: false,
-    },
-    waiting_for_input: {
-      text: label || "Waiting for input...",
-      textColor: "text-status-success",
-      bgColor: "bg-status-success/10",
-      borderColor: "border-status-success/20",
-      dotColor: "bg-status-success",
-      icon: AlertCircle,
-      spin: false,
-    },
+    thinking: { text: label || "Thinking…", textColor: "text-chat-foreground-secondary", spin: true },
+    running_tool: { text: label || "Running a tool…", textColor: "text-chat-foreground-secondary", spin: true },
+    // the agent needs the user: the warning ink, never the "all fine" green
+    waiting_for_input: { text: label || "Waiting for you", textColor: "text-status-warning", spin: false },
   }[state];
 
-  const Icon = config.icon;
-
   return (
-    <div
-      role="status"
-      aria-live="polite"
-      className={cn(
-        "inline-flex items-center gap-2 px-2.5 py-1 rounded-full text-xs font-medium border backdrop-blur-sm shadow-xs transition-colors",
-        config.bgColor,
-        config.borderColor,
-        config.textColor,
-        className
+    <div className={cn("inline-flex items-center gap-2 text-sm", config.textColor, className)}>
+      {config.spin ? (
+        <Loader2 aria-hidden="true" className="size-3.5 animate-spin motion-reduce:animate-none" />
+      ) : (
+        <AlertCircle aria-hidden="true" className="size-3.5" />
       )}
-    >
-      <span className="relative flex h-2 w-2">
-        <span
-          className={cn(
-            "animate-ping motion-reduce:animate-none absolute inline-flex h-full w-full rounded-full opacity-75",
-            config.dotColor
-          )}
-        />
-        <span
-          className={cn(
-            "relative inline-flex rounded-full h-2 w-2",
-            config.dotColor
-          )}
-        />
-      </span>
-      <Icon
-        className={cn("w-3.5 h-3.5", config.spin && "animate-spin motion-reduce:animate-none")}
-      />
-      <span className="tracking-wide whitespace-nowrap">{config.text}</span>
+      <span className="whitespace-nowrap">{config.text}</span>
     </div>
   );
 };
@@ -146,7 +99,7 @@ export const AttachmentList: React.FC<AttachmentListProps> = ({
           return (
             <div
               key={att.id}
-              className="relative overflow-hidden rounded-lg border border-chat-foreground/10 bg-chat-surface/60 shadow-xs max-w-[200px]"
+              className="relative overflow-hidden rounded-lg border border-chat-border bg-chat-surface max-w-[12.5rem]"
             >
               <img
                 src={att.url}
@@ -154,7 +107,7 @@ export const AttachmentList: React.FC<AttachmentListProps> = ({
                 className="h-28 w-auto object-cover"
                 loading="lazy"
               />
-              <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-chat-screen/80 via-chat-screen/40 to-transparent p-1 px-1.5 text-[10px] text-chat-foreground-secondary truncate">
+              <div className="absolute inset-x-0 bottom-0 bg-chat-screen/90 px-1.5 py-0.5 text-xs text-chat-foreground truncate">
                 {att.name}
               </div>
             </div>
@@ -164,12 +117,12 @@ export const AttachmentList: React.FC<AttachmentListProps> = ({
         return (
           <div
             key={att.id}
-            className="flex items-center gap-2 rounded-lg border border-chat-foreground/10 bg-chat-surface/60 px-2.5 py-1.5 text-xs text-chat-foreground-secondary shadow-xs backdrop-blur-sm"
+            className="flex items-center gap-2 rounded-lg border border-chat-border bg-chat-surface px-2.5 py-1.5 text-xs text-chat-foreground-secondary"
           >
-            <FileText className="w-3.5 h-3.5 text-chat-foreground-secondary shrink-0" />
-            <span className="truncate max-w-[140px] font-medium">{att.name}</span>
+            <FileText aria-hidden="true" className="size-3.5 text-chat-foreground-secondary shrink-0" />
+            <span className="truncate max-w-[9rem] font-medium">{att.name}</span>
             {att.size !== undefined && (
-              <span className="text-[10px] text-chat-foreground-tertiary font-mono">
+              <span className="text-xs text-chat-foreground-secondary font-mono">
                 {String(att.size)}
               </span>
             )}
@@ -205,7 +158,7 @@ export function getToolIcon(toolName: string) {
   )
     return Search;
   if (lower.startsWith("web") || lower === "fetch" || lower === "browser") return Globe;
-  if (lower === "task" || lower.startsWith("agent") || lower === "workpool") return Sparkles;
+  if (lower === "task" || lower.startsWith("agent") || lower === "workpool") return Users;
   if (lower === "todo") return ListChecks;
   return Wrench;
 }
@@ -251,17 +204,16 @@ export const WorkRow: React.FC<WorkRowProps> = ({
 }) => {
   const rowContent = (
     <>
-      <div className="w-6 h-6 shrink-0 flex items-center justify-center">
+      <div className="size-6 shrink-0 flex items-center justify-center self-start mt-0.5">
         <Icon
           aria-hidden="true"
-          className={cn("w-3.5 h-3.5", isError ? "text-chat-danger" : "text-chat-foreground-secondary")}
+          className={cn("size-3.5", isError ? "text-chat-danger" : "text-chat-foreground-secondary")}
         />
       </div>
       <div
         className={cn(
-          "min-w-0 flex-1 truncate text-sm leading-none",
-          isError ? "text-chat-danger" : "text-chat-foreground-secondary",
-          isRunning && "work-shimmer-text"
+          "min-w-0 flex-1 line-clamp-2 break-words text-sm leading-snug",
+          isError ? "text-chat-danger" : isRunning ? "work-shimmer-text" : "text-chat-foreground-secondary"
         )}
       >
         {label}
@@ -280,7 +232,7 @@ export const WorkRow: React.FC<WorkRowProps> = ({
           data-testid="work-row"
           onClick={onToggle}
           className={cn(
-            "w-full min-h-[32px] flex items-center gap-1.5 px-1 py-0.5 text-left rounded hover:bg-chat-row-hover transition-colors group focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+            "w-full min-h-11 flex items-center gap-1.5 px-1 py-1 text-left rounded hover:bg-chat-row-hover transition-colors group focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
             isError ? "text-chat-danger" : "text-chat-foreground-secondary"
           )}
         >
@@ -290,7 +242,7 @@ export const WorkRow: React.FC<WorkRowProps> = ({
         <div
           data-testid="work-row"
           className={cn(
-            "w-full min-h-[32px] flex items-center gap-1.5 px-1 py-0.5 text-left rounded transition-colors group",
+            "w-full min-h-11 flex items-center gap-1.5 px-1 py-1 text-left rounded transition-colors group",
             isError ? "text-chat-danger" : "text-chat-foreground-secondary"
           )}
         >
@@ -336,12 +288,12 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = ({
   );
 
   const expandedPanel = (
-    <div className="ml-7 border-l border-chat-border pl-3 py-1 space-y-1.5">
+    <div className="ml-7 rounded-lg bg-chat-surface px-3 py-2 space-y-1.5">
       {command && (
         <pre
           data-testid="tool-call-input"
           tabIndex={0}
-          className="font-mono text-[12px] text-chat-foreground-secondary whitespace-pre-wrap break-words max-h-60 overflow-y-auto select-text"
+          className="font-mono text-[0.8125rem] leading-relaxed text-chat-foreground whitespace-pre-wrap break-words select-text"
         >
           {command}
         </pre>
@@ -350,7 +302,7 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = ({
         <pre
           data-testid="work-row-output"
           tabIndex={0}
-          className="font-mono text-[12px] text-chat-foreground-secondary whitespace-pre-wrap break-words max-h-60 overflow-y-auto select-text"
+          className="font-mono text-[0.8125rem] leading-relaxed text-chat-foreground whitespace-pre-wrap break-words select-text"
         >
           {output}
         </pre>
@@ -396,7 +348,7 @@ export const ThinkingBlock: React.FC<{ text: string; source?: "prose" }> = ({
   const labelNode = isProse ? (
     <>
       <span className="sr-only">Message: </span>
-      {firstLine && <span className="italic opacity-80">{firstLine}</span>}
+      {firstLine && <span>{firstLine}</span>}
     </>
   ) : (
     <>
@@ -404,17 +356,17 @@ export const ThinkingBlock: React.FC<{ text: string; source?: "prose" }> = ({
       {firstLine && (
         <>
           {" "}
-          <span className="italic opacity-80">{firstLine}</span>
+          <span>{firstLine}</span>
         </>
       )}
     </>
   );
 
   const expandedPanel = (
-    <div className="ml-7 border-l border-chat-border pl-3 py-1">
+    <div className="ml-7 rounded-lg bg-chat-surface px-3 py-2">
       <p
         tabIndex={0}
-        className="font-sans text-[12px] text-chat-foreground-secondary italic whitespace-pre-wrap break-words max-h-60 overflow-y-auto select-text"
+        className="font-sans text-sm text-chat-foreground-secondary whitespace-pre-wrap break-words select-text"
       >
         {text}
       </p>
@@ -438,6 +390,8 @@ export const ThinkingBlock: React.FC<{ text: string; source?: "prose" }> = ({
 
 export interface ApprovalActionCardProps {
   title?: string;
+  /** Drawn inside a card that already shows the title: no shell, no header of its own. */
+  bare?: boolean;
   description: string;
   confirmLabel?: string;
   declineLabel?: string;
@@ -451,12 +405,13 @@ export interface ApprovalActionCardProps {
 }
 
 export const ApprovalActionCard: React.FC<ApprovalActionCardProps> = ({
-  title = "Action Required",
+  title = "Needs your approval",
+  bare = false,
   description,
   confirmLabel = "Approve",
   declineLabel = "Decline",
   allowCustomFeedback = true,
-  feedbackPlaceholder = "Add instructions or reason...",
+  feedbackPlaceholder = "Add instructions or a reason…",
   onAccept,
   onDecline,
   isSubmitting = false,
@@ -473,78 +428,81 @@ export const ApprovalActionCard: React.FC<ApprovalActionCardProps> = ({
     onDecline(feedback.trim() ? feedback.trim() : undefined, event);
   };
 
+  const actions = (
+    <>
+      {allowCustomFeedback && showFeedbackInput && (
+        <textarea
+          value={feedback}
+          onChange={(e) => setFeedback(e.target.value)}
+          placeholder={feedbackPlaceholder}
+          aria-label="Note for the agent"
+          rows={2}
+          disabled={isSubmitting}
+          className="w-full rounded-lg border border-chat-border bg-chat-screen px-3 py-2 text-base text-chat-foreground placeholder:text-chat-foreground-tertiary transition-colors resize-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        />
+      )}
+
+      {/* stacked, full width and 12px apart: a slip off one never lands on the other; the safe
+          choice (decline) carries the primary emphasis */}
+      <div className="flex flex-col gap-3">
+        <button
+          type="button"
+          data-testid="approval-accept"
+          onClick={handleConfirm}
+          disabled={isSubmitting}
+          aria-busy={isSubmitting || undefined}
+          className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-chat-border bg-chat-surface-raised px-4 py-2 text-left text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          {isSubmitting ? (
+            <Loader2 aria-hidden="true" className="size-4 shrink-0 animate-spin motion-reduce:animate-none" />
+          ) : (
+            <Check aria-hidden="true" className="size-4 shrink-0" />
+          )}
+          <span className="min-w-0 break-words">{confirmLabel}</span>
+        </button>
+        <button
+          type="button"
+          data-testid="approval-decline"
+          onClick={handleDecline}
+          disabled={isSubmitting}
+          className="flex min-h-11 w-full items-center justify-center rounded-lg bg-chat-primary px-4 py-2 text-sm font-medium text-chat-primary-foreground transition-colors hover:bg-chat-primary/90 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          <span className="min-w-0 break-words">{declineLabel}</span>
+        </button>
+        {allowCustomFeedback && !showFeedbackInput && (
+          <button
+            type="button"
+            onClick={() => setShowFeedbackInput(true)}
+            className="flex min-h-11 w-full items-center justify-center rounded-lg px-4 text-sm text-chat-foreground-secondary transition-colors hover:bg-chat-row-hover hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            Add a note
+          </button>
+        )}
+      </div>
+    </>
+  );
+
+  if (bare) {
+    return <div className={cn("space-y-3", className)}>{actions}</div>;
+  }
+
   return (
     <div
       className={cn(
-        "rounded-xl border border-status-warning/30 bg-chat-surface/90 shadow-md p-3.5 backdrop-blur-md my-2.5 space-y-3",
+        "rounded-xl border border-chat-border bg-chat-surface p-3.5 my-2.5 space-y-3",
         className
       )}
     >
-      <div className="flex items-start gap-2.5">
-        <div className="p-1 rounded-lg bg-status-warning/10 border border-status-warning/20 text-status-warning shrink-0 mt-0.5">
-          <AlertCircle className="w-4 h-4" />
-        </div>
-        <div className="space-y-0.5 min-w-0 flex-1">
-          <h4 className="text-xs font-semibold text-chat-foreground tracking-tight">
-            {title}
-          </h4>
-          <p className="text-xs text-chat-foreground-secondary leading-relaxed break-words">
-            {description}
-          </p>
-        </div>
+      <div className="space-y-1 min-w-0">
+        <h4 className="flex items-start gap-2 text-base font-semibold text-chat-foreground">
+          <AlertCircle aria-hidden="true" className="mt-1 size-4 shrink-0 text-status-warning" />
+          <span className="min-w-0 break-words">{title}</span>
+        </h4>
+        <p className="text-[0.9375rem] text-chat-foreground leading-relaxed break-words">
+          {description}
+        </p>
       </div>
-
-      {allowCustomFeedback && showFeedbackInput && (
-        <div className="relative">
-          <textarea
-            value={feedback}
-            onChange={(e) => setFeedback(e.target.value)}
-            placeholder={feedbackPlaceholder}
-            rows={2}
-            disabled={isSubmitting}
-            className="w-full rounded-lg border border-chat-foreground/10 bg-chat-screen/50 px-2.5 py-1.5 text-xs text-chat-foreground placeholder:text-chat-foreground-tertiary focus:outline-none focus:border-status-warning/50 focus:ring-1 focus:ring-status-warning/30 transition-all resize-none"
-          />
-        </div>
-      )}
-
-      <div className="flex items-center justify-between gap-2 pt-1 border-t border-chat-foreground/10">
-        <div>
-          {allowCustomFeedback && !showFeedbackInput && (
-            <button
-              type="button"
-              onClick={() => setShowFeedbackInput(true)}
-              className="text-[11px] text-chat-foreground-secondary hover:text-chat-foreground underline decoration-chat-foreground-tertiary underline-offset-2 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
-            >
-              Add note...
-            </button>
-          )}
-        </div>
-
-        <div className="flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={handleDecline}
-            disabled={isSubmitting}
-            className="px-3 py-1.5 rounded-lg border border-chat-foreground/10 bg-chat-surface-raised hover:bg-chat-surface-hover active:bg-chat-surface-raised text-xs font-medium text-chat-foreground-secondary hover:text-chat-foreground transition-all disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          >
-            {declineLabel}
-          </button>
-          <button
-            type="button"
-            onClick={handleConfirm}
-            disabled={isSubmitting}
-            aria-busy={isSubmitting || undefined}
-            className="px-3 py-1.5 rounded-lg border border-status-warning/40 bg-status-warning/20 hover:bg-status-warning/30 active:bg-status-warning/20 text-xs font-medium text-status-warning hover:text-chat-foreground shadow-xs transition-all flex items-center gap-1.5 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          >
-            {isSubmitting ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin motion-reduce:animate-none" />
-            ) : (
-              <Check className="w-3.5 h-3.5" />
-            )}
-            <span>{confirmLabel}</span>
-          </button>
-        </div>
-      </div>
+      {actions}
     </div>
   );
 };
@@ -730,7 +688,7 @@ export const ChatMarkdownImage: React.FC<{ src?: string; alt?: string }> = ({ sr
   }
   const label = (alt && alt.trim().length > 0 ? alt.trim() : "Image") + (host ? " (" + host + ")" : "");
   const className =
-    "inline-flex items-center gap-1 rounded border border-chat-border bg-chat-surface/70 px-1.5 py-0.5 text-xs text-chat-foreground-secondary";
+    "inline-flex items-center gap-1 rounded border border-chat-border bg-chat-surface px-1.5 py-0.5 text-xs text-chat-foreground-secondary";
   const icon = <ImageIcon aria-hidden="true" className="size-3 shrink-0" />;
   return href && !insideLink ? (
     <a
@@ -773,18 +731,23 @@ const REFERENCE_PROSE_COMPONENTS = {
     </a>
   ),
   pre: ({ children }: any) => (
-    <pre className="my-2 overflow-x-auto rounded-lg border border-chat-border bg-chat-screen/70 p-2 font-mono text-[11px] scrollbar-sleek">
+    <pre className="my-2 whitespace-pre-wrap break-words rounded-lg border border-chat-border bg-chat-screen p-3 font-mono text-[0.8125rem] leading-relaxed text-chat-foreground [&_code]:bg-transparent [&_code]:p-0 [&_code]:text-[1em] [&_code]:text-chat-foreground">
       {children}
     </pre>
   ),
   code: ({ children }: any) => (
-    <code className="rounded bg-chat-surface-raised px-1 py-0.5 font-mono text-xs text-chat-code">
+    <code className="rounded bg-chat-surface-raised px-1 py-0.5 font-mono text-[0.875em] text-chat-code">
       {children}
     </code>
   ),
   img: ChatMarkdownImage,
   ul: ({ children }: any) => <ul className="list-disc pl-4 mb-2 space-y-1">{children}</ul>,
   ol: ({ children }: any) => <ol className="list-decimal pl-4 mb-2 space-y-1">{children}</ol>,
+  blockquote: ({ children }: any) => (
+    <blockquote className="my-2 rounded-lg bg-chat-surface px-3 py-2 text-chat-foreground-secondary">
+      {children}
+    </blockquote>
+  ),
 };
 
 /** Markdown the page already carries, drawn the way the rest of the chat draws prose. */
@@ -817,11 +780,11 @@ export const ReferenceDisclosureBanner: React.FC<{ disclosure: string; className
     data-testid="reference-disclosure"
     role="note"
     className={cn(
-      "flex items-start gap-2 rounded-lg border border-chat-border bg-chat-surface/70 px-3 py-2 my-2 text-[11px] text-chat-foreground-secondary",
+      "flex items-start gap-2 rounded-lg border border-chat-border bg-chat-surface px-3 py-2 my-2 text-xs text-chat-foreground-secondary",
       className,
     )}
   >
-    <Terminal aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-chat-foreground-tertiary" />
+    <Terminal aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-chat-foreground-secondary" />
     <span className="min-w-0 break-words">{disclosure}</span>
   </div>
 );
@@ -848,20 +811,20 @@ export const ReferenceCompactionDisclosure: React.FC<{
     <details
       data-testid="reference-compaction"
       className={cn(
-        "rounded-lg border border-chat-border bg-chat-surface/60 px-3 py-2 my-1.5",
+        "rounded-lg border border-chat-border bg-chat-surface px-3 my-1.5",
         className,
       )}
     >
-      <summary className="flex items-center gap-1.5 cursor-pointer text-[11px] font-medium text-chat-foreground-secondary select-none">
+      <summary className="flex min-h-11 items-center gap-1.5 cursor-pointer rounded text-xs font-medium text-chat-foreground-secondary select-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
         <CircleSlash aria-hidden="true" className="size-3.5 shrink-0" />
         <span>Conversation compacted</span>
         {time && (
-          <span className="ml-auto shrink-0 font-mono text-[10px] text-chat-foreground-tertiary">
+          <span className="ml-auto shrink-0 font-mono text-xs text-chat-foreground-secondary">
             {time}
           </span>
         )}
       </summary>
-      <div className="mt-2">
+      <div className="pb-2">
         <ReferenceProse text={text} />
       </div>
     </details>
@@ -879,20 +842,20 @@ export const ReferenceAbandonedBranchDisclosure: React.FC<{
   <details
     data-testid="reference-abandoned"
     className={cn(
-      "w-full rounded-lg border border-chat-border bg-chat-surface/60 px-3 py-2 my-1.5",
+      "w-full rounded-lg border border-chat-border bg-chat-surface px-3 my-1.5",
       className,
     )}
   >
-    <summary className="flex items-center gap-1.5 cursor-pointer text-[11px] font-medium text-chat-foreground-secondary select-none">
+    <summary className="flex min-h-11 items-center gap-1.5 cursor-pointer rounded text-xs font-medium text-chat-foreground-secondary select-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
       <Layers aria-hidden="true" className="size-3.5 shrink-0" />
       <span className="min-w-0">{referenceAbandonedSummary(abandoned)}</span>
     </summary>
     {abandoned.summary ? (
-      <div className="mt-2">
+      <div className="pb-2">
         <ReferenceProse text={abandoned.summary} />
       </div>
     ) : (
-      <p className="mt-2 text-[11px] text-chat-foreground-tertiary">{REFERENCE_ABANDONED_NOTE}</p>
+      <p className="pb-2 text-xs text-chat-foreground-secondary">{REFERENCE_ABANDONED_NOTE}</p>
     )}
   </details>
 );
@@ -909,20 +872,20 @@ export const ReferenceNoticeDisclosure: React.FC<{
     <details
       data-testid="reference-notice"
       className={cn(
-        "rounded-lg border border-chat-border bg-chat-surface/60 px-3 py-2 my-1.5",
+        "rounded-lg border border-chat-border bg-chat-surface px-3 my-1.5",
         className,
       )}
     >
-      <summary className="flex items-center gap-1.5 cursor-pointer text-[11px] font-medium text-chat-foreground-secondary select-none">
+      <summary className="flex min-h-11 items-center gap-1.5 cursor-pointer rounded text-xs font-medium text-chat-foreground-secondary select-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
         <Info aria-hidden="true" className="size-3.5 shrink-0" />
         <span className="min-w-0 truncate">{referenceNoticeLabel({ text, source })}</span>
         {time && (
-          <span className="ml-auto shrink-0 font-mono text-[10px] text-chat-foreground-tertiary">
+          <span className="ml-auto shrink-0 font-mono text-xs text-chat-foreground-secondary">
             {time}
           </span>
         )}
       </summary>
-      <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-[11px] text-chat-foreground-secondary select-text">
+      <pre className="pb-2 whitespace-pre-wrap break-words font-mono text-[0.8125rem] text-chat-foreground select-text">
         {text}
       </pre>
     </details>
@@ -937,19 +900,23 @@ export const ReferenceSkillEvidence: React.FC<{
   <details
     data-testid="reference-skill"
     className={cn(
-      "rounded-md border border-chat-border bg-chat-surface/50 px-2 py-1 text-[11px]",
-      skill.status === "failed" && "border-chat-danger/40",
+      "rounded-md border border-chat-border bg-chat-surface px-2 text-xs",
       className,
     )}
   >
-    <summary className="flex items-center gap-1.5 cursor-pointer text-chat-foreground-secondary select-none">
-      <BookOpen aria-hidden="true" className="size-3 shrink-0" />
+    <summary className="flex min-h-11 items-center gap-1.5 cursor-pointer rounded text-chat-foreground-secondary select-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
+      <BookOpen aria-hidden="true" className="size-3.5 shrink-0" />
       <span className="min-w-0 truncate">{skill.name}</span>
-      <span className="ml-auto shrink-0 text-[10px] text-chat-foreground-tertiary">
+      <span
+        className={cn(
+          "ml-auto shrink-0 text-xs",
+          skill.status === "failed" ? "text-chat-danger" : "text-chat-foreground-secondary",
+        )}
+      >
         {referenceSkillLabel(skill)}
       </span>
     </summary>
-    <div className="mt-1 space-y-1 text-[10px] text-chat-foreground-tertiary">
+    <div className="pb-2 space-y-1 text-xs text-chat-foreground-secondary">
       <p>{referenceSkillDetail(skill)}</p>
       {skill.path && <code className="block truncate font-mono">{skill.path}</code>}
     </div>
@@ -966,9 +933,9 @@ export const ReferenceTaskResultRow: React.FC<{
   return (
     <details
       data-testid="reference-task-result"
-      className={cn("rounded-lg border border-chat-border bg-chat-surface/50", className)}
+      className={cn("rounded-lg border border-chat-border bg-chat-surface", className)}
     >
-      <summary className="flex items-center gap-2 px-2.5 py-1.5 cursor-pointer text-xs select-none">
+      <summary className="flex min-h-11 items-center gap-2 px-2.5 py-1.5 cursor-pointer rounded-lg text-sm select-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
         <Icon
           aria-hidden="true"
           className={cn(
@@ -980,27 +947,29 @@ export const ReferenceTaskResultRow: React.FC<{
                 : "text-status-success",
           )}
         />
-        <span className="min-w-0 flex-1 truncate text-chat-foreground">{task.title}</span>
-        {meta.length > 0 && (
-          <span className="shrink-0 font-mono text-[10px] text-chat-foreground-tertiary">
-            {meta}
+        <span className="min-w-0 flex-1">
+          <span className="flex items-baseline gap-2">
+            <span className="min-w-0 flex-1 truncate text-chat-foreground">{task.title}</span>
+            <span className="shrink-0 text-xs text-chat-foreground-secondary">
+              {referenceTaskStatusWord(task.status)}
+            </span>
           </span>
-        )}
-        <span className="shrink-0 text-[10px] text-chat-foreground-secondary">
-          {referenceTaskStatusWord(task.status)}
+          {meta.length > 0 && (
+            <span className="block truncate font-mono text-xs text-chat-foreground-secondary">{meta}</span>
+          )}
         </span>
-        <ChevronDown aria-hidden="true" className="size-3.5 shrink-0 text-chat-foreground-tertiary" />
+        <ChevronDown aria-hidden="true" className="size-3.5 shrink-0 text-chat-foreground-secondary" />
       </summary>
       <div className="border-t border-chat-border px-2.5 py-2">
         {task.result.trim().length > 0 ? (
           <ReferenceProse text={task.result} />
         ) : (
-          <p className="text-[11px] text-chat-foreground-tertiary">
+          <p className="text-xs text-chat-foreground-secondary">
             The task reported no result.
           </p>
         )}
         {task.resultCut === true && (
-          <p className="mt-1 text-[10px] text-chat-foreground-tertiary">
+          <p className="mt-1 text-xs text-chat-foreground-secondary">
             This is the first part of a longer result.
           </p>
         )}
@@ -1025,7 +994,7 @@ export const ReferenceTaskResultsBlock: React.FC<{
       aria-label={heading}
       className={cn("my-1.5 space-y-1.5", className)}
     >
-      <p className="flex items-center gap-1.5 text-[11px] font-medium text-chat-foreground-secondary">
+      <p className="flex items-center gap-1.5 text-xs font-medium text-chat-foreground-secondary">
         <Layers aria-hidden="true" className="size-3.5" />
         <span>{heading}</span>
       </p>
@@ -1055,7 +1024,7 @@ export const ReferenceImagePart: React.FC<{
         rel="noopener noreferrer"
         title={part.ref}
         className={cn(
-          "block overflow-hidden rounded-lg border border-chat-foreground/10 bg-chat-surface/60 shadow-xs max-w-[200px]",
+          "block overflow-hidden rounded-lg border border-chat-border bg-chat-surface max-w-[12.5rem]",
           className,
         )}
       >
@@ -1073,13 +1042,13 @@ export const ReferenceImagePart: React.FC<{
     <div
       data-testid="reference-image-unresolved"
       className={cn(
-        "flex items-center gap-2 rounded-lg border border-chat-foreground/10 bg-chat-surface/60 px-2.5 py-1.5 text-xs text-chat-foreground-secondary shadow-xs",
+        "flex items-center gap-2 rounded-lg border border-chat-border bg-chat-surface px-2.5 py-1.5 text-xs text-chat-foreground-secondary",
         className,
       )}
     >
       <ImageIcon aria-hidden="true" className="size-3.5 shrink-0" />
-      <span className="truncate max-w-[160px] font-mono">{part.ref}</span>
-      <span className="text-[10px] text-chat-foreground-tertiary">{part.mediaType}</span>
+      <span className="truncate max-w-[10rem] font-mono">{part.ref}</span>
+      <span className="text-xs text-chat-foreground-secondary">{part.mediaType}</span>
     </div>
   );
 };
@@ -1117,12 +1086,12 @@ export const ReferenceToolPartCard: React.FC<{
   );
 
   const expandedPanel = (
-    <div className="ml-7 border-l border-chat-border pl-3 py-1 space-y-1.5">
+    <div className="ml-7 rounded-lg bg-chat-surface px-3 py-2 space-y-1.5">
       {part.input && (
         <pre
           data-testid="reference-tool-input"
           tabIndex={0}
-          className="font-mono text-[12px] text-chat-foreground-secondary whitespace-pre-wrap break-words max-h-60 overflow-y-auto select-text"
+          className="font-mono text-[0.8125rem] leading-relaxed text-chat-foreground whitespace-pre-wrap break-words select-text"
         >
           {part.input}
         </pre>
@@ -1131,7 +1100,7 @@ export const ReferenceToolPartCard: React.FC<{
         <pre
           data-testid="reference-tool-output"
           tabIndex={0}
-          className="font-mono text-[12px] text-chat-foreground-secondary whitespace-pre-wrap break-words max-h-60 overflow-y-auto select-text"
+          className="font-mono text-[0.8125rem] leading-relaxed text-chat-foreground whitespace-pre-wrap break-words select-text"
         >
           {part.output}
         </pre>
@@ -1153,7 +1122,7 @@ export const ReferenceToolPartCard: React.FC<{
           data-testid="reference-tool-whole-output"
           disabled={loading}
           onClick={() => onRequestWholeOutput(outputRef)}
-          className="rounded-md border border-chat-border bg-chat-surface-raised px-2 py-1 text-[11px] text-chat-foreground-secondary hover:text-chat-foreground disabled:opacity-60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="min-h-11 rounded-md border border-chat-border bg-chat-surface-raised px-3 text-sm text-chat-foreground transition-colors hover:bg-chat-surface-hover disabled:opacity-60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           {loading
             ? "Loading the whole output…"
@@ -1325,9 +1294,9 @@ export const ReferenceOlderPageControl: React.FC<{
           data-testid="reference-older-button"
           disabled={state === "loading"}
           onClick={() => onLoadOlder?.()}
-          className="flex items-center gap-1.5 rounded-full border border-chat-border bg-chat-surface/70 px-3 py-1 text-[11px] text-chat-foreground-secondary hover:text-chat-foreground disabled:opacity-60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="flex min-h-11 items-center gap-1.5 rounded-full border border-chat-border bg-chat-surface px-4 text-sm text-chat-foreground-secondary transition-colors hover:text-chat-foreground disabled:opacity-60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
-          <ArrowUp aria-hidden="true" className="size-3" />
+          <ArrowUp aria-hidden="true" className="size-3.5" />
           <span>{referenceOlderControlLabel(state)}</span>
         </button>
       </div>
@@ -1337,7 +1306,7 @@ export const ReferenceOlderPageControl: React.FC<{
     return (
       <p
         data-testid="reference-older-endcap"
-        className={cn("my-2 text-center text-[10px] text-chat-foreground-tertiary", className)}
+        className={cn("my-2 text-center text-xs text-chat-foreground-secondary", className)}
       >
         Beginning of conversation
       </p>

@@ -167,7 +167,7 @@ describe("MobileChatMessage reference rich parts", () => {
       />,
     );
 
-    expect(screen.getByText("Runtime message")).toBeInTheDocument();
+    expect(screen.getByRole("article", { name: /^Runtime message/ })).toBeInTheDocument();
   });
 });
 
@@ -800,7 +800,7 @@ describe("native turn props as mapReferenceTurns builds them", () => {
       />,
     );
 
-    expect(screen.getByText("Runtime message")).toBeInTheDocument();
+    expect(screen.getByRole("article", { name: /^Runtime message/ })).toBeInTheDocument();
     expect(screen.queryByTestId("user-message-bubble")).not.toBeInTheDocument();
     expect(screen.getByTestId("reference-notice")).toBeInTheDocument();
     expect(screen.queryByTestId("message-copy-button")).not.toBeInTheDocument();
