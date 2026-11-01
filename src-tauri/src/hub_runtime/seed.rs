@@ -32,17 +32,31 @@ fn memory_files(home: &Path) -> Vec<(&'static str, PathBuf)> {
     ]
 }
 
-/// Non-empty blank-line-separated paragraphs of text, at most max.
+/// Non-empty blank-line-separated paragraphs of text, at most max, each once. A paragraph's
+/// ordinal (and so its import source id) is a hash of its own text rather than its position,
+/// so inserting, removing or moving one paragraph does not give every other paragraph a new
+/// id and make owner ingest learn the whole file again. A repeated paragraph keeps its first
+/// occurrence only, since both copies would share one id.
 fn paragraphs(text: &str, max: usize) -> Vec<ImportTurn> {
     let normalized = text.replace("\r\n", "\n");
+    let mut seen = std::collections::HashSet::new();
     normalized
         .split("\n\n")
         .map(str::trim)
         .filter(|paragraph| !paragraph.is_empty())
+        .map(|paragraph| ImportTurn { ordinal: paragraph_id(paragraph), text: paragraph.to_owned() })
+        .filter(|turn| seen.insert(turn.ordinal))
         .take(max)
-        .enumerate()
-        .map(|(ordinal, paragraph)| ImportTurn { ordinal, text: paragraph.to_owned() })
         .collect()
+}
+
+/// The leading bytes of the paragraph's SHA-256 as a number.
+fn paragraph_id(paragraph: &str) -> usize {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(paragraph.as_bytes());
+    let mut head = [0u8; std::mem::size_of::<usize>()];
+    head.copy_from_slice(&digest[..head.len()]);
+    usize::from_be_bytes(head)
 }
 
 /// One import session per readable instruction file (provider memory, id <tool>:<file>).
@@ -192,8 +206,39 @@ mod tests {
     #[test]
     fn instruction_files_split_into_bounded_paragraphs() {
         let turns = paragraphs("one\r\n\r\n\n two \n\nthree\n\nfour", 3);
-        let texts: Vec<_> = turns.iter().map(|turn| (turn.ordinal, turn.text.as_str())).collect();
-        assert_eq!(texts, vec![(0, "one"), (1, "two"), (2, "three")]);
+        let texts: Vec<_> = turns.iter().map(|turn| turn.text.as_str()).collect();
+        assert_eq!(texts, vec!["one", "two", "three"]);
+        // The id follows the text, not its position; a repeated paragraph is kept once.
+        let moved = paragraphs("zero\n\nthree\n\none\n\nthree", 10);
+        let moved: Vec<_> = moved.iter().map(|turn| (turn.ordinal, turn.text.as_str())).collect();
+        assert_eq!(moved, vec![(paragraph_id("zero"), "zero"), (turns[2].ordinal, "three"), (turns[0].ordinal, "one")]);
+        assert_ne!(turns[0].ordinal, turns[1].ordinal);
+    }
+
+    #[tokio::test]
+    async fn an_inserted_paragraph_keeps_the_ids_of_the_others() {
+        let home = tempfile::tempdir().unwrap();
+        let claude = home.path().join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        let file = claude.join("CLAUDE.md");
+        std::fs::write(&file, "Prefer small focused commits.\n\nAnswer in Korean when I write Korean.\n").unwrap();
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::supervisor::provision_identity(&pool, "local:tester").await.unwrap();
+        let memory: Arc<dyn OwnerMemory> = Arc::new(Learner::default());
+        let first = seed_with_roots(&pool, memory.clone(), "local:tester", home.path().to_path_buf(), Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(first.turns_ingested, 2);
+
+        std::fs::write(
+            &file,
+            "Run clippy before every commit.\n\nPrefer small focused commits.\n\nAnswer in Korean when I write Korean.\n",
+        )
+        .unwrap();
+        let second = seed_with_roots(&pool, memory, "local:tester", home.path().to_path_buf(), Vec::new())
+            .await
+            .unwrap();
+        assert_eq!((second.turns_ingested, second.failed), (1, 0), "{second:?}");
     }
 
     #[tokio::test]
