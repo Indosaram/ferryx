@@ -4114,7 +4114,17 @@ async fn handle_control_socket(
                 }
                 break;
             }
-            grant = grants.recv() => {
+            // One delivery at a time: the daemon's ack carries no reliable correlation, so a
+            // second grant waits until the first is acknowledged or its caller gave up.
+            _ = async {
+                if let Some(ack) = pending_grant.as_mut() {
+                    ack.closed().await;
+                }
+            }, if pending_grant.is_some() => {
+                // The caller timed out; its slot must not capture the next delivery's ack.
+                pending_grant = None;
+            }
+            grant = grants.recv(), if pending_grant.is_none() => {
                 let Some(GrantDeliveryRequest { delivery, ack }) = grant else { break };
                 let Ok(payload) = serde_json::to_string(&delivery) else { continue };
                 if !matches!(timeout(TRANSFER_TIMEOUT, socket.send(Message::Text(payload.into()))).await, Ok(Ok(()))) {
@@ -5767,6 +5777,85 @@ mod tests {
         // The control socket survives and keeps its registration.
         control_barrier(&mut daemon).await;
         assert!(state.inner.control_channels.lock().contains_key("busy_machine"));
+        server.abort();
+    }
+
+    fn grant_envelope() -> crate::remote::account_protocol::AccountGrantOfferEnvelope {
+        crate::remote::account_protocol::AccountGrantOfferEnvelope {
+            machine_id: "grant_machine".into(),
+            enrollment_epoch: "1".into(),
+            sealed: "c2VhbGVk".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_grant_deliveries_each_get_their_own_ack() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (mut daemon, auth) = authenticate(&base, &identity(37, "grant_machine"), false, false).await;
+        assert!(auth.success);
+        let first_state = state.clone();
+        let first = tokio::spawn(async move {
+            first_state.deliver_grant_offer("grant_machine", grant_envelope()).await
+        });
+        let delivery: AccountGrantOfferDelivery = receive_json(&mut daemon).await;
+        assert_eq!(delivery.machine_id, "grant_machine");
+        // A second grant is queued while the first is unacknowledged; it must not be sent
+        // yet, so the daemon's first ack cannot be mistaken for it.
+        let second_state = state.clone();
+        let second = tokio::spawn(async move {
+            second_state.deliver_grant_offer("grant_machine", grant_envelope()).await
+        });
+        let ack = |id: &str| {
+            TMessage::Text(
+                serde_json::to_string(&AccountGrantOfferDelivered {
+                    grant_id: Some(id.into()),
+                    status: "ready".into(),
+                })
+                .unwrap()
+                .into(),
+            )
+        };
+        daemon.send(ack("grant-1")).await.unwrap();
+        assert_eq!(first.await.unwrap().unwrap().grant_id.as_deref(), Some("grant-1"));
+        let _: AccountGrantOfferDelivery = receive_json(&mut daemon).await;
+        daemon.send(ack("grant-2")).await.unwrap();
+        assert_eq!(second.await.unwrap().unwrap().grant_id.as_deref(), Some("grant-2"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_grant_ack_slot_does_not_capture_the_next_delivery() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (mut daemon, auth) = authenticate(&base, &identity(38, "grant_machine"), false, false).await;
+        assert!(auth.success);
+        let first_state = state.clone();
+        let first = tokio::spawn(async move {
+            first_state.deliver_grant_offer("grant_machine", grant_envelope()).await
+        });
+        let _: AccountGrantOfferDelivery = receive_json(&mut daemon).await;
+        // The first caller gives up (as its 10 s timeout would) without any ack.
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let second_state = state.clone();
+        let second = tokio::spawn(async move {
+            second_state.deliver_grant_offer("grant_machine", grant_envelope()).await
+        });
+        // The second delivery is forwarded once the abandoned slot is released.
+        let _: AccountGrantOfferDelivery = receive_json(&mut daemon).await;
+        daemon
+            .send(TMessage::Text(
+                serde_json::to_string(&AccountGrantOfferDelivered {
+                    grant_id: Some("grant-2".into()),
+                    status: "ready".into(),
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(second.await.unwrap().unwrap().grant_id.as_deref(), Some("grant-2"));
         server.abort();
     }
 
