@@ -1196,7 +1196,9 @@ pub fn live_relay_url(url: &str) -> std::borrow::Cow<'_, str> {
 
 /// Proxies frames bidirectionally between a relay data-channel WebSocket
 /// and a local TCP connection (the loopback gateway) until either side
-/// closes or errors.
+/// closes or errors. Once one direction ends, the other gets
+/// [`PROXY_DRAIN_TIMEOUT`] to flush what is in flight and is then dropped, so a
+/// dead side cannot keep the other connection (and this task) alive.
 async fn proxy_ws_to_tcp(
     ws: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -1206,7 +1208,7 @@ async fn proxy_ws_to_tcp(
     let (mut ws_tx, mut ws_rx) = ws.split();
     let (mut tcp_rx, mut tcp_tx) = tcp.into_split();
 
-    let ws_to_tcp = async {
+    let ws_to_tcp = std::pin::pin!(async {
         loop {
             match ws_rx.next().await {
                 Some(Ok(Message::Binary(data))) => {
@@ -1225,9 +1227,9 @@ async fn proxy_ws_to_tcp(
             }
         }
         let _ = tcp_tx.shutdown().await;
-    };
+    });
 
-    let tcp_to_ws = async {
+    let tcp_to_ws = std::pin::pin!(async {
         // 64 KiB matches the relay data channel's per-message cap (relay_server MAX_MESSAGE_SIZE).
         let mut buf = vec![0u8; 64 * 1024];
         loop {
@@ -1245,11 +1247,22 @@ async fn proxy_ws_to_tcp(
             }
         }
         let _ = ws_tx.send(Message::Close(None)).await;
-    };
+    });
 
-    tokio::join!(ws_to_tcp, tcp_to_ws);
+    match futures_util::future::select(ws_to_tcp, tcp_to_ws).await {
+        futures_util::future::Either::Left(((), remaining)) => {
+            let _ = tokio::time::timeout(PROXY_DRAIN_TIMEOUT, remaining).await;
+        }
+        futures_util::future::Either::Right(((), remaining)) => {
+            let _ = tokio::time::timeout(PROXY_DRAIN_TIMEOUT, remaining).await;
+        }
+    }
     Ok(())
 }
+
+/// How long the surviving direction of a data-channel proxy may keep flushing after the
+/// other direction ended.
+const PROXY_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(test)]
 mod tests {
@@ -2070,6 +2083,42 @@ mod tests {
         );
         let stream = client.connect_gateway().await.unwrap();
         assert!(stream.nodelay().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_closed_relay_side_ends_the_proxy_even_if_the_gateway_stays_silent() {
+        // A streaming gateway response: the gateway keeps its connection open and quiet.
+        let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_addr = gateway.local_addr().unwrap();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let held = tokio::spawn(async move {
+            let (socket, _) = gateway.accept().await.unwrap();
+            let _ = release_rx.await;
+            drop(socket);
+        });
+        let relay = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (tcp, _) = relay.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            // The relay side goes away first.
+            socket.close(None).await.unwrap();
+            while socket.next().await.is_some() {}
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{relay_addr}/tunnel/data/s"))
+            .await
+            .unwrap();
+        let tcp = TcpStream::connect(gateway_addr).await.unwrap();
+
+        // Real time: the proxy ends on the relay's Close frame plus at most one drain
+        // window, and a paused clock could jump past the bound while that frame is in flight.
+        tokio::time::timeout(PROXY_DRAIN_TIMEOUT * 4, proxy_ws_to_tcp(ws, tcp))
+            .await
+            .expect("the proxy must end once the relay side closed")
+            .unwrap();
+        release_tx.send(()).ok();
+        held.await.unwrap();
+        peer.await.unwrap();
     }
 
     #[tokio::test]
