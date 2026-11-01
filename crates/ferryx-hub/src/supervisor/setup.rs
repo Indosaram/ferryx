@@ -70,7 +70,8 @@ impl EngineView {
     }
 }
 
-/// The first unmet setup step.
+/// The first unmet setup step. After a rollback the cutover is not named again: the owner
+/// chose the legacy intake, and cutting over once more is an explicit `ferryx hub cutover`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NextAction {
@@ -250,7 +251,10 @@ pub async fn adoptable_lane_keys(pool: &SqlitePool) -> Result<Vec<String>, Super
         .await?)
 }
 
-/// This installation's setup status. Reads only.
+/// This installation's setup status. Reads only. A ready engine whose unified intake is
+/// closed asks for the cutover, except after a rollback: the owner deliberately went back to
+/// the legacy intake, so `nextAction` is `none` instead of pushing the cutover again (memory
+/// import and adoption are unified work and wait for that explicit cutover).
 pub async fn setup_status(
     pool: &SqlitePool,
     engine: EngineView,
@@ -288,6 +292,9 @@ pub async fn setup_status(
             EngineStep::Fix => NextAction::FixEngine,
             EngineStep::Ready if owner.is_none() => NextAction::CreateOwner,
             EngineStep::Ready if projects == 0 => NextAction::MapProjects,
+            EngineStep::Ready if !intake.unified_open && intake.origin == Origin::Rollback => {
+                NextAction::None
+            }
             EngineStep::Ready if !intake.unified_open => NextAction::Cutover,
             EngineStep::Ready if memory_import.enabled && memory_import.last_at.is_none() => {
                 NextAction::ImportMemory

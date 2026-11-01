@@ -355,6 +355,21 @@ mod status {
     }
 
     #[tokio::test]
+    async fn after_a_rollback_setup_does_not_ask_for_the_cutover_again() {
+        let pool = crate::storage::memory().await.unwrap();
+        crate::supervisor::cutover::note_import(&pool).await.unwrap();
+        provision_owner(&pool, OWNER, "qa-supervisor", REPO, HOST, DIR).await.unwrap();
+        assert_eq!(next(&pool, ready()).await, NextAction::Cutover);
+        let engine = ready();
+        crate::supervisor::cutover::cutover(&pool, engine.health.as_ref()).await.unwrap();
+        crate::supervisor::cutover::rollback(&pool).await.unwrap();
+        let rolled_back = setup_status(&pool, ready()).await.unwrap();
+        assert_eq!(rolled_back.intake.origin, "rollback");
+        assert!(!rolled_back.intake.unified_open);
+        assert_eq!(rolled_back.next_action, NextAction::None);
+    }
+
+    #[tokio::test]
     async fn the_status_wire_shape_is_camel_case_with_snake_case_actions() {
         let pool = crate::storage::memory().await.unwrap();
         let value = serde_json::to_value(setup_status(&pool, EngineView::default()).await.unwrap()).unwrap();
