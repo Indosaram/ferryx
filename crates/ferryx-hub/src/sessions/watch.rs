@@ -1,9 +1,9 @@
 //! Session notices driven by observer events. Delivery waits `notify_after` and
-//! holds through KST quiet hours on a timer. Nothing here polls the panes.
+//! holds through the owner's local quiet hours on a timer. Nothing here polls the panes.
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use chrono::{DateTime, TimeDelta, Timelike, Utc};
+use chrono::{DateTime, TimeDelta, TimeZone, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use tokio::sync::Mutex;
@@ -12,7 +12,6 @@ use crate::error::Result;
 
 pub const DEFAULT_NOTIFY_AFTER: Duration = Duration::from_secs(30 * 60);
 pub const DEFAULT_QUIET_HOURS: (u32, u32) = (0, 8);
-const KST: TimeDelta = TimeDelta::hours(9);
 
 /// Which owner-facing notices are posted to Slack or Discord.
 ///
@@ -138,7 +137,7 @@ impl NotifyPolicy {
         let Some((start, end)) = self.quiet_hours else {
             return false;
         };
-        let hour = (now + KST).hour();
+        let hour = crate::locale::current().local_hour(now);
         if start <= end {
             (start..end).contains(&hour)
         } else {
@@ -154,12 +153,17 @@ impl NotifyPolicy {
         let Some((_, end)) = self.quiet_hours else {
             return ready;
         };
-        let kst = ready + KST;
-        let mut end_naive = kst.date_naive().and_hms_opt(end % 24, 0, 0).expect("hour");
-        if kst.time() >= end_naive.time() {
+        let zone = crate::locale::current().timezone;
+        let local = ready.with_timezone(&zone).naive_local();
+        let mut end_naive = local.date().and_hms_opt(end % 24, 0, 0).expect("hour");
+        if local.time() >= end_naive.time() {
             end_naive += TimeDelta::days(1);
         }
-        DateTime::<Utc>::from_naive_utc_and_offset(end_naive, Utc) - KST
+        zone.from_local_datetime(&end_naive)
+            .earliest()
+            // The end hour falls in a DST gap: release an hour later, after the gap.
+            .or_else(|| zone.from_local_datetime(&(end_naive + TimeDelta::hours(1))).earliest())
+            .map_or(ready, |at| at.with_timezone(&Utc))
     }
 }
 
@@ -305,16 +309,21 @@ impl Watcher {
         let mut next_wake = None;
         let keys: Vec<String> = state.pending.keys().cloned().collect();
         for key in keys {
-            let Some((_, first)) = state.pending.get(&key).cloned() else {
+            if self.already_sent(&key).await? || state.sent_fallback.contains(&key) {
+                state.pending.remove(&key);
+                continue;
+            }
+            let Some((notice, first)) = state.pending.get(&key).cloned() else {
                 continue;
             };
+            if notice.target != obs.target {
+                continue;
+            }
             let ready = self.policy.release_at(
                 first + chrono::Duration::from_std(self.policy.notify_after).unwrap_or_default(),
             );
             if now >= ready {
-                if let Some((notice, _)) = state.pending.remove(&key) {
-                    due.push(notice);
-                }
+                due.push(notice);
             } else {
                 next_wake =
                     Some(next_wake.map_or(ready, |current: DateTime<Utc>| current.min(ready)));
@@ -503,6 +512,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn another_target_cannot_drain_a_pending_completion() {
+        let pool = crate::storage::memory().await.unwrap();
+        let watcher = Watcher::new(pool, NotifyPolicy {
+            notify_after: Duration::from_secs(60), quiet_hours: None, mode: NotifyMode::Actionable,
+        });
+        let start = Utc::now();
+        let mut first = question(true);
+        first.question = None;
+        watcher.on_observation(&first, start).await.unwrap();
+        first.streaming = false;
+        assert!(watcher.on_observation(&first, start).await.unwrap().due.is_empty());
+        let mut other = first.clone();
+        other.target = "host-a:sess-2".into();
+        other.session_id = "sess-2".into();
+        let later = start + chrono::Duration::seconds(61);
+        let unrelated = watcher.on_observation(&other, later).await.unwrap();
+        assert!(unrelated.due.is_empty());
+        assert!(unrelated.next_wake.is_none());
+        let ready = watcher.on_observation(&first, later).await.unwrap();
+        assert_eq!(ready.due.len(), 1);
+        assert_eq!(ready.due[0].target, first.target);
+        assert_eq!(ready.due[0].kind, "completion");
+    }
+
+    #[tokio::test]
     async fn one_question_and_one_completion_are_deduped_across_restart() {
         let pool = crate::storage::memory().await.unwrap();
         let policy = NotifyPolicy {
@@ -594,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn quiet_hours_hold_a_notice_until_08_kst() {
+    fn quiet_hours_hold_a_notice_until_08_owner_time() {
         let policy = NotifyPolicy::default();
         let quiet = DateTime::parse_from_rfc3339("2026-10-21T16:30:00Z")
             .unwrap()
@@ -607,6 +641,19 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc)
         );
+        // The same instant is 16:30 for a UTC owner: not quiet, released at once. 01:00Z is
+        // quiet there and is held until 08:00Z.
+        crate::locale::with(crate::locale::OwnerLocale::english_utc(), || {
+            assert!(!policy.is_quiet(quiet));
+            assert_eq!(policy.release_at(quiet), quiet);
+            let night = DateTime::parse_from_rfc3339("2026-10-22T01:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc);
+            assert_eq!(
+                policy.release_at(night).to_rfc3339(),
+                "2026-10-22T08:00:00+00:00"
+            );
+        });
     }
 
     #[test]

@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 use crate::error::{HubError, Result};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlOp {
     Stop,
     Start,
@@ -20,6 +20,44 @@ pub enum ControlOp {
     Cutover,
     Rollback,
     Intake,
+    Report(Box<ReportRequest>),
+    ReportStatus(i64),
+    ReportMutate(Box<crate::report_mutation::Request>),
+    ReportAdopt(Box<crate::report_adoption::Request>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportRequest {
+    pub source: String,
+    pub topic: String,
+    pub salience: crate::report_gate::Salience,
+    pub body: String,
+    pub state: String,
+    pub quote: Option<String>,
+    pub sender: Option<String>,
+    pub origin: Option<String>,
+    pub thread: Option<String>,
+    pub blocks: Option<Vec<Value>>,
+    /// A producer must supply the eligibility evidence it observed, not a guessed age.
+    pub blocked_reason: Option<String>,
+    /// The cron run whose failure this report is about (`FERRYX_CRON_RUN_ID` of the reporting
+    /// script), when the producer runs as a hub cron job.
+    #[serde(default)]
+    pub incident: Option<String>,
+}
+
+impl ReportRequest {
+    fn report(&self) -> crate::report_gate::Report {
+        let mut report = crate::report_gate::Report::new(
+            uuid::Uuid::new_v4().to_string(), &self.source, &self.topic, self.salience, &self.body,
+        ).with_state(&self.state);
+        report.quote.clone_from(&self.quote);
+        report.sender.clone_from(&self.sender);
+        report.origin_ref.clone_from(&self.origin);
+        report.thread.clone_from(&self.thread);
+        report.with_incident(self.incident.clone())
+    }
 }
 
 pub fn parse_control(line: &str) -> Result<ControlOp> {
@@ -37,6 +75,44 @@ pub fn parse_control(line: &str) -> Result<ControlOp> {
         Some("cutover") => Ok(ControlOp::Cutover),
         Some("rollback") => Ok(ControlOp::Rollback),
         Some("intake") => Ok(ControlOp::Intake),
+        Some("report_status") => value.get("outbox_id").and_then(Value::as_i64)
+            .filter(|id| *id > 0).map(ControlOp::ReportStatus)
+            .ok_or_else(|| HubError::message("report_status needs a positive outbox_id")),
+        Some("report_adopt") => {
+            let mut payload = value.clone();
+            if let Some(object) = payload.as_object_mut() { object.remove("op"); }
+            let request: crate::report_adoption::Request = serde_json::from_value(payload)
+                .map_err(|error| HubError::message(format!("invalid adoption: {error}")))?;
+            request.validate()?;
+            Ok(ControlOp::ReportAdopt(Box::new(request)))
+        }
+        Some("report_mutate") => {
+            let mut payload = value.clone();
+            if let Some(object) = payload.as_object_mut() { object.remove("op"); }
+            let request: crate::report_mutation::Request = serde_json::from_value(payload)
+                .map_err(|error| HubError::message(format!("invalid mutation: {error}")))?;
+            request.validate()?;
+            Ok(ControlOp::ReportMutate(Box::new(request)))
+        }
+        Some("report") => {
+            let mut payload = value.clone();
+            if let Some(object) = payload.as_object_mut() {
+                object.remove("op");
+            }
+            let request: ReportRequest = serde_json::from_value(payload)
+                .map_err(|error| HubError::message(format!("invalid report: {error}")))?;
+            if [&request.source, &request.topic, &request.body, &request.state]
+                .iter().any(|field| field.trim().is_empty())
+                || request.blocked_reason.as_deref().is_some_and(|reason| reason.trim().is_empty())
+                || request.incident.as_deref().is_some_and(|run| run.trim().is_empty())
+                || request.thread.as_deref().is_some_and(|thread| thread.trim().is_empty())
+                || request.blocks.as_ref().is_some_and(|blocks| blocks.is_empty() || blocks.len() > 50
+                    || blocks.iter().any(|block| !block.is_object()))
+            {
+                return Err(HubError::message("report fields and supplied eligibility evidence must not be empty"));
+            }
+            Ok(ControlOp::Report(Box::new(request)))
+        }
         _ => Err(HubError::message(
             "hub control expected stop, start, status, approve_rerun, cutover, rollback, or intake",
         )),
@@ -91,7 +167,116 @@ pub fn control_line(op: ControlOp) -> String {
         ControlOp::Cutover => "{\"op\":\"cutover\"}\n".to_owned(),
         ControlOp::Rollback => "{\"op\":\"rollback\"}\n".to_owned(),
         ControlOp::Intake => "{\"op\":\"intake\"}\n".to_owned(),
+        ControlOp::ReportStatus(id) => format!("{}\n", json!({"op":"report_status", "outbox_id":id})),
+        ControlOp::ReportAdopt(request) => {
+            let mut value = json!(request);
+            value["op"] = json!("report_adopt");
+            format!("{value}\n")
+        }
+        ControlOp::ReportMutate(request) => {
+            let mut value = json!(request);
+            value["op"] = json!("report_mutate");
+            format!("{value}\n")
+        }
+        ControlOp::Report(request) => {
+            let mut value = json!(request);
+            value["op"] = json!("report");
+            format!("{value}\n")
+        }
     }
+}
+
+/// Admission is durable even when Slack is unavailable; the normal outbox worker delivers it.
+pub async fn report_reply(pool: &sqlx::SqlitePool, session: &str, request: &ReportRequest) -> Value {
+    match queue_report(pool, session, request).await {
+        Ok((decision, outbox)) => json!({"status":"ok", "op":"report",
+            "decision":decision.as_str(), "outbox_id":outbox}),
+        Err(error) => json!({"status":"failed", "op":"report", "error":error.to_string()}),
+    }
+}
+
+/// Reads a delivery receipt without resubmitting or posting the report. `uncertain` means a
+/// post may have reached Slack without a recorded outcome (a timeout, or a sender that died
+/// mid-post); the hub never retries it on its own, so a producer must not resubmit it either.
+pub async fn report_status_reply(pool: &sqlx::SqlitePool, id: i64) -> Value {
+    type Row = (Option<String>, Option<String>, Option<String>, Option<String>,
+        Option<String>, Option<String>, Option<i64>, Option<String>, i64, Option<String>);
+    let row = sqlx::query_as::<_, Row>(
+        "SELECT delivered_at, cancelled_at, posted_channel, posted_ts, send_uncertain_at,
+                send_uncertain_error, send_inflight, send_claim_until, send_chunks_done, send_chunks_json
+           FROM chat_outbox WHERE id = ?")
+            .bind(id).fetch_optional(pool).await;
+    match row {
+        Ok(Some((delivered, cancelled, channel, ts, uncertain_at, uncertain_error, inflight,
+            claim_until, chunks_done, chunks))) => {
+            // A live claim is pending, not a final unknown; see report_mutation::statuses.
+            let mutations = match crate::report_mutation::statuses(pool, id).await {
+                Ok(rows) => rows,
+                Err(error) => return json!({"status":"failed","op":"report_status","error":error.to_string()}),
+            };
+            // A sender that is still inside its lease is posting now; past it, nobody recorded
+            // the outcome of the chunk it was posting.
+            let abandoned = inflight.is_some() && claim_until.as_deref()
+                .and_then(|until| chrono::DateTime::parse_from_rfc3339(until).ok())
+                .is_none_or(|until| until <= chrono::Utc::now());
+            let delivery = if cancelled.is_some() { "cancelled" }
+                else if delivered.is_some() { "delivered" }
+                else if uncertain_at.is_some() || abandoned { "uncertain" }
+                else { "pending" };
+            let chunks_total = chunks.as_deref()
+                .and_then(|chunks| serde_json::from_str::<Vec<Value>>(chunks).ok())
+                .map(|chunks| chunks.len());
+            json!({"status":"ok", "op":"report_status", "outbox_id":id,
+                "delivery":delivery, "channel":channel, "ts":ts,"mutations":mutations,
+                "chunks_posted":chunks_done, "chunks_total":chunks_total,
+                "uncertain_since":uncertain_at, "uncertain_error":uncertain_error})
+        }
+        Ok(None) => json!({"status":"failed", "op":"report_status", "code":"not_found", "outbox_id":id}),
+        Err(error) => json!({"status":"failed", "op":"report_status", "error":error.to_string()}),
+    }
+}
+
+async fn queue_report(
+    pool: &sqlx::SqlitePool,
+    session: &str,
+    request: &ReportRequest,
+) -> Result<(crate::report_gate::Decision, Option<i64>)> {
+    use crate::storage::WriteTx;
+    let destination = if let Some(thread) = &request.thread {
+        let mut key = crate::chat::session::SessionKey::from_storage_key(session)
+            .map_err(|error| HubError::message(error.to_string()))?;
+        key.thread_id = Some(thread.clone());
+        key.storage_key()
+    } else {
+        session.to_owned()
+    };
+    let mut tx = pool.begin_write().await?;
+    let report = request.report();
+    let text = match report.quote.as_deref() {
+        Some(quote) => format!("{}\n\n{}", report.body, quote),
+        None => report.body.clone(),
+    };
+    let mut result = match &request.blocks {
+        Some(blocks) => crate::report_gate::queue_card_in(
+            &mut tx, &destination, &report, request.blocked_reason.is_some(), &text, blocks,
+        ).await?,
+        None => crate::report_gate::queue_delivery_in(
+            &mut tx, &destination, &report, request.blocked_reason.is_some(), &text, None,
+        ).await?,
+    };
+    if result.0 == crate::report_gate::Decision::Duplicate {
+        result.1 = sqlx::query_scalar(
+            "SELECT o.id FROM chat_outbox o JOIN report_delivery_parts p ON p.outbox_id = o.id
+             WHERE o.session_key = ? AND o.cancelled_at IS NULL
+               AND json_extract(p.report_json, '$.source') = ?
+               AND json_extract(p.report_json, '$.topic_key') = ?
+               AND json_extract(p.report_json, '$.state_hash') = ?
+             ORDER BY o.id DESC LIMIT 1",
+        ).bind(&destination).bind(&report.source).bind(&report.topic_key).bind(&report.state_hash)
+            .fetch_optional(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(result)
 }
 
 /// The control reply to `approve_rerun`. The rerun itself runs in the background and reports
@@ -285,7 +470,7 @@ mod tests {
         );
         assert!(parse_control("{\"op\":\"approve_rerun\"}").is_err());
         for op in [ControlOp::Cutover, ControlOp::Rollback, ControlOp::Intake] {
-            assert_eq!(parse_control(&control_line(op)).unwrap(), op);
+            assert_eq!(parse_control(&control_line(op.clone())).unwrap(), op);
         }
         assert!(parse_control("{\"op\":\"restart-daemon\"}").is_err());
     }
@@ -295,6 +480,190 @@ mod tests {
         let reply = approve_rerun_reply(7).await;
         assert!(!reply_ok(&reply), "{reply}");
         assert!(reply.contains("cron remediator not installed"), "{reply}");
+    }
+
+    #[tokio::test]
+    async fn external_reports_are_queued_once_and_stale_cards_are_not_queued() {
+        let pool = crate::storage::memory().await.unwrap();
+        let input = json!({"op":"report", "source":"autopilot", "topic":"card:42",
+            "salience":"action", "body":"새 공고를 확인해 주세요.", "state":"eligible"});
+        let ControlOp::Report(mut request) = parse_control(&input.to_string()).unwrap() else {
+            panic!("report request expected");
+        };
+        assert_eq!(parse_control(&control_line(ControlOp::Report(request.clone()))).unwrap(),
+            ControlOp::Report(request.clone()));
+        let first = report_reply(&pool, "owner", &request).await;
+        assert_eq!(first["decision"], "sent");
+        let retry = report_reply(&pool, "owner", &request).await;
+        assert_eq!(retry["decision"], "duplicate");
+        assert!(first["outbox_id"].as_i64().is_some());
+        assert_eq!(retry["outbox_id"], first["outbox_id"]);
+        assert!(report_reply(&pool, "other-owner", &request).await["outbox_id"].is_null());
+        sqlx::query("UPDATE chat_outbox SET cancelled_at = CURRENT_TIMESTAMP WHERE id = ?")
+            .bind(first["outbox_id"].as_i64().unwrap()).execute(&pool).await.unwrap();
+        let cancelled = report_reply(&pool, "owner", &request).await;
+        assert_eq!(cancelled["decision"], "duplicate");
+        assert!(cancelled["outbox_id"].is_null());
+        request.topic = "card:43".into();
+        request.blocked_reason = Some("provider returned preferred_only=true".into());
+        assert_eq!(report_reply(&pool, "owner", &request).await["decision"], "stale");
+        let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_outbox")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(queued, 1);
+    }
+
+    #[test]
+    fn external_report_boundary_rejects_missing_identity_and_unknown_salience() {
+        let input = json!({"op":"report", "source":"autopilot", "topic":"card:42",
+            "salience":"action", "body":"확인해 주세요.", "state":"eligible"});
+        for field in ["source", "topic", "body", "state"] {
+            let mut invalid = input.clone();
+            invalid[field] = json!(" ");
+            assert!(parse_control(&invalid.to_string()).is_err());
+        }
+        for blocks in [json!([]), json!(["not a block"]), json!({"type":"actions"})] {
+            let mut invalid = input.clone();
+            invalid["blocks"] = blocks;
+            assert!(parse_control(&invalid.to_string()).is_err());
+        }
+        let mut invalid = input;
+        invalid["salience"] = json!("urgent");
+        assert!(parse_control(&invalid.to_string()).is_err());
+    }
+
+    #[tokio::test]
+    async fn card_persistence_failure_rolls_back_admission() {
+        // Given a valid external card and a storage failure saving its blocks.
+        let pool = crate::storage::memory().await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_blocks BEFORE UPDATE OF blocks_json ON chat_outbox BEGIN SELECT RAISE(ABORT, 'test failure'); END")
+            .execute(&pool).await.unwrap();
+        let input = json!({"op":"report", "source":"autopilot", "topic":"card:42",
+            "salience":"decision", "body":"지원 여부를 선택해 주세요.", "state":"eligible",
+            "blocks":[{"type":"actions","elements":[]}]});
+        let ControlOp::Report(request) = parse_control(&input.to_string()).unwrap() else {
+            panic!("report request expected");
+        };
+
+        // When the same transaction cannot persist the interactive content.
+        assert_eq!(report_reply(&pool, "owner", &request).await["status"], "failed");
+
+        // Then no reservation or orphaned text-only message survives.
+        for table in ["chat_outbox", "report_topics", "report_suppressions", "report_delivery_parts", "delivered_alerts"] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&pool).await.unwrap();
+            assert_eq!(count, 0, "{table}");
+        }
+    }
+
+    #[cfg(feature = "hub-slack")]
+    #[tokio::test]
+    async fn external_card_retry_preserves_buttons_and_thread() {
+        // Given a durably admitted card, without an initial transport attempt.
+        let pool = crate::storage::memory().await.unwrap();
+        let owner = crate::chat::session::SessionKey::new("slack", None::<String>, "DOWNER", None::<String>, "UOWNER");
+        let blocks = json!([{"type":"actions","elements":[{"type":"button",
+            "text":{"type":"plain_text","text":"Approve"},
+            "action_id":"omon:btn:autopilot:apply:42", "value":"omon:btn:autopilot:apply:42"}]}]);
+        let input = json!({"op":"report", "source":"autopilot", "topic":"card:42",
+            "salience":"decision", "body":"지원 여부를 선택해 주세요.", "state":"eligible",
+            "quote":"Project #42: Rust integration", "thread":"1700000000.1", "blocks":blocks});
+        let ControlOp::Report(request) = parse_control(&input.to_string()).unwrap() else {
+            panic!("report request expected");
+        };
+        let admitted = report_reply(&pool, &owner.storage_key(), &request).await;
+        assert_eq!(admitted["decision"], "sent");
+        let id = admitted["outbox_id"].as_i64().unwrap();
+        let (base, calls) = crate::chat::slack_web::mock::serve("B1").await;
+
+        let scope = crate::report_rules::scope_from_alert("autopilot", None, None, Some("card:42"));
+        crate::report_rules::record(&pool, &scope, crate::report_rules::Effect::Digest, "digest", None).await.unwrap();
+        crate::chat::slack::with_test_api(base, "test-token".into(), async {
+            assert_eq!(crate::chat::reply::flush_pending(&pool).await.unwrap(), 0);
+            assert!(calls.lock().unwrap().iter().all(|(method, _)| method != "chat.postMessage"));
+            let due = (chrono::Utc::now() - chrono::Duration::minutes(3)).to_rfc3339();
+            let old = (chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+            sqlx::query("UPDATE chat_outbox SET report_not_before=?,created_at=? WHERE id=?")
+                .bind(due).bind(old).bind(id).execute(&pool).await.unwrap();
+            assert_eq!(crate::chat::reply::flush_stale(&pool, crate::chat::reply::OUTBOX_SETTLE, chrono::Duration::hours(24)).await.unwrap(), 1);
+        }).await;
+
+        // Then the actual HTTP request retains the original action IDs and thread.
+        let receipt = report_status_reply(&pool, id).await;
+        assert_eq!(receipt["delivery"], "delivered");
+        assert_eq!(receipt["channel"], "DOWNER");
+        assert!(receipt["ts"].as_str().is_some_and(|ts| !ts.is_empty()));
+        let calls = calls.lock().unwrap();
+        let posts: Vec<_> = calls.iter().filter(|(method, _)| method == "chat.postMessage").collect();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].1["blocks"], blocks);
+        assert_eq!(posts[0].1["thread_ts"], "1700000000.1");
+        assert_eq!(posts[0].1["channel"], "DOWNER");
+        assert_eq!(posts[0].1["text"], format!("{}\n\n{}", request.body, request.quote.as_deref().unwrap()));
+    }
+
+    #[test]
+    fn report_status_requires_a_positive_outbox_identity() {
+        let op = ControlOp::ReportStatus(42);
+        assert_eq!(parse_control(&control_line(op.clone())).unwrap(), op);
+        for id in [json!(0), json!(-1), json!(null), json!("42")] {
+            assert!(parse_control(&json!({"op":"report_status", "outbox_id":id}).to_string()).is_err());
+        }
+    }
+
+    #[test]
+    fn report_adoption_roundtrips_without_producer_content() {
+        let input = json!({"op":"report_adopt","channel":"DOWNER","ts":"1700.1",
+            "source":"autopilot","topic":"autopilot:item:42"});
+        let op = parse_control(&input.to_string()).unwrap();
+        assert_eq!(parse_control(&control_line(op.clone())).unwrap(), op);
+        let mut invalid = input;
+        invalid["blocks"] = json!([]);
+        assert!(parse_control(&invalid.to_string()).is_err());
+    }
+
+    #[test]
+    fn report_mutation_roundtrips_and_requires_parent_identity() {
+        for change in [json!({"kind":"restore_actions"}),
+            json!({"kind":"action_row","row":{"type":"context","elements":[{"type":"plain_text","text":"processing"}]}})] {
+            let input = json!({"op":"report_mutate","outbox_id":42,
+                "mutation_id":"processing:1","change":change});
+            let op = parse_control(&input.to_string()).unwrap();
+            assert_eq!(parse_control(&control_line(op.clone())).unwrap(), op);
+            for id in [json!(0), json!(-1), json!(null)] {
+                let mut invalid = input.clone();
+                invalid["outbox_id"] = id;
+                assert!(parse_control(&invalid.to_string()).is_err());
+            }
+            let mut invalid = input;
+            invalid["mutation_id"] = json!("");
+            assert!(parse_control(&invalid.to_string()).is_err());
+            invalid["mutation_id"] = json!("processing:1");
+            invalid["change"] = json!({"kind":"action_row","row":{"type":"actions",
+                "elements":[{"type":"button","action_id":"unapproved"}]}});
+            assert!(parse_control(&invalid.to_string()).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_and_cancelled_reports_never_claim_a_delivery_receipt() {
+        let pool = crate::storage::memory().await.unwrap();
+        let input = json!({"op":"report", "source":"autopilot", "topic":"card:42",
+            "salience":"decision", "body":"지원 여부를 선택해 주세요.", "state":"eligible"});
+        let ControlOp::Report(request) = parse_control(&input.to_string()).unwrap() else {
+            panic!("report request expected");
+        };
+        let admitted = report_reply(&pool, "owner", &request).await;
+        let id = admitted["outbox_id"].as_i64().unwrap();
+        let pending = report_status_reply(&pool, id).await;
+        assert_eq!(pending["delivery"], "pending");
+        assert!(pending["channel"].is_null());
+        assert!(pending["ts"].is_null());
+        sqlx::query("UPDATE chat_outbox SET cancelled_at = ? WHERE id = ?")
+            .bind(crate::storage::now_rfc3339()).bind(id).execute(&pool).await.unwrap();
+        let cancelled = report_status_reply(&pool, id).await;
+        assert_eq!(cancelled["delivery"], "cancelled");
+        assert!(cancelled["ts"].is_null());
+        assert_eq!(report_status_reply(&pool, id + 1).await["code"], "not_found");
     }
 
     #[test]

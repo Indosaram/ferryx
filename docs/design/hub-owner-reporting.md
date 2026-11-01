@@ -1,6 +1,6 @@
 # Hub owner reporting: owner report rules, one outbound gate, commitments
 
-Date: 2026-10-30. Status: design, not approved, nothing implemented.
+Date: 2026-10-30. Status: approved for implementation; integration and acceptance checks ongoing.
 Scope: `crates/ferryx-hub`. Incorporates `docs/research/harness2-pstack-adoption-2026-10-30.md`
 (lesson ledger A1/A2, owner control A3, verifier rules A4, alert-only caps A5).
 Evidence: `ferryx-wt/.evidence/report-gate-20261030/` (`findings.md`, `slack-audit-182.jsonl`,
@@ -88,7 +88,7 @@ The rule's scope comes from the alert being objected to, never from guessing:
 |---|---|
 | `source` | `mail`, `kakao`, `imessage`, `cron`, `github`, `ci`, `report` |
 | `sender_key` | normalised sender address, domain or room id (optional) |
-| `topic_key` | the alert's gate topic key (section 4) |
+| `topic_key` | stable non-inbox topic; inbox item IDs are excluded when sender or subject identifies the kind |
 | `pattern` | a subject stem taken from the alert, with digits and ids stripped (optional) |
 | `effect` | `mute` (never send), `digest` (daily digest only), `send` (always send immediately) |
 
@@ -98,7 +98,21 @@ stored only after he confirms. This is the one case where the bot asks.
 
 A `once:` or `이번만:` objection mutes only the alert it was attached to and stores no rule.
 
+Feedback on a delivered inbox alert must match the next item of that kind, not only the
+already-delivered item. The triage and outbound gate both normalise the sender and subject
+stem before matching, including display-name addresses and changing numeric codes. Other
+subjects from the same sender retain the default-send policy.
+
 ### Confirmation and undo
+
+Delivery compares an applicable durable rule with the applicable memory directive.
+A conflicting directive overrides the rule only when its source date proves it was
+given later than the rule's recorded timestamp. Projection refresh and judge-call
+timestamps are not owner-decision timestamps. Date-only directives use the earliest
+possible instant for that date (UTC+14); overlapping dates, undated directives and
+unparseable timestamps retain the explicit scoped rule rather than inventing order.
+This limitation does not affect later scoped feedback, which records an exact time
+and supersedes earlier matching rules. Unrelated scopes retain their own decisions.
 
 After storing a rule the bot replies once, in Korean, in the same thread, for example:
 "앞으로 GitLab 새 위치 로그인 메일은 보내지 않습니다. 다시 받으시려면 '이건 다시 보내'라고 해 주세요."
@@ -109,8 +123,10 @@ After storing a rule the bot replies once, in Korean, in the same thread, for ex
 
 ### Supersession
 
-When rules overlap, the newest wins (`created_at`). An older overlapping rule is closed with
-`superseded_by` and stays in the table for history. A rule never deletes another; it closes it.
+When rules overlap, the newest matching rule wins (`created_at`, then insertion order).
+An older rule is closed with `superseded_by` only when the new rule covers its entire scope.
+Broader rules remain active for unaffected items when a narrower exception is added. Two
+different subjects from one sender never erase each other's rules. Closed rows remain for history.
 When a new rule closes an older rule that has a different `effect`, the confirmation says so in
 one line: "이전 규칙 '…'은 이 규칙으로 대체됐습니다."
 
@@ -160,8 +176,23 @@ instead of posting directly. `Report` carries:
 | `lanes/kibitzer.rs` wake output | free text | `fyi` or `action` per its envelope |
 | `chat/slack.rs` `post_message`, `chat/slack_web.rs` | raw transport | reachable only from the gate and from direct replies to an owner message |
 
-A direct reply to the owner's own message in the same turn passes through the leak filter only.
-It is the answer he asked for.
+A direct reply is a requested result, not background FYI. Its intermediate and final reports
+share the owner-turn identity. Before admission, a Jev comparison against the latest admitted
+report in that same destination marks pure rewording as the existing state; the normal gate
+then records a duplicate. New actions, decisions, outcomes, blockers, corrections and evidence
+that changes the conclusion remain separate reports. Missing or capped judgment preserves
+the candidate. Cancelled reports and other destinations never supply comparison context.
+There is no elapsed-time window. Commitment-fulfilling results retain their explicit delivery.
+
+Turn phase is context, not a salience verdict. Interim and final candidates are classified
+with the originating request; a meaningful interim action or result is not discarded as
+progress. Successful action, decision and result judgments survive the prose leak heuristic.
+Classification metadata is persisted with the queued report for delivery-policy rechecks;
+the originating request text is not persisted in that metadata. An internal final answer
+to an explicit owner request is suppressed only after a report of that same destination
+and turn has a non-cancelled `chat_outbox.delivered_at` receipt. Admission in `report_topics`
+does not establish delivery. Without that receipt the real final answer remains eligible,
+subject to owner rules, empty-content, stale and duplicate checks.
 
 ### Rules, in order
 
@@ -185,6 +216,29 @@ It is the answer he asked for.
 Every decision writes one `report_suppressions` row (kept or dropped, with the rule that
 decided). This is the suppression log, and the replay reads it.
 
+Delivery admission, the retry outbox row and the owner-feedback reference commit in one
+SQLite write transaction. Inbox alert obligations join that transaction. A failed insert
+must not consume the topic, and concurrent admissions of one state queue only one message.
+
+The daily digest is queued at 18:00 KST or the next delivery sweep. It carries actual
+content and quoted source text, not topic identifiers. Up to 20 pending topics are included;
+remaining and later topics carry over to the next day. The latest state replaces earlier
+pending content for a topic. Owner rules are checked again immediately before queuing, so
+a mute received after deferral still applies. The outbox retries transport failures without
+creating another digest for the same KST day. Each included topic retains a feedback reference.
+
+Outbox retries recheck the latest owner rules immediately before transport. Muted messages
+receive a cancellation timestamp, not a delivered timestamp, and their obligations become
+suppressed. A pending digest removes only the muted parts and keeps the remaining content
+and feedback references. A new digest rule defers an admitted immediate report without
+losing its body. All outbox retry entry points use this same check.
+
+External report admission accepts the producer's optional Slack blocks and thread. Blocks
+commit with the gate decision and outbox, and retries preserve button action IDs rather than
+replacing a card with plain text. An admission response is not a Slack delivery receipt;
+producers that need a channel and message timestamp must obtain the actual transport receipt
+before recording a posted card.
+
 ## 5. Commitment ledger and known outages
 
 ### Commitments
@@ -203,6 +257,12 @@ The sweeper runs every 10 minutes:
   resumes.
 - A row the bot cannot do any more is closed `abandoned` with one honest line.
 - The owner can close a row by replying.
+
+The overdue state transition, report-gate decision, retry outbox row, feedback reference and
+lane wake commit in one write transaction per commitment. Queue failure leaves the promise
+open for the next sweep. Concurrent sweeps admit one follow-up. Delivery uses the stored
+Slack channel and thread, and a transport failure leaves the outbox retry responsible for it.
+The follow-up states the missed deadline without making another untracked promise.
 
 ### Known outages
 
@@ -245,6 +305,12 @@ only when the job's own output proves work happened:
 - a new `cron_runs` row with a non-empty result;
 - no failure marker in the output;
 - for publishing jobs, the published item id or URL.
+
+Before the runtime marks a problem fixed, a separate CronOutcome judgment checks
+that the output describes the intended work actually completing. Login requests,
+skipped work and a bare success/ok are not completion evidence. Only a nonfallback,
+noncapped completed judgment closes the problem; unavailable judgment leaves it
+unverified. The stored run receipt remains the evidence for that decision.
 
 Otherwise the outcome is `unverified` or `failed`. The outcome taxonomy, with owner text in
 Korean:
@@ -353,8 +419,16 @@ reports and writes `{i, outcome}` JSONL. `score-replay.ts` passes when there are
 rows, no expected-suppress row is kept, and no expected-keep row is lost. Mismatches between
 digest and suppress are listed, not failed.
 
-**Commitment DB replay:** feeding the 20 promise rows yields 7 follow-ups, one each for rows 17,
-85, 87, 157, 165, 180 and 181, and none for the 13 fulfilled ones.
+The owner confirmed Ferryx-only scope: the 21 GeekNews/Instinct posts are explicitly
+reported as `external_bot`, checked against the original sender, and excluded from
+Ferryx acceptance. They are not counted as successful gate decisions. Missing Ferryx
+producer evidence still fails. External producers using the Ferryx bot remain in scope.
+
+**Commitment DB replay:** the 20 promise labels include two Instinct promises
+(157 and 165), outside Ferryx visibility and excluded under the confirmed scope.
+Each of the five unfulfilled Ferryx promises (17, 85, 87, 180 and 181) gets one
+follow-up. Fulfilled promises get no subsequent follow-up; a promise fulfilled
+after its deadline may already have received one, recorded separately.
 
 **Gates:** `cargo test -p ferryx-hub` and `cargo clippy -p ferryx-hub --all-targets -- -D warnings`
 on a remote host picked by `scripts/pick-build-host.sh`, never this Mac.
@@ -372,6 +446,30 @@ on a remote host picked by `scripts/pick-build-host.sh`, never this Mac.
 `src/lib.rs` module registration is done once by L1 for every new module, so the lanes do not
 collide on it.
 
+## Generic owner
+
+The hub is a product anyone can run, not one owner's bot. Every setting is listed in
+[`docs/hub/CONFIGURATION.md`](../hub/CONFIGURATION.md).
+
+- **Locale.** Owner-facing built-in texts, day boundaries, quiet hours and time labels come
+  from `crate::locale` (`FERRYX_HUB_OWNER_LANGUAGE` / `FERRYX_HUB_OWNER_TIMEZONE`, or
+  `ownerLanguage` / `ownerTimezone` in the hub config file). Built-in texts have a Korean and an
+  English branch (`locale::text` / `pick`), and any other language gets English. Model prompts
+  are written in English and ask for output "in {language name}". Daily caps, the usage
+  digest's "yesterday", kibitzer and session quiet hours, and inbox filter stats all use the
+  owner's local day. No code adds a fixed +9h offset, and no text hardcodes a "KST" label:
+  labels come from `locale.format`, which appends the zone abbreviation.
+- **No personal defaults.** There is no built-in Slack owner id, background model, requester
+  name or personal URL. With no owner configured, the hub logs a config error and runs without
+  one: there is no owner DM lead and nobody may press buttons. It never guesses a person.
+  `OMON_BACKGROUND_MODEL` unset means background turns use the default model. Remaining
+  hardcoded values outside this lane are listed as known gaps in CONFIGURATION.md
+  (`OMON_PIRATETALK_URL` fallback, quota URL).
+- **Incident ids.** A cron job script receives `FERRYX_CRON_RUN_ID`. When it reports a failure
+  through the control socket it passes that id as `incident`, so the hub's own remediation of
+  the same run is recognised as one incident and the owner hears about it once, not once from
+  the script and again from remediation.
+
 ## 13. Open owner decisions
 
 Decided by the owner on 2026-10-30:
@@ -380,3 +478,20 @@ Decided by the owner on 2026-10-30:
    the work branch and reaches `main` with it.
 2. **Bot-caused mail:** no special case. It is sent by default and muted only by his rules.
 3. **Dedupe:** no time windows (rule 5): one message per topic, again only on a state change.
+
+## 14. Follow-ups outside this crate
+
+- **outsourcing-autopilot** (`~/code/project/outsourcing-autopilot/src/slack.ts`) posts job
+  cards, "⏳ 접수했습니다" acks, results and collection errors straight to Slack with the hub
+  bot token, so those posts skip the gate. The hub now exposes a control-socket `report` op
+  (topic, salience, body, state, thread and blocks) and a `report_status` receipt query.
+  Producer migration remains required acceptance work; an admission is not a Slack receipt.
+  The source is not a git repository. Preserve a patch artifact and keep deployment separate
+  from the Ferryx release; this does not make the bypass an acceptable final state.
+  Versioned adapters are in `scripts/hub-report-adapters/autopilot.patch` and
+  `scripts/hub-report-adapters/content-intel.patch`; their README describes ordering
+  and receipt semantics. Both patches pass apply-check against the current producer
+  sources. They are not applied automatically by building or installing Ferryx.
+- **Release:** build unsigned on another Mac, never the owner's MacBook. The owner permits
+  reaching maho-mac through the Ferryx relay when needed. Install and daemon handover
+  wait for his approval; a paid builder requires separate authorization.

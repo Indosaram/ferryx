@@ -20,6 +20,9 @@ pub struct HubConfig {
     pub supervisor_cwd: Option<PathBuf>,
     /// Launch the supervisor pane preset. The headless engine starts either way.
     pub supervisor_pane: bool,
+    /// The owner's Slack user id (`FERRYX_HUB_SLACK_OWNER`, else the first
+    /// `SLACK_ALLOWED_USERS` entry). There is no built-in owner: unset, the hub runs without
+    /// one and logs a configuration error at load.
     pub owner_slack_id: Option<String>,
     /// Slack channel for owner notices and approval cards (`SLACK_HOME_CHANNEL`).
     /// Absent means those posts go to the owner DM.
@@ -36,15 +39,31 @@ pub struct HubConfig {
     pub profile_routes: Vec<ProfileRoute>,
     /// `TYPESAFE_*` values. The judge reads these and does not scrape `~/.zshenv`.
     pub typesafe: BTreeMap<String, String>,
+    /// The owner's language as a BCP 47 tag (`ko`, `en-US`): the config-file counterpart of
+    /// `FERRYX_HUB_OWNER_LANGUAGE`. The environment and the hub env file win over it.
+    pub owner_language: Option<String>,
+    /// The owner's IANA time zone (`Asia/Seoul`, `Europe/Paris`): the config-file counterpart of
+    /// `FERRYX_HUB_OWNER_TIMEZONE`. The environment and the hub env file win over it.
+    pub owner_timezone: Option<String>,
 }
 
 impl HubConfig {
     /// File at `FERRYX_HUB_CONFIG`, then env overrides. Missing file is an empty config.
+    ///
+    /// The file's `ownerLanguage` / `ownerTimezone` are exported as `FERRYX_HUB_OWNER_LANGUAGE`
+    /// / `FERRYX_HUB_OWNER_TIMEZONE` when neither the environment nor the hub env file sets
+    /// them, so [`crate::locale`] reads them. The locale is resolved once, on first use, so
+    /// call this at startup before any owner-facing text is built.
     pub fn load() -> Result<Self> {
         let mut config = match crate::hub_env::var("FERRYX_HUB_CONFIG") {
             Ok(path) => Self::from_file(Path::new(&path))?,
             Err(_) => Self::default(),
         };
+        for (key, value) in config.owner_locale_exports(|key| crate::hub_env::var(key).ok()) {
+            // Startup, before the locale is first read; the key is unset everywhere, so no
+            // other reader can observe a change.
+            std::env::set_var(key, value);
+        }
         if let Ok(path) = crate::hub_env::var("FERRYX_HUB_DB") {
             config.database_path = Some(PathBuf::from(path));
         }
@@ -75,15 +94,38 @@ impl HubConfig {
             .as_deref()
             .is_none_or(|id| id.trim().is_empty())
         {
-            config.owner_slack_id = Some(slack_owner_from(
-                crate::hub_env::var("SLACK_ALLOWED_USERS").ok().as_deref(),
-            ));
+            config.owner_slack_id =
+                slack_owner_from(crate::hub_env::var("SLACK_ALLOWED_USERS").ok().as_deref());
+        }
+        if config.owner_slack_id.is_none() {
+            tracing::error!(
+                "no hub owner is configured: set FERRYX_HUB_SLACK_OWNER (or SLACK_ALLOWED_USERS, or ownerSlackId in the hub config file) to the owner's Slack user id; owner DMs, approvals and button clicks are disabled until then"
+            );
         }
         config.apply_slack_home_override(crate::hub_env::var("SLACK_HOME_CHANNEL").ok().as_deref());
         config.home_platform = Some(
             home_platform(crate::hub_env::var("OMON_HOME_PLATFORM").ok().as_deref()).to_owned(),
         );
         Ok(config)
+    }
+
+    /// `(env key, value)` for each of the file's owner locale settings that `lookup` (the
+    /// environment, then the hub env file) leaves unset. Blank values count as unset.
+    pub fn owner_locale_exports(
+        &self,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Vec<(&'static str, String)> {
+        [
+            ("FERRYX_HUB_OWNER_LANGUAGE", self.owner_language.as_deref()),
+            ("FERRYX_HUB_OWNER_TIMEZONE", self.owner_timezone.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let value = value.map(str::trim).filter(|value| !value.is_empty())?;
+            let set = lookup(key).is_some_and(|current| !current.trim().is_empty());
+            (!set).then(|| (key, value.to_owned()))
+        })
+        .collect()
     }
 
     pub fn from_file(path: &Path) -> Result<Self> {
@@ -177,14 +219,10 @@ pub fn secret_from_lookup(
     Some(trimmed)
 }
 
-/// omo-gateway's owner: the first `SLACK_ALLOWED_USERS` entry, else its built-in owner id.
-pub const DEFAULT_SLACK_OWNER_ID: &str = "U04M1JNJM8T";
-
-pub fn slack_owner_from(allowed_users: Option<&str>) -> String {
-    slack_allowed_from(allowed_users)
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| DEFAULT_SLACK_OWNER_ID.to_owned())
+/// The owner from `SLACK_ALLOWED_USERS`: its first entry. `None` when the list is empty; there
+/// is no built-in owner.
+pub fn slack_owner_from(allowed_users: Option<&str>) -> Option<String> {
+    slack_allowed_from(allowed_users).into_iter().next()
 }
 
 /// omo-gateway's `SLACK_ALLOWED_USERS` list (comma or whitespace separated).
@@ -198,13 +236,17 @@ pub fn slack_allowed_from(allowed_users: Option<&str>) -> Vec<String> {
         .collect()
 }
 
-/// Who may press buttons and talk to the bot: `SLACK_ALLOWED_USERS` (else omo's owner) plus
-/// the configured owner.
+/// Who may press buttons and talk to the bot: `SLACK_ALLOWED_USERS` plus the configured owner.
+/// With neither set nobody may.
 pub fn slack_allowed_users(owner: &str) -> Vec<String> {
-    let mut users = slack_allowed_from(crate::hub_env::var("SLACK_ALLOWED_USERS").ok().as_deref());
-    if users.is_empty() {
-        users.push(DEFAULT_SLACK_OWNER_ID.to_owned());
-    }
+    allowed_users_with(
+        crate::hub_env::var("SLACK_ALLOWED_USERS").ok().as_deref(),
+        owner,
+    )
+}
+
+fn allowed_users_with(allowed_users: Option<&str>, owner: &str) -> Vec<String> {
+    let mut users = slack_allowed_from(allowed_users);
     let owner = owner.trim();
     if !owner.is_empty() && !users.iter().any(|id| id == owner) {
         users.push(owner.to_owned());
@@ -255,11 +297,41 @@ mod tests {
     }
 
     #[test]
-    fn the_slack_owner_defaults_like_omo_gateway() {
-        assert_eq!(slack_owner_from(None), "U04M1JNJM8T");
-        assert_eq!(slack_owner_from(Some("  ")), "U04M1JNJM8T");
-        assert_eq!(slack_owner_from(Some("UA, UB")), "UA");
+    fn there_is_no_built_in_slack_owner() {
+        assert_eq!(slack_owner_from(None), None);
+        assert_eq!(slack_owner_from(Some("  ")), None);
+        assert_eq!(slack_owner_from(Some("UA, UB")).as_deref(), Some("UA"));
         assert_eq!(slack_allowed_from(Some("UA,UB UC")), ["UA", "UB", "UC"]);
+        // Nobody is allowed when neither the list nor the owner is set.
+        assert!(allowed_users_with(None, " ").is_empty());
+        assert_eq!(allowed_users_with(None, "UOWNER"), ["UOWNER"]);
+        assert_eq!(allowed_users_with(Some("UA"), "UOWNER"), ["UA", "UOWNER"]);
+        assert_eq!(allowed_users_with(Some("UA"), "UA"), ["UA"]);
+    }
+
+    #[test]
+    fn file_owner_locale_is_exported_only_where_the_environment_is_silent() {
+        let config: HubConfig =
+            serde_json::from_str(r#"{"ownerLanguage":"en-US","ownerTimezone":" Europe/Paris "}"#)
+                .unwrap();
+        assert_eq!(config.owner_language.as_deref(), Some("en-US"));
+        assert_eq!(
+            config.owner_locale_exports(|_| None),
+            [
+                ("FERRYX_HUB_OWNER_LANGUAGE", "en-US".to_owned()),
+                ("FERRYX_HUB_OWNER_TIMEZONE", "Europe/Paris".to_owned()),
+            ]
+        );
+        // The environment (or hub env file) wins; a blank value there counts as unset.
+        let env = |key: &str| match key {
+            "FERRYX_HUB_OWNER_LANGUAGE" => Some("ko".to_owned()),
+            _ => Some("  ".to_owned()),
+        };
+        assert_eq!(
+            config.owner_locale_exports(env),
+            [("FERRYX_HUB_OWNER_TIMEZONE", "Europe/Paris".to_owned())]
+        );
+        assert!(HubConfig::default().owner_locale_exports(|_| None).is_empty());
     }
 
     #[test]
