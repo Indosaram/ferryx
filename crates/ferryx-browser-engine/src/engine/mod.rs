@@ -138,6 +138,8 @@ thread_local! {
     static QUITTING: Cell<bool> = const { Cell::new(false) };
     /// DevTools calls in flight: message id to the Ferryx tab that asked.
     static DEVTOOLS_CALLS: RefCell<HashMap<u32, String>> = RefCell::new(HashMap::new());
+    /// Tabs whose `focus` command waits for their window to become active (see `focus_tab`).
+    static PENDING_FOCUS: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
 }
 
 fn emit(event: Event) {
@@ -263,6 +265,7 @@ fn adopt(tab: String, popup: u32) {
 fn close(tab: &str) {
     // Ferryx closed the tab: requests it held are denied (dropped) and their prompts go.
     permissions::forget_tab(tab);
+    PENDING_FOCUS.with_borrow_mut(|pending| pending.remove(tab));
     if let Some(pane) = TABS.with_borrow_mut(|tabs| tabs.remove(tab))
         && let Some(browser) = pane.view.browser()
         && let Some(host) = browser.host()
@@ -385,23 +388,33 @@ fn execute(command: Command) {
         }
         Command::Focus { tab, address } => {
             let window = TABS.with_borrow(|tabs| tabs.get(&tab).and_then(|pane| pane.window.clone()));
-            let host = browser_of(&tab).and_then(|browser| browser.host());
-            eprintln!(
-                "ferryx-engine: focus {tab} address={address}: window {}, browser host {}",
-                window.is_some(),
-                host.is_some()
-            );
-            if let Some(window) = window {
+            let Some(window) = window else {
+                eprintln!("ferryx-engine: focus {tab}: the tab has no window yet");
+                return;
+            };
+            // Moving X focus into the window activates its widget only once Chromium handles the
+            // FocusIn, and activation restores the widget's last focused view: a view focused
+            // before that (Chrome's address bar) loses focus again. An inactive window gets its
+            // view focused from `on_window_activation_changed` instead.
+            let active = window.is_active() != 0;
+            eprintln!("ferryx-engine: focus {tab} address={address}: window active {active}");
+            if active {
+                focus_tab(&tab, address);
+            } else {
+                PENDING_FOCUS.with_borrow_mut(|pending| pending.insert(tab.clone(), address));
                 platform::focus(&window);
             }
-            if let Some(host) = host {
-                if address {
-                    host.execute_chrome_command(sys::IDC_FOCUS_LOCATION, WindowOpenDisposition::CURRENT_TAB);
-                } else {
-                    host.set_focus(1);
-                }
-            }
         }
+    }
+}
+
+/// Focuses Chrome's address bar (`address`) or the page of a tab whose window is active.
+fn focus_tab(tab: &str, address: bool) {
+    let Some(host) = browser_of(tab).and_then(|browser| browser.host()) else { return };
+    if address {
+        host.execute_chrome_command(sys::IDC_FOCUS_LOCATION, WindowOpenDisposition::CURRENT_TAB);
+    } else {
+        host.set_focus(1);
     }
 }
 
@@ -573,6 +586,17 @@ wrap_window_delegate! {
 
         fn on_window_destroyed(&self, _window: Option<&mut Window>) {
             self.view.borrow_mut().take();
+        }
+
+        fn on_window_activation_changed(&self, _window: Option<&mut Window>, active: ::std::os::raw::c_int) {
+            let Key::Tab(tab) = &self.key else { return };
+            if active == 0 {
+                return;
+            }
+            if let Some(address) = PENDING_FOCUS.with_borrow_mut(|pending| pending.remove(tab)) {
+                eprintln!("ferryx-engine: focus {tab} address={address}: window activated");
+                focus_tab(tab, address);
+            }
         }
 
         fn is_frameless(&self, _window: Option<&mut Window>) -> ::std::os::raw::c_int {

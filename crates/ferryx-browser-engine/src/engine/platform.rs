@@ -526,10 +526,8 @@ mod imp {
                 unsafe { XGetInputFocus(display, &mut focused, &mut revert) };
                 let under_pointer = inside.then_some(child);
                 let target = focus_target(parent, &panes, under_pointer, focused);
-                eprintln!(
-                    "ferryx-engine: focus watcher: release, parent {parent:#x}, under pointer {under_pointer:x?}, focused {focused:#x}, panes {panes:x?}, target {target:x?}"
-                );
                 if let Some(target) = target {
+                    eprintln!("ferryx-engine: focus watcher: click moves X focus from {focused:#x} to {target:#x}");
                     // SAFETY: `target` is a viewable window of this server; a stale id only
                     // produces an X error the default handler logs.
                     unsafe {
