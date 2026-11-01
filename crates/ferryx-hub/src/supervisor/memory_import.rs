@@ -12,7 +12,9 @@
 //! not read again and a rerun ingests nothing.
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::LazyLock;
 
+use regex::Regex;
 use serde::Serialize;
 use sqlx::SqlitePool;
 
@@ -40,10 +42,21 @@ const HUB_MARKERS: [&str; 6] = [
     "This session is being continued",
 ];
 
-/// Token prefixes of credentials (OpenAI/Anthropic keys, GitHub tokens, Slack tokens, AWS
-/// access keys). Matched at the start of a whitespace-separated token, so ordinary words such
-/// as "task-based" are not mistaken for a key.
-const SECRET_PREFIXES: [&str; 5] = ["sk-", "ghp_", "github_pat_", "xox", "AKIA"];
+/// Token prefixes of credentials (OpenAI/Anthropic keys, GitHub tokens, Slack bot and app
+/// tokens, AWS access keys, Stripe live keys, GitLab tokens, Google API keys, JWTs). Matched at
+/// the start of a token, a run of letters, digits, `_` and `-`, so a key inside quotes, JSON or
+/// `NAME=value` is still found while ordinary words such as "task-based" are not taken for one.
+const SECRET_PREFIXES: [&str; 10] = [
+    "sk-", "ghp_", "github_pat_", "xox", "AKIA", "xapp-", "sk_live_", "glpat-", "AIza", "eyJ",
+];
+
+/// A credential recognized by its shape rather than its prefix: a secret, token, password or
+/// API key name followed by an assignment (`OPENAI_API_KEY=`, `"token":`, `DB_SECRET:`), or a
+/// bearer credential. A name with no `=` or `:` after it ("token-efficient answers", "rotate
+/// secrets quarterly") is ordinary prose and still teaches.
+static SECRET_SHAPE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)(secret|token|passw|api[_-]?key)\w*\s*["']?\s*[=:]|\bbearer\s+\S{8,}"#).unwrap()
+});
 
 /// One user turn of a provider session, in session order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,10 +127,10 @@ pub async fn hub_driven_session_ids(pool: &SqlitePool) -> Result<HashSet<String>
 
 fn looks_like_secret(text: &str) -> bool {
     text.contains("-----BEGIN")
-        || text.split_whitespace().any(|token| {
-            let token = token.trim_start_matches(|c: char| !c.is_ascii_alphanumeric());
-            SECRET_PREFIXES.iter().any(|prefix| token.starts_with(prefix))
-        })
+        || SECRET_SHAPE.is_match(text)
+        || text
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+            .any(|token| SECRET_PREFIXES.iter().any(|prefix| token.starts_with(prefix)))
 }
 
 /// The learnable owner text of one user turn, or `None` when it must not teach: empty, a

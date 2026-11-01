@@ -481,6 +481,18 @@ mod import {
             "aws AKIAIOSFODNN7EXAMPLE",
             "-----BEGIN OPENSSH PRIVATE KEY-----",
             "Once: skip the e2e suite",
+            "export OPENAI_API_KEY=sk-proj-abc123",
+            "{\"token\":\"ghp_abcdefghijklmnop\"}",
+            "slack app xapp-1-A0-123-abc",
+            "stripe sk_live_abc123",
+            "gitlab glpat-abcdefghij",
+            "maps AIzaSyA-abcdefg",
+            "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig",
+            "Authorization: Bearer abcdef0123456789",
+            "password=hunter2",
+            "DB_SECRET: s3cr3t",
+            "\"api_key\": \"abc\"",
+            "api-key = abc",
         ] {
             assert_eq!(owner_turn_text(rejected, 2000), None, "{rejected:?}");
         }
@@ -491,6 +503,9 @@ mod import {
         );
         // Ordinary words starting like a key prefix are not secrets.
         assert!(owner_turn_text("Keep the task-based skeleton.", 2000).is_some());
+        // Naming a secret or a token without assigning one is ordinary prose.
+        assert!(owner_turn_text("Prefer token-efficient answers.", 2000).is_some());
+        assert!(owner_turn_text("Rotate secrets quarterly.", 2000).is_some());
         // Truncated on a character boundary.
         assert_eq!(owner_turn_text("가나다라마", 3).as_deref(), Some("가나다"));
     }
