@@ -9,6 +9,7 @@ pub mod autonomy;
 pub mod browser;
 pub mod chat;
 pub mod checkpoint;
+pub mod checkpoint_import;
 pub mod child_env;
 pub mod config;
 pub mod context;
