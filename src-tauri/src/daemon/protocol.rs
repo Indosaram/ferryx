@@ -626,6 +626,10 @@ pub enum SupervisorReadAction {
         after: Option<i64>,
     },
     Memory,
+    /// Whether this daemon serves the supervisor or stands by for a holder:
+    /// `{standby, holderMachineId, holderLabel}`. Read by `ferryx-cli mcp` before it opens
+    /// the hub database.
+    Role,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

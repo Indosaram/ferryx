@@ -75,6 +75,8 @@ pub struct RequestFailure {
     pub code: String,
     pub status: u16,
     pub message: String,
+    /// SUPERVISOR_STANDBY only: the lease holder `(machine id, label)` the caller should use.
+    pub holder: Option<(Option<String>, Option<String>)>,
 }
 
 impl RequestFailure {
@@ -83,6 +85,7 @@ impl RequestFailure {
             code: code.to_owned(),
             status: status_for_code(code),
             message: message.into(),
+            holder: None,
         }
     }
 
@@ -92,7 +95,12 @@ impl RequestFailure {
 
     /// The machine envelope fields every adapter reports.
     pub fn to_json(&self) -> Value {
-        json!({"code": self.code, "status": self.status, "message": self.message})
+        let mut value = json!({"code": self.code, "status": self.status, "message": self.message});
+        if let Some((holder_machine_id, holder_label)) = &self.holder {
+            value["holderMachineId"] = json!(holder_machine_id);
+            value["holderLabel"] = json!(holder_label);
+        }
+        value
     }
 }
 
@@ -126,6 +134,7 @@ pub fn status_for_code(code: &str) -> u16 {
         | admission::LEGACY_LANE_LIVE
         | admission::LEGACY_TERMS_CHANGED
         | admission::LEGACY_GOAL_OFF
+        | crate::holder::SUPERVISOR_STANDBY
         | TURN_LIMIT => 409,
         "STORAGE" | "INTERNAL" => 500,
         "SUPERVISOR_UNAVAILABLE" | "JUDGE_UNAVAILABLE" | super::cutover::SUPERVISOR_INTAKE_CLOSED => 503,

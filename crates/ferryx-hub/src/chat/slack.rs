@@ -955,6 +955,10 @@ pub(crate) async fn call_method(method: &str, body: Value) -> Result<bool> {
 
 #[cfg(feature = "hub-slack")]
 async fn slack_method(method: &str, body: Value) -> Result<bool> {
+    // Every bot post (replies, cron, lane deliveries, cards, uploads) leaves only the holder.
+    if !crate::holder::is_holder_now() {
+        return Ok(false);
+    }
     let Some(token) = bot_token() else {
         return Ok(false);
     };
@@ -1416,6 +1420,13 @@ async fn connect_once(
 ) -> Result<SlackSocket> {
     *attempt = attempt.saturating_add(1);
     let attempt = *attempt;
+    // A standby never opens Socket Mode: only the lease holder takes Slack events.
+    if !crate::holder::is_holder_now() {
+        return Err(HubError::message(format!(
+            "{}: this machine does not hold the supervisor lease",
+            crate::holder::SUPERVISOR_STANDBY
+        )));
+    }
     if credentials.app_token.is_empty() {
         return Err(HubError::config("SLACK_APP_TOKEN is not set"));
     }
@@ -2385,6 +2396,31 @@ mod tests {
             "stalled apps.connections.open was retried after {gap:?}, budget {budget:?}"
         );
         client.abort();
+    }
+
+    /// A standby keeps retrying on its backoff but never reaches `apps.connections.open` on
+    /// the loopback fake Slack: the holder check comes before any request.
+    #[cfg(feature = "hub-slack")]
+    #[tokio::test(start_paused = true)]
+    async fn a_standby_never_calls_connections_open() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut accepts = spawn_stalled_accepts(listener);
+        let pace = test_pace();
+        let creds = test_credentials(format!("http://127.0.0.1:{port}"));
+        let standby: crate::holder::HolderGate = std::sync::Arc::new(|| false);
+        let socket = crate::holder::scope(
+            standby,
+            run_socket_mode(move || Ok(creds.clone()), pace, |_| async {}),
+        );
+        let window = (pace.connect_timeout + pace.backoff_cap) * 20;
+        tokio::select! {
+            ended = socket => panic!("a standby socket loop never ends on its own: {ended:?}"),
+            accepted = tokio::time::timeout(window, accepts.recv()) => {
+                assert!(accepted.is_err(), "a standby opened a connection to the fake Slack");
+            }
+        }
+        assert!(accepts.try_recv().is_err(), "zero connections.open calls");
     }
 
     #[cfg(feature = "hub-slack")]

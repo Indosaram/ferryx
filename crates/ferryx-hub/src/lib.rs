@@ -23,6 +23,7 @@ pub mod effect;
 pub mod error;
 pub mod fleet;
 pub mod goals;
+pub mod holder;
 pub mod http;
 pub mod hub;
 pub mod hub_env;

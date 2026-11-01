@@ -897,6 +897,9 @@ async fn record_human_keystrokes(
 /// A person typed raw keys into `session_id`. When the pane belongs to a lane, the hub records
 /// one human_correction turn per typing burst. The keys themselves are never stored.
 pub(crate) fn note_lane_keystrokes(session_id: &str, now_ms: u64) {
+    if drop_observation_on_standby("keystrokes") {
+        return;
+    }
     let Some((hub, _)) = supervisor_view() else { return };
     let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
     let pool = hub.pool.clone();
@@ -942,6 +945,9 @@ pub(crate) fn note_agent_control_input(op: &AgentControlOp) {
     if ferryx_hub::goals::turns::records_own_turn(request_id.as_deref()) {
         return;
     }
+    if drop_observation_on_standby("agent control input") {
+        return;
+    }
     let Some((hub, _)) = supervisor_view() else { return };
     let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
     let pool = hub.pool.clone();
@@ -958,6 +964,12 @@ pub(crate) fn note_agent_control_input(op: &AgentControlOp) {
 /// event path ([`ferryx_hub::lanes::dispatch::report_from_worker`]). The reply is one JSON
 /// value: `{ok:true, ...}` or `{ok:false, code, message}`.
 pub async fn supervisor_worker_report((session_id, event_id, body): (String, String, String)) -> Value {
+    if let Some(refusal) = standby_refusal() {
+        OBSERVE_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (holder_machine_id, holder_label) = refusal.holder.clone().unwrap_or_default();
+        return json!({"ok": false, "code": refusal.code, "message": refusal.message,
+            "holderMachineId": holder_machine_id, "holderLabel": holder_label});
+    }
     let Some((hub, _)) = supervisor_view() else {
         return json!({"ok": false, "code": "SUPERVISOR_UNAVAILABLE", "message": "the supervisor hub is not open in this daemon"});
     };
@@ -1023,6 +1035,14 @@ trait LeaseGate: Send + Sync {
     fn current_role(&self) -> crate::daemon::supervisor_lease_role::Role;
     /// One non-forced acquire; the role once it settled, `None` when the client ended.
     async fn try_acquire(&self) -> Option<crate::daemon::supervisor_lease_role::Role>;
+    /// Holder-now check for side effects (chat sends, goal settles); Provisional counts.
+    fn may_act_now(&self) -> bool {
+        self.allows_hub()
+    }
+    /// What is left of the previous holder's lease (+5s) after a takeover; Slack waits it out.
+    fn takeover_wait(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
 }
 
 #[async_trait]
@@ -1038,6 +1058,10 @@ impl LeaseGate for crate::daemon::supervisor_lease_client::SupervisorLeaseHandle
     async fn try_acquire(&self) -> Option<crate::daemon::supervisor_lease_role::Role> {
         self.acquire(false).await
     }
+
+    fn takeover_wait(&self) -> std::time::Duration {
+        self.state().takeover_wait()
+    }
 }
 
 /// The lease client this daemon runs, installed by [`start`].
@@ -1045,6 +1069,55 @@ static LEASE_GATE: std::sync::RwLock<Option<Arc<dyn LeaseGate>>> = std::sync::Rw
 
 fn lease_gate() -> Option<Arc<dyn LeaseGate>> {
     LEASE_GATE.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// The holder's Slack wait after a takeover, zero without a lease client.
+fn takeover_wait() -> std::time::Duration {
+    lease_gate().map_or(std::time::Duration::ZERO, |lease| lease.takeover_wait())
+}
+
+/// Installs the lease as the hub crate's holder predicate (chat sends, goal settles), or
+/// removes it for an unleased hub.
+fn install_holder_gate(lease: Option<Arc<dyn LeaseGate>>) {
+    let gate = lease.map(|lease| -> ferryx_hub::holder::HolderGate { Arc::new(move || lease.may_act_now()) });
+    ferryx_hub::holder::install(gate);
+}
+
+/// The holder a standby names in a refusal; `None` when this daemon may serve (holder,
+/// provisional, or no lease client at all).
+fn standby_holder() -> Option<(Option<String>, Option<String>)> {
+    let lease = lease_gate()?;
+    if lease.may_act_now() {
+        return None;
+    }
+    match standby_error(&lease.current_role()) {
+        HubStartError::Standby { holder_machine_id, holder_label } => Some((holder_machine_id, holder_label)),
+        _ => Some((None, None)),
+    }
+}
+
+/// SUPERVISOR_STANDBY (409) naming the holder, when this daemon is on standby.
+fn standby_refusal() -> Option<ferryx_hub::supervisor::request::RequestFailure> {
+    standby_holder().map(|(id, label)| ferryx_hub::holder::standby_failure(id.as_deref(), label.as_deref()))
+}
+
+/// Hook observations a standby could not apply (they belong to the holder's hub).
+static OBSERVE_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many local pane observations this standby dropped instead of writing its own hub DB.
+pub fn observe_dropped() -> u64 {
+    OBSERVE_DROPPED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// True when this daemon is on standby: the observation is counted and dropped with a warning
+/// rather than written to a hub database the holder does not read.
+fn drop_observation_on_standby(what: &str) -> bool {
+    let Some((holder_machine_id, holder_label)) = standby_holder() else {
+        return false;
+    };
+    OBSERVE_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    tracing::warn!(what, holder = ?holder_label.or(holder_machine_id), "standby dropped a supervisor observation");
+    true
 }
 
 fn standby_error(role: &crate::daemon::supervisor_lease_role::Role) -> HubStartError {
@@ -1339,6 +1412,10 @@ pub async fn set_lane_paused_gated(
 ) -> Result<bool, LanePauseError> {
     use ferryx_hub::lanes::state::LaneStatus;
     use ferryx_hub::supervisor::request::{self, RequestContext, RequestFailure};
+    // Every lane, supervisor-owned or legacy, is paused on the holder.
+    if let Some(refusal) = standby_refusal() {
+        return Err(LanePauseError::Supervisor(refusal));
+    }
     if let Ok((pool, owner, control)) = supervisor_service(state).await {
         let owned = ferryx_hub::supervisor::supervisor_owns_lane(&pool, lane_key)
             .await
@@ -1624,6 +1701,11 @@ async fn supervisor_service(
         return Ok((pool, Some(owner), None));
     }
     let _ = state;
+    // A standby never serves supervisor state: requests, conversation, memory and pause go
+    // to the holder, named in the refusal (409 SUPERVISOR_STANDBY).
+    if let Some(refusal) = standby_refusal() {
+        return Err(refusal);
+    }
     let Some((hub, _)) = supervisor_view() else {
         return Err(RequestFailure::new(
             "SUPERVISOR_UNAVAILABLE",
@@ -1740,7 +1822,42 @@ pub async fn supervisor_read(
             supervisor_conversation(state, SupervisorCaller::Desktop, &project_id, after.unwrap_or(0)).await
         }
         SupervisorReadAction::Memory => supervisor_memory(state, SupervisorCaller::Desktop).await,
+        SupervisorReadAction::Role => Ok(supervisor_role()),
     }
+}
+
+/// This daemon's supervisor role for a local reader: `standby` with the holder, or serving.
+fn supervisor_role() -> Value {
+    match standby_holder() {
+        Some((holder_machine_id, holder_label)) => json!({
+            "standby": true,
+            "holderMachineId": holder_machine_id,
+            "holderLabel": holder_label,
+        }),
+        None => json!({ "standby": false, "holderMachineId": null, "holderLabel": null }),
+    }
+}
+
+/// Asks the running daemon for its role before `ferryx-cli mcp` opens the hub database.
+/// `Some(refusal)` on standby. A daemon that cannot be asked (absent, or older) is treated
+/// as serving, which is the pre-lease behaviour.
+async fn mcp_standby_refusal() -> Option<ferryx_hub::supervisor::request::RequestFailure> {
+    use crate::daemon::protocol::SupervisorReadAction;
+    let request = DaemonRequest::SupervisorReadV1 { request: SupervisorReadAction::Role };
+    let exchange = crate::cli::supervisor_goal::exchange_once(SUPERVISOR_READ_CAPABILITY, request, false);
+    let answer = tokio::time::timeout(std::time::Duration::from_secs(15), exchange).await.ok()?;
+    match answer {
+        Ok(DaemonResponse::SupervisorReadV1Ok { value }) => mcp_role_refusal(&value),
+        _ => None,
+    }
+}
+
+/// The refusal a `role` answer means for the MCP process.
+fn mcp_role_refusal(role: &Value) -> Option<ferryx_hub::supervisor::request::RequestFailure> {
+    if role["standby"].as_bool() != Some(true) {
+        return None;
+    }
+    Some(ferryx_hub::holder::standby_failure(role["holderMachineId"].as_str(), role["holderLabel"].as_str()))
 }
 
 /// The unified supervisor's part of the snapshot: identity, engine health and every goal's
@@ -2124,6 +2241,7 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     let (wanted, lease_decisions) = tokio::sync::watch::channel(false);
     let lease = spawn_lease_client(&server, wanted).await;
     *LEASE_GATE.write().unwrap_or_else(|e| e.into_inner()) = lease.clone();
+    install_holder_gate(lease.clone());
     let standby = lease.as_ref().is_some_and(|lease| !lease.allows_hub());
     // A predecessor from before 2026.1022.7 keeps its hub through the drain. Stop it over
     // control.sock; its stop persists hub_stopped=1, so the value read above is put back.
@@ -2455,9 +2573,10 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         // reconcile every few minutes. It reads with the bot token; Socket Mode is untouched.
         if let Some(config) = ferryx_hub::chat::slack_turn::installed() {
             if ferryx_hub::chat::slack::app_token().is_some() {
-                tasks.push(tokio::spawn(ferryx_hub::chat::slack_backfill::run_forever(
-                    config,
-                    launch.hub.pool.clone(),
+                // After a takeover the backfill waits out the old holder's lease like the socket.
+                tasks.push(tokio::spawn(ferryx_hub::holder::after_takeover(
+                    takeover_wait(),
+                    ferryx_hub::chat::slack_backfill::run_forever(config, launch.hub.pool.clone()),
                 )));
             }
         }
@@ -2539,7 +2658,11 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         let slack_profiles = launch.profiles.clone();
         let slack_meta = launch.meta_session_id.clone();
         let slack_pool = launch.hub.pool.clone();
+        // Two sockets never overlap: a new holder opens Slack only after the previous holder's
+        // lease deadline (+5s) passed on this machine's monotonic clock.
+        let slack_wait = takeover_wait();
         tasks.push(tokio::spawn(async move {
+            ferryx_hub::holder::after_takeover(slack_wait, async {}).await;
             let owner_for_frames = owner.clone();
             if let Err(error) = ferryx_hub::chat::slack::connect_socket_mode(move |text| {
                 let bridge = slack_bridge.clone();
@@ -3107,7 +3230,17 @@ pub fn run_mcp() -> i32 {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let pool = match ferryx_hub::storage::connect(&path).await {
+        // On standby the hub database is not this machine's to serve: supervisor reads and
+        // writes are refused with the holder, and the file is never opened (an empty
+        // in-memory store backs the agent tools only).
+        let standby = mcp_standby_refusal().await;
+        let opened = if standby.is_some() {
+            ferryx_hub::storage::memory().await
+        } else {
+            ferryx_hub::storage::connect(&path).await
+        };
+        ferryx_hub::holder::set_standby(standby);
+        let pool = match opened {
             Ok(pool) => pool,
             Err(error) => {
                 eprintln!("ferryx mcp: {error}");
@@ -3549,6 +3682,33 @@ mod tests {
             json!({"status": "standby", "op": "start", "holder": "Laptop B"})
         );
         assert!(!ferryx_hub::control::reply_ok(&standby_reply(&refused).to_string()), "the CLI exits non-zero");
+    }
+
+    /// `ferryx-cli mcp` reads the daemon's role before it opens the hub database: a standby
+    /// answer becomes SUPERVISOR_STANDBY naming the holder; a serving or older daemon none.
+    #[test]
+    fn the_mcp_role_answer_on_standby_refuses_with_the_holder() {
+        let refused = mcp_role_refusal(&json!({"standby": true, "holderMachineId": "mach-b", "holderLabel": "Laptop B"}))
+            .expect("standby refuses");
+        assert_eq!(refused.code, ferryx_hub::holder::SUPERVISOR_STANDBY);
+        assert_eq!(refused.holder, Some((Some("mach-b".into()), Some("Laptop B".into()))));
+        assert!(mcp_role_refusal(&json!({"standby": false})).is_none());
+        assert!(mcp_role_refusal(&json!({})).is_none(), "an older daemon serves as before");
+    }
+
+    /// The lease is re-read at use: one installed predicate flips every gate.
+    #[tokio::test]
+    async fn the_installed_holder_gate_follows_the_lease_now() {
+        let lease = Arc::new(FakeLease::new(false, false));
+        let gate: Arc<dyn LeaseGate> = lease.clone();
+        let predicate: ferryx_hub::holder::HolderGate = Arc::new(move || gate.may_act_now());
+        let flag = Arc::clone(&lease);
+        ferryx_hub::holder::scope(predicate, async move {
+            assert!(!ferryx_hub::holder::is_holder_now());
+            flag.allows.store(true, std::sync::atomic::Ordering::SeqCst);
+            assert!(ferryx_hub::holder::is_holder_now());
+        })
+        .await;
     }
 
     #[tokio::test]

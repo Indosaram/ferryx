@@ -178,6 +178,10 @@ pub enum SupervisorError {
     /// been cut over yet, or a rollback. New work is refused (503-class); nothing was written.
     #[error("SUPERVISOR_INTAKE_CLOSED: {0}")]
     IntakeClosed(String),
+    /// This machine does not hold the supervisor lease now: the goal write is held, nothing
+    /// was written.
+    #[error("SUPERVISOR_STANDBY: goal {goal_id} is held; this machine does not hold the supervisor lease")]
+    Standby { goal_id: String },
     /// A cutover needs the mhc engine with every required capability; `code` is the engine's
     /// fault code (`MHC_CAPABILITY_MISSING`, `MHC_NOT_RUNNING`, ...). Nothing was changed.
     #[error("{code}: {detail}")]
@@ -215,6 +219,7 @@ impl SupervisorError {
             SupervisorError::SetupConflict(_) => SETUP_CONFLICT,
             SupervisorError::SessionAlreadyBound { .. } => SESSION_ALREADY_BOUND,
             SupervisorError::IntakeClosed(_) => cutover::SUPERVISOR_INTAKE_CLOSED,
+            SupervisorError::Standby { .. } => crate::holder::SUPERVISOR_STANDBY,
             SupervisorError::EngineUnavailable { code, .. } => code,
             SupervisorError::Invalid(_)
             | SupervisorError::Unknown { .. }
@@ -2382,6 +2387,13 @@ async fn transition_goal_in(
     to: RunState,
     detail: Option<&str>,
 ) -> Result<SupervisorGoal, SupervisorError> {
+    // Every goal settle or complete write is a supervisor side effect: re-checked here,
+    // immediately before it, so a holder whose lease ran out leaves the goal as it was.
+    if !crate::holder::is_holder_now() {
+        return Err(SupervisorError::Standby {
+            goal_id: goal_id.to_owned(),
+        });
+    }
     if to == RunState::Dispatching {
         return Err(SupervisorError::Invalid(
             "a goal enters dispatching only by claiming its ready dispatch".into(),

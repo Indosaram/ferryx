@@ -41,6 +41,8 @@ pub const BOOT_UNREACHABLE_AFTER: Duration = Duration::from_secs(10);
 const TICK: Duration = Duration::from_secs(1);
 /// Requests one burst of actions may send before the client waits for the next event.
 const MAX_SENDS_PER_EVENT: usize = 4;
+/// Margin past the previous holder's lease deadline before a new holder opens Slack.
+pub const TAKEOVER_MARGIN: Duration = Duration::from_secs(5);
 
 /// The relay side as the client sees it: [`RelayClient`] in production, a fake in tests.
 #[async_trait::async_trait]
@@ -125,6 +127,9 @@ struct StateInner {
     machine: parking_lot::Mutex<RoleMachine>,
     role_tx: watch::Sender<Role>,
     clock: LeaseClock,
+    /// From the last granted acquire that displaced another holder: when it was answered
+    /// (local monotonic clock) and how long the previous holder's deadline could still run.
+    takeover: parking_lot::Mutex<Option<(tokio::time::Instant, Duration)>>,
 }
 
 /// Cheap, cloneable view of the hub role shared with every side-effect gate.
@@ -142,6 +147,7 @@ impl SupervisorLeaseState {
                 machine: parking_lot::Mutex::new(machine),
                 role_tx,
                 clock,
+                takeover: parking_lot::Mutex::new(None),
             }),
         }
     }
@@ -184,6 +190,23 @@ impl SupervisorLeaseState {
 
     pub fn snapshot(&self) -> PersistedLease {
         self.inner.machine.lock().snapshot().clone()
+    }
+
+    /// How long this holder must still wait before it opens Slack after a takeover: the
+    /// previous holder's remaining lease (`previous_expires_in_secs`) plus 5s, counted on the
+    /// local monotonic clock from the acquire ack. Zero without a takeover or once it passed.
+    pub fn takeover_wait(&self) -> Duration {
+        let Some((acked_at, previous)) = *self.inner.takeover.lock() else {
+            return Duration::ZERO;
+        };
+        (acked_at + previous + TAKEOVER_MARGIN).saturating_duration_since(tokio::time::Instant::now())
+    }
+
+    fn note_acquire_ack(&self, ack: &SupervisorLeaseAck) {
+        if let Some(previous) = ack.previous_expires_in_secs {
+            *self.inner.takeover.lock() =
+                Some((tokio::time::Instant::now(), Duration::from_secs(previous)));
+        }
     }
 
     /// Feeds one event at the current time and publishes the role. The lock is never held
@@ -459,6 +482,9 @@ impl<T: LeaseTransport + ?Sized, H: HubSwitch + ?Sized> Driver<T, H> {
             let sent_at = (self.clock)();
             match self.transport.call(request).await {
                 Ok(ack) => {
+                    if !renew {
+                        self.state.note_acquire_ack(&ack);
+                    }
                     let ack = LeaseAck::from_wire(&ack);
                     let event = if renew {
                         Event::RenewAck { sent_at, ack }
@@ -698,6 +724,67 @@ mod tests {
         *jump.lock() = Duration::from_secs(3600);
         assert!(!handle.is_holder_now());
         assert!(!handle.state().may_act_now());
+        task.abort();
+    }
+
+    /// The acceptance case for holder-only side effects: the wall clock jumps past the lease
+    /// deadline and no tick runs. A queued chat reply is not posted (it stays queued) and a
+    /// goal settle is held, because each side effect re-checks the lease right before it.
+    #[tokio::test(start_paused = true)]
+    async fn past_the_deadline_without_a_tick_a_reply_stays_queued_and_no_goal_settles() {
+        let relay = FakeRelay::new(Some(true));
+        let hub = Arc::new(FakeHub::default());
+        let (clock, jump) = test_clock();
+        let (handle, task) =
+            spawn_supervisor_lease_client(config(clock, Some("acct"), None), Arc::clone(&relay), Arc::clone(&hub)).await;
+        wait_role(&handle, |r| *r == Role::Holder { fence: 7 }).await;
+        let state = handle.state().clone();
+        let gate: ferryx_hub::holder::HolderGate = Arc::new(move || state.may_act_now());
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let session = ferryx_hub::chat::session::SessionKey::new("slack", None::<String>, "C1", None::<String>, "U1");
+        *jump.lock() = VALID_FOR * 2;
+        let (queued, settle) = ferryx_hub::holder::scope(gate, async {
+            let id = ferryx_hub::chat::reply::chat_reply(&pool, &session, "done", None).await.unwrap();
+            let delivered = ferryx_hub::chat::reply::deliver_stored(&pool, id, &session.storage_key(), "done")
+                .await
+                .unwrap();
+            assert!(!delivered, "a standby posts nothing");
+            let settle = ferryx_hub::supervisor::receipts::record_pty_settle(&pool, "local", "pane-1", "i1", 1).await;
+            (ferryx_hub::chat::reply::pending(&pool).await.unwrap(), settle)
+        })
+        .await;
+        assert_eq!(queued.len(), 1, "the reply stays queued for the holder");
+        assert_eq!(settle.unwrap_err().code(), ferryx_hub::holder::SUPERVISOR_STANDBY);
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_takeover_ack_delays_slack_until_the_old_deadline_plus_five_seconds() {
+        let relay = FakeRelay::new(Some(true));
+        let hub = Arc::new(FakeHub::default());
+        let (clock, _) = test_clock();
+        let (handle, task) =
+            spawn_supervisor_lease_client(config(clock, Some("acct"), None), Arc::clone(&relay), hub).await;
+        wait_role(&handle, |r| *r == Role::Holder { fence: 7 }).await;
+        assert_eq!(handle.state().takeover_wait(), Duration::ZERO, "no takeover, no wait");
+        let ack = SupervisorLeaseAck {
+            request_id: "r".into(),
+            outcome: SupervisorLeaseOutcome::Granted,
+            fence: Some(8),
+            holder_machine_id: None,
+            holder_label: None,
+            expires_in_secs: Some(120),
+            previous_expires_in_secs: Some(90),
+            checkpoint_id: None,
+            account_machine_count: Some(2),
+            reason_code: None,
+        };
+        handle.state().note_acquire_ack(&ack);
+        assert_eq!(handle.state().takeover_wait(), Duration::from_secs(95));
+        tokio::time::advance(Duration::from_secs(94)).await;
+        assert_eq!(handle.state().takeover_wait(), Duration::from_secs(1), "still inside the old lease");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(handle.state().takeover_wait(), Duration::ZERO);
         task.abort();
     }
 

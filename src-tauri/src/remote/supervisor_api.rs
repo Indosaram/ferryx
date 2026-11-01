@@ -133,11 +133,16 @@ fn start_refusal(error: &HubStartError) -> Response {
 /// status (400/403/404/409/503) and stable code.
 fn service_refusal(failure: &ferryx_hub::supervisor::request::RequestFailure) -> Response {
     let status = StatusCode::from_u16(failure.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let mut details = serde_json::Map::new();
+    if let Some((holder_machine_id, holder_label)) = &failure.holder {
+        details.insert("holderMachineId".into(), serde_json::json!(holder_machine_id));
+        details.insert("holderLabel".into(), serde_json::json!(holder_label));
+    }
     machine_error_with_details(
         status,
         &failure.code,
         &failure.message,
-        serde_json::Map::new(),
+        details,
     )
 }
 
