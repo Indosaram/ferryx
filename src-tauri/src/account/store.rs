@@ -279,6 +279,24 @@ pub struct OrgInviteRecord {
 
 pub const ACCOUNT_SIGNING_KEY_FILE: &str = "account-signing-key.json";
 
+/// One account's supervisor lease row (`supervisor_leases`). Rows are never deleted, only
+/// marked released; `account::supervisor_lease` owns every write and its rules.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SupervisorLeaseRecord {
+    pub user_id: String,
+    pub holder_machine_id: String,
+    /// `(relay_epoch << 32) | counter`; never decreases for one account.
+    pub fence: u64,
+    pub expires_at: u64,
+    pub checkpoint_id: Option<String>,
+    pub checkpoint_at: Option<u64>,
+    pub released: bool,
+    pub reserved_for: Option<String>,
+    pub reserved_fence: Option<u64>,
+    pub updated_at: u64,
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountSigningKeyRecord {
@@ -326,6 +344,9 @@ pub struct AccountStore {
     pub org_invites: BTreeMap<String, OrgInviteRecord>,
     #[serde(default)]
     pub machine_requests: BTreeMap<String, MachineRequestRecord>,
+    /// Supervisor lease rows keyed by user id. Empty on a replica without the lease tables.
+    #[serde(default)]
+    pub supervisor_leases: BTreeMap<String, SupervisorLeaseRecord>,
 }
 
 impl AccountStore {

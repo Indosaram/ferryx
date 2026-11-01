@@ -3,8 +3,43 @@ use rusqlite::{params, Connection, Transaction};
 use crate::account::store::{
     AccountStore, BillingStateRecord, DeviceAuthRecord, EnrollmentCodeRecord, GrantRecord,
     LoginCodeRecord, MachineRecord, MachineRequestRecord, OrgInviteRecord, OrgMemberRecord, OrgRecord, PaymentEventRecord,
-    SessionRecord, SubscriptionRecord, UserRecord,
+    SessionRecord, SubscriptionRecord, SupervisorLeaseRecord, UserRecord,
 };
+
+/// Column list shared by every `supervisor_leases` read; matches [`supervisor_lease_from_row`].
+pub const SUPERVISOR_LEASE_SELECT: &str = "SELECT user_id, holder_machine_id, fence, expires_at, \
+     checkpoint_id, checkpoint_at, released, reserved_for, reserved_fence, updated_at \
+     FROM supervisor_leases";
+
+pub fn supervisor_lease_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SupervisorLeaseRecord> {
+    let checkpoint_at: Option<i64> = row.get(5)?;
+    let reserved_fence: Option<i64> = row.get(8)?;
+    Ok(SupervisorLeaseRecord {
+        user_id: row.get(0)?,
+        holder_machine_id: row.get(1)?,
+        fence: row.get::<_, i64>(2)? as u64,
+        expires_at: row.get::<_, i64>(3)? as u64,
+        checkpoint_id: row.get(4)?,
+        checkpoint_at: checkpoint_at.map(|v| v as u64),
+        released: row.get::<_, i64>(6)? != 0,
+        reserved_for: row.get(7)?,
+        reserved_fence: reserved_fence.map(|v| v as u64),
+        updated_at: row.get::<_, i64>(9)? as u64,
+    })
+}
+
+/// True when `table` exists. A read-only replica never runs the v3 migration, so lease tables
+/// may be absent there and readers must not fail on them.
+pub fn table_exists(conn: &Connection, table: &str) -> Result<bool, String> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![table],
+            |row| row.get(0),
+        )
+        .map_err(|err| format!("Failed to check for table {table}: {err}"))?;
+    Ok(count > 0)
+}
 
 pub fn load_store_from_connection(conn: &Connection) -> Result<AccountStore, String> {
     let mut store = AccountStore::default();
@@ -387,6 +422,22 @@ pub fn load_store_from_connection(conn: &Connection) -> Result<AccountStore, Str
             store
                 .machine_requests
                 .insert(record.request_id.clone(), record);
+        }
+    }
+
+    if table_exists(conn, "supervisor_leases")? {
+        let mut stmt = conn
+            .prepare(SUPERVISOR_LEASE_SELECT)
+            .map_err(|err| format!("Failed to prepare supervisor_leases query: {err}"))?;
+        let rows = stmt
+            .query_map([], supervisor_lease_from_row)
+            .map_err(|err| format!("Failed to query supervisor_leases: {err}"))?;
+        for lease in rows {
+            let record =
+                lease.map_err(|err| format!("Failed to read supervisor_lease row: {err}"))?;
+            store
+                .supervisor_leases
+                .insert(record.user_id.clone(), record);
         }
     }
 
@@ -1080,6 +1131,57 @@ pub fn save_store_to_transaction(tx: &Transaction, store: &AccountStore) -> Resu
                 ])
                 .map_err(|e| {
                     format!("Failed to upsert machine_request {}: {e}", request.request_id)
+                })?;
+        }
+    }
+
+    // Lease rows are never deleted, and a whole-store save must never move a lease backwards:
+    // `account::supervisor_lease` writes them with targeted SQL, so a store snapshot only
+    // overwrites a row it is strictly newer than (higher fence, or same fence and later
+    // update), and the per-account fence high-water mark only ever grows.
+    if !store.supervisor_leases.is_empty() && table_exists(tx, "supervisor_leases")? {
+        let mut upsert_stmt = tx
+            .prepare(
+                "INSERT INTO supervisor_leases (user_id, holder_machine_id, fence, expires_at, \
+                 checkpoint_id, checkpoint_at, released, reserved_for, reserved_fence, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+                 ON CONFLICT(user_id) DO UPDATE SET \
+                 holder_machine_id=excluded.holder_machine_id, fence=excluded.fence, \
+                 expires_at=excluded.expires_at, checkpoint_id=excluded.checkpoint_id, \
+                 checkpoint_at=excluded.checkpoint_at, released=excluded.released, \
+                 reserved_for=excluded.reserved_for, reserved_fence=excluded.reserved_fence, \
+                 updated_at=excluded.updated_at \
+                 WHERE excluded.fence > supervisor_leases.fence \
+                 OR (excluded.fence = supervisor_leases.fence \
+                     AND excluded.updated_at > supervisor_leases.updated_at)",
+            )
+            .map_err(|e| format!("Failed to prepare supervisor_lease upsert: {e}"))?;
+        let mut fence_stmt = tx
+            .prepare(
+                "INSERT INTO supervisor_lease_fences (user_id, last_fence) VALUES (?1, ?2) \
+                 ON CONFLICT(user_id) DO UPDATE SET \
+                 last_fence = MAX(supervisor_lease_fences.last_fence, excluded.last_fence)",
+            )
+            .map_err(|e| format!("Failed to prepare supervisor_lease_fences upsert: {e}"))?;
+        for lease in store.supervisor_leases.values() {
+            upsert_stmt
+                .execute(params![
+                    lease.user_id,
+                    lease.holder_machine_id,
+                    lease.fence as i64,
+                    lease.expires_at as i64,
+                    lease.checkpoint_id,
+                    lease.checkpoint_at.map(|v| v as i64),
+                    i64::from(lease.released),
+                    lease.reserved_for,
+                    lease.reserved_fence.map(|v| v as i64),
+                    lease.updated_at as i64
+                ])
+                .map_err(|e| format!("Failed to upsert supervisor_lease {}: {e}", lease.user_id))?;
+            fence_stmt
+                .execute(params![lease.user_id, lease.fence as i64])
+                .map_err(|e| {
+                    format!("Failed to upsert supervisor_lease_fence {}: {e}", lease.user_id)
                 })?;
         }
     }
