@@ -3372,7 +3372,9 @@ async fn proxy_http(
         Ok(Err(StatusCode::GATEWAY_TIMEOUT)) => {
             Ok(relay_timeout_response(RELAY_STAGE_DATA_PAIRING_TIMEOUT))
         }
-        Ok(Err(status)) => Err(status),
+        // The relay's own refusals keep their status but carry the typed machine envelope, so
+        // a client can tell "machine offline" from a missing route.
+        Ok(Err(status)) => relay_refusal(status).map_or(Err(status), Ok),
         Err(_) if mutation && forwarded.load(Ordering::SeqCst) => {
             Ok(reference_chat_outcome_unknown(&request_id))
         }
@@ -3380,6 +3382,29 @@ async fn proxy_http(
             Ok(relay_timeout_response(RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT))
         }
     }
+}
+
+/// The typed envelope for a status the relay itself produced while reaching a machine, or
+/// `None` for a status that needs no explanation.
+fn relay_refusal(status: StatusCode) -> Option<Response> {
+    let (code, message) = match status {
+        StatusCode::NOT_FOUND => ("MACHINE_OFFLINE", "machine is offline"),
+        StatusCode::SERVICE_UNAVAILABLE => (
+            "RELAY_BUSY",
+            "the relay has too many sessions waiting for this machine; retry shortly",
+        ),
+        StatusCode::GONE => (
+            "MACHINE_RECONNECTED",
+            "the machine reconnected; retry the request",
+        ),
+        _ => return None,
+    };
+    Some(crate::remote::server::machine_error_with_details(
+        status,
+        code,
+        message,
+        serde_json::Map::new(),
+    ))
 }
 
 enum RoundTripError {
@@ -8631,7 +8656,7 @@ mod tests {
         )
         .await;
         // Then routing succeeds and the offline machine is reported, not forbidden.
-        assert_eq!(result.unwrap_err(), StatusCode::NOT_FOUND);
+        assert_eq!(result.unwrap().status(), StatusCode::NOT_FOUND);
     }
 
     #[test]
@@ -10493,6 +10518,31 @@ mod tests {
             res.headers().get(RELAY_STAGE_HEADER).and_then(|v| v.to_str().ok()),
             Some(RELAY_STAGE_DATA_PAIRING_TIMEOUT)
         );
+    }
+
+    #[tokio::test]
+    async fn an_offline_machine_answers_404_with_a_typed_envelope() {
+        let state = test_state(vec![]);
+        let response = proxy_http(
+            &state,
+            "nobody-home",
+            None,
+            Method::GET,
+            "/api/v1/capabilities",
+            HeaderMap::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("a relay refusal is a typed response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), MAX_MESSAGE_SIZE).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["error"]["code"], "MACHINE_OFFLINE");
+        assert!(relay_refusal(StatusCode::GONE).is_some());
+        assert_eq!(relay_refusal(StatusCode::SERVICE_UNAVAILABLE).unwrap().status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(relay_refusal(StatusCode::BAD_GATEWAY).is_none());
     }
 
     #[tokio::test]
