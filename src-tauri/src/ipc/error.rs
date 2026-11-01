@@ -141,6 +141,9 @@ pub enum IpcErrorCode {
     AuthExpired,
     NotFound,
     MethodNotAllowed,
+    /// Installing, rolling back or removing the Chromium engine failed.
+    /// details: the engine_install::InstallError, tagged by `reason`.
+    BrowserEngineInstallFailed,
     #[serde(untagged)]
     Custom(String),
 }

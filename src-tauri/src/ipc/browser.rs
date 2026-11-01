@@ -1388,9 +1388,20 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
     };
 
     #[cfg(any(target_os = "windows", target_os = "macos"))]
-    if let Some(engine_dir) = cef_engine_dir {
-        return create_cef_browser_session(app, manager, state, engine_dir).await;
-    }
+    let state = match cef_engine_dir {
+        Some(engine_dir) => {
+            let browser_id = state.browser_id.clone();
+            match create_cef_browser_session(app, manager, state, engine_dir).await {
+                Ok(state) => return Ok(state),
+                // The engine could not open the tab: it opens on the system webview instead,
+                // and its pane says why.
+                Err(error) => crate::ipc::browser_engine::fall_back_to_system_webview(
+                    app, manager, &request, &browser_id, error,
+                )?,
+            }
+        }
+        None => state,
+    };
 
     if let Some(main_window) = app.get_window("main") {
         let label = state.webview_label.clone();
@@ -3744,7 +3755,7 @@ pub async fn cmd_browser_list(
 
 /// Where the engine and its per-tab caches live: the app data dir, or `FERRYX_DATA_DIR` when an
 /// isolated (QA or test) instance set it, so such a run never touches the real install.
-fn engine_data_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<std::path::PathBuf, IpcError> {
+pub(crate) fn engine_data_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<std::path::PathBuf, IpcError> {
     if let Some(dir) = std::env::var_os("FERRYX_DATA_DIR").filter(|dir| !dir.is_empty()) {
         return Ok(std::path::PathBuf::from(dir));
     }
@@ -3753,15 +3764,7 @@ fn engine_data_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<std::path::P
         .map_err(|error| IpcError::new(crate::ipc::error::IpcErrorCode::IoError, error.to_string()))
 }
 
-fn engine_install_error(error: crate::browser::engine_install::InstallError) -> IpcError {
-    use crate::browser::engine_install::InstallError;
-    let code = match error {
-        InstallError::Unsupported(_) => crate::ipc::error::IpcErrorCode::UnsupportedCapability,
-        InstallError::Io(_) => crate::ipc::error::IpcErrorCode::IoError,
-        _ => crate::ipc::error::IpcErrorCode::InternalError,
-    };
-    IpcError::new(code, error.to_string())
-}
+use crate::ipc::browser_engine::install_error as engine_install_error;
 
 /// Whether the Chromium engine is installed. New tabs use it once it is.
 #[tauri::command]
@@ -3775,21 +3778,40 @@ pub async fn cmd_browser_engine_status<R: tauri::Runtime>(
     .await
 }
 
-/// Downloads, verifies and installs the Chromium engine for this platform.
+/// Downloads, verifies (signed manifest, size, SHA-256) and installs the Chromium engine for
+/// this platform, keeping the engine it replaces for rollback. Failures carry the typed reason
+/// in `details` (see `engine_install::InstallError`).
 #[tauri::command]
 pub async fn cmd_browser_engine_install<R: tauri::Runtime>(
     app: AppHandle<R>,
 ) -> Result<crate::browser::engine_install::EngineStatus, IpcError> {
     use crate::browser::engine_install;
     let data_dir = engine_data_dir(&app)?;
+    let guard = engine_install::InstallGuard::acquire().map_err(engine_install_error)?;
     let client = reqwest::Client::builder()
         .user_agent(concat!("Ferryx/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|error| IpcError::internal(error.to_string()))?;
-    let bytes = engine_install::fetch(&client).await.map_err(engine_install_error)?;
+    let cleanup_dir = data_dir.clone();
     crate::ipc::run_blocking(move || {
-        let dir = engine_install::unpack(&bytes, &data_dir, ENGINE_EXECUTABLE)
-            .map_err(engine_install_error)?;
+        engine_install::clean_leftovers(&cleanup_dir);
+        Ok(())
+    })
+    .await?;
+    let downloaded = engine_install::download(&client, &data_dir).await.map_err(engine_install_error)?;
+    crate::ipc::run_blocking(move || {
+        let _guard = guard;
+        let installed = engine_install::install_archive(
+            &downloaded.path,
+            &data_dir,
+            &downloaded.version,
+            &downloaded.sha256,
+            ENGINE_EXECUTABLE,
+        );
+        if let Err(error) = std::fs::remove_file(&downloaded.path) {
+            tracing::warn!(path = %downloaded.path.display(), "could not remove the engine download: {error}");
+        }
+        let dir = installed.map_err(engine_install_error)?;
         #[cfg(target_os = "windows")]
         crate::browser::cef_engine::grant_sandbox_read(&dir).map_err(IpcError::from)?;
         #[cfg(not(target_os = "windows"))]
@@ -3799,7 +3821,7 @@ pub async fn cmd_browser_engine_install<R: tauri::Runtime>(
     .await
 }
 
-/// Removes the installed engine; open Chromium tabs keep running until closed.
+/// Removes every installed engine; open Chromium tabs keep running until closed.
 #[tauri::command]
 pub async fn cmd_browser_engine_remove<R: tauri::Runtime>(
     app: AppHandle<R>,
@@ -3807,12 +3829,8 @@ pub async fn cmd_browser_engine_remove<R: tauri::Runtime>(
     use crate::browser::engine_install;
     let data_dir = engine_data_dir(&app)?;
     crate::ipc::run_blocking(move || {
-        let dir = engine_install::install_dir(&data_dir);
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).map_err(|error| {
-                IpcError::new(crate::ipc::error::IpcErrorCode::IoError, error.to_string())
-            })?;
-        }
+        let _guard = engine_install::InstallGuard::acquire().map_err(engine_install_error)?;
+        engine_install::remove_all(&data_dir).map_err(engine_install_error)?;
         Ok(engine_install::status(&data_dir, ENGINE_EXECUTABLE))
     })
     .await
@@ -3820,9 +3838,9 @@ pub async fn cmd_browser_engine_remove<R: tauri::Runtime>(
 
 /// The engine's executable name, also on platforms without a Chromium backend yet.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-const ENGINE_EXECUTABLE: &str = crate::browser::cef_engine::ENGINE_EXE;
+pub(crate) const ENGINE_EXECUTABLE: &str = crate::browser::cef_engine::ENGINE_EXE;
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-const ENGINE_EXECUTABLE: &str = "ferryx_engine";
+pub(crate) const ENGINE_EXECUTABLE: &str = "ferryx_engine";
 
 /// Where a pane's engine window goes, in the units the platform module places it in: pixels
 /// inside the main window on Windows, screen points (top-left origin) on macOS, where the

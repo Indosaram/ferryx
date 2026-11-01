@@ -655,6 +655,96 @@ updater manifest; stores update the app.
    owner-approved step, the same as Partner Center for MSIX. The full command reference and the
    owner checklist are in [mobile/README.md](../../mobile/README.md#release-build-owner-machine-only).
 
+## Browser engine (Chromium) release
+
+The Chromium engine that browser tabs use (`crates/ferryx-browser-engine`) is not inside
+Ferryx: the app downloads it on demand from Settings > Browser > Chromium Engine. It ships as
+its own GitHub release, `browser-engine-<ENGINE_VERSION>`, separate from the app tags (it does
+not use the `vYYYY.MMDD.N` scheme and never becomes "latest"). Like every release it is built,
+signed and published locally with `scripts/browser-engine/release-engine.mjs`; no hosted
+workflow may run it.
+
+What the app checks before it installs an engine (`src-tauri/src/browser/engine_install.rs`):
+
+- `manifest.json.sig` is a detached ed25519 signature (base64) over the exact
+  `manifest.json` bytes, made by a key listed in `TRUSTED_MANIFEST_KEYS`. A missing or
+  wrong signature refuses the install (`unsigned` / `badSignature`).
+- `manifest.json` `version` equals the app's `ENGINE_VERSION` (`versionMismatch`).
+- The archive's size and SHA-256 equal the manifest entry (`partial`, `oversized`,
+  `checksumMismatch`); a full disk is reported as `diskFull`.
+- The new engine goes into `<data>/browser-engine/<version>_<sha12>`; the `active` pointer
+  switches only after it unpacked completely, the engine it replaced is kept for rollback
+  (Settings shows "Use <version>"), and older ones are removed.
+
+### One-time: the manifest signing key
+
+```bash
+bun scripts/browser-engine/release-engine.mjs keygen --out "$HOME/.config/ferryx/engine-key"
+```
+
+This writes `engine-manifest.key` (PKCS#8 PEM, mode 0600) outside the repository and prints the
+public key. Put the printed line into `TRUSTED_MANIFEST_KEYS` in `engine_install.rs`, and ship
+an app release with it before publishing an engine signed by that key: an app that does not
+list the key refuses the engine. Back the private key up the same way as the updater key; never
+commit it, never pass it on argv in a shared terminal log. To rotate, add the new public key,
+release the app, sign engines with the new key, and drop the old key one release later.
+
+Debug builds (only) also trust a key from `FERRYX_BROWSER_ENGINE_PUBLIC_KEY`, so QA can install
+an engine signed with a throwaway key from a test server set by
+`FERRYX_BROWSER_ENGINE_MANIFEST_URL`.
+
+### Per engine release
+
+Bump `ENGINE_VERSION` (and `MANIFEST_URL`) in `engine_install.rs` and the engine crate version
+together when the engine changes, then on each OS:
+
+```bash
+export ENGINE_OUT="$HOME/ferryx-releases/engine-$(date +%Y%m%d)"   # one fresh dir per release
+
+# macOS (maho-mac or this Mac): Developer ID, hardened runtime, then notarize and staple.
+bun scripts/browser-engine/release-engine.mjs build --out "$ENGINE_OUT" \
+  --identity "Developer ID Application: Indo Yoon (5DUM8WPB4C)" \
+  --notarize --notary-profile FerryxNotary
+
+# Windows (maho-win), with an Authenticode certificate in the user store:
+bun scripts/browser-engine/release-engine.mjs build --out "$ENGINE_OUT" --signtool-cert <thumbprint>
+# Without --signtool-cert the engine is built unsigned and recorded as such
+# ("codeSigned": false in engine-windows-x86_64.json; `manifest` warns about it).
+```
+
+`build` runs `bundle-engine --release`, signs inside out (framework libraries, the framework,
+each helper app with `entitlements/helper.plist`, the outer app with `entitlements/engine.plist`:
+allow-jit and unsigned executable memory for V8, camera and microphone for pages), checks
+`codesign --verify --deep --strict` and records `spctl`, zips with `ditto` (symlinks and modes
+kept), and writes `engine-<platform>.zip` plus `engine-<platform>.json`. Copy the Windows pair
+into the same `$ENGINE_OUT` on the Mac, then sign the manifest and check it as the app will:
+
+```bash
+bun scripts/browser-engine/release-engine.mjs manifest --dir "$ENGINE_OUT" \
+  --key "$HOME/.config/ferryx/engine-key/engine-manifest.key"
+bun scripts/browser-engine/release-engine.mjs verify --dir "$ENGINE_OUT" \
+  --public-key "$(cat "$HOME/.config/ferryx/engine-key/engine-manifest.pub")"
+# the app's own verifier, same check in Rust:
+cargo run --manifest-path src-tauri/Cargo.toml --example verify_engine_manifest -- \
+  "$ENGINE_OUT" "$(cat "$HOME/.config/ferryx/engine-key/engine-manifest.pub")"
+```
+
+Publishing is a separate, owner-approved step. Without `--publish` the command only prints the
+`gh` commands; with it, it creates the release as a draft, uploads `manifest.json`,
+`manifest.json.sig` and the archives, downloads the draft and compares every byte, and only then
+makes it public (`--latest=false`, so the app's updater `latest.json` is untouched). It refuses
+to run under CI and fails if the release already exists (no `--clobber`).
+
+```bash
+bun scripts/browser-engine/release-engine.mjs publish --dir "$ENGINE_OUT" \
+  --public-key "$(cat "$HOME/.config/ferryx/engine-key/engine-manifest.pub")" --publish
+```
+
+Then install from a released app build on each OS (Settings > Browser > Chromium Engine >
+Download) and open a browser tab. If a published engine is bad, publish a fixed one under a new
+`ENGINE_VERSION`; users can switch back with "Use <previous>" meanwhile. Never replace assets of
+a published engine release.
+
 ## Checks, cleanup, and recovery
 
 ### Completion checklist
