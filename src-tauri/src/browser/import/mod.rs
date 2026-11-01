@@ -6,9 +6,11 @@
 //! [`ImportSink`]. Cookies go straight into the target profile (see [`cookie_sink`]).
 //! Bookmarks, history and passwords are written as JSON-lines staging files under
 //! `<data>/browser-import/<profile>/` (see [`staging`]) for the bookmark, history and vault
-//! stores to ingest; the orchestrator connects those stores to the sink.
+//! stores; [`ingest`] moves them into those stores when the import ends and deletes the files.
 
 pub mod cookie_sink;
+pub mod ingest;
+pub mod installed_cookies;
 pub mod run;
 pub mod staging;
 
@@ -116,6 +118,9 @@ pub struct ImportTypeResult {
     #[serde(rename = "type")]
     pub data_type: ImportDataType,
     pub imported: usize,
+    /// Records Ferryx already had (bookmarks, history and passwords).
+    #[serde(default)]
+    pub duplicates: usize,
     pub skipped: usize,
     pub notes: Vec<String>,
     pub error: Option<ImportTypeError>,

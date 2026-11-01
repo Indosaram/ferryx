@@ -258,6 +258,7 @@ fn cancelled_result(data_type: ImportDataType) -> ImportTypeResult {
     ImportTypeResult {
         data_type,
         imported: 0,
+        duplicates: 0,
         skipped: 0,
         notes: Vec::new(),
         error: Some(ImportTypeError::new("cancelled", "the import was cancelled")),
@@ -288,6 +289,7 @@ impl ImportRun {
                     return ImportTypeResult {
                         data_type,
                         imported: 0,
+                        duplicates: 0,
                         skipped: 0,
                         notes: Vec::new(),
                         error: Some(ImportTypeError::new(
@@ -303,6 +305,7 @@ impl ImportRun {
                     return ImportTypeResult {
                         data_type,
                         imported: 0,
+                        duplicates: 0,
                         skipped: 0,
                         notes: Vec::new(),
                         error: Some(ImportTypeError::new(
@@ -344,7 +347,7 @@ impl ImportRun {
         };
         if let Some(error) = failure {
             sink.discard(data_type);
-            return ImportTypeResult { data_type, imported: 0, skipped, notes, error: Some(error) };
+            return ImportTypeResult { data_type, imported: 0, duplicates: 0, skipped, notes, error: Some(error) };
         }
         match sink.finish(data_type) {
             Ok(kept) => {
@@ -352,6 +355,7 @@ impl ImportRun {
                 ImportTypeResult {
                     data_type,
                     imported: kept.kept,
+                    duplicates: 0,
                     skipped: skipped + kept.skipped,
                     notes,
                     error: None,
@@ -360,6 +364,7 @@ impl ImportRun {
             Err(error) => ImportTypeResult {
                 data_type,
                 imported: 0,
+                duplicates: 0,
                 skipped,
                 notes,
                 error: Some(ImportTypeError::from_sink(&error)),
@@ -419,6 +424,7 @@ pub fn import_password_file(
     let fail = |error: ImportTypeError| ImportTypeResult {
         data_type: ImportDataType::Passwords,
         imported: 0,
+        duplicates: 0,
         skipped: 0,
         notes: Vec::new(),
         error: Some(error),
@@ -457,6 +463,7 @@ pub fn import_password_file(
         Ok(kept) => ImportTypeResult {
             data_type: ImportDataType::Passwords,
             imported: kept.kept,
+            duplicates: 0,
             skipped: parsed.preview.skipped,
             notes: parsed.preview.safe_messages,
             error: None,

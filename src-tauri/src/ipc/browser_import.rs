@@ -3,13 +3,19 @@
 //! Whole-command failures are `BROWSER_IMPORT_FAILED` with `details.reason`:
 //! `unknown-source`, `invalid-profile`, `private-profile`, `busy`, `no-data-dir`.
 //! Per-type failures are in each result's `error.code` (see `browser::import`).
+//!
+//! When the records are read, the same blocking task moves the staged bookmarks, history and
+//! passwords into Ferryx's stores and deletes the staged files (`browser::import::ingest`), so
+//! each result counts what the stores kept.
 
 use crate::browser::import::cookie_sink::CookieSink;
+use crate::browser::import::ingest::{self, PasswordVault};
 use crate::browser::import::run::{
     detect_sources, import_password_file, ImportRun, ImportSource, PasswordFileFormat, ProfileSink,
 };
 use crate::browser::import::staging::{pending_dir, StagingWriter};
 use crate::browser::import::{ImportDataType, ImportReport, ImportTypeResult};
+use crate::browser::library::BrowserLibrary;
 use crate::browser::{BrowserManager, BrowserProfileId};
 use crate::ipc::error::{IpcError, IpcErrorCode};
 use parking_lot::Mutex;
@@ -36,6 +42,37 @@ fn target_profile(profile_id: &str) -> Result<BrowserProfileId, IpcError> {
         ));
     }
     Ok(profile)
+}
+
+/// Where the staged records of one import go: the pending dir, the library and the vault.
+struct Stores {
+    pending: PathBuf,
+    library: Arc<BrowserLibrary>,
+    vault: crate::ipc::browser_vault::AppVault,
+}
+
+impl Stores {
+    fn of<R: tauri::Runtime>(app: &AppHandle<R>, profile: &BrowserProfileId) -> Result<Self, IpcError> {
+        let data_dir = crate::ipc::browser::engine_data_dir(app)
+            .map_err(|error| import_failed("no-data-dir", error.message))?;
+        Ok(Self {
+            pending: pending_dir(&data_dir, profile.as_str()),
+            library: crate::ipc::browser_library::library(app)?,
+            vault: crate::ipc::browser_vault::app_vault(app)?,
+        })
+    }
+
+    /// Blocking: stores and deletes the staged files, then puts the counts into `results`.
+    fn ingest(&self, results: &mut Vec<ImportTypeResult>) {
+        let ingested = ingest::ingest_pending(&self.pending, &self.library, &self.vault as &dyn PasswordVault);
+        ingest::apply(results, ingested);
+    }
+}
+
+fn library_changed(results: &[ImportTypeResult]) -> bool {
+    results.iter().any(|result| {
+        matches!(result.data_type, ImportDataType::Bookmarks | ImportDataType::History) && result.imported > 0
+    })
 }
 
 /// The sink for `profile`: staging under the data dir, cookies into its Chromium cache (when
@@ -124,6 +161,7 @@ pub async fn cmd_browser_import_run<R: tauri::Runtime>(
     .await?;
 
     let sink = profile_sink(&app, &manager, &profile, &browser.display_name)?;
+    let stores = Stores::of(&app, &profile)?;
     let password_file = request.password_csv_path.map(PathBuf::from);
     let has_password_file = password_file.is_some();
     let run = Arc::new(ImportRun::new(Arc::new(sink), password_file));
@@ -135,11 +173,17 @@ pub async fn cmd_browser_import_run<R: tauri::Runtime>(
         *active = Some(Arc::clone(&run));
     }
     let types = request.types;
-    crate::ipc::run_blocking(move || {
+    let report = crate::ipc::run_blocking(move || {
         let _guard = ActiveGuard;
-        Ok(run.run(&browser, &types, has_password_file))
+        let mut report = run.run(&browser, &types, has_password_file);
+        stores.ingest(&mut report.results);
+        Ok(report)
     })
-    .await
+    .await?;
+    if library_changed(&report.results) {
+        crate::ipc::browser_library::notify_imported(&app);
+    }
+    Ok(report)
 }
 
 #[tauri::command]
@@ -174,7 +218,18 @@ pub async fn cmd_browser_import_password_file<R: tauri::Runtime>(
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "password export".to_string());
     let sink = profile_sink(&app, manager.inner(), &profile, &source_name)?;
-    crate::ipc::run_blocking(move || Ok(import_password_file(&sink, request.format, &file))).await
+    let stores = Stores::of(&app, &profile)?;
+    let mut results = crate::ipc::run_blocking(move || {
+        let mut results = vec![import_password_file(&sink, request.format, &file)];
+        stores.ingest(&mut results);
+        Ok(results)
+    })
+    .await?;
+    if library_changed(&results) {
+        crate::ipc::browser_library::notify_imported(&app);
+    }
+    // `results[0]` is the passwords result; others are files an interrupted import left behind.
+    Ok(results.swap_remove(0))
 }
 
 #[cfg(test)]

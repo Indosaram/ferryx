@@ -2540,22 +2540,19 @@ pub async fn cmd_browser_import_installed_cookies<R: tauri::Runtime>(
     let kind = request.source;
     let source_profile = request.source_profile;
 
-    let read_result: crate::browser::chromium_cookies::ChromiumCookieReadResult =
-        crate::ipc::run_blocking(move || {
-            crate::browser::chromium_cookie_source::import_installed_browser_cookies_sync(
-                kind,
-                source_profile.as_deref(),
-                Some(&home_dir),
-            )
-            .map_err(|import_err| {
-                IpcError::new(
-                    IpcErrorCode::BrowserCookieImportFailed,
-                    import_err.to_string(),
-                )
+    // The ported importer reads the profile (snapshot copy, Keychain / keyring / DPAPI).
+    let read_result = crate::ipc::run_blocking(move || {
+        crate::browser::import::installed_cookies::read_installed_browser_cookies(
+            kind,
+            source_profile.as_deref(),
+            Some(&home_dir),
+        )
+        .map_err(|import_err| {
+            IpcError::new(IpcErrorCode::BrowserCookieImportFailed, import_err.to_string())
                 .with_details(serde_json::json!({ "reason": import_err.reason.as_str() }))
-            })
         })
-        .await?;
+    })
+    .await?;
 
     let cookies = read_result
         .cookies
@@ -2583,9 +2580,7 @@ pub async fn cmd_browser_import_installed_cookies<R: tauri::Runtime>(
         }
     }
 
-    let skipped_count = read_result.unsupported_v11_count
-        + read_result.decrypt_failed_count
-        + read_result.invalid_count;
+    let skipped_count = read_result.skipped;
 
     Ok(ImportInstalledBrowserCookiesResult {
         imported_count: cookies.len(),
