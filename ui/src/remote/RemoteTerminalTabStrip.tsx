@@ -91,8 +91,8 @@ function ActivityGlyph({ activity }: { readonly activity: RemoteInventoryActivit
   if (activity === "waiting") {
     return (
       <span aria-hidden="true" data-testid="tab-waiting-indicator" className="flex shrink-0 items-center gap-1 text-status-warning">
-        <span className="size-2 rounded-full border-2 border-current" />
-        <span className="hidden text-xs [@media(pointer:coarse)]:inline">Waiting</span>
+        <span className="size-2 rounded-full bg-current" />
+        <span className="hidden text-xs [@media(pointer:coarse)]:inline">Needs you</span>
       </span>
     );
   }

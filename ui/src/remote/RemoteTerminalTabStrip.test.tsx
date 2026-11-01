@@ -36,15 +36,15 @@ function renderStrip(tabs: readonly RemoteStripTab[]) {
 describe("RemoteTerminalTabStrip", () => {
   afterEach(cleanup);
 
-  it("shows waiting and done as distinct shapes instead of a ringed colour dot", () => {
+  it("shows waiting and done as distinct shapes with text instead of a ringed or outlined dot", () => {
     // Given: one waiting and one done tab
     renderStrip([tab("build", { activity: "waiting" }), tab("tests", { activity: "done" })]);
 
-    // Then: waiting is a hollow outline glyph with text, done is a check glyph with text
+    // Then: waiting is a filled dot with text, done is a check glyph with text
     const waiting = screen.getByTestId("tab-waiting-indicator");
     const done = screen.getByTestId("tab-done-indicator");
-    expect(waiting.className).not.toMatch(/ring-/);
-    expect(waiting).toHaveTextContent("Waiting");
+    expect(waiting.innerHTML).not.toMatch(/ring-|border-/);
+    expect(waiting).toHaveTextContent("Needs you");
     expect(done).toHaveTextContent("Done");
     expect(done.querySelector("svg")).not.toBeNull();
   });
