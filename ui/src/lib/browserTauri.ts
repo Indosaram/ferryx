@@ -431,7 +431,7 @@ export async function listBrowsers(): Promise<BrowserSessionSummary[]> {
 export type BrowserEngineStatus =
   | { state: "unsupported" }
   | { state: "notInstalled" }
-  | { state: "installed"; version: string };
+  | { state: "installed"; version: string; previous?: string | null };
 
 export async function getBrowserEngineStatus(): Promise<BrowserEngineStatus> {
   return invoke<BrowserEngineStatus>("cmd_browser_engine_status");
@@ -443,6 +443,31 @@ export async function installBrowserEngine(): Promise<BrowserEngineStatus> {
 
 export async function removeBrowserEngine(): Promise<BrowserEngineStatus> {
   return invoke<BrowserEngineStatus>("cmd_browser_engine_remove");
+}
+
+/** Makes the previously installed engine active again. */
+export async function rollbackBrowserEngine(): Promise<BrowserEngineStatus> {
+  return invoke<BrowserEngineStatus>("cmd_browser_engine_rollback");
+}
+
+/**
+ * Why an engine install failed, from the structured IPC error: `details.reason` of a
+ * BROWSER_ENGINE_INSTALL_FAILED error (badSignature, unsigned, checksumMismatch, partial,
+ * oversized, diskFull, versionMismatch, network, ...), else the error code.
+ */
+export type BrowserEngineFailure = { code: string; reason: string | null; message: string | null };
+
+export function parseBrowserEngineFailure(err: unknown): BrowserEngineFailure {
+  const code = extractBrowserErrorCode(err);
+  if (!err || typeof err !== "object") return { code, reason: null, message: null };
+  const record = err as Record<string, unknown>;
+  const details = record.details;
+  const reason =
+    details && typeof details === "object" && typeof (details as Record<string, unknown>).reason === "string"
+      ? ((details as Record<string, unknown>).reason as string)
+      : null;
+  const message = typeof record.message === "string" && record.message.trim() ? record.message.trim() : null;
+  return { code, reason, message };
 }
 
 export async function importBrowserCookies(profileId: string, filePath: string): Promise<number> {

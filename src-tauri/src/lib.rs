@@ -1857,6 +1857,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_browser_engine_status,
         cmd_browser_engine_install,
         cmd_browser_engine_remove,
+        crate::ipc::browser_engine::cmd_browser_engine_rollback,
+        crate::ipc::browser_engine::cmd_browser_engine_take_fallback,
         cmd_browser_open_external,
         cmd_browser_remote_reclaim,
         cmd_browser_remote_revoke,
