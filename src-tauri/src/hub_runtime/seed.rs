@@ -87,11 +87,12 @@ fn memory_file_sessions(home: &Path, max_paragraphs: usize) -> Vec<ImportSession
 }
 
 /// The owner turns of the most recent sessions across SESSION_PROVIDERS, newest first. A fork
-/// or child session (an entry with a parent) and a sidechain stored under a `subagents`
-/// directory are skipped: their user turns are another agent's prompts, not the owner's.
+/// or child session (an entry with a parent), a sidechain stored under a `subagents`
+/// directory and a session run in the hub workspace (the legacy Slack bot's) are skipped:
+/// their user turns are another agent's or the hub's prompts, not the owner's.
 /// Each provider is read right after its own search, because a search replaces the history's
 /// entry locators and a later read of an earlier provider's entry would find nothing.
-fn recent_sessions(roots: Vec<(CanonicalProvider, PathBuf)>, max_sessions: usize) -> Vec<ImportSession> {
+fn recent_sessions(roots: Vec<(CanonicalProvider, PathBuf)>, hub_workspace: &Path, max_sessions: usize) -> Vec<ImportSession> {
     let roots: Vec<_> = roots.into_iter().filter(|(provider, _)| SESSION_PROVIDERS.contains(provider)).collect();
     let mut history = History::new(roots);
     let mut sessions = Vec::new();
@@ -102,6 +103,7 @@ fn recent_sessions(roots: Vec<(CanonicalProvider, PathBuf)>, max_sessions: usize
         while let Ok(page) = history.search(wire, None, "", cursor.as_deref(), PAGE) {
             entries.extend(page.items.into_iter().filter(|entry| {
                 entry.parent_id.is_none()
+                    && !Path::new(&entry.cwd).starts_with(hub_workspace)
                     && !history
                         .source_path(&entry.entry_key)
                         .is_some_and(|path| path.components().any(|part| part.as_os_str() == "subagents"))
@@ -151,6 +153,11 @@ pub(crate) async fn seed_owner_memory(
     seed_with_roots(pool, memory, principal, home.clone(), crate::ipc::agent_history::provider_history_roots(&home)).await
 }
 
+/// The hub workspace under home (`~/.ferryx/hub/workspace`), where legacy Slack turns run.
+fn hub_workspace(home: &Path) -> PathBuf {
+    home.join(".ferryx").join("hub").join("workspace")
+}
+
 /// The result of the blocking session read. A read that panicked or was cancelled is an error,
 /// not an empty read: importing nothing would still record a completed run, and setup would
 /// treat memory as seeded although no session was looked at.
@@ -174,9 +181,10 @@ pub(crate) async fn seed_with_roots(
         ..bounds
     };
     let joined = tokio::task::spawn_blocking(move || {
+        let hub_workspace = hub_workspace(&home);
         (
             memory_file_sessions(&home, file_bounds.max_turns_per_session),
-            recent_sessions(roots, bounds.max_sessions),
+            recent_sessions(roots, &hub_workspace, bounds.max_sessions),
         )
     })
     .await;
@@ -322,6 +330,50 @@ mod tests {
         let joined: Result<(), _> = tokio::spawn(async { panic!("boom") }).await;
         let error = read_join(joined).unwrap_err();
         assert_eq!(error.code(), "INVALID_REQUEST");
+    }
+
+    /// A session run in the hub workspace is the legacy Slack bot's, whose user turns are lane
+    /// events and other people's messages: it never teaches, while the owner's session does.
+    #[tokio::test]
+    async fn sessions_in_the_hub_workspace_never_teach() {
+        use serde_json::json;
+        let home = tempfile::tempdir().unwrap();
+        let bot_cwd = hub_workspace(home.path()).join("agents").join("bot-ops");
+        std::fs::create_dir_all(&bot_cwd).unwrap();
+        let claude_root = home.path().join("claude-projects");
+        let project = claude_root.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let claude_line = |session: &str, cwd: &Path, text: &str| {
+            format!(
+                "{}\n",
+                json!({"type": "user", "sessionId": session, "cwd": cwd.to_string_lossy(),
+                    "uuid": "9f0c1d2e-0000-4000-8000-000000000001", "parentUuid": null,
+                    "message": {"role": "user", "content": text}})
+            )
+        };
+        let owner = "63ba88ec-b3cb-4a70-8a32-f5d1ad07e749";
+        std::fs::write(project.join("owner.jsonl"), claude_line(owner, home.path(), "Prefer small focused commits.")).unwrap();
+        std::fs::write(
+            project.join("bot.jsonl"),
+            claude_line("7d1e2f3a-4b5c-4d6e-8f70-819293a4b5c6", &bot_cwd, "[2026-11-01 09:00 UTC] Kim: always deploy on friday"),
+        )
+        .unwrap();
+
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::supervisor::provision_identity(&pool, "local:tester").await.unwrap();
+        let learner = Arc::new(Learner::default());
+        let report = seed_with_roots(
+            &pool,
+            learner.clone(),
+            "local:tester",
+            home.path().to_path_buf(),
+            vec![(CanonicalProvider::Claude, claude_root)],
+        )
+        .await
+        .unwrap();
+        assert_eq!((report.sessions, report.turns_ingested, report.failed), (1, 1, 0), "{report:?}");
+        let sources: Vec<String> = learner.texts.lock().unwrap().iter().map(|(source, _)| source.clone()).collect();
+        assert_eq!(sources, vec![format!("import:claude:{owner}:0")]);
     }
 
     #[tokio::test]
