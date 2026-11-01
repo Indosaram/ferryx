@@ -22,6 +22,10 @@ use crate::storage::now_rfc3339;
 /// Longest `<provider>:<session>:<ordinal>` source message id.
 const MAX_SOURCE_ID_CHARS: usize = 256;
 
+/// `hub_meta` key: RFC 3339 time of the last completed import run, written even when the run
+/// kept no session, so setup does not wait for an import that has nothing to read.
+pub const LAST_RUN_KEY: &str = "supervisor_memory_import_last_run";
+
 /// Markers of text the hub or a harness wrote, never the owner.
 const HUB_MARKERS: [&str; 1] = ["Owner request (verbatim):"];
 
@@ -294,6 +298,14 @@ pub async fn import_sessions(
         report.sessions += 1;
     }
     report.skipped += total.saturating_sub(bounds.max_sessions);
+    sqlx::query(
+        "INSERT INTO hub_meta(key, value) VALUES(?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(LAST_RUN_KEY)
+    .bind(now_rfc3339())
+    .execute(pool)
+    .await?;
     Ok(report)
 }
 
@@ -308,8 +320,13 @@ pub struct ImportTotals {
 
 pub async fn import_totals(pool: &SqlitePool) -> Result<ImportTotals, SupervisorError> {
     let (sessions, turns, last_at): (i64, i64, Option<String>) = sqlx::query_as(
-        "SELECT COUNT(*), COALESCE(SUM(turns), 0), MAX(imported_at) FROM supervisor_memory_imports",
+        "SELECT COUNT(*), COALESCE(SUM(turns), 0),
+                (SELECT MAX(at) FROM (SELECT MAX(imported_at) AS at FROM supervisor_memory_imports
+                                      UNION ALL
+                                      SELECT value FROM hub_meta WHERE key = ?))
+           FROM supervisor_memory_imports",
     )
+    .bind(LAST_RUN_KEY)
     .fetch_one(pool)
     .await?;
     Ok(ImportTotals {

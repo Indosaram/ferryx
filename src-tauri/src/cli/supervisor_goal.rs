@@ -155,6 +155,40 @@ pub fn canonical_git_common_dir(host: &str, dir: &str) -> Result<String, (&'stat
     common.to_str().map(str::to_owned).ok_or_else(|| refuse("the path is not UTF-8".into()))
 }
 
+/// The repository identity and canonical git common dir of a checkout on this host, as
+/// automatic setup maps it: the dir is resolved exactly as `supervisor setup --host local`
+/// resolves `--git-common-dir`; the identity is the origin remote in the form every checkout
+/// of one repository shares, else `local:<git common dir>` for a repository without origin.
+pub fn local_project_mapping(dir: &str) -> Result<(String, String), (&'static str, String)> {
+    let common = canonical_git_common_dir(ferryx_hub::agent_control::LOCAL_HOST_ID, dir)?;
+    let identity = rev_parse_config(Path::new(&common), "remote.origin.url")
+        .map(|url| crate::hub_runtime::remote_key(&url))
+        .filter(|key| !key.is_empty())
+        .unwrap_or_else(|| format!("local:{common}"));
+    Ok((identity, common))
+}
+
+/// One `git config --get <key>` in the git dir `git_dir`, free of inherited overrides.
+fn rev_parse_config(git_dir: &Path, key: &str) -> Option<String> {
+    let output = crate::util::no_window_command("git")
+        .arg("--git-dir")
+        .arg(git_dir)
+        .args(["config", "--get", key])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
 /// The git common dir `dir` names on paired host `host`, normalized lexically: it cannot be
 /// resolved from this machine. Absolute, trailing separators stripped, and refused with
 /// NOT_A_GIT_DIR when any component is empty, `.` or `..`, or the last one is not `.git` (the

@@ -198,20 +198,31 @@ async fn meta_flag(pool: &SqlitePool, key: &str) -> Result<bool, SupervisorError
 
 /// Legacy lanes the owner could adopt: queued or blocked, not admitted by the supervisor and
 /// not already adopted.
-pub async fn adoptable_lanes(pool: &SqlitePool) -> Result<i64, SupervisorError> {
-    Ok(sqlx::query_scalar(
-        "SELECT COUNT(*) FROM lanes l
+const ADOPTABLE_WHERE: &str = "FROM lanes l
           WHERE substr(l.key, 1, length(?)) <> ?
             AND l.status IN ('queued','blocked')
             AND NOT EXISTS(SELECT 1 FROM supervisor_goals g WHERE g.lane_key = l.key)
             AND NOT EXISTS(SELECT 1 FROM supervisor_requests r
-                            WHERE r.source_message_id = ? || l.key)",
-    )
+                            WHERE r.source_message_id = ? || l.key)";
+
+/// How many legacy lanes the owner could adopt ([`ADOPTABLE_WHERE`]).
+pub async fn adoptable_lanes(pool: &SqlitePool) -> Result<i64, SupervisorError> {
+    Ok(sqlx::query_scalar(&format!("SELECT COUNT(*) {ADOPTABLE_WHERE}"))
     .bind(LANE_KEY_PREFIX)
     .bind(LANE_KEY_PREFIX)
     .bind(ADOPT_MESSAGE_PREFIX)
     .fetch_one(pool)
     .await?)
+}
+
+/// The keys of the lanes [`adoptable_lanes`] counts, in key order.
+pub async fn adoptable_lane_keys(pool: &SqlitePool) -> Result<Vec<String>, SupervisorError> {
+    Ok(sqlx::query_scalar(&format!("SELECT l.key {ADOPTABLE_WHERE} ORDER BY l.key"))
+        .bind(LANE_KEY_PREFIX)
+        .bind(LANE_KEY_PREFIX)
+        .bind(ADOPT_MESSAGE_PREFIX)
+        .fetch_all(pool)
+        .await?)
 }
 
 /// This installation's setup status. Reads only.
@@ -307,6 +318,21 @@ pub async fn set_setup_flags(
         set_flag(pool, MEMORY_IMPORT_KEY, on).await?;
     }
     Ok(())
+}
+
+/// The Slack team (workspace) id this hub has stored a Slack conversation for, when exactly
+/// one is known; automatic setup uses it for the owner principal `slack:<team>:<user>`.
+pub async fn known_slack_team(pool: &SqlitePool) -> Result<Option<String>, SupervisorError> {
+    let teams: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT guild_id FROM sessions
+          WHERE platform = 'slack' AND guild_id IS NOT NULL AND guild_id <> '' LIMIT 2",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(match teams.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
+    })
 }
 
 /// `text` without surrounding whitespace or control characters; `None` when nothing is left.
