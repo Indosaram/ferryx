@@ -225,7 +225,7 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
   const consuming = loading && !codeRequested && !email.trim();
 
   return (
-    <div className="flex min-h-dvh w-full flex-col bg-background text-foreground px-4 pt-[max(env(safe-area-inset-top),1.5rem)] pb-[max(env(safe-area-inset-bottom),1.5rem)] sm:items-center sm:justify-center sm:p-6">
+    <div className="remote-app-root flex min-h-dvh w-full flex-col bg-background text-foreground px-4 pt-[max(env(safe-area-inset-top),1.5rem)] pb-[max(env(safe-area-inset-bottom),1.5rem)] sm:items-center sm:justify-center sm:p-6">
       <main className="flex w-full flex-1 flex-col justify-center sm:max-w-sm sm:flex-none">
         <div className="space-y-6 sm:rounded-2xl sm:border sm:border-border sm:bg-card sm:p-8">
           <div className="flex flex-col items-center space-y-3 text-center">

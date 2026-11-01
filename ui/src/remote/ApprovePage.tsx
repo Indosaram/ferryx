@@ -130,7 +130,7 @@ export const ApprovePage: React.FC<ApprovePageProps> = ({ relayUrl }) => {
 
   if (!origin) {
     return (
-      <main className="flex min-h-dvh items-center justify-center bg-background pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] text-foreground">
+      <main className="remote-app-root flex min-h-dvh items-center justify-center bg-background pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] text-foreground">
         <LoaderCircle className="size-5 animate-spin motion-reduce:animate-none text-muted-foreground" aria-label="Loading" />
       </main>
     );
@@ -165,7 +165,7 @@ export const ApprovePage: React.FC<ApprovePageProps> = ({ relayUrl }) => {
   };
 
   return (
-    <main className="flex min-h-dvh items-start justify-center bg-background px-4 pt-[max(env(safe-area-inset-top),1rem)] pb-[max(env(safe-area-inset-bottom),1rem)] text-foreground sm:items-center sm:p-6">
+    <main className="remote-app-root flex min-h-dvh items-start justify-center bg-background px-4 pt-[max(env(safe-area-inset-top),1rem)] pb-[max(env(safe-area-inset-bottom),1rem)] text-foreground sm:items-center sm:p-6">
       <div className="w-full max-w-sm space-y-4">
         <div className="space-y-1">
           <h1 className="text-xl font-semibold">Approve a computer</h1>

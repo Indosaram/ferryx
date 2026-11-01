@@ -90,7 +90,7 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired, transportUrl
   };
 
   return (
-    <main className="flex min-h-dvh w-full flex-col items-center justify-center bg-background px-4 pt-[max(env(safe-area-inset-top),1rem)] pb-[max(env(safe-area-inset-bottom),1rem)] text-foreground">
+    <main className="remote-app-root flex min-h-dvh w-full flex-col items-center justify-center bg-background px-4 pt-[max(env(safe-area-inset-top),1rem)] pb-[max(env(safe-area-inset-bottom),1rem)] text-foreground">
       <div className="w-full max-w-sm space-y-6">
         <div className="space-y-2">
           <h1 className="text-xl font-semibold tracking-tight text-foreground">Pair this phone</h1>
