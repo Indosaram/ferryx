@@ -313,6 +313,12 @@ pub fn reload(browser_id: &str, ignore_cache: bool) -> Result<(), BrowserError> 
     send_to_tab(browser_id, EngineCommand::Reload { tab: browser_id.to_string(), ignore_cache })
 }
 
+/// Tells a running engine of `profile` to apply the cookie file Ferryx staged at `path`.
+/// Returns false when that engine is not running; it applies the file when it next starts.
+pub fn import_cookies(profile: &str, path: &Path) -> bool {
+    send(profile, &EngineCommand::ImportCookies { path: path.display().to_string() })
+}
+
 /// Brings the tab's window back into view after the page changed: Windows repaints the app's
 /// own windows around it, macOS puts the engine's windows back above the Ferryx window.
 pub fn repaint(browser_id: &str) {

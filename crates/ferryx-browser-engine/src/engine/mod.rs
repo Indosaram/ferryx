@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
 mod platform;
+mod import_cookies;
 
 #[cfg(target_os = "macos")]
 pub mod mac_app;
@@ -297,6 +298,9 @@ fn execute(command: Command) {
                 }
             }
         }
+        Command::ImportCookies { path } => {
+            import_cookies::apply(std::path::Path::new(&path));
+        }
     }
 }
 
@@ -384,6 +388,9 @@ wrap_browser_process_handler! {
 
     impl BrowserProcessHandler {
         fn on_context_initialized(&self) {
+            if let Ok(dir) = std::env::var("FERRYX_CEF_CACHE") {
+                import_cookies::apply_pending(std::path::Path::new(&dir));
+            }
             std::thread::spawn(read_commands);
         }
 

@@ -45,6 +45,7 @@ import {
 import { Switch } from "../ui/switch";
 import { BrowserEngineGroup } from "./BrowserEngineGroup";
 import { SettingRow, SettingsGroup, SettingsHeading } from "./primitives";
+import { ImportBrowserDataDialog } from "./ImportBrowserDataDialog";
 
 export function BrowserSection() {
   const { settings, updateSettings, resetSettings } = useBrowserSettings();
@@ -694,7 +695,36 @@ export function BrowserSection() {
           </div>
         ) : null}
       </SettingsGroup>
+      <ImportBrowserDataGroup
+        profiles={visibleProfiles.filter((profile) => profile.id !== "private")}
+        defaultProfileId={settings.defaultProfileId === "private" ? "default" : settings.defaultProfileId}
+      />
     </section>
+  );
+}
+
+function ImportBrowserDataGroup({
+  profiles,
+  defaultProfileId,
+}: {
+  profiles: { id: string; name: string }[];
+  defaultProfileId: string;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <SettingsGroup
+      title="Import"
+      description="Bring bookmarks, history, cookies and passwords from another browser or a password manager export."
+      action={
+        <Button type="button" variant="outline" size="sm" onClick={() => setOpen(true)} className="h-8 px-2 text-[11px]">
+          Import browser data…
+        </Button>
+      }
+    >
+      {open ? (
+        <ImportBrowserDataDialog open={open} onOpenChange={setOpen} profiles={profiles} defaultProfileId={defaultProfileId} />
+      ) : null}
+    </SettingsGroup>
   );
 }
 

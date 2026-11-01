@@ -1,0 +1,4 @@
+collections,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp
+Engineering,login,Bitwarden Org Login,Synthetic org note,"org_unsupported:synthetic",0,https://bitwarden-org.example/login,bw-org@example.test,SYNTH-BITWARDEN-ORG-PASSWORD-001,otpauth://totp/Org:bw-org?secret=SYNTHOTP
+Engineering,login,Bitwarden Org Duplicate,Synthetic duplicate,,0,https://bitwarden-org.example/login,bw-org@example.test,SYNTH-BITWARDEN-ORG-PASSWORD-002,
+Engineering,login,Bitwarden Org Blank,Synthetic blank,,0,https://blank.bitwarden-org.example,blank-org@example.test,,

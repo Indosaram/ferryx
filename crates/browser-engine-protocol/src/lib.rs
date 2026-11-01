@@ -11,6 +11,8 @@
 /// Marks an engine stdout line as a protocol event.
 pub const EVENT_PREFIX: &str = "@ferryx ";
 
+pub mod cookies;
+
 /// A pane rectangle: pixels inside the Ferryx window on Windows, screen points from the
 /// top-left on macOS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -38,6 +40,8 @@ pub enum Command {
     Back { tab: String },
     Forward { tab: String },
     Reload { tab: String, ignore_cache: bool },
+    /// Applies (then deletes) a staged cookie file, see [`cookies`]. Not tab scoped.
+    ImportCookies { path: String },
 }
 
 /// Engine to Ferryx.
@@ -122,6 +126,7 @@ impl Command {
             Self::Back { tab } => format!("back {tab}"),
             Self::Forward { tab } => format!("forward {tab}"),
             Self::Reload { tab, ignore_cache } => format!("reload {tab} {}", flag(*ignore_cache)),
+            Self::ImportCookies { path } => format!("import-cookies {}", one_line(path)),
         }
     }
 
@@ -160,6 +165,7 @@ impl Command {
                 let (parts, _) = fields(rest, 2)?;
                 Some(Self::Reload { tab: parts[0].to_string(), ignore_cache: parse_flag(parts[1])? })
             }
+            "import-cookies" if !rest.is_empty() => Some(Self::ImportCookies { path: rest.to_string() }),
             _ => None,
         }
     }
@@ -252,6 +258,7 @@ mod tests {
             Command::Forward { tab: tab.clone() },
             Command::Reload { tab: tab.clone(), ignore_cache: true },
             Command::Raise,
+            Command::ImportCookies { path: "/data/browser-cef/default/ferryx import.tsv".into() },
         ];
         for command in commands {
             assert_eq!(Command::parse(&command.to_line()), Some(command));

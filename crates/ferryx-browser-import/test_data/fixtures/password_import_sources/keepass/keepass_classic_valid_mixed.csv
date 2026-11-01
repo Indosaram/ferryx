@@ -1,0 +1,4 @@
+Account,Login Name,Password,Web Site,Comments
+KeePass Classic Login,classic-user@example.test,SYNTH-KEEPASS-CLASSIC-PASSWORD-001,https://keepass-classic.example/login,Synthetic comment
+KeePass Classic Duplicate,classic-user@example.test,SYNTH-KEEPASS-CLASSIC-PASSWORD-002,https://keepass-classic.example/login,Synthetic duplicate
+KeePass Classic Blank,blank-classic@example.test,,https://blank.keepass-classic.example,Synthetic blank

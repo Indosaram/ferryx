@@ -141,6 +141,7 @@ pub enum IpcErrorCode {
     AuthExpired,
     NotFound,
     MethodNotAllowed,
+    BrowserImportFailed,
     #[serde(untagged)]
     Custom(String),
 }
@@ -210,6 +211,7 @@ impl IpcErrorCode {
             "AUTH_EXPIRED" => Self::AuthExpired,
             "NOT_FOUND" => Self::NotFound,
             "METHOD_NOT_ALLOWED" => Self::MethodNotAllowed,
+            "BROWSER_IMPORT_FAILED" => Self::BrowserImportFailed,
             "INTERNAL_ERROR" => Self::InternalError,
             "UNSUPPORTED" => Self::Unsupported,
             "SESSION_ID_CONFLICT" => Self::SessionIdConflict,

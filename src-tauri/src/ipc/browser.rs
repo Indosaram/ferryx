@@ -3744,7 +3744,7 @@ pub async fn cmd_browser_list(
 
 /// Where the engine and its per-tab caches live: the app data dir, or `FERRYX_DATA_DIR` when an
 /// isolated (QA or test) instance set it, so such a run never touches the real install.
-fn engine_data_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<std::path::PathBuf, IpcError> {
+pub(crate) fn engine_data_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<std::path::PathBuf, IpcError> {
     if let Some(dir) = std::env::var_os("FERRYX_DATA_DIR").filter(|dir| !dir.is_empty()) {
         return Ok(std::path::PathBuf::from(dir));
     }
