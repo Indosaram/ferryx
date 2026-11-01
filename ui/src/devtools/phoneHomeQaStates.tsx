@@ -210,9 +210,7 @@ function pendingOption(model: RemoteWorkspaceModel, state: string): RemoteContex
   const section = sidebarParitySections("desktop")[0];
   const node = section?.model?.projects[0]?.worktrees[0];
   if (!node) return null;
-  return { workspaceId: node.workspaceId, worktreeSlug: node.worktreeSlug, worktreeLabel: node.label, machineId: section.machineId } as RemoteContextOption & {
-    machineId: string;
-  };
+  return { workspaceId: node.workspaceId, worktreeSlug: node.worktreeSlug, worktreeLabel: node.label, machineId: section.machineId };
 }
 
 export const PhoneHomeQaState: React.FC<{ state: string; model: RemoteWorkspaceModel }> = ({ state: rawState, model }) => {

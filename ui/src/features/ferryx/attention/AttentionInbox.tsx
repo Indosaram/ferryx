@@ -162,7 +162,7 @@ export function AttentionInbox({
         <p className="text-[12.5px] font-semibold text-worktree-sidebar-foreground">
           Nobody is <span className="text-status-warning">waiting on you</span>.
         </p>
-        <p className="mt-2 max-w-[260px] text-[10.5px] leading-relaxed text-muted-foreground/80">
+        <p className="mt-2 max-w-[260px] text-xs leading-relaxed text-muted-foreground">
           Agents show up here when they need your input or finish their work. Running sessions stay quiet.
         </p>
       </div>
