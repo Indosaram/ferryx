@@ -3067,6 +3067,8 @@ pub(super) fn validate_http_query(path: &str, query: Option<&str>) -> Result<(),
         ["fs", "repositories"] => &["path", "depth", "includeHidden"],
         ["browser", "sessions"] | ["browser", "identify"] => &["workspaceId", "worktreeSlug"],
         ["workspace", "worktrees"] => &["workspaceId"],
+        // The remote sidebar lists desktop-scoped projects (`?scope=desktopLocal`).
+        ["workspace", "projects"] => &["scope"],
         ["workspace", "worktrees", "status"] => &["workspaceId", "wsId", "slug"],
         // Session listing is workspace-scoped; a single session is epoch-fenced.
         ["sessions"] => &["workspaceId", "daemonEpoch"],
@@ -5276,6 +5278,15 @@ mod tests {
         )
         .is_ok());
     }
+    #[test]
+    fn workspace_projects_admits_its_scope_query() {
+        assert_eq!(validate_http_query("workspace/projects", Some("scope=desktopLocal")), Ok(()));
+        assert_eq!(
+            validate_http_query("workspace/projects", Some("other=1")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
     #[test]
     fn r4_strict_utf8_query() {
         assert!(validate_http_query("fs/directories", Some("path=%2Ftmp%2F%EF%BF%BD")).is_ok());
