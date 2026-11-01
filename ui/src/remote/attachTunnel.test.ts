@@ -561,7 +561,8 @@ describe("attachTunnel HTTP shim deadlines and caps", () => {
       const transport = createTunnelTransport(stream);
       const hung = transport.fetchLike("/hung");
       const hungResult = expect(hung).rejects.toThrow(/HTTP_TIMEOUT/);
-      const queued = transport.fetchLike("/next");
+      // A longer deadline so the queued request outlives the hung one and sees the closed stream.
+      const queued = transport.fetchLike("/next", { timeoutMs: DEFAULT_TUNNEL_REQUEST_TIMEOUT_MS * 2 });
       const queuedResult = expect(queued).rejects.toThrow(/STREAM_CLOSED/);
 
       // When the default deadline elapses
@@ -571,6 +572,30 @@ describe("attachTunnel HTTP shim deadlines and caps", () => {
       await hungResult;
       await queuedResult;
       expect(stream.closed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds a request's wait behind a slow one from the moment it is queued", async () => {
+    vi.useFakeTimers();
+    try {
+      // Given a slow in-flight request and a second request queued behind it
+      const stream = new ScriptedByteStream();
+      const transport = createTunnelTransport(stream);
+      const slow = transport.fetchLike("/slow", { timeoutMs: DEFAULT_TUNNEL_REQUEST_TIMEOUT_MS * 3 });
+      const queued = transport.fetchLike("/queued");
+      const queuedResult = expect(queued).rejects.toThrow(/HTTP_TIMEOUT/);
+
+      // When the queued request's deadline elapses while it is still waiting
+      await vi.advanceTimersByTimeAsync(DEFAULT_TUNNEL_REQUEST_TIMEOUT_MS);
+
+      // Then it rejects without closing the stream, and is never sent
+      await queuedResult;
+      expect(stream.closed).toBe(false);
+      stream.pushIncoming("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+      expect((await slow).status).toBe(200);
+      expect(stream.written).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }

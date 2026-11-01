@@ -328,26 +328,17 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
   let isClosed = false;
 
   let requestQueue: Promise<unknown> = Promise.resolve();
-
-  function enqueue<T>(fn: () => Promise<T>): Promise<T> {
-    const run = () => {
-      if (isUpgraded) {
-        return Promise.reject(new Error("STREAM_UPGRADED: stream has been handed over to WebSocket"));
-      }
-      if (isClosed) {
-        return Promise.reject(new TunnelError("STREAM_CLOSED", "transport has been closed"));
-      }
-      return fn();
-    };
-    const next = requestQueue.then(run, run);
-    requestQueue = next.catch(() => {});
-    return next;
-  }
+  let markClosed!: () => void;
+  /** Resolves once the transport is closed, so the queue never waits on a dead stream. */
+  const closedSignal = new Promise<void>((resolve) => {
+    markClosed = resolve;
+  });
 
   /** Closes the shared stream: after a timeout, abort, parse failure or cap violation its framing is unknown. */
   function failTransport() {
     if (isClosed) return;
     isClosed = true;
+    markClosed();
     stream.close();
   }
 
@@ -356,16 +347,23 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
     return new Error(message);
   }
 
-  function withDeadline<T>(
+  /**
+   * Queues one request on the shared stream. Its deadline and abort listener start at enqueue,
+   * so time spent behind other requests counts: a request still waiting when either fires is
+   * rejected and skipped (never sent); one already on the wire closes the stream, since its
+   * response framing is then unknown.
+   */
+  function schedule<T>(
     work: () => Promise<T>,
     timeoutMs: number,
     signal?: AbortSignal,
   ): Promise<T> {
     if (signal?.aborted) {
-      return Promise.reject(new Error("HTTP_ABORTED: request aborted before it was sent"));
+      return Promise.reject(new TunnelError("HTTP_ABORTED", "request aborted before it was sent"));
     }
     return new Promise<T>((resolve, reject) => {
       let settled = false;
+      let started = false;
       const finish = (complete: () => void) => {
         if (settled) return;
         settled = true;
@@ -375,20 +373,44 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
       };
       const fail = (err: Error) =>
         finish(() => {
-          failTransport();
+          if (started) failTransport();
           reject(err);
         });
-      const onAbort = () => fail(new Error("HTTP_ABORTED: request aborted; tunnel stream closed"));
+      const onAbort = () =>
+        fail(new TunnelError("HTTP_ABORTED", started ? "request aborted; tunnel stream closed" : "request aborted before it was sent"));
       const timer = setTimeout(
-        () => fail(new TunnelError("HTTP_TIMEOUT", `no complete response within ${timeoutMs}ms; tunnel stream closed`)),
+        () =>
+          fail(
+            new TunnelError(
+              "HTTP_TIMEOUT",
+              started
+                ? `no complete response within ${timeoutMs}ms; tunnel stream closed`
+                : `request waited ${timeoutMs}ms behind earlier requests`,
+            ),
+          ),
         timeoutMs,
       );
       signal?.addEventListener("abort", onAbort, { once: true });
-      work().then(
-        (value) => finish(() => resolve(value)),
-        // Any failure mid-response leaves unknown bytes in the buffer; never reuse the stream.
-        (err) => fail(err instanceof Error ? err : new Error(String(err))),
-      );
+      const run = async (): Promise<void> => {
+        if (settled) return;
+        if (isUpgraded) {
+          finish(() => reject(new TunnelError("STREAM_UPGRADED", "stream has been handed over to WebSocket")));
+          return;
+        }
+        if (isClosed) {
+          finish(() => reject(new TunnelError("STREAM_CLOSED", "transport has been closed")));
+          return;
+        }
+        started = true;
+        const outcome = work();
+        outcome.then(
+          (value) => finish(() => resolve(value)),
+          // Any failure mid-response leaves unknown bytes in the buffer; never reuse the stream.
+          (err) => fail(err instanceof Error ? err : new Error(String(err))),
+        );
+        await Promise.race([outcome.then(() => {}, () => {}), closedSignal]);
+      };
+      requestQueue = requestQueue.then(run, run);
     });
   }
 
@@ -707,21 +729,18 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
 
   return {
     fetchLike(pathAndQuery: string, init?: FetchLikeInit): Promise<TunnelResponse> {
-      return enqueue(() =>
-        withDeadline(
-          () => doFetch(pathAndQuery, init),
-          init?.timeoutMs ?? DEFAULT_TUNNEL_REQUEST_TIMEOUT_MS,
-          init?.signal,
-        ),
+      return schedule(
+        () => doFetch(pathAndQuery, init),
+        init?.timeoutMs ?? DEFAULT_TUNNEL_REQUEST_TIMEOUT_MS,
+        init?.signal,
       );
     },
     openWebSocket(pathAndQuery: string, headers?: Record<string, string>): Promise<TunnelWebSocket> {
-      return enqueue(() =>
-        withDeadline(() => doOpenWebSocket(pathAndQuery, headers), DEFAULT_TUNNEL_REQUEST_TIMEOUT_MS),
-      );
+      return schedule(() => doOpenWebSocket(pathAndQuery, headers), DEFAULT_TUNNEL_REQUEST_TIMEOUT_MS);
     },
     close(): void {
       isClosed = true;
+      markClosed();
       stream.close();
     },
     get isClosed(): boolean {
