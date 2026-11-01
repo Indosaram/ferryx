@@ -3857,20 +3857,53 @@ struct SuspensionTargets {
 /// to its account record, evaluates each distinct owner once at `now`, and returns the
 /// machines owned by an owner whose grace period has ended.
 ///
-/// A store read error propagates instead of being defaulted: an owner the relay cannot
-/// evaluate is never silently treated as healthy, and the pass is retried.
+/// A store read error is never defaulted to healthy, but it also does not abort the pass: the
+/// failing machine or owner is logged and retried on the next tick while every other owner is
+/// still enforced.
 fn suspension_targets(
     account: &crate::account::service::AccountState,
     candidates: &[String],
     now: u64,
 ) -> Result<SuspensionTargets, crate::account::service::ApiError> {
+    Ok(suspension_targets_with(
+        candidates,
+        |machine_id| {
+            crate::account::service::try_enrolled_machine_by_id(account, machine_id)
+                .map(|record| record.map(|record| (record.machine_id, record.owner_user_id)))
+        },
+        |owner_user_id| {
+            crate::account::billing::routes::entitlement_for_user(account, owner_user_id, now)
+                .map(|entitlement| {
+                    entitlement.status
+                        == crate::account::billing::entitlement::EntitlementStatus::Stopped
+                })
+        },
+    ))
+}
+
+/// [`suspension_targets`] over injected reads: `machine` resolves a candidate to its
+/// `(machine_id, owner_user_id)`, `stopped` evaluates one owner.
+fn suspension_targets_with(
+    candidates: &[String],
+    machine: impl Fn(&str) -> Result<Option<(String, String)>, crate::account::service::ApiError>,
+    stopped: impl Fn(&str) -> Result<bool, crate::account::service::ApiError>,
+) -> SuspensionTargets {
     let mut owned: Vec<(String, String)> = Vec::new();
     for machine_id in candidates {
-        match crate::account::service::try_enrolled_machine_by_id(account, machine_id)? {
-            Some(record) => owned.push((record.machine_id, record.owner_user_id)),
+        match machine(machine_id) {
+            Ok(Some(record)) => owned.push(record),
             // A machine that never enrolled with this account is outside billing, so the
             // operator-token path stays exactly as it was.
-            None => continue,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::error!(
+                    %machine_id,
+                    code = error.code,
+                    message = %error.message,
+                    "suspension sweep could not read a machine; the next tick retries it"
+                );
+                continue;
+            }
         }
     }
 
@@ -3878,22 +3911,24 @@ fn suspension_targets(
     let mut targets = SuspensionTargets::default();
     for (machine_id, owner_user_id) in owned {
         if evaluated.insert(owner_user_id.clone()) {
-            let entitlement = crate::account::billing::routes::entitlement_for_user(
-                account,
-                &owner_user_id,
-                now,
-            )?;
-            if entitlement.status
-                == crate::account::billing::entitlement::EntitlementStatus::Stopped
-            {
-                targets.owners.insert(owner_user_id.clone());
+            match stopped(&owner_user_id) {
+                Ok(true) => {
+                    targets.owners.insert(owner_user_id.clone());
+                }
+                Ok(false) => {}
+                Err(error) => tracing::error!(
+                    %owner_user_id,
+                    code = error.code,
+                    message = %error.message,
+                    "suspension sweep could not evaluate an owner; the next tick retries it"
+                ),
             }
         }
         if targets.owners.contains(&owner_user_id) {
             targets.machines.insert(machine_id);
         }
     }
-    Ok(targets)
+    targets
 }
 
 impl RelayState {
@@ -12622,6 +12657,29 @@ mod tests {
         // The exchange never reached the host: no data channel was requested.
         assert!(matches!(notices.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
         assert_eq!(state.inner.pairings.lock()["123456"].state, PairingState::Ready);
+    }
+
+    #[test]
+    fn one_unreadable_machine_or_owner_does_not_abort_the_suspension_sweep() {
+        let candidates: Vec<String> =
+            ["broken-machine", "stopped-machine", "broken-owner-machine"]
+                .into_iter()
+                .map(String::from)
+                .collect();
+        let targets = suspension_targets_with(
+            &candidates,
+            |machine| match machine {
+                "broken-machine" => Err(crate::account::service::ApiError::internal("corrupt row")),
+                "stopped-machine" => Ok(Some((machine.into(), "stopped-owner".into()))),
+                _ => Ok(Some((machine.into(), "broken-owner".into()))),
+            },
+            |owner| match owner {
+                "stopped-owner" => Ok(true),
+                _ => Err(crate::account::service::ApiError::internal("unreadable billing")),
+            },
+        );
+        assert_eq!(targets.owners, HashSet::from(["stopped-owner".to_string()]));
+        assert_eq!(targets.machines, HashSet::from(["stopped-machine".to_string()]));
     }
 
     #[tokio::test]
