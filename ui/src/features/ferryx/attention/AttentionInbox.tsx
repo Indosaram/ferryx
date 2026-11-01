@@ -5,6 +5,7 @@ import type { AgentPrompt, AgentPromptAnswer } from "../../../lib/tauri";
 
 import { cn } from "../../../lib/cn";
 import {
+  ATTENTION_KIND_LABEL,
   ATTENTION_STATE_LABEL,
   ATTENTION_STATE_SHORT_LABEL,
   attentionKindLabel,
