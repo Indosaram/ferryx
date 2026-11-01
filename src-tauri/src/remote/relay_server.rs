@@ -2867,6 +2867,9 @@ async fn host_http_handler(
 const MAX_HTTP_SIZE: usize = 8 * 1024 * 1024;
 /// Most informational (1xx) responses one forwarded request may receive before its final one.
 const MAX_INFORMATIONAL_RESPONSES: usize = 8;
+/// How long a request on a pooled (idle) data channel waits for its first response byte before
+/// the channel is presumed dead and the request is replayed on a fresh one.
+const POOLED_FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How large a forwarded response one reference-chat route may return.
 ///
@@ -3312,7 +3315,9 @@ async fn proxy_http(
             if let Some((socket, control_generation)) =
                 state.take_pooled_data(machine, expected_generation)
             {
-                match http_round_trip(socket, &raw, head, max_response).await {
+                // An idle channel can die silently (a NAT drops it): bound the wait for its
+                // first response byte, then replay this safe request on a fresh channel.
+                match http_round_trip(socket, &raw, head, max_response, Some(POOLED_FIRST_RESPONSE_TIMEOUT)).await {
                     Ok((response, reusable)) => {
                         if let Some(socket) = reusable {
                             state.return_pooled_data(machine, control_generation, socket);
@@ -3328,7 +3333,7 @@ async fn proxy_http(
             .open_session_channel_at(machine, expected_generation)
             .await?;
         forwarded.store(true, Ordering::SeqCst);
-        match http_round_trip(socket, &raw, head, max_response).await {
+        match http_round_trip(socket, &raw, head, max_response, None).await {
             Ok((response, reusable)) => {
                 if let Some(socket) = reusable {
                     state.return_pooled_data(machine, control_generation, socket);
@@ -3385,6 +3390,9 @@ async fn http_round_trip(
     raw: &[u8],
     head: bool,
     max_response: usize,
+    // When set, an empty response after this long is `Unanswered` (the channel is presumed
+    // dead before the host saw the request).
+    first_response_timeout: Option<Duration>,
 ) -> Result<(Response, Option<WebSocket>), RoundTripError> {
     for chunk in raw.chunks(MAX_MESSAGE_SIZE) {
         socket
@@ -3400,8 +3408,16 @@ async fn http_round_trip(
             RoundTripError::Failed(StatusCode::BAD_GATEWAY)
         }
     };
+    let first_deadline = first_response_timeout.map(|limit| tokio::time::Instant::now() + limit);
     loop {
-        let eof = match socket.recv().await {
+        let received = match first_deadline.filter(|_| response.is_empty()) {
+            Some(deadline) => match tokio::time::timeout_at(deadline, socket.recv()).await {
+                Ok(received) => received,
+                Err(_) => return Err(RoundTripError::Unanswered),
+            },
+            None => socket.recv().await,
+        };
+        let eof = match received {
             Some(Ok(Message::Binary(bytes))) => {
                 response.extend_from_slice(&bytes);
                 false
@@ -5775,6 +5791,45 @@ mod tests {
             parse_http_response(&many, false, false).err(),
             Some(StatusCode::BAD_GATEWAY)
         );
+    }
+
+    #[tokio::test]
+    async fn a_silent_pooled_channel_falls_through_to_a_fresh_one() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (generation, mut notices, _grants) = state.register_control_channel("pool".into());
+        let first = async {
+            let notice = notices.recv().await.unwrap();
+            let (mut data, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/data/{}", notice.session_id)).await.unwrap();
+            answer_one(&mut data, b"GET /api/v1/capabilities HTTP/1.1\r\n").await;
+            data
+        };
+        let (status, mut silent) = tokio::join!(get_via_relay(&state, "pool", generation), first);
+        assert_eq!(status, StatusCode::OK);
+        // The pooled channel stays open but never answers (a NAT dropped it): the request
+        // reaches it, then the relay must give up quickly and open a fresh channel.
+        let request = get_via_relay(&state, "pool", generation);
+        tokio::pin!(request);
+        let seen = tokio::select! {
+            status = &mut request => panic!("answered before reaching the pooled channel: {status}"),
+            frame = silent.next() => frame.unwrap().unwrap(),
+        };
+        assert!(seen.into_data().starts_with(b"GET /api/v1/capabilities HTTP/1.1\r\n"));
+        tokio::time::pause();
+        let notice = tokio::select! {
+            status = &mut request => panic!("no fresh channel was opened: {status}"),
+            notice = notices.recv() => notice.unwrap(),
+        };
+        tokio::time::resume();
+        let fresh = async {
+            let (mut data, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/data/{}", notice.session_id)).await.unwrap();
+            answer_one(&mut data, b"GET /api/v1/capabilities HTTP/1.1\r\n").await;
+            data
+        };
+        let (status, _fresh) = tokio::join!(request, fresh);
+        assert_eq!(status, StatusCode::OK);
+        drop(silent);
+        server.abort();
     }
 
     #[test]
