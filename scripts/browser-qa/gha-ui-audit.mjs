@@ -652,6 +652,15 @@ const env = {
 };
 if (platform === "linux") Object.assign(env, { GDK_BACKEND: "x11", LIBGL_ALWAYS_SOFTWARE: "1", WEBKIT_DISABLE_DMABUF_RENDERER: "1", WEBKIT_DISABLE_COMPOSITING_MODE: "1" });
 
+// `ferryx browser ...` from this harness carries only the transport token. Settings > Browser >
+// Agent access "require pairing" is persisted in <data>/browser/agent-authority.json; turning it
+// off for this isolated profile lets `browser list` / `navigate` answer instead of
+// BROWSER_CONTROLLER_PAIRING_REQUIRED.
+const agentAuthority = join(dirs.data, "browser", "agent-authority.json");
+mkdirSync(join(dirs.data, "browser"), { recursive: true });
+writeFileSync(agentAuthority, JSON.stringify({ settings: { requirePairing: false } }));
+summary.agent_access = { requirePairing: false, file: agentAuthority };
+
 const appLog = openSync(join(out, "app.log"), "w");
 let app = null;
 if (!existsSync(binary)) {
@@ -1231,17 +1240,40 @@ await step("narrow-900-settings-closed", "Escape closes Settings at 900px", [foc
 
 // ---------------------------------------------------------------- Chromium engine checks (Linux)
 const enginePids = () => (platform === "linux" ? run("pgrep", ["-f", "ferryx_engine"]).stdout.split(/\s+/).filter(Boolean).map(Number) : []);
+let xStateIndex = 0;
+/** Writes the X window tree, the raw focus window and its properties to x-state/<n>-<name>.txt. */
+const captureXState = (name) => {
+  xStateIndex += 1;
+  const dir = join(out, "x-state");
+  mkdirSync(dir, { recursive: true });
+  const rawFocus = run("xdotool", ["getwindowfocus", "-f"]).stdout;
+  const file = `x-state/${String(xStateIndex).padStart(2, "0")}-${name}.txt`;
+  writeFileSync(join(out, file), [
+    `ferryx toplevel: ${linux.windowId}`,
+    `raw focus (xdotool getwindowfocus -f): ${rawFocus}`,
+    `client focus (xdotool getwindowfocus): ${run("xdotool", ["getwindowfocus"]).stdout}`,
+    "--- xprop -id <raw focus>",
+    /^\d+$/.test(rawFocus) ? run("xprop", ["-id", rawFocus]).stdout : "(none)",
+    "--- xwininfo -root -tree",
+    run("xwininfo", ["-root", "-tree"]).stdout,
+  ].join("\n"));
+  return { file, raw_focus: rawFocus };
+};
 /** Waits until X keyboard focus leaves the Ferryx toplevel for the engine's pane window (the
- * engine moves it asynchronously after Mod+L or a click), bounded by `timeout`. */
+ * engine moves it asynchronously after Mod+L or a click), bounded by `timeout`. Reads the raw
+ * focus window (`-f`): the engine window is a child of the Ferryx window without WM_STATE, and
+ * plain `getwindowfocus` walks up from it to the Ferryx client window. */
 const waitForEngineFocus = (label, timeout = 8000) => [label, async () => {
   const deadline = Date.now() + timeout;
   let focused = "";
   while (Date.now() < deadline) {
-    focused = run("xdotool", ["getwindowfocus"]).stdout;
-    if (/^\d+$/.test(focused) && Number(focused) > 1 && focused !== String(linux.windowId)) return { ok: true, focused, ferryx: linux.windowId };
+    focused = run("xdotool", ["getwindowfocus", "-f"]).stdout;
+    if (/^\d+$/.test(focused) && Number(focused) > 1 && focused !== String(linux.windowId)) {
+      return { ok: true, focused, ferryx: linux.windowId, x_state: captureXState(label.replace(/\W+/g, "-")).file };
+    }
     await sleep(200);
   }
-  return { ok: false, focused, ferryx: linux.windowId, stderr: "X keyboard focus stayed off the engine window" };
+  return { ok: false, focused, ferryx: linux.windowId, x_state: captureXState(label.replace(/\W+/g, "-")).file, stderr: "X keyboard focus stayed off the engine window" };
 }];
 if (engineZip && summary.engine.checks.installed_from_settings) {
   await step("engine-restore-size", "Resize back to 1280x850 before the Chromium tab", [focus, ["resize", () => host.resize(1280, 850)], 1500]);
