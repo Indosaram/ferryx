@@ -1627,6 +1627,19 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::ipc::paired_host::paired_host_forget,
         crate::ipc::paired_host::paired_host_attach_session,
         crate::ipc::paired_host::cmd_retry_paired_session,
+        crate::ipc::remote_desktop::cmd_rd_supported,
+        #[cfg(feature = "remote-desktop")]
+        crate::ipc::remote_desktop::commands::cmd_rd_connect,
+        #[cfg(feature = "remote-desktop")]
+        crate::ipc::remote_desktop::commands::cmd_rd_input,
+        #[cfg(feature = "remote-desktop")]
+        crate::ipc::remote_desktop::commands::cmd_rd_disconnect,
+        #[cfg(feature = "remote-desktop")]
+        crate::ipc::remote_desktop_host::cmd_rd_host_state,
+        #[cfg(feature = "remote-desktop")]
+        crate::ipc::remote_desktop_host::cmd_rd_host_set,
+        #[cfg(feature = "remote-desktop")]
+        crate::ipc::remote_desktop_host::cmd_rd_host_respond,
         crate::ipc::file_preview::cmd_file_preview_open,
         crate::ipc::file_preview::cmd_file_preview_open_child,
         crate::ipc::file_preview::cmd_file_preview_open_child_document,

@@ -23,6 +23,10 @@ pub const PASTE_CANCEL_CAPABILITY: &str = "pasteCancelV1";
 pub const AGENT_PROMPT_CAPABILITY: &str = "agentPromptV1";
 /// Advertised in `GetCapabilities` by a daemon that spawns `TerminalStartup::AgentLaunch`.
 pub const AGENT_LAUNCH_CAPABILITY: &str = "agentLaunchV1";
+/// Advertised in `GetCapabilities` by a daemon built with the `remote-desktop` feature, which
+/// serves `RemoteDesktopHost{Get,Set,Respond}`. Consent prompts reach the GUI as the remote event
+/// `rd-host-consent` `{requestId, clientName}`.
+pub const REMOTE_DESKTOP_CAPABILITY: &str = "remoteDesktopV1";
 /// Error code of a `PasteWrite` chunk that was refused or unwound by `CancelPaste`. Its
 /// details carry the exact `bytesWritten` of that chunk.
 pub const PASTE_CANCELLED_CODE: &str = "PASTE_CANCELLED";
@@ -1161,6 +1165,50 @@ pub enum DaemonRequest {
         #[serde(default)]
         excluded_device_ids: Vec<String>,
     },
+    /// The remote desktop host's settings and live state. Gated by `remoteDesktopV1`.
+    RemoteDesktopHostGet,
+    /// Turns the remote desktop host on or off and sets its input/clipboard policy.
+    #[serde(rename_all = "camelCase")]
+    RemoteDesktopHostSet {
+        enabled: bool,
+        allow_input: bool,
+        allow_clipboard: bool,
+    },
+    /// Answers a pending remote desktop consent prompt.
+    #[serde(rename_all = "camelCase")]
+    RemoteDesktopHostRespond {
+        request_id: String,
+        approve: bool,
+    },
+}
+
+/// One connected remote desktop viewer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RdHostSession {
+    pub session_id: String,
+    pub client_name: String,
+}
+
+/// One remote desktop consent prompt awaiting the owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RdHostPending {
+    pub request_id: String,
+    pub client_name: String,
+}
+
+/// The remote desktop host as the Settings section shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RdHostState {
+    pub enabled: bool,
+    pub running: bool,
+    pub allow_input: bool,
+    pub allow_clipboard: bool,
+    pub sessions: Vec<RdHostSession>,
+    pub pending: Vec<RdHostPending>,
+    pub error: Option<String>,
 }
 
 /// What a prompt asks for: pick one of its options, approve or reject an action, or type text.
@@ -1602,6 +1650,10 @@ pub enum DaemonResponse {
     },
     SubscribeDagOk,
     UnsubscribeDagOk,
+    #[serde(rename_all = "camelCase")]
+    RemoteDesktopHostState {
+        state: RdHostState,
+    },
     #[serde(rename_all = "camelCase")]
     Error {
         message: String,
@@ -3684,6 +3736,42 @@ mod tests {
         let unsub_ok = DaemonResponse::UnsubscribeDagOk;
         let unsub_ok_json = serde_json::to_string(&unsub_ok).expect("serialize UnsubscribeDagOk");
         assert_eq!(unsub_ok_json, r#"{"type":"unsubscribeDagOk"}"#);
+
+        let set: DaemonRequest = serde_json::from_str(
+            r#"{"type":"remoteDesktopHostSet","enabled":true,"allowInput":false,"allowClipboard":true}"#,
+        )
+        .expect("parse RemoteDesktopHostSet");
+        assert!(matches!(
+            set,
+            DaemonRequest::RemoteDesktopHostSet { enabled: true, allow_input: false, allow_clipboard: true }
+        ));
+        let respond: DaemonRequest = serde_json::from_str(
+            r#"{"type":"remoteDesktopHostRespond","requestId":"r-1","approve":false}"#,
+        )
+        .expect("parse RemoteDesktopHostRespond");
+        assert!(matches!(
+            respond,
+            DaemonRequest::RemoteDesktopHostRespond { ref request_id, approve: false } if request_id == "r-1"
+        ));
+        assert_eq!(
+            serde_json::to_string(&DaemonRequest::RemoteDesktopHostGet).expect("serialize"),
+            r#"{"type":"remoteDesktopHostGet"}"#
+        );
+        let rd_state = DaemonResponse::RemoteDesktopHostState {
+            state: RdHostState {
+                enabled: true,
+                running: false,
+                allow_input: true,
+                allow_clipboard: false,
+                sessions: Vec::new(),
+                pending: vec![RdHostPending { request_id: "r-1".into(), client_name: "Laptop".into() }],
+                error: Some("capture denied".into()),
+            },
+        };
+        let rd_json: serde_json::Value = serde_json::to_value(&rd_state).expect("serialize RD state");
+        assert_eq!(rd_json["type"], "remoteDesktopHostState");
+        assert_eq!(rd_json["state"]["allowClipboard"], false);
+        assert_eq!(rd_json["state"]["pending"][0]["clientName"], "Laptop");
 
         let snapshot = crate::dag::journal::DagRunSnapshot {
             run_id: "run-123".to_string(),

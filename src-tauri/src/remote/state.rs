@@ -878,6 +878,9 @@ pub struct RemoteGatewayState {
     pub(crate) host_lease_wired: std::sync::atomic::AtomicBool,
     pub browser_backend: parking_lot::RwLock<Arc<dyn RemoteBrowserBackend>>,
     pub admission_controller: Arc<AdmissionController>,
+    /// The daemon-owned remote desktop host behind `/api/v1/remote-desktop/*`.
+    #[cfg(feature = "remote-desktop")]
+    pub remote_desktop: Arc<crate::remote::remote_desktop::RemoteDesktopHost>,
     pub browser_service_epoch: AtomicU64,
     snapshot_cache: RwLock<Option<WorkspaceCacheEntry>>,
     snapshot_lock: tokio::sync::Mutex<()>,
@@ -1059,6 +1062,22 @@ impl RemoteGatewayState {
                 }
             }));
         }
+        #[cfg(feature = "remote-desktop")]
+        let remote_desktop = Arc::new(crate::remote::remote_desktop::RemoteDesktopHost::new(
+            // Explicit stores (fixtures, isolated daemons) keep RD state beside their auth store.
+            identity_dir
+                .as_ref()
+                .map(|dir| dir.join("remote-desktop"))
+                .or_else(crate::remote::remote_desktop::default_dir),
+        ));
+        #[cfg(feature = "remote-desktop")]
+        {
+            // A revoked device's remote desktop key must stop authenticating with its token.
+            let remote_desktop = Arc::clone(&remote_desktop);
+            auth_manager.on_device_revoked(Arc::new(move |device_id: &str| {
+                remote_desktop.revoke_device(device_id);
+            }));
+        }
         Self {
             config: RwLock::new(config),
             identity_dir,
@@ -1102,6 +1121,8 @@ impl RemoteGatewayState {
             desktop_event_sink: RwLock::new(None),
             relay_pairing: RwLock::new(None),
             relay_client: RwLock::new(None),
+            #[cfg(feature = "remote-desktop")]
+            remote_desktop,
             socket_tickets: parking_lot::Mutex::new(std::collections::HashMap::new()),
             host_lease: Arc::new(crate::remote::direct_lease::HostLeaseState::new()),
             host_lease_required: std::sync::atomic::AtomicBool::new(false),

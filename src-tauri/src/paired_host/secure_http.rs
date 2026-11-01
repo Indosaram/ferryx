@@ -11,6 +11,7 @@ use super::{
     inventory::HostAttach,
 };
 use crate::remote::attach_crypto::MAX_ATTACH_FRAME;
+use crate::remote::relay_server::SessionKind;
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
@@ -176,16 +177,22 @@ fn allocation_error(status: u16, body: &[u8]) -> ClientError {
     })
 }
 
-/// `POST {relay_origin}/api/v1/attach/session?e2e=1`; answers the opaque session id.
+/// `POST {relay_origin}/api/v1/attach/session?e2e=1`; answers the opaque session id. A
+/// non-default `kind` is declared so the relay applies that kind's session lifetime.
 pub async fn allocate_e2e_session(
     http: &reqwest::Client,
     relay_origin: &str,
     bearer: &str,
     machine_id: &str,
+    kind: SessionKind,
 ) -> Result<String, ClientError> {
     let origin = relay_origin.trim_end_matches('/');
-    let body = serde_json::to_vec(&serde_json::json!({ "machineId": machine_id }))
-        .map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+    let request = if kind == SessionKind::default() {
+        serde_json::json!({ "machineId": machine_id })
+    } else {
+        serde_json::json!({ "machineId": machine_id, "sessionKind": kind })
+    };
+    let body = serde_json::to_vec(&request).map_err(|_| ClientError::local("INVALID_REQUEST"))?;
     let mut response = http
         .post(format!("{origin}/api/v1/attach/session?e2e=1"))
         .bearer_auth(bearer)
@@ -391,12 +398,13 @@ async fn establish_stream(
     allocation_bearer: &str,
     machine_id: &str,
     attach: &HostAttach,
+    kind: SessionKind,
 ) -> Result<RelayAttachedStream, ClientError> {
     let relay_origin = crate::remote::relay_client::live_relay_url(relay_origin).into_owned();
     let dir = client_attach_dir()?;
     tokio::time::timeout(ESTABLISH_TIMEOUT, async {
         let session_id =
-            allocate_e2e_session(http, &relay_origin, allocation_bearer, machine_id).await?;
+            allocate_e2e_session(http, &relay_origin, allocation_bearer, machine_id, kind).await?;
         let attached = attach_relay_session(
             &relay_origin,
             &session_id,
@@ -425,9 +433,16 @@ impl SecureHttpSession {
         machine_id: &str,
         attach: &HostAttach,
     ) -> Result<Self, ClientError> {
-        establish_stream(http, relay_origin, allocation_bearer, machine_id, attach)
-            .await
-            .map(|stream| Self { stream })
+        establish_stream(
+            http,
+            relay_origin,
+            allocation_bearer,
+            machine_id,
+            attach,
+            SessionKind::Http,
+        )
+        .await
+        .map(|stream| Self { stream })
     }
 
     /// Sends one request and reads one complete response. On failure the second value says
@@ -479,6 +494,8 @@ pub struct SecureTarget<'a> {
     pub machine_id: &'a str,
     pub attach: &'a HostAttach,
     pub bearer: &'a str,
+    /// Lifetime class the relay applies to a socket opened on this target.
+    pub session_kind: SessionKind,
 }
 
 type Slot = Arc<tokio::sync::Mutex<Option<SecureHttpSession>>>;
@@ -566,6 +583,7 @@ pub async fn open_secure_websocket(
         target.bearer,
         target.machine_id,
         target.attach,
+        target.session_kind,
     )
     .await?;
     let (local, gateway) = tokio::io::duplex(256 * 1024);
@@ -644,6 +662,49 @@ pub fn warn_repair_required(host_id: &str, generation: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A relay stub that records every allocation body and answers one opaque session.
+    async fn allocation_relay() -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&bodies);
+        let app = axum::Router::new().route(
+            "/api/v1/attach/session",
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let recorded = Arc::clone(&recorded);
+                async move {
+                    let machine = body["machineId"].clone();
+                    recorded.lock().unwrap().push(body);
+                    axum::Json(serde_json::json!({
+                        "sessionId": "rd-session-1",
+                        "machineId": machine,
+                        "opaque": true,
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (origin, bodies)
+    }
+
+    #[tokio::test]
+    async fn only_a_remote_desktop_allocation_declares_its_session_kind() {
+        let (origin, bodies) = allocation_relay().await;
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        for kind in [SessionKind::Http, SessionKind::RemoteDesktop] {
+            let id = allocate_e2e_session(&http, &origin, "token", "machine-a", kind)
+                .await
+                .unwrap();
+            assert_eq!(id, "rd-session-1");
+        }
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies[0], serde_json::json!({ "machineId": "machine-a" }));
+        assert_eq!(
+            bodies[1],
+            serde_json::json!({ "machineId": "machine-a", "sessionKind": "remoteDesktop" })
+        );
+    }
 
     #[test]
     fn a_content_length_response_completes_only_when_the_body_has_arrived() {

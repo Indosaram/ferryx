@@ -66,6 +66,7 @@ fn main() {
     }
     println!("cargo::rustc-env=FERRYX_BUILD_TARGET={build_target}");
     println!("cargo::rustc-check-cfg=cfg(a10_wire_red)");
+    remote_desktop_rpath();
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -136,5 +137,33 @@ fn main() {
         tauri_build::try_build(attrs).expect("tauri build failed");
     } else {
         tauri_build::build();
+    }
+}
+
+/// `--features remote-desktop` links FFmpeg's shared libraries, which releases bundle next to the
+/// app (scripts/stage-ffmpeg.mjs). Teach the loader where they live:
+/// - macOS: `Contents/Frameworks` of the app (`@executable_path/../Frameworks`), the same dir
+///   from the daemon helper `Contents/Helpers/Ferryx Daemon.app/Contents/MacOS`, and `<dir of
+///   the staged helper bundle>/ffmpeg` for a daemon generation staged outside the app.
+/// - Linux: deb/AppImage resources at `usr/lib/Ferryx/ffmpeg` from `usr/bin`, and `ffmpeg/` next
+///   to a staged daemon executable.
+/// - Windows needs nothing: the DLLs sit beside ferryx.exe.
+///
+/// Builds without the feature emit nothing, so their binaries are unchanged.
+fn remote_desktop_rpath() {
+    if std::env::var_os("CARGO_FEATURE_REMOTE_DESKTOP").is_none() {
+        return;
+    }
+    let rpaths: &[&str] = match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("macos") => &[
+            "@executable_path/../Frameworks",
+            "@executable_path/../../../../Frameworks",
+            "@executable_path/../../../ffmpeg",
+        ],
+        Ok("linux") => &["$ORIGIN/../lib/Ferryx/ffmpeg", "$ORIGIN/ffmpeg"],
+        _ => &[],
+    };
+    for rpath in rpaths {
+        println!("cargo:rustc-link-arg-bins=-Wl,-rpath,{rpath}");
     }
 }

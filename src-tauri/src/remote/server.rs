@@ -8164,6 +8164,13 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         )))
         .with_state(Arc::clone(&state));
 
+    // Remote desktop pairing and stream routes; they run the same bearer check and then require
+    // a Machine grant with Control.
+    #[cfg(feature = "remote-desktop")]
+    {
+        router = router.merge(super::remote_desktop::router(Arc::clone(&state)));
+    }
+
     if cfg!(not(test)) {
         let auth = Arc::clone(&state.auth_manager);
         let deps = Arc::new(crate::remote::attach_router::AttachRouterDeps {
