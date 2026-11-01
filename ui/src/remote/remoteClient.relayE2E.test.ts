@@ -3,6 +3,7 @@ import type { HostEndpoint } from "../state/remoteHostStore";
 import type { OpenTunnelParams } from "./accountSession";
 import type { TunnelTransport, TunnelWebSocket } from "./attachTunnel";
 import {
+  allocateE2ESession,
   CLIENT_BUILD_HEADER,
   openRelayE2ETransport,
   RELAY_E2E_AWARE_HEADER,
@@ -249,6 +250,32 @@ describe("relay end-to-end encryption", () => {
     // Then encryption is tried again instead of staying on plaintext
     expect(relayE2EState(host, RELAY)).toBe("e2e");
     await expect(remoteFetch(BASE, "/api/v1/health")).rejects.toMatchObject({ code: "MACHINE_OFFLINE" });
+  });
+
+  it("times out an allocation whose response body stalls", async () => {
+    vi.useFakeTimers();
+    try {
+      // Given a relay that sends headers and then never finishes the body
+      const allocate = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            init?.signal?.addEventListener("abort", () => controller.error(new DOMException("aborted", "AbortError")), { once: true });
+          },
+        });
+        return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+      });
+      const result = expect(
+        allocateE2ESession(RELAY, "device-token", MACHINE, allocate as unknown as typeof fetch),
+      ).rejects.toMatchObject({ code: "REQUEST_TIMEOUT" });
+
+      // When the allocation deadline passes
+      await vi.advanceTimersByTimeAsync(15_000);
+
+      // Then the stalled body is a typed timeout
+      await result;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("closes a socket whose upgrade finished after the connection was closed", async () => {

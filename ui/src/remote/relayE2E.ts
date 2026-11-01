@@ -282,31 +282,35 @@ export async function allocateE2ESession(
 ): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), E2E_ALLOCATION_TIMEOUT_MS);
+  const timedOut = () =>
+    new RelayE2EError("REQUEST_TIMEOUT", `Encrypted session allocation timed out after ${E2E_ALLOCATION_TIMEOUT_MS}ms`);
   let response: Response;
-  try {
-    response = await fetchImpl(`${relayOrigin.replace(/\/+$/, "")}/api/v1/attach/session?e2e=1`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${bearer}`,
-        "Content-Type": "application/json",
-        [CLIENT_BUILD_HEADER]: clientBuild(),
-      },
-      body: JSON.stringify({ machineId }),
-      signal: controller.signal,
-    });
-  } catch (error) {
-    if (controller.signal.aborted) {
-      throw new RelayE2EError("REQUEST_TIMEOUT", `Encrypted session allocation timed out after ${E2E_ALLOCATION_TIMEOUT_MS}ms`);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timer);
-  }
   let data: unknown = null;
   try {
-    data = await response.json();
-  } catch {
-    data = null;
+    try {
+      response = await fetchImpl(`${relayOrigin.replace(/\/+$/, "")}/api/v1/attach/session?e2e=1`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${bearer}`,
+          "Content-Type": "application/json",
+          [CLIENT_BUILD_HEADER]: clientBuild(),
+        },
+        body: JSON.stringify({ machineId }),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (controller.signal.aborted) throw timedOut();
+      throw error;
+    }
+    // The deadline covers the body too: a stalled body is a timeout, not a hang.
+    try {
+      data = await response.json();
+    } catch {
+      if (controller.signal.aborted) throw timedOut();
+      data = null;
+    }
+  } finally {
+    clearTimeout(timer);
   }
   if (!response.ok) {
     const code = errorCode(data);
