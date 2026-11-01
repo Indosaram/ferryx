@@ -117,34 +117,45 @@ pub fn home_relative(folder: &str) -> String {
         .map_or_else(|| folder.to_owned(), |rest| format!("~/{rest}"))
 }
 
+/// How long ago `value` was, with the owner-local clock time: `3분 전 (14:02 KST)` or
+/// `3 min ago (05:02 UTC)`.
 pub fn activity(value: Option<&str>, now: DateTime<Utc>) -> String {
+    let locale = crate::locale::current();
+    let ko = locale.is_korean();
     let Some(at) = value.and_then(|value| DateTime::parse_from_rfc3339(value).ok()) else {
-        return "활동 미상 (KST)".into();
+        return locale.pick("활동 미상", "activity unknown").into();
     };
+    let at = at.with_timezone(&Utc);
     let seconds = now.signed_duration_since(at).num_seconds().max(0);
-    let relative = if seconds < 60 {
-        format!("{seconds}초 전")
-    } else if seconds < 3600 {
-        format!("{}분 전", seconds / 60)
-    } else if seconds < 86400 {
-        format!("{}시간 전", seconds / 3600)
-    } else {
-        format!("{}일 전", seconds / 86400)
+    let relative = match (seconds, ko) {
+        (0..=59, true) => format!("{seconds}초 전"),
+        (0..=59, false) => format!("{seconds}s ago"),
+        (60..=3599, true) => format!("{}분 전", seconds / 60),
+        (60..=3599, false) => format!("{} min ago", seconds / 60),
+        (3600..=86399, true) => format!("{}시간 전", seconds / 3600),
+        (3600..=86399, false) => format!("{} h ago", seconds / 3600),
+        (_, true) => format!("{}일 전", seconds / 86400),
+        (_, false) => format!("{} d ago", seconds / 86400),
     };
-    format!("{relative} (KST)")
+    format!("{relative} ({})", locale.format(at, "%H:%M"))
 }
 
 fn collapse_newlines(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn question_pending() -> String {
+    crate::locale::text("질문 대기 중", "question pending")
+}
+
 pub fn format_question_summary(question: &PendingQuestion) -> String {
     if let Some(first) = question.questions.first() {
+        let pending = question_pending();
         let text = first
             .question
             .as_deref()
             .or(first.header.as_deref())
-            .unwrap_or("질문 대기 중");
+            .unwrap_or(pending.as_str());
         let collapsed = collapse_newlines(text);
         if first.options.is_empty() {
             compact(&collapsed, 90)
@@ -158,11 +169,12 @@ pub fn format_question_summary(question: &PendingQuestion) -> String {
             compact(&format!("{collapsed} {opts}"), 90)
         }
     } else {
-        "질문 대기 중".into()
+        question_pending()
     }
 }
 
 pub fn format_overview(overview: &Overview, now: DateTime<Utc>, max_chars: usize) -> String {
+    let locale = crate::locale::current();
     let mut machines = Vec::<String>::new();
     let mut add_machine = |machine: &str| {
         if !machines.iter().any(|seen| seen == machine) {
@@ -213,7 +225,13 @@ pub fn format_overview(overview: &Overview, now: DateTime<Utc>, max_chars: usize
             .stale
             .iter()
             .find(|item| item.machine == *machine && item.stale)
-            .map(|item| format!(" · stale {}초 전", item.age_seconds))
+            .map(|item| {
+                format!(
+                    " · stale {}{}",
+                    item.age_seconds,
+                    locale.pick("초 전", "s ago")
+                )
+            })
             .unwrap_or_default();
         let mut working = Vec::new();
         let mut questions = Vec::new();
@@ -269,7 +287,7 @@ pub fn format_overview(overview: &Overview, now: DateTime<Utc>, max_chars: usize
                             .questions
                             .first()
                             .map(format_question_summary)
-                            .unwrap_or_else(|| "질문 대기 중".into());
+                            .unwrap_or_else(question_pending);
                         questions.push((
                             format!(
                                 "❓ {} · {} · {} · `{}:{}`",
@@ -292,7 +310,12 @@ pub fn format_overview(overview: &Overview, now: DateTime<Utc>, max_chars: usize
                                 machine,
                                 id
                             ),
-                            "  ↳ 터미널에서 답변 필요 (차단형 질문)".into(),
+                            locale
+                                .pick(
+                                    "  ↳ 터미널에서 답변 필요 (차단형 질문)",
+                                    "  ↳ answer needed in the terminal (blocking question)",
+                                )
+                                .into(),
                         ));
                     }
                     SessionState::Idle => {
@@ -318,14 +341,21 @@ pub fn format_overview(overview: &Overview, now: DateTime<Utc>, max_chars: usize
                 ));
             }
         }
-        lines.push(format!(
-            "🖥️ {} — 작업 중 {} · 답변 대기 {} · 대기 {}{}",
+        let (machine_name, busy, waiting, idle_count) = (
             compact(machine, 32),
             working.len(),
             questions.len() + blocked.len(),
             idle.len(),
-            stale_suffix
-        ));
+        );
+        lines.push(if locale.is_korean() {
+            format!(
+                "🖥️ {machine_name} — 작업 중 {busy} · 답변 대기 {waiting} · 대기 {idle_count}{stale_suffix}"
+            )
+        } else {
+            format!(
+                "🖥️ {machine_name} — working {busy} · awaiting answer {waiting} · idle {idle_count}{stale_suffix}"
+            )
+        });
         for (header, sub) in working.into_iter().chain(questions).chain(blocked) {
             lines.push(header);
             lines.push(sub);
@@ -335,7 +365,11 @@ pub fn format_overview(overview: &Overview, now: DateTime<Utc>, max_chars: usize
         } else {
             let overflow = idle.len() - 8;
             lines.extend(idle.into_iter().take(8));
-            lines.push(format!("… 외 {overflow}개 대기"));
+            lines.push(if locale.is_korean() {
+                format!("… 외 {overflow}개 대기")
+            } else {
+                format!("… {overflow} more idle")
+            });
         }
     }
     for error in &overview.list.errors {
@@ -348,13 +382,14 @@ pub fn format_overview(overview: &Overview, now: DateTime<Utc>, max_chars: usize
         }
     }
     if lines.is_empty() {
-        return "실행 중인 세션 없음".into();
+        return locale.pick("실행 중인 세션 없음", "no running sessions").into();
     }
     apply_max_chars(lines, max_chars)
 }
 
 fn apply_max_chars(lines: Vec<String>, max_chars: usize) -> String {
-    let ellipsis = "… (일부 생략)";
+    let ellipsis = crate::locale::text("… (일부 생략)", "… (truncated)");
+    let ellipsis = ellipsis.as_str();
     let full = lines.join("\n");
     if full.chars().count() <= max_chars {
         return full;
@@ -436,5 +471,32 @@ mod tests {
         assert!(capped.chars().count() <= 40, "{capped}");
         assert!(capped.contains("… (일부 생략)"));
         let _ = json!({});
+    }
+
+    #[test]
+    fn activity_labels_carry_the_owner_zone_and_language() {
+        let now = DateTime::parse_from_rfc3339("2026-10-21T03:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(activity(Some("2026-10-21T02:57:00Z"), now), "3분 전 (11:57 KST)");
+        assert_eq!(activity(None, now), "활동 미상");
+        crate::locale::with(crate::locale::OwnerLocale::english_utc(), || {
+            assert_eq!(activity(Some("2026-10-21T02:57:00Z"), now), "3 min ago (02:57 UTC)");
+            assert_eq!(activity(Some("2026-10-19T02:57:00Z"), now), "2 d ago (02:57 UTC)");
+            assert_eq!(activity(None, now), "activity unknown");
+            let empty = Overview { list: SessionList::default(), snapshots: Vec::new() };
+            assert_eq!(
+                format_overview(&empty, now, 400),
+                "🖥\u{fe0f} local — working 0 · awaiting answer 0 · idle 0"
+            );
+            assert_eq!(
+                format_question_summary(&PendingQuestion::default()),
+                "question pending"
+            );
+            assert_eq!(
+                apply_max_chars(vec!["x".repeat(30), "y".repeat(30)], 50),
+                format!("{}\n… (truncated)", "x".repeat(30))
+            );
+        });
     }
 }

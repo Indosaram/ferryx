@@ -1,8 +1,9 @@
 //! Owner-intent nudge gate. Quiet hours, spacing, the daily wake cap, and the
 //! strict decision JSON are the gateway's rules. A model turn runs only after
 //! `next_due` says the generation is armed; this module does not poll.
+//! Quiet hours and the day boundary are in the owner's time zone ([`crate::locale`]).
 use async_trait::async_trait;
-use chrono::{DateTime, TimeDelta, Timelike, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
@@ -10,8 +11,8 @@ use crate::error::{HubError, Result};
 use crate::judge::{Judge, Purpose};
 
 const SPACING: TimeDelta = TimeDelta::minutes(30);
-const KST: TimeDelta = TimeDelta::hours(9);
 
+/// Quiet hours are owner-local hours `[quiet_start, quiet_end)`.
 #[derive(Debug, Clone, Copy)]
 pub struct NudgeClock {
     pub quiet_start: u32,
@@ -29,7 +30,7 @@ impl Default for NudgeClock {
 
 impl NudgeClock {
     pub fn allows(self, now: DateTime<Utc>, last_nudge: Option<DateTime<Utc>>) -> bool {
-        let hour = (now + KST).hour();
+        let hour = crate::locale::current().local_hour(now);
         let quiet = if self.quiet_start <= self.quiet_end {
             (self.quiet_start..self.quiet_end).contains(&hour)
         } else {
@@ -81,18 +82,17 @@ pub fn next_due(now: DateTime<Utc>, state: &ArmState) -> Option<DateTime<Utc>> {
     if state.wakes_today >= 6 {
         due = due.max(day_start(now) + TimeDelta::days(1));
     }
-    if (due + KST).hour() < 8 {
-        due = day_start(due) + TimeDelta::hours(8);
+    let quiet_end = NudgeClock::default().quiet_end;
+    if crate::locale::current().local_hour(due) < quiet_end {
+        due = day_start(due) + TimeDelta::hours(i64::from(quiet_end));
     }
     Some(due)
 }
 
+/// The UTC instant the owner's local day containing `now` began.
 fn day_start(now: DateTime<Utc>) -> DateTime<Utc> {
-    let local = now + KST;
-    local
-        - TimeDelta::seconds(i64::from(local.num_seconds_from_midnight()))
-        - TimeDelta::nanoseconds(i64::from(local.nanosecond()))
-        - KST
+    let locale = crate::locale::current();
+    locale.day_start(locale.local_date(now))
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -216,7 +216,13 @@ pub trait ModelTurn: Send + Sync {
     }
 }
 
-const KIBITZER_PROMPT: &str = "Return only JSON with exactly wake (boolean), reason (string), suggested (string), target_lane (string or null). Decide whether the owner needs proactive action. Do not perform actions. Set wake to true only when there is something concrete the owner should act on now (from the open owner items, recent events and lanes); otherwise set wake to false. When wake is true, write suggested as a short Korean message to the owner that names the 1-3 most important concrete things to do now and why each matters.";
+/// The decision instruction; `suggested` is asked for in the owner's language.
+fn kibitzer_prompt() -> String {
+    format!(
+        "Return only JSON with exactly wake (boolean), reason (string), suggested (string), target_lane (string or null). Decide whether the owner needs proactive action. Do not perform actions. Set wake to true only when there is something concrete the owner should act on now (from the open owner items, recent events and lanes); otherwise set wake to false. When wake is true, write suggested as a short message in {} to the owner that names the 1-3 most important concrete things to do now and why each matters.",
+        crate::locale::current().language_name()
+    )
+}
 
 /// Consumes one armed generation. A judge or model failure puts the generation back.
 /// A hold, or a decision whose `wake` is false, stays consumed.
@@ -257,7 +263,14 @@ pub async fn evaluate_at(
     if reserved.rows_affected() != 1 {
         return Ok(false);
     }
-    let document = match state_document(pool, lead).await {
+    let directives = match crate::owner_directives::current(pool, judge).await {
+        Ok(projection) => projection.map(|projection| projection.body),
+        Err(error) => {
+            tracing::warn!("owner directive projection unavailable for the kibitzer: {error}");
+            None
+        }
+    };
+    let document = match state_document(pool, lead, directives.as_deref()).await {
         Ok(document) => document,
         Err(error) => {
             restore_admitted(pool, lead, admitted).await?;
@@ -283,7 +296,7 @@ pub async fn evaluate_at(
         return Ok(false);
     }
     let reply = match model
-        .complete(&format!("{KIBITZER_PROMPT}\n\n{document}"))
+        .complete(&format!("{}\n\n{document}", kibitzer_prompt()))
         .await
     {
         Ok(reply) => reply,
@@ -302,8 +315,10 @@ pub async fn evaluate_at(
     if !decision.wake {
         return Ok(false);
     }
-    let body =
-        serde_json::to_string(&decision).map_err(|error| HubError::message(error.to_string()))?;
+    let state = report_state(pool, lead).await?;
+    // Put the state before prose: lane dispatch bounds event bodies to 600 characters.
+    let body = format!("[report_state={state}] {}",
+        serde_json::to_string(&decision).map_err(|error| HubError::message(error.to_string()))?);
     let start = day_start(now);
     let inserted = sqlx::query(
         "INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at)
@@ -357,7 +372,26 @@ async fn restore_admitted(pool: &SqlitePool, lead: &str, admitted: i64) -> Resul
     Ok(())
 }
 
-async fn state_document(pool: &SqlitePool, lead: &str) -> Result<String> {
+async fn report_state(pool: &SqlitePool, lead: &str) -> Result<String> {
+    let items: Vec<(String, String)> = sqlx::query_as(
+        "SELECT item_id, status FROM inbox_decisions WHERE class = 'owner' AND status = 'open' ORDER BY item_id",
+    ).fetch_all(pool).await?;
+    let lanes: Vec<(String, String)> = sqlx::query_as(
+        "SELECT key, status FROM lanes WHERE lead_session_key = ? AND status IN ('blocked','not_done','failed') ORDER BY key",
+    ).bind(lead).fetch_all(pool).await?;
+    let problems: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT job_id, kind, signature FROM cron_problems WHERE status = 'needs_owner' ORDER BY job_id, kind, signature",
+    ).fetch_all(pool).await?;
+    let state = serde_json::to_string(&(items, lanes, problems))
+        .map_err(|error| HubError::message(error.to_string()))?;
+    Ok(crate::report_gate::state_hash(&state))
+}
+
+async fn state_document(
+    pool: &SqlitePool,
+    lead: &str,
+    directives: Option<&str>,
+) -> Result<String> {
     let lanes: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT key, status, title FROM lanes WHERE lead_session_key = ? AND status IN ('queued','working','blocked','done_claimed','not_done','verified_done') ORDER BY created_at, key",
     )
@@ -391,7 +425,12 @@ async fn state_document(pool: &SqlitePool, lead: &str) -> Result<String> {
     )
     .fetch_all(pool)
     .await?;
-    let mut document = String::from("Open lanes:\n");
+    let mut document = String::new();
+    if let Some(directives) = directives.filter(|body| !body.is_empty()) {
+        document.push_str(directives);
+        document.push_str("\n\n");
+    }
+    document.push_str("Open lanes:\n");
     for (key, status, title) in lanes {
         document.push_str(&format!("{key} {status}: {title}\n"));
     }
@@ -491,6 +530,38 @@ mod tests {
     }
 
     #[test]
+    fn quiet_hours_day_start_and_prompt_language_follow_the_owner_locale() {
+        let clock = NudgeClock::default();
+        // 16:30Z is 01:30 in Seoul (quiet) and 16:30 in UTC (awake).
+        let at = DateTime::parse_from_rfc3339("2026-10-21T16:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(!clock.allows(at, None));
+        assert!(kibitzer_prompt().contains("short message in Korean"));
+        let armed = ArmState {
+            generation: 1,
+            consumed: 0,
+            admitted: None,
+            wakes_today: 0,
+            enabled: true,
+        };
+        // Seoul holds an armed wake until 08:00 local (23:00Z); day starts at 15:00Z.
+        assert_eq!(
+            next_due(at, &armed).unwrap().to_rfc3339(),
+            "2026-10-21T23:00:00+00:00"
+        );
+        assert_eq!(day_start(at).to_rfc3339(), "2026-10-21T15:00:00+00:00");
+        crate::locale::with(crate::locale::OwnerLocale::english_utc(), || {
+            assert!(clock.allows(at, None));
+            assert_eq!(next_due(at, &armed), Some(at));
+            assert_eq!(day_start(at).to_rfc3339(), "2026-10-21T00:00:00+00:00");
+            let prompt = kibitzer_prompt();
+            assert!(prompt.contains("short message in English"), "{prompt}");
+            assert!(!prompt.contains("Korean"), "{prompt}");
+        });
+    }
+
+    #[test]
     fn an_unarmed_generation_has_no_due_time_and_the_seventh_wake_waits() {
         let now = DateTime::parse_from_rfc3339("2026-10-21T02:00:00Z")
             .unwrap()
@@ -540,6 +611,26 @@ mod tests {
             }
             Ok(self.text.clone())
         }
+    }
+
+    #[tokio::test]
+    async fn report_identity_tracks_owner_blockers_not_wording_or_timestamps() {
+        let pool = crate::storage::memory().await.unwrap();
+        let initial = report_state(&pool, "meta").await.unwrap();
+        sqlx::query("INSERT INTO cron_problems(id,job_id,kind,signature,status,created_at) VALUES('1','collect','login','account-a','needs_owner','2026-10-30T00:00:00Z')")
+            .execute(&pool).await.unwrap();
+        let blocked = report_state(&pool, "meta").await.unwrap();
+        assert_ne!(blocked, initial);
+        sqlx::query("UPDATE cron_problems SET detail = 'same issue in different words', updated_at = '2026-10-31T00:00:00Z'")
+            .execute(&pool).await.unwrap();
+        assert_eq!(report_state(&pool, "meta").await.unwrap(), blocked);
+        sqlx::query("UPDATE cron_problems SET status = 'resolved'")
+            .execute(&pool).await.unwrap();
+        assert_eq!(report_state(&pool, "meta").await.unwrap(), initial);
+        sqlx::query("INSERT INTO lanes(key,title,lead_session_key,cwd,session_key,status,done_signals,last_activity_at) VALUES('task','Task','meta','/work','worker','blocked','[]','2026-10-30T00:00:00Z')")
+            .execute(&pool).await.unwrap();
+        assert_ne!(report_state(&pool, "meta").await.unwrap(), initial);
+        assert_eq!(report_state(&pool, "another-lead").await.unwrap(), initial);
     }
 
     #[tokio::test]
@@ -598,6 +689,8 @@ mod tests {
         assert!(generation > consumed);
     }
 
+
+
     #[tokio::test]
     async fn the_state_document_groups_open_owner_items_and_skips_dismissed_ones() {
         let pool = crate::storage::memory().await.unwrap();
@@ -652,6 +745,13 @@ mod tests {
             .await
             .unwrap();
         }
+        crate::owner_directives::store(
+            &pool,
+            "[Owner directives]\n```owner-directives\n- 2026-10-30 boundary: drafts may be posted\n```".into(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
         let now = DateTime::parse_from_rfc3339("2026-10-21T02:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -659,6 +759,7 @@ mod tests {
             text: r#"{"wake":true,"reason":"sign","suggested":"sign the contract","target_lane":null}"#.into(),
             fail: false,
             expect: &[
+                "- 2026-10-30 boundary: drafts may be posted",
                 "Open owner items:",
                 "Total open owner items: 2",
                 "[mail] Contract x2 latest 2026-10-21T01:30:00Z: please sign today",

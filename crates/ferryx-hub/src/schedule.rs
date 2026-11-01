@@ -312,7 +312,7 @@ pub(crate) fn cron_owner_item_id(job_id: &str) -> String {
 /// The latest failure of a job, as its owner inbox item shows it.
 pub(crate) struct CronOwnerItem<'a> {
     pub job_id: &'a str,
-    /// Keeps the `{job_id}: needs you - ` prefix the digest groups by.
+
     pub title: &'a str,
     /// Snippet and proposed action.
     pub action: &'a str,
@@ -399,7 +399,7 @@ struct LegacyOwnerRow {
 /// Idempotent; returns how many legacy decisions were dismissed.
 pub async fn reconcile_cron_owner_items(pool: &SqlitePool) -> Result<u64> {
     const LEGACY: &str = "d.status = 'open' AND d.class = 'owner' AND i.source = 'cron'
-        AND d.item_id LIKE 'cron:%' AND d.item_id NOT LIKE 'cron:job:%'";
+        AND d.item_id LIKE 'cron:%' AND d.item_id NOT LIKE 'cron:job:%' AND d.item_id NOT LIKE 'cron:env:%'";
     let mut tx = pool.begin_write().await?;
     // Remediation problem items (`cron:<problem id>`) were written without an author; take the
     // job from the problem row so they collapse with the rest of the job.
@@ -485,7 +485,8 @@ pub async fn reconcile_cron_owner_items(pool: &SqlitePool) -> Result<u64> {
 }
 
 /// omo-gateway's `needs_owner`: a cron failure refreshes the job's one open owner item
-/// (`cron:job:<job_id>`), so the owner alert sweep posts it once and the digest lists it.
+/// (`cron:job:<job_id>`), so the owner alert sweep posts it once and the digest lists it. A
+/// host/environment fault refreshes the fault's one item instead, naming every job it fails.
 async fn escalate_incident(
     pool: &SqlitePool,
     job_id: &str,
@@ -494,8 +495,18 @@ async fn escalate_incident(
     now: DateTime<Utc>,
 ) -> Result<()> {
     let at = now.to_rfc3339();
-    let action = crate::judge::scrub_for_external(detail);
-    let title = format!("{job_id}: needs you - {kind}: {action}");
+    if let Some(fault) = crate::cron_exec::EnvironmentFault::parse(detail) {
+        let mut tx = pool.begin_write().await?;
+        crate::cron_remediate::upsert_environment_item(&mut tx, &fault, &at).await?;
+        tx.commit().await?;
+        return Ok(());
+    }
+    let action = crate::judge::scrub_for_external(&crate::cron_remediate::strip_ansi(detail));
+    // The digest groups cron items by the text before ": 확인 필요" / ": needs you".
+    let title = crate::locale::text(
+        &format!("{job_id}: 확인 필요 - {kind}: {action}"),
+        &format!("{job_id}: needs you - {kind}: {action}"),
+    );
     let mut tx = pool.begin_write().await?;
     upsert_cron_owner_item(
         &mut tx,
@@ -693,8 +704,8 @@ pub async fn run_native_job(
     .await?;
     let model = cron_model();
     let skills = skills_root_from_env();
-    let outcome =
-        crate::cron_exec::run_payload(pool, job_id, &payload, &model, skills.as_deref()).await;
+    let outcome = crate::cron_exec::with_run(&run_id,
+        crate::cron_exec::run_payload(pool, job_id, &payload, &model, skills.as_deref())).await;
     if let Ok(executed) = &outcome {
         if let Some(hash) = &executed.monitor_hash {
             let _ = crate::cron_exec::commit_monitor(pool, job_id, hash).await;
@@ -935,22 +946,51 @@ pub const LEASE_EXPIRED_ERROR: &str = "lease expired before completion";
 /// How often a running batch pushes its leases forward.
 pub const LEASE_RENEW_EVERY: Duration = Duration::from_secs(60);
 
-/// Signal 0 tests existence without delivering a signal. EPERM means the pid exists but
-/// belongs to another user, which is still a live owner.
+/// Whether a process with this pid currently exists. A direct, non-blocking OS query (no
+/// child process, no shell), safe to call on the async runtime. pid 0 is never live.
+/// An answer the OS cannot give errs toward live: a lease holder is never abandoned on a guess.
+///
+/// Unix: signal 0 tests existence without delivering a signal. EPERM means the pid exists
+/// but belongs to another user, which is still a live owner; any other failure is gone.
+///
+/// Windows: the process object is opened for `SYNCHRONIZE` and waited on with a zero timeout:
+/// live while unsignaled, gone once signaled (it exited; the object outlives the exit while any
+/// handle is open). `OpenProcess` failing with `ERROR_INVALID_PARAMETER` means no such pid;
+/// every other failure (`ERROR_ACCESS_DENIED`: another account's process) is reported live.
+///
+/// Other targets have no query and report every pid gone.
 pub fn process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
     #[cfg(unix)]
     {
         let Ok(pid) = i32::try_from(pid) else {
             return false;
         };
-        if pid <= 0 {
-            return false;
-        }
         // SAFETY: kill with signal 0 performs only the existence and permission check.
         let result = unsafe { sys::kill(pid, 0) };
         result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(1)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const ERROR_INVALID_PARAMETER: u32 = 87;
+        const WAIT_OBJECT_0: u32 = 0;
+        // SAFETY: OpenProcess returns a handle or null; it is closed exactly once below and
+        // never escapes this block.
+        let handle = unsafe { sys::OpenProcess(SYNCHRONIZE, 0, pid) };
+        if handle.is_null() {
+            // SAFETY: reads this thread's last error right after the failed call.
+            return unsafe { sys::GetLastError() } != ERROR_INVALID_PARAMETER;
+        }
+        // SAFETY: a zero timeout never blocks; the handle is valid until CloseHandle.
+        let signaled = unsafe { sys::WaitForSingleObject(handle, 0) } == WAIT_OBJECT_0;
+        // SAFETY: closes the handle opened above.
+        unsafe { sys::CloseHandle(handle) };
+        !signaled
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         false
@@ -961,6 +1001,18 @@ pub fn process_alive(pid: u32) -> bool {
 mod sys {
     unsafe extern "C" {
         pub fn kill(pid: i32, sig: i32) -> i32;
+    }
+}
+
+#[cfg(windows)]
+mod sys {
+    use std::ffi::c_void;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        pub fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        pub fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32;
+        pub fn CloseHandle(handle: *mut c_void) -> i32;
+        pub fn GetLastError() -> u32;
     }
 }
 
@@ -1525,8 +1577,8 @@ async fn run_claimed(
             continue;
         };
         let payload: Value = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
-        let executed =
-            crate::cron_exec::run_payload(pool, &job_id, &payload, model, skills_root).await;
+        let executed = crate::cron_exec::with_run(&run_id,
+            crate::cron_exec::run_payload(pool, &job_id, &payload, model, skills_root)).await;
         let (ok, output, error, deliver, monitor_hash) = match executed {
             Ok(executed) => (
                 true,
@@ -1621,17 +1673,37 @@ pub(crate) async fn note_run_health(
         _ => None,
     };
     let Some((kind, detail)) = problem else {
+        // A clean run ends the job's known outage: the owner hears "recovered" once.
+        // The outage key is the failure signature, which is not prose, so the text is built here.
+        if crate::outages::observe(pool, job_id, "", false, Utc::now())
+            .await?
+            .is_some()
+        {
+            let recovered = crate::locale::text("다시 정상적으로 실행됐습니다.", "runs normally again.");
+            announce_cron_failure(pool, job_id, &recovered, false).await;
+        }
         return resolve_after_success(pool, job_id, &now_rfc3339()).await;
     };
     let signature = problem_signature(kind, &detail);
-    if let Some(problem_id) =
-        record_problem(pool, job_id, run_id, kind, &signature, &detail).await?
-    {
+    let opened = record_problem(pool, job_id, run_id, kind, &signature, &detail).await?;
+    if crate::cron_exec::EnvironmentFault::parse(&detail).is_some() {
+        // A host/environment fault is one incident for every job it fails: its one owner item
+        // (remediation or `escalate_incident`) tells the owner, not a per-job outage notice.
+        return Ok(());
+    }
+    // The outage row, keyed by the failure signature, decides whether the owner hears about
+    // this failure: once when it starts, never while it repeats, again only on a new cause.
+    let notice = crate::outages::observe(pool, job_id, &signature, true, Utc::now()).await?;
+    if let (Some(_), Some(_)) = (opened, notice) {
         // omo-gateway triages every new problem (cron_remediate via the queued event), so
         // the announcement says remediation is under way when a remediator is running.
-        let _ = problem_id;
         let remediating = crate::cron_remediate::installed().is_some();
-        announce_cron_failure(pool, job_id, &detail, remediating).await;
+        let detail = crate::cron_remediate::strip_ansi(&detail);
+        let text = crate::locale::text(
+            &format!("실행이 실패했습니다. 오류: {detail}\n같은 원인으로 반복되는 동안은 다시 알리지 않고, 복구되면 알려드립니다."),
+            &format!("failed. Error: {detail}\nI will not repeat this while the same cause continues, and will tell you when it recovers."),
+        );
+        announce_cron_failure(pool, job_id, &text, remediating).await;
     }
     Ok(())
 }
@@ -1672,6 +1744,9 @@ pub(crate) async fn resolve_after_success(pool: &SqlitePool, job_id: &str, at: &
     settle_failures_before(pool, job_id, at).await?;
     close_cron_owner_items(pool, job_id).await?;
     crate::cron_remediate::reconcile_fixed(pool, job_id).await?;
+    // A clean run after an environment fault whose path is back closes the fault's one item and
+    // reports its one recovery result.
+    crate::cron_remediate::settle_environment_faults(pool, job_id).await?;
     Ok(())
 }
 
@@ -1713,15 +1788,27 @@ pub async fn reconcile_resolved_cron_failures(pool: &SqlitePool) -> Result<u64> 
 async fn announce_cron_failure(
     pool: &SqlitePool,
     job_id: &str,
-    detail: &str,
+    notice: &str,
     remediation_opened: bool,
 ) {
-    let mut text = format!("cron {job_id} failed: {detail}");
+    let mut text = crate::locale::text(
+        &format!("[크론 {job_id}] {notice}"),
+        &format!("[cron {job_id}] {notice}"),
+    );
     if remediation_opened {
-        text.push_str("\nremediation started (root-cause triage)");
+        text.push('\n');
+        text.push_str(&crate::locale::text(
+            "원인 분석과 자동 복구를 시작했습니다.",
+            "I started diagnosing the cause and repairing it automatically.",
+        ));
     }
     if let Err(error) = crate::http::record_log(pool, "error", &text).await {
         tracing::warn!(%error, %job_id, "cron failure was not written to the activity log");
+    }
+    // The remediator either verifies a repair or escalates a concrete owner action. Do not
+    // send its input error first, nor a recovery for an outage the owner never had to handle.
+    if remediation_opened || crate::cron_remediate::installed().is_some() {
+        return;
     }
     let mode = crate::sessions::watch::effective_notify_mode(pool)
         .await
@@ -1744,7 +1831,12 @@ async fn announce_cron_failure(
         None::<String>,
         "owner",
     );
-    if let Err(error) = crate::chat::reply::chat_reply(pool, &session, &text, None).await {
+    let report = crate::report_gate::Report::new(
+        uuid::Uuid::new_v4().to_string(), "cron", format!("cron-outage:{job_id}"),
+        crate::report_gate::Salience::Action,
+        text,
+    ).with_state(&problem_signature("notice", notice));
+    if let Err(error) = crate::owner_alert::notify_report(pool, &session.storage_key(), &report).await {
         tracing::warn!(%error, %job_id, "cron failure was logged but not posted");
     }
 }
@@ -1903,6 +1995,28 @@ pub async fn targets_for_job(
     Ok(targets)
 }
 
+/// Cron producers may supply a stable state (for example a recommendation id), independent
+/// of a run timestamp or wording. Ordinary scheduled information is collected in the digest.
+pub fn cron_report(job_id: &str, payload: &Value, text: &str) -> crate::report_gate::Report {
+    use crate::report_gate::{Report, Salience};
+    let salience = match payload.get("report_salience").and_then(Value::as_str) {
+        Some("action") => Salience::Action,
+        Some("decision") => Salience::Decision,
+        Some("result") => Salience::Result,
+        Some("internal") => Salience::Internal,
+        Some("fyi") => Salience::Fyi,
+        _ => Salience::Action,
+    };
+    let empty_benchmark = text.contains("채택 0") && text.contains("보류 0")
+        && text.contains("새 PR 없음");
+    let mut report = Report::new(uuid::Uuid::new_v4().to_string(), "cron",
+        format!("cron:{job_id}"), salience, if empty_benchmark { "" } else { text });
+    if let Some(state) = payload.get("report_state").and_then(Value::as_str) {
+        report = report.with_state(state);
+    }
+    report
+}
+
 async fn deliver_run_output(
     pool: &SqlitePool,
     job_id: &str,
@@ -1919,7 +2033,55 @@ async fn deliver_run_output(
             None => None,
         };
     }
-    let (error, delivered) = post_targets(&targets, text).await;
+    let mut report = cron_report(job_id, payload, text);
+    if payload.get("report_salience").is_none()
+        && !crate::report_gate::is_empty_body(&report.body)
+        && !crate::report_gate::is_leak(&report.body)
+    {
+        let judge = crate::judge::Judge::from_config(crate::judge::typesafe_from_env()).with_pool(pool.clone());
+        match crate::report_gate::classify_salience(&judge, &report).await {
+            Ok(salience) => report.salience = salience,
+            Err(error) => tracing::warn!(%error, job_id, "cron salience unavailable; preserving owner report"),
+        }
+    }
+    let mut errors = Vec::new();
+    let mut delivered = Vec::new();
+    for target in &targets {
+        let mut report = report.clone();
+        report.topic_key = format!("{}:{}:{}:{}", report.topic_key, target.platform,
+            target.chat_id, target.thread_id.as_deref().unwrap_or(""));
+        if target.platform == "slack" {
+            let session = crate::chat::session::SessionKey::new("slack", None::<String>,
+                &target.chat_id, target.thread_id.clone(), "cron");
+            match crate::report_gate::queue(pool, &session.storage_key(), &report, false).await {
+                Ok((_, Some(id))) => {
+                    match crate::chat::reply::deliver_stored_posted(pool, id, &session.storage_key(), &report.body).await {
+                        Ok(Some(posted)) => {
+                            delivered.push(target);
+                            if let Err(error) = crate::report_feedback::posted_from_outbox(pool, id, &posted).await {
+                                errors.push(error.to_string());
+                            }
+                        }
+                        Ok(None) => errors.push("Slack delivery has no receipt yet; queued for retry".into()),
+                        Err(error) => errors.push(error.to_string()),
+                    }
+                }
+                Ok((_, None)) => {},
+                Err(error) => errors.push(error.to_string()),
+            }
+        } else {
+            match crate::report_gate::submit(pool, &report).await {
+                Ok(crate::report_gate::Decision::Sent) => {
+                    let (error, sent) = post_targets(std::slice::from_ref(target), text).await;
+                    if let Some(error) = error { errors.push(error); }
+                    delivered.extend(sent);
+                }
+                Ok(_) => {},
+                Err(error) => errors.push(error.to_string()),
+            }
+        }
+    }
+    let error = (!errors.is_empty()).then(|| errors.join("; "));
     // omo's attach_to_session (default on): what the job posted joins that conversation.
     if payload
         .get("attach_to_session")
@@ -2133,6 +2295,49 @@ fn parse_interval(expression: &str) -> Result<Option<Duration>> {
 mod tests {
     use super::*;
 
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn process_alive_sees_this_process_and_never_pid_zero() {
+        assert!(process_alive(std::process::id()));
+        assert!(!process_alive(0));
+    }
+
+    /// The Child keeps its process handle open, so the exited pid cannot be reused while this
+    /// test still asks about it. (On Unix a reaped pid may be reused at once, so no such test.)
+    #[cfg(windows)]
+    #[test]
+    fn process_alive_reports_an_exited_windows_process_gone() {
+        let mut child = std::process::Command::new("cmd").args(["/C", "exit"]).spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        assert!(!process_alive(pid));
+    }
+
+    #[tokio::test]
+    async fn cron_output_is_deferred_with_content_and_empty_runs_are_suppressed() {
+        let pool = crate::storage::memory().await.unwrap();
+        let payload = serde_json::json!({"deliver":"slack:D1", "report_salience":"fyi"});
+        let body = "새 게시글을 발행했습니다.";
+        assert!(deliver_run_output(&pool, "publish", &payload, body).await.is_none());
+        let pending: String = sqlx::query_scalar("SELECT body FROM report_digest_pending")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(pending, body);
+        let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_outbox")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(queued, 0);
+        let report = cron_report("benchmark", &payload, "판정 4건: 채택 0 · 보류 0 · 제외 4 새 PR 없음");
+        assert_eq!(crate::report_gate::decide(&report, None, None, false), crate::report_gate::Decision::Empty);
+    }
+
+    #[test]
+    fn cron_recommendation_identity_does_not_depend_on_wording() {
+        let payload = serde_json::json!({"report_state":"recommendation:58"});
+        let first = cron_report("recommend", &payload, "새 글 추천입니다.");
+        let second = cron_report("recommend", &payload, "이 글을 읽어 보세요.");
+        assert_eq!(first.topic_key, second.topic_key);
+        assert_eq!(first.state_hash, second.state_hash);
+    }
+
     #[test]
     fn leases_retries_and_slack_threads_follow_the_gateway() {
         assert!(!should_reclaim(
@@ -2312,7 +2517,7 @@ mod tests {
         assert_eq!(alerts[0].item_id, cron_owner_item_id("job"));
         assert_eq!(
             crate::owner_alert::alert_line(&alerts[0]),
-            "📬 [크론] job — job: needs you - failed: boom"
+            "📬 [크론] job — job: 확인 필요 - failed: boom"
         );
         let failures: i64 =
             sqlx::query_scalar("SELECT consecutive_failures FROM scheduled_jobs WHERE id = 'job'")
@@ -2597,23 +2802,23 @@ mod tests {
             .await
             .unwrap();
         sqlx::query("INSERT INTO scheduled_jobs(id, expression, payload_json, enabled) VALUES('job-1','every 1m',?,1)")
-            .bind(r#"{"command":"printf hi","deliver":"origin"}"#)
+            .bind(r#"{"command":"printf 확인해주세요","deliver":"origin","report_salience":"action"}"#)
             .execute(&pool)
             .await
             .unwrap();
         let receipt = run_native_job(&pool, "job-1", false, false).await.unwrap();
         assert_eq!(receipt.status, "succeeded");
-        assert_eq!(receipt.output.as_deref(), Some("hi"));
+        assert_eq!(receipt.output.as_deref(), Some("확인해주세요"));
         assert_eq!(
             receipt.last_delivery_error.as_deref(),
-            Some("unconfigured delivery transport: slack")
+            Some("Slack delivery has no receipt yet; queued for retry")
         );
         let stored: String =
             sqlx::query_scalar("SELECT payload_json FROM scheduled_jobs WHERE id = 'job-1'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert!(stored.contains("unconfigured delivery transport: slack"));
+        assert!(stored.contains("Slack delivery has no receipt yet; queued for retry"));
     }
 
     #[tokio::test]
@@ -2690,7 +2895,7 @@ mod tests {
         .await
         .unwrap();
         let logged: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM hub_log WHERE message LIKE 'cron broken failed:%'",
+            "SELECT COUNT(*) FROM hub_log WHERE message LIKE '[크론 broken]%'",
         )
         .fetch_one(&pool)
         .await
@@ -2700,7 +2905,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(message, "cron broken failed: disk full");
+        assert!(message.starts_with("[크론 broken] 실행이 실패했습니다. 오류: disk full"), "{message}");
         let outbox: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_outbox")
             .fetch_one(&pool)
             .await
@@ -2718,7 +2923,7 @@ mod tests {
         .await
         .unwrap();
         let logged: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM hub_log WHERE message LIKE 'cron broken failed:%'",
+            "SELECT COUNT(*) FROM hub_log WHERE message LIKE '[크론 broken]%'",
         )
         .fetch_one(&pool)
         .await
@@ -2745,9 +2950,71 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(queued.len(), 1, "{queued:?}");
-        assert!(queued[0].1.contains("cron broken failed: socket refused"));
+        assert!(queued[0].1.contains("오류: socket refused"), "{queued:?}");
         let session = crate::chat::session::SessionKey::from_storage_key(&queued[0].0).unwrap();
         assert_eq!(session.channel_id, "CHOME");
+    }
+
+    /// A failing job is one outage: one notice when it starts, nothing while the same cause
+    /// repeats on new runs, one notice when a clean run recovers it, and nothing after that.
+    #[tokio::test]
+    async fn a_repeating_cron_failure_is_reported_once_and_its_recovery_once() {
+        let pool = crate::storage::memory().await.unwrap();
+        sqlx::query("INSERT INTO scheduled_jobs(id, expression, payload_json, enabled, consecutive_failures) VALUES('collect','every 1m','{}',1,3)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO hub_meta(key, value) VALUES('slack_home_channel', 'CHOME')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let fail = |run: &'static str| {
+            let pool = pool.clone();
+            async move {
+                note_run_health(
+                    &pool,
+                    "collect",
+                    run,
+                    "failed",
+                    "",
+                    Some("LOGIN_FAILED Error: CDP command timeout: Page.navigate"),
+                    &serde_json::json!({}),
+                )
+                .await
+                .unwrap();
+            }
+        };
+        let posted = |pool: SqlitePool| async move {
+            sqlx::query_scalar::<_, String>("SELECT text FROM chat_outbox ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        };
+        fail("run-1").await;
+        // The problem row is fixed by a later clean run in production; here the same cause
+        // simply keeps failing on new runs, which reopens nothing and posts nothing.
+        sqlx::query("UPDATE cron_problems SET status = 'fixed'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        fail("run-2").await;
+        fail("run-3").await;
+        assert_eq!(posted(pool.clone()).await.len(), 1, "{:?}", posted(pool.clone()).await);
+        let succeed = |run: &'static str| {
+            let pool = pool.clone();
+            async move {
+                note_run_health(&pool, "collect", run, "succeeded", "ok", None, &serde_json::json!({}))
+                    .await
+                    .unwrap();
+            }
+        };
+        succeed("run-4").await;
+        succeed("run-5").await;
+        let texts = posted(pool.clone()).await;
+        assert_eq!(texts.len(), 2, "{texts:?}");
+        assert!(texts[1].contains("다시 정상적으로 실행됐습니다"), "{texts:?}");
+        fail("run-6").await;
+        assert_eq!(posted(pool.clone()).await.len(), 3, "a recovered job that fails again is new");
     }
 
     fn at(text: &str) -> DateTime<Utc> {
@@ -3027,8 +3294,69 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(title, "job: needs you - stuck: again");
+        assert_eq!(title, "job: 확인 필요 - stuck: again");
         assert_eq!(reason, "stuck");
+    }
+
+    /// Without a remediator, one missing path is one owner item naming every job it fails, and
+    /// a job's own clean run does not close it while the path is still missing.
+    #[tokio::test]
+    async fn an_environment_fault_holds_one_owner_item_for_all_its_jobs() {
+        let pool = crate::storage::memory().await.unwrap();
+        let root = std::env::temp_dir().join(format!("fx-env-{}", uuid::Uuid::new_v4().simple()));
+        let fault = crate::cron_exec::EnvironmentFault {
+            missing: crate::cron_exec::MissingKind::WorkingDirectory,
+            path: root.to_string_lossy().into_owned(),
+        };
+        for job in ["alerts", "collect"] {
+            sqlx::query("INSERT INTO cron_incidents(id, job_id, kind, detail, status, created_at) VALUES(?, ?, 'failed', ?, 'open', ?)")
+                .bind(uuid::Uuid::new_v4().to_string())
+                .bind(job)
+                .bind(fault.message())
+                .bind(Utc::now().to_rfc3339())
+                .execute(&pool)
+                .await
+                .unwrap();
+            escalate_incident(&pool, job, "failed", &fault.message(), Utc::now()).await.unwrap();
+        }
+        let items = owner_items(&pool).await;
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].0, crate::cron_remediate::environment_item_id(&fault));
+        let title: String = sqlx::query_scalar("SELECT title FROM inbox_items")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(title.contains("크론 2개가 실행되지 못했습니다: alerts, collect"), "{title}");
+        assert!(!title.contains("확인 필요 - failed"), "{title}");
+        close_cron_owner_items(&pool, "alerts").await.unwrap();
+        assert_eq!(owner_items(&pool).await[0].1, "open");
+    }
+
+    #[tokio::test]
+    async fn an_english_owner_reads_cron_failure_texts_in_english() {
+        crate::locale::scope(crate::locale::OwnerLocale::english_utc(), async {
+            let pool = crate::storage::memory().await.unwrap();
+            escalate_incident(&pool, "job", "failed", "\u{1b}[31mboom\u{1b}[0m", Utc::now()).await.unwrap();
+            let title: String = sqlx::query_scalar("SELECT title FROM inbox_items")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(title, "job: needs you - failed: boom");
+            sqlx::query("INSERT INTO scheduled_jobs(id, expression, payload_json, enabled) VALUES('broken','every 1m','{}',1)")
+                .execute(&pool)
+                .await
+                .unwrap();
+            note_run_health(&pool, "broken", "run-1", "failed", "", Some("disk full"), &serde_json::json!({}))
+                .await
+                .unwrap();
+            let logged: String = sqlx::query_scalar("SELECT message FROM hub_log")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert!(logged.starts_with("[cron broken] failed. Error: disk full"), "{logged}");
+            assert!(!logged.chars().any(crate::locale::is_hangul), "{logged}");
+        })
+        .await;
     }
 
     #[tokio::test]

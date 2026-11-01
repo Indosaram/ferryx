@@ -1,0 +1,1497 @@
+diff --git a/src/slack.ts b/src/slack.ts
+--- a/src/slack.ts
++++ b/src/slack.ts
+@@ -1,84 +1,178 @@
+-const TOKEN_FILE = process.env.AUTOPILOT_SLACK_TOKEN_FILE ?? "/Users/indo/.ferryx/hub/secrets/slack-bot-token";
+-export const CHANNEL = process.env.AUTOPILOT_SLACK_CHANNEL ?? "U04M1JNJM8T";
+-export const NAMESPACE = "autopilot";
+-
+-async function call(method: string, body: Record<string, unknown>): Promise<{ ok?: boolean; error?: string; ts?: string; channel?: string; messages?: any[] }> {
+-  const token = (await Bun.file(TOKEN_FILE).text()).trim();
+-  const res = await fetch(`https://slack.com/api/${method}`, {
+-    method: "POST",
+-    headers: { Authorization: `Bearer ${token}`, "content-type": "application/json; charset=utf-8" },
+-    body: JSON.stringify(body),
+-    signal: AbortSignal.timeout(20_000),
+-  });
+-  const json = (await res.json()) as { ok?: boolean; error?: string };
+-  if (!json.ok) throw new Error(`Slack ${method}: ${json.error ?? res.status}`);
+-  return json;
+-}
+-
+-export async function reportOnCard(chatRef: string, text: string, closeLabel: string | null): Promise<void> {
+-  const [channel, ts] = chatRef.split(":");
+-  await call("chat.postMessage", { channel, thread_ts: ts, text: clip(text, 3500), unfurl_links: false });
+-  if (closeLabel) await setActionRow(chatRef, { type: "context", elements: [{ type: "mrkdwn", text: closeLabel }] });
+-}
+-
+-const savedRows = new Map<string, unknown>();
+-
+-async function setActionRow(chatRef: string, row: unknown): Promise<void> {
+-  const [channel, ts] = chatRef.split(":");
+-  const hist = await call("conversations.history", { channel, latest: ts, inclusive: true, limit: 1 });
+-  const msg = hist.messages?.[0];
+-  if (!msg || msg.ts !== ts) return;
+-  const blocks = (msg.blocks ?? []) as any[];
+-  const i = blocks.findIndex((b) => b.type === "actions" || b.block_id === "autopilot-status");
+-  if (i < 0) return;
+-  if (blocks[i].type === "actions") savedRows.set(chatRef, blocks[i]);
+-  blocks[i] = row;
+-  await call("chat.update", { channel, ts, text: msg.text, blocks });
+-}
+-
+-export async function markProcessing(chatRef: string, label: string): Promise<void> {
+-  const [channel, ts] = chatRef.split(":");
+-  await setActionRow(chatRef, { type: "context", block_id: "autopilot-status", elements: [{ type: "mrkdwn", text: `⏳ ${label} 처리 중…` }] });
+-  await call("chat.postMessage", { channel, thread_ts: ts, text: `⏳ ${label} 접수했습니다. 끝나면 여기에 결과를 남깁니다.` });
+-}
+-
+-export async function restoreButtons(chatRef: string): Promise<void> {
+-  const row = savedRows.get(chatRef);
+-  if (row) await setActionRow(chatRef, row);
+-}
+-
+-async function post(body: Record<string, unknown>): Promise<string> {
+-  const token = (await Bun.file(TOKEN_FILE).text()).trim();
+-  const res = await fetch("https://slack.com/api/chat.postMessage", {
+-    method: "POST",
+-    headers: { Authorization: `Bearer ${token}`, "content-type": "application/json; charset=utf-8" },
+-    body: JSON.stringify({ channel: CHANNEL, unfurl_links: false, unfurl_media: false, ...body }),
+-    signal: AbortSignal.timeout(20_000),
+-  });
+-  const json = (await res.json()) as { ok?: boolean; error?: string; ts?: string; channel?: string };
+-  if (!json.ok || !json.ts) throw new Error(`Slack chat.postMessage: ${json.error ?? res.status}`);
+-  return `${json.channel}:${json.ts}`;
+-}
+-
+-export type Button = { label: string; action: string; style?: "primary" | "danger" };
+-const clip = (s: string, n: number) => (s.length <= n ? s : s.slice(0, n - 1) + "…");
+-
+-export async function postCard(title: string, fields: [string, string][], url: string, shortId: string, buttons: Button[]): Promise<string> {
+-  const header = `*<${url}|${clip(title, 200)}>*  ·  autopilot #${shortId}`;
+-  const blocks = [
+-    { type: "section", text: { type: "mrkdwn", text: header } },
+-    ...fields.map(([name, value]) => ({ type: "section", text: { type: "mrkdwn", text: clip(`*${name}*\n${value || "-"}`, 2900) } })),
+-    {
+-      type: "actions",
+-      elements: buttons.map((b) => {
+-        const id = `omon:btn:${NAMESPACE}:${b.action}:${shortId}`;
+-        return { type: "button", text: { type: "plain_text", text: b.label }, action_id: id, value: id, ...(b.style ? { style: b.style } : {}) };
+-      }),
+-    },
+-  ];
+-  return post({ text: clip(`${title} — 승인 필요`, 300), blocks });
+-}
+-
+-export async function postText(text: string): Promise<void> {
+-  await post({ text: clip(text, 3500) });
+-}
++import { homedir } from "node:os";
++import { createHash } from "node:crypto";
++import * as S from "./state.ts";
++import { GateError, ReportGate, socketTransport, type MutationState, type Report } from "./report-gate.ts";
++import { ReportOutbox, type StoredDelivery } from "./report-outbox.ts";
++const gate = new ReportGate(socketTransport(process.env.FERRYX_HUB_CONTROL_SOCKET ?? `${homedir()}/.ferryx/hub/control.sock`));
++const outbox = new ReportOutbox(S.db, gate);
++// Card edits are durable intents: ordered per card, one identity across retries and restarts.
++// Legacy cards (no hub-owned parent receipt) keep their intents as 'legacy', in order, for later adoption.
++S.db.exec(`CREATE TABLE IF NOT EXISTS report_card_intents (seq INTEGER PRIMARY KEY AUTOINCREMENT,
++  card TEXT NOT NULL, item_id TEXT, change_json TEXT NOT NULL, mutation_id TEXT NOT NULL UNIQUE,
++  state TEXT NOT NULL DEFAULT 'pending', detail TEXT)`);
++export async function flushReports(): Promise<void> {
++  await outbox.flush();
++  const cards = S.db.query<{ card: string }, []>("SELECT card FROM report_card_intents WHERE state IN ('pending','legacy') GROUP BY card ORDER BY MIN(seq)").all();
++  for (const { card } of cards) await drainCard(card);
++}
++const stateHash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
++export async function resolveRef(ref: string): Promise<string | null> {
++  try {
++    if (ref.startsWith("report:")) {
++      const result = await outbox.deliver(ref.slice(7));
++      return result.kind === "delivered" ? result.ref : null;
++    }
++    if (ref.startsWith("outbox:")) {
++      const result = await gate.status(Number(ref.slice(7)));
++      return result.kind === "delivered" ? result.ref : null;
++    }
++    return ref;
++  } catch (error) {
++    if (!(error instanceof GateError)) throw error;
++    S.log(null, "report:reference-unavailable", error.message);
++    return null;
++  }
++}
++
++export const CHANNEL = process.env.AUTOPILOT_SLACK_CHANNEL ?? "U04M1JNJM8T";
++export const NAMESPACE = "autopilot";
++
++// Raw Slack refs map to their hub-owned card unless intents already live under the raw ref (legacy).
++function cardKey(ref: string): string {
++  if (ref.startsWith("report:") || S.db.query("SELECT 1 FROM report_card_intents WHERE card=? LIMIT 1").get(ref)) return ref;
++  const owner = S.db.query<{ id: string }, [string]>("SELECT id FROM report_outbox WHERE ref=? AND approval=1 ORDER BY rowid DESC LIMIT 1").get(ref);
++  return owner ? `report:${owner.id}` : ref;
++}
++
++// Persisted before reference resolution or any hub call; an identical unsent tail is the same edit.
++function queueCardIntent(chatRef: string, change: Record<string, unknown>): string {
++  const card = cardKey(chatRef);
++  const encoded = JSON.stringify(change);
++  S.db.transaction(() => {
++    const tail = S.db.query<{ change_json: string; state: string }, [string]>(
++      "SELECT change_json,state FROM report_card_intents WHERE card=? ORDER BY seq DESC LIMIT 1").get(card);
++    if ((tail?.state === "pending" || tail?.state === "legacy") && tail.change_json === encoded) return;
++    const item = S.db.query<{ id: string }, [string, string]>("SELECT id FROM items WHERE chat_ref IN (?,?) ORDER BY rowid DESC LIMIT 1").get(chatRef, card);
++    S.db.query("INSERT INTO report_card_intents(card,item_id,change_json,mutation_id) VALUES(?,?,?,?)").run(card, item?.id ?? null, encoded, crypto.randomUUID());
++  })();
++  return card;
++}
++
++// Pending stays retryable under its identity and never blocks a newer desired card; uncertain or failed
++// blocks later edits and is never replayed; legacy holds the queue.
++async function drainCard(card: string): Promise<void> {
++  const open = S.db.query<{ seq: number; change_json: string; mutation_id: string; state: string }, [string]>(
++    "SELECT seq,change_json,mutation_id,state FROM report_card_intents WHERE card=? AND state IN ('pending','legacy','uncertain','failed') ORDER BY seq").all(card);
++  const head = open[0];
++  if (!head) return;
++  if (head.state === "legacy") {
++    holdLegacy(card);
++    const item = S.db.query<{ item_id: string | null }, [string]>("SELECT item_id FROM report_card_intents WHERE card=? AND item_id IS NOT NULL ORDER BY seq LIMIT 1").get(card);
++    if (!item?.item_id) return;
++    const split = card.indexOf(":");
++    if (split < 1) throw new GateError("protocol", "Legacy card has no Slack receipt");
++    let adopted: number | null;
++    try { adopted = await gate.adopt(card.slice(0, split), card.slice(split + 1), "autopilot", `autopilot:item:${item.item_id}`); }
++    catch (error) { S.log(item.item_id, "report:adoption-failed", String(error)); return; }
++    if (adopted === null) return;
++    S.db.transaction(() => {
++      S.db.query("INSERT OR IGNORE INTO report_outbox(id,request,item_id,approval,ref,state,reason) VALUES(?,'{}',?,1,?,'delivered',?)").run(`adopt:${card}`, item.item_id, card, String(adopted));
++      S.db.query("UPDATE report_card_intents SET state='pending',detail=NULL WHERE card=? AND state='legacy'").run(card);
++    })();
++    return drainCard(card);
++  }
++  if (head.state !== "pending") {
++    S.log(null, "report:card-blocked", `${card} waits behind ${head.state} edit ${head.mutation_id}`);
++    return;
++  }
++  const resolved = await resolveRef(card);
++  if (resolved === null) {
++    if (card.startsWith("report:") && S.db.query("SELECT 1 FROM report_outbox WHERE id=? AND state='suppressed'").get(card.slice(7)))
++      S.db.query("UPDATE report_card_intents SET state='suppressed',detail='parent suppressed' WHERE card=? AND state='pending'").run(card);
++    return;
++  }
++  const parent = S.db.query<{ reason: string }, [string, string]>(
++    "SELECT reason FROM report_outbox WHERE (id=? OR ref=?) AND state='delivered' AND approval=1 ORDER BY rowid DESC LIMIT 1")
++    .get(card.startsWith("report:") ? card.slice(7) : "", resolved);
++  if (!parent) { holdLegacy(card); return; }
++  for (const intent of open) {
++    if (intent.state !== "pending") return;
++    let state: MutationState;
++    try {
++      state = await gate.mutate(Number(parent.reason), intent.mutation_id, JSON.parse(intent.change_json));
++    } catch (error) {
++      if (!(error instanceof GateError)) throw error;
++      if (error.code === "unavailable") return;
++      S.db.query("UPDATE report_card_intents SET state='failed',detail=? WHERE seq=? AND state='pending'").run(`${error.code}: ${error.message}`, intent.seq);
++      S.log(null, "report:card-failed", `${intent.mutation_id}: ${error.message}`);
++      return;
++    }
++    // Admission or hub progress is not delivery: the intent stays pending and is re-queried next run, while
++    // the newer desired card is still submitted. Submission in seq order fixes the hub's card generations.
++    if (state === "pending" || state === "in_flight" || state === "recovering") {
++      S.db.query("UPDATE report_card_intents SET detail=? WHERE seq=? AND state='pending'").run(state, intent.seq);
++      continue;
++    }
++    // A late receipt (delivered, suppressed, superseded) may settle an intent another run saw as uncertain.
++    S.db.query("UPDATE report_card_intents SET state=?,detail=NULL WHERE seq=? AND (state='pending' OR (state='uncertain' AND ?<>'uncertain'))")
++      .run(state, intent.seq, state);
++    if (state === "uncertain") { S.log(null, "report:card-uncertain", `${intent.mutation_id} not replayed`); return; }
++  }
++}
++
++// Adoption is unresolved: nothing is sent and no receipt is invented; adoption later returns 'legacy' rows to 'pending'.
++function holdLegacy(card: string): void {
++  const held = S.db.query("UPDATE report_card_intents SET state='legacy',detail='no hub-owned parent receipt' WHERE card=? AND state='pending'").run(card).changes;
++  if (held) S.log(null, "report:legacy-card", "Card update withheld: no hub-owned parent receipt");
++}
++
++async function mutateCard(chatRef: string, change: Record<string, unknown>): Promise<void> {
++  await drainCard(queueCardIntent(chatRef, change));
++}
++
++export async function reportOnCard(chatRef: string, text: string, closeLabel: string | null, itemId: string, action: string, failed: boolean, outcomeCode: string): Promise<void> {
++  const card = closeLabel ? queueCardIntent(chatRef, { kind: "action_row", row: { type: "context", elements: [{ type: "mrkdwn", text: closeLabel }] } }) : null;
++  const resolved = await resolveRef(chatRef);
++  await outbox.enqueue({ source: "autopilot", topic: `autopilot:item:${itemId}:result`,
++    salience: failed ? "action" : "result", body: text,
++    state: stateHash([action, failed, outcomeCode]), ...(resolved ? { thread: resolved.split(":")[1] } : {}) });
++  if (card) await drainCard(card);
++}
++
++export async function markProcessing(chatRef: string, label: string): Promise<void> {
++  await mutateCard(chatRef, { kind: "action_row", row: { type: "context", block_id: "autopilot-status", elements: [{ type: "mrkdwn", text: label + " 처리 중" }] } });
++}
++
++export async function restoreButtons(chatRef: string): Promise<void> {
++  await mutateCard(chatRef, { kind: "restore_actions" });
++}
++
++
++export type Button = { label: string; action: string; style?: "primary" | "danger" };
++const clip = (s: string, n: number) => (s.length <= n ? s : s.slice(0, n - 1) + "…");
++
++export async function postCard(title: string, fields: [string, string][], url: string, shortId: string, buttons: Button[], itemId: string): Promise<StoredDelivery> {
++  const header = `*<${url}|${clip(title, 200)}>*  ·  autopilot #${shortId}`;
++  const blocks = [
++    { type: "section", text: { type: "mrkdwn", text: header } },
++    ...fields.map(([name, value]) => ({ type: "section", text: { type: "mrkdwn", text: clip(`*${name}*\n${value || "-"}`, 2900) } })),
++    {
++      type: "actions",
++      elements: buttons.map((b) => {
++        const id = `omon:btn:${NAMESPACE}:${b.action}:${shortId}`;
++        return { type: "button", text: { type: "plain_text", text: b.label }, action_id: id, value: id, ...(b.style ? { style: b.style } : {}) };
++      }),
++    },
++  ];
++  return outbox.enqueue({ source: "autopilot", topic: `autopilot:item:${itemId}`,
++    salience: "decision", body: "외주 작업 승인이 필요합니다.", quote: title, origin: url,
++    state: stateHash([fields, buttons]), blocks }, itemId, true);
++}
++
++export async function postText(text: string, identity: Pick<Report, "topic" | "state" | "salience" | "incident">): Promise<void> {
++  await outbox.enqueue({ source: "autopilot", body: text, ...identity });
++}
++
++export function saveCard(itemId: string, delivery: StoredDelivery): void {
++  if (delivery.kind === "suppressed") S.log(itemId, "report:suppressed", delivery.reason);
++}
+diff --git a/src/collect.ts b/src/collect.ts
+--- a/src/collect.ts
++++ b/src/collect.ts
+@@ -1,278 +1,276 @@
+-#!/usr/bin/env bun
+-import * as K from "./kmong.ts";
+-import * as W from "./wishket.ts";
+-import * as F from "./freelancer.ts";
+-import * as FM from "./freemoa.ts";
+-import * as M from "./mercor.ts";
+-import * as S from "./state.ts";
+-import { TRANSIENT, TransientAsideError } from "./aside.ts";
+-import { AuthRequiredError, decide, loadNoticeState, saveNoticeState, type StepFailure } from "./auth-notice.ts";
+-import { unreadCount } from "./fiverr.ts";
+-import { judgeMessage, judgeProject, judgeBid, judgeMercor, planOrder, hasBanned } from "./judge.ts";
+-import { postCard, postText, reportOnCard, type Button } from "./slack.ts";
+-
+-const DRY = process.argv.includes("--dry");
+-const ONLY = process.argv.find((a) => a.startsWith("--only="))?.slice(7);
+-const MSG_WINDOW_MS = Number(process.env.AUTOPILOT_MSG_WINDOW_H ?? 72) * 3600_000;
+-const FIT_MIN = Number(process.env.AUTOPILOT_FIT_MIN ?? 40);
+-const WISHKET_PER_RUN = Number(process.env.AUTOPILOT_WISHKET_PER_RUN ?? 5);
+-const FL_PER_RUN = Number(process.env.AUTOPILOT_FL_PER_RUN ?? 3);
+-const FREEMOA_PER_RUN = Number(process.env.AUTOPILOT_FREEMOA_PER_RUN ?? 5);
+-const MERCOR_PER_RUN = Number(process.env.AUTOPILOT_MERCOR_PER_RUN ?? 3);
+-const errors: string[] = [];
+-let transientOnly = true;
+-// A network/Aside outage shorter than this is retried by the next 20-minute run instead of paging the owner.
+-const OUTAGE_GRACE_MS = Number(process.env.AUTOPILOT_OUTAGE_GRACE_MIN ?? 60) * 60_000;
+-
+-const transcriptOf = (msgs: K.KmongMessage[]) =>
+-  msgs.map((m) => `${m.is_mine ? "나" : "상대"} (${m.sent_at}): ${m.message}`).join("\n");
+-
+-async function card(item: S.Item, title: string, fields: [string, string][], buttons: Button[]) {
+-  if (DRY) { console.log(`[dry] card ${title}\n${fields.map(([k, v]) => `  ${k}: ${v}`).join("\n")}`); return; }
+-  const mid = await postCard(title, fields, item.url, S.shortId(item.id), buttons);
+-  S.update(item.id, { status: "pending_approval", chat_ref: mid });
+-}
+-
+-export async function draftKmongReply(item: S.Item, note = "") {
+-  const [groupId] = item.external_id.split("/");
+-  const msgs = await K.listMessages(groupId!);
+-  const banned = await K.bannedKeywords();
+-  let v = await judgeMessage(transcriptOf(msgs), note);
+-  let hits = hasBanned(v.draft, banned);
+-  if (v.action === "reply" && hits.length) {
+-    v = await judgeMessage(transcriptOf(msgs), `${note}\n금칙어(${hits.join(", ")})가 들어갔다. 이 단어들 없이 다시 써라.`);
+-    hits = hasBanned(v.draft, banned);
+-  }
+-  S.update(item.id, { verdict: JSON.stringify(v), draft: v.draft });
+-  if (v.action === "skip") { S.update(item.id, { status: "skipped" }); S.log(item.id, "skip", v.summary); return; }
+-  await card(S.get(item.id)!, `크몽 문의 답장 · ${item.title}`, [
+-    ["요청", v.summary], ["위험", hits.length ? `금칙어 포함: ${hits.join(", ")} / ${v.risk}` : v.risk], ["보낼 답장", v.draft],
+-  ], [
+-    { label: "승인·발송", action: "send", style: "primary" }, { label: "다시 쓰기", action: "redo" }, { label: "무시", action: "reject", style: "danger" },
+-  ]);
+-}
+-
+-async function kmongMessages() {
+-  for (const { group: g, last } of await K.lastMessages()) {
+-    if (!last || last.is_mine) continue;
+-    const sentAt = parseKmongTime(last.sent_at);
+-    if (sentAt && Date.now() - sentAt > MSG_WINDOW_MS) continue;
+-    const id = `kmong_message:${g.inbox_group_id}:${last.MID}`;
+-    const created = S.upsertNew({
+-      id, kind: "kmong_message", external_id: `${g.inbox_group_id}/${g.partner.USERID}`,
+-      url: K.inboxUrl(g.inbox_group_id, g.partner.USERID), title: g.partner.username, body: last.message,
+-    });
+-    if (created) await draftKmongReply(S.get(id)!);
+-  }
+-}
+-
+-function parseKmongTime(s: string): number | null {
+-  const m = s.match(/^(\d{2})\.(\d{2})\.(\d{2}) (\d{2}):(\d{2})$/);
+-  return m ? new Date(`20${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:00+09:00`).getTime() : null;
+-}
+-
+-async function kmongOrders() {
+-  for (const orderId of await K.ongoingOrderIds()) {
+-    const id = `kmong_order:${orderId}:1`;
+-    if (!S.upsertNew({ id, kind: "kmong_order", external_id: orderId, url: `https://kmong.com/order-detail/${orderId}`, title: `주문 #${orderId}`, body: "" })) continue;
+-    const detail = await K.orderDetailText(orderId);
+-    const plan = await planOrder(detail, "");
+-    S.update(id, { body: detail, verdict: JSON.stringify(plan), draft: plan.plan });
+-    await card(S.get(id)!, `크몽 신규 주문 · #${orderId}`, [
+-      ["주문", plan.summary], ["납품물", plan.scope], ["구현 계획", plan.plan], ["위험/확인", plan.risk],
+-    ], [
+-      { label: plan.feasible ? "AI 개발 시작" : "그래도 개발 시작", action: "develop", ...(plan.feasible ? { style: "primary" as const } : {}) },
+-      { label: "보류", action: "reject", style: "danger" },
+-    ]);
+-  }
+-}
+-
+-export async function draftWishketProposal(item: S.Item, note = "") {
+-  const v = await judgeProject(item.body, note);
+-  S.update(item.id, { verdict: JSON.stringify(v), draft: JSON.stringify({ price: v.price, period: v.period, body: v.proposal }) });
+-  if (v.action === "skip" || v.fit < FIT_MIN) { S.update(item.id, { status: "skipped" }); S.log(item.id, "skip", `${v.fit} ${v.summary}`); return; }
+-  await card(S.get(item.id)!, `위시켓 지원 제안 · ${item.title}`, [
+-    ["적합도", `${v.fit}/100 · ${v.summary}`], ["위험", v.risk], ["금액·기간", `${v.price} / ${v.period}`], ["지원 내용", v.proposal],
+-  ], [
+-    { label: "승인·지원", action: "apply", style: "primary" }, { label: "다시 쓰기", action: "redo" }, { label: "패스", action: "reject", style: "danger" },
+-  ]);
+-}
+-
+-async function wishket() {
+-  let judged = 0;
+-  for (const p of await W.listProjects()) {
+-    const id = `wishket_project:${p.id}:1`;
+-    if (S.get(id)) continue;
+-    if (judged >= WISHKET_PER_RUN) break;
+-    let { text, loggedIn } = await W.projectText(p.url);
+-    if (!loggedIn) {
+-      // Same as Freelancer: restore the session with the stored partner account instead of asking the owner.
+-      const r = await W.ensureLogin();
+-      if (r !== "LOGGED_IN") throw new (TRANSIENT.test(r) ? TransientAsideError : Error)(`위시켓 자동 재로그인 실패: ${r}`);
+-      ({ text, loggedIn } = await W.projectText(p.url));
+-      if (!loggedIn) throw new Error("위시켓 재로그인 후에도 로그아웃 상태입니다.");
+-    }
+-    judged++;
+-    S.upsertNew({ id, kind: "wishket_project", external_id: p.id, url: p.url, title: p.title, body: text });
+-    if (W.tierOnly(text)) { S.update(id, { status: "skipped" }); S.log(id, "skip", "PRIME/PRO/BOOST only"); continue; }
+-    await draftWishketProposal(S.get(id)!);
+-  }
+-}
+-
+-export async function draftFreelancerBid(item: S.Item, note = "") {
+-  const v = await judgeBid(item.body, note);
+-  S.update(item.id, { verdict: JSON.stringify(v), draft: JSON.stringify({ amount: v.amount, days: v.days, body: v.proposal }) });
+-  if (v.action === "skip" || v.fit < FIT_MIN) { S.update(item.id, { status: "skipped" }); S.log(item.id, "skip", `${v.fit} ${v.summary}`); return; }
+-  await card(S.get(item.id)!, `Freelancer 입찰 제안 · ${item.title}`, [
+-    ["적합도", `${v.fit}/100 · ${v.summary}`], ["위험", v.risk], ["금액·기간", `$${v.amount} / ${v.days}일`], ["제안서(영문)", v.proposal],
+-  ], [
+-    { label: "승인·입찰", action: "bid", style: "primary" }, { label: "다시 쓰기", action: "redo" }, { label: "패스", action: "reject", style: "danger" },
+-  ]);
+-}
+-
+-async function freelancer() {
+-  // Listing uses the public API, so a logged-out Aside session would go unnoticed until the owner presses "bid".
+-  // Restore the login on every run so a bid never waits on the owner.
+-  const login = await F.ensureLogin();
+-  if (login !== "LOGGED_IN") throw new (TRANSIENT.test(login) ? TransientAsideError : Error)(`Freelancer 자동 재로그인 실패: ${login}`);
+-  let judged = 0;
+-  for (const p of await F.listProjects()) {
+-    const id = `freelancer_project:${p.id}:1`;
+-    if (S.get(id) || !F.worthJudging(p)) continue;
+-    if (judged >= FL_PER_RUN) break;
+-    judged++;
+-    const budget = `${p.type} ${p.budget.minimum ?? "?"}-${p.budget.maximum ?? "?"} ${p.currency}, ${p.bids} bids so far`;
+-    S.upsertNew({ id, kind: "freelancer_project", external_id: String(p.id), url: p.url, title: p.title.slice(0, 120), body: `${p.title}\nBudget: ${budget}\n\n${p.description.slice(0, 5000)}` });
+-    await draftFreelancerBid(S.get(id)!);
+-  }
+-}
+-
+-export async function draftFreemoaProposal(item: S.Item, note = "") {
+-  const v = await judgeProject(item.body, `${note}\n프리모아는 지원 금액에 이용요금 15%를 포함해 만원 단위로 쓴다. 미팅은 온라인만 가능하다. 사업자 형태는 개인사업자(1인)다.`, "프리모아", "만원 단위 정수 하나만, 예: 800. 범위·설명 금지");
+-  S.update(item.id, { verdict: JSON.stringify(v), draft: JSON.stringify({ cost: v.price, days: v.period, body: v.proposal }) });
+-  if (v.action === "skip" || v.fit < FIT_MIN) { S.update(item.id, { status: "skipped" }); S.log(item.id, "skip", `${v.fit} ${v.summary}`); return; }
+-  await card(S.get(item.id)!, `프리모아 지원 제안 · ${item.title}`, [
+-    ["적합도", `${v.fit}/100 · ${v.summary}`], ["위험", v.risk], ["금액·기간", `${v.price}만원(수수료 15% 포함) / ${v.period}일`], ["지원 내용", v.proposal],
+-  ], [
+-    { label: "승인·지원", action: "apply", style: "primary" }, { label: "다시 쓰기", action: "redo" }, { label: "패스", action: "reject", style: "danger" },
+-  ]);
+-}
+-
+-async function freemoa() {
+-  let judged = 0;
+-  for (const p of await FM.listProjects()) {
+-    const id = `freemoa_project:${p.pno}:1`;
+-    if (S.get(id)) continue;
+-    if (judged >= FREEMOA_PER_RUN) break;
+-    let { text, loggedIn, applied } = await FM.projectText(p.pno);
+-    if (!loggedIn) {
+-      const r = await FM.ensureLogin();
+-      if (r === "PASSKEY_REQUIRED") throw new AuthRequiredError("프리모아 로그인이 풀려 다시 로그인하는데 구글 패스키 확인이 필요합니다. Aside에 떠 있는 구글 본인 확인(indoyoon93)만 승인해 주세요. 다음 수집부터 자동으로 이어집니다.");
+-      if (r === "LOGIN_REQUIRED") throw new AuthRequiredError("프리모아 Google 로그인 세션이 만료되었습니다. Aside에서 프리모아에 다시 로그인해 주세요.");
+-      // ensureLogin catches page errors into its result, so an Aside restart mid-login arrives here as text.
+-      if (r !== "LOGGED_IN") throw new (TRANSIENT.test(r) ? TransientAsideError : Error)(`프리모아 자동 재로그인 실패: ${r}`);
+-      ({ text, loggedIn, applied } = await FM.projectText(p.pno));
+-      if (!loggedIn) throw new Error("프리모아 재로그인 후에도 로그아웃 상태입니다.");
+-    }
+-    judged++;
+-    S.upsertNew({ id, kind: "freemoa_project", external_id: p.pno, url: p.url, title: p.title.slice(0, 120), body: text });
+-    if (applied) { S.update(id, { status: "skipped" }); S.log(id, "skip", "already applied"); continue; }
+-    await draftFreemoaProposal(S.get(id)!);
+-  }
+-}
+-
+-// Unanswered approval cards for public listings go stale (the listing closes or fills); close them so the
+-// owner's DM only shows cards that can still be acted on.
+-const PENDING_TTL_MS = Number(process.env.AUTOPILOT_PENDING_TTL_H ?? 72) * 3600_000;
+-async function expireStale() {
+-  for (const item of S.listByStatus("pending_approval")) {
+-    if (!/_project$/.test(item.kind) || Date.now() - Date.parse(item.created_at) < PENDING_TTL_MS) continue;
+-    if (DRY) { console.log(`[dry] expire ${item.id}`); continue; }
+-    S.update(item.id, { status: "rejected", result: "expired" });
+-    S.log(item.id, "expire", `pending since ${item.created_at}`);
+-    if (item.chat_ref) await reportOnCard(item.chat_ref, "승인 없이 3일이 지나 정리했습니다. 공고가 마감됐을 가능성이 커서 지원하지 않습니다.", "⌛ 기한 지나 정리됨").catch((e) => S.log(item.id, "report:fail", String(e)));
+-  }
+-}
+-
+-async function fiverr() {
+-  const unread = await unreadCount();
+-  const flag = Bun.file(`${S.HOME}/fiverr-unread`);
+-  const prev = (await flag.exists()) ? Number(await flag.text()) : 0;
+-  await Bun.write(flag, String(unread));
+-  if (unread > prev && !DRY) await postText(`Fiverr 안 읽은 메시지 ${unread}건: https://www.fiverr.com/inbox`);
+-}
+-
+-export async function draftMercorApplication(item: S.Item, note = "") {
+-  const v = await judgeMercor(item.body, note);
+-  S.update(item.id, { verdict: JSON.stringify(v), draft: v.talkingPoints });
+-  if (v.action === "skip" || v.fit < FIT_MIN) { S.update(item.id, { status: "skipped" }); S.log(item.id, "skip", `${v.fit} ${v.summary}`); return; }
+-  const rateLine = item.body.split("\n")[1] ?? "";
+-  await card(S.get(item.id)!, `Mercor 고단가 원격 · ${item.title}`, [
+-    ["적합도", `${v.fit}/100 · ${v.summary}`],
+-    ["단가·슬롯", rateLine],
+-    ["위험/조건", v.risk],
+-    ["인터뷰 어필 포인트", v.talkingPoints],
+-  ], [
+-    { label: "승인·지원", action: "apply", style: "primary" }, { label: "다시 쓰기", action: "redo" }, { label: "패스", action: "reject", style: "danger" },
+-  ]);
+-}
+-
+-async function mercor() {
+-  let judged = 0;
+-  for (const p of await M.listProjects()) {
+-    const id = `mercor_project:${p.id}:1`;
+-    const existing = S.get(id);
+-    if (existing && existing.status !== "new") continue;
+-    if (judged >= MERCOR_PER_RUN) break;
+-    judged++;
+-    const rate = `$${p.rateMin}~$${p.rateMax} / ${p.payRateFrequency} · ${p.commitment} · 남은 슬롯: ${p.remainingSlots ?? "상시"}`;
+-    if (!existing) {
+-      S.upsertNew({
+-        id, kind: "mercor_project", external_id: p.id, url: p.url,
+-        title: p.title.slice(0, 120), body: `${p.title}\n${rate}\n\n${p.description.slice(0, 5000)}`,
+-      });
+-    }
+-    await draftMercorApplication(S.get(id)!);
+-  }
+-}
+-
+-if (import.meta.main) {
+-  const steps: [string, () => Promise<void>][] = [["expire", expireStale], ["kmong-messages", kmongMessages], ["kmong-orders", kmongOrders], ["wishket", wishket], ["freelancer", freelancer], ["freemoa", freemoa], ["fiverr", fiverr]];
+-  const failures: StepFailure[] = [];
+-  for (const [name, fn] of steps) {
+-    if (ONLY && ONLY !== name) continue;
+-    try { await fn(); } catch (e) {
+-      failures.push({ step: name, error: e });
+-      S.log(null, "error", `${name}: ${(e as Error).stack}`);
+-    }
+-  }
+-  const noticeFile = `${S.HOME}/auth-notice.json`;
+-  const outcome = decide(failures, loadNoticeState(noticeFile));
+-  saveNoticeState(noticeFile, outcome.state);
+-  if (outcome.notices.length) console.log(outcome.notices.join("\n"));
+-  for (const { step, error } of outcome.errors) {
+-    if (!(error instanceof TransientAsideError)) transientOnly = false;
+-    errors.push(`${step}: ${(error as Error).message}`);
+-  }
+-  const outageFlag = Bun.file(`${S.HOME}/outage-since`);
+-  if (errors.length && transientOnly) {
+-    const since = (await outageFlag.exists()) ? Date.parse(await outageFlag.text()) : Date.now();
+-    if (!(await outageFlag.exists())) await Bun.write(outageFlag, new Date(since).toISOString());
+-    if (Date.now() - since < OUTAGE_GRACE_MS) {
+-      console.log(`transient network/Aside outage since ${new Date(since).toISOString()}; next run retries\n${errors.join("\n")}`);
+-      process.exit(0);
+-    }
+-  } else {
+-    await outageFlag.delete().catch(() => {});
+-  }
+-  if (errors.length) {
+-    const day = new Date().toISOString().slice(0, 10);
+-    const flag = `${S.HOME}/error-${day}-${Bun.hash(errors.join("|"))}`;
+-    if (!(await Bun.file(flag).exists())) {
+-      await Bun.write(flag, "1");
+-      if (!DRY) await postText(`외주 오토파일럿 수집 오류\n${errors.join("\n")}`).catch(() => {});
+-    }
+-    console.error(errors.join("\n"));
+-    process.exit(1);
+-  }
+-}
++#!/usr/bin/env bun
++import * as K from "./kmong.ts";
++import * as W from "./wishket.ts";
++import * as F from "./freelancer.ts";
++import * as FM from "./freemoa.ts";
++import * as M from "./mercor.ts";
++import * as S from "./state.ts";
++import { TRANSIENT, TransientAsideError } from "./aside.ts";
++import { AuthRequiredError, decide, loadNoticeState, saveNoticeState, type StepFailure } from "./auth-notice.ts";
++import { unreadCount } from "./fiverr.ts";
++import { judgeMessage, judgeProject, judgeBid, judgeMercor, planOrder, hasBanned } from "./judge.ts";
++import { postCard, postText, reportOnCard, saveCard, flushReports, type Button } from "./slack.ts";
++
++const DRY = process.argv.includes("--dry");
++const ONLY = process.argv.find((a) => a.startsWith("--only="))?.slice(7);
++const MSG_WINDOW_MS = Number(process.env.AUTOPILOT_MSG_WINDOW_H ?? 72) * 3600_000;
++const FIT_MIN = Number(process.env.AUTOPILOT_FIT_MIN ?? 40);
++const WISHKET_PER_RUN = Number(process.env.AUTOPILOT_WISHKET_PER_RUN ?? 5);
++const FL_PER_RUN = Number(process.env.AUTOPILOT_FL_PER_RUN ?? 3);
++const FREEMOA_PER_RUN = Number(process.env.AUTOPILOT_FREEMOA_PER_RUN ?? 5);
++const MERCOR_PER_RUN = Number(process.env.AUTOPILOT_MERCOR_PER_RUN ?? 3);
++const errors: string[] = [];
++let transientOnly = true;
++// A network/Aside outage shorter than this is retried by the next 20-minute run instead of paging the owner.
++const OUTAGE_GRACE_MS = Number(process.env.AUTOPILOT_OUTAGE_GRACE_MIN ?? 60) * 60_000;
++
++const transcriptOf = (msgs: K.KmongMessage[]) =>
++  msgs.map((m) => `${m.is_mine ? "나" : "상대"} (${m.sent_at}): ${m.message}`).join("\n");
++
++async function card(item: S.Item, title: string, fields: [string, string][], buttons: Button[]) {
++  if (DRY) { console.log(`[dry] card ${title}\n${fields.map(([k, v]) => `  ${k}: ${v}`).join("\n")}`); return; }
++  const mid = await postCard(title, fields, item.url, S.shortId(item.id), buttons, item.id);
++  saveCard(item.id, mid);
++}
++
++export async function draftKmongReply(item: S.Item, note = "") {
++  const [groupId] = item.external_id.split("/");
++  const msgs = await K.listMessages(groupId!);
++  const banned = await K.bannedKeywords();
++  let v = await judgeMessage(transcriptOf(msgs), note);
++  let hits = hasBanned(v.draft, banned);
++  if (v.action === "reply" && hits.length) {
++    v = await judgeMessage(transcriptOf(msgs), `${note}\n금칙어(${hits.join(", ")})가 들어갔다. 이 단어들 없이 다시 써라.`);
++    hits = hasBanned(v.draft, banned);
++  }
++  S.update(item.id, { verdict: JSON.stringify(v), draft: v.draft });
++  if (v.action === "skip") { S.update(item.id, { status: "skipped" }); S.log(item.id, "skip", v.summary); return; }
++  await card(S.get(item.id)!, `크몽 문의 답장 · ${item.title}`, [
++    ["요청", v.summary], ["위험", hits.length ? `금칙어 포함: ${hits.join(", ")} / ${v.risk}` : v.risk], ["보낼 답장", v.draft],
++  ], [
++    { label: "승인·발송", action: "send", style: "primary" }, { label: "다시 쓰기", action: "redo" }, { label: "무시", action: "reject", style: "danger" },
++  ]);
++}
++
++async function kmongMessages() {
++  for (const { group: g, last } of await K.lastMessages()) {
++    if (!last || last.is_mine) continue;
++    const sentAt = parseKmongTime(last.sent_at);
++    if (sentAt && Date.now() - sentAt > MSG_WINDOW_MS) continue;
++    const id = `kmong_message:${g.inbox_group_id}:${last.MID}`;
++    const created = S.upsertNew({
++      id, kind: "kmong_message", external_id: `${g.inbox_group_id}/${g.partner.USERID}`,
++      url: K.inboxUrl(g.inbox_group_id, g.partner.USERID), title: g.partner.username, body: last.message,
++    });
++    if (created) await draftKmongReply(S.get(id)!);
++  }
++}
++
++function parseKmongTime(s: string): number | null {
++  const m = s.match(/^(\d{2})\.(\d{2})\.(\d{2}) (\d{2}):(\d{2})$/);
++  return m ? new Date(`20${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:00+09:00`).getTime() : null;
++}
++
++async function kmongOrders() {
++  for (const orderId of await K.ongoingOrderIds()) {
++    const id = `kmong_order:${orderId}:1`;
++    if (!S.upsertNew({ id, kind: "kmong_order", external_id: orderId, url: `https://kmong.com/order-detail/${orderId}`, title: `주문 #${orderId}`, body: "" })) continue;
++    const detail = await K.orderDetailText(orderId);
++    const plan = await planOrder(detail, "");
++    S.update(id, { body: detail, verdict: JSON.stringify(plan), draft: plan.plan });
++    await card(S.get(id)!, `크몽 신규 주문 · #${orderId}`, [
++      ["주문", plan.summary], ["납품물", plan.scope], ["구현 계획", plan.plan], ["위험/확인", plan.risk],
++    ], [
++      { label: plan.feasible ? "AI 개발 시작" : "그래도 개발 시작", action: "develop", ...(plan.feasible ? { style: "primary" as const } : {}) },
++      { label: "보류", action: "reject", style: "danger" },
++    ]);
++  }
++}
++
++export async function draftWishketProposal(item: S.Item, note = "") {
++  if (W.tierOnly(item.body)) { S.update(item.id, { status: "skipped" }); S.log(item.id, "skip", "PRIME/PRO/BOOST only"); return; }
++  const v = await judgeProject(item.body, note);
++  S.update(item.id, { verdict: JSON.stringify(v), draft: JSON.stringify({ price: v.price, period: v.period, body: v.proposal }) });
++  if (v.action === "skip" || v.fit < FIT_MIN) { S.update(item.id, { status: "skipped" }); S.log(item.id, "skip", `${v.fit} ${v.summary}`); return; }
++  await card(S.get(item.id)!, `위시켓 지원 제안 · ${item.title}`, [
++    ["적합도", `${v.fit}/100 · ${v.summary}`], ["위험", v.risk], ["금액·기간", `${v.price} / ${v.period}`], ["지원 내용", v.proposal],
++  ], [
++    { label: "승인·지원", action: "apply", style: "primary" }, { label: "다시 쓰기", action: "redo" }, { label: "패스", action: "reject", style: "danger" },
++  ]);
++}
++
++async function wishket() {
++  let judged = 0;
++  for (const p of await W.listProjects()) {
++    const id = `wishket_project:${p.id}:1`;
++    if (S.get(id)) continue;
++    if (judged >= WISHKET_PER_RUN) break;
++    let { text, loggedIn } = await W.projectText(p.url);
++    if (!loggedIn) {
++      // Same as Freelancer: restore the session with the stored partner account instead of asking the owner.
++      const r = await W.ensureLogin();
++      if (r !== "LOGGED_IN") throw new (TRANSIENT.test(r) ? TransientAsideError : Error)(`위시켓 자동 재로그인 실패: ${r}`);
++      ({ text, loggedIn } = await W.projectText(p.url));
++      if (!loggedIn) throw new Error("위시켓 재로그인 후에도 로그아웃 상태입니다.");
++    }
++    judged++;
++    S.upsertNew({ id, kind: "wishket_project", external_id: p.id, url: p.url, title: p.title, body: text });
++    await draftWishketProposal(S.get(id)!);
++  }
++}
++
++export async function draftFreelancerBid(item: S.Item, note = "") {
++  const v = await judgeBid(item.body, note);
++  S.update(item.id, { verdict: JSON.stringify(v), draft: JSON.stringify({ amount: v.amount, days: v.days, body: v.proposal }) });
++  if (v.action === "skip" || v.fit < FIT_MIN) { S.update(item.id, { status: "skipped" }); S.log(item.id, "skip", `${v.fit} ${v.summary}`); return; }
++  await card(S.get(item.id)!, `Freelancer 입찰 제안 · ${item.title}`, [
++    ["적합도", `${v.fit}/100 · ${v.summary}`], ["위험", v.risk], ["금액·기간", `$${v.amount} / ${v.days}일`], ["제안서(영문)", v.proposal],
++  ], [
++    { label: "승인·입찰", action: "bid", style: "primary" }, { label: "다시 쓰기", action: "redo" }, { label: "패스", action: "reject", style: "danger" },
++  ]);
++}
++
++async function freelancer() {
++  // Listing uses the public API, so a logged-out Aside session would go unnoticed until the owner presses "bid".
++  // Restore the login on every run so a bid never waits on the owner.
++  const login = await F.ensureLogin();
++  if (login !== "LOGGED_IN") throw new (TRANSIENT.test(login) ? TransientAsideError : Error)(`Freelancer 자동 재로그인 실패: ${login}`);
++  let judged = 0;
++  for (const p of await F.listProjects()) {
++    const id = `freelancer_project:${p.id}:1`;
++    if (S.get(id) || !F.worthJudging(p)) continue;
++    if (judged >= FL_PER_RUN) break;
++    judged++;
++    const budget = `${p.type} ${p.budget.minimum ?? "?"}-${p.budget.maximum ?? "?"} ${p.currency}, ${p.bids} bids so far`;
++    S.upsertNew({ id, kind: "freelancer_project", external_id: String(p.id), url: p.url, title: p.title.slice(0, 120), body: `${p.title}\nBudget: ${budget}\n\n${p.description.slice(0, 5000)}` });
++    await draftFreelancerBid(S.get(id)!);
++  }
++}
++
++export async function draftFreemoaProposal(item: S.Item, note = "") {
++  const v = await judgeProject(item.body, `${note}\n프리모아는 지원 금액에 이용요금 15%를 포함해 만원 단위로 쓴다. 미팅은 온라인만 가능하다. 사업자 형태는 개인사업자(1인)다.`, "프리모아", "만원 단위 정수 하나만, 예: 800. 범위·설명 금지");
++  S.update(item.id, { verdict: JSON.stringify(v), draft: JSON.stringify({ cost: v.price, days: v.period, body: v.proposal }) });
++  if (v.action === "skip" || v.fit < FIT_MIN) { S.update(item.id, { status: "skipped" }); S.log(item.id, "skip", `${v.fit} ${v.summary}`); return; }
++  await card(S.get(item.id)!, `프리모아 지원 제안 · ${item.title}`, [
++    ["적합도", `${v.fit}/100 · ${v.summary}`], ["위험", v.risk], ["금액·기간", `${v.price}만원(수수료 15% 포함) / ${v.period}일`], ["지원 내용", v.proposal],
++  ], [
++    { label: "승인·지원", action: "apply", style: "primary" }, { label: "다시 쓰기", action: "redo" }, { label: "패스", action: "reject", style: "danger" },
++  ]);
++}
++
++async function freemoa() {
++  let judged = 0;
++  for (const p of await FM.listProjects()) {
++    const id = `freemoa_project:${p.pno}:1`;
++    if (S.get(id)) continue;
++    if (judged >= FREEMOA_PER_RUN) break;
++    let { text, loggedIn, applied } = await FM.projectText(p.pno);
++    if (!loggedIn) {
++      const r = await FM.ensureLogin();
++      if (r === "PASSKEY_REQUIRED") throw new AuthRequiredError("프리모아 로그인이 풀려 다시 로그인하는데 구글 패스키 확인이 필요합니다. Aside에 떠 있는 구글 본인 확인(indoyoon93)만 승인해 주세요. 다음 수집부터 자동으로 이어집니다.");
++      if (r === "LOGIN_REQUIRED") throw new AuthRequiredError("프리모아 Google 로그인 세션이 만료되었습니다. Aside에서 프리모아에 다시 로그인해 주세요.");
++      // ensureLogin catches page errors into its result, so an Aside restart mid-login arrives here as text.
++      if (r !== "LOGGED_IN") throw new (TRANSIENT.test(r) ? TransientAsideError : Error)(`프리모아 자동 재로그인 실패: ${r}`);
++      ({ text, loggedIn, applied } = await FM.projectText(p.pno));
++      if (!loggedIn) throw new Error("프리모아 재로그인 후에도 로그아웃 상태입니다.");
++    }
++    judged++;
++    S.upsertNew({ id, kind: "freemoa_project", external_id: p.pno, url: p.url, title: p.title.slice(0, 120), body: text });
++    if (applied) { S.update(id, { status: "skipped" }); S.log(id, "skip", "already applied"); continue; }
++    await draftFreemoaProposal(S.get(id)!);
++  }
++}
++
++// Unanswered approval cards for public listings go stale (the listing closes or fills); close them so the
++// owner's DM only shows cards that can still be acted on.
++const PENDING_TTL_MS = Number(process.env.AUTOPILOT_PENDING_TTL_H ?? 72) * 3600_000;
++async function expireStale() {
++  for (const item of S.listByStatus("pending_approval")) {
++    if (!/_project$/.test(item.kind) || Date.now() - Date.parse(item.created_at) < PENDING_TTL_MS) continue;
++    if (DRY) { console.log(`[dry] expire ${item.id}`); continue; }
++    S.update(item.id, { status: "rejected", result: "expired" });
++    S.log(item.id, "expire", `pending since ${item.created_at}`);
++    if (item.chat_ref) await reportOnCard(item.chat_ref, "승인 없이 3일이 지나 정리했습니다. 공고가 마감됐을 가능성이 커서 지원하지 않습니다.", "⌛ 기한 지나 정리됨", item.id, "expire", false, "expired").catch((e) => S.log(item.id, "report:fail", String(e)));
++  }
++}
++
++async function fiverr() {
++  const unread = await unreadCount();
++  const flag = Bun.file(`${S.HOME}/fiverr-unread`);
++  const prev = (await flag.exists()) ? Number(await flag.text()) : 0;
++  await Bun.write(flag, String(unread));
++  if (unread > prev && !DRY) await postText(`Fiverr 안 읽은 메시지 ${unread}건: https://www.fiverr.com/inbox`, { topic: "autopilot:fiverr-unread", state: String(unread), salience: "action" });
++}
++
++export async function draftMercorApplication(item: S.Item, note = "") {
++  const v = await judgeMercor(item.body, note);
++  S.update(item.id, { verdict: JSON.stringify(v), draft: v.talkingPoints });
++  if (v.action === "skip" || v.fit < FIT_MIN) { S.update(item.id, { status: "skipped" }); S.log(item.id, "skip", `${v.fit} ${v.summary}`); return; }
++  const rateLine = item.body.split("\n")[1] ?? "";
++  await card(S.get(item.id)!, `Mercor 고단가 원격 · ${item.title}`, [
++    ["적합도", `${v.fit}/100 · ${v.summary}`],
++    ["단가·슬롯", rateLine],
++    ["위험/조건", v.risk],
++    ["인터뷰 어필 포인트", v.talkingPoints],
++  ], [
++    { label: "승인·지원", action: "apply", style: "primary" }, { label: "다시 쓰기", action: "redo" }, { label: "패스", action: "reject", style: "danger" },
++  ]);
++}
++
++async function mercor() {
++  let judged = 0;
++  for (const p of await M.listProjects()) {
++    const id = `mercor_project:${p.id}:1`;
++    const existing = S.get(id);
++    if (existing && existing.status !== "new") continue;
++    if (judged >= MERCOR_PER_RUN) break;
++    judged++;
++    const rate = `$${p.rateMin}~$${p.rateMax} / ${p.payRateFrequency} · ${p.commitment} · 남은 슬롯: ${p.remainingSlots ?? "상시"}`;
++    if (!existing) {
++      S.upsertNew({
++        id, kind: "mercor_project", external_id: p.id, url: p.url,
++        title: p.title.slice(0, 120), body: `${p.title}\n${rate}\n\n${p.description.slice(0, 5000)}`,
++      });
++    }
++    await draftMercorApplication(S.get(id)!);
++  }
++}
++
++if (import.meta.main) {
++  if (!DRY) await flushReports();
++  const steps: [string, () => Promise<void>][] = [["expire", expireStale], ["kmong-messages", kmongMessages], ["kmong-orders", kmongOrders], ["wishket", wishket], ["freelancer", freelancer], ["freemoa", freemoa], ["fiverr", fiverr]];
++  const failures: StepFailure[] = [];
++  for (const [name, fn] of steps) {
++    if (ONLY && ONLY !== name) continue;
++    try { await fn(); } catch (e) {
++      failures.push({ step: name, error: e });
++      S.log(null, "error", `${name}: ${(e as Error).stack}`);
++    }
++  }
++  const noticeFile = `${S.HOME}/auth-notice.json`;
++  const outcome = decide(failures, loadNoticeState(noticeFile));
++  saveNoticeState(noticeFile, outcome.state);
++  if (outcome.notices.length) console.log(outcome.notices.join("\n"));
++  for (const { step, error } of outcome.errors) {
++    if (!(error instanceof TransientAsideError)) transientOnly = false;
++    errors.push(`${step}: ${(error as Error).message}`);
++  }
++  const outageFlag = Bun.file(`${S.HOME}/outage-since`);
++  if (errors.length && transientOnly) {
++    const since = (await outageFlag.exists()) ? Date.parse(await outageFlag.text()) : Date.now();
++    if (!(await outageFlag.exists())) await Bun.write(outageFlag, new Date(since).toISOString());
++    if (Date.now() - since < OUTAGE_GRACE_MS) {
++      console.log(`transient network/Aside outage since ${new Date(since).toISOString()}; next run retries\n${errors.join("\n")}`);
++      process.exit(0);
++    }
++  } else {
++    await outageFlag.delete().catch(() => {});
++  }
++  if (errors.length) {
++    if (!DRY) await postText(`외주 수집을 완료하지 못했습니다. 실패한 수집 단계: ${[...new Set(outcome.errors.map(({ step }) => step))].join(", ")}. 오류 상세는 수집 로그에 저장했습니다.`,
++      { topic: "autopilot:collect-error", state: JSON.stringify([...errors].sort()), salience: "action",
++        ...(process.env.FERRYX_CRON_RUN_ID ? { incident: process.env.FERRYX_CRON_RUN_ID } : {}) });
++    console.error(errors.join("\n"));
++    process.exit(1);
++  }
++}
+diff --git a/src/develop.ts b/src/develop.ts
+--- a/src/develop.ts
++++ b/src/develop.ts
+@@ -1,46 +1,46 @@
+-#!/usr/bin/env bun
+-import { join } from "node:path";
+-import { mkdirSync } from "node:fs";
+-import * as S from "./state.ts";
+-import { ask } from "./llm.ts";
+-import { postCard, postText } from "./slack.ts";
+-
+-// The Ferryx Hub picks one model for every cron job (FERRYX_CRON_MODEL, provider/id).
+-const MODEL = process.env.FERRYX_CRON_MODEL?.trim() || process.env.AUTOPILOT_DEV_MODEL?.trim() || "mahoquot/gpt-6-luna";
+-const [itemId] = process.argv.slice(2);
+-const item = itemId ? S.get(itemId) : null;
+-if (!item) { console.error(`unknown item ${itemId}`); process.exit(2); }
+-
+-const dir = join(S.HOME, "orders", item.external_id);
+-const work = join(dir, "work");
+-mkdirSync(work, { recursive: true });
+-await Bun.write(join(dir, "REQUIREMENTS.md"), `# 주문 #${item.external_id}\n\n## 주문 원문\n${item.body}\n\n## 판정\n${item.verdict}\n`);
+-
+-const prompt = `TASK: ${join(dir, "REQUIREMENTS.md")} 의 크몽 주문을 이 디렉터리(${work})에서 끝까지 구현하라.
+-DELIVERABLE: 동작하는 소스, 실행 방법이 담긴 README.md, 그리고 ${join(work, "DELIVERY.md")} (구현 범위, 실행·테스트 결과 원문, 남은 한계).
+-VERIFY: 직접 빌드·실행·테스트하고 그 출력 원문을 DELIVERY.md에 붙여라. 실행해 보지 않은 것은 '미검증'으로 적어라.
+-STOP WHEN: DELIVERY.md가 쓰이고 테스트가 통과하면 즉시 멈춰라. 외부로 아무것도 보내지 마라.`;
+-
+-const log = Bun.file(join(dir, "develop.log"));
+-const proc = Bun.spawn(["omo", "-p", "--no-session", "--model", MODEL, prompt], { cwd: work, stdout: log, stderr: log, env: process.env });
+-const code = await proc.exited;
+-const delivery = Bun.file(join(work, "DELIVERY.md"));
+-if (code !== 0 || !(await delivery.exists())) {
+-  S.update(item.id, { status: "failed", result: `develop exit ${code}` });
+-  await postText(`주문 #${item.external_id} AI 개발 실패 (exit ${code}). 로그: ${join(dir, "develop.log")}`);
+-  process.exit(1);
+-}
+-
+-const zip = join(dir, `delivery-${item.external_id}.zip`);
+-const z = Bun.spawn(["zip", "-qr", zip, ".", "-x", "node_modules/*", ".git/*", "target/*"], { cwd: work });
+-if ((await z.exited) !== 0) { await postText(`주문 #${item.external_id} 압축 실패`); process.exit(1); }
+-
+-const report = await delivery.text();
+-const summary = await ask("한국어로 3줄 이내 요약. 과장 금지.", `납품 보고서:\n${report.slice(0, 8000)}`).catch(() => report.slice(0, 600));
+-S.update(item.id, { status: "pending_approval", result: zip, draft: zip });
+-const mid = await postCard(`크몽 납품 승인 · 주문 #${item.external_id}`, [
+-  ["AI 개발 결과", summary], ["납품 파일", zip], ["보고서", join(work, "DELIVERY.md")],
+-], item.url, S.shortId(item.id), [
+-  { label: "승인·작업물 발송", action: "deliver", style: "primary" }, { label: "보류", action: "reject", style: "danger" },
+-]);
+-S.update(item.id, { chat_ref: mid });
++#!/usr/bin/env bun
++import { join } from "node:path";
++import { mkdirSync } from "node:fs";
++import * as S from "./state.ts";
++import { ask } from "./llm.ts";
++import { postCard, postText, saveCard } from "./slack.ts";
++
++// The Ferryx Hub picks one model for every cron job (FERRYX_CRON_MODEL, provider/id).
++const MODEL = process.env.FERRYX_CRON_MODEL?.trim() || process.env.AUTOPILOT_DEV_MODEL?.trim() || "mahoquot/gpt-6-luna";
++const [itemId] = process.argv.slice(2);
++const item = itemId ? S.get(itemId) : null;
++if (!item) { console.error(`unknown item ${itemId}`); process.exit(2); }
++
++const dir = join(S.HOME, "orders", item.external_id);
++const work = join(dir, "work");
++mkdirSync(work, { recursive: true });
++await Bun.write(join(dir, "REQUIREMENTS.md"), `# 주문 #${item.external_id}\n\n## 주문 원문\n${item.body}\n\n## 판정\n${item.verdict}\n`);
++
++const prompt = `TASK: ${join(dir, "REQUIREMENTS.md")} 의 크몽 주문을 이 디렉터리(${work})에서 끝까지 구현하라.
++DELIVERABLE: 동작하는 소스, 실행 방법이 담긴 README.md, 그리고 ${join(work, "DELIVERY.md")} (구현 범위, 실행·테스트 결과 원문, 남은 한계).
++VERIFY: 직접 빌드·실행·테스트하고 그 출력 원문을 DELIVERY.md에 붙여라. 실행해 보지 않은 것은 '미검증'으로 적어라.
++STOP WHEN: DELIVERY.md가 쓰이고 테스트가 통과하면 즉시 멈춰라. 외부로 아무것도 보내지 마라.`;
++
++const log = Bun.file(join(dir, "develop.log"));
++const proc = Bun.spawn(["omo", "-p", "--no-session", "--model", MODEL, prompt], { cwd: work, stdout: log, stderr: log, env: process.env });
++const code = await proc.exited;
++const delivery = Bun.file(join(work, "DELIVERY.md"));
++if (code !== 0 || !(await delivery.exists())) {
++  S.update(item.id, { status: "failed", result: `develop exit ${code}` });
++  await postText(`주문 #${item.external_id} AI 개발 실패 (exit ${code}). 로그: ${join(dir, "develop.log")}`, { topic: `autopilot:item:${item.id}:develop`, state: `exit:${code}`, salience: "action" });
++  process.exit(1);
++}
++
++const zip = join(dir, `delivery-${item.external_id}.zip`);
++const z = Bun.spawn(["zip", "-qr", zip, ".", "-x", "node_modules/*", ".git/*", "target/*"], { cwd: work });
++if ((await z.exited) !== 0) { await postText(`주문 #${item.external_id} 압축 실패`, { topic: `autopilot:item:${item.id}:develop`, state: "zip_failed", salience: "action" }); process.exit(1); }
++
++const report = await delivery.text();
++const summary = await ask("한국어로 3줄 이내 요약. 과장 금지.", `납품 보고서:\n${report.slice(0, 8000)}`).catch(() => report.slice(0, 600));
++S.update(item.id, { status: "pending_approval", result: zip, draft: zip });
++const mid = await postCard(`크몽 납품 승인 · 주문 #${item.external_id}`, [
++  ["AI 개발 결과", summary], ["납품 파일", zip], ["보고서", join(work, "DELIVERY.md")],
++], item.url, S.shortId(item.id), [
++  { label: "승인·작업물 발송", action: "deliver", style: "primary" }, { label: "보류", action: "reject", style: "danger" },
++], item.id);
++saveCard(item.id, mid);
+diff --git a/src/action.ts b/src/action.ts
+--- a/src/action.ts
++++ b/src/action.ts
+@@ -1,126 +1,137 @@
+-#!/usr/bin/env bun
+-import { join } from "node:path";
+-import * as S from "./state.ts";
+-import * as K from "./kmong.ts";
+-import * as W from "./wishket.ts";
+-import * as F from "./freelancer.ts";
+-import * as FM from "./freemoa.ts";
+-import * as M from "./mercor.ts";
+-import { asideAgent } from "./aside.ts";
+-import * as O from "./outcome.ts";
+-import { draftKmongReply, draftWishketProposal, draftFreelancerBid, draftFreemoaProposal, draftMercorApplication } from "./collect.ts";
+-import { reportOnCard, markProcessing, restoreButtons } from "./slack.ts";
+-
+-const DRY = process.env.AUTOPILOT_DRY_RUN === "1" || (await Bun.file(join(S.HOME, "DRY_RUN")).exists());
+-const [action, short] = process.argv.slice(2);
+-const item = short ? S.byShort(short) : null;
+-if (!action || !item) { console.error(`usage: action.ts <send|apply|bid|develop|deliver|redo|reject> <shortId>`); process.exit(2); }
+-
+-const CLOSE_LABEL: Record<string, string> = { send: "✓ 발송됨", apply: "✓ 지원함", bid: "✓ 입찰함", develop: "⏳ AI 개발 중", deliver: "✓ 납품함", reject: "✓ 무시함", redo: "↻ 새 초안으로 대체됨" };
+-async function report(text: string, close: boolean) {
+-  const ref = S.get(item!.id)?.chat_ref ?? item!.chat_ref;
+-  if (!ref) return;
+-  await reportOnCard(ref, text, close ? CLOSE_LABEL[action!] ?? "✓ 처리됨" : null)
+-    .catch((e) => S.log(item!.id, "report:fail", O.briefError(e)));
+-  if (!close && action !== "redo") await restoreButtons(ref).catch((e) => S.log(item!.id, "report:fail", O.briefError(e)));
+-}
+-// stdout is what the hub shows to the person who pressed the button, so it carries the same clean text as the card.
+-const done = async (msg: string, close = !DRY) => { console.log(msg); await report(msg, close); process.exit(0); };
+-const fail = async (msg: string): Promise<never> => {
+-  S.update(item.id, { status: "failed", result: msg }); S.log(item.id, `${action}:fail`, msg); console.log(msg);
+-  await report(`${msg}\n버튼을 다시 누르면 재시도합니다.`, false);
+-  process.exit(1);
+-};
+-
+-const LOGIN_HINT: Record<string, string> = {
+-  wishket_project: "Aside(u0)에서 위시켓 로그인 상태를 확인해야 합니다.",
+-  freemoa_project: "Aside(u0)에서 프리모아 구글 로그인(indoyoon93)을 다시 해야 합니다.",
+-  mercor_project: "Aside(u0)에서 work.mercor.com 로그인과 이력서 1회 등록이 필요합니다.",
+-  freelancer_project: "Aside(u0)에서 Freelancer 로그인이 필요합니다.",
+-};
+-
+-// The single place an action's outcome becomes DB state and card text.
+-async function finish(label: string, o: O.Outcome, extra: string[] = []): Promise<never> {
+-  const shown: O.Outcome = { ...o, facts: [...o.facts, ...(o.code === "LOGIN_REQUIRED" ? [LOGIN_HINT[item!.kind] ?? ""] : []), ...extra].filter(Boolean) };
+-  const text = O.render(label, shown);
+-  if (o.status === "failed") return fail(text);
+-  const status = o.status === "dry_run" ? "pending_approval" : "executed";
+-  S.update(item!.id, { status, result: text });
+-  S.log(item!.id, `${action}:${o.code}`, o.session ?? "");
+-  return done(text, o.status !== "dry_run");
+-}
+-
+-if (action === "reject") { S.update(item.id, { status: "rejected" }); S.log(item.id, "reject"); await done("무시 처리했습니다.", true); }
+-const claimed = S.db.query(`UPDATE items SET status='executing', updated_at=$t WHERE id=$id AND status IN ('pending_approval','failed')`)
+-  .run({ $t: new Date().toISOString(), $id: item.id }).changes;
+-if (!claimed) await done(`이미 처리 중이거나 처리된 항목입니다 (${item.status}).`, false);
+-S.log(item.id, action, DRY ? "dry-run" : "");
+-const ACTION_LABEL: Record<string, string> = { send: "답장 발송", apply: "지원서 작성", bid: "Freelancer 입찰", develop: "AI 개발 시작", deliver: "작업물 발송", redo: "초안 다시 쓰기" };
+-if (item.chat_ref) await markProcessing(item.chat_ref, `${ACTION_LABEL[action] ?? action}${DRY ? "(드라이런)" : ""}`)
+-  .catch((e) => S.log(item.id, "report:fail", O.briefError(e)));
+-
+-type AgentDeliver = { status: "SENT" | "READY" | "FAILED"; reason?: string };
+-
+-try {
+-  switch (action) {
+-    case "send": {
+-      if (item.kind !== "kmong_message") await fail("send는 크몽 메시지에만 쓸 수 있습니다.");
+-      const [groupId, partnerId] = item.external_id.split("/");
+-      await finish("크몽 답장", await K.sendMessage(groupId!, partnerId!, item.draft ?? "", DRY));
+-      break;
+-    }
+-    case "apply": {
+-      if (item.kind === "mercor_project") await finish("Mercor 지원", await M.apply(item.external_id, DRY), [`공고: ${item.url}`]);
+-      if (item.kind === "freemoa_project") {
+-        let o = await FM.apply(item.external_id, JSON.parse(item.draft ?? "{}"), DRY);
+-        if (o.code === "LOGIN_REQUIRED" && (await FM.ensureLogin()) === "LOGGED_IN") o = await FM.apply(item.external_id, JSON.parse(item.draft ?? "{}"), DRY);
+-        await finish("프리모아 지원", o);
+-      }
+-      if (item.kind !== "wishket_project") await fail("apply는 위시켓·프리모아·Mercor 공고에만 쓸 수 있습니다.");
+-      await finish("위시켓 지원", await W.apply(item.url, JSON.parse(item.draft ?? "{}"), DRY));
+-      break;
+-    }
+-    case "bid": {
+-      if (item.kind !== "freelancer_project") await fail("bid는 Freelancer 공고에만 쓸 수 있습니다.");
+-      await finish("Freelancer 입찰", await F.bid(item.external_id, JSON.parse(item.draft ?? "{}"), DRY));
+-      break;
+-    }
+-    case "develop": {
+-      S.update(item.id, { status: "executing" });
+-      const proc = Bun.spawn(["bun", join(import.meta.dir, "develop.ts"), item.id], { stdio: ["ignore", "ignore", "ignore"], detached: true, env: process.env });
+-      proc.unref();
+-      await done(`AI 개발을 시작했습니다 (pid ${proc.pid}). 끝나면 납품 승인 카드를 보냅니다.`);
+-      break;
+-    }
+-    case "deliver": {
+-      if (item.kind !== "kmong_order" || !item.result) await fail("납품할 파일이 없습니다.");
+-      const zip = item.result!.split("\n")[0]!;
+-      const stop = DRY ? "마지막 발송/확인 버튼은 누르지 말고, 파일 첨부와 메시지 입력까지만 한 상태에서 멈춰라." : "발송까지 완료하라.";
+-      const run = await asideAgent<AgentDeliver>(`크몽 주문 상세 ${item.url} 에서 판매자로서 '작업물 발송'을 진행한다. 첨부 파일: ${zip}
+-메시지: "요청하신 작업물 전달드립니다. 압축 파일 안 README.md에 실행 방법을, DELIVERY.md에 구현 범위와 테스트 결과를 정리했습니다. 확인 후 수정이 필요하시면 말씀해 주세요."
+-외부 연락처나 링크는 쓰지 마라. ${stop}`, `{"status":"SENT|READY|FAILED","reason":"실패면 한 문장 사유, 아니면 빈 문자열"}`);
+-      const r = run.result;
+-      const o = r?.status === "SENT" && !DRY ? O.done("SENT", [`첨부: ${zip}`, "에이전트 보고 기준입니다. 크몽 주문 상세에서 발송 여부를 확인해 주세요."], run.session)
+-        : r?.status === "READY" && DRY ? O.dryRun("READY", [`첨부: ${zip}`, "파일 첨부와 메시지 입력까지 하고 멈췄습니다."], run.session)
+-        : O.failed("FAILED", r?.reason ? O.brief(String(r.reason)) : "에이전트가 결과를 남기지 않았습니다.", run.session);
+-      if (o.status !== "failed") S.update(item.id, { result: zip });
+-      await finish("크몽 작업물 발송", o);
+-      break;
+-    }
+-    case "redo": {
+-      S.update(item.id, { status: "new" });
+-      if (item.kind === "kmong_message") await draftKmongReply(item, "직전 초안은 사용자가 반려했다. 더 짧고 구체적으로, 다른 접근으로 다시 써라.");
+-      else if (item.kind === "wishket_project") await draftWishketProposal(item, "직전 초안은 사용자가 반려했다. 금액·범위를 다시 검토하고 다른 강조점으로 써라.");
+-      else if (item.kind === "freelancer_project") await draftFreelancerBid(item, "The owner rejected the previous draft. Rethink price and scope and use a different angle.");
+-      else if (item.kind === "freemoa_project") await draftFreemoaProposal(item, "직전 초안은 사용자가 반려했다. 금액·범위를 다시 검토하고 다른 강조점으로 써라.");
+-      else if (item.kind === "mercor_project") await draftMercorApplication(item, "직전 요약/어필 포인트를 사용자가 반려했다. 다른 실무 강점을 중심으로 다시 써라.");
+-      else await fail("redo는 메시지/공고에만 쓸 수 있습니다.");
+-      await done("새 초안 카드를 보냈습니다.");
+-      break;
+-    }
+-    default:
+-      await fail(`알 수 없는 동작: ${action}`);
+-  }
+-} catch (e) {
+-  await fail(O.render(ACTION_LABEL[action] ?? action, O.failed("ERROR", O.briefError(e))));
+-}
++#!/usr/bin/env bun
++import { join } from "node:path";
++import * as S from "./state.ts";
++import * as K from "./kmong.ts";
++import * as W from "./wishket.ts";
++import * as F from "./freelancer.ts";
++import * as FM from "./freemoa.ts";
++import * as M from "./mercor.ts";
++import { asideAgent } from "./aside.ts";
++import * as O from "./outcome.ts";
++import { draftKmongReply, draftWishketProposal, draftFreelancerBid, draftFreemoaProposal, draftMercorApplication } from "./collect.ts";
++import { reportOnCard, markProcessing, restoreButtons } from "./slack.ts";
++
++const DRY = process.env.AUTOPILOT_DRY_RUN === "1" || (await Bun.file(join(S.HOME, "DRY_RUN")).exists());
++const [action, short] = process.argv.slice(2);
++const item = short ? S.byShort(short) : null;
++if (!action || !item) { console.error(`usage: action.ts <send|apply|bid|develop|deliver|redo|reject> <shortId>`); process.exit(2); }
++
++const CLOSE_LABEL: Record<string, string> = { send: "✓ 발송됨", apply: "✓ 지원함", bid: "✓ 입찰함", develop: "⏳ AI 개발 중", deliver: "✓ 납품함", reject: "✓ 무시함", redo: "↻ 새 초안으로 대체됨" };
++let outcomeCode = action;
++async function report(text: string, close: boolean) {
++  const ref = action === "redo" ? item!.chat_ref : S.get(item!.id)?.chat_ref ?? item!.chat_ref;
++  if (!ref) return;
++  await reportOnCard(ref, text, close ? CLOSE_LABEL[action!] ?? "✓ 처리됨" : null, item!.id, action!, S.get(item!.id)?.status === "failed", outcomeCode!)
++    .catch((e) => S.log(item!.id, "report:fail", O.briefError(e)));
++  if (!close && action !== "redo") await restoreButtons(ref).catch((e) => S.log(item!.id, "report:fail", O.briefError(e)));
++}
++// stdout is what the hub shows to the person who pressed the button, so it carries the same clean text as the card.
++const done = async (msg: string, close = !DRY) => { console.log(msg); await report(msg, close); process.exit(0); };
++const fail = async (msg: string): Promise<never> => {
++  S.update(item.id, { status: "failed", result: msg }); S.log(item.id, `${action}:fail`, msg); console.log(msg);
++  await report(`${msg}\n버튼을 다시 누르면 재시도합니다.`, false);
++  process.exit(1);
++};
++
++const LOGIN_HINT: Record<string, string> = {
++  wishket_project: "Aside(u0)에서 위시켓 로그인 상태를 확인해야 합니다.",
++  freemoa_project: "Aside(u0)에서 프리모아 구글 로그인(indoyoon93)을 다시 해야 합니다.",
++  mercor_project: "Aside(u0)에서 work.mercor.com 로그인과 이력서 1회 등록이 필요합니다.",
++  freelancer_project: "Aside(u0)에서 Freelancer 로그인이 필요합니다.",
++};
++
++// The single place an action's outcome becomes DB state and card text.
++async function finish(label: string, o: O.Outcome, extra: string[] = []): Promise<never> {
++  outcomeCode = o.code;
++  const shown: O.Outcome = { ...o, facts: [...o.facts, ...(o.code === "LOGIN_REQUIRED" ? [LOGIN_HINT[item!.kind] ?? ""] : []), ...extra].filter(Boolean) };
++  const text = O.render(label, shown);
++  if (o.status === "failed" && (o.code === "PREFERRED_ONLY" || o.code === "PROJECT_CLOSED")) {
++    S.update(item!.id, { status: "skipped", result: text });
++    S.log(item!.id, `${action}:${o.code}`, o.session ?? "");
++    CLOSE_LABEL[action!] = "✓ 지원 대상 아님";
++    return done(text, true);
++  }
++  if (o.status === "failed") return fail(text);
++  const status = o.status === "dry_run" ? "pending_approval" : "executed";
++  S.update(item!.id, { status, result: text });
++  S.log(item!.id, `${action}:${o.code}`, o.session ?? "");
++  return done(text, o.status !== "dry_run");
++}
++
++if (action === "reject") { S.update(item.id, { status: "rejected" }); S.log(item.id, "reject"); await done("무시 처리했습니다.", true); }
++const claimed = S.db.query(`UPDATE items SET status='executing', updated_at=$t WHERE id=$id AND status IN ('pending_approval','failed')`)
++  .run({ $t: new Date().toISOString(), $id: item.id }).changes;
++if (!claimed) { console.log(`이미 처리 중이거나 처리된 항목입니다 (${item.status}).`); process.exit(0); }
++S.log(item.id, action, DRY ? "dry-run" : "");
++const ACTION_LABEL: Record<string, string> = { send: "답장 발송", apply: "지원서 작성", bid: "Freelancer 입찰", develop: "AI 개발 시작", deliver: "작업물 발송", redo: "초안 다시 쓰기" };
++if (item.chat_ref) await markProcessing(item.chat_ref, `${ACTION_LABEL[action] ?? action}${DRY ? "(드라이런)" : ""}`)
++  .catch((e) => S.log(item.id, "report:fail", O.briefError(e)));
++
++type AgentDeliver = { status: "SENT" | "READY" | "FAILED"; reason?: string };
++
++try {
++  switch (action) {
++    case "send": {
++      if (item.kind !== "kmong_message") await fail("send는 크몽 메시지에만 쓸 수 있습니다.");
++      const [groupId, partnerId] = item.external_id.split("/");
++      await finish("크몽 답장", await K.sendMessage(groupId!, partnerId!, item.draft ?? "", DRY));
++      break;
++    }
++    case "apply": {
++      if (item.kind === "mercor_project") await finish("Mercor 지원", await M.apply(item.external_id, DRY), [`공고: ${item.url}`]);
++      if (item.kind === "freemoa_project") {
++        let o = await FM.apply(item.external_id, JSON.parse(item.draft ?? "{}"), DRY);
++        if (o.code === "LOGIN_REQUIRED" && (await FM.ensureLogin()) === "LOGGED_IN") o = await FM.apply(item.external_id, JSON.parse(item.draft ?? "{}"), DRY);
++        await finish("프리모아 지원", o);
++      }
++      if (item.kind !== "wishket_project") await fail("apply는 위시켓·프리모아·Mercor 공고에만 쓸 수 있습니다.");
++      await finish("위시켓 지원", await W.apply(item.url, JSON.parse(item.draft ?? "{}"), DRY));
++      break;
++    }
++    case "bid": {
++      if (item.kind !== "freelancer_project") await fail("bid는 Freelancer 공고에만 쓸 수 있습니다.");
++      await finish("Freelancer 입찰", await F.bid(item.external_id, JSON.parse(item.draft ?? "{}"), DRY));
++      break;
++    }
++    case "develop": {
++      S.update(item.id, { status: "executing" });
++      const proc = Bun.spawn(["bun", join(import.meta.dir, "develop.ts"), item.id], { stdio: ["ignore", "ignore", "ignore"], detached: true, env: process.env });
++      proc.unref();
++      await done(`AI 개발을 시작했습니다 (pid ${proc.pid}). 끝나면 납품 승인 카드를 보냅니다.`);
++      break;
++    }
++    case "deliver": {
++      if (item.kind !== "kmong_order" || !item.result) await fail("납품할 파일이 없습니다.");
++      const zip = item.result!.split("\n")[0]!;
++      const stop = DRY ? "마지막 발송/확인 버튼은 누르지 말고, 파일 첨부와 메시지 입력까지만 한 상태에서 멈춰라." : "발송까지 완료하라.";
++      const run = await asideAgent<AgentDeliver>(`크몽 주문 상세 ${item.url} 에서 판매자로서 '작업물 발송'을 진행한다. 첨부 파일: ${zip}
++메시지: "요청하신 작업물 전달드립니다. 압축 파일 안 README.md에 실행 방법을, DELIVERY.md에 구현 범위와 테스트 결과를 정리했습니다. 확인 후 수정이 필요하시면 말씀해 주세요."
++외부 연락처나 링크는 쓰지 마라. ${stop}`, `{"status":"SENT|READY|FAILED","reason":"실패면 한 문장 사유, 아니면 빈 문자열"}`);
++      const r = run.result;
++      const o = r?.status === "SENT" && !DRY ? O.done("SENT", [`첨부: ${zip}`, "에이전트 보고 기준입니다. 크몽 주문 상세에서 발송 여부를 확인해 주세요."], run.session)
++        : r?.status === "READY" && DRY ? O.dryRun("READY", [`첨부: ${zip}`, "파일 첨부와 메시지 입력까지 하고 멈췄습니다."], run.session)
++        : O.failed("FAILED", r?.reason ? O.brief(String(r.reason)) : "에이전트가 결과를 남기지 않았습니다.", run.session);
++      if (o.status !== "failed") S.update(item.id, { result: zip });
++      await finish("크몽 작업물 발송", o);
++      break;
++    }
++    case "redo": {
++      S.update(item.id, { status: "new" });
++      if (item.kind === "kmong_message") await draftKmongReply(item, "직전 초안은 사용자가 반려했다. 더 짧고 구체적으로, 다른 접근으로 다시 써라.");
++      else if (item.kind === "wishket_project") await draftWishketProposal(item, "직전 초안은 사용자가 반려했다. 금액·범위를 다시 검토하고 다른 강조점으로 써라.");
++      else if (item.kind === "freelancer_project") await draftFreelancerBid(item, "The owner rejected the previous draft. Rethink price and scope and use a different angle.");
++      else if (item.kind === "freemoa_project") await draftFreemoaProposal(item, "직전 초안은 사용자가 반려했다. 금액·범위를 다시 검토하고 다른 강조점으로 써라.");
++      else if (item.kind === "mercor_project") await draftMercorApplication(item, "직전 요약/어필 포인트를 사용자가 반려했다. 다른 실무 강점을 중심으로 다시 써라.");
++      else await fail("redo는 메시지/공고에만 쓸 수 있습니다.");
++      const after = S.get(item.id), skipped = after?.status === "skipped" && after.chat_ref === item.chat_ref, replacement = after?.chat_ref !== item.chat_ref ? after?.chat_ref : null;
++      if (skipped) { outcomeCode = "SKIPPED"; CLOSE_LABEL.redo = "✓ 지원 대상 아님"; } await done(skipped ? "다시 검토한 결과 지원 대상이 아니어서 새 초안 카드를 보내지 않았습니다." : !replacement ? "새 초안 알림은 보고 규칙에 따라 보류했습니다."
++        : replacement.startsWith("report:") || replacement.startsWith("outbox:")
++          ? "새 초안은 저장됐고 승인 카드 전송을 기다리고 있습니다." : "새 초안 카드를 보냈습니다.");
++      break;
++    }
++    default:
++      await fail(`알 수 없는 동작: ${action}`);
++  }
++} catch (e) {
++  await fail(O.render(ACTION_LABEL[action] ?? action, O.failed("ERROR", O.briefError(e))));
++}
+diff --git a/src/report-gate.ts b/src/report-gate.ts
+new file mode 100644
+--- /dev/null
++++ b/src/report-gate.ts
+@@ -0,0 +1,148 @@
++import { createConnection } from "node:net";
++
++export type Report = {
++  readonly source: string;
++  readonly topic: string;
++  readonly salience: "action" | "decision" | "result" | "fyi" | "internal";
++  readonly body: string;
++  readonly state: string;
++  readonly quote?: string;
++  readonly sender?: string;
++  readonly origin?: string;
++  readonly thread?: string;
++  readonly blocks?: readonly Record<string, unknown>[];
++  readonly blocked_reason?: string;
++  /** The hub cron run whose failure this reports (`FERRYX_CRON_RUN_ID`). */
++  readonly incident?: string;
++};
++
++export type Delivery =
++  | { readonly kind: "pending"; readonly outboxId: number }
++  | { readonly kind: "delivered"; readonly outboxId: number; readonly ref: string }
++  | { readonly kind: "suppressed"; readonly reason: string };
++// `superseded`: a newer desired card generation replaced this update; terminal, never delivered.
++// `in_flight`/`recovering`: the hub still settles this identity; ask again with the same identity.
++export type MutationState = "delivered" | "suppressed" | "pending" | "uncertain" | "superseded" | "in_flight" | "recovering";
++
++export class GateError extends Error {
++  constructor(readonly code: "unavailable" | "protocol" | "rejected", message: string) {
++    super(message);
++    this.name = "GateError";
++  }
++}
++
++export type Transport = (request: Readonly<Record<string, unknown>>) => Promise<unknown>;
++
++export function socketTransport(path: string): Transport {
++  return (request) => new Promise((resolve, reject) => {
++    const socket = createConnection(path);
++    let buffer = "";
++    let settled = false;
++    const fail = (error: GateError) => {
++      if (settled) return;
++      settled = true;
++      socket.destroy();
++      reject(error);
++    };
++    socket.setEncoding("utf8");
++    socket.setTimeout(20_000, () => fail(new GateError("unavailable", "Hub reply timed out")));
++    socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
++    socket.on("data", (chunk) => {
++      buffer += chunk;
++      if (buffer.length > 1_048_576) {
++        fail(new GateError("protocol", "Hub reply exceeds 1 MiB"));
++        return;
++      }
++      const end = buffer.indexOf("\n");
++      if (end < 0 || settled) return;
++      try {
++        const reply: unknown = JSON.parse(buffer.slice(0, end));
++        settled = true;
++        socket.destroy();
++        resolve(reply);
++      } catch (error) {
++        fail(new GateError("protocol", error instanceof Error ? error.message : "Invalid JSON"));
++      }
++    });
++    socket.once("error", (error) => fail(new GateError("unavailable", error.message)));
++    socket.once("close", () => fail(new GateError("unavailable", "Hub closed before its reply")));
++  });
++}
++
++function object(value: unknown): Record<string, unknown> {
++  if (typeof value !== "object" || value === null || Array.isArray(value))
++    throw new GateError("protocol", "Expected a hub reply object");
++  return Object.fromEntries(Object.entries(value));
++}
++
++function reply(value: unknown, op: string): Record<string, unknown> {
++  const parsed = object(value);
++  if (parsed.status === "failed")
++    throw new GateError("rejected", typeof parsed.error === "string" ? parsed.error : String(parsed.code));
++  if (parsed.status !== "ok" || parsed.op !== op)
++    throw new GateError("protocol", "Unexpected hub reply operation or status");
++  return parsed;
++}
++
++function positiveId(value: unknown): number {
++  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0)
++    throw new GateError("protocol", "Missing positive outbox ID");
++  return value;
++}
++
++export class ReportGate {
++  constructor(private readonly transport: Transport) {}
++
++  async adopt(channel: string, ts: string, source: string, topic: string): Promise<number | null> {
++    const raw = object(await this.transport({ op: "report_adopt", channel, ts, source, topic }));
++    if (raw.status === "pending" && raw.op === "report_adopt") return null;
++    const value = reply(raw, "report_adopt");
++    if (value.adoption !== "adopted" || value.channel !== channel || value.ts !== ts) throw new GateError("protocol", "Adoption receipt mismatch");
++    return positiveId(value.outbox_id);
++  }
++
++  async mutate(outboxId: number, mutationId: string, change: Record<string, unknown>): Promise<MutationState> {
++    const value = reply(await this.transport({ op: "report_mutate", outbox_id: positiveId(outboxId), mutation_id: mutationId, change }), "report_mutate");
++    if (value.outbox_id !== outboxId || value.mutation_id !== mutationId) throw new GateError("protocol", "Mutation receipt identity mismatch");
++    const state = value.delivery;
++    if (state !== "delivered" && state !== "suppressed" && state !== "pending" && state !== "uncertain" && state !== "superseded")
++      throw new GateError("protocol", "Unknown mutation state");
++    const progress = value.progress;
++    if (state !== "pending" || progress === undefined) return state;
++    if ((progress === "in_flight" || progress === "recovering") && value.blocked_by === mutationId) return progress;
++    throw new GateError("protocol", "Unknown mutation progress");
++  }
++
++  async status(outboxId: number): Promise<Delivery> {
++    const id = positiveId(outboxId);
++    const value = reply(await this.transport({ op: "report_status", outbox_id: id }), "report_status");
++    if (value.outbox_id !== id) throw new GateError("protocol", "Receipt belongs to another outbox row");
++    switch (value.delivery) {
++      case "pending": return { kind: "pending", outboxId: id };
++      case "cancelled": return { kind: "suppressed", reason: "cancelled" };
++      case "delivered": {
++        if (typeof value.channel !== "string" || !value.channel.trim()
++          || typeof value.ts !== "string" || !value.ts.trim())
++          throw new GateError("protocol", "Delivered report has no Slack receipt");
++        return { kind: "delivered", outboxId: id, ref: `${value.channel}:${value.ts}` };
++      }
++      default: throw new GateError("protocol", "Unknown delivery state");
++    }
++  }
++
++  async submit(report: Report): Promise<Delivery> {
++    const value = reply(await this.transport({ op: "report", ...report }), "report");
++    switch (value.decision) {
++      case "sent": return this.status(positiveId(value.outbox_id));
++      case "duplicate":
++        return value.outbox_id === null ? { kind: "suppressed", reason: "duplicate" }
++          : this.status(positiveId(value.outbox_id));
++      case "digest":
++        return value.outbox_id === null ? { kind: "suppressed", reason: "digest" }
++          : this.status(positiveId(value.outbox_id));
++      case "muted": case "internal": case "empty": case "stale":
++        return { kind: "suppressed", reason: value.decision };
++      default: throw new GateError("protocol", "Unknown gate decision");
++    }
++  }
++}
+diff --git a/src/report-outbox.ts b/src/report-outbox.ts
+new file mode 100644
+--- /dev/null
++++ b/src/report-outbox.ts
+@@ -0,0 +1,84 @@
++import { Database } from "bun:sqlite";
++import { createHash } from "node:crypto";
++import { GateError, ReportGate, type Delivery, type Report } from "./report-gate.ts";
++
++export type StoredDelivery = Delivery | { readonly kind: "queued"; readonly localId: string };
++export class ReportOutbox {
++  constructor(private readonly db: Database, private readonly gate: ReportGate) {
++    db.exec(`CREATE TABLE IF NOT EXISTS report_outbox (
++      id TEXT PRIMARY KEY, request TEXT NOT NULL, item_id TEXT, approval INTEGER NOT NULL,
++      ref TEXT, state TEXT NOT NULL DEFAULT 'pending', reason TEXT)`);
++  }
++
++  async enqueue(report: Report, itemId: string | null = null, approval = false): Promise<StoredDelivery> {
++    const id = createHash("sha256").update(JSON.stringify([report.source, report.topic, report.state])).digest("hex");
++    this.db.transaction(() => {
++      const inserted = this.db.query("INSERT OR IGNORE INTO report_outbox(id,request,item_id,approval) VALUES(?,?,?,?)")
++        .run(id, JSON.stringify(report), itemId, approval ? 1 : 0);
++      if (inserted.changes && approval && itemId) {
++        this.db.query("UPDATE items SET status='pending_approval',chat_ref=?,updated_at=? WHERE id=?")
++          .run(`report:${id}`, new Date().toISOString(), itemId);
++      }
++    })();
++    return this.deliver(id);
++  }
++
++  async deliver(id: string): Promise<StoredDelivery> {
++    const row = this.db.query<{ request: string; item_id: string | null; approval: number; ref: string | null; state: string; reason: string | null }, [string]>(
++      "SELECT request,item_id,approval,ref,state,reason FROM report_outbox WHERE id = ?").get(id);
++    if (!row) throw new GateError("protocol", "Unknown local report");
++    if (row.state === "suppressed") return { kind: "suppressed", reason: row.reason ?? "suppressed" };
++    if (row.state === "delivered" && row.ref) {
++      // The receipt is already durable; no new admission or network call is needed.
++      return { kind: "delivered", outboxId: Number(row.reason), ref: row.ref };
++    }
++    let delivery: Delivery;
++    try {
++      const report: Report = JSON.parse(row.request);
++      delivery = row.ref?.startsWith("outbox:")
++        ? await this.gate.status(Number(row.ref.slice(7))) : await this.gate.submit(report);
++    } catch (error) {
++      if (!(error instanceof GateError) || error.code !== "unavailable") throw error;
++      return { kind: "queued", localId: id };
++    }
++    const ref = delivery.kind === "delivered" ? delivery.ref
++      : delivery.kind === "pending" ? `outbox:${delivery.outboxId}` : null;
++    const reason = delivery.kind === "suppressed" ? delivery.reason
++      : delivery.kind === "delivered" ? String(delivery.outboxId) : null;
++    this.db.transaction(() => {
++      this.db.query("UPDATE report_outbox SET state=?,ref=?,reason=? WHERE id=?")
++        .run(delivery.kind, ref, reason, id);
++      if (row.approval && row.item_id) {
++        // A superseded draft must never overwrite the new card or reopen an executed item.
++        this.db.query(`UPDATE items SET chat_ref=?,status=?,updated_at=? WHERE id=?
++          AND status IN ('new','pending_approval') AND (chat_ref=? OR chat_ref=? OR (chat_ref IS NULL AND status='new'))`)
++          .run(ref ?? null, delivery.kind === "suppressed" ? "skipped" : "pending_approval",
++            new Date().toISOString(), row.item_id, `report:${id}`, row.ref);
++      }
++    })();
++    return delivery;
++  }
++
++  async flush(): Promise<void> {
++    const rows = this.db.query<{ id: string }, []>("SELECT id FROM report_outbox WHERE state='pending' ORDER BY rowid").all();
++    for (const row of rows) {
++      try {
++        await this.deliver(row.id);
++      } catch (error) {
++        if (!(error instanceof GateError)) throw error;
++        this.db.query("UPDATE report_outbox SET state='failed',reason=? WHERE id=?")
++          .run(`${error.code}: ${error.message}`, row.id);
++        console.error(`Report ${row.id} requires repair: ${error.message}`);
++      }
++    }
++  }
++}
++
++export function reference(delivery: StoredDelivery): string | null {
++  switch (delivery.kind) {
++    case "queued": return `report:${delivery.localId}`;
++    case "pending": return `outbox:${delivery.outboxId}`;
++    case "delivered": return delivery.ref;
++    case "suppressed": return null;
++  }
++}
+diff --git a/src/report-card.test.ts b/src/report-card.test.ts
+new file mode 100644
+--- /dev/null
++++ b/src/report-card.test.ts
+@@ -0,0 +1,63 @@
++import { expect, test } from "bun:test";
++import { mkdtempSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { GateError, ReportGate } from "./report-gate.ts";
++
++const change = { kind: "restore_actions" };
++const answer = (extra: Record<string, unknown>) => new ReportGate(async () => ({
++  status: "ok", op: "report_mutate", outbox_id: 7, mutation_id: "m1", ...extra }));
++
++test("superseded is a terminal mutation state; progress belongs only to the caller's identity", async () => {
++  expect(await answer({ delivery: "superseded" }).mutate(7, "m1", change)).toBe("superseded");
++  expect(await answer({ delivery: "pending", progress: "recovering", blocked_by: "m1" }).mutate(7, "m1", change)).toBe("recovering");
++  expect(await answer({ delivery: "pending", blocked_by: "m0" }).mutate(7, "m1", change)).toBe("pending");
++  await expect(answer({ delivery: "pending", progress: "in_flight", blocked_by: "m0" }).mutate(7, "m1", change)).rejects.toBeInstanceOf(GateError);
++  await expect(answer({ delivery: "sent" }).mutate(7, "m1", change)).rejects.toThrow(/Unknown mutation state/);
++});
++
++test("an unsettled card edit never blocks the newer desired card and is never called delivered", async () => {
++  const root = mkdtempSync(join(tmpdir(), "autopilot-card-"));
++  process.env.AUTOPILOT_HOME = join(root, "home");
++  process.env.FERRYX_HUB_CONTROL_SOCKET = join(root, "hub.sock");
++  // The hub's receipt per identity; an unknown identity is admitted as plain pending.
++  const receipts = new Map<string, Record<string, unknown>>();
++  const seen: string[] = [];
++  const server = Bun.listen<{ input: string }>({ unix: process.env.FERRYX_HUB_CONTROL_SOCKET, socket: {
++    open(socket) { socket.data = { input: "" }; },
++    data(socket, bytes) {
++      socket.data.input += Buffer.from(bytes).toString();
++      if (!socket.data.input.includes("\n")) return;
++      const request = JSON.parse(socket.data.input);
++      seen.push(request.mutation_id);
++      socket.end(JSON.stringify({ status: "ok", op: "report_mutate", outbox_id: request.outbox_id,
++        mutation_id: request.mutation_id, delivery: "pending", ...receipts.get(request.mutation_id) }) + "\n");
++    },
++  } });
++  const S = await import("./state.ts");
++  const slack = await import("./slack.ts");
++  const intents = () => S.db.query<{ mutation_id: string; state: string; detail: string | null }, []>(
++    "SELECT mutation_id,state,detail FROM report_card_intents ORDER BY seq").all();
++  try {
++    S.db.query("INSERT INTO report_outbox(id,request,item_id,approval,ref,state,reason) VALUES('parent','{}',NULL,1,'D1:100.1','delivered','42')").run();
++    await slack.markProcessing("D1:100.1", "bid");
++    const [older] = intents().map((intent) => intent.mutation_id);
++    receipts.set(older!, { progress: "recovering", blocked_by: older });
++    await slack.restoreButtons("D1:100.1");
++    const newer = intents()[1]!.mutation_id;
++    expect(seen).toEqual([older, older, newer]);
++    expect(intents()).toEqual([
++      { mutation_id: older!, state: "pending", detail: "recovering" },
++      { mutation_id: newer, state: "pending", detail: "pending" },
++    ]);
++    receipts.set(older!, { delivery: "superseded" });
++    receipts.set(newer, { delivery: "delivered" });
++    await slack.flushReports();
++    expect(seen.slice(3)).toEqual([older, newer]);
++    expect(intents().map((intent) => intent.state)).toEqual(["superseded", "delivered"]);
++  } finally {
++    server.stop(true);
++    S.db.close();
++    rmSync(root, { force: true, recursive: true });
++  }
++});

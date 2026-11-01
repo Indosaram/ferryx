@@ -20,6 +20,14 @@ const PREFIX: &str = "omon:approval:";
 pub const EXPIRED_TEXT: &str = "⌛ Approval expired";
 pub const STALE_APPROVAL: &str =
     "이 승인 요청은 이미 처리됐거나 만료됐어요. 다시 누르지 않으셔도 돼요.";
+/// English form of [`STALE_APPROVAL`].
+pub const STALE_APPROVAL_EN: &str =
+    "This approval request was already handled or has expired. No need to press it again.";
+
+/// The stale-card text in the owner's language.
+pub fn stale_approval() -> &'static str {
+    crate::locale::current().pick(STALE_APPROVAL, STALE_APPROVAL_EN)
+}
 pub const NOT_AUTHORIZED: &str = "You are not authorized to answer this approval request.";
 const REASON_LIMIT: usize = 1500;
 const COMMAND_LIMIT: usize = 2500;
@@ -93,6 +101,24 @@ fn truncate(text: &str, limit: usize) -> String {
 }
 
 /// omo's `approval_blocks`.
+/// The gate report for one approval prompt: a `decision`, one topic per card so a later
+/// identical ask is a new question, not a duplicate.
+pub fn approval_report(
+    id: Uuid,
+    session_key: &str,
+    summary: &str,
+    reason: &str,
+) -> crate::report_gate::Report {
+    crate::report_gate::Report::new(
+        format!("approval:{id}"),
+        "turn_approval",
+        format!("approval:{id}"),
+        crate::report_gate::Salience::Decision,
+        format!("{}: {summary}\n{reason}", crate::locale::current().pick("승인 요청", "Approval request")),
+    )
+    .with_thread(session_key.to_owned())
+}
+
 pub fn approval_blocks(id: Uuid, command: &str, reason: &str) -> Value {
     let reason = escape(&truncate(reason, REASON_LIMIT));
     let command = escape(&truncate(command, COMMAND_LIMIT)).replace("```", "`\u{200b}``");
@@ -218,6 +244,18 @@ impl Approver for SlackApprover {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .insert(id, Pending { answer: tx });
+        // An approval prompt is a `decision` report: it is always sent, and the gate records it.
+        let report = approval_report(id, &self.session_key, &classification.summary, &card_reason);
+        match crate::report_gate::submit(&self.pool, &report).await {
+            Ok(crate::report_gate::Decision::Sent) => {}
+            Ok(decision) => tracing::warn!(
+                decision = decision.as_str(),
+                "approval prompt sent despite the report gate"
+            ),
+            Err(error) => {
+                tracing::warn!(%error, "approval prompt was not recorded by the report gate")
+            }
+        }
         let mut body = json!({
             "channel": self.channel,
             "text": format!("Approval needed: {}", truncate(&classification.summary, 200)),
@@ -324,7 +362,7 @@ pub async fn handle_click(payload: &Value, allowed_users: &[String]) -> bool {
     if !known {
         // omo: an unknown or expired request id clears the stale card.
         if !channel.is_empty() && !ts.is_empty() {
-            update_card(&channel, &ts, STALE_APPROVAL).await;
+            update_card(&channel, &ts, stale_approval()).await;
         }
         return true;
     }
@@ -391,5 +429,27 @@ mod tests {
         assert_eq!(timeout_from(None), Duration::from_secs(1800));
         assert_eq!(timeout_from(Some("5")), Duration::from_secs(5));
         assert!(parse_value(&format!("{PREFIX}{id}:bogus")).is_none());
+    }
+
+    #[test]
+    fn approval_prompts_are_decisions_that_are_always_sent() {
+        let report = approval_report(
+            Uuid::new_v4(),
+            "slack:D1",
+            "git push origin main",
+            "push the branch\neffect: external_send | target: origin",
+        );
+        assert_eq!(report.salience, crate::report_gate::Salience::Decision);
+        assert!(report.body.starts_with("승인 요청: git push origin main\n"), "{}", report.body);
+        crate::locale::with(crate::locale::OwnerLocale::english_utc(), || {
+            let english = approval_report(Uuid::new_v4(), "slack:D1", "git push", "why");
+            assert_eq!(english.body, "Approval request: git push\nwhy");
+            assert_eq!(stale_approval(), STALE_APPROVAL_EN);
+        });
+        assert_eq!(stale_approval(), STALE_APPROVAL);
+        assert_eq!(
+            crate::report_gate::decide(&report, None, None, false),
+            crate::report_gate::Decision::Sent
+        );
     }
 }

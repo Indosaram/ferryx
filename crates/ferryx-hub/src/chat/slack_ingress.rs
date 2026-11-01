@@ -793,14 +793,25 @@ pub async fn hydrate(
         }
     }
     for transcript in transcripts {
-        *content = match transcript {
-            Ok(text) => format!("🎤 [음성 전사]: {text}\n\n{content}"),
-            Err(error) => {
-                tracing::warn!(%error, "failed to transcribe Slack audio attachment");
-                format!("{content}\n\n_⚠️ 음성 전사 실패 (일반 오디오 첨부로 처리)_")
-            }
-        };
+        if let Err(error) = &transcript {
+            tracing::warn!(%error, "failed to transcribe Slack audio attachment");
+        }
+        with_transcript(content, transcript.as_deref().ok());
     }
+}
+
+/// Puts an audio transcript (`Some`) in front of `content`, or appends the transcription
+/// failure notice (`None`), in the owner's language.
+fn with_transcript(content: &mut String, transcript: Option<&str>) {
+    let korean = crate::locale::current().is_korean();
+    *content = match (transcript, korean) {
+        (Some(text), true) => format!("🎤 [음성 전사]: {text}\n\n{content}"),
+        (Some(text), false) => format!("🎤 [voice transcript]: {text}\n\n{content}"),
+        (None, true) => format!("{content}\n\n_⚠️ 음성 전사 실패 (일반 오디오 첨부로 처리)_"),
+        (None, false) => {
+            format!("{content}\n\n_⚠️ voice transcription failed (handled as a plain audio attachment)_")
+        }
+    };
 }
 
 /// omo's `render_user_prompt`: the timestamped body, then one line per attachment (with its
@@ -858,6 +869,24 @@ pub fn render_prompt(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn transcript_markers_are_in_the_owner_language() {
+        let mut korean = "body".to_owned();
+        with_transcript(&mut korean, Some("hello"));
+        assert_eq!(korean, "🎤 [음성 전사]: hello\n\nbody");
+        crate::locale::with(crate::locale::OwnerLocale::english_utc(), || {
+            let mut heard = "body".to_owned();
+            with_transcript(&mut heard, Some("hello"));
+            assert_eq!(heard, "🎤 [voice transcript]: hello\n\nbody");
+            let mut failed = "body".to_owned();
+            with_transcript(&mut failed, None);
+            assert_eq!(
+                failed,
+                "body\n\n_⚠️ voice transcription failed (handled as a plain audio attachment)_"
+            );
+        });
+    }
 
     #[test]
     fn forwarded_messages_become_a_block_with_their_files() {

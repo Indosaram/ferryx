@@ -7,6 +7,10 @@ pub enum HubError {
     Config(String),
     #[error("{0}")]
     Message(String),
+    #[error("Slack rejected {method}: {code}")]
+    SlackRejected { method: String, code: String },
+    #[error("Slack attachment was not shared: {0}")]
+    SlackNotShared(String),
     #[error(transparent)]
     Sql(#[from] sqlx::Error),
     #[error(transparent)]
