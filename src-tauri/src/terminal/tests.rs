@@ -752,6 +752,8 @@ async fn a_wedged_pty_does_not_block_the_async_runtime_thread() {
         let discipline_full = true;
         let mut chunk_size = fill_chunk.len();
         loop {
+            // SAFETY: `fill_chunk` is live for the call and holds at least `chunk_size` bytes;
+            // `master_fd` belongs to the session retained above.
             let n = unsafe { libc::write(master_fd, fill_chunk.as_ptr().cast(), chunk_size) };
             if n < 0 {
                 let err = std::io::Error::last_os_error();
@@ -812,7 +814,10 @@ async fn a_wedged_pty_does_not_block_the_async_runtime_thread() {
         "spawned task must have executed during timeout window (reactor was not blocked)"
     );
 
-    // Clean up: SIGKILL the child pid and close the session
+    // Clean up: release the slave probe first so the master reader sees EOF at once, then
+    // SIGKILL the child pid and close the session.
+    #[cfg(target_os = "linux")]
+    drop(slave);
     unsafe {
         libc::kill(pid as i32, libc::SIGKILL);
     }
