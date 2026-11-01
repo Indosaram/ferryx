@@ -1657,8 +1657,8 @@ async fn boot_generation(launch: &HubLaunch, stopped: bool, lease: Option<&dyn L
     Some(open_generation(launch).await)
 }
 
-/// The rest of [`start`] once the hub is open: the boot generation (if any) goes into the
-/// running slot, which is published with the hub for the view, the phone and control.sock.
+/// The boot of [`start_opened`]: the boot generation (if any) goes into the running slot,
+/// which is published with the hub for the view, the phone and control.sock.
 async fn boot_hub(
     launch: &HubLaunch,
     stopped: bool,
@@ -2949,27 +2949,6 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     // while this machine holds the lease and pulls the holder's checkpoint while it stands by.
     crate::supervisor_move::install_hosts(server.paired_hosts().clone());
     HUB_TASKS.track(&spawn_checkpoint_publisher());
-    // The supervisor lease decides which of the owner's machines runs the hub. Without a relay
-    // client the hub runs unleased until one is published (see `follow_relay`).
-    let (wanted, lease_decisions) = tokio::sync::watch::channel(false);
-    // Subscribed before the relay is read, so a relay published from here on binds the client.
-    let relay_published = RELAY_PUBLISHED.subscribe();
-    let remote = Arc::clone(server.remote_state());
-    let relay = remote.relay_client.read().clone();
-    let (lease, lease_task) = match relay {
-        Some(relay) => {
-            let (gate, task) = spawn_lease_client(relay, wanted.clone(), Arc::clone(&server.handover_manager)).await;
-            HUB_TASKS.track(&task);
-            (Some(gate), Some(task))
-        }
-        None => {
-            // Unleased until a relay is published: no holder predicate in the hub crate.
-            install_holder_gate(None);
-            (None, None)
-        }
-    };
-    set_lease_gate(lease.clone());
-    let standby = lease.as_ref().is_some_and(|lease| !lease.allows_hub());
     // A predecessor from before 2026.1022.7 keeps its hub through the drain. Stop it over
     // control.sock; its stop persists hub_stopped=1, so the value read above is put back.
     #[cfg(unix)]
@@ -2982,39 +2961,86 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
             tracing::warn!(%error, "hub_stopped was not restored after stopping the previous hub");
         }
     }
-    let launch = HubLaunch {
-        server,
-        config,
-        hub,
-        bridge,
-        #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
-        profiles,
-        #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
-        meta_session_id,
-        effects: Arc::new(DaemonEffects),
-    };
-    let running = boot_hub(&launch, stopped, lease.as_deref()).await;
-    let follower = tokio::spawn(follow_lease(lease_decisions, Arc::clone(&running), promote_generation));
-    HUB_TASKS.track(&follower);
-    let bind_wanted = wanted.clone();
-    let bind_handover = Arc::clone(&launch.server.handover_manager);
-    let relays = tokio::spawn(follow_relay(
-        relay_published,
+    let remote = Arc::clone(server.remote_state());
+    let handover = Arc::clone(&server.handover_manager);
+    let followers = start_opened(
+        HubLaunch {
+            server,
+            config,
+            hub,
+            bridge,
+            #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
+            profiles,
+            #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
+            meta_session_id,
+            effects: Arc::new(DaemonEffects),
+        },
+        stopped,
+        // Subscribed before the relay is read, so a relay published from here on binds the client.
+        RELAY_PUBLISHED.subscribe(),
         move || remote.relay_client.read().clone(),
-        move |relay: crate::remote::relay_client::RelayClient| {
-            let wanted = bind_wanted.clone();
-            let handover_manager = Arc::clone(&bind_handover);
+        move |relay: crate::remote::relay_client::RelayClient, wanted| {
+            let handover_manager = Arc::clone(&handover);
             async move {
                 let (gate, task) = spawn_lease_client(relay, wanted, handover_manager).await;
                 HUB_TASKS.track(&task);
                 (gate, task)
             }
         },
+        serve_control,
+    )
+    .await;
+    for task in &followers {
+        HUB_TASKS.track(task);
+    }
+    Ok(())
+}
+
+/// The rest of [`start`] once the hub is open: the supervisor lease decides which of the
+/// owner's machines runs the hub, so the lease client over `relay()` binds (through `bind`)
+/// and is installed before the boot generation, which runs only on the holder. Without a
+/// relay client the hub runs unleased until one is published (see `follow_relay`). `serve`
+/// answers control.sock for the running slot. Returns the lease and relay followers.
+async fn start_opened<C, R, B, Fut, S>(
+    launch: HubLaunch,
+    stopped: bool,
+    relay_published: tokio::sync::watch::Receiver<u64>,
+    mut relay: R,
+    mut bind: B,
+    serve: S,
+) -> [tokio::task::JoinHandle<()>; 2]
+where
+    C: Send + 'static,
+    R: FnMut() -> Option<C> + Send + 'static,
+    B: FnMut(C, tokio::sync::watch::Sender<bool>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = (Arc<dyn LeaseGate>, tokio::task::JoinHandle<()>)> + Send + 'static,
+    S: FnOnce(Arc<tokio::sync::Mutex<Option<Generation>>>, HubLaunch) + Send,
+{
+    let (wanted, lease_decisions) = tokio::sync::watch::channel(false);
+    let (lease, lease_task) = match relay() {
+        Some(client) => {
+            let (gate, task) = bind(client, wanted.clone()).await;
+            (Some(gate), Some(task))
+        }
+        None => {
+            // Unleased until a relay is published: no holder predicate in the hub crate.
+            install_holder_gate(None);
+            (None, None)
+        }
+    };
+    set_lease_gate(lease.clone());
+    let standby = lease.as_ref().is_some_and(|lease| !lease.allows_hub());
+    let running = boot_hub(&launch, stopped, lease.as_deref()).await;
+    let follower = tokio::spawn(follow_lease(lease_decisions, Arc::clone(&running), promote_generation));
+    let bind_wanted = wanted.clone();
+    let relays = tokio::spawn(follow_relay(
+        relay_published,
+        relay,
+        move |client: C| bind(client, bind_wanted.clone()),
         lease_task,
         wanted,
     ));
-    HUB_TASKS.track(&relays);
-    serve_control(running, launch);
+    serve(running, launch);
     if standby {
         tracing::info!("ferryx hub is on standby: another machine holds the supervisor lease");
     } else if stopped {
@@ -3022,7 +3048,7 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     } else {
         tracing::info!("ferryx hub is up");
     }
-    Ok(())
+    [follower, relays]
 }
 
 #[derive(Clone)]
@@ -4888,6 +4914,75 @@ mod tests {
         let running = boot_hub(&launch, false, Some(&holder as &dyn LeaseGate)).await;
         assert!(running.lock().await.is_some());
         assert_eq!(effects.counts(), (1, 0, 1));
+    }
+
+    /// [`start_opened`] with a relay whose lease client answers `holder`: the gate it bound and
+    /// the running slot control.sock was served with.
+    async fn start_opened_with(launch: HubLaunch, holder: bool) -> (Arc<dyn LeaseGate>, SupervisorView) {
+        set_lease_gate(None);
+        let (_published, published) = tokio::sync::watch::channel(0u64);
+        let bound = Arc::new(std::sync::Mutex::new(Vec::<Arc<dyn LeaseGate>>::new()));
+        let served = Arc::new(std::sync::Mutex::new(None::<Arc<tokio::sync::Mutex<Option<Generation>>>>));
+        let binds = Arc::clone(&bound);
+        let serves = Arc::clone(&served);
+        let followers = start_opened(
+            launch,
+            false,
+            published,
+            move || Some(holder),
+            move |holder: bool, _wanted: tokio::sync::watch::Sender<bool>| {
+                let gate: Arc<dyn LeaseGate> = Arc::new(FakeLease::new(holder, false));
+                binds.lock().unwrap().push(Arc::clone(&gate));
+                let (generation, _ended) = pending_generation();
+                let task = generation.tasks.into_iter().next().unwrap();
+                async move { (gate, task) }
+            },
+            move |running, _launch| *serves.lock().unwrap() = Some(running),
+        )
+        .await;
+        for task in followers {
+            task.abort();
+        }
+        let gate = bound.lock().unwrap().pop().expect("the relay's lease client was bound");
+        let running = served.lock().unwrap().take().expect("control.sock was served");
+        let (hub, published) = supervisor_view().expect("the hub is published for the view");
+        assert!(Arc::ptr_eq(&published, &running), "control.sock serves the published slot");
+        (gate, (hub, running))
+    }
+
+    /// `start` once the hub is open, on a standby: the lease client bound to the relay is the
+    /// installed gate and the one the boot asks, so no stored reply is posted, no pane is
+    /// launched, no generation runs and nothing is sent; control.sock serves the published slot.
+    #[tokio::test]
+    async fn a_standby_start_flushes_nothing_launches_no_pane_and_runs_no_generation() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::control::clear_stopped(&pool).await.unwrap();
+        let effects = CountingEffects::new();
+        let (launch, control) = test_launch(pool, pane_config(), &effects);
+
+        let (gate, (_, running)) = start_opened_with(launch, false).await;
+
+        assert!(lease_gate().is_some_and(|installed| Arc::ptr_eq(&installed, &gate)), "the bound gate is installed");
+        assert!(running.lock().await.is_none(), "a standby starts without a generation");
+        assert_eq!(effects.counts(), (0, 0, 0), "no flush, no pane, no generation");
+        assert!(control.ops().is_empty(), "nothing was sent");
+        set_lease_gate(None);
+    }
+
+    /// The same start on the lease holder runs the boot generation through the effects.
+    #[tokio::test]
+    async fn a_holder_start_runs_the_generation() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::control::clear_stopped(&pool).await.unwrap();
+        let effects = CountingEffects::new();
+        let (launch, _) = test_launch(pool, HubConfig::default(), &effects);
+
+        let (gate, (_, running)) = start_opened_with(launch, true).await;
+
+        assert!(lease_gate().is_some_and(|installed| Arc::ptr_eq(&installed, &gate) && installed.allows_hub()));
+        assert!(running.lock().await.is_some(), "the holder starts a generation");
+        assert_eq!(effects.counts(), (1, 0, 1));
+        set_lease_gate(None);
     }
 
     /// The control.sock / CLI / phone start path asks the installed lease, not a test-only one.
