@@ -22,7 +22,9 @@ const MAX_PRINCIPAL_CHARS: usize = 256;
 /// What the caller knows about the engine of this process.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EngineView {
-    /// The hub env file turns the engine on (`FERRYX_HUB_MHC_SUPERVISOR`).
+    /// The engine is on for this process: the hub env file turns it on
+    /// (`FERRYX_HUB_MHC_SUPERVISOR`) and this process's environment does not turn it off
+    /// ([`Self::enabled_for`]).
     pub enabled: bool,
     /// An engine is installed in the running hub generation.
     pub installed: bool,
@@ -31,14 +33,30 @@ pub struct EngineView {
 }
 
 impl EngineView {
+    /// Whether the engine is on as [`crate::meta::mhc_profile::MhcProfileConfig::from_env_in`]
+    /// decides it: `shared` (the hub env file entries) turns it on and `process` (this
+    /// process's `FERRYX_HUB_MHC_SUPERVISOR`) does not turn it off. A process value never
+    /// turns it on.
+    pub fn enabled_for(
+        shared: &std::collections::BTreeMap<String, String>,
+        process: Option<&str>,
+    ) -> bool {
+        let process_off = process.is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        });
+        crate::meta::mhc_profile::MhcProfileConfig::enabled_in(shared) && !process_off
+    }
+
     /// The engine as this process sees it now: the hub env file read fresh, and the engine
-    /// installed in this process, if any.
+    /// installed in this process, if any. Reads a file: call it off the async runtime threads.
     pub fn current() -> Self {
         let installed = crate::meta::mhc_supervisor::installed();
+        let process = std::env::var(crate::meta::mhc_profile::ENABLE_KEY).ok();
         Self {
-            enabled: crate::meta::mhc_profile::MhcProfileConfig::enabled_in(
-                &crate::hub_env::read_file_env(),
-            ),
+            enabled: Self::enabled_for(&crate::hub_env::read_file_env(), process.as_deref()),
             installed: installed.is_some(),
             health: installed.map(|engine| engine.health()),
         }

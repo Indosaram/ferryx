@@ -3,15 +3,17 @@
 //! installed (never the daemon, so PTY sessions stay up), creates the owner identity and maps
 //! the requested projects. Every step is idempotent; the answer is the shared SetupStatus.
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
 use ferryx_hub::meta::mhc_profile::{MhcProfileConfig, ENABLE_KEY};
+use ferryx_hub::meta::mhc_supervisor::{HealthState, SupervisorHealth};
 use ferryx_hub::supervisor::setup::{self, EngineView};
 use ferryx_hub::supervisor::SupervisorError;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::{start_generation, HubStartError, HUB_TASKS, SUPERVISOR_LAUNCH, SUPERVISOR_VIEW};
+use super::{start_generation, Generation, HubStartError, HUB_TASKS, SUPERVISOR_LAUNCH, SUPERVISOR_VIEW};
 use crate::remote::state::RemoteGatewayState;
 
 /// One project the owner asked setup to map: a display name and a local checkout path.
@@ -42,9 +44,14 @@ pub enum SetupError {
     HandedOver,
     #[error("hub env file: {0}")]
     EnvFile(String),
+    #[error("the Slack owner {0} is configured but its Slack team could not be resolved yet; run setup again once Slack answers")]
+    SlackTeamUnresolved(String),
     #[error("{0}")]
     Supervisor(#[from] SupervisorError),
 }
+
+/// The wire code of [`SetupError::SlackTeamUnresolved`]: retryable, nothing was provisioned.
+pub const SLACK_TEAM_UNRESOLVED: &str = "SLACK_TEAM_UNRESOLVED";
 
 impl SetupError {
     pub fn code(&self) -> &'static str {
@@ -52,6 +59,7 @@ impl SetupError {
             Self::Unavailable => "SUPERVISOR_UNAVAILABLE",
             Self::HandedOver => "INVALID_STATE",
             Self::EnvFile(_) => "STORAGE",
+            Self::SlackTeamUnresolved(_) => SLACK_TEAM_UNRESOLVED,
             Self::Supervisor(error) => error.code(),
         }
     }
@@ -85,47 +93,72 @@ pub(super) fn hub_pool(state: &RemoteGatewayState) -> Result<(ferryx_hub::goals:
     Ok((hub.pool.clone(), true))
 }
 
-pub(crate) fn env_file() -> Result<PathBuf, SetupError> {
-    ferryx_hub::hub_env::env_file_path()
-        .ok_or_else(|| SetupError::EnvFile("neither HOME nor USERPROFILE is set".into()))
+/// Runs blocking work (the env file reads and writes) on the blocking pool, never on an
+/// async runtime thread.
+async fn off_runtime<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, SetupError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| SetupError::EnvFile(format!("blocking task failed: {error}")))
 }
 
+/// Where setup reads and writes the engine flag: this user's hub env file and this process's
+/// environment, or (tests) a given file and a given process value.
+#[derive(Debug, Clone)]
+pub(crate) enum HubEnv {
+    Live,
+    #[cfg(test)]
+    At { file: PathBuf, process: Option<String> },
+}
+
+impl HubEnv {
+    /// The env file entries as they are on disk now. Blocking.
+    fn read(&self) -> BTreeMap<String, String> {
+        match self {
+            Self::Live => ferryx_hub::hub_env::read_file_env(),
+            #[cfg(test)]
+            Self::At { file, .. } => read_env_at(file),
+        }
+    }
+
+    /// This process's ENABLE_KEY, which may turn the engine off but never on.
+    fn process(&self) -> Option<String> {
+        match self {
+            Self::Live => std::env::var(ENABLE_KEY).ok(),
+            #[cfg(test)]
+            Self::At { process, .. } => process.clone(),
+        }
+    }
+
+    /// Merges ENABLE_KEY=1 into the env file. Blocking.
+    fn enable(&self) -> Result<(), SetupError> {
+        let entries = BTreeMap::from([(ENABLE_KEY.to_owned(), "1".to_owned())]);
+        let written = match self {
+            Self::Live => ferryx_hub::hub_env::set_file_entries(&entries),
+            #[cfg(test)]
+            Self::At { file, .. } => ferryx_hub::hub_env::write_merged(file, &entries),
+        };
+        written.map(drop).map_err(|error| SetupError::EnvFile(error.to_string()))
+    }
+}
+
+#[cfg(test)]
 fn read_env_at(path: &Path) -> BTreeMap<String, String> {
     std::fs::read_to_string(path)
         .map(|text| ferryx_hub::hub_env::parse_env_file(&text))
         .unwrap_or_default()
 }
 
-/// The engine as setup sees it: the env file at env_file read now, and this process's engine.
-pub(crate) fn engine_view(env_file: &Path) -> EngineView {
+/// The engine as setup sees it: the env file read now (off the runtime threads), this
+/// process's override, and this process's engine.
+pub(crate) async fn engine_view(env: &HubEnv) -> Result<EngineView, SetupError> {
+    let reader = env.clone();
+    let shared = off_runtime(move || reader.read()).await?;
     let installed = ferryx_hub::meta::mhc_supervisor::installed();
-    EngineView {
-        enabled: MhcProfileConfig::enabled_in(&read_env_at(env_file)),
+    Ok(EngineView {
+        enabled: EngineView::enabled_for(&shared, env.process().as_deref()),
         installed: installed.is_some(),
         health: installed.map(|engine| engine.health()),
-    }
-}
-
-/// Merges ENABLE_KEY=1 into the env file, creating its directory (0700) when missing.
-fn enable_in_env_file(env_file: &Path) -> Result<(), SetupError> {
-    if let Some(parent) = env_file.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-        if !parent.exists() {
-            let mut builder = std::fs::DirBuilder::new();
-            builder.recursive(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
-            builder
-                .create(parent)
-                .map_err(|error| SetupError::EnvFile(format!("{}: {error}", parent.display())))?;
-        }
-    }
-    let entries = BTreeMap::from([(ENABLE_KEY.to_owned(), "1".to_owned())]);
-    ferryx_hub::hub_env::write_merged(env_file, &entries)
-        .map(|_| ())
-        .map_err(|error| SetupError::EnvFile(error.to_string()))
+    })
 }
 
 /// This OS account's name, the local:<account> owner when Slack does not name one.
@@ -166,25 +199,41 @@ async fn slack_owner(pool: &ferryx_hub::goals::SqlitePool) -> SlackOwner {
     SlackOwner { team, user: Some(user) }
 }
 
-/// Stops the running generation and starts a fresh one, as control stop then start do, but
-/// without leaving the persisted stopped flag set. Never restarts the daemon or touches a PTY.
-async fn restart_generation() -> Result<(), SetupError> {
+/// Restarts this daemon's hub generation when one runs (see [`restart_if_running`]). Returns
+/// whether it restarted. Never restarts the daemon or touches a PTY.
+async fn restart_generation() -> Result<bool, SetupError> {
     let (Some((_, running)), Some(launch)) = (SUPERVISOR_VIEW.get(), SUPERVISOR_LAUNCH.get()) else {
         return Err(SetupError::Unavailable);
     };
     if HUB_TASKS.is_retired() {
         return Err(SetupError::HandedOver);
     }
-    let previous = running.lock().await.take();
-    if let Some(generation) = previous {
-        generation.end().await;
-    }
-    start_generation(running, launch).await?;
-    Ok(())
+    restart_if_running(running, || start_generation(running, launch)).await
+}
+
+/// Ends the running generation and starts a fresh one with start, as control stop then start
+/// do, but without leaving the persisted stopped flag set. A hub the owner stopped stays
+/// stopped (false): setup reports `restart_required` instead of starting it.
+async fn restart_if_running<F, Fut>(
+    running: &tokio::sync::Mutex<Option<Generation>>,
+    start: F,
+) -> Result<bool, SetupError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<bool, HubStartError>>,
+{
+    let Some(previous) = running.lock().await.take() else {
+        return Ok(false);
+    };
+    previous.end().await;
+    start().await?;
+    Ok(true)
 }
 
 /// The installation's owner identity: the existing one, else a new one for the Slack owner
-/// (when both team and user are known) or the local account.
+/// (when both team and user are known) or the local account. A configured Slack owner whose
+/// team is not known yet is refused, never provisioned as the local account: that identity
+/// would never match the owner's Slack messages.
 async fn ensure_owner(
     pool: &ferryx_hub::goals::SqlitePool,
     slack: &SlackOwner,
@@ -192,6 +241,9 @@ async fn ensure_owner(
 ) -> Result<ferryx_hub::supervisor::SupervisorIdentity, SetupError> {
     if let Some(existing) = ferryx_hub::supervisor::identities(pool).await?.into_iter().next() {
         return Ok(existing);
+    }
+    if let (Some(user), None) = (&slack.user, &slack.team) {
+        return Err(SetupError::SlackTeamUnresolved(user.clone()));
     }
     let principal = setup::default_owner_principal(slack.team.as_deref(), slack.user.as_deref(), account);
     Ok(ferryx_hub::supervisor::provision_identity(pool, &principal).await?)
@@ -247,46 +299,51 @@ async fn map_projects(
     results
 }
 
-/// The setup run over an explicit pool and env file. restart is false for a hub that is not
+/// The setup run over an explicit pool and hub env. restart is false for a hub that is not
 /// this daemon's live one (tests, the desktop-independent CLI), whose generation cannot be
-/// restarted from here. engine is the health of the engine installed in the running
-/// generation, if any.
+/// restarted from here; a live hub the owner stopped is not restarted either. engine is the
+/// health of the engine installed in the running generation, if any.
 ///
-/// The owner and projects are written before the generation restarts, so the new
-/// generation's first Ready already finds them. An engine that is already Ready sees no new
+/// The owner is resolved first, so a refusal (a Slack owner whose team is not known yet)
+/// changes nothing. The owner and projects are written before the generation restarts, so
+/// the new generation's first Ready already finds them. An engine that is already Ready sees no new
 /// Ready transition, so the run itself attempts the automatic cutover; the answer's
 /// `seedDue` tells the caller to seed owner memory with that engine.
 pub(crate) async fn run_setup_on(
     pool: &ferryx_hub::goals::SqlitePool,
-    env_file: &Path,
+    env: &HubEnv,
     request: SetupRunRequest,
     slack: &SlackOwner,
     account: &str,
     restart: bool,
-    engine: Option<ferryx_hub::meta::mhc_supervisor::SupervisorHealth>,
+    engine: Option<SupervisorHealth>,
 ) -> Result<Value, SetupError> {
-    use ferryx_hub::meta::mhc_supervisor::HealthState;
-    if !MhcProfileConfig::enabled_in(&read_env_at(env_file)) {
-        enable_in_env_file(env_file)?;
-    }
-    setup::set_setup_flags(pool, Some(true), Some(request.import_memory)).await?;
     let identity = ensure_owner(pool, slack, account).await?;
+    let writer = env.clone();
+    off_runtime(move || {
+        if MhcProfileConfig::enabled_in(&writer.read()) {
+            Ok(())
+        } else {
+            writer.enable()
+        }
+    })
+    .await??;
+    setup::set_setup_flags(pool, Some(true), Some(request.import_memory)).await?;
     let projects = map_projects(pool, &identity.supervisor_id, request.projects).await;
+    // An engine this process turns off never installs: a restart would change nothing.
+    let may_restart = restart && engine.is_none() && engine_view(env).await?.enabled;
     let mut restarted = false;
     let mut cut_over = false;
     let mut seed_due = false;
     match &engine {
-        None if restart => {
-            restart_generation().await?;
-            restarted = true;
-        }
+        None if may_restart => restarted = restart_generation().await?,
         Some(health) if health.state == HealthState::Ready => {
             cut_over = ferryx_hub::supervisor::cutover::auto_cutover(pool, Some(health)).await?.is_some();
             seed_due = request.import_memory;
         }
         _ => {}
     }
-    let status = setup::setup_status(pool, engine_view(env_file)).await?;
+    let status = setup::setup_status(pool, engine_view(env).await?).await?;
     let mut answer = serde_json::to_value(status).unwrap_or(Value::Null);
     if let Some(fields) = answer.as_object_mut() {
         fields.insert("projectResults".into(), Value::Array(projects));
@@ -309,30 +366,53 @@ pub(super) async fn auto_setup(
     state: std::sync::Arc<RemoteGatewayState>,
     home: PathBuf,
 ) {
-    use ferryx_hub::meta::mhc_supervisor::HealthState;
-    let mut health = engine.subscribe_health();
+    let health = engine.subscribe_health();
+    let seeded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let publish = || {
+        crate::remote::server::agent_control_service::publish_supervisor_changed(&state, json!({ "setup": "cutover" }));
+    };
+    let seed = || {
+        let (engine, pool, state, home) = (engine.clone(), pool.clone(), std::sync::Arc::clone(&state), home.clone());
+        let seeded = std::sync::Arc::clone(&seeded);
+        async move {
+            use std::sync::atomic::Ordering;
+            if !seeded.load(Ordering::SeqCst) {
+                // Seeded only once an import ran or had already finished; a skip (no owner
+                // or memory import off at that moment) leaves it to the next Ready or setup run.
+                seeded.store(seed_if_wanted(&engine, &pool, &state, home).await, Ordering::SeqCst);
+            }
+        }
+    };
+    cut_over_on_ready(health, &pool, publish, seed).await;
+}
+
+/// The loop of [`auto_setup`] over one engine health channel: on every transition to Ready it
+/// runs the automatic cutover (cut_over is told when it moved the intake), then on_ready.
+/// Returns when the channel closes.
+async fn cut_over_on_ready<C, R, Fut>(
+    mut health: tokio::sync::watch::Receiver<SupervisorHealth>,
+    pool: &ferryx_hub::goals::SqlitePool,
+    mut cut_over: C,
+    mut on_ready: R,
+) where
+    C: FnMut(),
+    R: FnMut() -> Fut,
+    Fut: Future<Output = ()>,
+{
     let mut was_ready = false;
-    let mut seeded = false;
     loop {
         let current = health.borrow_and_update().clone();
         let ready = current.state == HealthState::Ready;
         if ready && !was_ready {
-            match ferryx_hub::supervisor::cutover::auto_cutover(&pool, Some(&current)).await {
+            match ferryx_hub::supervisor::cutover::auto_cutover(pool, Some(&current)).await {
                 Ok(Some(transition)) => {
                     tracing::info!(steps = transition.steps.len(), "supervisor intake cut over automatically");
-                    crate::remote::server::agent_control_service::publish_supervisor_changed(
-                        &state,
-                        json!({ "setup": "cutover" }),
-                    );
+                    cut_over();
                 }
                 Ok(None) => {}
                 Err(error) => tracing::warn!(code = error.code(), "automatic cutover failed"),
             }
-            if !seeded {
-                // Seeded only once an import ran or had already finished; a skip (no owner
-                // or memory import off at that moment) leaves it to the next Ready or setup run.
-                seeded = seed_if_wanted(&engine, &pool, &state, home.clone()).await;
-            }
+            on_ready().await;
         }
         was_ready = ready;
         if health.changed().await.is_err() {
@@ -421,10 +501,14 @@ pub async fn supervisor_setup(
 
 /// The snapshot's `setup` field: the SetupStatus, or null when it cannot be read.
 pub(super) async fn snapshot_setup(pool: &ferryx_hub::goals::SqlitePool) -> Value {
-    let Ok(env_file) = env_file() else {
-        return Value::Null;
+    let engine = match engine_view(&HubEnv::Live).await {
+        Ok(engine) => engine,
+        Err(error) => {
+            tracing::warn!(code = error.code(), "supervisor setup engine view was not read");
+            return Value::Null;
+        }
     };
-    match setup::setup_status(pool, engine_view(&env_file)).await {
+    match setup::setup_status(pool, engine).await {
         Ok(status) => serde_json::to_value(status).unwrap_or(Value::Null),
         Err(error) => {
             tracing::warn!(code = error.code(), "supervisor setup status was not read");
@@ -436,7 +520,7 @@ pub(super) async fn snapshot_setup(pool: &ferryx_hub::goals::SqlitePool) -> Valu
 /// The shared SetupStatus of this installation. Reads only.
 pub async fn supervisor_setup_status(state: &RemoteGatewayState) -> Result<Value, SetupError> {
     let (pool, _) = hub_pool(state)?;
-    let status = setup::setup_status(&pool, engine_view(&env_file()?)).await?;
+    let status = setup::setup_status(&pool, engine_view(&HubEnv::Live).await?).await?;
     Ok(serde_json::to_value(status).unwrap_or(Value::Null))
 }
 
@@ -447,11 +531,10 @@ pub async fn supervisor_setup_run(
     request: SetupRunRequest,
 ) -> Result<Value, SetupError> {
     let (pool, live) = hub_pool(state)?;
-    let env_file = env_file()?;
     let slack = if live { slack_owner(&pool).await } else { SlackOwner::default() };
     let installed = if live { ferryx_hub::meta::mhc_supervisor::installed() } else { None };
     let health = installed.as_ref().map(|engine| engine.health());
-    let answer = run_setup_on(&pool, &env_file, request, &slack, &local_account(), live, health).await?;
+    let answer = run_setup_on(&pool, &HubEnv::Live, request, &slack, &local_account(), live, health).await?;
     if answer["cutOver"] == true {
         crate::remote::server::agent_control_service::publish_supervisor_changed(state, json!({ "setup": "cutover" }));
     }
@@ -526,12 +609,14 @@ async fn setup_locally(args: &HubSetupArgs) -> Result<Value, (String, String)> {
         std::fs::create_dir_all(parent).map_err(|error| ("STORAGE".to_owned(), format!("cannot create {}: {error}", parent.display())))?;
     }
     let pool = ferryx_hub::storage::connect(&path).await.map_err(|error| ("STORAGE".to_owned(), error.to_string()))?;
-    let env_file = env_file().map_err(fail)?;
     let answer = if args.status {
-        setup::setup_status(&pool, engine_view(&env_file))
-            .await
-            .map(|status| serde_json::to_value(status).unwrap_or(Value::Null))
-            .map_err(|error| fail(error.into()))
+        match engine_view(&HubEnv::Live).await {
+            Ok(engine) => setup::setup_status(&pool, engine)
+                .await
+                .map(|status| serde_json::to_value(status).unwrap_or(Value::Null))
+                .map_err(|error| fail(error.into())),
+            Err(error) => Err(fail(error)),
+        }
     } else {
         let slack = match config.owner_slack_id.clone() {
             Some(user) => {
@@ -543,7 +628,7 @@ async fn setup_locally(args: &HubSetupArgs) -> Result<Value, (String, String)> {
             }
             None => SlackOwner::default(),
         };
-        run_setup_on(&pool, &env_file, args.request.clone(), &slack, &local_account(), false, None)
+        run_setup_on(&pool, &HubEnv::Live, args.request.clone(), &slack, &local_account(), false, None)
             .await
             .map_err(fail)
     };
@@ -635,6 +720,10 @@ mod tests {
         args.iter().map(|arg| (*arg).to_owned()).collect()
     }
 
+    fn env_at(file: &Path) -> HubEnv {
+        HubEnv::At { file: file.to_path_buf(), process: None }
+    }
+
     #[test]
     fn the_setup_cli_parses_status_run_and_refuses_the_rest() {
         assert_eq!(parse_hub_setup(&words(&["--status", "--json"])), Ok(HubSetupArgs { status: true, json: true, request: SetupRunRequest::default() }));
@@ -677,7 +766,7 @@ mod tests {
         };
         let slack = SlackOwner::default();
 
-        let first = run_setup_on(&pool, &env_file, request.clone(), &slack, "tester", false, None)
+        let first = run_setup_on(&pool, &env_at(&env_file), request.clone(), &slack, "tester", false, None)
             .await
             .unwrap();
         assert_eq!(read_env_at(&env_file).get(ENABLE_KEY).map(String::as_str), Some("1"));
@@ -694,7 +783,7 @@ mod tests {
         assert_eq!(results[1]["code"], "NOT_A_GIT_DIR");
 
         let env_before = std::fs::read_to_string(&env_file).unwrap();
-        let second = run_setup_on(&pool, &env_file, request, &slack, "someone-else", false, None)
+        let second = run_setup_on(&pool, &env_at(&env_file), request, &slack, "someone-else", false, None)
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&env_file).unwrap(), env_before);
@@ -708,12 +797,74 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let pool = ferryx_hub::storage::memory().await.unwrap();
         let slack = SlackOwner { team: Some("T1".into()), user: Some("U9".into()) };
-        let answer = run_setup_on(&pool, &temp.path().join("env"), SetupRunRequest::default(), &slack, "tester", false, None)
+        let answer = run_setup_on(&pool, &env_at(&temp.path().join("env")), SetupRunRequest::default(), &slack, "tester", false, None)
             .await
             .unwrap();
         assert_eq!(answer["owner"]["ownerPrincipal"], "slack:T1:U9");
         assert_eq!(answer["memoryImport"]["enabled"], false);
         assert_eq!(answer["nextAction"], "restart_required");
+    }
+
+    #[tokio::test]
+    async fn a_slack_owner_without_a_known_team_is_refused_and_nothing_is_provisioned() {
+        let temp = tempfile::tempdir().unwrap();
+        let env_file = temp.path().join("env");
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let slack = SlackOwner { team: None, user: Some("U9".into()) };
+        let error = run_setup_on(&pool, &env_at(&env_file), SetupRunRequest::default(), &slack, "tester", false, None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), SLACK_TEAM_UNRESOLVED);
+        assert!(ferryx_hub::supervisor::identities(&pool).await.unwrap().is_empty(), "no local: fallback");
+        assert!(!env_file.exists(), "a refused run writes nothing");
+    }
+
+    #[tokio::test]
+    async fn a_process_disable_shows_the_engine_off_even_when_the_file_turns_it_on() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("env");
+        std::fs::write(&file, format!("{ENABLE_KEY}=1\n")).unwrap();
+        assert!(engine_view(&env_at(&file)).await.unwrap().enabled);
+        let off = HubEnv::At { file: file.clone(), process: Some("0".into()) };
+        assert!(!engine_view(&off).await.unwrap().enabled);
+        // A process value never turns the engine on.
+        let empty = temp.path().join("empty");
+        let on = HubEnv::At { file: empty, process: Some("1".into()) };
+        assert!(!engine_view(&on).await.unwrap().enabled);
+        // Setup with the process override off answers enable_engine, never restart_required.
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let answer = run_setup_on(&pool, &off, SetupRunRequest::default(), &SlackOwner::default(), "tester", true, None)
+            .await
+            .unwrap();
+        assert_eq!(answer["engineEnabled"], false);
+        assert_eq!(answer["restarted"], false);
+        assert_eq!(answer["nextAction"], "enable_engine");
+    }
+
+    #[tokio::test]
+    async fn env_file_work_runs_off_the_async_runtime_thread() {
+        let caller = std::thread::current().id();
+        let worker = off_runtime(|| std::thread::current().id()).await.unwrap();
+        assert_ne!(caller, worker);
+    }
+
+    #[tokio::test]
+    async fn a_stopped_hub_stays_stopped_and_a_running_one_restarts() {
+        let counter = std::sync::atomic::AtomicUsize::new(0);
+        let starts = &counter;
+        let start = move || async move {
+            starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(true)
+        };
+        let stopped = tokio::sync::Mutex::new(None);
+        assert!(!restart_if_running(&stopped, start).await.unwrap());
+        assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 0, "a stopped hub is not started");
+        assert!(stopped.lock().await.is_none());
+
+        let task = tokio::spawn(std::future::pending::<()>());
+        let running = tokio::sync::Mutex::new(Some(Generation { tasks: vec![task] }));
+        assert!(restart_if_running(&running, start).await.unwrap());
+        assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     fn ready_health() -> ferryx_hub::meta::mhc_supervisor::SupervisorHealth {
@@ -744,7 +895,7 @@ mod tests {
 
         let answer = run_setup_on(
             &pool,
-            &env_file,
+            &env_at(&env_file),
             SetupRunRequest { import_memory: true, projects: Vec::new() },
             &SlackOwner::default(),
             "tester",
@@ -761,10 +912,72 @@ mod tests {
         assert_eq!(after.legacy, ferryx_hub::supervisor::cutover::LegacyIntake::Stopped);
 
         // Idempotent: a second run moves nothing.
-        let again = run_setup_on(&pool, &env_file, SetupRunRequest::default(), &SlackOwner::default(), "tester", false, Some(ready_health()))
+        let again = run_setup_on(&pool, &env_at(&env_file), SetupRunRequest::default(), &SlackOwner::default(), "tester", false, Some(ready_health()))
             .await
             .unwrap();
         assert_eq!(again["cutOver"], false);
         assert_eq!(again["seedDue"], false);
+    }
+
+    fn health_in(state: ferryx_hub::meta::mhc_supervisor::HealthState) -> SupervisorHealth {
+        SupervisorHealth { state, ..ready_health() }
+    }
+
+    /// Criterion 1, the upgrade flow: setup ran while no engine was installed (restart
+    /// required); the restarted generation's engine starts and becomes Ready, and the
+    /// generation's setup loop cuts the intake over on that transition, once.
+    #[tokio::test]
+    async fn the_generation_cuts_over_when_its_engine_turns_ready_after_a_restart() {
+        use ferryx_hub::meta::mhc_supervisor::HealthState;
+        let temp = tempfile::tempdir().unwrap();
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::lanes::state::insert_lane(&pool, "nightly", "Nightly", "lead", "/repo", "file marker")
+            .await
+            .unwrap();
+        ferryx_hub::supervisor::cutover::note_import(&pool).await.unwrap();
+        let answer = run_setup_on(&pool, &env_at(&temp.path().join("env")), SetupRunRequest::default(), &SlackOwner::default(), "tester", false, None)
+            .await
+            .unwrap();
+        assert_eq!(answer["nextAction"], "restart_required");
+        assert!(!ferryx_hub::supervisor::cutover::installation_intake(&pool).await.unwrap().unified_open);
+
+        let (sender, receiver) = tokio::sync::watch::channel(health_in(HealthState::Stopped));
+        let (ready_tx, mut ready_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let cut_overs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let loop_pool = pool.clone();
+        let counted = std::sync::Arc::clone(&cut_overs);
+        let task = tokio::spawn(async move {
+            cut_over_on_ready(
+                receiver,
+                &loop_pool,
+                || {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                },
+                || {
+                    let ready_tx = ready_tx.clone();
+                    async move {
+                        let _ = ready_tx.send(());
+                    }
+                },
+            )
+            .await;
+        });
+        sender.send(health_in(HealthState::Ready)).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), ready_rx.recv())
+            .await
+            .expect("the Ready transition is handled")
+            .expect("loop alive");
+        assert_eq!(cut_overs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let after = ferryx_hub::supervisor::cutover::installation_intake(&pool).await.unwrap();
+        assert!(after.unified_open);
+        assert_eq!(after.legacy, ferryx_hub::supervisor::cutover::LegacyIntake::Stopped);
+
+        // Ending the generation closes the channel and the loop ends.
+        drop(sender);
+        tokio::time::timeout(std::time::Duration::from_secs(10), task)
+            .await
+            .expect("loop ends with its channel")
+            .unwrap();
+        assert_eq!(cut_overs.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

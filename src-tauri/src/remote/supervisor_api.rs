@@ -124,6 +124,8 @@ fn setup_refusal(error: &crate::hub_runtime::SetupError) -> Response {
     let code = error.code();
     let status = match code {
         SUPERVISOR_UNAVAILABLE_CODE => StatusCode::SERVICE_UNAVAILABLE,
+        // Retryable: Slack did not name the owner's team yet; nothing was provisioned.
+        crate::hub_runtime::SLACK_TEAM_UNRESOLVED => StatusCode::SERVICE_UNAVAILABLE,
         SUPERVISOR_INVALID_STATE_CODE => StatusCode::CONFLICT,
         other => StatusCode::from_u16(ferryx_hub::supervisor::request::status_for_code(other))
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
