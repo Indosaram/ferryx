@@ -9,10 +9,10 @@
 
 pub mod authority;
 mod catalog;
-#[cfg(all(feature = "desktop", any(target_os = "windows", target_os = "macos")))]
+#[cfg(all(feature = "desktop", any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub mod cdp;
 pub mod client;
-#[cfg(all(feature = "desktop", any(target_os = "windows", target_os = "macos")))]
+#[cfg(all(feature = "desktop", any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub mod cef_backend;
 pub(crate) mod platform;
 mod policy;

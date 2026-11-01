@@ -171,4 +171,16 @@ describe("BrowserEngineGroup", () => {
     await vi.waitFor(() => expect(action).toHaveTextContent("Remove"));
     expect(screen.queryByTestId("browser-engine-rollback")).toBeNull();
   });
+
+  it("keeps offering removal when the installed engine cannot run in this session", async () => {
+    engine.getBrowserEngineStatus.mockResolvedValue({
+      state: "installed",
+      version: "156.2.0-ferryx.1",
+      inactive: "wayland-session",
+    });
+    render(<BrowserEngineGroup />);
+    const action = await screen.findByTestId("browser-engine-action");
+    await vi.waitFor(() => expect(action).toHaveTextContent("Remove"));
+    expect(screen.getByText(/GDK_BACKEND=x11/)).toBeInTheDocument();
+  });
 });

@@ -4,6 +4,10 @@
 //! (`--ferryx-parent-hwnd`) and is placed in pixels inside it. macOS cannot host another
 //! process's view, so the window stays a borderless window ordered directly above the Ferryx
 //! window (`--ferryx-parent-window`, its window number) at screen points.
+//! Linux (X11, including XWayland): the window is reparented into the Ferryx toplevel X window
+//! (`--ferryx-parent-xid`) and placed in pixels inside it, like Windows. A native Wayland Ferryx
+//! window has no X id, so Ferryx keeps those tabs on the system webview and never starts the
+//! engine with a parent.
 
 use cef::*;
 use ferryx_browser_engine_protocol::Rect as PaneRect;
@@ -185,7 +189,343 @@ mod imp {
     }
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg(target_os = "linux")]
+mod imp {
+    use super::*;
+    use std::cell::Cell;
+    use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void};
+
+    #[link(name = "X11")]
+    unsafe extern "C" {
+        fn XOpenDisplay(name: *const c_char) -> *mut c_void;
+        fn XReparentWindow(display: *mut c_void, window: c_ulong, parent: c_ulong, x: c_int, y: c_int) -> c_int;
+        fn XMoveResizeWindow(
+            display: *mut c_void,
+            window: c_ulong,
+            x: c_int,
+            y: c_int,
+            width: c_uint,
+            height: c_uint,
+        ) -> c_int;
+        fn XRaiseWindow(display: *mut c_void, window: c_ulong) -> c_int;
+        fn XFlush(display: *mut c_void) -> c_int;
+        fn XSetErrorHandler(handler: Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int>) -> *mut c_void;
+    }
+
+    /// Xlib's default error handler exits the process. A pane window can vanish between a
+    /// command and its X request (a tab closing while it is resized), which is harmless: log it
+    /// and go on.
+    unsafe extern "C" fn ignore_x_error(_display: *mut c_void, _event: *mut c_void) -> c_int {
+        eprintln!("ferryx-engine: ignored an X error from a pane window request");
+        0
+    }
+
+    fn install_error_handler() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        // SAFETY: installs a handler that only logs; called before this process's own Xlib
+        // connections are opened.
+        ONCE.call_once(|| unsafe {
+            XSetErrorHandler(Some(ignore_x_error));
+        });
+    }
+
+    thread_local! {
+        /// The engine's own Xlib connection, opened on the UI thread on first use. Chromium
+        /// keeps its own; window ids are server-wide, so either connection can move a window.
+        static DISPLAY: Cell<*mut c_void> = const { Cell::new(std::ptr::null_mut()) };
+    }
+
+    fn display() -> Option<*mut c_void> {
+        DISPLAY.with(|cell| {
+            if cell.get().is_null() {
+                install_error_handler();
+                // SAFETY: a null name opens $DISPLAY; the connection lives for the process.
+                cell.set(unsafe { XOpenDisplay(std::ptr::null()) });
+            }
+            let display = cell.get();
+            (!display.is_null()).then_some(display)
+        })
+    }
+
+    fn parent() -> Option<c_ulong> {
+        parent_switch("ferryx-parent-xid").map(|value| value as c_ulong)
+    }
+
+    fn xid(window: &Window) -> c_ulong {
+        window.window_handle()
+    }
+
+    pub fn embed(window: &Window) {
+        let (Some(parent), Some(display)) = (parent(), display()) else {
+            if parent().is_some() {
+                eprintln!("ferryx-engine: no X display; the window stays a top-level window");
+            }
+            return;
+        };
+        // Unmapped at this point, so the window manager never takes the window as its own: once
+        // it is a child of the Ferryx window it moves, stacks and closes with that window.
+        // SAFETY: both ids are live windows on this display; the call runs on the UI thread.
+        unsafe {
+            XReparentWindow(display, xid(window), parent, 0, 0);
+            XFlush(display);
+        }
+        focus_on_click::track(xid(window), parent);
+    }
+
+    pub fn handle(window: &Window) -> u64 {
+        xid(window)
+    }
+
+    fn move_resize(window: &Window, rect: PaneRect) {
+        let Some(display) = display() else { return };
+        // SAFETY: the window id is live while the CEF window is; UI thread only.
+        unsafe {
+            XMoveResizeWindow(
+                display,
+                xid(window),
+                rect.x,
+                rect.y,
+                rect.width.max(1) as c_uint,
+                rect.height.max(1) as c_uint,
+            );
+            XFlush(display);
+        }
+    }
+
+    pub fn place(window: &Window, rect: PaneRect, visible: bool) {
+        if parent().is_none() {
+            window.set_bounds(Some(&Rect { x: rect.x, y: rect.y, width: rect.width, height: rect.height }));
+        }
+        // Showing and hiding go through CEF, as on Windows: a window Views still believes hidden
+        // never paints. The pixel rectangle is applied after showing, so a show that restores
+        // the window's earlier size cannot undo it; Chromium follows the ConfigureNotify.
+        if !visible {
+            window.hide();
+        } else if window.is_visible() == 0 {
+            window.show();
+        }
+        if parent().is_some() {
+            move_resize(window, rect);
+        }
+    }
+
+    /// Puts the window back on top of the Ferryx window's other children (the GTK webview can
+    /// restack its own subwindows).
+    pub fn raise(window: &Window) {
+        let (Some(_), Some(display)) = (parent(), display()) else { return };
+        // SAFETY: as in `move_resize`.
+        unsafe {
+            XRaiseWindow(display, xid(window));
+            XFlush(display);
+        }
+    }
+
+    /// The window manager focuses the Ferryx toplevel on a click and never a child window of
+    /// another client, so the page would get clicks but no keys. A thread with its own X
+    /// connection watches XInput2 raw button releases (any client may select those on the root
+    /// window) and moves X keyboard focus to the engine window under the pointer, or back to the
+    /// Ferryx window when the click landed elsewhere in it.
+    mod focus_on_click {
+        use std::collections::HashSet;
+        use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void};
+        use std::sync::{Mutex, Once};
+
+        const REVERT_TO_PARENT: c_int = 2;
+        const GENERIC_EVENT: c_int = 35;
+        const XI_ALL_MASTER_DEVICES: c_int = 1;
+        const XI_RAW_BUTTON_RELEASE: c_int = 16;
+
+        /// Read only by Xlib, hence the underscores.
+        #[repr(C)]
+        struct XiEventMask {
+            _deviceid: c_int,
+            _mask_len: c_int,
+            _mask: *mut u8,
+        }
+
+        /// The leading fields of an `XGenericEventCookie`, inside a full-size `XEvent`.
+        #[repr(C)]
+        struct GenericEvent {
+            kind: c_int,
+            _serial: c_ulong,
+            _send_event: c_int,
+            _display: *mut c_void,
+            extension: c_int,
+            evtype: c_int,
+            _rest: [c_ulong; 20],
+        }
+
+        #[link(name = "X11")]
+        unsafe extern "C" {
+            fn XOpenDisplay(name: *const c_char) -> *mut c_void;
+            fn XDefaultRootWindow(display: *mut c_void) -> c_ulong;
+            fn XQueryExtension(
+                display: *mut c_void,
+                name: *const c_char,
+                opcode: *mut c_int,
+                event: *mut c_int,
+                error: *mut c_int,
+            ) -> c_int;
+            fn XNextEvent(display: *mut c_void, event: *mut GenericEvent) -> c_int;
+            fn XQueryPointer(
+                display: *mut c_void,
+                window: c_ulong,
+                root: *mut c_ulong,
+                child: *mut c_ulong,
+                root_x: *mut c_int,
+                root_y: *mut c_int,
+                x: *mut c_int,
+                y: *mut c_int,
+                mask: *mut c_uint,
+            ) -> c_int;
+            fn XGetInputFocus(display: *mut c_void, focus: *mut c_ulong, revert: *mut c_int) -> c_int;
+            fn XGetGeometry(
+                display: *mut c_void,
+                drawable: c_ulong,
+                root: *mut c_ulong,
+                x: *mut c_int,
+                y: *mut c_int,
+                width: *mut c_uint,
+                height: *mut c_uint,
+                border: *mut c_uint,
+                depth: *mut c_uint,
+            ) -> c_int;
+            fn XSetInputFocus(display: *mut c_void, focus: c_ulong, revert: c_int, time: c_ulong) -> c_int;
+            fn XFlush(display: *mut c_void) -> c_int;
+        }
+
+        #[link(name = "Xi")]
+        unsafe extern "C" {
+            fn XIQueryVersion(display: *mut c_void, major: *mut c_int, minor: *mut c_int) -> c_int;
+            fn XISelectEvents(display: *mut c_void, window: c_ulong, masks: *mut XiEventMask, count: c_int) -> c_int;
+        }
+
+        static PANES: Mutex<Option<(c_ulong, HashSet<c_ulong>)>> = Mutex::new(None);
+
+        pub fn track(window: c_ulong, parent: c_ulong) {
+            {
+                let mut panes = PANES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                panes.get_or_insert_with(|| (parent, HashSet::new())).1.insert(window);
+            }
+            static ONCE: Once = Once::new();
+            ONCE.call_once(|| {
+                if let Err(error) = std::thread::Builder::new().name("ferryx-x11-focus".into()).spawn(watch) {
+                    eprintln!("ferryx-engine: focus watcher not started: {error}");
+                }
+            });
+        }
+
+        /// Where keyboard focus should go after a click, given the Ferryx window's child under
+        /// the pointer (0 for Ferryx's own area, `None` outside the window) and the window
+        /// holding focus now: `None` leaves focus alone.
+        pub(super) fn focus_target(
+            parent: c_ulong,
+            panes: &HashSet<c_ulong>,
+            under_pointer: Option<c_ulong>,
+            focused: c_ulong,
+        ) -> Option<c_ulong> {
+            match under_pointer {
+                Some(child) if panes.contains(&child) => (focused != child).then_some(child),
+                Some(_) if panes.contains(&focused) => Some(parent),
+                _ => None,
+            }
+        }
+
+        fn watch() {
+            // SAFETY: this connection is opened, used and kept by this thread only.
+            let display = unsafe { XOpenDisplay(std::ptr::null()) };
+            if display.is_null() {
+                eprintln!("ferryx-engine: focus watcher has no X display");
+                return;
+            }
+            let (mut opcode, mut first_event, mut first_error) = (0, 0, 0);
+            let present = unsafe {
+                XQueryExtension(display, c"XInputExtension".as_ptr(), &mut opcode, &mut first_event, &mut first_error)
+            };
+            // Raw events need XI 2.0, and the server only sends them to a client that said so.
+            let (mut major, mut minor) = (2, 0);
+            if present == 0 || unsafe { XIQueryVersion(display, &mut major, &mut minor) } != 0 {
+                eprintln!("ferryx-engine: no XInput extension; clicking a page does not give it keyboard focus");
+                return;
+            }
+            let mut bits = [0u8; 4];
+            bits[(XI_RAW_BUTTON_RELEASE / 8) as usize] |= 1 << (XI_RAW_BUTTON_RELEASE % 8);
+            let mut mask =
+                XiEventMask { _deviceid: XI_ALL_MASTER_DEVICES, _mask_len: bits.len() as c_int, _mask: bits.as_mut_ptr() };
+            // SAFETY: `mask` and `bits` outlive the call; the root window belongs to `display`.
+            unsafe {
+                XISelectEvents(display, XDefaultRootWindow(display), &mut mask, 1);
+                XFlush(display);
+            }
+            loop {
+                let mut event = GenericEvent {
+                    kind: 0,
+                    _serial: 0,
+                    _send_event: 0,
+                    _display: std::ptr::null_mut(),
+                    extension: 0,
+                    evtype: 0,
+                    _rest: [0; 20],
+                };
+                // SAFETY: `event` is at least as large as an XEvent (24 longs).
+                unsafe { XNextEvent(display, &mut event) };
+                if event.kind != GENERIC_EVENT || event.extension != opcode || event.evtype != XI_RAW_BUTTON_RELEASE {
+                    continue;
+                }
+                let Some((parent, panes)) =
+                    PANES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+                else {
+                    continue;
+                };
+                let (mut root, mut child, mut mask) = (0, 0, 0);
+                let (mut root_x, mut root_y, mut x, mut y) = (0, 0, 0, 0);
+                let (mut gx, mut gy, mut width, mut height, mut border, mut depth) = (0, 0, 0, 0, 0, 0);
+                // SAFETY: plain out-parameters; a vanished parent makes the calls return 0.
+                let inside = unsafe {
+                    XQueryPointer(display, parent, &mut root, &mut child, &mut root_x, &mut root_y, &mut x, &mut y, &mut mask) != 0
+                        && XGetGeometry(display, parent, &mut root, &mut gx, &mut gy, &mut width, &mut height, &mut border, &mut depth) != 0
+                } && x >= 0
+                    && y >= 0
+                    && (x as c_uint) < width
+                    && (y as c_uint) < height;
+                let (mut focused, mut revert) = (0, 0);
+                unsafe { XGetInputFocus(display, &mut focused, &mut revert) };
+                let under_pointer = inside.then_some(child);
+                if let Some(target) = focus_target(parent, &panes, under_pointer, focused) {
+                    // SAFETY: `target` is a viewable window of this server; a stale id only
+                    // produces an X error the default handler logs.
+                    unsafe {
+                        XSetInputFocus(display, target, REVERT_TO_PARENT, 0);
+                        XFlush(display);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::focus_on_click::focus_target;
+        use std::collections::HashSet;
+
+        #[test]
+        fn a_click_moves_keyboard_focus_between_the_page_and_ferryx() {
+            let panes: HashSet<_> = [11, 12].into_iter().collect();
+            // Into a page that does not have focus yet.
+            assert_eq!(focus_target(1, &panes, Some(11), 1), Some(11));
+            // Into the page that already has it.
+            assert_eq!(focus_target(1, &panes, Some(11), 11), None);
+            // Onto the Ferryx UI while a page has focus.
+            assert_eq!(focus_target(1, &panes, Some(99), 12), Some(1));
+            assert_eq!(focus_target(1, &panes, Some(0), 11), Some(1));
+            // Onto the Ferryx UI while Ferryx has focus, and outside the window.
+            assert_eq!(focus_target(1, &panes, Some(99), 1), None);
+            assert_eq!(focus_target(1, &panes, None, 11), None);
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 mod imp {
     use super::*;
 

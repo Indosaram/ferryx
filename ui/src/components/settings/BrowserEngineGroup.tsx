@@ -79,6 +79,15 @@ function percentOf(progress: InstallProgress | null): number | null {
   return Math.max(0, Math.min(100, Math.floor((progress.receivedBytes / progress.totalBytes) * 100)));
 }
 
+/** The Chromium engine is installed but this session cannot run it (a native Wayland window). */
+function inactiveText(status: BrowserEngineStatus | null): string | null {
+  if (status?.state !== "installed" || !status.inactive) return null;
+  if (status.inactive === "wayland-session") {
+    return "Not used in this Wayland session: Chromium tabs need an X11 window. Start Ferryx with GDK_BACKEND=x11 to use it; until then browser tabs use the system webview.";
+  }
+  return "Not used in this session; browser tabs use the system webview.";
+}
+
 /** Installs or removes the on-demand Chromium engine that new browser tabs use when present. */
 export function BrowserEngineGroup() {
   const [status, setStatus] = useState<BrowserEngineStatus | null>(null);
@@ -203,6 +212,7 @@ export function BrowserEngineGroup() {
   const busy = busyAction !== null;
   const installed = status?.state === "installed";
   const previous = status?.state === "installed" ? status.previous ?? null : null;
+  const inactive = inactiveText(status);
 
   return (
     <div id="browser-engine" className="scroll-mt-4">
@@ -258,6 +268,12 @@ export function BrowserEngineGroup() {
             </Button>
           </div>
         </SettingRow>
+
+        {inactive ? (
+          <p className="border-b border-border/40 py-2 text-[11px] text-muted-foreground" data-testid="browser-engine-inactive">
+            {inactive}
+          </p>
+        ) : null}
 
         <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 border-b border-border/40 py-3 text-[11px]">
           <dt className="text-muted-foreground">Download size</dt>

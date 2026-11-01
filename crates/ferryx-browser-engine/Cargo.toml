@@ -61,3 +61,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+[target.'cfg(target_os = "linux")'.dependencies]
+# The namespace-sandbox probe (engine/linux_sandbox.rs).
+libc = "0.2"
+# Writes engine-linux-<arch>.zip (src/bin/bundle.rs); same version the Ferryx installer reads.
+zip = { version = "4.6", default-features = false, features = ["deflate"] }

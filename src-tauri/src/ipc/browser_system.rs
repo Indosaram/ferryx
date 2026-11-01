@@ -129,7 +129,7 @@ async fn apply_zoom<R: Runtime>(
     zoom: f64,
 ) -> Result<f64, IpcError> {
     let clamped = manager.set_zoom(browser_id, zoom)?;
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     if crate::browser::cef_engine::is_cef_tab(browser_id) {
         crate::browser::cef_engine::system::set_zoom(browser_id, clamped)?;
         return Ok(clamped);
@@ -204,7 +204,7 @@ pub async fn apply_site_zoom<R: Runtime>(
 
 /// Starts or continues a native find in a Chromium tab. The count arrives as
 /// `browser_find_result` events; the returned value only says the search was sent.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub fn cef_find(browser_id: &str, query: &str, backwards: bool) -> Result<BrowserFindResult, IpcError> {
     use crate::browser::cef_engine::system;
     if query.trim().is_empty() {
@@ -218,16 +218,16 @@ pub fn cef_find(browser_id: &str, query: &str, backwards: bool) -> Result<Browse
     Ok(BrowserFindResult { match_count: last as usize, found: last > 0 })
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub fn cef_clear_find(browser_id: &str) -> Result<(), IpcError> {
     CEF_FIND_QUERIES.lock().remove(browser_id);
     CEF_FIND_COUNTS.lock().remove(browser_id);
     Ok(crate::browser::cef_engine::system::stop_find(browser_id)?)
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 static CEF_FIND_QUERIES: LazyLock<Mutex<std::collections::HashMap<String, String>>> = LazyLock::new(Default::default);
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 static CEF_FIND_COUNTS: LazyLock<Mutex<std::collections::HashMap<String, u32>>> = LazyLock::new(Default::default);
 
 // ---------------------------------------------------------------------------------------------
@@ -242,7 +242,7 @@ pub async fn cmd_browser_print<R: Runtime>(
     manager: State<'_, Arc<BrowserManager>>,
     browser_id: String,
 ) -> Result<(), IpcError> {
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     if crate::browser::cef_engine::is_cef_tab(&browser_id) {
         return Ok(crate::browser::cef_engine::system::print(&browser_id)?);
     }
@@ -265,7 +265,7 @@ pub async fn cmd_browser_save_pdf<R: Runtime>(
     browser_id: String,
 ) -> Result<bool, IpcError> {
     let state = manager.get_state(&browser_id)?;
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     if crate::browser::cef_engine::is_cef_tab(&browser_id) {
         let title = state.title.clone().unwrap_or_default();
         let suggested = format!("{}.pdf", if title.trim().is_empty() { "page" } else { title.trim() });
@@ -312,7 +312,7 @@ pub async fn cmd_browser_download_pause(download_id: String, pause: bool) -> Res
 
 /// Registry ids of live Chromium engine downloads by (profile, engine download id). Engine
 /// ids restart with each engine process, so the registry gets a fresh id per download.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 static CEF_DOWNLOADS: LazyLock<Mutex<std::collections::HashMap<(String, u32), String>>> =
     LazyLock::new(Default::default);
 
@@ -355,7 +355,7 @@ pub(crate) fn apply_download_update(
 // ---------------------------------------------------------------------------------------------
 
 /// Handles the engine events this module owns; returns the event back when it is not one.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub fn handle_cef_event<R: Runtime>(
     app: &AppHandle<R>,
     manager: &Arc<BrowserManager>,
@@ -438,7 +438,7 @@ pub fn handle_cef_event<R: Runtime>(
 }
 
 /// Runs a page's file chooser as a native dialog. Blocking.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn pick_files<R: Runtime>(
     app: &AppHandle<R>,
     mode: ferryx_browser_engine_protocol::FileDialogMode,
@@ -551,7 +551,7 @@ async fn answer_page_permission<R: Runtime>(
     browser_id: &str,
     state: ferryx_browser_engine_protocol::PagePermission,
 ) {
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     if crate::browser::cef_engine::is_cef_tab(browser_id) {
         if let Err(error) = crate::browser::cef_engine::system::notification_permission(browser_id, state) {
             tracing::debug!(%error, "could not answer a page notification request");

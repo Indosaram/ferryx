@@ -50,7 +50,7 @@ fn profile_sink<R: tauri::Runtime>(
         .map_err(|error| import_failed("no-data-dir", error.message))?;
     let staging = StagingWriter::new(pending_dir(&data_dir, profile.as_str()), source_name);
 
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     let (cef_cache_dir, notify): (Option<PathBuf>, crate::browser::import::cookie_sink::EngineNotify) = {
         let installed = crate::browser::cef_engine::engine_dir(&data_dir).is_some();
         let dir = installed.then(|| data_dir.join("browser-cef").join(profile.as_str()));
@@ -60,7 +60,7 @@ fn profile_sink<R: tauri::Runtime>(
             Box::new(move |path: &std::path::Path| crate::browser::cef_engine::import_cookies(&name, path)),
         )
     };
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     let (cef_cache_dir, notify): (Option<PathBuf>, crate::browser::import::cookie_sink::EngineNotify) =
         (None, Box::new(|_: &std::path::Path| false));
 

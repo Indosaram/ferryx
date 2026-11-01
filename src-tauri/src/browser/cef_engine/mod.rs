@@ -1,4 +1,4 @@
-//! Chromium (CEF) engine for browser panes on Windows and macOS.
+//! Chromium (CEF) engine for browser panes on Windows, macOS and Linux (X11/XWayland).
 //!
 //! Used once the engine is installed (Settings > Browser, see `engine_install`), or when
 //! `FERRYX_CEF_ENGINE_DIR` names a local engine build. One engine process serves every tab of
@@ -6,7 +6,8 @@
 //! drives it with the line protocol in `ferryx-browser-engine-protocol`: commands on the
 //! engine's stdin, events on its stdout. Each tab is a Chrome-style window the engine keeps
 //! over the tab's pane: a child window of the Ferryx window on Windows, a borderless window
-//! ordered directly above it on macOS. Closing stdin ends the engine.
+//! ordered directly above it on macOS, a child X window of the Ferryx toplevel on Linux.
+//! Closing stdin ends the engine.
 
 use crate::browser::{BrowserError, LogicalRect};
 pub use ferryx_browser_engine_protocol::Event;
@@ -28,6 +29,10 @@ use macos as platform;
 mod windows;
 #[cfg(target_os = "windows")]
 use windows as platform;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as platform;
 
 pub mod system;
 
@@ -36,6 +41,8 @@ pub use platform::ENGINE_EXE;
 pub use windows::grant_sandbox_read;
 #[cfg(target_os = "macos")]
 pub use macos::window_number;
+#[cfg(target_os = "linux")]
+pub use linux::{parent_xid, WAYLAND_REASON};
 
 /// A pane rectangle in the units the engine places windows in: pixels relative to the Ferryx
 /// window on Windows, screen points from the top-left on macOS.

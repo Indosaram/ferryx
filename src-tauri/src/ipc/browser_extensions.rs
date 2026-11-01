@@ -81,11 +81,11 @@ pub async fn cmd_browser_extensions_open_page<R: tauri::Runtime>(
     profile: Option<String>,
     page: ExtensionPage,
 ) -> Result<BrowserState, IpcError> {
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     {
         open_page(&app, manager.inner(), profile, page).await
     }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
         let _ = (app, manager, profile, page);
         Err(IpcError::new(
@@ -96,7 +96,7 @@ pub async fn cmd_browser_extensions_open_page<R: tauri::Runtime>(
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 async fn open_page<R: tauri::Runtime>(
     app: &AppHandle<R>,
     manager: &Arc<BrowserManager>,

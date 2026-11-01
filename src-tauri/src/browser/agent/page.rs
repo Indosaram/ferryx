@@ -13,11 +13,11 @@ use crate::ipc::error::IpcError;
 
 /// Whether the tab is served by the Chromium engine.
 pub fn is_engine_tab(browser_id: &str) -> bool {
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     {
         crate::browser::cef_engine::is_cef_tab(browser_id)
     }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
         let _ = browser_id;
         false
@@ -31,7 +31,7 @@ pub async fn eval<R: tauri::Runtime>(
     browser_id: &str,
     script: String,
 ) -> Result<String, BrowserError> {
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     if is_engine_tab(browser_id) {
         return super::cef_backend::eval(browser_id, &script).await;
     }
@@ -47,7 +47,7 @@ pub async fn trusted_act(
     action: &BrowserAutomationAction,
     selector: Option<&str>,
 ) -> Result<bool, BrowserError> {
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     if is_engine_tab(browser_id) {
         return super::cef_backend::act(browser_id, action, selector).await;
     }
@@ -62,7 +62,7 @@ pub async fn capture<R: tauri::Runtime>(
     browser_id: &str,
     options: SnapshotOptions,
 ) -> Result<BrowserSnapshot, IpcError> {
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     if is_engine_tab(browser_id) {
         return Ok(super::cef_backend::capture(browser_id).await?);
     }

@@ -286,7 +286,7 @@ pub fn site_decision(profile: &str, origin: &str, kind: PermissionKind) -> SiteP
 }
 
 /// A Chromium engine request; the engine holds it until [`decide`] or a dismissal.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub fn cef_request(profile: &str, tab: String, request_id: u64, kinds: Vec<PermissionKind>, origin: String) {
     let engine_profile = profile.to_string();
     let answer = Answer::new(Box::new(move |allow| {
@@ -305,7 +305,7 @@ pub fn cef_request(profile: &str, tab: String, request_id: u64, kinds: Vec<Permi
 }
 
 /// The engine dropped a request on its own (navigation, the tab closed).
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub fn cef_dismissed(profile: &str, request_id: u64) {
     let dismissed = STATE.lock().broker.dismiss_external(&format!("{profile}:{request_id}"));
     if let Some((prompt, answer)) = dismissed {
@@ -315,7 +315,7 @@ pub fn cef_dismissed(profile: &str, request_id: u64) {
 }
 
 /// The engine reports the tab's camera (`video`) and microphone (`audio`) use.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub fn cef_media_access(tab: &str, video: bool, audio: bool) {
     let payload = {
         let mut state = STATE.lock();

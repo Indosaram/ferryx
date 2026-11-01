@@ -66,9 +66,12 @@ pub async fn cmd_browser_engine_rollback<R: tauri::Runtime>(
     app: AppHandle<R>,
 ) -> Result<engine_install::EngineStatus, IpcError> {
     let data_dir = crate::ipc::browser::engine_data_dir(&app)?;
+    let inactive = crate::ipc::browser::engine_inactive_reason(&app);
     crate::ipc::run_blocking(move || {
         let _guard = engine_install::InstallGuard::acquire().map_err(install_error)?;
-        engine_install::rollback(&data_dir, crate::ipc::browser::ENGINE_EXECUTABLE).map_err(install_error)
+        let status =
+            engine_install::rollback(&data_dir, crate::ipc::browser::ENGINE_EXECUTABLE).map_err(install_error)?;
+        Ok(engine_install::mark_inactive(status, inactive))
     })
     .await
 }
