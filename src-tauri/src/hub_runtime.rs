@@ -1378,9 +1378,25 @@ fn checkpoint_status_fields(
     (status.checkpoint_id, status.checkpoint_age_secs, block)
 }
 
-/// Open goals of this machine's archived supervisor. Filled by the adoption code.
-fn status_adoptable_goals() -> Option<Vec<ferryx_hub::control::AdoptableGoal>> {
-    None
+/// The status `adoptable` field from this machine's adoptable archived goals
+/// ([`adoptable_goals`]): absent when there are none.
+fn status_adoptable(
+    goals: Vec<ferryx_hub::adoption::AdoptableGoal>,
+) -> Option<Vec<ferryx_hub::control::AdoptableGoal>> {
+    if goals.is_empty() {
+        return None;
+    }
+    Some(
+        goals
+            .into_iter()
+            .map(|goal| ferryx_hub::control::AdoptableGoal {
+                goal_id: goal.goal_id,
+                title: goal.title,
+                supervisor_id: goal.supervisor_id,
+                from_machine: goal.from_machine,
+            })
+            .collect(),
+    )
 }
 
 /// The supervisor lease as `status` and the snapshot report it. `pool` is the open hub
@@ -1392,6 +1408,7 @@ async fn live_lease(pool: Option<&ferryx_hub::goals::SqlitePool>) -> ferryx_hub:
     };
     let mut lease = lease_status(lease_gate().as_deref());
     lease.unmapped_hosts = unmapped_hosts;
+    lease.adoptable = status_adoptable(adoptable_goals().await);
     // Only the holder's own term pushes fences; a standby's last gate is a past term.
     if lease.role == ferryx_hub::control::LeaseRole::Holder {
         lease.unreachable_hosts = slot_get(&FENCE_GATE)
@@ -1424,7 +1441,6 @@ fn lease_status_with(
         checkpoint_id,
         checkpoint_age,
         promotion_block_reason,
-        adoptable: status_adoptable_goals(),
         observe_dropped: observe_dropped(),
         ..LiveLease::default()
     };
@@ -5171,6 +5187,30 @@ mod tests {
         let unleased = lease_status(None);
         assert_eq!(unleased.role, ferryx_hub::control::LeaseRole::Holder, "no lease client runs the hub");
         assert_eq!(unleased.fence, 0);
+    }
+
+    /// The status `adoptable` field carries the archived goals the owner can adopt, pinned
+    /// to its wire fields, and is absent when there are none.
+    #[test]
+    fn the_lease_status_reports_the_adoptable_archived_goals() {
+        let none = ferryx_hub::control::LiveLease { adoptable: status_adoptable(Vec::new()), ..Default::default() };
+        let wire = serde_json::to_value(&none).unwrap();
+        assert!(wire.get("adoptable").is_none(), "{wire}");
+
+        let goal = ferryx_hub::adoption::AdoptableGoal {
+            goal_id: "goal-1".into(),
+            title: "Ship it".into(),
+            from_machine: "mach-a".into(),
+            supervisor_id: "sup-1".into(),
+            project_name: "ferryx".into(),
+            run_state: "running".into(),
+        };
+        let some = ferryx_hub::control::LiveLease { adoptable: status_adoptable(vec![goal]), ..Default::default() };
+        let wire = serde_json::to_value(&some).unwrap();
+        assert_eq!(
+            wire["adoptable"],
+            json!([{"goalId": "goal-1", "title": "Ship it", "supervisorId": "sup-1", "fromMachine": "mach-a"}])
+        );
     }
 
     /// A standby with a recorded checkpoint reports its id, its age and why it does not
