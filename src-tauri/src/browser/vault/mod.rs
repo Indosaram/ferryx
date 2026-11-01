@@ -14,7 +14,7 @@ pub mod reauth;
 pub mod store;
 
 pub use autofill::{
-    fill_script, is_capture_envelope, parse_submission, PendingPrompts, SubmittedLogin,
+    fill_for_page, fill_script, is_capture_envelope, parse_submission, PendingPrompts, SubmittedLogin,
     VaultSavePrompt, BROWSER_VAULT_SAVE_PROMPT_EVENT,
 };
 pub use origin::{credential_origin_matches, origin_of_page, CredentialOrigin};

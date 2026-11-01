@@ -15,7 +15,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::browser::vault::generator::{generate_password, PasswordGeneratorOptions};
 use crate::browser::vault::{
-    self, fill_script, keystore, PendingPrompts, VaultError, VaultItemSummary, VaultSavePrompt,
+    self, fill_for_page, keystore, PendingPrompts, VaultError, VaultItemSummary, VaultSavePrompt,
     VaultStore, BROWSER_VAULT_SAVE_PROMPT_EVENT,
 };
 use crate::browser::{BrowserEngine, BrowserError, BrowserManager};
@@ -224,15 +224,8 @@ pub async fn cmd_browser_vault_fill<R: tauri::Runtime>(
 ) -> Result<(), IpcError> {
     let state = manager.get_state(&browser_id)?;
     let url = state.url.clone();
-    let script = with_store(&app, move |vault| {
-        let credential = store(vault).credential(&id)?;
-        // The tab's current origin, re-checked here and again inside the page.
-        if !crate::browser::vault::credential_origin_matches(credential.origin.as_str(), &url) {
-            return Err(VaultError::InvalidArgument("this login is for another site".into()));
-        }
-        Ok(fill_script(&credential.origin, &credential.username, &credential.password))
-    })
-    .await?;
+    // The tab's current origin, checked here and again inside the page.
+    let script = with_store(&app, move |vault| fill_for_page(&store(vault).credential(&id)?, &url)).await?;
     match state.engine {
         BrowserEngine::Chromium => fill_chromium(&browser_id, script.to_string()),
         BrowserEngine::System => {

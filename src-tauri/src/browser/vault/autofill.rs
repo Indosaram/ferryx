@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use super::origin::{origin_of_page, CredentialOrigin};
-use super::store::{SaveKind, VaultError, VaultItemSummary, VaultStore};
+use super::origin::{credential_origin_matches, origin_of_page, CredentialOrigin};
+use super::store::{SaveKind, VaultCredential, VaultError, VaultItemSummary, VaultStore};
 
 /// Envelope kind the capture script posts.
 pub const FORM_SUBMITTED_KIND: &str = "formSubmitted";
@@ -150,41 +150,26 @@ impl PendingPrompts {
 
 const FILL_PLACEHOLDER: &str = "__FERRYX_FILL__";
 
-/// Fills a login form in the top frame of the page it runs in (an isolated world). It does
-/// nothing unless the frame is the top frame and its origin is exactly `origin`, so a page
-/// that navigated away, or a cross-origin iframe, never receives the secret. Values are set
-/// through the native value setter and announced with input/change events, as typing would.
-const FILL_SCRIPT: &str = r#"(() => {
-  const fill = __FERRYX_FILL__;
-  let topFrame = false;
-  try { topFrame = window.top === window; } catch (error) { topFrame = false; }
-  if (!topFrame) return 'not-top';
-  if (location.origin !== fill.origin) return 'origin-mismatch';
-  const visible = (input) => !input.disabled && input.type !== 'hidden' && !input.readOnly;
-  const passwords = Array.from(document.querySelectorAll('input[type="password"]')).filter(visible);
-  const password = passwords.find((input) => input.autocomplete !== 'new-password') || passwords[0];
-  const scope = (password && password.form) || document;
-  const fields = Array.from(scope.querySelectorAll('input')).filter(visible);
-  const before = password ? fields.slice(0, fields.indexOf(password)).reverse() : fields;
-  const username = fields.find((input) => input.autocomplete === 'username')
-    || before.find((input) => ['text', 'email', 'tel', ''].includes(input.type));
-  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-  const put = (input, value) => {
-    input.focus();
-    setter.call(input, value);
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    input.dispatchEvent(new Event('change', { bubbles: true }));
-  };
-  if (username && fill.username) put(username, fill.username);
-  if (password) put(password, fill.password);
-  return password ? 'filled' : (username ? 'username-only' : 'no-fields');
-})()"#;
+/// Fills a login form in the top frame of the page it runs in (an isolated world): nothing
+/// unless the frame is the top frame and its origin is exactly `origin`, and only fields the user
+/// can see (`fill.js`).
+const FILL_SCRIPT: &str = include_str!("fill.js");
 
 /// The fill script for one login, with its values embedded as escaped JSON.
 pub fn fill_script(origin: &CredentialOrigin, username: &str, password: &str) -> Zeroizing<String> {
     let value = serde_json::json!({ "origin": origin.as_str(), "username": username, "password": password });
     let literal = Zeroizing::new(crate::browser::popup::embed_value(&value));
     Zeroizing::new(FILL_SCRIPT.replace(FILL_PLACEHOLDER, &literal))
+}
+
+/// The fill script for a saved credential on the tab showing `page_url`, or an error when the
+/// page is not exactly the credential's origin (another scheme, host or port). An https login
+/// is never sent to an http page. The page re-checks its own origin before it fills.
+pub fn fill_for_page(credential: &VaultCredential, page_url: &str) -> Result<Zeroizing<String>, VaultError> {
+    if !credential_origin_matches(credential.origin.as_str(), page_url) {
+        return Err(VaultError::InvalidArgument("this login is for another site".into()));
+    }
+    Ok(fill_script(&credential.origin, &credential.username, &credential.password))
 }
 
 #[cfg(test)]
@@ -267,5 +252,57 @@ mod tests {
         assert!(script.contains(r#""origin":"https://example.com""#));
         assert!(script.contains("window.top === window"));
         assert!(script.contains("location.origin !== fill.origin"));
+    }
+
+    fn credential(origin: &str) -> VaultCredential {
+        VaultCredential {
+            origin: super::super::origin::canonicalize_origin(origin).unwrap(),
+            username: Zeroizing::new("ada".into()),
+            password: Zeroizing::new("pw-7f3c".into()),
+        }
+    }
+
+    #[test]
+    fn a_login_fills_only_on_its_exact_origin() {
+        let saved = credential("https://example.com");
+        let script = fill_for_page(&saved, "https://example.com/login?next=/").unwrap();
+        assert!(script.contains(r#""origin":"https://example.com""#));
+        assert!(script.contains("pw-7f3c"));
+        for page in [
+            "http://example.com/login",
+            "https://example.com:8443/login",
+            "https://login.example.com/",
+            "https://example.com.evil.test/",
+            "https://evil.test/?u=https://example.com",
+            "about:blank",
+            "data:text/html,<form><input type=password></form>",
+            "file:///tmp/login.html",
+        ] {
+            assert!(
+                matches!(fill_for_page(&saved, page), Err(VaultError::InvalidArgument(_))),
+                "{page} must not receive the https://example.com login"
+            );
+        }
+        let insecure = credential("http://intranet.test");
+        assert!(fill_for_page(&insecure, "http://intranet.test/").is_ok());
+        assert!(fill_for_page(&insecure, "https://intranet.test/").is_err());
+    }
+
+    #[test]
+    fn the_fill_script_survives_the_engine_line_protocol() {
+        // The Chromium engine joins a command onto one line, so a `//` comment would swallow
+        // the rest of the script there.
+        assert!(!FILL_SCRIPT.lines().any(|line| line.trim_start().starts_with("//")));
+        let origin = origin_of_page("https://example.com/").unwrap();
+        let script = fill_script(&origin, "ada", "line\nbreak");
+        let fill = ferryx_browser_engine_protocol::Command::Fill { tab: "b1".into(), script: script.to_string() };
+        let ferryx_browser_engine_protocol::Command::Fill { script: sent, .. } =
+            ferryx_browser_engine_protocol::Command::parse(&fill.to_line()).unwrap()
+        else {
+            panic!("a fill line parses back as a fill");
+        };
+        assert_eq!(sent.matches("__FERRYX_FILL__").count(), 0);
+        assert!(sent.trim_end().ends_with("})()"));
+        assert!(sent.contains(r#""password":"line\nbreak""#));
     }
 }
