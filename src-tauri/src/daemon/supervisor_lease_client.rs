@@ -24,8 +24,8 @@ use crate::daemon::supervisor_lease_role::{
     StandDownReason,
 };
 use crate::remote::protocol::{
-    SupervisorLeaseAck, SupervisorLeaseAcquire, SupervisorLeaseRelease, SupervisorLeaseRenew,
-    SupervisorLeaseRequest,
+    SupervisorLeaseAck, SupervisorLeaseAcquire, SupervisorLeaseOutcome, SupervisorLeaseRelease,
+    SupervisorLeaseQuery, SupervisorLeaseRenew, SupervisorLeaseRequest,
 };
 use crate::remote::relay_client::{LeaseCallError, RelayClient};
 
@@ -125,6 +125,9 @@ struct StateInner {
     machine: parking_lot::Mutex<RoleMachine>,
     role_tx: watch::Sender<Role>,
     clock: LeaseClock,
+    /// The running client's command queue (weak, so the state never keeps the client alive);
+    /// `None` for a state without a client.
+    commands: Option<mpsc::WeakSender<LeaseCommand>>,
 }
 
 /// Cheap, cloneable view of the hub role shared with every side-effect gate.
@@ -134,7 +137,12 @@ pub struct SupervisorLeaseState {
 }
 
 impl SupervisorLeaseState {
-    fn new(account: Option<String>, machine: RoleMachine, clock: LeaseClock) -> Self {
+    fn new(
+        account: Option<String>,
+        machine: RoleMachine,
+        clock: LeaseClock,
+        commands: Option<mpsc::WeakSender<LeaseCommand>>,
+    ) -> Self {
         let (role_tx, _) = watch::channel(machine.role().clone());
         Self {
             inner: Arc::new(StateInner {
@@ -142,6 +150,7 @@ impl SupervisorLeaseState {
                 machine: parking_lot::Mutex::new(machine),
                 role_tx,
                 clock,
+                commands,
             }),
         }
     }
@@ -222,9 +231,17 @@ impl crate::agent_control::fence::SupervisorFenceSource for SupervisorLeaseState
         SupervisorLeaseState::current_fence(self)
     }
 
-    /// A daemon refused this holder's fence: the hub stands down through the lease's own stop.
+    /// A daemon refused this holder's fence: the hub stands down through the lease's own stop,
+    /// and the client releases the lease (no more renewals, auto-acquire paused) so a later
+    /// start cannot resurrect the generation on the stale fence.
     fn stand_down(&self) {
         crate::hub_runtime::stand_down_now();
+        let commands = self.inner.commands.as_ref().and_then(mpsc::WeakSender::upgrade);
+        if let Some(commands) = commands {
+            if let Err(error) = commands.try_send(LeaseCommand::FenceStale) {
+                tracing::warn!("stale-fence release not queued: {error}");
+            }
+        }
     }
 }
 
@@ -232,7 +249,13 @@ impl crate::agent_control::fence::SupervisorFenceSource for SupervisorLeaseState
 enum LeaseCommand {
     Acquire { force: bool, reply: oneshot::Sender<Role> },
     Release { reply: oneshot::Sender<Role> },
+    /// Release reserving the fence for `target` (a move); replies whether the relay released.
+    ReleaseTo { target: String, reply: oneshot::Sender<bool> },
+    /// The relay's view of the lease (a move's first step); `None` without an answer.
+    Query { reply: oneshot::Sender<Option<SupervisorLeaseAck>> },
     ResetCapability { reply: oneshot::Sender<Role> },
+    /// A daemon refused the held fence: release without a caller waiting.
+    FenceStale,
 }
 
 /// Handle to a running lease client: the shared state plus acquire/release commands.
@@ -270,6 +293,24 @@ impl SupervisorLeaseHandle {
         self.command(|reply| LeaseCommand::Release { reply }).await
     }
 
+    /// [`Self::release`] reserving the released fence for `target` (the move target), with the
+    /// last published checkpoint. True when the relay released the lease.
+    pub async fn release_to(&self, target: &str) -> bool {
+        let (reply, wait) = oneshot::channel();
+        let command = LeaseCommand::ReleaseTo { target: target.to_owned(), reply };
+        if self.commands.send(command).await.is_err() {
+            return false;
+        }
+        wait.await.unwrap_or(false)
+    }
+
+    /// Asks the relay who holds the lease; `None` when it could not be asked.
+    pub async fn query(&self) -> Option<SupervisorLeaseAck> {
+        let (reply, wait) = oneshot::channel();
+        self.commands.send(LeaseCommand::Query { reply }).await.ok()?;
+        wait.await.ok().flatten()
+    }
+
     /// Forgets the capability latch (what `ferryx hub lease reset-capability` triggers).
     pub async fn reset_capability(&self) -> Option<Role> {
         self.command(|reply| LeaseCommand::ResetCapability { reply }).await
@@ -292,6 +333,8 @@ pub struct LeaseClientConfig {
     /// `supervisor-lease.json`; `None` disables persistence.
     pub lease_file: Option<PathBuf>,
     pub clock: LeaseClock,
+    /// Checkpoints this machine holds and publishes (acquire/renew/release carry their ids).
+    pub checkpoints: Arc<crate::supervisor_checkpoint::CheckpointState>,
 }
 
 impl LeaseClientConfig {
@@ -303,6 +346,7 @@ impl LeaseClientConfig {
             account,
             lease_file: lease_file_path(),
             clock: system_clock(),
+            checkpoints: crate::supervisor_checkpoint::shared(),
         }
     }
 }
@@ -327,8 +371,8 @@ where
         persisted,
         (config.clock)(),
     );
-    let state = SupervisorLeaseState::new(config.account, machine, config.clock.clone());
     let (commands, command_rx) = mpsc::channel(8);
+    let state = SupervisorLeaseState::new(config.account, machine, config.clock.clone(), Some(commands.downgrade()));
     // Subscribed before the task starts, so no capability change can slip past it.
     let capability = transport.subscribe_capability();
     let driver = Driver {
@@ -337,6 +381,9 @@ where
         hub,
         lease_file: config.lease_file,
         clock: config.clock,
+        checkpoints: config.checkpoints,
+        release_target: parking_lot::Mutex::new(None),
+        released: parking_lot::Mutex::new(None),
     };
     let task = tokio::spawn(driver.run(initial, command_rx, capability));
     (SupervisorLeaseHandle { state, commands }, task)
@@ -348,6 +395,11 @@ struct Driver<T: ?Sized, H: ?Sized> {
     hub: Arc<H>,
     lease_file: Option<PathBuf>,
     clock: LeaseClock,
+    checkpoints: Arc<crate::supervisor_checkpoint::CheckpointState>,
+    /// `reserved_for` of the next release (a move), taken when it is sent.
+    release_target: parking_lot::Mutex<Option<String>>,
+    /// Whether the last release sent was acknowledged as released.
+    released: parking_lot::Mutex<Option<bool>>,
 }
 
 impl<T: LeaseTransport + ?Sized, H: HubSwitch + ?Sized> Driver<T, H> {
@@ -357,7 +409,7 @@ impl<T: LeaseTransport + ?Sized, H: HubSwitch + ?Sized> Driver<T, H> {
         mut commands: mpsc::Receiver<LeaseCommand>,
         mut capability: watch::Receiver<Option<bool>>,
     ) {
-        self.execute(initial).await;
+        self.execute(initial, false).await;
         let mut session_seen = false;
         let first = *capability.borrow_and_update();
         self.on_capability(first, &mut session_seen).await;
@@ -389,12 +441,30 @@ impl<T: LeaseTransport + ?Sized, H: HubSwitch + ?Sized> Driver<T, H> {
                 command = commands.recv() => {
                     let Some(command) = command else { break };
                     let (event, reply) = match command {
-                        LeaseCommand::Acquire { force, reply } => (Event::AcquireRequested { force }, reply),
-                        LeaseCommand::Release { reply } => (Event::ReleaseRequested, reply),
-                        LeaseCommand::ResetCapability { reply } => (Event::CapabilityReset, reply),
+                        LeaseCommand::Acquire { force, reply } => (Event::AcquireRequested { force }, Some(reply)),
+                        LeaseCommand::Release { reply } => (Event::ReleaseRequested, Some(reply)),
+                        LeaseCommand::ResetCapability { reply } => (Event::CapabilityReset, Some(reply)),
+                        LeaseCommand::FenceStale => (Event::ReleaseRequested, None),
+                        LeaseCommand::ReleaseTo { target, reply } => {
+                            *self.release_target.lock() = Some(target);
+                            *self.released.lock() = None;
+                            self.feed_with(Event::ReleaseRequested, true).await;
+                            self.release_target.lock().take();
+                            let _ = reply.send(self.released.lock().take().unwrap_or(false));
+                            continue;
+                        }
+                        LeaseCommand::Query { reply } => {
+                            let query = SupervisorLeaseRequest::SupervisorLeaseQuery(SupervisorLeaseQuery {
+                                request_id: request_id(),
+                            });
+                            let _ = reply.send(self.transport.call(query).await.ok());
+                            continue;
+                        }
                     };
-                    self.feed(event).await;
-                    let _ = reply.send(self.state.role());
+                    self.feed_with(event, true).await;
+                    if let Some(reply) = reply {
+                        let _ = reply.send(self.state.role());
+                    }
                 }
                 _ = ticker.tick() => {
                     if self.consume_reset_marker().await {
@@ -419,18 +489,35 @@ impl<T: LeaseTransport + ?Sized, H: HubSwitch + ?Sized> Driver<T, H> {
     }
 
     async fn feed(&self, event: Event) {
+        self.feed_with(event, false).await;
+    }
+
+    /// `explicit`: a person's or the hub's command, not the machine's own cadence.
+    async fn feed_with(&self, event: Event, explicit: bool) {
         let actions = self.state.handle(event);
-        self.execute(actions).await;
+        self.execute(actions, explicit).await;
     }
 
     /// Executes actions in order; acks of sent requests go back into the machine with the
-    /// request's send time and their actions run in the same burst (bounded).
-    async fn execute(&self, actions: Vec<Action>) {
+    /// request's send time and their actions run in the same burst (bounded). A standby whose
+    /// owner stopped the hub never takes part in auto-promotion: only `explicit` acquires go out.
+    async fn execute(&self, actions: Vec<Action>, explicit: bool) {
         let mut queue: VecDeque<Action> = actions.into();
         let mut sends = 0;
         while let Some(action) = queue.pop_front() {
-            // `renew` selects the ack event: RenewAck for a renew, AcquireAck for an acquire.
-            let (request, renew) = match action {
+            // Auto-promotion: a standby asks at its cadence with its newest checkpoint and the
+            // relay (single writer) grants a free lease only against the recorded checkpoint;
+            // a machine whose owner stopped the hub does not take part.
+            if matches!(action, Action::SendAcquire { .. })
+                && !explicit
+                && matches!(self.state.role(), Role::Standby { .. })
+                && self.checkpoints.hub_stopped()
+            {
+                continue;
+            }
+            // `renew` selects the ack event: RenewAck for a renew, AcquireAck for an acquire;
+            // `reported` is the checkpoint id a renew carries.
+            let (request, renew, reported) = match action {
                 Action::StartHub => {
                     self.hub.start_hub();
                     continue;
@@ -446,30 +533,38 @@ impl<T: LeaseTransport + ?Sized, H: HubSwitch + ?Sized> Driver<T, H> {
                 Action::SendAcquire { force } => (
                     SupervisorLeaseRequest::SupervisorLeaseAcquire(SupervisorLeaseAcquire {
                         request_id: request_id(),
-                        checkpoint_id: None,
+                        // The relay grants a takeover only against the checkpoint it recorded.
+                        checkpoint_id: self.checkpoints.local().map(|local| local.id),
                         force,
                     }),
                     false,
+                    None,
                 ),
-                Action::SendRenew { fence } => (
-                    SupervisorLeaseRequest::SupervisorLeaseRenew(SupervisorLeaseRenew {
+                Action::SendRenew { fence } => {
+                    let reported = self.checkpoints.unreported();
+                    let renew = SupervisorLeaseRequest::SupervisorLeaseRenew(SupervisorLeaseRenew {
                         request_id: request_id(),
                         fence,
-                        checkpoint_id: None,
-                    }),
-                    true,
-                ),
+                        checkpoint_id: reported.clone(),
+                    });
+                    (renew, true, reported)
+                }
                 Action::SendRelease { fence } => {
                     let release = SupervisorLeaseRequest::SupervisorLeaseRelease(SupervisorLeaseRelease {
                         request_id: request_id(),
                         fence,
-                        checkpoint_id: None,
-                        reserved_for: None,
+                        checkpoint_id: self.checkpoints.published(),
+                        reserved_for: self.release_target.lock().take(),
                     });
                     // A release ack has no role effect; failures leave the relay lease to expire.
-                    if let Err(error) = self.transport.call(release).await {
-                        tracing::warn!("supervisor lease release not acknowledged: {error}");
-                    }
+                    let released = match self.transport.call(release).await {
+                        Ok(ack) => ack.outcome == SupervisorLeaseOutcome::Released,
+                        Err(error) => {
+                            tracing::warn!("supervisor lease release not acknowledged: {error}");
+                            false
+                        }
+                    };
+                    *self.released.lock() = Some(released);
                     continue;
                 }
             };
@@ -479,8 +574,18 @@ impl<T: LeaseTransport + ?Sized, H: HubSwitch + ?Sized> Driver<T, H> {
             }
             sends += 1;
             let sent_at = (self.clock)();
+            let was_holder = matches!(self.state.role(), Role::Holder { fence } if fence > 0);
             match self.transport.call(request).await {
                 Ok(ack) => {
+                    if renew {
+                        if let Some(id) = reported.filter(|id| ack.checkpoint_id.as_deref() == Some(id.as_str())) {
+                            self.checkpoints.mark_reported(&id);
+                        }
+                    } else if let Some(refusal) = crate::supervisor_checkpoint::refusal_of(&ack) {
+                        self.checkpoints.note_refusal(Some(refusal));
+                    } else if matches!(ack.outcome, SupervisorLeaseOutcome::Granted | SupervisorLeaseOutcome::Renewed) {
+                        self.checkpoints.note_granted(ack.checkpoint_id.as_deref(), was_holder);
+                    }
                     let ack = LeaseAck::from_wire(&ack);
                     let event = if renew {
                         Event::RenewAck { sent_at, ack }
@@ -636,6 +741,7 @@ mod tests {
             account: account.map(str::to_owned),
             lease_file,
             clock,
+            checkpoints: Arc::default(),
         }
     }
 
@@ -902,7 +1008,7 @@ mod tests {
             Now { mono: base.mono + offset, wall: base.wall + offset }
         });
         let (machine, _) = RoleMachine::new(RoleConfig::default(), "mach-a", account.is_some(), persisted, clock());
-        (SupervisorLeaseState::new(account.map(str::to_owned), machine, clock), secs)
+        (SupervisorLeaseState::new(account.map(str::to_owned), machine, clock, None), secs)
     }
 
     #[test]
@@ -944,5 +1050,42 @@ mod tests {
         assert!(gate.stood_down());
         install_source(None);
         crate::hub_runtime::install_lease_stop(None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_fence_stand_down_releases_and_stops_renewing() {
+        use crate::agent_control::fence::SupervisorFenceSource;
+        let relay = FakeRelay::new(Some(true));
+        let hub = Arc::new(FakeHub::default());
+        let (clock, _) = test_clock();
+        let (handle, task) =
+            spawn_supervisor_lease_client(config(clock, Some("acct"), None), Arc::clone(&relay), Arc::clone(&hub)).await;
+        wait_role(&handle, |r| *r == Role::Holder { fence: 7 }).await;
+
+        SupervisorFenceSource::stand_down(handle.state());
+
+        wait_role(&handle, |r| *r == Role::standby_unknown()).await;
+        // Several renew periods later (paused time): nothing renewed, re-acquired or restarted.
+        tokio::time::sleep(VALID_FOR * 3).await;
+        assert_eq!(handle.state().role(), Role::standby_unknown());
+        assert!(!handle.is_holder_now());
+        assert_eq!(handle.current_fence(), 0);
+        let sent = relay.sent.lock();
+        let released = sent
+            .iter()
+            .position(|(_, r)| {
+                matches!(r, SupervisorLeaseRequest::SupervisorLeaseRelease(SupervisorLeaseRelease { fence: 7, .. }))
+            })
+            .expect("the stale fence was released");
+        assert_eq!(released + 1, sent.len(), "no renew or acquire after the release: {:?}", &sent[released..]);
+        drop(sent);
+        let events = hub.events.lock();
+        let stopped = events
+            .iter()
+            .position(|e| *e == Some(StandDownReason::Released))
+            .expect("the hub was stood down by the release");
+        assert!(events[stopped..].iter().all(Option::is_some), "the hub was never started again");
+        drop(events);
+        task.abort();
     }
 }

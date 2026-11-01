@@ -1217,31 +1217,26 @@ async fn follow_lease<F, Fut>(
     }
 }
 
-/// `<hub.sqlite>.incoming`: a hub database staged by an import for the next promotion.
-fn staged_database(database: &std::path::Path) -> std::path::PathBuf {
-    let mut name = database.as_os_str().to_owned();
-    name.push(".incoming");
-    std::path::PathBuf::from(name)
+/// `hub.sqlite.incoming` next to `database`: what a checkpoint import staged.
+fn staged_database(database: &std::path::Path) -> Option<std::path::PathBuf> {
+    database
+        .parent()
+        .map(|dir| dir.join(ferryx_hub::checkpoint_import::INCOMING_DB))
 }
 
-/// Closes `pool` and moves a staged database over `database`. Returns whether one was staged.
+/// Closes `pool` when a checkpoint import staged a database next to `database`, so the next
+/// hub open swaps it in through the import's own swap (the old file is kept as
+/// `hub.sqlite.pre-move-<ts>`, a failed swap is rolled back). Returns whether one was staged.
 /// Only called while no generation runs, so nothing else writes the closed pool.
-async fn swap_staged_database(
-    pool: &ferryx_hub::goals::SqlitePool,
-    database: &std::path::Path,
-) -> Result<bool, HubError> {
-    let incoming = staged_database(database);
+async fn close_for_staged_swap(pool: &ferryx_hub::goals::SqlitePool, database: &std::path::Path) -> bool {
+    let Some(incoming) = staged_database(database) else {
+        return false;
+    };
     if !tokio::fs::try_exists(&incoming).await.unwrap_or(false) {
-        return Ok(false);
+        return false;
     }
     pool.close().await;
-    for suffix in ["-wal", "-shm"] {
-        let mut name = database.as_os_str().to_owned();
-        name.push(suffix);
-        let _ = tokio::fs::remove_file(std::path::PathBuf::from(name)).await;
-    }
-    tokio::fs::rename(&incoming, database).await?;
-    Ok(true)
+    true
 }
 
 /// Promotion (Standby -> Holder): reopens the hub on a staged database first, then runs a
@@ -1254,9 +1249,9 @@ async fn promote_generation() -> Option<Generation> {
         .database_path
         .clone()
         .unwrap_or_else(ferryx_hub::hub::default_database_path);
-    match swap_staged_database(&launch.hub.pool, &database).await {
-        Ok(false) => {}
-        Ok(true) => match Hub::open(launch.config.clone(), launch.bridge.clone()).await {
+    if close_for_staged_swap(&launch.hub.pool, &database).await {
+        // Hub::open applies the staged swap before its pool exists.
+        match Hub::open(launch.config.clone(), launch.bridge.clone()).await {
             Ok(hub) => {
                 if let Err(error) = ferryx_hub::lanes::kibitzer::ensure_schema(&hub.pool).await {
                     tracing::warn!(%error, "kibitzer schema was not created");
@@ -1269,10 +1264,6 @@ async fn promote_generation() -> Option<Generation> {
                 tracing::warn!(%error, "hub did not reopen on the staged database");
                 return None;
             }
-        },
-        Err(error) => {
-            tracing::warn!(%error, "staged hub database was not swapped in");
-            return None;
         }
     }
     let forced_on = std::env::var("FERRYX_HUB").ok().as_deref() == Some("on");
@@ -3676,19 +3667,27 @@ mod tests {
         let database = dir.path().join("hub.sqlite");
         let local = ferryx_hub::storage::connect(&database).await.unwrap();
         assert!(sv::identities(&local).await.unwrap().is_empty());
-        let incoming = staged_database(&database);
+        let incoming = staged_database(&database).unwrap();
         let imported = ferryx_hub::storage::connect(&incoming).await.unwrap();
         sv::provision_owner(&imported, "slack:T1:U-owner", "ferryx", "github.com/example/ferryx", "host-b", "/repo/.git")
             .await
             .unwrap();
         imported.close().await;
 
-        assert!(swap_staged_database(&local, &database).await.unwrap());
+        assert!(close_for_staged_swap(&local, &database).await);
         assert!(local.is_closed(), "the old pool is closed before the swap");
+        // The promotion reopens through the import's swap, as Hub::open does.
+        let reopened = ferryx_hub::checkpoint_import::open_with_staged_swap(&database, 1_800_000_000)
+            .await
+            .unwrap();
         assert!(!incoming.exists());
-        let reopened = ferryx_hub::storage::connect(&database).await.unwrap();
         assert_eq!(sv::identities(&reopened).await.unwrap().len(), 1, "the imported supervisor is there");
-        assert!(!swap_staged_database(&reopened, &database).await.unwrap(), "nothing staged: nothing swapped");
+        let backup = dir.path().join("hub.sqlite.pre-move-1800000000");
+        assert!(backup.exists(), "the replaced database is kept as a pre-move backup");
+        let kept = ferryx_hub::storage::connect(&backup).await.unwrap();
+        assert!(sv::identities(&kept).await.unwrap().is_empty(), "the backup is the old database");
+        kept.close().await;
+        assert!(!close_for_staged_swap(&reopened, &database).await, "nothing staged: nothing swapped");
         assert!(!reopened.is_closed());
     }
 }

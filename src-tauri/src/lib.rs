@@ -20,6 +20,7 @@ pub mod cli;
 pub mod clipboard_image;
 pub mod daemon;
 pub mod hub_runtime;
+pub mod supervisor_checkpoint;
 pub mod dag;
 pub use dag::journal as dag_journal;
 pub mod host_boot;
