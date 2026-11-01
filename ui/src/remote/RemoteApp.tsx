@@ -28,6 +28,7 @@ import {
   type RemoteWorkspaceModel,
 } from "./RemoteSessionList";
 import { BUILD_STAMP } from "../lib/buildStamp";
+import { isMobileCompanion } from "../lib/clientRuntime";
 import { MobileTopBar, type MobileTopBarActivityState } from "./chat/MobileTopBar";
 import { MobileSessionSwitcherSheet } from "./chat/MobileSessionSwitcherSheet";
 import { MobileOverflowSheet } from "./chat/MobileOverflowSheet";
@@ -295,6 +296,8 @@ const CONFIRMATION_TIMEOUT_MS = 6000;
 const TUNNEL_PROBE_TIMEOUT_MS = 5000;
 /** A dropped events socket is shown only once it stays down this long; brief blips stay quiet. */
 const CONNECTION_STRIP_DELAY_MS = 3000;
+/** The key a shell overlay's history entry carries; the phone screens use their own key. */
+const OVERLAY_HISTORY_KEY = "ferryxOverlay";
 /** How long a tapped phone alert waits for its session before it is reported as gone. */
 const ALERT_TAP_TIMEOUT_MS = 10000;
 
@@ -1469,6 +1472,7 @@ export const RemoteHostConnection: React.FC<{
 
   const [browserSessions, setBrowserSessions] = useState<Array<{ browserId: string; title?: string; url?: string }>>([]);
   const [selectedBrowserId, setSelectedBrowserId] = useState<string | null>(null);
+  const [browserListFailed, setBrowserListFailed] = useState(false);
   // First render always speaks to the relay; a verified probe swaps this for a direct endpoint.
   const [transport, setTransport] = useState<CandidateEndpoint>(() => relayEndpoint(relayUrl));
   const remoteHostState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
@@ -2003,10 +2007,22 @@ export const RemoteHostConnection: React.FC<{
           }
         }
       }
-    } catch {
-      // Ignore network errors
+      setBrowserListFailed(!response.ok && response.status !== 404);
+    } catch (error) {
+      console.warn("Browser session list failed", error);
+      setBrowserListFailed(true);
     }
   }, [token, model.context.workspaceId, model.context.worktreeSlug, transportBaseUrl, selectedBrowserId]);
+  // A host that publishes browser sessions for this worktree makes the browser view reachable.
+  // Read through a ref: picking a browser must not refetch the list.
+  const fetchBrowserSessionsRef = useRef(fetchBrowserSessions);
+  fetchBrowserSessionsRef.current = fetchBrowserSessions;
+  const browserContextWorkspace = model.context.workspaceId;
+  const browserContextWorktree = model.context.worktreeSlug;
+  useEffect(() => {
+    if (!token || !browserContextWorkspace) return;
+    void fetchBrowserSessionsRef.current();
+  }, [token, browserContextWorkspace, browserContextWorktree, transportBaseUrl]);
 
   useEffect(() => () => {
     workspaceRefreshVersionRef.current += 1;
@@ -3139,6 +3155,39 @@ export const RemoteHostConnection: React.FC<{
   const phoneBack = phoneNav.back;
   // A selection backed out of on the Session screen ("Back to Worktrees") leaves no session to
   // show, so the screen returns to the home it came from.
+  /* Platform back closes the topmost shell overlay before it walks the phone screens: an open
+     sheet, drawer or picker owns one history entry, and a popstate while it is open closes it.
+     Closing it any other way pops that entry so back never revisits a closed overlay. */
+  const overlayOpen = !desktopSidebar
+    && (selectorOpen || switcherOpen || menuOpen || phoneAlertsOpen || hostDrawerOpen || inboxOpen || accountSheetOpen);
+  const overlayEntryRef = useRef(false);
+  useEffect(() => {
+    if (!overlayOpen) {
+      if (overlayEntryRef.current) {
+        overlayEntryRef.current = false;
+        if (window.history.state?.[OVERLAY_HISTORY_KEY]) window.history.back();
+      }
+      return;
+    }
+    if (!overlayEntryRef.current) {
+      overlayEntryRef.current = true;
+      const base = window.history.state && typeof window.history.state === "object" ? window.history.state : {};
+      window.history.pushState({ ...base, [OVERLAY_HISTORY_KEY]: true }, "");
+    }
+    const onPop = (event: PopStateEvent) => {
+      if ((event.state as Record<string, unknown> | null)?.[OVERLAY_HISTORY_KEY]) return;
+      overlayEntryRef.current = false;
+      setSelectorOpen(false);
+      setSwitcherOpen(false);
+      setMenuOpen(false);
+      setPhoneAlertsOpen(false);
+      setHostDrawerOpen(false);
+      setInboxOpen(false);
+      setAccountSheetOpen(false);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [overlayOpen]);
   /** The worktree a phone tap is opening while its tunnel is acquired; shown at once on the Session screen. */
   const [phoneOpening, setPhoneOpening] = useState<string | null>(null);
   const openPhoneSessionRef = useRef<(option: AccountWorktreeOption) => void>(() => {});
@@ -5045,6 +5094,8 @@ export const RemoteHostConnection: React.FC<{
     </Suspense>
   );
 
+  const canOpenBrowser = Boolean(token) && browserSessions.length > 0;
+  const phoneAlertsSupported = !isMobileCompanion() && typeof navigator !== "undefined" && "serviceWorker" in navigator;
   const CONNECTION_SHORT: Record<string, string> = {
     relay: "Relay",
     lan: "LAN",
@@ -5271,19 +5322,19 @@ export const RemoteHostConnection: React.FC<{
       ) : (
       <>
       {desktopSidebar ? (
-      <header className="flex h-7 shrink-0 items-center justify-between border-b border-chat-border bg-chat-surface px-2.5">
+      <header className="flex h-7 [@media(pointer:coarse)]:h-14 shrink-0 items-center justify-between border-b border-chat-border bg-chat-surface px-2.5">
         <button
           type="button"
           aria-label="Change workspace context"
           aria-expanded={selectorOpen}
           onClick={() => setSelectorOpen((open) => !open)}
-          className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden rounded px-1 py-0.5 -mx-1 text-left transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden rounded px-1 py-0.5 -mx-1 [@media(pointer:coarse)]:min-h-11 text-left transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           <img src="/icon-192.png" alt="Ferryx" width={16} height={16} className="size-4 shrink-0 rounded object-contain" />
           {/* The brand word is the first thing to go when the status cluster grows;
               the workspace context stays legible longer than the app name. */}
           <span className="hidden shrink-0 text-xs font-semibold leading-none sm:inline">Ferryx Remote</span>
-          <span className="min-w-0 truncate font-mono text-[11px] leading-none text-chat-foreground-secondary" aria-label="Current desktop context">{contextName(model.context)}</span>
+          <span className="min-w-0 truncate font-mono text-xs leading-none text-chat-foreground-secondary [@media(pointer:coarse)]:text-sm" aria-label="Current desktop context">{contextName(model.context)}</span>
           <ChevronDown aria-hidden="true" className={`size-3 shrink-0 text-chat-foreground-secondary transition-transform ${selectorOpen ? "rotate-180" : ""}`} />
         </button>
         {accountPreselection ? null : (
@@ -5320,24 +5371,25 @@ export const RemoteHostConnection: React.FC<{
                 });
                 focusSessionInput();
               }}
-              className="flex h-5 items-center gap-1 rounded bg-status-warning/15 px-1.5 text-[11px] font-medium text-status-warning transition-colors hover:bg-status-warning/25 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
+              className="flex h-5 [@media(pointer:coarse)]:h-11 items-center gap-1 rounded bg-status-warning/15 px-1.5 [@media(pointer:coarse)]:px-3 text-xs font-medium text-status-warning transition-colors hover:bg-status-warning/25 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
             >
-              <span className="size-1.5 rounded-full bg-status-warning ring-2 ring-status-warning/20 motion-reduce:animate-none" aria-hidden="true" />
+              <span className="size-1.5 rounded-full bg-status-warning" aria-hidden="true" />
               <span className="truncate max-w-28 sm:max-w-40">{firstWaiting.label}</span>
               {waitingCount > 1 ? (
-                <span className="rounded bg-status-warning/20 px-1 text-[10px] font-mono leading-tight">
+                <span className="rounded bg-status-warning/20 px-1 text-xs font-mono leading-tight">
                   {waitingCount}
                 </span>
               ) : null}
             </button>
           ) : null}
 
-          <div className="flex items-center gap-1 border-l border-chat-border/40 pl-2">
+          <div role="group" aria-label="View" className="flex items-center gap-1 [@media(pointer:coarse)]:gap-2 border-l border-chat-border/40 pl-2">
             <button
               type="button"
               data-testid="remote-view-mode-chat"
+              aria-pressed={viewMode === "chat"}
               onClick={() => setViewMode("chat")}
-              className={`flex h-5 items-center rounded px-1.5 text-[11px] font-medium transition-colors ${
+              className={`flex h-5 [@media(pointer:coarse)]:h-11 items-center rounded px-1.5 [@media(pointer:coarse)]:px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
                 viewMode === "chat"
                   ? "bg-chat-surface-raised text-chat-foreground"
                   : "text-chat-foreground-secondary hover:text-chat-foreground"
@@ -5348,8 +5400,9 @@ export const RemoteHostConnection: React.FC<{
             <button
               type="button"
               data-testid="remote-view-mode-terminal"
+              aria-pressed={viewMode === "terminal"}
               onClick={() => setViewMode("terminal")}
-              className={`flex h-5 items-center rounded px-1.5 text-[11px] font-medium transition-colors ${
+              className={`flex h-5 [@media(pointer:coarse)]:h-11 items-center rounded px-1.5 [@media(pointer:coarse)]:px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
                 viewMode === "terminal"
                   ? "bg-chat-surface-raised text-chat-foreground"
                   : "text-chat-foreground-secondary hover:text-chat-foreground"
@@ -5371,7 +5424,7 @@ export const RemoteHostConnection: React.FC<{
           pickerOpen={selectorOpen}
           onTogglePicker={() => setSelectorOpen((open) => !open)}
           attention={mobileAttention}
-          viewMode={viewMode as "chat" | "terminal"}
+          viewMode={viewMode === "browser" ? "chat" : viewMode}
           onViewModeChange={setViewMode}
           sessionCount={terminalTabs.length >= 1 ? terminalTabs.length : undefined}
           inbox={model.context.workspaceId ? { count: remoteInbox.needsYou, open: inboxOpen, onOpen: () => setInboxOpen(true) } : undefined}
@@ -5482,7 +5535,7 @@ export const RemoteHostConnection: React.FC<{
           accountPreselection && creationError ? (
             <>
               {accountPickerStatus}
-              <p role="alert" className="px-2 py-1 text-[11px] text-destructive">{creationError}</p>
+              <p role="alert" className="px-2 py-1 text-sm text-chat-foreground">{creationError}</p>
             </>
           ) : accountPickerStatus
         }
@@ -5603,31 +5656,24 @@ export const RemoteHostConnection: React.FC<{
             </div>
           ) : viewMode === "browser" ? renderLazy(
             <div className="flex-1 flex flex-col min-h-0 bg-chat-screen overflow-hidden">
-              {browserSessions.length > 0 && (
-                <div className="flex items-center gap-1.5 px-2 py-1 bg-chat-surface border-b border-chat-border text-xs overflow-x-auto shrink-0">
-                  <span className="text-chat-foreground-secondary text-[11px] shrink-0">Browsers:</span>
-                  {browserSessions.map((s) => (
+              {browserSessions.length > 1 && (
+                <div role="group" aria-label="Browsers" className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-chat-border bg-chat-surface px-2 py-1">
+                  {browserSessions.map((session) => (
                     <button
-                      key={s.browserId}
+                      key={session.browserId}
                       type="button"
-                      data-testid={`select-browser-${s.browserId}`}
-                      onClick={() => setSelectedBrowserId(s.browserId)}
-                      className={`px-2 py-0.5 rounded text-[11px] font-medium transition shrink-0 ${
-                        selectedBrowserId === s.browserId
-                          ? "bg-chat-primary text-white"
-                          : "bg-chat-surface-raised text-chat-foreground-secondary hover:bg-chat-surface-hover hover:text-chat-foreground"
+                      data-testid={`select-browser-${session.browserId}`}
+                      aria-pressed={selectedBrowserId === session.browserId}
+                      onClick={() => setSelectedBrowserId(session.browserId)}
+                      className={`flex h-11 shrink-0 items-center rounded-lg px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+                        selectedBrowserId === session.browserId
+                          ? "bg-chat-surface-raised text-chat-foreground"
+                          : "text-chat-foreground-secondary hover:bg-chat-surface-hover hover:text-chat-foreground"
                       }`}
                     >
-                      {s.title || s.browserId}
+                      {session.title || "Browser"}
                     </button>
                   ))}
-                  <button
-                    type="button"
-                    onClick={() => void fetchBrowserSessions()}
-                    className="ml-auto text-[11px] text-chat-foreground-secondary hover:text-chat-foreground"
-                  >
-                    Refresh
-                  </button>
                 </div>
               )}
 
@@ -5636,30 +5682,30 @@ export const RemoteHostConnection: React.FC<{
                   baseUrl={transportBaseUrl}
                   browserId={selectedBrowserId}
                   deviceToken={token}
-                  onBack={() => setViewMode("terminal")}
+                  onBack={() => setViewMode("chat")}
                 />
               ) : (
-                <div className="flex flex-col items-center justify-center flex-1 p-4 text-center text-chat-foreground-secondary gap-3">
-                  <p className="text-sm font-medium">No active browser session selected</p>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="text"
-                      placeholder="Enter browser ID..."
-                      data-testid="remote-manual-browser-id-input"
-                      className="px-2 py-1 text-xs rounded bg-chat-surface border border-chat-border text-chat-foreground font-mono"
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229 && (e.target as HTMLInputElement).value.trim()) {
-                          setSelectedBrowserId((e.target as HTMLInputElement).value.trim());
-                        }
-                      }}
-                    />
+                <div className="flex flex-1 flex-col items-center justify-center gap-4 p-6 text-center text-chat-foreground">
+                  <p className="text-sm">
+                    {browserListFailed
+                      ? "Couldn't load the browsers open on your computer."
+                      : "No browser is open in this worktree on your computer."}
+                  </p>
+                  <div className="flex flex-wrap items-center justify-center gap-2">
                     <button
                       type="button"
                       data-testid="remote-fetch-browsers-btn"
                       onClick={() => void fetchBrowserSessions()}
-                      className="px-2.5 py-1 text-xs rounded bg-chat-surface-raised text-chat-foreground font-medium hover:bg-chat-surface-hover transition"
+                      className="flex h-11 items-center rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                     >
-                      Refresh Sessions
+                      Check again
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setViewMode("chat")}
+                      className="flex h-11 items-center rounded-lg border border-chat-border px-4 text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    >
+                      Back to chat
                     </button>
                   </div>
                 </div>
@@ -5786,7 +5832,8 @@ export const RemoteHostConnection: React.FC<{
         }}
         onNewWorktree={createWorktree}
         onOpenMachines={isAccountMode ? undefined : () => setHostDrawerOpen(true)}
-        onOpenPhoneAlerts={token ? () => setPhoneAlertsOpen(true) : undefined}
+        onOpenBrowser={canOpenBrowser ? () => setViewMode("browser") : undefined}
+        onOpenPhoneAlerts={token && phoneAlertsSupported ? () => setPhoneAlertsOpen(true) : undefined}
         onSignOut={isAccountMode ? handleSignOut : undefined}
         connectionLabel={
           accountPreselection
