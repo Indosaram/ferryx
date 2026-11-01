@@ -17,6 +17,8 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 vi.mock("./SiteSettingsGroup", () => ({ SiteSettingsGroup: () => null }));
 // The agent access group has its own tests and talks to the backend on mount.
 vi.mock("./BrowserAgentAccessGroup", () => ({ BrowserAgentAccessGroup: () => null }));
+// The default-browser group has its own tests and queries the OS on mount.
+vi.mock("./DefaultBrowserGroup", () => ({ DefaultBrowserGroup: () => null }));
 vi.mock("../../lib/browserVault", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/browserVault")>()),
   getVaultStatus: vi.fn(async () => ({ available: true, backend: "keychain" as const })),
