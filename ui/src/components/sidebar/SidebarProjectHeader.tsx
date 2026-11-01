@@ -95,7 +95,7 @@ export function SidebarProjectHeader({
         title={title}
         className={cn(
           "flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none",
-          touch ? "text-[14px]" : "text-[12px]",
+          touch ? "min-h-11 text-sm" : "text-[12px]",
         )}
       >
         <Folder className={cn(touch ? "size-4" : "size-3.5", "shrink-0")} />

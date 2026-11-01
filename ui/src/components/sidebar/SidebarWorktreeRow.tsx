@@ -84,7 +84,7 @@ export function SidebarWorktreeRow({
         <span
           className={cn(
             "min-w-0 truncate font-semibold leading-tight",
-            touch ? "text-[14px]" : "text-[12px]",
+            touch ? "text-sm" : "text-[12px]",
             touch ? "text-chat-foreground" : live.active ? "text-foreground" : "text-worktree-sidebar-foreground",
           )}
         >

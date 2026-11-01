@@ -307,7 +307,7 @@ describe("remote sidebar drawn by the desktop sidebar view", () => {
     const drawerRows = within(sidebarRoot()).getAllByTestId("remote-sidebar-row").map((row) => row.textContent);
     const touchRow = rowButton(machineSection(MACHINE_A), "main");
     expect(touchRow).toHaveClass("min-h-11");
-    expect(within(touchRow).getByText("main")).toHaveClass("text-[14px]");
+    expect(within(touchRow).getByText("main")).toHaveClass("text-sm");
     cleanup();
 
     desktopViewport();
