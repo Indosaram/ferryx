@@ -4,9 +4,10 @@ import {
   ArrowRight,
   ArrowUp,
   CornerDownLeft,
+  Lock,
   SlidersHorizontal,
 } from "lucide-react";
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 export type DockModifierState = "off" | "oneshot" | "locked";
 
@@ -51,18 +52,41 @@ export function modifierPrefix(modifiers: DockModifiers): string {
 
 export type TerminalInputMode = "direct" | "line";
 
+/** Shrink of the visual viewport below the layout viewport that counts as an open soft keyboard. */
+const KEYBOARD_MIN_SHRINK_PX = 120;
+
+/** True while a soft keyboard covers part of the layout viewport. */
+export function useSoftKeyboardOpen(): boolean {
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+    const update = () => setOpen(window.innerHeight - viewport.height > KEYBOARD_MIN_SHRINK_PX);
+    update();
+    viewport.addEventListener("resize", update);
+    return () => viewport.removeEventListener("resize", update);
+  }, []);
+  return open;
+}
+
 type MobileKeyDockProps = {
   onSendKey: (key: string) => void;
   /** Controlled modifier state; the dock keeps its own when omitted. */
   modifiers?: DockModifiers;
   onModifiersChange?: (modifiers: DockModifiers) => void;
-  /** Shows the Direct/Line input toggle when both are provided. */
+  /** Shows the Line input toggle when both are provided. */
   inputMode?: TerminalInputMode;
   onInputModeChange?: (mode: TerminalInputMode) => void;
+  /** One row only (navigation keys move behind More), for when a text field already takes space. */
+  compact?: boolean;
+  /** The soft keyboard already sits over the home indicator, so the bottom safe-area inset is dropped. */
+  keyboardOpen?: boolean;
 };
 
 /** Keys that already carry their chord and ignore latched modifiers. */
 const FIXED_CHORD_ACTIONS = new Set(["ctrl-c", "ctrl-d", "ctrl-z"]);
+
+const ARROW_ICON = "size-4";
 
 export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({
   onSendKey,
@@ -70,6 +94,8 @@ export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({
   onModifiersChange,
   inputMode,
   onInputModeChange,
+  compact = false,
+  keyboardOpen = false,
 }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [ownModifiers, setOwnModifiers] = useState<DockModifiers>(NO_DOCK_MODIFIERS);
@@ -82,12 +108,12 @@ export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({
   };
 
   const vibrate = () => {
-    if ("vibrate" in navigator) {
-      try {
-        navigator.vibrate(15);
-      } catch {
-        // Haptics are optional; a refusing platform simply stays silent.
-      }
+    if (!("vibrate" in navigator)) return;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    try {
+      navigator.vibrate(15);
+    } catch {
+      // Haptics are optional; a refusing platform simply stays silent.
     }
   };
 
@@ -110,11 +136,15 @@ export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({
     onSendKey(`${prefix}${action}`);
   };
 
+  const showNavigationRow = !compact || isExpanded;
+
   return (
-    <div className="w-full bg-card border-t border-border select-none touch-manipulation z-30 pb-[env(safe-area-inset-bottom)]">
-      {/* Expanded utility row */}
+    <div
+      data-testid="mobile-key-dock"
+      className={`z-30 w-full select-none touch-manipulation border-t border-chat-border bg-chat-surface ${keyboardOpen ? "" : "pb-safe"}`}
+    >
       {isExpanded && (
-        <div className="flex gap-1.5 px-2 pt-2 pb-1 overflow-x-auto no-scrollbar text-xs font-mono">
+        <div data-testid="mobile-key-dock-more" className="grid grid-cols-7 gap-1 px-2 pt-2">
           <KeyButton label="~" onClick={() => triggerKey("~")} />
           <KeyButton label="`" onClick={() => triggerKey("`")} />
           <KeyButton label="|" onClick={() => triggerKey("|")} />
@@ -123,8 +153,8 @@ export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({
           <KeyButton label="-" onClick={() => triggerKey("-")} />
           <KeyButton label="_" onClick={() => triggerKey("_")} />
           <KeyButton label="=" onClick={() => triggerKey("=")} />
-          <KeyButton label="PgUp" onClick={() => triggerKey("pageup")} />
-          <KeyButton label="PgDn" onClick={() => triggerKey("pagedown")} />
+          <KeyButton label="PgUp" ariaLabel="Page up" onClick={() => triggerKey("pageup")} />
+          <KeyButton label="PgDn" ariaLabel="Page down" onClick={() => triggerKey("pagedown")} />
           <KeyButton label="Home" onClick={() => triggerKey("home")} />
           <KeyButton label="End" onClick={() => triggerKey("end")} />
           <KeyButton label="Ctrl-Z" onClick={() => triggerKey("ctrl-z")} />
@@ -132,53 +162,49 @@ export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({
         </div>
       )}
 
-      {/* Primary essential row */}
-      <div className="flex items-center justify-between gap-1 px-2 py-1.5 overflow-x-auto no-scrollbar">
-        <div className="flex items-center gap-1.5">
-          <ModifierButton label="Ctrl" state={modifiers.ctrl} onClick={() => toggleModifier("ctrl")} />
-          <ModifierButton label="Alt" state={modifiers.alt} onClick={() => toggleModifier("alt")} />
-          <KeyButton label="Esc" onClick={() => triggerKey("esc")} />
-          <KeyButton label="Tab" onClick={() => triggerKey("tab")} />
-          <KeyButton
-            label="Ctrl-C"
-            highlight
-            onClick={() => triggerKey("ctrl-c")}
-            className="font-bold text-destructive-foreground border-destructive/50 bg-destructive/20"
-          />
-        </div>
+      <div className="grid grid-cols-7 gap-1 px-2 pt-1.5">
+        <KeyButton label="Esc" onClick={() => triggerKey("esc")} />
+        <KeyButton label="Tab" onClick={() => triggerKey("tab")} />
+        <ModifierButton label="Ctrl" state={modifiers.ctrl} onClick={() => toggleModifier("ctrl")} />
+        <ModifierButton label="Alt" state={modifiers.alt} onClick={() => toggleModifier("alt")} />
+        <ModifierButton label="Shift" state={modifiers.shift} onClick={() => toggleModifier("shift")} />
+        <KeyButton label="Ctrl-C" onClick={() => triggerKey("ctrl-c")} className="font-bold text-chat-danger" />
+        <KeyButton
+          icon={<SlidersHorizontal className="size-4" aria-hidden="true" />}
+          active={isExpanded}
+          pressed={isExpanded}
+          onClick={() => setIsExpanded(!isExpanded)}
+          title="More keys"
+          ariaLabel="More keys"
+        />
+      </div>
 
-        <div className="flex items-center gap-1">
-          <KeyButton icon={<ArrowLeft size={14} />} ariaLabel="Left" onClick={() => triggerKey("left")} />
-          <KeyButton icon={<ArrowUp size={14} />} ariaLabel="Up" onClick={() => triggerKey("up")} />
-          <KeyButton icon={<ArrowDown size={14} />} ariaLabel="Down" onClick={() => triggerKey("down")} />
-          <KeyButton icon={<ArrowRight size={14} />} ariaLabel="Right" onClick={() => triggerKey("right")} />
-          <ModifierButton label="Shift" state={modifiers.shift} onClick={() => toggleModifier("shift")} />
+      {showNavigationRow ? (
+        <div data-testid="mobile-key-dock-navigation" className="grid grid-cols-7 gap-1 px-2 pt-1">
+          <KeyButton icon={<ArrowLeft className={ARROW_ICON} aria-hidden="true" />} ariaLabel="Left" onClick={() => triggerKey("left")} />
+          <KeyButton icon={<ArrowUp className={ARROW_ICON} aria-hidden="true" />} ariaLabel="Up" onClick={() => triggerKey("up")} />
+          <KeyButton icon={<ArrowDown className={ARROW_ICON} aria-hidden="true" />} ariaLabel="Down" onClick={() => triggerKey("down")} />
+          <KeyButton icon={<ArrowRight className={ARROW_ICON} aria-hidden="true" />} ariaLabel="Right" onClick={() => triggerKey("right")} />
           <KeyButton
-            icon={<CornerDownLeft size={14} />}
+            icon={<CornerDownLeft className={ARROW_ICON} aria-hidden="true" />}
             ariaLabel="Enter"
             title="Enter"
             onClick={() => triggerKey("enter")}
-          />
-          <KeyButton
-            icon={<SlidersHorizontal size={13} />}
-            active={isExpanded}
-            onClick={() => setIsExpanded(!isExpanded)}
-            title="More keys"
-            ariaLabel="More keys"
+            className="col-span-2"
           />
           {inputMode !== undefined && onInputModeChange ? (
             <KeyButton
-              label={inputMode === "line" ? "Line" : "Direct"}
+              label="Line"
               active={inputMode === "line"}
               pressed={inputMode === "line"}
-              ariaLabel="Line input mode"
               title={inputMode === "line" ? "Line input: edit a whole line, then send it" : "Direct input: every key goes straight to the terminal"}
               testId="remote-terminal-input-mode-toggle"
               onClick={() => onInputModeChange(inputMode === "line" ? "direct" : "line")}
             />
           ) : null}
         </div>
-      </div>
+      ) : null}
+      <div className="h-1.5" aria-hidden="true" />
     </div>
   );
 };
@@ -196,11 +222,18 @@ function ModifierButton({
     <KeyButton
       label={label}
       active={state !== "off"}
-      pressed={state === "locked" ? true : state === "oneshot" ? "mixed" : false}
+      pressed={state !== "off"}
       dataState={state}
       onClick={onClick}
-      title={state === "locked" ? `${label} locked` : undefined}
-      className={`font-semibold ${state === "locked" ? "underline decoration-2 underline-offset-2 ring-2 ring-primary/60 ring-offset-1 ring-offset-card" : ""}`}
+      title={state === "locked" ? `${label} locked` : state === "oneshot" ? `${label} for the next key` : undefined}
+      className="font-semibold"
+      indicator={
+        state === "locked" ? (
+          <Lock data-testid="dock-modifier-locked" className="size-3" aria-hidden="true" />
+        ) : state === "oneshot" ? (
+          <span data-testid="dock-modifier-oneshot" className="size-1.5 rounded-full bg-current" aria-hidden="true" />
+        ) : null
+      }
     />
   );
 }
@@ -209,7 +242,6 @@ function KeyButton({
   label,
   icon,
   active,
-  highlight,
   onClick,
   className = "",
   title,
@@ -217,18 +249,19 @@ function KeyButton({
   pressed,
   dataState,
   testId,
+  indicator,
 }: {
   label?: string;
   icon?: React.ReactNode;
   active?: boolean;
-  highlight?: boolean;
   onClick: () => void;
   className?: string;
   title?: string;
   ariaLabel?: string;
-  pressed?: boolean | "mixed";
+  pressed?: boolean;
   dataState?: string;
   testId?: string;
+  indicator?: React.ReactNode;
 }) {
   return (
     <button
@@ -242,15 +275,14 @@ function KeyButton({
       aria-pressed={pressed}
       data-state={dataState}
       data-testid={testId}
-      className={`min-w-[44px] min-h-11 px-2 flex items-center justify-center rounded border text-xs font-mono font-medium transition-all active:scale-95 ${
+      className={`flex min-h-11 min-w-0 items-center justify-center gap-1 rounded border px-1 font-mono text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
         active
-          ? "bg-primary border-primary text-primary-foreground shadow-sm"
-          : highlight
-          ? "border-border text-foreground bg-secondary hover:bg-secondary/80"
-          : "bg-secondary/60 border-border text-foreground hover:bg-secondary hover:text-foreground"
+          ? "border-chat-primary bg-chat-primary text-chat-primary-foreground"
+          : "border-chat-border bg-chat-surface-raised text-chat-foreground hover:bg-chat-surface-hover"
       } ${className}`}
     >
       {icon || label}
+      {indicator}
     </button>
   );
 }
