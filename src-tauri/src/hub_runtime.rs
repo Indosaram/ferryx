@@ -22,7 +22,7 @@ mod setup;
 mod seed;
 pub use setup::{
     supervisor_adopt_all, supervisor_setup, supervisor_setup_run, supervisor_setup_status, SetupError, SetupProject,
-    SetupRunRequest,
+    SetupRunRequest, SLACK_TEAM_UNRESOLVED,
 };
 
 /// Capability a daemon advertises once it serves `DaemonRequest::SupervisorSetup`.
@@ -2197,7 +2197,15 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     // each generation supervises it (launch, owned-exit watch, 5s..300s relaunch backoff).
     // Aborting the generation's tasks (hub stop, handover retirement) closes the engine's stdin
     // and kills it after a short grace; the next generation's supervise call re-enables it.
-    let mhc_supervisor = ferryx_hub::meta::mhc_profile::MhcProfileConfig::from_env().map(|config| {
+    // from_env reads the hub env file: off the async runtime threads.
+    let mhc_config = match tokio::task::spawn_blocking(ferryx_hub::meta::mhc_profile::MhcProfileConfig::from_env).await {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(%error, "the mhc supervisor engine config was not read");
+            None
+        }
+    };
+    let mhc_supervisor = mhc_config.map(|config| {
         ferryx_hub::meta::mhc_supervisor::install_with(|| {
             let data_dir = ferryx_hub::meta::supervisor::state_dir_from_home()
                 .unwrap_or_else(|| std::path::PathBuf::from(".ferryx/hub"));
