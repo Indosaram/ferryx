@@ -823,12 +823,22 @@ async fn import_staged(
 /// of the kept database, `None` when nothing was staged or no database existed before. A
 /// failed swap puts the old files back.
 pub fn apply_staged_swap(hub_dir: &Path, now_ts: i64) -> io::Result<Option<PathBuf>> {
+    swap_under_open_lock(hub_dir, now_ts, &|from: &Path, to: &Path| fs::rename(from, to))
+}
+
+/// [`apply_staged_swap`] with the install step passed in, so a test can look at the open
+/// lock from inside the swap.
+fn swap_under_open_lock(
+    hub_dir: &Path,
+    now_ts: i64,
+    install: &dyn Fn(&Path, &Path) -> io::Result<()>,
+) -> io::Result<Option<PathBuf>> {
     if !hub_dir.join(INCOMING_DB).exists() {
         return Ok(None);
     }
     let _open_lock = crate::storage::lock_open(&hub_dir.join(LIVE_DB))?;
     // Checked again under the lock: another opener may have swapped it in meanwhile.
-    swap_in(hub_dir, now_ts, &|from: &Path, to: &Path| fs::rename(from, to))
+    swap_in(hub_dir, now_ts, install)
 }
 
 /// The swap itself; `install` moves the incoming file onto the live name.
@@ -1536,6 +1546,38 @@ mod tests {
         fs::remove_dir_all(&hub).unwrap();
     }
 
+    /// The swap moves files only while it holds the open lock [`crate::storage::connect`]
+    /// takes, so no opener migrates a file that is being replaced: from inside the install
+    /// step a second handle cannot take that lock, and after the swap it can.
+    #[test]
+    fn the_swap_runs_under_the_open_lock() {
+        let hub = temp_root("swap-lock");
+        fs::write(hub.join(LIVE_DB), b"old db").unwrap();
+        fs::write(hub.join(INCOMING_DB), b"new db").unwrap();
+        let lock_path = hub.join("hub.sqlite.open-lock");
+        let try_lock = || -> Result<(), fs::TryLockError> {
+            let file = fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&lock_path)
+                .unwrap();
+            file.try_lock()
+        };
+        let held_during_install = std::cell::Cell::new(None);
+        let kept = swap_under_open_lock(&hub, 1_800_000_080, &|from: &Path, to: &Path| {
+            held_during_install.set(Some(matches!(try_lock(), Err(fs::TryLockError::WouldBlock))));
+            fs::rename(from, to)
+        })
+        .unwrap();
+        assert_eq!(held_during_install.get(), Some(true), "the install ran under the open lock");
+        assert!(try_lock().is_ok(), "the lock is released after the swap");
+        assert_eq!(kept, Some(hub.join("hub.sqlite.pre-move-1800000080")));
+        assert_eq!(fs::read(hub.join(LIVE_DB)).unwrap(), b"new db");
+        assert!(!hub.join(INCOMING_DB).exists());
+        fs::remove_dir_all(&hub).unwrap();
+    }
+
     /// A hand-built archive whose manifest lists machine-local env keys: import drops them,
     /// whatever the manifest says.
     #[tokio::test]
@@ -1586,6 +1628,44 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error.code(), CHECKPOINT_TOO_LARGE);
+        assert_eq!(fs::read_dir(&staging).unwrap().count(), 0);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The production `unpack` bounds the decompressed stream at
+    /// [`CHECKPOINT_MAX_ARCHIVE_BYTES`]: an archive expanding just past it is refused. The
+    /// archive is a tar header frame followed by one 1 MiB zstd frame of zeros repeated (a
+    /// decoder reads concatenated frames as one stream), so the test never holds 512 MiB.
+    #[test]
+    fn unpack_refuses_an_archive_just_past_the_production_bound() {
+        const CHUNK: u64 = 1024 * 1024;
+        assert_eq!(CHECKPOINT_MAX_ARCHIVE_BYTES % CHUNK, 0);
+        let root = temp_root("prod-bound");
+        let zeros = |len: u64| zstd::stream::encode_all(io::repeat(0).take(len), 3).unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_path("padding.bin").unwrap();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(CHECKPOINT_MAX_ARCHIVE_BYTES);
+        header.set_mode(0o600);
+        header.set_mtime(0);
+        header.set_cksum();
+        let mut bytes = zstd::stream::encode_all(&header.as_bytes()[..], 3).unwrap();
+        let chunk = zeros(CHUNK);
+        for _ in 0..CHECKPOINT_MAX_ARCHIVE_BYTES / CHUNK {
+            bytes.extend_from_slice(&chunk);
+        }
+        // The two zero blocks that end a tar archive.
+        bytes.extend_from_slice(&zeros(1024));
+        assert!((bytes.len() as u64) < CHECKPOINT_MAX_COMPRESSED_BYTES, "compresses small");
+        let archive = root.join("just-past.tar.zst");
+        fs::write(&archive, bytes).unwrap();
+        let staging = root.join("staging");
+        fs::create_dir_all(&staging).unwrap();
+        let error = match unpack(&archive, &staging) {
+            Ok(_) => panic!("an archive past the bound was unpacked"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), CHECKPOINT_TOO_LARGE, "{error}");
         assert_eq!(fs::read_dir(&staging).unwrap().count(), 0);
         fs::remove_dir_all(&root).unwrap();
     }

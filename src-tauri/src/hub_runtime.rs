@@ -2804,7 +2804,7 @@ pub fn run_mcp() -> i32 {
         }
         // A plain open: only the daemon's hub open swaps in a staged checkpoint import. This
         // process runs beside the daemon, whose pool may hold the database.
-        let pool = match ferryx_hub::storage::connect(&path).await {
+        let pool = match open_mcp_pool(&path).await {
             Ok(pool) => pool,
             Err(error) => {
                 eprintln!("ferryx mcp: {error}");
@@ -2827,9 +2827,34 @@ pub fn run_mcp() -> i32 {
     })
 }
 
+/// The `ferryx-cli mcp` database open: a plain open that leaves a staged checkpoint import
+/// (`hub.sqlite.incoming`) for the daemon's hub open to swap in.
+async fn open_mcp_pool(path: &std::path::Path) -> Result<ferryx_hub::goals::SqlitePool, HubError> {
+    ferryx_hub::storage::connect(path).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ferryx-cli mcp` runs beside the daemon, whose pool may hold the database: its open
+    /// never swaps a staged import in.
+    #[tokio::test]
+    async fn the_mcp_open_leaves_a_staged_import_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("hub.sqlite");
+        ferryx_hub::storage::connect(&live).await.unwrap().close().await;
+        let incoming = dir.path().join(ferryx_hub::checkpoint_import::INCOMING_DB);
+        std::fs::write(&incoming, b"staged import").unwrap();
+        let pool = open_mcp_pool(&live).await.unwrap();
+        pool.close().await;
+        assert_eq!(std::fs::read(&incoming).unwrap(), b"staged import", "still staged");
+        let swapped = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry.file_name().to_string_lossy().contains(".pre-move-"));
+        assert!(!swapped, "the live database was not moved aside");
+    }
 
     #[test]
     fn each_hub_pane_launch_gets_its_own_spawn_request_id() {
