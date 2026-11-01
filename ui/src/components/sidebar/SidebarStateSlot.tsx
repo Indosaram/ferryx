@@ -2,6 +2,7 @@ import { Server } from "lucide-react";
 
 import { cn } from "../../lib/cn";
 import { StatusDot } from "../ui/StatusDot";
+import type { SidebarDensity } from "./SidebarWorktreeRow";
 
 export type SidebarSlotState = "waiting" | "working" | "unread" | "done" | null;
 
@@ -16,6 +17,8 @@ export type SidebarStateSlotProps = {
   title?: string;
   ariaLabel?: string;
   className?: string;
+  /** `touch` (the phone) sets the text at 12px; the desktop keeps its compact 10px. */
+  density?: SidebarDensity;
   "data-testid"?: string;
   "data-attention-state"?: string;
 };
@@ -23,7 +26,8 @@ export type SidebarStateSlotProps = {
 const ACTIVITY_LABELS = { waiting: "needs input", working: "running" } as const;
 
 /** The single trailing status element of a sidebar row (ui/DESIGN.md section 2 and section 4 rule 7). */
-export function SidebarStateSlot({ state, label, host, onActivate, title, ariaLabel, className, ...data }: SidebarStateSlotProps) {
+export function SidebarStateSlot({ state, label, host, onActivate, title, ariaLabel, className, density = "compact", ...data }: SidebarStateSlotProps) {
+  const touch = density === "touch";
   const showHost = state === null && Boolean(host);
   const text = state === "waiting" || state === "working"
     ? (label ?? ACTIVITY_LABELS[state])
@@ -32,7 +36,7 @@ export function SidebarStateSlot({ state, label, host, onActivate, title, ariaLa
 
   const content = (
     <>
-      {showHost ? <Server aria-hidden="true" className="size-2.5 shrink-0" /> : null}
+      {showHost ? <Server aria-hidden="true" className={cn(touch ? "size-3.5" : "size-2.5", "shrink-0")} /> : null}
       {showHost ? <span className="max-w-[88px] truncate">{host}</span> : null}
       {text ? <span className="truncate">{text}</span> : null}
       {state ? <StatusDot state={state} /> : null}
@@ -40,7 +44,11 @@ export function SidebarStateSlot({ state, label, host, onActivate, title, ariaLa
   );
   // The slot's state as data, so tests compare dots whose colour is their only difference.
   const stateData = state ? { "data-slot-state": state } : {};
-  const classes = cn("inline-flex shrink-0 items-center gap-1 text-[10px] leading-none text-muted-foreground", className);
+  const classes = cn(
+    "inline-flex shrink-0 items-center gap-1 leading-none text-muted-foreground",
+    touch ? "text-xs" : "text-[10px]",
+    className,
+  );
 
   if (onActivate) {
     return (

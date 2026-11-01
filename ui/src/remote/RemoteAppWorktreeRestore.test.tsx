@@ -132,7 +132,12 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
     const { unmount } = render(<RemoteApp />);
 
     const picker = await openWorkspacePicker();
-    const signOutBtn = within(picker).getByRole("button", { name: "Sign out" });
+    // Sign-out lives only in the Account sheet on the phone home (H-18).
+    expect(within(picker).queryByRole("button", { name: "Sign out" })).toBeNull();
+    act(() => {
+      fireEvent.click(screen.getByTestId("account-open"));
+    });
+    const signOutBtn = await screen.findByTestId("account-sign-out");
     expect(signOutBtn).toBeDefined();
 
     act(() => {
@@ -703,7 +708,12 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
     });
 
     const picker = await openWorkspacePicker();
-    const signOutBtn = within(picker).getByRole("button", { name: "Sign out" });
+    // Sign-out lives only in the Account sheet on the phone home (H-18).
+    expect(within(picker).queryByRole("button", { name: "Sign out" })).toBeNull();
+    act(() => {
+      fireEvent.click(screen.getByTestId("account-open"));
+    });
+    const signOutBtn = await screen.findByTestId("account-sign-out");
 
     act(() => {
       fireEvent.click(signOutBtn);

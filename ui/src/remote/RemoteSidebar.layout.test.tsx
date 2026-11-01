@@ -20,8 +20,8 @@ function section(machineId: string, state: RemoteSidebarSection["state"], withMo
   };
 }
 
-function renderSections(sections: readonly RemoteSidebarSection[]) {
-  render(<RemoteSidebar sections={sections} density="touch" pending={null} onSelect={() => undefined} view="worktrees" />);
+function renderSections(sections: readonly RemoteSidebarSection[], density: "compact" | "touch" = "compact") {
+  render(<RemoteSidebar sections={sections} density={density} pending={null} onSelect={() => undefined} view="worktrees" />);
   return Object.fromEntries(screen.getAllByTestId("remote-sidebar-section").map((el) => [el.dataset.machineId, el.className.split(/\s+/)]));
 }
 
@@ -41,5 +41,17 @@ describe("remote sidebar section height", () => {
 
     expect(classes["loading-mac"]).not.toContain("flex-1");
     expect(classes["online-mac"]).toContain("flex-1");
+  });
+});
+
+describe("remote sidebar on a phone", () => {
+  it("scrolls the whole page once, with one filter for every machine", () => {
+    const classes = renderSections([section("offline-mac", "offline", true), section("online-mac", "ok", true)], "touch");
+    expect(screen.getAllByRole("searchbox", { name: "Filter worktrees" })).toHaveLength(1);
+    expect(screen.getAllByTestId("remote-sidebar-scroller")).toHaveLength(1);
+    expect(classes["offline-mac"]).not.toContain("max-h-[40%]");
+    for (const section of screen.getAllByTestId("remote-sidebar-section")) {
+      expect(section.querySelector(".overflow-y-auto")).toBeNull();
+    }
   });
 });

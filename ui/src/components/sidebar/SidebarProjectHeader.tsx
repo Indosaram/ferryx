@@ -59,14 +59,17 @@ export function SidebarProjectHeader({
       data-attention-state={slot.kind === "attention" ? slot.state ?? undefined : undefined}
       onActivate={onActivateSlot}
       ariaLabel={slotAriaLabel}
+      density={density}
     />
   );
   return (
     <div
       onContextMenu={onContextMenu}
       className={cn(
-        "group/project flex w-full items-center gap-0.5 rounded-md pr-1 text-worktree-sidebar-foreground/65 transition-colors hover:bg-worktree-sidebar-accent/60 hover:text-worktree-sidebar-foreground",
-        touch ? "min-h-11" : "h-7",
+        "group/project flex w-full items-center gap-0.5 rounded-md pr-1 transition-colors",
+        touch
+          ? "min-h-11 text-chat-foreground hover:bg-chat-row-hover"
+          : "h-7 text-worktree-sidebar-foreground/65 hover:bg-worktree-sidebar-accent/60 hover:text-worktree-sidebar-foreground",
       )}
     >
       <button

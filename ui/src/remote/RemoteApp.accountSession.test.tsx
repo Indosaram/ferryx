@@ -457,9 +457,10 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     expect(picker.textContent).not.toContain("mach-phone-1");
     expect(within(picker).queryByRole("button", { name: /Work MacBook Pro|mach-phone-1/i })).toBeNull();
     expect(screen.queryByText(/Loading machines/i)).toBeNull();
-    // Account mode has no machine chooser entry point; sign-out remains available.
-    expect(within(picker).queryByRole("button", { name: "Machines" })).toBeNull();
-    expect(within(picker).getByRole("button", { name: "Sign out" })).toBeDefined();
+    // Account mode has no machine chooser entry point; sign-out lives in the Account sheet.
+    expect(within(picker).queryByRole("button", { name: "Computers" })).toBeNull();
+    expect(within(picker).queryByRole("button", { name: "Sign out" })).toBeNull();
+    expect(screen.getByTestId("account-open")).toBeDefined();
 
     act(() => {
       fireEvent.click(optionBtn);
