@@ -172,6 +172,8 @@ enum PairingWait {
     Paired(WebSocket),
     /// The suspension sweeper ended the session before the opposite half arrived.
     Suspended(String),
+    /// The registry entry was retired (pairing deadline) before the opposite half arrived.
+    Abandoned,
 }
 
 pub const RELAY_STAGE_HEADER: &str = "x-ferryx-relay-stage";
@@ -2110,9 +2112,12 @@ async fn browser_socket(
         .max_message_size(max_size)
         .max_frame_size(max_size)
         .on_upgrade(move |browser| async move {
+            // The bridge ends itself at the deadline with a close frame; the outer bound only
+            // backstops that best-effort close.
+            let deadline = tokio::time::Instant::now() + SESSION_TRANSFER_TIMEOUT;
             match timeout(
-                SESSION_TRANSFER_TIMEOUT,
-                bridge_browser_socket(browser, data, &target, &device_token, &mut suspension),
+                SESSION_TRANSFER_TIMEOUT + TRANSFER_TIMEOUT,
+                bridge_browser_socket(browser, data, &target, &device_token, &mut suspension, deadline),
             )
             .await
             {
@@ -2133,6 +2138,7 @@ async fn bridge_browser_socket(
     target: &str,
     device_token: &str,
     suspension: &mut watch::Receiver<Option<String>>,
+    deadline: tokio::time::Instant,
 ) -> anyhow::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::tungstenite::Message as Wire;
@@ -2145,6 +2151,7 @@ async fn bridge_browser_socket(
     let (client_io, tunnel_io) = tokio::io::duplex(buffer_size);
     let (mut reader, mut writer) = tokio::io::split(tunnel_io);
     let tunnel = async {
+        let result = async {
         let mut buffer = vec![0; buffer_size];
         loop {
             tokio::select! {
@@ -2165,6 +2172,14 @@ async fn bridge_browser_socket(
                 }
             }
         }
+        }
+        .await;
+        if result.is_err() {
+            // End the inner stream so the application side sees the host go away and closes
+            // the browser with a reason instead of waiting out its own timeout.
+            let _ = timeout(TRANSFER_TIMEOUT, writer.shutdown()).await;
+        }
+        result
     };
     let application = async {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -2172,13 +2187,28 @@ async fn bridge_browser_socket(
         request
             .headers_mut()
             .insert("authorization", format!("Bearer {device_token}").parse()?);
-        let (mut daemon, _) = timeout(
+        let (mut daemon, _) = match timeout(
             TRANSFER_TIMEOUT,
             tokio_tungstenite::client_async(request, client_io),
         )
-        .await??;
+        .await
+        {
+            Ok(Ok(connected)) => connected,
+            Ok(Err(error)) => {
+                close_browser(&mut browser, axum::extract::ws::close_code::ERROR, "host disconnected").await;
+                return Err(error.into());
+            }
+            Err(error) => {
+                close_browser(&mut browser, axum::extract::ws::close_code::ERROR, "host disconnected").await;
+                return Err(error.into());
+            }
+        };
         loop {
             tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    close_browser(&mut browser, axum::extract::ws::close_code::AWAY, "session lifetime exceeded").await;
+                    return Ok(());
+                }
                 reason = next_suspension_reason(suspension) => {
                     // A stopped owner's browser stream ends with the exact reason rather than
                     // being cut off by the tunnel dropping.
@@ -2212,8 +2242,18 @@ async fn bridge_browser_socket(
                     }
                 }
                 frame = daemon.next() => {
-                    let Some(frame) = frame else { return Ok(()); };
-                    let frame = match frame? {
+                    let frame = match frame {
+                        Some(Ok(frame)) => frame,
+                        None => {
+                            close_browser(&mut browser, axum::extract::ws::close_code::ERROR, "host disconnected").await;
+                            return Ok(());
+                        }
+                        Some(Err(error)) => {
+                            close_browser(&mut browser, axum::extract::ws::close_code::ERROR, "host disconnected").await;
+                            return Err(error.into());
+                        }
+                    };
+                    let frame = match frame {
                         Wire::Text(text) => Message::Text(text.to_string().into()),
                         Wire::Binary(bytes) => Message::Binary(bytes),
                         Wire::Ping(bytes) => Message::Ping(bytes),
@@ -2231,9 +2271,13 @@ async fn bridge_browser_socket(
     tokio::pin!(tunnel);
     tokio::pin!(application);
     tokio::select! {
-        result = &mut tunnel => {
-            result?;
-            timeout(TRANSFER_TIMEOUT, &mut application).await?
+        result = &mut tunnel => match result {
+            Ok(()) => timeout(TRANSFER_TIMEOUT, &mut application).await?,
+            Err(error) => {
+                // Let the application side deliver its "host disconnected" close first.
+                let _ = timeout(TRANSFER_TIMEOUT, &mut application).await;
+                Err(error)
+            }
         },
         result = &mut application => {
             result?;
@@ -4459,6 +4503,7 @@ async fn handle_half_socket(
             } else {
                 BrowserSide::Own
             };
+            let deadline = tokio::time::Instant::now() + lifetime;
             let transfer = async {
                 let mut buffered = Vec::new();
                 let mut bytes = 0;
@@ -4467,9 +4512,10 @@ async fn handle_half_socket(
                     while suspended.is_none() {
                         tokio::select! {
                             peer = &mut rx => {
-                                return Ok::<PairingWait, anyhow::Error>(PairingWait::Paired(
-                                    peer.map_err(anyhow::Error::from)?,
-                                ));
+                                return Ok::<PairingWait, anyhow::Error>(match peer {
+                                    Ok(peer) => PairingWait::Paired(peer),
+                                    Err(_) => PairingWait::Abandoned,
+                                });
                             }
                             reason = next_suspension_reason(&mut suspension) => {
                                 suspended = Some(reason);
@@ -4498,9 +4544,18 @@ async fn handle_half_socket(
                     Ok(PairingWait::Suspended(suspended.unwrap_or_default()))
                 };
                 let pairing_result = timeout(SESSION_PAIRING_TIMEOUT, pairing).await;
-                let mut peer = match pairing_result?? {
-                    PairingWait::Paired(peer) => peer,
-                    PairingWait::Suspended(reason) => {
+                let mut peer = match pairing_result {
+                    Ok(Ok(PairingWait::Paired(peer))) => peer,
+                    // Timed out, or the entry was retired (by the sweeper at the same deadline)
+                    // before the opposite half arrived.
+                    Err(_) | Ok(Ok(PairingWait::Abandoned)) => {
+                        if browser_side == BrowserSide::Own {
+                            close_browser(&mut socket, axum::extract::ws::close_code::AGAIN, "machine did not connect").await;
+                        }
+                        anyhow::bail!("relay session pairing timed out");
+                    }
+                    Ok(Err(error)) => return Err(error),
+                    Ok(Ok(PairingWait::Suspended(reason))) => {
                         if browser_side == BrowserSide::Own {
                             close_suspended_browser(&mut socket, &reason).await;
                         }
@@ -4533,18 +4588,36 @@ async fn handle_half_socket(
                     peer,
                     browser_side,
                     suspension,
+                    deadline,
                     #[cfg(test)]
                     tap,
                 )
                 .await
             };
-            match timeout(lifetime, transfer).await {
+            // The browser-facing pump closes with a reason at `deadline`; the outer bound only
+            // backstops that best-effort close.
+            match timeout(lifetime + TRANSFER_TIMEOUT, transfer).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => tracing::warn!(%error, "relay session failed"),
                 Err(error) => tracing::warn!(%error, "relay session lifetime exceeded"),
             }
             drop(guard);
         }
+    }
+}
+
+/// Best-effort close of a browser-facing socket with a code and reason, bounded by
+/// [`TRANSFER_TIMEOUT`].
+async fn close_browser(socket: &mut WebSocket, code: u16, reason: &'static str) {
+    let frame = axum::extract::ws::CloseFrame {
+        code,
+        reason: reason.into(),
+    };
+    if !matches!(
+        timeout(TRANSFER_TIMEOUT, socket.send(Message::Close(Some(frame)))).await,
+        Ok(Ok(()))
+    ) {
+        tracing::debug!(reason, "relay browser close frame was not delivered");
     }
 }
 
@@ -4573,6 +4646,7 @@ async fn proxy_sockets(
     b: WebSocket,
     browser_side: BrowserSide,
     suspension: watch::Receiver<Option<String>>,
+    deadline: tokio::time::Instant,
     #[cfg(test)] tap: Option<Arc<Mutex<Vec<u8>>>>,
 ) -> anyhow::Result<()> {
     let (mut a_tx, mut a_rx) = a.split();
@@ -4583,10 +4657,13 @@ async fn proxy_sockets(
     // `a_to_b` writes to the peer half; `b_to_a` writes to this task's own half.
     let mut peer_suspension = (browser_side == BrowserSide::Peer).then(|| suspension.clone());
     let mut own_suspension = (browser_side == BrowserSide::Own).then_some(suspension);
+    let peer_deadline = (browser_side == BrowserSide::Peer).then_some(deadline);
+    let own_deadline = (browser_side == BrowserSide::Own).then_some(deadline);
     let a_to_b = pump_relay_direction(
         &mut a_rx,
         &mut b_tx,
         &mut peer_suspension,
+        peer_deadline,
         #[cfg(test)]
         tap_a.as_ref(),
     );
@@ -4596,6 +4673,7 @@ async fn proxy_sockets(
         &mut b_rx,
         &mut a_tx,
         &mut own_suspension,
+        own_deadline,
         #[cfg(test)]
         tap_b.as_ref(),
     );
@@ -4613,6 +4691,9 @@ async fn pump_relay_direction(
     rx: &mut futures_util::stream::SplitStream<WebSocket>,
     tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     suspension: &mut Option<watch::Receiver<Option<String>>>,
+    // Set only on the direction that writes to the browser half: at the session lifetime the
+    // browser is told why its socket ends instead of seeing an abnormal close.
+    deadline: Option<tokio::time::Instant>,
     #[cfg(test)] tap: Option<&Arc<Mutex<Vec<u8>>>>,
 ) -> anyhow::Result<()> {
     loop {
@@ -4638,6 +4719,14 @@ async fn pump_relay_direction(
                 let frame = axum::extract::ws::CloseFrame {
                     code: axum::extract::ws::close_code::POLICY,
                     reason: reason.into(),
+                };
+                timeout(TRANSFER_TIMEOUT, tx.send(Message::Close(Some(frame)))).await??;
+                return Ok(());
+            }
+            _ = async { tokio::time::sleep_until(deadline.unwrap_or_else(tokio::time::Instant::now)).await }, if deadline.is_some() => {
+                let frame = axum::extract::ws::CloseFrame {
+                    code: axum::extract::ws::close_code::AWAY,
+                    reason: "session lifetime exceeded".into(),
                 };
                 timeout(TRANSFER_TIMEOUT, tx.send(Message::Close(Some(frame)))).await??;
                 return Ok(());
@@ -8866,6 +8955,93 @@ mod tests {
     /// either side are proxied through to the other - i.e. the relay's
     /// reverse-tunnel multiplexing bridges the two independently-opened
     /// WebSocket connections into one bidirectional pipe.
+    fn assert_close(frame: Option<Result<TMessage, tokio_tungstenite::tungstenite::Error>>, code: u16, reason: &str) {
+        match frame {
+            Some(Ok(TMessage::Close(Some(close)))) => {
+                assert_eq!(u16::from(close.code), code);
+                assert_eq!(close.reason.as_str(), reason);
+            }
+            other => panic!("expected close {code} {reason:?}, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_half_whose_machine_never_connects_is_closed_with_a_reason() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (_generation, mut notices, _grants) = state.register_control_channel("lonely".into());
+        assert!(state.notify_incoming_session("lonely", "lonely-session"));
+        notices.try_recv().unwrap();
+        let (mut client, _) =
+            tokio_tungstenite::connect_async(format!("{base}/tunnel/client/lonely-session"))
+                .await
+                .unwrap();
+        // Paused time auto-advances to the pairing deadline once every task is idle.
+        tokio::time::pause();
+        assert_close(client.next().await, 1013, "machine did not connect");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_session_past_its_lifetime_tells_the_browser_why() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (_generation, mut notices, _grants) = state.register_control_channel("aging".into());
+        assert!(state.notify_incoming_session("aging", "aging-session"));
+        notices.try_recv().unwrap();
+        let (mut client, _) =
+            tokio_tungstenite::connect_async(format!("{base}/tunnel/client/aging-session"))
+                .await
+                .unwrap();
+        let (mut data, _) =
+            tokio_tungstenite::connect_async(format!("{base}/tunnel/data/aging-session"))
+                .await
+                .unwrap();
+        // The splice is live once a frame crosses it.
+        client.send(TMessage::Text("ping".into())).await.unwrap();
+        assert_eq!(data.next().await.unwrap().unwrap(), TMessage::Text("ping".into()));
+        tokio::time::pause();
+        assert_close(client.next().await, 1001, "session lifetime exceeded");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_browser_socket_whose_host_goes_away_is_closed_with_a_reason() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (_generation, mut notices, _grants) =
+            state.register_control_channel("browser-machine".into());
+        let ticket = issue_test_ticket(&state, "/api/v1/events").await;
+        let browser = tokio::spawn({
+            let base = base.clone();
+            async move {
+                tokio_tungstenite::connect_async(format!(
+                    "{base}/host/browser-machine/api/v1/events?ticket={}",
+                    ticket.ticket
+                ))
+                .await
+                .unwrap()
+                .0
+            }
+        });
+        let notice = timeout(Duration::from_secs(5), notices.recv()).await.unwrap().unwrap();
+        let (mut data, _) =
+            tokio_tungstenite::connect_async(format!("{base}/tunnel/data/{}", notice.session_id))
+                .await
+                .unwrap();
+        let mut browser = browser.await.unwrap();
+        // The relay's inner WebSocket upgrade reaches the host; the host then goes away.
+        let upgrade = timeout(Duration::from_secs(5), data.next()).await.unwrap().unwrap().unwrap();
+        assert!(upgrade.into_data().starts_with(b"GET /api/v1/events HTTP/1.1\r\n"));
+        data.close(None).await.unwrap();
+        assert_close(
+            timeout(Duration::from_secs(5), browser.next()).await.unwrap(),
+            1011,
+            "host disconnected",
+        );
+        server.abort();
+    }
+
     #[tokio::test]
     async fn test_relay_reverse_tunnel_multiplex() {
         let (base_url, _server) = spawn_test_relay().await;
