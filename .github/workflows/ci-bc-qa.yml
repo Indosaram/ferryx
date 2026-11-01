@@ -1,0 +1,218 @@
+name: Browser UI audit (real OS input)
+
+# Builds the debug desktop app on each hosted OS, drives the built-in browser with real OS input
+# and uploads one full-screen screenshot per step plus summary.json as ui-audit-<os>.
+# A missing UI element never fails the job; only a broken build or harness does.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'ci/bc-qa*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-bc-qa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ui-audit:
+    name: UI audit (${{ matrix.os_name }})
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-24.04
+            os_name: linux
+          - platform: macos-15
+            os_name: macos
+          - platform: windows-2022
+            os_name: windows
+    env:
+      # Shared CEF SDK location for the Linux engine bundle (crates/ferryx-browser-engine).
+      CEF_PATH: ${{ github.workspace }}/../cef-sdk
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+    steps:
+      - name: 'Checkout repository (submodules: recursive)'
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: Install Linux system dependencies
+        if: matrix.os_name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libasound2-dev \
+            clang \
+            libclang-dev \
+            libpipewire-0.3-dev \
+            libspa-0.2-dev \
+            libdbus-1-dev \
+            libva-dev \
+            libdrm-dev \
+            libgbm-dev \
+            libegl-dev \
+            libgl-dev \
+            libxcb1-dev \
+            libxcb-shm0-dev \
+            libxcb-randr0-dev \
+            libxcb-xfixes0-dev \
+            libx11-dev \
+            libxext-dev \
+            libxrandr-dev \
+            libxfixes-dev \
+            libxtst-dev \
+            libxi-dev \
+            libevdev-dev \
+            libudev-dev \
+            cmake ninja-build pkg-config xvfb xdotool x11-utils openbox imagemagick \
+            dbus-x11 mesa-vulkan-drivers libvulkan1 fonts-dejavu-core tesseract-ocr \
+            libnss3 libatk-bridge2.0-0 libxkbcommon0 libxcomposite1 libxdamage1 \
+            libcups2 libpango-1.0-0 libasound2t64
+
+      - name: Free disk (Linux)
+        if: matrix.os_name == 'linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Allow unprivileged user namespaces (Chromium engine sandbox, Linux)
+        if: matrix.os_name == 'linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Install cliclick and tesseract (macOS)
+        if: matrix.os_name == 'macos'
+        run: brew install cliclick tesseract imagemagick || echo "brew install incomplete; summary.json records what OCR had"
+
+      - name: Install tesseract (Windows)
+        if: matrix.os_name == 'windows'
+        run: choco install tesseract -y --no-progress || echo "tesseract unavailable; the audit records OCR as unavailable"
+
+      - name: Use Strawberry Perl for vendored OpenSSL (Windows)
+        if: matrix.os_name == 'windows'
+        shell: bash
+        run: echo "OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe" >> "$GITHUB_ENV"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./src-tauri -> target
+            ./crates/ferryx-browser-engine -> target
+          shared-key: bc-qa-${{ matrix.os_name }}-v1
+
+      - name: Install Node/Bun dependencies
+        shell: bash
+        run: |
+          bun install --frozen-lockfile || bun install
+          bun install --cwd ui --frozen-lockfile || bun install --cwd ui
+
+      - name: Build Frontend UI
+        run: bun run --cwd ui build
+
+      # Branches with the default remote-desktop feature link the pinned FFmpeg SDK that
+      # .cargo/config.toml points FFMPEG_DIR at; older trees have no fetch script.
+      - name: Fetch FFmpeg SDK (remote-desktop, when the tree has it)
+        shell: bash
+        run: |
+          if [ -f scripts/fetch-ffmpeg.mjs ]; then bun scripts/fetch-ffmpeg.mjs; else echo "no scripts/fetch-ffmpeg.mjs in this tree"; fi
+
+      - name: Build debug app
+        shell: bash
+        run: cargo build --manifest-path src-tauri/Cargo.toml --bin ferryx --features tauri/custom-protocol
+
+      - name: Preserve dependency cache even if the audit step fails
+        shell: bash
+        run: echo "CACHE_ON_FAILURE=true" >> "$GITHUB_ENV"
+
+      # Chromium engine checks need the Linux engine bundle, which only trees with
+      # crates/ferryx-browser-engine/src/engine/linux_sandbox.rs can build. Failure here only
+      # skips the engine steps; the UI audit still runs.
+      - name: Bundle the Chromium engine (Linux, when supported)
+        if: matrix.os_name == 'linux'
+        continue-on-error: true
+        timeout-minutes: 45
+        shell: bash
+        run: |
+          if [ ! -f crates/ferryx-browser-engine/src/engine/linux_sandbox.rs ]; then
+            echo "this tree has no Linux engine; engine checks are skipped"
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/engine-out"
+          (cd crates/ferryx-browser-engine && cargo run --release --bin bundle-engine -- "$RUNNER_TEMP/engine-out" --release)
+          ls -la "$RUNNER_TEMP/engine-out"
+          zip=$(ls "$RUNNER_TEMP"/engine-out/engine-linux-*.zip | head -1)
+          echo "FERRYX_UI_AUDIT_ENGINE_ZIP=$zip" >> "$GITHUB_ENV"
+
+      - name: Run UI audit (Linux, Xvfb + openbox)
+        if: matrix.os_name == 'linux'
+        timeout-minutes: 35
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/ui-audit"
+          mkdir -p "$out"
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp > "$out/xvfb.log" 2>&1 &
+          for i in $(seq 1 50); do xdpyinfo > /dev/null 2>&1 && break; sleep 0.2; done
+          dbus-run-session -- bash -c '
+            openbox > "$1/openbox.log" 2>&1 &
+            sleep 2
+            bun scripts/browser-qa/gha-ui-audit.mjs --binary src-tauri/target/debug/ferryx --out "$1"
+          ' bash "$out" || echo "audit driver exited non-zero: $?"
+
+      - name: Run UI audit (macOS)
+        if: matrix.os_name == 'macos'
+        timeout-minutes: 35
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/ui-audit"
+          mkdir -p "$out"
+          bun scripts/browser-qa/gha-ui-audit.mjs --binary src-tauri/target/debug/ferryx --out "$out" || echo "audit driver exited non-zero: $?"
+
+      - name: Run UI audit (Windows)
+        if: matrix.os_name == 'windows'
+        timeout-minutes: 35
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/ui-audit"
+          mkdir -p "$out"
+          bun scripts/browser-qa/gha-ui-audit.mjs --binary src-tauri/target/debug/ferryx.exe --out "$out" || echo "audit driver exited non-zero: $?"
+
+      - name: Upload UI audit artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-audit-${{ matrix.os_name }}
+          path: ${{ runner.temp }}/ui-audit/
+          if-no-files-found: warn
+          retention-days: 14
