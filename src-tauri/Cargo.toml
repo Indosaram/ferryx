@@ -55,7 +55,7 @@ required-features = ["desktop"]
 tauri-build = { version = "2", features = [] }
 
 [features]
-default = ["desktop", "hub-slack", "hub-discord", "hub-voice"]
+default = ["desktop", "hub-slack", "hub-discord", "hub-voice", "remote-desktop"]
 # The Tauri GUI stack: tauri and its plugins, rodio playback, and on Linux GTK, WebKitGTK and
 # JavaScriptCore. `ferryx-cli`, `ferryx-relay` and `ferryx-account` build without it
 # (`--no-default-features`), so the Linux CLI links none of the desktop libraries.
@@ -96,8 +96,10 @@ hub-slack = ["ferryx-hub/hub-slack"]
 hub-discord = ["ferryx-hub/hub-discord"]
 hub-voice = ["ferryx-hub/hub-voice"]
 # Remote desktop (ferryx-rd engine): the daemon-owned host, the gateway RD routes and the GUI
-# client. Off by default: it links FFmpeg, Opus and the platform capture stacks, none of which
-# `ferryx-cli`, `ferryx-relay` or `ferryx-account` may pull in.
+# client. Part of every desktop build. It links FFmpeg 9 (the pinned LGPL SDK that
+# scripts/fetch-ffmpeg.mjs fetches and .cargo/config.toml points FFMPEG_DIR at), Opus and the
+# platform capture stacks, so the headless `ferryx-cli`, `ferryx-relay` and `ferryx-account`
+# builds use `--no-default-features` to leave it out.
 remote-desktop = [
     "dep:ferryx-rd-proto",
     "dep:ferryx-rd-net",
@@ -331,13 +333,13 @@ strip = "none"
 [profile.dev.package.sha2]
 opt-level = 3
 
-# ffmpeg-sys-next (feature `remote-desktop`) runs bindgen over the FFmpeg headers in its
+# ffmpeg-sys-next (default feature `remote-desktop`) runs bindgen over the FFmpeg headers in its
 # build script. On Windows an unoptimized bindgen overflows the build script's 1 MiB main
 # thread stack (STATUS_STACK_OVERFLOW); optimized frames are small enough.
 [profile.dev.package.bindgen]
 opt-level = 3
 
-# The remote desktop viewer (feature `remote-desktop`) converts every decoded NV12 frame to RGB
+# The remote desktop viewer (default feature `remote-desktop`) converts every decoded NV12 frame to RGB
 # and encodes it as JPEG. Unoptimized, that costs over a second per desktop-sized frame, so a
 # dev build presents about one frame per second. Optimizing just these packages keeps the
 # viewer at its frame-rate cap.

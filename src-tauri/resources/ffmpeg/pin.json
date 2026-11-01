@@ -5,5 +5,23 @@
     "url": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
     "sha256": "8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e",
     "license": "LGPL-2.1-or-later"
+  },
+  "sdk": {
+    "repo": "Indosaram/ferryx",
+    "tag": "ffmpeg-sdk-9.0.2-1",
+    "assets": {
+      "x86_64-unknown-linux-gnu": {
+        "name": "ffmpeg-lgpl-9.0.2-x86_64-unknown-linux-gnu.tar.gz",
+        "sha256": "53be39b84363395d21fea0423f3966c3805f963402a0917fb5e26670ce8f1803"
+      },
+      "universal-apple-darwin": {
+        "name": "ffmpeg-lgpl-9.0.2-universal-apple-darwin.tar.gz",
+        "sha256": "86c285dc4014bdf41ef345d138de4d6bdc5b56952a8d985d8ebd2b4aaf5c169e"
+      },
+      "x86_64-pc-windows-msvc": {
+        "name": "ffmpeg-lgpl-9.0.2-x86_64-pc-windows-msvc.tar.gz",
+        "sha256": "1ac6162755098602a71916d632ca907d841672e0af63deb9903714ef821f4dbc"
+      }
+    }
   }
 }

@@ -128,6 +128,11 @@ jobs:
       - name: Build remote helper (debug, required by ssh bridge suites)
         run: cargo build --manifest-path remote-helper/Cargo.toml
 
+      # The default remote-desktop feature links the pinned LGPL FFmpeg SDK that
+      # .cargo/config.toml points FFMPEG_DIR at.
+      - name: Fetch FFmpeg SDK (remote-desktop)
+        run: bun scripts/fetch-ffmpeg.mjs --target aarch64-apple-darwin
+
       # ---- Lint gates ----
       - name: Verify release workflow policy
         run: bun scripts/release-workflow-policy.mjs
@@ -337,7 +342,29 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf \
-            libasound2-dev
+            libasound2-dev \
+            clang \
+            libclang-dev \
+            libpipewire-0.3-dev \
+            libspa-0.2-dev \
+            libdbus-1-dev \
+            libva-dev \
+            libdrm-dev \
+            libgbm-dev \
+            libegl-dev \
+            libgl-dev \
+            libxcb1-dev \
+            libxcb-shm0-dev \
+            libxcb-randr0-dev \
+            libxcb-xfixes0-dev \
+            libx11-dev \
+            libxext-dev \
+            libxrandr-dev \
+            libxfixes-dev \
+            libxtst-dev \
+            libxi-dev \
+            libevdev-dev \
+            libudev-dev
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -384,7 +411,11 @@ jobs:
         run: bun run --cwd ui build
 
       - name: Cargo Check
-        run: cargo check --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
+        # The default remote-desktop feature links the pinned LGPL FFmpeg SDK first.
+        shell: bash
+        run: |
+          bun scripts/fetch-ffmpeg.mjs --target ${{ matrix.target }}
+          cargo check --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
 
       # cargo check does not invoke link.exe, so it cannot catch mismatched Ghostty static and
       # import library directives. Link the Windows binary before allowing a release-tag PR through.

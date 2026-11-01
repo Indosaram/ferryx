@@ -1,6 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -587,17 +598,16 @@ function parseBuildResult(stdout) {
   return validateToolchains(JSON.parse(match[1]), { required: ["node", "bun", "zig", "rust"] });
 }
 
-/** Cargo feature that pulls in ferryx-rd and with it the bundled LGPL FFmpeg payload. */
-export const REMOTE_DESKTOP_FEATURE = "remote-desktop";
+/**
+ * Every desktop release links FFmpeg through the default `remote-desktop` feature and bundles the
+ * LGPL payload staged here. Release hosts build FFmpeg from the pinned tarball and point
+ * FFMPEG_DIR at that prefix, which overrides the dev SDK path in .cargo/config.toml.
+ */
 export const FFMPEG_PAYLOAD_REL = "src-tauri/resources/ffmpeg/payload";
 
-export function hasRemoteDesktop(features) {
-  return Array.isArray(features) && features.includes(REMOTE_DESKTOP_FEATURE);
-}
-
 /**
- * Linux remote-desktop prelude: builds (or reuses a cached) LGPL FFmpeg prefix with
- * scripts/build-ffmpeg-lgpl.sh, stages it, and points pkg-config at it. The cache key is the
+ * Linux FFmpeg prelude: builds (or reuses a cached) LGPL FFmpeg prefix with
+ * scripts/build-ffmpeg-lgpl.sh, stages it, and links against it (FFMPEG_DIR). The cache key is the
  * build script's sha256, so any change to the pinned FFmpeg or flags rebuilds.
  */
 function linuxFfmpegPrelude(cacheRoot) {
@@ -613,14 +623,13 @@ if [ ! -s "$ffmpeg_prefix/build-receipt.txt" ]; then
 fi
 bun "$source_dir/scripts/stage-ffmpeg.mjs" --target ${triple} --prefix "$ffmpeg_prefix" --prune
 bun "$source_dir/scripts/stage-ffmpeg.mjs" --target ${triple} --check
-export PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig"
+export FFMPEG_DIR="$ffmpeg_prefix"
 export LD_LIBRARY_PATH="$ffmpeg_prefix/lib\${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 ffmpeg_overlay="$source_dir/${FFMPEG_PAYLOAD_REL}/${triple}/tauri.ffmpeg.conf.json"
 `;
 }
 
-export function createLinuxBuildScript({ workspaceDir, plan, hostConfig, features = [] }) {
-  const rd = hasRemoteDesktop(features);
+export function createLinuxBuildScript({ workspaceDir, plan, hostConfig }) {
   const signingKey = process.env.TAURI_SIGNING_PRIVATE_KEY;
   const signingPassword = process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD;
   const signingEnv = signingKey
@@ -631,18 +640,14 @@ export function createLinuxBuildScript({ workspaceDir, plan, hostConfig, feature
   const targetDirCode = hostConfig.root
     ? `export CARGO_TARGET_DIR=${quoteSh(targetDir)}\nmkdir -p "$CARGO_TARGET_DIR"`
     : `export CARGO_TARGET_DIR="$workspace/cargo-target"`;
-  const ffmpegPrelude = rd
-    ? linuxFfmpegPrelude(hostConfig.root ? quoteSh(`${hostConfig.root}/ffmpeg-cache`) : `"$workspace/ffmpeg-cache"`)
-    : "";
-  const tauriBuild = rd
-    ? `bun tauri build --bundles appimage,deb --features ${REMOTE_DESKTOP_FEATURE} -c "$ffmpeg_overlay"`
-    : "bun tauri build --bundles appimage,deb";
-  const ffmpegBundleCheck = rd
-    ? `deb_listing="$(dpkg-deb -c "${"${debs[0]}"}")"
+  const ffmpegPrelude = linuxFfmpegPrelude(
+    hostConfig.root ? quoteSh(`${hostConfig.root}/ffmpeg-cache`) : `"$workspace/ffmpeg-cache"`,
+  );
+  const tauriBuild = `bun tauri build --bundles appimage,deb -c "$ffmpeg_overlay"`;
+  const ffmpegBundleCheck = `deb_listing="$(dpkg-deb -c "${"${debs[0]}"}")"
 grep 'usr/lib/Ferryx/ffmpeg/libavcodec\\.so\\.' <<<"$deb_listing" >/dev/null
 grep 'usr/lib/Ferryx/ffmpeg-legal/build-receipt\\.txt' <<<"$deb_listing" >/dev/null
-`
-    : "";
+`;
   return `set -euo pipefail
 umask 077
 ${pathPrefix}workspace=${quoteSh(workspaceDir)}
@@ -697,25 +702,23 @@ printf '%s\\n' '---BUILD_RESULT---' "{\\"node\\":\\"$(node --version | sed 's/^v
 `;
 }
 
-export function createWindowsBuildScript({ workspaceDir, plan, hostConfig, signingSecretFile = null, features = [] }) {
-  const rd = hasRemoteDesktop(features);
+export function createWindowsBuildScript({ workspaceDir, plan, hostConfig, signingSecretFile = null }) {
   const pathPrefix = hostConfig.path
     ? `$env:PATH = ${quotePowerShell(`${hostConfig.path};`)} + $env:PATH\n`
     : "";
   const targetDirCode = hostConfig.root
     ? `$cargoTarget = Join-Path ${quotePowerShell(hostConfig.root)} 'cargo-target'\nif (-not (Test-Path $cargoTarget)) { New-Item -ItemType Directory -Path $cargoTarget -Force | Out-Null }\n$env:CARGO_TARGET_DIR = $cargoTarget`
     : `$cargoTarget = Join-Path $workspace 'cargo-target'\n$env:CARGO_TARGET_DIR = $cargoTarget`;
-  // remote-desktop: build FFmpeg from the pinned source tarball with scripts/build-ffmpeg-lgpl.sh
+  // FFmpeg: build it from the pinned source tarball with scripts/build-ffmpeg-lgpl.sh
   // (MSYS2 bash + MSVC toolchain, no OpenH264; cached per script hash), stage it, link against
   // its import libs (FFMPEG_DIR), and pass the payload to NSIS (overlay merged into one -c file)
   // and to build-msix.ps1. MSYS2 is found at $env:FERRYX_MSYS2_ROOT, else C:\\msys64.
   const ffmpegCache = hostConfig.root
     ? `Join-Path ${quotePowerShell(hostConfig.root)} 'ffmpeg-cache'`
     : `Join-Path $workspace 'ffmpeg-cache'`;
-  const ffmpegPrelude = rd
-    ? `$msysRoot = if ($env:FERRYX_MSYS2_ROOT) { $env:FERRYX_MSYS2_ROOT } else { 'C:\\msys64' }
+  const ffmpegPrelude = `$msysRoot = if ($env:FERRYX_MSYS2_ROOT) { $env:FERRYX_MSYS2_ROOT } else { 'C:\\msys64' }
 $msysBash = Join-Path $msysRoot 'usr\\bin\\bash.exe'
-if (-not (Test-Path -LiteralPath $msysBash)) { throw "MSYS2 bash not found at $msysBash (set FERRYX_MSYS2_ROOT); required to build FFmpeg for remote-desktop" }
+if (-not (Test-Path -LiteralPath $msysBash)) { throw "MSYS2 bash not found at $msysBash (set FERRYX_MSYS2_ROOT); required to build FFmpeg" }
 $ffmpegCache = ${ffmpegCache}
 New-Item -ItemType Directory -Path $ffmpegCache -Force | Out-Null
 $ffmpegScript = Join-Path $sourceDir 'scripts/build-ffmpeg-lgpl.sh'
@@ -746,14 +749,10 @@ $nsisConfig = Get-Content -LiteralPath (Join-Path $ffmpegPayload 'tauri.ffmpeg.c
 $nsisConfig | Add-Member -NotePropertyName build -NotePropertyValue ([PSCustomObject]@{ beforeBuildCommand = '' }) -Force
 $nsisConfigPath = Join-Path $workspace 'tauri.nsis.ffmpeg.conf.json'
 [System.IO.File]::WriteAllText($nsisConfigPath, ($nsisConfig | ConvertTo-Json -Depth 10))
-`
-    : "";
-  const featureArgs = rd ? ` --features ${REMOTE_DESKTOP_FEATURE}` : "";
-  const nsisConfigArg = rd ? `$nsisConfigPath` : `'{"build":{"beforeBuildCommand":""}}'`;
-  const msixPayloadArg = rd ? " -FfmpegPayloadDir $ffmpegPayload" : "";
+`;
   const nsisBuild = plan.channels.nsisMigration
     ? `Remove-Item -Path (Join-Path $cargoTarget 'release\\bundle') -Recurse -Force -ErrorAction SilentlyContinue
-bun tauri build --bundles nsis${featureArgs} -c ${nsisConfigArg}; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+bun tauri build --bundles nsis -c $nsisConfigPath; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $nsis = @(Get-ChildItem -Path $cargoTarget -Filter '*-setup.exe' -File -Recurse)
 if ($nsis.Count -ne 1) { throw "Expected exactly one NSIS installer, found $($nsis.Count)" }
 Copy-Item -LiteralPath $nsis[0].FullName -Destination (Join-Path $outDir 'Ferryx_x64-setup.exe')
@@ -796,10 +795,10 @@ ${ffmpegPrelude}New-Item -ItemType Directory -Path $outDir | Out-Null
 ${targetDirCode}
 $env:SOURCE_DATE_EPOCH = ${quotePowerShell(String(plan.sourceDateEpoch))}
 Push-Location $sourceDir
-bun tauri build --no-bundle${featureArgs}; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+bun tauri build --no-bundle; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $executables = @(Get-ChildItem -Path (Join-Path $cargoTarget 'release') -Filter 'ferryx.exe' -File)
 if ($executables.Count -ne 1) { throw "Expected exactly one Ferryx executable, found $($executables.Count)" }
-& (Join-Path $sourceDir 'scripts/build-msix.ps1') -ExePath $executables[0].FullName -Version ${quotePowerShell(plan.msixVersion)} -OutputDir $outDir -SkipSigning${msixPayloadArg}
+& (Join-Path $sourceDir 'scripts/build-msix.ps1') -ExePath $executables[0].FullName -Version ${quotePowerShell(plan.msixVersion)} -OutputDir $outDir -SkipSigning -FfmpegPayloadDir $ffmpegPayload
 if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ${nsisBuild}Pop-Location
 $msix = @(Get-ChildItem -Path $outDir -Filter '*.msix' -File)
@@ -1073,16 +1072,17 @@ function nestedHelperBundles(appPath) {
 }
 
 /**
- * macOS remote-desktop payload: builds (or reuses cached) arm64 and x86_64 LGPL FFmpeg prefixes,
- * stages them as universal dylibs with @rpath install names, and returns the cargo env (per-target
- * pkg-config paths) plus the `tauri build -c` overlay that copies them into Contents/Frameworks.
+ * macOS FFmpeg payload: builds (or reuses cached) arm64 and x86_64 LGPL FFmpeg prefixes, stages
+ * them as universal dylibs with @rpath install names, and returns the cargo env plus the
+ * `tauri build -c` overlay that copies them into Contents/Frameworks. One universal build links
+ * both slices, so FFMPEG_DIR is a link SDK of the arm64 headers (arch-neutral) and the staged
+ * universal dylibs.
  */
 export function prepareMacosFfmpeg({ sourceDir, cacheRoot, exec = execFileSync }) {
   const script = join(sourceDir, "scripts", "build-ffmpeg-lgpl.sh");
   const key = createHash("sha256").update(readFileSync(script)).digest("hex").slice(0, 16);
   mkdirSync(cacheRoot, { recursive: true });
   const prefixes = {};
-  const env = { PKG_CONFIG_ALLOW_CROSS: "1" };
   for (const [triple, arch] of [["aarch64-apple-darwin", "arm64"], ["x86_64-apple-darwin", "x86_64"]]) {
     const prefix = join(cacheRoot, `lgpl-${key}-${arch}`);
     if (!existsSync(join(prefix, "build-receipt.txt"))) {
@@ -1095,7 +1095,6 @@ export function prepareMacosFfmpeg({ sourceDir, cacheRoot, exec = execFileSync }
       rmSync(`${prefix}.build`, { recursive: true, force: true });
     }
     prefixes[triple] = prefix;
-    env[`PKG_CONFIG_PATH_${triple.replaceAll("-", "_")}`] = join(prefix, "lib", "pkgconfig");
   }
   const stage = join(sourceDir, "scripts", "stage-ffmpeg.mjs");
   exec("bun", [
@@ -1108,6 +1107,16 @@ export function prepareMacosFfmpeg({ sourceDir, cacheRoot, exec = execFileSync }
   exec("bun", [stage, "--target", "universal-apple-darwin", "--check"], { cwd: sourceDir, stdio: "pipe" });
   // One -c file: the staged overlay plus the empty beforeBuildCommand of the bundling pass.
   const payloadDir = join(sourceDir, FFMPEG_PAYLOAD_REL, "universal-apple-darwin");
+  const sdkDir = join(payloadDir, "sdk");
+  rmSync(sdkDir, { recursive: true, force: true });
+  mkdirSync(join(sdkDir, "lib"), { recursive: true });
+  cpSync(join(prefixes["aarch64-apple-darwin"], "include"), join(sdkDir, "include"), { recursive: true });
+  const stage = JSON.parse(readFileSync(join(payloadDir, "stage.json"), "utf8"));
+  for (const name of Object.keys(stage.runtime)) {
+    // libavcodec.63.dylib -> lib/libavcodec.dylib, the name `-lavcodec` resolves.
+    symlinkSync(join(payloadDir, "runtime", name), join(sdkDir, "lib", name.replace(/\.\d+\.dylib$/, ".dylib")));
+  }
+  const env = { FFMPEG_DIR: sdkDir };
   const merged = JSON.parse(readFileSync(join(payloadDir, "tauri.ffmpeg.conf.json"), "utf8"));
   merged.build = { beforeBuildCommand: "" };
   const overlay = join(payloadDir, "tauri.bundle.conf.json");
@@ -1145,7 +1154,7 @@ export function verifyMacosFfmpegBundle({ appPath, payloadDir, exec = macExec })
     linksFfmpeg = true;
     if (!dep.startsWith("@rpath/")) throw new Error(`Ferryx binary links FFmpeg through a non-@rpath path: ${dep}`);
   }
-  if (!linksFfmpeg) throw new Error("Ferryx binary does not link FFmpeg; was it built with --features remote-desktop?");
+  if (!linksFfmpeg) throw new Error("Ferryx binary does not link FFmpeg; was the default remote-desktop feature disabled?");
   return Object.keys(manifest.runtime);
 }
 
@@ -1158,7 +1167,6 @@ export async function buildHost({
   runDir,
   approveNotarization = false,
   runner = null,
-  features = [],
   timeoutMs = Number(process.env.FERRYX_BUILD_TIMEOUT_MS) || 1800000,
 }) {
   if (!VALID_HOSTS.includes(hostName)) {
@@ -1277,7 +1285,6 @@ export async function buildHost({
       artifactsOutDir,
       plan,
       approveNotarization,
-      features,
     });
     if (!runResult || typeof runResult.exitCode !== "number") {
       throw new Error(`Build runner returned no result for host '${hostName}'`);
@@ -1330,15 +1337,11 @@ export async function buildHost({
         CARGO_TARGET_DIR: cargoTargetDir,
         SOURCE_DATE_EPOCH: String(plan.sourceDateEpoch),
       };
-      const rd = hasRemoteDesktop(features);
-      const ffmpeg = rd
-        ? prepareMacosFfmpeg({
-            sourceDir: isolatedSource,
-            cacheRoot: join(hostConfig.root ?? workspaceDir, "ffmpeg-cache"),
-          })
-        : null;
-      if (ffmpeg) Object.assign(buildEnv, ffmpeg.env);
-      const featureArgs = rd ? ["--features", REMOTE_DESKTOP_FEATURE] : [];
+      const ffmpeg = prepareMacosFfmpeg({
+        sourceDir: isolatedSource,
+        cacheRoot: join(hostConfig.root ?? workspaceDir, "ffmpeg-cache"),
+      });
+      Object.assign(buildEnv, ffmpeg.env);
       if (hostConfig.signingIdentity) {
         buildEnv.APPLE_SIGNING_IDENTITY = hostConfig.signingIdentity;
       }
@@ -1357,7 +1360,7 @@ export async function buildHost({
 
       execFileSync(
         "bun",
-        ["tauri", "build", "--target", "universal-apple-darwin", "--no-bundle", ...featureArgs],
+        ["tauri", "build", "--target", "universal-apple-darwin", "--no-bundle"],
         {
           cwd: isolatedSource,
           env: buildEnv,
@@ -1365,6 +1368,20 @@ export async function buildHost({
           timeout: timeoutMs,
         },
       );
+
+      // The headless binaries ship standalone (ferryx-cli-darwin-universal) and must not load the
+      // FFmpeg dylibs that only the app bundle carries, so rebuild them without default features.
+      for (const triple of ["aarch64-apple-darwin", "x86_64-apple-darwin"]) {
+        execFileSync(
+          "cargo",
+          [
+            "build", "--manifest-path", join(isolatedSource, "src-tauri", "Cargo.toml"), "--release",
+            "--no-default-features", "--target", triple,
+            "--bin", "ferryx-cli", "--bin", "ferryx-account", "--bin", "ferryx-relay",
+          ],
+          { cwd: isolatedSource, env: buildEnv, stdio: "pipe", timeout: timeoutMs },
+        );
+      }
 
       // Ensure all workspace binaries used by the app bundle are universal lipo'd.
       mkdirSync(universalRel, { recursive: true });
@@ -1393,8 +1410,8 @@ export async function buildHost({
       execFileSync(
         "bun",
         [
-          "tauri", "build", "--target", "universal-apple-darwin", "--bundles", "app,dmg", ...featureArgs,
-          "-c", ffmpeg ? ffmpeg.overlay : '{"build":{"beforeBuildCommand":""}}',
+          "tauri", "build", "--target", "universal-apple-darwin", "--bundles", "app,dmg",
+          "-c", ffmpeg.overlay,
         ],
         {
           cwd: isolatedSource,
@@ -1439,12 +1456,10 @@ export async function buildHost({
       if (!plistText.includes(`<string>${plan.appVersion}</string>`)) {
         throw new Error(`Info.plist version does not match plan version '${plan.appVersion}'`);
       }
-      if (rd) {
-        verifyMacosFfmpegBundle({
-          appPath,
-          payloadDir: join(isolatedSource, FFMPEG_PAYLOAD_REL, "universal-apple-darwin"),
-        });
-      }
+      verifyMacosFfmpegBundle({
+        appPath,
+        payloadDir: join(isolatedSource, FFMPEG_PAYLOAD_REL, "universal-apple-darwin"),
+      });
 
       // 3-4. Re-sign all Mach-O binaries, notarize/staple the app, then rebuild
       // and notarize the DMG from that final signed + stapled app.
@@ -1518,7 +1533,7 @@ export async function buildHost({
       await runProcess(scpCommand, [...sshArgs, sourceBundlePath, ghosttyBundlePath, bundleTarget], { timeoutMs });
 
       if (hostConfig.platform === "linux") {
-        const script = createLinuxBuildScript({ workspaceDir, plan, hostConfig, features });
+        const script = createLinuxBuildScript({ workspaceDir, plan, hostConfig });
         const result = await runHostScript(hostConfig, { posix: script }, { timeoutMs });
         toolchains = parseBuildResult(result.stdout);
         for (const name of ["Ferryx_amd64.AppImage", "Ferryx_amd64.deb", "ferryx-cli-linux-amd64"]) {
@@ -1541,7 +1556,6 @@ export async function buildHost({
             plan,
             hostConfig,
             signingSecretFile: signingKey ? "tauri-signing-secret.json" : null,
-            features,
           });
           const result = await runHostScript(hostConfig, { powershell: script }, { timeoutMs });
           toolchains = parseBuildResult(result.stdout);
