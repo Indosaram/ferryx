@@ -67,6 +67,31 @@ the primary is down, the current holder keeps its lease through the standby, but
 machine can take it over, and nothing is released. A move or a takeover waits for the primary or
 for a promotion. A read-only store never runs the v3 migration.
 
+In detail, a standby relay (`ferryx-relay` with `standby.readonly` in its data directory)
+answers lease requests like this (`answer_standby_lease` in `src-tauri/src/remote/relay_server.rs`):
+
+- `SupervisorLeaseAcquire` and `SupervisorLeaseRelease` get outcome `unavailable` with
+  `reasonCode` `ACCOUNT_STORE_READ_ONLY`, without reading the store. This includes a forced
+  acquire.
+- `SupervisorLeaseRenew` re-reads the replicated row on every request. It answers `renewed`,
+  with an expiry of the standby's `now + TTL_SECS`, only if the row is not released, names the
+  asking machine and the presented fence, and that fence is in the replica's current epoch.
+  Otherwise it answers `refused` with `LEASE_NOT_HOLDER`. The checkpoint id a renew carries is
+  not recorded.
+- `SupervisorLeaseQuery` reports the replicated holder. Its expiry is the later of the
+  replicated `expires_at` and the in-memory renewal.
+
+What this means for daemons while only the standby relay is up:
+
+- A holder's clean `ferryx hub stop` still publishes its final checkpoint, but its release is
+  not acknowledged. The holder has stopped renewing, so its lease runs out on its own (TTL plus
+  grace). No standby daemon can acquire it until the primary is back or promoted.
+- `ferryx hub move-here` (also with `--force`) cannot acquire the lease. A move that staged an
+  import discards it, and the target keeps its own database.
+- A standby daemon does not take over automatically, because acquire is unavailable.
+- After a promotion, the epoch bump makes the old holder's fence unrenewable; the holder
+  re-acquires and gets a new-epoch fence (see "Promotion and failback").
+
 Refusal codes in `reasonCode`: `LEASE_HELD` (another machine holds a live or in-grace lease),
 `LEASE_CHECKPOINT_MISMATCH` (the lease is free but the caller's checkpoint is not the last
 recorded one), `LEASE_NOT_HOLDER` (renew with a wrong holder, fence or epoch, or a released

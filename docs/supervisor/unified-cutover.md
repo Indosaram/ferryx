@@ -225,8 +225,16 @@ once that renew is granted. No other machine sees a free lease during the handov
 
 `hub_stopped` still means "the owner turned the supervisor off" and is independent of the
 lease. Losing the lease stops the hub tasks without setting it, so the machine starts again by
-itself when it becomes holder. In this version `ferryx hub stop` only stops the hub tasks; it
-does not publish a checkpoint or release the lease.
+itself when it becomes holder.
+
+`ferryx hub stop` on the holder sets `hub_stopped`, stops the hub tasks and then hands the
+supervisor on: it publishes a final checkpoint first and then releases the lease, and the
+release records that checkpoint. The relay treats a released lease as free without waiting
+for the grace period, for a machine that presents that checkpoint. If the final checkpoint cannot
+be published, the lease is kept rather than released with an older checkpoint recorded. It
+then expires normally (120 s plus the 30 s grace). If the relay does not acknowledge the
+release, for example while only the standby relay is up, the lease also just expires. A stop
+on a standby, or on a self-hosted holder with fence `0`, publishes and releases nothing.
 
 ### Moving the supervisor
 
@@ -237,8 +245,10 @@ ferryx hub move-here
 ```
 
 The phone does the same with `POST /api/v1/supervisor/move` on the target machine, body
-`{"force": false}`, answer `{"moved": true}` (`false`: it already ran there); the desktop panel
-has a "Move supervisor here" button. The target asks the holder, over the paired end-to-end
+`{"force": false, "replaceLocal": false}` (`replaceLocal` is optional), answer
+`{"moved": true}` (`false`: it already ran there). The desktop panel has a "Move supervisor
+here" button (`cmd_supervisor_move_here` with `force` and an optional `replace_local`). The
+target asks the holder, over the paired end-to-end
 channel, to stop (`POST /api/v1/supervisor/release-to`). The holder publishes a final
 checkpoint and releases the lease reserved for the target. The target pulls that checkpoint
 (`GET /api/v1/supervisor/checkpoint`), imports it and acquires the lease with the next fence.
@@ -249,11 +259,24 @@ starts fresh ones. Before the import replaces anything, the target keeps its pre
 as `hub.sqlite.pre-move-<ts>` (with its `-wal`/`-shm`), and the previous env file and memory
 repo as `*.pre-move-<ts>`. Hosts are remapped to the target's paired hosts. A host the exporter
 could not scope is written as `unmapped:<id>`; its goals are held with `REMOTE_HOST_UNMAPPED`
-and never sent to another pane. If the target hub holds a different supervisor (the import
-refuses with `SUPERVISOR_IDENTITY_MISMATCH`), the target first archives that supervisor as
-`hub.sqlite.pre-lease-<ts>` and then imports again. The archive is written once and never
-deleted, and its open goals become adoptable (see "First rollout"). No flag is needed. A
-target with the same supervisor identity imports without an archive.
+and never sent to another pane. A target with the same supervisor identity, or one whose
+supervisor was already archived (see "First rollout"), imports without an archive.
+
+If the target hub holds a different supervisor, the move is refused with
+`SUPERVISOR_IDENTITY_MISMATCH` (HTTP 409). Nothing is archived or staged, and the lease does
+not move. The CLI prints a hint to add `--replace-local`. Only the owner can replace that
+local supervisor, and only explicitly:
+
+```bash
+ferryx hub move-here --replace-local                    # holder reachable
+ferryx hub move-here --force --confirm --replace-local  # forced takeover (see below)
+```
+
+On the phone, send `{"force": ..., "replaceLocal": true}`. The desktop command takes
+`replace_local: true`. With it, the target first archives its own supervisor as
+`hub.sqlite.pre-lease-<ts>` (with its `-wal`) and then imports again. The archive is written
+once and never deleted, and its open goals become adoptable (see "First rollout").
+Automatic takeover never replaces a local supervisor.
 
 If the holder cannot be reached, the move succeeds only when the lease expired past the grace
 period and this machine has the checkpoint the relay recorded last. Otherwise it fails with
@@ -268,6 +291,12 @@ ferryx hub move-here --force --confirm
 a usage error. On the phone, send `{"force": true}`. A holder whose lease is still live cannot
 be forced out; the move answers `SUPERVISOR_STANDBY`.
 
+A forced takeover first imports this machine's newest pulled checkpoint, if it has one, and
+only then asks the relay for the lease. That import runs the same identity check. A hub that
+holds a different supervisor is therefore refused with `SUPERVISOR_IDENTITY_MISMATCH` before
+the lease moves, unless `--replace-local` is also given. If the relay then refuses the lease,
+the staged import is discarded and this machine keeps its own database.
+
 ### Checkpoints and automatic takeover
 
 The holder publishes a checkpoint every 300 s and on every release. Standbys pull the newest
@@ -279,8 +308,10 @@ stops once it unpacks past 512 MiB, so a small archive cannot fill the disk.
 When the holder's lease expired past the grace period, a standby takes over automatically only
 if its hub is not stopped and its newest checkpoint is the one the relay recorded. It imports
 that checkpoint (keeping `hub.sqlite.pre-move-<ts>`) before its hub reopens. The relay decides
-between several candidates. The same import runs here, including the archive of a different
-local supervisor. A standby that is blocked says why in `promotionBlockReason`:
+between several candidates. This import never replaces a different local supervisor. It is
+refused with `SUPERVISOR_IDENTITY_MISMATCH`, the refusal is logged, and the hub reopens on its
+own database, which the refused import never touched. A standby that is blocked says why in
+`promotionBlockReason`:
 `HUB_STOPPED`, `CHECKPOINT_MISSING`, `CHECKPOINT_STALE`, `LEASE_HELD` or the relay's refusal
 code. Nothing forces a takeover automatically.
 
@@ -330,8 +361,9 @@ Slack socket:
 Every other machine whose hub ran its own supervisor before the lease archives it the first
 time it becomes standby for another machine. It copies its database (and `-wal`) to
 `hub.sqlite.pre-lease-<ts>` once and never writes or deletes that copy. A move onto a machine
-that holds a different supervisor archives it the same way before the import (see "Moving the
-supervisor"). An archived hub counts as fresh for a later move into this machine.
+that still holds a different supervisor archives it the same way only with the owner's
+`--replace-local` (see "Moving the supervisor"); without it the move is refused. An archived
+hub counts as fresh for a later move into this machine.
 
 The archive's open goals (neither completed nor cancelled) are listed in `adoptable` and in the
 standby UI ("Adoptable from <fromMachine>"). Nothing is adopted automatically. To adopt them,
