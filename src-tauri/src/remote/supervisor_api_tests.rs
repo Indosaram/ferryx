@@ -175,6 +175,12 @@ async fn a_machine_control_device_reads_the_snapshot_shape_without_a_hub() {
     assert_eq!(body["hub"]["available"], false);
     assert_eq!(body["hub"]["running"], false);
     assert!(body["hub"]["error"].is_null(), "{body}");
+    // No lease client in this daemon: it runs its own hub as an unleased holder.
+    assert_eq!(body["hub"]["role"], "holder", "{body}");
+    assert_eq!(body["hub"]["fence"], 0);
+    assert!(body["hub"]["holderPaired"].is_boolean());
+    assert_eq!(body["hub"]["unmappedHosts"], serde_json::json!([]));
+    assert_eq!(body["hub"]["unreachableHosts"], serde_json::json!([]));
     for list in ["lanes", "watched", "actions"] {
         assert!(body[list].is_array(), "{list} in {body}");
     }
