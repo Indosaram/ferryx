@@ -36,6 +36,11 @@ const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Matches the relay's `TRANSFER_TIMEOUT`: a control write that cannot complete in this
 /// long means the relay stopped reading, and the session is treated as failed.
 const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often the control channel pings the relay.
+const CONTROL_PING_INTERVAL: Duration = Duration::from_secs(15);
+/// Three missed ping intervals with no inbound frame at all (pong, notice, ACK) means the
+/// socket is half-open; the session fails so status flips and the client reconnects.
+const CONTROL_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Sends one control frame, bounded by [`CONTROL_WRITE_TIMEOUT`]. Expiry is an error so a
 /// relay that stops reading cannot stall every notice, ACK and attach reply behind it.
@@ -691,6 +696,11 @@ impl RelayClient {
 
     async fn run_control_session(&self) -> anyhow::Result<()> {
         let socket = self.connect_control().await?;
+        self.serve_control_session(socket).await
+    }
+
+    /// Services an authenticated control socket until it closes or errors.
+    async fn serve_control_session(&self, socket: ControlSocket) -> anyhow::Result<()> {
         // Set only after authentication succeeds. Drop clears every exit, including a later reject.
         let _admitted = ControlChannelAdmission::admit(&self.control_accepted);
         let mut registrations = self.register_rx.lock().await;
@@ -701,12 +711,19 @@ impl RelayClient {
         let (mut write, mut read) = socket.split();
         // Dropping the control future also aborts its data channels.
         let mut sessions = tokio::task::JoinSet::new();
-        let mut ping_interval = tokio::time::interval(Duration::from_secs(15));
+        let mut ping_interval = tokio::time::interval(CONTROL_PING_INTERVAL);
         ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_inbound = tokio::time::Instant::now();
 
         loop {
             let message = tokio::select! {
                 _ = ping_interval.tick() => {
+                    if last_inbound.elapsed() >= CONTROL_IDLE_TIMEOUT {
+                        return Err(anyhow::anyhow!(
+                            "relay control channel silent for {}s; treating it as dead",
+                            last_inbound.elapsed().as_secs()
+                        ));
+                    }
                     if let Err(err) = send_control(&mut write, Message::Ping(Vec::new().into())).await {
                         tracing::warn!("relay control ping failed: {err}");
                         break;
@@ -737,7 +754,10 @@ impl RelayClient {
                     pending = None;
                     continue;
                 }
-                message = read.next() => message,
+                message = read.next() => {
+                    last_inbound = tokio::time::Instant::now();
+                    message
+                }
                 result = sessions.join_next(), if !sessions.is_empty() => {
                     if let Some(Err(err)) = result {
                         tracing::warn!("relay data channel task failed: {err}");
@@ -1299,6 +1319,36 @@ mod tests {
         .expect("the write must give up on its own")
         .unwrap_err();
         assert!(error.to_string().contains("timed out"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_silent_relay_fails_the_control_session_and_clears_connected() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = RelayClient::new(format!("http://{}", listener.local_addr().unwrap()), "tok");
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            // Hold the socket without ever reading it: pings are never answered, like a
+            // half-open connection after a NAT drop.
+            let socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let _ = release_rx.await;
+            drop(socket);
+        });
+        let socket = client.connect_control().await.unwrap();
+        // Only the idle deadline is under test; the paused clock auto-advances while the
+        // runtime waits on a relay that never answers.
+        tokio::time::pause();
+        let error = tokio::time::timeout(
+            CONTROL_IDLE_TIMEOUT * 4,
+            client.serve_control_session(socket),
+        )
+        .await
+        .expect("a silent control channel must fail on its own")
+        .unwrap_err();
+        assert!(error.to_string().contains("silent"), "{error}");
+        assert!(!client.control_channel_accepted());
+        release_tx.send(()).ok();
+        server.await.unwrap();
     }
 
     #[tokio::test]
