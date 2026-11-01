@@ -103,6 +103,8 @@ export function SupervisorStep({ projects, onReady }: SupervisorStepProps): JSX.
   }
 
   const action = actionFor(status);
+  // Earlier jobs waiting for adoption get their own row; the status box says the supervisor runs.
+  const shown = finished ? actionFor({ ...status, nextAction: "none" }) : action;
   // A step that still needs the person keeps its button: a stalled setup is retried, never spun on.
   const canRun = action.primary === "run_setup";
   const showProgress = state === "working";
@@ -133,7 +135,7 @@ export function SupervisorStep({ projects, onReady }: SupervisorStepProps): JSX.
         <div className="flex min-w-0 items-center gap-2">
           {showProgress ? <Loader2 aria-hidden="true" className="size-3.5 shrink-0 animate-spin text-muted-foreground" /> : null}
           {finished ? (
-            <WizardStatus tone="success" label={action.kind === "adopt" ? "Supervisor is running on its own" : action.label} />
+            <WizardStatus tone="success" label={shown.label} />
           ) : state === "blocked" ? (
             <WizardStatus tone="warning" label={action.label} />
           ) : (
@@ -143,7 +145,7 @@ export function SupervisorStep({ projects, onReady }: SupervisorStepProps): JSX.
           )}
         </div>
         <p data-testid="onboarding-supervisor-description" className="mt-1 break-words text-[12px] leading-relaxed text-muted-foreground">
-          {action.description}
+          {shown.description}
         </p>
       </div>
 
@@ -174,7 +176,9 @@ export function SupervisorStep({ projects, onReady }: SupervisorStepProps): JSX.
                         onChange={() => toggleProject(project.path)}
                         className="size-3.5 shrink-0 accent-primary"
                       />
-                      <span className="shrink-0 font-medium text-foreground">{project.name}</span>
+                      <span className="min-w-0 max-w-[60%] shrink-0 truncate font-medium text-foreground" title={project.name}>
+                        {project.name}
+                      </span>
                       <span className="min-w-0 truncate font-mono text-[11px] text-muted-foreground" title={project.path}>
                         {project.path}
                       </span>
