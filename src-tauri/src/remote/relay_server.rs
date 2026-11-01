@@ -4063,14 +4063,30 @@ async fn download_cli_artifact_from_candidate_dirs(
         let file_path = dir.join(artifact);
         if let Ok(meta) = tokio::fs::symlink_metadata(&file_path).await {
             if meta.file_type().is_file() {
-                if let Ok(bytes) = tokio::fs::read(&file_path).await {
-                    return (
-                        [
-                            (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
-                            (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"ferryx-cli\""),
-                        ],
-                        bytes,
-                    ).into_response();
+                if let Ok(file) = tokio::fs::File::open(&file_path).await {
+                    // Stream the binary instead of reading tens of MB into memory per request.
+                    let body = futures_util::stream::unfold(file, |mut file| async move {
+                        use tokio::io::AsyncReadExt as _;
+                        let mut chunk = bytes::BytesMut::with_capacity(64 * 1024);
+                        match file.read_buf(&mut chunk).await {
+                            Ok(0) => None,
+                            Ok(_) => Some((Ok::<_, std::io::Error>(chunk.freeze()), file)),
+                            Err(error) => Some((Err(error), file)),
+                        }
+                    });
+                    // Every name comes from the fixed allowlist above, so it is safe to quote.
+                    let disposition = format!("attachment; filename=\"{artifact}\"");
+                    let mut response = Body::from_stream(body).into_response();
+                    let headers = response.headers_mut();
+                    headers.insert(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/octet-stream"),
+                    );
+                    if let Ok(value) = HeaderValue::from_str(&disposition) {
+                        headers.insert(header::CONTENT_DISPOSITION, value);
+                    }
+                    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(meta.len()));
+                    return response;
                 }
             }
         }
@@ -10436,6 +10452,15 @@ mod tests {
             .await
             .expect("download request");
         assert_eq!(staged.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            staged.headers().get("content-disposition").and_then(|v| v.to_str().ok()),
+            Some("attachment; filename=\"ferryx-cli-linux-amd64\""),
+            "the saved file keeps its artifact name (and .exe on Windows)"
+        );
+        assert_eq!(
+            staged.headers().get("content-length").and_then(|v| v.to_str().ok()),
+            Some(artifact_bytes.len().to_string().as_str())
+        );
         let served = staged.bytes().await.expect("download body");
         assert_eq!(
             served.as_ref(),
@@ -10595,6 +10620,26 @@ mod tests {
             fallback_real_bytes.as_slice(),
             "must serve regular file bytes from second candidate directory"
         );
+    }
+
+    #[tokio::test]
+    async fn a_multi_chunk_artifact_is_streamed_whole() {
+        let staging = tempfile::tempdir().expect("staging dir");
+        let artifact: Vec<u8> = (0..(200 * 1024u32)).map(|n| (n % 251) as u8).collect();
+        std::fs::write(staging.path().join("ferryx-cli-windows-amd64.exe"), &artifact).unwrap();
+        let response = download_cli_artifact_from_candidate_dirs(
+            "ferryx-cli-windows-amd64.exe",
+            vec![staging.path().to_path_buf()],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_DISPOSITION],
+            "attachment; filename=\"ferryx-cli-windows-amd64.exe\""
+        );
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], artifact.len().to_string());
+        let body = axum::body::to_bytes(response.into_body(), artifact.len() + 1).await.unwrap();
+        assert_eq!(body.as_ref(), artifact.as_slice());
     }
 
     async fn spawn_test_relay_with_account_state(
