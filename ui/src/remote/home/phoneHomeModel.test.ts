@@ -1,14 +1,20 @@
 import { describe, expect, it } from "vitest";
 
 import { fixtureAction, fixtureInventory, fixtureLane, fixtureMachine, fixtureOption, fixtureSnapshot } from "./phoneHomeFixtures";
-import { buildInboxRows, laneName, laneStatus, optionForSession, recentActions, supervisorHeadline } from "./phoneHomeModel";
+import { actionText, buildInboxRows, headlineSentence, laneFolder, laneStatus, optionForSession, recentActions, supervisorHeadline } from "./phoneHomeModel";
 
 const NOW = 1_000_000;
 
 describe("supervisorHeadline", () => {
   it("is off when no readable machine runs a hub", () => {
     const machines = [fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ hub: { available: true, running: false } }) })];
-    expect(supervisorHeadline(machines, NOW)).toBe("off");
+    expect(supervisorHeadline(machines, NOW)).toEqual({ kind: "off" });
+  });
+
+  it("is unknown, not off, when no machine can be read", () => {
+    const machines = [fixtureMachine({ machineId: "m1", state: "offline", snapshot: null })];
+    expect(supervisorHeadline(machines, NOW)).toEqual({ kind: "unknown" });
+    expect(headlineSentence({ kind: "unknown" })).not.toMatch(/isn't running/);
   });
 
   it("is paused when every lane on every machine is paused", () => {
@@ -16,13 +22,13 @@ describe("supervisorHeadline", () => {
       fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "a", paused: true })] }) }),
       fixtureMachine({ machineId: "m2", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "b", paused: true })] }) }),
     ];
-    expect(supervisorHeadline(machines, NOW)).toBe("paused");
+    expect(supervisorHeadline(machines, NOW).kind).toBe("paused");
   });
 
   it("is typing when a lane's session got a fresh OK input", () => {
     const lane = fixtureLane({ key: "a" });
     const snapshot = fixtureSnapshot({ lanes: [lane], actions: [fixtureAction({ atMs: NOW - 1000, sessionId: lane.sessionId })] });
-    expect(supervisorHeadline([fixtureMachine({ machineId: "m1", snapshot })], NOW)).toBe("typing");
+    expect(supervisorHeadline([fixtureMachine({ machineId: "m1", snapshot })], NOW).kind).toBe("typing");
   });
 
   it("counts lanes and watched sessions across machines", () => {
@@ -31,7 +37,7 @@ describe("supervisorHeadline", () => {
       fixtureMachine({ machineId: "m2", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "b", paused: true })] }) }),
       fixtureMachine({ machineId: "m3", state: "offline", snapshot: null }),
     ];
-    expect(supervisorHeadline(machines, NOW)).toBe("watching 3");
+    expect(supervisorHeadline(machines, NOW)).toEqual({ kind: "active", lanes: 2, watched: 1 });
   });
 });
 
@@ -42,12 +48,16 @@ describe("laneStatus", () => {
     expect(laneStatus({ ...lane, paused: true }, acting, true).kind).toBe("paused");
     expect(laneStatus(lane, acting, true).kind).toBe("typing");
     expect(laneStatus(lane, new Set(), true).kind).toBe("needs-you");
-    expect(laneStatus(lane, new Set(), false)).toEqual({ kind: "status", label: "Waiting on review" });
+    expect(laneStatus(lane, new Set(), false)).toEqual({ kind: "status", label: "Waiting for review" });
   });
 
-  it("names a lane by its cwd leaf and title", () => {
-    expect(laneName({ cwd: "/a/b/ferryx/", title: "Inbox" })).toBe("ferryx · Inbox");
-    expect(laneName({ cwd: "", title: "Inbox" })).toBe("Inbox");
+  it("never shows a raw hub status: unknown values read as Working", () => {
+    expect(laneStatus(fixtureLane({ key: "a", status: "blocked_on_flux_capacitor" }), new Set(), false).label).toBe("Working");
+  });
+
+  it("takes the folder from the lane's cwd leaf", () => {
+    expect(laneFolder({ cwd: "/a/b/ferryx/" })).toBe("ferryx");
+    expect(laneFolder({ cwd: "" })).toBeNull();
   });
 });
 
@@ -57,6 +67,13 @@ describe("recentActions", () => {
     const m2 = fixtureMachine({ machineId: "m2", snapshot: fixtureSnapshot({ actions: [fixtureAction({ atMs: 20 })] }) });
     expect(recentActions([m1, m2]).map((a) => [a.machineId, a.atMs])).toEqual([["m1", 30], ["m2", 20], ["m1", 10]]);
     expect(recentActions([m1, m2], 2)).toHaveLength(2);
+  });
+
+  it("describes refused actions without codes or session ids", () => {
+    const m1 = fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ actions: [fixtureAction({ atMs: 1, code: "RATE_LIMITED", sessionId: "abcdef123456" })] }) });
+    const [action] = recentActions([m1]);
+    expect(action.where).toBeNull();
+    expect(actionText(action)).toBe("Not sent");
   });
 });
 
