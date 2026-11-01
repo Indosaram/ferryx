@@ -2865,6 +2865,8 @@ async fn host_http_handler(
 }
 
 const MAX_HTTP_SIZE: usize = 8 * 1024 * 1024;
+/// Most informational (1xx) responses one forwarded request may receive before its final one.
+const MAX_INFORMATIONAL_RESPONSES: usize = 8;
 
 /// How large a forwarded response one reference-chat route may return.
 ///
@@ -3496,25 +3498,37 @@ fn parse_http_response_within(
     max_body: usize,
 ) -> Result<Option<Response>, StatusCode> {
     let bad = StatusCode::BAD_GATEWAY;
-    let Some(end) = raw.windows(4).position(|b| b == b"\r\n\r\n") else {
-        return Ok(None);
-    };
-    let text = std::str::from_utf8(&raw[..end]).map_err(|_| bad)?;
-    let mut lines = text.split("\r\n");
-    let mut status_line = lines.next().ok_or(bad)?.split_whitespace();
-    if !matches!(status_line.next(), Some("HTTP/1.1" | "HTTP/1.0")) {
-        return Err(bad);
-    }
-    let status = StatusCode::from_u16(status_line.next().ok_or(bad)?.parse().map_err(|_| bad)?)
-        .map_err(|_| bad)?;
-    if status.is_informational() {
+    // Informational (1xx) blocks precede the final response. Skip them iteratively, and
+    // refuse a host that sends more than a handful: each one used to be a recursive call.
+    let mut raw = raw;
+    let mut informational = 0usize;
+    let (end, mut lines, status) = loop {
+        let Some(end) = raw.windows(4).position(|b| b == b"\r\n\r\n") else {
+            return Ok(None);
+        };
+        let text = std::str::from_utf8(&raw[..end]).map_err(|_| bad)?;
+        let mut lines = text.split("\r\n");
+        let mut status_line = lines.next().ok_or(bad)?.split_whitespace();
+        if !matches!(status_line.next(), Some("HTTP/1.1" | "HTTP/1.0")) {
+            return Err(bad);
+        }
+        let status =
+            StatusCode::from_u16(status_line.next().ok_or(bad)?.parse().map_err(|_| bad)?)
+                .map_err(|_| bad)?;
+        if !status.is_informational() {
+            break (end, lines, status);
+        }
         if status == StatusCode::SWITCHING_PROTOCOLS {
             return Err(bad);
         }
-        return parse_http_response_within(&raw[end + 4..], head, eof, max_body);
-    }
+        informational += 1;
+        if informational > MAX_INFORMATIONAL_RESPONSES {
+            return Err(bad);
+        }
+        raw = &raw[end + 4..];
+    };
     let mut headers = HeaderMap::new();
-    for line in lines {
+    for line in lines.by_ref() {
         let (name, value) = line.split_once(':').ok_or(bad)?;
         headers.append(
             name.parse::<axum::http::HeaderName>().map_err(|_| bad)?,
@@ -5730,6 +5744,21 @@ mod tests {
         let (_newer, _rx, _g) = state.register_control_channel("pool".into());
         assert!(state.take_pooled_data("pool", None).is_none());
         server.abort();
+    }
+
+    #[test]
+    fn informational_responses_are_skipped_but_bounded() {
+        let final_response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+        let mut one = b"HTTP/1.1 100 Continue\r\n\r\n".to_vec();
+        one.extend_from_slice(final_response);
+        let parsed = parse_http_response(&one, false, false).unwrap().unwrap();
+        assert_eq!(parsed.status(), StatusCode::OK);
+        let mut many = b"HTTP/1.1 100 Continue\r\n\r\n".repeat(50);
+        many.extend_from_slice(final_response);
+        assert_eq!(
+            parse_http_response(&many, false, false).err(),
+            Some(StatusCode::BAD_GATEWAY)
+        );
     }
 
     #[test]
