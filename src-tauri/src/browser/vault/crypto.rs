@@ -201,8 +201,8 @@ impl VaultKey {
     /// Rebuilds a key the OS keystore returned; `None` when it is not exactly [`KEY_LEN`] bytes.
     pub fn from_slice(bytes: &[u8], version: VaultKeyVersion) -> Option<Self> {
         let array: [u8; KEY_LEN] = bytes.try_into().ok()?;
-        let mut array = Zeroizing::new(array);
-        Some(Self::from_bytes(*array.as_mut(), version))
+        let array = Zeroizing::new(array);
+        Some(Self::from_bytes(*array, version))
     }
 
     pub const fn version(&self) -> VaultKeyVersion {

@@ -170,38 +170,6 @@ impl WindowsAppBoundDecryptor {
     }
 }
 
-#[cfg(test)]
-mod review_tests {
-    use super::*;
-
-    #[test]
-    fn review_invalid_windows_key_returns_error_without_panicking() {
-        for len in [0, 16, 31, 33] {
-            let decryptor = WindowsAppBoundDecryptor { aes_key: vec![0; len] };
-            assert!(decryptor.decrypt_cookie(&[0; 28]).is_err());
-        }
-    }
-
-    #[test]
-    fn bound_cookie_strips_the_host_hash_and_rejects_another_host() {
-        use sha2::{Digest, Sha256};
-        let key = [7u8; 32];
-        let iv = [3u8; 12];
-        let mut plain = Sha256::digest(b".example.com").to_vec();
-        plain.extend_from_slice(b"session-value");
-        let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
-        let mut blob = iv.to_vec();
-        blob.extend(cipher.encrypt(Nonce::from_slice(&iv), plain.as_slice()).unwrap());
-        let decryptor = WindowsAppBoundDecryptor { aes_key: key.to_vec() };
-
-        assert_eq!(
-            decryptor.decrypt_bound_cookie(&blob, 24, ".example.com").unwrap(),
-            "session-value"
-        );
-        assert!(decryptor.decrypt_bound_cookie(&blob, 24, ".other.com").is_err());
-    }
-}
-
 // Browser config containing CLSID and vtable slot offset for IElevator.
 #[cfg(windows)]
 struct BrowserComConfig {
@@ -319,4 +287,36 @@ unsafe fn call_decrypt_data(
     }
 
     Ok(std::slice::from_raw_parts(plaintext_raw as *const u8, size).to_vec())
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+
+    #[test]
+    fn review_invalid_windows_key_returns_error_without_panicking() {
+        for len in [0, 16, 31, 33] {
+            let decryptor = WindowsAppBoundDecryptor { aes_key: vec![0; len] };
+            assert!(decryptor.decrypt_cookie(&[0; 28]).is_err());
+        }
+    }
+
+    #[test]
+    fn bound_cookie_strips_the_host_hash_and_rejects_another_host() {
+        use sha2::{Digest, Sha256};
+        let key = [7u8; 32];
+        let iv = [3u8; 12];
+        let mut plain = Sha256::digest(b".example.com").to_vec();
+        plain.extend_from_slice(b"session-value");
+        let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
+        let mut blob = iv.to_vec();
+        blob.extend(cipher.encrypt(Nonce::from_slice(&iv), plain.as_slice()).unwrap());
+        let decryptor = WindowsAppBoundDecryptor { aes_key: key.to_vec() };
+
+        assert_eq!(
+            decryptor.decrypt_bound_cookie(&blob, 24, ".example.com").unwrap(),
+            "session-value"
+        );
+        assert!(decryptor.decrypt_bound_cookie(&blob, 24, ".other.com").is_err());
+    }
 }
