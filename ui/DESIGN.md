@@ -96,7 +96,7 @@ Inside `.remote-app-root` the shared `--border` follows `--chat-border`, `--inpu
 Reusable, already shipped. Compose these; don't hand-roll equivalents.
 
 ### App Primitives
-- `ui/IconButton` (`ui/src/components/ui/IconButton.tsx`): Square icon control (`size-6` sm / `size-7` md, desktop only; phone surfaces need a 44px hit area per §6), `aria-label` and `title` required.
+- `ui/IconButton` (`ui/src/components/ui/IconButton.tsx`): Square icon control (`size-6` sm / `size-7` md for desktop; `size-11` `touch` for phone surfaces, per §6), `aria-label` and `title` required.
 - `ui/SectionHeader` (`ui/src/components/ui/SectionHeader.tsx`): `h-8` section title with optional count pill and trailing actions.
 - `ui/StatusDot` (`ui/src/components/ui/StatusDot.tsx`): Maps `AgentState` to a status glyph; `working` pulses, `motion-reduce` safe.
 - `ui/SegmentedControl` (`ui/src/components/ui/SegmentedControl.tsx`): `role="tablist"` of equal-width `role="tab"` buttons with `aria-selected` and arrow-key roving. Track `bg-card rounded-md p-0.5`; segment `text-[11px] rounded-sm text-muted-foreground`; selected segment `bg-worktree-sidebar-accent text-foreground`. An optional count renders `text-status-warning` beside the label. Selection is a fill, never a border.
