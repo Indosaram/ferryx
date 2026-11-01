@@ -60,8 +60,13 @@ pub(crate) const AUTOMATION_SNAPSHOT_SCRIPT: &str = r#"(() => {
     return segments.join(' > ');
   };
   const roleFor = (element) => element.getAttribute('role') || element.tagName.toLowerCase();
-  const nameFor = (element) => element.getAttribute('aria-label') || element.getAttribute('title') ||
-    element.getAttribute('placeholder') || element.textContent.trim().replace(/\s+/g, ' ').slice(0, 160);
+  // A password field is named by its label only: never its value or a value attribute a
+  // framework mirrored into the DOM.
+  const isSecret = (element) => element instanceof HTMLInputElement && element.type === 'password';
+  const nameFor = (element) => isSecret(element)
+    ? (element.getAttribute('aria-label') || element.getAttribute('placeholder') || 'password')
+    : (element.getAttribute('aria-label') || element.getAttribute('title') ||
+      element.getAttribute('placeholder') || element.textContent.trim().replace(/\s+/g, ' ').slice(0, 160));
   return JSON.stringify({
     url: location.href,
     title: document.title,
@@ -69,7 +74,7 @@ pub(crate) const AUTOMATION_SNAPSHOT_SCRIPT: &str = r#"(() => {
       reference: `e${index + 1}`,
       selector: selectorFor(element),
       role: roleFor(element),
-      name: nameFor(element),
+      name: nameFor(element).slice(0, 160),
       tagName: element.tagName.toLowerCase(),
     })),
   });
@@ -457,6 +462,12 @@ fn automation_script(
 #[cfg(test)]
 mod automation_tests {
     use super::*;
+
+    #[test]
+    fn automation_snapshot_never_reads_field_values_and_names_password_fields_by_label() {
+        assert!(AUTOMATION_SNAPSHOT_SCRIPT.contains("element.type === 'password'"));
+        assert!(!AUTOMATION_SNAPSHOT_SCRIPT.contains(".value"));
+    }
 
     #[test]
     fn fill_script_encodes_untrusted_values_as_json_strings() {
@@ -2018,6 +2029,10 @@ fn cef_event_sink<R: tauri::Runtime>(
                 crate::browser::site_permissions::cef_media_access(&tab, video, audio);
                 return;
             }
+            Event::FormSubmitted { tab, payload } => {
+                crate::ipc::browser_vault::handle_form_submitted(&app, &manager, &tab, &payload);
+                return;
+            }
             _ => return,
         };
         if let Ok(state) = update {
@@ -2084,6 +2099,13 @@ pub(crate) fn trusted_bridge_sink<R: tauri::Runtime>(
     manager: Arc<BrowserManager>,
 ) -> crate::browser::bridge::BridgeSink {
     Arc::new(move |browser_id: &str, raw: &str, attestation| {
+        // A login submission from the vault capture script in the same isolated world.
+        if attestation == crate::browser::bridge::Attestation::IsolatedWorld
+            && crate::browser::vault::is_capture_envelope(raw)
+        {
+            crate::ipc::browser_vault::handle_form_submitted(&app, &manager, browser_id, raw);
+            return;
+        }
         let action = match crate::browser::bridge::parse_envelope(raw) {
             Ok(action) => action,
             Err(error) => {
@@ -3834,6 +3856,7 @@ pub async fn cmd_browser_close<R: tauri::Runtime>(
     manager: State<'_, Arc<BrowserManager>>,
     browser_id: String,
 ) -> Result<(), IpcError> {
+    crate::ipc::browser_vault::forget_browser(&browser_id);
     match close_browser_session(&app, manager.inner(), &browser_id).await {
         Ok(()) => Ok(()),
         Err(IpcError {

@@ -208,6 +208,10 @@ web-push = { version = "=0.11.0", default-features = false }
 ece = "=2.3.1"
 jwt-simple = { version = "=0.12.11", default-features = false, features = ["pure-rust"] }
 openssl = { version = "=0.10.81", features = ["vendored"] }
+# Browser password vault (src/browser/vault): AES-256-GCM record envelopes ported from Maho and
+# zeroizing key material. Both are already in Cargo.lock (ferryx-rd-net, ed25519-dalek).
+aes-gcm = "0.10.3"
+zeroize = { version = "1.9", features = ["zeroize_derive"] }
 
 
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
@@ -302,6 +306,7 @@ windows-sys = { version = "0.59", default-features = false, features = [
     "Win32_System_SystemInformation",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_Security_Cryptography",
 ] }
 # Trusted browser bridge (src/browser/bridge/windows.rs). Same versions wry 0.55 already
 # pulls in (Cargo.lock: webview2-com 0.38.2, windows 0.61.3), so no second copy is built.
@@ -311,6 +316,7 @@ windows = { version = "0.61", default-features = false, features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Security_Credentials_UI",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -318,6 +324,9 @@ gtk = { version = "0.18", default-features = false, optional = true }
 webkit2gtk = { version = "2.0.2", default-features = false, optional = true }
 # Reads the trusted bridge's JavaScriptCore values (browser/bridge/linux.rs); same pin as wry.
 javascriptcore = { package = "javascriptcore-rs", version = "=1.1.2", default-features = false, optional = true }
+# Browser vault key in the Secret Service (src/browser/vault/keystore/linux.rs); the same zbus 5
+# notify-rust already pulls in.
+zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
 
 [dev-dependencies]
 tempfile = "3.17"

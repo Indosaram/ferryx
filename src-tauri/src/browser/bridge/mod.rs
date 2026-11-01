@@ -384,7 +384,12 @@ pub(crate) async fn eval_in_world<R: tauri::Runtime>(
 /// or the CDP binding `__ferryxTrusted` (WebView2); both exist only in this world.
 /// The source lives in `broker.js` so `ui/src/lib/bridgeBroker.test.ts` can execute it.
 /// When the channel is missing the broker never cancels a native default.
-pub const TRUSTED_BROKER_SCRIPT: &str = include_str!("broker.js");
+pub const TRUSTED_BROKER_SCRIPT: &str = concat!(
+    include_str!("broker.js"),
+    "\n",
+    // Password-vault login capture: posts `formSubmitted` envelopes through the broker's channel.
+    include_str!("../../../../crates/browser-engine-protocol/src/vault_capture.js")
+);
 
 const PICK_TOKEN_PLACEHOLDER: &str = "__FERRYX_PICK_TOKEN__";
 

@@ -39,6 +39,9 @@ resources_path = "resources"
 cef = { version = "=156.2.0", default-features = false, features = ["build-util"] }
 ferryx-browser-engine-protocol = { path = "../browser-engine-protocol" }
 semver = "1"
+# Parses the DevTools events the password-vault hooks observe (engine/vault.rs); cef already
+# depends on it.
+serde_json = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.3"

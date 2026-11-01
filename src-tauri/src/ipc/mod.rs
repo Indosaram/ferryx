@@ -21,6 +21,8 @@ pub mod browser_import;
 pub mod browser_cli;
 #[cfg(feature = "desktop")]
 pub mod browser_engine;
+#[cfg(feature = "desktop")]
+pub mod browser_vault;
 pub mod cli_install;
 #[cfg(feature = "desktop")]
 pub mod default_browser;

@@ -37,6 +37,7 @@ import { BrowserDownloadsShelf } from "./BrowserDownloadsShelf";
 import { BrowserEngineFallbackNotice } from "./BrowserEngineFallbackNotice";
 import { BrowserMediaCaptureIndicator, BrowserPermissionPrompts } from "./BrowserPermissionPrompt";
 import { onBrowserFindResult } from "../lib/browserSystem";
+import { BrowserVaultBar } from "./BrowserVaultBar";
 import type { BrowserTab } from "../lib/types";
 
 interface BrowserPaneProps {
@@ -526,6 +527,7 @@ export function BrowserPane({
           </div>
         ) : null}
         <BrowserEngineFallbackNotice browserId={tab.browserId} />
+        <BrowserVaultBar browserId={liveTab.browserId} url={liveTab.url} />
         {paneAlert ? (
           <div
             role="alert"

@@ -2442,6 +2442,7 @@ name = "ferryx"
 version = "2026.1101.1"
 dependencies = [
  "aes 0.8.4",
+ "aes-gcm 0.10.3",
  "anyhow",
  "async-trait",
  "axum",
@@ -2535,6 +2536,8 @@ dependencies = [
  "windows-sys 0.59.0",
  "winit",
  "x25519-dalek",
+ "zbus",
+ "zeroize",
  "zip",
 ]
 

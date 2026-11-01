@@ -82,10 +82,15 @@ struct PendingDevtools {
 static DEVTOOLS_CALLS: LazyLock<Mutex<HashMap<u32, PendingDevtools>>> = LazyLock::new(Default::default);
 static NEXT_DEVTOOLS_ID: AtomicU32 = AtomicU32::new(1);
 
-/// Next DevTools message id: positive and inside `i32`, as CEF's message ids are.
+/// Ids at and above this belong to the engine's own vault DevTools calls on the same browser
+/// (`engine/vault.rs`), so Ferryx's calls stay below it and never collide with them.
+const ENGINE_OWN_DEVTOOLS_IDS: u32 = 1_000_000;
+
+/// Next DevTools message id: positive and below [`ENGINE_OWN_DEVTOOLS_IDS`] (so inside `i32`,
+/// as CEF's message ids are).
 fn next_devtools_id() -> u32 {
     loop {
-        let id = NEXT_DEVTOOLS_ID.fetch_add(1, Ordering::Relaxed) & 0x7fff_ffff;
+        let id = NEXT_DEVTOOLS_ID.fetch_add(1, Ordering::Relaxed) % ENGINE_OWN_DEVTOOLS_IDS;
         if id != 0 {
             return id;
         }
@@ -405,6 +410,11 @@ fn devtools_answer(method: &str, ok: bool, raw: &str) -> Result<serde_json::Valu
 /// Returns false when that engine is not running; it applies the file when it next starts.
 pub fn import_cookies(profile: &str, path: &Path) -> bool {
     send(profile, &EngineCommand::ImportCookies { path: path.display().to_string() })
+}
+
+/// Runs a password fill script in the tab's isolated vault world inside the engine.
+pub fn fill(browser_id: &str, script: String) -> Result<(), BrowserError> {
+    send_to_tab(browser_id, EngineCommand::Fill { tab: browser_id.to_string(), script })
 }
 
 /// Brings the tab's window back into view after the page changed: Windows repaints the app's

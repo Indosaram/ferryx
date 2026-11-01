@@ -23,6 +23,11 @@ vi.mock("../../lib/browserExtensions", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/browserExtensions")>()),
   listBrowserExtensions: vi.fn(async () => ({ profile: "default", engineInstalled: false, supported: false, extensions: [] })),
 }));
+vi.mock("../../lib/browserVault", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/browserVault")>()),
+  getVaultStatus: vi.fn(async () => ({ available: true, backend: "keychain" as const })),
+  listVaultItems: vi.fn(async () => []),
+}));
 
 const activeBrowser = {
   browserId: "browser-1",

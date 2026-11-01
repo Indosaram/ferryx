@@ -16,6 +16,7 @@ mod platform;
 mod permissions;
 mod system;
 mod import_cookies;
+mod vault;
 
 #[cfg(target_os = "macos")]
 pub mod mac_app;
@@ -367,6 +368,11 @@ fn execute(command: Command) {
         Command::Devtools { tab, id, method, params } => devtools(tab, id, &method, &params),
         Command::ImportCookies { path } => {
             import_cookies::apply(std::path::Path::new(&path));
+        }
+        Command::Fill { tab, script } => {
+            if let Some(browser) = browser_of(&tab) {
+                vault::fill(&browser, &script);
+            }
         }
     }
 }
@@ -723,6 +729,7 @@ wrap_life_span_handler! {
         fn on_after_created(&self, browser: Option<&mut Browser>) {
             LIVE_BROWSERS.set(LIVE_BROWSERS.get() + 1);
             let Some(browser) = browser else { return };
+            vault::attach(browser);
             if key_of(browser).is_some() {
                 return;
             }
@@ -734,6 +741,7 @@ wrap_life_span_handler! {
         fn on_before_close(&self, browser: Option<&mut Browser>) {
             LIVE_BROWSERS.set(LIVE_BROWSERS.get().saturating_sub(1));
             if let Some(browser) = browser {
+                vault::detach(browser);
                 STRAYS.with_borrow_mut(|strays| strays.retain(|candidate| candidate.is_same(Some(browser)) == 0));
                 DEVTOOLS.with_borrow_mut(|views| views.retain(|view| !same(view, browser)));
                 match key_of(browser) {

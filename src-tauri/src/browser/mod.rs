@@ -40,6 +40,7 @@ pub mod state_cookies;
 pub mod system;
 #[cfg(test)]
 pub mod tests;
+pub mod vault;
 
 pub use cookies::{cookie_from_imported, parse_cookie_file, ImportedCookie};
 pub use bridge::{TrustedAction, TrustedBridgeKind};

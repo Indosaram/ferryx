@@ -48,6 +48,7 @@ import { SiteSettingsGroup } from "./SiteSettingsGroup";
 import { BrowserExtensionsGroup } from "./BrowserExtensionsGroup";
 import { BrowserAgentAccessGroup } from "./BrowserAgentAccessGroup";
 import { DefaultBrowserGroup } from "./DefaultBrowserGroup";
+import { BrowserPasswordsGroup } from "./BrowserPasswordsGroup";
 import { SettingRow, SettingsGroup, SettingsHeading } from "./primitives";
 import { ImportBrowserDataDialog } from "./ImportBrowserDataDialog";
 
@@ -374,6 +375,7 @@ export function BrowserSection() {
       <SiteSettingsGroup />
 
       <BrowserAgentAccessGroup />
+      <BrowserPasswordsGroup />
 
       <SettingsGroup title="Link Routing">
         <div className="border-b border-border">
