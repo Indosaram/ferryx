@@ -23,7 +23,7 @@ const STATE_LABELS: Record<SetupChecklistState, string> = {
 };
 
 function StateIcon({ state, touch }: { state: SetupChecklistState; touch: boolean }) {
-  const size = touch ? "size-4" : "size-3.5";
+  const size = touch ? "mt-0.5 size-4" : "mt-px size-3.5";
   switch (state) {
     case "done":
       return <Check aria-hidden="true" className={cn(size, "shrink-0 text-status-success")} />;
@@ -45,21 +45,23 @@ export function SetupChecklist({ status, earlierJobsAction, touch = false, class
           key={row.id}
           data-testid={`setup-checklist-${row.id}`}
           data-state={row.state}
-          className={cn("flex min-w-0 items-center gap-2 leading-snug", touch ? "min-h-9 text-[14px]" : "min-h-7 text-[12px]")}
+          className={cn("flex min-w-0 items-start gap-2 leading-snug", touch ? "py-1.5 text-[14px]" : "py-1 text-[12px]")}
         >
           <StateIcon state={row.state} touch={touch} />
           <span className="sr-only">{STATE_LABELS[row.state]}:</span>
-          <span className={cn("shrink-0", row.state === "done" ? "text-muted-foreground" : "font-medium text-foreground")}>{row.label}</span>
-          <span
-            data-testid={`setup-checklist-${row.id}-detail`}
-            title={row.detail}
-            className={cn(
-              "min-w-0 flex-1 truncate",
-              row.state === "blocked" ? "font-mono text-destructive" : "text-muted-foreground",
-              row.id === "owner" && row.state === "done" ? "font-mono" : null,
-            )}
-          >
-            {row.detail}
+          {/* Label and detail wrap rather than truncate, so a narrow phone still shows the whole detail. */}
+          <span className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2">
+            <span className={cn(row.state === "done" ? "text-muted-foreground" : "font-medium text-foreground")}>{row.label}</span>
+            <span
+              data-testid={`setup-checklist-${row.id}-detail`}
+              className={cn(
+                "min-w-0 break-words",
+                row.state === "blocked" ? "font-mono text-destructive" : "text-muted-foreground",
+                row.id === "owner" && row.state === "done" ? "break-all font-mono" : null,
+              )}
+            >
+              {row.detail}
+            </span>
           </span>
           {row.id === "earlier_jobs" && row.state !== "done" && earlierJobsAction ? <span className="shrink-0">{earlierJobsAction}</span> : null}
         </li>
