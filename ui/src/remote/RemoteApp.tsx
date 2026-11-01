@@ -5178,10 +5178,8 @@ export const RemoteHostConnection: React.FC<{
     const generation = accountSelectionGenerationRef.current;
     void attempt.then((ok) => {
       setPhoneOpening(null);
-      if (generation === generationBefore) {
-        if (!ok) phoneNav.back();
-        return;
-      }
+      // A refused start leaves no target, so phoneSessionLost returns the screen to home.
+      if (generation === generationBefore) return;
       if (!ok && accountSelectionGenerationRef.current === generation) {
         toast.error("Couldn't open that session", {
           description: `Check that ${option.machineDisplayName || "your computer"} is awake and running Ferryx, then try again.`,
