@@ -104,7 +104,7 @@ jobs:
 
       - name: Install cliclick and tesseract (macOS)
         if: matrix.os_name == 'macos'
-        run: brew install cliclick tesseract || echo "brew install incomplete; the audit records OCR as unavailable"
+        run: brew install cliclick tesseract imagemagick || echo "brew install incomplete; summary.json records what OCR had"
 
       - name: Install tesseract (Windows)
         if: matrix.os_name == 'windows'

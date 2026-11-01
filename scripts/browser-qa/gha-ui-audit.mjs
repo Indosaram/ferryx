@@ -278,6 +278,10 @@ const win = {
   resize(width, height) {
     return this.ps("resize", ["-Hwnd", this.hwnd, "-Width", String(width), "-Height", String(height)]);
   },
+  closeDialogs() {
+    const result = this.ps("closedialogs", ["-ProcessId", String(this.pid)]);
+    return { ...result, closed: Number(result.stdout.split(/\s+/).pop()) || 0 };
+  },
   wheel(x, y, notches) {
     return this.ps("wheel", ["-Hwnd", this.hwnd, "-Width", String(x), "-Height", String(y), "-Codes", String(notches)]);
   },
@@ -311,6 +315,8 @@ public static class FxInput {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder name, int max);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
   public delegate bool EnumProc(IntPtr h, IntPtr l);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
@@ -318,6 +324,17 @@ public static class FxInput {
     IntPtr found = IntPtr.Zero;
     EnumWindows((h, l) => { uint p; GetWindowThreadProcessId(h, out p); if (p == pid && IsWindowVisible(h)) { found = h; return false; } return true; }, IntPtr.Zero);
     return found;
+  }
+  /** Posts WM_CLOSE to visible standard dialogs (#32770, e.g. a file picker) of a process. */
+  public static int CloseDialogs(uint pid) {
+    int closed = 0;
+    EnumWindows((h, l) => {
+      uint p; GetWindowThreadProcessId(h, out p);
+      var name = new System.Text.StringBuilder(64); GetClassName(h, name, 64);
+      if (p == pid && IsWindowVisible(h) && name.ToString() == "#32770") { PostMessage(h, 0x0010, IntPtr.Zero, IntPtr.Zero); closed++; }
+      return true;
+    }, IntPtr.Zero);
+    return closed;
   }
   static INPUT Key(ushort vk, ushort scan, uint flags) { var i = new INPUT(); i.type = 1; i.u.ki.wVk = vk; i.u.ki.wScan = scan; i.u.ki.dwFlags = flags; return i; }
   static INPUT Mouse(uint flags) { var i = new INPUT(); i.type = 0; i.u.mi.dwFlags = flags; return i; }
@@ -367,6 +384,7 @@ switch ($Action) {
   "keys" { [void][FxInput]::Focus($handle); $n = [FxInput]::Chord([uint16[]]($Codes -split "," | ForEach-Object { [uint16]$_ })); if ($n -eq 0) { exit 4 } }
   "type" { [void][FxInput]::Focus($handle); $n = [FxInput]::Type($Text); if ($n -eq 0) { exit 4 } }
   "click" { $n = [FxInput]::Click($Width, $Height); if ($n -eq 0) { exit 4 } }
+  "closedialogs" { Write-Output ([FxInput]::CloseDialogs([uint32]$ProcessId)) }
   "wheel" { $n = [FxInput]::Wheel($Width, $Height, [int]$Codes); if ($n -eq 0) { exit 4 } }
   "resize" { if (-not [FxInput]::SetWindowPos($handle, [IntPtr]::Zero, 40, 40, $Width, $Height, 0x0004)) { exit 5 } }
   "upscale" {
@@ -433,6 +451,7 @@ summary.ocr = tesseract ? { tesseract } : { unavailable: true };
 
 let ocrIndex = 0;
 const imageMagick = ["magick", "convert"].find((candidate) => run(candidate, ["-version"]).ok) ?? null;
+summary.ocr.image_magick = imageMagick ?? (platform === "win32" ? "System.Drawing" : "missing: raw-only OCR, nav labels may be unreadable");
 /** OCR inputs: raw, 2x, and 2x inverted grayscale (sidebar/nav labels are light on dark). */
 function ocrVariants(path) {
   const x2 = path.replace(/\.png$/, ".x2.png");
@@ -772,9 +791,15 @@ const typeUrl = (url) => [
  */
 const NAV_ORDER = ["General", "Appearance", "Terminal", "Keyboard", "Agents", "Browser", "Notifications", "Permissions", "Remote"];
 function navTarget(words, name) {
-  const general = findWord(words, "", { match: exactly("General"), pick: "leftmost" });
+  // Column anchor: the leftmost of any nav label (or "Back" of "Back to app"); "General" alone is
+  // not enough because the content header also reads "General" and OCR may miss the nav one.
+  const anchors = (words ?? []).filter((word) => [...NAV_ORDER, "Back"].includes(word.text));
+  if (!anchors.length) return null;
+  const columnLeft = Math.min(...anchors.map((word) => word.left));
+  const inColumn = (word) => Math.abs(word.left - columnLeft) <= 14;
+  const general = findWord(words, "", { match: (word) => word.text === "General" && inColumn(word) })
+    ?? findWord(words, "", { match: (word) => NAV_ORDER.includes(word.text) && inColumn(word) });
   if (!general) return null;
-  const inColumn = (word) => Math.abs(word.left - general.left) <= 14;
   const direct = findWord(words, "", { match: (word) => word.text === name && inColumn(word) });
   if (direct) return { ...direct, how: "label" };
   const seen = NAV_ORDER.map((label, index) => {
@@ -783,7 +808,7 @@ function navTarget(words, name) {
   }).filter(Boolean);
   if (seen.length < 2) return null;
   const pitch = (seen.at(-1).y - seen[0].y) / (seen.at(-1).index - seen[0].index);
-  return { x: general.x, y: Math.round(seen[0].y + (NAV_ORDER.indexOf(name) - seen[0].index) * pitch), how: `interpolated, pitch ${pitch.toFixed(1)}` };
+  return { x: columnLeft + 24, y: Math.round(seen[0].y + (NAV_ORDER.indexOf(name) - seen[0].index) * pitch), how: `interpolated, pitch ${pitch.toFixed(1)}` };
 }
 async function clickNav(name) {
   const deadline = Date.now() + 6000;
@@ -839,9 +864,29 @@ async function openSettings() {
   return { ok: visible, attempts: 2, refocus_click: focused.ok, stderr: visible ? "" : "Settings did not open after Mod+, twice (second after clicking the sidebar)" };
 }
 /** Optional: dismiss the Windows "moving to the Microsoft Store" toast so it does not cover rows. */
-const dismissStoreToast = [
-  "optional dismiss Windows store toast",
-  () => (platform === "win32" ? clickText("Got", { timeout: 1500, match: exactly("Got") }) : { ok: true, skipped: "not Windows" }),
+/**
+ * OCR never reads the toast's "Got it" button, but reads the toast body reliably. Measured on
+ * runs 41322108840/41331914682 at two window sizes: the button centre is at
+ * (moving.left + 200, moving.top + 41), where "moving" is from "is moving to the Microsoft Store".
+ */
+async function dismissToastNow() {
+  if (platform !== "win32") return { ok: true, skipped: "not Windows" };
+  const words = ocr(probeShot());
+  const direct = findWord(words, "", { match: exactly("Got") });
+  if (direct) return { ...host.click(direct.x + 8, direct.y), via: "Got label", at: [direct.x + 8, direct.y] };
+  const anchor = (words ?? []).find((word) => word.text === "moving");
+  if (!anchor) return { ok: true, skipped: "no toast visible" };
+  const at = [anchor.left + 200, anchor.top + 41];
+  const clicked = host.click(...at);
+  await sleep(800);
+  const still = (ocr(probeShot()) ?? []).some((word) => word.text === "moving");
+  return { ...clicked, ok: clicked.ok && !still, via: "offset from 'moving'", at, stderr: still ? "toast still visible after click" : "" };
+}
+const dismissStoreToast = ["optional dismiss Windows store toast", dismissToastNow];
+/** A stray native dialog (file picker) owned by the app swallows all later input; close it. */
+const closeStrayDialogs = [
+  "optional close stray native dialogs",
+  () => (platform === "win32" ? win.closeDialogs() : { ok: true, skipped: "not Windows" }),
 ];
 
 // ---------------------------------------------------------------- base flow
@@ -874,30 +919,45 @@ await step("settings-open", "Click the sidebar, Mod+, opens Settings (retried on
 await step(
   "settings-enable-advanced",
   "Click the switch on General > 'Advanced features' (row found by label, switch by its pixels); Browser/Notifications appear in the nav",
-  [focus, ["click Advanced features switch", () => clickRowSwitch("Advanced")], 1500],
+  [focus, dismissStoreToast, ["click Advanced features switch", () => clickRowSwitch("Advanced")], 1500],
   { any: ["Notifications"] },
 );
 await step(
   "settings-browser",
   "Click 'Browser' in the Settings nav (nav column found from 'General')",
-  [focus, ["click nav Browser", () => clickNav("Browser")], 2500],
+  [focus, dismissStoreToast, ["click nav Browser", () => clickNav("Browser")], 2500],
   { any: ["Web", "Navigation", "Chromium"] },
 );
 for (const [name, title] of [["extensions", "Extensions"], ["passwords", "Passwords"], ["import", "Import"]]) {
   await step(
     `settings-browser-${name}`,
     `Settings > Browser: scroll the content pane with the mouse wheel to the '${title}' group`,
-    [focus, [`scroll to ${title}`, () => scrollSettingsTo(title)], 800],
+    [focus, dismissStoreToast, [`scroll to ${title}`, () => scrollSettingsTo(title)], 800],
     { any: [title] },
   );
 }
 await step(
   "settings-browser-import-dialog",
   "Click 'Import browser data…' in the Import group; the import dialog opens",
-  [focus, ["click Import browser data", () => clickText("Import", { timeout: 4000, match: (word) => /^Import$/.test(word.text), pick: "rightmost" })], 2000],
+  [
+    focus,
+    dismissStoreToast,
+    ["click Import browser data", async () => {
+      // Not "Import Cookies" (opens a native file dialog): the "Import" whose next word on the
+      // same line is "browser".
+      const words = ocr(probeShot()) ?? [];
+      const button = words
+        .filter((word) => word.text === "Import")
+        .find((word) => words.some((next) => next.text === "browser" && Math.abs(next.top - word.top) <= 6 && next.left > word.left && next.left - (word.left + word.width) < 30));
+      if (!button) return { ok: false, stderr: "'Import browser data…' button not visible" };
+      const at = [button.left + Math.round(button.width / 2), button.top + Math.round(button.height / 2)];
+      return { ...host.click(...at), at };
+    }],
+    2000,
+  ],
   { any: ["Bookmarks", "History", "Cookies", "Passwords", "Chrome", "Firefox", "Safari", "Edge"] },
 );
-await step("settings-import-dialog-closed", "Escape closes the import dialog", [focus, key("Escape", { key: "Escape" }), 1000]);
+await step("settings-import-dialog-closed", "Escape closes the import dialog", [focus, key("Escape", { key: "Escape" }), 1000, closeStrayDialogs]);
 if (engineZip) {
   await step(
     "engine-install",
@@ -935,7 +995,7 @@ await step("settings-closed", "Escape closes Settings", [focus, key("Escape", { 
 await step(
   "download-trigger",
   "Load the local download page and click its download link; the download prompt shows ferryx-qa.txt",
-  [focus, ...typeUrl(`${fixtureBase}/download.html`), 4000, ["click download link", () => clickText("FERRYXDOWNLOAD", { timeout: 8000 })], 4000],
+  [closeStrayDialogs, focus, dismissStoreToast, ...typeUrl(`${fixtureBase}/download.html`), 4000, ["click download link", () => clickText("FERRYXDOWNLOAD", { timeout: 8000 })], 4000],
   { any: ["ferryx-qa.txt", "Save", "Download"] },
 );
 await step(
@@ -972,7 +1032,7 @@ await step("zoom-reset", "Mod+0 resets zoom", [focus, key("Mod+0", { key: "0", m
 await step("narrow-900", "Resize the window to 900x800 (toolbar must stay legible)", [focus, ["resize 900x800", () => host.resize(900, 800)], 2500], {
   any: ["127.0.0.1", "example.html", "Domain"],
 });
-await step("narrow-900-settings", "At 900px, open Settings > Browser", [focus, chromeFocus, ["open Settings", openSettings], ["click nav Browser", () => clickNav("Browser")], 2000], {
+await step("narrow-900-settings", "At 900px, open Settings > Browser", [closeStrayDialogs, focus, chromeFocus, ["open Settings", openSettings], dismissStoreToast, ["click nav Browser", () => clickNav("Browser")], 2000], {
   any: ["Web", "Navigation"],
 });
 await step("narrow-900-settings-closed", "Escape closes Settings at 900px", [focus, key("Escape", { key: "Escape" }), 1500]);
