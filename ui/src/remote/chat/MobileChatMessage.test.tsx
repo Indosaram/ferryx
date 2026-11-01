@@ -19,13 +19,20 @@ describe("MobileChatComponents & MobileChatMessage", () => {
 
   it("renders ActivityIndicator for different states", () => {
     const { container: thinking } = render(<ActivityIndicator state="thinking" />);
-    expect(thinking.textContent).toContain("Thinking...");
+    expect(thinking.textContent).toContain("Thinking…");
 
     const { container: runningTool } = render(<ActivityIndicator state="running_tool" label="Executing" />);
     expect(runningTool.textContent).toContain("Executing");
 
     const { container: waiting } = render(<ActivityIndicator state="waiting_for_input" />);
-    expect(waiting.textContent).toContain("Waiting for input...");
+    expect(waiting.textContent).toContain("Waiting for you");
+    // needing the user is a warning, never the "all fine" green
+    expect(waiting.firstElementChild).toHaveClass("text-status-warning");
+  });
+
+  it("is not a live region of its own: the stream announces a finished turn once", () => {
+    render(<ActivityIndicator state="thinking" />);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
   it("renders AttachmentList images and files", () => {
@@ -183,6 +190,23 @@ describe("MobileChatComponents & MobileChatMessage", () => {
     expect(screen.getByText("Needs your approval")).toBeInTheDocument();
   });
 
+  it("draws a system message as a quiet caption, not as the agent's prose", () => {
+    render(<MobileChatMessage id="s" role="system" content="Session resumed." />);
+    expect(screen.getByTestId("system-message")).toHaveTextContent("Session resumed.");
+    expect(screen.queryByTestId("assistant-message-body")).not.toBeInTheDocument();
+    expect(screen.getByRole("article", { name: /^System/ })).toBeInTheDocument();
+  });
+
+  it("names each turn by who spoke", () => {
+    render(<MobileChatMessage id="u" role="user" content="hi" />);
+    expect(screen.getByRole("article", { name: /^You/ })).toBeInTheDocument();
+  });
+
+  it("gives the message copy button a 44px hit area", () => {
+    render(<MobileChatMessage id="a" role="assistant" content="prose" />);
+    expect(screen.getByTestId("message-copy-button")).toHaveClass("size-11");
+  });
+
   it("renders user MobileChatMessage as a right-aligned accent bubble", () => {
     const { container } = render(
       <MobileChatMessage
@@ -331,6 +355,21 @@ describe("MobileChatComponents & MobileChatMessage", () => {
     expect(container.textContent).toContain("ts");
     expect(container.textContent).toContain("const x = 1;");
     expect(container.textContent).toContain("Copy");
+  });
+
+  it("wraps long code by default and colours added and removed diff lines", () => {
+    const { container } = render(
+      <MobileChatMessage id="d" role="assistant" content={"```diff\n+added\n-removed\n context\n```"} />
+    );
+    const wrap = screen.getByRole("button", { name: "Wrap" });
+    expect(wrap).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Copy code" })).toHaveClass("min-h-11");
+    const lines = Array.from(container.querySelectorAll("code span.block"));
+    expect(lines.map((line) => line.textContent)).toEqual(["+added", "-removed", " context"]);
+    expect(lines[0]).toHaveClass("bg-status-success/15");
+    expect(lines[1]).toHaveClass("bg-chat-danger/15");
+    fireEvent.click(wrap);
+    expect(wrap).toHaveAttribute("aria-pressed", "false");
   });
 
   it("renders pure inline code with InlineCode component", () => {

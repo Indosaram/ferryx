@@ -66,7 +66,7 @@ const InlineCode: React.FC<CodeBlockProps> = ({ className, children, ...props })
   return (
     <code
       className={cn(
-        "bg-chat-surface-raised text-chat-code px-1.5 py-0.5 rounded font-mono text-xs",
+        "bg-chat-surface-raised text-chat-code px-1 py-0.5 rounded font-mono text-[0.875em]",
         className
       )}
       {...props}
@@ -79,6 +79,8 @@ const InlineCode: React.FC<CodeBlockProps> = ({ className, children, ...props })
 const CodeBlock: React.FC<CodeBlockProps> = ({ className, children, ...props }) => {
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
+  // long lines wrap by default: a phone has no room for a sideways scroller inside the stream
+  const [wrap, setWrap] = useState(true);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const match = /language-(\w+)/.exec(className || "");
   const language = match ? match[1] : "";
@@ -106,40 +108,72 @@ const CodeBlock: React.FC<CodeBlockProps> = ({ className, children, ...props }) 
     }, 2000);
   };
 
-  return (
-    <div className="relative group my-2.5 rounded-xl border border-chat-border bg-chat-screen/90 overflow-hidden shadow-xs">
-      <div className="flex items-center justify-between px-3 py-1.5 bg-chat-surface/60 border-b border-chat-border text-[11px] font-mono text-chat-foreground-secondary">
-        <span className="uppercase text-[10px] tracking-wider text-chat-foreground-tertiary font-semibold">
-          {language || "code"}
-        </span>
-        <button
-          type="button"
-          onClick={handleCopy}
-          aria-label={copied ? "Copied" : copyFailed ? "Copy failed" : "Copy code"}
-          className="flex items-center gap-1 text-[10px] text-chat-foreground-secondary hover:text-chat-foreground transition-colors p-1 rounded hover:bg-chat-row-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-        >
-          {copied ? (
-            <>
-              <Check className="w-3 h-3 text-status-success" />
-              <span className="text-status-success font-sans">Copied</span>
-            </>
-          ) : copyFailed ? (
-            <>
-              <AlertCircle aria-hidden="true" className="w-3 h-3 text-chat-danger" />
-              <span className="text-chat-danger font-sans">Failed</span>
-            </>
-          ) : (
-            <>
-              <Copy className="w-3 h-3" />
-              <span className="font-sans">Copy</span>
-            </>
+  const isDiff = language === "diff" || language === "patch";
+  const codeBody = isDiff
+    ? codeText.split("\n").map((line, index) => (
+        <span
+          key={index}
+          className={cn(
+            "block",
+            line.startsWith("+") && !line.startsWith("+++") && "bg-status-success/15",
+            line.startsWith("-") && !line.startsWith("---") && "bg-chat-danger/15",
           )}
-        </button>
+        >
+          {line.length > 0 ? line : " "}
+        </span>
+      ))
+    : children;
+
+  return (
+    <div className="my-2.5 rounded-xl border border-chat-border bg-chat-screen overflow-hidden">
+      <div className="flex items-center justify-between gap-2 bg-chat-surface pl-3 text-xs text-chat-foreground-secondary">
+        <span className="font-mono">{language || "code"}</span>
+        <span className="flex items-center">
+          <button
+            type="button"
+            aria-pressed={wrap}
+            onClick={() => setWrap((prev) => !prev)}
+            className="flex min-h-11 items-center px-3 text-xs text-chat-foreground-secondary transition-colors hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            Wrap
+          </button>
+          <button
+            type="button"
+            onClick={handleCopy}
+            aria-label={copied ? "Copied" : copyFailed ? "Copy failed" : "Copy code"}
+            className="flex min-h-11 items-center gap-1.5 px-3 text-xs text-chat-foreground-secondary transition-colors hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            {copied ? (
+              <>
+                <Check aria-hidden="true" className="size-3.5 text-status-success" />
+                <span>Copied</span>
+              </>
+            ) : copyFailed ? (
+              <>
+                <AlertCircle aria-hidden="true" className="size-3.5 text-chat-danger" />
+                <span className="text-chat-danger">Failed</span>
+              </>
+            ) : (
+              <>
+                <Copy aria-hidden="true" className="size-3.5" />
+                <span>Copy</span>
+              </>
+            )}
+          </button>
+        </span>
+        <span role="status" className="sr-only">
+          {copied ? "Code copied" : copyFailed ? "Couldn't copy the code" : ""}
+        </span>
       </div>
-      <div className="overflow-x-auto p-3 text-[11px] font-mono text-chat-foreground leading-relaxed scrollbar-sleek">
-        <pre className="!bg-transparent !p-0 !m-0">
+      <div
+        className={cn(
+          "p-3 text-[0.8125rem] font-mono text-chat-foreground leading-relaxed",
+          wrap ? "whitespace-pre-wrap break-words" : "overflow-x-auto scrollbar-sleek",
+        )}
+      >
+        <pre className={cn("!bg-transparent !p-0 !m-0", wrap && "whitespace-pre-wrap break-words")}>
           <code className={className} {...props}>
-            {children}
+            {codeBody}
           </code>
         </pre>
       </div>
@@ -201,7 +235,7 @@ const ASSISTANT_MARKDOWN_COMPONENTS = {
     </a>
   ),
   blockquote: ({ children }: any) => (
-    <blockquote className="border-l-2 border-chat-border pl-2.5 my-2 text-chat-foreground-secondary italic">
+    <blockquote className="my-2 rounded-lg bg-chat-surface px-3 py-2 text-chat-foreground-secondary">
       {children}
     </blockquote>
   ),
@@ -213,45 +247,10 @@ interface WorkRowsContainerProps {
   count: number;
 }
 
-const WorkRowsContainer: React.FC<WorkRowsContainerProps> = ({ children, count }) => {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [overflows, setOverflows] = useState(false);
-
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const checkOverflow = () => {
-      setOverflows(el.scrollHeight > el.clientHeight);
-    };
-    checkOverflow();
-    if (typeof ResizeObserver !== "undefined") {
-      const observer = new ResizeObserver(checkOverflow);
-      observer.observe(el);
-      return () => observer.disconnect();
-    }
-  }, [children, count]);
-
-  const shouldFade = count > 8 || overflows;
-
-  return (
-    <div
-      ref={containerRef}
-      style={
-        shouldFade
-          ? {
-              maskImage:
-                "linear-gradient(to bottom, transparent 0, black 12px, black calc(100% - 12px), transparent 100%)",
-              WebkitMaskImage:
-                "linear-gradient(to bottom, transparent 0, black 12px, black calc(100% - 12px), transparent 100%)",
-            }
-          : undefined
-      }
-      className="flex flex-col gap-px max-h-64 overflow-y-auto w-full my-1 scrollbar-sleek"
-    >
-      {children}
-    </div>
-  );
-};
+// The work list grows inline: a nested scroller inside the stream traps a thumb scroll on a phone.
+const WorkRowsContainer: React.FC<WorkRowsContainerProps> = ({ children }) => (
+  <div className="flex flex-col gap-px w-full my-1">{children}</div>
+);
 
 const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
   role,
@@ -323,7 +322,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
   };
 
   const metaRow = (
-    <div className="flex items-center gap-1.5">
+    <div className="flex items-center gap-1">
       {formattedTime && (
         <span className="font-mono text-xs text-chat-foreground-secondary select-none">
           {formattedTime}
@@ -335,18 +334,28 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
         onClick={handleCopy}
         title={copyFailed ? "Copy unavailable" : "Copy message"}
         aria-label={copyFailed ? "Copy failed" : "Copy message"}
-        className="p-0.5 rounded text-chat-foreground-tertiary hover:text-chat-foreground-secondary hover:bg-chat-surface-raised/60 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="-my-2.5 flex size-11 items-center justify-center rounded text-chat-foreground-secondary hover:text-chat-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       >
         {copied ? (
-          <Check aria-hidden="true" className="size-3 text-status-success" />
+          <Check aria-hidden="true" className="size-3.5 text-status-success" />
         ) : copyFailed ? (
-          <AlertCircle aria-hidden="true" className="size-3 text-chat-danger" />
+          <AlertCircle aria-hidden="true" className="size-3.5 text-chat-danger" />
         ) : (
-          <Copy className="size-3" />
+          <Copy aria-hidden="true" className="size-3.5" />
         )}
       </button>
+      <span role="status" className="sr-only">
+        {copied ? "Message copied" : copyFailed ? "Couldn't copy the message" : ""}
+      </span>
     </div>
   );
+
+  const turnLabel = [
+    isRuntime ? "Runtime message" : isUser ? "You" : role === "system" ? "System" : "Assistant",
+    formattedTime,
+  ]
+    .filter(Boolean)
+    .join(", ");
 
   if (isUser) {
     // A runtime turn, or a native user turn made only of parts nobody typed (a compaction, a
@@ -361,16 +370,16 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
       );
     if (isRuntime || nobodyTyped) {
       return (
-        <div className={cn("mb-5 flex flex-col items-start gap-1 w-full", className)}>
-          {isRuntime && <span className="sr-only">Runtime message</span>}
+        <article aria-label={turnLabel} className={cn("mb-5 flex flex-col items-start gap-1 w-full", className)}>
           <ReferencePartList parts={visibleParts} context={referenceContext} timestamp={timestamp} />
           {hasProse && metaRow}
           <ReferenceTurnSkills parts={richParts} />
-        </div>
+        </article>
       );
     }
     return (
-      <div
+      <article
+        aria-label={turnLabel}
         className={cn(
           "mb-5 flex flex-col items-end gap-1 max-w-[88%] ml-auto",
           className
@@ -395,14 +404,30 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
         </div>
         {metaRow}
         <ReferenceTurnSkills parts={richParts} />
-      </div>
+      </article>
+    );
+  }
+
+  // System and runtime output is not the agent speaking: a quiet centred caption, not prose.
+  if (role === "system" && !hasRichParts) {
+    return (
+      <article
+        aria-label={turnLabel}
+        data-testid="system-message"
+        className={cn("my-3 flex w-full justify-center", className)}
+      >
+        <p className="max-w-[90%] whitespace-pre-wrap break-words text-center text-xs text-chat-foreground-secondary select-text">
+          {content}
+        </p>
+      </article>
     );
   }
 
   return (
-    <div
+    <article
+      aria-label={turnLabel}
       className={cn(
-        "flex flex-col items-start gap-1 my-2 max-w-[94%] mr-auto",
+        "flex flex-col items-start gap-1 my-2 w-full",
         className
       )}
     >
@@ -412,19 +437,18 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
 
       <ReferenceTurnSkills parts={richParts} />
 
-      {isRuntime && <span className="sr-only">Runtime message</span>}
-
       {durationLabel && hasWork && (
         <button
           type="button"
           data-testid="worked-for-toggle"
           aria-expanded={workExpanded}
           onClick={() => setWorkExpanded((prev) => !prev)}
-          className="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-xs font-mono text-chat-foreground-secondary hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="flex min-h-11 items-center gap-1.5 pr-3 rounded-md text-sm text-chat-foreground-secondary transition-colors hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           <ChevronRight
+            aria-hidden="true"
             className={cn(
-              "size-3 transition-transform duration-200 ease-out",
+              "size-3.5 transition-transform duration-200 ease-out motion-reduce:transition-none",
               workExpanded && "rotate-90"
             )}
           />
@@ -488,7 +512,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
       )}
 
       {hasProse && metaRow}
-    </div>
+    </article>
   );
 };
 
