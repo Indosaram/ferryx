@@ -1165,33 +1165,54 @@ fn relay(pending: &mut String, progress: &Option<UnboundedSender<String>>, deliv
     }
 }
 /// The workspace omo-gateway gives Slack turns: `<root>/agents/bot-<persona>` plus
-/// `<root>/shared`, where root is `OMON_WORKSPACE_ROOT` or `~/.ferryx/hub/workspace` and the
-/// persona is `OMON_SLACK_PERSONA_FROM`. Absent when no persona is configured or the
-/// directory does not exist, so the engine keeps its own default.
+/// `<root>/shared`, where root is [`workspace_root`] and the persona is
+/// `OMON_SLACK_PERSONA_FROM`. Without a configured persona whose directory exists, the turn
+/// runs in the root itself, so every Slack bot session lies under the hub-owned root (the
+/// owner-memory seed skips sessions there). Absent only when no root resolves or it cannot
+/// be created.
 pub fn slack_workspace() -> Option<protocol::Workspace> {
-    let root = crate::hub_env::var("OMON_WORKSPACE_ROOT")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            crate::hub_env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join(".ferryx/hub/workspace"))
-        })?;
+    let home = crate::hub_env::var_os("HOME").map(PathBuf::from);
+    let root = workspace_root(home.as_deref())?;
     workspace_in(&root, crate::hub_env::var("OMON_SLACK_PERSONA_FROM").ok().as_deref())
 }
 
+/// The hub workspace root Slack turns run under: `OMON_WORKSPACE_ROOT` from hub config, else
+/// `<home>/.ferryx/hub/workspace`.
+pub fn workspace_root(home: Option<&std::path::Path>) -> Option<PathBuf> {
+    workspace_root_from(crate::hub_env::var("OMON_WORKSPACE_ROOT").ok(), home)
+}
+
+/// [`workspace_root`] with the configured `OMON_WORKSPACE_ROOT` value given; a blank value
+/// counts as unset.
+pub fn workspace_root_from(configured: Option<String>, home: Option<&std::path::Path>) -> Option<PathBuf> {
+    configured
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home.map(|home| home.join(".ferryx").join("hub").join("workspace")))
+}
+
 fn workspace_in(root: &std::path::Path, persona: Option<&str>) -> Option<protocol::Workspace> {
-    let persona = persona.map(str::trim).filter(|value| !value.is_empty())?;
-    let cwd = root.join("agents").join(format!("bot-{persona}"));
-    if !cwd.is_dir() {
+    let persona_dir = persona
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|persona| root.join("agents").join(format!("bot-{persona}")))
+        .filter(|cwd| cwd.is_dir());
+    if let Some(cwd) = persona_dir {
+        return Some(protocol::Workspace {
+            cwd: cwd.display().to_string(),
+            roots: vec![
+                cwd.display().to_string(),
+                root.join("shared").display().to_string(),
+            ],
+        });
+    }
+    if let Err(error) = std::fs::create_dir_all(root) {
+        tracing::warn!(%error, root = %root.display(), "the hub workspace root was not created; Slack turns run in the engine's default directory");
         return None;
     }
     Some(protocol::Workspace {
-        cwd: cwd.display().to_string(),
-        roots: vec![
-            cwd.display().to_string(),
-            root.join("shared").display().to_string(),
-        ],
+        cwd: root.display().to_string(),
+        roots: vec![root.display().to_string()],
     })
 }
 
@@ -1861,11 +1882,38 @@ mod lifecycle_tests {
     fn the_workspace_persona_comes_only_from_configuration() {
         let root = std::env::temp_dir().join(format!("ferryx-ws-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("agents/bot-P1")).unwrap();
-        assert!(workspace_in(&root, None).is_none());
-        assert!(workspace_in(&root, Some("  ")).is_none());
-        assert!(workspace_in(&root, Some("missing")).is_none());
         let workspace = workspace_in(&root, Some("P1")).unwrap();
         assert!(workspace.cwd.ends_with("agents/bot-P1"), "{}", workspace.cwd);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Without a usable persona the Slack bot still runs inside the hub-owned root (created
+    /// when missing), never in the daemon's own directory, so its sessions are identifiable.
+    #[test]
+    fn without_a_persona_slack_turns_run_in_the_workspace_root() {
+        let root = std::env::temp_dir()
+            .join(format!("ferryx-ws-{}", uuid::Uuid::new_v4()))
+            .join("workspace");
+        for persona in [None, Some("  "), Some("missing")] {
+            let workspace = workspace_in(&root, persona).expect("the root workspace");
+            assert_eq!(workspace.cwd, root.display().to_string(), "{persona:?}");
+            assert_eq!(workspace.roots, vec![root.display().to_string()]);
+            assert!(root.is_dir());
+        }
+        std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn the_workspace_root_is_the_configured_one_or_under_home() {
+        let home = std::path::Path::new("/home/owner");
+        assert_eq!(
+            workspace_root_from(Some("/srv/hub-ws".into()), Some(home)),
+            Some(PathBuf::from("/srv/hub-ws"))
+        );
+        assert_eq!(
+            workspace_root_from(Some("  ".into()), Some(home)),
+            Some(home.join(".ferryx").join("hub").join("workspace"))
+        );
+        assert_eq!(workspace_root_from(None, None), None);
     }
 }

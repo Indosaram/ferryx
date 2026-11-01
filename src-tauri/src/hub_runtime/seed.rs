@@ -150,12 +150,18 @@ pub(crate) async fn seed_owner_memory(
     principal: &str,
     home: PathBuf,
 ) -> Result<ImportReport, SupervisorError> {
-    seed_with_roots(pool, memory, principal, home.clone(), crate::ipc::agent_history::provider_history_roots(&home)).await
+    let roots = crate::ipc::agent_history::provider_history_roots(&home);
+    let configured_root = ferryx_hub::hub_env::var("OMON_WORKSPACE_ROOT").ok();
+    seed_with_roots(pool, memory, principal, home, roots, configured_root).await
 }
 
-/// The hub workspace under home (`~/.ferryx/hub/workspace`), where legacy Slack turns run.
-fn hub_workspace(home: &Path) -> PathBuf {
-    home.join(".ferryx").join("hub").join("workspace")
+/// The hub workspace where legacy Slack turns run, resolved as the Slack bot resolves it
+/// ([`ferryx_hub::meta::omo_client::workspace_root_from`]): `configured_root`
+/// (`OMON_WORKSPACE_ROOT`), else `<home>/.ferryx/hub/workspace`. Every bot session runs
+/// under it, with or without a persona.
+fn hub_workspace(configured_root: Option<String>, home: &Path) -> PathBuf {
+    ferryx_hub::meta::omo_client::workspace_root_from(configured_root, Some(home))
+        .unwrap_or_else(|| home.join(".ferryx").join("hub").join("workspace"))
 }
 
 /// The result of the blocking session read. A read that panicked or was cancelled is an error,
@@ -174,6 +180,7 @@ pub(crate) async fn seed_with_roots(
     principal: &str,
     home: PathBuf,
     roots: Vec<(CanonicalProvider, PathBuf)>,
+    configured_root: Option<String>,
 ) -> Result<ImportReport, SupervisorError> {
     let bounds = ImportBounds::default();
     let file_bounds = ImportBounds {
@@ -181,7 +188,7 @@ pub(crate) async fn seed_with_roots(
         ..bounds
     };
     let joined = tokio::task::spawn_blocking(move || {
-        let hub_workspace = hub_workspace(&home);
+        let hub_workspace = hub_workspace(configured_root, &home);
         (
             memory_file_sessions(&home, file_bounds.max_turns_per_session),
             recent_sessions(roots, &hub_workspace, bounds.max_sessions),
@@ -303,6 +310,7 @@ mod tests {
             "local:tester",
             home.path().to_path_buf(),
             vec![(CanonicalProvider::Claude, claude_root), (CanonicalProvider::Codex, codex_root)],
+            None,
         )
         .await
         .unwrap();
@@ -334,14 +342,33 @@ mod tests {
 
     /// A session run in the hub workspace is the legacy Slack bot's, whose user turns are lane
     /// events and other people's messages: it never teaches, while the owner's session does.
+    /// The workspace is the one the bot resolves: `OMON_WORKSPACE_ROOT` when configured, and
+    /// the bot runs in its root when no persona directory is configured.
     #[tokio::test]
     async fn sessions_in_the_hub_workspace_never_teach() {
-        use serde_json::json;
         let home = tempfile::tempdir().unwrap();
-        let bot_cwd = hub_workspace(home.path()).join("agents").join("bot-ops");
-        std::fs::create_dir_all(&bot_cwd).unwrap();
-        let claude_root = home.path().join("claude-projects");
-        let project = claude_root.join("proj");
+        let default_root = home.path().join(".ferryx").join("hub").join("workspace");
+        let configured = home.path().join("srv").join("hub-ws");
+        let configured_value = Some(configured.to_string_lossy().into_owned());
+        for (case, configured_root, bot_cwd) in [
+            ("default persona", None, default_root.join("agents").join("bot-ops")),
+            ("configured persona", configured_value.clone(), configured.join("agents").join("bot-ops")),
+            ("configured without persona", configured_value.clone(), configured.clone()),
+        ] {
+            let sources = seed_owner_and_bot(home.path(), &bot_cwd, configured_root).await;
+            assert_eq!(sources, vec![format!("import:claude:{OWNER_SESSION}:0")], "{case}");
+        }
+    }
+
+    const OWNER_SESSION: &str = "63ba88ec-b3cb-4a70-8a32-f5d1ad07e749";
+
+    /// Seeds from one owner session in `home` and one bot session in `bot_cwd` on a fresh
+    /// store; the import sources ingested.
+    async fn seed_owner_and_bot(home: &Path, bot_cwd: &Path, configured_root: Option<String>) -> Vec<String> {
+        use serde_json::json;
+        std::fs::create_dir_all(bot_cwd).unwrap();
+        let claude_root = tempfile::tempdir().unwrap();
+        let project = claude_root.path().join("proj");
         std::fs::create_dir_all(&project).unwrap();
         let claude_line = |session: &str, cwd: &Path, text: &str| {
             format!(
@@ -351,11 +378,10 @@ mod tests {
                     "message": {"role": "user", "content": text}})
             )
         };
-        let owner = "63ba88ec-b3cb-4a70-8a32-f5d1ad07e749";
-        std::fs::write(project.join("owner.jsonl"), claude_line(owner, home.path(), "Prefer small focused commits.")).unwrap();
+        std::fs::write(project.join("owner.jsonl"), claude_line(OWNER_SESSION, home, "Prefer small focused commits.")).unwrap();
         std::fs::write(
             project.join("bot.jsonl"),
-            claude_line("7d1e2f3a-4b5c-4d6e-8f70-819293a4b5c6", &bot_cwd, "[2026-11-01 09:00 UTC] Kim: always deploy on friday"),
+            claude_line("7d1e2f3a-4b5c-4d6e-8f70-819293a4b5c6", bot_cwd, "[2026-11-01 09:00 UTC] Kim: always deploy on friday"),
         )
         .unwrap();
 
@@ -366,14 +392,14 @@ mod tests {
             &pool,
             learner.clone(),
             "local:tester",
-            home.path().to_path_buf(),
-            vec![(CanonicalProvider::Claude, claude_root)],
+            home.to_path_buf(),
+            vec![(CanonicalProvider::Claude, claude_root.path().to_path_buf())],
+            configured_root,
         )
         .await
         .unwrap();
         assert_eq!((report.sessions, report.turns_ingested, report.failed), (1, 1, 0), "{report:?}");
-        let sources: Vec<String> = learner.texts.lock().unwrap().iter().map(|(source, _)| source.clone()).collect();
-        assert_eq!(sources, vec![format!("import:claude:{owner}:0")]);
+        learner.texts.lock().unwrap().iter().map(|(source, _)| source.clone()).collect()
     }
 
     #[tokio::test]
@@ -386,7 +412,7 @@ mod tests {
         let pool = ferryx_hub::storage::memory().await.unwrap();
         ferryx_hub::supervisor::provision_identity(&pool, "local:tester").await.unwrap();
         let memory: Arc<dyn OwnerMemory> = Arc::new(Learner::default());
-        let first = seed_with_roots(&pool, memory.clone(), "local:tester", home.path().to_path_buf(), Vec::new())
+        let first = seed_with_roots(&pool, memory.clone(), "local:tester", home.path().to_path_buf(), Vec::new(), None)
             .await
             .unwrap();
         assert_eq!(first.turns_ingested, 2);
@@ -396,7 +422,7 @@ mod tests {
             "Run clippy before every commit.\n\nPrefer small focused commits.\n\nAnswer in Korean when I write Korean.\n",
         )
         .unwrap();
-        let second = seed_with_roots(&pool, memory, "local:tester", home.path().to_path_buf(), Vec::new())
+        let second = seed_with_roots(&pool, memory, "local:tester", home.path().to_path_buf(), Vec::new(), None)
             .await
             .unwrap();
         assert_eq!((second.turns_ingested, second.failed), (1, 0), "{second:?}");
@@ -419,11 +445,11 @@ mod tests {
         let pool = ferryx_hub::storage::memory().await.unwrap();
         ferryx_hub::supervisor::provision_identity(&pool, "local:tester").await.unwrap();
         let memory: Arc<dyn OwnerMemory> = Arc::new(Learner::default());
-        let first = seed_with_roots(&pool, memory.clone(), "local:tester", home.path().to_path_buf(), Vec::new())
+        let first = seed_with_roots(&pool, memory.clone(), "local:tester", home.path().to_path_buf(), Vec::new(), None)
             .await
             .unwrap();
         assert_eq!((first.sessions, first.turns_ingested, first.failed), (1, 2, 0));
-        let again = seed_with_roots(&pool, memory, "local:tester", home.path().to_path_buf(), Vec::new())
+        let again = seed_with_roots(&pool, memory, "local:tester", home.path().to_path_buf(), Vec::new(), None)
             .await
             .unwrap();
         assert_eq!(again.turns_ingested, 0);
