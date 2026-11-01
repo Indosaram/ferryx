@@ -30,6 +30,7 @@ import {
 import { copyTextToClipboard } from "../../lib/clipboard";
 import { cn } from "../../lib/cn";
 import { handleExternalLinkClick } from "../../lib/externalLinks";
+import { haptic } from "../haptics";
 import {
   referenceHistoryDisclosure,
   type ReferenceAbandonedBranch,
@@ -423,10 +424,12 @@ export const ApprovalActionCard: React.FC<ApprovalActionCardProps> = ({
   const [showFeedbackInput, setShowFeedbackInput] = useState(false);
 
   const handleConfirm = (event: React.MouseEvent<HTMLButtonElement>) => {
+    haptic("success");
     onAccept(feedback.trim() ? feedback.trim() : undefined, event);
   };
 
   const handleDecline = (event: React.MouseEvent<HTMLButtonElement>) => {
+    haptic("warning");
     onDecline(feedback.trim() ? feedback.trim() : undefined, event);
   };
 

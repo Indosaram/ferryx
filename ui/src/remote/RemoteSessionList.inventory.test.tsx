@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   paneSelectionOption,
@@ -338,6 +338,44 @@ describe("remote sidebar drawn by the desktop sidebar view", () => {
     expect(drawer.className).toContain("animate-drawer-in");
     expect(drawer.className).not.toContain("rounded-lg");
     expect(within(drawer).getAllByTestId("remote-sidebar-row").length).toBeGreaterThan(1);
+  });
+
+  describe("swipe left to dismiss the phone drawer", () => {
+    function swipe(drawer: HTMLElement, distance: number, stepMs: number) {
+      let now = 1_000;
+      vi.spyOn(performance, "now").mockImplementation(() => now);
+      vi.spyOn(drawer, "getBoundingClientRect").mockReturnValue({ width: 340, height: 800 } as DOMRect);
+      const row = within(drawer).getAllByTestId("remote-sidebar-row")[0];
+      fireEvent.pointerDown(row, { clientX: 300, clientY: 300, button: 0 });
+      for (let i = 1; i <= 4; i += 1) {
+        now += stepMs;
+        fireEvent.pointerMove(row, { clientX: 300 - (distance * i) / 4, clientY: 302 });
+      }
+      now += stepMs;
+      fireEvent.pointerUp(row, { clientX: 300 - distance, clientY: 302 });
+    }
+
+    it("slides the drawer out from the finger and then closes it", async () => {
+      const { onSelectorOpenChange, onSelect } = renderMirrorWith();
+      const drawer = screen.getByTestId("remote-sidebar-drawer");
+
+      swipe(drawer, 140, 120);
+
+      expect(drawer.style.transform).toBe("translate3d(-100%, 0, 0)");
+      await waitFor(() => expect(onSelectorOpenChange).toHaveBeenCalledWith(false));
+      // the drag over a row did not select it
+      expect(onSelect).not.toHaveBeenCalled();
+    });
+
+    it("springs back on a short slow swipe", () => {
+      const { onSelectorOpenChange } = renderMirrorWith();
+      const drawer = screen.getByTestId("remote-sidebar-drawer");
+
+      swipe(drawer, 40, 120);
+
+      expect(onSelectorOpenChange).not.toHaveBeenCalled();
+      expect(drawer.style.transform).toBe("translate3d(0, 0, 0)");
+    });
   });
 });
 

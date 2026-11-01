@@ -19,6 +19,7 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import { AlertCircle, Check, Loader2, Send } from "lucide-react";
 import { cn } from "../../lib/cn";
+import { haptic } from "../haptics";
 import { userFacingError } from "../userFacingError";
 import { isImeConfirmingKey } from "./imeKeys";
 import { ApprovalActionCard } from "./MobileChatComponents";
@@ -131,7 +132,12 @@ export function ReferencePromptCard({
   }, [typedIndex]);
 
   const answer = useCallback(
-    async (choice: ReferencePromptAnswer, press?: ReferencePromptPress): Promise<boolean> => {
+    // `pressFelt`: the approval card already gave the press its own haptic
+    async (
+      choice: ReferencePromptAnswer,
+      press?: ReferencePromptPress,
+      pressFelt = false,
+    ): Promise<boolean> => {
       // read now: the pressed control is disabled while the answer is on its way, and loses the focus
       const fromCard = cardRef.current?.contains(document.activeElement) === true;
       const click = press?.nativeEvent as Partial<PointerEvent> | undefined;
@@ -160,6 +166,7 @@ export function ReferencePromptCard({
           setPending(false);
           return false;
         }
+        if (!pressFelt) haptic("success");
         // and read again: the answer took a moment, and the user may have gone on to something else
         const card = cardRef.current;
         const active = document.activeElement;
@@ -338,10 +345,10 @@ export function ReferencePromptCard({
           declineLabel={prompt.options[twoOptionApproval[1] ?? 1]?.label ?? "Decline"}
           allowCustomFeedback={false}
           onAccept={(_feedback, event) =>
-            void answer({ optionIndex: twoOptionApproval[0] ?? 0 }, event)
+            void answer({ optionIndex: twoOptionApproval[0] ?? 0 }, event, true)
           }
           onDecline={(_feedback, event) =>
-            void answer({ optionIndex: twoOptionApproval[1] ?? 1 }, event)
+            void answer({ optionIndex: twoOptionApproval[1] ?? 1 }, event, true)
           }
           isSubmitting={pending}
         />

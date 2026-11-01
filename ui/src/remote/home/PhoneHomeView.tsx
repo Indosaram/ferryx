@@ -10,6 +10,7 @@ import type { AttentionRow } from "../../features/ferryx/attention/attentionMode
 import type { AttentionPrompts } from "../../features/ferryx/attention/attentionPrompts";
 import { SupervisorHome, type SupervisorHomeProps } from "./SupervisorHome";
 import type { PhoneDestination } from "./usePhoneNavigation";
+import { PullToRefreshContext } from "./usePullToRefresh";
 
 export type PhoneHomeViewProps = {
   readonly destination: PhoneDestination;
@@ -26,6 +27,11 @@ export type PhoneHomeViewProps = {
   readonly resume: { readonly title: string; readonly subtitle: string; readonly onOpen: () => void } | null;
   /** The Account entry every destination's header carries. */
   readonly accountAction?: ReactNode;
+  /**
+   * Pull-to-refresh for the destination on screen; the spinner holds until the promise settles.
+   * Absent: the lists do not pull. The Worktrees body reads it through `PullToRefreshContext`.
+   */
+  readonly onRefresh?: (destination: PhoneDestination) => Promise<unknown> | void;
 };
 
 /** The badge, the Inbox's "Needs input" group and its empty line count the same rows. */
@@ -33,12 +39,13 @@ export function inboxBadgeCount(rows: readonly AttentionRow[]): number {
   return rows.filter((row) => row.state === "needs-you").length;
 }
 
-export function PhoneHomeView({ destination, onSelectTab, supervisor, inbox, worktrees, resume, accountAction }: PhoneHomeViewProps) {
+export function PhoneHomeView({ destination, onSelectTab, supervisor, inbox, worktrees, resume, accountAction, onRefresh }: PhoneHomeViewProps) {
+  const refresh = onRefresh ? () => onRefresh(destination) : undefined;
   return (
     <div data-testid="mobile-home" data-destination={destination} className="flex min-h-0 min-w-0 flex-1 flex-col bg-chat-screen pt-[env(safe-area-inset-top)] px-safe">
       <main id={PHONE_HOME_PANEL_ID} role="tabpanel" aria-labelledby={phoneHomeTabId(destination)} className="flex min-h-0 min-w-0 flex-1 flex-col">
         {destination === "supervisor" ? (
-          <SupervisorHome {...supervisor} phoneHeader headerAction={accountAction} />
+          <SupervisorHome {...supervisor} phoneHeader headerAction={accountAction} onRefresh={refresh} />
         ) : destination === "inbox" ? (
           <InboxHome
             rows={inbox.rows}
@@ -48,9 +55,10 @@ export function PhoneHomeView({ destination, onSelectTab, supervisor, inbox, wor
             onOpen={inbox.onOpen}
             onBrowseWorktrees={() => onSelectTab("worktrees")}
             headerAction={accountAction}
+            onRefresh={refresh}
           />
         ) : (
-          worktrees
+          <PullToRefreshContext.Provider value={refresh}>{worktrees}</PullToRefreshContext.Provider>
         )}
       </main>
       {resume ? (

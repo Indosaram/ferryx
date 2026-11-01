@@ -737,7 +737,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("visualViewport", viewport);
     vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(focusedState))));
     await act(async () => { render(<RemoteApp />); });
-    const shell = screen.getByTestId("remote-context-label").closest("header")?.parentElement;
+    const shell = screen.getByTestId("remote-context-label").closest(".remote-app-root");
     expect(shell).toHaveStyle({ height: "720px" });
     act(() => { viewport.height = 320; viewport.dispatchEvent(new Event("resize")); });
     expect(shell).toHaveStyle({ height: "320px" });
@@ -750,7 +750,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("visualViewport", viewport);
     vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(focusedState))));
     await act(async () => { render(<RemoteApp />); });
-    const shell = screen.getByTestId("remote-context-label").closest("header")?.parentElement;
+    const shell = screen.getByTestId("remote-context-label").closest(".remote-app-root");
     act(() => { viewport.height = 380; viewport.offsetTop = 260; viewport.dispatchEvent(new Event("scroll")); });
     expect(shell).toHaveStyle({ position: "fixed", top: "260px", height: "380px" });
   });

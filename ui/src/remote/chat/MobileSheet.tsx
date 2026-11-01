@@ -2,6 +2,7 @@ import { X, type LucideIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { cn } from "../../lib/cn";
+import { useDragDismiss } from "../useDragDismiss";
 
 /**
  * Bottom-sheet primitive for the phone remote client. Structure follows the in-repo drawer
@@ -93,6 +94,7 @@ export function MobileSheet({
 }: MobileSheetProps) {
   const panelRef = useRef<HTMLDivElement | null>(null);
   const layerRef = useRef<HTMLDivElement | null>(null);
+  const backdropRef = useRef<HTMLDivElement | null>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const closeFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -218,6 +220,17 @@ export function MobileSheet({
     }
   };
 
+  // Swipe down to dismiss. Closing goes through onOpenChange(false) like every other path; the
+  // hook has already sent the panel down from where the finger left it, and its !important
+  // inline transform keeps the exit animation from snapping it back to the top first.
+  const { handlers: dragHandlers } = useDragDismiss({
+    axis: "y-down",
+    panelRef,
+    backdropRef,
+    active: open && isMounted && !isClosing,
+    onDismiss: () => onOpenChange(false),
+  });
+
   // aria-modal promises focus stays inside: wrap Tab / Shift+Tab at the panel edges.
   const handlePanelKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "Tab") return;
@@ -251,6 +264,7 @@ export function MobileSheet({
     >
       {/* the close button below is the named control; the scrim is a pointer target only */}
       <div
+        ref={backdropRef}
         aria-hidden="true"
         data-testid={testId ? `${testId}-backdrop` : undefined}
         onClick={() => onOpenChange(false)}
@@ -267,28 +281,37 @@ export function MobileSheet({
         tabIndex={-1}
         onKeyDown={handlePanelKeyDown}
         onAnimationEnd={handleAnimationEnd}
+        {...dragHandlers}
         className={cn(
           "relative z-10 flex max-h-[80dvh] min-w-0 flex-col overflow-hidden rounded-t-2xl border-t border-chat-border bg-chat-surface focus:outline-none",
           isClosing ? "animate-sheet-out" : "animate-sheet-in",
         )}
       >
-        <div className="flex items-center justify-between gap-3 py-1 pl-4 pr-2 pt-2">
-          <h2 className="min-w-0 truncate text-[0.9375rem] font-semibold text-chat-foreground">{title}</h2>
-          <button
-            type="button"
-            aria-label={closeAriaLabel ?? `Close ${ariaLabel}`}
-            title={closeAriaLabel ?? `Close ${ariaLabel}`}
-            onClick={() => onOpenChange(false)}
-            className="flex size-11 shrink-0 items-center justify-center rounded-full text-chat-foreground-secondary transition-colors hover:bg-chat-surface-hover hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          >
-            <X className="size-4" aria-hidden="true" />
-          </button>
+        {/* the grabber and title row are pure drag surface: the browser gets no pan there */}
+        <div data-testid={testId ? `${testId}-handle` : undefined} className="shrink-0" style={{ touchAction: "none" }}>
+          <div aria-hidden="true" className="flex justify-center pt-2">
+            <span className="block h-[5px] w-9 rounded-full bg-chat-border" />
+          </div>
+          <div className="flex items-center justify-between gap-3 py-1 pl-4 pr-2">
+            <h2 className="min-w-0 truncate text-[0.9375rem] font-semibold text-chat-foreground">{title}</h2>
+            <button
+              type="button"
+              aria-label={closeAriaLabel ?? `Close ${ariaLabel}`}
+              title={closeAriaLabel ?? `Close ${ariaLabel}`}
+              onClick={() => onOpenChange(false)}
+              className="flex size-11 shrink-0 items-center justify-center rounded-full text-chat-foreground-secondary transition-colors hover:bg-chat-surface-hover hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <X className="size-4" aria-hidden="true" />
+            </button>
+          </div>
         </div>
         <div
+          data-testid={testId ? `${testId}-body` : undefined}
           className={cn(
             "min-h-0 flex-1 overflow-y-auto overscroll-contain scrollbar-sleek",
             !footer && "pb-safe-sheet",
           )}
+          style={{ touchAction: "pan-y" }}
         >
           <div className="px-2 py-1">{children}</div>
         </div>
