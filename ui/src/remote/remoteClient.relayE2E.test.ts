@@ -252,6 +252,63 @@ describe("relay end-to-end encryption", () => {
     await expect(remoteFetch(BASE, "/api/v1/health")).rejects.toMatchObject({ code: "MACHINE_OFFLINE" });
   });
 
+  it.each(["MACHINE_OFFLINE", "RATE_LIMITED"])(
+    "caches a %s allocation failure with a growing backoff instead of re-POSTing every poll",
+    async (code) => {
+      vi.useFakeTimers();
+      try {
+        const status = code === "RATE_LIMITED" ? 429 : 409;
+        let answer: () => Response = () => jsonResponse(status, { code });
+        const allocate = vi.fn(async () => answer());
+        const connection = openRelayE2ETransport({
+          relayOrigin: RELAY,
+          machineId: MACHINE,
+          enrollmentEpoch: "7",
+          machineAttachPublicKey: "key",
+          attachKey: { publicKey: "pub", privateKey: "priv" },
+          bearer: "device-token",
+          deps: {
+            fetch: allocate as unknown as typeof fetch,
+            openTunnel: vi.fn(async () => ({
+              transport: {
+                fetchLike: vi.fn(async () => ({ status: 200, headers: {}, body: new Uint8Array(0) })),
+                openWebSocket: vi.fn(),
+                close: vi.fn(),
+                isClosed: false,
+              } as unknown as TunnelTransport,
+              close: vi.fn(),
+            })),
+          },
+        });
+
+        // Given one failed allocation
+        await expect(connection.fetchLike("/api/v1/health")).rejects.toMatchObject({ code });
+        expect(allocate).toHaveBeenCalledTimes(1);
+
+        // When polls arrive inside the 2s backoff, they get the cached rejection
+        await expect(connection.fetchLike("/api/v1/health")).rejects.toMatchObject({ code });
+        expect(allocate).toHaveBeenCalledTimes(1);
+
+        // After 2s one retry is allowed; it fails again and the backoff doubles to 4s
+        await vi.advanceTimersByTimeAsync(2_000);
+        await expect(connection.fetchLike("/api/v1/health")).rejects.toMatchObject({ code });
+        expect(allocate).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(2_000);
+        await expect(connection.fetchLike("/api/v1/health")).rejects.toMatchObject({ code });
+        expect(allocate).toHaveBeenCalledTimes(2);
+
+        // Then a success after the backoff resets it
+        await vi.advanceTimersByTimeAsync(2_000);
+        answer = () => jsonResponse(200, { sessionId: "sess-ok" });
+        expect((await connection.fetchLike("/api/v1/health")).status).toBe(200);
+        expect(allocate).toHaveBeenCalledTimes(3);
+        connection.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("times out an allocation whose response body stalls", async () => {
     vi.useFakeTimers();
     try {

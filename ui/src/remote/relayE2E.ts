@@ -272,6 +272,10 @@ export interface RelayE2EConnection extends RelayE2ETransport {
 }
 
 const E2E_ALLOCATION_TIMEOUT_MS = 15_000;
+/** Backoff for a failed allocation the relay will keep failing (machine offline, rate limited). */
+export const E2E_ALLOCATION_BACKOFF_INITIAL_MS = 2_000;
+export const E2E_ALLOCATION_BACKOFF_MAX_MS = 30_000;
+const BACKOFF_CODES = new Set(["MACHINE_OFFLINE", "RATE_LIMITED"]);
 
 /** `POST {relay}/api/v1/attach/session?e2e=1`; failures are typed and bounded by a deadline. */
 export async function allocateE2ESession(
@@ -360,14 +364,38 @@ export function openRelayE2ETransport(params: OpenRelayE2ETransportParams): Rela
   let http: OpenedTunnel | null = null;
   let opening: Promise<OpenedTunnel> | null = null;
   const sockets = new Set<{ socket: TunnelWebSocket; tunnel: OpenedTunnel }>();
+  // Negative cache: while the relay says the machine is offline or we are rate limited, every
+  // poll gets the cached rejection instead of another POST (which would only earn a 429).
+  let allocationBackoffMs = 0;
+  let allocationBlockedUntil = 0;
+  let allocationFailure: unknown = null;
 
   const assertOpen = () => {
     if (closed) throw new RelayE2EError("CONNECTION_CLOSED", "Encrypted relay connection has been closed");
   };
 
+  const allocate = async (): Promise<string> => {
+    if (allocationFailure !== null && Date.now() < allocationBlockedUntil) throw allocationFailure;
+    try {
+      const sessionId = await allocateE2ESession(params.relayOrigin, params.bearer, params.machineId, fetchImpl);
+      allocationBackoffMs = 0;
+      allocationFailure = null;
+      return sessionId;
+    } catch (error) {
+      if (error instanceof RelayE2EError && BACKOFF_CODES.has(error.code)) {
+        allocationBackoffMs = allocationBackoffMs === 0
+          ? E2E_ALLOCATION_BACKOFF_INITIAL_MS
+          : Math.min(allocationBackoffMs * 2, E2E_ALLOCATION_BACKOFF_MAX_MS);
+        allocationBlockedUntil = Date.now() + allocationBackoffMs;
+        allocationFailure = error;
+      }
+      throw error;
+    }
+  };
+
   const openSession = async (): Promise<OpenedTunnel> => {
     const localKeyPair = await attachKey;
-    const sessionId = await allocateE2ESession(params.relayOrigin, params.bearer, params.machineId, fetchImpl);
+    const sessionId = await allocate();
     assertOpen();
     return openTunnelImpl({
       relayOrigin: params.relayOrigin,
