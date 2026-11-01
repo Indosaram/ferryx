@@ -1279,9 +1279,14 @@ hub_slot! {
 }
 
 /// The checkpoint fields of the lease status: (checkpoint id, its age in seconds, why a
-/// standby would not take over). Filled by the checkpoint replication and promotion code.
-fn checkpoint_status_fields() -> (Option<String>, Option<u64>, Option<ferryx_hub::control::PromotionBlock>) {
-    (None, None, None)
+/// standby would not take over), from the checkpoint state's promotion `status`.
+fn checkpoint_status_fields(
+    status: crate::supervisor_checkpoint::PromotionStatus,
+) -> (Option<String>, Option<u64>, Option<ferryx_hub::control::PromotionBlock>) {
+    let block = status
+        .block_code
+        .map(|code| ferryx_hub::control::PromotionBlock { code, message: status.block_reason.unwrap_or_default() });
+    (status.checkpoint_id, status.checkpoint_age_secs, block)
 }
 
 /// Open goals of this machine's archived supervisor. Filled by the adoption code.
@@ -1313,9 +1318,17 @@ async fn live_lease(pool: Option<&ferryx_hub::goals::SqlitePool>) -> ferryx_hub:
 /// The lease fields `gate` answers (role, holder, fence, expiry), plus the pairing, drop
 /// counter and checkpoint fields. No lease client: a holder with fence 0 (unleased hub).
 fn lease_status(gate: Option<&dyn LeaseGate>) -> ferryx_hub::control::LiveLease {
+    lease_status_with(gate, crate::supervisor_checkpoint::promotion_status(unix_now()))
+}
+
+/// [`lease_status`] with the checkpoint fields taken from `checkpoints`.
+fn lease_status_with(
+    gate: Option<&dyn LeaseGate>,
+    checkpoints: crate::supervisor_checkpoint::PromotionStatus,
+) -> ferryx_hub::control::LiveLease {
     use crate::daemon::supervisor_lease_role::Role;
     use ferryx_hub::control::{LeaseRole, LiveLease};
-    let (checkpoint_id, checkpoint_age, promotion_block_reason) = checkpoint_status_fields();
+    let (checkpoint_id, checkpoint_age, promotion_block_reason) = checkpoint_status_fields(checkpoints);
     let mut lease = LiveLease {
         role: LeaseRole::Holder,
         holder_paired: holder_paired(),
@@ -4567,6 +4580,46 @@ mod tests {
         let unleased = lease_status(None);
         assert_eq!(unleased.role, ferryx_hub::control::LeaseRole::Holder, "no lease client runs the hub");
         assert_eq!(unleased.fence, 0);
+    }
+
+    /// A standby with a recorded checkpoint reports its id, its age and why it does not
+    /// take over, in the status and snapshot wire shape.
+    #[test]
+    fn a_standby_status_reports_its_checkpoint_and_the_promotion_block() {
+        use crate::supervisor_checkpoint::{CheckpointState, LeaseRefusal, StoredCheckpoint};
+        let have = "a".repeat(64);
+        let expected = "b".repeat(64);
+        let checkpoints = CheckpointState::default();
+        checkpoints.set_local(Some(StoredCheckpoint { id: have.clone(), at: 1_000, pulled: true }));
+        checkpoints.note_refusal(Some(LeaseRefusal {
+            code: crate::daemon::supervisor_lease_role::LEASE_CHECKPOINT_MISMATCH.to_owned(),
+            expected_checkpoint: Some(expected.clone()),
+            holder_machine_id: None,
+            holder_label: None,
+        }));
+        let standby = FakeLease::new(false, false);
+
+        let stale = lease_status_with(Some(&standby as &dyn LeaseGate), checkpoints.status(1_090));
+        let wire = serde_json::to_value(&stale).unwrap();
+        assert_eq!(wire["role"], "standby");
+        assert_eq!(wire["checkpointId"], have.as_str());
+        assert_eq!(wire["checkpointAge"], 90);
+        assert_eq!(wire["promotionBlockReason"]["code"], "CHECKPOINT_STALE");
+        let message = wire["promotionBlockReason"]["message"].as_str().unwrap();
+        assert!(message.contains(&expected), "{message}");
+        assert_eq!(wire["promotionBlockReason"].as_object().unwrap().len(), 2, "{wire}");
+
+        checkpoints.set_hub_stopped(true);
+        let stopped = lease_status_with(Some(&standby as &dyn LeaseGate), checkpoints.status(1_090));
+        let wire = serde_json::to_value(&stopped).unwrap();
+        assert_eq!(wire["promotionBlockReason"]["code"], "HUB_STOPPED");
+        assert_eq!(wire["checkpointId"], have.as_str());
+
+        let nothing = lease_status_with(Some(&standby as &dyn LeaseGate), CheckpointState::default().status(1_090));
+        let wire = serde_json::to_value(&nothing).unwrap();
+        for absent in ["checkpointId", "checkpointAge", "promotionBlockReason"] {
+            assert!(wire.get(absent).is_none(), "{absent} in {wire}");
+        }
     }
 
     /// A standby is healthy; one that has known no holder for longer than the TTL is not.
