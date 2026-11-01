@@ -91,7 +91,7 @@ export function MobileTopBar({
       data-testid="mobile-top-bar"
       className="shrink-0 bg-chat-header border-b border-chat-header-border pt-safe-header px-1"
     >
-      <div className="h-14 flex items-center gap-1">
+      <div className="h-14 flex items-center gap-1 overflow-hidden">
         <div className="flex shrink-0">
           {onBack ? (
             <button
@@ -177,8 +177,9 @@ export function MobileTopBar({
           </div>
         </div>
 
+        {/* Shrinks with the row: at large text sizes the controls scroll sideways instead of widening the page. */}
         {hideControls ? null : (
-          <div className="flex min-w-0 shrink-0">
+          <div className="flex min-w-0 shrink overflow-x-auto scrollbar-none">
             {attention ? (
               <button
                 type="button"

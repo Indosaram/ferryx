@@ -150,7 +150,7 @@ export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({
       className={`z-30 w-full select-none touch-manipulation border-t border-chat-border bg-chat-surface ${keyboardOpen ? "" : "pb-safe"}`}
     >
       {isExpanded && (
-        <div data-testid="mobile-key-dock-more" className="grid grid-cols-7 gap-1 px-2 pt-2">
+        <div data-testid="mobile-key-dock-more" className="grid grid-cols-[repeat(auto-fill,minmax(2.75rem,1fr))] gap-1 px-2 pt-2">
           <KeyButton label="~" onClick={() => triggerKey("~")} />
           <KeyButton label="`" onClick={() => triggerKey("`")} />
           <KeyButton label="|" onClick={() => triggerKey("|")} />
@@ -168,7 +168,7 @@ export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({
         </div>
       )}
 
-      <div className="grid grid-cols-7 gap-1 px-2 pt-1.5">
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(2.75rem,1fr))] gap-1 px-2 pt-1.5">
         <KeyButton label="Esc" onClick={() => triggerKey("esc")} />
         <KeyButton label="Tab" onClick={() => triggerKey("tab")} />
         <ModifierButton label="Ctrl" state={modifiers.ctrl} onClick={() => toggleModifier("ctrl")} />
@@ -186,7 +186,7 @@ export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({
       </div>
 
       {showNavigationRow ? (
-        <div data-testid="mobile-key-dock-navigation" className="grid grid-cols-7 gap-1 px-2 pt-1">
+        <div data-testid="mobile-key-dock-navigation" className="grid grid-cols-[repeat(auto-fill,minmax(2.75rem,1fr))] gap-1 px-2 pt-1">
           <KeyButton icon={<ArrowLeft className={ARROW_ICON} aria-hidden="true" />} ariaLabel="Left" onClick={() => triggerKey("left")} />
           <KeyButton icon={<ArrowUp className={ARROW_ICON} aria-hidden="true" />} ariaLabel="Up" onClick={() => triggerKey("up")} />
           <KeyButton icon={<ArrowDown className={ARROW_ICON} aria-hidden="true" />} ariaLabel="Down" onClick={() => triggerKey("down")} />
@@ -281,7 +281,7 @@ function KeyButton({
       aria-pressed={pressed}
       data-state={dataState}
       data-testid={testId}
-      className={`flex min-h-11 min-w-0 items-center justify-center gap-1 rounded border px-1 font-mono text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+      className={`flex min-h-11 min-w-11 items-center justify-center gap-1 rounded border px-1 font-mono text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
         active
           ? "border-chat-primary bg-chat-primary text-chat-primary-foreground"
           : "border-chat-border bg-chat-surface-raised text-chat-foreground hover:bg-chat-surface-hover"
