@@ -17,6 +17,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { inflateSync } from "node:zlib";
 
 const argv = process.argv.slice(2);
 const option = (name) => {
@@ -49,6 +50,8 @@ const summary = {
     "New browser tab: registered shortcut tab.newBrowser (Mod+Shift+B); the command palette lists only worktrees, tabs and 'Show changes', so it has no browser-tab command.",
     "Downloads shelf: no shortcut or palette command; it renders only while a download exists, so the step navigates to a local attachment URL.",
     "Settings > Browser is hidden until General > Advanced features is on (fresh-install default is off), so the run enables it first.",
+    "Controls are located from their own on-screen text: the address bar by its URL/about:blank text, Settings nav items in the column of 'General', the Advanced features switch from the row's pixels. Settings groups are reached with real mouse-wheel input.",
+    "Page loads use a local fixture server (example.html, download.html), so results do not depend on the network.",
     "ui_check uses tesseract OCR on the step screenshot: pass = expected text visible, fail = not visible, unavailable = OCR missing.",
   ],
   engine: engineZip ? { zip: engineZip, checks: {} } : { skipped: "FERRYX_UI_AUDIT_ENGINE_ZIP not set or missing" },
@@ -75,6 +78,13 @@ textarea{position:fixed;inset:40px;width:calc(100% - 80px);height:calc(100% - 80
 <script>t.addEventListener('input',()=>{document.title='typed:'+t.value})</script></body></html>`;
 const served = new Map([
   ["/fixture.html", { body: FIXTURE, type: "text/html" }],
+  ["/example.html", {
+    body: `<!doctype html><html><head><title>Example Domain</title><style>body{background:#eee;font:20px sans-serif;margin:0}
+div{width:600px;margin:15vh auto;padding:2em;background:#fdfdff;border-radius:.5em}h1{font-size:40px}</style></head>
+<body><div><h1>Example Domain</h1><p>This domain is for use in illustrative examples in documents.</p>
+<p>Example text repeated for find: Example, example, EXAMPLE.</p><p><a href="/download.html">More information...</a></p></div></body></html>`,
+    type: "text/html",
+  }],
   ["/download.html", {
     body: `<!doctype html><title>download-fixture</title><style>html,body{margin:0;height:100%;background:#fff}
 a{display:flex;align-items:center;justify-content:center;position:fixed;inset:0;font:bold 40px sans-serif;color:#000;text-decoration:none}</style>
@@ -151,6 +161,9 @@ const linux = {
   resize(width, height) {
     return run("xdotool", ["windowsize", "--sync", this.windowId, String(width), String(height)]);
   },
+  wheel(x, y, notches) {
+    return run("xdotool", ["mousemove", "--sync", String(x), String(y), "click", "--repeat", String(Math.abs(notches)), "--delay", "60", notches > 0 ? "5" : "4"]);
+  },
   screenshot(path) {
     const result = run("import", ["-window", "root", path]);
     return result.ok ? result : run("sh", ["-c", `xwd -root -silent | convert xwd:- png:'${path}'`]);
@@ -198,6 +211,32 @@ const mac = {
   screenshot(path) {
     return run("screencapture", ["-x", "-t", "png", path]);
   },
+  wheelBinary: null,
+  wheel(x, y, notches) {
+    if (!this.wheelBinary) {
+      const source = join(out, "mac-wheel.swift");
+      const binaryPath = join(out, "mac-wheel");
+      writeFileSync(source, [
+        "import CoreGraphics",
+        "import Foundation",
+        "let a = CommandLine.arguments",
+        "let point = CGPoint(x: Double(a[1])!, y: Double(a[2])!)",
+        "CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)",
+        "usleep(100000)",
+        "let lines = Int32(a[3])!",
+        "for _ in 0..<abs(lines) {",
+        "  CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: lines > 0 ? -3 : 3, wheel2: 0, wheel3: 0)?.post(tap: .cghidEventTap)",
+        "  usleep(60000)",
+        "}",
+      ].join("\n"));
+      const built = run("swiftc", ["-O", source, "-o", binaryPath], { timeout: 180000 });
+      this.wheelBinary = built.ok ? binaryPath : "";
+      if (!built.ok) summary.notes.push(`mac wheel helper failed to build: ${built.stderr.slice(0, 300)}`);
+    }
+    if (!this.wheelBinary) return { ok: false, stderr: "no wheel helper" };
+    const scale = this.scale();
+    return run(this.wheelBinary, [String(Math.round(x / scale)), String(Math.round(y / scale)), String(notches)]);
+  },
   scale() {
     if (this.pixelScale) return this.pixelScale;
     const bounds = this.osa('tell application "Finder" to get bounds of window of desktop').stdout.split(/,\s*/).map(Number);
@@ -238,6 +277,9 @@ const win = {
   },
   resize(width, height) {
     return this.ps("resize", ["-Hwnd", this.hwnd, "-Width", String(width), "-Height", String(height)]);
+  },
+  wheel(x, y, notches) {
+    return this.ps("wheel", ["-Hwnd", this.hwnd, "-Width", String(x), "-Height", String(y), "-Codes", String(notches)]);
   },
   screenshot(path) {
     return this.ps("shot", ["-Path", path]);
@@ -290,6 +332,12 @@ public static class FxInput {
     foreach (var c in text) { list.Add(Key(0, c, 4)); list.Add(Key(0, c, 4 | 2)); }
     return SendInput((uint)list.Count, list.ToArray(), Marshal.SizeOf(typeof(INPUT)));
   }
+  public static uint Wheel(int x, int y, int notches) {
+    SetCursorPos(x, y);
+    var list = new System.Collections.Generic.List<INPUT>();
+    for (int k = 0; k < Math.Abs(notches); k++) { var i = Mouse(0x0800); i.u.mi.mouseData = (uint)(notches > 0 ? -120 : 120); list.Add(i); }
+    return SendInput((uint)list.Count, list.ToArray(), Marshal.SizeOf(typeof(INPUT)));
+  }
   public static uint Click(int x, int y) {
     SetCursorPos(x, y);
     return SendInput(2, new INPUT[] { Mouse(0x0002), Mouse(0x0004) }, Marshal.SizeOf(typeof(INPUT)));
@@ -319,16 +367,43 @@ switch ($Action) {
   "keys" { [void][FxInput]::Focus($handle); $n = [FxInput]::Chord([uint16[]]($Codes -split "," | ForEach-Object { [uint16]$_ })); if ($n -eq 0) { exit 4 } }
   "type" { [void][FxInput]::Focus($handle); $n = [FxInput]::Type($Text); if ($n -eq 0) { exit 4 } }
   "click" { $n = [FxInput]::Click($Width, $Height); if ($n -eq 0) { exit 4 } }
+  "wheel" { $n = [FxInput]::Wheel($Width, $Height, [int]$Codes); if ($n -eq 0) { exit 4 } }
   "resize" { if (-not [FxInput]::SetWindowPos($handle, [IntPtr]::Zero, 40, 40, $Width, $Height, 0x0004)) { exit 5 } }
   "upscale" {
+    # Writes <Text> (3x grayscale) and <Text>.neg.png (2x grayscale inverted): light-on-dark UI
+    # text OCRs far better inverted.
     Add-Type -AssemblyName System.Drawing
     $src = [System.Drawing.Image]::FromFile($Path)
-    $dst = New-Object System.Drawing.Bitmap ($src.Width * 2), ($src.Height * 2)
-    $g = [System.Drawing.Graphics]::FromImage($dst)
-    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-    $g.DrawImage($src, 0, 0, $dst.Width, $dst.Height)
-    $dst.Save($Text, [System.Drawing.Imaging.ImageFormat]::Png)
-    $g.Dispose(); $dst.Dispose(); $src.Dispose()
+    foreach ($negate in @($false, $true)) {
+      $factor = if ($negate) { 2 } else { 3 }
+      $dst = New-Object System.Drawing.Bitmap ($src.Width * $factor), ($src.Height * $factor)
+      $g = [System.Drawing.Graphics]::FromImage($dst)
+      $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+      $rect = New-Object System.Drawing.Rectangle 0, 0, $dst.Width, $dst.Height
+      if ($negate) {
+        $m = New-Object System.Drawing.Imaging.ColorMatrix
+        $m.Matrix00 = -0.299; $m.Matrix01 = -0.299; $m.Matrix02 = -0.299
+        $m.Matrix10 = -0.587; $m.Matrix11 = -0.587; $m.Matrix12 = -0.587
+        $m.Matrix20 = -0.114; $m.Matrix21 = -0.114; $m.Matrix22 = -0.114
+        $m.Matrix33 = 1; $m.Matrix40 = 1; $m.Matrix41 = 1; $m.Matrix42 = 1; $m.Matrix44 = 1
+        $attributes = New-Object System.Drawing.Imaging.ImageAttributes
+        $attributes.SetColorMatrix($m)
+        $g.DrawImage($src, $rect, 0, 0, $src.Width, $src.Height, [System.Drawing.GraphicsUnit]::Pixel, $attributes)
+        $dst.Save($Text + ".neg.png", [System.Drawing.Imaging.ImageFormat]::Png)
+      } else {
+        $m = New-Object System.Drawing.Imaging.ColorMatrix
+        $m.Matrix00 = 0.299; $m.Matrix01 = 0.299; $m.Matrix02 = 0.299
+        $m.Matrix10 = 0.587; $m.Matrix11 = 0.587; $m.Matrix12 = 0.587
+        $m.Matrix20 = 0.114; $m.Matrix21 = 0.114; $m.Matrix22 = 0.114
+        $m.Matrix33 = 1; $m.Matrix44 = 1
+        $attributes = New-Object System.Drawing.Imaging.ImageAttributes
+        $attributes.SetColorMatrix($m)
+        $g.DrawImage($src, $rect, 0, 0, $src.Width, $src.Height, [System.Drawing.GraphicsUnit]::Pixel, $attributes)
+        $dst.Save($Text, [System.Drawing.Imaging.ImageFormat]::Png)
+      }
+      $g.Dispose(); $dst.Dispose()
+    }
+    $src.Dispose()
   }
   "shot" {
     Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -357,33 +432,145 @@ const tesseract = (() => {
 summary.ocr = tesseract ? { tesseract } : { unavailable: true };
 
 let ocrIndex = 0;
-function upscaled(path) {
-  const target = path.replace(/\.png$/, ".x2.png");
-  if (platform === "linux" && run("convert", [path, "-resize", "200%", target]).ok) return target;
-  if (platform === "win32" && win.ps("upscale", ["-Path", path, "-Text", target]).ok && existsSync(target)) return target;
-  return null;
+const imageMagick = ["magick", "convert"].find((candidate) => run(candidate, ["-version"]).ok) ?? null;
+/** OCR inputs: raw, 2x, and 2x inverted grayscale (sidebar/nav labels are light on dark). */
+function ocrVariants(path) {
+  const x2 = path.replace(/\.png$/, ".x2.png");
+  const neg = path.replace(/\.png$/, ".x2n.png");
+  if (imageMagick && platform !== "win32") {
+    const variants = [{ file: path, factor: 1 }];
+    // Measured on run 41327378231 screenshots: 3x gray reads dark-on-light and Windows/macOS
+    // settings rows; 2x inverted reads Linux light-on-dark nav and sidebar labels.
+    if (run(imageMagick, [path, "-colorspace", "gray", "-resize", "300%", x2]).ok) variants.push({ file: x2, factor: 3 });
+    if (run(imageMagick, [path, "-colorspace", "gray", "-negate", "-resize", "200%", neg]).ok) variants.push({ file: neg, factor: 2 });
+    return variants;
+  }
+  if (platform === "win32" && win.ps("upscale", ["-Path", path, "-Text", x2]).ok) {
+    return [{ file: path, factor: 1 }, { file: x2, factor: 3 }, { file: `${x2}.neg.png`, factor: 2 }].filter((variant) => existsSync(variant.file));
+  }
+  return [{ file: path, factor: 1 }];
 }
 function ocr(path) {
   if (!tesseract || !path || !existsSync(path)) return null;
-  // Small UI text (9-11 px at 1x) OCRs poorly; read a 2x copy and map coordinates back.
-  const big = platform === "darwin" ? null : upscaled(path);
-  const factor = big ? 2 : 1;
-  const result = run(tesseract, [big ?? path, "-", "--psm", "11", "tsv"], { timeout: 120000 });
-  if (!result.ok) return null;
-  const lines = result.stdout.split(/\r?\n/);
-  const header = lines.shift()?.split("\t") ?? [];
-  const col = (name) => header.indexOf(name);
-  return lines
-    .map((line) => line.split("\t"))
-    .filter((cells) => cells.length >= header.length && cells[col("text")]?.trim() && Number(cells[col("conf")]) > 0)
-    .map((cells) => ({
-      text: cells[col("text")].trim(),
-      left: Math.round(Number(cells[col("left")]) / factor),
-      top: Math.round(Number(cells[col("top")]) / factor),
-      width: Math.round(Number(cells[col("width")]) / factor),
-      height: Math.round(Number(cells[col("height")]) / factor),
-    }));
+  const words = [];
+  let anyPass = false;
+  for (const { file, factor } of ocrVariants(path)) {
+    const result = run(tesseract, [file, "-", "--psm", "11", "tsv"], { timeout: 120000 });
+    if (!result.ok) continue;
+    anyPass = true;
+    const lines = result.stdout.split(/\r?\n/);
+    const header = lines.shift()?.split("\t") ?? [];
+    const col = (name) => header.indexOf(name);
+    for (const cells of lines.map((line) => line.split("\t"))) {
+      if (cells.length < header.length || !cells[col("text")]?.trim() || Number(cells[col("conf")]) <= 0) continue;
+      words.push({
+        text: cells[col("text")].trim(),
+        left: Math.round(Number(cells[col("left")]) / factor),
+        top: Math.round(Number(cells[col("top")]) / factor),
+        width: Math.round(Number(cells[col("width")]) / factor),
+        height: Math.round(Number(cells[col("height")]) / factor),
+      });
+    }
+  }
+  return anyPass ? words : null;
 }
+
+// ---------------------------------------------------------------- PNG pixels (switch detection)
+/** Minimal 8-bit non-interlaced PNG decoder (RGB/RGBA/gray), enough for the three screenshot tools. */
+function decodePng(path) {
+  const data = readFileSync(path);
+  let offset = 8;
+  let width = 0, height = 0, colorType = 0, bitDepth = 0;
+  const idat = [];
+  while (offset < data.length) {
+    const length = data.readUInt32BE(offset);
+    const type = data.toString("ascii", offset + 4, offset + 8);
+    const body = data.subarray(offset + 8, offset + 8 + length);
+    if (type === "IHDR") {
+      width = body.readUInt32BE(0);
+      height = body.readUInt32BE(4);
+      bitDepth = body[8];
+      colorType = body[9];
+    } else if (type === "IDAT") idat.push(body);
+    else if (type === "IEND") break;
+    offset += 12 + length;
+  }
+  if (bitDepth !== 8) throw new Error(`unsupported PNG bit depth ${bitDepth}`);
+  const channels = { 0: 1, 2: 3, 4: 2, 6: 4 }[colorType];
+  if (!channels) throw new Error(`unsupported PNG color type ${colorType}`);
+  const raw = inflateSync(Buffer.concat(idat));
+  const stride = width * channels;
+  const pixels = Buffer.alloc(height * stride);
+  for (let y = 0; y < height; y += 1) {
+    const filter = raw[y * (stride + 1)];
+    const line = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+    for (let x = 0; x < stride; x += 1) {
+      const a = x >= channels ? pixels[y * stride + x - channels] : 0;
+      const b = y > 0 ? pixels[(y - 1) * stride + x] : 0;
+      const c = x >= channels && y > 0 ? pixels[(y - 1) * stride + x - channels] : 0;
+      let value = line[x];
+      if (filter === 1) value += a;
+      else if (filter === 2) value += b;
+      else if (filter === 3) value += (a + b) >> 1;
+      else if (filter === 4) {
+        const p = a + b - c;
+        const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+        value += pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+      }
+      pixels[y * stride + x] = value & 0xff;
+    }
+  }
+  const rgb = (x, y) => {
+    const i = y * stride + x * channels;
+    return channels >= 3 ? [pixels[i], pixels[i + 1], pixels[i + 2]] : [pixels[i], pixels[i], pixels[i]];
+  };
+  return { width, height, rgb };
+}
+/**
+ * The toggle switch on a settings row. A row label's OCR box centre is not the switch centre, so
+ * scan every line in label.y-12..+12; on each line, take runs of pixels that differ from the
+ * line's dominant colour by more than 18, merging gaps under 6px. Keep runs
+ * 22-70 px wide (narrower are scrollbars/borders, wider are select boxes) whose right edge is the
+ * rightmost such run on that line, then pick the run seen on the most lines. Returns its centre.
+ */
+function findRowSwitch(path, label) {
+  const image = decodePng(path);
+  const votes = new Map();
+  for (let dy = -12; dy <= 12; dy += 1) {
+    const y = Math.min(image.height - 1, Math.max(0, label.y + dy));
+    // Background = the most common colour on this line (a single sample can land on a glyph).
+    const counts = new Map();
+    for (let x = 0; x < image.width; x += 3) {
+      const key = image.rgb(x, y).map((value) => value >> 3).join(",");
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const background = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0].split(",").map((value) => (Number(value) << 3) + 4);
+    const differs = (x) => image.rgb(x, y).reduce((sum, value, index) => sum + Math.abs(value - background[index]), 0) > 24;
+    const runs = [];
+    let start = -1, lastHit = -10;
+    for (let x = label.right + 40; x < image.width; x += 1) {
+      if (!differs(x)) continue;
+      if (start < 0 || x - lastHit > 6) {
+        if (start >= 0) runs.push([start, lastHit]);
+        start = x;
+      }
+      lastHit = x;
+    }
+    if (start >= 0) runs.push([start, lastHit]);
+    const best = runs.filter(([a, b]) => b - a >= 22 && b - a <= 70).at(-1);
+    if (!best) continue;
+    const key = `${Math.round(best[0] / 4)}:${Math.round(best[1] / 4)}`;
+    const vote = votes.get(key) ?? { count: 0, run: best, ys: [] };
+    vote.count += 1;
+    vote.ys.push(y);
+    votes.set(key, vote);
+  }
+  const winner = [...votes.values()].sort((a, b) => b.count - a.count)[0];
+  if (!winner || winner.count < 3) return null;
+  const ys = winner.ys.sort((a, b) => a - b);
+  return { x: Math.round((winner.run[0] + winner.run[1]) / 2), y: ys[Math.floor(ys.length / 2)], lines: winner.count };
+}
+
 const norm = (text) => text.toLowerCase().replace(/[^a-z0-9:%./]/g, "");
 function findWord(words, text, { nth = 0, minX = 0, maxX = Infinity, pick = "first", match = null } = {}) {
   const test = match ?? ((word) => norm(word.text) === norm(text));
@@ -552,32 +739,113 @@ if (app) {
 }
 
 /** Click a sidebar label so keyboard focus leaves an embedded webview and app shortcuts reach the UI. */
-const chromeFocus = ["optional click sidebar 'Worktrees' (focus app chrome)", () => clickText("Worktrees", { timeout: 3000, match: (word) => word.text === "Worktrees" })];
+const chromeFocus = [
+  "optional click sidebar 'Worktrees' (focus app chrome)",
+  () => clickText("Worktrees", { timeout: 3000, match: (word) => /^worktrees$/i.test(word.text), pick: "leftmost" }),
+];
+const exactly = (label) => (word) => word.text === label;
 /** OCR the browser toolbar zoom label (e.g. "100%"). */
-function zoomLabel() {
-  const words = ocr(probeShot()) ?? [];
+function zoomLabel(words = ocr(probeShot()) ?? []) {
   return words.map((word) => word.text).find((text) => /^\d{2,3}%$/.test(text)) ?? null;
 }
-/**
- * Click inside the address bar. The sidebar's "Worktrees" segment shares the toolbar row, and the
- * bar starts just right of the sidebar, so the bar is at (Worktrees.x + 400, Worktrees.y) on every
- * OS at 1x. Falls back to Mod+L when the sidebar label is not readable.
- */
+/** The address bar's own text: about:blank, a URL, or the fixture host. Leftmost hit wins. */
+const ADDRESS_TEXT = /^(about:blank|https?:\/\/\S+|\S*127\.0\.0\.1\S*|\S*example\.com\S*)$/i;
+async function clickAddressBar() {
+  const deadline = Date.now() + 6000;
+  do {
+    const words = ocr(probeShot());
+    const hit = findWord(words, "", { match: (word) => ADDRESS_TEXT.test(word.text), pick: "leftmost" });
+    if (hit) return { ...host.click(hit.x, hit.y), via: "ocr-click", at: [hit.x, hit.y], text_seen: true };
+    await sleep(800);
+  } while (Date.now() < deadline);
+  return { ...host.key({ key: "l", mods: ["mod"] }), via: "keyboard Mod+L" };
+}
 const typeUrl = (url) => [
-  ["click address bar (Mod+L fallback)", async () => {
-    const anchor = findWord(ocr(probeShot()), "Worktrees", { match: (word) => word.text === "Worktrees" });
-    if (anchor) {
-      const at = [anchor.x + 400, anchor.y];
-      return { ...host.click(...at), via: "ocr-click", at };
-    }
-    return { ...host.key({ key: "l", mods: ["mod"] }), via: "keyboard" };
-  }],
+  ["click address bar by its own text (Mod+L fallback)", clickAddressBar],
   key("Mod+A", { key: "a", mods: ["mod"] }),
   ["type URL", () => host.type(url)],
   key("Enter", { key: "Enter" }),
 ];
+/**
+ * A Settings nav item, located by its own label in the nav column (the column of the leftmost
+ * "General"). When OCR misses the label itself, interpolate from the neighbours it did read.
+ */
+const NAV_ORDER = ["General", "Appearance", "Terminal", "Keyboard", "Agents", "Browser", "Notifications", "Permissions", "Remote"];
+function navTarget(words, name) {
+  const general = findWord(words, "", { match: exactly("General"), pick: "leftmost" });
+  if (!general) return null;
+  const inColumn = (word) => Math.abs(word.left - general.left) <= 14;
+  const direct = findWord(words, "", { match: (word) => word.text === name && inColumn(word) });
+  if (direct) return { ...direct, how: "label" };
+  const seen = NAV_ORDER.map((label, index) => {
+    const hit = findWord(words, "", { match: (word) => word.text === label && inColumn(word) });
+    return hit ? { index, y: hit.y } : null;
+  }).filter(Boolean);
+  if (seen.length < 2) return null;
+  const pitch = (seen.at(-1).y - seen[0].y) / (seen.at(-1).index - seen[0].index);
+  return { x: general.x, y: Math.round(seen[0].y + (NAV_ORDER.indexOf(name) - seen[0].index) * pitch), how: `interpolated, pitch ${pitch.toFixed(1)}` };
+}
+async function clickNav(name) {
+  const deadline = Date.now() + 6000;
+  do {
+    const target = navTarget(ocr(probeShot()), name);
+    if (target) return { ...host.click(target.x, target.y), via: "ocr-click", at: [target.x, target.y], how: target.how };
+    await sleep(800);
+  } while (Date.now() < deadline);
+  return { ok: false, stderr: `Settings nav not readable (looking for ${name})` };
+}
+/** The switch on the row whose label starts with `label`, found from the row's own pixels. */
+async function clickRowSwitch(label) {
+  const deadline = Date.now() + 6000;
+  do {
+    const path = probeShot();
+    const row = findWord(ocr(path), "", { match: exactly(label), pick: "leftmost" });
+    if (row) {
+      const knob = findRowSwitch(path, row);
+      if (knob) return { ...host.click(knob.x, knob.y), via: "pixel-switch", at: [knob.x, knob.y], label_at: [row.x, row.y] };
+      return { ok: false, stderr: `no switch-sized control right of "${label}"`, label_at: [row.x, row.y] };
+    }
+    await sleep(800);
+  } while (Date.now() < deadline);
+  return { ok: false, stderr: `row label not visible: ${label}` };
+}
+/** Scroll the Settings content pane until a group title is visible, then screenshot. */
+async function scrollSettingsTo(title, { notches = 4, attempts = 16 } = {}) {
+  for (let attempt = 0; attempt <= attempts; attempt += 1) {
+    const words = ocr(probeShot());
+    const hit = findWord(words, "", { match: exactly(title), pick: "first" });
+    const general = findWord(words, "", { match: exactly("General"), pick: "leftmost" });
+    if (hit && (!general || hit.left > general.left + 100)) return { ok: true, at: [hit.x, hit.y], scrolled_notches: attempt * Math.abs(notches) };
+    // Wheel over the content pane: well right of the nav column, mid-height.
+    const x = general ? general.x + 600 : 900;
+    const y = general ? general.y + 300 : 500;
+    if (!host.wheel) return { ok: false, stderr: "no wheel input on this platform" };
+    host.wheel(x, y, notches);
+    await sleep(700);
+  }
+  return { ok: false, stderr: `group title not visible after scrolling: ${title}` };
+}
+/** Open Settings: Mod+, then, when the nav is not visible, click the app sidebar and retry once. */
+async function openSettings() {
+  const settingsVisible = (words) => Boolean(findWord(words, "", { match: (word) => /^(Appearance|Keyboard)$/.test(word.text) }));
+  host.key({ key: ",", mods: ["mod"] });
+  await sleep(1800);
+  if (settingsVisible(ocr(probeShot()))) return { ok: true, attempts: 1 };
+  const focused = await clickText("Worktrees", { timeout: 3000, match: (word) => /^worktrees$/i.test(word.text), pick: "leftmost" });
+  await sleep(400);
+  host.key({ key: ",", mods: ["mod"] });
+  await sleep(1800);
+  const visible = settingsVisible(ocr(probeShot()));
+  return { ok: visible, attempts: 2, refocus_click: focused.ok, stderr: visible ? "" : "Settings did not open after Mod+, twice (second after clicking the sidebar)" };
+}
+/** Optional: dismiss the Windows "moving to the Microsoft Store" toast so it does not cover rows. */
+const dismissStoreToast = [
+  "optional dismiss Windows store toast",
+  () => (platform === "win32" ? clickText("Got", { timeout: 1500, match: exactly("Got") }) : { ok: true, skipped: "not Windows" }),
+];
 
-await step("launch", "App window after startup", [focus, ["optional dismiss Windows store toast", () => (platform === "win32" ? clickText("Got", { timeout: 2000 }) : { ok: true })]]);
+// ---------------------------------------------------------------- base flow
+await step("launch", "App window after startup", [focus, dismissStoreToast]);
 await step(
   "dismiss-onboarding",
   "Click 'Skip setup' in the first-run wizard (fallback: Tab into the wizard, Escape)",
@@ -590,74 +858,56 @@ await step("new-browser-tab", "Mod+Shift+B (tab.newBrowser) opens a browser tab"
 summary.cli_after_new_tab = sessions().raw;
 await step(
   "address-bar-example",
-  "Click the address bar (fallback Mod+L), select all, type https://example.com, Enter",
+  "Click the address bar (located by its own text), select all, type https://example.com, Enter",
   [focus, ...typeUrl("https://example.com"), 8000],
   { any: ["Domain", "documentation", "illustrative"] },
 );
-await step("settings-open", "Click the sidebar so the app has focus, then Mod+, opens Settings (General)", [
-  focus,
-  chromeFocus,
-  key("Mod+,", { key: ",", mods: ["mod"] }),
-  2000,
-  ["optional dismiss Windows store toast", () => (platform === "win32" ? clickText("Got", { timeout: 1500, match: (word) => word.text === "Got" }) : { ok: true })],
-], {
+await step(
+  "page-load-fixture",
+  "Address bar: local example page (fixture server), Enter; the page renders its heading",
+  [focus, ...typeUrl(`${fixtureBase}/example.html`), 5000],
+  { any: ["Domain", "illustrative"] },
+);
+await step("settings-open", "Click the sidebar, Mod+, opens Settings (retried once after re-focusing the app)", [focus, chromeFocus, ["open Settings", openSettings], dismissStoreToast], {
   any: ["General", "Appearance"],
 });
 await step(
   "settings-enable-advanced",
-  "Click the switch on the General > 'Advanced features' row (fallback: Tab x11, Space); Browser/Notifications appear in the nav",
-  [
-    focus,
-    ["click Advanced features switch (keyboard fallback)", async () => {
-      const words = ocr(probeShot());
-      const row = findWord(words, "Advanced");
-      // Switches and selects share a right edge; "(Recommended)" ends just left of the select chevron.
-      const anchor = findWord(words, "", { match: (word) => /Recommended\)?$/.test(word.text), pick: "rightmost" });
-      if (row && anchor) {
-        const x = anchor.right + 30;
-        const result = host.click(x, row.y);
-        return { ...result, via: "ocr-click", at: [x, row.y] };
-      }
-      for (const [, action] of [...repeat(11, "Tab", { key: "Tab" }), key("Space", { key: "Space" })]) {
-        await action();
-        await sleep(200);
-      }
-      return { ok: true, via: "keyboard", ocr_error: `row=${Boolean(row)} anchor=${Boolean(anchor)}` };
-    }],
-    1500,
-  ],
+  "Click the switch on General > 'Advanced features' (row found by label, switch by its pixels); Browser/Notifications appear in the nav",
+  [focus, ["click Advanced features switch", () => clickRowSwitch("Advanced")], 1500],
   { any: ["Notifications"] },
 );
 await step(
   "settings-browser",
-  "Click 'Browser' in the Settings nav (fallback: Tab x6, Enter)",
-  [
-    focus,
-    // Exact case and leftmost: "browser" also appears in General's row descriptions.
-    clickOr("Browser", [key("Escape", { key: "Escape" }), key("Mod+,", { key: ",", mods: ["mod"] }), ...repeat(6, "Tab", { key: "Tab" }), key("Enter", { key: "Enter" })], {
-      match: (word) => word.text === "Browser",
-      pick: "leftmost",
-    }),
-    2500,
-  ],
-  { any: ["Chromium", "Engine", "engine", "Search"] },
+  "Click 'Browser' in the Settings nav (nav column found from 'General')",
+  [focus, ["click nav Browser", () => clickNav("Browser")], 2500],
+  { any: ["Web", "Navigation", "Chromium"] },
 );
+for (const [name, title] of [["extensions", "Extensions"], ["passwords", "Passwords"], ["import", "Import"]]) {
+  await step(
+    `settings-browser-${name}`,
+    `Settings > Browser: scroll the content pane with the mouse wheel to the '${title}' group`,
+    [focus, [`scroll to ${title}`, () => scrollSettingsTo(title)], 800],
+    { any: [title] },
+  );
+}
+await step(
+  "settings-browser-import-dialog",
+  "Click 'Import browser data…' in the Import group; the import dialog opens",
+  [focus, ["click Import browser data", () => clickText("Import", { timeout: 4000, match: (word) => /^Import$/.test(word.text), pick: "rightmost" })], 2000],
+  { any: ["Bookmarks", "History", "Cookies", "Passwords", "Chrome", "Firefox", "Safari", "Edge"] },
+);
+await step("settings-import-dialog-closed", "Escape closes the import dialog", [focus, key("Escape", { key: "Escape" }), 1000]);
 if (engineZip) {
   await step(
     "engine-install",
     "Settings > Browser > Chromium Engine: click 'Download', wait for the install",
     [
       focus,
-      ["optional scroll to the engine group", async () => {
-        for (let attempt = 0; attempt < 4; attempt += 1) {
-          const words = ocr(probeShot());
-          if (findWord(words, "Chromium")) return { ok: true };
-          if (platform === "linux") run("xdotool", ["mousemove", "1100", "600", "click", "--repeat", "8", "5"]);
-          await sleep(600);
-        }
-        return { ok: false, stderr: "Chromium group not visible" };
-      }],
-      ["click Download", () => clickText("Download", { timeout: 8000 })],
+      // The Import step left the pane scrolled to the bottom; Chromium Engine sits above Extensions.
+      ["scroll up to the Chromium Engine group", () => scrollSettingsTo("Chromium", { notches: -4 })],
+      // Rightmost: the group also has a "Download size" row label on the left.
+      ["click Download", () => clickText("Download", { timeout: 8000, match: exactly("Download"), pick: "rightmost" })],
       3000,
       ["wait for ferryx_engine on disk", async () => {
         const root = join(dirs.data, "browser-engine");
@@ -680,35 +930,32 @@ if (engineZip) {
 }
 
 await step("settings-closed", "Escape closes Settings", [focus, key("Escape", { key: "Escape" }), 1500], { none: ["Appearance"] });
-await step("narrow-900", "Resize the window to 900x800", [focus, ["resize 900x800", () => host.resize(900, 800)], 2500]);
+
+// ---------------------------------------------------------------- page interactions (every OS)
 await step(
-  "downloads-shelf",
-  "Open a local page with a download link and click it; the download prompt/shelf appears",
-  [
-    focus,
-    ...typeUrl(`${fixtureBase}/download.html`),
-    5000,
-    ["click download link", () => clickText("FERRYXDOWNLOAD", { timeout: 8000 })],
-    4000,
-  ],
-  { any: ["ferryx-qa.txt", "Downloads*", "Save", "Download"] },
+  "download-trigger",
+  "Load the local download page and click its download link; the download prompt shows ferryx-qa.txt",
+  [focus, ...typeUrl(`${fixtureBase}/download.html`), 4000, ["click download link", () => clickText("FERRYXDOWNLOAD", { timeout: 8000 })], 4000],
+  { any: ["ferryx-qa.txt", "Save", "Download"] },
 );
 await step(
-  "back-to-example",
-  "Address bar: https://example.com, Enter (page for find and zoom)",
-  [focus, ...typeUrl("https://example.com"), 6000],
-  { any: ["Domain", "documentation", "illustrative"] },
+  "page-for-find",
+  "Load the local example page again (find and zoom target)",
+  [focus, ...typeUrl(`${fixtureBase}/example.html`), 4000],
+  { any: ["Domain", "illustrative"] },
 );
-await step("find-bar", "Mod+F opens the find bar; type 'Example'", [focus, chromeFocus, key("Mod+F", { key: "f", mods: ["mod"] }), 1000, ["type query", () => host.type("Example")], 1500], {
-  any: ["matches", "match", "1/1", "of"],
+await step("find-open", "Mod+F opens the find bar; type 'Example' (page has 4 matches)", [focus, chromeFocus, key("Mod+F", { key: "f", mods: ["mod"] }), 1000, ["type query", () => host.type("Example")], 1500], {
+  any: ["matches", "match", "1/4", "of"],
+});
+await step("find-close", "Escape closes the find bar (no alert expected)", [focus, key("Escape", { key: "Escape" }), 1500], {
+  none: ["matches", "failed:", "BROWSER_FIND_FAILED"],
 });
 let zoomBefore = null;
 await step(
   "zoom-in",
-  "Escape closes find, Mod+= twice; the toolbar zoom label must change",
+  "Mod+= twice; the toolbar zoom label must change from 100%",
   [
     focus,
-    key("Escape", { key: "Escape" }),
     chromeFocus,
     ["read zoom label", () => ((zoomBefore = zoomLabel()), { ok: true, zoom_before: zoomBefore })],
     key("Mod+= 1", { key: "=", mods: ["mod"] }),
@@ -721,6 +968,14 @@ await step(
     }],
   ],
 );
+await step("zoom-reset", "Mod+0 resets zoom", [focus, key("Mod+0", { key: "0", mods: ["mod"] }), 1500]);
+await step("narrow-900", "Resize the window to 900x800 (toolbar must stay legible)", [focus, ["resize 900x800", () => host.resize(900, 800)], 2500], {
+  any: ["127.0.0.1", "example.html", "Domain"],
+});
+await step("narrow-900-settings", "At 900px, open Settings > Browser", [focus, chromeFocus, ["open Settings", openSettings], ["click nav Browser", () => clickNav("Browser")], 2000], {
+  any: ["Web", "Navigation"],
+});
+await step("narrow-900-settings-closed", "Escape closes Settings at 900px", [focus, key("Escape", { key: "Escape" }), 1500]);
 
 // ---------------------------------------------------------------- Chromium engine checks (Linux)
 const enginePids = () => (platform === "linux" ? run("pgrep", ["-f", "ferryx_engine"]).stdout.split(/\s+/).filter(Boolean).map(Number) : []);

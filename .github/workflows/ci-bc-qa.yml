@@ -176,7 +176,7 @@ jobs:
 
       - name: Run UI audit (Linux, Xvfb + openbox)
         if: matrix.os_name == 'linux'
-        timeout-minutes: 15
+        timeout-minutes: 35
         shell: bash
         run: |
           out="$RUNNER_TEMP/ui-audit"
@@ -192,7 +192,7 @@ jobs:
 
       - name: Run UI audit (macOS)
         if: matrix.os_name == 'macos'
-        timeout-minutes: 15
+        timeout-minutes: 35
         shell: bash
         run: |
           out="$RUNNER_TEMP/ui-audit"
@@ -201,7 +201,7 @@ jobs:
 
       - name: Run UI audit (Windows)
         if: matrix.os_name == 'windows'
-        timeout-minutes: 15
+        timeout-minutes: 35
         shell: bash
         run: |
           out="$RUNNER_TEMP/ui-audit"
