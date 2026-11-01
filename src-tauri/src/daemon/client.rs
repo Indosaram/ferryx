@@ -780,6 +780,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::SupervisorSetPaused { .. } => "supervisorSetPaused",
         DaemonRequest::SupervisorGoal { .. } => "supervisorGoal",
         DaemonRequest::SupervisorEngine { .. } => "supervisorEngine",
+        DaemonRequest::SupervisorMoveHere { .. } => "supervisorMoveHere",
         DaemonRequest::SupervisorRequestV1 { .. } => "supervisorRequestV1",
         DaemonRequest::SupervisorReadV1 { .. } => "supervisorReadV1",
     }
@@ -981,6 +982,8 @@ fn request_timeout(request: &DaemonRequest) -> std::time::Duration {
         DaemonRequest::SupervisorGoal { request } if request.mutates() => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
         // A cancel stops the worker's pane before it answers.
         DaemonRequest::SupervisorRequestV1 { .. } => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
+        // A move waits for the holder's final checkpoint, its transfer and the import.
+        DaemonRequest::SupervisorMoveHere { .. } => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
         _ => DEFAULT_REQUEST_TIMEOUT,
     }
 }

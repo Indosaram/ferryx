@@ -2050,3 +2050,57 @@ mod tests;
 #[cfg(test)]
 #[path = "probe_tests.rs"]
 mod probe_tests;
+
+/// One supervisor request to the paired host on `machine_id` over its shared end-to-end
+/// encrypted session only: a host without the machine attach key is refused
+/// (`REPAIR_REQUIRED`), never sent through the relay's plaintext proxied route. Returns the
+/// response status, its headers and body.
+pub async fn supervisor_secure_request(
+    service: &PairedHostService,
+    machine_id: &str,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+    limit: usize,
+) -> Result<super::secure_http::HttpResponse> {
+    let hosts = service.list().await?;
+    let host = hosts
+        .into_iter()
+        .find(|host| host.machine_id == machine_id && host.grant_scope == GrantScope::Machine)
+        .ok_or_else(|| ClientError::local("HOST_UNAVAILABLE"))?;
+    let (host, lease) = service.capture_operation(host.host_id.clone(), host.generation).await?;
+    let attach = lease.attach().ok_or_else(|| ClientError::local("REPAIR_REQUIRED"))?;
+    let bearer = lease.token()?.to_owned();
+    let mut headers = vec![
+        ("Authorization", format!("Bearer {bearer}")),
+        ("X-Ferryx-Client-Build", super::secure_http::CLIENT_BUILD.to_owned()),
+    ];
+    if body.is_some() {
+        headers.push(("Content-Type", "application/json".to_owned()));
+    }
+    let relay_origin = crate::remote::relay_client::live_relay_url(&host.relay_origin);
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|_| ClientError::local("INTERNAL_ERROR"))?;
+    let target = super::secure_http::SecureTarget {
+        http: &http,
+        host_id: &host.host_id,
+        generation: lease.generation().0,
+        relay_origin: &relay_origin,
+        machine_id: &host.machine_id,
+        attach,
+        bearer: &bearer,
+    };
+    let mut cancellation = lease.cancellation();
+    tokio::select! { biased;
+        _ = cancellation.changed() => Err(ClientError::local("PAIRED_HOST_STALE_GENERATION")),
+        result = tokio::time::timeout(
+            Duration::from_secs(120),
+            super::secure_http::shared_request(&target, method, path, &headers, body, limit, method == "GET"),
+        ) => result.map_err(|_| ClientError::local("TIMEOUT"))?,
+    }
+}

@@ -451,6 +451,7 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
         Some("env") => return hub_env_cli(&args[3.min(args.len())..]),
         Some("cron") => return hub_cron_cli(&args[3.min(args.len())..]),
         Some("lease") => return hub_lease_cli(&args[3.min(args.len())..]),
+        Some("move-here") => return hub_move_here_cli(&args[3.min(args.len())..]),
         Some("migrate") => {}
         _ => {
             eprintln!("usage: ferryx hub migrate [--from-omo <db>] [--cwd <dir>] [--imported-from <db>] [--dry-run]");
@@ -461,6 +462,7 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
             );
             eprintln!("       ferryx hub cron list | ferryx hub cron model <job-id> <provider/model | --clear> | ferryx hub cron approve-rerun <problem-id>");
             eprintln!("       ferryx hub lease reset-capability");
+            eprintln!("       ferryx hub move-here [--force [--confirm]]");
             return 2;
         }
     }
@@ -686,6 +688,70 @@ fn hub_lease_cli(args: &[String]) -> i32 {
         _ => {
             eprintln!("usage: ferryx hub lease reset-capability");
             2
+        }
+    }
+}
+
+/// Parses `move-here` flags: `--force` alone is refused; it needs `--confirm` (the person
+/// read what a forced takeover loses). `Err` is the usage exit.
+fn move_here_flags(args: &[String]) -> Result<(bool, bool), String> {
+    let (mut force, mut confirm) = (false, false);
+    for arg in args {
+        match arg.as_str() {
+            "--force" => force = true,
+            "--confirm" => confirm = true,
+            other => return Err(format!("unknown argument {other}")),
+        }
+    }
+    if confirm && !force {
+        return Err("--confirm only confirms --force".to_owned());
+    }
+    Ok((force, confirm))
+}
+
+/// `ferryx hub move-here [--force [--confirm]]`: moves the supervisor to this machine. A
+/// forced takeover is only sent after `--confirm`; without it the daemon is asked unforced
+/// and its `SUPERVISOR_FORCE_REQUIRED` warning (what will be lost) is printed.
+fn hub_move_here_cli(args: &[String]) -> i32 {
+    let (force, confirm) = match move_here_flags(args) {
+        Ok(flags) => flags,
+        Err(message) => {
+            eprintln!("{message}");
+            eprintln!("usage: ferryx hub move-here [--force [--confirm]]");
+            return 2;
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("runtime: {error}");
+            return 1;
+        }
+    };
+    let request = DaemonRequest::SupervisorMoveHere { force: force && confirm };
+    match runtime.block_on(DaemonClient::new().send_request(request)) {
+        Ok(DaemonResponse::SupervisorMoveHereOk { moved: true }) => {
+            println!("the supervisor runs on this machine now");
+            0
+        }
+        Ok(DaemonResponse::SupervisorMoveHereOk { moved: false }) => {
+            println!("the supervisor already runs on this machine");
+            0
+        }
+        Ok(DaemonResponse::Error { message, code, .. }) => {
+            eprintln!("{}: {message}", code.as_deref().unwrap_or("ERROR"));
+            if code.as_deref() == Some(crate::supervisor_checkpoint::SUPERVISOR_FORCE_REQUIRED) {
+                eprintln!("run 'ferryx hub move-here --force --confirm' to take over anyway");
+            }
+            1
+        }
+        Ok(other) => {
+            eprintln!("unexpected daemon response: {other:?}");
+            1
+        }
+        Err(error) => {
+            eprintln!("daemon: {}", error.message);
+            1
         }
     }
 }
@@ -1394,6 +1460,7 @@ where
         tracing::warn!(%error, "hub start did not clear the stopped flag");
         return Err(HubStartError::Storage(error.to_string()));
     }
+    crate::supervisor_checkpoint::shared().set_hub_stopped(false);
     let mut slot = running.lock().await;
     if slot.is_some() {
         return Ok(false);
@@ -1515,24 +1582,16 @@ async fn follow_lease<F, Fut>(
     }
 }
 
-/// `path` with `suffix` appended to its file name.
-fn with_suffix(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(suffix);
-    std::path::PathBuf::from(name)
+/// `hub.sqlite.incoming` next to `database`: what a checkpoint import staged.
+fn staged_database(database: &std::path::Path) -> Option<std::path::PathBuf> {
+    database
+        .parent()
+        .map(|dir| dir.join(ferryx_hub::checkpoint_import::INCOMING_DB))
 }
-
-/// `<hub.sqlite>.incoming`: a hub database staged by an import for the next promotion.
-fn staged_database(database: &std::path::Path) -> std::path::PathBuf {
-    with_suffix(database, ".incoming")
-}
-
-/// `<hub.sqlite>.pre-move-<ms>`: the backup a promotion keeps of the database it replaced.
-const PRE_MOVE_SUFFIX: &str = ".pre-move-";
 
 /// Folds the staged database's WAL into its main file and switches it to a rollback journal,
-/// so the one file moved into place carries every committed row (a `-wal` beside
-/// `.incoming` would not follow the rename).
+/// so the one file the staged swap moves into place carries every committed row (a `-wal`
+/// beside `.incoming` would not follow the rename).
 async fn seal_staged_database(incoming: std::path::PathBuf) -> Result<(), HubError> {
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let conn = rusqlite::Connection::open(&incoming).map_err(|error| error.to_string())?;
@@ -1556,53 +1615,24 @@ async fn seal_staged_database(incoming: std::path::PathBuf) -> Result<(), HubErr
     .map_err(|error| HubError::message(format!("staged hub database was not sealed: {error}")))
 }
 
-/// Puts files moved aside back where they were, last first. Best effort: it runs on a failed
-/// swap, whose own error is the one reported.
-async fn restore_moved(moved: &[(std::path::PathBuf, std::path::PathBuf)]) {
-    for (from, to) in moved.iter().rev() {
-        if let Err(error) = tokio::fs::rename(to, from).await {
-            tracing::warn!(%error, path = %from.display(), "hub database file was not restored after a failed swap");
-        }
-    }
-}
-
-/// Closes `pool` and moves a staged database over `database`. Returns whether one was staged.
-/// Only called while no generation runs, so nothing else writes the closed pool. The replaced
-/// database and any `-wal`/`-shm` beside it are kept as `<hub.sqlite>.pre-move-<ms>`(+suffix);
-/// a failed move puts them back.
-async fn swap_staged_database(
+/// Seals a database a checkpoint import staged next to `database` and closes `pool`, so the
+/// next hub open swaps it in through the import's own swap (under the open lock; the old file
+/// and its `-wal`/`-shm` are kept as `hub.sqlite.pre-move-<ts>`, a failed swap is rolled back).
+/// Returns whether one was staged. Only called while no generation runs, so nothing else
+/// writes the closed pool.
+async fn close_for_staged_swap(
     pool: &ferryx_hub::goals::SqlitePool,
     database: &std::path::Path,
 ) -> Result<bool, HubError> {
-    let incoming = staged_database(database);
+    let Some(incoming) = staged_database(database) else {
+        return Ok(false);
+    };
     if !tokio::fs::try_exists(&incoming).await.unwrap_or(false) {
         return Ok(false);
     }
     seal_staged_database(incoming.clone()).await?;
     // Resolves once every connection of the old pool is closed.
     pool.close().await;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis())
-        .unwrap_or_default();
-    let backup = with_suffix(database, &format!("{PRE_MOVE_SUFFIX}{stamp}"));
-    let mut moved = Vec::new();
-    for suffix in ["", "-wal", "-shm"] {
-        let from = with_suffix(database, suffix);
-        if !tokio::fs::try_exists(&from).await.unwrap_or(false) {
-            continue;
-        }
-        let to = with_suffix(&backup, suffix);
-        if let Err(error) = tokio::fs::rename(&from, &to).await {
-            restore_moved(&moved).await;
-            return Err(error.into());
-        }
-        moved.push((from, to));
-    }
-    if let Err(error) = tokio::fs::rename(&incoming, database).await {
-        restore_moved(&moved).await;
-        return Err(error.into());
-    }
     Ok(true)
 }
 
@@ -1616,8 +1646,13 @@ async fn promote_generation() -> Option<Generation> {
         .database_path
         .clone()
         .unwrap_or_else(ferryx_hub::hub::default_database_path);
-    match swap_staged_database(&launch.hub.pool, &database).await {
+    // A takeover granted against a pulled checkpoint stages it first (todo 7's import).
+    if let Some(dir) = database.parent() {
+        crate::supervisor_move::import_pending(dir).await;
+    }
+    match close_for_staged_swap(&launch.hub.pool, &database).await {
         Ok(false) => {}
+        // Hub::open applies the staged swap before its pool exists.
         Ok(true) => match Hub::open(launch.config.clone(), launch.bridge.clone()).await {
             Ok(hub) => {
                 if let Err(error) = ferryx_hub::lanes::kibitzer::ensure_schema(&hub.pool).await {
@@ -1692,6 +1727,8 @@ async fn spawn_lease_client(
     // a rebound client replaces the previous client's source.
     let source: Arc<dyn crate::agent_control::fence::SupervisorFenceSource> = Arc::new(handle.state().clone());
     crate::agent_control::fence::install_source(Some(source));
+    // A move drives this client; a rebound client replaces the previous client's handle.
+    *LEASE_HANDLE.write().unwrap_or_else(|e| e.into_inner()) = Some(handle.clone());
     let gate: Arc<dyn LeaseGate> = Arc::new(handle);
     // The hub crate's holder predicate (chat sends, goal settles) follows this client; a
     // rebound client replaces the previous client's gate.
@@ -1750,6 +1787,123 @@ fn lease_client_config(
     let mut config = crate::daemon::supervisor_lease_client::LeaseClientConfig::system(machine_id, account);
     config.handed_over = handover_manager.take_handed_supervisor_lease();
     config
+}
+
+/// The lease client handle a move drives, installed with the lease gate.
+static LEASE_HANDLE: std::sync::RwLock<Option<crate::daemon::supervisor_lease_client::SupervisorLeaseHandle>> =
+    std::sync::RwLock::new(None);
+
+pub(crate) fn lease_handle() -> Option<crate::daemon::supervisor_lease_client::SupervisorLeaseHandle> {
+    LEASE_HANDLE.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+pub(crate) fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// The hub directory of the open hub (where `hub.sqlite` lives); `None` before it opened.
+pub(crate) fn open_hub_dir() -> Option<std::path::PathBuf> {
+    supervisor_launch().map(|launch| hub_dir(&launch))
+}
+
+fn hub_dir(launch: &HubLaunch) -> std::path::PathBuf {
+    let database = launch.config.database_path.clone().unwrap_or_else(ferryx_hub::hub::default_database_path);
+    database.parent().map(std::path::Path::to_path_buf).unwrap_or_default()
+}
+
+/// Exports the running hub as this holder's newest checkpoint and records it for the next
+/// renew (and the release). Returns its id.
+async fn publish_checkpoint(launch: &HubLaunch) -> Result<String, String> {
+    use crate::supervisor_checkpoint as cp;
+    let dir = cp::checkpoint_dir().ok_or("the Ferryx data directory cannot be resolved")?;
+    let machine_id = lease_machine_id().await;
+    let tmp = dir.join(format!(".export-{}.partial", uuid::Uuid::new_v4().simple()));
+    tokio::fs::create_dir_all(&dir).await.map_err(|error| error.to_string())?;
+    let mut request = ferryx_hub::checkpoint::ExportRequest::new(
+        hub_dir(launch),
+        machine_id,
+        tmp.clone(),
+        ferryx_hub::checkpoint_import::default_private_writer(),
+    );
+    request.env_file = ferryx_hub::hub_env::env_file_path();
+    request.memory_root = std::env::var_os("HOME")
+        .map(|home| std::path::PathBuf::from(home).join(".omo").join("memory").join("agents"));
+    let exported = ferryx_hub::checkpoint::export(&launch.hub.pool, &request).await;
+    let result = match exported {
+        Ok(exported) => {
+            let store = cp::CheckpointStore::new(dir);
+            let id = exported.checkpoint_id.clone();
+            let saved = tokio::task::spawn_blocking(move || {
+                let bytes = std::fs::read(&exported.path)?;
+                store.save(&exported.checkpoint_id, &bytes, unix_now(), false)
+            })
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|saved| saved.map_err(|error| error.to_string()));
+            saved.map(|entry| {
+                cp::shared().publish(entry);
+                id
+            })
+        }
+        Err(error) => Err(error.to_string()),
+    };
+    let _ = tokio::fs::remove_file(&tmp).await;
+    result
+}
+
+/// This machine's lease id (the enrollment's machine record id; `local` without one).
+pub(crate) async fn lease_machine_id() -> String {
+    crate::ipc::run_blocking(|| Ok(crate::account::enroll_client::load_enrollment_record()))
+        .await
+        .ok()
+        .flatten()
+        .map_or_else(|| "local".to_owned(), |record| record.machine_record_id)
+}
+
+/// The holder side of a move (`POST /api/v1/supervisor/release-to`): stops the generation,
+/// publishes the final checkpoint and releases the lease reserved for `target`. Returns the
+/// final checkpoint id.
+pub async fn release_supervisor_to(target: &str) -> Result<Option<String>, crate::supervisor_checkpoint::MoveError> {
+    use crate::supervisor_checkpoint::MoveError;
+    let (Some(handle), Some(launch), Some((_, running))) = (lease_handle(), supervisor_launch(), supervisor_view()) else {
+        return Err(MoveError::new(503, "SUPERVISOR_UNAVAILABLE", "the supervisor hub is not open in this daemon"));
+    };
+    if !handle.is_holder_now() {
+        return Err(MoveError::new(409, crate::supervisor_checkpoint::SUPERVISOR_STANDBY, "this machine does not run the supervisor"));
+    }
+    stand_down(&running).await;
+    let id = publish_checkpoint(&launch)
+        .await
+        .map_err(|error| MoveError::new(500, "CHECKPOINT_EXPORT_FAILED", error))?;
+    if !handle.release_to(target).await {
+        return Err(MoveError::new(503, "SUPERVISOR_UNAVAILABLE", "the relay did not release the supervisor lease"));
+    }
+    tracing::info!(target_machine = target, checkpoint = %id, "supervisor released to another machine");
+    Ok(Some(id))
+}
+
+/// Every [`crate::supervisor_checkpoint::PUBLISH_EVERY`] while this machine holds the lease:
+/// a fresh checkpoint for the standbys, reported on the next renew.
+fn spawn_checkpoint_publisher() -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticks = tokio::time::interval(crate::supervisor_checkpoint::PUBLISH_EVERY);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticks.tick().await;
+        loop {
+            ticks.tick().await;
+            let holder = lease_handle().is_some_and(|handle| handle.is_holder_now());
+            let Some(launch) = supervisor_launch() else { continue };
+            if holder {
+                if let Err(error) = publish_checkpoint(&launch).await {
+                    tracing::warn!(%error, "supervisor checkpoint was not published");
+                }
+            } else {
+                crate::supervisor_move::pull_from_holder().await;
+            }
+        }
+    })
 }
 
 /// A person starts the stopped hub from another surface. `by` names who, as for a lane pause.
@@ -2653,8 +2807,19 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     let forced_on = std::env::var("FERRYX_HUB").ok().as_deref() == Some("on");
     let persisted_stop = ferryx_hub::control::is_stopped(&hub.pool).await.unwrap_or(true);
     let stopped = !forced_on && persisted_stop;
+    // Only machines whose owner has not stopped the hub take part in auto-promotion.
+    crate::supervisor_checkpoint::shared().set_hub_stopped(persisted_stop);
+    if let Some(dir) = crate::supervisor_checkpoint::checkpoint_dir() {
+        let store = crate::supervisor_checkpoint::CheckpointStore::new(dir);
+        let newest = tokio::task::spawn_blocking(move || store.newest()).await.ok().flatten();
+        crate::supervisor_checkpoint::shared().set_local(newest);
+    }
     // This daemon owns the hub from here; a later handover commit ends it again.
     server.handover_manager.on_commit(retire_for_handover);
+    // A move reaches the holder over the paired encrypted channel; the publisher checkpoints
+    // while this machine holds the lease and pulls the holder's checkpoint while it stands by.
+    crate::supervisor_move::install_hosts(server.paired_hosts().clone());
+    HUB_TASKS.track(&spawn_checkpoint_publisher());
     // The supervisor lease decides which of the owner's machines runs the hub. Without a relay
     // client the hub runs unleased until one is published (see `follow_relay`).
     let (wanted, lease_decisions) = tokio::sync::watch::channel(false);
@@ -3388,6 +3553,9 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                     let reply = match ferryx_hub::control::parse_control(&line) {
                         Ok(ferryx_hub::control::ControlOp::Stop) => {
                             let persisted = ferryx_hub::control::mark_stopped(&launch.hub.pool).await;
+                            if persisted.is_ok() {
+                                crate::supervisor_checkpoint::shared().set_hub_stopped(true);
+                            }
                             if let Some(generation) = running.lock().await.take() {
                                 for task in &generation.tasks {
                                     task.abort();
@@ -4289,34 +4457,47 @@ mod tests {
 
     #[tokio::test]
     async fn a_staged_database_replaces_the_hub_database_on_promotion() {
+        a_staged_database_case().await;
+    }
+
+    #[test]
+    fn move_here_force_needs_the_explicit_confirm() {
+        let args = |list: &[&str]| list.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        assert_eq!(move_here_flags(&args(&[])), Ok((false, false)));
+        assert_eq!(move_here_flags(&args(&["--force"])), Ok((true, false)), "force alone is not sent forced");
+        assert_eq!(move_here_flags(&args(&["--force", "--confirm"])), Ok((true, true)));
+        assert!(move_here_flags(&args(&["--confirm"])).is_err());
+        assert!(move_here_flags(&args(&["--yes"])).is_err());
+    }
+
+    async fn a_staged_database_case() {
         use ferryx_hub::supervisor as sv;
         let dir = tempfile::tempdir().unwrap();
         let database = dir.path().join("hub.sqlite");
         let local = ferryx_hub::storage::connect(&database).await.unwrap();
         assert!(sv::identities(&local).await.unwrap().is_empty());
-        let incoming = staged_database(&database);
+        let incoming = staged_database(&database).unwrap();
         let imported = ferryx_hub::storage::connect(&incoming).await.unwrap();
         sv::provision_owner(&imported, "slack:T1:U-owner", "ferryx", "github.com/example/ferryx", "host-b", "/repo/.git")
             .await
             .unwrap();
         imported.close().await;
 
-        assert!(swap_staged_database(&local, &database).await.unwrap());
+        assert!(close_for_staged_swap(&local, &database).await.unwrap());
         assert!(local.is_closed(), "the old pool is closed before the swap");
+        assert!(!dir.path().join("hub.sqlite.incoming-wal").exists(), "the staged WAL was folded in");
+        // The promotion reopens through the import's swap, as Hub::open does.
+        let reopened = ferryx_hub::checkpoint_import::open_with_staged_swap(&database, 1_800_000_000)
+            .await
+            .unwrap();
         assert!(!incoming.exists());
-        assert!(!with_suffix(&incoming, "-wal").exists(), "the staged WAL was folded in");
-        let backups: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with("hub.sqlite.pre-move-") && !name.ends_with("-wal") && !name.ends_with("-shm"))
-            .collect();
-        assert_eq!(backups.len(), 1, "the replaced database is kept: {backups:?}");
-        let backup = ferryx_hub::storage::connect(&dir.path().join(&backups[0])).await.unwrap();
-        assert!(sv::identities(&backup).await.unwrap().is_empty(), "the backup is the local database");
-        backup.close().await;
-        let reopened = ferryx_hub::storage::connect(&database).await.unwrap();
         assert_eq!(sv::identities(&reopened).await.unwrap().len(), 1, "the imported supervisor is there");
-        assert!(!swap_staged_database(&reopened, &database).await.unwrap(), "nothing staged: nothing swapped");
+        let backup = dir.path().join("hub.sqlite.pre-move-1800000000");
+        assert!(backup.exists(), "the replaced database is kept as a pre-move backup");
+        let kept = ferryx_hub::storage::connect(&backup).await.unwrap();
+        assert!(sv::identities(&kept).await.unwrap().is_empty(), "the backup is the old database");
+        kept.close().await;
+        assert!(!close_for_staged_swap(&reopened, &database).await.unwrap(), "nothing staged: nothing swapped");
         assert!(!reopened.is_closed());
     }
 
@@ -4499,7 +4680,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let database = dir.path().join("hub.sqlite");
         let local = ferryx_hub::storage::connect(&database).await.unwrap();
-        let imported = ferryx_hub::storage::connect(&staged_database(&database)).await.unwrap();
+        let imported = ferryx_hub::storage::connect(&staged_database(&database).unwrap()).await.unwrap();
         let owner = "slack:T1:U-owner";
         let (identity, project, _) =
             sv::provision_owner(&imported, owner, "ferryx", "github.com/example/ferryx", "host-b", "/repo/.git")

@@ -135,9 +135,49 @@ pub async fn cmd_supervisor_read(
     read_from(daemon_client.send_request(DaemonRequest::SupervisorReadV1 { request }).await?)
 }
 
+fn moved_from(response: DaemonResponse) -> Result<serde_json::Value, IpcError> {
+    match response {
+        DaemonResponse::SupervisorMoveHereOk { moved } => Ok(serde_json::json!({ "moved": moved })),
+        DaemonResponse::Error { message, code, details } => {
+            let mut error = failure(message, code);
+            if details.is_some() {
+                error.details = details;
+            }
+            Err(error)
+        }
+        _ => Err(IpcError::internal("Unexpected daemon supervisor move response")),
+    }
+}
+
+/// Move the supervisor to this machine: `{force}` -> `{moved}`. Refusals keep their wire code
+/// (`SUPERVISOR_STANDBY`, `SUPERVISOR_FORCE_REQUIRED` with `{holderLabel, checkpointAt}`, ...).
+#[tauri::command]
+pub async fn cmd_supervisor_move_here(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+    force: bool,
+) -> Result<serde_json::Value, IpcError> {
+    moved_from(daemon_client.send_request(DaemonRequest::SupervisorMoveHere { force }).await?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_move_refusal_keeps_its_code_and_details() {
+        let refusal = DaemonResponse::Error {
+            message: "changes since 900 on Laptop A will be lost".into(),
+            code: Some(crate::supervisor_checkpoint::SUPERVISOR_FORCE_REQUIRED.into()),
+            details: Some(serde_json::json!({"holderLabel": "Laptop A", "checkpointAt": 900})),
+        };
+        let error = moved_from(refusal).unwrap_err();
+        assert_eq!(error.code, IpcErrorCode::Custom("SUPERVISOR_FORCE_REQUIRED".into()));
+        assert_eq!(error.details, Some(serde_json::json!({"holderLabel": "Laptop A", "checkpointAt": 900})));
+        assert_eq!(
+            moved_from(DaemonResponse::SupervisorMoveHereOk { moved: true }).unwrap(),
+            serde_json::json!({"moved": true})
+        );
+    }
 
     #[test]
     fn an_untyped_error_means_the_daemon_is_older() {
