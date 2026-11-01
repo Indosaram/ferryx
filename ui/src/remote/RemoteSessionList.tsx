@@ -8,6 +8,7 @@ import { RemoteSidebar, type PublishedAttentionTarget, type RemoteSidebarTarget 
 import { RemoteTerminalTabStrip, stripTabs, type RemoteStripTab } from "./RemoteTerminalTabStrip";
 import type { RemoteSidebarSection } from "./useRemoteSidebarModel";
 import { useOverlayHistory } from "./home/usePhoneNavigation";
+import { useDragDismiss } from "./useDragDismiss";
 import { cn } from "../lib/cn";
 
 export type RemoteTerminalTabInfo = {
@@ -647,8 +648,19 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   // The phone drawer is worktrees only: the phone home owns the one Inbox and the one Supervisor.
   const phoneDrawer = !inline && !desktopSidebar;
   const drawerRef = useRef<HTMLDivElement | null>(null);
+  const drawerBackdropRef = useRef<HTMLButtonElement | null>(null);
   const drawerOpen = phoneDrawer && selectorOpen;
   useOverlayHistory(drawerOpen, () => onSelectorOpenChange(false));
+  // Swipe left to dismiss. The drawer unmounts on close with no exit animation, so the hook slides
+  // it out from where the finger left it and closes once it is off screen.
+  const { handlers: drawerDragHandlers } = useDragDismiss({
+    axis: "x-left",
+    panelRef: drawerRef,
+    backdropRef: drawerBackdropRef,
+    active: drawerOpen,
+    deferDismiss: true,
+    onDismiss: () => onSelectorOpenChange(false),
+  });
   useEffect(() => {
     if (!drawerOpen) return;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -794,6 +806,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
       ) : selectorOpen ? (
         <>
           <button
+            ref={drawerBackdropRef}
             type="button"
             aria-label="Dismiss worktree list"
             onClick={() => onSelectorOpenChange(false)}
@@ -806,6 +819,8 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
             aria-modal="true"
             aria-label="Workspace context"
             onKeyDown={trapTab}
+            {...drawerDragHandlers}
+            style={{ touchAction: "pan-y" }}
             className="absolute inset-y-0 left-0 z-40 flex min-h-0 w-[88%] max-w-[340px] animate-drawer-in flex-col border-r border-chat-border bg-chat-screen text-chat-foreground motion-reduce:animate-none"
           >
             {sidebarBody}
