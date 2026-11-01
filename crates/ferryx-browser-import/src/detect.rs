@@ -500,10 +500,27 @@ mod tests {
         results
     }
 
+    /// The browser's data dir under `base` on the platform running the tests.
+    fn chromium_root(base: &Path, browser_type: BrowserType) -> PathBuf {
+        let info = CHROMIUM_BROWSERS
+            .iter()
+            .find(|info| info.browser_type == browser_type)
+            .expect("known Chromium browser");
+        base.join(chromium_subdir(info).expect("browser supported on this platform"))
+    }
+
+    fn gecko_root(base: &Path, browser_type: BrowserType) -> PathBuf {
+        let info = GECKO_BROWSERS
+            .iter()
+            .find(|info| info.browser_type == browser_type)
+            .expect("known Gecko browser");
+        base.join(gecko_subdir(info).expect("browser supported on this platform"))
+    }
+
     #[test]
     fn detects_chrome_with_default_profile() {
         let tmp = tempfile::tempdir().unwrap();
-        let chrome_dir = tmp.path().join("Google/Chrome/Default");
+        let chrome_dir = chromium_root(tmp.path(), BrowserType::Chrome).join("Default");
         std::fs::create_dir_all(&chrome_dir).unwrap();
         std::fs::write(chrome_dir.join("Bookmarks"), "{}").unwrap();
 
@@ -518,7 +535,7 @@ mod tests {
     #[test]
     fn detects_chrome_with_custom_profile_name() {
         let tmp = tempfile::tempdir().unwrap();
-        let profile_dir = tmp.path().join("Google/Chrome/Profile 1");
+        let profile_dir = chromium_root(tmp.path(), BrowserType::Chrome).join("Profile 1");
         std::fs::create_dir_all(&profile_dir).unwrap();
         std::fs::write(profile_dir.join("Bookmarks"), "{}").unwrap();
 
@@ -534,10 +551,11 @@ mod tests {
         assert_eq!(results[0].display_name, "Google Chrome - Personal");
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn arc_collapses_multiple_profiles_to_single_entry() {
         let tmp = tempfile::tempdir().unwrap();
-        let base = tmp.path().join("Arc/User Data");
+        let base = chromium_root(tmp.path(), BrowserType::Arc);
         for (dir, name) in [
             ("Default", "ts"),
             ("Profile 1", "Your Chromium"),
@@ -568,10 +586,11 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn arc_single_default_profile_has_plain_name() {
         let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("Arc/User Data/Default");
+        let p = chromium_root(tmp.path(), BrowserType::Arc).join("Default");
         std::fs::create_dir_all(&p).unwrap();
         std::fs::write(p.join("Bookmarks"), "{}").unwrap();
 
@@ -584,10 +603,11 @@ mod tests {
         assert_eq!(arc[0].display_name, "Arc");
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn arc_without_default_picks_profile_with_data() {
         let tmp = tempfile::tempdir().unwrap();
-        let p1 = tmp.path().join("Arc/User Data/Profile 1");
+        let p1 = chromium_root(tmp.path(), BrowserType::Arc).join("Profile 1");
         std::fs::create_dir_all(&p1).unwrap();
         std::fs::write(p1.join("Bookmarks"), "{}").unwrap();
 
@@ -601,10 +621,11 @@ mod tests {
         assert!(arc[0].profile_path.ends_with("Profile 1"));
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn arc_without_default_or_data_picks_first_profile() {
         let tmp = tempfile::tempdir().unwrap();
-        let base = tmp.path().join("Arc/User Data");
+        let base = chromium_root(tmp.path(), BrowserType::Arc);
         std::fs::create_dir_all(base.join("Profile 1")).unwrap();
         std::fs::create_dir_all(base.join("Profile 2")).unwrap();
 
@@ -625,7 +646,7 @@ mod tests {
     #[test]
     fn detects_firefox_with_profiles_ini() {
         let tmp = tempfile::tempdir().unwrap();
-        let ff_dir = tmp.path().join("Firefox");
+        let ff_dir = gecko_root(tmp.path(), BrowserType::Firefox);
         let profile_dir = ff_dir.join("Profiles/abc123.default");
         std::fs::create_dir_all(&profile_dir).unwrap();
 
@@ -644,7 +665,7 @@ mod tests {
     #[test]
     fn detects_zen_with_workspaces_flag() {
         let tmp = tempfile::tempdir().unwrap();
-        let zen_dir = tmp.path().join("zen");
+        let zen_dir = gecko_root(tmp.path(), BrowserType::Zen);
         let profile_dir = zen_dir.join("abc.default");
         std::fs::create_dir_all(&profile_dir).unwrap();
 
@@ -662,7 +683,7 @@ mod tests {
     #[test]
     fn gecko_without_places_sqlite_skipped() {
         let tmp = tempfile::tempdir().unwrap();
-        let ff_dir = tmp.path().join("Firefox");
+        let ff_dir = gecko_root(tmp.path(), BrowserType::Firefox);
         let profile_dir = ff_dir.join("Profiles/abc.default");
         std::fs::create_dir_all(&profile_dir).unwrap();
 

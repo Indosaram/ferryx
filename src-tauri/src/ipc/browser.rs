@@ -24,8 +24,6 @@ use tauri::{AppHandle, Emitter, Manager, State};
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AutomationSnapshotResult {
-    pub(crate) url: String,
-    pub(crate) title: String,
     pub(crate) elements: Vec<AutomationSnapshotElement>,
 }
 
