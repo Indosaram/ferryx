@@ -2311,11 +2311,12 @@ pub async fn installed_engine_snapshot() -> Result<Value, SupervisorFault> {
 /// (see [`configured_in`]), never one process's environment, so the MCP server and CLI agree
 /// with the daemon and report [`SupervisorFault::NotRunning`] instead of using the omo model.
 pub fn configured_model() -> Option<Arc<dyn ModelTurn>> {
-    // Tests never read the developer's hub env file or data directory.
+    // Tests never read the developer's hub env file or data directory. The file is read fresh,
+    // so an engine turned on after this process started is seen without a restart.
     let configured = installed().is_some()
         || (!cfg!(test)
             && configured_in(
-                crate::hub_env::file_env(),
+                &crate::hub_env::read_file_env(),
                 super::supervisor::state_dir_from_home().as_deref(),
             ));
     model_when(configured)

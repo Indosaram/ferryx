@@ -36,33 +36,77 @@ const PROCESS_KEYS: &[&str] = &[
 
 static FILE_ENV: OnceLock<BTreeMap<String, String>> = OnceLock::new();
 
-/// `~/.ferryx/hub/env`, or `FERRYX_HUB_ENV_FILE`.
+/// `~/.ferryx/hub/env`, or `FERRYX_HUB_ENV_FILE`. The home is `HOME`, else `USERPROFILE`
+/// (Windows).
 pub fn env_file_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("FERRYX_HUB_ENV_FILE").filter(|path| !path.is_empty()) {
         return Some(PathBuf::from(path));
     }
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ferryx/hub/env"))
+    home_from(std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
+        .map(|home| home.join(".ferryx").join("hub").join("env"))
+}
+
+fn home_from(home: Option<OsString>, profile: Option<OsString>) -> Option<PathBuf> {
+    home.filter(|home| !home.is_empty())
+        .or_else(|| profile.filter(|profile| !profile.is_empty()))
+        .map(PathBuf::from)
 }
 
 /// Entries from the hub env file, read once. A missing or unreadable file is empty.
 pub fn file_env() -> &'static BTreeMap<String, String> {
     FILE_ENV.get_or_init(|| {
-        let Some(path) = env_file_path() else {
-            return BTreeMap::new();
-        };
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                let entries = parse_env_file(&text);
-                tracing::info!(path = %path.display(), keys = entries.len(), "hub env file loaded");
-                entries
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-            Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "hub env file was not read");
-                BTreeMap::new()
-            }
-        }
+        let entries = read_file_env();
+        tracing::info!(keys = entries.len(), "hub env file loaded");
+        entries
     })
+}
+
+/// Entries of the hub env file as they are on disk now, read again on every call (unlike the
+/// cached [`file_env`]), so a setting written by [`set_file_entries`] is seen without a process
+/// restart. A missing or unreadable file is empty.
+pub fn read_file_env() -> BTreeMap<String, String> {
+    match env_file_path() {
+        Some(path) => read_env_file_at(&path),
+        None => BTreeMap::new(),
+    }
+}
+
+fn read_env_file_at(path: &Path) -> BTreeMap<String, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => parse_env_file(&text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "hub env file was not read");
+            BTreeMap::new()
+        }
+    }
+}
+
+/// Merges `entries` into the hub env file ([`env_file_path`]) with [`write_merged`], creating
+/// its directory (mode 0700) when missing. Returns the key names the file holds; values are
+/// never returned.
+pub fn set_file_entries(entries: &BTreeMap<String, String>) -> Result<Vec<String>> {
+    let dest = env_file_path()
+        .ok_or_else(|| HubError::message("hub env file: neither HOME nor USERPROFILE is set"))?;
+    set_entries_at(&dest, entries)
+}
+
+fn set_entries_at(dest: &Path, entries: &BTreeMap<String, String>) -> Result<Vec<String>> {
+    if let Some(parent) = dest.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        if !parent.exists() {
+            let mut builder = std::fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder
+                .create(parent)
+                .map_err(|error| HubError::message(format!("{}: {error}", parent.display())))?;
+        }
+    }
+    write_merged(dest, entries)
 }
 
 /// The daemon environment first, then the hub env file.
@@ -351,6 +395,53 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_home_falls_back_to_userprofile() {
+        assert_eq!(
+            home_from(Some("/home/me".into()), Some("C:\\Users\\me".into())),
+            Some(PathBuf::from("/home/me"))
+        );
+        assert_eq!(
+            home_from(None, Some("C:\\Users\\me".into())),
+            Some(PathBuf::from("C:\\Users\\me"))
+        );
+        assert_eq!(
+            home_from(Some("".into()), Some("C:\\Users\\me".into())),
+            Some(PathBuf::from("C:\\Users\\me"))
+        );
+        assert_eq!(home_from(None, None), None);
+    }
+
+    #[test]
+    fn entries_set_into_a_missing_directory_are_read_back_fresh() {
+        let dir = scratch("set");
+        let dest = dir.join("nested/hub/env");
+        assert!(read_env_file_at(&dest).is_empty(), "a missing file is empty");
+        let mut entries = BTreeMap::new();
+        entries.insert("FERRYX_HUB_MHC_SUPERVISOR".to_owned(), "1".to_owned());
+        let keys = set_entries_at(&dest, &entries).unwrap();
+        assert_eq!(keys, ["FERRYX_HUB_MHC_SUPERVISOR"]);
+        assert_eq!(
+            read_env_file_at(&dest).get("FERRYX_HUB_MHC_SUPERVISOR").map(String::as_str),
+            Some("1")
+        );
+        entries.insert("FERRYX_HUB_MHC_SUPERVISOR".to_owned(), "0".to_owned());
+        entries.insert("OTHER".to_owned(), "x".to_owned());
+        set_entries_at(&dest, &entries).unwrap();
+        let fresh = read_env_file_at(&dest);
+        assert_eq!(fresh.get("FERRYX_HUB_MHC_SUPERVISOR").map(String::as_str), Some("0"));
+        assert_eq!(fresh.len(), 2);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dest.parent().unwrap()).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700);
             let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }

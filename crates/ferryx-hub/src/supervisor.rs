@@ -374,7 +374,9 @@ impl RunState {
 }
 
 supervisor_enum!(
-    /// Channel provider of a binding, and the source adapter of an admitted request.
+    /// Channel provider of a binding, and the source adapter of an admitted request. `import`
+    /// is only an owner-memory provenance adapter (owner turns imported from earlier agent
+    /// sessions, migration 0045); no binding or request carries it.
     ChannelProvider, "channel provider", {
         Slack => "slack",
         Discord => "discord",
@@ -382,6 +384,7 @@ supervisor_enum!(
         Phone => "phone",
         Cli => "cli",
         Mcp => "mcp",
+        Import => "import",
     }
 );
 
@@ -1421,6 +1424,65 @@ pub async fn bind_project_host(
     })
 }
 
+/// The installation's one identity for `owner_principal` inside the caller's write
+/// transaction: the existing one, or a new one when the installation has none. Another owner's
+/// identity is [`SupervisorError::SetupConflict`] and nothing is written.
+async fn owner_identity_in(
+    conn: &mut SqliteConnection,
+    owner_principal: &str,
+) -> Result<SupervisorIdentity, SupervisorError> {
+    let owners: Vec<(String, String)> = sqlx::query_as(
+        "SELECT supervisor_id, owner_principal FROM supervisor_identity ORDER BY created_at",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    if !owners.is_empty() && !owners.iter().any(|(_, owner)| owner == owner_principal) {
+        let held: Vec<&str> = owners.iter().map(|(_, owner)| owner.as_str()).collect();
+        return Err(SupervisorError::SetupConflict(format!(
+            "this installation's supervisor already belongs to {}; it is not given a second owner",
+            held.join(", ")
+        )));
+    }
+    sqlx::query(
+        "INSERT INTO supervisor_identity(supervisor_id, owner_principal, memory_name, created_at)
+         VALUES(?,?,?,?) ON CONFLICT(owner_principal) DO NOTHING",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(owner_principal)
+    .bind(MEMORY_NAME)
+    .bind(now_rfc3339())
+    .execute(&mut *conn)
+    .await?;
+    let (supervisor_id, owner, memory_name, created_at): (String, String, String, String) =
+        sqlx::query_as(
+            "SELECT supervisor_id, owner_principal, memory_name, created_at
+             FROM supervisor_identity WHERE owner_principal = ?",
+        )
+        .bind(owner_principal)
+        .fetch_one(&mut *conn)
+        .await?;
+    Ok(SupervisorIdentity {
+        supervisor_id,
+        owner_principal: owner,
+        memory_name,
+        created_at,
+    })
+}
+
+/// Sets up only this installation's one owner identity, without a project. Re-running it with
+/// the same principal returns the same identity; another principal while an identity exists
+/// is [`SupervisorError::SetupConflict`] and writes nothing (see [`provision_owner`]).
+pub async fn provision_identity(
+    pool: &SqlitePool,
+    owner_principal: &str,
+) -> Result<SupervisorIdentity, SupervisorError> {
+    require_id("owner principal", owner_principal, 256)?;
+    let mut tx = pool.begin_write().await?;
+    let identity = owner_identity_in(&mut tx, owner_principal).await?;
+    tx.commit().await?;
+    Ok(identity)
+}
+
 /// Sets up this installation's supervisor in one write transaction: its one owner identity,
 /// the project for `repo_identity` and the project's mapping on `host_id`. Re-running it with
 /// the same arguments changes nothing and returns the same ids.
@@ -1445,44 +1507,8 @@ pub async fn provision_owner(
     require_id("host id", host_id, 256)?;
     require_id("git common dir", git_common_dir, 4096)?;
     let mut tx = pool.begin_write().await?;
-
-    let owners: Vec<(String, String)> = sqlx::query_as(
-        "SELECT supervisor_id, owner_principal FROM supervisor_identity ORDER BY created_at",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-    if !owners.is_empty() && !owners.iter().any(|(_, owner)| owner == owner_principal) {
-        let held: Vec<&str> = owners.iter().map(|(_, owner)| owner.as_str()).collect();
-        return Err(SupervisorError::SetupConflict(format!(
-            "this installation's supervisor already belongs to {}; it is not given a second owner",
-            held.join(", ")
-        )));
-    }
+    let identity = owner_identity_in(&mut tx, owner_principal).await?;
     let now = now_rfc3339();
-    sqlx::query(
-        "INSERT INTO supervisor_identity(supervisor_id, owner_principal, memory_name, created_at)
-         VALUES(?,?,?,?) ON CONFLICT(owner_principal) DO NOTHING",
-    )
-    .bind(Uuid::new_v4().to_string())
-    .bind(owner_principal)
-    .bind(MEMORY_NAME)
-    .bind(&now)
-    .execute(&mut *tx)
-    .await?;
-    let (supervisor_id, owner, memory_name, identity_created): (String, String, String, String) =
-        sqlx::query_as(
-            "SELECT supervisor_id, owner_principal, memory_name, created_at
-             FROM supervisor_identity WHERE owner_principal = ?",
-        )
-        .bind(owner_principal)
-        .fetch_one(&mut *tx)
-        .await?;
-    let identity = SupervisorIdentity {
-        supervisor_id,
-        owner_principal: owner,
-        memory_name,
-        created_at: identity_created,
-    };
 
     let existing: Option<ProjectRow> = sqlx::query_as(
         "SELECT project_id, supervisor_id, name, repo_identity, created_at
@@ -3690,6 +3716,8 @@ pub mod delivery;
 pub mod dispatcher;
 pub mod lessons;
 pub mod memory;
+pub mod memory_import;
 pub mod receipts;
 pub mod request;
+pub mod setup;
 pub mod wakes;
