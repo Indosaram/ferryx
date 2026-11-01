@@ -706,7 +706,12 @@ async fn a_wedged_pty_does_not_block_the_async_runtime_thread() {
         .expect("session exists");
     let pid = session.pid().expect("child pid");
 
-    // Fill the PTY input queue to a real kernel WouldBlock.
+    // Fill the PTY input queue to a real kernel WouldBlock. Linux queues master writes in the
+    // pty's flip buffer and a kernel worker later moves them into the slave's line discipline,
+    // so a WouldBlock seen before that worker ran is not final: the move frees room and the
+    // write under test would be accepted outright. The queue is full for good only once the
+    // line discipline itself is full, so wait for that exact state (the slave's FIONREAD) and
+    // fill again.
     let master_fd = session.raw_master_fd().expect("raw master fd");
     unsafe {
         let flags = libc::fcntl(master_fd, libc::F_GETFL);
@@ -714,28 +719,67 @@ async fn a_wedged_pty_does_not_block_the_async_runtime_thread() {
             libc::fcntl(master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
         }
     }
+    #[cfg(target_os = "linux")]
+    let slave = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+            .open(session.slave_tty_name().expect("pty slave path"))
+            .expect("open pty slave")
+    };
     let fill_chunk = vec![b'x'; 65536];
     let mut accepted = 0usize;
+    let settle_deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let n = unsafe {
-            libc::write(
-                master_fd,
-                fill_chunk.as_ptr().cast(),
-                fill_chunk.len(),
-            )
+        // Sampled before the fill: once the line discipline is full nothing can move out of
+        // the flip buffer afterwards, so the fill's WouldBlock is final.
+        #[cfg(target_os = "linux")]
+        let discipline_full = {
+            use std::os::fd::AsRawFd;
+            let mut queued: libc::c_int = 0;
+            // SAFETY: `slave` is an open tty fd; FIONREAD writes one c_int.
+            assert_eq!(
+                unsafe { libc::ioctl(slave.as_raw_fd(), libc::FIONREAD, &mut queued) },
+                0
+            );
+            // A raw-mode n_tty read buffer holds N_TTY_BUF_SIZE - 1 bytes at most.
+            queued >= 4095
         };
-        if n < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::WouldBlock {
+        // Other kernels hand master writes to the line discipline synchronously.
+        #[cfg(not(target_os = "linux"))]
+        let discipline_full = true;
+        let mut chunk_size = fill_chunk.len();
+        loop {
+            let n = unsafe { libc::write(master_fd, fill_chunk.as_ptr().cast(), chunk_size) };
+            if n < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() != std::io::ErrorKind::WouldBlock {
+                    panic!("unexpected error saturating PTY: {err}");
+                }
+                // Step down so the queue is full to a single byte: WouldBlock on a 64 KiB
+                // write does not prove the one-byte write under test cannot fit.
+                if chunk_size > 1 {
+                    chunk_size = (chunk_size / 2).max(1);
+                    continue;
+                }
                 break;
             }
-            panic!("unexpected error saturating PTY: {err}");
+            if n == 0 {
+                panic!("PTY write returned zero while saturating queue");
+            }
+            accepted += n as usize;
+            assert!(accepted < 4 * 1024 * 1024, "exceeded 4 MiB saturation cap");
         }
-        if n == 0 {
-            panic!("PTY write returned zero while saturating queue");
+        if discipline_full {
+            break;
         }
-        accepted += n as usize;
-        assert!(accepted < 4 * 1024 * 1024, "exceeded 4 MiB saturation cap");
+        assert!(
+            std::time::Instant::now() < settle_deadline,
+            "pty line discipline never filled; accepted={accepted}"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
 
     // Call write_input_operation - wrap ONLY the synchronous call in Instant timing
