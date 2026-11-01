@@ -22,6 +22,76 @@ function stagedFile(overrides: Partial<ReferenceFileReceipt> = {}): ReferenceFil
   };
 }
 
+function setCoarsePointer(coarse: boolean) {
+  window.matchMedia = ((media: string) =>
+    Object.assign(new EventTarget(), {
+      media,
+      matches: coarse && media === "(pointer: coarse)",
+      onchange: null,
+      addListener() {},
+      removeListener() {},
+    })) as unknown as typeof window.matchMedia;
+}
+
+describe("MobileChatComposer touch safety", () => {
+  const originalMatchMedia = window.matchMedia;
+  beforeEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    window.matchMedia = originalMatchMedia;
+  });
+
+  it("puts Stop at the opposite edge from Send while a prompt is open", () => {
+    render(
+      <MobileChatComposer onSend={vi.fn()} onStop={vi.fn()} isRunning promptCard={<div>q</div>} value="1" />,
+    );
+    const stop = screen.getByTestId("stop-button");
+    const send = screen.getByTestId("send-button");
+    expect(stop).toHaveClass("h-11");
+    expect(stop).toHaveTextContent("Stop");
+    // different flex groups at either end of a justify-between row
+    expect(stop.parentElement).not.toBe(send.parentElement);
+    expect(send.parentElement).toHaveClass("justify-between", "gap-3");
+  });
+
+  it("needs a second tap to stop on a touch screen", () => {
+    setCoarsePointer(true);
+    const onStop = vi.fn();
+    render(<MobileChatComposer onSend={vi.fn()} onStop={onStop} isRunning />);
+    fireEvent.click(screen.getByTestId("stop-button"));
+    expect(onStop).not.toHaveBeenCalled();
+    expect(screen.getByTestId("stop-button")).toHaveAccessibleName("Tap again to stop the running turn");
+    fireEvent.click(screen.getByTestId("stop-button"));
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps Enter as a new line on a touch screen; the Send button sends", () => {
+    setCoarsePointer(true);
+    const onSend = vi.fn();
+    render(<MobileChatComposer onSend={onSend} />);
+    const textarea = screen.getByTestId("chat-composer-textarea");
+    fireEvent.change(textarea, { target: { value: "line one" } });
+    fireEvent.keyDown(textarea, { key: "Enter", keyCode: 13 });
+    expect(onSend).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("send-button"));
+    expect(onSend).toHaveBeenCalledWith("line one");
+  });
+
+  it("names held rows with a short excerpt, not the whole message", () => {
+    const long = "a".repeat(200);
+    render(<MobileChatComposer onSend={vi.fn()} heldMessages={[{ id: "h", text: long }]} />);
+    const name = screen.getByTestId("held-message-send-h").getAttribute("aria-label") ?? "";
+    expect(name.length).toBeLessThan(70);
+    expect(screen.getByTestId("held-message-remove-h")).toHaveClass("size-11");
+  });
+
+  it("caps the banners, held rows and prompt in their own scroller so the message box stays reachable", () => {
+    render(<MobileChatComposer onSend={vi.fn()} promptCard={<div>q</div>} warning="w" />);
+    expect(screen.getByTestId("chat-composer-extras")).toHaveClass("overflow-y-auto");
+    expect(screen.getByTestId("chat-composer-extras")).toContainElement(screen.getByTestId("chat-composer-prompt"));
+  });
+});
+
 describe("MobileChatComposer", () => {
   beforeEach(cleanup);
   afterEach(cleanup);
@@ -58,13 +128,16 @@ describe("MobileChatComposer", () => {
     }
   });
 
-  it("renders the T3 composer row with attach, mic, and circular send controls", () => {
+  it("renders the composer row with attach and a 44px send control, and no dead mic button", () => {
     const onSend = vi.fn();
     render(<MobileChatComposer onSend={onSend} />);
 
     expect(screen.getByTestId("chat-composer-textarea")).toHaveAttribute("placeholder", "Ask the agent…");
     expect(screen.getByTestId("attach-file-button")).toBeInTheDocument();
-    expect(screen.getByTestId("mic-button")).toBeDisabled();
+    expect(screen.queryByTestId("mic-button")).not.toBeInTheDocument();
+    expect(screen.getByTestId("send-button")).toHaveClass("size-11");
+    expect(screen.getByTestId("attach-file-button")).toHaveClass("size-11");
+    expect(screen.getByTestId("chat-composer-textarea")).toHaveAccessibleName("Ask the agent");
     expect(screen.getByTestId("file-upload-input")).toBeInTheDocument();
     expect(screen.queryByTestId("mobile-chat-quick-actions")).not.toBeInTheDocument();
     expect(screen.queryByTestId("terminal-accessory-bar")).not.toBeInTheDocument();
@@ -273,13 +346,12 @@ describe("MobileChatComposer", () => {
     expect(screen.getByTestId("chat-composer-warning")).toHaveTextContent("stop request");
   });
 
-  it("provides title tooltips matching accessible names on icon buttons (+, mic, send, stop)", () => {
+  it("provides title tooltips matching accessible names on icon buttons (+, send, stop)", () => {
     const { rerender } = render(
       <MobileChatComposer onSend={vi.fn()} onStop={vi.fn()} isRunning={false} value="hello" />
     );
 
     expect(screen.getByTestId("attach-file-button")).toHaveAttribute("title", "Attach file");
-    expect(screen.getByTestId("mic-button")).toHaveAttribute("title", "Voice input is not supported");
     expect(screen.getByTestId("send-button")).toHaveAttribute("title", "Send message");
 
     rerender(

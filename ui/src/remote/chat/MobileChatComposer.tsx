@@ -4,7 +4,6 @@ import {
   ArrowUp,
   FileText,
   Loader2,
-  Mic,
   Pencil,
   Plus,
   Square,
@@ -15,6 +14,7 @@ import { cn } from "../../lib/cn";
 import type { ChatAttachment } from "./MobileChatComponents";
 import type { HeldMessage } from "./referenceQueue";
 import type { ReferenceFileReceipt } from "./referenceTypes";
+import { isImeConfirmingKey } from "./imeKeys";
 
 export type { ChatAttachment };
 
@@ -70,18 +70,17 @@ export interface MobileChatComposerProps {
   readonly className?: string;
 }
 
-/**
- * Enter that confirms an IME candidate is not a submit. Safari fires that keydown after
- * compositionend with isComposing=false and keyCode 229, so every signal is checked.
- */
-function isImeConfirmingKey(e: React.KeyboardEvent, composing: boolean): boolean {
-  return (
-    composing ||
-    Boolean(e.nativeEvent?.isComposing) ||
-    Boolean((e as unknown as { isComposing?: boolean }).isComposing) ||
-    e.keyCode === 229 ||
-    (e.nativeEvent as KeyboardEvent | undefined)?.keyCode === 229
-  );
+/** How long a first tap on Stop stays armed on a touch screen before it needs arming again. */
+const STOP_ARM_MS = 3000;
+
+/** A held message named in a button's label: enough to tell rows apart, never a whole paragraph. */
+function heldName(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > 40 ? `${flat.slice(0, 39)}…` : flat;
+}
+
+function coarsePointer(): boolean {
+  return typeof window !== "undefined" && window.matchMedia?.("(pointer: coarse)").matches === true;
 }
 
 function formatFileSize(bytes: number): string {
@@ -124,6 +123,25 @@ export const MobileChatComposer = React.forwardRef<
   const [editingHeldId, setEditingHeldId] = useState<string | null>(null);
   const [editingHeldText, setEditingHeldText] = useState("");
   const isComposingRef = useRef(false);
+  // On a touch screen Stop takes two taps: the first arms it, so a slip never ends a turn.
+  const [stopArmed, setStopArmed] = useState(false);
+  const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
+  }, []);
+  useEffect(() => {
+    if (!isRunning) setStopArmed(false);
+  }, [isRunning]);
+  const handleStop = useCallback(() => {
+    if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
+    if (!coarsePointer() || stopArmed) {
+      setStopArmed(false);
+      onStop?.();
+      return;
+    }
+    setStopArmed(true);
+    stopTimerRef.current = setTimeout(() => setStopArmed(false), STOP_ARM_MS);
+  }, [onStop, stopArmed]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -191,6 +209,8 @@ export const MobileChatComposer = React.forwardRef<
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key === "Enter" && !e.shiftKey) {
         if (isImeConfirmingKey(e, isComposingRef.current)) return;
+        // a soft keyboard has no Shift+Enter: there Enter is a new line and the Send button sends
+        if (coarsePointer()) return;
         e.preventDefault();
         handleSend();
       }
@@ -239,22 +259,37 @@ export const MobileChatComposer = React.forwardRef<
   // beside Stop while one is up. Without a prompt, a running pane shows Stop alone.
   const answersWaitingPrompt = promptCard !== undefined && promptCard !== null;
   const showsSend = !isRunning || answersWaitingPrompt;
+  const textareaLabel = placeholder.replace(/…$/, "");
+  const hasExtras =
+    draftUnsaved ||
+    warning !== null ||
+    attachError !== null ||
+    attachments.length > 0 ||
+    heldMessages.length > 0 ||
+    answersWaitingPrompt;
 
   return (
     <div
       data-testid="mobile-chat-composer"
       className={cn(
-        "flex flex-col w-full bg-chat-composer-panel border-t border-chat-composer-border rounded-2xl backdrop-blur-md pb-safe select-none",
+        "flex flex-col w-full bg-chat-composer-panel border-t border-chat-composer-border rounded-t-2xl pb-safe select-none",
         className
       )}
     >
+      {hasExtras && (
+      // Banners, files, held rows and the prompt scroll on their own, so the message box always
+      // stays on screen above the keyboard.
+      <div
+        data-testid="chat-composer-extras"
+        className="max-h-[45dvh] overflow-y-auto overscroll-contain scrollbar-sleek"
+      >
       {draftUnsaved && (
         <div
           data-testid="chat-composer-draft-unsaved"
           role="status"
-          className="flex items-center gap-2 px-3 pt-2 pb-1 text-[11px] text-chat-danger"
+          className="flex items-center gap-2 px-3 pt-2 pb-1 text-xs text-chat-danger"
         >
-          <AlertCircle aria-hidden="true" className="size-3 shrink-0" />
+          <AlertCircle aria-hidden="true" className="size-3.5 shrink-0" />
           <span>This draft could not be saved on this device. It stays here until you send it.</span>
         </div>
       )}
@@ -263,7 +298,7 @@ export const MobileChatComposer = React.forwardRef<
           data-testid="chat-composer-warning"
           role="status"
           aria-live="polite"
-          className="flex items-center gap-2 px-3 pt-2 pb-1 text-[11px] text-chat-foreground-secondary"
+          className="flex items-center gap-2 px-3 pt-2 pb-1 text-xs text-chat-foreground-secondary"
         >
           <span>{warning}</span>
         </div>
@@ -272,7 +307,7 @@ export const MobileChatComposer = React.forwardRef<
         <div
           data-testid="chat-composer-attach-error"
           role="alert"
-          className="flex items-center gap-2 px-3 pt-2 pb-1 text-[11px] text-chat-danger"
+          className="flex items-center gap-2 px-3 pt-2 pb-1 text-xs text-chat-danger"
         >
           <span>{attachError}</span>
         </div>
@@ -288,16 +323,16 @@ export const MobileChatComposer = React.forwardRef<
               <div
                 key={id}
                 data-testid={`attachment-preview-${id}`}
-                className="group relative flex items-center gap-2 rounded-lg bg-chat-surface/90 border border-chat-border p-1.5 pr-2.5 shrink-0 max-w-[220px] shadow-sm"
+                className="group relative flex items-center gap-2 rounded-lg bg-chat-surface border border-chat-border p-1.5 pr-1 shrink-0 max-w-[15rem]"
               >
-                <div className="flex size-8 items-center justify-center rounded bg-chat-surface-raised/60 text-chat-foreground-secondary border border-chat-border/50">
+                <div className="flex size-8 items-center justify-center rounded bg-chat-surface-raised text-chat-foreground-secondary">
                   <FileText className="size-4" aria-hidden="true" />
                 </div>
                 <div className="flex flex-col min-w-0 flex-1">
                   <span className="truncate text-xs font-mono font-medium text-chat-foreground">
                     {att.displayName}
                   </span>
-                  <span className="truncate text-[10px] font-mono text-chat-foreground-secondary">
+                  <span className="truncate text-xs font-mono text-chat-foreground-secondary">
                     {formatFileSize(att.receipt.sizeBytes)} · {att.mentionText.trim()}
                   </span>
                 </div>
@@ -306,9 +341,9 @@ export const MobileChatComposer = React.forwardRef<
                   data-testid={`remove-attachment-${id}`}
                   aria-label={"Remove staged file " + att.displayName}
                   onClick={() => onRemoveAttachment?.(id)}
-                  className="size-5 rounded-md bg-chat-surface-raised hover:bg-chat-danger/80 hover:text-chat-screen text-chat-foreground-secondary flex items-center justify-center shrink-0 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  className="flex size-11 shrink-0 items-center justify-center rounded-md text-chat-foreground-secondary transition-colors hover:bg-chat-surface-hover hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 >
-                  <X className="size-3" aria-hidden="true" />
+                  <X className="size-4" aria-hidden="true" />
                 </button>
               </div>
             );
@@ -322,7 +357,7 @@ export const MobileChatComposer = React.forwardRef<
           aria-label="Held messages"
           className="flex flex-col gap-1 px-3 pt-2 pb-1 border-b border-chat-composer-border/60"
         >
-          <span className="text-[11px] text-chat-foreground-secondary">
+          <span className="text-xs text-chat-foreground-secondary">
             {heldUnsaved
               ? "Held here — this device could not save them. Send or remove one yourself."
               : "Held until you send them. Nothing is sent on its own."}
@@ -333,12 +368,13 @@ export const MobileChatComposer = React.forwardRef<
               <div
                 key={message.id}
                 data-testid={`held-message-${message.id}`}
-                className="flex items-start gap-2 rounded-lg border border-chat-border bg-chat-surface/70 px-2 py-1.5"
+                className="flex items-center gap-2 rounded-lg border border-chat-border bg-chat-surface py-0.5 pl-3 pr-0.5"
               >
                 {editingHeldId === message.id ? (
                   <input
                     data-testid={`held-message-input-${message.id}`}
-                    className="min-w-0 flex-1 rounded-md border border-chat-border bg-chat-screen/60 px-2 py-1 text-xs text-chat-foreground"
+                    aria-label={"Edit held message " + heldName(message.text)}
+                    className="min-h-11 min-w-0 flex-1 rounded-md border border-chat-border bg-chat-screen px-2 py-1 text-base text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                     value={editingHeldText}
                     disabled={sending}
                     onChange={(event) => setEditingHeldText(event.currentTarget.value)}
@@ -350,44 +386,44 @@ export const MobileChatComposer = React.forwardRef<
                     }}
                   />
                 ) : (
-                  <span className="min-w-0 flex-1 whitespace-pre-wrap break-words text-xs text-chat-foreground-secondary">
+                  <span className="min-w-0 flex-1 whitespace-pre-wrap break-words text-sm text-chat-foreground">
                     {message.text}
                   </span>
                 )}
-                <span className="flex shrink-0 items-center gap-1">
+                <span className="flex shrink-0 items-center gap-0.5">
                   <button
                     type="button"
                     data-testid={`held-message-send-${message.id}`}
-                    aria-label={"Send held message " + message.text}
+                    aria-label={"Send held message " + heldName(message.text)}
                     disabled={sending || editingHeldId === message.id}
                     onClick={() => onSendHeld?.(message.id)}
-                    className="flex size-6 items-center justify-center rounded-md text-chat-foreground-secondary hover:text-chat-foreground disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    className="flex size-11 items-center justify-center rounded-md text-chat-foreground-secondary transition-colors hover:bg-chat-surface-hover hover:text-chat-foreground disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   >
                     {sending ? (
-                      <Loader2 aria-hidden="true" className="size-3 animate-spin motion-reduce:animate-none" />
+                      <Loader2 aria-hidden="true" className="size-4 animate-spin motion-reduce:animate-none" />
                     ) : (
-                      <ArrowUp aria-hidden="true" className="size-3" />
+                      <ArrowUp aria-hidden="true" className="size-4" />
                     )}
                   </button>
                   <button
                     type="button"
                     data-testid={`held-message-edit-${message.id}`}
-                    aria-label={"Edit held message " + message.text}
+                    aria-label={"Edit held message " + heldName(message.text)}
                     disabled={sending}
                     onClick={() => (editingHeldId === message.id ? commitHeldEdit() : beginHeldEdit(message))}
-                    className="flex size-6 items-center justify-center rounded-md text-chat-foreground-secondary hover:text-chat-foreground disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    className="flex size-11 items-center justify-center rounded-md text-chat-foreground-secondary transition-colors hover:bg-chat-surface-hover hover:text-chat-foreground disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   >
-                    <Pencil aria-hidden="true" className="size-3" />
+                    <Pencil aria-hidden="true" className="size-4" />
                   </button>
                   <button
                     type="button"
                     data-testid={`held-message-remove-${message.id}`}
-                    aria-label={"Remove held message " + message.text}
+                    aria-label={"Remove held message " + heldName(message.text)}
                     disabled={sending}
                     onClick={() => onRemoveHeld?.(message.id)}
-                    className="flex size-6 items-center justify-center rounded-md text-chat-foreground-secondary hover:text-chat-danger disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    className="ml-2 flex size-11 items-center justify-center rounded-md text-chat-foreground-secondary transition-colors hover:bg-chat-surface-hover hover:text-chat-danger disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   >
-                    <Trash2 aria-hidden="true" className="size-3" />
+                    <Trash2 aria-hidden="true" className="size-4" />
                   </button>
                 </span>
               </div>
@@ -400,9 +436,11 @@ export const MobileChatComposer = React.forwardRef<
           {promptCard}
         </div>
       )}
+      </div>
+      )}
 
       {/* One card, text first under it: single-surface wrapper + control row ported from paseo composer/input/input.tsx (Apache-2.0) and t3code ThreadComposer.tsx (MIT). */}
-      <div className="flex flex-col px-[12px] py-2">
+      <div className="flex flex-col px-3 py-2">
         <input
           ref={fileInputRef}
           type="file"
@@ -420,74 +458,66 @@ export const MobileChatComposer = React.forwardRef<
             value={text}
             disabled={disabled}
             placeholder={placeholder}
-            aria-label="Ask the repo agent"
-            enterKeyHint="send"
+            aria-label={textareaLabel}
+            enterKeyHint={coarsePointer() ? "enter" : "send"}
             autoComplete="off"
             inputMode="text"
             onChange={(e) => setText(e.target.value)}
             onKeyDown={handleKeyDown}
             onCompositionStart={handleCompositionStart}
             onCompositionEnd={handleCompositionEnd}
-            className="w-full resize-none bg-transparent px-[14px] pt-2.5 font-sans text-base text-chat-foreground placeholder:text-chat-foreground-secondary focus:outline-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring max-h-36 overflow-y-auto leading-relaxed scrollbar-sleek"
+            className="w-full resize-none bg-transparent px-3.5 pt-2.5 font-sans text-base text-chat-foreground placeholder:text-chat-foreground-secondary focus:outline-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring max-h-36 overflow-y-auto leading-relaxed scrollbar-sleek"
           />
 
-          <div className="flex items-center justify-between px-2 pb-2">
-            <button
-              type="button"
-              data-testid="attach-file-button"
-              aria-label="Attach file"
-              title="Attach file"
-              aria-busy={attaching || undefined}
-              disabled={disabled || attaching}
-              onClick={() => fileInputRef.current?.click()}
-              className="flex size-8 shrink-0 items-center justify-center rounded-full text-chat-foreground-secondary hover:text-chat-foreground active:bg-chat-surface-raised transition-colors disabled:opacity-40 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            >
-              <Plus className="size-4" />
-            </button>
-
+          {/* Stop sits at the left edge, Send at the right: a slip never turns an answer into a stop */}
+          <div className="flex items-center justify-between gap-3 px-1 pb-1">
             <div className="flex items-center gap-1">
               <button
                 type="button"
-                data-testid="mic-button"
-                disabled
-                aria-label="Voice input is not supported"
-                title="Voice input is not supported"
-                className="flex size-8 shrink-0 items-center justify-center rounded-full text-chat-foreground-secondary hover:text-chat-foreground active:bg-chat-surface-raised transition-colors disabled:opacity-40 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                data-testid="attach-file-button"
+                aria-label="Attach file"
+                title="Attach file"
+                aria-busy={attaching || undefined}
+                disabled={disabled || attaching}
+                onClick={() => fileInputRef.current?.click()}
+                className="flex size-11 shrink-0 items-center justify-center rounded-full text-chat-foreground-secondary hover:text-chat-foreground active:bg-chat-surface-raised transition-colors disabled:opacity-40 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
-                <Mic className="size-4" />
+                <Plus aria-hidden="true" className="size-5" />
               </button>
 
               {isRunning && (
                 <button
                   type="button"
                   data-testid="stop-button"
-                  aria-label="Stop the running turn"
+                  aria-label={stopArmed ? "Tap again to stop the running turn" : "Stop the running turn"}
                   title="Stop the running turn"
-                  onClick={onStop}
-                  className="flex size-8 shrink-0 items-center justify-center rounded-full bg-chat-danger text-chat-foreground shadow-sm hover:bg-chat-danger/90 active:bg-chat-danger/80 active:scale-95 transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  onClick={handleStop}
+                  className="flex h-11 shrink-0 items-center gap-1.5 rounded-full bg-chat-danger px-4 text-sm font-medium text-chat-screen hover:bg-chat-danger/90 active:bg-chat-danger/80 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 >
-                  <Square className="size-4 fill-current" />
-                </button>
-              )}
-              {showsSend && (
-                <button
-                  type="button"
-                  data-testid="send-button"
-                  aria-label="Send message"
-                  title="Send message"
-                  disabled={!canSubmit}
-                  onClick={handleSend}
-                  className={cn(
-                    "flex size-8 shrink-0 items-center justify-center rounded-full transition-all active:scale-95 shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                    canSubmit
-                      ? "bg-chat-primary text-chat-primary-foreground hover:brightness-110 active:brightness-95"
-                      : "bg-chat-surface-raised/40 text-chat-foreground-secondary/50 border border-chat-border/40 cursor-not-allowed"
-                  )}
-                >
-                  <ArrowUp className="size-4 stroke-[2.5]" />
+                  <Square aria-hidden="true" className="size-3.5 fill-current" />
+                  <span aria-hidden="true">{stopArmed ? "Tap to confirm" : "Stop"}</span>
                 </button>
               )}
             </div>
+
+            {showsSend && (
+              <button
+                type="button"
+                data-testid="send-button"
+                aria-label="Send message"
+                title="Send message"
+                disabled={!canSubmit}
+                onClick={handleSend}
+                className={cn(
+                  "flex size-11 shrink-0 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                  canSubmit
+                    ? "bg-chat-primary text-chat-primary-foreground hover:bg-chat-primary/90"
+                    : "bg-chat-surface-raised text-chat-foreground-secondary cursor-not-allowed"
+                )}
+              >
+                <ArrowUp aria-hidden="true" className="size-5 stroke-[2.5]" />
+              </button>
+            )}
           </div>
         </div>
       </div>
