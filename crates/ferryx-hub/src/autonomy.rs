@@ -8,7 +8,6 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Timelike, Utc};
-use chrono_tz::Asia::Seoul;
 use serde_json::Value;
 use sqlx::SqlitePool;
 
@@ -66,8 +65,9 @@ struct LoopItem {
 }
 
 impl LoopItem {
-    /// One readable line per item: `[카톡 · 봇 처리] 여신님: <message>`. The owner sees this
-    /// text in the turn status message, so it carries no internal kind names.
+    /// One readable line per item: `[카톡 · 봇 처리] 여신님: <message>` (`[KakaoTalk · Bot can
+    /// handle]` for an English owner). The owner sees this text in the turn status message, so
+    /// it carries no internal kind names.
     fn format_entry(&self) -> String {
         let source = source_label(&self.source);
         let tag = match kind_label(&self.kind) {
@@ -82,21 +82,14 @@ impl LoopItem {
 }
 
 fn source_label(source: &str) -> &str {
-    match source {
-        "kakao" => "카톡",
-        "mail" => "메일",
-        "imessage" => "문자",
-        "github" => "GitHub",
-        "slack" => "슬랙",
-        "cron" => "크론",
-        other => other,
-    }
+    crate::owner_alert::source_label(source)
 }
 
 fn kind_label(kind: &str) -> Option<&'static str> {
+    let locale = crate::locale::current();
     match kind {
-        "inbox_bot" => Some("봇 처리"),
-        "inbox_owner" => Some("대표 확인 필요"),
+        "inbox_bot" => Some(locale.pick("봇 처리", "Bot can handle")),
+        "inbox_owner" => Some(locale.pick("대표 확인 필요", "Needs you")),
         _ => None,
     }
 }
@@ -184,7 +177,8 @@ impl ActionLoop {
         if items.is_empty() {
             return Ok(None);
         }
-        let start = kst_day_start(now);
+        let locale = crate::locale::current();
+        let start = locale.day_start(locale.local_date(now));
         let end = start + chrono::Duration::days(1);
         let today: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM lane_events WHERE kind = 'action_loop' AND lead_session_key = ? AND created_at >= ? AND created_at < ?",
@@ -206,7 +200,7 @@ impl ActionLoop {
         if items.len() > MAX_LISTED_ITEMS {
             body.push_str(&format!("\n… {} more", items.len() - MAX_LISTED_ITEMS));
         }
-        let release_at = in_quiet_hours_kst(now).then(|| next_0800_kst(now).to_rfc3339());
+        let release_at = in_quiet_hours(now).then(|| next_0800(now).to_rfc3339());
         let event_id = insert_event(
             &self.pool,
             &self.lead_session_key,
@@ -439,31 +433,24 @@ fn may_execute(
     yolo_on && !tainted && effect.allows_class_precedent()
 }
 
-fn kst_day_start(now: DateTime<Utc>) -> DateTime<Utc> {
-    let local = now.with_timezone(&Seoul);
-    local
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .and_then(|midnight| midnight.and_local_timezone(Seoul).single())
-        .map(|at| at.with_timezone(&Utc))
-        .unwrap_or(now)
+/// Before 08:00 in the owner's time zone.
+fn in_quiet_hours(now: DateTime<Utc>) -> bool {
+    crate::locale::current().local_hour(now) < 8
 }
 
-fn in_quiet_hours_kst(now: DateTime<Utc>) -> bool {
-    now.with_timezone(&Seoul).hour() < 8
-}
-
-fn next_0800_kst(now: DateTime<Utc>) -> DateTime<Utc> {
-    let kst = now.with_timezone(&Seoul);
+/// The next 08:00 in the owner's time zone.
+fn next_0800(now: DateTime<Utc>) -> DateTime<Utc> {
+    let zone = crate::locale::current().timezone;
+    let local = now.with_timezone(&zone);
     let eight = chrono::NaiveTime::from_hms_opt(8, 0, 0).unwrap_or_default();
-    let date = if kst.hour() < 8 {
-        kst.date_naive()
+    let date = if local.hour() < 8 {
+        local.date_naive()
     } else {
-        kst.date_naive() + chrono::Duration::days(1)
+        local.date_naive() + chrono::Duration::days(1)
     };
     date.and_time(eight)
-        .and_local_timezone(Seoul)
-        .single()
+        .and_local_timezone(zone)
+        .earliest()
         .map(|at| at.with_timezone(&Utc))
         .unwrap_or(now)
 }
@@ -530,6 +517,11 @@ async fn unseen_inbox(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<LoopI
            AND i.received_at >= ?
            AND NOT EXISTS (SELECT 1 FROM action_loop_seen s WHERE s.item_key = 'inbox:' || d.item_id)
            AND NOT EXISTS (SELECT 1 FROM action_loop_outcomes o WHERE o.item_key = 'inbox:' || d.item_id)
+           AND NOT EXISTS (
+               SELECT 1 FROM action_proposals p
+               WHERE p.origin = 'inbox' AND json_extract(p.payload_json, '$.item_id') = d.item_id
+                 AND p.state <> 'auto_allowed'
+           )
            AND NOT EXISTS (SELECT 1 FROM action_loop_seen s WHERE s.item_key = 'github:' || d.item_id)
          ORDER BY d.decided_at ASC",
     )
@@ -542,7 +534,7 @@ async fn unseen_inbox(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<LoopI
             |(id, class, reason, source, author, title, snippet, link)| {
                 let text = item_text(&author, &title, &snippet);
                 let author = if author.trim().is_empty() {
-                    "보낸 사람 없음".to_owned()
+                    crate::locale::text("보낸 사람 없음", "no sender")
                 } else {
                     author.trim().to_owned()
                 };
@@ -920,8 +912,13 @@ mod tests {
         )
         .await;
         assert!(missing.is_err());
-        let script = std::env::temp_dir().join(format!("ferryx-cal-{}", std::process::id()));
-        std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' \"$3\"\n").unwrap();
+        let (suffix, body) = if cfg!(windows) {
+            (".cmd", "@echo off\r\necho %~3\r\n")
+        } else {
+            ("", "#!/bin/sh\nprintf '%s\\n' \"$3\"\n")
+        };
+        let script = std::env::temp_dir().join(format!("ferryx-cal-{}{suffix}", std::process::id()));
+        std::fs::write(&script, body).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -956,9 +953,9 @@ mod tests {
         let quiet = DateTime::parse_from_rfc3339("2026-10-21T22:30:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        assert!(in_quiet_hours_kst(quiet));
+        assert!(in_quiet_hours(quiet));
         assert_eq!(
-            next_0800_kst(quiet),
+            next_0800(quiet),
             DateTime::parse_from_rfc3339("2026-10-21T23:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc)
@@ -966,7 +963,26 @@ mod tests {
         let day = DateTime::parse_from_rfc3339("2026-10-22T03:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        assert!(!in_quiet_hours_kst(day));
+        assert!(!in_quiet_hours(day));
+        // An English/UTC owner's quiet hours and labels follow his locale.
+        crate::locale::with(crate::locale::OwnerLocale::english_utc(), || {
+            assert!(!in_quiet_hours(quiet), "22:30 UTC is not before 08:00 UTC");
+            assert_eq!(
+                next_0800(quiet),
+                DateTime::parse_from_rfc3339("2026-10-22T08:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc)
+            );
+            let item = LoopItem {
+                item_key: "inbox:k".into(),
+                kind: "inbox_owner".into(),
+                source: "kakao".into(),
+                line: "Ann: lunch?".into(),
+                link: None,
+                attempts: 1,
+            };
+            assert_eq!(item.format_entry(), "[KakaoTalk · Needs you] Ann: lunch?");
+        });
     }
 
     #[tokio::test]
@@ -1003,7 +1019,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(release, next_0800_kst(quiet).to_rfc3339());
+        assert_eq!(release, next_0800(quiet).to_rfc3339());
         sqlx::query("DELETE FROM action_loop_seen")
             .execute(&pool)
             .await
