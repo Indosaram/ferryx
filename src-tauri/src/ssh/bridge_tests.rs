@@ -1748,8 +1748,8 @@ fn spawn_pipe_guarded_sleeper() -> (
     let replies = unsafe { OwnedFd::from_raw_fd(read) };
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     assert_eq!(
-        read_probe_reply(replies.as_raw_fd(), deadline),
-        Some(b"ready\n".to_vec()),
+        read_probe_reply(replies.as_raw_fd(), deadline).as_deref(),
+        Some(&b"ready\n"[..]),
         "sleeper must announce its trap"
     );
     let stdout = child.stdout.as_ref().expect("child stdout");
@@ -1766,8 +1766,8 @@ fn spawn_pipe_guarded_sleeper() -> (
 #[cfg(unix)]
 fn cloexec_pipe() -> (std::os::unix::io::RawFd, std::os::unix::io::RawFd) {
     let mut fds = [0; 2];
-    // SAFETY: `pipe2` writes two new descriptors into `fds`.
     #[cfg(any(target_os = "linux", target_os = "android"))]
+    // SAFETY: `pipe2` writes two new descriptors into `fds`.
     let created = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
     // macOS has no `pipe2`; std itself sets close-on-exec right after `pipe` there.
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -1843,23 +1843,26 @@ impl LivenessProbe {
     ///
     /// The probe pipe must be quiet before signalling: a child that is already gone has closed
     /// it (EOF reads as readable), and its pid may belong to another process by now, so it is
-    /// never signalled; a leftover reply would be just as wrong. The blocking wait is bounded
-    /// and runs off the async worker.
+    /// never signalled; a leftover reply would be just as wrong. The blocking wait is bounded,
+    /// runs off the async worker, and reads its own duplicate of the pipe, so dropping this
+    /// future mid-wait never leaves a thread reading a descriptor number that was reused.
     async fn answers(&self) -> bool {
         use std::os::fd::AsRawFd;
         let fd = self.replies.as_raw_fd();
         if probe_readable(fd) {
             return false;
         }
+        let waiter = self.replies.try_clone().expect("duplicate probe pipe");
         // SAFETY: plain signal to the test's own child, whose probe pipe is still open.
         if unsafe { libc::kill(self.pid as i32, libc::SIGUSR1) } != 0 {
             return false;
         }
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        tokio::task::spawn_blocking(move || read_probe_reply(fd, deadline))
-            .await
-            .expect("probe wait")
-            == Some(b"alive\n".to_vec())
+        let reply =
+            tokio::task::spawn_blocking(move || read_probe_reply(waiter.as_raw_fd(), deadline))
+                .await
+                .expect("probe wait");
+        reply.as_deref() == Some(&b"alive\n"[..])
     }
 }
 
