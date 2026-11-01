@@ -227,6 +227,11 @@ function pickerFailureMessage(status: { errorCode?: string; error?: string }): s
   return userFacingError({ code: code ?? undefined }, { action: "load worktrees from your computer" });
 }
 
+/** The worktree name a typed label becomes: lowercase letters, numbers and single dashes. */
+function worktreeSlugFrom(entered: string): string {
+  return entered.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
 /** How long a connection may take before the screen says the computer may be asleep. */
 const SLOW_CONNECT_MS = 10000;
 
@@ -3136,6 +3141,7 @@ export const RemoteHostConnection: React.FC<{
   // show, so the screen returns to the home it came from.
   /** The worktree a phone tap is opening while its tunnel is acquired; shown at once on the Session screen. */
   const [phoneOpening, setPhoneOpening] = useState<string | null>(null);
+  const openPhoneSessionRef = useRef<(option: AccountWorktreeOption) => void>(() => {});
   /** Inbox rows a tap could not open, marked on the row itself as well as in the toast. */
   const [unopenableRowIds, setUnopenableRowIds] = useState<ReadonlySet<string>>(() => new Set());
   const phoneSessionLost = phoneHome && phoneNav.screen.kind === "session" && !token && !initialAccountTarget && phoneOpening === null;
@@ -4704,17 +4710,28 @@ export const RemoteHostConnection: React.FC<{
   const chatComposerPlaceholder =
     chatPrompt !== null ? referenceAnswerHint(chatPrompt) : undefined;
 
-  const createWorktree = useCallback(async () => {
+  const [newWorktreeOpen, setNewWorktreeOpen] = useState(false);
+  const [newWorktreeName, setNewWorktreeName] = useState("");
+  const [newWorktreeError, setNewWorktreeError] = useState<string | null>(null);
+  const [newWorktreeBusy, setNewWorktreeBusy] = useState(false);
+  const newWorktreeSlug = worktreeSlugFrom(newWorktreeName);
+  const createWorktree = useCallback(() => {
+    if (!model.context.workspaceId || !token) return;
+    setNewWorktreeName("");
+    setNewWorktreeError(null);
+    setNewWorktreeOpen(true);
+  }, [model.context.workspaceId, token]);
+  const submitNewWorktree = useCallback(async () => {
     const workspaceId = model.context.workspaceId;
-    if (!workspaceId || !token) return;
-    const entered = window.prompt("New worktree slug (letters, numbers and dashes)");
-    if (!entered) return;
-    const slug = entered.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+    if (!workspaceId || !token || newWorktreeBusy) return;
+    const slug = worktreeSlugFrom(newWorktreeName);
     if (!slug) {
-      setCreationError("Enter a slug using letters, numbers or dashes.");
+      setNewWorktreeError("Use letters, numbers or dashes.");
       return;
     }
+    setNewWorktreeError(null);
     setCreationError(null);
+    setNewWorktreeBusy(true);
     try {
       const response = await remoteFetch(transportBaseUrl, "/api/v1/workspace/worktrees", {
         method: "POST",
@@ -4726,15 +4743,23 @@ export const RemoteHostConnection: React.FC<{
         }),
       });
       if (!response.ok) {
-        const reason = (await response.text()).replace(/\/[^\s"]+/g, "<path>").slice(0, 140);
-        setCreationError(`Could not create worktree (HTTP ${response.status}). ${reason}`);
+        console.warn("Worktree creation refused", response.status);
+        setNewWorktreeError(
+          response.status === 409
+            ? "A worktree with that name already exists."
+            : userFacingError({ status: response.status }, { action: "create the worktree" }),
+        );
         return;
       }
+      setNewWorktreeOpen(false);
       await selectContext({ workspaceId, worktreeSlug: slug, worktreeLabel: null });
     } catch (error) {
-      setCreationError(error instanceof Error ? error.message : "Worktree creation request failed");
+      console.warn("Worktree creation failed", error);
+      setNewWorktreeError(userFacingError(error, { action: "create the worktree" }));
+    } finally {
+      setNewWorktreeBusy(false);
     }
-  }, [model.context.workspaceId, token, transportBaseUrl, selectContext]);
+  }, [model.context.workspaceId, newWorktreeBusy, newWorktreeName, token, transportBaseUrl, selectContext]);
 
   /* Phone alerts speak to the paired gateway with this device's bearer. */
   const phonePushRequest = useCallback<PushRequest>((path, init = {}) => {
@@ -4769,6 +4794,30 @@ export const RemoteHostConnection: React.FC<{
     worker.addEventListener("message", onMessage);
     return () => worker.removeEventListener("message", onMessage);
   }, []);
+  /* Account mode has no device token until a worktree opens: a tap there resolves through the
+     account inventory and opens the Session screen. A tap that matches nothing is reported once
+     its wait runs out instead of firing later on an unrelated refresh. */
+  const openPhoneScreen = phoneNav.openSession;
+  const alertTapSessionRef = useRef<string | null>(null);
+  alertTapSessionRef.current = alertSessionId;
+  useEffect(() => {
+    if (!alertSessionId) return;
+    const timer = setTimeout(() => {
+      if (alertTapSessionRef.current !== alertSessionId) return;
+      setAlertSessionId(null);
+      toast.error("That session isn't available anymore", {
+        description: "It may have ended, or its computer is offline.",
+      });
+    }, ALERT_TAP_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [alertSessionId]);
+  useEffect(() => {
+    if (!alertSessionId || token || !accountSessionToken) return;
+    const option = accountDiscovery.accountOptions.find((row) => row.sessionId === alertSessionId && !row.unavailable);
+    if (!option) return;
+    setAlertSessionId(null);
+    openPhoneSessionRef.current(option);
+  }, [alertSessionId, token, accountSessionToken, accountDiscovery.accountOptions]);
   useEffect(() => {
     if (!alertSessionId || !token || pending) return;
     const workspaceId = model.context.workspaceId;
@@ -4790,8 +4839,10 @@ export const RemoteHostConnection: React.FC<{
         : null);
     if (!target) return;
     setAlertSessionId(null);
-    void selectContext(target);
-  }, [alertSessionId, token, pending, model, selectContext]);
+    void selectContext(target).then((ok) => {
+      if (ok && phoneHome) openPhoneScreen();
+    });
+  }, [alertSessionId, token, pending, model, selectContext, phoneHome, openPhoneScreen]);
 
   if ((!token && !accountSessionToken) || magicLinkActive) {
     return (
@@ -4985,11 +5036,8 @@ export const RemoteHostConnection: React.FC<{
           aria-live="polite"
           className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-2 bg-background text-foreground"
         >
-          <div className="flex items-center space-x-2">
-            <span className="px-2 py-0.5 text-[11px] font-medium bg-muted text-muted-foreground rounded animate-pulse">
-              Loading workspace...
-            </span>
-          </div>
+          <LoaderCircle aria-hidden="true" className="size-5 animate-spin text-muted-foreground motion-reduce:animate-none" />
+          <span className="text-sm text-muted-foreground">Loading...</span>
         </div>
       }
     >
@@ -5040,11 +5088,7 @@ export const RemoteHostConnection: React.FC<{
             tabId: firstWaiting.tabId,
             sessionId: firstWaiting.sessionId,
           });
-          document
-            .querySelector<HTMLTextAreaElement>(
-              'textarea[data-testid="remote-terminal-input-sink"]',
-            )
-            ?.focus({ preventScroll: true });
+          focusSessionInput();
         },
       }
     : null;
@@ -5073,6 +5117,7 @@ export const RemoteHostConnection: React.FC<{
       }
     });
   };
+  openPhoneSessionRef.current = openPhoneSession;
   const cancelOpening = () => {
     accountSelectionGenerationRef.current += 1;
     setPhoneOpening(null);
@@ -5273,7 +5318,7 @@ export const RemoteHostConnection: React.FC<{
                   tabId: firstWaiting.tabId,
                   sessionId: firstWaiting.sessionId,
                 });
-                document.querySelector<HTMLTextAreaElement>('textarea[data-testid="remote-terminal-input-sink"]')?.focus({ preventScroll: true });
+                focusSessionInput();
               }}
               className="flex h-5 items-center gap-1 rounded bg-status-warning/15 px-1.5 text-[11px] font-medium text-status-warning transition-colors hover:bg-status-warning/25 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
             >
@@ -5472,10 +5517,19 @@ export const RemoteHostConnection: React.FC<{
             }}
           />
         ) : accountPreselection ? (
-          <div data-testid="remote-account-empty-body" className="flex-1 flex flex-col items-center justify-center gap-2 p-6 text-center">
-            <p className="text-xs text-muted-foreground">
-              Choose a worktree to open its terminal.
-            </p>
+          <div data-testid="remote-account-empty-body" className="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
+            {accountEmptyReason || accountInventoryLoading ? null : (
+              <>
+                <p className="text-sm text-muted-foreground">Pick a worktree to follow its agent.</p>
+                <button
+                  type="button"
+                  onClick={() => setSelectorOpen(true)}
+                  className="flex h-11 items-center rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  Choose a worktree
+                </button>
+              </>
+            )}
             {accountPickerStatus}
           </div>
         ) : initialAccountTarget || phoneOpening !== null ? (
@@ -5632,7 +5686,33 @@ export const RemoteHostConnection: React.FC<{
               onAgentStateFrame={handleMachineAgentStateFrame}
               createWebSocket={terminalCreateWebSocket}
             />
-          ) : null}
+          ) : (
+            <div data-testid="remote-terminal-empty" className="flex flex-1 flex-col items-center justify-center gap-4 bg-chat-screen p-6 text-center text-chat-foreground">
+              <p className="text-sm">
+                No terminal running in {model.context.worktreeLabel ?? model.context.workspaceId ?? "this worktree"}.
+              </p>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <button
+                  type="button"
+                  disabled={pending !== null || !model.context.workspaceId}
+                  onClick={() => {
+                    if (!model.context.workspaceId) return;
+                    void selectContext({ workspaceId: model.context.workspaceId, worktreeSlug: model.context.worktreeSlug, worktreeLabel: model.context.worktreeLabel }, true);
+                  }}
+                  className="flex h-11 items-center rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
+                >
+                  New terminal
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode("chat")}
+                  className="flex h-11 items-center rounded-lg border border-chat-border px-4 text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  Back to chat
+                </button>
+              </div>
+            </div>
+          )}
       </RemoteWorkspaceMirror>
       </>
       )}
@@ -5704,9 +5784,7 @@ export const RemoteHostConnection: React.FC<{
             true,
           );
         }}
-        onNewWorktree={() => {
-          void createWorktree();
-        }}
+        onNewWorktree={createWorktree}
         onOpenMachines={isAccountMode ? undefined : () => setHostDrawerOpen(true)}
         onOpenPhoneAlerts={token ? () => setPhoneAlertsOpen(true) : undefined}
         onSignOut={isAccountMode ? handleSignOut : undefined}
@@ -5734,6 +5812,52 @@ export const RemoteHostConnection: React.FC<{
           </div>
         </MobileSheet>
       ) : null}
+
+      <MobileSheet
+        open={newWorktreeOpen}
+        onOpenChange={setNewWorktreeOpen}
+        title="New worktree"
+        ariaLabel="New worktree"
+        testId="new-worktree-sheet"
+      >
+        <form
+          className="space-y-3 px-2 pb-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submitNewWorktree();
+          }}
+        >
+          <label htmlFor="new-worktree-name" className="block text-sm font-medium text-chat-foreground">
+            Worktree name
+          </label>
+          <input
+            id="new-worktree-name"
+            type="text"
+            value={newWorktreeName}
+            onChange={(event) => setNewWorktreeName(event.target.value)}
+            autoCapitalize="none"
+            autoComplete="off"
+            spellCheck={false}
+            aria-describedby="new-worktree-hint"
+            aria-invalid={newWorktreeError !== null}
+            disabled={newWorktreeBusy}
+            className="h-11 w-full rounded-lg border border-chat-border bg-chat-surface px-3.5 text-base text-chat-foreground focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+          />
+          <p id="new-worktree-hint" className="text-sm text-chat-foreground-secondary">
+            {newWorktreeSlug ? `Will be created as ${newWorktreeSlug}` : "Letters, numbers and dashes."}
+          </p>
+          {newWorktreeError ? (
+            <p role="alert" className="rounded-lg bg-destructive/10 p-3 text-sm text-chat-foreground">{newWorktreeError}</p>
+          ) : null}
+          <button
+            type="submit"
+            disabled={newWorktreeBusy || !newWorktreeSlug}
+            className="flex h-11 w-full items-center justify-center rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
+          >
+            {newWorktreeBusy ? "Creating..." : "Create worktree"}
+          </button>
+        </form>
+      </MobileSheet>
 
       {isAccountMode ? (
         <AccountSheet
