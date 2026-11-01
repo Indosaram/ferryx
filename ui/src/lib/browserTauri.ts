@@ -729,14 +729,78 @@ export function onInboundUrls(listener: () => void): Promise<UnlistenFn> {
   return listen(INBOUND_URL_EVENT, () => listener());
 }
 
-export type SignInBlock = { kind: "googleBlocked"; retryUrl: string } | { kind: "notBlocked" };
+export type SignInProvider = "google" | "apple" | "microsoft" | "okta";
 
-/** Classifies a page as Google's "this browser or app may not be secure" sign-in block. */
+export type SignInBlock =
+  | { kind: "blocked"; provider: SignInProvider; retryUrl: string }
+  | { kind: "notBlocked" };
+
+/** Classifies a page as an identity provider refusing sign-in in this browser engine. */
 export async function detectSignInBlock(url: string, title?: string | null): Promise<SignInBlock> {
   return invoke<SignInBlock>("cmd_browser_detect_sign_in_block", { url, title: title ?? null });
+}
+
+/** Callback the OS auth session waits for: a custom-scheme or an https redirect. */
+export type AuthCallback = { kind: "scheme"; scheme: string } | { kind: "https"; host: string; path: string };
+
+export type HandoffAction =
+  | { kind: "chromiumTab"; url: string }
+  | { kind: "installEngine"; url: string }
+  | { kind: "systemAuthSession"; authorizeUrl: string; callback: AuthCallback }
+  | { kind: "externalBrowser"; url: string };
+
+export type HandoffPlan = {
+  provider: SignInProvider;
+  engine: "ready" | "notInstalled" | "unusable" | "unsupported";
+  /** The offered action. */
+  primary: HandoffAction;
+  /** Other in-app actions, tried in order when the primary fails. */
+  alternatives: HandoffAction[];
+  /** Shown only after the user declines the in-app actions. */
+  onDecline: HandoffAction[];
+};
+
+/** The sign-in handoff plan for a tab's page, or null when the page is not a blocked sign-in. */
+export async function getSignInHandoffPlan(
+  browserId: string,
+  url: string,
+  title?: string | null,
+): Promise<HandoffPlan | null> {
+  return invoke<HandoffPlan | null>("cmd_browser_sign_in_handoff_plan", { browserId, url, title: title ?? null });
+}
+
+export type AuthSessionResult =
+  | { outcome: "completed"; callbackUrl: string }
+  | { outcome: "cancelled" }
+  | { outcome: "unavailable"; reason: string };
+
+/** Runs the OS web-authentication session; on completion the callback loads in the original tab. */
+export async function runSignInAuthSession(
+  browserId: string,
+  authorizeUrl: string,
+  callback: AuthCallback,
+): Promise<AuthSessionResult> {
+  return invoke<AuthSessionResult>("cmd_browser_sign_in_auth_session", { browserId, authorizeUrl, callback });
+}
+
+/**
+ * Watches a Chromium handoff tab; once it leaves the identity provider host, its cookies are
+ * copied into the profile's system-webview tabs.
+ */
+export async function trackSignInHandoff(
+  chromiumBrowserId: string,
+  profileId: string,
+  targetUrl: string,
+  idpHost: string,
+): Promise<void> {
+  return invoke<void>("cmd_browser_sign_in_track", { chromiumBrowserId, profileId, targetUrl, idpHost });
 }
 
 /** Window event asking the app to reopen a blocked sign-in in a Chromium tab of the same profile. */
 export const SIGN_IN_HANDOFF_EVENT = "ferryx:browser-sign-in-handoff";
 
-export type SignInHandoffDetail = { url: string; profileId?: string };
+/**
+ * `browserId` is the pre-generated id for the Chromium tab; `idpHost` is the identity provider
+ * host the sign-in started on.
+ */
+export type SignInHandoffDetail = { url: string; profileId?: string; browserId?: string; idpHost?: string };

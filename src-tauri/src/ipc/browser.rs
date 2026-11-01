@@ -1712,6 +1712,7 @@ fn cef_event_sink<R: tauri::Runtime>(
                 return;
             }
             Event::Address { tab, url } => {
+                crate::ipc::default_browser::on_cef_address(&app, &manager, &tab, &url);
                 let update = manager.update_navigation_state(&tab, Some(url), None, None, None, None, None);
                 (tab, update)
             }
@@ -3707,7 +3708,23 @@ pub async fn cmd_browser_engine_install<R: tauri::Runtime>(
         Ok(())
     })
     .await?;
-    let downloaded = engine_install::download(&client, &data_dir).await.map_err(engine_install_error)?;
+    let progress_app = app.clone();
+    let mut last_percent: Option<u64> = None;
+    // Emits when the download has moved by at least 1% since the last event, and when done.
+    let mut on_progress = move |received: u64, total: u64| {
+        let percent = received.saturating_mul(100).checked_div(total).unwrap_or(100);
+        if last_percent.is_some_and(|last| percent <= last) && received < total {
+            return;
+        }
+        last_percent = Some(percent);
+        let _ = progress_app.emit(
+            BROWSER_ENGINE_INSTALL_PROGRESS_EVENT,
+            EngineInstallProgress { received_bytes: received, total_bytes: Some(total) },
+        );
+    };
+    let downloaded = engine_install::download(&client, &data_dir, &mut on_progress)
+        .await
+        .map_err(engine_install_error)?;
     crate::ipc::run_blocking(move || {
         let _guard = guard;
         let installed = engine_install::install_archive(
@@ -3728,6 +3745,16 @@ pub async fn cmd_browser_engine_install<R: tauri::Runtime>(
         Ok(engine_install::mark_inactive(engine_install::status(&data_dir, ENGINE_EXECUTABLE), inactive))
     })
     .await
+}
+
+/// Emitted with an [`EngineInstallProgress`] while the engine archive downloads.
+pub const BROWSER_ENGINE_INSTALL_PROGRESS_EVENT: &str = "browser_engine_install_progress";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineInstallProgress {
+    pub received_bytes: u64,
+    pub total_bytes: Option<u64>,
 }
 
 /// Removes every installed engine; open Chromium tabs keep running until closed.

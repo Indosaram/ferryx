@@ -35,7 +35,7 @@ import { useApplyAppearanceSettings } from "./lib/appearanceSettings";
 import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots, isLocalDagProject, remoteProjectsWatchKey } from "./lib/dagWatchRoots";
 import { loadBrowserSettings, newBrowserTabUrl } from "./lib/browserSettings";
-import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, onInboundUrls, openExternalUrl, SIGN_IN_HANDOFF_EVENT, takeInboundUrls, type SignInHandoffDetail, popupOpenerLink, reportBrowserAdoption, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
+import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, onInboundUrls, openExternalUrl, SIGN_IN_HANDOFF_EVENT, takeInboundUrls, trackSignInHandoff, type SignInHandoffDetail, popupOpenerLink, reportBrowserAdoption, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
 import { printBrowser, stepBrowserZoom, useBrowserDownloadPreferencesSync } from "./lib/browserSystem";
 import { OPEN_BROWSER_URL_EVENT, OPEN_SETTINGS_EVENT, type OpenBrowserUrlDetail, type OpenSettingsDetail } from "./lib/browserExtensions";
 import { listen } from "@tauri-apps/api/event";
@@ -3817,13 +3817,20 @@ function WorkspaceApp({
     };
   }, [createBrowserTab, reportRuntimeError]);
 
-  // A system-webview tab Google refused to sign in hands the sign-in to a Chromium tab of the
-  // same profile (new tabs use the Chromium engine once it is installed).
+  // A system-webview tab an identity provider refused to sign in hands the sign-in to a Chromium
+  // tab of the same profile (new tabs use the Chromium engine once it is installed). The new tab
+  // is tracked so its cookies reach the profile's system-webview tabs once sign-in finishes.
   useEffect(() => {
     const onHandoff = (event: Event) => {
       const detail = (event as CustomEvent<SignInHandoffDetail>).detail;
       if (!detail?.url) return;
-      void createBrowserTab(detail.url, undefined, detail.profileId ? { profileId: detail.profileId } : undefined).catch(reportRuntimeError);
+      const { url, profileId, browserId, idpHost } = detail;
+      void createBrowserTab(url, undefined, { profileId, browserId })
+        .then(async (tabId) => {
+          if (!tabId || !browserId || !profileId || !idpHost) return;
+          await trackSignInHandoff(browserId, profileId, url, idpHost);
+        })
+        .catch(reportRuntimeError);
     };
     window.addEventListener(SIGN_IN_HANDOFF_EVENT, onHandoff);
     return () => window.removeEventListener(SIGN_IN_HANDOFF_EVENT, onHandoff);

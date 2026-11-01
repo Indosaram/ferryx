@@ -366,7 +366,13 @@ pub fn verify_file(path: &Path, artifact: &Artifact) -> Result<(), InstallError>
 
 /// Writes `chunks` to `writer` while checking them, flushing at the end. A chunk error is the
 /// download breaking off; a write error is the disk (full, or otherwise failing).
-pub async fn copy_checked<S, E, W>(chunks: S, writer: &mut W, artifact: &Artifact) -> Result<(), InstallError>
+/// `on_progress` gets (received, total) bytes after each chunk is written.
+pub async fn copy_checked<S, E, W>(
+    chunks: S,
+    writer: &mut W,
+    artifact: &Artifact,
+    on_progress: &mut (dyn FnMut(u64, u64) + Send),
+) -> Result<(), InstallError>
 where
     S: futures_util::Stream<Item = Result<bytes::Bytes, E>>,
     E: std::fmt::Display,
@@ -386,6 +392,7 @@ where
         })?;
         check.update(&chunk)?;
         writer.write_all(&chunk).await?;
+        on_progress(check.received, check.expected_size);
     }
     writer.flush().await?;
     check.finish()
@@ -608,7 +615,12 @@ pub struct Downloaded {
 
 /// Downloads and verifies the signed manifest, then streams this platform's archive into a part
 /// file under the engine root, verifying it on the way. A failed download leaves no part file.
-pub async fn download(client: &reqwest::Client, data_dir: &Path) -> Result<Downloaded, InstallError> {
+/// `on_progress` gets (received, total) archive bytes as they are written.
+pub async fn download(
+    client: &reqwest::Client,
+    data_dir: &Path,
+    on_progress: &mut (dyn FnMut(u64, u64) + Send),
+) -> Result<Downloaded, InstallError> {
     let platform = platform_key().ok_or_else(|| InstallError::Unsupported {
         platform: std::env::consts::OS.to_string(),
     })?;
@@ -640,7 +652,7 @@ pub async fn download(client: &reqwest::Client, data_dir: &Path) -> Result<Downl
     let path = part_path(data_dir);
     let result = async {
         let mut file = tokio::fs::File::create(&path).await?;
-        copy_checked(response.bytes_stream(), &mut file, &artifact).await
+        copy_checked(response.bytes_stream(), &mut file, &artifact, on_progress).await
     }
     .await;
     if let Err(error) = result {
@@ -852,10 +864,38 @@ mod tests {
     async fn a_complete_download_is_written_and_verified() {
         let artifact = artifact_for(b"hello world");
         let mut out = Vec::new();
-        copy_checked(chunks(vec![Ok("hello "), Ok("world")]), &mut out, &artifact)
+        copy_checked(chunks(vec![Ok("hello "), Ok("world")]), &mut out, &artifact, &mut |_, _| {})
             .await
             .expect("copied");
         assert_eq!(out, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn a_download_reports_its_progress_after_each_chunk() {
+        let artifact = artifact_for(b"hello world");
+        let mut out = Vec::new();
+        let mut seen = Vec::new();
+        copy_checked(
+            chunks(vec![Ok("hel"), Ok("lo "), Ok("world")]),
+            &mut out,
+            &artifact,
+            &mut |received, total| seen.push((received, total)),
+        )
+        .await
+        .expect("copied");
+        assert_eq!(seen, vec![(3, 11), (6, 11), (11, 11)]);
+
+        let mut seen = Vec::new();
+        let mut out = Vec::new();
+        let broken = copy_checked(
+            chunks(vec![Ok("hello "), Err("connection reset")]),
+            &mut out,
+            &artifact,
+            &mut |received, total| seen.push((received, total)),
+        )
+        .await;
+        assert!(matches!(broken, Err(InstallError::Partial { .. })));
+        assert_eq!(seen, vec![(6, 11)]);
     }
 
     #[tokio::test]
@@ -863,12 +903,13 @@ mod tests {
         let artifact = artifact_for(b"hello world");
         let mut out = Vec::new();
         assert_eq!(
-            copy_checked(chunks(vec![Ok("hello "), Err("connection reset")]), &mut out, &artifact).await,
+            copy_checked(chunks(vec![Ok("hello "), Err("connection reset")]), &mut out, &artifact, &mut |_, _| {})
+                .await,
             Err(InstallError::Partial { expected: 11, received: 6 })
         );
         let mut out = Vec::new();
         assert_eq!(
-            copy_checked(chunks(vec![Ok("hello")]), &mut out, &artifact).await,
+            copy_checked(chunks(vec![Ok("hello")]), &mut out, &artifact, &mut |_, _| {}).await,
             Err(InstallError::Partial { expected: 11, received: 5 })
         );
     }
@@ -878,12 +919,12 @@ mod tests {
         let artifact = artifact_for(b"hello world");
         let mut out = Vec::new();
         assert_eq!(
-            copy_checked(chunks(vec![Ok("hello World")]), &mut out, &artifact).await,
+            copy_checked(chunks(vec![Ok("hello World")]), &mut out, &artifact, &mut |_, _| {}).await,
             Err(InstallError::ChecksumMismatch)
         );
         let mut out = Vec::new();
         assert_eq!(
-            copy_checked(chunks(vec![Ok("hello world"), Ok("!")]), &mut out, &artifact).await,
+            copy_checked(chunks(vec![Ok("hello world"), Ok("!")]), &mut out, &artifact, &mut |_, _| {}).await,
             Err(InstallError::Oversized { expected: 11 })
         );
     }
@@ -911,7 +952,7 @@ mod tests {
     async fn a_full_disk_is_reported_as_disk_full() {
         let artifact = artifact_for(b"hello world");
         assert!(matches!(
-            copy_checked(chunks(vec![Ok("hello world")]), &mut FullDisk, &artifact).await,
+            copy_checked(chunks(vec![Ok("hello world")]), &mut FullDisk, &artifact, &mut |_, _| {}).await,
             Err(InstallError::DiskFull { .. })
         ));
         #[cfg(unix)]
