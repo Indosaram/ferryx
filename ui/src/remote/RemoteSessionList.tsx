@@ -445,6 +445,8 @@ type RemoteWorkspaceMirrorProps = {
   onSelect: (option: RemoteContextOption) => void;
   onCreateTerminal?: () => void;
   onCreateWorktree?: () => void;
+  /** Phone: the no-terminal state offers a way back to the chat view. */
+  onBackToChat?: () => void;
   creationError?: string | null;
   /** Machine that owns model.context; account options from other machines are never current. */
   activeMachineId?: string | null;
@@ -584,6 +586,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   onSelect,
   onCreateTerminal,
   onCreateWorktree,
+  onBackToChat,
   creationError,
   activeMachineId = null,
   sidebarSections = [],
@@ -840,7 +843,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                   </p>
                 </div>
               ) : (
-                <div className="flex max-w-sm flex-col items-center gap-3 text-center">
+                <div data-testid="remote-terminal-empty" className="flex max-w-sm flex-col items-center gap-3 text-center">
                   <h2 className="text-base font-semibold text-chat-foreground">No focused terminal</h2>
                   <p className="text-sm leading-relaxed text-chat-foreground-secondary">
                     {paneTabs.length > 0 ? "Pick a terminal from the tabs above." : "There's no terminal open in this worktree yet."}
@@ -854,6 +857,11 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                       <button type="button" disabled={createDisabled} onClick={onCreateTerminal} className={PHONE_ACTION}>
                         <Plus className="size-4" aria-hidden="true" />
                         New terminal
+                      </button>
+                    ) : null}
+                    {onBackToChat ? (
+                      <button type="button" onClick={onBackToChat} className={PHONE_ACTION}>
+                        Back to chat
                       </button>
                     ) : null}
                   </div>

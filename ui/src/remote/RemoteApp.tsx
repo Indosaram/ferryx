@@ -4438,7 +4438,7 @@ export const RemoteHostConnection: React.FC<{
       }
       if (!outcome.ok) {
         console.warn("Prompt answer refused", outcome.code);
-        setChatPromptError(userFacingError({ code: outcome.code }, { action: "send that answer" }));
+        setChatPromptError(userFacingError({ code: outcome.code }, { action: "send your answer" }));
         throw new ReferencePromptRefused(outcome.code, outcome.message);
       }
       setChatTypedAnswer(null);
@@ -5290,8 +5290,10 @@ export const RemoteHostConnection: React.FC<{
       || (entry.machineId ? optionForSession(accountDiscovery.accountOptions, entry.machineId, entry.sessionId) !== null : false);
     if (openable && !unopenableRowIds.has(row.id)) return row;
     if (!entry.machineId && !unopenableRowIds.has(row.id)) return row;
+    // The reason rides on `unavailable`, not on `text`: the Inbox re-reads a row's prompt when its
+    // text changes, so marking a row must not send a request.
     const note = entry.machineId ? "Computer offline. Can't open it from here right now." : "Answer it here, or pick its worktree to open it.";
-    return { ...row, text: row.text ? `${note} ${row.text}` : note };
+    return { ...row, unavailable: note };
   });
   const activeSupervisorSnapshot = phoneHome && activeMachineId
     ? phoneSupervisor.machines.find((machine) => machine.machineId === activeMachineId)?.snapshot ?? null
@@ -5653,6 +5655,8 @@ export const RemoteHostConnection: React.FC<{
           void selectContext({ workspaceId: model.context.workspaceId, worktreeSlug: model.context.worktreeSlug, worktreeLabel: model.context.worktreeLabel }, true);
         }}
         onCreateWorktree={createWorktree}
+        // No terminal to mirror: the mirror draws its own empty state with these actions.
+        onBackToChat={() => setViewMode("chat")}
         creationError={initialAccountTarget || accountPreselection ? null : creationError}
       >
         {planLimitNotice ? (
@@ -5831,33 +5835,7 @@ export const RemoteHostConnection: React.FC<{
               onAgentStateFrame={handleMachineAgentStateFrame}
               createWebSocket={terminalCreateWebSocket}
             />
-          ) : (
-            <div data-testid="remote-terminal-empty" className="flex flex-1 flex-col items-center justify-center gap-4 bg-chat-screen p-6 text-center text-chat-foreground">
-              <p className="text-sm">
-                No terminal running in {model.context.worktreeLabel ?? model.context.workspaceId ?? "this worktree"}.
-              </p>
-              <div className="flex flex-wrap items-center justify-center gap-2">
-                <button
-                  type="button"
-                  disabled={pending !== null || !model.context.workspaceId}
-                  onClick={() => {
-                    if (!model.context.workspaceId) return;
-                    void selectContext({ workspaceId: model.context.workspaceId, worktreeSlug: model.context.worktreeSlug, worktreeLabel: model.context.worktreeLabel }, true);
-                  }}
-                  className="flex h-11 items-center rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
-                >
-                  New terminal
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setViewMode("chat")}
-                  className="flex h-11 items-center rounded-lg border border-chat-border px-4 text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                >
-                  Back to chat
-                </button>
-              </div>
-            </div>
-          )}
+          ) : null}
       </RemoteWorkspaceMirror>
       </>
       )}
