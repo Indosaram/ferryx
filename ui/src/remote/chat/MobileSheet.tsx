@@ -268,7 +268,7 @@ export function MobileSheet({
         onKeyDown={handlePanelKeyDown}
         onAnimationEnd={handleAnimationEnd}
         className={cn(
-          "relative z-10 flex max-h-[80dvh] min-w-0 flex-col overflow-hidden rounded-t-[1.25rem] border-t border-chat-border bg-chat-surface focus:outline-none",
+          "relative z-10 flex max-h-[80dvh] min-w-0 flex-col overflow-hidden rounded-t-2xl border-t border-chat-border bg-chat-surface focus:outline-none",
           isClosing ? "animate-sheet-out" : "animate-sheet-in",
         )}
       >

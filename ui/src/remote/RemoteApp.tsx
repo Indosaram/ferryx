@@ -167,6 +167,7 @@ import { remoteSupervisorTyping } from "./remoteSidebarLive";
 import { directSidebarInventory } from "./directSidebarInventory";
 import { useRemoteSidebarModel } from "./useRemoteSidebarModel";
 import { SupervisorHome } from "./home/SupervisorHome";
+import { AccountButton } from "./home/AccountButton";
 import { buildInboxRows, optionForSession, type InboxRow } from "./home/phoneHomeModel";
 import { PhoneHomeView } from "./home/PhoneHomeView";
 import { SupervisorSessionStrip } from "./home/SupervisorSessionStrip";
@@ -1684,7 +1685,9 @@ export const RemoteHostConnection: React.FC<{
     disconnect();
   }, [disconnect, relayUrl]);
 
+  const phoneNavResetRef = useRef<() => void>(() => {});
   const handleSignOut = useCallback(() => {
+    phoneNavResetRef.current();
     if (accountSessionToken) {
       const issuer = getStoredAccountTokenOrigin() || relayUrl;
       void logoutAccountSession(issuer, accountSessionToken);
@@ -3064,6 +3067,7 @@ export const RemoteHostConnection: React.FC<{
   // The supervisor-first phone home exists only for a signed-in account on a narrow layout.
   const phoneHome = !desktopSidebar && isAccountMode && planLimitNotice === null;
   const phoneNav = usePhoneNavigation(phoneHome);
+  phoneNavResetRef.current = phoneNav.reset;
   const supervisorFeedEnabled = phoneHome || (desktopSidebar && isAccountMode && planLimitNotice === null);
   const phoneSupervisor = usePhoneSupervisor({
     // The phone home and the wide sidebar's Supervisor tab both read it.
@@ -3179,8 +3183,10 @@ export const RemoteHostConnection: React.FC<{
   /* Platform back closes the topmost shell overlay before it walks the phone screens: an open
      sheet, drawer or picker owns one history entry, and a popstate while it is open closes it.
      Closing it any other way pops that entry so back never revisits a closed overlay. */
+  /* The worktree drawer, host drawer and Account sheet own their entries through useOverlayHistory;
+     counting them here too would push twice and pop twice on a button close. */
   const overlayOpen = !desktopSidebar
-    && (selectorOpen || switcherOpen || menuOpen || phoneAlertsOpen || hostDrawerOpen || inboxOpen || accountSheetOpen);
+    && (switcherOpen || menuOpen || phoneAlertsOpen || inboxOpen);
   const overlayEntryRef = useRef(false);
   useEffect(() => {
     if (!overlayOpen) {
@@ -3198,13 +3204,10 @@ export const RemoteHostConnection: React.FC<{
     const onPop = (event: PopStateEvent) => {
       if ((event.state as Record<string, unknown> | null)?.[OVERLAY_HISTORY_KEY]) return;
       overlayEntryRef.current = false;
-      setSelectorOpen(false);
       setSwitcherOpen(false);
       setMenuOpen(false);
       setPhoneAlertsOpen(false);
-      setHostDrawerOpen(false);
       setInboxOpen(false);
-      setAccountSheetOpen(false);
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -3278,6 +3281,8 @@ export const RemoteHostConnection: React.FC<{
               onSetPaused={phoneSupervisor.setPaused}
               onStartHub={phoneSupervisor.startHub}
               unified={phoneSupervisor.unified}
+              discovering={accountDiscovery.loading}
+              onRetry={phoneSupervisor.resync}
               onOpenLane={(machineId, sessionId) => {
                 const option = optionForSession(accountDiscovery.accountOptions, machineId, sessionId);
                 if (option) void selectAccountOption(option);
@@ -5311,7 +5316,6 @@ export const RemoteHostConnection: React.FC<{
         pending={pending}
         selectorOpen
         onSelectorOpenChange={() => {}}
-        onSignOut={handleSignOut}
         activeMachineId={activeMachineId}
         sidebarSections={sidebarSections}
         pickerStatus={accountPickerStatus}
@@ -5353,6 +5357,8 @@ export const RemoteHostConnection: React.FC<{
             onSetPaused: phoneSupervisor.setPaused,
             onStartHub: phoneSupervisor.startHub,
             unified: phoneSupervisor.unified,
+            discovering: accountDiscovery.loading,
+            onRetry: phoneSupervisor.resync,
             onOpenLane: (machineId, sessionId) => {
               const option = optionForSession(accountDiscovery.accountOptions, machineId, sessionId);
               if (!option) {
@@ -5373,6 +5379,7 @@ export const RemoteHostConnection: React.FC<{
             },
           }}
           worktrees={phoneWorktrees}
+          accountAction={<AccountButton onOpen={() => setAccountSheetOpen(true)} />}
           resume={
             token && model.context.workspaceId
               ? { title: mobileTitle, subtitle: contextName(model.context), onOpen: phoneNav.openSession }
