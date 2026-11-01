@@ -1,3 +1,4 @@
+import { useId } from "react";
 import { ChevronLeft, Ellipsis, Inbox, MessageSquare, Server, SquareTerminal } from "lucide-react";
 import { isMonochromeAgentLogo, resolveAgentLogo } from "../../lib/agentIcon";
 import { cn } from "../../lib/cn";
@@ -9,16 +10,12 @@ import { cn } from "../../lib/cn";
  * both view-mode buttons mounted in either mode so the compact layout contract holds.
  */
 
-// 32px controls extend to a 44px vertical hit area (paseo tab-switcher.tsx:25, hitSlop {top:8,bottom:8}).
-const HIT_SLOP = "before:absolute before:inset-x-0 before:-inset-y-1.5 before:content-['']";
-
-const ICON_BUTTON_32 =
-  "relative flex size-8 shrink-0 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring " +
-  HIT_SLOP;
+// Every control is a 44x44 target; the visible chip inside it stays 32px.
+const ICON_BUTTON =
+  "group/icon relative flex size-11 shrink-0 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
 const ATTENTION_BUTTON =
-  "relative flex h-8 min-w-0 items-center gap-1 rounded-full bg-status-warning/15 px-2 text-status-warning text-[12px] font-medium disabled:opacity-60 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring " +
-  HIT_SLOP;
+  "relative flex h-11 min-w-0 items-center gap-1.5 rounded-full px-2.5 text-status-warning text-xs font-medium disabled:opacity-60 transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
 export type MobileTopBarActivityState = "working" | "waiting" | "done" | null;
 
@@ -85,17 +82,17 @@ export function MobileTopBar({
   hideControls = false,
   onBack,
 }: MobileTopBarProps) {
+  const contextLabelId = useId();
   const logo = resolveAgentLogo(agentType);
   const monochrome = isMonochromeAgentLogo(agentType);
 
   return (
     <header
       data-testid="mobile-top-bar"
-      className="shrink-0 bg-chat-header border-b border-chat-header-border pt-safe-header px-3 max-[374px]:px-2"
+      className="shrink-0 bg-chat-header border-b border-chat-header-border pt-safe-header px-1"
     >
-      <div className="h-14 flex items-center gap-2 max-[374px]:gap-0">
-        {/* Left island: the workspace-context switcher (paseo compact-header.tsx island chrome). */}
-        <div className="flex gap-0.5 rounded-full p-[7px] max-[374px]:p-1 bg-chat-surface-raised shadow-sm">
+      <div className="h-14 flex items-center gap-1">
+        <div className="flex shrink-0">
           {onBack ? (
             <button
               type="button"
@@ -103,7 +100,7 @@ export function MobileTopBar({
               aria-label="Back to home"
               title="Back to home"
               onClick={onBack}
-              className={cn(ICON_BUTTON_32, "text-chat-foreground-secondary hover:text-chat-foreground")}
+              className={cn(ICON_BUTTON, "text-chat-foreground-secondary hover:text-chat-foreground")}
             >
               <ChevronLeft aria-hidden="true" className="size-4" />
             </button>
@@ -114,13 +111,13 @@ export function MobileTopBar({
             title="Change workspace context"
             aria-expanded={pickerOpen}
             onClick={onTogglePicker}
-            className={cn(ICON_BUTTON_32, "text-chat-foreground-secondary hover:text-chat-foreground")}
+            className={cn(ICON_BUTTON, "text-chat-foreground-secondary hover:text-chat-foreground")}
           >
             {/* Three bars: 16px, 16px, 8px at 1.5px thick, 4px apart (paseo sidebar-menu-toggle.tsx:30-45). */}
             <span aria-hidden="true" className="flex flex-col items-start gap-1">
-              <span className="h-[1.5px] w-4 rounded-full bg-current" />
-              <span className="h-[1.5px] w-4 rounded-full bg-current" />
-              <span className="h-[1.5px] w-2 rounded-full bg-current" />
+              <span className="h-0.5 w-4 rounded-full bg-current" />
+              <span className="h-0.5 w-4 rounded-full bg-current" />
+              <span className="h-0.5 w-2 rounded-full bg-current" />
             </span>
           </button>
         </div>
@@ -151,11 +148,10 @@ export function MobileTopBar({
               </>
             ) : null}
           </div>
-          <div className="flex min-w-0 items-center gap-1.5 text-[13px] text-chat-foreground-secondary">
-            {/* role=group makes the aria-label valid (a generic span cannot be named). */}
+          <div className="flex min-w-0 items-center gap-1.5 text-[0.8125rem] text-chat-foreground-secondary">
+            <span id={contextLabelId} className="sr-only">Current desktop context</span>
             <span
-              role="group"
-              aria-label="Current desktop context"
+              aria-labelledby={contextLabelId}
               data-testid="remote-context-label"
               className="min-w-8 shrink truncate"
             >
@@ -182,7 +178,7 @@ export function MobileTopBar({
         </div>
 
         {hideControls ? null : (
-          <div className="flex min-w-0 rounded-full p-[7px] max-[374px]:p-1 bg-chat-surface-raised shadow-sm gap-0.5">
+          <div className="flex min-w-0 shrink-0">
             {attention ? (
               <button
                 type="button"
@@ -207,10 +203,10 @@ export function MobileTopBar({
                 aria-haspopup="dialog"
                 aria-expanded={switcherOpen}
                 onClick={onOpenSwitcher}
-                className={cn(ICON_BUTTON_32, "text-chat-foreground-secondary hover:text-chat-foreground")}
+                className={cn(ICON_BUTTON, "text-chat-foreground-secondary hover:text-chat-foreground")}
               >
                 {/* Count badge sized like paseo tab-switcher.tsx:472-480 (16px, hairline border, tabular digits). */}
-                <span className="flex h-4 min-w-4 items-center justify-center rounded-[4px] border border-chat-foreground-secondary px-0.5 text-[10px] font-medium tabular-nums">
+                <span className="flex h-5 min-w-5 items-center justify-center rounded border border-chat-foreground-secondary px-1 text-xs font-medium tabular-nums">
                   {sessionCount}
                 </span>
               </button>
@@ -225,13 +221,13 @@ export function MobileTopBar({
                 aria-haspopup="dialog"
                 aria-expanded={inbox.open}
                 onClick={inbox.onOpen}
-                className={cn(ICON_BUTTON_32, "text-chat-foreground-secondary hover:text-chat-foreground")}
+                className={cn(ICON_BUTTON, "text-chat-foreground-secondary hover:text-chat-foreground")}
               >
                 <Inbox aria-hidden="true" className="size-4" />
                 {inbox.count > 0 ? (
                   <span
                     data-testid="mobile-inbox-badge"
-                    className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-status-warning px-1 text-[10px] font-semibold tabular-nums text-black"
+                    className="absolute right-0.5 top-0.5 flex h-5 min-w-5 items-center justify-center rounded-full bg-status-warning px-1 text-xs font-semibold tabular-nums text-chat-screen"
                   >
                     {inbox.count}
                   </span>
@@ -239,7 +235,7 @@ export function MobileTopBar({
               </button>
             ) : null}
 
-            <div role="group" aria-label="View" className="flex gap-0.5">
+            <div role="group" aria-label="View" className="flex">
               <button
                 type="button"
                 data-testid="remote-view-mode-chat"
@@ -247,7 +243,7 @@ export function MobileTopBar({
                 aria-pressed={viewMode === "chat"}
                 onClick={() => onViewModeChange("chat")}
                 className={cn(
-                  ICON_BUTTON_32,
+                  ICON_BUTTON,
                   viewMode === "chat"
                     ? "bg-chat-surface-hover text-chat-foreground"
                     : "text-chat-foreground-secondary"
@@ -263,7 +259,7 @@ export function MobileTopBar({
                 aria-pressed={viewMode === "terminal"}
                 onClick={() => onViewModeChange("terminal")}
                 className={cn(
-                  ICON_BUTTON_32,
+                  ICON_BUTTON,
                   viewMode === "terminal"
                     ? "bg-chat-surface-hover text-chat-foreground"
                     : "text-chat-foreground-secondary"
@@ -281,7 +277,7 @@ export function MobileTopBar({
               aria-haspopup="dialog"
               aria-expanded={menuOpen}
               onClick={onOpenMenu}
-              className={cn(ICON_BUTTON_32, "text-chat-foreground-secondary hover:text-chat-foreground")}
+              className={cn(ICON_BUTTON, "text-chat-foreground-secondary hover:text-chat-foreground")}
             >
               <Ellipsis aria-hidden="true" className="size-4" />
             </button>

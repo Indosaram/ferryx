@@ -35,11 +35,10 @@ describe("MobileTopBar", () => {
       "bg-chat-header",
       "border-b",
       "border-chat-header-border",
-      "pt-safe-header",
-      "px-3"
+      "pt-safe-header"
     );
     const row = header.firstElementChild as HTMLElement;
-    expect(row).toHaveClass("h-14", "flex", "items-center", "gap-2");
+    expect(row).toHaveClass("h-14", "flex", "items-center");
   });
 
   it("toggles the workspace context from the left island", () => {
@@ -62,9 +61,9 @@ describe("MobileTopBar", () => {
     expect(glyph).toHaveClass("gap-1");
     const bars = toggle.querySelectorAll("span > span");
     expect(bars).toHaveLength(3);
-    expect(bars[0]).toHaveClass("w-4", "h-[1.5px]");
-    expect(bars[1]).toHaveClass("w-4", "h-[1.5px]");
-    expect(bars[2]).toHaveClass("w-2", "h-[1.5px]");
+    expect(bars[0]).toHaveClass("w-4", "h-0.5");
+    expect(bars[1]).toHaveClass("w-4", "h-0.5");
+    expect(bars[2]).toHaveClass("w-2", "h-0.5");
   });
 
   it("renders the agent logo, monochrome only for the adaptive brands", () => {
@@ -123,7 +122,8 @@ describe("MobileTopBar", () => {
     expect(context.textContent).toBe("ferryx-ui / feat-x");
     expect(context).toHaveClass("min-w-8", "shrink", "truncate");
     expect(context).not.toHaveClass("min-w-0");
-    expect(context.parentElement).toHaveClass("text-[13px]", "text-chat-foreground-secondary");
+    expect(context.parentElement).toHaveClass("text-[0.8125rem]", "text-chat-foreground-secondary");
+    expect(context).not.toHaveAttribute("role");
   });
 
   it("names the context and connection through sr-only text, not aria-label on generic spans", () => {
@@ -136,9 +136,10 @@ describe("MobileTopBar", () => {
     expect(badge).toHaveTextContent("Connection: Relay");
     expect(screen.getByText("Connection: Relay")).toHaveClass("sr-only");
 
-    expect(screen.getByRole("group", { name: "Current desktop context" })).toBe(
+    expect(screen.getByLabelText("Current desktop context")).toBe(
       screen.getByTestId("remote-context-label"),
     );
+    expect(screen.queryByRole("group", { name: "Current desktop context" })).toBeNull();
     expect(screen.getByTestId("mobile-top-bar").querySelector("span[aria-label]:not([role])")).toBeNull();
   });
 
@@ -188,7 +189,7 @@ describe("MobileTopBar", () => {
     expect(badge).toBeDisabled();
     expect(badge).toHaveTextContent("Fix tests");
     expect(badge).toHaveTextContent("3");
-    expect(badge).toHaveClass("bg-status-warning/15", "text-status-warning", "text-[12px]", "min-w-0");
+    expect(badge).toHaveClass("h-11", "text-status-warning", "text-xs", "min-w-0");
     expect(badge).not.toHaveClass("shrink-0");
     expect(badge.parentElement).toHaveClass("min-w-0");
     expect(badge.lastElementChild).toHaveClass("shrink-0");
@@ -255,11 +256,11 @@ describe("MobileTopBar", () => {
     const badge = button.querySelector("span") as HTMLElement;
     expect(badge).toHaveTextContent("2");
     expect(badge).toHaveClass(
-      "min-w-4",
-      "h-4",
-      "rounded-[4px]",
+      "min-w-5",
+      "h-5",
+      "rounded",
       "border",
-      "text-[10px]",
+      "text-xs",
       "font-medium",
       "tabular-nums"
     );
@@ -305,7 +306,7 @@ describe("MobileTopBar", () => {
     ).toBeInTheDocument();
   });
 
-  it("extends every 32px control to a 44px vertical hit area", () => {
+  it("gives every control a 44x44 hit area in both axes", () => {
     renderTopBar({ sessionCount: 3 });
     const buttons = [
       screen.getByRole("button", { name: "Change workspace context" }),
@@ -315,7 +316,7 @@ describe("MobileTopBar", () => {
       screen.getByRole("button", { name: "More actions" }),
     ];
     for (const button of buttons) {
-      expect(button).toHaveClass("before:absolute", "before:inset-x-0", "before:-inset-y-1.5");
+      expect(button).toHaveClass("size-11");
     }
   });
 
