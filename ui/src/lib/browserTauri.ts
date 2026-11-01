@@ -674,6 +674,7 @@ export type BrowserStateChangedPayload = {
   browserId: string;
   url: string;
   title?: string | null;
+  loading?: boolean;
   engine?: import("./types").BrowserEngine;
 };
 

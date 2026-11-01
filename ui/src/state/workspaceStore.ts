@@ -13,6 +13,7 @@ import { resolveAgentLogo } from "../lib/agentIcon";
 import { agentDisplayNameForType, classifyTerminalTitleActivity, formatTabLabelFromTitle, isBareAgentTitle, normalizeTerminalTitle, parseAgentTitle } from "../lib/agentTitle";
 import { workspaceName } from "../lib/branchFilter";
 import { browserTabIdForBrowserId, closeBrowser, createBrowser, createPopupBrowser, navigateBrowser, onBrowserStateChanged, reloadBrowser, type BrowserReloadOptions, type BrowserSessionCreatedPayload } from "../lib/browserTauri";
+import { browserTabNavigation } from "../lib/browserTabNavigation";
 import { closeTerminal, describeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalFocus, onNativeTerminalTitle, spawnTerminal, toIpcError, waitForTerminalExit, type SpawnTerminalRequest } from "../lib/tauri";
 import * as tauriIpc from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
@@ -2046,6 +2047,7 @@ export function useWorkspaceStore({
         // references its id any more.
         dispatch({ type: "CLOSE_TAB", tabId });
         if (!isBrowserIdReferenced(stateRef.current, closingTab.browserId)) {
+          browserTabNavigation.forget(closingTab.browserId);
           await closeBrowser(closingTab.browserId).catch((error: unknown) => {
             console.warn("Failed to close browser webview:", closingTab.browserId, error);
           });
@@ -2108,7 +2110,10 @@ export function useWorkspaceStore({
       await Promise.allSettled(
         [...closingBrowserIds]
           .filter((browserId) => !isBrowserIdReferenced(stateRef.current, browserId))
-          .map((browserId) => closeBrowser(browserId)),
+          .map((browserId) => {
+            browserTabNavigation.forget(browserId);
+            return closeBrowser(browserId);
+          }),
       );
       releaseOrphanPreviews(stateRef.current);
     },
@@ -2139,6 +2144,7 @@ export function useWorkspaceStore({
       // Browser pane leaves carry no session; their native child webview must be torn
       // down here once the last layout reference to the browser id is gone.
       if (closingBrowserId && !isBrowserIdReferenced(stateRef.current, closingBrowserId)) {
+        browserTabNavigation.forget(closingBrowserId);
         await closeBrowser(closingBrowserId);
       }
     },
@@ -2574,6 +2580,12 @@ export function useWorkspaceStore({
     let unlisten: (() => void) | undefined;
     void onBrowserStateChanged((payload) => {
       const current = stateRef.current;
+      // Every committed page (top-level tab or split pane) extends the tab's saved back/forward
+      // stack. A browser no layout knows yet has no known profile, so it is not recorded.
+      const profile = browserProfileForBrowserId(current, payload.browserId);
+      if (profile && payload.loading === false) {
+        browserTabNavigation.record(payload.browserId, payload.url, payload.title, profile.profileId);
+      }
       const tabs = [
         ...current.layout.tabs,
         ...Object.values(current.worktreeLayouts ?? {}).flatMap((layout) => layout.tabs),
@@ -4803,6 +4815,24 @@ function isBrowserIdReferenced(state: WorkspaceState, browserId: string): boolea
       ),
     );
   });
+}
+
+/** The profile of the layout entry showing `browserId`, or null when no layout shows it. */
+function browserProfileForBrowserId(state: WorkspaceState, browserId: string): { profileId: string | undefined } | null {
+  if (!browserId) return null;
+  for (const layout of [state.layout, ...Object.values(state.worktreeLayouts ?? {})]) {
+    for (const tab of layout.tabs) {
+      if (tab.kind === "browser" && tab.browserId === browserId) return { profileId: tab.profileId };
+    }
+    for (const tabLayout of Object.values(layout.layoutsByTabId ?? {})) {
+      for (const content of Object.values(tabLayout.contentsByLeafId ?? {})) {
+        if (content.kind !== "browser") continue;
+        const browser = content.browser ?? content;
+        if ((browser.browserId ?? "") === browserId) return { profileId: browser.profileId };
+      }
+    }
+  }
+  return null;
 }
 
 function getDisposableSessionsForTab(state: WorkspaceState, tabId: string): TerminalSession[] {

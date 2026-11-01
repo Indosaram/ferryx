@@ -6,8 +6,8 @@ import type { WorkspaceState } from "../state/workspaceStore";
 import type { TerminalActivity } from "./activity";
 import {
   isNavigableBrowserUrl,
+  isPrivateBrowserProfileId,
   loadBrowserSettings,
-  PRIVATE_BROWSER_PROFILE,
   resolveSupportedBrowserProfileId,
   supportedBrowserProfiles,
 } from "./browserSettings";
@@ -71,10 +71,7 @@ export function readScrollPosition(raw: unknown): BrowserScrollPosition | undefi
   return { x: clampScrollAxis(x), y: clampScrollAxis(y) };
 }
 
-export function isPrivateBrowserProfileId(profileId: string | null | undefined): boolean {
-  const trimmed = profileId?.trim();
-  return trimmed === PRIVATE_BROWSER_PROFILE.id || trimmed === "private" || trimmed === "remote";
-}
+export { isPrivateBrowserProfileId };
 
 /**
  * Identity of everything about the live sessions that has to reach disk. Saves are scheduled off
