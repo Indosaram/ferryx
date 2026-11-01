@@ -94,8 +94,8 @@ describe("remote terminal ordinal matches the rendered selection", () => {
     model.context.activeTerminal = null;
     renderOrdinalMirror(model);
 
-    expect(screen.getByLabelText("Terminal position: unknown of 3")).toBeInTheDocument();
-    expect(screen.getByText("? / 3")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Terminal position/)).toBeNull();
+    expect(screen.queryByText("? / 3")).toBeNull();
     expect(
       screen.getAllByRole("tab").some((tab) => tab.getAttribute("aria-selected") === "true"),
     ).toBe(false);
