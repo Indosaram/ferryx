@@ -2148,14 +2148,13 @@ async fn ssh_bridge_setup_failure_ends_the_child() {
         eof,
         "setup failure must end the child and close its stdout pipe"
     );
-    assert!(
-        !child_still_running(pid),
-        "setup failure must not leave the child running"
-    );
+    // A dying process closes its descriptors before it turns into a zombie, so at the EOF
+    // barrier `waitpid(WNOHANG)` may still report it running. The bounded reap wait proves the
+    // exit instead: it succeeds only once the child has exited.
     let reaped = wait_for_child_reaped(pid).await;
     assert!(
         reaped,
-        "child PID {pid} must be reaped after a setup failure"
+        "setup failure must end child PID {pid} and let it be reaped"
     );
 }
 /// Hosts supervisor mode inside the test binary, whose harness cannot take custom argv.
