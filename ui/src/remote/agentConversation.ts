@@ -164,13 +164,20 @@ export function mapAgentConversation(
     }
   }
 
+  /** When the running turn started, so the chat can tick its "Worked for" while it runs. */
+  function activeStart(isLastSpan: boolean, promptTimestamp?: number | null): number | undefined {
+    if (!isLastSpan || options?.activeTurnStartedAt == null) return undefined;
+    if (promptTimestamp !== null && promptTimestamp !== undefined) return promptTimestamp;
+    return parseTimestamp(options.activeTurnStartedAt) ?? options.activeTurnStartedAt;
+  }
+
   function resolveDuration(
     assistantId: string,
     toolCalls: ChatWorkItem[],
     timestamps: number[],
     isLastSpan: boolean,
     promptTimestamp?: number | null,
-  ): string {
+  ): string | undefined {
     const turnActive = isLastSpan && options?.activeTurnStartedAt != null;
     if (!turnActive) {
       if (options?.turnDurationsMap?.has(assistantId)) {
@@ -193,7 +200,7 @@ export function mapAgentConversation(
       const startMs = promptMs !== null ? promptMs : activeMs;
       return formatWorkedDuration(Math.max(0, Date.now() - startMs));
     }
-    let label: string;
+    let label: string | undefined;
     const sumMs = toolCalls.filter(isToolCard).reduce((acc, tc) => acc + (tc.durationMs ?? 0), 0);
     if (timestamps.length >= 2) {
       const min = Math.min(...timestamps);
@@ -202,11 +209,10 @@ export function mapAgentConversation(
       label = formatWorkedDuration(diff);
     } else if (sumMs > 0) {
       label = formatWorkedDuration(sumMs);
-    } else {
-      label = formatWorkedDuration(0);
     }
+    // No timestamps and no tool durations: the time is unknown, and "0s" would be a false claim.
     // Idle last span: honor the label finalize settled, but never cache a computed one (more records may still arrive).
-    if (!isLastSpan) {
+    if (!isLastSpan && label !== undefined) {
       options?.turnDurationsMap?.set(assistantId, label);
     }
     return label;
@@ -400,22 +406,26 @@ export function mapAgentConversation(
         ? resolveDuration(assistantId, workList, spanTimestamps, isLastSpan, promptTimestamp)
         : undefined;
 
+      const startedAt = hasTools ? activeStart(isLastSpan, promptTimestamp) : undefined;
       turnMessage = {
         id: assistantId,
         role: "assistant",
         content,
         ...(hasTools ? { toolCalls: workList, durationLabel } : {}),
+        ...(startedAt !== undefined ? { durationStartedAt: startedAt } : {}),
         timestamp: parseTimestamp(proseRecord.timestamp) ?? spanTimestamps[spanTimestamps.length - 1] ?? Date.now(),
       };
     } else if (workList.length > 0) {
       const assistantId = `assistant-${span[0].ordinal}`;
       const durationLabel = resolveDuration(assistantId, workList, spanTimestamps, isLastSpan, promptTimestamp);
+      const startedAt = activeStart(isLastSpan, promptTimestamp);
       turnMessage = {
         id: assistantId,
         role: "assistant",
         content: "",
         toolCalls: workList,
         durationLabel,
+        ...(startedAt !== undefined ? { durationStartedAt: startedAt } : {}),
         timestamp: spanTimestamps[spanTimestamps.length - 1] ?? parseTimestamp(span[0].timestamp) ?? Date.now(),
       };
     }

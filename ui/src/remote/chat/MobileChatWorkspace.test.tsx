@@ -217,6 +217,16 @@ describe("MobileChatWorkspace", () => {
     expect(screen.getByTestId("chat-history-warning")).toHaveTextContent("not available");
   });
 
+  it("marks the owner's optimistic echo of a send as sending until the transcript carries it", () => {
+    render(
+      <MobileChatWorkspace
+        messages={[{ id: "pending-r1", role: "user", content: "please review", timestamp: 1 }]}
+        onSendMessage={vi.fn()}
+      />
+    );
+    expect(screen.getByTestId("user-message-sending")).toHaveTextContent("Sending");
+  });
+
   it("10. header degrades safely when optional header props are absent", () => {
     render(<MobileChatWorkspace messages={[]} onSendMessage={vi.fn()} />);
 

@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import {
   ActivityIndicator,
   AttachmentList,
@@ -200,6 +200,30 @@ describe("MobileChatComponents & MobileChatMessage", () => {
   it("names each turn by who spoke", () => {
     render(<MobileChatMessage id="u" role="user" content="hi" />);
     expect(screen.getByRole("article", { name: /^You/ })).toBeInTheDocument();
+  });
+
+  it("ticks a running turn's Worked for from its start instead of freezing between polls", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(10_000);
+      render(
+        <MobileChatMessage
+          id="run"
+          role="assistant"
+          content=""
+          durationLabel="0s"
+          durationStartedAt={5_000}
+          toolCalls={[{ toolName: "bash", status: "running", command: "make" }]}
+        />
+      );
+      expect(screen.getByTestId("worked-for-toggle")).toHaveTextContent("Worked for 5s");
+      act(() => {
+        vi.advanceTimersByTime(3_000);
+      });
+      expect(screen.getByTestId("worked-for-toggle")).toHaveTextContent("Worked for 8s");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("gives the message copy button a 44px hit area", () => {

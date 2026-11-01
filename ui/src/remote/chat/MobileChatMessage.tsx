@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { AlertCircle, Check, ChevronRight, Copy } from "lucide-react";
+import { AlertCircle, Check, ChevronRight, Copy, Loader2 } from "lucide-react";
 import { copyTextToClipboard } from "../../lib/clipboard";
+import { formatWorkedDuration } from "../agentConversation";
 import { cn } from "../../lib/cn";
 import { handleExternalLinkClick } from "../../lib/externalLinks";
 import {
@@ -42,6 +43,10 @@ export interface MobileChatMessageProps {
   approvalAction?: ApprovalActionCardProps;
   activityState?: ActivityState;
   durationLabel?: string;
+  /** Epoch ms the running turn started: its "Worked for" ticks once a second instead of jumping per poll. */
+  durationStartedAt?: number;
+  /** The user's message is on its way to the host and not yet in the transcript. */
+  pending?: boolean;
   className?: string;
   /**
    * Herdr reference rich parts (plan task 5). When present they are the turn's body:
@@ -242,6 +247,18 @@ const ASSISTANT_MARKDOWN_COMPONENTS = {
   img: ChatMarkdownImage,
 };
 
+/** The "Worked for" time of a running turn, ticking on its own between polls. */
+function useTickingDuration(startedAt: number | undefined, fallback: string | undefined): string | undefined {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (startedAt === undefined) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [startedAt]);
+  return startedAt === undefined ? fallback : formatWorkedDuration(Math.max(0, now - startedAt));
+}
+
 interface WorkRowsContainerProps {
   children: React.ReactNode;
   count: number;
@@ -260,7 +277,9 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
   toolCalls = [],
   approvalAction,
   activityState,
-  durationLabel,
+  durationLabel: settledDurationLabel,
+  durationStartedAt,
+  pending = false,
   referenceParts,
   referenceAbandoned,
   referenceSource,
@@ -268,6 +287,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
   className,
 }) => {
   const isUser = role === "user";
+  const durationLabel = useTickingDuration(durationStartedAt, settledDurationLabel);
   // A native turn's start is an ISO instant; it prints as a local time like every other turn.
   const formattedTime = formatReferenceTimestamp(timestamp);
   const [copied, setCopied] = useState(false);
@@ -390,6 +410,15 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
           className="min-w-0 gap-2 rounded-[20px] px-3.5 py-2.5 bg-chat-user-bubble text-chat-foreground leading-relaxed text-base break-words select-text"
         >
           <p className="whitespace-pre-wrap">{copyText}</p>
+          {pending && (
+            <span
+              data-testid="user-message-sending"
+              className="mt-1 flex items-center gap-1.5 text-xs text-chat-foreground-secondary"
+            >
+              <Loader2 aria-hidden="true" className="size-3 animate-spin motion-reduce:animate-none" />
+              Sending…
+            </span>
+          )}
           {attachments.length > 0 && (
             <AttachmentList attachments={attachments} className="mt-1" />
           )}
