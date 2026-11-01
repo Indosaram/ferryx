@@ -41,6 +41,105 @@ const REPO: &str = "/home/owner/code/ferryx";
 const PANE: &str = "pane-sv-1";
 const DEADLINE: Duration = Duration::from_secs(10);
 
+/// Opts in to the automatic cutover after setup.
+async fn opt_in(pool: &SqlitePool) {
+    crate::supervisor::setup::set_setup_flags(pool, Some(true), None).await.unwrap();
+}
+
+/// An upgraded hub opted in to the automatic cutover cuts over once the engine is ready, logs
+/// it as automatic, and a second call changes nothing.
+#[tokio::test]
+async fn an_opted_in_upgrade_cuts_over_automatically_once_the_engine_is_ready() {
+    let pool = upgraded_pool().await;
+    opt_in(&pool).await;
+    let done = cutover::auto_cutover(&pool, Some(&engine(None)))
+        .await
+        .unwrap()
+        .expect("an automatic cutover");
+    assert_eq!(done.steps, vec!["legacy_intake_stopped", "unified_intake_enabled"]);
+    assert_eq!(done.intake.legacy, LegacyIntake::Stopped);
+    assert!(done.intake.unified_open);
+    assert_eq!(done.intake.origin, Origin::Cutover);
+    let details: Vec<String> =
+        sqlx::query_scalar("SELECT detail FROM supervisor_cutover_log ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(details.len(), 2);
+    assert!(details.iter().all(|detail| detail.starts_with("automatic cutover after setup")), "{details:?}");
+    // The owner decided now (a row exists): nothing more happens.
+    assert_eq!(cutover::auto_cutover(&pool, Some(&engine(None))).await.unwrap(), None);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM supervisor_cutover_log").await, 2);
+}
+
+/// Without the opt-in, after an owner rollback, on a fresh hub, with a legacy goal turn in
+/// flight, or with the engine absent, starting or short of a capability, the automatic
+/// cutover writes nothing; the blocker names why.
+#[tokio::test]
+async fn the_automatic_cutover_never_overrides_the_owner_or_runs_without_a_ready_engine() {
+    use cutover::{
+        auto_cutover, auto_cutover_blocker, AUTO_CUTOVER_LEGACY_TURN, AUTO_CUTOVER_NO_LEGACY,
+        AUTO_CUTOVER_OFF, AUTO_CUTOVER_OWNER_DECIDED,
+    };
+    // Not opted in.
+    let pool = upgraded_pool().await;
+    assert_eq!(auto_cutover(&pool, Some(&engine(None))).await.unwrap(), None);
+    assert_eq!(auto_cutover_blocker(&pool, Some(&engine(None))).await.unwrap(), Some(AUTO_CUTOVER_OFF));
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM supervisor_cutover").await, 0);
+
+    // Opted in, but the engine is absent, still starting, or short of a capability.
+    opt_in(&pool).await;
+    let mut starting = engine(None);
+    starting.state = HealthState::Waiting;
+    for (health, code) in [
+        (None, "MHC_NOT_RUNNING"),
+        (Some(starting), "MHC_NOT_RUNNING"),
+        (Some(engine(Some("memory_receipts"))), "MHC_CAPABILITY_MISSING"),
+    ] {
+        assert_eq!(auto_cutover(&pool, health.as_ref()).await.unwrap(), None);
+        assert_eq!(auto_cutover_blocker(&pool, health.as_ref()).await.unwrap(), Some(code));
+    }
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM supervisor_cutover").await, 0);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM supervisor_cutover_log").await, 0);
+
+    // A legacy goal turn committed but not settled holds it back.
+    sqlx::query("UPDATE lane_goal SET proposal_state = 'sent' WHERE lane_key = 'ledger'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(auto_cutover(&pool, Some(&engine(None))).await.unwrap(), None);
+    assert_eq!(
+        auto_cutover_blocker(&pool, Some(&engine(None))).await.unwrap(),
+        Some(AUTO_CUTOVER_LEGACY_TURN)
+    );
+    sqlx::query("UPDATE lane_goal SET proposal_state = NULL WHERE lane_key = 'ledger'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // An owner rollback is never overridden: the owner cut over by hand, then rolled back.
+    cutover::cutover(&pool, Some(&engine(None))).await.unwrap();
+    cutover::rollback(&pool).await.unwrap();
+    let before = installation_intake(&pool).await.unwrap();
+    assert_eq!(auto_cutover(&pool, Some(&engine(None))).await.unwrap(), None);
+    assert_eq!(
+        auto_cutover_blocker(&pool, Some(&engine(None))).await.unwrap(),
+        Some(AUTO_CUTOVER_OWNER_DECIDED)
+    );
+    assert_eq!(installation_intake(&pool).await.unwrap(), before);
+    assert!(!before.unified_open && before.origin == Origin::Rollback);
+
+    // A fresh hub already runs on the unified intake: nothing to do.
+    let fresh = fresh_pool().await;
+    opt_in(&fresh).await;
+    assert_eq!(auto_cutover(&fresh, Some(&engine(None))).await.unwrap(), None);
+    assert_eq!(
+        auto_cutover_blocker(&fresh, Some(&engine(None))).await.unwrap(),
+        Some(AUTO_CUTOVER_NO_LEGACY)
+    );
+    assert_eq!(count(&fresh, "SELECT COUNT(*) FROM supervisor_cutover").await, 0);
+}
+
 /// An upgraded hub: legacy lanes, a legacy chat session with its transcript and a cron job
 /// exist before the supervisor schema runs, so migration 0025 records legacy history.
 async fn upgraded_pool() -> SqlitePool {

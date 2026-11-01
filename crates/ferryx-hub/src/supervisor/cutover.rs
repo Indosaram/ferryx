@@ -21,6 +21,12 @@
 //!   intake again over the same rows.
 //!
 //! Reads never write: the row is created by the first cutover or rollback.
+//!
+//! - **Automatic cutover** ([`auto_cutover`]) runs the same cutover once setup finishes, when
+//!   the owner opted in (`hub_meta.supervisor_auto_cutover = 1`), the upgraded installation
+//!   has exactly one identity, the owner never cut over or rolled back (no row: an explicit
+//!   rollback is never overridden), no legacy goal turn is pending or sent, and the engine is
+//!   ready. Otherwise it changes nothing and [`auto_cutover_blocker`] names why.
 use serde::Serialize;
 use sqlx::{SqliteConnection, SqlitePool};
 
@@ -31,6 +37,16 @@ use crate::storage::{now_rfc3339, WriteTx};
 
 /// Wire code of [`SupervisorError::IntakeClosed`]: new unified work is refused (503-class).
 pub const SUPERVISOR_INTAKE_CLOSED: &str = "SUPERVISOR_INTAKE_CLOSED";
+
+/// `hub_meta` key: `1` when the owner opted in to the automatic cutover after setup.
+pub const AUTO_CUTOVER_KEY: &str = "supervisor_auto_cutover";
+
+/// Why [`auto_cutover`] does nothing now; an engine refusal is the engine's own code instead.
+pub const AUTO_CUTOVER_OFF: &str = "AUTO_CUTOVER_OFF";
+pub const AUTO_CUTOVER_NO_OWNER: &str = "AUTO_CUTOVER_NO_OWNER";
+pub const AUTO_CUTOVER_OWNER_DECIDED: &str = "AUTO_CUTOVER_OWNER_DECIDED";
+pub const AUTO_CUTOVER_NO_LEGACY: &str = "AUTO_CUTOVER_NO_LEGACY";
+pub const AUTO_CUTOVER_LEGACY_TURN: &str = "AUTO_CUTOVER_LEGACY_TURN";
 
 /// The legacy intake as the installation sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -292,30 +308,136 @@ pub async fn cutover(
     pool: &SqlitePool,
     health: Option<&SupervisorHealth>,
 ) -> Result<Transition, SupervisorError> {
+    match cutover_with(pool, health, false).await? {
+        Some(transition) => Ok(transition),
+        // Only an automatic cutover stops early; report the unchanged intake regardless.
+        None => Ok(Transition {
+            intake: installation_intake(pool).await?,
+            steps: Vec::new(),
+        }),
+    }
+}
+
+/// [`cutover`]; `automatic` additionally re-checks, under the first commit's write lock, that
+/// the owner never decided (no row) and no legacy goal turn is pending or sent, answering
+/// `None` with nothing written otherwise.
+async fn cutover_with(
+    pool: &SqlitePool,
+    health: Option<&SupervisorHealth>,
+    automatic: bool,
+) -> Result<Option<Transition>, SupervisorError> {
     require_engine(health)?;
     let identity = the_identity(pool).await?;
     let id = identity.supervisor_id.as_str();
     let mut steps = Vec::new();
     let mut tx = pool.begin_write().await?;
+    if automatic && (has_row(&mut tx, id).await? || legacy_turn_open(&mut tx).await?) {
+        tx.commit().await?;
+        return Ok(None);
+    }
     let now = intake_in(&mut tx, id).await?;
     if now.legacy == LegacyIntake::Stopped && now.unified_open {
         tx.commit().await?;
-        return Ok(Transition { intake: now, steps });
+        return Ok(Some(Transition { intake: now, steps }));
     }
-    write_row(&mut tx, id, "stopped", "closed", Origin::Cutover, "legacy_intake_stopped",
-        "legacy owner turns, the legacy goal loop and the kibitzer lead wake take no new work").await?;
+    let stopped = if automatic {
+        "automatic cutover after setup: legacy owner turns, the legacy goal loop and the kibitzer lead wake take no new work"
+    } else {
+        "legacy owner turns, the legacy goal loop and the kibitzer lead wake take no new work"
+    };
+    write_row(&mut tx, id, "stopped", "closed", Origin::Cutover, "legacy_intake_stopped", stopped)
+        .await?;
     tx.commit().await?;
     steps.push("legacy_intake_stopped");
 
     let mut tx = pool.begin_write().await?;
-    write_row(&mut tx, id, "stopped", "open", Origin::Cutover, "unified_intake_enabled",
-        "the unified supervisor admits, dispatches and wakes").await?;
+    let enabled = if automatic {
+        "automatic cutover after setup: the unified supervisor admits, dispatches and wakes"
+    } else {
+        "the unified supervisor admits, dispatches and wakes"
+    };
+    write_row(&mut tx, id, "stopped", "open", Origin::Cutover, "unified_intake_enabled", enabled)
+        .await?;
     let intake = intake_in(&mut tx, id).await?;
     tx.commit().await?;
     steps.push("unified_intake_enabled");
     super::dispatcher::poke();
     super::wakes::poke();
-    Ok(Transition { intake, steps })
+    Ok(Some(Transition { intake, steps }))
+}
+
+async fn has_row(conn: &mut SqliteConnection, supervisor_id: &str) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM supervisor_cutover WHERE supervisor_id = ?)")
+        .bind(supervisor_id)
+        .fetch_one(conn)
+        .await
+}
+
+/// A legacy goal turn is committed but not settled: cutting over now would strand it.
+async fn legacy_turn_open(conn: &mut SqliteConnection) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM lane_goal WHERE proposal_state IN ('pending','sent'))",
+    )
+    .fetch_one(conn)
+    .await
+}
+
+/// Whether the owner opted in to the automatic cutover.
+pub async fn auto_cutover_enabled(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
+    let value: Option<String> = sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = ?")
+        .bind(AUTO_CUTOVER_KEY)
+        .fetch_optional(pool)
+        .await?;
+    Ok(value.as_deref() == Some("1"))
+}
+
+/// Why [`auto_cutover`] would change nothing now, or `None` when it would cut over: one of the
+/// `AUTO_CUTOVER_*` codes, or the engine's refusal code from [`require_engine`]
+/// (`MHC_NOT_RUNNING`, `MHC_CAPABILITY_MISSING`, ...). Reads only.
+pub async fn auto_cutover_blocker(
+    pool: &SqlitePool,
+    health: Option<&SupervisorHealth>,
+) -> Result<Option<&'static str>, SupervisorError> {
+    if !auto_cutover_enabled(pool).await? {
+        return Ok(Some(AUTO_CUTOVER_OFF));
+    }
+    let mut conn = pool.acquire().await?;
+    let owners: Vec<String> =
+        sqlx::query_scalar("SELECT supervisor_id FROM supervisor_identity LIMIT 2")
+            .fetch_all(&mut *conn)
+            .await?;
+    let [supervisor_id] = owners.as_slice() else {
+        return Ok(Some(AUTO_CUTOVER_NO_OWNER));
+    };
+    if has_row(&mut conn, supervisor_id).await? {
+        return Ok(Some(AUTO_CUTOVER_OWNER_DECIDED));
+    }
+    if !legacy_history(&mut conn).await? {
+        return Ok(Some(AUTO_CUTOVER_NO_LEGACY));
+    }
+    if legacy_turn_open(&mut conn).await? {
+        return Ok(Some(AUTO_CUTOVER_LEGACY_TURN));
+    }
+    drop(conn);
+    Ok(require_engine(health).err().map(|error| error.code()))
+}
+
+/// The automatic cutover after setup: [`cutover`] when [`auto_cutover_blocker`] finds nothing
+/// in the way, else `Ok(None)` with nothing written, so the caller retries on the next engine
+/// health change. An owner's explicit cutover or rollback is never overridden.
+pub async fn auto_cutover(
+    pool: &SqlitePool,
+    health: Option<&SupervisorHealth>,
+) -> Result<Option<Transition>, SupervisorError> {
+    if let Some(blocker) = auto_cutover_blocker(pool, health).await? {
+        tracing::debug!(blocker, "automatic supervisor cutover is not due");
+        return Ok(None);
+    }
+    let transition = cutover_with(pool, health, true).await?;
+    if let Some(transition) = &transition {
+        tracing::info!(steps = ?transition.steps, "automatic supervisor cutover after setup");
+    }
+    Ok(transition)
 }
 
 /// Moves the installation's owner back to the legacy intake. The unified intake closes first
