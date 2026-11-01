@@ -251,7 +251,13 @@ async fn map_projects(
 
 /// The setup run over an explicit pool and env file. restart is false for a hub that is not
 /// this daemon's live one (tests, the desktop-independent CLI), whose generation cannot be
-/// restarted from here.
+/// restarted from here. engine is the health of the engine installed in the running
+/// generation, if any.
+///
+/// The owner and projects are written before the generation restarts, so the new
+/// generation's first Ready already finds them. An engine that is already Ready sees no new
+/// Ready transition, so the run itself attempts the automatic cutover; the answer's
+/// `seedDue` tells the caller to seed owner memory with that engine.
 pub(crate) async fn run_setup_on(
     pool: &ferryx_hub::goals::SqlitePool,
     env_file: &Path,
@@ -259,25 +265,38 @@ pub(crate) async fn run_setup_on(
     slack: &SlackOwner,
     account: &str,
     restart: bool,
+    engine: Option<ferryx_hub::meta::mhc_supervisor::SupervisorHealth>,
 ) -> Result<Value, SetupError> {
+    use ferryx_hub::meta::mhc_supervisor::HealthState;
     if !MhcProfileConfig::enabled_in(&read_env_at(env_file)) {
         enable_in_env_file(env_file)?;
     }
     setup::set_setup_flags(pool, Some(true), Some(request.import_memory)).await?;
-    let mut restarted = false;
-    if restart && ferryx_hub::meta::mhc_supervisor::installed().is_none() {
-        restart_generation().await?;
-        restarted = true;
-    }
     let identity = ensure_owner(pool, slack, account).await?;
     let projects = map_projects(pool, &identity.supervisor_id, request.projects).await;
+    let mut restarted = false;
+    let mut cut_over = false;
+    let mut seed_due = false;
+    match &engine {
+        None if restart => {
+            restart_generation().await?;
+            restarted = true;
+        }
+        Some(health) if health.state == HealthState::Ready => {
+            cut_over = ferryx_hub::supervisor::cutover::auto_cutover(pool, Some(health)).await?.is_some();
+            seed_due = request.import_memory;
+        }
+        _ => {}
+    }
     let status = setup::setup_status(pool, engine_view(env_file)).await?;
     let mut answer = serde_json::to_value(status).unwrap_or(Value::Null);
     if let Some(fields) = answer.as_object_mut() {
         fields.insert("projectResults".into(), Value::Array(projects));
         fields.insert("restarted".into(), Value::Bool(restarted));
+        fields.insert("cutOver".into(), Value::Bool(cut_over));
+        fields.insert("seedDue".into(), Value::Bool(seed_due));
     }
-    tracing::info!(restarted, "supervisor setup ran");
+    tracing::info!(restarted, cut_over, "supervisor setup ran");
     Ok(answer)
 }
 
@@ -312,8 +331,9 @@ pub(super) async fn auto_setup(
                 Err(error) => tracing::warn!(code = error.code(), "automatic cutover failed"),
             }
             if !seeded {
-                seeded = true;
-                seed_if_wanted(&engine, &pool, &state, home.clone()).await;
+                // Seeded only once an import ran or had already finished; a skip (no owner
+                // or memory import off at that moment) leaves it to the next Ready or setup run.
+                seeded = seed_if_wanted(&engine, &pool, &state, home.clone()).await;
             }
         }
         was_ready = ready;
@@ -323,29 +343,40 @@ pub(super) async fn auto_setup(
     }
 }
 
+/// Seeds owner memory when the owner opted in and no import finished yet. Returns whether
+/// seeding is settled: an import ran, or one had already finished.
 async fn seed_if_wanted(
     engine: &ferryx_hub::meta::mhc_supervisor::MhcSupervisor,
     pool: &ferryx_hub::goals::SqlitePool,
     state: &RemoteGatewayState,
     home: PathBuf,
-) {
+) -> bool {
     let status = match setup::setup_status(pool, EngineView::default()).await {
         Ok(status) => status,
         Err(error) => {
             tracing::warn!(code = error.code(), "setup status was not read for memory seeding");
-            return;
+            return false;
         }
     };
-    let (Some(owner), true, None) = (status.owner, status.memory_import.enabled, status.memory_import.last_at) else {
-        return;
+    if status.memory_import.last_at.is_some() {
+        return true;
+    }
+    let (Some(owner), true) = (status.owner, status.memory_import.enabled) else {
+        return false;
     };
     let memory: std::sync::Arc<dyn ferryx_hub::meta::mhc_supervisor::OwnerMemory> = std::sync::Arc::new(engine.clone());
     match super::seed::seed_owner_memory(pool, memory, &owner.owner_principal, home).await {
-        Ok(_) => crate::remote::server::agent_control_service::publish_supervisor_changed(
-            state,
-            json!({ "setup": "memory" }),
-        ),
-        Err(error) => tracing::warn!(code = error.code(), "owner memory seeding failed"),
+        Ok(_) => {
+            crate::remote::server::agent_control_service::publish_supervisor_changed(
+                state,
+                json!({ "setup": "memory" }),
+            );
+            true
+        }
+        Err(error) => {
+            tracing::warn!(code = error.code(), "owner memory seeding failed");
+            false
+        }
     }
 }
 
@@ -377,7 +408,7 @@ pub async fn supervisor_adopt_all(
 
 /// Serves one daemon `supervisorSetup` request from the desktop (or the owner's CLI).
 pub async fn supervisor_setup(
-    state: &RemoteGatewayState,
+    state: &std::sync::Arc<RemoteGatewayState>,
     request: crate::daemon::protocol::SupervisorSetupAction,
 ) -> Result<Value, SetupError> {
     use crate::daemon::protocol::SupervisorSetupAction;
@@ -414,13 +445,27 @@ pub async fn supervisor_setup_status(state: &RemoteGatewayState) -> Result<Value
 /// Runs setup for the owner and returns the fresh SetupStatus (plus projectResults and
 /// restarted). The Supervisor views are told to refetch.
 pub async fn supervisor_setup_run(
-    state: &RemoteGatewayState,
+    state: &std::sync::Arc<RemoteGatewayState>,
     request: SetupRunRequest,
 ) -> Result<Value, SetupError> {
     let (pool, live) = hub_pool(state)?;
     let env_file = env_file()?;
     let slack = if live { slack_owner(&pool).await } else { SlackOwner::default() };
-    let answer = run_setup_on(&pool, &env_file, request, &slack, &local_account(), live).await?;
+    let installed = if live { ferryx_hub::meta::mhc_supervisor::installed() } else { None };
+    let health = installed.as_ref().map(|engine| engine.health());
+    let answer = run_setup_on(&pool, &env_file, request, &slack, &local_account(), live, health).await?;
+    if answer["cutOver"] == true {
+        crate::remote::server::agent_control_service::publish_supervisor_changed(state, json!({ "setup": "cutover" }));
+    }
+    if let (Some(engine), true) = (installed, answer["seedDue"] == true) {
+        // The engine was already Ready, so its generation's task saw no new Ready: seed here,
+        // off the request path (once; a finished import makes this a no-op).
+        let state = std::sync::Arc::clone(state);
+        let pool = pool.clone();
+        super::HUB_TASKS.track(&tokio::spawn(async move {
+            seed_if_wanted(&engine, &pool, &state, super::home_dir()).await;
+        }));
+    }
     crate::remote::server::agent_control_service::publish_supervisor_changed(state, json!({ "setup": "run" }));
     Ok(answer)
 }
@@ -500,7 +545,7 @@ async fn setup_locally(args: &HubSetupArgs) -> Result<Value, (String, String)> {
             }
             None => SlackOwner::default(),
         };
-        run_setup_on(&pool, &env_file, args.request.clone(), &slack, &local_account(), false)
+        run_setup_on(&pool, &env_file, args.request.clone(), &slack, &local_account(), false, None)
             .await
             .map_err(fail)
     };
@@ -634,7 +679,7 @@ mod tests {
         };
         let slack = SlackOwner::default();
 
-        let first = run_setup_on(&pool, &env_file, request.clone(), &slack, "tester", false)
+        let first = run_setup_on(&pool, &env_file, request.clone(), &slack, "tester", false, None)
             .await
             .unwrap();
         assert_eq!(read_env_at(&env_file).get(ENABLE_KEY).map(String::as_str), Some("1"));
@@ -651,7 +696,7 @@ mod tests {
         assert_eq!(results[1]["code"], "NOT_A_GIT_DIR");
 
         let env_before = std::fs::read_to_string(&env_file).unwrap();
-        let second = run_setup_on(&pool, &env_file, request, &slack, "someone-else", false)
+        let second = run_setup_on(&pool, &env_file, request, &slack, "someone-else", false, None)
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&env_file).unwrap(), env_before);
@@ -665,11 +710,63 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let pool = ferryx_hub::storage::memory().await.unwrap();
         let slack = SlackOwner { team: Some("T1".into()), user: Some("U9".into()) };
-        let answer = run_setup_on(&pool, &temp.path().join("env"), SetupRunRequest::default(), &slack, "tester", false)
+        let answer = run_setup_on(&pool, &temp.path().join("env"), SetupRunRequest::default(), &slack, "tester", false, None)
             .await
             .unwrap();
         assert_eq!(answer["owner"]["ownerPrincipal"], "slack:T1:U9");
         assert_eq!(answer["memoryImport"]["enabled"], false);
         assert_eq!(answer["nextAction"], "restart_required");
+    }
+
+    fn ready_health() -> ferryx_hub::meta::mhc_supervisor::SupervisorHealth {
+        ferryx_hub::meta::mhc_supervisor::SupervisorHealth {
+            state: ferryx_hub::meta::mhc_supervisor::HealthState::Ready,
+            generation: 1,
+            pid: None,
+            capabilities: ferryx_hub::meta::mhc_profile::REQUIRED_CAPABILITIES.iter().map(|c| (*c).to_owned()).collect(),
+            server_version: None,
+            fault: None,
+            detail: None,
+            queued_decisions: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn setup_on_an_already_ready_engine_cuts_over_without_a_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let env_file = temp.path().join("env");
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        // An upgraded installation: legacy history exists and the legacy intake is open.
+        ferryx_hub::lanes::state::insert_lane(&pool, "nightly", "Nightly", "lead", "/repo", "file marker")
+            .await
+            .unwrap();
+        ferryx_hub::supervisor::cutover::note_import(&pool).await.unwrap();
+        let before = ferryx_hub::supervisor::cutover::installation_intake(&pool).await.unwrap();
+        assert!(!before.unified_open);
+
+        let answer = run_setup_on(
+            &pool,
+            &env_file,
+            SetupRunRequest { import_memory: true, projects: Vec::new() },
+            &SlackOwner::default(),
+            "tester",
+            false,
+            Some(ready_health()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer["restarted"], false);
+        assert_eq!(answer["cutOver"], true, "{answer}");
+        assert_eq!(answer["seedDue"], true);
+        let after = ferryx_hub::supervisor::cutover::installation_intake(&pool).await.unwrap();
+        assert!(after.unified_open);
+        assert_eq!(after.legacy, ferryx_hub::supervisor::cutover::LegacyIntake::Stopped);
+
+        // Idempotent: a second run moves nothing.
+        let again = run_setup_on(&pool, &env_file, SetupRunRequest::default(), &SlackOwner::default(), "tester", false, Some(ready_health()))
+            .await
+            .unwrap();
+        assert_eq!(again["cutOver"], false);
+        assert_eq!(again["seedDue"], false);
     }
 }
