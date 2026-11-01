@@ -1304,6 +1304,10 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
       key("Mod+L", { key: "l", mods: ["mod"] }),
       waitForEngineFocus("engine window takes keyboard focus after Mod+L"),
       ["type URL", () => host.type(`${fixtureBase}/fixture.html`)],
+      ["screenshot after typing the URL", () => {
+        const shot = screenshot("chromium-typed-url");
+        return { ok: shot.ok, file: shot.file };
+      }],
       key("Enter", { key: "Enter" }),
       5000,
       ["optional title via CLI", async () => {
