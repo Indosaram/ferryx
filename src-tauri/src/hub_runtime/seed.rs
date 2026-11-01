@@ -55,7 +55,8 @@ fn paragraph_id(paragraph: &str) -> usize {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(paragraph.as_bytes());
     let mut head = [0u8; std::mem::size_of::<usize>()];
-    head.copy_from_slice(&digest[..head.len()]);
+    let width = head.len();
+    head.copy_from_slice(&digest[..width]);
     usize::from_be_bytes(head)
 }
 
