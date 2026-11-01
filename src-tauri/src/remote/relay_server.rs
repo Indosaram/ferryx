@@ -1081,21 +1081,38 @@ impl RelayState {
         mpsc::Receiver<IncomingSessionNotice>,
         mpsc::Receiver<GrantDeliveryRequest>,
     ) {
+        let (generation, rx, grant_rx, _, _) = self.register_control_channel_handle(machine_id);
+        (generation, rx, grant_rx)
+    }
+
+    /// [`Self::register_control_channel`], also returning the registered channel and grant
+    /// sender so the owning socket can bind aliases to exactly its own registration.
+    fn register_control_channel_handle(
+        &self,
+        machine_id: String,
+    ) -> (
+        u64,
+        mpsc::Receiver<IncomingSessionNotice>,
+        mpsc::Receiver<GrantDeliveryRequest>,
+        ControlChannel,
+        mpsc::Sender<GrantDeliveryRequest>,
+    ) {
         let (tx, rx) = mpsc::channel(MAX_PENDING_SESSIONS);
         let (grant_tx, grant_rx) = mpsc::channel(1);
         let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
+        let channel = ControlChannel { generation, tx };
         {
             // One lock order everywhere: `control_channels` before `grant_channels`.
             let mut channels = self.inner.control_channels.lock();
             let mut grants = self.inner.grant_channels.lock();
-            channels.insert(machine_id.clone(), ControlChannel { generation, tx });
-            grants.insert(machine_id, grant_tx);
+            channels.insert(machine_id.clone(), channel.clone());
+            grants.insert(machine_id, grant_tx.clone());
         }
         self.inner
             .control_suspensions
             .lock()
             .insert(generation, new_suspension_signal());
-        (generation, rx, grant_rx)
+        (generation, rx, grant_rx, channel, grant_tx)
     }
 
     fn unregister_control_channel(&self, _machine_token: &str, generation: u64) {
@@ -1188,20 +1205,47 @@ impl RelayState {
         }
     }
 
-    /// Makes the control socket registered under `machine_token` reachable as `alias` (the
-    /// machine id a token-authenticated daemon announces): session allocation and grant
+    /// Test shorthand for [`Self::bind_control_alias_for`] that binds whatever channel is
+    /// currently registered under `machine_token`.
+    #[cfg(test)]
+    pub fn bind_control_alias(&self, machine_token: &str, alias: String) -> bool {
+        let channel = self.inner.control_channels.lock().get(machine_token).cloned();
+        let grant = self.inner.grant_channels.lock().get(machine_token).cloned();
+        match (channel, grant) {
+            (Some(channel), Some(grant)) => self.bind_control_alias_for(&channel, &grant, alias),
+            _ => false,
+        }
+    }
+
+    /// Makes the caller's own control registration (`channel`, `grant`) reachable as `alias`
+    /// (the machine id a token-authenticated daemon announces): session allocation and grant
     /// delivery both look the machine up by that id, so both maps get the alias.
     /// Unregistering the generation retires every name it was bound to.
-    pub fn bind_control_alias(&self, machine_token: &str, alias: String) {
+    ///
+    /// The alias is bound to the caller's generation, never to whatever currently sits under
+    /// a shared token, and it is refused when another live control generation already holds
+    /// it or when an Ed25519 identity has enrolled that machine id: a token-authenticated
+    /// daemon must not take over another machine's routing.
+    fn bind_control_alias_for(
+        &self,
+        channel: &ControlChannel,
+        grant: &mpsc::Sender<GrantDeliveryRequest>,
+        alias: String,
+    ) -> bool {
+        if self.inner.machine_public_keys.lock().contains_key(&alias) {
+            return false;
+        }
         // One lock order everywhere: `control_channels` before `grant_channels`.
         let mut channels = self.inner.control_channels.lock();
         let mut grants = self.inner.grant_channels.lock();
-        if let Some(channel) = channels.get(machine_token).cloned() {
-            if let Some(grant) = grants.get(machine_token).cloned() {
-                grants.insert(alias.clone(), grant);
-            }
-            channels.insert(alias, channel);
+        if channels.get(&alias).is_some_and(|existing| {
+            existing.generation != channel.generation && !existing.tx.is_closed()
+        }) {
+            return false;
         }
+        grants.insert(alias.clone(), grant.clone());
+        channels.insert(alias, channel.clone());
+        true
     }
 
     /// Trusted in-process issuance API. The caller must supply an opaque,
@@ -3880,7 +3924,7 @@ async fn authenticate_control_socket(
 ) {
     if let Some(token) = token {
         state.record_auth(ip, true);
-        handle_control_socket(socket, state, token, machine_id).await;
+        handle_control_socket(socket, state, token, machine_id, false).await;
         return;
     }
     let challenge = ControlChallenge {
@@ -3952,7 +3996,7 @@ async fn authenticate_control_socket(
         return;
     }
     match result {
-        Ok(machine_id) => handle_control_socket(socket, state, machine_id, None).await,
+        Ok(machine_id) => handle_control_socket(socket, state, machine_id, None, true).await,
         Err(ref err) => {
             if err == "REMOTE_SUSPENDED" {
                 let close_frame = axum::extract::ws::CloseFrame {
@@ -3984,12 +4028,21 @@ async fn handle_control_socket(
     state: RelayState,
     machine_token: String,
     machine_id: Option<String>,
+    // True when `machine_token` is the Ed25519-authenticated machine id itself. Such a socket
+    // speaks only for that id and may never bind an alias.
+    key_authenticated: bool,
 ) {
-    let (generation, mut notices, mut grants) = state.register_control_channel(machine_token.clone());
+    let (generation, mut notices, mut grants, own_channel, own_grant) =
+        state.register_control_channel_handle(machine_token.clone());
     let mut pending_grant: Option<oneshot::Sender<AccountGrantOfferDelivered>> = None;
-    if let Some(ref id) = machine_id {
-        if id != &machine_token {
-            state.bind_control_alias(&machine_token, id.clone());
+    // An announced alias another live generation still holds (for example this daemon's own
+    // previous, half-open socket) is retried on later inbound frames until that holder is gone.
+    let mut pending_alias = machine_id.filter(|id| id != &machine_token);
+    if let Some(id) = pending_alias.clone() {
+        if state.bind_control_alias_for(&own_channel, &own_grant, id) {
+            pending_alias = None;
+        } else {
+            tracing::warn!("relay deferred a control alias another live machine holds");
         }
     }
     let mut suspension = state.control_suspension_receiver(generation);
@@ -4028,6 +4081,11 @@ async fn handle_control_socket(
                 }
             }
             incoming = socket.recv() => {
+                if let Some(id) = pending_alias.clone() {
+                    if state.bind_control_alias_for(&own_channel, &own_grant, id) {
+                        pending_alias = None;
+                    }
+                }
                 match incoming {
                     Some(Ok(Message::Close(_))) => {
                         // Flush tungstenite's queued close acknowledgement back to the client
@@ -4068,22 +4126,37 @@ async fn handle_control_socket(
                                 }
                             }
                             Ok(ControlRequest::RegisterPairingPin(registration)) => {
-                                if !registration.machine_id.is_empty() && registration.machine_id != machine_token {
-                                    state.bind_control_alias(&machine_token, registration.machine_id.clone());
-                                }
+                                let foreign = !registration.machine_id.is_empty()
+                                    && registration.machine_id != machine_token;
+                                // An Ed25519 socket speaks only for its authenticated id; a token
+                                // socket may alias an id no other live machine holds.
+                                let alias_refused = foreign
+                                    && (key_authenticated
+                                        || !state.bind_control_alias_for(
+                                            &own_channel,
+                                            &own_grant,
+                                            registration.machine_id.clone(),
+                                        ));
                                 let target_machine = if !registration.machine_id.is_empty() {
                                     registration.machine_id.clone()
                                 } else {
                                     machine_token.clone()
                                 };
-                                let ack = RegisterPairingPinAck {
-                                    generation: registration.generation,
-                                    pin: registration.pin.clone(),
-                                    machine_id: target_machine.clone(),
-                                    status: match state.register_pairing(&target_machine, generation, registration) {
+                                let ack_generation = registration.generation;
+                                let ack_pin = registration.pin.clone();
+                                let status = if alias_refused {
+                                    "Machine ID does not match this control identity"
+                                } else {
+                                    match state.register_pairing(&target_machine, generation, registration) {
                                         Ok(()) => "ready",
                                         Err(error) => error,
-                                    }.into(),
+                                    }
+                                };
+                                let ack = RegisterPairingPinAck {
+                                    generation: ack_generation,
+                                    pin: ack_pin,
+                                    machine_id: target_machine,
+                                    status: status.into(),
                                 };
                                 if !matches!(timeout(TRANSFER_TIMEOUT, socket.send(Message::Text(serde_json::to_string(&ack).unwrap().into()))).await, Ok(Ok(()))) {
                                     tracing::warn!("relay pairing acknowledgment failed");
@@ -5528,6 +5601,86 @@ mod tests {
             .pending_sessions
             .lock()
             .contains_key(&notice.session_id));
+        server.abort();
+    }
+
+    async fn token_control(base: &str, machine_id: &str) -> TestSocket {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = format!("{base}/tunnel/control").into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("authorization", "Bearer test-machine-token".parse().unwrap());
+        request
+            .headers_mut()
+            .insert("x-ferryx-machine-id", machine_id.parse().unwrap());
+        tokio_tungstenite::connect_async(request).await.unwrap().0
+    }
+
+    /// Waits until the relay has processed every frame sent before this point: a Ping's Pong
+    /// is written by the same control loop, in order.
+    async fn control_barrier(socket: &mut TestSocket) {
+        socket.send(TMessage::Ping(b"barrier".to_vec().into())).await.unwrap();
+        loop {
+            match timeout(Duration::from_secs(5), socket.next()).await.unwrap() {
+                Some(Ok(TMessage::Pong(payload))) if payload.as_ref() == b"barrier" => return,
+                Some(Ok(_)) => continue,
+                other => panic!("control socket ended before the barrier: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_second_token_daemon_cannot_steal_a_live_alias() {
+        let state = test_state(vec!["test-machine-token".into()]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let mut first = token_control(&base, "machine-a").await;
+        control_barrier(&mut first).await;
+        let first_generation = state.inner.control_channels.lock()["machine-a"].generation;
+        // A second daemon sharing the operator token announces the same machine id, then
+        // registers a PIN under it.
+        let mut second = token_control(&base, "machine-a").await;
+        control_barrier(&mut second).await;
+        let mut registration = security_registration("machine-a");
+        registration.pin = "654321".into();
+        second
+            .send(TMessage::Text(serde_json::to_string(&registration).unwrap().into()))
+            .await
+            .unwrap();
+        let ack: RegisterPairingPinAck = receive_json(&mut second).await;
+        assert_ne!(ack.status, "ready");
+        assert_eq!(
+            state.inner.control_channels.lock()["machine-a"].generation,
+            first_generation,
+            "the alias must stay routed to the daemon that holds it"
+        );
+        assert!(!state.inner.pairings.lock().contains_key("654321"));
+        drop(first);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_ed25519_daemon_cannot_register_a_pin_for_another_machine() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (_victim, auth) = authenticate(&base, &identity(34, "machine_victim"), false, false).await;
+        assert!(auth.success);
+        let victim_generation = state.inner.control_channels.lock()["machine_victim"].generation;
+        let (mut attacker, auth) =
+            authenticate(&base, &identity(35, "machine_attacker"), false, false).await;
+        assert!(auth.success);
+        attacker
+            .send(TMessage::Text(
+                serde_json::to_string(&security_registration("machine_victim")).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        let ack: RegisterPairingPinAck = receive_json(&mut attacker).await;
+        assert_eq!(ack.status, "Machine ID does not match this control identity");
+        assert_eq!(
+            state.inner.control_channels.lock()["machine_victim"].generation,
+            victim_generation
+        );
+        assert!(state.inner.pairings.lock().is_empty());
         server.abort();
     }
 
