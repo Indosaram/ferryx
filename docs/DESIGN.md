@@ -114,6 +114,10 @@ behavior, native-surface masking during overlays/drag, and stable terminal sessi
 across pane movement. Subscribe to exact async state changes before actions in QA;
 do not use fixed sleeps to make assertions pass.
 
+Phone header controls (back, terminal/chat switch, overflow, context picker)
+have 44x44px hit areas like every other phone target; the 28px header size is a
+desktop-only density and is never used on a phone header.
+
 ### Terminal overlay and disconnected presentation
 
 On macOS, native terminal surfaces sit below WebKit. Keep their last complete

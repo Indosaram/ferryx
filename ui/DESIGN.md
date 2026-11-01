@@ -271,6 +271,9 @@ compact scale; phone changes are gated on the remote root or the existing touch/
   `size-11`, or an invisible hit-slop covering 44x44 on both axes), with at least 8px between
   neighbouring targets. Glyphs may stay `size-4`/`size-5`; the hit area grows, never the icon.
   `IconButton` `sm`/`md` (24/28px) are desktop sizes and are not used bare on a phone.
+- **Header controls.** Phone header and top-bar controls (back, terminal/chat switch, overflow,
+  context picker) follow the same 44x44 rule (`size-11` / `min-h-11`); the compact `size-7` (28px)
+  header buttons are desktop-only and never ship on a phone header.
 - **Text.** Body text is at least 14px (`text-sm` / `text-phone-body`); nothing is smaller than
   12px (`text-xs` / `text-phone-meta`). `text-[10px]`, `text-[11px]` and `text-[10.5px]` are
   banned on phone surfaces. Use rem sizes (Tailwind's scale or `text-phone-*`), never `text-[Npx]`,
