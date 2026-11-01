@@ -2100,7 +2100,9 @@ describe("RemoteBrowser component", () => {
 
       // Readiness deadline fires and tears down socket
       expect(ws.readyState).toBe(MockWebSocket.CLOSED);
-      expect(screen.getByText(/Readiness deadline expired/i)).toBeDefined();
+      expect(screen.getByText("Something went wrong. Try again.")).toBeDefined();
+      expect(screen.getByTestId("remote-browser-closed-reason").textContent).toMatch(/Readiness deadline expired/i);
+      expect(screen.getByTestId("remote-browser-closed-reason").closest("details")).not.toHaveAttribute("open");
     } finally {
       vi.useRealTimers();
     }
@@ -2173,7 +2175,9 @@ describe("RemoteBrowser component", () => {
 
       // ACK sweeper fires, tearing down stalled client
       expect(ws.readyState).toBe(MockWebSocket.CLOSED);
-      expect(screen.getByText(/ACK deadline expired/i)).toBeDefined();
+      expect(screen.getByText("Something went wrong. Try again.")).toBeDefined();
+      expect(screen.getByTestId("remote-browser-closed-reason").textContent).toMatch(/ACK deadline expired/i);
+      expect(screen.getByTestId("remote-browser-closed-reason").closest("details")).not.toHaveAttribute("open");
     } finally {
       vi.useRealTimers();
     }

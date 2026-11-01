@@ -525,6 +525,12 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
             <p role="status" className="text-chat-foreground text-center">
               {error ? userFacingError(error) : "The connection to your computer dropped."}
             </p>
+            {error ? (
+              <details className="max-w-full text-xs text-chat-foreground-secondary">
+                <summary className={`cursor-pointer w-fit mx-auto rounded ${BROWSER_FOCUS_RING}`}>Details</summary>
+                <span data-testid="remote-browser-closed-reason" className="mt-1 block font-mono break-words">{error.message}</span>
+              </details>
+            ) : null}
             <button
               ref={reconnectButtonRef}
               type="button"
