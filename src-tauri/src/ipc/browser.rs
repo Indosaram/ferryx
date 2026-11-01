@@ -1050,6 +1050,7 @@ pub(crate) async fn eval_webview<R: tauri::Runtime>(
 pub const BROWSER_STATE_CHANGED_EVENT: &str = "browser_state_changed";
 
 fn emit_browser_state<R: tauri::Runtime>(webview: &tauri::Webview<R>, state: &BrowserState) {
+    crate::ipc::browser_library::observe_browser_state(webview.app_handle(), state);
     let _ = webview.app_handle().emit(
         BROWSER_STATE_CHANGED_EVENT,
         BrowserStateChangedPayload::from(state),
@@ -1065,6 +1066,7 @@ pub fn install_browser_state_emitter<R: tauri::Runtime>(
 ) {
     let app = app.clone();
     manager.set_state_listener(Arc::new(move |state: &BrowserState| {
+        crate::ipc::browser_library::observe_browser_state(&app, state);
         let _ = app.emit(
             BROWSER_STATE_CHANGED_EVENT,
             BrowserStateChangedPayload::from(state),
@@ -1092,12 +1094,19 @@ fn update_webview_state<R: tauri::Runtime>(
         let manager = Arc::clone(&manager);
         let browser_id = browser_id.clone();
         let webview_for_emit = webview.clone();
+        // A finished load also re-reads the document title: the title observer can miss the
+        // change on a same-tab navigation, which left the previous page's title on the tab.
+        let load_finished = loading == Some(false);
         let _ = webview.with_webview(move |platform_webview| unsafe {
             let native: &objc2_web_kit::WKWebView = &*platform_webview.inner().cast();
+            let title = load_finished
+                .then(|| native.title().map(|title| title.to_string()))
+                .flatten()
+                .filter(|title| !title.trim().is_empty());
             if let Ok(state) = manager.update_navigation_state(
                 &browser_id,
                 None,
-                None,
+                title,
                 None,
                 Some(native.canGoBack()),
                 Some(native.canGoForward()),
@@ -1823,6 +1832,7 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
 /// Publishes a session state change without a webview in scope (CEF tabs have none).
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn emit_session_state<R: tauri::Runtime>(app: &AppHandle<R>, state: &BrowserState) {
+    crate::ipc::browser_library::observe_browser_state(app, state);
     let _ = app.emit(
         BROWSER_STATE_CHANGED_EVENT,
         BrowserStateChangedPayload::from(state),

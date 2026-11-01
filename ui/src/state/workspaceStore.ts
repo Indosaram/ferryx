@@ -2581,7 +2581,10 @@ export function useWorkspaceStore({
       const tabId = browserTabIdForBrowserId(tabs, payload.browserId);
       const tab = tabs.find((candidate) => candidate.id === tabId);
       if (!tabId || tab?.kind !== "browser") return;
-      const title = payload.title?.trim() || null;
+      // Engines report an empty title while a new document commits (WKWebView's title KVO fires
+      // "" before the next <title> is parsed). Keeping the last real title through that gap keeps
+      // the label's "follows the title" link intact, so the next real title still renames the tab.
+      const title = payload.title?.trim() || tab.title || null;
       const labelFollowsTitle = tab.label === "Browser" || tab.label === (tab.title ?? "");
       const updates: Partial<BrowserTab> = {
         url: payload.url || tab.url,

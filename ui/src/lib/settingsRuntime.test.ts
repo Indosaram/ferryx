@@ -138,9 +138,10 @@ describe("settings runtime contracts", () => {
 
   it("persists browser zoom and restore preference and resets them", () => {
     saveBrowserSettings({ defaultZoom: 125, restoreTabsOnLaunch: true });
-    expect(loadBrowserSettings()).toMatchObject({ defaultZoom: 125, restoreTabsOnLaunch: true });
+    saveBrowserSettings({ restoreTabsOnLaunch: false });
+    expect(loadBrowserSettings()).toMatchObject({ defaultZoom: 125, restoreTabsOnLaunch: false });
     resetBrowserSettings();
-    expect(loadBrowserSettings()).toMatchObject({ defaultZoom: 100, restoreTabsOnLaunch: false });
+    expect(loadBrowserSettings()).toMatchObject({ defaultZoom: 100, restoreTabsOnLaunch: true });
   });
 
   describe("installSettingsRuntimeBridge", () => {

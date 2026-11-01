@@ -142,12 +142,15 @@ fn with_native_overrides<T>(read: impl FnOnce(Option<&NativeOverrides>) -> T) ->
 }
 
 /// The single mapping between TS action ids and the ids [`chord_to_action`] returns.
-pub const BROWSER_ACTION_IDS: [(&str, &str); 33] = [
+/// Order matters: the first id whose chord matches wins, so `browser.bookmarkPage` (Mod+D on a
+/// focused browser guest) precedes `terminal.splitRight`.
+pub const BROWSER_ACTION_IDS: [(&str, &str); 34] = [
     ("tab.newBrowser", "tab-new-browser"),
     ("tab.close", "tab-close"),
     ("commandPalette.open", "command-palette"),
     ("sidebar.left.toggle", "sidebar-toggle"),
     ("settings.toggle", "settings-toggle"),
+    ("browser.bookmarkPage", "bookmark-page"),
     ("terminal.splitRight", "split-right"),
     ("terminal.splitDown", "split-down"),
     ("zoom.in", "zoom-in"),
@@ -260,6 +263,7 @@ fn default_chords(consumer: NativeConsumer, id: &str, platform: KeyPlatform) -> 
         "zoom.reset" if browser => vec![p(Digit(0), false)],
         "browser.focusAddress" if browser => vec![p(Letter('l'), false)],
         "browser.find" if browser => vec![p(Letter('f'), false)],
+        "browser.bookmarkPage" if browser => vec![p(Letter('d'), false)],
         "tab.reopenClosed" if browser => vec![p(Letter('t'), true)],
         // The legacy guest table ignored Shift on Ctrl+PageUp/PageDown.
         "tab.next" if browser => vec![
@@ -454,7 +458,7 @@ fn legacy_chord_to_action(chord: Chord, platform: KeyPlatform) -> Option<&'stati
                 KeyId::Letter('k') => Some("command-palette"),
                 KeyId::Letter('b') => Some("sidebar-toggle"),
                 KeyId::Comma => Some("settings-toggle"),
-                KeyId::Letter('d') => Some("split-right"),
+                KeyId::Letter('d') => Some("bookmark-page"),
                 KeyId::Equal => Some("zoom-in"),
                 KeyId::Minus => Some("zoom-out"),
                 KeyId::Digit(0) => Some("zoom-reset"),
@@ -557,7 +561,7 @@ mod tests {
             (KeyId::Letter('k'), false, "command-palette"),
             (KeyId::Letter('b'), false, "sidebar-toggle"),
             (KeyId::Comma, false, "settings-toggle"),
-            (KeyId::Letter('d'), false, "split-right"),
+            (KeyId::Letter('d'), false, "bookmark-page"),
             (KeyId::Equal, false, "zoom-in"),
             (KeyId::Minus, false, "zoom-out"),
             (KeyId::Digit(0), false, "zoom-reset"),

@@ -10,6 +10,7 @@ pub mod engine_install;
 pub mod find;
 pub mod guest;
 pub mod hard_reload;
+pub mod library;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 pub mod linux;
 pub mod manager;

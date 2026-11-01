@@ -93,6 +93,9 @@ beforeEach(() => {
   browserMocks.setBrowserVisible.mockClear();
 });
 
+// History is recorded host-side from the same state change (private tabs are refused there, see
+// src-tauri/src/browser/library/recorder.rs); the pane itself must no longer persist visited
+// pages in webview storage, where an isolated data dir could not separate them.
 describe("BrowserPane history privacy", () => {
   it("does not record history for a private-profile pane", async () => {
     render(
@@ -109,7 +112,7 @@ describe("BrowserPane history privacy", () => {
     expect(loadBrowserHistory()).toEqual([]);
   });
 
-  it("still records history for a default-profile pane", async () => {
+  it("leaves default-profile history to the host store instead of webview storage", async () => {
     render(
       <BrowserPane
         tab={{ ...tab, profileId: DEFAULT_BROWSER_PROFILE.id }}
@@ -121,6 +124,6 @@ describe("BrowserPane history privacy", () => {
     await waitFor(() => expect(eventState.stateChanged).toBeTypeOf("function"));
     emitSettledLoad("https://example.com/public-page");
 
-    expect(loadBrowserHistory().map((entry) => entry.url)).toEqual(["https://example.com/public-page"]);
+    expect(loadBrowserHistory()).toEqual([]);
   });
 });
