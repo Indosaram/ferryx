@@ -661,7 +661,8 @@ describe("RemoteBrowser - Mobile Viewport & Touch Interaction (Phase 7B)", () =>
       fireEvent.compositionUpdate(imeInput, { data: "한" });
       fireEvent.compositionUpdate(imeInput, { data: "한글" });
 
-      // End IME composition: should NOT wipe "Preceding text " with just "한글"
+      // A real browser has already placed the composed text in the field when compositionend fires
+      fireEvent.change(imeInput, { target: { value: "Preceding text 한글" } });
       fireEvent.compositionEnd(imeInput, { data: "한글" });
       expect(imeInput).toHaveValue("Preceding text 한글");
     });
@@ -1402,6 +1403,62 @@ describe("RemoteBrowser - Mobile Viewport & Touch Interaction (Phase 7B)", () =>
       });
       expect(sentCommands(ws, "fill")).toHaveLength(0);
       expect(screen.getByTestId("remote-browser-driver-error").textContent).toContain("guard missing");
+    });
+
+    describe("phone workspace", () => {
+      function stubCoarsePointer() {
+        vi.stubGlobal("matchMedia", (media: string) =>
+          Object.assign(new EventTarget(), {
+            media,
+            matches: media === "(pointer: coarse)",
+            onchange: null,
+            addListener() {},
+            removeListener() {},
+          }),
+        );
+      }
+
+      it("renders the phone toolbar with a Tools button and no eval on a coarse pointer", async () => {
+        stubCoarsePointer();
+        await mountDriving("b-phone", "epoch-phone");
+        expect(screen.getByTestId("remote-browser-tools-btn")).toBeDefined();
+        expect(screen.queryByTestId("remote-browser-eval-toggle")).toBeNull();
+        expect(screen.queryByTestId("remote-browser-fill-btn")).toBeNull();
+        expect(screen.getByTestId("remote-browser-workspace-back-btn").textContent).toBe("Back to sessions");
+        expect(screen.getByTestId("remote-browser-ime-toggle-btn").textContent).toBe("Type text");
+      });
+
+      it("shows the page host instead of the raw browser id", async () => {
+        const ws = await mountDriving("b-raw-id", "epoch-label");
+        await act(async () => {
+          ws.onmessage?.({
+            data: JSON.stringify({
+              type: "browserState",
+              browserId: "b-raw-id",
+              url: "https://news.example.org/story",
+              documentGeneration: "1",
+              viewportRevision: "1",
+              loading: false,
+              paused: false,
+            }),
+          });
+        });
+        const label = screen.getByTestId("remote-browser-page-label").textContent;
+        expect(label).toBe("news.example.org");
+        expect(label).not.toContain("b-raw-id");
+      });
+
+      it("does not submit the IME form on an Enter that confirms a candidate", async () => {
+        const ws = await mountDriving("b-ime-enter", "epoch-ime-enter");
+        fireEvent.click(screen.getByTestId("remote-browser-ime-toggle-btn"));
+        const imeInput = screen.getByTestId("remote-browser-ime-text-input");
+        fireEvent.change(imeInput, { target: { value: "\uD55C" } });
+        const before = sentCommands(ws, "fill").length;
+        const proceeded = fireEvent.keyDown(imeInput, { key: "Enter", keyCode: 229 });
+        expect(proceeded).toBe(false);
+        expect(sentCommands(ws, "fill")).toHaveLength(before);
+        expect(imeInput.className).toContain("text-base");
+      });
     });
   });
 });
