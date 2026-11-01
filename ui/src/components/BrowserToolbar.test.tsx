@@ -424,4 +424,49 @@ describe("BrowserToolbar", () => {
     expect(await screen.findByText("125%")).toBeInTheDocument();
     expect(browserNative.setBrowserZoom).toHaveBeenCalledWith("b-1", 1.1);
   });
+
+  it("zooms in, out and back to 100% from the zoom shortcuts and claims each event", async () => {
+    browserNative.setBrowserZoom.mockImplementation(async (_browserId: string, zoom: number) => zoom);
+    await act(async () => { render(<BrowserToolbar tab={mockTab} onNavigate={vi.fn()} onReload={vi.fn()} />); });
+    const readout = screen.getByTestId("browser-zoom-readout");
+    expect(readout).toHaveTextContent("100%");
+
+    const shortcut = (browserId: string, action: string) => {
+      const event = new CustomEvent("ferryx:browser-shortcut", { detail: { browserId, action }, cancelable: true });
+      act(() => { window.dispatchEvent(event); });
+      return event;
+    };
+
+    expect(shortcut("b-1", "zoom-in").defaultPrevented).toBe(true);
+    await waitFor(() => expect(readout).toHaveTextContent("110%"));
+    expect(browserNative.setBrowserZoom).toHaveBeenLastCalledWith("b-1", 1.1);
+
+    expect(shortcut("b-1", "zoom-out").defaultPrevented).toBe(true);
+    await waitFor(() => expect(readout).toHaveTextContent("100%"));
+    expect(browserNative.setBrowserZoom).toHaveBeenLastCalledWith("b-1", 1.0);
+
+    expect(shortcut("b-1", "zoom-out").defaultPrevented).toBe(true);
+    await waitFor(() => expect(readout).toHaveTextContent("90%"));
+
+    expect(shortcut("b-1", "zoom-reset").defaultPrevented).toBe(true);
+    await waitFor(() => expect(readout).toHaveTextContent("100%"));
+    expect(browserNative.setBrowserZoom).toHaveBeenLastCalledWith("b-1", 1.0);
+    expect(browserNative.setBrowserZoom).toHaveBeenCalledTimes(4);
+
+    // Another tab's zoom shortcut is neither applied nor claimed here.
+    expect(shortcut("b-2", "zoom-in").defaultPrevented).toBe(false);
+    expect(browserNative.setBrowserZoom).toHaveBeenCalledTimes(4);
+    expect(readout).toHaveTextContent("100%");
+  });
+
+  it("zooms from a native zoom shortcut for its own tab", async () => {
+    browserNative.setBrowserZoom.mockImplementation(async (_browserId: string, zoom: number) => zoom);
+    await act(async () => { render(<BrowserToolbar tab={mockTab} onNavigate={vi.fn()} onReload={vi.fn()} />); });
+    const listener = browserNative.onBrowserShortcutRequested.mock.calls[0][0] as (payload: { browserId: string; action: string }) => void;
+
+    act(() => listener({ browserId: "b-1", action: "zoom-in" }));
+
+    await waitFor(() => expect(screen.getByTestId("browser-zoom-readout")).toHaveTextContent("110%"));
+    expect(browserNative.setBrowserZoom).toHaveBeenCalledExactlyOnceWith("b-1", 1.1);
+  });
 });

@@ -1294,6 +1294,62 @@ describe("App project workspace flow", () => {
     }
   });
 
+  it("routes Cmd+=, Cmd+- and Cmd+0 to the focused browser tab's zoom and to terminal zoom elsewhere", async () => {
+    const browserSystem = await import("./lib/browserSystem");
+    const step = vi.spyOn(browserSystem, "stepBrowserZoom").mockResolvedValue(1);
+    const prevLayout = workspace.storeState.layout;
+    workspace.storeState.layout = {
+      ...prevLayout,
+      activeTabId: "browser-tab-1",
+      tabs: [
+        { id: "browser-tab-1", kind: "browser", label: "Docs", url: "https://example.com", browserId: "browser-1" },
+        ...prevLayout.tabs,
+      ],
+    } as any;
+    const received: string[] = [];
+    let claim = false;
+    const receiver = (event: Event) => {
+      const detail = (event as CustomEvent<{ browserId: string; action: string }>).detail;
+      received.push(`${detail.browserId}:${detail.action}`);
+      if (claim) event.preventDefault();
+    };
+    window.addEventListener("ferryx:browser-shortcut", receiver);
+    let view: ReturnType<typeof render> | undefined;
+    try {
+      await act(async () => { view = render(<App />); });
+
+      // A system-webview tab's BrowserToolbar claims the event and applies the zoom itself.
+      claim = true;
+      fireEvent.keyDown(window, { key: "=", code: "Equal", metaKey: true });
+      fireEvent.keyDown(window, { key: "+", code: "Equal", metaKey: true, shiftKey: true });
+      fireEvent.keyDown(window, { key: "-", code: "Minus", metaKey: true });
+      fireEvent.keyDown(window, { key: "0", code: "Digit0", metaKey: true });
+      expect(received).toEqual(["browser-1:zoom-in", "browser-1:zoom-in", "browser-1:zoom-out", "browser-1:zoom-reset"]);
+      expect(step).not.toHaveBeenCalled();
+
+      // A Chromium tab has no BrowserToolbar to claim it, so the host steps the zoom.
+      claim = false;
+      fireEvent.keyDown(window, { key: "=", code: "Equal", metaKey: true });
+      fireEvent.keyDown(window, { key: "-", code: "Minus", metaKey: true });
+      fireEvent.keyDown(window, { key: "0", code: "Digit0", metaKey: true });
+      expect(step.mock.calls).toEqual([["browser-1", "in"], ["browser-1", "out"], ["browser-1", "reset"]]);
+
+      // With a terminal tab active the chords stay with the terminal font zoom.
+      received.length = 0;
+      step.mockClear();
+      workspace.storeState.layout = { ...workspace.storeState.layout, activeTabId: prevLayout.activeTabId } as any;
+      await act(async () => { view?.rerender(<App />); });
+      fireEvent.keyDown(window, { key: "=", code: "Equal", metaKey: true });
+      fireEvent.keyDown(window, { key: "0", code: "Digit0", metaKey: true });
+      expect(received).toEqual([]);
+      expect(step).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener("ferryx:browser-shortcut", receiver);
+      step.mockRestore();
+      workspace.storeState.layout = prevLayout;
+    }
+  });
+
   it("routes http links to a built-in browser tab through the app-registered opener", async () => {
     const browserTauriModule = await import("./lib/browserTauri");
     const openExternalUrlSpy = vi.spyOn(browserTauriModule, "openExternalUrl").mockResolvedValue();

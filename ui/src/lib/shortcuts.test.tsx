@@ -114,6 +114,9 @@ describe("shortcut registry", () => {
       "browser.find",
       "browser.bookmarkPage",
       "browser.print",
+      "browser.zoomIn",
+      "browser.zoomOut",
+      "browser.zoomReset",
       "tab.next",
       "tab.previous",
       "tab.select1",
@@ -572,6 +575,9 @@ describe("shortcut chord collision invariants", () => {
       "Mod+]": ["browser.forward", "terminal.focusNext"],
       "Mod+d": ["browser.bookmarkPage", "terminal.splitRight"],
       "Mod+f": ["browser.find", "terminal.search"],
+      "Mod+=": ["browser.zoomIn", "zoom.in"],
+      "Mod+-": ["browser.zoomOut", "zoom.out"],
+      "Mod+0": ["browser.zoomReset", "zoom.reset"],
     });
     // terminal.copyMode (Mod+Shift+Space) shares its chord with nothing.
     expect(Object.values(collisions).flat()).not.toContain("terminal.copyMode");
@@ -585,10 +591,61 @@ describe("shortcut chord collision invariants", () => {
       // A collision between two same-surface ids would be a real, unresolvable conflict.
       expect(ids).toHaveLength(2);
       const hasBrowser = ids.some((id) => id.startsWith("browser."));
-      const hasTerminal = ids.some((id) => id.startsWith("terminal."));
+      // zoom.* is the terminal font zoom.
+      const hasTerminal = ids.some((id) => id.startsWith("terminal.") || id.startsWith("zoom."));
       expect(hasBrowser, `Expected chord ${chord} to have a browser action`).toBe(true);
       expect(hasTerminal, `Expected chord ${chord} to have a terminal action`).toBe(true);
     }
+  });
+
+  it("Mod+=, Mod+Shift+=, Mod+- and Mod+0 zoom the browser page in a browser tab and the terminal font elsewhere", () => {
+    const chords: readonly [KeyboardEventInit, "In" | "Out" | "Reset"][] = [
+      [{ key: "=", code: "Equal" }, "In"],
+      [{ key: "+", code: "Equal", shiftKey: true }, "In"],
+      [{ key: "+", code: "NumpadAdd" }, "In"],
+      [{ key: "-", code: "Minus" }, "Out"],
+      [{ key: "0", code: "Digit0" }, "Reset"],
+    ];
+    for (const isMac of [true, false]) {
+      for (const [init, direction] of chords) {
+        const browserZoom = vi.fn();
+        const terminalZoom = vi.fn();
+        const browserId = `browser.zoom${direction}` as ShortcutActionId;
+        const terminalId = `zoom.${direction.toLowerCase()}` as ShortcutActionId;
+        const press = () => {
+          const event = new KeyboardEvent("keydown", { ...init, metaKey: isMac, ctrlKey: !isMac, bubbles: true, cancelable: true });
+          window.dispatchEvent(event);
+          return event;
+        };
+        // App registers the browser handler and drops the terminal one while a browser owns shortcuts.
+        const inBrowser = renderHook(() => useShortcuts({ [browserId]: browserZoom, [terminalId]: undefined }, { isMac }));
+        expect(press().defaultPrevented).toBe(true);
+        expect(browserZoom).toHaveBeenCalledOnce();
+        expect(terminalZoom).not.toHaveBeenCalled();
+        inBrowser.unmount();
+
+        const elsewhere = renderHook(() => useShortcuts({ [browserId]: undefined, [terminalId]: terminalZoom }, { isMac }));
+        expect(press().defaultPrevented).toBe(true);
+        expect(terminalZoom).toHaveBeenCalledOnce();
+        expect(browserZoom).toHaveBeenCalledOnce();
+        elsewhere.unmount();
+      }
+    }
+  });
+
+  it("browser zoom follows a user override without moving the terminal font zoom", () => {
+    const browserZoom = vi.fn();
+    const terminalZoom = vi.fn();
+    const overrides = { "browser.zoomIn": { key: "i", mod: true, alt: true } };
+    const { unmount } = renderHook(() =>
+      useShortcuts({ "browser.zoomIn": browserZoom, "zoom.in": terminalZoom }, { isMac: true, overrides }),
+    );
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "i", code: "KeyI", metaKey: true, altKey: true, bubbles: true, cancelable: true }));
+    expect(browserZoom).toHaveBeenCalledOnce();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "=", code: "Equal", metaKey: true, bubbles: true, cancelable: true }));
+    expect(terminalZoom).toHaveBeenCalledOnce();
+    expect(browserZoom).toHaveBeenCalledOnce();
+    unmount();
   });
 
   it("dispatcher resolves each chord by which surface's handler is registered", () => {

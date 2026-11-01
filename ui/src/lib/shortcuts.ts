@@ -39,6 +39,9 @@ export type ShortcutActionId =
   | "browser.find"
   | "browser.bookmarkPage"
   | "browser.print"
+  | "browser.zoomIn"
+  | "browser.zoomOut"
+  | "browser.zoomReset"
   | "terminal.splitRight"
   | "terminal.splitDown"
   | "terminal.unsplit"
@@ -163,6 +166,30 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     title: "Print browser page",
     group: "Tabs",
     binding: { key: "p", mod: true },
+    source: "ferryx",
+  },
+  {
+    // The browser.zoom* actions are listed before the terminal font zoom (zoom.*) whose chords
+    // they take over while a browser tab owns shortcuts.
+    id: "browser.zoomIn",
+    title: "Zoom in browser page",
+    group: "View",
+    binding: { key: "=", mod: true },
+    aliases: [{ key: "+", mod: true, shift: true }],
+    source: "ferryx",
+  },
+  {
+    id: "browser.zoomOut",
+    title: "Zoom out browser page",
+    group: "View",
+    binding: { key: "-", mod: true },
+    source: "ferryx",
+  },
+  {
+    id: "browser.zoomReset",
+    title: "Reset browser page zoom",
+    group: "View",
+    binding: { key: "0", mod: true },
     source: "ferryx",
   },
   {
@@ -577,7 +604,15 @@ export type ShortcutConflict =
   | { readonly kind: "reserved"; readonly chord: ReservedChord };
 
 /** Terminal actions App disables while a browser surface owns shortcuts, so they may share browser chords. */
-const BROWSER_EXCLUSIVE_TERMINAL_ACTIONS = new Set<ShortcutActionId>(["terminal.focusNext", "terminal.focusPrevious", "terminal.search", "terminal.splitRight"]);
+const BROWSER_EXCLUSIVE_TERMINAL_ACTIONS = new Set<ShortcutActionId>([
+  "terminal.focusNext",
+  "terminal.focusPrevious",
+  "terminal.search",
+  "terminal.splitRight",
+  "zoom.in",
+  "zoom.out",
+  "zoom.reset",
+]);
 
 function surfacesAreExclusive(a: ShortcutActionId, b: ShortcutActionId): boolean {
   return (a.startsWith("browser.") && BROWSER_EXCLUSIVE_TERMINAL_ACTIONS.has(b))

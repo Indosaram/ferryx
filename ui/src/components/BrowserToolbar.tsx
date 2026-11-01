@@ -451,11 +451,13 @@ export function BrowserToolbar({
 
   // The shortcut listener must not re-subscribe on every render (parents pass inline callbacks),
   // so it reads the latest handlers through a ref instead of depending on them.
-  const shortcutHandlersRef = useRef({ onReload, goBack: handleGoBack, goForward: handleGoForward, toggleBookmark });
-  shortcutHandlersRef.current = { onReload, goBack: handleGoBack, goForward: handleGoForward, toggleBookmark };
+  // The zoom handlers are function declarations hoisted from below, read at shortcut time.
+  const shortcutHandlersRef = useRef({ onReload, goBack: handleGoBack, goForward: handleGoForward, toggleBookmark, zoomIn: handleZoomIn, zoomOut: handleZoomOut, zoomReset: handleZoomReset });
+  shortcutHandlersRef.current = { onReload, goBack: handleGoBack, goForward: handleGoForward, toggleBookmark, zoomIn: handleZoomIn, zoomOut: handleZoomOut, zoomReset: handleZoomReset };
 
   useEffect(() => {
-    const runShortcut = (action: BrowserShortcutAction) => {
+    /** Returns true when this toolbar handled the action itself. */
+    const runShortcut = (action: BrowserShortcutAction): boolean => {
       const handlers = shortcutHandlersRef.current;
       // Every shortcut but focus-address acts on the page (find, reload, history), so the
       // suggestion list from an earlier omnibox session closes first.
@@ -490,15 +492,26 @@ export function BrowserToolbar({
         case "find":
           // BrowserPane owns the find overlay and receives the same event.
           break;
+        case "zoom-in":
+          void handlers.zoomIn();
+          return true;
+        case "zoom-out":
+          void handlers.zoomOut();
+          return true;
+        case "zoom-reset":
+          void handlers.zoomReset();
+          return true;
         default:
           // Tab navigation actions are routed at the App level; ignore here.
           break;
       }
+      return false;
     };
 
     const handleDomShortcut = (event: Event) => {
       const detail = (event as BrowserShortcutDomEvent).detail;
-      if (detail?.browserId === tab.browserId) runShortcut(detail.action);
+      // Claiming the event tells App this tab applied the zoom, so App does not step it again.
+      if (detail?.browserId === tab.browserId && runShortcut(detail.action)) event.preventDefault();
     };
     window.addEventListener(BROWSER_SHORTCUT_EVENT, handleDomShortcut);
 
@@ -636,13 +649,17 @@ export function BrowserToolbar({
     }
   };
 
-  const handleZoomIn = async () => {
+  async function handleZoomIn() {
     await applyZoom(Math.min(BROWSER_ZOOM_MAX, Math.round((zoomFactor + 0.1) * 10) / 10));
-  };
+  }
 
-  const handleZoomOut = async () => {
+  async function handleZoomOut() {
     await applyZoom(Math.max(BROWSER_ZOOM_MIN, Math.round((zoomFactor - 0.1) * 10) / 10));
-  };
+  }
+
+  async function handleZoomReset() {
+    await applyZoom(1.0);
+  }
 
   const handleFocus = async () => {
     try {

@@ -143,7 +143,8 @@ fn with_native_overrides<T>(read: impl FnOnce(Option<&NativeOverrides>) -> T) ->
 
 /// The single mapping between TS action ids and the ids [`chord_to_action`] returns.
 /// Order matters: the first id whose chord matches wins, so `browser.bookmarkPage` (Mod+D on a
-/// focused browser guest) precedes `terminal.splitRight`.
+/// focused browser guest) precedes `terminal.splitRight`. Page zoom follows the
+/// `browser.zoom*` bindings, not the terminal font zoom (`zoom.*`) that shares their chords.
 pub const BROWSER_ACTION_IDS: [(&str, &str); 35] = [
     ("tab.newBrowser", "tab-new-browser"),
     ("tab.close", "tab-close"),
@@ -153,9 +154,9 @@ pub const BROWSER_ACTION_IDS: [(&str, &str); 35] = [
     ("browser.bookmarkPage", "bookmark-page"),
     ("terminal.splitRight", "split-right"),
     ("terminal.splitDown", "split-down"),
-    ("zoom.in", "zoom-in"),
-    ("zoom.out", "zoom-out"),
-    ("zoom.reset", "zoom-reset"),
+    ("browser.zoomIn", "zoom-in"),
+    ("browser.zoomOut", "zoom-out"),
+    ("browser.zoomReset", "zoom-reset"),
     ("browser.focusAddress", "focus-address"),
     ("browser.find", "find"),
     ("tab.reopenClosed", "tab-reopen-closed"),
@@ -259,9 +260,10 @@ fn default_chords(consumer: NativeConsumer, id: &str, platform: KeyPlatform) -> 
         "settings.toggle" => vec![p(Comma, false)],
         "terminal.splitRight" => vec![p(Letter('d'), false)],
         "terminal.splitDown" => vec![p(Letter('d'), true)],
-        "zoom.in" if browser => vec![p(Equal, false), p(Equal, true)],
-        "zoom.out" if browser => vec![p(Minus, false)],
-        "zoom.reset" if browser => vec![p(Digit(0), false)],
+        // Mod+= and Mod+Shift+= (the "+" glyph on US layouts).
+        "browser.zoomIn" if browser => vec![p(Equal, false), p(Equal, true)],
+        "browser.zoomOut" if browser => vec![p(Minus, false)],
+        "browser.zoomReset" if browser => vec![p(Digit(0), false)],
         "browser.focusAddress" if browser => vec![p(Letter('l'), false)],
         "browser.find" if browser => vec![p(Letter('f'), false)],
         "browser.bookmarkPage" if browser => vec![p(Letter('d'), false)],
@@ -768,7 +770,7 @@ mod tests {
         assert_eq!(chord_to_action(mac_l, KeyPlatform::Mac), Some("focus-address"));
         set_native_overrides(Some(overrides(&[
             ("browser.focusAddress", Some(binding("g", true, false, false, false))),
-            ("zoom.in", Some(binding("=", false, true, false, false))),
+            ("browser.zoomIn", Some(binding("=", false, true, false, false))),
         ])));
         assert_eq!(chord_to_action(mac_l, KeyPlatform::Mac), None);
         assert_eq!(
@@ -794,6 +796,47 @@ mod tests {
         );
         set_native_overrides(None);
         assert_eq!(chord_to_action(mac_l, KeyPlatform::Mac), Some("focus-address"));
+    }
+
+    #[test]
+    fn browser_zoom_chords_follow_the_browser_bindings() {
+        let defaults = [
+            (KeyId::Equal, false, "zoom-in"),
+            (KeyId::Equal, true, "zoom-in"),
+            (KeyId::Minus, false, "zoom-out"),
+            (KeyId::Digit(0), false, "zoom-reset"),
+        ];
+        for platform in PLATFORMS {
+            for (key, shift, action) in defaults {
+                assert_eq!(chord_to_action_in(None, primary(platform, key, shift), platform), Some(action));
+            }
+        }
+        // Rebinding or unbinding the terminal font zoom leaves the page zoom chords alone.
+        let terminal = overrides(&[
+            ("zoom.in", Some(binding("i", true, false, true, false))),
+            ("zoom.reset", None),
+        ]);
+        for platform in PLATFORMS {
+            for (key, shift, action) in defaults {
+                assert_eq!(chord_to_action_in(Some(&terminal), primary(platform, key, shift), platform), Some(action));
+            }
+            let mut alt_i = primary(platform, KeyId::Letter('i'), false);
+            alt_i.alt = true;
+            assert_eq!(chord_to_action_in(Some(&terminal), alt_i, platform), None);
+        }
+        // The browser bindings follow the user's overrides: a rebind drops both default
+        // zoom-in chords, and an unbound reset is no longer intercepted.
+        let browser = overrides(&[
+            ("browser.zoomIn", Some(binding("+", true, false, false, true))),
+            ("browser.zoomReset", None),
+        ]);
+        for platform in PLATFORMS {
+            let at = |key, shift| chord_to_action_in(Some(&browser), primary(platform, key, shift), platform);
+            assert_eq!(at(KeyId::Equal, false), None);
+            assert_eq!(at(KeyId::Equal, true), Some("zoom-in"));
+            assert_eq!(at(KeyId::Digit(0), false), None);
+            assert_eq!(at(KeyId::Minus, false), Some("zoom-out"));
+        }
     }
 
     #[test]

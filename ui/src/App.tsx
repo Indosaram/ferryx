@@ -3978,11 +3978,19 @@ function WorkspaceApp({
     ? shortcutContent.kind === "browser" ? shortcutContent.browser?.browserId ?? shortcutContent.browserId : undefined
     : activeShortcutTab?.kind === "browser" ? activeShortcutTab.browserId : undefined;
   const browserShortcutsActive = Boolean(shortcutBrowserId);
-  const dispatchBrowserShortcut = (action: BrowserShortcutAction) => {
-    if (!shortcutBrowserId) return;
-    window.dispatchEvent(new CustomEvent(BROWSER_SHORTCUT_EVENT, {
+  /** True when a receiver claimed the action (called preventDefault on the event). */
+  const dispatchBrowserShortcut = (action: BrowserShortcutAction): boolean => {
+    if (!shortcutBrowserId) return false;
+    return !window.dispatchEvent(new CustomEvent(BROWSER_SHORTCUT_EVENT, {
       detail: { browserId: shortcutBrowserId, action },
+      cancelable: true,
     }) satisfies BrowserShortcutDomEvent);
+  };
+  // The tab's BrowserToolbar applies the zoom and shows it. A Chromium tab draws its own toolbar,
+  // so when no BrowserToolbar claims the event the host steps that tab's zoom instead.
+  const dispatchBrowserZoom = (action: "zoom-in" | "zoom-out" | "zoom-reset", direction: "in" | "out" | "reset") => {
+    if (!shortcutBrowserId || dispatchBrowserShortcut(action)) return;
+    void handleBrowserZoom(shortcutBrowserId, direction);
   };
 
   // Child browser webviews own OS focus, so the main window never sees these
@@ -4017,23 +4025,9 @@ function WorkspaceApp({
         handleReopenClosedBrowserTab();
         return;
       }
-      if (action === "bookmark-page") {
-        // The sending tab's BrowserToolbar handles this event itself (it owns the star).
-        return;
-      }
-      if ((action as string) === "zoom-in") {
-        const targetId = payload.browserId || shortcutBrowserId;
-        if (targetId) void handleBrowserZoom(targetId, "in");
-        return;
-      }
-      if ((action as string) === "zoom-out") {
-        const targetId = payload.browserId || shortcutBrowserId;
-        if (targetId) void handleBrowserZoom(targetId, "out");
-        return;
-      }
-      if ((action as string) === "zoom-reset") {
-        const targetId = payload.browserId || shortcutBrowserId;
-        if (targetId) void handleBrowserZoom(targetId, "reset");
+      if (action === "bookmark-page" || action === "zoom-in" || action === "zoom-out" || action === "zoom-reset") {
+        // The sending tab's BrowserToolbar handles this event itself (it owns the star and the
+        // zoom readout). Native chords come only from system-webview guests, which have one.
         return;
       }
       if ((action as string) === "print") {
@@ -4092,7 +4086,6 @@ function WorkspaceApp({
     handleSplitActive,
     handleSelectWorktreeByIndex,
     handleReopenClosedBrowserTab,
-    handleBrowserZoom,
     handleBrowserPrint,
     createBrowserTab,
     shortcutBrowserId,
@@ -4121,6 +4114,9 @@ function WorkspaceApp({
         "browser.find": browserShortcutsActive ? () => dispatchBrowserShortcut("find") : undefined,
         "browser.bookmarkPage": browserShortcutsActive ? () => dispatchBrowserShortcut("bookmark-page") : undefined,
         "browser.print": browserShortcutsActive && shortcutBrowserId ? () => handleBrowserPrint(shortcutBrowserId) : undefined,
+        "browser.zoomIn": browserShortcutsActive ? () => dispatchBrowserZoom("zoom-in", "in") : undefined,
+        "browser.zoomOut": browserShortcutsActive ? () => dispatchBrowserZoom("zoom-out", "out") : undefined,
+        "browser.zoomReset": browserShortcutsActive ? () => dispatchBrowserZoom("zoom-reset", "reset") : undefined,
         "tab.next": () => handleCycleTab(1),
         "tab.previous": () => handleCycleTab(-1),
         "tab.select1": () => handleSelectTerminalTabByIndex(0),
@@ -4158,9 +4154,10 @@ function WorkspaceApp({
         "commandPalette.open": handleOpenCommandPalette,
         "settings.toggle": handleToggleSettings,
         "notifications.toggle": handleToggleNotificationCenter,
-        "zoom.in": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "in") : handleZoomIn,
-        "zoom.out": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "out") : handleZoomOut,
-        "zoom.reset": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "reset") : handleZoomReset,
+        // Mod+= / Mod+- / Mod+0 zoom the page while a browser owns shortcuts (browser.zoom*).
+        "zoom.in": browserShortcutsActive ? undefined : handleZoomIn,
+        "zoom.out": browserShortcutsActive ? undefined : handleZoomOut,
+        "zoom.reset": browserShortcutsActive ? undefined : handleZoomReset,
       };
     },
     [
