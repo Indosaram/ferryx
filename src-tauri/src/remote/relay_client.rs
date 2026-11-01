@@ -251,8 +251,12 @@ impl PairingCoordinator {
                 PairingState::Ready | PairingState::Claimed | PairingState::Cancelled => {
                     self.transition_locked(PairingState::Expired)?
                 }
+                // A second request while one is registering is a user double-click, not
+                // an internal state error.
+                PairingState::Registering => {
+                    return Err("A pairing request is already in progress".into());
+                }
                 PairingState::Created
-                | PairingState::Registering
                 | PairingState::Consumed
                 | PairingState::Expired => Vec::new(),
             };
@@ -1764,10 +1768,14 @@ mod tests {
         assert_eq!(registration.pairing_token.len(), 32);
         assert!(u128::from_str_radix(&registration.pairing_token, 16).is_ok());
         assert!(coordinator.transition(PairingState::Consumed).is_err());
-        assert!(coordinator
-            .generate_pairing(Duration::from_secs(60))
-            .await
-            .is_err());
+        assert_eq!(
+            coordinator
+                .generate_pairing(Duration::from_secs(60))
+                .await
+                .unwrap_err(),
+            "A pairing request is already in progress"
+        );
+        assert_eq!(coordinator.state(), PairingState::Registering);
         release_tx.send(()).unwrap();
         let session = tokio::time::timeout(Duration::from_secs(5), generation)
             .await
