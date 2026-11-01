@@ -4982,7 +4982,17 @@ async fn pump_relay_direction(
             }
             return Ok(());
         };
-        let msg = msg?;
+        let msg = match msg {
+            Ok(msg) => msg,
+            Err(error) => {
+                // A peer that sent its last frame and then dropped the socket surfaces the drop
+                // here; frames already fed must still reach the other side.
+                if unflushed > 0 {
+                    let _ = timeout(TRANSFER_TIMEOUT, tx.flush()).await;
+                }
+                return Err(error.into());
+            }
+        };
         let is_close = matches!(msg, Message::Close(_));
         #[cfg(test)]
         if let Some(tap) = tap {
@@ -9569,6 +9579,39 @@ mod tests {
             timeout(Duration::from_secs(5), data.next()).await.unwrap().unwrap().unwrap(),
             TMessage::Text("tail".into())
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_last_frame_before_the_host_drops_its_socket_still_reaches_the_client() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (_generation, mut notices, _grants) = state.register_control_channel("abrupt".into());
+        assert!(state.notify_incoming_session("abrupt", "abrupt-session"));
+        notices.try_recv().unwrap();
+        let (mut client, _) =
+            tokio_tungstenite::connect_async(format!("{base}/tunnel/client/abrupt-session"))
+                .await
+                .unwrap();
+        let (mut data, _) =
+            tokio_tungstenite::connect_async(format!("{base}/tunnel/data/abrupt-session"))
+                .await
+                .unwrap();
+        // The splice is live once a frame crosses it.
+        client.send(TMessage::Text("hello".into())).await.unwrap();
+        assert_eq!(data.next().await.unwrap().unwrap(), TMessage::Text("hello".into()));
+        // The host answers and drops its socket without a close handshake, as a daemon task
+        // that returns right after its last send does. The relay reads the frame and the
+        // abrupt end together; the frame it already queued must still be delivered.
+        data.send(TMessage::Binary(b"last reply".to_vec().into())).await.unwrap();
+        drop(data);
+        let reply = loop {
+            match timeout(Duration::from_secs(5), client.next()).await.unwrap() {
+                Some(Ok(TMessage::Ping(_) | TMessage::Pong(_))) => continue,
+                other => break other,
+            }
+        };
+        assert_eq!(reply.unwrap().unwrap().into_data().as_ref(), b"last reply");
         server.abort();
     }
 
