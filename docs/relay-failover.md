@@ -30,6 +30,60 @@ the primary persists it once it is back. Sign-in, enrollment, grants and billing
 or a promotion. The marker is created before the first restore and removed only by
 `promote-standby`.
 
+## Supervisor lease on the relay
+
+The relay decides which machine of an account runs the supervisor. The decision is a lease
+row per account in the account database (schema v3): `supervisor_leases` (holder, fence,
+`expires_at`, last checkpoint id, released flag, reservation), `supervisor_lease_fences`
+(the highest fence ever issued, never lowered) and `supervisor_relay_epoch` (one row, `0`
+until the first promotion). Lease rows are never deleted, only marked released. The rules live
+in `src-tauri/src/account/supervisor_lease.rs`:
+
+- `TTL_SECS = 120`: every grant and renew is valid for 120 s of relay time.
+- `RENEW_SECS = 20`: the holder renews every 20 s.
+- `GRACE_SECS = 30`: after expiry, another machine still cannot take the lease for 30 s.
+- A fence is `(relay_epoch << 32) | counter`. A new holder always gets a fence above every
+  fence recorded for the account; the same holder keeps its fence within one epoch.
+- Another machine gets a free lease (released, past `expires_at + GRACE_SECS`, or from an older
+  epoch) only if it presents the last recorded checkpoint id, or the lease was released to it
+  in this epoch, or it asks with `force`.
+
+Daemons send the requests over their authenticated control channel. The relay takes the
+machine and account from the control socket's key, never from the message. Requests are
+`SupervisorLeaseAcquire`, `SupervisorLeaseRenew`, `SupervisorLeaseRelease` and
+`SupervisorLeaseQuery`; the one reply is `SupervisorLeaseAck` with `outcome`
+`granted | renewed | released | refused | unavailable` and a `reasonCode`. A relay that serves
+leases lists `supervisorLeaseV1` in the `capabilities` of its control challenge.
+
+| relay | acquire / release | renew | query |
+|-------|-------------------|-------|-------|
+| primary | decided in one write transaction | extends by `TTL_SECS` | current holder |
+| standby (`standby.readonly`) | `unavailable`, `ACCOUNT_STORE_READ_ONLY` | answered while the replicated row still names the same holder, fence and epoch and is not released | current holder |
+| replica that predates schema v3, or no account store | `unavailable`, `LEASE_UNSUPPORTED` | same | same |
+
+On the standby the renewed expiry is kept in memory with the standby's own clock and is never
+written; it is dropped as soon as the replicated row names another holder or fence. So while
+the primary is down, the current holder keeps its lease through the standby, but no other
+machine can take it over, and nothing is released. A move or a takeover waits for the primary or
+for a promotion. A read-only store never runs the v3 migration.
+
+Refusal codes in `reasonCode`: `LEASE_HELD` (another machine holds a live or in-grace lease),
+`LEASE_CHECKPOINT_MISMATCH` (the lease is free but the caller's checkpoint is not the last
+recorded one), `LEASE_NOT_HOLDER` (renew with a wrong holder, fence or epoch, or a released
+row), `LEASE_MACHINE_NOT_ENROLLED`, `LEASE_FENCE_EXHAUSTED`, `LEASE_STORE_ERROR`.
+
+### Deploy order for the lease
+
+1. Upgrade the standby relay first. Its store is read-only, so the new binary does not migrate
+   it; until the replica carries the v3 tables it answers `LEASE_UNSUPPORTED`.
+2. Upgrade the primary. Its first start migrates the account database to v3, and Litestream
+   carries the new tables to the standby.
+3. Then upgrade the daemons (see `docs/supervisor/unified-cutover.md`).
+
+Never downgrade a relay below the lease version once daemons have seen `supervisorLeaseV1`:
+those daemons stay on standby against a relay without the capability instead of starting their
+own supervisor.
+
 ## Tooling
 
 `scripts/relay-failover.mjs` prints a JSON plan for each command and changes nothing unless
@@ -98,10 +152,26 @@ enrollment POST straight to the standby must return `ACCOUNT_STORE_READ_ONLY`.
 ## Promotion and failback
 
 `promote-standby` fences the old primary (stops its relay and Litestream; power it off in the
-provider console if it is unreachable), stops the restore timer, restores the newest replica,
-removes the marker and starts Litestream on the new primary. Point the load balancer's pool
-order at the new primary, then run `demote primary` on the old one when it comes back, so it
-rejoins as the standby. Never remove a marker by hand while the other host is writable.
+provider console if it is unreachable), stops the restore timer and restores the newest
+replica. On the standby it then runs, in this order:
+
+1. `stop-relay`: stops `ferryx-relay.service`. A running relay checks the marker on every
+   store call and would turn writable the instant the marker goes.
+2. `remove-marker`: removes `standby.readonly`.
+3. `bump-lease-epoch`: `ferryx-relay bump-lease-epoch` (with `FERRYX_ACCOUNT_DATA_DIR` set to
+   the account data directory) raises the supervisor lease epoch in one write transaction.
+4. `start-replication`: starts Litestream and the relay.
+
+The epoch bump is what keeps fences safe across a promotion. The restored replica can lag the
+old primary, so it may not know the newest fence. After the bump every fence the new primary
+issues is in a higher epoch than anything the old primary issued. A lease row from the old epoch
+counts as free for acquire and cannot be renewed once it has expired, so a restored row cannot
+revive an old holder. The current holder re-acquires and gets a new-epoch fence; executing
+daemons then refuse any send stamped with an older fence.
+
+Point the load balancer's pool order at the new primary, then run `demote primary` on the old
+one when it comes back, so it rejoins as the standby. Never remove a marker by hand while the
+other host is writable, and never start a promoted relay before `bump-lease-epoch` succeeded.
 
 ## Status page
 
