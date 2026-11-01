@@ -84,4 +84,46 @@ describe("useEdgeSwipeBack", () => {
     drag(getByTestId("screen"), 10, 130);
     expect(onBack).toHaveBeenCalledTimes(1);
   });
+
+  it("ignores a swipe that starts inside an open drawer or sheet", () => {
+    const onBack = vi.fn();
+    function WithDrawer() {
+      const ref = useEdgeSwipeBack({ enabled: true, onBack });
+      return (
+        <div ref={ref} data-testid="screen">
+          <div role="dialog" aria-modal="true" data-testid="drawer" />
+        </div>
+      );
+    }
+    const { getByTestId } = render(<WithDrawer />);
+    drag(getByTestId("drawer"), 10, 130);
+    expect(onBack).not.toHaveBeenCalled();
+    expect(getByTestId("screen").style.transform).toBe("");
+    drag(getByTestId("screen"), 10, 130);
+    expect(onBack).toHaveBeenCalledTimes(1);
+  });
+
+  it("goes back on a touch-event edge swipe and blocks the page scroll once horizontal", () => {
+    const onBack = vi.fn();
+    const { getByTestId } = render(<Screen enabled onBack={onBack} />);
+    const screen = getByTestId("screen");
+    const touch = (type: string, x: number) => {
+      const point = { identifier: 7, clientX: x, clientY: 200, target: screen } as unknown as Touch;
+      const event = new Event(type, { bubbles: true, cancelable: true }) as TouchEvent;
+      Object.defineProperty(event, "touches", { value: type === "touchend" ? [] : [point] });
+      Object.defineProperty(event, "changedTouches", { value: [point] });
+      return event;
+    };
+    screen.dispatchEvent(touch("touchstart", 10));
+    let blocked = false;
+    for (let x = 30; x <= 130; x += 20) {
+      const move = touch("touchmove", x);
+      screen.dispatchEvent(move);
+      blocked ||= move.defaultPrevented;
+    }
+    screen.dispatchEvent(touch("touchend", 130));
+    expect(blocked).toBe(true);
+    expect(onBack).toHaveBeenCalledTimes(1);
+  });
+
 });

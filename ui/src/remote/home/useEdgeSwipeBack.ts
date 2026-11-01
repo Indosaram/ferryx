@@ -62,6 +62,11 @@ function now(): number {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
 }
 
+/** An open drawer or sheet owns its own gestures; a swipe that starts inside it is not a back. */
+function insideModal(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest('[aria-modal="true"]') !== null;
+}
+
 function reducedMotion(): boolean {
   return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
@@ -172,6 +177,7 @@ function installEdgeSwipe(element: HTMLElement, back: () => void): () => void {
     if (drag) return;
     if (event.pointerType === "touch" && touchEventsOwnTouch) return;
     if (event.button !== 0) return;
+    if (insideModal(event.target)) return;
     if (!begin(event.clientX, event.clientY)) return;
     pointerId = event.pointerId;
     window.addEventListener("pointermove", onPointerMove);
@@ -195,6 +201,7 @@ function installEdgeSwipe(element: HTMLElement, back: () => void): () => void {
   };
   const onTouchStart = (event: TouchEvent) => {
     if (drag || event.touches.length !== 1) return;
+    if (insideModal(event.target)) return;
     const touch = event.changedTouches[0];
     if (!touch || !begin(touch.clientX, touch.clientY)) return;
     touchId = touch.identifier;

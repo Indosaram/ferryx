@@ -225,6 +225,10 @@ body {
 
 :where(button, a, [role="button"], [role="tab"], [role="menuitem"], summary, label) {
   touch-action: manipulation;
+}
+
+/* Links keep the iOS long-press preview and Copy Link. */
+:where(button, [role="button"], [role="tab"], [role="menuitem"], summary, label) {
   -webkit-touch-callout: none;
 }
 
