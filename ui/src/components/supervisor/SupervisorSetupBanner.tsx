@@ -67,7 +67,7 @@ export function SupervisorSetupBanner({
 }: SupervisorSetupBannerProps) {
   const touch = surface === "phone";
   const dismissed = useDismissedKinds();
-  const [importMemory, setImportMemory] = useState(true);
+  const [importMemory, setImportMemory] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [expanded, setExpanded] = useState(false);

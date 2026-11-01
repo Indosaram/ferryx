@@ -149,7 +149,7 @@ describe("SupervisorHome", () => {
       renderHome({ machines: [needsSetup()], setupActions });
       expect(setupActions).toHaveBeenCalledWith("m1");
       await act(async () => fireEvent.click(screen.getByRole("button", { name: "Finish setup" })));
-      expect(run).toHaveBeenCalledWith({ importMemory: true, projects: [] });
+      expect(run).toHaveBeenCalledWith({ importMemory: false, projects: [] });
     });
 
     it("shows a view-only device the text only", () => {

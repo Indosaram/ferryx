@@ -851,11 +851,12 @@ describe("WelcomeWizard", () => {
       expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Let the supervisor run your work");
       expect(screen.getByTestId("onboarding-supervisor-label").textContent).toBe("Turn on the supervisor");
       const memory = screen.getByLabelText("Learn from my recent Claude, Codex and Ferryx sessions (only what I typed)");
-      expect((memory as HTMLInputElement).checked).toBe(true);
+      expect((memory as HTMLInputElement).checked).toBe(false);
       const boxes = screen.getAllByTestId("onboarding-supervisor-project") as HTMLInputElement[];
       expect(boxes.map((box) => box.checked)).toEqual([true, true]);
       expect(screen.getByTestId("onboarding-next").textContent).toBe("Skip");
 
+      fireEvent.click(memory);
       fireEvent.click(boxes[1]!);
       await act(async () => {
         fireEvent.click(screen.getByTestId("onboarding-supervisor-run"));
