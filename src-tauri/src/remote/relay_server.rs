@@ -2251,11 +2251,11 @@ async fn bridge_browser_socket(
             Ok(Ok(connected)) => connected,
             Ok(Err(error)) => {
                 close_browser(&mut browser, axum::extract::ws::close_code::ERROR, "host disconnected").await;
-                return Err(error.into());
+                return Err(anyhow::Error::from(error));
             }
             Err(error) => {
                 close_browser(&mut browser, axum::extract::ws::close_code::ERROR, "host disconnected").await;
-                return Err(error.into());
+                return Err(anyhow::Error::from(error));
             }
         };
         loop {
@@ -2305,7 +2305,7 @@ async fn bridge_browser_socket(
                         }
                         Some(Err(error)) => {
                             close_browser(&mut browser, axum::extract::ws::close_code::ERROR, "host disconnected").await;
-                            return Err(error.into());
+                            return Err(anyhow::Error::from(error));
                         }
                     };
                     let frame = match frame {
@@ -5507,7 +5507,7 @@ mod tests {
                 assert!(state.inner.pending_sessions.lock().is_empty());
             }
             let mut waiting = Vec::new();
-            for _ in 0..MAX_PENDING_SESSIONS {
+            for _ in 0..MAX_PENDING_SESSIONS_PER_MACHINE {
                 let mut request = Box::pin(state.open_session_channel("load", Some(generation)));
                 tokio::select! {
                     result = &mut request => panic!("unexpected completion: {:?}", result.err()),
@@ -5521,7 +5521,7 @@ mod tests {
             state.unregister_control_channel("load", generation);
             server.abort();
             assert!(server.await.unwrap_err().is_cancelled());
-            println!("R4 admission: 60 issued data-channel requests bypass exhausted guess budget; invalid guesses/429; 100 waiting requests/503; cancellation registry=0");
+            println!("R4 admission: 60 issued data-channel requests bypass exhausted guess budget; invalid guesses/429; per-machine waiting cap/503; cancellation registry=0");
         })
         }));
         drop(runtime);
@@ -6706,15 +6706,14 @@ mod tests {
             answer_token_authority(&mut control, &base, "refused-device", StatusCode::UNAUTHORIZED);
         let (status, ()) = tokio::join!(request, authority);
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        // The same bearer is refused from the negative cache: no session notice reaches the
-        // machine. The barrier proves the control loop would have forwarded one by now.
+        // The same bearer is refused from the negative cache. A probe would open a session the
+        // test never answers, so the request would time out instead of returning 401.
         for _ in 0..3 {
             assert_eq!(
                 ticket_status(&base, "authority-machine", "refused-device").await,
                 StatusCode::UNAUTHORIZED
             );
         }
-        control_barrier(&mut control).await;
         assert!(state.inner.pending_sessions.lock().is_empty());
         // Every refusal counted toward the per-IP lockout (1 probed + 3 cached = 4); the
         // fifth locks the address and the sixth is refused before any probe.
@@ -8916,12 +8915,18 @@ mod tests {
     }
 
     async fn receive_json<T: serde::de::DeserializeOwned>(socket: &mut TestSocket) -> T {
-        let frame = timeout(Duration::from_secs(5), socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        serde_json::from_str(frame.to_text().unwrap()).unwrap()
+        loop {
+            let frame = timeout(Duration::from_secs(5), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            // Keepalive replies (tungstenite's automatic Pong plus the relay's own) carry no JSON.
+            if matches!(frame, TMessage::Ping(_) | TMessage::Pong(_)) {
+                continue;
+            }
+            return serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        }
     }
 
     async fn authenticate(
@@ -9245,14 +9250,14 @@ mod tests {
         let (mut daemon, auth) = authenticate(&base, &identity(46, "silent_machine"), false, false).await;
         assert!(auth.success);
         control_barrier(&mut daemon).await;
-        assert!(state.inner.control_channels.lock().contains_key("silent_machine"));
+        // The socket task owns the grant receiver; it is dropped only after the task has
+        // unregistered, so the sender closing is the signal that the registration is gone.
+        let grant = state.inner.grant_channels.lock()["silent_machine"].clone();
         // Paused time auto-advances to the idle deadline once the relay waits on it.
         tokio::time::pause();
-        assert_close(daemon.next().await, 1001, "control channel idle");
+        assert_close(&mut daemon, 1001, "control channel idle").await;
         tokio::time::resume();
-        // The relay drops the socket only after unregistering it, so the stream's end is the
-        // signal that the registration is gone.
-        while let Some(Ok(_)) = timeout(Duration::from_secs(5), daemon.next()).await.unwrap() {}
+        timeout(Duration::from_secs(5), grant.closed()).await.unwrap();
         assert!(!state.inner.control_channels.lock().contains_key("silent_machine"));
         server.abort();
     }
@@ -9442,13 +9447,20 @@ mod tests {
     /// either side are proxied through to the other - i.e. the relay's
     /// reverse-tunnel multiplexing bridges the two independently-opened
     /// WebSocket connections into one bidirectional pipe.
-    fn assert_close(frame: Option<Result<TMessage, tokio_tungstenite::tungstenite::Error>>, code: u16, reason: &str) {
-        match frame {
-            Some(Ok(TMessage::Close(Some(close)))) => {
-                assert_eq!(u16::from(close.code), code);
-                assert_eq!(close.reason.as_str(), reason);
+    /// Reads past keepalive frames to the next frame and asserts it is the expected close.
+    /// No timeout of its own: callers on paused time rely on auto-advance to reach the relay's
+    /// deadline, and a real-time caller wraps the call in one.
+    async fn assert_close(socket: &mut TestSocket, code: u16, reason: &str) {
+        loop {
+            match socket.next().await {
+                Some(Ok(TMessage::Ping(_) | TMessage::Pong(_))) => continue,
+                Some(Ok(TMessage::Close(Some(close)))) => {
+                    assert_eq!(u16::from(close.code), code);
+                    assert_eq!(close.reason.as_str(), reason);
+                    return;
+                }
+                other => panic!("expected close {code} {reason:?}, got {other:?}"),
             }
-            other => panic!("expected close {code} {reason:?}, got {other:?}"),
         }
     }
 
@@ -9465,7 +9477,7 @@ mod tests {
                 .unwrap();
         // Paused time auto-advances to the pairing deadline once every task is idle.
         tokio::time::pause();
-        assert_close(client.next().await, 1013, "machine did not connect");
+        assert_close(&mut client, 1013, "machine did not connect").await;
         server.abort();
     }
 
@@ -9488,7 +9500,7 @@ mod tests {
         client.send(TMessage::Text("ping".into())).await.unwrap();
         assert_eq!(data.next().await.unwrap().unwrap(), TMessage::Text("ping".into()));
         tokio::time::pause();
-        assert_close(client.next().await, 1001, "session lifetime exceeded");
+        assert_close(&mut client, 1001, "session lifetime exceeded").await;
         server.abort();
     }
 
@@ -9521,11 +9533,9 @@ mod tests {
         let upgrade = timeout(Duration::from_secs(5), data.next()).await.unwrap().unwrap().unwrap();
         assert!(upgrade.into_data().starts_with(b"GET /api/v1/events HTTP/1.1\r\n"));
         data.close(None).await.unwrap();
-        assert_close(
-            timeout(Duration::from_secs(5), browser.next()).await.unwrap(),
-            1011,
-            "host disconnected",
-        );
+        timeout(Duration::from_secs(5), assert_close(&mut browser, 1011, "host disconnected"))
+            .await
+            .unwrap();
         server.abort();
     }
 
