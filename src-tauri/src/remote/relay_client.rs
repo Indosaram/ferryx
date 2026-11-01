@@ -30,6 +30,39 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 type ControlSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
 const REGISTER_ACK_TIMEOUT: Duration = Duration::from_secs(5);
+/// Upper bound on one whole control connect: TCP, TLS, WebSocket upgrade and the signed
+/// challenge exchange. A blackholed primary must give way to `fallback_urls` quickly.
+const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Matches the relay's `TRANSFER_TIMEOUT`: a control write that cannot complete in this
+/// long means the relay stopped reading, and the session is treated as failed.
+const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often the control channel pings the relay.
+const CONTROL_PING_INTERVAL: Duration = Duration::from_secs(15);
+/// Three missed ping intervals with no inbound frame at all (pong, notice, ACK) means the
+/// socket is half-open; the session fails so status flips and the client reconnects.
+const CONTROL_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+/// Upper bound on a local opaque-session allocation, queueing included.
+const ALLOCATE_SESSION_TIMEOUT: Duration = Duration::from_secs(10);
+/// Upper bound on opening a data channel: the relay WebSocket connect, and separately the
+/// attach handshake a peer must finish before the local gateway is touched. The handshake
+/// bound covers the relay's 30s wait for the peer's half plus the handshake itself.
+const DATA_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const DATA_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Sends one control frame, bounded by [`CONTROL_WRITE_TIMEOUT`]. Expiry is an error so a
+/// relay that stops reading cannot stall every notice, ACK and attach reply behind it.
+async fn send_control<S>(write: &mut S, message: Message) -> anyhow::Result<()>
+where
+    S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    match tokio::time::timeout(CONTROL_WRITE_TIMEOUT, write.send(message)).await {
+        Ok(result) => result.map_err(anyhow::Error::from),
+        Err(_) => Err(anyhow::anyhow!(
+            "relay control write timed out after {}s",
+            CONTROL_WRITE_TIMEOUT.as_secs()
+        )),
+    }
+}
 
 pub struct RegisterPairingPinRequest {
     pub registration: RegisterPairingPin,
@@ -58,6 +91,27 @@ pub struct PairingCoordinator {
     register_tx: mpsc::Sender<RegisterPairingPinRequest>,
     machine_id: String,
     auth: AuthManager,
+    /// The owning relay client's connection state; `None` for a standalone coordinator.
+    relay_link: Option<RelayLink>,
+}
+
+/// What a coordinator needs to know about its relay client's control channel.
+#[derive(Clone)]
+struct RelayLink {
+    accepted: Arc<std::sync::atomic::AtomicBool>,
+    last_close_reason: Arc<parking_lot::Mutex<Option<String>>>,
+}
+
+impl RelayLink {
+    /// `Some` once a control attempt has ended and no session is accepted now. Before the
+    /// first attempt finishes, a registration still waits for it: callers that start the
+    /// client and pair at once use the registration ACK as their readiness barrier.
+    fn offline_reason(&self) -> Option<String> {
+        if self.accepted.load(std::sync::atomic::Ordering::Acquire) {
+            return None;
+        }
+        self.last_close_reason.lock().clone()
+    }
 }
 
 impl PairingCoordinator {
@@ -73,6 +127,7 @@ impl PairingCoordinator {
             register_tx,
             machine_id: machine_id.into(),
             auth: AuthManager::with_persistence(canonical_auth_path()),
+            relay_link: None,
         }
     }
 
@@ -94,6 +149,7 @@ impl PairingCoordinator {
             register_tx,
             machine_id: machine_id.into(),
             auth,
+            relay_link: None,
         }
     }
 
@@ -101,7 +157,28 @@ impl PairingCoordinator {
         *self.state.read()
     }
 
+    /// Changes state and, for a terminal target, retires the active capabilities.
+    ///
+    /// For synchronous callers: the auth-store write runs inline, though never under a
+    /// coordinator lock. Async paths in this module use [`Self::transition_and_retire`],
+    /// which moves that write onto the blocking pool.
     pub fn transition(&self, target: PairingState) -> Result<(), String> {
+        for token in self.transition_locked(target)? {
+            self.auth.cancel_pairing_capability(&token);
+        }
+        Ok(())
+    }
+
+    async fn transition_and_retire(&self, target: PairingState) -> Result<(), String> {
+        let retired = self.transition_locked(target)?;
+        self.retire_capabilities(retired).await;
+        Ok(())
+    }
+
+    /// Applies the state change under the state lock and hands back the capabilities a
+    /// terminal target retires. No I/O happens here: the caller cancels them after every
+    /// guard is released.
+    fn transition_locked(&self, target: PairingState) -> Result<Vec<String>, String> {
         let mut state = self.state.write();
         if !state.can_transition_to(&target) {
             return Err(format!(
@@ -109,18 +186,34 @@ impl PairingCoordinator {
             ));
         }
         *state = target;
+        let mut retired = Vec::new();
         if matches!(
             target,
             PairingState::Consumed | PairingState::Expired | PairingState::Cancelled
         ) {
-            if let Some(pin) = self.active_pin.write().take() {
-                self.auth.cancel_pairing_capability(&pin);
-            }
-            if let Some(token) = self.active_token.write().take() {
-                self.auth.cancel_pairing_capability(&token);
-            }
+            retired.extend(self.active_pin.write().take());
+            retired.extend(self.active_token.write().take());
         }
-        Ok(())
+        Ok(retired)
+    }
+
+    /// Cancels retired capabilities in the auth store, which takes a file lock and writes
+    /// to disk, so it runs on the blocking pool.
+    async fn retire_capabilities(&self, tokens: Vec<String>) {
+        if tokens.is_empty() {
+            return;
+        }
+        let auth = self.auth.clone();
+        let cancelled = crate::ipc::run_blocking(move || {
+            for token in &tokens {
+                auth.cancel_pairing_capability(token);
+            }
+            Ok(())
+        })
+        .await;
+        if let Err(error) = cancelled {
+            tracing::warn!("Retiring pairing capabilities failed: {error}");
+        }
     }
 
     /// `timeout` is the PIN lifetime; registration itself has a five-second deadline.
@@ -154,6 +247,9 @@ impl PairingCoordinator {
         {
             return Err("Machine access requires Control permission".into());
         }
+        if let Some(reason) = self.relay_link.as_ref().and_then(RelayLink::offline_reason) {
+            return Err(format!("Relay not connected ({reason})"));
+        }
         // Gateway (phone mirror) pairing codes are typed into the paired browser
         // within seconds of being shown, so they stay at sixty seconds.
         // Machine-scope pairing codes are redeemed from another machine's settings
@@ -172,21 +268,25 @@ impl PairingCoordinator {
             .duration_since(UNIX_EPOCH)
             .map_err(|e| e.to_string())?
             .as_secs();
-        let (generation, pin, pairing_token) = {
+        let (generation, pin, pairing_token, retired) = {
             let mut generation = self.generation_id.write();
             // An owner request replaces the previous offer, including after a
             // redemption that does not send a control-channel state transition.
             // Retire both local capabilities before publishing the next generation.
-            match self.state() {
+            let retired = match self.state() {
                 PairingState::Ready | PairingState::Claimed | PairingState::Cancelled => {
-                    self.transition(PairingState::Expired)?;
+                    self.transition_locked(PairingState::Expired)?
+                }
+                // A second request while one is registering is a user double-click, not
+                // an internal state error.
+                PairingState::Registering => {
+                    return Err("A pairing request is already in progress".into());
                 }
                 PairingState::Created
-                | PairingState::Registering
                 | PairingState::Consumed
-                | PairingState::Expired => {}
-            }
-            self.transition(PairingState::Registering)?;
+                | PairingState::Expired => Vec::new(),
+            };
+            self.transition_locked(PairingState::Registering)?;
             *generation = generation
                 .checked_add(1)
                 .ok_or("Pairing generation exhausted")?;
@@ -194,14 +294,40 @@ impl PairingCoordinator {
             let pairing_token = format!("{:032x}", rand::rngs::OsRng.gen::<u128>());
             *self.active_pin.write() = Some(pin.clone());
             *self.active_token.write() = Some(pairing_token.clone());
-            self.auth
-                .register_scoped_pairing_capability(&pairing_token, permission, scope)
-                .map_err(|error| error.to_string())?;
-            self.auth
-                .register_scoped_pairing_capability(&pin, permission, scope)
-                .map_err(|error| error.to_string())?;
-            (*generation, pin, pairing_token)
+            (*generation, pin, pairing_token, retired)
         };
+        // The auth store takes a file lock and writes to disk: do it on the blocking pool,
+        // with no coordinator lock held, retiring the previous offer before the new one.
+        let auth = self.auth.clone();
+        let (new_pin, new_token) = (pin.clone(), pairing_token.clone());
+        let registered = crate::ipc::run_blocking(move || {
+            for token in &retired {
+                auth.cancel_pairing_capability(token);
+            }
+            Ok(auth
+                .register_scoped_pairing_capability(&new_token, permission, scope)
+                .and_then(|()| auth.register_scoped_pairing_capability(&new_pin, permission, scope))
+                .map_err(|error| error.to_string()))
+        })
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|registered| registered);
+        if let Err(error) = registered {
+            // Do not leave the coordinator wedged in Registering with half-issued codes.
+            if let Err(cancel) = self.transition_and_retire(PairingState::Cancelled).await {
+                tracing::debug!("Pairing cancel after a failed registration ignored: {cancel}");
+            }
+            return Err(error);
+        }
+        // The codes were written without holding the coordinator locks. If this offer was
+        // cancelled meanwhile, its retirement may have run first: retire them again so a
+        // cancelled offer never stays redeemable.
+        let superseded = *self.generation_id.read() != generation
+            || self.state() != PairingState::Registering;
+        if superseded {
+            self.retire_capabilities(vec![pin, pairing_token]).await;
+            return Err("Pairing registration superseded".into());
+        }
         let registration = RegisterPairingPin {
             generation: Some(generation),
             pin: pin.clone(),
@@ -231,22 +357,23 @@ impl PairingCoordinator {
             Ok(())
         })
         .await;
-        let current_generation = self.generation_id.read();
-        if *current_generation != generation {
-            return Err("Pairing registration superseded".into());
-        }
+        let retired = {
+            let current_generation = self.generation_id.read();
+            if *current_generation != generation {
+                return Err("Pairing registration superseded".into());
+            }
+            self.transition_locked(match result {
+                Ok(Ok(())) => PairingState::Ready,
+                Ok(Err(_)) => PairingState::Cancelled,
+                Err(_) => PairingState::Expired,
+            })?
+        };
+        self.retire_capabilities(retired).await;
         match result {
-            Ok(Ok(())) => self.transition(PairingState::Ready)?,
-            Ok(Err(error)) => {
-                self.transition(PairingState::Cancelled)?;
-                return Err(error);
-            }
-            Err(_) => {
-                self.transition(PairingState::Expired)?;
-                return Err("Timed out waiting for relay registration ACK".into());
-            }
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Err("Timed out waiting for relay registration ACK".into()),
         }
-        drop(current_generation);
         let coordinator = self.clone();
         tokio::spawn(async move {
             let deadline = UNIX_EPOCH + Duration::from_secs(expires_at);
@@ -256,7 +383,7 @@ impl PairingCoordinator {
                     .unwrap_or_default(),
             )
             .await;
-            coordinator.expire_generation(generation);
+            coordinator.expire_generation(generation).await;
         });
         Ok(PairingSessionInfo {
             pin,
@@ -266,13 +393,21 @@ impl PairingCoordinator {
         })
     }
 
-    fn expire_generation(&self, generation: u64) {
-        let current = self.generation_id.read();
-        if *current == generation {
-            if let Err(error) = self.transition(PairingState::Expired) {
-                tracing::debug!("Pairing expiry ignored: {error}");
+    async fn expire_generation(&self, generation: u64) {
+        let retired = {
+            let current = self.generation_id.read();
+            if *current != generation {
+                return;
             }
-        }
+            match self.transition_locked(PairingState::Expired) {
+                Ok(retired) => retired,
+                Err(error) => {
+                    tracing::debug!("Pairing expiry ignored: {error}");
+                    return;
+                }
+            }
+        };
+        self.retire_capabilities(retired).await;
     }
 }
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -291,6 +426,41 @@ const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 
 /// Ceiling on the reconnect backoff delay.
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// A control session must stay up this long before it counts as healthy and resets the
+/// backoff. A relay that accepts and then drops at once must not cause a reconnect storm.
+const HEALTHY_SESSION_UPTIME: Duration = Duration::from_secs(30);
+
+/// The relay's close reason when an owner's remote access is suspended.
+const REMOTE_SUSPENDED: &str = "REMOTE_SUSPENDED";
+
+/// A rejection that retrying soon cannot fix: the account is suspended or the relay refused
+/// this machine's credentials. The client keeps retrying, but at [`MAX_BACKOFF`].
+fn is_terminal_rejection(reason: &str) -> bool {
+    reason.contains(REMOTE_SUSPENDED) || reason.contains("Relay authentication rejected")
+}
+
+/// Text recorded for status when a control session fails.
+fn describe_control_failure(err: &anyhow::Error) -> String {
+    if let Some(tokio_tungstenite::tungstenite::Error::Http(response)) =
+        err.downcast_ref::<tokio_tungstenite::tungstenite::Error>()
+    {
+        let status = response.status();
+        if status == tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED
+            || status == tokio_tungstenite::tungstenite::http::StatusCode::FORBIDDEN
+        {
+            return format!("Relay authentication rejected: machine token refused (HTTP {status})");
+        }
+    }
+    format!("{err:#}")
+}
+
+/// A random delay in `[backoff / 2, backoff]`, so daemons dropped by one relay restart do not
+/// reconnect in lockstep and trip the relay's admission limit together.
+fn jittered(backoff: Duration, rng: &mut impl Rng) -> Duration {
+    let half = backoff / 2;
+    half + Duration::from_nanos(rng.gen_range(0..=(backoff - half).as_nanos() as u64))
+}
 
 /// Notification pushed down the control channel when a client asks to open
 /// a new session against this daemon. Mirrors
@@ -334,6 +504,9 @@ pub struct RelayClient {
     /// True only while a control session has passed authentication and has not dropped.
     /// Shared across clones so status reads the client the gateway published, not a copy.
     control_accepted: Arc<std::sync::atomic::AtomicBool>,
+    /// Why the last control session ended or was refused (the relay's close reason, or the
+    /// authentication rejection text). Cleared once a session is accepted again.
+    last_close_reason: Arc<parking_lot::Mutex<Option<String>>>,
 }
 
 /// Holds `control_accepted` for one live control session and clears it on every exit.
@@ -395,7 +568,9 @@ impl RelayClient {
             attach_tx,
             attach_rx: Arc::new(Mutex::new(attach_rx)),
             control_accepted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_close_reason: Arc::new(parking_lot::Mutex::new(None)),
         }
+        .link_pairing()
     }
 
     pub fn with_machine_id(mut self, machine_id: impl Into<String>) -> Self {
@@ -445,7 +620,19 @@ impl RelayClient {
             attach_tx,
             attach_rx: Arc::new(Mutex::new(attach_rx)),
             control_accepted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_close_reason: Arc::new(parking_lot::Mutex::new(None)),
         }
+        .link_pairing()
+    }
+
+    /// Lets the pairing coordinator see this client's control channel, so pairing while
+    /// the relay is offline fails at once with the reason instead of a vague timeout.
+    fn link_pairing(mut self) -> Self {
+        self.pairing.relay_link = Some(RelayLink {
+            accepted: Arc::clone(&self.control_accepted),
+            last_close_reason: Arc::clone(&self.last_close_reason),
+        });
+        self
     }
 
     /// Supplies the private relay's enrollment credential for key-based authentication.
@@ -525,13 +712,36 @@ impl RelayClient {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Why the relay last closed or refused the control channel, e.g. `REMOTE_SUSPENDED` or
+    /// `Relay authentication rejected: ...`. `None` while a session is accepted or before
+    /// the first attempt ends, so status can tell "suspended" or "bad credentials" apart
+    /// from a plain network drop.
+    pub fn last_control_close_reason(&self) -> Option<String> {
+        self.last_close_reason.lock().clone()
+    }
+
+    fn record_close_reason(&self, reason: Option<String>) {
+        *self.last_close_reason.lock() = reason;
+    }
+
     #[cfg(test)]
     pub(crate) fn test_admit_control_channel(&self) -> ControlChannelAdmission {
         ControlChannelAdmission::admit(&self.control_accepted)
     }
 
     pub async fn connect_control(&self) -> anyhow::Result<ControlSocket> {
-        let mut request = self.control_url().into_client_request()?;
+        match tokio::time::timeout(CONTROL_CONNECT_TIMEOUT, self.connect_control_unbounded()).await
+        {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!(
+                "relay control connect timed out after {}s",
+                CONTROL_CONNECT_TIMEOUT.as_secs()
+            )),
+        }
+    }
+
+    async fn connect_control_unbounded(&self) -> anyhow::Result<ControlSocket> {
+        let mut request = self.control_url()?.into_client_request()?;
         if self.identity.is_none() {
             request.headers_mut().insert(
                 AUTHORIZATION,
@@ -585,21 +795,21 @@ impl RelayClient {
         Ok(socket)
     }
 
-    fn control_url(&self) -> String {
-        let relay_url = self.active_relay_url();
-        format!(
+    /// A URL that fails relay validation is never dialed: falling back to the raw string
+    /// would reach a plaintext relay the security policy just refused.
+    fn control_url(&self) -> Result<String, RelayUrlSecurityError> {
+        Ok(format!(
             "{}/tunnel/control",
-            to_ws_base(relay_url).unwrap_or_else(|_| relay_url.to_string())
-        )
+            to_ws_base(self.active_relay_url())?
+        ))
     }
 
-    fn data_url(&self, session_id: &str) -> String {
-        let relay_url = self.active_relay_url();
-        format!(
+    fn data_url(&self, session_id: &str) -> Result<String, RelayUrlSecurityError> {
+        Ok(format!(
             "{}/tunnel/data/{}",
-            to_ws_base(relay_url).unwrap_or_else(|_| relay_url.to_string()),
+            to_ws_base(self.active_relay_url())?,
             session_id
-        )
+        ))
     }
 
     /// Runs the reverse tunnel client forever: connects the control
@@ -609,30 +819,57 @@ impl RelayClient {
     pub async fn run(&self) {
         let mut backoff = INITIAL_BACKOFF;
         loop {
-            match self.run_control_session().await {
-                Ok(()) => {
-                    // Clean shutdown (control socket closed normally).
-                    // Still reconnect - the daemon is expected to stay
-                    // tunneled for as long as it runs - but reset backoff
-                    // since the prior session was healthy.
-                    tracing::info!("relay control channel closed; reconnecting");
-                    backoff = INITIAL_BACKOFF;
-                    // A healthy session ended: return to the primary so a failover is
-                    // temporary and the standby is only used while the primary is down.
-                    self.active_endpoint
-                        .store(0, std::sync::atomic::Ordering::Release);
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        "relay control channel error: {err}; retrying in {:.1}s",
-                        backoff.as_secs_f64()
-                    );
-                    self.advance_endpoint();
-                }
+            let started = tokio::time::Instant::now();
+            let result = self.run_control_session().await;
+            backoff = self.backoff_after_session(started.elapsed(), backoff);
+            match result {
+                // Still reconnect - the daemon is expected to stay tunneled for as long
+                // as it runs.
+                Ok(()) => tracing::info!(
+                    "relay control channel closed; reconnecting in {:.1}s",
+                    backoff.as_secs_f64()
+                ),
+                Err(err) => tracing::warn!(
+                    "relay control channel error: {err}; retrying in {:.1}s",
+                    backoff.as_secs_f64()
+                ),
             }
 
-            tokio::time::sleep(backoff).await;
+            // Computed in its own statement: the thread-local rng is !Send and must not be
+            // held across the await.
+            let delay = jittered(backoff, &mut rand::thread_rng());
+            tokio::time::sleep(delay).await;
             backoff = std::cmp::min(backoff * 2, MAX_BACKOFF);
+        }
+    }
+
+    /// [`Self::next_backoff`], except that a terminal rejection (suspension, refused
+    /// credentials) always waits the longest: hammering the relay cannot fix it.
+    fn backoff_after_session(&self, uptime: Duration, backoff: Duration) -> Duration {
+        let next = self.next_backoff(uptime, backoff);
+        let terminal = self
+            .last_control_close_reason()
+            .is_some_and(|reason| is_terminal_rejection(&reason));
+        if terminal {
+            tracing::warn!("relay refused this machine; backing off for {}s", MAX_BACKOFF.as_secs());
+            MAX_BACKOFF
+        } else {
+            next
+        }
+    }
+
+    /// Picks the delay before the next connect from how long the last session stayed up.
+    /// Only a session that lasted [`HEALTHY_SESSION_UPTIME`] resets the backoff and returns
+    /// to the primary (a failover is temporary); a session that dropped at once, cleanly or
+    /// not, keeps backing off and moves to the next endpoint.
+    fn next_backoff(&self, uptime: Duration, backoff: Duration) -> Duration {
+        if uptime >= HEALTHY_SESSION_UPTIME {
+            self.active_endpoint
+                .store(0, std::sync::atomic::Ordering::Release);
+            INITIAL_BACKOFF
+        } else {
+            self.advance_endpoint();
+            backoff
         }
     }
 
@@ -644,23 +881,45 @@ impl RelayClient {
     /// returns its id. The relay mints the id; the daemon only carries the request and the
     /// answer, so the client learns the id from the machine it is attaching to.
     pub async fn allocate_opaque_session(&self) -> anyhow::Result<String> {
-        let (ack, wait) = oneshot::channel::<Result<String, String>>();
-        self.attach_tx
-            .send(AttachSessionRequest { opaque: true, ack })
-            .await
-            .map_err(|_| anyhow::anyhow!("relay control channel is not running"))?;
-        match tokio::time::timeout(Duration::from_secs(10), wait).await {
-            Ok(Ok(Ok(session_id))) => Ok(session_id),
-            Ok(Ok(Err(error))) => Err(anyhow::anyhow!(error)),
-            Ok(Err(_)) => Err(anyhow::anyhow!("relay control channel dropped the request")),
-            Err(_) => Err(anyhow::anyhow!("relay did not allocate a session in time")),
+        if !self.control_channel_accepted() {
+            anyhow::bail!("relay not connected");
         }
+        let (ack, wait) = oneshot::channel::<Result<String, String>>();
+        // One deadline covers queueing behind another allocation and the relay's answer:
+        // the request channel holds one entry and its receiver is never dropped, so an
+        // unbounded send could wait forever behind a stuck request.
+        let allocation = async {
+            self.attach_tx
+                .send(AttachSessionRequest { opaque: true, ack })
+                .await
+                .map_err(|_| anyhow::anyhow!("relay control channel is not running"))?;
+            match wait.await {
+                Ok(Ok(session_id)) => Ok(session_id),
+                Ok(Err(error)) => Err(anyhow::anyhow!(error)),
+                Err(_) => Err(anyhow::anyhow!("relay control channel dropped the request")),
+            }
+        };
+        tokio::time::timeout(ALLOCATE_SESSION_TIMEOUT, allocation)
+            .await
+            .map_err(|_| anyhow::anyhow!("relay did not allocate a session in time"))?
     }
 
     async fn run_control_session(&self) -> anyhow::Result<()> {
-        let socket = self.connect_control().await?;
+        let result = match self.connect_control().await {
+            Ok(socket) => self.serve_control_session(socket).await,
+            Err(err) => Err(err),
+        };
+        if let Err(err) = &result {
+            self.record_close_reason(Some(describe_control_failure(err)));
+        }
+        result
+    }
+
+    /// Services an authenticated control socket until it closes or errors.
+    async fn serve_control_session(&self, socket: ControlSocket) -> anyhow::Result<()> {
         // Set only after authentication succeeds. Drop clears every exit, including a later reject.
         let _admitted = ControlChannelAdmission::admit(&self.control_accepted);
+        self.record_close_reason(None);
         let mut registrations = self.register_rx.lock().await;
         let mut attachments = self.attach_rx.lock().await;
         let mut pending: Option<RegisterPairingPinRequest> = None;
@@ -669,15 +928,21 @@ impl RelayClient {
         let (mut write, mut read) = socket.split();
         // Dropping the control future also aborts its data channels.
         let mut sessions = tokio::task::JoinSet::new();
-        let mut ping_interval = tokio::time::interval(Duration::from_secs(15));
+        let mut ping_interval = tokio::time::interval(CONTROL_PING_INTERVAL);
         ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_inbound = tokio::time::Instant::now();
 
         loop {
             let message = tokio::select! {
                 _ = ping_interval.tick() => {
-                    if let Err(err) = write.send(Message::Ping(Vec::new().into())).await {
-                        tracing::warn!("relay control ping failed: {err}");
-                        break;
+                    if last_inbound.elapsed() >= CONTROL_IDLE_TIMEOUT {
+                        return Err(anyhow::anyhow!(
+                            "relay control channel silent for {}s; treating it as dead",
+                            last_inbound.elapsed().as_secs()
+                        ));
+                    }
+                    if let Err(err) = send_control(&mut write, Message::Ping(Vec::new().into())).await {
+                        return Err(err.context("relay control ping failed"));
                     }
                     continue;
                 }
@@ -685,9 +950,8 @@ impl RelayClient {
                     if let Some(request) = request {
                         if request.ack.is_closed() { continue; }
                         let payload = serde_json::json!({"type": "AllocateSession", "opaque": request.opaque});
-                        if let Err(err) = write.send(Message::Text(payload.to_string().into())).await {
-                            tracing::warn!("relay attach allocation failed: {err}");
-                            break;
+                        if let Err(err) = send_control(&mut write, Message::Text(payload.to_string().into())).await {
+                            return Err(err.context("relay attach allocation failed"));
                         }
                         pending_attach = Some(request);
                     }
@@ -696,7 +960,7 @@ impl RelayClient {
                 registration = registrations.recv(), if pending.is_none() => {
                     if let Some(registration) = registration {
                         if registration.ack.is_closed() { continue; }
-                        write.send(Message::Text(serde_json::to_string(&registration.registration)?.into())).await?;
+                        send_control(&mut write, Message::Text(serde_json::to_string(&registration.registration)?.into())).await?;
                         pending = Some(registration);
                     }
                     continue;
@@ -705,7 +969,16 @@ impl RelayClient {
                     pending = None;
                     continue;
                 }
-                message = read.next() => message,
+                // A caller that gave up must not keep the slot: the next opaque notice
+                // would be handed to its dead receiver instead of opening a data channel.
+                _ = async { pending_attach.as_mut().unwrap().ack.closed().await }, if pending_attach.is_some() => {
+                    pending_attach = None;
+                    continue;
+                }
+                message = read.next() => {
+                    last_inbound = tokio::time::Instant::now();
+                    message
+                }
                 result = sessions.join_next(), if !sessions.is_empty() => {
                     if let Some(Err(err)) = result {
                         tracing::warn!("relay data channel task failed: {err}");
@@ -765,16 +1038,26 @@ impl RelayClient {
                                 }
                             };
                             let encoded = serde_json::to_string(&ack)?;
-                            write.send(Message::Text(encoded.into())).await?;
+                            send_control(&mut write, Message::Text(encoded.into())).await?;
                         }
                         continue;
                     }
                     match serde_json::from_str::<SessionRequest>(&text) {
                         Ok(SessionRequest { session_id, opaque }) => {
+                            // The notice carries no request id, so an opaque notice for a
+                            // browser attach can arrive while a local allocation is pending
+                            // and be reported to that caller. The notice still means "open
+                            // the data half", so it is always honoured: whichever peer owns
+                            // the id finds the daemon's half waiting, and no session is
+                            // swallowed. Exact correlation needs a request id echoed by the
+                            // relay (AllocateSession -> IncomingSessionNotice).
                             if opaque {
                                 if let Some(request) = pending_attach.take() {
-                                    let _ = request.ack.send(Ok(session_id));
-                                    continue;
+                                    if request.ack.send(Ok(session_id.clone())).is_err() {
+                                        tracing::debug!(
+                                            "opaque session allocated after its caller gave up"
+                                        );
+                                    }
                                 }
                             }
                             let client = self.clone();
@@ -797,9 +1080,21 @@ impl RelayClient {
                     }
                 }
                 Some(Ok(Message::Ping(payload))) => {
-                    write.send(Message::Pong(payload)).await?;
+                    send_control(&mut write, Message::Pong(payload)).await?;
                 }
-                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(Message::Close(frame))) => {
+                    let reason = frame
+                        .map(|frame| frame.reason.to_string())
+                        .filter(|reason| !reason.is_empty())
+                        .unwrap_or_else(|| "relay closed the control channel".into());
+                    tracing::info!("relay closed the control channel: {reason}");
+                    self.record_close_reason(Some(reason));
+                    break;
+                }
+                None => {
+                    self.record_close_reason(Some("relay control connection ended".into()));
+                    break;
+                }
                 Some(Ok(_)) => {
                     // Binary/Pong/Frame - control channel has no other
                     // traffic; ignore.
@@ -815,10 +1110,13 @@ impl RelayClient {
     /// frames bidirectionally between it and the local loopback gateway
     /// until either side disconnects.
     async fn handle_session(&self, session_id: &str, opaque: bool) -> anyhow::Result<()> {
-        let (ws, _response) = tokio_tungstenite::connect_async(self.data_url(session_id)).await?;
-        let gateway = TcpStream::connect(&self.gateway_addr).await?;
+        let url = self.data_url(session_id)?;
+        let (ws, _response) =
+            tokio::time::timeout(DATA_CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url))
+                .await
+                .map_err(|_| anyhow::anyhow!("relay data channel connect timed out"))??;
         if !opaque {
-            return proxy_ws_to_tcp(ws, gateway).await;
+            return proxy_ws_to_tcp(ws, self.connect_gateway().await?).await;
         }
 
         let (attach, enrollment_record) = crate::ipc::run_blocking(|| {
@@ -830,37 +1128,65 @@ impl RelayClient {
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let attach = attach.map_err(|error| anyhow::anyhow!(error))?;
-        // The browser binds the account machine id into the prologue; a token-authenticated
-        // client has no identity here and must still bind the id it announced.
-        let machine_id = self.machine_id().to_owned();
         let enrollment_epoch = enrollment_record
             .map(|record| record.enrollment_epoch)
             .unwrap_or_default();
+        self.serve_opaque_session(ws, session_id, attach, enrollment_epoch)
+            .await
+    }
+
+    /// Runs the attach handshake on an opaque data channel and, once the peer is
+    /// authorized, proxies it to the local gateway.
+    async fn serve_opaque_session(
+        &self,
+        ws: ControlSocket,
+        session_id: &str,
+        attach: crate::remote::attach_identity::AttachIdentity,
+        enrollment_epoch: String,
+    ) -> anyhow::Result<()> {
+        // The browser binds the account machine id into the prologue; a token-authenticated
+        // client has no identity here and must still bind the id it announced.
+        let machine_id = self.machine_id().to_owned();
         let auth = self.pairing.auth.clone();
 
         let stream = crate::remote::attach_crypto::WebSocketByteStream::new(ws);
-        let transport = crate::remote::session_transport::establish_session(
-            stream,
-            true,
-            Some(&attach),
-            &machine_id,
-            session_id,
-            &enrollment_epoch,
-            move |key: &[u8; 32]| auth.authorizes_attach_key_bytes(key),
+        // A peer that never completes the handshake must not pin this task, and the local
+        // gateway is only reached once the peer is authorized.
+        let transport = tokio::time::timeout(
+            DATA_HANDSHAKE_TIMEOUT,
+            crate::remote::session_transport::establish_session(
+                stream,
+                true,
+                Some(&attach),
+                &machine_id,
+                session_id,
+                &enrollment_epoch,
+                move |key: &[u8; 32]| auth.authorizes_attach_key_bytes(key),
+            ),
         )
         .await
+        .map_err(|_| anyhow::anyhow!("attach handshake timed out"))?
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
         match transport {
             crate::remote::session_transport::SessionTransport::Attached(secure) => {
+                let gateway = self.connect_gateway().await?;
                 crate::remote::session_transport::proxy_secure_to_gateway(secure, gateway)
                     .await
                     .map_err(|error| anyhow::anyhow!(error.to_string()))
             }
             crate::remote::session_transport::SessionTransport::Plain(stream) => {
-                proxy_ws_to_tcp(stream.into_inner(), gateway).await
+                proxy_ws_to_tcp(stream.into_inner(), self.connect_gateway().await?).await
             }
         }
+    }
+
+    /// Opens the loopback gateway connection a data channel is proxied to. Nagle is off:
+    /// terminal echoes and other small frames must not wait on delayed ACKs.
+    async fn connect_gateway(&self) -> anyhow::Result<TcpStream> {
+        let gateway = TcpStream::connect(&self.gateway_addr).await?;
+        gateway.set_nodelay(true)?;
+        Ok(gateway)
     }
 }
 
@@ -1059,7 +1385,9 @@ pub fn live_relay_url(url: &str) -> std::borrow::Cow<'_, str> {
 
 /// Proxies frames bidirectionally between a relay data-channel WebSocket
 /// and a local TCP connection (the loopback gateway) until either side
-/// closes or errors.
+/// closes or errors. Once one direction ends, the other gets
+/// [`PROXY_DRAIN_TIMEOUT`] to flush what is in flight and is then dropped, so a
+/// dead side cannot keep the other connection (and this task) alive.
 async fn proxy_ws_to_tcp(
     ws: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -1069,7 +1397,7 @@ async fn proxy_ws_to_tcp(
     let (mut ws_tx, mut ws_rx) = ws.split();
     let (mut tcp_rx, mut tcp_tx) = tcp.into_split();
 
-    let ws_to_tcp = async {
+    let ws_to_tcp = std::pin::pin!(async {
         loop {
             match ws_rx.next().await {
                 Some(Ok(Message::Binary(data))) => {
@@ -1088,9 +1416,9 @@ async fn proxy_ws_to_tcp(
             }
         }
         let _ = tcp_tx.shutdown().await;
-    };
+    });
 
-    let tcp_to_ws = async {
+    let tcp_to_ws = std::pin::pin!(async {
         // 64 KiB matches the relay data channel's per-message cap (relay_server MAX_MESSAGE_SIZE).
         let mut buf = vec![0u8; 64 * 1024];
         loop {
@@ -1108,11 +1436,22 @@ async fn proxy_ws_to_tcp(
             }
         }
         let _ = ws_tx.send(Message::Close(None)).await;
-    };
+    });
 
-    tokio::join!(ws_to_tcp, tcp_to_ws);
+    match futures_util::future::select(ws_to_tcp, tcp_to_ws).await {
+        futures_util::future::Either::Left(((), remaining)) => {
+            let _ = tokio::time::timeout(PROXY_DRAIN_TIMEOUT, remaining).await;
+        }
+        futures_util::future::Either::Right(((), remaining)) => {
+            let _ = tokio::time::timeout(PROXY_DRAIN_TIMEOUT, remaining).await;
+        }
+    }
     Ok(())
 }
+
+/// How long the surviving direction of a data-channel proxy may keep flushing after the
+/// other direction ended.
+const PROXY_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(test)]
 mod tests {
@@ -1230,6 +1569,9 @@ mod tests {
             let client = client.clone();
             async move { client.run_control_session().await }
         });
+        // Allocation is refused outright while the relay is not connected; hold the flag
+        // so the request queues for the control loop instead of racing its admission.
+        let _connected = client.test_admit_control_channel();
         let id = tokio::time::timeout(Duration::from_secs(5), client.allocate_opaque_session())
             .await
             .expect("bounded allocation")
@@ -1237,6 +1579,163 @@ mod tests {
         assert_eq!(id, "opaque-1");
         control.abort();
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn allocation_fails_fast_while_the_relay_is_not_connected() {
+        let client = RelayClient::new("https://relay.example.com", "tok");
+        let error = client.allocate_opaque_session().await.unwrap_err();
+        assert_eq!(error.to_string(), "relay not connected");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn allocation_is_bounded_while_queued_behind_a_stuck_request() {
+        // No control loop drains the queue: the first request fills its single slot.
+        let client = RelayClient::new("https://relay.example.com", "tok");
+        let _connected = client.test_admit_control_channel();
+        let (stuck, _never_answered) = oneshot::channel();
+        client
+            .attach_tx
+            .send(AttachSessionRequest { opaque: true, ack: stuck })
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(ALLOCATE_SESSION_TIMEOUT * 3, client.allocate_opaque_session())
+            .await
+            .expect("a queued allocation must give up on its own")
+            .unwrap_err();
+        assert!(error.to_string().contains("in time"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_opaque_notice_after_the_caller_gave_up_still_opens_a_data_channel() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = RelayClient::new(format!("http://{}", listener.local_addr().unwrap()), "machine");
+        let (requested_tx, requested_rx) = oneshot::channel::<()>();
+        let (gave_up_tx, gave_up_rx) = oneshot::channel::<()>();
+        let (data_tx, data_rx) = oneshot::channel::<String>();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut control = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            loop {
+                if let Message::Text(text) = control.next().await.unwrap().unwrap() {
+                    let request: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    assert_eq!(request["type"], "AllocateSession");
+                    break;
+                }
+            }
+            requested_tx.send(()).unwrap();
+            gave_up_rx.await.unwrap();
+            // An opaque notice the abandoned caller can no longer receive (or a browser
+            // attach): the daemon must still open its data half.
+            control
+                .send(Message::Text(
+                    serde_json::json!({"session_id": "browser-1", "opaque": true})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            let (tcp, _) = listener.accept().await.unwrap();
+            // Read the upgrade request line and never answer it: the daemon's data half has
+            // been dialed, and it stops before loading any on-disk attach identity.
+            let mut request_line = String::new();
+            tokio::io::AsyncBufReadExt::read_line(
+                &mut tokio::io::BufReader::new(tcp),
+                &mut request_line,
+            )
+            .await
+            .unwrap();
+            let path = request_line.split_whitespace().nth(1).unwrap_or_default().to_owned();
+            data_tx.send(path).unwrap();
+            while let Some(message) = control.next().await {
+                if message.is_err() {
+                    break;
+                }
+            }
+        });
+        let control = tokio::spawn({
+            let client = client.clone();
+            async move { client.run_control_session().await }
+        });
+        let _connected = client.test_admit_control_channel();
+        let caller = tokio::spawn({
+            let client = client.clone();
+            async move { client.allocate_opaque_session().await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), requested_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        gave_up_tx.send(()).unwrap();
+        let path = tokio::time::timeout(Duration::from_secs(5), data_rx)
+            .await
+            .expect("the notice must open a data channel, not vanish into the dead request")
+            .unwrap();
+        assert_eq!(path, "/tunnel/data/browser-1");
+        control.abort();
+        server.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_relay_cannot_hold_the_control_connect_open() {
+        // The listener's backlog completes TCP, but nothing ever answers the upgrade.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = RelayClient::new(format!("http://{}", listener.local_addr().unwrap()), "tok");
+        let error = tokio::time::timeout(Duration::from_secs(60), client.connect_control())
+            .await
+            .expect("connect_control must give up on its own")
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error}");
+        drop(listener);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_control_write_the_relay_never_reads_fails_instead_of_hanging() {
+        // A sink that accepts the frame but never finishes flushing it, like a relay whose
+        // TCP window stays open while it stops reading.
+        let mut stalled = std::pin::pin!(futures_util::sink::unfold((), |(), _message: Message| {
+            futures_util::future::pending::<Result<(), tokio_tungstenite::tungstenite::Error>>()
+        }));
+        let error = tokio::time::timeout(
+            CONTROL_WRITE_TIMEOUT * 2,
+            send_control(&mut stalled, Message::Ping(Vec::new().into())),
+        )
+        .await
+        .expect("the write must give up on its own")
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_silent_relay_fails_the_control_session_and_clears_connected() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = RelayClient::new(format!("http://{}", listener.local_addr().unwrap()), "tok");
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            // Hold the socket without ever reading it: pings are never answered, like a
+            // half-open connection after a NAT drop.
+            let socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let _ = release_rx.await;
+            drop(socket);
+        });
+        let socket = client.connect_control().await.unwrap();
+        // Only the idle deadline is under test; the paused clock auto-advances while the
+        // runtime waits on a relay that never answers.
+        tokio::time::pause();
+        let error = tokio::time::timeout(
+            CONTROL_IDLE_TIMEOUT * 4,
+            client.serve_control_session(socket),
+        )
+        .await
+        .expect("a silent control channel must fail on its own")
+        .unwrap_err();
+        assert!(error.to_string().contains("silent"), "{error}");
+        assert!(!client.control_channel_accepted());
+        release_tx.send(()).ok();
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -1323,6 +1822,88 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn a_suspension_close_is_recorded_and_backs_off_to_the_maximum() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = RelayClient::new(format!("http://{}", listener.local_addr().unwrap()), "tok");
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            socket
+                .close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                    code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy,
+                    reason: REMOTE_SUSPENDED.into(),
+                }))
+                .await
+                .unwrap();
+            while socket.next().await.is_some() {}
+        });
+        tokio::time::timeout(Duration::from_secs(5), client.run_control_session())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            client.last_control_close_reason().as_deref(),
+            Some(REMOTE_SUSPENDED)
+        );
+        assert_eq!(
+            client.backoff_after_session(Duration::from_secs(1), INITIAL_BACKOFF),
+            MAX_BACKOFF
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_authentication_rejection_is_recorded_and_backs_off_to_the_maximum() {
+        let (client, server) = auth_fixture(false).await;
+        let error = tokio::time::timeout(Duration::from_secs(5), client.run_control_session())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("denied"), "{error}");
+        let reason = client.last_control_close_reason().unwrap();
+        assert!(reason.contains("Relay authentication rejected"), "{reason}");
+        assert!(reason.contains("denied"), "{reason}");
+        assert_eq!(
+            client.backoff_after_session(Duration::from_secs(1), INITIAL_BACKOFF),
+            MAX_BACKOFF
+        );
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn a_plain_network_drop_keeps_the_normal_backoff() {
+        let client = RelayClient::new("https://relay.example.com", "tok");
+        client.record_close_reason(Some("relay control connection ended".into()));
+        assert_eq!(
+            client.backoff_after_session(Duration::from_secs(1), INITIAL_BACKOFF),
+            INITIAL_BACKOFF
+        );
+    }
+
+    #[tokio::test]
+    async fn pairing_while_the_relay_is_offline_fails_at_once_with_the_reason() {
+        let client = RelayClient::new("https://relay.example.com", "tok");
+        let mut coordinator = client.pairing_coordinator();
+        coordinator.auth = AuthManager::with_persistence(None);
+        client.record_close_reason(Some("relay control connection ended".into()));
+        // No deadline wrapper is needed: an offline relay must not reach the 5s ACK wait.
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let error = coordinator
+            .generate_pairing(Duration::from_secs(60))
+            .await
+            .unwrap_err();
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert_eq!(error, "Relay not connected (relay control connection ended)");
+        // Nothing was issued or changed for a request that never reached the relay.
+        assert_eq!(coordinator.state(), PairingState::Created);
+
+        // Once a session is accepted again, pairing proceeds to the relay.
+        let _connected = client.test_admit_control_channel();
+        assert!(coordinator.relay_link.as_ref().unwrap().offline_reason().is_none());
+    }
+
     #[test]
     fn admitting_the_control_channel_is_what_status_reads() {
         let client = RelayClient::new("https://relay.example", "token");
@@ -1382,10 +1963,14 @@ mod tests {
         assert_eq!(registration.pairing_token.len(), 32);
         assert!(u128::from_str_radix(&registration.pairing_token, 16).is_ok());
         assert!(coordinator.transition(PairingState::Consumed).is_err());
-        assert!(coordinator
-            .generate_pairing(Duration::from_secs(60))
-            .await
-            .is_err());
+        assert_eq!(
+            coordinator
+                .generate_pairing(Duration::from_secs(60))
+                .await
+                .unwrap_err(),
+            "A pairing request is already in progress"
+        );
+        assert_eq!(coordinator.state(), PairingState::Registering);
         release_tx.send(()).unwrap();
         let session = tokio::time::timeout(Duration::from_secs(5), generation)
             .await
@@ -1447,17 +2032,85 @@ mod tests {
             }
             previous = Some(session);
             assert_eq!(*coordinator.generation_id.read(), generation);
-            coordinator.expire_generation(generation - 1);
+            coordinator.expire_generation(generation - 1).await;
             assert_eq!(coordinator.state(), PairingState::Ready);
             if generation % 2 == 0 {
                 coordinator.transition(PairingState::Claimed).unwrap();
                 coordinator.transition(PairingState::Consumed).unwrap();
             } else if generation == 3 {
-                coordinator.expire_generation(generation);
+                coordinator.expire_generation(generation).await;
                 assert_eq!(coordinator.state(), PairingState::Expired);
             }
         }
         responder.await.unwrap();
+    }
+
+    /// The auth store's transaction takes a cross-process file lock. While another process
+    /// holds it, pairing must wait on the blocking pool, not freeze the async runtime.
+    #[tokio::test]
+    async fn pairing_waits_for_the_auth_file_lock_off_the_async_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("remote-auth.json");
+        let (tx, mut rx) = mpsc::channel::<RegisterPairingPinRequest>(1);
+        let coordinator = PairingCoordinator::new_with_auth(
+            "machine",
+            tx,
+            AuthManager::with_persistence(Some(store.clone())),
+        );
+
+        // Another process holds the auth transaction lock until told to release it. The
+        // receive deadline only bounds a broken run, where the runtime thread is blocked
+        // and the release signal can never be sent.
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(store.with_extension("tx.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let released_on_request = release_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+            drop(lock);
+            released_on_request
+        });
+
+        let generator = coordinator.clone();
+        let generation =
+            tokio::spawn(async move { generator.generate_pairing(Duration::from_secs(60)).await });
+        // On this single-threaded runtime the loop only runs again if the pairing task
+        // parked instead of blocking the thread on the file lock.
+        while coordinator.state() != PairingState::Registering {
+            tokio::task::yield_now().await;
+        }
+        release_tx.send(()).ok();
+        let released_on_request = tokio::task::spawn_blocking(move || holder.join().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            released_on_request,
+            "the pairing task blocked the async runtime on the auth file lock"
+        );
+
+        let request = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        request
+            .ack
+            .send(Ok(RegisterPairingPinAck {
+                generation: request.registration.generation,
+                pin: request.registration.pin,
+                machine_id: request.registration.machine_id,
+                status: "ready".into(),
+            }))
+            .unwrap();
+        let session = generation.await.unwrap().unwrap();
+        assert!(coordinator
+            .auth
+            .exchange_pairing_code(&session.pin, "phone")
+            .is_ok());
     }
 
     #[tokio::test]
@@ -1604,12 +2257,33 @@ mod tests {
     fn control_and_data_urls_are_built_from_relay_url() {
         let client = RelayClient::new("https://relay.example.com", "tok");
         assert_eq!(
-            client.control_url(),
+            client.control_url().unwrap(),
             "wss://relay.example.com/tunnel/control"
         );
         assert_eq!(
-            client.data_url("abc123"),
+            client.data_url("abc123").unwrap(),
             "wss://relay.example.com/tunnel/data/abc123"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_relay_url_that_fails_validation_is_never_dialed() {
+        // A public plaintext relay is refused by policy; the raw URL must not be used instead.
+        let client = RelayClient::new("http://public.example.com", "tok");
+        assert!(matches!(
+            client.control_url(),
+            Err(RelayUrlSecurityError::InsecurePublicRelayForbidden { .. })
+        ));
+        assert!(matches!(
+            client.data_url("s1"),
+            Err(RelayUrlSecurityError::InsecurePublicRelayForbidden { .. })
+        ));
+        let error = client.connect_control().await.unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<RelayUrlSecurityError>()
+                .map(RelayUrlSecurityError::code),
+            Some("INSECURE_PUBLIC_RELAY_FORBIDDEN")
         );
     }
 
@@ -1625,15 +2299,48 @@ mod tests {
             *client.fallback_urls,
             vec!["https://standby.example.com".to_string()]
         );
-        assert_eq!(client.control_url(), "wss://relay.example.com/tunnel/control");
+        assert_eq!(client.control_url().unwrap(), "wss://relay.example.com/tunnel/control");
 
         client.advance_endpoint();
         assert_eq!(client.active_relay_url(), "https://standby.example.com");
-        assert_eq!(client.control_url(), "wss://standby.example.com/tunnel/control");
+        assert_eq!(client.control_url().unwrap(), "wss://standby.example.com/tunnel/control");
         // A clone (the per-session task) follows the same endpoint as the control channel.
-        assert_eq!(client.clone().data_url("s1"), "wss://standby.example.com/tunnel/data/s1");
+        assert_eq!(
+            client.clone().data_url("s1").unwrap(),
+            "wss://standby.example.com/tunnel/data/s1"
+        );
 
         client.advance_endpoint();
+        assert_eq!(client.active_relay_url(), "https://relay.example.com");
+    }
+
+    #[test]
+    fn reconnect_delays_are_jittered_within_half_to_full_backoff() {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let backoff = Duration::from_secs(8);
+        let delays: Vec<Duration> = (0..256).map(|_| jittered(backoff, &mut rng)).collect();
+        assert!(delays.iter().all(|d| *d >= backoff / 2 && *d <= backoff));
+        // Spread across the window, not pinned to the full backoff.
+        assert!(delays.iter().any(|d| *d < backoff * 3 / 4));
+        assert!(delays.iter().any(|d| *d > backoff * 3 / 4));
+    }
+
+    #[test]
+    fn only_a_session_that_stayed_up_resets_the_backoff() {
+        let client = RelayClient::new("https://relay.example.com", "tok")
+            .with_fallback_urls(["https://standby.example.com"]);
+        let grown = Duration::from_secs(8);
+
+        // Accepted and dropped at once: keep backing off and try the standby.
+        assert_eq!(client.next_backoff(Duration::from_secs(1), grown), grown);
+        assert_eq!(client.active_relay_url(), "https://standby.example.com");
+
+        // A session that stayed up was healthy: start over at the primary.
+        assert_eq!(
+            client.next_backoff(HEALTHY_SESSION_UPTIME, grown),
+            INITIAL_BACKOFF
+        );
         assert_eq!(client.active_relay_url(), "https://relay.example.com");
     }
 
@@ -1659,15 +2366,102 @@ mod tests {
             RelayClient::with_gateway("http://localhost:8787/", "machine", "127.0.0.1:54321");
         assert_eq!(client.gateway_addr, "127.0.0.1:54321");
         assert_eq!(client.machine_token, "machine");
-        assert_eq!(client.control_url(), "ws://localhost:8787/tunnel/control");
+        assert_eq!(client.control_url().unwrap(), "ws://localhost:8787/tunnel/control");
         assert_eq!(
-            client.data_url("session"),
+            client.data_url("session").unwrap(),
             "ws://localhost:8787/tunnel/data/session"
         );
         assert_eq!(
             RelayClient::new("http://localhost", "tok").gateway_addr,
             LOCAL_GATEWAY_ADDR
         );
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_never_handshakes_times_out_before_the_gateway_is_dialed() {
+        // A gateway address nothing listens on: dialing it before authorization would fail
+        // with a connect error instead of the handshake deadline.
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_addr = closed.local_addr().unwrap().to_string();
+        drop(closed);
+        let client = RelayClient::with_gateway("http://127.0.0.1:1", "tok", gateway_addr);
+
+        // A data channel whose peer accepts the WebSocket and then never speaks.
+        let relay = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let peer = tokio::spawn(async move {
+            let (tcp, _) = relay.accept().await.unwrap();
+            let socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let _ = release_rx.await;
+            drop(socket);
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{relay_addr}/tunnel/data/s"))
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let attach =
+            crate::remote::attach_identity::load_or_generate_attach_identity(dir.path()).unwrap();
+
+        tokio::time::pause();
+        let error = tokio::time::timeout(
+            DATA_HANDSHAKE_TIMEOUT * 4,
+            client.serve_opaque_session(ws, "s", attach, String::new()),
+        )
+        .await
+        .expect("a silent peer must not pin the data task")
+        .unwrap_err();
+        assert!(error.to_string().contains("handshake timed out"), "{error}");
+        release_tx.send(()).ok();
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_gateway_connection_disables_nagle() {
+        let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = RelayClient::with_gateway(
+            "http://127.0.0.1:1",
+            "tok",
+            gateway.local_addr().unwrap().to_string(),
+        );
+        let stream = client.connect_gateway().await.unwrap();
+        assert!(stream.nodelay().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_closed_relay_side_ends_the_proxy_even_if_the_gateway_stays_silent() {
+        // A streaming gateway response: the gateway keeps its connection open and quiet.
+        let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_addr = gateway.local_addr().unwrap();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let held = tokio::spawn(async move {
+            let (socket, _) = gateway.accept().await.unwrap();
+            let _ = release_rx.await;
+            drop(socket);
+        });
+        let relay = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (tcp, _) = relay.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            // The relay side goes away first.
+            socket.close(None).await.unwrap();
+            while socket.next().await.is_some() {}
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{relay_addr}/tunnel/data/s"))
+            .await
+            .unwrap();
+        let tcp = TcpStream::connect(gateway_addr).await.unwrap();
+
+        // Real time: the proxy ends on the relay's Close frame plus at most one drain
+        // window, and a paused clock could jump past the bound while that frame is in flight.
+        tokio::time::timeout(PROXY_DRAIN_TIMEOUT * 4, proxy_ws_to_tcp(ws, tcp))
+            .await
+            .expect("the proxy must end once the relay side closed")
+            .unwrap();
+        release_tx.send(()).ok();
+        held.await.unwrap();
+        peer.await.unwrap();
     }
 
     #[tokio::test]
