@@ -321,17 +321,18 @@ describe("MobileHostDrawer", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
-  it("renders both close buttons with aria-label 'Close computer switcher' and clicking the X closes the drawer", () => {
+  it("renders one named close button 'Close computer switcher' (the scrim is aria-hidden) and clicking the X closes the drawer", () => {
     const onOpenChange = vi.fn();
     render(<MobileHostDrawer open onOpenChange={onOpenChange} />);
 
-    const closeButtons = screen.getAllByLabelText("Close computer switcher");
-    expect(closeButtons).toHaveLength(2);
+    // The scrim is a pointer target only (aria-hidden), so the header X is the one named control.
+    const closeButtons = screen.getAllByRole("button", { name: "Close computer switcher" });
+    expect(closeButtons).toHaveLength(1);
+    expect(screen.getByTestId("mobile-host-drawer-backdrop")).toHaveAttribute("aria-hidden", "true");
 
-    // The X button inside the dialog header is the second close button (first is backdrop)
-    const xButton = closeButtons.find((btn) => btn.querySelector("svg"));
-    expect(xButton).toBeDefined();
-    fireEvent.click(xButton!);
+    const xButton = closeButtons[0];
+    expect(xButton.querySelector("svg")).not.toBeNull();
+    fireEvent.click(xButton);
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 });

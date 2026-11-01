@@ -316,7 +316,14 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
     };
   }, [messages]);
 
+  // Set by a pill press: its own smooth scroll already heads to the bottom, so the follow effect
+  // that the press re-runs (isAtBottom flips) must not cut that animation short with a jump.
+  const pillScrollRef = useRef(false);
   useEffect(() => {
+    if (pillScrollRef.current) {
+      pillScrollRef.current = false;
+      return;
+    }
     if (isAtBottom) {
       scrollToBottom(false);
     }
@@ -511,6 +518,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
                 type="button"
                 data-testid="scroll-to-latest-pill"
                 onClick={() => {
+                  pillScrollRef.current = !isAtBottom;
                   setIsAtBottom(true);
                   scrollToBottom(true);
                 }}

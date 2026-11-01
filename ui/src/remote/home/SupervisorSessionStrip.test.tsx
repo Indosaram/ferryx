@@ -27,7 +27,9 @@ describe("SupervisorSessionStrip", () => {
       />,
     );
     expect(screen.getByTestId("supervisor-session-strip")).toHaveAttribute("data-state", "acting");
-    expect(screen.getByTestId("supervisor-session-strip")).toHaveTextContent("“run the tests”");
+    // H-56: the typed text is shown as-is, with no decorative curly quotes around it.
+    expect(screen.getByText("run the tests")).toBeInTheDocument();
+    expect(screen.getByTestId("supervisor-session-strip").textContent).not.toMatch(/[“”]/);
     fireEvent.click(screen.getByTestId("supervisor-take-over"));
     expect(onFocusInput).not.toHaveBeenCalled();
     await act(async () => answer(ok));

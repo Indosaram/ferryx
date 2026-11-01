@@ -2066,8 +2066,8 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     expect(lateAnswerSockets.a).toBe(0);
     const lastTerminal = openedPaths.filter((path) => path.startsWith("/api/v1/terminal/")).at(-1);
     expect(lastTerminal?.startsWith(`/api/v1/terminal/${SID_X}`)).toBe(true);
-    const shown = document.querySelector<HTMLElement>(`[data-session-id="${SID_X}"][aria-current="true"]`);
-    const wrong = document.querySelector<HTMLElement>(`[data-session-id="${SID_A}"][aria-current="true"]`);
+    const shown = document.querySelector<HTMLElement>(`[data-session-id="${SID_X}"][role="tab"][aria-selected="true"]`);
+    const wrong = document.querySelector<HTMLElement>(`[data-session-id="${SID_A}"][role="tab"][aria-selected="true"]`);
     expect(wrong).toBeNull();
     if (shown === null && document.querySelector(`[data-session-id="${SID_X}"]`) !== null) {
       throw new Error("session X is rendered but no longer marked as the shown session");

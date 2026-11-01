@@ -384,7 +384,7 @@ describe("reference chat lane (task 12)", () => {
     const workspace = await screen.findByTestId("mobile-chat-workspace");
     expect(workspace).toBeTruthy();
     await waitFor(() => {
-      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/not available/i);
+      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/can't be shown on this phone/i);
     });
     expect(screen.queryByTestId("assistant-message-body")).not.toBeInTheDocument();
   });
@@ -1937,7 +1937,7 @@ describe("reference chat lane review fixes", () => {
       });
       await drainSettledResponses();
 
-      expect(screen.getByText(/Couldn't send that answer\./)).toBeInTheDocument();
+      expect(screen.getByText(/Couldn't send your answer\./)).toBeInTheDocument();
       expect(screen.queryByText("answer failed in gap")).not.toBeInTheDocument();
     } finally {
       remoteHostStore.reset();
@@ -2150,7 +2150,7 @@ describe("reference chat lane review fixes", () => {
     );
     render(<RemoteApp />);
     await waitFor(() => {
-      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/not available/i);
+      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/can't be shown on this phone/i);
     });
     fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "abc" } });
 
@@ -2196,7 +2196,7 @@ describe("reference chat lane review fixes", () => {
       fireEvent.click(screen.getByTestId("send-button"));
     });
     await waitFor(() => {
-      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/not delivered/);
+      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/can only view this session/);
     });
 
     await act(async () => {
@@ -2206,7 +2206,7 @@ describe("reference chat lane review fixes", () => {
       expect(submits).toBe(2);
     });
     await drainSettledResponses();
-    expect(screen.queryByTestId("chat-history-warning")?.textContent ?? "").not.toMatch(/not delivered/);
+    expect(screen.queryByTestId("chat-history-warning")?.textContent ?? "").not.toMatch(/can only view this session/);
   });
 
   it("ui-workspace-wiring-r2-2: a transient capabilities failure warns and retries instead of killing the lane", async () => {
@@ -2219,7 +2219,7 @@ describe("reference chat lane review fixes", () => {
     });
     render(<RemoteApp />);
     await waitFor(() => {
-      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/not available/i);
+      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/can't be shown on this phone/i);
     });
 
     await act(async () => {
@@ -2389,7 +2389,7 @@ describe("reference chat lane review fixes", () => {
     });
     await drainSettledResponses();
 
-    expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/not delivered/);
+    expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/can only view this session/);
     const box = screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement;
     expect(box.value).toContain("refactor the parser");
     expect(box.value).toContain("and");
@@ -2505,7 +2505,7 @@ describe("reference chat lane review fixes", () => {
       fireEvent.click(screen.getByTestId("send-button"));
     });
     await waitFor(() => {
-      expect(screen.getByTestId("chat-composer-warning")).toHaveTextContent(/not delivered/);
+      expect(screen.getByTestId("chat-composer-warning")).toHaveTextContent(/can only view this session/);
     });
 
     await switchToSecondTab();
@@ -2540,7 +2540,7 @@ describe("reference chat lane review fixes", () => {
     await drainSettledResponses();
 
     expect(screen.getByText("B0")).toBeInTheDocument();
-    expect(screen.queryByTestId("chat-history-warning")?.textContent ?? "").not.toMatch(/not available/);
+    expect(screen.queryByTestId("chat-history-warning")?.textContent ?? "").not.toMatch(/can't be shown on this phone/);
   });
 
   it.each([
@@ -2669,7 +2669,7 @@ describe("reference chat lane review fixes", () => {
     }
     const settled = changed ? null : whenState(() => result === "accepted"
       ? screen.queryByTestId("reference-prompt-card") === null
-      : screen.queryAllByText("R24 answer refused").length > 0);
+      : screen.queryAllByText(/Couldn't send your answer/).length > 0);
     completed = true;
     await act(async () => {
       answer.resolve(result === "accepted"
@@ -2683,11 +2683,14 @@ describe("reference chat lane review fixes", () => {
       else {
         expect(screen.getByTestId("reference-prompt-card")).toBe(card);
         expect(screen.getByTestId("reference-prompt-option-0")).toBeEnabled();
+        // the refusal is one plain sentence on the card; the host's message never shows
+        expect(screen.queryAllByText("R24 answer refused")).toHaveLength(0);
       }
       return;
     }
     expect(screen.getByTestId("reference-prompt-card")).toBe(card);
     expect(screen.getByTestId("reference-prompt-custom-input")).toHaveValue(customDraft);
+    expect(screen.queryAllByText(/Couldn't send your answer/)).toHaveLength(0);
     expect(screen.queryAllByText("R24 answer refused")).toHaveLength(0);
     const nextAnswer = calls.filter((call) => call.url.includes("/answer")).length;
     const nextDispatched = bounded(nextArrived.promise);
@@ -2732,7 +2735,7 @@ describe("reference chat lane review fixes", () => {
 
     expect(screen.getByText("Question B")).toBeInTheDocument();
     expect(screen.queryByText("pane A answer failed")).not.toBeInTheDocument();
-    expect(screen.queryByText(/Couldn't send that answer/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Couldn't send your answer/)).not.toBeInTheDocument();
   });
 
   it("ui-workspace-wiring-r11-1: an answer accepted after a pane switch keeps the new pane's typed answer waiting for Confirm", async () => {

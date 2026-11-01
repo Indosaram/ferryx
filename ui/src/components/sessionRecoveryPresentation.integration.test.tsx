@@ -494,7 +494,9 @@ describe("Session recovery presentation cross-flow integration matrix", () => {
       });
       const outcomeElem = screen.getByTestId("remote-terminal-outcome");
       expect(outcomeElem).toBeInTheDocument();
-      expect(outcomeElem).toHaveTextContent(blockedFrame.blockedReason);
+      // The host's free-form reason never reaches the phone; an unmapped reason reads as one plain sentence.
+      expect(outcomeElem).toHaveTextContent("This terminal is blocked on your computer.");
+      expect(outcomeElem).not.toHaveTextContent(blockedFrame.blockedReason);
       expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
 
       view.unmount();
@@ -541,7 +543,7 @@ describe("Session recovery presentation cross-flow integration matrix", () => {
 
       const outcomeElem = screen.getByTestId("remote-terminal-outcome");
       expect(outcomeElem).toBeInTheDocument();
-      expect(outcomeElem).toHaveTextContent("Terminal exited (137)");
+      expect(outcomeElem).toHaveTextContent("This terminal has exited (code 137).");
 
       view.unmount();
       expect(sockets[0].close).toHaveBeenCalled();

@@ -205,7 +205,7 @@ const DELETE_FAILURES: Readonly<Record<string, AccountSessionError>> = {
   "account-delete-error-unknown": new AccountSessionError("INTERNAL", "unexpected failure", 500),
 };
 
-function pendingOption(model: RemoteWorkspaceModel, state: string): RemoteContextOption | null {
+function pendingOption(state: string): RemoteContextOption | null {
   if (state !== "home-worktrees-pending") return null;
   const section = sidebarParitySections("desktop")[0];
   const node = section?.model?.projects[0]?.worktrees[0];
@@ -259,7 +259,7 @@ export const PhoneHomeQaState: React.FC<{ state: string; model: RemoteWorkspaceM
             <RemoteWorkspaceMirror
               inline
               model={model}
-              pending={pendingOption(model, state)}
+              pending={pendingOption(state)}
               selectorOpen
               onSelectorOpenChange={() => undefined}
               onSelect={() => undefined}

@@ -185,6 +185,9 @@ function ticketed(inner: typeof fetch): typeof fetch {
     }
     const lane = chatLaneFixture(url);
     if (lane !== null) return lane;
+    // The browser view's session probe fires once the context is known; answered by URL (no
+    // browsers listed) so it never consumes a response a test queued for its own sequence.
+    if (url.includes("/api/v1/browser/sessions")) return jsonResponse([]);
     const sidebar = sidebarFixtureResponse(url);
     if (sidebar !== null) return sidebar;
     return inner(input, init);
@@ -389,7 +392,7 @@ describe("RemoteAttention Affordance", () => {
     }
   });
 
-  it("keeps the worktree list as the drawer default and opens the two-state inbox from its view tab", async () => {
+  it("keeps the phone drawer to worktrees only and opens the two-state inbox from the top bar", async () => {
     localStorage.setItem("ferryx_remote_token", "test-token");
     const stateWithAttention = {
       ...baseState,
@@ -397,10 +400,10 @@ describe("RemoteAttention Affordance", () => {
         ...baseState.activeContext,
         tabId: "tab-1",
         terminalTabs: [
-          { id: "tab-1", label: "Editor", activityState: "waiting" },
-          { id: "tab-2", label: "Fix login", activityState: "done", agentType: "codex" },
-          { id: "tab-3", label: "omo", activityState: "waiting", agentType: "omo" },
-          { id: "tab-4", label: "Build", activityState: "working" },
+          { id: "tab-1", label: "Editor", sessionId: "tab-1-session" },
+          { id: "tab-2", label: "Fix login", activityState: "done", agentType: "codex", sessionId: "tab-2-session" },
+          { id: "tab-3", label: "omo", activityState: "waiting", agentType: "omo", sessionId: "tab-3-session" },
+          { id: "tab-4", label: "Build", activityState: "working", sessionId: "tab-4-session" },
         ],
       },
     };
@@ -416,30 +419,31 @@ describe("RemoteAttention Affordance", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
     });
+    // The phone drawer is the worktree list only: the phone has one Inbox, reached from the top bar.
     const drawer = screen.getByRole("dialog", { name: "Workspace context" });
-
+    expect(within(drawer).queryByRole("tab", { name: "Worktrees" })).toBeNull();
+    expect(within(drawer).queryByRole("tab", { name: /^Inbox/ })).toBeNull();
     expect(within(drawer).queryAllByTestId("attention-row")).toHaveLength(0);
-    expect(within(drawer).getByRole("tab", { name: "Worktrees" })).toHaveAttribute("aria-selected", "true");
-    await act(async () => { fireEvent.click(within(drawer).getByRole("tab", { name: "Inbox (2)" })); });
-    expect(within(drawer).getByTestId("worktree-region")).not.toBeVisible();
+    await act(async () => {
+      fireEvent.click(within(drawer).getByRole("button", { name: "Close worktree list" }));
+    });
 
-    const inbox = drawer;
+    await act(async () => { fireEvent.click(screen.getByTestId("mobile-inbox-button")); });
+    const inbox = screen.getByRole("dialog", { name: "Inbox" });
+    // Only the waiting and finished panes are listed, waiting first.
     expect(within(inbox).getAllByTestId("attention-row").map((row) => row.dataset.attentionState)).toEqual(["needs-you", "done"]);
     expect(within(inbox).getByText("omo")).toBeInTheDocument();
     expect(within(inbox).getByTestId("attention-row-text")).toHaveTextContent("Fix login");
+    const before = fetchMock.mock.calls.length;
 
     await act(async () => { fireEvent.click(within(inbox).getAllByTestId("attention-row")[0]); });
 
+    // A mirrored pane opens on this phone only: the desktop's focus never moves.
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining("/api/v1/workspace/select"),
-        expect.objectContaining({
-          method: "POST",
-          body: JSON.stringify({ workspaceId: "ferryx-ui", worktreeSlug: "main", tabId: "tab-3" }),
-        }),
-      );
+      expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "tab-3-session");
     });
-    expect(screen.queryByRole("dialog", { name: "Workspace context" })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.slice(before).some(([input]) => String(input).includes("/api/v1/workspace/select"))).toBe(false);
+    expect(screen.queryByRole("dialog", { name: "Inbox" })).not.toBeInTheDocument();
   });
 
   it("offers no Dismiss on its own Inbox rows when no desktop publishes any", async () => {
@@ -450,9 +454,9 @@ describe("RemoteAttention Affordance", () => {
         ...baseState.activeContext,
         tabId: "tab-1",
         terminalTabs: [
-          { id: "tab-1", label: "Editor" },
-          { id: "tab-2", label: "Fix login", activityState: "done", agentType: "codex" },
-          { id: "tab-3", label: "omo", activityState: "waiting", agentType: "omo" },
+          { id: "tab-1", label: "Editor", sessionId: "tab-1-session" },
+          { id: "tab-2", label: "Fix login", activityState: "done", agentType: "codex", sessionId: "tab-2-session" },
+          { id: "tab-3", label: "omo", activityState: "waiting", agentType: "omo", sessionId: "tab-3-session" },
         ],
       },
     };
@@ -465,14 +469,11 @@ describe("RemoteAttention Affordance", () => {
     render(<RemoteApp />);
     await switchToTerminalMode();
     await screen.findByTestId("remote-terminal");
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
-    });
-    const drawer = screen.getByRole("dialog", { name: "Workspace context" });
-    await act(async () => { fireEvent.click(within(drawer).getByRole("tab", { name: "Inbox (2)" })); });
+    await act(async () => { fireEvent.click(screen.getByTestId("mobile-inbox-button")); });
+    const inbox = screen.getByRole("dialog", { name: "Inbox" });
 
-    expect(within(drawer).getAllByTestId("attention-row")).toHaveLength(2);
-    expect(within(drawer).queryAllByRole("button", { name: /^Dismiss/ })).toHaveLength(0);
+    expect(within(inbox).getAllByTestId("attention-row")).toHaveLength(2);
+    expect(within(inbox).queryAllByRole("button", { name: /^Dismiss/ })).toHaveLength(0);
   });
 
   it("renders attention affordance with accessible name when a background tab enters waiting state", async () => {

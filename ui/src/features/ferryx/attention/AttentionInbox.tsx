@@ -330,7 +330,7 @@ function AttentionInboxRow({
 }) {
   if (touch) return <TouchInboxRow row={row} now={now} onOpen={onOpen} {...(onDismiss ? { onDismiss } : {})} {...(prompts ? { prompts } : {})} />;
   const when = row.at !== undefined ? formatAttentionTime(row.at, now) : undefined;
-  const summary = [row.who, row.supervisorLabel ?? ATTENTION_STATE_LABEL[row.state], row.location, row.text].filter(Boolean).join(", ");
+  const summary = [row.who, row.supervisorLabel ?? ATTENTION_STATE_LABEL[row.state], row.location, row.text, row.unavailable].filter(Boolean).join(", ");
   return (
     <li>
       <div className="group relative">
@@ -373,6 +373,11 @@ function AttentionInboxRow({
             className="mt-1 line-clamp-2 min-w-0 break-words rounded border border-worktree-sidebar-border bg-black/20 px-1.5 py-0.5 font-mono text-[10.5px] leading-snug text-worktree-sidebar-foreground/85"
           >
             {row.text}
+          </span>
+        ) : null}
+        {row.unavailable ? (
+          <span data-testid="attention-row-unavailable" className="mt-1 min-w-0 break-words text-xs text-muted-foreground">
+            {row.unavailable}
           </span>
         ) : null}
       </button>

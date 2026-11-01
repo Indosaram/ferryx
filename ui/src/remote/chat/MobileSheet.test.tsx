@@ -86,7 +86,7 @@ describe("MobileSheet", () => {
     const dialog = screen.getByRole("dialog", { name: "Actions" });
     expect(dialog).toHaveAttribute("aria-modal", "true");
     expect(dialog).toHaveClass(
-      "rounded-t-[1.25rem]",
+      "rounded-t-2xl",
       "bg-chat-surface",
       "border-t",
       "border-chat-border",

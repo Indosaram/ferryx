@@ -62,11 +62,11 @@ describe("Windows Opera device suggestion", () => {
       vi.spyOn(navigator, "userAgent", "get").mockReturnValue(ua);
       vi.stubGlobal("fetch", fetchMock);
       render(createElement(PairingPage, { onPaired }));
-      const nameInput = screen.getByPlaceholderText("Device name");
+      const nameInput = screen.getByLabelText("Phone name");
       // Soft assertion lets RED still reach and assert the actual submitted field.
       expect.soft(nameInput).toHaveValue(`Windows - ${browser}`);
       if (edit !== undefined) fireEvent.change(nameInput, { target: { value: edit } });
-      fireEvent.change(screen.getByPlaceholderText("6-digit PIN"), { target: { value: "654321" } });
+      fireEvent.change(screen.getByLabelText("Pairing code"), { target: { value: "654321" } });
 
       // When: submit through the real form, then release the exact response.
       await act(async () => {
