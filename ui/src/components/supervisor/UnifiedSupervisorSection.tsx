@@ -318,21 +318,23 @@ function ConnectionBanner({ connection, hostLabel, error, touch }: { connection:
     <div
       data-testid="supervisor-connection"
       data-state={connection}
-      role={connection === "live" ? undefined : "alert"}
+      role={connection === "live" ? undefined : connection === "standby" ? "status" : "alert"}
       className={cn(
         "flex min-w-0 flex-col rounded-md px-2 py-1.5 leading-snug",
-        connection === "live" ? "bg-card text-muted-foreground" : "bg-destructive/10 text-foreground",
+        connection === "live" || connection === "standby" ? "bg-card text-muted-foreground" : "bg-destructive/10 text-foreground",
         touch ? "min-h-11 justify-center" : null,
       )}
     >
       <span>
         {connection === "live"
           ? `Supervisor on ${hostLabel}`
-          : connection === "unavailable"
-            ? `The supervisor on ${hostLabel} is unavailable. The last state it reported is shown; nothing can be sent.`
-            : `${hostLabel} is disconnected. The last state it reported is shown; nothing can be sent and no other supervisor is started.`}
+          : connection === "standby"
+            ? `Supervisor runs on ${hostLabel}. This computer is on standby.`
+            : connection === "unavailable"
+              ? `The supervisor on ${hostLabel} is unavailable. The last state it reported is shown; nothing can be sent.`
+              : `${hostLabel} is disconnected. The last state it reported is shown; nothing can be sent and no other supervisor is started.`}
       </span>
-      {connection !== "live" && error ? <span className="font-mono text-[0.9em] text-muted-foreground">{error.code}</span> : null}
+      {connection !== "live" && connection !== "standby" && error ? <span className="font-mono text-[0.9em] text-muted-foreground">{error.code}</span> : null}
     </div>
   );
 }

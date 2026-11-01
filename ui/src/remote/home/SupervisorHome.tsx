@@ -1,13 +1,16 @@
-// The phone's default home: what the hub supervisor on each computer drives, its pause, and
-// what it typed. Mirrors the desktop SupervisorPanelView, laid out as touch cards per machine.
-import { LoaderCircle, Power, RotateCw } from "lucide-react";
+// The phone's default home: the one account supervisor, what it drives on each computer, its
+// pause, and what it typed. Mirrors the desktop SupervisorPanelView, laid out as touch cards per
+// machine. A computer that does not hold the supervisor lease is on standby: it offers "Move
+// supervisor here", never a second supervisor.
+import { ArrowRightLeft, LoaderCircle, RotateCw } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { cn } from "../../lib/cn";
-import { actingSessionIds, type SupervisorLane } from "../../lib/supervisorModel";
+import { actingSessionIds, isStandbyRole, type SupervisorLane, type SupervisorSnapshot } from "../../lib/supervisorModel";
+import { forceMoveWarning, type SupervisorMoveResult } from "../../lib/unifiedSupervisor";
 import { UnifiedSupervisorSection } from "../../components/supervisor/UnifiedSupervisorSection";
-import type { HubStartResult, LanePauseResult } from "../remoteSupervisor";
+import type { AdoptArchivedResult, LanePauseResult } from "../remoteSupervisor";
 import { userFacingError } from "../userFacingError";
 import { PhoneHomeHeader } from "./PhoneHomeHeader";
 import type { UnifiedHostView } from "./usePhoneSupervisor";
@@ -30,10 +33,12 @@ export type SupervisorHomeProps = {
   readonly needsYou: ReadonlySet<string>;
   readonly onSetPaused: (machineId: string, laneKey: string, paused: boolean) => Promise<LanePauseResult>;
   readonly onOpenLane: (machineId: string, sessionId: string) => void;
-  /** Starts a stopped hub on that machine. Absent: the home only says where to start it. */
-  readonly onStartHub?: (machineId: string) => Promise<HubStartResult>;
-  /** The unified supervisor host(s), live or last seen. Absent: the lane view only. */
-  readonly unified?: readonly UnifiedHostView[];
+  /** Moves the account supervisor to a standby machine. Absent: standby machines offer no move. */
+  readonly onMoveHere?: (machineId: string, force: boolean) => Promise<SupervisorMoveResult>;
+  /** Adopts a standby machine's archived open goals. Absent: the list shows without the action. */
+  readonly onAdoptArchived?: (machineId: string, goalIds: readonly string[]) => Promise<AdoptArchivedResult>;
+  /** The one account supervisor host, live or last seen. Absent: the lane view only. */
+  readonly host?: UnifiedHostView | null;
   /** Account discovery has not answered yet: an empty machine list means "still looking". */
   readonly discovering?: boolean;
   /** Asks one computer for its supervisor again. Absent: unreadable computers offer no retry. */
@@ -48,6 +53,153 @@ const RECENT_COLLAPSED = 3;
 
 const SECONDARY_BUTTON =
   "flex h-11 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-chat-surface-raised px-3 text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover active:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50";
+
+const NOTE = "flex min-w-0 flex-col gap-2 rounded-xl bg-chat-surface px-3 py-2 text-sm leading-snug text-chat-foreground-secondary";
+
+/** The holder a standby machine names, or the account host the home already knows. */
+function holderName(snapshot: SupervisorSnapshot, host: UnifiedHostView | null): string {
+  return snapshot.hub.holderLabel || host?.label || snapshot.hub.holderMachineId || "another computer";
+}
+
+function clockTime(atMs: number): string {
+  const date = new Date(atMs);
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+/**
+ * A machine that does not hold the account supervisor lease: where the supervisor runs, the
+ * move (a forced one shows its data-loss window and needs a second confirm), what does not
+ * line up with the holder, and the open goals of its archived pre-lease supervisor.
+ */
+function StandbyNote({
+  machineId,
+  label,
+  snapshot,
+  host,
+  onMoveHere,
+  onAdoptArchived,
+}: {
+  machineId: string;
+  label: string;
+  snapshot: SupervisorSnapshot;
+  host: UnifiedHostView | null;
+  onMoveHere?: (machineId: string, force: boolean) => Promise<SupervisorMoveResult>;
+  onAdoptArchived?: (machineId: string, goalIds: readonly string[]) => Promise<AdoptArchivedResult>;
+}) {
+  const [moving, setMoving] = useState(false);
+  const [forceWarning, setForceWarning] = useState<string | null>(null);
+  const [adopting, setAdopting] = useState<ReadonlySet<string>>(() => new Set());
+  const holder = holderName(snapshot, host);
+  const { hub } = snapshot;
+
+  const move = async (force: boolean) => {
+    if (!onMoveHere || moving) return;
+    setMoving(true);
+    const result = await onMoveHere(machineId, force);
+    setMoving(false);
+    if (result.kind === "force-required") {
+      setForceWarning(forceMoveWarning(result, holder, clockTime));
+      return;
+    }
+    setForceWarning(null);
+    if (result.kind === "error") toast.error(userFacingError(result, { action: "move the supervisor" }));
+  };
+
+  const adopt = async (goalId: string) => {
+    if (!onAdoptArchived || adopting.has(goalId)) return;
+    setAdopting((prev) => new Set(prev).add(goalId));
+    const result = await onAdoptArchived(machineId, [goalId]);
+    setAdopting((prev) => {
+      const copy = new Set(prev);
+      copy.delete(goalId);
+      return copy;
+    });
+    if (result.kind === "error") toast.error(userFacingError(result, { action: "adopt the goal" }));
+  };
+
+  const adoptable = hub.adoptable ?? [];
+  const unmapped = hub.unmappedHosts ?? [];
+  return (
+    <div data-testid="supervisor-standby" data-machine-id={machineId} className={NOTE}>
+      <div className="flex min-w-0 items-center gap-2">
+        <span data-testid="supervisor-standby-text" className="min-w-0 flex-1 py-1">Standby - supervisor runs on {holder}</span>
+        {onMoveHere && hub.available && forceWarning === null ? (
+          <button
+            type="button"
+            data-testid="supervisor-move-here"
+            aria-label={`Move supervisor to ${label}`}
+            aria-busy={moving || undefined}
+            disabled={moving}
+            onClick={() => void move(false)}
+            className={SECONDARY_BUTTON}
+          >
+            {moving ? (
+              <LoaderCircle aria-hidden="true" className="size-4 animate-spin motion-reduce:animate-none" />
+            ) : (
+              <ArrowRightLeft aria-hidden="true" className="size-4" />
+            )}
+            {moving ? "Moving…" : "Move supervisor here"}
+          </button>
+        ) : null}
+      </div>
+      {forceWarning !== null ? (
+        <div data-testid="supervisor-move-force" role="alert" className="flex min-w-0 flex-col gap-2 rounded-lg bg-status-warning/15 px-2 py-2 text-chat-foreground">
+          <p data-testid="supervisor-move-force-warning">{forceWarning}</p>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              data-testid="supervisor-move-force-confirm"
+              aria-busy={moving || undefined}
+              disabled={moving}
+              onClick={() => void move(true)}
+              className={SECONDARY_BUTTON}
+            >
+              Move anyway
+            </button>
+            <button type="button" data-testid="supervisor-move-force-cancel" disabled={moving} onClick={() => setForceWarning(null)} className={SECONDARY_BUTTON}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {hub.holderPaired === false ? (
+        <p data-testid="supervisor-standby-unpaired">
+          {label} is not paired to {holder}, so its sessions are not supervised yet. Pair them from Ferryx on {label}.
+        </p>
+      ) : null}
+      {unmapped.length > 0 ? (
+        <p data-testid="supervisor-standby-unmapped">
+          Some goals name a computer {label} does not know ({unmapped.join(", ")}). They stay held until it is paired.
+        </p>
+      ) : null}
+      {adoptable.length > 0 ? (
+        <ul data-testid="supervisor-adoptable" className="flex flex-col gap-1">
+          {adoptable.map((goal) => (
+            <li key={goal.goalId} data-testid="supervisor-adoptable-goal" data-goal-id={goal.goalId} className="flex min-w-0 items-center gap-2">
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-chat-foreground">{goal.title}</span>
+                <span className="block truncate text-xs">Adoptable from {goal.fromMachine || label}</span>
+              </span>
+              {onAdoptArchived ? (
+                <button
+                  type="button"
+                  data-testid="supervisor-adopt-archived"
+                  aria-label={`Adopt ${goal.title}`}
+                  aria-busy={adopting.has(goal.goalId) || undefined}
+                  disabled={adopting.has(goal.goalId)}
+                  onClick={() => void adopt(goal.goalId)}
+                  className={SECONDARY_BUTTON}
+                >
+                  Adopt
+                </button>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
 
 function MachineStateNote({ machine, onRetry }: { machine: SupervisorMachineView; onRetry?: () => void }) {
   const text =
@@ -200,15 +352,15 @@ export function SupervisorHome({
   needsYou,
   onSetPaused,
   onOpenLane,
-  onStartHub,
-  unified = [],
+  onMoveHere,
+  onAdoptArchived,
+  host = null,
   discovering = false,
   onRetry,
   phoneHeader = false,
   headerAction,
 }: SupervisorHomeProps) {
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
-  const [starting, setStarting] = useState<ReadonlySet<string>>(() => new Set());
   const [recentExpanded, setRecentExpanded] = useState(false);
   // The lane's paused value the person asked for, shown until the next snapshot settles it.
   const [optimistic, setOptimistic] = useState<ReadonlyMap<string, boolean>>(() => new Map());
@@ -233,18 +385,6 @@ export function SupervisorHome({
   const shownRecent = recentExpanded ? recent : recent.slice(0, RECENT_COLLAPSED);
   const readable = machines.filter((machine) => machine.snapshot);
   const severalMachines = machines.length > 1;
-
-  const startHub = async (machineId: string) => {
-    if (!onStartHub || starting.has(machineId)) return;
-    setStarting((prev) => new Set(prev).add(machineId));
-    const result = await onStartHub(machineId);
-    setStarting((prev) => {
-      const copy = new Set(prev);
-      copy.delete(machineId);
-      return copy;
-    });
-    if (result.kind === "error") toast.error(userFacingError(result, { action: "start the supervisor" }));
-  };
 
   const togglePause = async (machineId: string, lane: SupervisorLane) => {
     const id = `${machineId}\u0000${lane.key}`;
@@ -284,9 +424,8 @@ export function SupervisorHome({
             </p>
           ) : null}
 
-          {unified.map((host) => (
+          {host ? (
             <UnifiedSupervisorSection
-              key={host.machineId}
               surface="phone"
               hostLabel={host.label}
               connection={host.connection}
@@ -294,7 +433,7 @@ export function SupervisorHome({
               view={host.view}
               client={host.client}
             />
-          ))}
+          ) : null}
 
           {machines.length === 0 ? (
             discovering ? (
@@ -312,36 +451,25 @@ export function SupervisorHome({
           {machines.map((machine) => {
             const snapshot = machine.snapshot;
             const acting = snapshot ? actingSessionIds(snapshot, now) : new Set<string>();
-            const hubOff = snapshot && (!snapshot.hub.available || (!snapshot.hub.running && snapshot.lanes.length === 0));
-            const isStarting = starting.has(machine.machineId);
+            const standby = snapshot !== null && isStandbyRole(snapshot.hub.role);
+            const hubOff = snapshot && !standby && (!snapshot.hub.available || (!snapshot.hub.running && snapshot.lanes.length === 0));
             return (
               <section key={machine.machineId} data-testid={`supervisor-machine-${machine.machineId}`} aria-label={machine.label} className="flex flex-col gap-2">
                 <h2 className="truncate px-1 text-sm font-semibold text-chat-foreground">{machine.label}</h2>
                 {snapshot ? null : <MachineStateNote machine={machine} {...(onRetry ? { onRetry: () => onRetry(machine.machineId) } : {})} />}
-                {hubOff ? (
+                {standby && snapshot ? (
+                  <StandbyNote
+                    machineId={machine.machineId}
+                    label={machine.label}
+                    snapshot={snapshot}
+                    host={host}
+                    {...(onMoveHere ? { onMoveHere } : {})}
+                    {...(onAdoptArchived ? { onAdoptArchived } : {})}
+                  />
+                ) : null}
+                {standby && snapshot?.lanes.length === 0 ? null : hubOff ? (
                   <div data-testid="supervisor-hub-off" className="flex min-w-0 items-center gap-2 rounded-xl bg-chat-surface px-3 py-2 text-sm leading-snug text-chat-foreground-secondary">
-                    {onStartHub && snapshot.hub.available ? (
-                      <>
-                        <span className="min-w-0 flex-1">The supervisor is stopped.</span>
-                        <button
-                          type="button"
-                          data-testid="supervisor-hub-start"
-                          aria-busy={isStarting || undefined}
-                          disabled={isStarting}
-                          onClick={() => void startHub(machine.machineId)}
-                          className={SECONDARY_BUTTON}
-                        >
-                          {isStarting ? (
-                            <LoaderCircle aria-hidden="true" className="size-4 animate-spin motion-reduce:animate-none" />
-                          ) : (
-                            <Power aria-hidden="true" className="size-4" />
-                          )}
-                          {isStarting ? "Starting…" : "Start"}
-                        </button>
-                      </>
-                    ) : (
-                      <span className="min-w-0 py-1">The supervisor isn't running. Start it from Ferryx on {machine.label}.</span>
-                    )}
+                    <span className="min-w-0 py-1">The supervisor isn't running. Start it from Ferryx on {machine.label}.</span>
                   </div>
                 ) : snapshot && snapshot.lanes.length === 0 ? (
                   <p className="rounded-xl bg-chat-surface px-3 py-3 text-sm leading-snug text-chat-foreground-secondary">

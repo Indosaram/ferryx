@@ -2,7 +2,9 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  adoptArchivedGoals,
   desktopUnifiedClient,
+  moveSupervisorHere,
   normalizeSnapshot,
   setSupervisorSnapshotForTest,
   SUPERVISOR_STOP_REASON_LABELS,
@@ -288,6 +290,81 @@ describe("SupervisorPanelView unified supervisor", () => {
     expect(adoptableLanes(snapshot, snapshot.supervisor ?? null)).toEqual([{ key: "ledger", title: "Ledger" }]);
     expect(desktopConnection(snapshot)).toBe("live");
     expect(desktopConnection({ ...snapshot, supervisor: null })).toBe("unavailable");
+    expect(desktopConnection({ ...snapshot, hub: { ...snapshot.hub, role: "standby", holderLabel: "Studio" } })).toBe("standby");
+  });
+});
+
+describe("SupervisorPanelView standby", () => {
+  const standby = (over: Partial<SupervisorSnapshot["hub"]> = {}): SupervisorSnapshot => ({
+    hub: { available: true, running: false, role: "standby", holderMachineId: "studio", holderLabel: "Studio", ...over },
+    lanes: [],
+    watched: [],
+    actions: [],
+  });
+
+  it("says where the supervisor runs and moves it here instead of starting one", async () => {
+    const moveHere = vi.fn(async () => ({ kind: "ok" as const, moved: true }));
+    render(<SupervisorPanelView snapshot={standby()} now={now} moveHere={moveHere} />);
+    expect(screen.getByTestId("supervisor-panel").dataset.supervisorState).toBe("standby");
+    expect(screen.getByTestId("supervisor-standby-text").textContent).toBe("Supervisor runs on Studio. This computer is on standby.");
+    expect(screen.queryByText(/ferryx hub start/)).toBeNull();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Move supervisor here" }));
+    });
+    expect(moveHere).toHaveBeenCalledWith(false);
+  });
+
+  it("offers no move where this computer has no hub", () => {
+    render(<SupervisorPanelView snapshot={standby({ available: false })} now={now} moveHere={vi.fn()} />);
+    expect(screen.getByTestId("supervisor-standby-text")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Move supervisor here" })).toBeNull();
+  });
+
+  it("asks again before a forced move, showing what will be lost", async () => {
+    const checkpointAt = new Date(2026, 9, 31, 9, 30).getTime();
+    const moveHere = vi.fn(async (force: boolean) =>
+      force ? { kind: "ok" as const, moved: true } : { kind: "force-required" as const, holderLabel: "Studio", checkpointAt, message: "" });
+    render(<SupervisorPanelView snapshot={standby()} now={now} moveHere={moveHere} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Move supervisor here" }));
+    });
+    expect(screen.getByTestId("supervisor-move-force-warning").textContent).toContain("Changes since 09:30 on Studio will be lost.");
+    expect(moveHere).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Move anyway" }));
+    });
+    expect(moveHere).toHaveBeenLastCalledWith(true);
+  });
+
+  it("lists archived goals with Adopt and the pairing and host-mapping notices", async () => {
+    const adoptArchived = vi.fn(async () => ({ kind: "ok" as const, value: {} }));
+    const snapshot = standby({
+      holderPaired: false,
+      unmappedHosts: ["host-9"],
+      adoptable: [{ goalId: "old-1", title: "Fix the flaky test", supervisorId: "s-old", fromMachine: "Laptop" }],
+    });
+    render(<SupervisorPanelView snapshot={snapshot} now={now} adoptArchived={adoptArchived} />);
+    expect(screen.getByTestId("supervisor-adoptable-goal").textContent).toContain("Adoptable from Laptop");
+    expect(screen.getByTestId("supervisor-standby-unpaired").textContent).toContain("not paired to Studio");
+    expect(screen.getByTestId("supervisor-standby-unmapped").textContent).toContain("host-9");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Adopt Fix the flaky test" }));
+    });
+    expect(adoptArchived).toHaveBeenCalledWith(["old-1"]);
+  });
+
+  it("moves and adopts through the typed IPC commands and keeps the force payload", async () => {
+    ipc.invoke.mockImplementation(async (command: string) => {
+      if (command === "cmd_supervisor_move_here") {
+        throw { code: "SUPERVISOR_FORCE_REQUIRED", message: "holder unreachable", details: { holderLabel: "Studio", checkpointAt: 1_790_000_000, status: 409 } };
+      }
+      if (command === "cmd_supervisor_adopt_archived") return { adopted: 1 };
+      return undefined;
+    });
+    await expect(moveSupervisorHere(false)).resolves.toEqual({ kind: "force-required", holderLabel: "Studio", checkpointAt: 1_790_000_000_000, message: "holder unreachable" });
+    expect(ipc.invoke).toHaveBeenCalledWith("cmd_supervisor_move_here", { force: false });
+    await expect(adoptArchivedGoals(["old-1"])).resolves.toEqual({ kind: "ok", value: { adopted: 1 } });
+    expect(ipc.invoke).toHaveBeenCalledWith("cmd_supervisor_adopt_archived", { goalIds: ["old-1"] });
   });
 });
 

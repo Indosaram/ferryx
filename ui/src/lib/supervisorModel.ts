@@ -127,7 +127,7 @@ export type SupervisorAction = {
 };
 
 export type SupervisorSnapshot = {
-  hub: { available: boolean; running: boolean; error?: string | null };
+  hub: SupervisorHubState;
   lanes: SupervisorLane[];
   watched: string[];
   /** Newest first. */
@@ -135,6 +135,63 @@ export type SupervisorSnapshot = {
   /** The unified supervisor (identity, engine health, projects, goals); null or absent for an older daemon or a closed hub. */
   supervisor?: UnifiedSupervisorView | null;
 };
+
+/** The account supervisor lease role this machine reports (`supervisor_snapshot` hub.role). */
+export type SupervisorLeaseRole = "holder" | "provisional" | "standby" | "unleased";
+
+/** An open goal of this machine's archived pre-lease supervisor the owner may adopt. */
+export type ArchivedGoal = { goalId: string; title: string; supervisorId: string; fromMachine: string };
+
+export type SupervisorHubState = {
+  available: boolean;
+  running: boolean;
+  error?: string | null;
+  /** Absent from an older daemon: it runs its own supervisor as before. */
+  role?: SupervisorLeaseRole | null;
+  holderMachineId?: string | null;
+  holderLabel?: string | null;
+  /** False when this standby holds no agent-control grant on the holder. */
+  holderPaired?: boolean | null;
+  /** Host ids an imported checkpoint names that this machine cannot map. */
+  unmappedHosts?: string[];
+  /** Open goals of this machine's archived supervisor, not adopted yet. */
+  adoptable?: ArchivedGoal[];
+};
+
+const LEASE_ROLES: ReadonlySet<string> = new Set(["holder", "provisional", "standby", "unleased"]);
+
+/** Standby or unleased: another computer runs the account supervisor; this one must not. */
+export function isStandbyRole(role: SupervisorLeaseRole | null | undefined): boolean {
+  return role === "standby" || role === "unleased";
+}
+
+function optionalText(value: unknown): string | null {
+  return typeof value === "string" && value ? value : null;
+}
+
+function normalizeHub(value: unknown): SupervisorHubState {
+  const raw = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const role = typeof raw.role === "string" && LEASE_ROLES.has(raw.role) ? (raw.role as SupervisorLeaseRole) : null;
+  const adoptable = Array.isArray(raw.adoptable)
+    ? raw.adoptable.flatMap((item): ArchivedGoal[] => {
+        const goal = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
+        const goalId = optionalText(goal.goalId);
+        if (!goalId) return [];
+        return [{ goalId, title: optionalText(goal.title) ?? goalId, supervisorId: optionalText(goal.supervisorId) ?? "", fromMachine: optionalText(goal.fromMachine) ?? "" }];
+      })
+    : [];
+  return {
+    available: Boolean(raw.available),
+    running: Boolean(raw.running),
+    error: typeof raw.error === "string" ? raw.error : null,
+    role,
+    holderMachineId: optionalText(raw.holderMachineId),
+    holderLabel: optionalText(raw.holderLabel),
+    holderPaired: typeof raw.holderPaired === "boolean" ? raw.holderPaired : null,
+    unmappedHosts: Array.isArray(raw.unmappedHosts) ? raw.unmappedHosts.filter((host): host is string => typeof host === "string" && host !== "") : [],
+    adoptable,
+  };
+}
 
 export type PaneSupervision =
   | { kind: "acting"; text: string | null; atMs: number; lane?: SupervisorLane }
@@ -213,11 +270,7 @@ export function normalizeSnapshot(value: unknown): SupervisorSnapshot {
   if (!value || typeof value !== "object") return EMPTY_SNAPSHOT;
   const raw = value as Partial<SupervisorSnapshot>;
   return {
-    hub: {
-      available: Boolean(raw.hub?.available),
-      running: Boolean(raw.hub?.running),
-      error: raw.hub?.error ?? null,
-    },
+    hub: normalizeHub(raw.hub),
     lanes: Array.isArray(raw.lanes)
       ? raw.lanes.map((lane) => ({ ...lane, lastReason: typeof lane?.lastReason === "string" ? lane.lastReason : null }))
       : [],

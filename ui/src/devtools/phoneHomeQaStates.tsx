@@ -244,7 +244,8 @@ export const PhoneHomeQaState: React.FC<{ state: string; model: RemoteWorkspaceM
           needsYou: new Set(["studio\u0000session-auth"]),
           onSetPaused: pauseOk,
           onOpenLane: () => undefined,
-          onStartHub: async () => ({ kind: "ok", started: true }),
+          onMoveHere: async () => ({ kind: "ok", moved: true }),
+          onAdoptArchived: async (_machineId, goalIds) => ({ kind: "ok", adopted: goalIds.length }),
           onRetry: () => undefined,
           discovering: state === "home-supervisor-loading",
         }}

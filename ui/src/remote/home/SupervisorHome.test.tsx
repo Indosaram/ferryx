@@ -1,11 +1,12 @@
 import { act, fireEvent, render, screen, within, cleanup } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { HubStartResult, LanePauseResult } from "../remoteSupervisor";
+import type { AdoptArchivedResult, LanePauseResult } from "../remoteSupervisor";
 import { fixtureAction, fixtureLane, fixtureMachine, fixtureSnapshot } from "./phoneHomeFixtures";
 import { SupervisorHome, type SupervisorHomeProps } from "./SupervisorHome";
-import { unifiedHosts } from "./usePhoneSupervisor";
-import { normalizeUnified } from "../../lib/unifiedSupervisor";
+import { accountHost, newHostMemory } from "./usePhoneSupervisor";
+import { normalizeUnified, type SupervisorMoveResult } from "../../lib/unifiedSupervisor";
+import type { SupervisorHubState } from "../../lib/supervisorModel";
 
 const NOW = 5_000_000;
 
@@ -138,24 +139,16 @@ describe("SupervisorHome", () => {
     expect(screen.getByTestId("supervisor-home")).toHaveAttribute("data-headline", "off");
   });
 
-  it("starts a stopped hub from the phone and disables the button until the machine answers", async () => {
-    let answer!: (result: HubStartResult) => void;
-    const onStartHub = vi.fn(() => new Promise<HubStartResult>((resolve) => { answer = resolve; }));
-    renderHome({ onStartHub, machines: [fixtureMachine({ machineId: "m1", label: "Studio", snapshot: fixtureSnapshot({ hub: { available: true, running: false } }) })] });
-    const button = screen.getByTestId("supervisor-hub-start");
-    fireEvent.click(button);
-    expect(onStartHub).toHaveBeenCalledWith("m1");
-    expect(button).toBeDisabled();
-    expect(button).toHaveTextContent("Starting…");
-    fireEvent.click(button);
-    expect(onStartHub).toHaveBeenCalledTimes(1);
-    await act(async () => answer({ kind: "ok", started: true }));
-    expect(button).toBeEnabled();
+  it("never offers to start a second supervisor on a stopped hub", () => {
+    renderHome({ onMoveHere: vi.fn(), machines: [fixtureMachine({ machineId: "m1", label: "Studio", snapshot: fixtureSnapshot({ hub: { available: true, running: false } }) })] });
+    expect(screen.queryByRole("button", { name: /start/i })).toBeNull();
+    expect(screen.queryByTestId("supervisor-move-here")).toBeNull();
+    expect(screen.getByTestId("supervisor-hub-off")).toHaveTextContent("Start it from Ferryx on Studio.");
   });
 
   it("offers no start button where this machine has no hub at all", () => {
-    renderHome({ onStartHub: vi.fn(), machines: [fixtureMachine({ machineId: "m1", label: "Studio", snapshot: fixtureSnapshot({ hub: { available: false, running: false } }) })] });
-    expect(screen.queryByTestId("supervisor-hub-start")).toBeNull();
+    renderHome({ onMoveHere: vi.fn(), machines: [fixtureMachine({ machineId: "m1", label: "Studio", snapshot: fixtureSnapshot({ hub: { available: false, running: false } }) })] });
+    expect(screen.queryByRole("button", { name: /start/i })).toBeNull();
     expect(screen.getByTestId("supervisor-hub-off")).toHaveTextContent("Start it from Ferryx on Studio.");
   });
 
@@ -199,7 +192,7 @@ describe("SupervisorHome unified supervisor", () => {
     };
     renderHome({
       machines: [fixtureMachine({ machineId: "studio", snapshot: fixtureSnapshot({ supervisor: live }) })],
-      unified: [{ machineId: "studio", label: "Studio", connection: "live", error: null, view: live, client }],
+      host: { machineId: "studio", label: "Studio", connection: "live", error: null, view: live, client },
     });
     await act(async () => {
       await client.conversation.mock.results[0]?.value;
@@ -214,30 +207,123 @@ describe("SupervisorHome unified supervisor", () => {
   });
 
   it("keeps a disconnected host's last goals, says so, and substitutes no other supervisor", () => {
-    const lastSeen = new Map();
+    const memory = newHostMemory();
     const clientFor = vi.fn(() => null);
     const liveMachines = [
       fixtureMachine({ machineId: "studio", label: "Studio", snapshot: fixtureSnapshot({ supervisor: live }) }),
       fixtureMachine({ machineId: "laptop", label: "Laptop", snapshot: fixtureSnapshot() }),
     ];
-    expect(unifiedHosts(liveMachines, lastSeen, clientFor).map((host) => [host.machineId, host.connection])).toEqual([["studio", "live"]]);
+    expect(accountHost(liveMachines, memory, clientFor)).toMatchObject({ machineId: "studio", connection: "live" });
     const gone = [
       fixtureMachine({ machineId: "studio", label: "Studio", state: "offline", snapshot: null, error: { code: "OFFLINE", message: "tunnel closed" } }),
       fixtureMachine({ machineId: "laptop", label: "Laptop", snapshot: fixtureSnapshot() }),
     ];
-    const hosts = unifiedHosts(gone, lastSeen, clientFor);
-    expect(hosts).toHaveLength(1);
-    expect(hosts[0]).toMatchObject({ machineId: "studio", connection: "disconnected", client: null, error: { code: "OFFLINE" } });
-    expect(hosts[0]!.view.goals[0]!.goalId).toBe("g-1");
+    const host = accountHost(gone, memory, clientFor);
+    expect(host).toMatchObject({ machineId: "studio", connection: "disconnected", client: null, error: { code: "OFFLINE" } });
+    expect(host!.view.goals[0]!.goalId).toBe("g-1");
     // A hub that closed on a reachable machine is unavailable, not disconnected.
     const closed = [fixtureMachine({ machineId: "studio", label: "Studio", snapshot: fixtureSnapshot({ supervisor: null }) })];
-    expect(unifiedHosts(closed, lastSeen, clientFor)[0]).toMatchObject({ connection: "unavailable", client: null, error: { code: "SUPERVISOR_UNAVAILABLE" } });
+    expect(accountHost(closed, memory, clientFor)).toMatchObject({ connection: "unavailable", client: null, error: { code: "SUPERVISOR_UNAVAILABLE" } });
 
-    renderHome({ machines: gone, unified: hosts });
+    renderHome({ machines: gone, host });
     const banner = screen.getByTestId("supervisor-connection");
     expect(banner.dataset.state).toBe("disconnected");
     expect(banner).toHaveTextContent("Studio is disconnected");
     expect(screen.getByTestId("supervisor-goal-id")).toHaveTextContent("g-1");
     expect(screen.getByTestId("supervisor-pause")).toBeDisabled();
+  });
+
+  it("picks the lease holder as the one account supervisor, not a standby's own hub", () => {
+    const memory = newHostMemory();
+    const archived = normalizeUnified({ ...unifiedWire, identity: { supervisorId: "s-old", ownerPrincipal: "desktop:qa-owner" } })!;
+    const machines = [
+      fixtureMachine({ machineId: "laptop", label: "Laptop", snapshot: fixtureSnapshot({ hub: { available: true, running: false, role: "standby", holderMachineId: "studio", holderLabel: "Studio" }, supervisor: archived }) }),
+      fixtureMachine({ machineId: "studio", label: "Studio", snapshot: fixtureSnapshot({ hub: { available: true, running: true, role: "holder" }, supervisor: live }) }),
+    ];
+    const host = accountHost(machines, memory, () => null);
+    expect(host).toMatchObject({ machineId: "studio", label: "Studio", connection: "live" });
+    expect(host!.view.identity?.supervisorId).toBe("s-1");
+    // The holder drops off: the last known holder stays, disconnected; the standby never replaces it.
+    const gone = [machines[0]!, fixtureMachine({ machineId: "studio", label: "Studio", state: "offline", snapshot: null })];
+    expect(accountHost(gone, memory, () => null)).toMatchObject({ machineId: "studio", connection: "disconnected" });
+  });
+
+  it("follows the holder a SUPERVISOR_STANDBY refusal named", () => {
+    const memory = newHostMemory();
+    const machines = [
+      fixtureMachine({ machineId: "laptop", snapshot: fixtureSnapshot({ hub: { available: true, running: true, role: "holder" }, supervisor: live }) }),
+      fixtureMachine({ machineId: "studio", label: "Studio", snapshot: fixtureSnapshot({ hub: { available: true, running: true }, supervisor: live }) }),
+    ];
+    expect(accountHost(machines, memory, () => null)?.machineId).toBe("laptop");
+    // Neither snapshot reports a role yet (laptop's is stale) but a refusal named Studio.
+    const stale = [
+      fixtureMachine({ machineId: "laptop", snapshot: fixtureSnapshot({ hub: { available: true, running: true }, supervisor: live }) }),
+      machines[1]!,
+    ];
+    expect(accountHost(stale, newHostMemory(), () => null)?.machineId).toBe("laptop");
+    expect(accountHost(stale, memory, () => null, "studio")?.machineId).toBe("studio");
+  });
+});
+
+describe("SupervisorHome standby machines", () => {
+  const standbyHub = (over: Partial<SupervisorHubState> = {}) =>
+    fixtureSnapshot({ hub: { available: true, running: false, role: "standby", holderMachineId: "studio", holderLabel: "Studio", ...over } });
+
+  it("shows standby instead of a stopped supervisor, with Move supervisor here", async () => {
+    const onMoveHere = vi.fn(async (): Promise<SupervisorMoveResult> => ({ kind: "ok", moved: true }));
+    renderHome({ onMoveHere, machines: [fixtureMachine({ machineId: "laptop", label: "Laptop", snapshot: standbyHub() })] });
+    expect(screen.getByTestId("supervisor-standby-text")).toHaveTextContent("Standby - supervisor runs on Studio");
+    expect(screen.queryByTestId("supervisor-hub-off")).toBeNull();
+    expect(screen.queryByRole("button", { name: /start/i })).toBeNull();
+    await act(async () => fireEvent.click(screen.getByTestId("supervisor-move-here")));
+    expect(onMoveHere).toHaveBeenCalledWith("laptop", false);
+    expect(onMoveHere).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers no move where the standby machine has no hub", () => {
+    renderHome({ onMoveHere: vi.fn(), machines: [fixtureMachine({ machineId: "laptop", snapshot: standbyHub({ available: false }) })] });
+    expect(screen.getByTestId("supervisor-standby-text")).toHaveTextContent("Standby - supervisor runs on Studio");
+    expect(screen.queryByTestId("supervisor-move-here")).toBeNull();
+  });
+
+  it("needs a second confirm for a forced move and shows the data-loss window", async () => {
+    const checkpointAt = new Date(2026, 9, 31, 14, 5).getTime();
+    const onMoveHere = vi.fn(async (_machineId: string, force: boolean): Promise<SupervisorMoveResult> =>
+      force ? { kind: "ok", moved: true } : { kind: "force-required", holderLabel: "Studio", checkpointAt, message: "holder unreachable" });
+    renderHome({ onMoveHere, machines: [fixtureMachine({ machineId: "laptop", snapshot: standbyHub() })] });
+    await act(async () => fireEvent.click(screen.getByTestId("supervisor-move-here")));
+    expect(onMoveHere).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("supervisor-move-force-warning")).toHaveTextContent("Changes since 14:05 on Studio will be lost.");
+    expect(screen.queryByTestId("supervisor-move-here")).toBeNull();
+    await act(async () => fireEvent.click(screen.getByTestId("supervisor-move-force-confirm")));
+    expect(onMoveHere).toHaveBeenLastCalledWith("laptop", true);
+    expect(screen.queryByTestId("supervisor-move-force")).toBeNull();
+  });
+
+  it("cancelling a forced move sends nothing", async () => {
+    const onMoveHere = vi.fn(async (): Promise<SupervisorMoveResult> => ({ kind: "force-required", holderLabel: null, checkpointAt: null, message: "" }));
+    renderHome({ onMoveHere, machines: [fixtureMachine({ machineId: "laptop", snapshot: standbyHub() })] });
+    await act(async () => fireEvent.click(screen.getByTestId("supervisor-move-here")));
+    expect(screen.getByTestId("supervisor-move-force-warning")).toHaveTextContent("Changes on Studio since its last checkpoint will be lost.");
+    fireEvent.click(screen.getByTestId("supervisor-move-force-cancel"));
+    expect(onMoveHere).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("supervisor-move-here")).toBeEnabled();
+  });
+
+  it("lists archived goals as adoptable and adopts one on request", async () => {
+    const onAdoptArchived = vi.fn(async (): Promise<AdoptArchivedResult> => ({ kind: "ok", adopted: 1 }));
+    const snapshot = standbyHub({ adoptable: [{ goalId: "old-1", title: "Fix the flaky test", supervisorId: "s-old", fromMachine: "Laptop" }] });
+    renderHome({ onAdoptArchived, machines: [fixtureMachine({ machineId: "laptop", label: "Laptop", snapshot })] });
+    const goal = screen.getByTestId("supervisor-adoptable-goal");
+    expect(goal).toHaveTextContent("Fix the flaky test");
+    expect(goal).toHaveTextContent("Adoptable from Laptop");
+    await act(async () => fireEvent.click(within(goal).getByRole("button", { name: "Adopt Fix the flaky test" })));
+    expect(onAdoptArchived).toHaveBeenCalledWith("laptop", ["old-1"]);
+  });
+
+  it("says when the standby is not paired to the holder and when goals name an unmapped host", () => {
+    renderHome({ machines: [fixtureMachine({ machineId: "laptop", label: "Laptop", snapshot: standbyHub({ holderPaired: false, unmappedHosts: ["host-9"] }) })] });
+    expect(screen.getByTestId("supervisor-standby-unpaired")).toHaveTextContent("Laptop is not paired to Studio");
+    expect(screen.getByTestId("supervisor-standby-unmapped")).toHaveTextContent("host-9");
   });
 });
