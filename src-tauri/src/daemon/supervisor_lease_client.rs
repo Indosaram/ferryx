@@ -1,0 +1,869 @@
+//! Daemon-side supervisor lease client (plan todo 3, part B: relay I/O and wiring).
+//!
+//! Drives the pure [`RoleMachine`] of [`crate::daemon::supervisor_lease_role`]: it turns relay
+//! session changes, one-second ticks and acquire/release commands into machine events, then
+//! executes the returned [`Action`]s in order: start/stop the hub through a [`HubSwitch`], send
+//! acquire/renew/release over the relay control channel (a [`LeaseTransport`]; the send time of
+//! each request is passed back with its ack), and persist the snapshot to
+//! `supervisor-lease.json` (0600, atomic write, on the blocking pool). It never touches PTYs and
+//! never restarts the daemon.
+//!
+//! [`SupervisorLeaseState`] is the cheap, cloneable view side-effect gates call before acting;
+//! its [`SupervisorLeaseState::is_holder_now`] re-checks the deadline on both clocks at the
+//! moment of use through the machine, never a cached flag.
+
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
+use tokio::sync::{mpsc, oneshot, watch};
+
+use crate::daemon::supervisor_lease_role::{
+    Action, Event, LastRole, LeaseAck, Now, PersistedLease, Role, RoleConfig, RoleMachine,
+    StandDownReason,
+};
+use crate::remote::protocol::{
+    SupervisorLeaseAck, SupervisorLeaseAcquire, SupervisorLeaseRelease, SupervisorLeaseRenew,
+    SupervisorLeaseRequest,
+};
+use crate::remote::relay_client::{LeaseCallError, RelayClient};
+
+/// File under the remote data dir holding [`PersistedLease`].
+pub const LEASE_FILE: &str = "supervisor-lease.json";
+/// Marker left by `ferryx hub lease reset-capability`; a running client consumes it.
+pub const RESET_CAPABILITY_MARKER: &str = "supervisor-lease.reset-capability";
+/// Bound on one lease request's round trip over the control channel.
+pub const LEASE_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the first relay session may take before boot counts as relay-unreachable.
+pub const BOOT_UNREACHABLE_AFTER: Duration = Duration::from_secs(10);
+/// Tick cadence the machine expects ("about once a second").
+const TICK: Duration = Duration::from_secs(1);
+/// Requests one burst of actions may send before the client waits for the next event.
+const MAX_SENDS_PER_EVENT: usize = 4;
+
+/// The relay side as the client sees it: [`RelayClient`] in production, a fake in tests.
+#[async_trait::async_trait]
+pub trait LeaseTransport: Send + Sync + 'static {
+    /// Lease capability of the live control session; `None` while disconnected.
+    fn subscribe_capability(&self) -> watch::Receiver<Option<bool>>;
+    async fn call(&self, request: SupervisorLeaseRequest) -> Result<SupervisorLeaseAck, LeaseCallError>;
+}
+
+#[async_trait::async_trait]
+impl LeaseTransport for RelayClient {
+    fn subscribe_capability(&self) -> watch::Receiver<Option<bool>> {
+        self.subscribe_lease_capability()
+    }
+
+    async fn call(&self, request: SupervisorLeaseRequest) -> Result<SupervisorLeaseAck, LeaseCallError> {
+        self.supervisor_lease_request(request, LEASE_CALL_TIMEOUT).await
+    }
+}
+
+/// Starts and stops the hub when the machine asks; `stop_hub` is the stand-down event.
+pub trait HubSwitch: Send + Sync + 'static {
+    fn start_hub(&self);
+    fn stop_hub(&self, reason: StandDownReason);
+}
+
+/// Both clocks as one reading.
+pub type LeaseClock = Arc<dyn Fn() -> Now + Send + Sync>;
+
+/// Production clock. The monotonic side goes through Tokio's clock so paused-time tests
+/// drive it; outside tests it is `std::time::Instant::now()`.
+pub fn system_clock() -> LeaseClock {
+    Arc::new(|| Now {
+        mono: tokio::time::Instant::now().into_std(),
+        wall: SystemTime::now(),
+    })
+}
+
+/// Path of `supervisor-lease.json`, `None` when the remote data dir cannot be resolved.
+pub fn lease_file_path() -> Option<PathBuf> {
+    crate::remote::auth::canonical_remote_dir().map(|dir| dir.join(LEASE_FILE))
+}
+
+/// Reads `supervisor-lease.json`; `None` when missing or unreadable. Blocking.
+pub fn read_persisted(path: &Path) -> Option<PersistedLease> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Writes `supervisor-lease.json` (0600, atomic rename). Blocking.
+pub fn write_persisted(path: &Path, lease: &PersistedLease) -> std::io::Result<()> {
+    crate::account::store::write_private_json(path, lease)
+}
+
+/// Reads `supervisor-lease.json` on the blocking pool.
+pub async fn load_persisted(path: Option<PathBuf>) -> Option<PersistedLease> {
+    let path = path?;
+    crate::ipc::run_blocking(move || Ok(read_persisted(&path)))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// `ferryx hub lease reset-capability`: clears the capability latch for a deliberate relay
+/// downgrade, the same way the machine does on `CapabilityReset`, and leaves a marker so a
+/// running daemon forgets its in-memory latch too. Blocking.
+pub fn reset_capability_latch(path: &Path) -> std::io::Result<()> {
+    let lease = PersistedLease {
+        last_role: LastRole::Holder,
+        last_fence: 0,
+        holder_machine_id: None,
+        lease_capable: false,
+        ..read_persisted(path).unwrap_or_default()
+    };
+    write_persisted(path, &lease)?;
+    let marker = path.with_file_name(RESET_CAPABILITY_MARKER);
+    crate::account::store::write_private_json(&marker, &serde_json::json!({"reset": true}))
+}
+
+struct StateInner {
+    account: Option<String>,
+    machine: parking_lot::Mutex<RoleMachine>,
+    role_tx: watch::Sender<Role>,
+    clock: LeaseClock,
+}
+
+/// Cheap, cloneable view of the hub role shared with every side-effect gate.
+#[derive(Clone)]
+pub struct SupervisorLeaseState {
+    inner: Arc<StateInner>,
+}
+
+impl SupervisorLeaseState {
+    fn new(account: Option<String>, machine: RoleMachine, clock: LeaseClock) -> Self {
+        let (role_tx, _) = watch::channel(machine.role().clone());
+        Self {
+            inner: Arc::new(StateInner {
+                account,
+                machine: parking_lot::Mutex::new(machine),
+                role_tx,
+                clock,
+            }),
+        }
+    }
+
+    /// Account this machine is enrolled in; `None` for account-less/selfhost.
+    pub fn account(&self) -> Option<String> {
+        self.inner.account.clone()
+    }
+
+    pub fn role(&self) -> Role {
+        self.inner.machine.lock().role().clone()
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<Role> {
+        self.inner.role_tx.subscribe()
+    }
+
+    /// Fence to stamp on side effects: the holder's fence, 0 otherwise (0 = unleased mode).
+    pub fn current_fence(&self) -> u64 {
+        self.inner.machine.lock().fence().unwrap_or(0)
+    }
+
+    /// Strict holder check against both clocks read now (deadline and clock-jump rules of the
+    /// machine); call before every side effect.
+    pub fn is_holder_now(&self) -> bool {
+        let now = (self.inner.clock)();
+        self.inner.machine.lock().is_holder_now(now)
+    }
+
+    /// [`Self::is_holder_now`] or Provisional (offline single-machine hub).
+    pub fn may_act_now(&self) -> bool {
+        let now = (self.inner.clock)();
+        self.inner.machine.lock().may_act_now(now)
+    }
+
+    /// Status hint, e.g. the `RELAY_LEASE_UNSUPPORTED` reset-capability hint.
+    pub fn status_hint(&self) -> Option<&'static str> {
+        self.inner.machine.lock().status_hint()
+    }
+
+    pub fn snapshot(&self) -> PersistedLease {
+        self.inner.machine.lock().snapshot().clone()
+    }
+
+    /// Feeds one event at the current time and publishes the role. The lock is never held
+    /// across an await.
+    fn handle(&self, event: Event) -> Vec<Action> {
+        let now = (self.inner.clock)();
+        let (actions, role) = {
+            let mut machine = self.inner.machine.lock();
+            let actions = machine.handle(event, now);
+            (actions, machine.role().clone())
+        };
+        self.inner.role_tx.send_if_modified(|current| {
+            let changed = *current != role;
+            if changed {
+                *current = role;
+            }
+            changed
+        });
+        actions
+    }
+}
+
+/// Requests other daemon tasks make of the lease client.
+enum LeaseCommand {
+    Acquire { force: bool, reply: oneshot::Sender<Role> },
+    Release { reply: oneshot::Sender<Role> },
+    ResetCapability { reply: oneshot::Sender<Role> },
+}
+
+/// Handle to a running lease client: the shared state plus acquire/release commands.
+#[derive(Clone)]
+pub struct SupervisorLeaseHandle {
+    state: SupervisorLeaseState,
+    commands: mpsc::Sender<LeaseCommand>,
+}
+
+impl SupervisorLeaseHandle {
+    pub fn state(&self) -> &SupervisorLeaseState {
+        &self.state
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<Role> {
+        self.state.subscribe()
+    }
+
+    pub fn current_fence(&self) -> u64 {
+        self.state.current_fence()
+    }
+
+    pub fn is_holder_now(&self) -> bool {
+        self.state.is_holder_now()
+    }
+
+    /// Asks for the lease (`force` = takeover); returns the role once the request settled.
+    /// `None` when the client task has ended.
+    pub async fn acquire(&self, force: bool) -> Option<Role> {
+        self.command(|reply| LeaseCommand::Acquire { force, reply }).await
+    }
+
+    /// Releases the lease and stands the hub down; auto-acquire pauses until [`Self::acquire`].
+    pub async fn release(&self) -> Option<Role> {
+        self.command(|reply| LeaseCommand::Release { reply }).await
+    }
+
+    /// Forgets the capability latch (what `ferryx hub lease reset-capability` triggers).
+    pub async fn reset_capability(&self) -> Option<Role> {
+        self.command(|reply| LeaseCommand::ResetCapability { reply }).await
+    }
+
+    async fn command(&self, build: impl FnOnce(oneshot::Sender<Role>) -> LeaseCommand) -> Option<Role> {
+        let (reply, wait) = oneshot::channel();
+        self.commands.send(build(reply)).await.ok()?;
+        wait.await.ok()
+    }
+}
+
+/// Inputs of [`spawn_supervisor_lease_client`] besides the transport and the hub switch.
+pub struct LeaseClientConfig {
+    pub role: RoleConfig,
+    /// This machine's id (recorded as holder in the snapshot).
+    pub machine_id: String,
+    /// Account this machine is enrolled in; `None` for account-less/selfhost (Holder fence 0).
+    pub account: Option<String>,
+    /// `supervisor-lease.json`; `None` disables persistence.
+    pub lease_file: Option<PathBuf>,
+    pub clock: LeaseClock,
+}
+
+impl LeaseClientConfig {
+    /// Production settings: standard timings, the canonical lease file, the system clocks.
+    pub fn system(machine_id: impl Into<String>, account: Option<String>) -> Self {
+        Self {
+            role: RoleConfig::default(),
+            machine_id: machine_id.into(),
+            account,
+            lease_file: lease_file_path(),
+            clock: system_clock(),
+        }
+    }
+}
+
+/// Loads the persisted lease, builds the role machine and spawns the client task, which runs
+/// until every handle is dropped. The first relay session not showing up within
+/// [`BOOT_UNREACHABLE_AFTER`] counts as relay-unreachable at boot (provisional rule).
+pub async fn spawn_supervisor_lease_client<T, H>(
+    config: LeaseClientConfig,
+    transport: Arc<T>,
+    hub: Arc<H>,
+) -> (SupervisorLeaseHandle, tokio::task::JoinHandle<()>)
+where
+    T: LeaseTransport + ?Sized,
+    H: HubSwitch + ?Sized,
+{
+    let persisted = load_persisted(config.lease_file.clone()).await;
+    let (machine, initial) = RoleMachine::new(
+        config.role,
+        config.machine_id,
+        config.account.is_some(),
+        persisted,
+        (config.clock)(),
+    );
+    let state = SupervisorLeaseState::new(config.account, machine, config.clock.clone());
+    let (commands, command_rx) = mpsc::channel(8);
+    // Subscribed before the task starts, so no capability change can slip past it.
+    let capability = transport.subscribe_capability();
+    let driver = Driver {
+        state: state.clone(),
+        transport,
+        hub,
+        lease_file: config.lease_file,
+        clock: config.clock,
+    };
+    let task = tokio::spawn(driver.run(initial, command_rx, capability));
+    (SupervisorLeaseHandle { state, commands }, task)
+}
+
+struct Driver<T: ?Sized, H: ?Sized> {
+    state: SupervisorLeaseState,
+    transport: Arc<T>,
+    hub: Arc<H>,
+    lease_file: Option<PathBuf>,
+    clock: LeaseClock,
+}
+
+impl<T: LeaseTransport + ?Sized, H: HubSwitch + ?Sized> Driver<T, H> {
+    async fn run(
+        self,
+        initial: Vec<Action>,
+        mut commands: mpsc::Receiver<LeaseCommand>,
+        mut capability: watch::Receiver<Option<bool>>,
+    ) {
+        self.execute(initial).await;
+        let mut session_seen = false;
+        let first = *capability.borrow_and_update();
+        self.on_capability(first, &mut session_seen).await;
+        let boot_deadline = tokio::time::sleep(BOOT_UNREACHABLE_AFTER);
+        tokio::pin!(boot_deadline);
+        let mut boot_pending = !session_seen;
+        let mut capability_open = true;
+        let mut ticker = tokio::time::interval(TICK);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                // Session changes first, so a command or tick never runs against a stale session.
+                biased;
+                changed = capability.changed(), if capability_open => {
+                    let advertised = if changed.is_ok() {
+                        *capability.borrow_and_update()
+                    } else {
+                        // The transport is gone: disconnected for good.
+                        capability_open = false;
+                        None
+                    };
+                    self.on_capability(advertised, &mut session_seen).await;
+                    boot_pending &= !session_seen;
+                }
+                _ = &mut boot_deadline, if boot_pending => {
+                    boot_pending = false;
+                    self.feed(Event::RelayUnreachableAtBoot).await;
+                }
+                command = commands.recv() => {
+                    let Some(command) = command else { break };
+                    let (event, reply) = match command {
+                        LeaseCommand::Acquire { force, reply } => (Event::AcquireRequested { force }, reply),
+                        LeaseCommand::Release { reply } => (Event::ReleaseRequested, reply),
+                        LeaseCommand::ResetCapability { reply } => (Event::CapabilityReset, reply),
+                    };
+                    self.feed(event).await;
+                    let _ = reply.send(self.state.role());
+                }
+                _ = ticker.tick() => {
+                    if self.consume_reset_marker().await {
+                        self.feed(Event::CapabilityReset).await;
+                    }
+                    self.feed(Event::Tick).await;
+                }
+            }
+        }
+    }
+
+    /// `Some(capable)` = a control session is up, `None` = it closed.
+    async fn on_capability(&self, advertised: Option<bool>, session_seen: &mut bool) {
+        match advertised {
+            Some(lease_capable) => {
+                *session_seen = true;
+                self.feed(Event::SessionOpened { lease_capable }).await;
+            }
+            None if *session_seen => self.feed(Event::SessionClosed).await,
+            None => {}
+        }
+    }
+
+    async fn feed(&self, event: Event) {
+        let actions = self.state.handle(event);
+        self.execute(actions).await;
+    }
+
+    /// Executes actions in order; acks of sent requests go back into the machine with the
+    /// request's send time and their actions run in the same burst (bounded).
+    async fn execute(&self, actions: Vec<Action>) {
+        let mut queue: VecDeque<Action> = actions.into();
+        let mut sends = 0;
+        while let Some(action) = queue.pop_front() {
+            // `renew` selects the ack event: RenewAck for a renew, AcquireAck for an acquire.
+            let (request, renew) = match action {
+                Action::StartHub => {
+                    self.hub.start_hub();
+                    continue;
+                }
+                Action::StopHub { reason } => {
+                    self.hub.stop_hub(reason);
+                    continue;
+                }
+                Action::Persist(snapshot) => {
+                    self.persist(snapshot).await;
+                    continue;
+                }
+                Action::SendAcquire { force } => (
+                    SupervisorLeaseRequest::SupervisorLeaseAcquire(SupervisorLeaseAcquire {
+                        request_id: request_id(),
+                        checkpoint_id: None,
+                        force,
+                    }),
+                    false,
+                ),
+                Action::SendRenew { fence } => (
+                    SupervisorLeaseRequest::SupervisorLeaseRenew(SupervisorLeaseRenew {
+                        request_id: request_id(),
+                        fence,
+                        checkpoint_id: None,
+                    }),
+                    true,
+                ),
+                Action::SendRelease { fence } => {
+                    let release = SupervisorLeaseRequest::SupervisorLeaseRelease(SupervisorLeaseRelease {
+                        request_id: request_id(),
+                        fence,
+                        checkpoint_id: None,
+                        reserved_for: None,
+                    });
+                    // A release ack has no role effect; failures leave the relay lease to expire.
+                    if let Err(error) = self.transport.call(release).await {
+                        tracing::warn!("supervisor lease release not acknowledged: {error}");
+                    }
+                    continue;
+                }
+            };
+            if sends >= MAX_SENDS_PER_EVENT {
+                tracing::warn!("supervisor lease request deferred to the next tick");
+                continue;
+            }
+            sends += 1;
+            let sent_at = (self.clock)();
+            match self.transport.call(request).await {
+                Ok(ack) => {
+                    let ack = LeaseAck::from_wire(&ack);
+                    let event = if renew {
+                        Event::RenewAck { sent_at, ack }
+                    } else {
+                        Event::AcquireAck { sent_at, ack }
+                    };
+                    queue.extend(self.state.handle(event));
+                }
+                // No ack: the machine retries at its cadence and the deadline rules apply.
+                Err(error) => tracing::debug!("supervisor lease request failed: {error}"),
+            }
+        }
+    }
+
+    async fn persist(&self, snapshot: PersistedLease) {
+        let Some(path) = self.lease_file.clone() else { return };
+        match crate::ipc::run_blocking(move || Ok(write_persisted(&path, &snapshot))).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!("supervisor lease state not saved: {error}"),
+            Err(error) => tracing::warn!("supervisor lease state not saved: {}", error.message),
+        }
+    }
+
+    /// True once per `ferryx hub lease reset-capability`: the marker is removed when seen.
+    async fn consume_reset_marker(&self) -> bool {
+        let Some(path) = self.lease_file.clone() else { return false };
+        let marker = path.with_file_name(RESET_CAPABILITY_MARKER);
+        crate::ipc::run_blocking(move || Ok(std::fs::remove_file(marker).is_ok()))
+            .await
+            .unwrap_or(false)
+    }
+}
+
+fn request_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::supervisor_lease_role::RELAY_LEASE_UNSUPPORTED;
+    use crate::remote::protocol::SupervisorLeaseOutcome;
+    use parking_lot::Mutex;
+    use tokio::time::Instant;
+
+    /// Full validity of a grant with the standard config: TTL 120s - 15s margin.
+    const VALID_FOR: Duration = Duration::from_secs(105);
+
+    /// Fake relay: records each request with its send instant and answers from a script.
+    struct FakeRelay {
+        capability: watch::Sender<Option<bool>>,
+        sent: Mutex<Vec<(Instant, SupervisorLeaseRequest)>>,
+        acquire: Mutex<Result<SupervisorLeaseOutcome, LeaseCallError>>,
+        renew: Mutex<Result<SupervisorLeaseOutcome, LeaseCallError>>,
+        delay: Duration,
+    }
+
+    impl FakeRelay {
+        fn new(advertised: Option<bool>) -> Arc<Self> {
+            Self::delayed(advertised, Duration::ZERO)
+        }
+
+        fn delayed(advertised: Option<bool>, delay: Duration) -> Arc<Self> {
+            let (capability, _) = watch::channel(advertised);
+            Arc::new(Self {
+                capability,
+                sent: Mutex::new(Vec::new()),
+                acquire: Mutex::new(Ok(SupervisorLeaseOutcome::Granted)),
+                renew: Mutex::new(Ok(SupervisorLeaseOutcome::Renewed)),
+                delay,
+            })
+        }
+
+        fn first_send(&self) -> Instant {
+            self.sent.lock().first().expect("a request was sent").0
+        }
+
+        fn renews(&self) -> usize {
+            self.sent
+                .lock()
+                .iter()
+                .filter(|(_, r)| matches!(r, SupervisorLeaseRequest::SupervisorLeaseRenew(_)))
+                .count()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LeaseTransport for FakeRelay {
+        fn subscribe_capability(&self) -> watch::Receiver<Option<bool>> {
+            self.capability.subscribe()
+        }
+
+        async fn call(&self, request: SupervisorLeaseRequest) -> Result<SupervisorLeaseAck, LeaseCallError> {
+            let request_id = request.request_id().to_owned();
+            let script = match request {
+                SupervisorLeaseRequest::SupervisorLeaseRenew(_) => self.renew.lock().clone(),
+                SupervisorLeaseRequest::SupervisorLeaseRelease(_) => Ok(SupervisorLeaseOutcome::Released),
+                _ => self.acquire.lock().clone(),
+            };
+            self.sent.lock().push((Instant::now(), request));
+            tokio::time::sleep(self.delay).await;
+            let outcome = script?;
+            let refused = outcome == SupervisorLeaseOutcome::Refused;
+            Ok(SupervisorLeaseAck {
+                request_id,
+                outcome,
+                fence: Some(7),
+                holder_machine_id: refused.then(|| "mach-b".into()),
+                holder_label: refused.then(|| "Laptop B".into()),
+                expires_in_secs: Some(120),
+                previous_expires_in_secs: None,
+                checkpoint_id: None,
+                account_machine_count: Some(2),
+                reason_code: refused.then(|| "LEASE_HELD".into()),
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeHub {
+        events: Mutex<Vec<Option<StandDownReason>>>,
+    }
+
+    impl HubSwitch for FakeHub {
+        fn start_hub(&self) {
+            self.events.lock().push(None);
+        }
+        fn stop_hub(&self, reason: StandDownReason) {
+            self.events.lock().push(Some(reason));
+        }
+    }
+
+    /// Monotonic side follows Tokio's (paused) clock; the wall side adds a settable jump.
+    fn test_clock() -> (LeaseClock, Arc<Mutex<Duration>>) {
+        let start = Instant::now();
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let jump = Arc::new(Mutex::new(Duration::ZERO));
+        let reader = Arc::clone(&jump);
+        let clock: LeaseClock = Arc::new(move || {
+            let now = Instant::now();
+            Now {
+                mono: now.into_std(),
+                wall: base + (now - start) + *reader.lock(),
+            }
+        });
+        (clock, jump)
+    }
+
+    fn config(clock: LeaseClock, account: Option<&str>, lease_file: Option<PathBuf>) -> LeaseClientConfig {
+        LeaseClientConfig {
+            role: RoleConfig::default(),
+            machine_id: "mach-a".into(),
+            account: account.map(str::to_owned),
+            lease_file,
+            clock,
+        }
+    }
+
+    async fn wait_role(handle: &SupervisorLeaseHandle, wanted: impl Fn(&Role) -> bool) -> Role {
+        let mut roles = handle.subscribe();
+        let role = tokio::time::timeout(Duration::from_secs(600), roles.wait_for(|role| wanted(role)))
+            .await
+            .expect("role reached in bounded (paused) time")
+            .expect("lease client alive")
+            .clone();
+        role
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_capable_relay_grants_holder_and_renewals_keep_it() {
+        let relay = FakeRelay::new(Some(true));
+        let hub = Arc::new(FakeHub::default());
+        let (clock, _) = test_clock();
+        let (handle, task) =
+            spawn_supervisor_lease_client(config(clock, Some("acct"), None), Arc::clone(&relay), Arc::clone(&hub)).await;
+        assert_eq!(wait_role(&handle, |r| *r == Role::Holder { fence: 7 }).await, Role::Holder { fence: 7 });
+        assert_eq!(handle.current_fence(), 7);
+        assert!(handle.is_holder_now());
+        assert_eq!(handle.state().account().as_deref(), Some("acct"));
+        assert!(handle.state().snapshot().lease_capable, "capability latched");
+        let first = relay.first_send();
+        // Well past the first grant's deadline: only renewals can keep the role.
+        tokio::time::sleep_until(first + VALID_FOR * 3).await;
+        assert!(relay.renews() >= 3);
+        assert!(handle.is_holder_now());
+        assert_eq!(handle.state().role(), Role::Holder { fence: 7 });
+        assert!(!hub.events.lock().iter().any(Option::is_some), "never stood down");
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn missed_renewals_stand_down_exactly_at_the_deadline() {
+        let relay = FakeRelay::new(Some(true));
+        *relay.renew.lock() = Err(LeaseCallError::Timeout);
+        let hub = Arc::new(FakeHub::default());
+        let (clock, _) = test_clock();
+        let (handle, task) =
+            spawn_supervisor_lease_client(config(clock, Some("acct"), None), Arc::clone(&relay), Arc::clone(&hub)).await;
+        wait_role(&handle, |r| *r == Role::Holder { fence: 7 }).await;
+        let deadline = relay.first_send() + VALID_FOR;
+        tokio::time::sleep_until(deadline - Duration::from_secs(1)).await;
+        assert!(handle.is_holder_now(), "one second before the deadline");
+        tokio::time::sleep_until(deadline).await;
+        assert!(!handle.is_holder_now(), "re-checked at use, exactly at the deadline");
+        wait_role(&handle, |r| *r == Role::standby_unknown()).await;
+        assert!(hub.events.lock().contains(&Some(StandDownReason::DeadlineReached)));
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_deadline_counts_from_the_send_time_of_a_delayed_ack() {
+        let relay = FakeRelay::delayed(Some(true), Duration::from_secs(10));
+        *relay.renew.lock() = Err(LeaseCallError::Timeout);
+        let hub = Arc::new(FakeHub::default());
+        let (clock, _) = test_clock();
+        let (handle, task) =
+            spawn_supervisor_lease_client(config(clock, Some("acct"), None), Arc::clone(&relay), hub).await;
+        wait_role(&handle, |r| *r == Role::Holder { fence: 7 }).await;
+        let sent = relay.first_send();
+        assert_eq!(Instant::now() - sent, Duration::from_secs(10), "ack arrived 10s after send");
+        tokio::time::sleep_until(sent + VALID_FOR - Duration::from_secs(1)).await;
+        assert!(handle.is_holder_now());
+        tokio::time::sleep_until(sent + VALID_FOR).await;
+        assert!(!handle.is_holder_now(), "deadline is send + TTL - margin, not ack + TTL - margin");
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wall_clock_jump_ends_holder_before_the_next_tick() {
+        let relay = FakeRelay::new(Some(true));
+        let hub = Arc::new(FakeHub::default());
+        let (clock, jump) = test_clock();
+        let (handle, task) =
+            spawn_supervisor_lease_client(config(clock, Some("acct"), None), Arc::clone(&relay), Arc::clone(&hub)).await;
+        wait_role(&handle, |r| *r == Role::Holder { fence: 7 }).await;
+        // Sleep/wake: one hour of wall time with no monotonic advance.
+        *jump.lock() = Duration::from_secs(3600);
+        assert!(!handle.is_holder_now());
+        assert!(!handle.state().may_act_now());
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_acquire_is_standby_with_the_holder_label() {
+        let relay = FakeRelay::new(Some(true));
+        *relay.acquire.lock() = Ok(SupervisorLeaseOutcome::Refused);
+        let hub = Arc::new(FakeHub::default());
+        let (clock, _) = test_clock();
+        let (handle, task) =
+            spawn_supervisor_lease_client(config(clock, Some("acct"), None), Arc::clone(&relay), Arc::clone(&hub)).await;
+        let role = wait_role(&handle, |r| matches!(r, Role::Standby { holder_label: Some(_), .. })).await;
+        assert_eq!(
+            role,
+            Role::Standby {
+                holder_machine_id: Some("mach-b".into()),
+                holder_label: Some("Laptop B".into()),
+                fence: Some(7),
+            }
+        );
+        assert!(!handle.is_holder_now());
+        assert_eq!(handle.current_fence(), 0);
+        assert!(hub.events.lock().contains(&Some(StandDownReason::Refused)));
+        // Refusal is retried at the renew cadence, not in a tight loop.
+        let sent_before = relay.sent.lock().len();
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert!(relay.sent.lock().len() <= sent_before + 1);
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_relay_without_the_capability_keeps_holder_fence_zero() {
+        let relay = FakeRelay::new(Some(false));
+        let hub = Arc::new(FakeHub::default());
+        let (clock, _) = test_clock();
+        let (handle, task) =
+            spawn_supervisor_lease_client(config(clock, Some("acct"), None), Arc::clone(&relay), Arc::clone(&hub)).await;
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(handle.state().role(), Role::Holder { fence: 0 });
+        assert!(handle.is_holder_now());
+        assert!(relay.sent.lock().is_empty(), "no lease traffic to an incapable relay");
+        assert_eq!(*hub.events.lock(), vec![None], "hub started once at boot");
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_account_less_daemon_is_holder_fence_zero_even_on_a_capable_relay() {
+        let relay = FakeRelay::new(Some(true));
+        let hub = Arc::new(FakeHub::default());
+        let (clock, _) = test_clock();
+        let (handle, task) =
+            spawn_supervisor_lease_client(config(clock, None, None), Arc::clone(&relay), hub).await;
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(handle.state().role(), Role::Holder { fence: 0 });
+        assert!(relay.sent.lock().is_empty());
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn capability_seen_then_missing_is_unleased_with_the_reset_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LEASE_FILE);
+        write_persisted(&path, &PersistedLease { lease_capable: true, ..Default::default() }).unwrap();
+        let relay = FakeRelay::new(Some(false));
+        let hub = Arc::new(FakeHub::default());
+        let (handle, task) = spawn_supervisor_lease_client(
+            config(system_clock(), Some("acct"), Some(path.clone())),
+            Arc::clone(&relay),
+            hub,
+        )
+        .await;
+        let role = wait_role(&handle, |r| matches!(r, Role::Unleased { .. })).await;
+        assert_eq!(role, Role::Unleased { reason: RELAY_LEASE_UNSUPPORTED.into() });
+        assert!(!handle.is_holder_now());
+        assert!(handle.state().status_hint().is_some_and(|hint| hint.contains("reset-capability")));
+        // The CLI clears the latch; the running client picks the marker up on its next tick.
+        reset_capability_latch(&path).unwrap();
+        let role = wait_role(&handle, |r| *r == Role::Holder { fence: 0 }).await;
+        assert_eq!(role, Role::Holder { fence: 0 });
+        assert!(!dir.path().join(RESET_CAPABILITY_MARKER).exists(), "marker consumed");
+        assert!(!read_persisted(&path).unwrap().lease_capable);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_grant_is_persisted_with_the_account_machine_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LEASE_FILE);
+        let relay = FakeRelay::new(Some(true));
+        let hub = Arc::new(FakeHub::default());
+        let (handle, task) = spawn_supervisor_lease_client(
+            config(system_clock(), Some("acct"), Some(path.clone())),
+            Arc::clone(&relay),
+            hub,
+        )
+        .await;
+        wait_role(&handle, |r| *r == Role::Holder { fence: 7 }).await;
+        // A command round trip orders after the persist that preceded the published role.
+        handle.acquire(false).await;
+        let persisted = read_persisted(&path).expect("lease file written");
+        assert_eq!(persisted.last_role, LastRole::Holder);
+        assert_eq!(persisted.last_fence, 7);
+        assert_eq!(persisted.account_machine_count, Some(2));
+        assert_eq!(persisted.holder_machine_id.as_deref(), Some("mach-a"));
+        assert!(persisted.lease_capable);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn release_sends_the_fence_and_stands_down() {
+        let relay = FakeRelay::new(Some(true));
+        let hub = Arc::new(FakeHub::default());
+        let (clock, _) = test_clock();
+        let (handle, task) =
+            spawn_supervisor_lease_client(config(clock, Some("acct"), None), Arc::clone(&relay), Arc::clone(&hub)).await;
+        wait_role(&handle, |r| *r == Role::Holder { fence: 7 }).await;
+        assert_eq!(handle.release().await, Some(Role::standby_unknown()));
+        assert!(relay.sent.lock().iter().any(|(_, r)| matches!(
+            r,
+            SupervisorLeaseRequest::SupervisorLeaseRelease(SupervisorLeaseRelease { fence: 7, .. })
+        )));
+        assert!(hub.events.lock().contains(&Some(StandDownReason::Released)));
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unreachable_relay_at_boot_is_provisional_for_a_single_machine_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LEASE_FILE);
+        let single = PersistedLease {
+            last_role: LastRole::Holder,
+            last_fence: 4,
+            account_machine_count: Some(1),
+            holder_machine_id: Some("mach-a".into()),
+            lease_capable: true,
+        };
+        write_persisted(&path, &single).unwrap();
+        let relay = FakeRelay::new(None);
+        let hub = Arc::new(FakeHub::default());
+        let (clock, _) = test_clock();
+        let (handle, task) =
+            spawn_supervisor_lease_client(config(clock, Some("acct"), Some(path)), relay, Arc::clone(&hub)).await;
+        assert_eq!(handle.state().role(), Role::standby_unknown());
+        wait_role(&handle, |r| *r == Role::Provisional).await;
+        assert!(handle.state().may_act_now());
+        assert!(!handle.is_holder_now(), "provisional is not a strict holder");
+        assert_eq!(*hub.events.lock(), vec![None]);
+        task.abort();
+    }
+
+    #[test]
+    fn reset_capability_clears_the_latch_and_leaves_a_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LEASE_FILE);
+        let latched = PersistedLease { lease_capable: true, account_machine_count: Some(3), ..Default::default() };
+        write_persisted(&path, &latched).unwrap();
+        reset_capability_latch(&path).unwrap();
+        let lease = read_persisted(&path).unwrap();
+        assert!(!lease.lease_capable);
+        assert_eq!(lease.account_machine_count, Some(3));
+        assert!(dir.path().join(RESET_CAPABILITY_MARKER).exists());
+    }
+}

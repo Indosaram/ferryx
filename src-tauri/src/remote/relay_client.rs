@@ -19,13 +19,14 @@ use crate::remote::auth::{
 use crate::remote::protocol::{
     AccountGrantOfferDelivered, AccountGrantOfferDelivery, ControlAuth, ControlAuthResponse,
     ControlChallenge, PairingPinClaimed, PairingState, RegisterPairingPin, RegisterPairingPinAck,
+    SupervisorLeaseAck, SupervisorLeaseRequest, SUPERVISOR_LEASE_CAPABILITY,
 };
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use rand::Rng;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 
 type ControlSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
@@ -47,6 +48,82 @@ pub struct PairingSessionInfo {
 pub struct AttachSessionRequest {
     pub opaque: bool,
     pub ack: oneshot::Sender<Result<String, String>>,
+}
+
+/// Why a supervisor lease request got no ack from the relay.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LeaseCallError {
+    /// No authenticated control session is up.
+    #[error("relay control channel is not connected")]
+    NotConnected,
+    /// The relay of the current control session did not advertise
+    /// [`SUPERVISOR_LEASE_CAPABILITY`] in its challenge.
+    #[error("relay does not serve the supervisor lease")]
+    Unsupported,
+    /// The control session ended before the relay answered.
+    #[error("relay control channel dropped the lease request")]
+    Dropped,
+    /// The relay did not answer within the caller's bound.
+    #[error("relay did not answer the lease request in time")]
+    Timeout,
+}
+
+/// One supervisor lease request queued for the control session, answered exactly once.
+pub struct SupervisorLeaseCall {
+    pub request: SupervisorLeaseRequest,
+    pub ack: oneshot::Sender<Result<SupervisorLeaseAck, LeaseCallError>>,
+}
+
+/// Queue and capability state shared by every clone of one [`RelayClient`].
+#[derive(Clone)]
+struct LeaseCalls {
+    tx: mpsc::Sender<SupervisorLeaseCall>,
+    rx: Arc<Mutex<mpsc::Receiver<SupervisorLeaseCall>>>,
+    /// `None` while no control session is authenticated, otherwise whether the relay of the
+    /// live session advertised [`SUPERVISOR_LEASE_CAPABILITY`].
+    capability: Arc<watch::Sender<Option<bool>>>,
+}
+
+impl LeaseCalls {
+    fn new() -> Self {
+        let (tx, rx) = mpsc::channel(1);
+        let (capability, _) = watch::channel(None);
+        Self {
+            tx,
+            rx: Arc::new(Mutex::new(rx)),
+            capability: Arc::new(capability),
+        }
+    }
+}
+
+/// Publishes the live session's lease capability and resets it to `None` on every exit.
+struct LeaseCapabilityPublication {
+    capability: Arc<watch::Sender<Option<bool>>>,
+}
+
+impl LeaseCapabilityPublication {
+    fn publish(capability: &Arc<watch::Sender<Option<bool>>>, supported: bool) -> Self {
+        capability.send_replace(Some(supported));
+        Self {
+            capability: Arc::clone(capability),
+        }
+    }
+}
+
+impl Drop for LeaseCapabilityPublication {
+    fn drop(&mut self) {
+        self.capability.send_replace(None);
+    }
+}
+
+/// Parses a relay frame as a supervisor lease ack only when it is tagged as one, so a lease
+/// ack is never mistaken for another control frame and vice versa.
+fn parse_supervisor_lease_ack(text: &str) -> Option<SupervisorLeaseAck> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("SupervisorLeaseAck") {
+        return None;
+    }
+    serde_json::from_value(value).ok()
 }
 
 #[derive(Clone)]
@@ -334,6 +411,8 @@ pub struct RelayClient {
     /// True only while a control session has passed authentication and has not dropped.
     /// Shared across clones so status reads the client the gateway published, not a copy.
     control_accepted: Arc<std::sync::atomic::AtomicBool>,
+    /// Supervisor lease request queue and the live session's lease capability.
+    lease: LeaseCalls,
 }
 
 /// Holds `control_accepted` for one live control session and clears it on every exit.
@@ -395,6 +474,7 @@ impl RelayClient {
             attach_tx,
             attach_rx: Arc::new(Mutex::new(attach_rx)),
             control_accepted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            lease: LeaseCalls::new(),
         }
     }
 
@@ -445,6 +525,7 @@ impl RelayClient {
             attach_tx,
             attach_rx: Arc::new(Mutex::new(attach_rx)),
             control_accepted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            lease: LeaseCalls::new(),
         }
     }
 
@@ -530,7 +611,55 @@ impl RelayClient {
         ControlChannelAdmission::admit(&self.control_accepted)
     }
 
+    /// Follows the lease capability of the live control session: `None` while disconnected,
+    /// `Some(true)` once the relay advertised [`SUPERVISOR_LEASE_CAPABILITY`] in its challenge.
+    pub fn subscribe_lease_capability(&self) -> watch::Receiver<Option<bool>> {
+        self.lease.capability.subscribe()
+    }
+
+    /// The lease capability of the live control session, see
+    /// [`Self::subscribe_lease_capability`].
+    pub fn lease_capability(&self) -> Option<bool> {
+        *self.lease.capability.borrow()
+    }
+
+    /// Sends one supervisor lease request over the control channel and waits at most
+    /// `timeout` for the relay's ack. Requests are answered one at a time in queue order.
+    pub async fn supervisor_lease_request(
+        &self,
+        request: SupervisorLeaseRequest,
+        timeout: Duration,
+    ) -> Result<SupervisorLeaseAck, LeaseCallError> {
+        match self.lease_capability() {
+            None => return Err(LeaseCallError::NotConnected),
+            Some(false) => return Err(LeaseCallError::Unsupported),
+            Some(true) => {}
+        }
+        let (ack, wait) = oneshot::channel();
+        let call = SupervisorLeaseCall { request, ack };
+        let exchange = async {
+            match self.lease.tx.send(call).await {
+                Ok(()) => wait.await.unwrap_or(Err(LeaseCallError::Dropped)),
+                Err(_) => Err(LeaseCallError::NotConnected),
+            }
+        };
+        match tokio::time::timeout(timeout, exchange).await {
+            Ok(result) => result,
+            Err(_) => Err(LeaseCallError::Timeout),
+        }
+    }
+
     pub async fn connect_control(&self) -> anyhow::Result<ControlSocket> {
+        self.connect_control_with_capabilities()
+            .await
+            .map(|(socket, _)| socket)
+    }
+
+    /// Authenticates the control channel and returns the capabilities the relay advertised in
+    /// its challenge (none for a token-authenticated client, which receives no challenge).
+    async fn connect_control_with_capabilities(
+        &self,
+    ) -> anyhow::Result<(ControlSocket, Vec<String>)> {
         let mut request = self.control_url().into_client_request()?;
         if self.identity.is_none() {
             request.headers_mut().insert(
@@ -545,8 +674,9 @@ impl RelayClient {
             }
         }
         let (mut socket, _) = tokio_tungstenite::connect_async(request).await?;
+        let mut capabilities = Vec::new();
         if let Some(identity) = &self.identity {
-            tokio::time::timeout(REGISTER_ACK_TIMEOUT, async {
+            capabilities = tokio::time::timeout(REGISTER_ACK_TIMEOUT, async {
                 let challenge: ControlChallenge = read_control_json(&mut socket).await?;
                 let auth = ControlAuth {
                     enrollment_token: (!self.machine_token.is_empty())
@@ -578,11 +708,11 @@ impl RelayClient {
                     "Relay authentication rejected: {}",
                     response.error.unwrap_or_default()
                 );
-                Ok::<_, anyhow::Error>(())
+                Ok::<_, anyhow::Error>(challenge.capabilities)
             })
             .await??;
         }
-        Ok(socket)
+        Ok((socket, capabilities))
     }
 
     fn control_url(&self) -> String {
@@ -658,13 +788,22 @@ impl RelayClient {
     }
 
     async fn run_control_session(&self) -> anyhow::Result<()> {
-        let socket = self.connect_control().await?;
+        let (socket, capabilities) = self.connect_control_with_capabilities().await?;
         // Set only after authentication succeeds. Drop clears every exit, including a later reject.
         let _admitted = ControlChannelAdmission::admit(&self.control_accepted);
+        let _lease_capability = LeaseCapabilityPublication::publish(
+            &self.lease.capability,
+            capabilities
+                .iter()
+                .any(|capability| capability == SUPERVISOR_LEASE_CAPABILITY),
+        );
         let mut registrations = self.register_rx.lock().await;
         let mut attachments = self.attach_rx.lock().await;
+        let mut lease_calls = self.lease.rx.lock().await;
         let mut pending: Option<RegisterPairingPinRequest> = None;
         let mut pending_attach: Option<AttachSessionRequest> = None;
+        // At most one lease request is in flight; dropping it on exit answers `Dropped`.
+        let mut pending_lease: Option<SupervisorLeaseCall> = None;
         tracing::info!("relay control channel connected");
         let (mut write, mut read) = socket.split();
         // Dropping the control future also aborts its data channels.
@@ -693,6 +832,19 @@ impl RelayClient {
                     }
                     continue;
                 }
+                call = lease_calls.recv(), if pending_lease.is_none() => {
+                    if let Some(call) = call {
+                        if call.ack.is_closed() { continue; }
+                        write.send(Message::Text(serde_json::to_string(&call.request)?.into())).await?;
+                        pending_lease = Some(call);
+                    }
+                    continue;
+                }
+                _ = async { pending_lease.as_mut().unwrap().ack.closed().await }, if pending_lease.is_some() => {
+                    // The caller gave up; a late ack for it is ignored by request id.
+                    pending_lease = None;
+                    continue;
+                }
                 registration = registrations.recv(), if pending.is_none() => {
                     if let Some(registration) = registration {
                         if registration.ack.is_closed() { continue; }
@@ -715,6 +867,16 @@ impl RelayClient {
             };
             match message {
                 Some(Ok(Message::Text(text))) => {
+                    if let Some(ack) = parse_supervisor_lease_ack(&text) {
+                        if pending_lease
+                            .as_ref()
+                            .is_some_and(|call| call.request.request_id() == ack.request_id)
+                            && pending_lease.take().unwrap().ack.send(Ok(ack)).is_err()
+                        {
+                            tracing::debug!("Supervisor lease ACK arrived after caller gave up");
+                        }
+                        continue;
+                    }
                     if let Ok(ack) = serde_json::from_str::<RegisterPairingPinAck>(&text) {
                         if pending.as_ref().is_some_and(|request| {
                             request.registration.generation == ack.generation
@@ -1236,6 +1398,138 @@ mod tests {
             .expect("bounded allocation")
             .expect("session id");
         assert_eq!(id, "opaque-1");
+        control.abort();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn supervisor_lease_requests_round_trip_on_a_capable_relay() {
+        use crate::remote::protocol::{SupervisorLeaseOutcome, SupervisorLeaseQuery};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = RelayClient::with_identity(
+            format!("http://{}", listener.local_addr().unwrap()),
+            test_identity(),
+            LOCAL_GATEWAY_ADDR,
+        );
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let challenge = ControlChallenge {
+                nonce: "lease-challenge".into(),
+                timestamp: 1234,
+                audience: None,
+                capabilities: vec![SUPERVISOR_LEASE_CAPABILITY.into()],
+            };
+            socket
+                .send(Message::Text(serde_json::to_string(&challenge).unwrap().into()))
+                .await
+                .unwrap();
+            let _auth = socket.next().await.unwrap().unwrap();
+            let accepted = ControlAuthResponse { success: true, error: None };
+            socket
+                .send(Message::Text(serde_json::to_string(&accepted).unwrap().into()))
+                .await
+                .unwrap();
+            let request: SupervisorLeaseRequest = loop {
+                match socket.next().await.unwrap().unwrap() {
+                    Message::Text(text) => break serde_json::from_str(&text).unwrap(),
+                    _ => continue,
+                }
+            };
+            let ack = |request_id: &str| SupervisorLeaseAck {
+                request_id: request_id.into(),
+                outcome: SupervisorLeaseOutcome::Refused,
+                fence: Some(3),
+                holder_machine_id: Some("mach-b".into()),
+                holder_label: Some("Laptop B".into()),
+                expires_in_secs: Some(90),
+                previous_expires_in_secs: None,
+                checkpoint_id: None,
+                account_machine_count: Some(2),
+                reason_code: Some("LEASE_HELD".into()),
+            };
+            // A stale ack for another request id is ignored; the matching one answers.
+            for request_id in ["stale-id", request.request_id()] {
+                socket
+                    .send(Message::Text(serde_json::to_string(&ack(request_id)).unwrap().into()))
+                    .await
+                    .unwrap();
+            }
+            while let Some(message) = socket.next().await {
+                if message.is_err() {
+                    break;
+                }
+            }
+        });
+        assert_eq!(
+            client
+                .supervisor_lease_request(
+                    SupervisorLeaseRequest::SupervisorLeaseQuery(SupervisorLeaseQuery {
+                        request_id: "early".into(),
+                    }),
+                    Duration::from_secs(5),
+                )
+                .await,
+            Err(LeaseCallError::NotConnected),
+            "no control session yet"
+        );
+        let mut capability = client.subscribe_lease_capability();
+        let control = tokio::spawn({
+            let client = client.clone();
+            async move { client.run_control_session().await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), capability.wait_for(|c| *c == Some(true)))
+            .await
+            .expect("capability published")
+            .expect("capability channel open");
+        let ack = client
+            .supervisor_lease_request(
+                SupervisorLeaseRequest::SupervisorLeaseQuery(SupervisorLeaseQuery {
+                    request_id: "q1".into(),
+                }),
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("lease ack");
+        assert_eq!(ack.request_id, "q1");
+        assert_eq!(ack.holder_label.as_deref(), Some("Laptop B"));
+        control.abort();
+        let _ = control.await;
+        assert_eq!(client.lease_capability(), None, "capability cleared when the session ends");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_token_session_reports_the_lease_unsupported() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = RelayClient::new(format!("http://{}", listener.local_addr().unwrap()), "machine");
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            while let Some(message) = socket.next().await {
+                if message.is_err() {
+                    break;
+                }
+            }
+        });
+        let mut capability = client.subscribe_lease_capability();
+        let control = tokio::spawn({
+            let client = client.clone();
+            async move { client.run_control_session().await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), capability.wait_for(|c| c.is_some()))
+            .await
+            .expect("capability published")
+            .expect("capability channel open");
+        let result = client
+            .supervisor_lease_request(
+                SupervisorLeaseRequest::SupervisorLeaseQuery(
+                    crate::remote::protocol::SupervisorLeaseQuery { request_id: "q".into() },
+                ),
+                Duration::from_secs(5),
+            )
+            .await;
+        assert_eq!(result, Err(LeaseCallError::Unsupported));
         control.abort();
         server.abort();
     }
