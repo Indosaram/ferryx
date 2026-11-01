@@ -294,7 +294,12 @@ impl SupervisorLeaseState {
         (acked_at + previous + TAKEOVER_MARGIN).saturating_duration_since(tokio::time::Instant::now())
     }
 
+    /// Starts the takeover wait from a granted acquire ack. A refusal (or any other outcome)
+    /// grants nothing, so its `previous_expires_in_secs` never starts a wait.
     fn note_acquire_ack(&self, ack: &SupervisorLeaseAck) {
+        if ack.outcome != SupervisorLeaseOutcome::Granted {
+            return;
+        }
         if let Some(previous) = ack.previous_expires_in_secs {
             *self.inner.takeover.lock() =
                 Some((tokio::time::Instant::now(), Duration::from_secs(previous)));
@@ -1299,6 +1304,33 @@ mod tests {
         assert_eq!(handle.state().takeover_wait(), Duration::from_secs(1), "still inside the old lease");
         tokio::time::advance(Duration::from_secs(1)).await;
         assert_eq!(handle.state().takeover_wait(), Duration::ZERO);
+        task.abort();
+    }
+
+    /// Only a granted acquire starts the takeover wait: a refusal carrying the holder's
+    /// remaining lease does not.
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_acquire_ack_does_not_start_a_takeover_wait() {
+        let relay = FakeRelay::new(Some(true));
+        let hub = Arc::new(FakeHub::default());
+        let (clock, _) = test_clock();
+        let (handle, task) =
+            spawn_supervisor_lease_client(config(clock, Some("acct"), None), Arc::clone(&relay), hub).await;
+        wait_role(&handle, |r| *r == Role::Holder { fence: 7 }).await;
+        let refused = SupervisorLeaseAck {
+            request_id: "r".into(),
+            outcome: SupervisorLeaseOutcome::Refused,
+            fence: Some(8),
+            holder_machine_id: Some("mach-b".into()),
+            holder_label: Some("Laptop B".into()),
+            expires_in_secs: None,
+            previous_expires_in_secs: Some(90),
+            checkpoint_id: None,
+            account_machine_count: Some(2),
+            reason_code: None,
+        };
+        handle.state().note_acquire_ack(&refused);
+        assert_eq!(handle.state().takeover_wait(), Duration::ZERO, "a refusal starts no wait");
         task.abort();
     }
 
