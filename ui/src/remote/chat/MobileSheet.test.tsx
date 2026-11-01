@@ -111,11 +111,11 @@ describe("MobileSheet", () => {
     expect(screen.getByRole("button", { name: "New terminal" })).toBeInTheDocument();
   });
 
-  it("closes when Escape is pressed inside the sheet", () => {
+  it("closes when Escape is pressed", () => {
     const onOpenChange = vi.fn();
     render(<MobileSheet open onOpenChange={onOpenChange} title="Actions" ariaLabel="Actions" />);
 
-    fireEvent.keyDown(screen.getByRole("dialog", { name: "Actions" }), { key: "Escape" });
+    fireEvent.keyDown(window, { key: "Escape" });
 
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
@@ -129,7 +129,7 @@ describe("MobileSheet", () => {
         <MobileSheet open onOpenChange={closeUpper} title="Options" ariaLabel="Options" />
       </>,
     );
-    fireEvent.keyDown(screen.getByRole("dialog", { name: "Options" }), { key: "Escape" });
+    fireEvent.keyDown(window, { key: "Escape" });
     expect(closeUpper).toHaveBeenCalledWith(false);
     expect(closeLower).not.toHaveBeenCalled();
   });
@@ -142,7 +142,7 @@ describe("MobileSheet", () => {
       </div>,
     );
     expect(screen.getByTestId("behind")).toHaveAttribute("inert");
-    fireEvent.keyDown(screen.getByRole("dialog", { name: "Actions" }), { key: "Escape" });
+    fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.getByTestId("behind")).not.toHaveAttribute("inert");
   });
 

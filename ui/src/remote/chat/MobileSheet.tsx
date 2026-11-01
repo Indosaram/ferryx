@@ -65,6 +65,9 @@ function isolate(layer: HTMLElement): () => void {
   };
 }
 
+/** Open sheets, oldest first: Escape belongs to the last one only. */
+const openSheets: object[] = [];
+
 export type MobileSheetItemProps = {
   icon?: LucideIcon;
   label: string;
@@ -175,6 +178,21 @@ export function MobileSheet({
     return isolate(layerRef.current);
   }, [open, isMounted]);
 
+  // Escape closes only the topmost open sheet, wherever the focus is.
+  useEffect(() => {
+    if (!open) return;
+    const token = {};
+    openSheets.push(token);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && openSheets[openSheets.length - 1] === token) onOpenChange(false);
+    };
+    window.addEventListener("keydown", closeOnEscape, true);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape, true);
+      openSheets.splice(openSheets.indexOf(token), 1);
+    };
+  }, [open, onOpenChange]);
+
   // Capture whatever held focus when the sheet opens, focus the first focusable element inside
   // it, and hand focus back on close so the trigger is never left pointing at removed DOM.
   useEffect(() => {
@@ -200,14 +218,8 @@ export function MobileSheet({
     }
   };
 
-  // Escape is handled on the panel, so it closes only this (the topmost) sheet; aria-modal
-  // promises focus stays inside, so Tab / Shift+Tab wrap at the panel edges.
+  // aria-modal promises focus stays inside: wrap Tab / Shift+Tab at the panel edges.
   const handlePanelKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "Escape") {
-      event.stopPropagation();
-      onOpenChange(false);
-      return;
-    }
     if (event.key !== "Tab") return;
     const panel = panelRef.current;
     if (!panel) return;
