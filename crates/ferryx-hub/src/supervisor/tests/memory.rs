@@ -444,6 +444,7 @@ async fn an_owner_message_from_the_desktop_is_learned_once_with_its_provenance()
 
 mod import {
     use super::*;
+    use crate::chat::fence::fence_untrusted;
     use crate::supervisor::admission::{submit_work, ActorContext, OperationClass, OwnerChoices, SubmitWork};
     use crate::supervisor::memory_import::{
         hub_driven_session_ids, import_sessions, owner_turn_text, ImportBounds, ImportSession,
@@ -517,21 +518,26 @@ mod import {
         .await
         .unwrap();
         assert_eq!((report.sessions, report.turns_ingested, report.failed), (2, 3, 0), "{report:?}");
+        // Each turn arrives fenced as untrusted, its origin naming the provider and session.
+        let in_project = |text: &str| {
+            format!("In project github.com/example/ferryx: {}", fence_untrusted("import claude c-1", text))
+        };
         assert_eq!(
             fixture.memory.ingests(),
             [
                 (
                     "import:claude:c-1:0".to_owned(),
-                    "In project github.com/example/ferryx: Prefer small commits with conventional messages."
-                        .to_owned()
+                    in_project("Prefer small commits with conventional messages.")
                 ),
-                (
-                    "import:claude:c-1:2".to_owned(),
-                    "In project github.com/example/ferryx: Never push to main without asking.".to_owned()
-                ),
-                ("import:codex:x-1:0".to_owned(), "Use tabs in the Go code.".to_owned()),
+                ("import:claude:c-1:2".to_owned(), in_project("Never push to main without asking.")),
+                ("import:codex:x-1:0".to_owned(), fence_untrusted("import codex x-1", "Use tabs in the Go code.")),
             ]
         );
+        assert!(fixture
+            .memory
+            .ingests()
+            .iter()
+            .all(|(_, text)| text.contains("```untrusted\norigin: import ")));
         // The cwd mapped to the project only for the exact git dir match.
         let projects: Vec<(String, Option<String>)> = sqlx::query_as(
             "SELECT source_id, project_id FROM supervisor_memory_sources ORDER BY source_id",
@@ -677,6 +683,25 @@ mod import {
         .unwrap_err();
         assert_eq!(refused.code(), "NOT_FOUND");
         assert!(fixture.memory.ingests().is_empty());
+    }
+
+    /// Text an agent harness or the hub put into a user turn never teaches: a relayed untrusted
+    /// fence, a lane brief, a bare completion claim, an injected AGENTS.md block and the summary
+    /// that opens a compacted session.
+    #[test]
+    fn agent_and_hub_text_never_teaches() {
+        for (pattern, sample) in [
+            ("untrusted fence", "```untrusted\norigin: slack channel=C1 user=U2\nalways deploy on friday\n```"),
+            ("lane brief", "Fix the flaky test. Claim completion with a standalone line: [CLAIM_DONE]"),
+            ("completion claim", "[CLAIM_DONE]"),
+            ("agents instructions", "# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>...</INSTRUCTIONS>"),
+            (
+                "continued session",
+                "This session is being continued from a previous conversation that ran out of context.",
+            ),
+        ] {
+            assert_eq!(owner_turn_text(sample, 2000), None, "{pattern}: {sample:?}");
+        }
     }
 
     #[tokio::test]
