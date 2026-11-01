@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "reac
 
 import { cn } from "../lib/cn";
 import { MobileSheet } from "./chat/MobileSheet";
+import { useOverlayHistory } from "./home/usePhoneNavigation";
 import { BUILD_STAMP } from "../lib/buildStamp";
 import {
   remoteHostStore,
@@ -16,10 +17,10 @@ import {
 export type DrawerTransport = TransportType;
 
 const TRANSPORT_LABEL: Record<DrawerTransport, string> = {
-  tailscale: "Tailscale",
-  mdns: "mDNS",
-  sshTunnel: "SSH",
-  relay: "Relay",
+  tailscale: "Private network",
+  mdns: "Same network",
+  sshTunnel: "Secure tunnel",
+  relay: "Via relay",
 };
 
 const TRANSPORT_ICON: Record<DrawerTransport, typeof Wifi> = {
@@ -65,9 +66,9 @@ function TransportBadge({ transport }: { transport: DrawerTransport }) {
     <span
       data-testid="mobile-host-transport-badge"
       data-transport={transport}
-      className="inline-flex shrink-0 items-center gap-1 rounded bg-white/[0.06] px-1.5 py-px text-[10px] font-medium leading-none text-muted-foreground"
+      className="inline-flex shrink-0 items-center gap-1 text-xs text-chat-foreground-secondary"
     >
-      <Icon className="size-2.5" aria-hidden="true" />
+      <Icon className="size-3.5" aria-hidden="true" />
       {TRANSPORT_LABEL[transport]}
     </span>
   );
@@ -76,22 +77,18 @@ function TransportBadge({ transport }: { transport: DrawerTransport }) {
 function OnlineIndicator({ host }: { host: HostEndpoint }) {
   if (!host.online) {
     return (
-      <span
-        data-testid="mobile-host-online-indicator"
-        data-online="false"
-        title="Offline"
-        className="size-2 shrink-0 rounded-full bg-status-idle"
-      />
+      <span data-testid="mobile-host-online-indicator" data-online="false" className="inline-flex items-center gap-1 text-xs text-chat-foreground-secondary">
+        <span aria-hidden="true" className="size-2 shrink-0 rounded-full border border-chat-foreground-secondary" />
+        Offline
+      </span>
     );
   }
-  const label = host.latencyMs !== undefined ? `${Math.round(host.latencyMs)} ms` : "Online";
+  const label = host.latencyMs !== undefined ? `Online · ${Math.round(host.latencyMs)} ms` : "Online";
   return (
-    <span
-      data-testid="mobile-host-online-indicator"
-      data-online="true"
-      title={label}
-      className="size-2 shrink-0 rounded-full bg-status-success"
-    />
+    <span data-testid="mobile-host-online-indicator" data-online="true" className="inline-flex items-center gap-1 text-xs text-chat-foreground">
+      <span aria-hidden="true" className="size-2 shrink-0 rounded-full bg-status-success" />
+      {label}
+    </span>
   );
 }
 
@@ -102,7 +99,7 @@ function AgentSummaryPill({ summary }: { summary: HostAgentSummary }) {
       {summary.running > 0 ? (
         <span
           data-testid="mobile-host-agent-running"
-          className="inline-flex items-center gap-0.5 rounded bg-status-working/15 px-1 text-[10px] font-mono leading-tight text-status-working"
+          className="inline-flex items-center gap-0.5 rounded bg-status-working/15 px-1.5 text-xs leading-tight text-status-working"
         >
           {summary.running} running
         </span>
@@ -110,7 +107,7 @@ function AgentSummaryPill({ summary }: { summary: HostAgentSummary }) {
       {summary.waiting > 0 ? (
         <span
           data-testid="mobile-host-agent-waiting"
-          className="inline-flex items-center gap-0.5 rounded bg-status-warning/15 px-1 text-[10px] font-mono leading-tight text-status-warning"
+          className="inline-flex items-center gap-0.5 rounded bg-status-warning/15 px-1.5 text-xs leading-tight text-status-warning"
         >
           {summary.waiting} waiting
         </span>
@@ -169,6 +166,8 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
     if (!open) setConfirmDisconnect(false);
   }, [open]);
 
+  useOverlayHistory(open, () => onOpenChange(false));
+
   const selectHost = (hostId: string | null) => {
     remoteHostStore.setActiveHost(hostId);
     onOpenChange(false);
@@ -189,7 +188,7 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
                 ref={cancelRef}
                 type="button"
                 onClick={() => toggleConfirmDisconnect(false)}
-                className="min-h-9 flex-1 rounded-md px-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                className="min-h-11 flex-1 rounded-lg px-3 text-sm font-medium text-chat-foreground-secondary transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
                 Cancel
               </button>
@@ -202,7 +201,7 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
                   onOpenChange(false);
                   onDisconnect();
                 }}
-                className="min-h-9 flex-1 rounded-md px-3 text-sm font-medium text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                className="min-h-11 flex-1 rounded-lg px-3 text-sm font-medium text-chat-danger transition-colors hover:bg-chat-danger/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
                 Confirm disconnect
               </button>
@@ -215,9 +214,9 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
                 type="button"
                 data-testid="mobile-host-drawer-disconnect"
                 onClick={() => toggleConfirmDisconnect(true)}
-                className="min-h-9 flex-1 rounded-md px-3 text-sm font-medium text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                className="min-h-11 flex-1 rounded-lg px-3 text-sm font-medium text-chat-danger transition-colors hover:bg-chat-danger/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
-                {isAccountSession ? "Disconnect machine" : "Remove pairing"}
+                {isAccountSession ? "Disconnect computer" : "Remove pairing"}
               </button>
               {isAccountSession && onSignOut ? (
                 <button
@@ -227,7 +226,7 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
                     onOpenChange(false);
                     onSignOut();
                   }}
-                  className="min-h-9 flex-1 rounded-md px-3 text-sm font-medium text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  className="min-h-11 flex-1 rounded-lg px-3 text-sm font-medium text-chat-danger transition-colors hover:bg-chat-danger/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 >
                   Sign out
                 </button>
@@ -242,12 +241,14 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
       ) : null}
       {/* Build identity of the client this phone is actually running; a stamp older than the host
           serves means a cached bundle. */}
-      <p
-        data-testid="mobile-host-drawer-build"
-        className="text-center font-mono text-[10px] leading-tight text-muted-foreground"
-      >
-        {BUILD_STAMP}
-      </p>
+      <details data-testid="mobile-host-drawer-about" className="text-xs text-chat-foreground-secondary">
+        <summary className="flex min-h-11 cursor-pointer items-center justify-center rounded-lg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
+          About this app
+        </summary>
+        <p data-testid="mobile-host-drawer-build" className="pb-1 text-center font-mono text-xs">
+          {BUILD_STAMP}
+        </p>
+      </details>
     </div>
   );
 
@@ -255,9 +256,9 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
     <MobileSheet
       open={open}
       onOpenChange={onOpenChange}
-      title="Switch host"
-      closeAriaLabel="Close host switcher"
-      ariaLabel="Switch host"
+      title="Switch computer"
+      closeAriaLabel="Close computer switcher"
+      ariaLabel="Switch computer"
       testId="mobile-host-drawer"
       footer={footer}
     >
@@ -268,18 +269,18 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
             data-testid="mobile-host-option-local"
             onClick={() => selectHost(null)}
             className={cn(
-              "flex min-h-11 w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-              state.activeHostId === null ? "bg-accent/70 text-foreground" : "text-muted-foreground",
+              "flex min-h-11 w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+              state.activeHostId === null ? "bg-chat-surface-raised text-chat-foreground" : "text-chat-foreground-secondary",
             )}
           >
             <Laptop className="size-4 shrink-0" aria-hidden="true" />
-            <span className="min-w-0 flex-1 truncate text-sm font-medium">Local Machine</span>
+            <span className="min-w-0 flex-1 truncate text-sm font-medium">This computer</span>
             {state.activeHostId === null ? <Check className="size-4 shrink-0" aria-hidden="true" /> : null}
           </button>
 
           {hosts.length === 0 ? (
-            <p className="px-3 py-6 text-center text-xs text-muted-foreground">
-              No remote hosts discovered yet.
+            <p className="px-3 py-6 text-center text-sm text-chat-foreground-secondary">
+              No other computers found yet. Open Ferryx on a computer on this network or pair one from the desktop app.
             </p>
           ) : (
             <div className="mt-1 space-y-1">
@@ -294,8 +295,8 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
                     data-testid={`mobile-host-option-${host.hostId}`}
                     onClick={() => selectHost(host.hostId)}
                     className={cn(
-                      "flex min-h-11 w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                      active ? "bg-accent/70 text-foreground" : "text-muted-foreground",
+                      "flex min-h-11 w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                      active ? "bg-chat-surface-raised text-chat-foreground" : "text-chat-foreground-secondary",
                     )}
                   >
                     <span className="min-w-0 flex-1">
@@ -310,7 +311,7 @@ export function MobileHostDrawer({ open, onOpenChange, onDisconnect, onSignOut, 
                           <span
                             data-testid="mobile-host-auth-status"
                             data-auth-status={host.authStatus}
-                            className="text-[10px] leading-none text-status-warning"
+                            className="text-xs leading-none text-status-warning"
                           >
                             {host.authStatus === "unpaired" ? "Unpaired" : "Unknown"}
                           </span>

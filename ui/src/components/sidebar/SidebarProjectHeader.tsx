@@ -59,14 +59,17 @@ export function SidebarProjectHeader({
       data-attention-state={slot.kind === "attention" ? slot.state ?? undefined : undefined}
       onActivate={onActivateSlot}
       ariaLabel={slotAriaLabel}
+      density={density}
     />
   );
   return (
     <div
       onContextMenu={onContextMenu}
       className={cn(
-        "group/project flex w-full items-center gap-0.5 rounded-md pr-1 text-worktree-sidebar-foreground/65 transition-colors hover:bg-worktree-sidebar-accent/60 hover:text-worktree-sidebar-foreground",
-        touch ? "min-h-11" : "h-7",
+        "group/project flex w-full items-center gap-0.5 rounded-md pr-1 transition-colors",
+        touch
+          ? "min-h-11 text-chat-foreground hover:bg-chat-row-hover"
+          : "h-7 text-worktree-sidebar-foreground/65 hover:bg-worktree-sidebar-accent/60 hover:text-worktree-sidebar-foreground",
       )}
     >
       <button
@@ -92,7 +95,7 @@ export function SidebarProjectHeader({
         title={title}
         className={cn(
           "flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none",
-          touch ? "text-[14px]" : "text-[12px]",
+          touch ? "min-h-11 text-sm" : "text-[12px]",
         )}
       >
         <Folder className={cn(touch ? "size-4" : "size-3.5", "shrink-0")} />

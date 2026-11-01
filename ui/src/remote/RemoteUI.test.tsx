@@ -781,8 +781,8 @@ describe("Remote UI Components", () => {
     // Disconnect drops the session token, so the same mount renders the login
     // screen; a hook declared below that early return changes the hook count.
     await openWorktreeDrawer();
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Machines" })); });
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Machines" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Computers" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Computers" })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Remove pairing" })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Confirm disconnect" })); });
     expect(screen.getByRole("heading", { name: "Sign in to Ferryx" })).toBeInTheDocument();
@@ -2536,7 +2536,7 @@ describe("Remote UI Components", () => {
 
     // Disconnect now lives in the Machines drawer, behind a confirmation step.
     await openWorktreeDrawer();
-    fireEvent.click(screen.getByRole("button", { name: "Machines" }));
+    fireEvent.click(screen.getByRole("button", { name: "Computers" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove pairing" }));
 
     expect(screen.queryByRole("heading", { name: /Sign in to Ferryx/i })).not.toBeInTheDocument();
@@ -2563,7 +2563,7 @@ describe("Remote UI Components", () => {
     await screen.findByTestId("remote-terminal");
 
     await openWorktreeDrawer();
-    fireEvent.click(screen.getByRole("button", { name: "Machines" }));
+    fireEvent.click(screen.getByRole("button", { name: "Computers" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove pairing" }));
 
     expect(screen.queryByPlaceholderText(/6-digit PIN/i)).not.toBeInTheDocument();
@@ -2592,7 +2592,7 @@ describe("Remote UI Components", () => {
     await screen.findByTestId("remote-terminal");
 
     await openWorktreeDrawer();
-    fireEvent.click(screen.getByRole("button", { name: "Machines" }));
+    fireEvent.click(screen.getByRole("button", { name: "Computers" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove pairing" }));
     expect(screen.getByRole("button", { name: "Confirm disconnect" })).toBeInTheDocument();
 

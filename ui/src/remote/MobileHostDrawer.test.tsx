@@ -61,17 +61,19 @@ describe("MobileHostDrawer", () => {
 
     const host1 = screen.getByTestId("mobile-host-option-host-1");
     expect(host1).toHaveTextContent("Studio Mac");
-    expect(host1).toHaveTextContent("Tailscale");
+    expect(host1).toHaveTextContent("Private network");
 
     const host2 = screen.getByTestId("mobile-host-option-host-2");
     expect(host2).toHaveTextContent("Laptop");
-    expect(host2).toHaveTextContent("mDNS");
+    expect(host2).toHaveTextContent("Same network");
     expect(host2.querySelector('[data-testid="mobile-host-online-indicator"]')).toHaveAttribute("data-online", "false");
+    expect(host2.querySelector('[data-testid="mobile-host-online-indicator"]')).toHaveTextContent("Offline");
 
     const host3 = screen.getByTestId("mobile-host-option-host-3");
     expect(host3).toHaveTextContent("Build Box");
-    expect(host3).toHaveTextContent("SSH");
+    expect(host3).toHaveTextContent("Secure tunnel");
     expect(host3.querySelector('[data-testid="mobile-host-online-indicator"]')).toHaveAttribute("data-online", "true");
+    expect(host3.querySelector('[data-testid="mobile-host-online-indicator"]')).toHaveTextContent("Online");
   });
 
   it("renders a Relay transport badge for relay-reachable hosts", () => {
@@ -85,7 +87,7 @@ describe("MobileHostDrawer", () => {
     const relayHost = screen.getByTestId("mobile-host-option-host-4");
     const badge = relayHost.querySelector('[data-testid="mobile-host-transport-badge"]');
     expect(badge).toHaveAttribute("data-transport", "relay");
-    expect(badge).toHaveTextContent("Relay");
+    expect(badge).toHaveTextContent("Via relay");
     expect(badge?.querySelector("svg")).toBeInTheDocument();
 
     const directHost = screen.getByTestId("mobile-host-option-host-1");
@@ -106,12 +108,12 @@ describe("MobileHostDrawer", () => {
       .getByTestId("mobile-host-option-host-5")
       .querySelector('[data-testid="mobile-host-transport-badge"]');
     expect(badge).toHaveAttribute("data-transport", "relay");
-    expect(badge).toHaveTextContent("Relay");
+    expect(badge).toHaveTextContent("Via relay");
   });
 
   it("shows an empty state when no hosts have been discovered", () => {
     render(<MobileHostDrawer open onOpenChange={vi.fn()} />);
-    expect(screen.getByText("No remote hosts discovered yet.")).toBeInTheDocument();
+    expect(screen.getByText(/No other computers found yet/)).toBeInTheDocument();
   });
 
   it("displays per-host agent status counts accurately", () => {
@@ -319,11 +321,11 @@ describe("MobileHostDrawer", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
-  it("renders both close buttons with aria-label 'Close host switcher' and clicking the X closes the drawer", () => {
+  it("renders both close buttons with aria-label 'Close computer switcher' and clicking the X closes the drawer", () => {
     const onOpenChange = vi.fn();
     render(<MobileHostDrawer open onOpenChange={onOpenChange} />);
 
-    const closeButtons = screen.getAllByLabelText("Close host switcher");
+    const closeButtons = screen.getAllByLabelText("Close computer switcher");
     expect(closeButtons).toHaveLength(2);
 
     // The X button inside the dialog header is the second close button (first is backdrop)

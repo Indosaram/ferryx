@@ -1,5 +1,5 @@
-import { GitBranch, LogOut, PanelLeft, Plus, Server, Terminal as TerminalIcon, X } from "lucide-react";
-import React, { useEffect, useMemo, useState, type ReactNode } from "react";
+import { FolderTree, GitBranch, LogOut, PanelLeft, Plus, Server, Terminal as TerminalIcon, X } from "lucide-react";
+import React, { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { SidebarViewId } from "../components/sidebar/SidebarViewTabs";
 import { IconButton } from "../components/ui/IconButton";
 import { buildRemoteAttentionRows, type AttentionRow } from "../features/ferryx/attention/attentionModel";
@@ -7,6 +7,8 @@ import { buildRemoteInventory, declaresOwnProperty, type RemoteInventoryModel } 
 import { RemoteSidebar, type PublishedAttentionTarget, type RemoteSidebarTarget } from "./RemoteSidebar";
 import { RemoteTerminalTabStrip, stripTabs, type RemoteStripTab } from "./RemoteTerminalTabStrip";
 import type { RemoteSidebarSection } from "./useRemoteSidebarModel";
+import { useOverlayHistory } from "./home/usePhoneNavigation";
+import { cn } from "../lib/cn";
 
 export type RemoteTerminalTabInfo = {
   id: string;
@@ -437,7 +439,8 @@ type RemoteWorkspaceMirrorProps = {
   selectorOpen: boolean;
   onSelectorOpenChange: (open: boolean) => void;
   onOpenHosts?: () => void;
-  /** Account mode: replaces the host (machine) action with a neutral account sign-out. */
+  /** Account mode: replaces the host (machine) action with a neutral account sign-out. Not shown
+   * inline on the phone home, where the Account sheet owns sign-out. */
   onSignOut?: () => void;
   onSelect: (option: RemoteContextOption) => void;
   onCreateTerminal?: () => void;
@@ -568,6 +571,9 @@ export function publishedAttentionOption(model: RemoteWorkspaceModel, target: Pu
   return attachOnly({ workspaceId: row.workspaceId, worktreeSlug: null, worktreeLabel: null, ...(accountMachines ? { machineId } : {}) });
 }
 
+const PHONE_ACTION =
+  "flex h-11 shrink-0 items-center gap-1.5 rounded-lg bg-chat-surface-raised px-3 text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50";
+
 export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   model,
   pending,
@@ -635,6 +641,39 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
     selectOption(publishedAttentionOption(model, target));
   };
 
+  // The phone drawer is worktrees only: the phone home owns the one Inbox and the one Supervisor.
+  const phoneDrawer = !inline && !desktopSidebar;
+  const drawerRef = useRef<HTMLDivElement | null>(null);
+  const drawerOpen = phoneDrawer && selectorOpen;
+  useOverlayHistory(drawerOpen, () => onSelectorOpenChange(false));
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    drawerRef.current?.querySelector<HTMLElement>("button, input, [tabindex]:not([tabindex='-1'])")?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onSelectorOpenChange(false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      if (previous?.isConnected) previous.focus();
+    };
+  }, [drawerOpen, onSelectorOpenChange]);
+  const trapTab = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Tab") return;
+    const focusables = Array.from(drawerRef.current?.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex='-1'])") ?? []);
+    if (focusables.length === 0) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
   const sidebarEmpty = sidebarSections.length === 0;
   const busyTab = pending?.sessionId ? tabs.find((tab) => tab.sessionId === pending.sessionId)?.key ?? null : null;
   const createDisabled = pending !== null || !model.context.workspaceId;
@@ -642,9 +681,9 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   const sidebarBody = (
     <>
       {inline || desktopSidebar ? null : (
-        <div className="flex h-8 shrink-0 items-center justify-end px-1.5">
-          <IconButton label="Close worktree list" onClick={() => onSelectorOpenChange(false)}>
-            <X className="size-3.5" aria-hidden="true" />
+        <div className="flex h-12 shrink-0 items-center justify-end px-1">
+          <IconButton label="Close worktree list" size="touch" onClick={() => onSelectorOpenChange(false)}>
+            <X className="size-4" aria-hidden="true" />
           </IconButton>
         </div>
       )}
@@ -657,15 +696,50 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
             onSelectorOpenChange(false);
             selectOption(sidebarRowOption(model, target));
           }}
-          view={inline ? "worktrees" : view}
-          {...(inline ? {} : { onViewChange: changeView, inbox: { rows: attentionRows, onOpen: openAttentionRow }, onOpenPublishedAttention: openPublishedAttention })}
-          {...(supervisor && !inline ? { supervisor } : {})}
+          view={inline || phoneDrawer ? "worktrees" : view}
+          {...(inline || phoneDrawer ? {} : { onViewChange: changeView, inbox: { rows: attentionRows, onOpen: openAttentionRow }, onOpenPublishedAttention: openPublishedAttention })}
+          {...(supervisor && !inline && !phoneDrawer ? { supervisor } : {})}
           status={pickerStatus}
         />
         {sidebarEmpty && !pickerStatus ? (
-          <p className="px-2 py-6 text-center text-[11px] text-muted-foreground">No selectable desktop worktrees are available.</p>
+          desktopSidebar ? (
+            <p className="px-2 py-6 text-center text-[11px] text-muted-foreground">No selectable desktop worktrees are available.</p>
+          ) : (
+            <div data-testid="remote-worktrees-empty" className="flex flex-col items-center gap-3 px-4 py-8 text-center">
+              <p className="text-sm text-chat-foreground-secondary">No worktrees to open yet. Open Ferryx on your computer to list its projects.</p>
+              {onCreateTerminal ? (
+                <button type="button" disabled={createDisabled} onClick={onCreateTerminal} className={PHONE_ACTION}>
+                  <TerminalIcon className="size-4" aria-hidden="true" />
+                  New terminal
+                </button>
+              ) : null}
+            </div>
+          )
         ) : null}
       </div>
+      {desktopSidebar ? null : (
+        <div className="flex shrink-0 items-center justify-end gap-2 border-t border-chat-border px-3 py-2">
+          {onOpenHosts && !onSignOut ? (
+            <button type="button" onClick={onOpenHosts} className={cn(PHONE_ACTION, "mr-auto")}>
+              <Server className="size-4" aria-hidden="true" />
+              Computers
+            </button>
+          ) : null}
+          {onCreateWorktree ? (
+            <button type="button" disabled={createDisabled} onClick={onCreateWorktree} className={PHONE_ACTION}>
+              <GitBranch className="size-4" aria-hidden="true" />
+              New worktree
+            </button>
+          ) : null}
+          {inline && onCreateTerminal ? (
+            <button type="button" disabled={createDisabled} onClick={onCreateTerminal} className={PHONE_ACTION}>
+              <Plus className="size-4" aria-hidden="true" />
+              New terminal
+            </button>
+          ) : null}
+        </div>
+      )}
+      {desktopSidebar ? (
       <div className="flex h-8 shrink-0 items-center justify-between gap-1 border-t border-worktree-sidebar-border px-1.5">
         {onSignOut ? (
           <IconButton label="Sign out" onClick={onSignOut}>
@@ -684,13 +758,9 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
               <GitBranch className="size-3.5" aria-hidden="true" />
             </IconButton>
           ) : null}
-          {inline && onCreateTerminal ? (
-            <IconButton label="New terminal tab" disabled={createDisabled} onClick={onCreateTerminal}>
-              <Plus className="size-3.5" aria-hidden="true" />
-            </IconButton>
-          ) : null}
         </div>
       </div>
+      ) : null}
     </>
   );
 
@@ -700,10 +770,10 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
         data-testid="remote-worktrees-inline"
         aria-label="Workspace context"
         role="region"
-        className="flex min-h-0 min-w-0 flex-1 flex-col bg-worktree-sidebar text-worktree-sidebar-foreground"
+        className="flex min-h-0 min-w-0 flex-1 flex-col bg-chat-screen text-chat-foreground"
       >
         {sidebarBody}
-        {creationError ? <p role="alert" className="shrink-0 px-3 py-2 text-xs text-destructive">{creationError}</p> : null}
+        {creationError ? <p role="alert" className="shrink-0 px-3 py-2 text-sm text-chat-danger">{creationError}</p> : null}
       </div>
     );
   }
@@ -724,13 +794,16 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
             type="button"
             aria-label="Dismiss worktree list"
             onClick={() => onSelectorOpenChange(false)}
-            className="absolute inset-0 z-30 bg-black/50"
+            className="absolute inset-0 z-30 bg-chat-screen/70"
           />
           <div
+            ref={drawerRef}
             data-testid="remote-sidebar-drawer"
             role="dialog"
+            aria-modal="true"
             aria-label="Workspace context"
-            className="absolute inset-y-0 left-0 z-40 flex min-h-0 w-[88%] max-w-[340px] animate-drawer-in flex-col border-r border-worktree-sidebar-border bg-worktree-sidebar text-worktree-sidebar-foreground shadow-xl"
+            onKeyDown={trapTab}
+            className="absolute inset-y-0 left-0 z-40 flex min-h-0 w-[88%] max-w-[340px] animate-drawer-in flex-col border-r border-chat-border bg-chat-screen text-chat-foreground motion-reduce:animate-none"
           >
             {sidebarBody}
           </div>
@@ -754,21 +827,38 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
             children
           ) : (
             <div className="flex flex-1 items-center justify-center p-6">
-              <div className="max-w-sm text-center">
-                <span className="mx-auto flex size-12 items-center justify-center rounded-lg border border-border bg-input text-muted-foreground">
-                  {desktopSidebar ? (
+              {desktopSidebar ? (
+                <div className="max-w-sm text-center">
+                  <span className="mx-auto flex size-12 items-center justify-center rounded-lg border border-border bg-input text-muted-foreground">
                     <PanelLeft className="size-5" aria-hidden="true" />
-                  ) : (
-                    <TerminalIcon className="size-5" aria-hidden="true" />
-                  )}
-                </span>
-                <h2 className="mt-4 text-sm font-semibold text-foreground">No focused terminal</h2>
-                <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                  {paneTabs.length > 0
-                    ? "Pick a terminal from the tabs to mirror it here. Browser tabs stay private."
-                    : "Open a terminal in Ferryx Desktop to mirror it here. Browser tabs stay private."}
-                </p>
-              </div>
+                  </span>
+                  <h2 className="mt-4 text-sm font-semibold text-foreground">No focused terminal</h2>
+                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                    {paneTabs.length > 0
+                      ? "Pick a terminal from the tabs to mirror it here. Browser tabs stay private."
+                      : "Open a terminal in Ferryx Desktop to mirror it here. Browser tabs stay private."}
+                  </p>
+                </div>
+              ) : (
+                <div className="flex max-w-sm flex-col items-center gap-3 text-center">
+                  <h2 className="text-base font-semibold text-chat-foreground">No focused terminal</h2>
+                  <p className="text-sm leading-relaxed text-chat-foreground-secondary">
+                    {paneTabs.length > 0 ? "Pick a terminal from the tabs above." : "There's no terminal open in this worktree yet."}
+                  </p>
+                  <div className="flex flex-wrap justify-center gap-2">
+                    <button type="button" onClick={() => onSelectorOpenChange(true)} className={PHONE_ACTION}>
+                      <FolderTree className="size-4" aria-hidden="true" />
+                      Open worktrees
+                    </button>
+                    {onCreateTerminal ? (
+                      <button type="button" disabled={createDisabled} onClick={onCreateTerminal} className={PHONE_ACTION}>
+                        <Plus className="size-4" aria-hidden="true" />
+                        New terminal
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

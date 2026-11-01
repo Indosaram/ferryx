@@ -119,7 +119,7 @@ function LaneCard({
           {status.label}
         </span>
       </span>
-      {folder ? <span className="mt-0.5 block min-w-0 truncate text-xs text-chat-foreground-secondary">{folder}</span> : null}
+      {folder ? <span className="mt-0.5 block min-w-0 truncate text-xs text-chat-foreground">{folder}</span> : null}
       {lane.goal && lane.goal !== lane.title ? (
         <span className="mt-1 line-clamp-2 min-w-0 break-words text-sm leading-snug text-chat-foreground">{lane.goal}</span>
       ) : null}
