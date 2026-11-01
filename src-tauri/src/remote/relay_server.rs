@@ -1788,10 +1788,12 @@ impl RelayState {
                 })
                 .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
         }
-        let socket = timeout(SESSION_PAIRING_TIMEOUT, rx)
-            .await
-            .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
-            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        let socket = match timeout(SESSION_PAIRING_TIMEOUT, rx).await {
+            Ok(Ok(socket)) => socket,
+            // The sweeper retires an unpaired entry at the same deadline this wait uses, so a
+            // dropped sender is the same pairing timeout, reported with its stage.
+            Err(_) | Ok(Err(_)) => return Err(StatusCode::GATEWAY_TIMEOUT),
+        };
         Ok((socket, guard, control_generation))
     }
 }
@@ -10155,6 +10157,36 @@ mod tests {
             Some(RELAY_STAGE_DATA_PAIRING_TIMEOUT)
         );
         state.unregister_control_channel("machine_stage_1", generation);
+    }
+
+    #[tokio::test]
+    async fn a_waiter_retired_by_the_sweeper_reports_the_data_pairing_timeout() {
+        let state = test_state(vec![]);
+        let (generation, mut notices, _grants) =
+            state.register_control_channel("machine_stage_swept".into());
+        let http_fut = proxy_http(
+            &state,
+            "machine_stage_swept",
+            Some(generation),
+            Method::GET,
+            "/api/v1/capabilities",
+            HeaderMap::new(),
+            Vec::new(),
+        );
+        tokio::pin!(http_fut);
+        let notice = tokio::select! {
+            res = &mut http_fut => panic!("completed prematurely: {:?}", res.map(|r| r.status())),
+            n = notices.recv() => n.expect("session notice"),
+        };
+        // The sweeper retires the entry (as it does at SESSION_PAIRING_TIMEOUT) before the
+        // waiter's own timer fires.
+        state.inner.pending_sessions.lock().remove(&notice.session_id);
+        let res = http_fut.await.expect("stage timeout is a response");
+        assert_eq!(res.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            res.headers().get(RELAY_STAGE_HEADER).and_then(|v| v.to_str().ok()),
+            Some(RELAY_STAGE_DATA_PAIRING_TIMEOUT)
+        );
     }
 
     #[tokio::test]
