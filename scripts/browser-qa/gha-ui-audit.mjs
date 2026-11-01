@@ -1231,6 +1231,18 @@ await step("narrow-900-settings-closed", "Escape closes Settings at 900px", [foc
 
 // ---------------------------------------------------------------- Chromium engine checks (Linux)
 const enginePids = () => (platform === "linux" ? run("pgrep", ["-f", "ferryx_engine"]).stdout.split(/\s+/).filter(Boolean).map(Number) : []);
+/** Waits until X keyboard focus leaves the Ferryx toplevel for the engine's pane window (the
+ * engine moves it asynchronously after Mod+L or a click), bounded by `timeout`. */
+const waitForEngineFocus = (label, timeout = 8000) => [label, async () => {
+  const deadline = Date.now() + timeout;
+  let focused = "";
+  while (Date.now() < deadline) {
+    focused = run("xdotool", ["getwindowfocus"]).stdout;
+    if (/^\d+$/.test(focused) && Number(focused) > 1 && focused !== String(linux.windowId)) return { ok: true, focused, ferryx: linux.windowId };
+    await sleep(200);
+  }
+  return { ok: false, focused, ferryx: linux.windowId, stderr: "X keyboard focus stayed off the engine window" };
+}];
 if (engineZip && summary.engine.checks.installed_from_settings) {
   await step("engine-restore-size", "Resize back to 1280x850 before the Chromium tab", [focus, ["resize", () => host.resize(1280, 850)], 1500]);
   let browserId = null;
@@ -1258,6 +1270,7 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
     [
       focus,
       key("Mod+L", { key: "l", mods: ["mod"] }),
+      waitForEngineFocus("engine window takes keyboard focus after Mod+L"),
       ["type URL", () => host.type(`${fixtureBase}/fixture.html`)],
       key("Enter", { key: "Enter" }),
       5000,
@@ -1287,6 +1300,7 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
         const hint = findWord(words, "fixture:") ?? findWord(words, "CEF");
         return hint ? host.click(hint.x, hint.y + 60) : host.click(760, 520);
       }],
+      waitForEngineFocus("engine window takes keyboard focus after the click"),
       ["type", () => host.type("ferryxqa")],
       2000,
       ["optional title via CLI", async () => {
