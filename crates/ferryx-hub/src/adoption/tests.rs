@@ -222,8 +222,9 @@ fn only_archived_source_ids_parse() {
     }
 }
 
-/// The `--replace-local` path: a target holding another supervisor refuses the import until
-/// it archives itself; after `archive_before_replace` the same import stages.
+/// The `--replace-local` move path: a target holding another supervisor refuses the import
+/// with `SUPERVISOR_IDENTITY_MISMATCH` until it archives itself; after
+/// `archive_before_replace` the same import stages.
 #[tokio::test]
 async fn replace_local_archives_then_imports() {
     let root = temp_dir("replace");
