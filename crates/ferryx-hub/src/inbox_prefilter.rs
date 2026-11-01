@@ -10,7 +10,7 @@ use sqlx::SqlitePool;
 
 use crate::inbox_sources::SourceItem;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct PrefilterRules {
     pub owner_kakao_name: String,
@@ -18,17 +18,6 @@ pub struct PrefilterRules {
     pub owner_kakao_authors: Vec<String>,
     pub kakao_keywords: Vec<String>,
     pub excluded_kakao_rooms: HashSet<String>,
-}
-
-impl Default for PrefilterRules {
-    fn default() -> Self {
-        Self {
-            owner_kakao_name: String::new(),
-            owner_kakao_authors: Vec::new(),
-            kakao_keywords: Vec::new(),
-            excluded_kakao_rooms: HashSet::new(),
-        }
-    }
 }
 
 pub fn rules_path() -> Option<PathBuf> {

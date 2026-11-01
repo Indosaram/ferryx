@@ -756,7 +756,9 @@ mod tests {
     async fn card_generation_migration_preserves_attachment_and_latest_card() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
             .connect("sqlite::memory:").await.unwrap();
-        for migration in sqlx::migrate!("./migrations").iter().filter(|m| m.version <= 42) {
+        // Every migration except the card-generation one under test (0044 only adds a column
+        // to another table, which queueing the parent report needs).
+        for migration in sqlx::migrate!("./migrations").iter().filter(|m| m.version != 43) {
             sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
         }
         let attachment = parent(&pool).await;

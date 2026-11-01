@@ -770,7 +770,7 @@ fn render_digest_section(heading: &str, rows: Vec<DigestRow>, max_groups: usize)
         }
         if group.count > 1 {
             let count = group.count;
-            out.push_str(&locale.pick(&format!(" · {count}건"), &format!(" · {count} items")));
+            out.push_str(locale.pick(&format!(" · {count}건"), &format!(" · {count} items")));
         }
         out.push_str(&format!(" · {} {}", locale.pick("최근", "latest"), local_short(&group.latest)));
         for preview in &group.previews {
@@ -784,7 +784,7 @@ fn render_digest_section(heading: &str, rows: Vec<DigestRow>, max_groups: usize)
         let mut rest: Vec<&DigestGroup> = groups[max_groups..].iter().collect();
         let count: usize = rest.iter().map(|g| g.count).sum();
         let more = rest.len();
-        out.push_str(&locale.pick(
+        out.push_str(locale.pick(
             &format!("\n- 외 {more}곳, {count}건"),
             &format!("\n- +{more} more ({count} items)"),
         ));
@@ -1072,7 +1072,7 @@ mod tests {
         });
     }
 
-    async fn owner_row(pool: &SqlitePool, id: &str, source: &str, thread: &str, author: &str, snippet: &str, at: &str, status: &str) {
+    async fn owner_row(pool: &SqlitePool, id: &str, source: &str, thread: &str, (author, snippet): (&str, &str), at: &str, status: &str) {
         sqlx::query(
             "INSERT INTO inbox_items(id, source, source_ref, thread_ref, author, title, snippet, received_at, raw_hash, collected_at)
              VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1096,16 +1096,16 @@ mod tests {
         let pool = crate::storage::memory().await.unwrap();
         let now = DateTime::parse_from_rfc3339("2026-11-01T00:00:00Z").unwrap().with_timezone(&Utc);
         let hours_ago = |h: i64| (now - TimeDelta::hours(h)).to_rfc3339();
-        owner_row(&pool, "fresh", "imessage", "t-fresh", "Bob", "call me", &hours_ago(2), "open").await;
-        owner_row(&pool, "old", "mail", "t-old", "Google", "Security alert", &hours_ago(100), "open").await;
-        owner_row(&pool, "due", "mail", "t-due", "Ann", "sign by friday", &hours_ago(100), "open").await;
+        owner_row(&pool, "fresh", "imessage", "t-fresh", ("Bob", "call me"), &hours_ago(2), "open").await;
+        owner_row(&pool, "old", "mail", "t-old", ("Google", "Security alert"), &hours_ago(100), "open").await;
+        owner_row(&pool, "due", "mail", "t-due", ("Ann", "sign by friday"), &hours_ago(100), "open").await;
         sqlx::query("UPDATE inbox_decisions SET due_at = ? WHERE item_id = 'due'")
             .bind((now + TimeDelta::hours(30)).to_rfc3339()).execute(&pool).await.unwrap();
         // Asked in a room, then a later message of that room was settled (the owner answered).
-        owner_row(&pool, "asked", "kakao", "room", "강우용", "저녁 만찬장은 어디인가요??", &hours_ago(10), "open").await;
-        owner_row(&pool, "answered", "kakao", "room", "강우용", "해송횟집입니다", &hours_ago(9), "done").await;
+        owner_row(&pool, "asked", "kakao", "room", ("강우용", "저녁 만찬장은 어디인가요??"), &hours_ago(10), "open").await;
+        owner_row(&pool, "answered", "kakao", "room", ("강우용", "해송횟집입니다"), &hours_ago(9), "done").await;
         // A CI failure whose PR recovered later.
-        owner_row(&pool, "ci", "github", "pr27", "repo", "[CI failed] repo#27: fix", &hours_ago(20), "open").await;
+        owner_row(&pool, "ci", "github", "pr27", ("repo", "[CI failed] repo#27: fix"), &hours_ago(20), "open").await;
         sqlx::query(
             "INSERT INTO inbox_items(id, source, source_ref, thread_ref, author, title, snippet, received_at, raw_hash, collected_at)
              VALUES('ci-ok', 'github', 'ci-ok', 'pr27', 'repo', 'fix', '[CI recovered] repo#27: fix', ?, 'ci-ok', ?)",
@@ -1114,7 +1114,7 @@ mod tests {
         .execute(&pool).await.unwrap();
         // Cron: one job is fixed, one is in today's ## Cron section, one is open and quiet.
         for (job, status, updated) in [("fixed-job", "fixed", 50), ("loud-job", "needs_owner", 3), ("quiet-job", "needs_owner", 40)] {
-            owner_row(&pool, &format!("cron:job:{job}"), "cron", job, job, "approve a rerun", &hours_ago(3), "open").await;
+            owner_row(&pool, &format!("cron:job:{job}"), "cron", job, (job, "approve a rerun"), &hours_ago(3), "open").await;
             sqlx::query("INSERT INTO cron_problems(id, job_id, summary, created_at, status, kind, signature, detail, updated_at)
                 VALUES(?, ?, 'boom', ?, ?, 'failed', 'sig', 'boom', ?)")
                 .bind(job).bind(job).bind(hours_ago(updated)).bind(status).bind(hours_ago(updated))
@@ -1126,7 +1126,7 @@ mod tests {
         assert_eq!(ids, vec!["approve a rerun", "call me", "sign by friday"]);
         // The section is capped at ten conversations.
         for n in 0..12 {
-            owner_row(&pool, &format!("m{n}"), "mail", &format!("t{n}"), &format!("s{n}"), "x", &hours_ago(1), "open").await;
+            owner_row(&pool, &format!("m{n}"), "mail", &format!("t{n}"), (&format!("s{n}"), "x"), &hours_ago(1), "open").await;
         }
         let text = render_digest_section("대표 확인 필요", digest_owner_rows(&pool, now).await.unwrap(), DIGEST_OWNER_MAX_GROUPS);
         assert_eq!(text.lines().filter(|line| line.starts_with("- [")).count(), DIGEST_OWNER_MAX_GROUPS);

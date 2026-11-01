@@ -493,7 +493,7 @@ pub(crate) async fn settle_environment_faults(pool: &SqlitePool, job: &str) -> R
             continue;
         };
         let mut conn = pool.acquire().await?;
-        let jobs = episode_jobs(&mut *conn, &fault, &since).await?;
+        let jobs = episode_jobs(&mut conn, &fault, &since).await?;
         drop(conn);
         if !jobs.iter().any(|affected| affected == job) {
             continue;

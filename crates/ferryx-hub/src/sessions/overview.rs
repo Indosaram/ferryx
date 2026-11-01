@@ -485,7 +485,10 @@ mod tests {
             assert_eq!(activity(Some("2026-10-19T02:57:00Z"), now), "2 d ago (02:57 UTC)");
             assert_eq!(activity(None, now), "activity unknown");
             let empty = Overview { list: SessionList::default(), snapshots: Vec::new() };
-            assert_eq!(format_overview(&empty, now, 400), "no running sessions");
+            assert_eq!(
+                format_overview(&empty, now, 400),
+                "🖥\u{fe0f} local — working 0 · awaiting answer 0 · idle 0"
+            );
             assert_eq!(
                 format_question_summary(&PendingQuestion::default()),
                 "question pending"

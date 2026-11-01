@@ -1052,7 +1052,11 @@ fn interim_route(text: &str, salience: Option<crate::report_gate::Salience>) -> 
         return InterimRoute::Drop;
     }
     match salience {
-        Some(Salience::Action | Salience::Decision) => InterimRoute::Post,
+        // An approval or choice always reaches the owner. Any other "action" is posted only
+        // when it is not working narration: an unavailable judge answers "action"
+        // conservatively, and narration such as "확인하겠습니다." must still fold into the status.
+        Some(Salience::Decision) => InterimRoute::Post,
+        Some(Salience::Action) if !crate::report_gate::is_leak(text) => InterimRoute::Post,
         _ => InterimRoute::Coalesce,
     }
 }

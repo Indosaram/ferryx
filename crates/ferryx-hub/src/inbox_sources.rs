@@ -1064,7 +1064,10 @@ mod tests {
     #[tokio::test]
     async fn an_owner_kakao_reply_closes_only_that_rooms_earlier_owner_items() {
         let pool = crate::storage::memory().await.unwrap();
-        let rules = crate::inbox_prefilter::PrefilterRules::default();
+        let rules = crate::inbox_prefilter::PrefilterRules {
+            owner_kakao_authors: vec!["윤인도".to_owned()],
+            ..Default::default()
+        };
         let at = |minute: i64| {
             DateTime::parse_from_rfc3339("2026-10-23T05:00:00Z")
                 .unwrap()
