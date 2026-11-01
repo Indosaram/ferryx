@@ -69,7 +69,9 @@ pub fn parse_setup_cli(args: &[String]) -> Result<SetupArgs, UsageError> {
     if let Some(extra) = rest.first() {
         return Err(UsageError(format!("unexpected argument {extra}\n{SETUP_USAGE}")));
     }
-    if !std::path::Path::new(&parsed.git_common_dir).is_absolute() {
+    // A paired host's dir is a path on that host (checked by `remote_git_common_dir`), so only
+    // the local form is held to this machine's notion of an absolute path.
+    if !parsed.remote && !std::path::Path::new(&parsed.git_common_dir).is_absolute() {
         return Err(UsageError("--git-common-dir must be an absolute path".into()));
     }
     if parsed.remote && parsed.host == ferryx_hub::agent_control::LOCAL_HOST_ID {
@@ -606,6 +608,12 @@ mod tests {
         words.iter().map(|word| (*word).to_owned()).collect()
     }
 
+    /// An absolute git dir on the machine running the test.
+    #[cfg(windows)]
+    const LOCAL_GIT_DIR: &str = r"C:\work\qa\.git";
+    #[cfg(not(windows))]
+    const LOCAL_GIT_DIR: &str = "/work/qa/.git";
+
     #[test]
     fn the_cli_parses_every_goal_command() {
         assert_eq!(
@@ -689,7 +697,7 @@ mod tests {
     fn the_setup_cli_needs_every_flag_once_and_an_absolute_dir() {
         let full = [
             "ferryx-cli", "supervisor", "setup", "--owner", "qa-owner", "--project", "qa-supervisor",
-            "--repo-identity", "qa:qa-supervisor", "--host", "local", "--git-common-dir", "/work/qa/.git", "--json",
+            "--repo-identity", "qa:qa-supervisor", "--host", "local", "--git-common-dir", LOCAL_GIT_DIR, "--json",
         ];
         assert_eq!(
             parse_setup_cli(&argv(&full)).unwrap(),
@@ -698,7 +706,7 @@ mod tests {
                 project: "qa-supervisor".into(),
                 repo_identity: "qa:qa-supervisor".into(),
                 host: "local".into(),
-                git_common_dir: "/work/qa/.git".into(),
+                git_common_dir: LOCAL_GIT_DIR.into(),
                 remote: false,
             }
         );
@@ -715,7 +723,7 @@ mod tests {
         let mut extra = argv(&full);
         extra.push("stray".into());
         assert!(parse_setup_cli(&extra).is_err(), "an unknown argument is refused");
-        let relative: Vec<String> = full.iter().map(|w| if *w == "/work/qa/.git" { "work/.git".to_owned() } else { (*w).to_owned() }).collect();
+        let relative: Vec<String> = full.iter().map(|w| if *w == LOCAL_GIT_DIR { "work/.git".to_owned() } else { (*w).to_owned() }).collect();
         assert!(parse_setup_cli(&relative).is_err(), "a relative dir is refused");
         assert_eq!(setup_exit_code(ferryx_hub::supervisor::SETUP_CONFLICT), EXIT_REFUSED);
         assert_eq!(setup_exit_code("INVALID_REQUEST"), EXIT_INVALID);
@@ -803,7 +811,9 @@ mod tests {
         };
         let parsed = parse_setup_cli(&with(paired, true)).unwrap();
         assert!(parsed.remote && parsed.host == paired);
-        assert!(!parse_setup_cli(&with(paired, false)).unwrap().remote, "without --remote the local path runs (HOST_NOT_LOCAL)");
+        let local_form: Vec<String> =
+            with(paired, false).into_iter().map(|w| if w == "/r/.git" { LOCAL_GIT_DIR.to_owned() } else { w }).collect();
+        assert!(!parse_setup_cli(&local_form).unwrap().remote, "without --remote the local path runs (HOST_NOT_LOCAL)");
         assert!(parse_setup_cli(&with("local", true)).is_err(), "--remote with host local is a usage error");
         let mut twice = with(paired, true);
         twice.push("--remote".into());
