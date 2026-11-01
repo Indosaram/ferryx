@@ -1,0 +1,8 @@
+[build]
+target-dir = "target"
+
+[env]
+# audiopus_sys vendors libopus with a pre-CMake-4 policy minimum.
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+# Build the portable vendored static library instead of depending on system Opus.
+OPUS_NO_PKG = "1"

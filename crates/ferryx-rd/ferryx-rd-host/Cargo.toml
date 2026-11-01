@@ -1,0 +1,125 @@
+[package]
+name = "ferryx-rd-host"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "ferryx_rd_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ferryx-rd-host"
+path = "src/main.rs"
+required-features = ["cli", "maho-relay"]
+
+[[example]]
+name = "agent_qa_host"
+required-features = ["cli"]
+
+[features]
+default = []
+macos-host = []
+# The standalone maho relay bridge (relay.rs). Ferryx carries RD over its own tunnel instead.
+maho-relay = ["dep:tokio-tungstenite", "dep:futures-util"]
+# mdns-sd advertising on Linux/Windows (Apple uses Bonjour regardless).
+mdns = ["ferryx-rd-net/mdns"]
+# Command-line front end of the standalone host binary and examples.
+# The standalone host still advertises itself on the LAN.
+cli = ["dep:clap", "dep:tracing-subscriber", "mdns"]
+
+[dependencies]
+opus = "0.3.1"
+audiopus_sys = { version = "0.2.2", features = ["static"] }
+ferryx-rd-proto = { path = "../ferryx-rd-proto" }
+ferryx-rd-net = { path = "../ferryx-rd-net" }
+tokio.workspace = true
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"], optional = true }
+futures-util = { version = "0.3", optional = true }
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, optional = true }
+openssl.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.9"
+uuid = { version = "1", features = ["v4"] }
+clap = { version = "4", features = ["derive"], optional = true }
+hostname = "0.4"
+dirs = "6"
+libc = "0.2"
+rustix.workspace = true
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+ffmpeg-next = { workspace = true, default-features = false, features = ["format", "software-scaling"] }
+
+[target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
+png = "0.17.16"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSData"] }
+objc2-app-kit = { version = "0.3.1", default-features = false, features = ["NSPasteboard", "NSCursor", "NSImage", "NSImageRep", "NSGraphicsContext", "objc2-core-graphics"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGImage"] }
+objc2-screen-capture-kit = { version = "0.3", features = ["block2", "dispatch2", "objc2-core-media"] }
+objc2-core-media = { version = "0.3", features = ["CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "objc2-core-audio-types", "objc2-core-video"] }
+objc2-core-audio-types = "0.3"
+objc2-core-video = { version = "0.3", features = ["CVPixelBuffer"] }
+objc2-core-foundation = "0.3"
+block2 = "0.6"
+dispatch2 = "0.3"
+core-graphics = { version = "0.25", features = ["elcapitan", "highsierra"] }
+core-foundation = "0.10"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ffmpeg-next = { workspace = true, default-features = false, features = ["filter"] }
+ashpd = { version = "0.11.1", default-features = false, features = ["tokio"] }
+pipewire = "0.9.2"
+evdev = "0.13"
+tempfile = "3"
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols = { version = "0.32.13", features = ["client", "unstable", "staging"] }
+libloading = "0.8.9"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+libloading = "0.8.9"
+clipboard-win = { version = "5.4.1", features = ["std"] }
+dxgi-capture-rs = "1.2.2"
+nvenc = "0.1.0"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media",
+    "Win32_Media_Audio",
+    "Win32_Media_MediaFoundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Environment",
+    "Win32_System_Registry",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Services",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_Threading",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+tracing-subscriber.workspace = true
+ferryx-rd-app = { path = "../ferryx-rd-app" }
+ferryx-rd-relay = { path = "../ferryx-rd-relay" }
+axum = { version = "0.8", features = ["ws"] }
