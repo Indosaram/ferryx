@@ -1389,7 +1389,7 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
 
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     if let Some(engine_dir) = cef_engine_dir {
-        return create_cef_browser_session(app, manager, state, engine_dir).await;
+        return create_cef_browser_session(app, manager, state, engine_dir, None).await;
     }
 
     if let Some(main_window) = app.get_window("main") {
@@ -1832,11 +1832,12 @@ fn emit_session_state<R: tauri::Runtime>(app: &AppHandle<R>, state: &BrowserStat
 /// Opens the tab in its profile's Chromium engine, whose browser window sits over the pane.
 /// The engine reports the page's address, title and loading state as events.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-async fn create_cef_browser_session<R: tauri::Runtime>(
+pub(crate) async fn create_cef_browser_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
     manager: &Arc<BrowserManager>,
     state: BrowserState,
     engine_dir: std::path::PathBuf,
+    engine_url: Option<String>,
 ) -> Result<BrowserState, IpcError> {
     use crate::browser::cef_engine;
     let browser_id = state.browser_id.clone();
@@ -1885,7 +1886,7 @@ async fn create_cef_browser_session<R: tauri::Runtime>(
     };
     let sink = cef_event_sink(app.clone(), Arc::clone(manager));
     let open_id = browser_id.clone();
-    let url = state.url.clone();
+    let url = engine_url.unwrap_or_else(|| state.url.clone());
     let visible = state.visible;
     if let Err(error) = crate::ipc::run_blocking(move || {
         let launch = cef_engine::EngineLaunch {
@@ -3744,7 +3745,7 @@ pub async fn cmd_browser_list(
 
 /// Where the engine and its per-tab caches live: the app data dir, or `FERRYX_DATA_DIR` when an
 /// isolated (QA or test) instance set it, so such a run never touches the real install.
-fn engine_data_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<std::path::PathBuf, IpcError> {
+pub(crate) fn engine_data_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<std::path::PathBuf, IpcError> {
     if let Some(dir) = std::env::var_os("FERRYX_DATA_DIR").filter(|dir| !dir.is_empty()) {
         return Ok(std::path::PathBuf::from(dir));
     }
@@ -3820,9 +3821,9 @@ pub async fn cmd_browser_engine_remove<R: tauri::Runtime>(
 
 /// The engine's executable name, also on platforms without a Chromium backend yet.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-const ENGINE_EXECUTABLE: &str = crate::browser::cef_engine::ENGINE_EXE;
+pub(crate) const ENGINE_EXECUTABLE: &str = crate::browser::cef_engine::ENGINE_EXE;
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-const ENGINE_EXECUTABLE: &str = "ferryx_engine";
+pub(crate) const ENGINE_EXECUTABLE: &str = "ferryx_engine";
 
 /// Where a pane's engine window goes, in the units the platform module places it in: pixels
 /// inside the main window on Windows, screen points (top-left origin) on macOS, where the

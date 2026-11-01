@@ -7,6 +7,7 @@ pub mod chromium_cookies;
 pub mod cookies;
 pub mod download;
 pub mod engine_install;
+pub mod extensions;
 pub mod find;
 pub mod guest;
 pub mod hard_reload;

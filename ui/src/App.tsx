@@ -35,6 +35,7 @@ import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots, isLocalDagProject, remoteProjectsWatchKey } from "./lib/dagWatchRoots";
 import { loadBrowserSettings, newBrowserTabUrl } from "./lib/browserSettings";
 import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, getBrowserState, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, openExternalUrl, popupOpenerLink, reportBrowserAdoption, setBrowserZoom, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
+import { OPEN_BROWSER_URL_EVENT, OPEN_SETTINGS_EVENT, type OpenBrowserUrlDetail, type OpenSettingsDetail } from "./lib/browserExtensions";
 import { listen } from "@tauri-apps/api/event";
 import { CLI_OPEN_FILE_EVENT, parseCliOpenFilePayload } from "./lib/cliOpenFile";
 import { registerBuiltInBrowserLinkOpener, registerWorktreePathOpener } from "./lib/linkRouting";
@@ -137,6 +138,7 @@ import {
   bootTrace,
   browserRemoteReclaim,
   discoverDagWatchRoots,
+  isStructuredIpcError,
   type AgentDetection,
   type FocusedTerminalPayload,
   type RegisteredProject,
@@ -347,7 +349,12 @@ const healedLocalWorkspaceIds = new Set<string>();
 // the failure is shown with its reason and a retry instead of only reaching the console.
 export function reportLocalRegistrationFailure(project: RegisteredProject, error: unknown): void {
   const name = project.repoRoot.split(/[\\/]/).filter(Boolean).pop() ?? project.workspaceId;
-  const reason = error instanceof Error ? error.message : String(error);
+  // Structured IPC errors are plain objects, so String(error) would print "[object Object]".
+  const reason = isStructuredIpcError(error)
+    ? error.message || error.code
+    : error instanceof Error
+      ? error.message
+      : String(error);
   toast.error(`Couldn't open project "${name}"`, {
     id: `local-registration:${project.workspaceId}`,
     description: `New terminals in this project will fail until it registers. ${reason}`,
@@ -3300,6 +3307,36 @@ function WorkspaceApp({
     setIsSettingsOpen(true);
   }, []);
   handleOpenSettingsRef.current = handleOpenSettings;
+  useEffect(() => {
+    const onOpenSettings = (event: Event) => {
+      const detail = (event as CustomEvent<OpenSettingsDetail>).detail;
+      if (!detail) return;
+      handleOpenSettingsRef.current(detail.section);
+      if (!detail.anchor) return;
+      // The settings dialog loads lazily, so wait for the anchor to mount before scrolling to it.
+      let frames = 0;
+      const scrollToAnchor = () => {
+        const target = document.getElementById(detail.anchor ?? "");
+        if (target) {
+          target.scrollIntoView({ block: "start" });
+          return;
+        }
+        if (++frames < 120) window.requestAnimationFrame(scrollToAnchor);
+      };
+      window.requestAnimationFrame(scrollToAnchor);
+    };
+    window.addEventListener(OPEN_SETTINGS_EVENT, onOpenSettings);
+    return () => window.removeEventListener(OPEN_SETTINGS_EVENT, onOpenSettings);
+  }, []);
+  useEffect(() => {
+    const onOpenBrowserUrl = (event: Event) => {
+      const detail = (event as CustomEvent<OpenBrowserUrlDetail>).detail;
+      if (!detail?.url) return;
+      void createBrowserTab(detail.url, undefined, { profileId: detail.profileId }).catch(reportRuntimeError);
+    };
+    window.addEventListener(OPEN_BROWSER_URL_EVENT, onOpenBrowserUrl);
+    return () => window.removeEventListener(OPEN_BROWSER_URL_EVENT, onOpenBrowserUrl);
+  }, [createBrowserTab, reportRuntimeError]);
   const handleOpenSshSettings = useCallback(() => handleOpenSettings("ssh"), [handleOpenSettings]);
   const handleCloseSettings = useCallback(() => {
     setIsSettingsOpen(false);

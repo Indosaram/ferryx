@@ -17,6 +17,11 @@ vi.mock("../../lib/browserTauri", async (importOriginal) => ({
   getBrowserEngineStatus: vi.fn(async () => ({ state: "unsupported" as const })),
 }));
 
+vi.mock("../../lib/browserExtensions", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/browserExtensions")>()),
+  listBrowserExtensions: vi.fn(async () => ({ profile: "default", engineInstalled: false, supported: false, extensions: [] })),
+}));
+
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
 }));

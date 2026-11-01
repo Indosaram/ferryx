@@ -1096,6 +1096,9 @@ type PaneLeafViewProps = {
   onFocusPane: (tabId: string, leafId: string) => void;
 };
 
+// Height of the pane drag toolbar (Tailwind h-5).
+const PANE_TOOLBAR_PX = 20;
+
 const PaneLeafView = React.memo(function PaneLeafView({
   leafId,
   tab,
@@ -1124,6 +1127,9 @@ const PaneLeafView = React.memo(function PaneLeafView({
 }: PaneLeafViewProps) {
   const [isHoveredTop, setIsHoveredTop] = React.useState(false);
   const [isFocusedWithin, setIsFocusedWithin] = React.useState(false);
+  // A pointer press focuses the drag handle (browser panes have no terminal focus sink to take
+  // it back); Enter/Space typed afterwards belongs to the page, not to a keyboard pane drag.
+  const handleFocusedByPointerRef = React.useRef(false);
   const leafRef = React.useRef<HTMLDivElement | null>(null);
   const focusFrameRef = React.useRef<number | null>(null);
   const focusTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1185,6 +1191,9 @@ const PaneLeafView = React.memo(function PaneLeafView({
       ? paneSupervision(supervisor, session?.backendSessionId, supervisorNow, activity?.state === "waiting")
       : null;
   const toolbarTop = supervision ? SUPERVISOR_PANE_BAR_PX : 0;
+  // A browser pane draws its own toolbar (address bar) at the top of its content, so the pane
+  // toolbar is a permanent strip above it instead of an overlay that would cover those controls.
+  const toolbarInset = content.kind === "browser" ? PANE_TOOLBAR_PX : 0;
 
   return (
     <NativeTerminalVisibilityProvider visible={tabVisible} occluded={showsDropFeedback}>
@@ -1281,15 +1290,24 @@ const PaneLeafView = React.memo(function PaneLeafView({
         {...draggable.attributes}
         {...draggable.listeners}
         className={`absolute inset-x-0 top-0 z-30 flex h-5 items-center justify-between overflow-visible border-b border-border/30 bg-background/85 px-2 text-[11px] text-muted-foreground transition-opacity duration-150 select-none cursor-grab touch-none active:cursor-grabbing ${
-          isHoveredTop || isFocusedWithin ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"
+          content.kind === "browser" || isHoveredTop || isFocusedWithin
+            ? "pointer-events-auto opacity-100"
+            : "pointer-events-none opacity-0"
         } ${draggable.isDragging ? "opacity-30" : ""}`}
         style={{ top: toolbarTop }}
         data-testid="pane-toolbar"
         data-dnd-type="pane"
         onPointerDown={(event) => {
           if (isInteractiveTarget(event.target as HTMLElement | null)) return;
+          handleFocusedByPointerRef.current = true;
           focusPaneInput();
           draggable.listeners?.onPointerDown?.(event);
+        }}
+        onKeyDown={(event) => {
+          const isActivationKey =
+            event.key === "Enter" || event.key === " " || event.code === "Enter" || event.code === "Space";
+          if (handleFocusedByPointerRef.current && isActivationKey) return;
+          draggable.listeners?.onKeyDown?.(event);
         }}
         onClick={(event) => {
           if (isInteractiveTarget(event.target as HTMLElement | null)) return;
@@ -1299,6 +1317,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
         onMouseLeave={() => setIsHoveredTop(false)}
         onFocusCapture={() => setIsFocusedWithin(true)}
         onBlurCapture={(event) => {
+          if (event.target === event.currentTarget) handleFocusedByPointerRef.current = false;
           const nextTarget = event.relatedTarget;
           if (!(nextTarget instanceof Element) || !event.currentTarget.contains(nextTarget)) {
             setIsFocusedWithin(false);
@@ -1370,7 +1389,13 @@ const PaneLeafView = React.memo(function PaneLeafView({
       </div>
 
       {supervision ? <SupervisorPaneBarView state={supervision} now={supervisorNow} onTakeOver={focusPaneInput} /> : null}
-      <div className="h-full w-full min-h-0 flex-1 overflow-hidden">
+      <div
+        className="box-border h-full w-full min-h-0 flex-1 overflow-hidden"
+        style={toolbarInset > 0 ? { paddingTop: toolbarInset } : undefined}
+        data-testid="pane-content"
+        data-pane-content-kind={content.kind}
+        data-pane-toolbar-inset={toolbarInset}
+      >
         {(() => {
           switch (content.kind) {
             case "terminal": {

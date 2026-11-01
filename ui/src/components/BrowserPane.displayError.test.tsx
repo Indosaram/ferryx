@@ -71,7 +71,7 @@ describe("BrowserPane display error banner and retry", () => {
 
     const banner = await screen.findByTestId("browser-pane-error");
     expect(banner).toBeInTheDocument();
-    expect(banner).toHaveTextContent("표시 실패: WEBVIEW_NOT_FOUND (bounds)");
+    expect(banner).toHaveTextContent("Couldn't show the page: WEBVIEW_NOT_FOUND (bounds)");
 
     const retryButton = screen.getByTestId("browser-retry-bounds");
     expect(retryButton).toBeInTheDocument();
@@ -129,7 +129,7 @@ describe("BrowserPane display error banner and retry", () => {
     expect(browserMocks.setBrowserBounds).toHaveBeenCalledTimes(3);
 
     const banner = screen.getByTestId("browser-pane-error");
-    expect(banner).toHaveTextContent("표시 실패: WEBVIEW_NOT_FOUND (bounds)");
+    expect(banner).toHaveTextContent("Couldn't show the page: WEBVIEW_NOT_FOUND (bounds)");
   });
 
   it("renders error banner with visibility operation if setBrowserVisible rejects", async () => {
@@ -144,6 +144,6 @@ describe("BrowserPane display error banner and retry", () => {
 
     const banner = await screen.findByTestId("browser-pane-error");
     expect(banner).toBeInTheDocument();
-    expect(banner).toHaveTextContent("표시 실패: SURFACE_LOST (visibility)");
+    expect(banner).toHaveTextContent("Couldn't show the page: SURFACE_LOST (visibility)");
   });
 });
