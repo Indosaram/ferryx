@@ -1639,7 +1639,7 @@ impl RelayState {
             locked_until: None,
         });
         if tracker.locked_until.is_some_and(|until| now < until) {
-            return Err(StatusCode::UNAUTHORIZED);
+            return Err(StatusCode::TOO_MANY_REQUESTS);
         }
         if now.duration_since(tracker.started) >= ADMISSION_WINDOW {
             *tracker = AttemptTracker {
@@ -1720,6 +1720,17 @@ impl RelayState {
             tracker.locked_until = Some(now + ADMISSION_WINDOW);
         }
         Err(StatusCode::NOT_FOUND)
+    }
+
+    /// How long `ip` stays locked out of pairing claims.
+    fn pairing_retry_after(&self, ip: IpAddr) -> Duration {
+        let now = Instant::now();
+        self.inner
+            .pairing_admission
+            .lock()
+            .get(&ip)
+            .and_then(|tracker| tracker.locked_until)
+            .map_or(Duration::ZERO, |until| until.saturating_duration_since(now))
     }
 
     /// Reserve the relay's HTTP half before notifying the daemon, so even an
@@ -3098,7 +3109,27 @@ async fn exchange_http(
         .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
     let payload: PublicPairExchangeRequest =
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let mut claim = state.claim_pairing(ip, &payload, machine)?;
+    let mut claim = match state.claim_pairing(ip, &payload, machine) {
+        Ok(claim) => claim,
+        // A locked-out source is told it is rate limited and when to retry, not that its
+        // code was wrong.
+        Err(StatusCode::TOO_MANY_REQUESTS) => {
+            let retry_after = state.pairing_retry_after(ip).as_secs().max(1);
+            let mut response = crate::account::service::ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "pairing_rate_limited",
+                "too many pairing attempts; wait before trying again",
+            )
+            .into_response();
+            response.headers_mut().insert(
+                header::RETRY_AFTER,
+                HeaderValue::from_str(&retry_after.to_string())
+                    .unwrap_or_else(|_| HeaderValue::from_static("60")),
+            );
+            return Ok(response);
+        }
+        Err(status) => return Err(status),
+    };
     // The loopback gateway calls its pairing secret `code`.
     let body = serde_json::to_vec(&serde_json::json!({
         "code": claim.pairing_token,
@@ -6135,10 +6166,10 @@ mod tests {
         for pin in ["000001", "000002", "000003", "000004", "000005"] {
             assert_eq!(security_claim(&state, pin).await, StatusCode::NOT_FOUND);
         }
-        // The current pairing API represents lockout with 401 (control admission uses 429).
+        // A locked-out source is told it is rate limited, not that its code was wrong.
         assert_eq!(
             security_claim(&state, "123456").await,
-            StatusCode::UNAUTHORIZED
+            StatusCode::TOO_MANY_REQUESTS
         );
         let admission = state.inner.pairing_admission.lock();
         let tracker = &admission[&"192.0.2.1".parse::<IpAddr>().unwrap()];
@@ -8395,9 +8426,20 @@ mod tests {
                 if attempt < 5 {
                     StatusCode::NOT_FOUND
                 } else {
-                    StatusCode::UNAUTHORIZED
+                    StatusCode::TOO_MANY_REQUESTS
                 }
             );
+            if attempt == 5 {
+                let retry_after: u64 = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.parse().ok())
+                    .expect("a lockout names when to retry");
+                assert!((1..=ADMISSION_WINDOW.as_secs()).contains(&retry_after));
+                let body: serde_json::Value = response.json().await.unwrap();
+                assert_eq!(body["code"], "pairing_rate_limited");
+            }
         }
         server.abort();
     }
