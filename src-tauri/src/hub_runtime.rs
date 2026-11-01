@@ -1468,6 +1468,7 @@ impl crate::daemon::supervisor_lease_client::HubSwitch for HubLeaseSwitch {
 async fn spawn_lease_client(
     relay: crate::remote::relay_client::RelayClient,
     wanted: tokio::sync::watch::Sender<bool>,
+    handover_manager: Arc<crate::daemon::handover::HandoverManager>,
 ) -> (Arc<dyn LeaseGate>, tokio::task::JoinHandle<()>) {
     use crate::daemon::supervisor_lease_client::{spawn_supervisor_lease_client, LeaseClientConfig};
     let enrollment = crate::ipc::run_blocking(|| Ok(crate::account::enroll_client::load_enrollment_record()))
@@ -1478,13 +1479,19 @@ async fn spawn_lease_client(
         Some(record) => (record.machine_record_id, Some(record.account_id)),
         None => ("local".to_owned(), None),
     };
-    let config = LeaseClientConfig::system(machine_id, account);
+    let mut config = LeaseClientConfig::system(machine_id, account);
+    // A handover successor renews the lease its predecessor handed over at commit (same
+    // machine id and fence) instead of acquiring a new one; a rebind finds it already taken.
+    config.handed_over = handover_manager.take_handed_supervisor_lease();
     // One Arc for the switch and the stop signal: `stand_down_now` sends on the watch the
     // switch drives (clones of a watch sender share its channel, so `follow_relay`'s too).
     let wanted = Arc::new(wanted);
     install_lease_stop(Some(Arc::clone(&wanted)));
     let (handle, task) =
         spawn_supervisor_lease_client(config, Arc::new(relay), Arc::new(HubLeaseSwitch { wanted })).await;
+    // A later handover commit freezes this client and hands its lease to the successor.
+    let handover: Arc<dyn crate::daemon::handover::SupervisorLeaseHandover> = Arc::new(handle.state().clone());
+    handover_manager.set_supervisor_lease(Some(handover));
     // Supervisor inputs are stamped with this lease's fence, checked right before each send;
     // a rebound client replaces the previous client's source.
     let source: Arc<dyn crate::agent_control::fence::SupervisorFenceSource> = Arc::new(handle.state().clone());
@@ -2389,7 +2396,7 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     let relay = remote.relay_client.read().clone();
     let (lease, lease_task) = match relay {
         Some(relay) => {
-            let (gate, task) = spawn_lease_client(relay, wanted.clone()).await;
+            let (gate, task) = spawn_lease_client(relay, wanted.clone(), Arc::clone(&server.handover_manager)).await;
             HUB_TASKS.track(&task);
             (Some(gate), Some(task))
         }
@@ -2424,13 +2431,15 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     let follower = tokio::spawn(follow_lease(lease_decisions, Arc::clone(&running), promote_generation));
     HUB_TASKS.track(&follower);
     let bind_wanted = wanted.clone();
+    let bind_handover = Arc::clone(&launch.server.handover_manager);
     let relays = tokio::spawn(follow_relay(
         relay_published,
         move || remote.relay_client.read().clone(),
         move |relay: crate::remote::relay_client::RelayClient| {
             let wanted = bind_wanted.clone();
+            let handover_manager = Arc::clone(&bind_handover);
             async move {
-                let (gate, task) = spawn_lease_client(relay, wanted).await;
+                let (gate, task) = spawn_lease_client(relay, wanted, handover_manager).await;
                 HUB_TASKS.track(&task);
                 (gate, task)
             }

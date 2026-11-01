@@ -512,6 +512,23 @@ pub struct HandoverTransaction {
     pub manifest_digest: Option<String>,
     pub rollback_reason: Option<String>,
     pub result: Option<HandoverTransactionResult>,
+    /// The supervisor lease a committing predecessor hands its successor (plan todo 9).
+    /// Optional with a serde default: a record without it (an older peer) reads as "no lease
+    /// handed over", and an absent lease is not written, so older readers see the same record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_lease: Option<SupervisorLeaseTransfer>,
+}
+
+/// The predecessor's held supervisor lease at handover commit: the machine identity and fence
+/// the successor renews with, and the local stand-down deadline of the current grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupervisorLeaseTransfer {
+    pub machine_id: String,
+    pub fence: u64,
+    /// Stand-down deadline of the grant (request send time + TTL - margin), wall clock in
+    /// milliseconds since the Unix epoch. Predecessor and successor share the machine's clock.
+    pub deadline_unix_ms: u64,
 }
 
 pub struct HandoverInventories {
@@ -549,6 +566,7 @@ impl HandoverTransaction {
             manifest_digest: None,
             rollback_reason: None,
             result: None,
+            supervisor_lease: None,
         }
     }
 
@@ -1677,5 +1695,23 @@ mod tests {
         assert_eq!(deserialized.state(), HandoverState::Transferring);
         assert_eq!(deserialized.frame_receipt_ledger().len(), 1);
         assert_eq!(deserialized.manifest_digest(), Some("digest-123"));
+    }
+
+    /// Plan todo 9: `supervisorLease` is optional both ways, so a record of an older peer reads
+    /// as "no lease handed over" and a record without a lease looks exactly as before.
+    #[test]
+    fn the_supervisor_lease_field_is_optional_for_older_peers() {
+        let tx = sample_transaction("req-lease", "fp-lease");
+        let mut json = serde_json::to_value(&tx).expect("serialize transaction");
+        assert!(json.get("supervisorLease").is_none(), "absent lease is not written");
+        let older: HandoverTransaction = serde_json::from_value(json.clone()).expect("older record parses");
+        assert_eq!(older.supervisor_lease, None);
+
+        json["supervisorLease"] = serde_json::json!({"machineId": "rec-a", "fence": 7, "deadlineUnixMs": 42});
+        let handed: HandoverTransaction = serde_json::from_value(json).expect("record with lease parses");
+        assert_eq!(
+            handed.supervisor_lease,
+            Some(SupervisorLeaseTransfer { machine_id: "rec-a".into(), fence: 7, deadline_unix_ms: 42 })
+        );
     }
 }

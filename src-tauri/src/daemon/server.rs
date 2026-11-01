@@ -6012,6 +6012,18 @@ impl DaemonServer {
         if handover_from.is_none() {
             self.restore_remote_sessions_at(self.remote_sessions_path.clone())
                 .await?;
+        } else if let Some(legacy) = handover_from.clone() {
+            // The committed predecessor wrote its supervisor lease into the decision record;
+            // the lease client started with the hub renews it (plan todo 9).
+            let manager = Arc::clone(&self.handover_manager);
+            if let Err(error) = crate::ipc::run_blocking(move || {
+                manager.adopt_recorded_supervisor_lease(&legacy);
+                Ok(())
+            })
+            .await
+            {
+                tracing::warn!(%error, "Could not read the supervisor lease handed over at commit");
+            }
         }
 
         // Both platform listeners share this call site: unix binds the socket path, every other

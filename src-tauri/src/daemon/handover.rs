@@ -780,6 +780,67 @@ mod spawn_owner_tests {
         );
     }
 
+    /// Lease client double: hands over `fence` and records freezes and thaws.
+    struct LeaseDouble {
+        fence: Option<u64>,
+        frozen: AtomicBool,
+        thawed: AtomicBool,
+    }
+
+    impl SupervisorLeaseHandover for LeaseDouble {
+        fn freeze_for_handover(&self) -> Option<super::super::handover_transaction::SupervisorLeaseTransfer> {
+            self.frozen.store(true, Ordering::SeqCst);
+            self.fence.map(|fence| super::super::handover_transaction::SupervisorLeaseTransfer {
+                machine_id: "rec-a".into(),
+                fence,
+                deadline_unix_ms: 1_800_000_105_000,
+            })
+        }
+
+        fn thaw_after_failed_handover(&self) {
+            self.thawed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn lease_double(fence: Option<u64>) -> Arc<LeaseDouble> {
+        Arc::new(LeaseDouble { fence, frozen: AtomicBool::new(false), thawed: AtomicBool::new(false) })
+    }
+
+    /// Plan todo 9: the commit decision freezes the lease client and carries its lease to the
+    /// successor, which reads it back from the same record.
+    #[test]
+    fn the_commit_decision_hands_the_supervisor_lease_to_the_successor() {
+        let (_root, manager, terminals, legacy) = committing_fixture();
+        let lease = lease_double(Some(7));
+        manager.set_supervisor_lease(Some(lease.clone()));
+        manager.commit_handover_v5(&terminals).expect("commit");
+        assert!(lease.frozen.load(Ordering::SeqCst), "the predecessor stops renewing at commit");
+        assert!(!lease.thawed.load(Ordering::SeqCst));
+        let handed = HandoverManager::recorded_supervisor_lease(&legacy).expect("lease in the record");
+        assert_eq!((handed.machine_id.as_str(), handed.fence), ("rec-a", 7));
+
+        let successor = HandoverManager::new(legacy.with_file_name("successor.sock"));
+        successor.adopt_recorded_supervisor_lease(&legacy);
+        assert_eq!(successor.take_handed_supervisor_lease(), Some(handed));
+        assert_eq!(successor.take_handed_supervisor_lease(), None, "taken once");
+    }
+
+    #[test]
+    fn a_failed_decision_write_resumes_renewing_and_an_abort_hands_nothing_over() {
+        let (_root, manager, terminals, legacy) = committing_fixture();
+        let lease = lease_double(Some(7));
+        manager.set_supervisor_lease(Some(lease.clone()));
+        // The decision cannot be written: its pending file is already taken.
+        std::fs::write(legacy.with_extension("transaction.pending"), b"").unwrap();
+        manager.commit_handover_v5(&terminals).unwrap_err();
+        assert!(lease.frozen.load(Ordering::SeqCst));
+        assert!(lease.thawed.load(Ordering::SeqCst), "no decision on disk: the predecessor keeps the lease");
+
+        std::fs::remove_file(legacy.with_extension("transaction.pending")).unwrap();
+        manager.abort_handover().expect("abort");
+        assert_eq!(HandoverManager::recorded_supervisor_lease(&legacy), None, "an abort record carries no lease");
+    }
+
     fn control_fixture() -> (Arc<HandoverManager>, Arc<TerminalService>) {
         let root = tempfile::tempdir().unwrap();
         let manager = Arc::new(HandoverManager::new(root.path().join("control.sock")));
@@ -1035,6 +1096,15 @@ mod spawn_owner_tests {
 
 type CommitCallbacks = Arc<Mutex<Vec<Box<dyn FnOnce() + Send + 'static>>>>;
 
+/// The supervisor lease client as the handover commit sees it (plan todo 9): frozen at the
+/// commit decision, its held lease written into the decision record for the successor.
+pub trait SupervisorLeaseHandover: Send + Sync {
+    /// Stops every further lease request and returns the held lease, `None` when not held.
+    fn freeze_for_handover(&self) -> Option<super::handover_transaction::SupervisorLeaseTransfer>;
+    /// The decision was not written: renewing resumes.
+    fn thaw_after_failed_handover(&self);
+}
+
 pub struct HandoverManager {
     status: Arc<RwLock<HandoverStatus>>,
     /// Duplicates of this daemon's public listening sockets (canonical data, control,
@@ -1087,6 +1157,10 @@ pub struct HandoverManager {
     client_abort_tx: broadcast::Sender<()>,
     commit_notify_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     commit_callbacks: CommitCallbacks,
+    /// This daemon's supervisor lease client, frozen and handed over at the commit decision.
+    supervisor_lease: RwLock<Option<Arc<dyn SupervisorLeaseHandover>>>,
+    /// The lease a committed predecessor handed this successor, taken by its lease client.
+    handed_supervisor_lease: Mutex<Option<super::handover_transaction::SupervisorLeaseTransfer>>,
 }
 
 impl HandoverManager {
@@ -1106,6 +1180,40 @@ impl HandoverManager {
         })
     }
 
+    /// The supervisor lease a predecessor wrote into its committed (Retired) decision record
+    /// beside `legacy`; `None` without a record, without a lease, or for an abort decision.
+    pub fn recorded_supervisor_lease(
+        legacy: &std::path::Path,
+    ) -> Option<super::handover_transaction::SupervisorLeaseTransfer> {
+        use super::handover_transaction::{HandoverState, HandoverTransaction};
+        let bytes = fs::read(legacy.with_extension("transaction")).ok()?;
+        let transaction: HandoverTransaction = serde_json::from_slice(&bytes).ok()?;
+        if transaction.transfer_id != legacy.to_string_lossy() || transaction.state != HandoverState::Retired {
+            return None;
+        }
+        transaction.supervisor_lease
+    }
+
+    /// Registers this daemon's supervisor lease client for the handover commit.
+    pub fn set_supervisor_lease(&self, lease: Option<Arc<dyn SupervisorLeaseHandover>>) {
+        *self.supervisor_lease.write() = lease;
+    }
+
+    /// Successor, after the commit was confirmed: keeps the lease the predecessor recorded
+    /// beside `legacy` for this daemon's lease client. Blocking (one small file read).
+    pub fn adopt_recorded_supervisor_lease(&self, legacy: &std::path::Path) {
+        let lease = Self::recorded_supervisor_lease(legacy);
+        if let Some(lease) = &lease {
+            tracing::info!(fence = lease.fence, "supervisor lease handed over by the predecessor");
+        }
+        *self.handed_supervisor_lease.lock() = lease;
+    }
+
+    /// The lease handed over by the predecessor, once.
+    pub fn take_handed_supervisor_lease(&self) -> Option<super::handover_transaction::SupervisorLeaseTransfer> {
+        self.handed_supervisor_lease.lock().take()
+    }
+
     fn record_decision(&self, committed: bool) -> Result<(), String> {
         use super::handover_transaction::{HandoverState, HandoverTransaction};
         let Some(legacy) = self.legacy_socket_path.read().clone() else { return Ok(()); };
@@ -1121,7 +1229,26 @@ impl HandoverManager {
             std::process::id(), 0, 0, 0, &identity);
         transaction.state = if committed { HandoverState::Retired } else { HandoverState::Active };
         transaction.rollback_reason = (!committed).then(|| "predecessor abort decision".into());
-        let bytes = serde_json::to_vec(&transaction).map_err(|error| error.to_string())?;
+        // The commit decision freezes the lease client (it renewed until here and sends nothing
+        // after) and hands its lease to the successor in the same durable record.
+        let lease = if committed { self.supervisor_lease.read().clone() } else { None };
+        transaction.supervisor_lease = lease.as_ref().and_then(|lease| lease.freeze_for_handover());
+        let written = Self::write_decision(&legacy, &transaction);
+        // Renewing resumes only when no decision reached the disk: a record that landed despite
+        // the error is the commit, and the successor renews that lease.
+        if written.is_err() && matches!(Self::recorded_decision(&legacy), Ok(None)) {
+            if let Some(lease) = &lease {
+                lease.thaw_after_failed_handover();
+            }
+        }
+        written
+    }
+
+    fn write_decision(
+        legacy: &std::path::Path,
+        transaction: &super::handover_transaction::HandoverTransaction,
+    ) -> Result<(), String> {
+        let bytes = serde_json::to_vec(transaction).map_err(|error| error.to_string())?;
         let path = legacy.with_extension("transaction");
         let temporary = legacy.with_extension("transaction.pending");
         use std::io::Write;
@@ -1202,6 +1329,8 @@ impl HandoverManager {
             client_abort_tx,
             commit_notify_tx: Arc::new(Mutex::new(None)),
             commit_callbacks: Arc::new(Mutex::new(Vec::new())),
+            supervisor_lease: RwLock::new(None),
+            handed_supervisor_lease: Mutex::new(None),
         }
     }
 
