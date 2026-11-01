@@ -798,21 +798,21 @@ export async function fetchChatSessionRows(args: {
   }
 }
 
-const CHAT_REFRESH_WARNING = "Could not refresh the transcript; showing the last known state.";
-const CHAT_UNAVAILABLE_WARNING = "This session's transcript is not available to this device.";
+const CHAT_REFRESH_WARNING = "Couldn't refresh the chat. Showing the last messages received.";
+const CHAT_UNAVAILABLE_WARNING = "This session's chat can't be shown on this phone.";
 const CHAT_NO_READER_WARNING =
-  "This pane runs no agent, so there is no transcript reader for it. Open the terminal to see its output.";
+  "No agent is running in this terminal, so there is no chat to show. Open the terminal to see its output.";
 
 const CHAT_RETENTION_WARNING = "Older messages are hidden to keep the phone view responsive.";
 const CHAT_SEND_FAILED_WARNING = "That message was not delivered. It is back in the message box.";
 const CHAT_VIEW_ONLY_WARNING =
-  "View-only access: this device cannot type into a pane. That message was not delivered. It is back in the message box.";
+  "This phone can only view this session, so that message wasn't sent. It is back in the message box.";
 const CHAT_OUTCOME_UNKNOWN_WARNING =
-  "That message may have reached the session, but the host did not confirm it. It is back in the message box and will not be sent again on its own.";
+  "That message may have reached the session, but your computer didn't confirm it. It is back in the message box and won't be sent again on its own.";
 const CHAT_STOP_REFUSED_WARNING =
-  "The chat does not know how to stop this pane, so nothing was sent. Open the terminal if you need to interrupt it.";
+  "Stop isn't available for this agent here, so nothing was sent. Open the terminal and press Ctrl-C to interrupt it.";
 const CHAT_STOP_FAILED_WARNING = "The stop request was not delivered.";
-const CHAT_HELD_WARNING = "Held: this prompt takes one of its own options, so nothing was sent.";
+const CHAT_HELD_WARNING = "Not sent: answer with one of the options above.";
 const CHAT_AMBIGUOUS_ANSWER_WARNING = "That answer did not name exactly one option, so it was not sent.";
 const CHAT_NO_SESSION_WARNING = "This session is not attached yet, so nothing was sent.";
 const CHAT_SUBMIT_TOO_LONG_WARNING = "That message is longer than the composer allows, so it was not sent.";
@@ -4420,7 +4420,8 @@ export const RemoteHostConnection: React.FC<{
         return true;
       }
       if (!outcome.ok) {
-        setChatPromptError(outcome.message);
+        console.warn("Prompt answer refused", outcome.code);
+        setChatPromptError(userFacingError({ code: outcome.code }, { action: "send that answer" }));
         throw new ReferencePromptRefused(outcome.code, outcome.message);
       }
       setChatTypedAnswer(null);

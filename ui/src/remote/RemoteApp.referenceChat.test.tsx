@@ -409,7 +409,7 @@ describe("reference chat lane (task 12)", () => {
       expect(await screen.findByTestId("mobile-chat-workspace")).toBeInTheDocument();
       // The notice is drawn only once the pane's target is bound, so the polls below are not vacuous.
       await waitFor(() => {
-        expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/no transcript reader/i);
+        expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/no chat to show/i);
       });
       await act(async () => {
         vi.advanceTimersByTime(9000);
@@ -501,7 +501,7 @@ describe("reference chat lane (task 12)", () => {
     });
     render(<RemoteApp />);
     await waitFor(() => {
-      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/no transcript reader/i);
+      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/no chat to show/i);
     });
 
     fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "ls" } });
@@ -512,7 +512,7 @@ describe("reference chat lane (task 12)", () => {
     await submitted;
 
     await waitFor(() => {
-      expect(screen.getByTestId("chat-composer-warning")).toHaveTextContent(/View-only access: this device cannot type into a pane/);
+      expect(screen.getByTestId("chat-composer-warning")).toHaveTextContent(/can only view this session/);
     });
     expect(screen.getByTestId("chat-composer-warning")).not.toHaveTextContent(/runs no agent/);
     expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("ls");
@@ -850,7 +850,7 @@ describe("reference chat lane (task 12)", () => {
 
     // an unknown capability is a typed refusal: nothing is sent, and the user is told why
     expect(calls.some((url) => url.includes("/stop"))).toBe(false);
-    expect(screen.getByTestId("chat-composer-warning")).toHaveTextContent(/does not know how to stop/i);
+    expect(screen.getByTestId("chat-composer-warning")).toHaveTextContent(/Stop isn't available/i);
   });
 
   it("QA-04: an acknowledgement settles the sent prefix and keeps what was typed after it", async () => {
@@ -1891,7 +1891,8 @@ describe("reference chat lane review fixes", () => {
       });
       await drainSettledResponses();
 
-      expect(screen.getByText("answer failed in gap")).toBeInTheDocument();
+      expect(screen.getByText(/Couldn't send that answer\./)).toBeInTheDocument();
+      expect(screen.queryByText("answer failed in gap")).not.toBeInTheDocument();
     } finally {
       remoteHostStore.reset();
     }
@@ -2679,6 +2680,7 @@ describe("reference chat lane review fixes", () => {
 
     expect(screen.getByText("Question B")).toBeInTheDocument();
     expect(screen.queryByText("pane A answer failed")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Couldn't send that answer/)).not.toBeInTheDocument();
   });
 
   it("ui-workspace-wiring-r11-1: an answer accepted after a pane switch keeps the new pane's typed answer waiting for Confirm", async () => {
