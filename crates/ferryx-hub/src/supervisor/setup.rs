@@ -43,6 +43,31 @@ impl EngineView {
             health: installed.map(|engine| engine.health()),
         }
     }
+
+    /// [`Self::current`] for async callers: the hub env file is read on the blocking pool so
+    /// a slow disk never stalls a runtime worker. When that read cannot finish (its task
+    /// panicked or was cancelled) the engine counts as off, and the installed engine is still
+    /// reported as it is.
+    pub async fn read() -> Self {
+        Self::read_with(Self::current).await
+    }
+
+    /// [`Self::read`] with the blocking reader given (tests pass one that never touches the
+    /// developer's hub env file).
+    pub(crate) async fn read_with(reader: impl FnOnce() -> Self + Send + 'static) -> Self {
+        match tokio::task::spawn_blocking(reader).await {
+            Ok(view) => view,
+            Err(error) => {
+                tracing::warn!(%error, "the hub env file was not read; the supervisor engine counts as off");
+                let installed = crate::meta::mhc_supervisor::installed();
+                Self {
+                    enabled: false,
+                    installed: installed.is_some(),
+                    health: installed.map(|engine| engine.health()),
+                }
+            }
+        }
+    }
 }
 
 /// The first unmet setup step.

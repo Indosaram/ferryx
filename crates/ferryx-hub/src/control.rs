@@ -311,14 +311,14 @@ pub struct LiveHub {
 /// The `status` reply. Counts and states only: no tokens, message text, or watcher stderr.
 /// `healthy` is false when the hub is stopped, HTTP is not bound, a configured Slack app has
 /// no open socket, or an inbox watcher's last run failed; each reason is in `problems`.
-/// The supervisor engine is this process's as [`crate::supervisor::setup::EngineView::current`]
-/// sees it; see [`status_report_with`].
+/// The supervisor engine is this process's as [`crate::supervisor::setup::EngineView::read`]
+/// sees it (the hub env file is read off the runtime threads); see [`status_report_with`].
 pub async fn status_report(pool: &sqlx::SqlitePool, live: &LiveHub) -> Value {
     // Tests never read the developer's hub env file.
     let engine = if cfg!(test) {
         crate::supervisor::setup::EngineView::default()
     } else {
-        crate::supervisor::setup::EngineView::current()
+        crate::supervisor::setup::EngineView::read().await
     };
     status_report_with(pool, live, &engine).await
 }

@@ -875,11 +875,21 @@ pub const ENGINE_UNAVAILABLE_NOTICE: &str = "MHC_NOT_RUNNING: the supervisor eng
 /// which keeps its legacy turn; a fresh hub with the engine off keeps the legacy turn too.
 pub async fn refuse_without_engine(pool: &SqlitePool, admitted: &Admitted) -> bool {
     // Tests never read the developer's hub env file.
-    let engine_enabled = !cfg!(test)
-        && crate::meta::mhc_profile::MhcProfileConfig::enabled_in(
-            &crate::hub_env::read_file_env(),
-        );
+    let engine_enabled = !cfg!(test) && engine_flag_on().await;
     refuse_without_engine_in(pool, admitted, engine_enabled).await
+}
+
+/// Whether the hub env file turns the engine on, read on the blocking pool so a slow disk
+/// never stalls a runtime worker. A read that cannot finish counts as off.
+async fn engine_flag_on() -> bool {
+    tokio::task::spawn_blocking(|| {
+        crate::meta::mhc_profile::MhcProfileConfig::enabled_in(&crate::hub_env::read_file_env())
+    })
+    .await
+    .unwrap_or_else(|error| {
+        tracing::warn!(%error, "the hub env file was not read; the supervisor engine counts as off");
+        false
+    })
 }
 
 /// [`refuse_without_engine`] with whether the hub env file turns the engine on.
