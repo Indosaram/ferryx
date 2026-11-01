@@ -734,7 +734,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("visualViewport", viewport);
     vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(focusedState))));
     await act(async () => { render(<RemoteApp />); });
-    const shell = screen.getByLabelText("Current desktop context").closest("header")?.parentElement;
+    const shell = screen.getByTestId("remote-context-label").closest("header")?.parentElement;
     expect(shell).toHaveStyle({ height: "720px" });
     act(() => { viewport.height = 320; viewport.dispatchEvent(new Event("resize")); });
     expect(shell).toHaveStyle({ height: "320px" });
@@ -747,7 +747,7 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("visualViewport", viewport);
     vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(focusedState))));
     await act(async () => { render(<RemoteApp />); });
-    const shell = screen.getByLabelText("Current desktop context").closest("header")?.parentElement;
+    const shell = screen.getByTestId("remote-context-label").closest("header")?.parentElement;
     act(() => { viewport.height = 380; viewport.offsetTop = 260; viewport.dispatchEvent(new Event("scroll")); });
     expect(shell).toHaveStyle({ position: "fixed", top: "260px", height: "380px" });
   });
@@ -810,7 +810,7 @@ describe("Remote UI Components", () => {
     const terminal = await screen.findByTestId("remote-terminal");
     expect(terminal).toHaveAttribute("data-session-id", "focused-terminal");
     expect(screen.getAllByTestId("remote-terminal")).toHaveLength(1);
-    expect(screen.getByLabelText("Current desktop context")).toHaveTextContent(
+    expect(screen.getByTestId("remote-context-label")).toHaveTextContent(
       "ferryx-ui / main",
     );
     expect(document.body).not.toHaveTextContent("/Users/alice/secret");
@@ -834,7 +834,7 @@ describe("Remote UI Components", () => {
       "data-session-id",
       "focused-terminal",
     );
-    expect(screen.getByLabelText("Current desktop context")).toHaveTextContent(
+    expect(screen.getByTestId("remote-context-label")).toHaveTextContent(
       "remote-e2e / mobile-control",
     );
     await openWorktreeDrawer();
@@ -867,7 +867,7 @@ describe("Remote UI Components", () => {
     expect(document.body).not.toHaveTextContent("/Users/alice/secret");
     expect(document.body).not.toHaveTextContent("/Volumes/private");
 
-    expect(screen.getByLabelText("Current desktop context")).toHaveTextContent(
+    expect(screen.getByTestId("remote-context-label")).toHaveTextContent(
       "ferryx-ui / main",
     );
     await openWorktreeDrawer();
@@ -910,7 +910,7 @@ describe("Remote UI Components", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByLabelText("Current desktop context")).toHaveTextContent(
+      expect(screen.getByTestId("remote-context-label")).toHaveTextContent(
         "api-service / feature/remote-safe",
       );
     });
@@ -965,7 +965,7 @@ describe("Remote UI Components", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByLabelText("Current desktop context")).toHaveTextContent(
+      expect(screen.getByTestId("remote-context-label")).toHaveTextContent(
         "api-service / feature/remote-safe",
       );
     });
@@ -1062,7 +1062,7 @@ describe("Remote UI Components", () => {
         "new-focused-terminal",
       );
     });
-    expect(screen.getByLabelText("Current desktop context")).toHaveTextContent(
+    expect(screen.getByTestId("remote-context-label")).toHaveTextContent(
       "api-service / feature/remote-safe",
     );
   });

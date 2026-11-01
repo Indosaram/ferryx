@@ -5410,7 +5410,7 @@ export const RemoteHostConnection: React.FC<{
           {/* The brand word is the first thing to go when the status cluster grows;
               the workspace context stays legible longer than the app name. */}
           <span className="hidden shrink-0 text-xs font-semibold leading-none sm:inline">Ferryx Remote</span>
-          <span className="min-w-0 truncate font-mono text-xs leading-none text-chat-foreground-secondary [@media(pointer:coarse)]:text-sm" aria-label="Current desktop context">{contextName(model.context)}</span>
+          <span className="min-w-0 truncate font-mono text-xs leading-none text-chat-foreground-secondary [@media(pointer:coarse)]:text-sm" data-testid="remote-context-label">{contextName(model.context)}</span>
           <ChevronDown aria-hidden="true" className={`size-3 shrink-0 text-chat-foreground-secondary transition-transform ${selectorOpen ? "rotate-180" : ""}`} />
         </button>
         {accountPreselection ? null : (

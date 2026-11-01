@@ -445,6 +445,15 @@ describe("read-only desktop context sync", () => {
     expect(stateGetCount()).toBe(0);
   });
 
+  it("names the context trigger by its button label, with no ignored aria-label on the inner span", async () => {
+    await mountAccountApp();
+    const trigger = screen.getByRole("button", { name: /Change workspace context/i });
+    const label = screen.getByTestId("remote-context-label");
+    expect(trigger).toContainElement(label);
+    expect(label).not.toHaveAttribute("aria-label");
+    expect(screen.queryByLabelText("Current desktop context")).toBeNull();
+  });
+
   it("follows the desktop active session inside a freshly chosen worktree, not the first row", async () => {
     armState(freshActiveContext("main"));
     const normalized = normalizeRemoteWorkspaceState(stateBody);

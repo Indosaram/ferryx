@@ -609,7 +609,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
 
     // In desktop mode with existing active terminal, verify current desktop context and active socket target remain old session
     expect(screen.getByTestId("remote-terminal-grid")).toBeDefined();
-    expect(screen.getByLabelText("Current desktop context").textContent).toBe("wsA / main");
+    expect(screen.getByTestId("remote-context-label").textContent).toBe("wsA / main");
     expect(MockTestWebSocket.instances.some((s) => s.url.includes("sess-new-wsB"))).toBe(false);
 
     await switchToTerminalMode();
@@ -637,7 +637,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("remote-terminal-grid")).toBeDefined();
-      expect(screen.getByLabelText("Current desktop context").textContent).toBe("wsB / feature-b");
+      expect(screen.getByTestId("remote-context-label").textContent).toBe("wsB / feature-b");
       expect(MockTestWebSocket.instances.some((s) => s.url.includes("sess-new-wsB"))).toBe(true);
     });
   });
@@ -763,7 +763,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     await waitFor(() => {
       expect(screen.getByTestId("remote-terminal-grid")).toBeDefined();
     });
-    expect(screen.getByLabelText("Current desktop context").textContent).toBe("wsB / feature-b");
+    expect(screen.getByTestId("remote-context-label").textContent).toBe("wsB / feature-b");
   });
 
   it("displays error and allows retry without mounting old terminal if context selection POST fails", async () => {
