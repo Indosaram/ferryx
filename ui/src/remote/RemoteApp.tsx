@@ -5440,6 +5440,21 @@ export const RemoteHostConnection: React.FC<{
             >
               Terminal
             </button>
+            {canOpenBrowser ? (
+              <button
+                type="button"
+                data-testid="remote-view-mode-browser"
+                aria-pressed={viewMode === "browser"}
+                onClick={() => setViewMode("browser")}
+                className={`flex h-5 [@media(pointer:coarse)]:h-11 items-center rounded px-1.5 [@media(pointer:coarse)]:px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
+                  viewMode === "browser"
+                    ? "bg-chat-surface-raised text-chat-foreground"
+                    : "text-chat-foreground-secondary hover:text-chat-foreground"
+                }`}
+              >
+                Browser
+              </button>
+            ) : null}
           </div>
         </div>
         )}
