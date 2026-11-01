@@ -1,6 +1,7 @@
 // Real-browser QA for supervisor setup (no daemon): the onboarding SupervisorStep, the desktop
 // setup banner over a main area, and the phone Supervisor home, each with a fixture SetupStatus.
 //   ?view=step|banner|phone  &kind=enable_engine|fix_engine|adopt|none|...  &theme=dark|light
+//   &fixture=upgrade-done|imported-adopt overrides kind with a named end state.
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { mockIPC } from "@tauri-apps/api/mocks";
@@ -43,7 +44,20 @@ function fixtureStatus(next: SetupNextAction): SetupStatus {
   };
 }
 
-const status = fixtureStatus(kind);
+/** Named end states: an upgrade that cut over and imported with nothing to adopt; the same with jobs to adopt. */
+function namedFixture(name: string | null): SetupStatus | null {
+  const upgraded: SetupStatus = {
+    ...fixtureStatus("none"),
+    intake: { unifiedOpen: true, legacy: "stopped", origin: "cutover", legacyHistory: true },
+    memoryImport: { enabled: true, sessions: 42, turns: 318, lastAt: "2026-11-01T09:12:00Z" },
+    adoptable: 0,
+  };
+  if (name === "upgrade-done") return upgraded;
+  if (name === "imported-adopt") return { ...upgraded, adoptable: 3, nextAction: "adopt" };
+  return null;
+}
+
+const status = namedFixture(params.get("fixture")) ?? fixtureStatus(kind);
 const projects = [
   { name: "ferryx", path: "/Users/me/code/ferryx" },
   { name: "mhc", path: "/Users/me/code/mhc" },
