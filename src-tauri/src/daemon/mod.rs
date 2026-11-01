@@ -40,6 +40,8 @@ pub mod sidebar_snapshot;
 pub mod split_journal;
 // Portable facade over the OS service manager that owns the daemon's lifetime (macOS: `launchd`).
 pub mod supervisor;
+// Todo 3 part A: pure supervisor lease role machine (Holder/Provisional/Standby/Unleased).
+pub mod supervisor_lease_role;
 // Windows backend of the facade: per-user scheduled task + `--daemon-supervisor` watchdog. Its pure
 // parts (task XML, watchdog decisions) build and test on every target.
 pub mod supervisor_windows;
