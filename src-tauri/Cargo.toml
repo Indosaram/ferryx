@@ -303,7 +303,7 @@ windows-sys = { version = "0.59", default-features = false, features = [
 # Trusted browser bridge (src/browser/bridge/windows.rs). Same versions wry 0.55 already
 # pulls in (Cargo.lock: webview2-com 0.38.2, windows 0.61.3), so no second copy is built.
 webview2-com = "0.38"
-windows = { version = "0.61", default-features = false, features = ["Win32_UI_Input_KeyboardAndMouse"] }
+windows = { version = "0.61", default-features = false, features = ["Win32_UI_Input_KeyboardAndMouse", "Security_Credentials_UI"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", default-features = false, optional = true }

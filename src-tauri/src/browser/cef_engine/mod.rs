@@ -313,6 +313,11 @@ pub fn reload(browser_id: &str, ignore_cache: bool) -> Result<(), BrowserError> 
     send_to_tab(browser_id, EngineCommand::Reload { tab: browser_id.to_string(), ignore_cache })
 }
 
+/// Runs a password fill script in the tab's isolated vault world inside the engine.
+pub fn fill(browser_id: &str, script: String) -> Result<(), BrowserError> {
+    send_to_tab(browser_id, EngineCommand::Fill { tab: browser_id.to_string(), script })
+}
+
 /// Brings the tab's window back into view after the page changed: Windows repaints the app's
 /// own windows around it, macOS puts the engine's windows back above the Ferryx window.
 pub fn repaint(browser_id: &str) {

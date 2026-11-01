@@ -10,6 +10,7 @@ pub mod crypto;
 pub mod generator;
 pub mod keystore;
 pub mod origin;
+pub mod reauth;
 pub mod store;
 
 pub use autofill::{
