@@ -252,6 +252,111 @@ describe("RemoteBrowser - Mobile Viewport & Touch Interaction (Phase 7B)", () =>
       expect(pt.seq).toBe(1);
     });
 
+    async function mountStreamingPortrait(onPointClick: (point: RemoteBrowserPointClickEvent) => void) {
+      render(
+        <RemoteBrowser
+          baseUrl="http://localhost:8080"
+          browserId="b-mobile"
+          deviceToken="token-mobile"
+          onPointClick={onPointClick}
+        />,
+      );
+      const ws = await waitForSocket(0);
+      await establishStreaming(ws);
+      await act(async () => {
+        ws.onmessage?.({ data: encodeFrame(makeTestFrame(1, 1, 1280, 720)).buffer as ArrayBuffer });
+      });
+      await act(async () => {
+        fireEvent.load(screen.getByAltText("Remote browser stream"));
+      });
+      const viewport = screen.getByTestId("remote-browser-viewport");
+      vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({
+        left: 0, top: 0, right: 390, bottom: 844, width: 390, height: 844, x: 0, y: 0, toJSON: () => {},
+      });
+      return viewport;
+    }
+
+    function stubPointer(coarse: boolean) {
+      vi.stubGlobal("matchMedia", (media: string) =>
+        Object.assign(new EventTarget(), {
+          media,
+          matches: coarse && media === "(pointer: coarse)",
+          onchange: null,
+          addListener() {},
+          removeListener() {},
+        }),
+      );
+    }
+
+    it("T-111: a pinch zooms the frame on a touch screen and a zoomed tap maps to the frame point under the finger", async () => {
+      stubPointer(true);
+      const onPointClick = vi.fn();
+      const viewport = await mountStreamingPortrait(onPointClick);
+      expect(viewport).toHaveClass("touch-none");
+
+      // fingers 100px apart spread to 200px around the frame centre (195, 422): 2x around that point
+      act(() => {
+        fireEvent.touchStart(viewport, { touches: [{ clientX: 145, clientY: 422 }, { clientX: 245, clientY: 422 }] });
+        fireEvent.touchMove(viewport, { touches: [{ clientX: 95, clientY: 422 }, { clientX: 295, clientY: 422 }] });
+        fireEvent.touchEnd(viewport, { touches: [] });
+      });
+      expect(viewport).toHaveAttribute("data-zoom-scale", "2");
+      expect(screen.getByTestId("remote-browser-zoom-layer").style.transform).toBe("translate(-195px, -422px) scale(2)");
+
+      // the click a browser may synthesise after the pinch is not a tap on the page
+      await act(async () => {
+        fireEvent.click(viewport, { clientX: 195, clientY: 422 });
+      });
+      expect(onPointClick).not.toHaveBeenCalled();
+
+      // a tap at screen x=245 is frame x=(245+195)/2=220 at 2x, so u=220/390, not 245/390
+      await act(async () => {
+        fireEvent.touchStart(viewport, { touches: [{ clientX: 245, clientY: 422 }] });
+        fireEvent.touchEnd(viewport, { touches: [] });
+        fireEvent.click(viewport, { clientX: 245, clientY: 422 });
+      });
+      expect(onPointClick).toHaveBeenCalledTimes(1);
+      const pt: RemoteBrowserPointClickEvent = onPointClick.mock.calls[0][0];
+      expect(pt.u).toBeCloseTo(220 / 390, 3);
+      expect(pt.v).toBeCloseTo(0.5, 3);
+      // the marker sits where the finger was, on screen
+      expect(screen.getByTestId("remote-browser-tap-marker").style.left).toBe("245px");
+
+      // a one-finger drag pans the zoomed frame and is not a tap
+      act(() => {
+        fireEvent.touchStart(viewport, { touches: [{ clientX: 200, clientY: 400 }] });
+        fireEvent.touchMove(viewport, { touches: [{ clientX: 260, clientY: 400 }] });
+        fireEvent.touchEnd(viewport, { touches: [] });
+      });
+      expect(screen.getByTestId("remote-browser-zoom-layer").style.transform).toBe("translate(-135px, -422px) scale(2)");
+      await act(async () => {
+        fireEvent.click(viewport, { clientX: 260, clientY: 400 });
+      });
+      expect(onPointClick).toHaveBeenCalledTimes(1);
+
+      fireEvent.click(screen.getByTestId("remote-browser-zoom-reset"));
+      expect(viewport).toHaveAttribute("data-zoom-scale", "1");
+      expect(screen.queryByTestId("remote-browser-zoom-reset")).toBeNull();
+      expect(onPointClick).toHaveBeenCalledTimes(1);
+    });
+
+    it("T-111: a fine pointer ignores touch gestures and keeps the unzoomed frame", async () => {
+      stubPointer(false);
+      const onPointClick = vi.fn();
+      const viewport = await mountStreamingPortrait(onPointClick);
+      expect(viewport).toHaveClass("touch-manipulation");
+      act(() => {
+        fireEvent.touchStart(viewport, { touches: [{ clientX: 145, clientY: 422 }, { clientX: 245, clientY: 422 }] });
+        fireEvent.touchMove(viewport, { touches: [{ clientX: 95, clientY: 422 }, { clientX: 295, clientY: 422 }] });
+        fireEvent.touchEnd(viewport, { touches: [] });
+      });
+      expect(viewport).toHaveAttribute("data-zoom-scale", "1");
+      await act(async () => {
+        fireEvent.click(viewport, { clientX: 245, clientY: 422 });
+      });
+      expect(onPointClick.mock.calls[0][0].u).toBeCloseTo(245 / 390, 3);
+    });
+
     it("discards touches in left and right pillarbox margins (mobile landscape: 844x390 with 3:4 portrait stream)", async () => {
       const onPointClick = vi.fn();
       render(
