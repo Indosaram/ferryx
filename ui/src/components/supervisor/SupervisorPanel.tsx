@@ -5,7 +5,9 @@ import { toast } from "sonner";
 import { cn } from "../../lib/cn";
 import {
   actingSessionIds,
+  adoptArchivedGoals,
   desktopUnifiedClient,
+  moveSupervisorHere,
   setSupervisorLanePaused,
   supervisorGoal,
   supervisorStopReasonLabel,
@@ -18,7 +20,16 @@ import {
   type SupervisorRequirementStatus,
   type SupervisorSnapshot,
 } from "../../lib/supervisor";
-import { LANE_KEY_PREFIX, type SupervisorConnection, type UnifiedSupervisorClient, type UnifiedSupervisorView } from "../../lib/unifiedSupervisor";
+import { isStandbyRole, leaseNotices, type SupervisorHubState } from "../../lib/supervisorModel";
+import {
+  forceMoveWarning,
+  LANE_KEY_PREFIX,
+  type SupervisorCallResult,
+  type SupervisorConnection,
+  type SupervisorMoveResult,
+  type UnifiedSupervisorClient,
+  type UnifiedSupervisorView,
+} from "../../lib/unifiedSupervisor";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { UnifiedSupervisorSection, type AdoptableLane } from "./UnifiedSupervisorSection";
 
@@ -157,11 +168,124 @@ function LaneGoal({ lane, goal }: { lane: SupervisorLane; goal: SupervisorGoalVi
 
 /**
  * The desktop's own daemon is the supervisor host it reaches. With no hub open there it says so
- * and keeps the last view it saw; it never starts another supervisor.
+ * and keeps the last view it saw; it never starts another supervisor. A daemon that does not hold
+ * the account supervisor lease is on standby.
  */
 export function desktopConnection(snapshot: SupervisorSnapshot): SupervisorConnection {
+  if (isStandbyRole(snapshot.hub.role)) return "standby";
   if (snapshot.supervisor) return "live";
   return snapshot.hub.error ? "disconnected" : "unavailable";
+}
+
+/** Lease warnings of this computer: unreachable hosts, dropped observations, a blocked takeover. */
+function LeaseNotices({ hub, className }: { hub: SupervisorHubState; className?: string }) {
+  const notices = leaseNotices(hub, "This computer");
+  if (notices.length === 0) return null;
+  return (
+    <div className={cn("flex flex-col gap-1", className)}>
+      {notices.map((notice) => (
+        <p key={notice.kind} data-testid="supervisor-lease-notice" data-kind={notice.kind} role="status" className="rounded-md bg-destructive/10 px-2 py-1.5 text-[11px] leading-snug text-foreground">
+          {notice.text}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * This computer on standby: where the account supervisor runs, "Move supervisor here" (a forced
+ * move shows the data-loss window and needs a second confirm), pairing and host-mapping notices,
+ * and the open goals of this computer's archived supervisor with Adopt.
+ */
+function DesktopStandby({
+  snapshot,
+  moveHere,
+  adoptArchived,
+}: {
+  snapshot: SupervisorSnapshot;
+  moveHere: (force: boolean) => Promise<SupervisorMoveResult>;
+  adoptArchived: (goalIds: readonly string[]) => Promise<SupervisorCallResult>;
+}) {
+  const { hub } = snapshot;
+  const holder = hub.holderLabel || hub.holderMachineId || "another computer";
+  const [moving, setMoving] = useState(false);
+  const [forceWarning, setForceWarning] = useState<string | null>(null);
+  const [adopting, setAdopting] = useState<ReadonlySet<string>>(() => new Set());
+
+  const move = async (force: boolean) => {
+    if (moving) return;
+    setMoving(true);
+    const result = await moveHere(force);
+    setMoving(false);
+    if (result.kind === "force-required") {
+      setForceWarning(forceMoveWarning(result, holder, clock));
+      return;
+    }
+    setForceWarning(null);
+    if (result.kind === "error") toast.error("Could not move the supervisor", { description: result.message });
+  };
+
+  const adopt = async (goalId: string) => {
+    if (adopting.has(goalId)) return;
+    setAdopting((prev) => new Set(prev).add(goalId));
+    const result = await adoptArchived([goalId]);
+    setAdopting((prev) => {
+      const copy = new Set(prev);
+      copy.delete(goalId);
+      return copy;
+    });
+    if (result.kind === "error") toast.error("Could not adopt the goal", { description: result.message });
+  };
+
+  const adoptable = hub.adoptable ?? [];
+  const unmapped = hub.unmappedHosts ?? [];
+  return (
+    <div data-testid="supervisor-standby" className="flex flex-col gap-2 text-[11px] leading-snug">
+      <p data-testid="supervisor-standby-text" role="status" className="text-foreground">
+        Supervisor runs on {holder}. This computer is on standby.
+      </p>
+      {hub.available && forceWarning === null ? (
+        <GoalButton disabled={moving} onClick={() => void move(false)} label="Move supervisor here">
+          {moving ? "Moving…" : "Move supervisor here"}
+        </GoalButton>
+      ) : null}
+      {forceWarning !== null ? (
+        <div data-testid="supervisor-move-force" role="alert" className="flex flex-col gap-1 rounded-md bg-destructive/10 p-1.5 text-foreground">
+          <span data-testid="supervisor-move-force-warning">{forceWarning}</span>
+          <div className="flex gap-1">
+            <GoalButton disabled={moving} onClick={() => void move(true)}>Move anyway</GoalButton>
+            <GoalButton ghost disabled={moving} onClick={() => setForceWarning(null)}>Cancel</GoalButton>
+          </div>
+        </div>
+      ) : null}
+      {hub.holderPaired === false ? (
+        <span data-testid="supervisor-standby-unpaired">
+          This computer is not paired to {holder}, so its panes are not supervised yet.
+        </span>
+      ) : null}
+      <LeaseNotices hub={hub} />
+      {unmapped.length > 0 ? (
+        <span data-testid="supervisor-standby-unmapped">
+          Some goals name a computer this one does not know ({unmapped.join(", ")}). They stay held until it is paired.
+        </span>
+      ) : null}
+      {adoptable.length > 0 ? (
+        <ul data-testid="supervisor-adoptable" className="flex flex-col gap-0.5">
+          {adoptable.map((goal) => (
+            <li key={goal.goalId} data-testid="supervisor-adoptable-goal" data-goal-id={goal.goalId} className="flex min-w-0 items-center gap-1.5">
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-foreground">{goal.title}</span>
+                <span className="block truncate text-[10px]">Adoptable from {goal.fromMachine || "this computer"}</span>
+              </span>
+              <GoalButton disabled={adopting.has(goal.goalId)} onClick={() => void adopt(goal.goalId)} label={`Adopt ${goal.title}`}>
+                Adopt
+              </GoalButton>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
 }
 
 /**
@@ -202,11 +326,15 @@ export function SupervisorPanelView({
   now,
   lastUnified = null,
   client = desktopUnifiedClient,
+  moveHere = moveSupervisorHere,
+  adoptArchived = adoptArchivedGoals,
 }: {
   snapshot: SupervisorSnapshot;
   now: number;
   lastUnified?: UnifiedSupervisorView | null;
   client?: UnifiedSupervisorClient;
+  moveHere?: (force: boolean) => Promise<SupervisorMoveResult>;
+  adoptArchived?: (goalIds: readonly string[]) => Promise<SupervisorCallResult>;
 }) {
   const { hub, lanes, watched, actions } = snapshot;
   const acting = actingSessionIds(snapshot, now);
@@ -218,6 +346,15 @@ export function SupervisorPanelView({
       : lanes.some((lane) => lane.sessionId && acting.has(lane.sessionId))
         ? "typing"
         : `watching ${lanes.length + watched.length}`;
+
+  if (desktopConnection(snapshot) === "standby") {
+    return (
+      <div data-testid="supervisor-panel" data-supervisor-state="standby" className="flex flex-col gap-2.5 px-4 py-4 text-[11px] leading-relaxed text-muted-foreground">
+        <b className="text-[12px] font-semibold text-foreground">Supervisor on standby</b>
+        <DesktopStandby snapshot={snapshot} moveHere={moveHere} adoptArchived={adoptArchived} />
+      </div>
+    );
+  }
 
   if (!hub.available || (!hub.running && lanes.length === 0)) {
     return (
@@ -268,6 +405,7 @@ export function SupervisorPanelView({
           <span className="font-mono text-[10.5px] text-muted-foreground">{hub.error}</span>
         </p>
       ) : null}
+      <LeaseNotices hub={hub} className="mx-2 mb-1.5" />
       {lanes.length === 0 && !hub.error ? (
         <p className="px-4 pb-2 text-[11px] text-muted-foreground">
           {watched.length > 0 ? `No lanes yet; watching ${watched.length} pane${watched.length === 1 ? "" : "s"}.` : "No lanes yet. Hand it a goal from the hub and it appears here."}

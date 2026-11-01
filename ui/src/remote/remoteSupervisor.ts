@@ -8,7 +8,14 @@ import {
   type SupervisorLane,
   type SupervisorSnapshot,
 } from "../lib/supervisorModel";
-import type { SupervisorCallResult, SupervisorEnvelope, UnifiedSupervisorClient } from "../lib/unifiedSupervisor";
+import {
+  moveRefusal,
+  SUPERVISOR_STANDBY,
+  type SupervisorCallResult,
+  type SupervisorEnvelope,
+  type SupervisorMoveResult,
+  type UnifiedSupervisorClient,
+} from "../lib/unifiedSupervisor";
 
 export const SUPERVISOR_CAPABILITY = "supervisorV1";
 export const SUPERVISOR_CHANGED_FRAME = "supervisorChanged";
@@ -59,12 +66,31 @@ function objectOf(value: unknown): Record<string, unknown> | null {
 }
 
 function errorOf(res: SupervisorHttpResponse): { code: string; message: string } {
+  const { code, message } = errorWithDetails(res);
+  return { code, message };
+}
+
+function errorWithDetails(res: SupervisorHttpResponse): { code: string; message: string; details: unknown } {
   const data = objectOf(decodeJson(res.body));
   // The machine API answers `{error: {code, message}}`; older routes answered `{code, message}`.
   const envelope = objectOf(data?.error) ?? data;
   const code = typeof envelope?.code === "string" && envelope.code ? envelope.code : (STATUS_CODES[res.status] ?? "HTTP_ERROR");
   const message = typeof envelope?.message === "string" && envelope.message ? envelope.message : `Supervisor request failed (${res.status})`;
-  return { code, message };
+  return { code, message, details: envelope?.details ?? null };
+}
+
+/** The holder a SUPERVISOR_STANDBY refusal names (`details` or the envelope itself). */
+export type StandbyHolder = { readonly holderMachineId: string; readonly holderLabel: string | null };
+
+export function standbyHolderOf(res: SupervisorHttpResponse): StandbyHolder | null {
+  if (res.status !== 409) return null;
+  const data = objectOf(decodeJson(res.body));
+  const envelope = objectOf(data?.error) ?? data;
+  if (!envelope || envelope.code !== SUPERVISOR_STANDBY) return null;
+  const details = objectOf(envelope.details) ?? envelope;
+  const holderMachineId = typeof details.holderMachineId === "string" ? details.holderMachineId : "";
+  if (!holderMachineId) return null;
+  return { holderMachineId, holderLabel: typeof details.holderLabel === "string" && details.holderLabel ? details.holderLabel : null };
 }
 
 function offline(err: unknown): { code: string; message: string } {
@@ -135,6 +161,45 @@ export async function startRemoteSupervisor(fetchLike: SupervisorFetch): Promise
   }
   if (res.status < 200 || res.status >= 300) return { kind: "error", ...errorOf(res), status: res.status };
   return { kind: "ok", started: objectOf(decodeJson(res.body))?.started === true };
+}
+
+/**
+ * `POST /api/v1/supervisor/move` on the target machine, as `ferryx hub move-here [--force]` does:
+ * the holder hands its checkpoint over and this machine becomes the account supervisor. A
+ * refusal that only a forced move can pass carries the data-loss window in `details`.
+ */
+export async function moveRemoteSupervisor(fetchLike: SupervisorFetch, force: boolean): Promise<SupervisorMoveResult> {
+  let res: SupervisorHttpResponse;
+  try {
+    res = await fetchLike("/api/v1/supervisor/move", postJson({ force }));
+  } catch (err) {
+    return { kind: "error", ...offline(err), status: null };
+  }
+  if (res.status < 200 || res.status >= 300) {
+    const { code, message, details } = errorWithDetails(res);
+    return moveRefusal(code, message, res.status, details);
+  }
+  return { kind: "ok", moved: objectOf(decodeJson(res.body))?.moved !== false };
+}
+
+export type AdoptArchivedResult =
+  | { kind: "ok"; adopted: number }
+  | { kind: "error"; code: string; message: string; status: number | null };
+
+/**
+ * `POST /api/v1/supervisor/adopt-archived` on the machine whose archived supervisor owns the
+ * goals, as `ferryx hub adopt-archived --goal <id>` does: each goal is submitted to the holder.
+ */
+export async function adoptRemoteArchivedGoals(fetchLike: SupervisorFetch, goalIds: readonly string[]): Promise<AdoptArchivedResult> {
+  let res: SupervisorHttpResponse;
+  try {
+    res = await fetchLike("/api/v1/supervisor/adopt-archived", postJson({ goalIds }));
+  } catch (err) {
+    return { kind: "error", ...offline(err), status: null };
+  }
+  if (res.status < 200 || res.status >= 300) return { kind: "error", ...errorOf(res), status: res.status };
+  const adopted = objectOf(decodeJson(res.body))?.adopted;
+  return { kind: "ok", adopted: typeof adopted === "number" ? adopted : Array.isArray(adopted) ? adopted.length : goalIds.length };
 }
 
 /** One unified supervisor call (`/api/v1/supervisor/{request,conversation,memory}`). */
