@@ -36,7 +36,7 @@ export function SupervisorStep({ projects, onReady }: SupervisorStepProps): JSX.
   const snapshot = useSyncExternalStore(subscribeSupervisorSnapshot, getSupervisorSnapshot, getSupervisorSnapshot);
   const [fetched, setFetched] = useState<SetupStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [importMemory, setImportMemory] = useState(true);
+  const [importMemory, setImportMemory] = useState(false);
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set(projects.map((project) => project.path)));
   const [running, setRunning] = useState(false);
   const [started, setStarted] = useState(false);

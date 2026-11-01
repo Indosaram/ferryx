@@ -166,6 +166,15 @@ export function adoptSummary(result: Extract<AdoptAllResult, { kind: "ok" }>): s
   return `${head} ${result.refused.length} could not be handed over (${codes}).`;
 }
 
+/**
+ * True after the person rolled the supervisor back. The hub then reports nextAction "none"; an
+ * older daemon still says "cutover". Either way the rollback was deliberate, so setup must not
+ * offer to finish it again: only `ferryx hub cutover` hands requests back.
+ */
+function isRolledBack(status: SetupStatus): boolean {
+  return status.intake.origin === "rollback" && (status.nextAction === "none" || status.nextAction === "cutover");
+}
+
 /** What the setup state means for the person. Unknown (null) never asks for anything. */
 export function readiness(status: SetupStatus | null): SetupReadiness {
   if (!status) return "unknown";
@@ -181,18 +190,20 @@ export function readiness(status: SetupStatus | null): SetupReadiness {
     case "enable_engine":
     case "create_owner":
     case "map_projects":
-    case "cutover":
     case "adopt":
       return "needs_setup";
+    case "cutover":
+      return isRolledBack(status) ? "ready" : "needs_setup";
   }
 }
 
 /**
- * True once the supervisor runs on its own. Earlier jobs waiting for adoption are an offer, not
- * unfinished setup, so onboarding counts them as done (the banner still offers them).
+ * True once the supervisor runs on its own, or was deliberately rolled back. Earlier jobs
+ * waiting for adoption are an offer, not unfinished setup, so onboarding counts them as done
+ * (the banner still offers them).
  */
 export function setupFinished(status: SetupStatus | null): boolean {
-  return status !== null && (status.nextAction === "none" || status.nextAction === "adopt");
+  return status !== null && (status.nextAction === "none" || status.nextAction === "adopt" || isRolledBack(status));
 }
 
 /** True when a setup banner should ask: needs setup or blocked, never unknown, ready or working. */
@@ -299,6 +310,14 @@ function faultDescription(status: SetupStatus): string {
 /** The one thing to tell (and offer) the person for this setup state. */
 export function actionFor(status: SetupStatus): SetupAction {
   const kind = status.nextAction;
+  if (isRolledBack(status)) {
+    return {
+      kind,
+      label: "Supervisor is rolled back",
+      description: "Earlier jobs run the old way. Run `ferryx hub cutover` to hand new requests to the supervisor again.",
+      primary: null,
+    };
+  }
   switch (kind) {
     case "enable_engine":
       return {

@@ -33,27 +33,27 @@ describe("SupervisorSetupBanner", () => {
     expect(screen.queryByTestId("supervisor-setup-banner")).toBeNull();
   });
 
-  it("turns the supervisor on with memory import on by default and the projects", async () => {
+  it("turns the supervisor on with memory import off by default and the projects", async () => {
     const acts = actions();
     render(
       <SupervisorSetupBanner surface="desktop" status={status("enable_engine")} actions={acts} projects={[{ name: "ferryx", path: "/code/ferryx" }]} />,
     );
     expect(screen.getByTestId("supervisor-setup-label")).toHaveTextContent("Turn on the supervisor");
-    expect(screen.getByTestId("supervisor-setup-import-memory")).toBeChecked();
+    expect(screen.getByTestId("supervisor-setup-import-memory")).not.toBeChecked();
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Turn on supervisor" }));
     });
-    expect(acts.run).toHaveBeenCalledWith({ importMemory: true, projects: [{ name: "ferryx", path: "/code/ferryx" }] });
+    expect(acts.run).toHaveBeenCalledWith({ importMemory: false, projects: [{ name: "ferryx", path: "/code/ferryx" }] });
   });
 
-  it("passes the unchecked memory choice", async () => {
+  it("passes the checked memory choice", async () => {
     const acts = actions();
     render(<SupervisorSetupBanner surface="desktop" status={status("cutover")} actions={acts} />);
     fireEvent.click(screen.getByTestId("supervisor-setup-import-memory"));
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Finish setup" }));
     });
-    expect(acts.run).toHaveBeenCalledWith({ importMemory: false, projects: [] });
+    expect(acts.run).toHaveBeenCalledWith({ importMemory: true, projects: [] });
   });
 
   it("shows a refusal's code", async () => {

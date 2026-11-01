@@ -5,12 +5,16 @@
 //! hub itself sent into a worker pane (a supervisor dispatch, a `[ferryx ...]` wrapper, a
 //! tagged harness message) is rejected by [`owner_turn_text`], every session the hub drove is
 //! skipped whole ([`hub_driven_session_ids`]), and text that looks like a credential is never
-//! sent. Each kept turn goes to owner ingest through [`super::memory::ingest`] with the
-//! provenance adapter `import`, once per turn; `supervisor_memory_imports` remembers what a
-//! session hashed to, so an unchanged session is not read again and a rerun ingests nothing.
+//! sent. Each kept turn is fenced as untrusted text whose origin names the provider and session
+//! it came from (an old transcript is still data, not an instruction), then goes to owner ingest
+//! through [`super::memory::ingest`] with the provenance adapter `import`, once per turn;
+//! `supervisor_memory_imports` remembers what a session hashed to, so an unchanged session is
+//! not read again and a rerun ingests nothing.
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::LazyLock;
 
+use regex::Regex;
 use serde::Serialize;
 use sqlx::SqlitePool;
 
@@ -26,13 +30,33 @@ const MAX_SOURCE_ID_CHARS: usize = 256;
 /// kept no session, so setup does not wait for an import that has nothing to read.
 pub const LAST_RUN_KEY: &str = "supervisor_memory_import_last_run";
 
-/// Markers of text the hub or a harness wrote, never the owner.
-const HUB_MARKERS: [&str; 1] = ["Owner request (verbatim):"];
+/// Markers of text the hub or a harness wrote, never the owner: a supervisor dispatch, an
+/// untrusted fence around relayed chat text, a lane brief and its completion claim, an
+/// injected AGENTS.md block, and the summary that opens a compacted, continued session.
+const HUB_MARKERS: [&str; 6] = [
+    "Owner request (verbatim):",
+    "```untrusted",
+    "[CLAIM_DONE]",
+    "Claim completion with a standalone line",
+    "# AGENTS.md instructions",
+    "This session is being continued",
+];
 
-/// Token prefixes of credentials (OpenAI/Anthropic keys, GitHub tokens, Slack tokens, AWS
-/// access keys). Matched at the start of a whitespace-separated token, so ordinary words such
-/// as "task-based" are not mistaken for a key.
-const SECRET_PREFIXES: [&str; 5] = ["sk-", "ghp_", "github_pat_", "xox", "AKIA"];
+/// Token prefixes of credentials (OpenAI/Anthropic keys, GitHub tokens, Slack bot and app
+/// tokens, AWS access keys, Stripe live keys, GitLab tokens, Google API keys, JWTs). Matched at
+/// the start of a token, a run of letters, digits, `_` and `-`, so a key inside quotes, JSON or
+/// `NAME=value` is still found while ordinary words such as "task-based" are not taken for one.
+const SECRET_PREFIXES: [&str; 10] = [
+    "sk-", "ghp_", "github_pat_", "xox", "AKIA", "xapp-", "sk_live_", "glpat-", "AIza", "eyJ",
+];
+
+/// A credential recognized by its shape rather than its prefix: a secret, token, password or
+/// API key name followed by an assignment (`OPENAI_API_KEY=`, `"token":`, `DB_SECRET:`), or a
+/// bearer credential. A name with no `=` or `:` after it ("token-efficient answers", "rotate
+/// secrets quarterly") is ordinary prose and still teaches.
+static SECRET_SHAPE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)(secret|token|passw|api[_-]?key)\w*\s*["']?\s*[=:]|\bbearer\s+\S{8,}"#).unwrap()
+});
 
 /// One user turn of a provider session, in session order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,14 +127,14 @@ pub async fn hub_driven_session_ids(pool: &SqlitePool) -> Result<HashSet<String>
 
 fn looks_like_secret(text: &str) -> bool {
     text.contains("-----BEGIN")
-        || text.split_whitespace().any(|token| {
-            let token = token.trim_start_matches(|c: char| !c.is_ascii_alphanumeric());
-            SECRET_PREFIXES.iter().any(|prefix| token.starts_with(prefix))
-        })
+        || SECRET_SHAPE.is_match(text)
+        || text
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+            .any(|token| SECRET_PREFIXES.iter().any(|prefix| token.starts_with(prefix)))
 }
 
 /// The learnable owner text of one user turn, or `None` when it must not teach: empty, a
-/// tagged wrapper (`<...`), a hub instruction (`Owner request (verbatim):`, `[ferryx ...`), or
+/// tagged wrapper (`<...`), hub or harness text (`[ferryx ...` or any of [`HUB_MARKERS`]), or
 /// anything that looks like a credential. Task-only lines are removed; the rest is cut to
 /// `max_chars` characters.
 pub fn owner_turn_text(text: &str, max_chars: usize) -> Option<String> {
@@ -261,8 +285,10 @@ pub async fn import_sessions(
             _ => None,
         };
         let (mut ok, mut failed) = (0usize, 0usize);
+        let origin = format!("import {} {}", session.provider, session.session_id);
         for (ordinal, text) in &kept {
             let source = source_message_id(&session.provider, &session.session_id, *ordinal);
+            let fenced = crate::chat::fence::fence_untrusted(&origin, text);
             let outcome = ingest(
                 pool,
                 memory,
@@ -270,7 +296,7 @@ pub async fn import_sessions(
                 ChannelProvider::Import,
                 &source,
                 project.as_deref(),
-                text,
+                &fenced,
             )
             .await;
             match outcome["state"].as_str() {

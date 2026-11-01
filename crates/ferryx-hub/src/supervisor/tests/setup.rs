@@ -267,6 +267,16 @@ mod status {
         setup_status(pool, engine).await.unwrap().next_action
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_async_engine_view_reads_off_the_runtime_and_falls_back_to_off() {
+        // The reader runs on the blocking pool even on a single-threaded runtime.
+        let read = EngineView::read_with(ready).await;
+        assert_eq!(read, ready());
+        // A reader that cannot finish counts as off; no engine is installed in tests.
+        let failed = EngineView::read_with(|| panic!("the hub env file read failed")).await;
+        assert_eq!(failed, EngineView { enabled: false, installed: false, health: None });
+    }
+
     #[tokio::test]
     async fn the_engine_steps_come_first_and_name_the_fault() {
         let pool = crate::storage::memory().await.unwrap();
@@ -342,6 +352,21 @@ mod status {
             .unwrap();
         let done = setup_status(&pool, ready()).await.unwrap();
         assert_eq!((done.adoptable, done.next_action), (0, NextAction::None));
+    }
+
+    #[tokio::test]
+    async fn after_a_rollback_setup_does_not_ask_for_the_cutover_again() {
+        let pool = crate::storage::memory().await.unwrap();
+        crate::supervisor::cutover::note_import(&pool).await.unwrap();
+        provision_owner(&pool, OWNER, "qa-supervisor", REPO, HOST, DIR).await.unwrap();
+        assert_eq!(next(&pool, ready()).await, NextAction::Cutover);
+        let engine = ready();
+        crate::supervisor::cutover::cutover(&pool, engine.health.as_ref()).await.unwrap();
+        crate::supervisor::cutover::rollback(&pool).await.unwrap();
+        let rolled_back = setup_status(&pool, ready()).await.unwrap();
+        assert_eq!(rolled_back.intake.origin, "rollback");
+        assert!(!rolled_back.intake.unified_open);
+        assert_eq!(rolled_back.next_action, NextAction::None);
     }
 
     #[tokio::test]

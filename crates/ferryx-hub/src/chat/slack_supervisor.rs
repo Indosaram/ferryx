@@ -89,18 +89,48 @@ impl SupervisorConversation for MhcSupervisor {
 tokio::task_local! {
     /// Test hook: the conversation Slack turns in this scope use.
     pub static TEST_CONVERSATION: Arc<dyn SupervisorConversation>;
+    /// Test hook: the health of the engine behind [`TEST_CONVERSATION`]; unset means ready.
+    pub static TEST_ENGINE_HEALTH: crate::meta::mhc_supervisor::SupervisorHealth;
 }
 
-/// The installed supervisor conversation, if this process owns the mhc engine.
-pub fn conversation() -> Option<Arc<dyn SupervisorConversation>> {
+/// Why no supervisor conversation can take a Slack turn now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineGap {
+    /// No mhc engine is installed in this process.
+    Absent,
+    /// An engine is installed but not ready, or short of a required capability.
+    NotReady,
+}
+
+/// The engine may take new work: ready, with every required capability
+/// ([`crate::supervisor::cutover::require_engine`]).
+fn engine_ready(health: Option<&crate::meta::mhc_supervisor::SupervisorHealth>) -> bool {
+    crate::supervisor::cutover::require_engine(health).is_ok()
+}
+
+/// The installed supervisor conversation when this process owns an mhc engine that is ready
+/// for new work; otherwise why not. An installed engine that is still starting, degraded or
+/// capability-short never gets the owner's turn.
+pub fn engine() -> Result<Arc<dyn SupervisorConversation>, EngineGap> {
     #[cfg(test)]
     {
-        TEST_CONVERSATION.try_with(Arc::clone).ok()
+        let conversation = TEST_CONVERSATION
+            .try_with(Arc::clone)
+            .map_err(|_| EngineGap::Absent)?;
+        match TEST_ENGINE_HEALTH.try_with(Clone::clone) {
+            Ok(health) if !engine_ready(Some(&health)) => Err(EngineGap::NotReady),
+            _ => Ok(conversation),
+        }
     }
     #[cfg(not(test))]
     {
-        crate::meta::mhc_supervisor::installed()
-            .map(|supervisor| Arc::new(supervisor) as Arc<dyn SupervisorConversation>)
+        match crate::meta::mhc_supervisor::installed() {
+            None => Err(EngineGap::Absent),
+            Some(supervisor) if engine_ready(Some(&supervisor.health())) => {
+                Ok(Arc::new(supervisor) as Arc<dyn SupervisorConversation>)
+            }
+            Some(_) => Err(EngineGap::NotReady),
+        }
     }
 }
 
@@ -865,21 +895,39 @@ pub async fn try_handle(
 }
 
 /// Code and text of the reply an owner message gets when the supervisor owns it (cut over)
-/// but no mhc engine runs in this daemon.
+/// but no ready mhc engine runs in this daemon.
 pub const ENGINE_UNAVAILABLE_NOTICE: &str = "MHC_NOT_RUNNING: the supervisor engine is not running on this hub, so new work cannot be started. Earlier conversations stay readable; nothing was registered.";
 
 /// Answers an owner message the unified supervisor owns ([`route`]: the owner, a DM or bound
-/// channel) with [`ENGINE_UNAVAILABLE_NOTICE`] when no engine is installed in this daemon:
-/// after an explicit cutover, and on a fresh hub (unified intake open, legacy idle) whose hub
-/// env file turns the engine on. Returns false, touching nothing, for every other message,
-/// which keeps its legacy turn; a fresh hub with the engine off keeps the legacy turn too.
-pub async fn refuse_without_engine(pool: &SqlitePool, admitted: &Admitted) -> bool {
-    // Tests never read the developer's hub env file.
-    let engine_enabled = !cfg!(test)
-        && crate::meta::mhc_profile::MhcProfileConfig::enabled_in(
-            &crate::hub_env::read_file_env(),
-        );
+/// channel) with [`ENGINE_UNAVAILABLE_NOTICE`] when no ready engine can take it (`gap`).
+/// After an explicit cutover the legacy turn is stopped, so the owner gets the notice whether
+/// the engine is absent or not ready. On a fresh hub (unified intake open, legacy idle) the
+/// notice answers only when the hub env file turns the engine on and none is installed; an
+/// installed engine that is not ready yet (starting, degraded, capability-short) lets the
+/// legacy turn answer instead, as does a fresh hub with the engine off. Returns false,
+/// touching nothing, for every message that keeps its legacy turn.
+pub async fn refuse_without_engine(
+    pool: &SqlitePool,
+    admitted: &Admitted,
+    gap: EngineGap,
+) -> bool {
+    // Tests never read the developer's hub env file. A not-ready engine on a fresh hub keeps
+    // the legacy turn exactly as the engine flag being off does.
+    let engine_enabled = !cfg!(test) && gap == EngineGap::Absent && engine_flag_on().await;
     refuse_without_engine_in(pool, admitted, engine_enabled).await
+}
+
+/// Whether the hub env file turns the engine on, read on the blocking pool so a slow disk
+/// never stalls a runtime worker. A read that cannot finish counts as off.
+async fn engine_flag_on() -> bool {
+    tokio::task::spawn_blocking(|| {
+        crate::meta::mhc_profile::MhcProfileConfig::enabled_in(&crate::hub_env::read_file_env())
+    })
+    .await
+    .unwrap_or_else(|error| {
+        tracing::warn!(%error, "the hub env file was not read; the supervisor engine counts as off");
+        false
+    })
 }
 
 /// [`refuse_without_engine`] with whether the hub env file turns the engine on.
@@ -1946,5 +1994,81 @@ mod tests {
         // An upgraded hub before cutover keeps the legacy turn even with the flag on.
         crate::supervisor::cutover::note_import(&pool).await.unwrap();
         assert!(!refuse_without_engine_in(&pool, &owner, true).await);
+    }
+
+    fn engine_health(
+        state: crate::meta::mhc_supervisor::HealthState,
+        drop: Option<&str>,
+    ) -> crate::meta::mhc_supervisor::SupervisorHealth {
+        crate::meta::mhc_supervisor::SupervisorHealth {
+            state,
+            generation: 1,
+            pid: None,
+            capabilities: crate::meta::mhc_profile::REQUIRED_CAPABILITIES
+                .iter()
+                .filter(|capability| Some(**capability) != drop)
+                .map(|capability| (*capability).to_owned())
+                .collect(),
+            server_version: None,
+            fault: None,
+            detail: None,
+            queued_decisions: 0,
+        }
+    }
+
+    #[test]
+    fn only_a_ready_engine_with_every_capability_takes_slack_turns() {
+        use crate::meta::mhc_supervisor::HealthState;
+        assert!(engine_ready(Some(&engine_health(HealthState::Ready, None))));
+        assert!(!engine_ready(Some(&engine_health(HealthState::Ready, Some("memory_forget")))));
+        assert!(!engine_ready(Some(&engine_health(HealthState::Waiting, None))));
+        assert!(!engine_ready(None));
+    }
+
+    #[tokio::test]
+    async fn an_installed_engine_that_is_not_ready_keeps_the_fresh_hub_on_the_legacy_turn() {
+        use crate::meta::mhc_supervisor::HealthState;
+        let (pool, _, _) = owner_pool().await;
+        let config = slack_config(false);
+        let owner = admit(&config, &dm("UOWNER", "D10", "8001.000001", WORK), "UBOT", false)
+            .unwrap();
+        let fake: Arc<dyn SupervisorConversation> = FakeConversation::new(&pool, true, "On it.");
+        // The installed engine is short of a capability: it does not get the turn.
+        let gap = TEST_CONVERSATION
+            .scope(fake.clone(), async {
+                TEST_ENGINE_HEALTH
+                    .scope(engine_health(HealthState::Ready, Some("memory_forget")), async {
+                        engine().err()
+                    })
+                    .await
+            })
+            .await;
+        assert_eq!(gap, Some(EngineGap::NotReady));
+        let ready = TEST_CONVERSATION
+            .scope(fake, async {
+                TEST_ENGINE_HEALTH
+                    .scope(engine_health(HealthState::Ready, None), async { engine().is_ok() })
+                    .await
+            })
+            .await;
+        assert!(ready, "a ready engine with every capability takes the turn");
+
+        let (base, calls) = serve_scripted("UBOT", Vec::new()).await;
+        let (fresh, cut_over) = with_test_api(base, "xoxb-test".into(), async {
+            // A fresh hub: the legacy turn answers while the engine gets ready.
+            let fresh = refuse_without_engine(&pool, &owner, EngineGap::NotReady).await;
+            // After an explicit cutover the legacy turn is stopped: the owner gets the notice.
+            let health = engine_health(HealthState::Ready, None);
+            crate::supervisor::cutover::cutover(&pool, Some(&health)).await.unwrap();
+            let cut_over = refuse_without_engine(&pool, &owner, EngineGap::NotReady).await;
+            (fresh, cut_over)
+        })
+        .await;
+        assert!(!fresh, "a fresh hub keeps the legacy turn while the engine is not ready");
+        assert!(cut_over, "after a cutover a not-ready engine refuses with the notice");
+        let posts = posted(&calls);
+        assert_eq!(posts.len(), 1, "{posts:?}");
+        assert_eq!(posts[0]["text"], ENGINE_UNAVAILABLE_NOTICE);
+        assert_eq!(goals(&pool).await, 0);
     }
 }

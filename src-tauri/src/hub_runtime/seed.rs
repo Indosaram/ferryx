@@ -32,17 +32,32 @@ fn memory_files(home: &Path) -> Vec<(&'static str, PathBuf)> {
     ]
 }
 
-/// Non-empty blank-line-separated paragraphs of text, at most max.
+/// Non-empty blank-line-separated paragraphs of text, at most max, each once. A paragraph's
+/// ordinal (and so its import source id) is a hash of its own text rather than its position,
+/// so inserting, removing or moving one paragraph does not give every other paragraph a new
+/// id and make owner ingest learn the whole file again. A repeated paragraph keeps its first
+/// occurrence only, since both copies would share one id.
 fn paragraphs(text: &str, max: usize) -> Vec<ImportTurn> {
     let normalized = text.replace("\r\n", "\n");
+    let mut seen = std::collections::HashSet::new();
     normalized
         .split("\n\n")
         .map(str::trim)
         .filter(|paragraph| !paragraph.is_empty())
+        .map(|paragraph| ImportTurn { ordinal: paragraph_id(paragraph), text: paragraph.to_owned() })
+        .filter(|turn| seen.insert(turn.ordinal))
         .take(max)
-        .enumerate()
-        .map(|(ordinal, paragraph)| ImportTurn { ordinal, text: paragraph.to_owned() })
         .collect()
+}
+
+/// The leading bytes of the paragraph's SHA-256 as a number.
+fn paragraph_id(paragraph: &str) -> usize {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(paragraph.as_bytes());
+    let mut head = [0u8; std::mem::size_of::<usize>()];
+    let width = head.len();
+    head.copy_from_slice(&digest[..width]);
+    usize::from_be_bytes(head)
 }
 
 /// One import session per readable instruction file (provider memory, id <tool>:<file>).
@@ -71,47 +86,58 @@ fn memory_file_sessions(home: &Path, max_paragraphs: usize) -> Vec<ImportSession
     sessions
 }
 
-/// The owner turns of the most recent sessions across SESSION_PROVIDERS, newest first.
+/// The owner turns of the most recent sessions across SESSION_PROVIDERS, newest first. A fork
+/// or child session (an entry with a parent) and a sidechain stored under a `subagents`
+/// directory are skipped: their user turns are another agent's prompts, not the owner's.
+/// Each provider is read right after its own search, because a search replaces the history's
+/// entry locators and a later read of an earlier provider's entry would find nothing.
 fn recent_sessions(roots: Vec<(CanonicalProvider, PathBuf)>, max_sessions: usize) -> Vec<ImportSession> {
     let roots: Vec<_> = roots.into_iter().filter(|(provider, _)| SESSION_PROVIDERS.contains(provider)).collect();
     let mut history = History::new(roots);
-    let mut entries = Vec::new();
+    let mut sessions = Vec::new();
     for provider in SESSION_PROVIDERS {
         let wire = crate::agent_history::history::provider_wire(provider);
+        let mut entries = Vec::new();
         let mut cursor: Option<String> = None;
         while let Ok(page) = history.search(wire, None, "", cursor.as_deref(), PAGE) {
-            entries.extend(page.items.into_iter().map(|entry| (wire, entry)));
+            entries.extend(page.items.into_iter().filter(|entry| {
+                entry.parent_id.is_none()
+                    && !history
+                        .source_path(&entry.entry_key)
+                        .is_some_and(|path| path.components().any(|part| part.as_os_str() == "subagents"))
+            }));
             match page.next_cursor {
                 Some(next) => cursor = Some(next),
                 None => break,
             }
         }
-    }
-    entries.sort_by_key(|(_, entry)| std::cmp::Reverse(entry.modified_ms));
-    let mut sessions = Vec::new();
-    for (wire, entry) in entries.into_iter().take(max_sessions) {
-        let mut turns = Vec::new();
-        let mut cursor: Option<String> = None;
-        while let Ok(page) = history.read(&entry.entry_key, cursor.as_deref(), PAGE) {
-            turns.extend(
-                page.items
-                    .into_iter()
-                    .filter(|message| message.role == "user")
-                    .map(|message| ImportTurn { ordinal: message.ordinal, text: message.text }),
-            );
-            match page.next_cursor {
-                Some(next) => cursor = Some(next),
-                None => break,
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.modified_ms));
+        for entry in entries.into_iter().take(max_sessions) {
+            let mut turns = Vec::new();
+            let mut cursor: Option<String> = None;
+            while let Ok(page) = history.read(&entry.entry_key, cursor.as_deref(), PAGE) {
+                turns.extend(
+                    page.items
+                        .into_iter()
+                        .filter(|message| message.role == "user")
+                        .map(|message| ImportTurn { ordinal: message.ordinal, text: message.text }),
+                );
+                match page.next_cursor {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
             }
+            let session = ImportSession {
+                provider: wire.to_owned(),
+                session_id: entry.provider_session.id.clone(),
+                cwd: (!entry.cwd.is_empty()).then(|| entry.cwd.clone()),
+                turns,
+            };
+            sessions.push((entry.modified_ms, session));
         }
-        sessions.push(ImportSession {
-            provider: wire.to_owned(),
-            session_id: entry.provider_session.id.clone(),
-            cwd: (!entry.cwd.is_empty()).then(|| entry.cwd.clone()),
-            turns,
-        });
     }
-    sessions
+    sessions.sort_by_key(|(modified_ms, _)| std::cmp::Reverse(*modified_ms));
+    sessions.into_iter().take(max_sessions).map(|(_, session)| session).collect()
 }
 
 /// Seeds owner memory for principal from the agent stores under home. File reads run on the
@@ -123,6 +149,16 @@ pub(crate) async fn seed_owner_memory(
     home: PathBuf,
 ) -> Result<ImportReport, SupervisorError> {
     seed_with_roots(pool, memory, principal, home.clone(), crate::ipc::agent_history::provider_history_roots(&home)).await
+}
+
+/// The result of the blocking session read. A read that panicked or was cancelled is an error,
+/// not an empty read: importing nothing would still record a completed run, and setup would
+/// treat memory as seeded although no session was looked at.
+fn read_join<T>(joined: Result<T, tokio::task::JoinError>) -> Result<T, SupervisorError> {
+    joined.map_err(|error| {
+        tracing::warn!(%error, "reading agent sessions for owner memory failed");
+        SupervisorError::Invalid(format!("reading agent sessions failed: {error}"))
+    })
 }
 
 pub(crate) async fn seed_with_roots(
@@ -137,14 +173,14 @@ pub(crate) async fn seed_with_roots(
         max_turns_per_session: bounds.max_turns_per_session * 3,
         ..bounds
     };
-    let (files, sessions) = tokio::task::spawn_blocking(move || {
+    let joined = tokio::task::spawn_blocking(move || {
         (
             memory_file_sessions(&home, file_bounds.max_turns_per_session),
             recent_sessions(roots, bounds.max_sessions),
         )
     })
-    .await
-    .unwrap_or_default();
+    .await;
+    let (files, sessions) = read_join(joined)?;
     let from_files = memory_import::import_sessions(pool, memory.as_ref(), principal, files, file_bounds).await?;
     let from_sessions = memory_import::import_sessions(pool, memory.as_ref(), principal, sessions, bounds).await?;
     let report = ImportReport {
@@ -176,6 +212,7 @@ mod tests {
     #[derive(Default)]
     struct Learner {
         seen: std::sync::Mutex<std::collections::HashSet<String>>,
+        texts: std::sync::Mutex<Vec<(String, String)>>,
     }
 
     #[async_trait]
@@ -183,7 +220,8 @@ mod tests {
         async fn memory_request(&self, name: &str, _data: Value) -> Result<Value, MemoryRequestError> {
             panic!("seeding sends no memory request ({name})")
         }
-        async fn ingest_owner_text(&self, source: &str, _text: &str) -> Result<IngestOutcome, SupervisorFault> {
+        async fn ingest_owner_text(&self, source: &str, text: &str) -> Result<IngestOutcome, SupervisorFault> {
+            self.texts.lock().unwrap().push((source.to_owned(), text.to_owned()));
             let fresh = self.seen.lock().unwrap().insert(source.to_owned());
             Ok(if fresh { IngestOutcome::Learned { reply: String::new() } } else { IngestOutcome::Duplicate })
         }
@@ -192,8 +230,124 @@ mod tests {
     #[test]
     fn instruction_files_split_into_bounded_paragraphs() {
         let turns = paragraphs("one\r\n\r\n\n two \n\nthree\n\nfour", 3);
-        let texts: Vec<_> = turns.iter().map(|turn| (turn.ordinal, turn.text.as_str())).collect();
-        assert_eq!(texts, vec![(0, "one"), (1, "two"), (2, "three")]);
+        let texts: Vec<_> = turns.iter().map(|turn| turn.text.as_str()).collect();
+        assert_eq!(texts, vec!["one", "two", "three"]);
+        // The id follows the text, not its position; a repeated paragraph is kept once.
+        let moved = paragraphs("zero\n\nthree\n\none\n\nthree", 10);
+        let moved: Vec<_> = moved.iter().map(|turn| (turn.ordinal, turn.text.as_str())).collect();
+        assert_eq!(moved, vec![(paragraph_id("zero"), "zero"), (turns[2].ordinal, "three"), (turns[0].ordinal, "one")]);
+        assert_ne!(turns[0].ordinal, turns[1].ordinal);
+    }
+
+    /// Only the owner's own sessions teach: a Claude sidechain under `subagents` and a forked
+    /// Codex session are skipped, and both providers' sessions are read even though the history
+    /// is searched provider by provider.
+    #[tokio::test]
+    async fn subagent_and_forked_sessions_never_teach() {
+        use serde_json::json;
+        let home = tempfile::tempdir().unwrap();
+        let cwd = home.path().to_string_lossy().into_owned();
+        let claude_root = home.path().join("claude-projects");
+        let project = claude_root.join("proj");
+        std::fs::create_dir_all(project.join("s1").join("subagents")).unwrap();
+        let claude_line = |session: &str, text: &str| {
+            format!(
+                "{}\n",
+                json!({"type": "user", "sessionId": session, "cwd": cwd, "uuid": "9f0c1d2e-0000-4000-8000-000000000001",
+                    "parentUuid": null, "message": {"role": "user", "content": text}})
+            )
+        };
+        let owner_claude = "63ba88ec-b3cb-4a70-8a32-f5d1ad07e749";
+        std::fs::write(project.join("s1.jsonl"), claude_line(owner_claude, "Prefer small focused commits.")).unwrap();
+        std::fs::write(
+            project.join("s1").join("subagents").join("agent-1.jsonl"),
+            claude_line("7d1e2f3a-4b5c-4d6e-8f70-819293a4b5c6", "Search the repo for flaky tests."),
+        )
+        .unwrap();
+        let codex_root = home.path().join("codex-sessions");
+        std::fs::create_dir_all(&codex_root).unwrap();
+        let codex_file = |id: &str, forked_from: Option<&str>, text: &str| {
+            let mut meta = json!({"id": id, "cwd": cwd, "cli_version": "0.153.2"});
+            if let Some(parent) = forked_from {
+                meta["forked_from_id"] = json!(parent);
+            }
+            format!(
+                "{}\n{}\n",
+                json!({"type": "session_meta", "payload": meta}),
+                json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": text}]}})
+            )
+        };
+        let owner_codex = "019ec598-c800-7000-8000-000000000001";
+        std::fs::write(codex_root.join("owner.jsonl"), codex_file(owner_codex, None, "Use tabs in the Go code.")).unwrap();
+        std::fs::write(
+            codex_root.join("forked.jsonl"),
+            codex_file("019ec598-c800-7000-8000-000000000002", Some(owner_codex), "Retry the forked plan."),
+        )
+        .unwrap();
+
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::supervisor::provision_identity(&pool, "local:tester").await.unwrap();
+        let learner = Arc::new(Learner::default());
+        let report = seed_with_roots(
+            &pool,
+            learner.clone(),
+            "local:tester",
+            home.path().to_path_buf(),
+            vec![(CanonicalProvider::Claude, claude_root), (CanonicalProvider::Codex, codex_root)],
+        )
+        .await
+        .unwrap();
+        assert_eq!((report.sessions, report.turns_ingested, report.failed), (2, 2, 0), "{report:?}");
+        let mut texts = learner.texts.lock().unwrap().clone();
+        texts.sort();
+        assert_eq!(
+            texts,
+            vec![
+                (
+                    format!("import:claude:{owner_claude}:0"),
+                    ferryx_hub::chat::fence::fence_untrusted(&format!("import claude {owner_claude}"), "Prefer small focused commits."),
+                ),
+                (
+                    format!("import:codex:{owner_codex}:1"),
+                    ferryx_hub::chat::fence::fence_untrusted(&format!("import codex {owner_codex}"), "Use tabs in the Go code."),
+                ),
+            ]
+        );
+        assert!(texts[0].1.contains("```untrusted\norigin: import claude "));
+    }
+
+    #[tokio::test]
+    async fn a_failed_session_read_is_an_error_not_an_empty_import() {
+        let joined: Result<(), _> = tokio::spawn(async { panic!("boom") }).await;
+        let error = read_join(joined).unwrap_err();
+        assert_eq!(error.code(), "INVALID_REQUEST");
+    }
+
+    #[tokio::test]
+    async fn an_inserted_paragraph_keeps_the_ids_of_the_others() {
+        let home = tempfile::tempdir().unwrap();
+        let claude = home.path().join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        let file = claude.join("CLAUDE.md");
+        std::fs::write(&file, "Prefer small focused commits.\n\nAnswer in Korean when I write Korean.\n").unwrap();
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::supervisor::provision_identity(&pool, "local:tester").await.unwrap();
+        let memory: Arc<dyn OwnerMemory> = Arc::new(Learner::default());
+        let first = seed_with_roots(&pool, memory.clone(), "local:tester", home.path().to_path_buf(), Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(first.turns_ingested, 2);
+
+        std::fs::write(
+            &file,
+            "Run clippy before every commit.\n\nPrefer small focused commits.\n\nAnswer in Korean when I write Korean.\n",
+        )
+        .unwrap();
+        let second = seed_with_roots(&pool, memory, "local:tester", home.path().to_path_buf(), Vec::new())
+            .await
+            .unwrap();
+        assert_eq!((second.turns_ingested, second.failed), (1, 0), "{second:?}");
     }
 
     #[tokio::test]
