@@ -798,10 +798,10 @@ impl SessionHub {
     /// for good after one reconnect gap.
     pub(crate) fn history_incomplete(&self) -> bool {
         self.history_incomplete
-            && !self
+            && self
                 .buffer
                 .retained_start_sequence()
-                .is_some_and(|start| start >= self.buffer.gap_floor)
+                .is_none_or(|start| start < self.buffer.gap_floor)
     }
 
     /// The mirrored screen, when it can stand in for retained replay.
