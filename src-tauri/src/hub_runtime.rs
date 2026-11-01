@@ -1315,11 +1315,17 @@ async fn spawn_lease_client(
         Some(record) => (record.machine_record_id, Some(record.account_id)),
         None => ("local".to_owned(), None),
     };
-    let config = LeaseClientConfig::system(machine_id, account);
+    let mut config = LeaseClientConfig::system(machine_id, account);
+    // A handover successor renews the lease its predecessor handed over at commit (same
+    // machine id and fence) instead of acquiring a new one.
+    config.handed_over = server.handover_manager.take_handed_supervisor_lease();
     install_lease_stop(Some(Arc::clone(&wanted)));
     let (handle, task) =
         spawn_supervisor_lease_client(config, Arc::new(relay), Arc::new(HubLeaseSwitch { wanted })).await;
     HUB_TASKS.track(&task);
+    // A later handover commit freezes this client and hands its lease to the successor.
+    let handover: Arc<dyn crate::daemon::handover::SupervisorLeaseHandover> = Arc::new(handle.state().clone());
+    server.handover_manager.set_supervisor_lease(Some(handover));
     // Supervisor inputs are stamped with this lease's fence, checked right before each send.
     let source: Arc<dyn crate::agent_control::fence::SupervisorFenceSource> = Arc::new(handle.state().clone());
     crate::agent_control::fence::install_source(Some(source));

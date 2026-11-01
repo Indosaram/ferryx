@@ -12568,4 +12568,83 @@ mod tests {
         );
         relay.abort();
     }
+
+    /// Rolling handover (plan todo 9): predecessor and successor daemon of one machine open two
+    /// control sessions (one registration per generation). Both are bound to the same machine
+    /// id, so both get lease acks for that machine and the same fence: the predecessor's until
+    /// its commit, then the successor's renew of the handed-over fence, without an acquire.
+    #[tokio::test]
+    async fn two_control_sessions_of_one_machine_both_get_acks_for_the_same_fence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ident = identity(32, "owned-machine");
+        let account =
+            test_account_state(tmp.path(), LEASE_USER, "session-token", "owned-machine", "other-machine");
+        add_second_machine(&account);
+        account
+            .mutate(|store| {
+                store
+                    .machines
+                    .get_mut("rec-owned")
+                    .expect("rec-owned fixture")
+                    .public_key = ident.public_key.clone();
+                Ok(())
+            })
+            .expect("pin enrolled public key");
+        let state = RelayState::new_with_key_store(vec![], tmp.path().join("keys.json")).unwrap();
+        let (base, relay) = spawn_test_relay_with_account_state(state, Some(account.clone())).await;
+
+        async fn connect(base: &str, ident: &crate::remote::auth::MachineIdentity) -> TestSocket {
+            let (mut socket, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/control"))
+                .await
+                .unwrap();
+            let challenge: ControlChallenge = receive_json(&mut socket).await;
+            let auth = ControlAuth {
+                enrollment_token: None,
+                machine_id: ident.machine_id.clone(),
+                display_name: ident.display_name.clone(),
+                public_key: ident.public_key.clone(),
+                timestamp: challenge.timestamp,
+                signature: crate::remote::auth::sign_control_challenge(
+                    ident,
+                    challenge.audience.as_deref().unwrap(),
+                    &challenge.nonce,
+                    challenge.timestamp,
+                )
+                .unwrap(),
+            };
+            socket
+                .send(TMessage::Text(serde_json::to_string(&auth).unwrap().into()))
+                .await
+                .unwrap();
+            let response: ControlAuthResponse = receive_json(&mut socket).await;
+            assert!(response.success, "{:?}", response.error);
+            socket
+        }
+
+        let mut predecessor = connect(&base, &ident).await;
+        predecessor
+            .send(TMessage::Text(r#"{"type":"SupervisorLeaseAcquire","requestId":"a1","force":false}"#.into()))
+            .await
+            .unwrap();
+        let granted: SupervisorLeaseAck = receive_json(&mut predecessor).await;
+        assert_eq!(granted.outcome, SupervisorLeaseOutcome::Granted);
+        let fence = granted.fence.expect("fence");
+
+        let renew = |id: &str| format!(r#"{{"type":"SupervisorLeaseRenew","requestId":"{id}","fence":{fence}}}"#);
+        // The predecessor renews up to its commit ...
+        predecessor.send(TMessage::Text(renew("p1").into())).await.unwrap();
+        let by_predecessor: SupervisorLeaseAck = receive_json(&mut predecessor).await;
+        // ... then the successor opens its own control session and renews the handed fence.
+        let mut successor = connect(&base, &ident).await;
+        successor.send(TMessage::Text(renew("s1").into())).await.unwrap();
+        let by_successor: SupervisorLeaseAck = receive_json(&mut successor).await;
+        for (ack, id) in [(&by_predecessor, "p1"), (&by_successor, "s1")] {
+            assert_eq!(ack.request_id, id);
+            assert_eq!(ack.outcome, SupervisorLeaseOutcome::Renewed);
+            assert_eq!(ack.fence, Some(fence), "same fence on both sessions");
+            assert_eq!(ack.holder_machine_id.as_deref(), Some("owned-machine"));
+        }
+        assert_eq!(lease_row(&account, LEASE_USER).map(|row| row.fence), Some(fence));
+        relay.abort();
+    }
 }

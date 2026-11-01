@@ -11,14 +11,22 @@
 //! [`SupervisorLeaseState`] is the cheap, cloneable view side-effect gates call before acting;
 //! its [`SupervisorLeaseState::is_holder_now`] re-checks the deadline on both clocks at the
 //! moment of use through the machine, never a cached flag.
+//!
+//! Rolling handover (plan todo 9): at the commit decision the predecessor freezes its client
+//! (no request is sent afterwards) and hands `{machine_id, fence, deadline}` to the successor
+//! through the handover transaction record. The successor seeds its machine with that fence,
+//! so its first request is a renew with the same machine id and fence, never an acquire, and
+//! its hub generation starts only once that renew is granted.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{mpsc, oneshot, watch};
 
+use crate::daemon::handover_transaction::SupervisorLeaseTransfer;
 use crate::daemon::supervisor_lease_role::{
     Action, Event, LastRole, LeaseAck, Now, PersistedLease, Role, RoleConfig, RoleMachine,
     StandDownReason,
@@ -122,9 +130,17 @@ pub fn reset_capability_latch(path: &Path) -> std::io::Result<()> {
 
 struct StateInner {
     account: Option<String>,
+    machine_id: String,
+    /// Validity of one grant counted from its request's send time (TTL - margin).
+    valid_for: Duration,
     machine: parking_lot::Mutex<RoleMachine>,
     role_tx: watch::Sender<Role>,
     clock: LeaseClock,
+    /// Fence and wall-clock stand-down deadline of the newest grant that made this machine
+    /// Holder; what a handover hands to the successor.
+    grant: parking_lot::Mutex<Option<(u64, SystemTime)>>,
+    /// Set from the handover commit decision on: the client sends no lease request.
+    handed_over: AtomicBool,
 }
 
 /// Cheap, cloneable view of the hub role shared with every side-effect gate.
@@ -134,14 +150,24 @@ pub struct SupervisorLeaseState {
 }
 
 impl SupervisorLeaseState {
-    fn new(account: Option<String>, machine: RoleMachine, clock: LeaseClock) -> Self {
+    fn new(
+        account: Option<String>,
+        machine_id: String,
+        valid_for: Duration,
+        machine: RoleMachine,
+        clock: LeaseClock,
+    ) -> Self {
         let (role_tx, _) = watch::channel(machine.role().clone());
         Self {
             inner: Arc::new(StateInner {
                 account,
+                machine_id,
+                valid_for,
                 machine: parking_lot::Mutex::new(machine),
                 role_tx,
                 clock,
+                grant: parking_lot::Mutex::new(None),
+                handed_over: AtomicBool::new(false),
             }),
         }
     }
@@ -186,15 +212,66 @@ impl SupervisorLeaseState {
         self.inner.machine.lock().snapshot().clone()
     }
 
+    /// True while a handover commit froze this client (no lease request is sent).
+    pub fn handed_over(&self) -> bool {
+        self.inner.handed_over.load(Ordering::SeqCst)
+    }
+
+    /// Handover commit decision: stops every further lease request and returns the held lease
+    /// for the successor; `None` when this machine is not a leased holder right now (fence 0,
+    /// standby, past the deadline), in which case the successor boots the normal way.
+    pub fn freeze_for_handover(&self) -> Option<SupervisorLeaseTransfer> {
+        // Frozen first, so no request is started after the lease was read.
+        self.inner.handed_over.store(true, Ordering::SeqCst);
+        let fence = self.current_fence();
+        if fence == 0 || !self.is_holder_now() {
+            return None;
+        }
+        let (granted, deadline) = (*self.inner.grant.lock())?;
+        if granted != fence {
+            return None;
+        }
+        let deadline_unix_ms = u64::try_from(deadline.duration_since(UNIX_EPOCH).ok()?.as_millis()).ok()?;
+        Some(SupervisorLeaseTransfer {
+            machine_id: self.inner.machine_id.clone(),
+            fence,
+            deadline_unix_ms,
+        })
+    }
+
+    /// The commit decision was not written: this daemon keeps the hub and renews again.
+    pub fn thaw_after_failed_handover(&self) {
+        self.inner.handed_over.store(false, Ordering::SeqCst);
+    }
+
     /// Feeds one event at the current time and publishes the role. The lock is never held
     /// across an await.
     fn handle(&self, event: Event) -> Vec<Action> {
         let now = (self.inner.clock)();
+        let granted = match &event {
+            Event::AcquireAck { sent_at, ack: LeaseAck::Granted { fence, .. } }
+            | Event::RenewAck { sent_at, ack: LeaseAck::Granted { fence, .. } } => {
+                Some((*fence, sent_at.wall + self.inner.valid_for))
+            }
+            _ => None,
+        };
         let (actions, role) = {
             let mut machine = self.inner.machine.lock();
             let actions = machine.handle(event, now);
             (actions, machine.role().clone())
         };
+        if let Some((fence, deadline)) = granted {
+            if role == (Role::Holder { fence }) {
+                let mut grant = self.inner.grant.lock();
+                let newer = match *grant {
+                    Some((held, current)) if held == fence => deadline > current,
+                    _ => true,
+                };
+                if newer {
+                    *grant = Some((fence, deadline));
+                }
+            }
+        }
         self.inner.role_tx.send_if_modified(|current| {
             let changed = *current != role;
             if changed {
@@ -225,6 +302,17 @@ impl crate::agent_control::fence::SupervisorFenceSource for SupervisorLeaseState
     /// A daemon refused this holder's fence: the hub stands down through the lease's own stop.
     fn stand_down(&self) {
         crate::hub_runtime::stand_down_now();
+    }
+}
+
+/// The handover commit freezes this lease and hands it to the successor.
+impl crate::daemon::handover::SupervisorLeaseHandover for SupervisorLeaseState {
+    fn freeze_for_handover(&self) -> Option<SupervisorLeaseTransfer> {
+        SupervisorLeaseState::freeze_for_handover(self)
+    }
+
+    fn thaw_after_failed_handover(&self) {
+        SupervisorLeaseState::thaw_after_failed_handover(self)
     }
 }
 
@@ -292,6 +380,8 @@ pub struct LeaseClientConfig {
     /// `supervisor-lease.json`; `None` disables persistence.
     pub lease_file: Option<PathBuf>,
     pub clock: LeaseClock,
+    /// The lease a handover predecessor handed this daemon at commit; `None` otherwise.
+    pub handed_over: Option<SupervisorLeaseTransfer>,
 }
 
 impl LeaseClientConfig {
@@ -303,8 +393,35 @@ impl LeaseClientConfig {
             account,
             lease_file: lease_file_path(),
             clock: system_clock(),
+            handed_over: None,
         }
     }
+}
+
+/// Seeds the persisted lease with a lease handed over at handover commit: Holder with the
+/// predecessor's fence, so the machine's first request is a renew of that fence. Ignored when
+/// it names another machine, carries no fence, or its deadline already passed (normal boot).
+fn adopt_handed_lease(
+    persisted: Option<PersistedLease>,
+    handed: Option<&SupervisorLeaseTransfer>,
+    machine_id: &str,
+    now: SystemTime,
+) -> Option<PersistedLease> {
+    let usable = handed.filter(|lease| {
+        lease.machine_id == machine_id
+            && lease.fence > 0
+            && UNIX_EPOCH
+                .checked_add(Duration::from_millis(lease.deadline_unix_ms))
+                .is_some_and(|deadline| deadline > now)
+    });
+    let Some(lease) = usable else { return persisted };
+    Some(PersistedLease {
+        last_role: LastRole::Holder,
+        last_fence: lease.fence,
+        holder_machine_id: Some(machine_id.to_owned()),
+        lease_capable: true,
+        ..persisted.unwrap_or_default()
+    })
 }
 
 /// Loads the persisted lease, builds the role machine and spawns the client task, which runs
@@ -320,14 +437,22 @@ where
     H: HubSwitch + ?Sized,
 {
     let persisted = load_persisted(config.lease_file.clone()).await;
+    let persisted = adopt_handed_lease(
+        persisted,
+        config.handed_over.as_ref(),
+        &config.machine_id,
+        (config.clock)().wall,
+    );
+    let valid_for = config.role.ttl.saturating_sub(config.role.margin);
     let (machine, initial) = RoleMachine::new(
         config.role,
-        config.machine_id,
+        config.machine_id.clone(),
         config.account.is_some(),
         persisted,
         (config.clock)(),
     );
-    let state = SupervisorLeaseState::new(config.account, machine, config.clock.clone());
+    let state =
+        SupervisorLeaseState::new(config.account, config.machine_id, valid_for, machine, config.clock.clone());
     let (commands, command_rx) = mpsc::channel(8);
     // Subscribed before the task starts, so no capability change can slip past it.
     let capability = transport.subscribe_capability();
@@ -460,6 +585,10 @@ impl<T: LeaseTransport + ?Sized, H: HubSwitch + ?Sized> Driver<T, H> {
                     true,
                 ),
                 Action::SendRelease { fence } => {
+                    if self.state.handed_over() {
+                        tracing::debug!("supervisor lease handed over; release not sent");
+                        continue;
+                    }
                     let release = SupervisorLeaseRequest::SupervisorLeaseRelease(SupervisorLeaseRelease {
                         request_id: request_id(),
                         fence,
@@ -473,6 +602,12 @@ impl<T: LeaseTransport + ?Sized, H: HubSwitch + ?Sized> Driver<T, H> {
                     continue;
                 }
             };
+            // After the handover commit decision the successor renews this lease; the
+            // predecessor sends nothing more.
+            if self.state.handed_over() {
+                tracing::debug!("supervisor lease handed over; request not sent");
+                continue;
+            }
             if sends >= MAX_SENDS_PER_EVENT {
                 tracing::warn!("supervisor lease request deferred to the next tick");
                 continue;
@@ -535,6 +670,8 @@ mod tests {
         sent: Mutex<Vec<(Instant, SupervisorLeaseRequest)>>,
         acquire: Mutex<Result<SupervisorLeaseOutcome, LeaseCallError>>,
         renew: Mutex<Result<SupervisorLeaseOutcome, LeaseCallError>>,
+        /// Fence an acquire answers with (renewals answer 7, the fence they renew).
+        acquire_fence: Mutex<u64>,
         delay: Duration,
     }
 
@@ -550,6 +687,7 @@ mod tests {
                 sent: Mutex::new(Vec::new()),
                 acquire: Mutex::new(Ok(SupervisorLeaseOutcome::Granted)),
                 renew: Mutex::new(Ok(SupervisorLeaseOutcome::Renewed)),
+                acquire_fence: Mutex::new(7),
                 delay,
             })
         }
@@ -565,6 +703,14 @@ mod tests {
                 .filter(|(_, r)| matches!(r, SupervisorLeaseRequest::SupervisorLeaseRenew(_)))
                 .count()
         }
+
+        fn acquires(&self) -> usize {
+            self.sent
+                .lock()
+                .iter()
+                .filter(|(_, r)| matches!(r, SupervisorLeaseRequest::SupervisorLeaseAcquire(_)))
+                .count()
+        }
     }
 
     #[async_trait::async_trait]
@@ -575,6 +721,11 @@ mod tests {
 
         async fn call(&self, request: SupervisorLeaseRequest) -> Result<SupervisorLeaseAck, LeaseCallError> {
             let request_id = request.request_id().to_owned();
+            let fence = if matches!(request, SupervisorLeaseRequest::SupervisorLeaseAcquire(_)) {
+                *self.acquire_fence.lock()
+            } else {
+                7
+            };
             let script = match request {
                 SupervisorLeaseRequest::SupervisorLeaseRenew(_) => self.renew.lock().clone(),
                 SupervisorLeaseRequest::SupervisorLeaseRelease(_) => Ok(SupervisorLeaseOutcome::Released),
@@ -587,7 +738,7 @@ mod tests {
             Ok(SupervisorLeaseAck {
                 request_id,
                 outcome,
-                fence: Some(7),
+                fence: Some(fence),
                 holder_machine_id: refused.then(|| "mach-b".into()),
                 holder_label: refused.then(|| "Laptop B".into()),
                 expires_in_secs: Some(120),
@@ -636,6 +787,17 @@ mod tests {
             account: account.map(str::to_owned),
             lease_file,
             clock,
+            handed_over: None,
+        }
+    }
+
+    /// The lease a predecessor hands over: `mach-a`, `fence`, deadline a full validity after
+    /// the test clock's start.
+    fn handed(fence: u64) -> SupervisorLeaseTransfer {
+        SupervisorLeaseTransfer {
+            machine_id: "mach-a".into(),
+            fence,
+            deadline_unix_ms: (1_700_000_000 + VALID_FOR.as_secs()) * 1000,
         }
     }
 
@@ -687,6 +849,107 @@ mod tests {
         assert!(!handle.is_holder_now(), "re-checked at use, exactly at the deadline");
         wait_role(&handle, |r| *r == Role::standby_unknown()).await;
         assert!(hub.events.lock().contains(&Some(StandDownReason::DeadlineReached)));
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_handover_successor_renews_the_handed_fence_without_an_acquire() {
+        let relay = FakeRelay::new(Some(true));
+        // An acquire would be granted a new fence; only the handed-over one may be used.
+        *relay.acquire_fence.lock() = 8;
+        let hub = Arc::new(FakeHub::default());
+        let (clock, _) = test_clock();
+        let mut successor = config(clock, Some("acct"), None);
+        successor.handed_over = Some(handed(7));
+        let (handle, task) =
+            spawn_supervisor_lease_client(successor, Arc::clone(&relay), Arc::clone(&hub)).await;
+        wait_role(&handle, Role::runs_hub).await;
+        assert_eq!(handle.state().role(), Role::Holder { fence: 7 }, "same fence as the predecessor");
+        assert!(handle.is_holder_now());
+        assert!(matches!(
+            relay.sent.lock().first(),
+            Some((_, SupervisorLeaseRequest::SupervisorLeaseRenew(SupervisorLeaseRenew { fence: 7, .. })))
+        ));
+        assert_eq!(relay.acquires(), 0, "no acquire, so no new fence");
+        assert_eq!(*hub.events.lock(), vec![None], "hub started once, after the renew was granted");
+        task.abort();
+    }
+
+    /// Rolling handover on paused time: the predecessor renews until the commit decision, then
+    /// sends nothing; the successor renews the same fence after booting. Every request renews
+    /// the relay row, so the row never expires when no gap between requests reaches the TTL.
+    #[tokio::test(start_paused = true)]
+    async fn the_lease_crosses_a_handover_without_a_gap_and_the_predecessor_goes_quiet() {
+        let ttl = Duration::from_secs(crate::account::supervisor_lease::TTL_SECS);
+        let (clock, _) = test_clock();
+        let old_relay = FakeRelay::new(Some(true));
+        let (old, old_task) = spawn_supervisor_lease_client(
+            config(clock.clone(), Some("acct"), None),
+            Arc::clone(&old_relay),
+            Arc::new(FakeHub::default()),
+        )
+        .await;
+        wait_role(&old, |r| *r == Role::Holder { fence: 7 }).await;
+        // The predecessor keeps renewing up to the commit.
+        tokio::time::sleep(Duration::from_secs(50)).await;
+        assert!(old_relay.renews() >= 2);
+
+        let transfer = old.state().freeze_for_handover().expect("a held lease is handed over");
+        assert_eq!((transfer.machine_id.as_str(), transfer.fence), ("mach-a", 7));
+        let sent_at_commit = old_relay.sent.lock().len();
+
+        // The successor finishes its handover start before its hub (and lease client) starts.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        let new_relay = FakeRelay::new(Some(true));
+        *new_relay.acquire_fence.lock() = 8;
+        let mut successor = config(clock, Some("acct"), None);
+        successor.handed_over = Some(transfer);
+        let (new, new_task) =
+            spawn_supervisor_lease_client(successor, Arc::clone(&new_relay), Arc::new(FakeHub::default())).await;
+        wait_role(&new, |r| *r == Role::Holder { fence: 7 }).await;
+        tokio::time::sleep(ttl * 3).await;
+
+        assert_eq!(old_relay.sent.lock().len(), sent_at_commit, "predecessor sent nothing after commit");
+        assert!(old.state().handed_over());
+        assert!(new.is_holder_now());
+        assert_eq!(new_relay.acquires(), 0);
+        let mut sends: Vec<Instant> = old_relay.sent.lock().iter().map(|(at, _)| *at).collect();
+        sends.extend(new_relay.sent.lock().iter().map(|(at, _)| *at));
+        sends.sort();
+        assert!(sends.windows(2).all(|pair| pair[1] - pair[0] < ttl), "relay row never expires");
+        old_task.abort();
+        new_task.abort();
+    }
+
+    #[test]
+    fn a_handed_lease_is_adopted_only_for_this_machine_before_its_deadline() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let adopted = adopt_handed_lease(None, Some(&handed(7)), "mach-a", now).expect("adopted");
+        assert_eq!((adopted.last_role, adopted.last_fence), (LastRole::Holder, 7));
+        assert_eq!(adopted.holder_machine_id.as_deref(), Some("mach-a"));
+        assert!(adopted.lease_capable);
+
+        let persisted = PersistedLease { account_machine_count: Some(2), ..Default::default() };
+        let foreign = adopt_handed_lease(Some(persisted.clone()), Some(&handed(7)), "mach-b", now);
+        assert_eq!(foreign, Some(persisted.clone()), "another machine's lease is not adopted");
+        let late = now + VALID_FOR;
+        assert_eq!(adopt_handed_lease(Some(persisted.clone()), Some(&handed(7)), "mach-a", late), Some(persisted));
+        assert_eq!(adopt_handed_lease(None, Some(&handed(0)), "mach-a", now), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn freezing_hands_nothing_over_unless_the_lease_is_held() {
+        let (clock, _) = test_clock();
+        let (handle, task) = spawn_supervisor_lease_client(
+            config(clock, None, None),
+            FakeRelay::new(Some(true)),
+            Arc::new(FakeHub::default()),
+        )
+        .await;
+        assert_eq!(handle.state().role(), Role::Holder { fence: 0 });
+        assert_eq!(handle.state().freeze_for_handover(), None, "fence 0 is nothing to hand over");
+        handle.state().thaw_after_failed_handover();
+        assert!(!handle.state().handed_over());
         task.abort();
     }
 
@@ -902,7 +1165,8 @@ mod tests {
             Now { mono: base.mono + offset, wall: base.wall + offset }
         });
         let (machine, _) = RoleMachine::new(RoleConfig::default(), "mach-a", account.is_some(), persisted, clock());
-        (SupervisorLeaseState::new(account.map(str::to_owned), machine, clock), secs)
+        let state = SupervisorLeaseState::new(account.map(str::to_owned), "mach-a".into(), VALID_FOR, machine, clock);
+        (state, secs)
     }
 
     #[test]
