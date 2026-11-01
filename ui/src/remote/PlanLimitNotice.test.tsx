@@ -24,7 +24,7 @@ describe("PlanLimitNotice", () => {
     expect(usage.getAttribute("data-used")).toBe("2");
 
     expect(screen.getByTestId("remote-plan-limit-coming-soon").textContent).toContain(
-      "Paid plans coming soon",
+      "Paid plans with more computers are coming soon.",
     );
     const pricing = screen.getByTestId("remote-plan-limit-pricing");
     expect(pricing.getAttribute("href")).toBe(DEFAULT_PRICING_URL);

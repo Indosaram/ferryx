@@ -107,7 +107,7 @@ describe("MobileSessionSwitcherSheet", () => {
     );
 
     expect(screen.getByTestId("session-switcher-tab-tab-1")).toHaveAccessibleName(/Working/);
-    expect(screen.getByTestId("session-switcher-tab-tab-2")).toHaveAccessibleName(/Approval/);
+    expect(screen.getByTestId("session-switcher-tab-tab-2")).toHaveAccessibleName(/Needs approval/);
   });
 
   it("indicates active tab via aria-current", () => {

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { MobileChatWorkspace } from "../remote/chat/MobileChatWorkspace";
@@ -18,9 +18,11 @@ describe("mobile chat QA states", () => {
   it("seeds the production ReferencePromptCard in the message stream for a two-option approval", () => {
     renderState("prompt-approval");
     expect(screen.getByTestId("chat-stream-prompt")).toContainElement(screen.getByTestId("reference-prompt-card"));
-    expect(screen.getByTestId("reference-prompt-option-0")).toBeInTheDocument();
-    expect(screen.getByTestId("reference-prompt-option-1")).toBeInTheDocument();
-    expect(screen.queryByTestId("reference-prompt-option-2")).not.toBeInTheDocument();
+    // A two-option approval is the card's own Approve / Decline pair, not the option list.
+    const card = screen.getByTestId("reference-prompt-card");
+    expect(within(card).getByTestId("approval-accept")).toHaveTextContent("Yes, run it");
+    expect(within(card).getByTestId("approval-decline")).toHaveTextContent("No, tell Codex what to do instead");
+    expect(screen.queryByTestId("reference-prompt-option-0")).not.toBeInTheDocument();
   });
 
   it("seeds a multi-select prompt with more than two options", () => {

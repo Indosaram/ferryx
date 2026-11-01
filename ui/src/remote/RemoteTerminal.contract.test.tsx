@@ -1102,9 +1102,9 @@ describe("remote terminal grid contract", () => {
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
     establishReady();
 
-    const buttons = screen.getAllByRole("button");
-    fireEvent.click(buttons[0]);
-    fireEvent.click(buttons[5]);
+    // Ctrl as a one-shot modifier, then the dock's Left arrow: the pair sends Ctrl-Left.
+    fireEvent.click(screen.getByRole("button", { name: "Ctrl" }));
+    fireEvent.click(screen.getByRole("button", { name: "Left" }));
 
     expect(socket().send).toHaveBeenCalledWith(new TextEncoder().encode("\u001b[1;5D"));
   });
