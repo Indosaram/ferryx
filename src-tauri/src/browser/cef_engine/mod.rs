@@ -16,7 +16,9 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -70,6 +72,25 @@ struct Tab {
 
 static ENGINES: LazyLock<Mutex<HashMap<String, Engine>>> = LazyLock::new(Default::default);
 static TABS: LazyLock<Mutex<HashMap<String, Tab>>> = LazyLock::new(Default::default);
+
+/// A DevTools call waiting for its answer: the profile whose engine runs it, and the waiter.
+struct PendingDevtools {
+    profile: String,
+    reply: tokio::sync::oneshot::Sender<(bool, String)>,
+}
+
+static DEVTOOLS_CALLS: LazyLock<Mutex<HashMap<u32, PendingDevtools>>> = LazyLock::new(Default::default);
+static NEXT_DEVTOOLS_ID: AtomicU32 = AtomicU32::new(1);
+
+/// Next DevTools message id: positive and inside `i32`, as CEF's message ids are.
+fn next_devtools_id() -> u32 {
+    loop {
+        let id = NEXT_DEVTOOLS_ID.fetch_add(1, Ordering::Relaxed) & 0x7fff_ffff;
+        if id != 0 {
+            return id;
+        }
+    }
+}
 
 /// The engine directory: a local build named by `FERRYX_CEF_ENGINE_DIR`, else the installed
 /// engine under the app data dir. `None` keeps tabs on the system webview.
@@ -135,6 +156,8 @@ fn engine_gone(profile: &str, pid: u32) {
     };
     let _ = engine.child.kill();
     let _ = engine.child.wait();
+    // Dropping the waiters tells every DevTools call in flight that the engine is gone.
+    DEVTOOLS_CALLS.lock().retain(|_, pending| pending.profile != profile);
     let orphaned: Vec<String> = {
         let mut tabs = TABS.lock();
         let ids: Vec<String> =
@@ -248,6 +271,13 @@ fn read_events(stdout: std::process::ChildStdout, profile: &str, pid: u32, sink:
             Event::Closed { tab } => {
                 TABS.lock().remove(tab);
             }
+            Event::Devtools { id, ok, result, .. } => {
+                // An answer goes to the call that asked for it, not to the tab's event sink.
+                if let Some(pending) = DEVTOOLS_CALLS.lock().remove(id) {
+                    let _ = pending.reply.send((*ok, result.clone()));
+                }
+                continue;
+            }
             _ => {}
         }
         sink(profile, event);
@@ -321,6 +351,56 @@ pub fn answer_permission(profile: &str, request: u64, allow: bool) -> bool {
     send(profile, &EngineCommand::Permission { request, allow })
 }
 
+/// Runs one Chrome DevTools Protocol call on the tab's browser through the engine's
+/// in-process DevTools message API (the engine opens no DevTools port). Returns the CDP
+/// result object, or the CDP error as `AutomationFailed`.
+pub async fn devtools(
+    browser_id: &str,
+    method: &str,
+    params: serde_json::Value,
+    timeout: Duration,
+) -> Result<serde_json::Value, BrowserError> {
+    let profile = TABS
+        .lock()
+        .get(browser_id)
+        .map(|tab| tab.profile.clone())
+        .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+    let id = next_devtools_id();
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    DEVTOOLS_CALLS.lock().insert(id, PendingDevtools { profile: profile.clone(), reply });
+    let command = EngineCommand::Devtools {
+        tab: browser_id.to_string(),
+        id,
+        method: method.to_string(),
+        params: params.to_string(),
+    };
+    if !send(&profile, &command) {
+        DEVTOOLS_CALLS.lock().remove(&id);
+        return Err(BrowserError::AutomationFailed("the Chromium engine is not running".into()));
+    }
+    let outcome = tokio::time::timeout(timeout, answer).await;
+    DEVTOOLS_CALLS.lock().remove(&id);
+    let (ok, raw) = outcome
+        .map_err(|_| BrowserError::AutomationFailed(format!("{method} timed out in the Chromium engine")))?
+        .map_err(|_| BrowserError::AutomationFailed("the Chromium engine stopped".into()))?;
+    devtools_answer(method, ok, &raw)
+}
+
+/// Turns an engine DevTools answer into the CDP result or a typed failure.
+fn devtools_answer(method: &str, ok: bool, raw: &str) -> Result<serde_json::Value, BrowserError> {
+    let value: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
+        BrowserError::AutomationFailed(format!("{method} returned malformed JSON: {error}"))
+    })?;
+    if ok {
+        return Ok(value);
+    }
+    let message = value
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("the DevTools call failed");
+    Err(BrowserError::AutomationFailed(format!("{method}: {message}")))
+}
+
 /// Brings the tab's window back into view after the page changed: Windows repaints the app's
 /// own windows around it, macOS puts the engine's windows back above the Ferryx window.
 pub fn repaint(browser_id: &str) {
@@ -356,6 +436,69 @@ mod tests {
         assert!(!set_visible("no-such-tab", true));
         assert!(!close("no-such-tab"));
         assert!(matches!(navigate("no-such-tab", "https://a.test/"), Err(BrowserError::NotFound(_))));
+    }
+
+    #[test]
+    fn devtools_answers_map_to_results_and_typed_failures() {
+        assert_eq!(
+            devtools_answer("Runtime.evaluate", true, r#"{"result":{"value":1}}"#).unwrap(),
+            serde_json::json!({"result": {"value": 1}})
+        );
+        assert_eq!(
+            devtools_answer("Page.navigate", false, r#"{"code":-32000,"message":"Cannot navigate"}"#),
+            Err(BrowserError::AutomationFailed("Page.navigate: Cannot navigate".into()))
+        );
+        assert!(matches!(
+            devtools_answer("Page.enable", true, "not json"),
+            Err(BrowserError::AutomationFailed(_))
+        ));
+        assert!(next_devtools_id() > 0 && next_devtools_id() <= i32::MAX as u32);
+    }
+
+    #[tokio::test]
+    async fn a_devtools_call_on_an_unknown_tab_is_not_found() {
+        let error = devtools("no-such-tab", "Page.enable", serde_json::json!({}), Duration::from_secs(1))
+            .await
+            .expect_err("unknown tab");
+        assert!(matches!(error, BrowserError::NotFound(_)));
+    }
+
+    /// A stand-in engine answers a DevTools call: the answer reaches the caller and not the
+    /// sink, and the engine exiting afterwards still closes its tab.
+    #[tokio::test]
+    async fn a_devtools_answer_reaches_its_caller() {
+        let id = next_devtools_id();
+        // No quotes in the line: `cmd /C echo` on Windows would print them escaped.
+        let line = format!("@ferryx devtools dt-tab {id} 1 [7]");
+        #[cfg(target_os = "windows")]
+        let command = {
+            let mut command = Command::new("cmd");
+            command.args(["/C", &format!("echo {line}")]);
+            command
+        };
+        #[cfg(not(target_os = "windows"))]
+        let command = {
+            let mut command = Command::new("sh");
+            command.args(["-c", &format!("echo '{line}'")]);
+            command
+        };
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        DEVTOOLS_CALLS.lock().insert(id, PendingDevtools { profile: "dt-profile".into(), reply });
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let sender = Mutex::new(sender);
+        let sink: EventSink = Arc::new(move |_: &str, event: Event| {
+            let _ = sender.lock().send(event);
+        });
+        TABS.lock().insert("dt-tab".into(), Tab { profile: "dt-profile".into(), handle: None });
+        start(command, "dt-profile", 0, sink).expect("stand-in engine starts");
+        let (ok, raw) = tokio::time::timeout(Duration::from_secs(10), answer)
+            .await
+            .expect("answer in time")
+            .expect("answer delivered");
+        assert!(ok);
+        assert_eq!(devtools_answer("Runtime.evaluate", ok, &raw).unwrap(), serde_json::json!([7]));
+        let closed = receiver.recv_timeout(Duration::from_secs(10)).expect("closed event");
+        assert_eq!(closed, Event::Closed { tab: "dt-tab".into() });
     }
 
     /// A stand-in engine prints two events and exits: the events reach the sink in order, and

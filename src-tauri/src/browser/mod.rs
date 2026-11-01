@@ -1,4 +1,5 @@
 pub mod adoption;
+pub mod agent;
 pub mod bridge;
 #[cfg(all(feature = "desktop", any(target_os = "windows", target_os = "macos")))]
 pub mod cef_engine;

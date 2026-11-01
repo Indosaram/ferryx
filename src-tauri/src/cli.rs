@@ -378,6 +378,13 @@ where
     if args.get(1).is_none_or(|arg| arg != "browser") {
         return Err(BROWSER_USAGE.into());
     }
+    // `--controller <uuid>` selects the paired identity for any browser command.
+    let mut args = args;
+    *crate::ipc::browser_cli::CLI_CONTROLLER.lock() =
+        crate::browser::agent::client::take_controller_option(&mut args)?;
+    if args.get(2).is_some_and(|arg| arg == "controllers") {
+        return Err(BROWSER_CONTROLLERS_ROUTE.into());
+    }
     match args.get(2).map(String::as_str) {
         Some("list") => Ok(BrowserCliCommand::List),
         Some("open") => {
@@ -3896,6 +3903,45 @@ pub fn run_open_cli(command: OpenFileCliCommand) -> Result<(), String> {
         BrowserCliResponse::Error { code, message, .. } => Err(format!("{code}: {message}")),
         other => Err(format!("unexpected response: {other:?}")),
     }
+}
+
+/// `ferryx browser controllers ...` is parsed by [`parse_browser_controllers_cli`].
+const BROWSER_CONTROLLERS_ROUTE: &str = "`browser controllers` is handled by parse_browser_controllers_cli";
+
+/// Parses `ferryx browser controllers <...> [--controller <uuid>]`; `None` for any other
+/// command line, which then goes to [`parse_browser_cli`].
+pub fn parse_browser_controllers_cli<I, T>(
+    args: I,
+) -> Option<Result<(crate::browser::agent::client::ControllersCommand, Option<String>), String>>
+where
+    I: IntoIterator<Item = T>,
+    T: AsRef<str>,
+{
+    let mut args = args.into_iter().map(|arg| arg.as_ref().to_string()).collect::<Vec<_>>();
+    if args.get(1).is_none_or(|arg| arg != "browser") || args.get(2).is_none_or(|arg| arg != "controllers") {
+        return None;
+    }
+    Some(crate::browser::agent::client::take_controller_option(&mut args).and_then(|controller| {
+        crate::browser::agent::client::parse_controllers(&args[3..]).map(|command| (command, controller))
+    }))
+}
+
+/// Runs `ferryx browser controllers ...` against the running app.
+pub fn run_browser_controllers_cli(
+    (command, controller): (crate::browser::agent::client::ControllersCommand, Option<String>),
+) -> Result<(), String> {
+    // Waiting for the desktop user's approval needs timers as well as I/O.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    let output = runtime.block_on(crate::browser::agent::client::run_controllers(
+        command,
+        controller.as_deref(),
+        crate::ipc::browser_cli::send_agent_request,
+    ))?;
+    println!("{output}");
+    Ok(())
 }
 
 pub fn run_browser_cli(command: BrowserCliCommand) -> Result<(), String> {

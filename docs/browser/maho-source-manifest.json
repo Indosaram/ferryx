@@ -1,0 +1,119 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-31",
+  "ferryxBaseline": "4231e6a51b4ec301b30c4e2f9448901b7227b91d",
+  "upstream": {
+    "repository": "Project-Maho/maho-browser",
+    "archived": true,
+    "retrieval": "gh api repos/Project-Maho/maho-browser/contents/<path>?ref=<sha>"
+  },
+  "rights": {
+    "upstreamLicense": {
+      "path": "LICENSE",
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "blob": "f636b2c5741280992a0875fcf408c21f81fb169c",
+      "name": "Sustainable Use License 1.0",
+      "holder": "Maho"
+    },
+    "ferryxLicense": "Ferryx License 1.0 (LICENSE)",
+    "compatible": false,
+    "reason": "SUL limits use to internal business, non-commercial or personal purposes; Ferryx permits commercial use. No documented owner grant covers relicensing.",
+    "defaultReuseMode": "behavior-reference"
+  },
+  "reuseModes": {
+    "behavior-reference": "Behavior read from the source and reimplemented in Ferryx code; no source text, tests, fixtures or catalog prose copied.",
+    "not-imported": "Inspected and deliberately excluded."
+  },
+  "sources": [
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-browser-mcp/src/protocol.rs",
+      "blob": "e22fb8e18e35bb667fdbe47a56ab07de08318e7c",
+      "destination": "src-tauri/src/browser/agent/protocol.rs",
+      "reuseMode": "behavior-reference"
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-browser-mcp/src/client.rs",
+      "blob": "8729d16e5202aa6718654acdbc85bc848f6f983c",
+      "destination": "src-tauri/src/browser/agent/mcp.rs",
+      "reuseMode": "behavior-reference"
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-browser-mcp/src/server.rs",
+      "blob": "abf87ab32e8f9013140a080589e315f9399d6247",
+      "destination": "src-tauri/src/browser/agent/mcp.rs",
+      "reuseMode": "behavior-reference"
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho/crates/maho-cli/src/browser_pipe.rs",
+      "blob": "e6798962fccf8d921c6fb21891424229123a6688",
+      "destination": "src-tauri/src/browser/agent/pipe.rs",
+      "reuseMode": "behavior-reference"
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho-chromium/browser/ai/maho_browser_capability_catalog.def",
+      "blob": "2f82462d62099e9e7198f3ac8d016fb4062d39a3",
+      "destination": "src-tauri/src/browser/agent/catalog.rs",
+      "reuseMode": "behavior-reference"
+    },
+    {
+      "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
+      "path": "maho-chromium/browser/ai/maho_browser_action_contract.def",
+      "blob": "a74fa67561357d121ad4ebebdbcc56b922b474bd",
+      "destination": "src-tauri/src/browser/agent/catalog.rs",
+      "reuseMode": "behavior-reference"
+    },
+    {
+      "commit": "a7896ab86424188849b4212e2ac7a51d3496095d",
+      "path": "maho-chromium/browser/mcp/maho_mcp_agent_policy.h",
+      "blob": "2f6d6ffaa41a9f0b0d7f37c517e02be11347f607",
+      "destination": "src-tauri/src/browser/agent/ownership.rs",
+      "reuseMode": "behavior-reference"
+    },
+    {
+      "commit": "a7896ab86424188849b4212e2ac7a51d3496095d",
+      "path": "maho-chromium/browser/mcp/maho_mcp_agent_policy.cc",
+      "blob": "2fb80bc73dbec5ac0600d8fe8da8b2ff32ed5450",
+      "destination": "src-tauri/src/browser/agent/ownership.rs",
+      "reuseMode": "behavior-reference"
+    },
+    {
+      "commit": "a7896ab86424188849b4212e2ac7a51d3496095d",
+      "path": "maho-chromium/browser/mcp/maho_mcp_agent_policy_unittest.cc",
+      "blob": "2739640471803563bb6f9f3069198aa3e73f177e",
+      "destination": null,
+      "reuseMode": "not-imported",
+      "note": "Upstream tests are not copied; Ferryx tests are independently authored."
+    },
+    {
+      "commit": "a7896ab86424188849b4212e2ac7a51d3496095d",
+      "path": "maho/crates/maho-browser-mcp/src/server.rs",
+      "blob": "26ce956a865c8937bebff7cf9c060e958dd86a55",
+      "destination": "src-tauri/src/browser/agent/catalog.rs",
+      "reuseMode": "behavior-reference"
+    }
+  ],
+  "inspectedNotImported": [
+    {
+      "commit": "f3cea55248a3a6e06f78a2972386d8889280d278",
+      "scope": "dependency and iOS generated asset delta"
+    },
+    {
+      "commit": "4c248fd2ce8a195ad7580aeefe65e83e943a1177",
+      "scope": "single FFI file delta"
+    },
+    {
+      "commit": "a69437dfbc74d0ac44535844e90974fa778cebca",
+      "scope": "markdown table rendering delta"
+    },
+    {
+      "commit": "14f21c1de920a1ed3fa4a7b343875a472792e2f5",
+      "scope": "Windows archive; cfg(unix) test skip not adopted"
+    }
+  ],
+  "notAudited": "Other archive branches are preserved upstream and not claimed audited or merged."
+}

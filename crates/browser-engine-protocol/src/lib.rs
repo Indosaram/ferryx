@@ -108,6 +108,10 @@ pub enum Command {
     FileChosen { request: u32, paths: Vec<String> },
     /// Tells the page's Notification shim what Ferryx decided for its origin.
     NotificationPermission { tab: String, state: PagePermission },
+    /// Sends one Chrome DevTools Protocol call to the tab's browser through CEF's in-process
+    /// DevTools message API (no TCP port). `params` is a JSON object on one line; the answer
+    /// is [`Event::Devtools`] with the same `id`.
+    Devtools { tab: String, id: u32, method: String, params: String },
 }
 
 /// Engine to Ferryx.
@@ -141,6 +145,9 @@ pub enum Event {
     FileDialog { request: u32, tab: String, mode: FileDialogMode, accept: Vec<String>, default_path: String },
     /// A message from the page's Notification shim (JSON), with the page URL it came from.
     PageMessage { tab: String, url: String, message: String },
+    /// The answer to [`Command::Devtools`]: `result` is the CDP result object on success, the
+    /// CDP error object (or `{"message":...}` when the call could not be sent) otherwise.
+    Devtools { tab: String, id: u32, ok: bool, result: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,6 +453,9 @@ impl Command {
             Self::DownloadControl { download, action } => format!("dlctl {download} {}", action.token()),
             Self::FileChosen { request, paths } => format!("filechosen {request} {}", paths_field(paths)),
             Self::NotificationPermission { tab, state } => format!("notifyperm {tab} {}", state.token()),
+            Self::Devtools { tab, id, method, params } => {
+                format!("devtools {tab} {id} {method} {}", one_line(params))
+            }
         }
     }
 
@@ -536,6 +546,15 @@ impl Command {
                     state: PagePermission::parse(parts[1])?,
                 })
             }
+            "devtools" => {
+                let (parts, params) = fields(rest, 3)?;
+                Some(Self::Devtools {
+                    tab: parts[0].to_string(),
+                    id: parts[1].parse().ok()?,
+                    method: parts[2].to_string(),
+                    params: if params.is_empty() { "{}".to_string() } else { params.to_string() },
+                })
+            }
             _ => None,
         }
     }
@@ -588,6 +607,9 @@ impl Event {
             ),
             Self::PageMessage { tab, url, message } => {
                 format!("pagemsg {tab} {} {}", token_field(url), one_line(message))
+            }
+            Self::Devtools { tab, id, ok, result } => {
+                format!("devtools {tab} {id} {} {}", flag(*ok), one_line(result))
             }
         };
         format!("{EVENT_PREFIX}{body}")
@@ -700,6 +722,15 @@ impl Event {
                     message: message.to_string(),
                 })
             }
+            "devtools" => {
+                let (parts, result) = fields(rest, 3)?;
+                Some(Self::Devtools {
+                    tab: parts[0].to_string(),
+                    id: parts[1].parse().ok()?,
+                    ok: parse_flag(parts[2])?,
+                    result: result.to_string(),
+                })
+            }
             _ => None,
         }
     }
@@ -736,6 +767,12 @@ mod tests {
             Command::Raise,
             Command::Permission { request: u64::MAX, allow: true },
             Command::Permission { request: 0, allow: false },
+            Command::Devtools {
+                tab: tab.clone(),
+                id: 42,
+                method: "Runtime.evaluate".into(),
+                params: r#"{"expression":"document.title + ' x'","returnByValue":true}"#.into(),
+            },
         ];
         for command in commands {
             assert_eq!(Command::parse(&command.to_line()), Some(command));
@@ -765,6 +802,13 @@ mod tests {
             },
             Event::PermissionDismissed { tab: tab.clone(), request: 42 },
             Event::MediaAccess { tab: tab.clone(), video: true, audio: false },
+            Event::Devtools {
+                tab: tab.clone(),
+                id: 9,
+                ok: true,
+                result: r#"{"result":{"type":"string","value":"a b"}}"#.into(),
+            },
+            Event::Devtools { tab: tab.clone(), id: 10, ok: false, result: r#"{"message":"no browser"}"#.into() },
             Event::Closed { tab },
         ];
         for event in events {
@@ -926,5 +970,20 @@ mod tests {
             notification_permission_script(PagePermission::Denied),
             "window.__ferryxNotificationPermission && window.__ferryxNotificationPermission('denied')"
         );
+    }
+
+    #[test]
+    fn a_devtools_call_without_params_gets_an_empty_object_and_a_bad_id_is_refused() {
+        assert_eq!(
+            Command::parse("devtools b1 3 Page.captureScreenshot"),
+            Some(Command::Devtools {
+                tab: "b1".into(),
+                id: 3,
+                method: "Page.captureScreenshot".into(),
+                params: "{}".into(),
+            })
+        );
+        assert_eq!(Command::parse("devtools b1 x Page.enable {}"), None);
+        assert_eq!(Event::parse("@ferryx devtools b1 3 2 {}"), None);
     }
 }

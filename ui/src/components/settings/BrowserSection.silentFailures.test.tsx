@@ -11,6 +11,9 @@ const browserMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("./SiteSettingsGroup", () => ({ SiteSettingsGroup: () => null }));
+// The agent access group has its own tests and talks to the backend on mount.
+vi.mock("./BrowserAgentAccessGroup", () => ({ BrowserAgentAccessGroup: () => null }));
+
 vi.mock("../../lib/browserTauri", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../lib/browserTauri")>();
   return { ...actual, ...browserMocks };

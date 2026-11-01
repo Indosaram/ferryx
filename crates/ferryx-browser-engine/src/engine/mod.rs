@@ -96,11 +96,22 @@ struct Pane {
     url: String,
     title: String,
     loading: Option<(bool, bool, bool)>,
+    /// Keeps the tab's DevTools message observer registered (dropping it unregisters).
+    devtools: Option<Registration>,
 }
 
 impl Pane {
     fn new(view: BrowserView, rect: PaneRect, visible: bool) -> Self {
-        Self { view, window: None, rect, visible, url: String::new(), title: String::new(), loading: None }
+        Self {
+            view,
+            window: None,
+            rect,
+            visible,
+            url: String::new(),
+            title: String::new(),
+            loading: None,
+            devtools: None,
+        }
     }
 }
 
@@ -114,6 +125,8 @@ thread_local! {
     static NEXT_POPUP: Cell<u32> = const { Cell::new(1) };
     static LIVE_BROWSERS: Cell<usize> = const { Cell::new(0) };
     static QUITTING: Cell<bool> = const { Cell::new(false) };
+    /// DevTools calls in flight: message id to the Ferryx tab that asked.
+    static DEVTOOLS_CALLS: RefCell<HashMap<u32, String>> = RefCell::new(HashMap::new());
 }
 
 fn emit(event: Event) {
@@ -247,6 +260,43 @@ fn close(tab: &str) {
     }
 }
 
+/// A CDP method name: `Domain.method`, ASCII letters only around one or more dots.
+fn is_cdp_method(method: &str) -> bool {
+    !method.is_empty()
+        && method.contains('.')
+        && method.split('.').all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
+fn devtools_failure(tab: String, id: u32, message: &str) {
+    let escaped: String = message.chars().filter(|c| !matches!(c, '"' | '\\') && !c.is_control()).collect();
+    emit(Event::Devtools { tab, id, ok: false, result: format!("{{\"message\":\"{escaped}\"}}") });
+}
+
+/// Runs one CDP call on the tab's browser through CEF's in-process DevTools message API; the
+/// answer arrives in [`EngineDevtoolsObserver`]. No DevTools port is opened.
+fn devtools(tab: String, id: u32, method: &str, params: &str) {
+    if !is_cdp_method(method) || !params.trim_start().starts_with('{') || i32::try_from(id).is_err() {
+        devtools_failure(tab, id, "malformed devtools call");
+        return;
+    }
+    let Some(host) = browser_of(&tab).and_then(|browser| browser.host()) else {
+        devtools_failure(tab, id, "the tab has no browser");
+        return;
+    };
+    with_pane(&Key::Tab(tab.clone()), |pane| {
+        if pane.devtools.is_none() {
+            let mut observer = EngineDevtoolsObserver::new();
+            pane.devtools = host.add_dev_tools_message_observer(Some(&mut observer));
+        }
+    });
+    DEVTOOLS_CALLS.with_borrow_mut(|calls| calls.insert(id, tab.clone()));
+    let message = format!("{{\"id\":{id},\"method\":\"{method}\",\"params\":{params}}}");
+    if host.send_dev_tools_message(Some(message.as_bytes())) == 0 {
+        DEVTOOLS_CALLS.with_borrow_mut(|calls| calls.remove(&id));
+        devtools_failure(tab, id, "the browser refused the devtools call");
+    }
+}
+
 fn execute(command: Command) {
     match command {
         Command::Open { tab, rect, visible, url } => open(tab, rect, visible, &url),
@@ -313,6 +363,7 @@ fn execute(command: Command) {
         Command::DownloadControl { download, action } => system::download_control(download, action),
         Command::FileChosen { request, paths } => system::file_chosen(request, &paths),
         Command::NotificationPermission { tab, state } => system::notification_permission(&tab, state),
+        Command::Devtools { tab, id, method, params } => devtools(tab, id, &method, &params),
     }
 }
 
@@ -693,6 +744,26 @@ wrap_life_span_handler! {
             if QUITTING.get() && LIVE_BROWSERS.get() == 0 {
                 quit_message_loop();
             }
+        }
+    }
+}
+
+wrap_dev_tools_message_observer! {
+    struct EngineDevtoolsObserver;
+
+    impl DevToolsMessageObserver {
+        fn on_dev_tools_method_result(
+            &self,
+            _browser: Option<&mut Browser>,
+            message_id: ::std::os::raw::c_int,
+            success: ::std::os::raw::c_int,
+            result: Option<&[u8]>,
+        ) {
+            let Ok(id) = u32::try_from(message_id) else { return };
+            // Only answers to calls Ferryx made are reported; DevTools windows use their own ids.
+            let Some(tab) = DEVTOOLS_CALLS.with_borrow_mut(|calls| calls.remove(&id)) else { return };
+            let result = result.map(|bytes| String::from_utf8_lossy(bytes).into_owned()).unwrap_or_else(|| "{}".into());
+            emit(Event::Devtools { tab, id, ok: success != 0, result });
         }
     }
 }

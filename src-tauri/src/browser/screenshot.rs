@@ -80,11 +80,11 @@ fn dirs_home_dir() -> Option<PathBuf> {
 pub fn unsupported_screenshot_error() -> IpcError {
     IpcError::new(
         IpcErrorCode::Unsupported,
-        "screenshots are unavailable on this platform: native webview capture is macOS-only in this build",
+        "screenshots are unavailable on this platform: native webview capture supports macOS, Windows and Linux only",
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub async fn take_browser_screenshot<R: tauri::Runtime>(
     app: &AppHandle<R>,
     webview_label: &str,
@@ -95,7 +95,7 @@ pub async fn take_browser_screenshot<R: tauri::Runtime>(
     take_browser_screenshot_with_source(&source, webview_label, target_path).await
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 pub async fn take_browser_screenshot<R: tauri::Runtime>(
     app: &AppHandle<R>,
     webview_label: &str,
@@ -302,7 +302,7 @@ mod tests {
             .and_then(|v| v.as_str().map(str::to_string))
             .unwrap();
         assert_eq!(code_str, "UNSUPPORTED");
-        assert!(err.message.contains("macOS-only"));
+        assert!(err.message.contains("unavailable on this platform"));
     }
 
     // A-CORE-10: drive the real `take_browser_screenshot` (whichever platform variant
