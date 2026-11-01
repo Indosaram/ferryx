@@ -6,6 +6,7 @@
  */
 
 import React, { useEffect, useRef, useState } from "react";
+import { CircleAlert, X } from "lucide-react";
 import {
   buildPointClickParams,
   type BrowserCaptureRect,
@@ -21,6 +22,29 @@ import {
   type RemoteBrowserStatus,
   type UseRemoteBrowserResult,
 } from "./useRemoteBrowser";
+import { userFacingError } from "./userFacingError";
+
+export const BROWSER_FOCUS_RING = "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+
+const COARSE_POINTER_QUERY = "(pointer: coarse)";
+
+/** True on touch-first devices (phones, tablets); tracks the media query live. */
+export function useCoarsePointer(): boolean {
+  const [coarse, setCoarse] = useState(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+    return window.matchMedia(COARSE_POINTER_QUERY)?.matches === true;
+  });
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia(COARSE_POINTER_QUERY);
+    if (!query || typeof query.addEventListener !== "function") return;
+    setCoarse(query.matches === true);
+    const onChange = (event: MediaQueryListEvent) => setCoarse(event.matches === true);
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, []);
+  return coarse;
+}
 
 export interface RemoteBrowserPointClickEvent {
   u: number;
@@ -66,6 +90,21 @@ export function buildRemoteInputRefusal(err: unknown): RemoteInputRefusal {
     inputClass: (details.inputClass as RemoteInputRefusal["inputClass"]) || "point",
     remediation: details.remediation,
   };
+}
+
+const REFUSAL_COPY: Record<string, string> = {
+  LETTERBOX_MARGIN: "That tap was outside the page.",
+  BROWSER_INVALID_REFERENCE: "That page element is no longer there.",
+  PAYLOAD_TOO_LARGE: "That is too much to send at once.",
+  KEY_NOT_ALLOWED: "That key can't be sent to the page.",
+  PERMISSION_DENIED: "Running a script on this page needs approval on the computer.",
+  UNSUPPORTED: "The page can't take that kind of input.",
+  COMMAND_FAILED: "That didn't go through.",
+};
+
+/** One plain sentence for a refusal; the raw code and server reason belong in diagnostics only. */
+export function describeRemoteInputRefusal(refusal: RemoteInputRefusal): string {
+  return REFUSAL_COPY[refusal.code] ?? userFacingError({ code: refusal.code });
 }
 
 export function resolveViewportClickParams(
@@ -190,6 +229,9 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
   const [displayedFrame, setDisplayedFrame] = useState<DecodedBrowserFrame | null>(null);
   const [localRefusal, setLocalRefusal] = useState<RemoteInputRefusal | null>(null);
   const activeRefusal = propRefusal ?? localRefusal;
+  const [tapMarker, setTapMarker] = useState<{ id: number; x: number; y: number } | null>(null);
+  const tapCounterRef = useRef(0);
+  const reconnectButtonRef = useRef<HTMLButtonElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const displayedFrameRef = useRef<DecodedBrowserFrame | null>(null);
   displayedFrameRef.current = displayedFrame;
@@ -250,6 +292,16 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
   }, []);
 
   useEffect(() => {
+    if (status === "closed") reconnectButtonRef.current?.focus();
+  }, [status]);
+
+  useEffect(() => {
+    if (!tapMarker) return;
+    const timer = setTimeout(() => setTapMarker(null), 600);
+    return () => clearTimeout(timer);
+  }, [tapMarker]);
+
+  useEffect(() => {
     if (frame && onFrame) {
       onFrame(frame);
     }
@@ -288,17 +340,11 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
       displayedFrame.seq,
     );
     if (!point) {
-      // Discard clicks in letterbox margins (§4.5), but explain why no action was taken
-      const refusal: RemoteInputRefusal = {
-        code: "LETTERBOX_MARGIN",
-        reason: "Click was outside active browser viewport (in letterbox margin)",
-        inputClass: "point",
-        remediation: "Click within the active webpage stream area.",
-      };
-      setLocalRefusal(refusal);
-      onRefusal?.(refusal);
       return;
     }
+
+    tapCounterRef.current += 1;
+    setTapMarker({ id: tapCounterRef.current, x: clickX, y: clickY });
 
     if (!onPointClick) {
       return;
@@ -364,44 +410,41 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
 
   return (
     <div
-      className={`relative flex flex-col w-full h-full bg-[#0a0a0a] text-[#f5f5f5] overflow-hidden select-none ${className}`}
+      className={`relative flex flex-col w-full h-full bg-chat-screen text-chat-foreground overflow-hidden select-none ${className}`}
     >
-      {/* Controls slot for Phase 6 composition */}
       {controls && (
         <div data-testid="remote-browser-controls-slot" className="shrink-0 z-10">
           {controls}
         </div>
       )}
 
-      {/* Refused Input Explanation Banner (T22, GAP-7) */}
       {activeRefusal && (
         <div
           data-testid="remote-browser-refusal-banner"
           role="alert"
-          className="absolute top-2 left-4 right-4 z-30 max-w-xl mx-auto flex items-center justify-between gap-3 px-3 py-2 bg-[#ff6467]/15 border border-[#ff6467]/40 rounded backdrop-blur-sm text-xs text-[#ff6467] shadow-lg animate-in fade-in slide-in-from-top-2 duration-150"
+          className="absolute top-2 left-4 right-4 z-30 max-w-xl mx-auto flex items-start justify-between gap-2 pl-3 pr-1 py-1 bg-chat-surface-raised border border-chat-border rounded text-sm text-chat-foreground animate-in fade-in slide-in-from-top-2 duration-150 motion-reduce:animate-none"
         >
-          <div className="flex items-start gap-2 flex-1 min-w-0">
-            <span
-              data-testid="remote-browser-refusal-code"
-              className="shrink-0 px-1.5 py-0.5 rounded bg-[#ff6467]/20 border border-[#ff6467]/30 text-[10px] font-semibold uppercase tracking-wider"
-            >
-              {activeRefusal.code || "REFUSED"}
-            </span>
-            <div className="flex flex-col flex-1 min-w-0">
-              <span
-                data-testid="remote-browser-refusal-reason"
-                className="font-medium text-[#f5f5f5] break-words"
-              >
-                {activeRefusal.reason}
+          <div className="flex items-start gap-2 flex-1 min-w-0 py-2">
+            <CircleAlert className="size-4 shrink-0 mt-0.5 text-chat-danger" aria-hidden="true" />
+            <div className="flex flex-col flex-1 min-w-0 gap-1">
+              <span data-testid="remote-browser-refusal-message" className="font-medium break-words">
+                {describeRemoteInputRefusal(activeRefusal)}
               </span>
               {activeRefusal.remediation && (
                 <span
                   data-testid="remote-browser-refusal-remediation"
-                  className="text-[11px] text-[#ff6467]/80 mt-0.5"
+                  className="text-xs text-chat-foreground-secondary"
                 >
                   {activeRefusal.remediation}
                 </span>
               )}
+              <details className="text-xs text-chat-foreground-secondary">
+                <summary className={`cursor-pointer w-fit rounded ${BROWSER_FOCUS_RING}`}>Details</summary>
+                <div className="mt-1 flex flex-col gap-0.5 font-mono break-words">
+                  <span data-testid="remote-browser-refusal-code">{activeRefusal.code || "REFUSED"}</span>
+                  <span data-testid="remote-browser-refusal-reason">{activeRefusal.reason}</span>
+                </div>
+              </details>
             </div>
           </div>
           <button
@@ -411,20 +454,19 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
               setLocalRefusal(null);
               onClearRefusal?.();
             }}
-            className="shrink-0 text-[#838383] hover:text-[#f5f5f5] text-sm leading-none p-1 rounded hover:bg-[#ff6467]/10 transition"
-            aria-label="Dismiss refusal notice"
+            className={`shrink-0 flex size-11 items-center justify-center rounded text-chat-foreground-secondary hover:text-chat-foreground hover:bg-chat-surface-hover transition-colors ${BROWSER_FOCUS_RING}`}
+            aria-label="Dismiss notice"
           >
-            ×
+            <X className="size-4" aria-hidden="true" />
           </button>
         </div>
       )}
 
-      {/* Main Viewport */}
       <div
         ref={viewportRef}
         data-testid="remote-browser-viewport"
         data-retained-frames={framesByUrlRef.current.size}
-        className="relative flex-1 w-full h-full flex items-center justify-center overflow-hidden cursor-crosshair"
+        className="relative flex-1 w-full h-full flex items-center justify-center overflow-hidden touch-manipulation [@media(pointer:fine)]:cursor-crosshair"
         onClick={handleViewportClick}
       >
         {imageUrl ? (
@@ -437,43 +479,63 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
             onError={() => handleImageError(imageUrl)}
           />
         ) : (
-          <div className="flex flex-col items-center justify-center text-[#818181] text-sm">
-            {status === "opening" && <span>Connecting to remote browser...</span>}
-            {status === "ready" && <span>Waiting for screencast stream...</span>}
+          <div role="status" className="flex flex-col items-center justify-center text-chat-foreground-secondary text-sm">
+            {status === "opening" && <span>Connecting to the browser...</span>}
+            {status === "ready" && <span>Waiting for the page...</span>}
             {status === "paused" && (
               <span>
-                Stream paused {browserState?.pauseReason ? `(${browserState.pauseReason})` : ""}
+                {browserState?.pauseReason === "hidden" ? "Paused while the page is hidden on your computer" : "Paused"}
               </span>
             )}
-            {status === "closed" && <span>Remote browser disconnected</span>}
+            {status === "closed" && <span>The browser disconnected</span>}
           </div>
         )}
 
-        {/* Status Overlays */}
+        {tapMarker && (
+          <span
+            key={tapMarker.id}
+            data-testid="remote-browser-tap-marker"
+            aria-hidden="true"
+            style={{ left: tapMarker.x, top: tapMarker.y }}
+            className="absolute z-10 size-8 -translate-x-1/2 -translate-y-1/2 rounded-full bg-chat-primary/40 pointer-events-none animate-out fade-out duration-500 fill-mode-forwards motion-reduce:animate-none"
+          />
+        )}
+
         {status === "paused" && imageUrl && (
           <div
             data-testid="remote-browser-paused-badge"
-            className="absolute top-2 right-2 px-2 py-1 bg-[#ffb900]/15 text-[#ffb900] border border-[#ffb900]/30 text-xs rounded font-medium pointer-events-none"
+            role="status"
+            className="absolute top-2 right-2 px-2 py-1 bg-chat-surface-raised text-status-warning border border-chat-border text-xs rounded font-medium pointer-events-none"
           >
-            Paused {browserState?.pauseReason ? `(${browserState.pauseReason})` : ""}
+            {browserState?.pauseReason === "hidden" ? "Paused while hidden on your computer" : "Paused"}
           </div>
         )}
 
         {status === "opening" && imageUrl && (
-          <div className="absolute top-2 right-2 px-2 py-1 bg-[#346bf1]/15 text-[#346bf1] border border-[#346bf1]/30 text-xs rounded font-medium pointer-events-none">
+          <div
+            role="status"
+            className="absolute top-2 right-2 px-2 py-1 bg-chat-surface-raised text-chat-foreground-secondary border border-chat-border text-xs rounded font-medium pointer-events-none"
+          >
             Reconnecting...
           </div>
         )}
 
         {status === "closed" && (
-          <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center p-4 z-20">
-            <p className="text-[#f5f5f5] mb-2">
-              {error ? error.message : "Connection closed"}
+          <div className="absolute inset-0 bg-chat-screen/80 flex flex-col items-center justify-center gap-3 p-4 z-20">
+            <p role="status" className="text-chat-foreground text-center">
+              {error ? userFacingError(error) : "The connection to your computer dropped."}
             </p>
+            {error ? (
+              <details className="max-w-full text-xs text-chat-foreground-secondary">
+                <summary className={`cursor-pointer w-fit mx-auto rounded ${BROWSER_FOCUS_RING}`}>Details</summary>
+                <span data-testid="remote-browser-closed-reason" className="mt-1 block font-mono break-words">{error.message}</span>
+              </details>
+            ) : null}
             <button
+              ref={reconnectButtonRef}
               type="button"
               onClick={reconnect}
-              className="px-3 py-1.5 bg-[#1a1b1b] hover:bg-[#141414] text-[#f5f5f5] rounded text-sm font-medium transition"
+              className={`min-h-11 px-5 bg-chat-primary text-chat-primary-foreground hover:brightness-110 rounded text-sm font-medium transition-colors ${BROWSER_FOCUS_RING}`}
             >
               Reconnect
             </button>

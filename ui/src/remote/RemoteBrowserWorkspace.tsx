@@ -6,11 +6,18 @@
  */
 
 import React, { useEffect, useRef, useState } from "react";
-import { RemoteBrowser, type RemoteBrowserPointClickEvent } from "./RemoteBrowser";
+import { ChevronLeft, Keyboard } from "lucide-react";
+import {
+  BROWSER_FOCUS_RING,
+  RemoteBrowser,
+  useCoarsePointer,
+  type RemoteBrowserPointClickEvent,
+} from "./RemoteBrowser";
 import { RemoteBrowserControls } from "./RemoteBrowserControls";
 import { reconcileMapRevision, type BrowserSubscribeOptions } from "./browserProtocol";
 import { useRemoteBrowser } from "./useRemoteBrowser";
 import { useRemoteBrowserDriver } from "./useRemoteBrowserDriver";
+import { userFacingError } from "./userFacingError";
 
 export interface RemoteBrowserWorkspaceProps {
   baseUrl: string;
@@ -35,6 +42,23 @@ function nextImeRevision(): number {
   return lastImeRevision;
 }
 
+function isImeConfirmingKey(e: React.KeyboardEvent, composing: boolean): boolean {
+  return composing || e.nativeEvent.isComposing || e.keyCode === 229;
+}
+
+function pageLabel(title: string | undefined, url: string | undefined): string {
+  const trimmedTitle = title?.trim();
+  if (trimmedTitle) return trimmedTitle;
+  if (url) {
+    try {
+      return new URL(url).host || "Browser";
+    } catch {
+      return "Browser";
+    }
+  }
+  return "Browser";
+}
+
 export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
   baseUrl,
   browserId,
@@ -44,6 +68,7 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
   onBack,
   className = "",
 }) => {
+  const phone = useCoarsePointer();
   // 1. Screencast viewer stream
   const session = useRemoteBrowser({
     baseUrl,
@@ -114,7 +139,7 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
 
   // Mobile IME handling state
   const [imeText, setImeText] = useState("");
-  const [isComposing, setIsComposing] = useState(false);
+  const composingRef = useRef(false);
   const [imeTargetRef, setImeTargetRef] = useState("active");
   const [showImeBar, setShowImeBar] = useState(false);
 
@@ -165,8 +190,7 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
   // Revision-Keyed Submission Queue: monotonic revision counter, ordered completion, and coherent full-value replacement (R4-12, R5-13)
   const handleImeSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isComposing) {
-      // Do NOT send during composition
+    if (composingRef.current) {
       return;
     }
     if (driver.driverState !== "driving") return;
@@ -331,41 +355,49 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
     }
   };
 
+  const focus = BROWSER_FOCUS_RING;
+  const touchTarget = phone ? "min-h-11" : "min-h-7";
+  const imeInputCls = `rounded bg-chat-surface border border-chat-border text-chat-foreground text-base sm:text-xs ${focus} ${
+    phone ? "min-h-11 px-3" : "px-2 py-1"
+  }`;
+
   const controls = (
     <div className="flex flex-col">
-      {/* Header with Back button if provided */}
       {onBack && (
-        <div className="flex items-center justify-between px-2 py-1 bg-[#0a0a0a] border-b border-[#191919] text-xs">
+        <div className="flex items-center justify-between gap-2 px-2 py-1 bg-chat-screen border-b border-chat-border text-xs">
           <button
             type="button"
             data-testid="remote-browser-workspace-back-btn"
             onClick={onBack}
-            className="flex items-center gap-1 text-[#838383] hover:text-[#f5f5f5] transition"
+            className={`flex items-center gap-1 pr-2 rounded text-chat-foreground-secondary hover:text-chat-foreground transition-colors ${touchTarget} ${focus}`}
           >
-            ← Back to Sessions
+            <ChevronLeft className="size-4" aria-hidden="true" />
+            Back to sessions
           </button>
-          <span className="font-mono text-[#838383] text-[11px] truncate max-w-[200px]">
-            {browserId}
+          <span data-testid="remote-browser-page-label" className="text-chat-foreground-secondary text-xs truncate min-w-0 flex-1 text-center">
+            {pageLabel(browserState?.title, browserState?.url)}
           </span>
           <button
             type="button"
             data-testid="remote-browser-ime-toggle-btn"
+            aria-pressed={showImeBar}
             onClick={() => setShowImeBar((prev) => !prev)}
-            className={`text-[11px] px-1.5 py-0.5 rounded border transition ${
+            className={`flex items-center gap-1.5 px-3 rounded border transition-colors ${touchTarget} ${focus} ${
               showImeBar
-                ? "bg-[#346bf1]/20 border-[#346bf1]/60 text-[#346bf1]"
-                : "bg-[#1a1b1b] border-[#191919] text-[#838383]"
+                ? "bg-chat-surface-raised border-chat-primary text-chat-primary"
+                : "bg-chat-surface-raised border-chat-border text-chat-foreground-secondary hover:text-chat-foreground"
             }`}
           >
-            IME Input
+            <Keyboard className="size-4" aria-hidden="true" />
+            Type text
           </button>
         </div>
       )}
 
-      {/* Main RemoteBrowserControls toolbar */}
       <RemoteBrowserControls
         url={browserState?.url || ""}
         driverState={driver.driverState}
+        phone={phone}
         canPointClick={canPointClick}
         pointClickEnabled={pointClickEnabled}
         onTogglePointClick={() => setPointClickEnabled((prev) => !prev)}
@@ -380,65 +412,68 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
         onEval={driver.evalJs}
       />
 
-      {/* Mobile IME input bar (safely buffers text and sends confirmed text via fill) */}
       {showImeBar && (
         <form
           onSubmit={handleImeSubmit}
           data-testid="remote-browser-ime-bar"
-          className="flex items-center gap-2 p-1.5 bg-[#0a0a0a] border-b border-[#191919] text-xs"
+          className="flex items-center gap-2 p-1.5 bg-chat-screen border-b border-chat-border text-xs"
         >
-          <span className="text-[#838383] text-[11px] shrink-0">Mobile IME:</span>
           <input
             type="text"
             data-testid="remote-browser-ime-ref-input"
             value={imeTargetRef}
             onChange={(e) => setImeTargetRef(e.target.value)}
-            placeholder="Target Ref (e.g. e1)"
-            className="w-20 px-1.5 py-0.5 rounded bg-[#111111] border border-[#191919] text-[#f5f5f5] text-xs font-mono"
+            aria-label="Field to type into"
+            placeholder="Field (e.g. e1)"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            className={`w-24 font-mono ${imeInputCls}`}
           />
           <input
             type="text"
             data-testid="remote-browser-ime-text-input"
             value={imeText}
             onChange={(e) => setImeText(e.target.value)}
-            onCompositionStart={() => setIsComposing(true)}
+            onCompositionStart={() => {
+              composingRef.current = true;
+            }}
             onCompositionEnd={(e) => {
-              setIsComposing(false);
-              if (e.data) {
-                // Prefer the field's real value: with the caret mid-text the composed text is already in place
-                // and appending it again would duplicate it.
-                const domValue = e.currentTarget.value;
-                const composed = e.data;
-                setImeText((prev) =>
-                  domValue.includes(composed)
-                    ? domValue
-                    : prev.endsWith(composed)
-                    ? prev
-                    : `${prev}${composed}`
-                );
+              composingRef.current = false;
+              setImeText(e.currentTarget.value);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && isImeConfirmingKey(e, composingRef.current)) {
+                e.preventDefault();
               }
             }}
-            placeholder="Type confirmed text..."
-            className="flex-1 px-2 py-0.5 rounded bg-[#111111] border border-[#191919] text-[#f5f5f5] text-xs"
+            aria-label="Text to type"
+            placeholder="Type text..."
+            enterKeyHint="send"
+            className={`flex-1 min-w-0 ${imeInputCls}`}
           />
           <button
             type="submit"
             data-testid="remote-browser-ime-send-btn"
-            disabled={driver.driverState !== "driving" || !imeText.trim() || isComposing}
-            className="px-2 py-0.5 bg-[#346bf1] hover:bg-[#346bf1]/90 disabled:opacity-40 text-[#f5f5f5] rounded text-xs font-medium transition"
+            disabled={driver.driverState !== "driving" || !imeText.trim()}
+            className={`px-4 bg-chat-primary text-chat-primary-foreground hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed rounded text-sm font-medium transition-colors ${touchTarget} ${focus}`}
           >
-            Send Fill
+            Send
           </button>
         </form>
       )}
 
-      {/* Driver or browser error banner if error occurred */}
       {(driver.error || imeError || actionError || browserError) && (
         <div
           data-testid="remote-browser-driver-error"
-          className="px-2 py-1 bg-[#ff6467]/15 border-b border-[#ff6467]/30 text-[#ff6467] text-xs flex items-center justify-between"
+          role="alert"
+          className="px-2 py-1.5 bg-chat-surface-raised border-b border-chat-border text-chat-danger text-xs flex flex-col gap-1"
         >
-          <span>{(driver.error ?? imeError ?? actionError ?? browserError)?.message}</span>
+          <span>{userFacingError(driver.error ?? imeError ?? actionError ?? browserError)}</span>
+          <details className="text-chat-foreground-secondary">
+            <summary className={`cursor-pointer rounded ${focus}`}>Details</summary>
+            <span className="font-mono break-words">{(driver.error ?? imeError ?? actionError ?? browserError)?.message}</span>
+          </details>
         </div>
       )}
     </div>

@@ -915,6 +915,62 @@ describe("RemoteBrowser component", () => {
     });
   });
 
+  it("ignores letterbox taps without a refusal banner or tap marker", async () => {
+    const onPointClick = vi.fn();
+    const mockSession = {
+      status: "streaming" as const,
+      frame: makeTestFrame(1, 1, 640, 400),
+      imageUrl: "blob:mock-url-letterbox",
+      browserState: null,
+      hello: null,
+      error: null,
+      client: null,
+      reconnect: vi.fn(),
+      sendAck: vi.fn(),
+      confirmPresented: vi.fn(),
+    };
+    render(<RemoteBrowser baseUrl="http://localhost:8080" browserId="b1" deviceToken="t" session={mockSession} onPointClick={onPointClick} />);
+    await act(async () => {
+      fireEvent.load(screen.getByAltText("Remote browser stream"));
+    });
+    const viewport = screen.getByTestId("remote-browser-viewport");
+    vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({
+      left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600, x: 0, y: 0, toJSON: () => {},
+    });
+
+    await act(async () => {
+      fireEvent.click(viewport, { clientX: 400, clientY: 20 });
+    });
+    expect(onPointClick).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("remote-browser-refusal-banner")).toBeNull();
+    expect(screen.queryByTestId("remote-browser-tap-marker")).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(viewport, { clientX: 400, clientY: 300 });
+    });
+    expect(onPointClick).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("remote-browser-tap-marker")).toBeDefined();
+  });
+
+  it("focuses the Reconnect button when the connection closes", async () => {
+    const mockSession = {
+      status: "closed" as const,
+      frame: null,
+      imageUrl: null,
+      browserState: null,
+      hello: null,
+      error: null,
+      client: null,
+      reconnect: vi.fn(),
+      sendAck: vi.fn(),
+      confirmPresented: vi.fn(),
+    };
+    render(<RemoteBrowser baseUrl="http://localhost:8080" browserId="b1" deviceToken="t" session={mockSession} />);
+    const button = screen.getByRole("button", { name: "Reconnect" });
+    expect(document.activeElement).toBe(button);
+    expect(screen.getAllByRole("status").length).toBeGreaterThan(0);
+  });
+
   it("does not create a duplicate client when session is passed (P1-09 dedup)", () => {
     const mockSession = {
       status: "streaming" as const,
@@ -1395,6 +1451,10 @@ describe("RemoteBrowser component", () => {
       await clickOnce(() => Promise.reject(rejection));
 
       expect(screen.getByTestId("remote-browser-refusal-banner")).toBeDefined();
+      expect(screen.getByTestId("remote-browser-refusal-message").textContent).toBe(
+        "The page can't take that kind of input.",
+      );
+      expect(screen.getByTestId("remote-browser-refusal-code").closest("details")).not.toBeNull();
       expect(screen.getByTestId("remote-browser-refusal-code").textContent).toBe("UNSUPPORTED");
       expect(screen.getByTestId("remote-browser-refusal-reason").textContent).toBe(details.reason);
       expect(screen.getByTestId("remote-browser-refusal-remediation").textContent).toBe(
@@ -2040,7 +2100,9 @@ describe("RemoteBrowser component", () => {
 
       // Readiness deadline fires and tears down socket
       expect(ws.readyState).toBe(MockWebSocket.CLOSED);
-      expect(screen.getByText(/Readiness deadline expired/i)).toBeDefined();
+      expect(screen.getByText("Something went wrong. Try again.")).toBeDefined();
+      expect(screen.getByTestId("remote-browser-closed-reason").textContent).toMatch(/Readiness deadline expired/i);
+      expect(screen.getByTestId("remote-browser-closed-reason").closest("details")).not.toHaveAttribute("open");
     } finally {
       vi.useRealTimers();
     }
@@ -2113,7 +2175,9 @@ describe("RemoteBrowser component", () => {
 
       // ACK sweeper fires, tearing down stalled client
       expect(ws.readyState).toBe(MockWebSocket.CLOSED);
-      expect(screen.getByText(/ACK deadline expired/i)).toBeDefined();
+      expect(screen.getByText("Something went wrong. Try again.")).toBeDefined();
+      expect(screen.getByTestId("remote-browser-closed-reason").textContent).toMatch(/ACK deadline expired/i);
+      expect(screen.getByTestId("remote-browser-closed-reason").closest("details")).not.toHaveAttribute("open");
     } finally {
       vi.useRealTimers();
     }
