@@ -745,7 +745,10 @@ async function agentQa(engine, browserId) {
       const taken = {
         generation: parsed.generation,
         isolated: parsed.isolated,
+        url: parsed.url,
+        title: parsed.title,
         elements: parsed.elements.length,
+        seen: parsed.elements.slice(0, 8).map((element) => `${element.tagName}/${element.role}/${element.name}`.slice(0, 80)),
         save: ref((element) => element.tagName === "button" && /save/i.test(element.name)),
         email: ref((element) => element.tagName === "input"),
       };
@@ -768,6 +771,13 @@ async function agentQa(engine, browserId) {
   const navigated = cli("navigate", ...id, "--url", `${fixtureBase}/agent.html`);
   record.navigate = navigated.ok ? "ok" : { status: navigated.status, code: cliCode(navigated), stderr: navigated.stderr.slice(0, 500) };
   record.checks.fixture_loaded = navigated.ok && load("wait_loaded");
+  // What the page script sees when the wait does not match: where it runs and what it reads.
+  if (!record.checks.fixture_loaded) {
+    const probe = cli("eval", ...id, "--script", "JSON.stringify({href: location.href, title: document.title, ready: document.readyState, text: (document.body && document.body.innerText || '').slice(0, 120)})");
+    record.eval_probe = probe.ok ? probe.stdout.slice(0, 600) : { status: probe.status, code: cliCode(probe), stderr: probe.stderr.slice(0, 400) };
+    const listed = sessions().list.find((entry) => entry.browserId === browserId);
+    record.listed = listed ? { url: listed.url, title: listed.title, engine: listed.engine ?? null } : null;
+  }
 
   // A ref observed before a reload names a node of the old document.
   const before = snapshot("snapshot_before_reload");
