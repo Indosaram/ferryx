@@ -9,7 +9,7 @@
 use super::{Answer, PermissionKind};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use webkit2gtk::glib::object::{Cast, ObjectType};
+use webkit2gtk::glib::object::{Cast, ObjectExt, ObjectType};
 use webkit2gtk::{
     GeolocationPermissionRequest, NotificationPermissionRequest, PermissionRequest, PermissionRequestExt,
     UserMediaPermissionRequest, UserMediaPermissionRequestExt, WebViewExt,
