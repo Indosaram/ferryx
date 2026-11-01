@@ -53,8 +53,13 @@ export async function fetchWithDeadline(
     controller.abort();
   }, timeoutMs);
   const callerSignal = init.signal ?? null;
-  const onCallerAbort = () => controller.abort(callerSignal?.reason);
-  if (callerSignal?.aborted) controller.abort(callerSignal.reason);
+  // The caller's own abort ends the deadline too: a fetch that ignores its signal must not keep
+  // the timer alive after the caller is gone.
+  const onCallerAbort = () => {
+    clearTimeout(timer);
+    controller.abort(callerSignal?.reason);
+  };
+  if (callerSignal?.aborted) onCallerAbort();
   else callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
   try {
     return await fetch(input, { ...init, signal: controller.signal });
