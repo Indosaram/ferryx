@@ -30,6 +30,9 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 type ControlSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
 const REGISTER_ACK_TIMEOUT: Duration = Duration::from_secs(5);
+/// Upper bound on one whole control connect: TCP, TLS, WebSocket upgrade and the signed
+/// challenge exchange. A blackholed primary must give way to `fallback_urls` quickly.
+const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct RegisterPairingPinRequest {
     pub registration: RegisterPairingPin,
@@ -531,6 +534,17 @@ impl RelayClient {
     }
 
     pub async fn connect_control(&self) -> anyhow::Result<ControlSocket> {
+        match tokio::time::timeout(CONTROL_CONNECT_TIMEOUT, self.connect_control_unbounded()).await
+        {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!(
+                "relay control connect timed out after {}s",
+                CONTROL_CONNECT_TIMEOUT.as_secs()
+            )),
+        }
+    }
+
+    async fn connect_control_unbounded(&self) -> anyhow::Result<ControlSocket> {
         let mut request = self.control_url()?.into_client_request()?;
         if self.identity.is_none() {
             request.headers_mut().insert(
@@ -1237,6 +1251,19 @@ mod tests {
         assert_eq!(id, "opaque-1");
         control.abort();
         server.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_relay_cannot_hold_the_control_connect_open() {
+        // The listener's backlog completes TCP, but nothing ever answers the upgrade.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = RelayClient::new(format!("http://{}", listener.local_addr().unwrap()), "tok");
+        let error = tokio::time::timeout(Duration::from_secs(60), client.connect_control())
+            .await
+            .expect("connect_control must give up on its own")
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error}");
+        drop(listener);
     }
 
     #[tokio::test]
