@@ -63,7 +63,7 @@ fn secret_service_secret(service_name: &str) -> Option<zeroize::Zeroizing<Vec<u8
     let items = ss
         .search_items(std::collections::HashMap::from([("application", service_name)]))
         .ok()?;
-    items
+    let secret = items
         .unlocked
         .into_iter()
         .chain(items.locked)
@@ -71,7 +71,8 @@ fn secret_service_secret(service_name: &str) -> Option<zeroize::Zeroizing<Vec<u8
             let _ = item.unlock();
             item.get_secret().ok().filter(|secret| !secret.is_empty())
         })
-        .map(zeroize::Zeroizing::new)
+        .map(zeroize::Zeroizing::new);
+    secret
 }
 
 #[cfg(target_os = "linux")]
