@@ -901,6 +901,7 @@ describe("features step", () => {
       "agents",
       "cli",
       "project",
+      "supervisor",
       "phone",
       "account",
     ]);
