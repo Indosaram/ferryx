@@ -107,6 +107,8 @@ export const FILE_PREVIEW_MARKDOWN_WIDE_STORAGE_KEY = "ferryx.filePreview.markdo
 export const EXTERNAL_WORKTREE_PROMPTED_STORAGE_KEY = "ferryx.worktrees.externalPrompted";
 /** Workspace ids whose outside-project worktree prompt the user turned off ("Don't ask again"). */
 export const EXTERNAL_WORKTREE_PROMPT_MUTED_STORAGE_KEY = "ferryx.worktrees.externalPromptMuted";
+/** Supervisor setup next-action kinds whose banner the user dismissed ("Not now"). */
+export const SUPERVISOR_SETUP_BANNER_DISMISSED_STORAGE_KEY = "ferryx.supervisor.setupBannerDismissed";
 
 
 
