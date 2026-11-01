@@ -431,8 +431,8 @@ mod tests {
             8443
         );
         assert!(parse(&[], &[("FERRYX_RELAY_PORT", "https")])
-            .unwrap_err()
-            .contains("FERRYX_RELAY_PORT"));
+            .err()
+            .is_some_and(|error| error.contains("FERRYX_RELAY_PORT")));
         assert!(parse(&[], &[("FERRYX_RELAY_PORT", "70000")]).is_err());
         // An empty value is the same as unset.
         assert_eq!(parse(&[], &[("FERRYX_RELAY_PORT", "")]).unwrap().port, 8787);
