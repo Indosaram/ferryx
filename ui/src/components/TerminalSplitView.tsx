@@ -541,16 +541,13 @@ export function TerminalSplitView({
     dropFeedbackLeafId,
   };
 
+  // A pane drag is named after its tab: a browser pane is not a "Terminal pane".
+  const dragTabLabel = activeDrag ? normalizedLayout.tabs.find((tab) => tab.id === activeDrag.tabId)?.label : undefined;
   const overlay: { kind: "tab" | "pane"; label: string } | null =
     activeDrag?.type === "tab"
-      ? { kind: "tab", label: normalizedLayout.tabs.find((tab) => tab.id === activeDrag.tabId)?.label ?? "Tab" }
+      ? { kind: "tab", label: dragTabLabel ?? "Tab" }
       : activeDrag?.type === "pane"
-        ? paneOverTabRow
-          ? {
-              kind: "tab",
-              label: normalizedLayout.tabs.find((tab) => tab.id === activeDrag.tabId)?.label ?? "Terminal pane",
-            }
-          : { kind: "pane", label: "Terminal pane" }
+        ? { kind: paneOverTabRow ? "tab" : "pane", label: dragTabLabel ?? "Pane" }
         : null;
 
   return (

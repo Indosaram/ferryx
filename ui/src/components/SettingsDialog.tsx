@@ -209,7 +209,9 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
 
       <main className="min-w-0 flex-1 overflow-y-auto bg-background scrollbar-sleek">
         <div data-tauri-drag-region className="h-titlebar shrink-0 border-b border-border/70" />
-        <div className="selectable mx-auto w-full max-w-[896px] px-8 pb-16 pt-10">
+        {/* Labels and descriptions are app chrome: Ctrl/Cmd+A must not select them. Inputs stay
+            editable, and values worth copying (paths, commands) opt in with `selectable`. */}
+        <div data-testid="settings-content" className="mx-auto w-full max-w-[896px] px-8 pb-16 pt-10">
           {section === "general" ? <GeneralSection /> : null}
           {section === "appearance" ? <AppearanceSection /> : null}
           {section === "terminal" ? (

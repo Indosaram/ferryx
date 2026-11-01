@@ -142,6 +142,9 @@ describe("browser pane drag handle keyboard activation", () => {
     fireEvent.keyDown(handle, { key: "Enter", code: "Enter" });
 
     await waitFor(() => expect(screen.getByTestId("workspace-drag-overlay")).toHaveAttribute("data-preview-kind", "pane"));
+    // The preview names the browser tab, never a terminal.
+    expect(screen.getByTestId("workspace-drag-overlay")).toHaveTextContent("Browser");
+    expect(screen.queryByText("Terminal pane")).toBeNull();
     expect(browserMocks.setBrowserVisible).toHaveBeenCalledWith(BROWSER_ID, false);
   });
 

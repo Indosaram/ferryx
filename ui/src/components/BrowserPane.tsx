@@ -37,6 +37,7 @@ import { BrowserDownloadsShelf } from "./BrowserDownloadsShelf";
 import { BrowserEngineFallbackNotice } from "./BrowserEngineFallbackNotice";
 import { BrowserMediaCaptureIndicator, BrowserPermissionPrompts } from "./BrowserPermissionPrompt";
 import { onBrowserFindResult } from "../lib/browserSystem";
+import { browserErrorText } from "../lib/browserErrorText";
 import { BrowserVaultBar } from "./BrowserVaultBar";
 import type { BrowserTab } from "../lib/types";
 
@@ -422,9 +423,9 @@ export function BrowserPane({
     setFindQuery("");
     setFindResult({ matchCount: 0, found: false });
     setFindError(null);
-    void clearBrowserFind(tab.browserId)
-      .then(() => setPaneAlert((current) => (current?.action === "Clear find" ? null : current)))
-      .catch((error: unknown) => setPaneAlert({ action: "Clear find", code: parseErrorCode(error) }));
+    // Closing find is a no-op when there is nothing to clear; a stale highlight is not worth an
+    // alert after the user dismissed the bar.
+    void clearBrowserFind(tab.browserId).catch(() => undefined);
   };
 
   const saveDownload = async () => {
@@ -439,7 +440,7 @@ export function BrowserPane({
       setDownloadStatus("Saved");
       setDownloadNeedsConfirmation(false);
     } catch (error) {
-      setDownloadStatus(extractBrowserErrorCode(error));
+      setDownloadStatus(browserErrorText(extractBrowserErrorCode(error)));
     } finally {
       // The registry only gains a record (completed or failed) once this call settles.
       if (saveAttempted) setDownloadsRefreshToken((current) => current + 1);
@@ -504,7 +505,7 @@ export function BrowserPane({
             <button type="button" aria-label="Previous match" onClick={() => void runFind(findQuery, true)} className="rounded p-1 hover:bg-accent"><ChevronUp className="size-3.5" /></button>
             <button type="button" aria-label="Next match" onClick={() => void runFind(findQuery, false)} className="rounded p-1 hover:bg-accent"><ChevronDown className="size-3.5" /></button>
             <button type="button" aria-label="Close find" onClick={closeFind} className="rounded p-1 hover:bg-accent"><X className="size-3.5" /></button>
-            {findError ? <span className="text-[10px] text-destructive">{findError}</span> : null}
+            {findError ? <span className="text-[10px] text-destructive" data-error-code={findError}>{browserErrorText(findError)}</span> : null}
           </div>
         ) : null}
         {downloadUrl ? (
@@ -536,7 +537,7 @@ export function BrowserPane({
           >
             <CircleAlert className="size-3.5 shrink-0" />
             <span className="min-w-0 flex-1 truncate">
-              {paneAlert.action} failed: {paneAlert.code}
+              {paneAlert.action} failed: {browserErrorText(paneAlert.code)}
             </span>
           </div>
         ) : null}

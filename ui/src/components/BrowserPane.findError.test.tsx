@@ -48,7 +48,7 @@ beforeEach(() => {
 });
 
 describe("BrowserPane find failure surfacing", () => {
-  it("shows the structured IPC code when find rejects, not a generic fallback", async () => {
+  it("shows readable text for the structured IPC code when find rejects, not a generic fallback", async () => {
     browserMocks.findBrowser.mockRejectedValueOnce({
       code: "BROWSER_FIND_FAILED",
       message: "find script evaluation failed",
@@ -65,7 +65,26 @@ describe("BrowserPane find failure surfacing", () => {
       fireEvent.change(input, { target: { value: "example" } });
     });
 
-    expect(await screen.findByText("BROWSER_FIND_FAILED")).toBeInTheDocument();
+    const message = await screen.findByText("This page can't be searched.");
+    expect(message).toHaveAttribute("data-error-code", "BROWSER_FIND_FAILED");
+    expect(screen.queryByText("BROWSER_FIND_FAILED")).toBeNull();
     expect(screen.queryByText("Find failed")).toBeNull();
+  });
+
+  it("closes find silently when clearing the highlight fails", async () => {
+    browserMocks.clearBrowserFind.mockRejectedValueOnce({ code: "BROWSER_FIND_FAILED", message: "no find session" });
+
+    render(<BrowserPane tab={tab} onNavigate={() => undefined} onReload={() => undefined} />);
+
+    act(() => {
+      fireEvent(window, new CustomEvent(BROWSER_SHORTCUT_EVENT, { detail: { browserId: tab.browserId, action: "find" } }));
+    });
+    await act(async () => {
+      fireEvent.keyDown(screen.getByLabelText("Find in page"), { key: "Escape" });
+    });
+
+    expect(browserMocks.clearBrowserFind).toHaveBeenCalledWith(tab.browserId);
+    expect(screen.queryByTestId("browser-find-bar")).toBeNull();
+    expect(screen.queryByTestId("browser-pane-alert")).toBeNull();
   });
 });

@@ -100,4 +100,13 @@ describe("BrowserVaultBar", () => {
     fireEvent.click(await screen.findByTestId("vault-fill"));
     expect(await screen.findByRole("alert")).toHaveTextContent("UNSUPPORTED_CAPABILITY");
   });
+
+  it("stays silent when the password vault is unavailable", async () => {
+    vault.vaultMatchesForBrowser.mockRejectedValue({ code: "BROWSER_VAULT_UNAVAILABLE", message: "no keyring" });
+    const { container } = render(<BrowserVaultBar browserId="b1" url="https://example.com/login" />);
+    await vi.waitFor(() => expect(vault.vaultMatchesForBrowser).toHaveBeenCalledTimes(1));
+    await act(async () => undefined);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(container).toBeEmptyDOMElement();
+  });
 });

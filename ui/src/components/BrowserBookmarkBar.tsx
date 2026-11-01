@@ -16,7 +16,7 @@ export function BrowserBookmarkBar({ tree, onOpen }: BrowserBookmarkBarProps) {
     <div
       role="toolbar"
       aria-label="Bookmarks bar"
-      className="flex min-h-6 items-center gap-0.5 overflow-x-auto border-b border-border bg-[#4b4b4b] px-2 py-0.5 text-[11px]"
+      className="flex min-h-6 items-center gap-0.5 overflow-x-auto border-b border-border bg-card px-2 py-0.5 text-[11px]"
     >
       {items.length === 0 ? (
         <span className="px-1 text-muted-foreground">Bookmark pages with the star or Cmd/Ctrl+D to see them here.</span>

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Copy, Eye, EyeOff, KeyRound, Pencil, Trash2 } from "lucide-react";
 
 import { extractBrowserErrorCode } from "../../lib/browserTauri";
+import { describeBrowserError, VAULT_UNAVAILABLE_CODE, VAULT_UNAVAILABLE_TEXT } from "../../lib/browserErrorText";
 import {
   deleteVaultItem,
   generateVaultPassword,
@@ -36,7 +37,7 @@ export function BrowserPasswordsGroup() {
   const [generated, setGenerated] = useState<GeneratedPassword | null>(null);
   const listSeq = useRef(0);
 
-  const fail = useCallback((failure: unknown) => setError(extractBrowserErrorCode(failure)), []);
+  const fail = useCallback((failure: unknown) => setError(describeBrowserError(failure)), []);
 
   const refresh = useCallback(
     (text: string) => {
@@ -65,7 +66,10 @@ export function BrowserPasswordsGroup() {
         if (next.available) refresh("");
       },
       (failure: unknown) => {
-        if (!cancelled) setStatus({ available: false, backend: "unsupported", error: extractBrowserErrorCode(failure) });
+        if (!cancelled) {
+          const errorCode = extractBrowserErrorCode(failure);
+          setStatus({ available: false, backend: "unsupported", error: describeBrowserError(failure), errorCode });
+        }
       },
     );
     return () => {
@@ -77,11 +81,19 @@ export function BrowserPasswordsGroup() {
   if (status === null) return null;
 
   if (!status.available) {
+    // A missing keyring is an environment fact, not a failure: explain it in plain words.
+    const noKeyring = !status.error || status.error === VAULT_UNAVAILABLE_CODE || status.errorCode === VAULT_UNAVAILABLE_CODE;
     return (
       <SettingsGroup title="Passwords">
-        <div role="alert" data-testid="vault-unavailable" className="text-[11px] text-destructive">
-          {status.error}
-        </div>
+        {noKeyring ? (
+          <div role="status" data-testid="vault-unavailable" className="text-[11px] text-muted-foreground">
+            {VAULT_UNAVAILABLE_TEXT}
+          </div>
+        ) : (
+          <div role="alert" data-testid="vault-unavailable" className="text-[11px] text-destructive">
+            {status.error}
+          </div>
+        )}
       </SettingsGroup>
     );
   }

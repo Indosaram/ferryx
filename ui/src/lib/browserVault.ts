@@ -17,6 +17,8 @@ export type VaultStatus = {
   available: boolean;
   backend: "keychain" | "dpapi" | "secretService" | "unsupported";
   error?: string | null;
+  /** Structured code (e.g. `BROWSER_VAULT_UNAVAILABLE`) when `available` is false. */
+  errorCode?: string | null;
 };
 
 export type VaultSavePrompt = {

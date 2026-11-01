@@ -3140,12 +3140,14 @@ pub async fn cmd_browser_clear_find<R: tauri::Runtime>(
         return crate::ipc::browser_system::cef_clear_find(&browser_id);
     }
     let state = manager.get_state(&browser_id)?;
-    let webview = app
-        .get_webview(&state.webview_label)
-        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
-    let _ = eval_webview(webview, BROWSER_CLEAR_FIND_SCRIPT.to_string())
-        .await
-        .map_err(|error| BrowserError::FindFailed(error.to_string()))?;
+    // Clearing is best-effort: a page that cannot run scripts (about:blank, a page mid-navigation)
+    // has no find highlight to clear, so closing the find bar must not report a failure.
+    let Some(webview) = app.get_webview(&state.webview_label) else {
+        return Ok(());
+    };
+    if let Err(error) = eval_webview(webview, BROWSER_CLEAR_FIND_SCRIPT.to_string()).await {
+        tracing::debug!(browser_id = %browser_id, %error, "find highlight was not cleared");
+    }
     Ok(())
 }
 

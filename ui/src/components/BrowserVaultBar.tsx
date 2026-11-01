@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { KeyRound, X } from "lucide-react";
 
-import { extractBrowserErrorCode } from "../lib/browserTauri";
+import { describeBrowserError, isVaultUnavailable } from "../lib/browserErrorText";
 import {
   dismissVaultPrompt,
   fillVaultItem,
@@ -42,7 +42,7 @@ export function BrowserVaultBar({ browserId, url }: { browserId: string; url: st
         else unlisten = stop;
       },
       (failure: unknown) => {
-        if (!cancelled) setPromptError(extractBrowserErrorCode(failure));
+        if (!cancelled) setPromptError(describeBrowserError(failure));
       },
     );
     return () => {
@@ -61,7 +61,10 @@ export function BrowserVaultBar({ browserId, url }: { browserId: string; url: st
         if (seq === matchSeq.current) setMatches(next ?? []);
       },
       (failure: unknown) => {
-        if (seq === matchSeq.current) setFillError(extractBrowserErrorCode(failure));
+        // The lookup runs on every page load without the user asking: no keyring simply means
+        // no fill offer (Settings > Passwords explains why), never an error in the page.
+        if (seq !== matchSeq.current || isVaultUnavailable(failure)) return;
+        setFillError(describeBrowserError(failure));
       },
     );
     return () => {
@@ -73,7 +76,7 @@ export function BrowserVaultBar({ browserId, url }: { browserId: string; url: st
     setPromptError(null);
     void saveVaultPrompt(current.promptId).then(
       () => setPrompt((shown) => (shown?.promptId === current.promptId ? null : shown)),
-      (failure: unknown) => setPromptError(extractBrowserErrorCode(failure)),
+      (failure: unknown) => setPromptError(describeBrowserError(failure)),
     );
   };
 
@@ -81,13 +84,13 @@ export function BrowserVaultBar({ browserId, url }: { browserId: string; url: st
     setPromptError(null);
     void dismissVaultPrompt(current.promptId).then(
       () => setPrompt((shown) => (shown?.promptId === current.promptId ? null : shown)),
-      (failure: unknown) => setPromptError(extractBrowserErrorCode(failure)),
+      (failure: unknown) => setPromptError(describeBrowserError(failure)),
     );
   };
 
   const fill = (id: string) => {
     setFillError(null);
-    void fillVaultItem(browserId, id).catch((failure: unknown) => setFillError(extractBrowserErrorCode(failure)));
+    void fillVaultItem(browserId, id).catch((failure: unknown) => setFillError(describeBrowserError(failure)));
   };
 
   const showOffer = matches.length > 0 && dismissedUrl !== url;

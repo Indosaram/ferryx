@@ -309,7 +309,7 @@ export function CliLauncherCard() {
           {status?.isSupported !== false ? (
             <div className="text-muted-foreground">
               Launcher location:{" "}
-              <code className="font-mono text-foreground">{status?.launcherPath ?? "~/.local/bin/ferryx"}</code>
+              <code className="selectable font-mono text-foreground">{status?.launcherPath ?? "~/.local/bin/ferryx"}</code>
             </div>
           ) : null}
           {status?.currentTarget ? (

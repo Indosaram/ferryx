@@ -229,6 +229,13 @@ describe("SettingsDialog", () => {
     expect(screen.getByRole("button", { name: "Notifications" })).toBeInTheDocument();
   });
 
+  it("keeps settings labels out of a select-all like native app chrome", () => {
+    render(<SettingsDialog open onClose={vi.fn()} />);
+
+    expect(screen.getByTestId("settings-content")).not.toHaveClass("selectable");
+    expect(screen.getByTestId("settings-content").closest(".selectable")).toBeNull();
+  });
+
   it("persists confirm before closing a tab checkbox in General settings", () => {
     render(<SettingsDialog open onClose={vi.fn()} />);
     expect(screen.getByRole("button", { name: "General" })).toBeInTheDocument();

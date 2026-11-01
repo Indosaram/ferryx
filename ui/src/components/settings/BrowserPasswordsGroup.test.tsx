@@ -29,12 +29,26 @@ describe("BrowserPasswordsGroup", () => {
   });
   afterEach(cleanup);
 
-  it("shows an alert when the vault is unavailable", async () => {
-    vault.getVaultStatus.mockResolvedValue({ available: false, backend: "unsupported", error: "BROWSER_VAULT_UNAVAILABLE" });
+  it("explains a missing system keyring in plain words instead of an error code", async () => {
+    vault.getVaultStatus.mockResolvedValue({
+      available: false,
+      backend: "secretService",
+      error: "the platform key store is unavailable: org.freedesktop.secrets was not provided",
+      errorCode: "BROWSER_VAULT_UNAVAILABLE",
+    });
     render(<BrowserPasswordsGroup />);
-    expect(await screen.findByTestId("vault-unavailable")).toHaveAttribute("role", "alert");
+    const notice = await screen.findByTestId("vault-unavailable");
+    expect(notice).toHaveAttribute("role", "status");
+    expect(notice).toHaveTextContent(/system keyring/);
+    expect(notice).not.toHaveTextContent("BROWSER_VAULT_UNAVAILABLE");
     expect(screen.queryByTestId("vault-search")).toBeNull();
     expect(vault.listVaultItems).not.toHaveBeenCalled();
+  });
+
+  it("keeps other vault failures as an alert", async () => {
+    vault.getVaultStatus.mockResolvedValue({ available: false, backend: "keychain", error: "vault file is damaged", errorCode: "BROWSER_VAULT_CORRUPTED" });
+    render(<BrowserPasswordsGroup />);
+    expect(await screen.findByTestId("vault-unavailable")).toHaveAttribute("role", "alert");
   });
 
   it("renders rows and deletes one", async () => {
@@ -76,10 +90,10 @@ describe("BrowserPasswordsGroup", () => {
     expect(vault.generateVaultPassword).toHaveBeenCalledWith({ length: 32 });
   });
 
-  it("surfaces the error code when an action fails", async () => {
+  it("surfaces a readable message when an action fails", async () => {
     vault.revealVaultPassword.mockRejectedValue({ code: "BROWSER_VAULT_NOT_FOUND", message: "gone" });
     render(<BrowserPasswordsGroup />);
     fireEvent.click(await screen.findByTestId("vault-reveal"));
-    expect(await screen.findByRole("alert")).toHaveTextContent("BROWSER_VAULT_NOT_FOUND");
+    expect(await screen.findByRole("alert")).toHaveTextContent("That saved login no longer exists.");
   });
 });

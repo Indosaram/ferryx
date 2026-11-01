@@ -222,7 +222,11 @@ pub fn cef_find(browser_id: &str, query: &str, backwards: bool) -> Result<Browse
 pub fn cef_clear_find(browser_id: &str) -> Result<(), IpcError> {
     CEF_FIND_QUERIES.lock().remove(browser_id);
     CEF_FIND_COUNTS.lock().remove(browser_id);
-    Ok(crate::browser::cef_engine::system::stop_find(browser_id)?)
+    // Best-effort like the system engine: a tab whose engine is gone has no find session left.
+    if let Err(error) = crate::browser::cef_engine::system::stop_find(browser_id) {
+        tracing::debug!(browser_id = %browser_id, %error, "Chromium find was not stopped");
+    }
+    Ok(())
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
