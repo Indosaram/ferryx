@@ -217,6 +217,8 @@ mod imp {
         ) -> c_int;
         fn XRaiseWindow(display: *mut c_void, window: c_ulong) -> c_int;
         fn XSetInputFocus(display: *mut c_void, focus: c_ulong, revert: c_int, time: c_ulong) -> c_int;
+        fn XGetInputFocus(display: *mut c_void, focus: *mut c_ulong, revert: *mut c_int) -> c_int;
+        fn XSync(display: *mut c_void, discard: c_int) -> c_int;
         fn XFlush(display: *mut c_void) -> c_int;
         fn XSetErrorHandler(handler: Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int>) -> *mut c_void;
     }
@@ -332,13 +334,20 @@ mod imp {
     /// Gives the window X keyboard focus (the window manager only ever focuses the Ferryx
     /// toplevel), for Ferryx's own focus requests such as Mod+L.
     pub fn focus(window: &Window) {
-        let (Some(_), Some(display)) = (parent(), display()) else { return };
+        let (Some(_), Some(display)) = (parent(), display()) else {
+            eprintln!("ferryx-engine: focus: no parent window or X display; X focus unchanged");
+            return;
+        };
+        let target = xid(window);
+        let (mut focused, mut revert) = (0, 0);
         // SAFETY: as in `move_resize`; RevertToParent (2) hands focus back to Ferryx if the
-        // window goes away.
+        // window goes away. XSync makes the read below see this request's outcome.
         unsafe {
-            XSetInputFocus(display, xid(window), 2, 0);
-            XFlush(display);
+            XSetInputFocus(display, target, 2, 0);
+            XSync(display, 0);
+            XGetInputFocus(display, &mut focused, &mut revert);
         }
+        eprintln!("ferryx-engine: focus: XSetInputFocus({target:#x}), X focus now {focused:#x}");
     }
 
     /// The window manager focuses the Ferryx toplevel on a click and never a child window of
@@ -472,6 +481,7 @@ mod imp {
                 eprintln!("ferryx-engine: no XInput extension; clicking a page does not give it keyboard focus");
                 return;
             }
+            eprintln!("ferryx-engine: focus watcher: XInput {major}.{minor}, watching raw button releases");
             let mut bits = [0u8; 4];
             bits[(XI_RAW_BUTTON_RELEASE / 8) as usize] |= 1 << (XI_RAW_BUTTON_RELEASE % 8);
             let mut mask =
@@ -515,7 +525,11 @@ mod imp {
                 let (mut focused, mut revert) = (0, 0);
                 unsafe { XGetInputFocus(display, &mut focused, &mut revert) };
                 let under_pointer = inside.then_some(child);
-                if let Some(target) = focus_target(parent, &panes, under_pointer, focused) {
+                let target = focus_target(parent, &panes, under_pointer, focused);
+                eprintln!(
+                    "ferryx-engine: focus watcher: release, parent {parent:#x}, under pointer {under_pointer:x?}, focused {focused:#x}, panes {panes:x?}, target {target:x?}"
+                );
+                if let Some(target) = target {
                     // SAFETY: `target` is a viewable window of this server; a stale id only
                     // produces an X error the default handler logs.
                     unsafe {

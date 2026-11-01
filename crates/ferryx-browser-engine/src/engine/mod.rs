@@ -384,10 +384,17 @@ fn execute(command: Command) {
             }
         }
         Command::Focus { tab, address } => {
-            if let Some(window) = TABS.with_borrow(|tabs| tabs.get(&tab).and_then(|pane| pane.window.clone())) {
+            let window = TABS.with_borrow(|tabs| tabs.get(&tab).and_then(|pane| pane.window.clone()));
+            let host = browser_of(&tab).and_then(|browser| browser.host());
+            eprintln!(
+                "ferryx-engine: focus {tab} address={address}: window {}, browser host {}",
+                window.is_some(),
+                host.is_some()
+            );
+            if let Some(window) = window {
                 platform::focus(&window);
             }
-            if let Some(host) = browser_of(&tab).and_then(|browser| browser.host()) {
+            if let Some(host) = host {
                 if address {
                     host.execute_chrome_command(sys::IDC_FOCUS_LOCATION, WindowOpenDisposition::CURRENT_TAB);
                 } else {

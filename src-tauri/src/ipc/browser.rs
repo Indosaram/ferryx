@@ -2780,6 +2780,7 @@ pub fn focus_browser_session<R: tauri::Runtime>(
 ) -> Result<(), IpcError> {
     set_browser_session_visible(app, manager, browser_id, true)?;
     record_session_created(browser_id);
+    tracing::info!(%browser_id, address, "browser focus request");
     // A Chromium-engine tab has no Tauri webview: its engine focuses the page or Chrome's own
     // address bar. Refocusing an already focused Ferryx window would only race that request.
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
