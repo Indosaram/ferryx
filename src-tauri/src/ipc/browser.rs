@@ -1113,11 +1113,9 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
             let root = discard_session_on_error(
                 manager,
                 &state.browser_id,
-                app.path()
-                    .app_data_dir()
-                    .map_err(|error| BrowserError::CreateFailed(error.to_string())),
+                crate::browser::data_paths::app_data_root(app).map_err(BrowserError::CreateFailed),
             )?;
-            let data_dir = root.join("browser-profiles").join(profile_id);
+            let data_dir = crate::browser::data_paths::named_profile_dir(&root, profile_id);
             discard_session_on_error(
                 manager,
                 &state.browser_id,
@@ -1127,8 +1125,14 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
             )?;
             Some(data_dir)
         }
-        _ => None,
+        // The default and private profiles share the app webview's folder, which an isolated
+        // run moves under FERRYX_DATA_DIR (WebView2 would otherwise use %LOCALAPPDATA%).
+        _ => crate::browser::data_paths::shared_webview_dir(std::env::var_os("FERRYX_DATA_DIR").as_deref()),
     };
+    // WebKit has no data folder; an isolated run gets its own website data store instead.
+    #[cfg(target_os = "macos")]
+    let isolated_store = crate::browser::data_paths::shared_webview_dir(std::env::var_os("FERRYX_DATA_DIR").as_deref())
+        .map(|dir| crate::browser::data_paths::data_store_identifier(&dir));
 
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     let state = match cef_engine_dir {
@@ -1408,6 +1412,11 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
             } else {
                 builder
             };
+            #[cfg(target_os = "macos")]
+            let builder = match isolated_store {
+                Some(identifier) if !incognito => builder.data_store_identifier(identifier),
+                _ => builder,
+            };
 
             let pos = if let Some(ref b) = bounds {
                 tauri::LogicalPosition { x: b.x, y: b.y }
@@ -1668,7 +1677,7 @@ pub(crate) async fn create_cef_browser_session<R: tauri::Runtime>(
         None
     } else {
         match engine_data_dir(app) {
-            Ok(root) => Some(root.join("browser-cef").join(&profile)),
+            Ok(root) => Some(crate::browser::data_paths::cef_profile_dir(&root, &profile)),
             Err(error) => return Err(fail(error.message)),
         }
     };
@@ -2835,6 +2844,39 @@ pub async fn cmd_browser_focus<R: tauri::Runtime>(
     focus_browser_session(&app, &manager, &browser_id, address.unwrap_or(false))
 }
 
+/// Gives OS keyboard focus back to the app's own webview, so a Ferryx input (find bar, address
+/// bar) receives typed keys while a page view holds focus: a WebView2/WebKitGTK child webview,
+/// a WKWebView, or a Chromium engine window (a child window on Windows and X11, a window of
+/// another app on macOS). Focusing a DOM input alone leaves the keys with the page view.
+pub fn focus_app_webview<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), IpcError> {
+    let webview = app
+        .get_webview("main")
+        .ok_or_else(|| BrowserError::WebviewNotFound("main".into()))?;
+    if let Some(window) = app.get_window("main") {
+        // macOS: activates Ferryx again when the engine app took the keyboard.
+        window.set_focus().map_err(|error| {
+            BrowserError::Internal(format!("failed to focus the main window: {error}"))
+        })?;
+        // X11: the engine's child window keeps X input focus even while the toplevel is
+        // active, so the toplevel takes it back before GTK focuses the webview widget.
+        #[cfg(target_os = "linux")]
+        if let Some(xid) = crate::browser::cef_engine::parent_xid(&window) {
+            window
+                .run_on_main_thread(move || crate::browser::cef_engine::take_x_focus(xid))
+                .map_err(|error| BrowserError::Internal(format!("failed to schedule X focus: {error}")))?;
+        }
+    }
+    webview.set_focus().map_err(|error| {
+        BrowserError::Internal(format!("failed to focus the app webview: {error}"))
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cmd_browser_focus_app<R: tauri::Runtime>(app: AppHandle<R>) -> Result<(), IpcError> {
+    focus_app_webview(&app)
+}
+
 #[tauri::command]
 pub async fn cmd_browser_get_state(
     manager: State<'_, Arc<BrowserManager>>,
@@ -3686,12 +3728,8 @@ pub async fn cmd_browser_list(
 /// Where the engine and its per-tab caches live: the app data dir, or `FERRYX_DATA_DIR` when an
 /// isolated (QA or test) instance set it, so such a run never touches the real install.
 pub(crate) fn engine_data_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<std::path::PathBuf, IpcError> {
-    if let Some(dir) = std::env::var_os("FERRYX_DATA_DIR").filter(|dir| !dir.is_empty()) {
-        return Ok(std::path::PathBuf::from(dir));
-    }
-    app.path()
-        .app_data_dir()
-        .map_err(|error| IpcError::new(crate::ipc::error::IpcErrorCode::IoError, error.to_string()))
+    crate::browser::data_paths::app_data_root(app)
+        .map_err(|error| IpcError::new(crate::ipc::error::IpcErrorCode::IoError, error))
 }
 
 use crate::ipc::browser_engine::install_error as engine_install_error;

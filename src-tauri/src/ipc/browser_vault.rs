@@ -51,13 +51,8 @@ pub(crate) fn vault_error(error: VaultError) -> IpcError {
 }
 
 fn vault_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, IpcError> {
-    let base = match std::env::var_os("FERRYX_DATA_DIR").filter(|dir| !dir.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None => app
-            .path()
-            .app_data_dir()
-            .map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string()))?,
-    };
+    let base = crate::browser::data_paths::app_data_root(app)
+        .map_err(|error| IpcError::new(IpcErrorCode::IoError, error))?;
     Ok(base.join(vault::VAULT_DIR))
 }
 

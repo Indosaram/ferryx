@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Folder, FolderPlus, Globe, Pencil, Trash2, X } from "lucide-react";
 
 import {
@@ -200,20 +200,33 @@ const CLEAR_RANGES: Array<{ id: string; label: string; span: number | null }> = 
 function HistoryPage({ onOpen, now }: { onOpen: (url: string) => void; now: () => number }) {
   const [query, setQuery] = useState("");
   const [entries, setEntries] = useState<HostHistoryEntry[]>([]);
+  // Until the first answer for the current query arrives the list is unknown, not empty.
+  const [loaded, setLoaded] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [range, setRange] = useState("hour");
   const [error, setError] = useState<string | null>(null);
+  // Loads overlap (mount, a history change, search, paging) and their answers can arrive out of
+  // order; only the latest request may set the list, so an older (empty) snapshot never
+  // overwrites a newer one.
+  const requestSeqRef = useRef(0);
 
   const load = useCallback((before?: number) => {
+    const seq = ++requestSeqRef.current;
     void Promise.resolve()
       .then(() => listHostHistory(query, before, HISTORY_PAGE))
       .then((page) => {
+        if (seq !== requestSeqRef.current) return;
         const rows = page ?? [];
         setEntries((current) => (before === undefined ? rows : [...current, ...rows]));
         setHasMore(rows.length === HISTORY_PAGE);
+        setLoaded(true);
         setError(null);
       })
-      .catch((err: unknown) => setError(`History failed: ${errorCode(err)}`));
+      .catch((err: unknown) => {
+        if (seq !== requestSeqRef.current) return;
+        setLoaded(true);
+        setError(`History failed: ${errorCode(err)}`);
+      });
   }, [query]);
 
   useEffect(() => {
@@ -226,8 +239,14 @@ function HistoryPage({ onOpen, now }: { onOpen: (url: string) => void; now: () =
     void Promise.resolve()
       .then(() => onBrowserLibraryChanged((kind) => { if (kind === "history") load(); }))
       .then((cleanup) => {
-        if (disposed) cleanup?.();
-        else unlisten = cleanup;
+        if (disposed) {
+          cleanup?.();
+          return;
+        }
+        unlisten = cleanup;
+        // A visit recorded between the first query and this subscription sent its change
+        // event to nobody; query again now that changes are heard.
+        load();
       })
       .catch(() => undefined);
     return () => {
@@ -261,7 +280,7 @@ function HistoryPage({ onOpen, now }: { onOpen: (url: string) => void; now: () =
       </div>
       {error ? <div role="alert" className="px-3 py-1 text-[11px] text-destructive">{error}</div> : null}
       <ul aria-label="History" className="min-h-0 flex-1 overflow-y-auto px-2 py-1">
-        {entries.length === 0 ? <li className="px-2 py-4 text-center text-muted-foreground">No browsing history.</li> : null}
+        {loaded && entries.length === 0 ? <li className="px-2 py-4 text-center text-muted-foreground">No browsing history.</li> : null}
         {entries.map((entry) => (
           <li key={entry.url} className="flex items-center gap-2 rounded px-2 py-1 hover:bg-accent/60">
             <span className="w-28 shrink-0 font-mono text-[10px] text-muted-foreground">{new Date(entry.lastVisitedAt).toLocaleString()}</span>

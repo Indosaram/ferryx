@@ -9,6 +9,7 @@ import { BrowserToolbar } from "./BrowserToolbar";
 
 const browserMocks = vi.hoisted(() => ({
   focusBrowser: vi.fn(async () => undefined),
+  focusAppWebview: vi.fn(async () => undefined),
   getBrowserState: vi.fn(),
   goBackBrowser: vi.fn(async () => undefined),
   goForwardBrowser: vi.fn(async () => undefined),
@@ -245,6 +246,56 @@ describe("BrowserToolbar omnibox", () => {
     fireEvent.keyDown(input, { key: "Escape" });
     expect(input).not.toHaveAttribute("aria-controls");
     expect(input).not.toHaveAttribute("aria-activedescendant");
+  });
+
+  it("reverts the typed text to the current page address on Escape and closes suggestions", async () => {
+    const props = { onNavigate: vi.fn(), onReload: vi.fn() };
+    const { rerender } = render(<BrowserToolbar tab={tab} {...props} />);
+    const input = (await focusOmnibox()) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "git" } });
+    expect(input.value).toBe("git");
+
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(input.value).toBe(tab.url);
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(props.onNavigate).not.toHaveBeenCalled();
+
+    // The page moved on while the user typed: Escape shows the page's address now.
+    fireEvent.change(input, { target: { value: "half typed" } });
+    rerender(<BrowserToolbar tab={{ ...tab, url: "https://next.example.com/" }} {...props} />);
+    expect(input.value).toBe("half typed");
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(input.value).toBe("https://next.example.com/");
+  });
+
+  it("moves OS keyboard focus to the app webview before focusing the address bar", async () => {
+    const order: string[] = [];
+    let release: () => void = () => undefined;
+    browserMocks.focusAppWebview.mockImplementation(() => {
+      order.push("native");
+      return new Promise<undefined>((resolve) => {
+        release = () => resolve(undefined);
+      });
+    });
+    render(<BrowserToolbar tab={tab} onNavigate={vi.fn()} onReload={vi.fn()} />);
+    const input = screen.getByLabelText("URL address bar");
+    const focus = HTMLElement.prototype.focus;
+    vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function (this: HTMLElement, options?: FocusOptions) {
+      if (this === input) order.push("input");
+      focus.call(this, options);
+    });
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent(BROWSER_SHORTCUT_EVENT, { detail: { browserId: tab.browserId, action: "focus-address" } }));
+    });
+    expect(browserMocks.focusAppWebview).toHaveBeenCalledOnce();
+    expect(order[0]).toBe("native");
+    expect(order.indexOf("input")).toBeGreaterThan(0);
+
+    const before = order.length;
+    await act(async () => release());
+    expect(order.slice(before)).toEqual(["input"]);
+    expect(document.activeElement).toBe(input);
   });
 
   it("stars the page with the button and the bookmark shortcut", async () => {

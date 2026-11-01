@@ -42,7 +42,7 @@ pub use windows::grant_sandbox_read;
 #[cfg(target_os = "macos")]
 pub use macos::window_number;
 #[cfg(target_os = "linux")]
-pub use linux::{parent_xid, WAYLAND_REASON};
+pub use linux::{parent_xid, take_x_focus, WAYLAND_REASON};
 
 /// A pane rectangle in the units the engine places windows in: pixels relative to the Ferryx
 /// window on Windows, screen points from the top-left on macOS.

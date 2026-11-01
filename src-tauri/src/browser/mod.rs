@@ -6,6 +6,7 @@ pub mod cef_engine;
 pub mod chromium_cookie_source;
 pub mod chromium_cookies;
 pub mod cookies;
+pub mod data_paths;
 #[cfg(feature = "desktop")]
 pub mod default_browser;
 pub mod download;

@@ -37,7 +37,7 @@ fn parse_profile(profile: Option<String>) -> Result<BrowserProfileId, IpcError> 
 
 /// The Chromium data dir the engine uses for `profile`.
 fn profile_root(data: &Path, profile: &BrowserProfileId) -> PathBuf {
-    data.join("browser-cef").join(profile.as_str())
+    crate::browser::data_paths::cef_profile_dir(data, profile.as_str())
 }
 
 /// A private profile keeps nothing on disk, so it never lists extensions.

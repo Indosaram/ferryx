@@ -29,3 +29,42 @@ pub fn parent_xid<R: tauri::Runtime>(window: &tauri::Window<R>) -> Option<isize>
 pub fn repaint(_parent: isize, _window: Option<isize>) -> bool {
     true
 }
+
+#[link(name = "X11")]
+unsafe extern "C" {
+    fn XOpenDisplay(name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
+    fn XSetInputFocus(
+        display: *mut std::ffi::c_void,
+        focus: std::ffi::c_ulong,
+        revert_to: std::ffi::c_int,
+        time: std::ffi::c_ulong,
+    ) -> std::ffi::c_int;
+    fn XFlush(display: *mut std::ffi::c_void) -> std::ffi::c_int;
+}
+
+thread_local! {
+    /// A connection of Ferryx's own for focus requests, opened on the main thread on first use;
+    /// window ids are server-wide, so it can focus the toplevel GTK created.
+    static FOCUS_DISPLAY: std::cell::Cell<*mut std::ffi::c_void> = const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
+
+/// Moves X keyboard focus to the Ferryx toplevel `xid`, away from an engine child window.
+pub fn take_x_focus(xid: isize) {
+    const REVERT_TO_PARENT: std::ffi::c_int = 2;
+    FOCUS_DISPLAY.with(|cell| {
+        if cell.get().is_null() {
+            // SAFETY: a null name opens $DISPLAY; the connection lives for the process.
+            cell.set(unsafe { XOpenDisplay(std::ptr::null()) });
+        }
+        let display = cell.get();
+        if display.is_null() {
+            tracing::warn!("no X display to move keyboard focus back to Ferryx");
+            return;
+        }
+        // SAFETY: `xid` is the live Ferryx toplevel on this server (`parent_xid`).
+        unsafe {
+            XSetInputFocus(display, xid as std::ffi::c_ulong, REVERT_TO_PARENT, 0);
+            XFlush(display);
+        }
+    });
+}

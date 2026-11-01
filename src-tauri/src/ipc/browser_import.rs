@@ -53,7 +53,7 @@ fn profile_sink<R: tauri::Runtime>(
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     let (cef_cache_dir, notify): (Option<PathBuf>, crate::browser::import::cookie_sink::EngineNotify) = {
         let installed = crate::browser::cef_engine::engine_dir(&data_dir).is_some();
-        let dir = installed.then(|| data_dir.join("browser-cef").join(profile.as_str()));
+        let dir = installed.then(|| crate::browser::data_paths::cef_profile_dir(&data_dir, profile.as_str()));
         let name = profile.as_str().to_string();
         (
             dir,

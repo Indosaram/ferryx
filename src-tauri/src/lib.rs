@@ -1287,6 +1287,37 @@ thread_local! {
     static QA_PRIMARY_WINDOW_PROFILE: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
+/// Stops Tauri from creating the main window from config, so setup can build it with an
+/// isolated data folder (see [`build_isolated_main_window`]).
+#[cfg(feature = "desktop")]
+fn defer_main_window<R: tauri::Runtime>(context: &mut tauri::Context<R>) {
+    if let Some(window) = context.config_mut().app.windows.iter_mut().find(|window| window.label == "main") {
+        window.create = false;
+    }
+}
+
+/// Builds the main window from config with its webview data under `FERRYX_DATA_DIR`: the
+/// WebView2 user data folder (otherwise `%LOCALAPPDATA%\<identifier>`), the WebKitGTK data
+/// dir, or on macOS a website data store of its own.
+#[cfg(feature = "desktop")]
+fn build_isolated_main_window<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
+    let Some(data_dir) =
+        crate::browser::data_paths::shared_webview_dir(std::env::var_os("FERRYX_DATA_DIR").as_deref())
+    else {
+        return Ok(());
+    };
+    let Some(config) = app.config().app.windows.iter().find(|window| window.label == "main").cloned() else {
+        return Ok(());
+    };
+    let builder = tauri::WebviewWindowBuilder::from_config(app, &config)?;
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.data_directory(data_dir);
+    #[cfg(target_os = "macos")]
+    let builder = builder.data_store_identifier(crate::browser::data_paths::data_store_identifier(&data_dir));
+    builder.build()?;
+    Ok(())
+}
+
 #[cfg(feature = "desktop")]
 pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     let daemon_client = Arc::new(DaemonClient::new());
@@ -1431,6 +1462,15 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             let _ = event;
         })
         .setup(move |app| {
+            // First, so everything below sees the main window exactly as in a normal run.
+            // The QA primary window builds its own main window below.
+            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+            let qa_window = QA_PRIMARY_WINDOW_PROFILE.with(|slot| slot.borrow().is_some());
+            #[cfg(not(all(feature = "local-split-qa", feature = "native-terminal")))]
+            let qa_window = false;
+            if !qa_window && app.get_webview_window("main").is_none() {
+                build_isolated_main_window(app)?;
+            }
             // Bridge-kind changes happen outside any webview callback (Windows upgrades from
             // the async CDP leak probe), so the manager publishes them as browser_state_changed.
             crate::ipc::browser::install_browser_state_emitter(
@@ -1578,15 +1618,22 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         // Restore the main window's size, position, and maximized state from the last run.
-        .plugin(
-            tauri_plugin_window_state::Builder::default()
-                .with_state_flags(
-                    tauri_plugin_window_state::StateFlags::SIZE
-                        | tauri_plugin_window_state::StateFlags::POSITION
-                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
-                )
-                .build(),
-        )
+        .plugin({
+            let window_state = tauri_plugin_window_state::Builder::default().with_state_flags(
+                tauri_plugin_window_state::StateFlags::SIZE
+                    | tauri_plugin_window_state::StateFlags::POSITION
+                    | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+            );
+            // The plugin joins the name onto the app config dir; an absolute path replaces it,
+            // which keeps an isolated run's window state under FERRYX_DATA_DIR.
+            let window_state = match crate::browser::data_paths::window_state_file(
+                std::env::var_os("FERRYX_DATA_DIR").as_deref(),
+            ) {
+                Some(file) => window_state.with_filename(file.to_string_lossy().into_owned()),
+                None => window_state,
+            };
+            window_state.build()
+        })
         .manage(
             Arc::new(crate::ipc::browser::ProductionDaemonReclaimTransport::new(
                 Arc::clone(&remote_manager),
@@ -1842,6 +1889,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_browser_set_visible,
         cmd_browser_set_zoom,
         cmd_browser_focus,
+        cmd_browser_focus_app,
         cmd_browser_get_state,
         cmd_browser_find,
         cmd_browser_clear_find,
@@ -2863,6 +2911,15 @@ pub fn run() {
         .try_init();
 
     let context = tauri::generate_context!();
+    // An isolated run (FERRYX_DATA_DIR) builds the main window itself in setup, with its webview
+    // data under that dir; a normal run keeps the config-created window and its data folder.
+    let context = {
+        let mut context = context;
+        if crate::browser::data_paths::shared_webview_dir(std::env::var_os("FERRYX_DATA_DIR").as_deref()).is_some() {
+            defer_main_window(&mut context);
+        }
+        context
+    };
     #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
     let qa_profile = match (
         std::env::var("FERRYX_QA_BARRIER_DIR"),

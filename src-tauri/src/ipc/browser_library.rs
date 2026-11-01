@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 
 use crate::browser::library::bookmarks::{
     Bookmark, BookmarkError, BookmarkFolder, BookmarkTree, ImportedBookmark, LoadOutcome, BAR_ROOT,
@@ -31,12 +31,7 @@ fn recorder() -> &'static HistoryRecorder {
 }
 
 fn library_data_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, IpcError> {
-    if let Some(dir) = std::env::var_os("FERRYX_DATA_DIR").filter(|dir| !dir.is_empty()) {
-        return Ok(PathBuf::from(dir));
-    }
-    app.path()
-        .app_data_dir()
-        .map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string()))
+    crate::browser::data_paths::app_data_root(app).map_err(|error| IpcError::new(IpcErrorCode::IoError, error))
 }
 
 fn library<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Arc<BrowserLibrary>, IpcError> {
