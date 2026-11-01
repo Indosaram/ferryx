@@ -38,40 +38,32 @@ describe("MobileOverflowSheet", () => {
     expect(screen.getByRole("dialog", { name: "Actions" })).toBeInTheDocument();
     expect(screen.getByText("New terminal")).toBeInTheDocument();
     expect(screen.getByText("New worktree")).toBeInTheDocument();
-    expect(screen.getByText("Machines")).toBeInTheDocument();
+    expect(screen.getByText("Computers")).toBeInTheDocument();
     expect(screen.queryByText("Sign out")).not.toBeInTheDocument();
     expect(screen.getByText("Relay")).toBeInTheDocument();
     expect(screen.getByText("v2026.1012.0")).toBeInTheDocument();
   });
 
-  it("renders Machines vs Sign out depending on mode props", () => {
-    // Account mode (onSignOut provided)
-    const { rerender } = render(
-      <MobileOverflowSheet
-        open
-        onOpenChange={vi.fn()}
-        onNewTerminal={vi.fn()}
-        onNewWorktree={vi.fn()}
-        onSignOut={vi.fn()}
-      />,
+  it("shows Computers and Sign out together when both exist, with sign out set apart", () => {
+    render(
+      <MobileOverflowSheet open onOpenChange={vi.fn()} onOpenMachines={vi.fn()} onSignOut={vi.fn()} />,
     );
+    expect(screen.getByTestId("overflow-action-machines")).toHaveTextContent("Computers");
+    const signOut = screen.getByTestId("overflow-action-sign-out");
+    expect(signOut).toHaveClass("text-chat-danger");
+    expect(signOut.parentElement).toHaveClass("border-t");
+  });
 
-    expect(screen.getByText("Sign out")).toBeInTheDocument();
-    expect(screen.queryByText("Machines")).not.toBeInTheDocument();
-
-    // Host mode (onOpenMachines provided)
-    rerender(
-      <MobileOverflowSheet
-        open
-        onOpenChange={vi.fn()}
-        onNewTerminal={vi.fn()}
-        onNewWorktree={vi.fn()}
-        onOpenMachines={vi.fn()}
-      />,
-    );
-
-    expect(screen.getByText("Machines")).toBeInTheDocument();
-    expect(screen.queryByText("Sign out")).not.toBeInTheDocument();
+  it("signs out only on a second, explicit press", () => {
+    const onSignOut = vi.fn();
+    const onOpenChange = vi.fn();
+    render(<MobileOverflowSheet open onOpenChange={onOpenChange} onSignOut={onSignOut} />);
+    fireEvent.click(screen.getByTestId("overflow-action-sign-out"));
+    expect(onSignOut).not.toHaveBeenCalled();
+    expect(screen.getByTestId("overflow-action-sign-out")).toHaveTextContent("Tap again to sign out");
+    fireEvent.click(screen.getByTestId("overflow-action-sign-out"));
+    expect(onSignOut).toHaveBeenCalledTimes(1);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
   it("disables New terminal and New worktree when disabled is true (e.g. pending or no workspaceId)", () => {
@@ -115,7 +107,7 @@ describe("MobileOverflowSheet", () => {
     fireEvent.click(screen.getByText("New worktree"));
     expect(onNewWorktree).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByText("Machines"));
+    fireEvent.click(screen.getByText("Computers"));
     expect(onOpenMachines).toHaveBeenCalledTimes(1);
   });
 });

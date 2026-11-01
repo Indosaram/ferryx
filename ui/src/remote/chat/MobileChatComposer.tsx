@@ -355,7 +355,7 @@ export const MobileChatComposer = React.forwardRef<
           data-testid="chat-composer-held"
           role="group"
           aria-label="Held messages"
-          className="flex flex-col gap-1 px-3 pt-2 pb-1 border-b border-chat-composer-border/60"
+          className="flex flex-col gap-1 px-3 pt-2 pb-1 border-b border-chat-border"
         >
           <span className="text-xs text-chat-foreground-secondary">
             {heldUnsaved

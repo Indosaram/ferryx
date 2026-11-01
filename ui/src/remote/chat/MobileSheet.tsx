@@ -42,6 +42,29 @@ export type MobileSheetProps = {
   testId?: string;
 };
 
+/**
+ * Make everything outside the sheet inert and stop the page behind it scrolling: every sibling of
+ * the sheet and of each of its ancestors up to <body>. The sheet stays inside the app root (its
+ * tokens are scoped there), and a sheet opened over another leaves only the topmost reachable.
+ * Returns the undo, which touches only what it changed.
+ */
+function isolate(layer: HTMLElement): () => void {
+  const changed: HTMLElement[] = [];
+  for (let node: HTMLElement | null = layer; node && node !== document.body; node = node.parentElement) {
+    for (const sibling of Array.from(node.parentElement?.children ?? [])) {
+      if (sibling === node || !(sibling instanceof HTMLElement) || sibling.hasAttribute("inert")) continue;
+      sibling.setAttribute("inert", "");
+      changed.push(sibling);
+    }
+  }
+  const overflow = document.body.style.overflow;
+  document.body.style.overflow = "hidden";
+  return () => {
+    for (const element of changed) element.removeAttribute("inert");
+    document.body.style.overflow = overflow;
+  };
+}
+
 export type MobileSheetItemProps = {
   icon?: LucideIcon;
   label: string;
@@ -51,6 +74,8 @@ export type MobileSheetItemProps = {
   disabled?: boolean;
   testId?: string;
   selected?: boolean;
+  /** A destructive action (sign out): drawn in the danger ink. */
+  danger?: boolean;
 };
 
 export function MobileSheet({
@@ -64,6 +89,7 @@ export function MobileSheet({
   testId,
 }: MobileSheetProps) {
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const layerRef = useRef<HTMLDivElement | null>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const closeFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -144,15 +170,10 @@ export function MobileSheet({
     };
   }, [isClosing]);
 
-  // Escape closes from a window-level capture listener, as in MobileHostDrawer.tsx:153-157.
   useEffect(() => {
-    if (!open) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onOpenChange(false);
-    };
-    window.addEventListener("keydown", closeOnEscape, true);
-    return () => window.removeEventListener("keydown", closeOnEscape, true);
-  }, [open, onOpenChange]);
+    if (!open || !layerRef.current) return;
+    return isolate(layerRef.current);
+  }, [open, isMounted]);
 
   // Capture whatever held focus when the sheet opens, focus the first focusable element inside
   // it, and hand focus back on close so the trigger is never left pointing at removed DOM.
@@ -179,8 +200,14 @@ export function MobileSheet({
     }
   };
 
-  // aria-modal promises focus stays inside: wrap Tab / Shift+Tab at the panel edges.
+  // Escape is handled on the panel, so it closes only this (the topmost) sheet; aria-modal
+  // promises focus stays inside, so Tab / Shift+Tab wrap at the panel edges.
   const handlePanelKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      onOpenChange(false);
+      return;
+    }
     if (event.key !== "Tab") return;
     const panel = panelRef.current;
     if (!panel) return;
@@ -206,15 +233,19 @@ export function MobileSheet({
 
   return (
     <div
+      ref={layerRef}
       className={cn("fixed inset-0 z-50 flex flex-col justify-end", isClosing && "pointer-events-none")}
       data-testid={testId}
     >
-      <button
-        type="button"
-        aria-label={closeAriaLabel ?? `Close ${ariaLabel}`}
+      {/* the close button below is the named control; the scrim is a pointer target only */}
+      <div
+        aria-hidden="true"
         data-testid={testId ? `${testId}-backdrop` : undefined}
         onClick={() => onOpenChange(false)}
-        className={cn("absolute inset-0 bg-black/50", isClosing ? "animate-fade-out" : "animate-fade-in")}
+        className={cn(
+          "absolute inset-0 bg-chat-screen/80 motion-reduce:animate-none",
+          isClosing ? "animate-fade-out" : "animate-fade-in",
+        )}
       />
       <div
         ref={panelRef}
@@ -225,15 +256,12 @@ export function MobileSheet({
         onKeyDown={handlePanelKeyDown}
         onAnimationEnd={handleAnimationEnd}
         className={cn(
-          "relative z-10 flex max-h-[80dvh] min-w-0 flex-col overflow-hidden rounded-t-[20px] border-t border-chat-border bg-chat-surface focus:outline-none",
+          "relative z-10 flex max-h-[80dvh] min-w-0 flex-col overflow-hidden rounded-t-[1.25rem] border-t border-chat-border bg-chat-surface focus:outline-none",
           isClosing ? "animate-sheet-out" : "animate-sheet-in",
         )}
       >
-        <div className="flex justify-center px-4 pt-2.5" aria-hidden="true">
-          <span className="h-1 w-9 rounded-full bg-chat-foreground-secondary/40" />
-        </div>
-        <div className="flex items-center justify-between gap-3 px-4 pb-1 pt-1.5">
-          <h2 className="min-w-0 truncate text-[15px] font-semibold text-chat-foreground">{title}</h2>
+        <div className="flex items-center justify-between gap-3 py-1 pl-4 pr-2 pt-2">
+          <h2 className="min-w-0 truncate text-[0.9375rem] font-semibold text-chat-foreground">{title}</h2>
           <button
             type="button"
             aria-label={closeAriaLabel ?? `Close ${ariaLabel}`}
@@ -244,14 +272,19 @@ export function MobileSheet({
             <X className="size-4" aria-hidden="true" />
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto pb-safe-sheet scrollbar-sleek">
+        <div
+          className={cn(
+            "min-h-0 flex-1 overflow-y-auto overscroll-contain scrollbar-sleek",
+            !footer && "pb-safe-sheet",
+          )}
+        >
           <div className="px-2 py-1">{children}</div>
-          {footer ? (
-            <div className="sticky bottom-0 border-t border-chat-border bg-chat-surface px-4 py-3">
-              {footer}
-            </div>
-          ) : null}
         </div>
+        {footer ? (
+          <div className="shrink-0 border-t border-chat-border bg-chat-surface px-4 pt-3 pb-safe-sheet">
+            {footer}
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -266,6 +299,7 @@ export function MobileSheetItem({
   disabled,
   testId,
   selected,
+  danger = false,
 }: MobileSheetItemProps) {
   return (
     <button
@@ -275,18 +309,22 @@ export function MobileSheetItem({
       disabled={disabled}
       onClick={() => onSelect?.()}
       className={cn(
-        "flex min-h-12 w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-chat-foreground transition-colors",
+        "flex min-h-12 w-full items-center gap-3 rounded-xl px-3 py-2 text-left transition-colors",
+        danger ? "text-chat-danger" : "text-chat-foreground",
         "hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
         disabled && "cursor-not-allowed opacity-50 hover:bg-transparent",
       )}
     >
       {Icon ? (
-        <Icon className="size-[18px] shrink-0 text-chat-foreground-secondary" aria-hidden="true" />
+        <Icon
+          className={cn("size-[1.125rem] shrink-0", danger ? "text-chat-danger" : "text-chat-foreground-secondary")}
+          aria-hidden="true"
+        />
       ) : null}
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[15px] leading-5">{label}</span>
+        <span className="block truncate text-[0.9375rem] leading-5">{label}</span>
         {description ? (
-          <span className="mt-0.5 block truncate text-[13px] text-chat-foreground-secondary">
+          <span className="mt-0.5 block truncate text-[0.8125rem] text-chat-foreground-secondary">
             {description}
           </span>
         ) : null}

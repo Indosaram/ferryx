@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Bell, GitBranch, LogOut, Plus, Server } from "lucide-react";
 import { MobileSheet, MobileSheetItem } from "./MobileSheet";
 
@@ -32,10 +33,17 @@ export function MobileOverflowSheet({
   buildStamp,
   disabled = false,
 }: MobileOverflowSheetProps) {
+  // Sign out takes a second, explicit press; closing the sheet forgets the first one.
+  const [confirmingSignOut, setConfirmingSignOut] = useState(false);
+  const changeOpen = (next: boolean) => {
+    if (!next) setConfirmingSignOut(false);
+    onOpenChange(next);
+  };
+
   return (
     <MobileSheet
       open={open}
-      onOpenChange={onOpenChange}
+      onOpenChange={changeOpen}
       title="Actions"
       ariaLabel="Actions"
       testId="mobile-overflow-sheet"
@@ -47,7 +55,7 @@ export function MobileOverflowSheet({
           disabled={disabled}
           onSelect={() => {
             onNewTerminal();
-            onOpenChange(false);
+            changeOpen(false);
           }}
           testId="overflow-action-new-terminal"
         />
@@ -60,9 +68,21 @@ export function MobileOverflowSheet({
           disabled={disabled}
           onSelect={() => {
             onNewWorktree();
-            onOpenChange(false);
+            changeOpen(false);
           }}
           testId="overflow-action-new-worktree"
+        />
+      ) : null}
+
+      {onOpenMachines ? (
+        <MobileSheetItem
+          icon={Server}
+          label="Computers"
+          onSelect={() => {
+            onOpenMachines();
+            changeOpen(false);
+          }}
+          testId="overflow-action-machines"
         />
       ) : null}
 
@@ -72,36 +92,34 @@ export function MobileOverflowSheet({
           label="Phone alerts"
           onSelect={() => {
             onOpenPhoneAlerts();
-            onOpenChange(false);
+            changeOpen(false);
           }}
           testId="overflow-action-phone-alerts"
         />
       ) : null}
 
       {onSignOut ? (
-        <MobileSheetItem
-          icon={LogOut}
-          label="Sign out"
-          onSelect={() => {
-            onSignOut();
-            onOpenChange(false);
-          }}
-          testId="overflow-action-sign-out"
-        />
-      ) : onOpenMachines ? (
-        <MobileSheetItem
-          icon={Server}
-          label="Machines"
-          onSelect={() => {
-            onOpenMachines();
-            onOpenChange(false);
-          }}
-          testId="overflow-action-machines"
-        />
+        <div className="mt-1 border-t border-chat-border pt-1">
+          <MobileSheetItem
+            icon={LogOut}
+            label={confirmingSignOut ? "Tap again to sign out" : "Sign out"}
+            description={confirmingSignOut ? "You'll need to sign in again on this phone." : undefined}
+            danger
+            onSelect={() => {
+              if (!confirmingSignOut) {
+                setConfirmingSignOut(true);
+                return;
+              }
+              onSignOut();
+              changeOpen(false);
+            }}
+            testId="overflow-action-sign-out"
+          />
+        </div>
       ) : null}
 
       {connectionLabel || buildStamp ? (
-        <div className="mt-2 flex items-center justify-between px-3 py-2 font-mono text-[11px] text-chat-foreground-secondary">
+        <div className="mt-2 flex items-center justify-between px-3 py-2 font-mono text-xs text-chat-foreground-secondary">
           <span>{connectionLabel ?? ""}</span>
           <span>{buildStamp ?? ""}</span>
         </div>
@@ -109,4 +127,3 @@ export function MobileOverflowSheet({
     </MobileSheet>
   );
 }
-

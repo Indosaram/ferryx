@@ -77,13 +77,16 @@ describe("MobileSheet", () => {
     expect(layer).toHaveClass("fixed", "inset-0", "z-50");
 
     const backdrop = screen.getByTestId("sheet-backdrop");
-    expect(backdrop).toHaveAttribute("aria-label", "Close Actions");
-    expect(backdrop).toHaveClass("bg-black/50");
+    // the scrim is a pointer target only: one named Close control, not two
+    expect(backdrop).toHaveAttribute("aria-hidden", "true");
+    expect(backdrop.tagName).not.toBe("BUTTON");
+    expect(backdrop).toHaveClass("bg-chat-screen/80");
+    expect(screen.getAllByRole("button", { name: "Close Actions" })).toHaveLength(1);
 
     const dialog = screen.getByRole("dialog", { name: "Actions" });
     expect(dialog).toHaveAttribute("aria-modal", "true");
     expect(dialog).toHaveClass(
-      "rounded-t-[20px]",
+      "rounded-t-[1.25rem]",
       "bg-chat-surface",
       "border-t",
       "border-chat-border",
@@ -91,30 +94,56 @@ describe("MobileSheet", () => {
       "animate-sheet-in",
     );
 
-    const handle = dialog.querySelector("span.h-1.w-9");
-    expect(handle).toBeInTheDocument();
-    expect(handle).toHaveClass("rounded-full", "bg-chat-foreground-secondary/40");
+    // no grabber: the sheet has no drag-to-dismiss, so it does not draw the affordance
+    expect(dialog.querySelector("span.h-1.w-9")).not.toBeInTheDocument();
 
     const title = dialog.querySelector("h2");
     expect(title).toHaveTextContent("Actions");
-    expect(title).toHaveClass("text-[15px]", "font-semibold");
+    expect(title).toHaveClass("text-[0.9375rem]", "font-semibold");
     expect(dialog.querySelector('[aria-label="Close Actions"] svg')).toBeInTheDocument();
 
-    const scroller = dialog.querySelector(".pb-safe-sheet");
-    expect(scroller).toBeInTheDocument();
-    expect(scroller).toHaveClass("overflow-y-auto");
+    // the footer sits outside the scroller and carries the safe-area padding itself
+    const footer = screen.getByRole("button", { name: "New terminal" }).parentElement as HTMLElement;
+    expect(footer).toHaveClass("pb-safe-sheet");
+    expect(footer.closest(".overflow-y-auto")).toBeNull();
 
     expect(screen.getByText("Machines")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "New terminal" })).toBeInTheDocument();
   });
 
-  it("closes when Escape is pressed", () => {
+  it("closes when Escape is pressed inside the sheet", () => {
     const onOpenChange = vi.fn();
     render(<MobileSheet open onOpenChange={onOpenChange} title="Actions" ariaLabel="Actions" />);
 
-    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Actions" }), { key: "Escape" });
 
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("closes only the topmost of two stacked sheets on Escape", () => {
+    const closeLower = vi.fn();
+    const closeUpper = vi.fn();
+    render(
+      <>
+        <MobileSheet open onOpenChange={closeLower} title="Actions" ariaLabel="Actions" />
+        <MobileSheet open onOpenChange={closeUpper} title="Options" ariaLabel="Options" />
+      </>,
+    );
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Options" }), { key: "Escape" });
+    expect(closeUpper).toHaveBeenCalledWith(false);
+    expect(closeLower).not.toHaveBeenCalled();
+  });
+
+  it("makes the page behind it inert while open and restores it on close", () => {
+    render(
+      <div>
+        <button type="button" data-testid="behind">Behind</button>
+        <ControlledSheetHarness initialOpen />
+      </div>,
+    );
+    expect(screen.getByTestId("behind")).toHaveAttribute("inert");
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Actions" }), { key: "Escape" });
+    expect(screen.getByTestId("behind")).not.toHaveAttribute("inert");
   });
 
   it("closes when the backdrop is tapped", () => {
@@ -392,9 +421,9 @@ describe("MobileSheetItem", () => {
 
     const active = screen.getByTestId("row-active");
     expect(active).toHaveClass("min-h-12");
-    expect(active.querySelector("svg")).toHaveClass("size-[18px]");
-    expect(screen.getByText("build box")).toHaveClass("text-[15px]");
-    expect(screen.getByText("orca/ws/main")).toHaveClass("text-[13px]", "text-chat-foreground-secondary");
+    expect(active.querySelector("svg")).toHaveClass("size-[1.125rem]");
+    expect(screen.getByText("build box")).toHaveClass("text-[0.9375rem]");
+    expect(screen.getByText("orca/ws/main")).toHaveClass("text-[0.8125rem]", "text-chat-foreground-secondary");
     expect(active).toHaveAttribute("aria-current", "true");
     expect(active).not.toHaveAttribute("aria-selected");
     expect(screen.getByTestId("row-idle")).not.toHaveAttribute("aria-current");
