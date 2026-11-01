@@ -12,9 +12,11 @@ import {
   readiness,
   runSetup,
   SETUP_NEXT_ACTIONS,
+  setupChecklist,
   setupFinished,
   setupNeedsAttention,
   setupProjectsFrom,
+  type SetupChecklistRowId,
   type SetupNextAction,
   type SetupStatus,
 } from "./supervisorSetup";
@@ -172,6 +174,126 @@ describe("readiness and actionFor", () => {
 
   it("falls back to the engine state when a fault carries nothing", () => {
     expect(actionFor(status("fix_engine", { engineState: "stopped" })).description).toContain('"stopped"');
+  });
+});
+
+// Checklist cases build on a bare status: nothing done, no import chosen.
+function bare(nextAction: SetupNextAction, over: Record<string, unknown> = {}): SetupStatus {
+  return normalizeSetupStatus({
+    nextAction,
+    engineEnabled: false,
+    engineInstalled: true,
+    engineState: "absent",
+    owner: null,
+    projects: 0,
+    intake: { unifiedOpen: false, legacy: "open", origin: "upgrade", legacyHistory: true },
+    autoCutover: false,
+    memoryImport: { enabled: false },
+    adoptable: 0,
+    ...over,
+  })!;
+}
+
+function row(status: SetupStatus, id: SetupChecklistRowId) {
+  return setupChecklist(status).find((item) => item.id === id);
+}
+
+describe("setupChecklist", () => {
+  it("lists the stages in order and hides memory when import was not chosen", () => {
+    expect(setupChecklist(bare("enable_engine")).map((item) => item.id)).toEqual([
+      "engine_on",
+      "engine_ready",
+      "owner",
+      "projects",
+      "cutover",
+      "earlier_jobs",
+    ]);
+    expect(setupChecklist(bare("none", { memoryImport: { enabled: true } })).map((item) => item.id)).toContain("memory");
+  });
+
+  it.each<[string, Record<string, unknown>, SetupNextAction, string, string]>([
+    ["off", {}, "enable_engine", "pending", "Off"],
+    ["on", { engineEnabled: true }, "wait_engine", "done", "On"],
+    ["enabled but not installed", { engineEnabled: true, engineInstalled: false }, "fix_engine", "blocked", "Not included in this install"],
+    ["restarting now", { engineEnabled: true, restartRequired: true }, "restart_required", "active", "Restarting to apply the change"],
+    ["restart pending", { engineEnabled: true, restartRequired: true }, "create_owner", "pending", "Restarting to apply the change"],
+  ])("engine on: %s", (_label, over, next, state, detail) => {
+    expect(row(bare(next, over), "engine_on")).toMatchObject({ state, detail });
+  });
+
+  it.each<[string, Record<string, unknown>, SetupNextAction, string, string]>([
+    ["ready", { engineState: "ready" }, "none", "done", "Ready"],
+    ["starting", { engineEnabled: true, engineState: "starting" }, "wait_engine", "active", "Starting"],
+    ["fault with code", { engineState: "degraded", engineFault: { code: "MHC_CAPABILITY_MISSING", message: "x" } }, "fix_engine", "blocked", "MHC_CAPABILITY_MISSING"],
+    ["fault without code", { engineState: "degraded", engineFault: { message: "x" } }, "fix_engine", "blocked", "degraded"],
+    ["fix without a fault", { engineState: "stopped" }, "fix_engine", "blocked", "stopped"],
+    ["engine off", {}, "enable_engine", "pending", "Waits for the engine to be on"],
+    ["enabled, not started", { engineEnabled: true, engineState: "stopped" }, "create_owner", "pending", "stopped"],
+  ])("engine ready: %s", (_label, over, next, state, detail) => {
+    expect(row(bare(next, over), "engine_ready")).toMatchObject({ state, detail });
+  });
+
+  it("owner: pending without one, done with the principal", () => {
+    expect(row(bare("create_owner"), "owner")).toMatchObject({ state: "pending", detail: "Not set yet" });
+    expect(row(bare("none", { owner: { supervisorId: "sup-1", ownerPrincipal: "slack:T1:U1" } }), "owner")).toMatchObject({
+      state: "done",
+      detail: "slack:T1:U1",
+    });
+    expect(row(bare("none", { owner: { supervisorId: "sup-1" } }), "owner")).toMatchObject({ state: "done", detail: "sup-1" });
+  });
+
+  it("projects: pending without any, done with the count", () => {
+    expect(row(bare("map_projects"), "projects")).toMatchObject({ state: "pending", detail: "None connected yet" });
+    expect(row(bare("none", { projects: 1 }), "projects")).toMatchObject({ state: "done", detail: "1 project" });
+    expect(row(bare("none", { projects: 3 }), "projects")).toMatchObject({ state: "done", detail: "3 projects" });
+  });
+
+  it.each<[string, Record<string, unknown>, string, string]>([
+    ["cut over after upgrade", { unifiedOpen: true, legacy: "stopped", origin: "cutover", legacyHistory: true }, "done", "Done"],
+    ["fresh install taking requests", { unifiedOpen: true, legacy: "idle", origin: "fresh", legacyHistory: false }, "done", "Taking requests"],
+    ["upgrade with the earlier runner still on", { unifiedOpen: true, legacy: "open", origin: "upgrade", legacyHistory: true }, "pending", "The earlier job runner is still on"],
+    ["not yet", { unifiedOpen: false, legacy: "open", origin: "upgrade", legacyHistory: true }, "pending", "Not yet"],
+    ["rolled back", { unifiedOpen: false, legacy: "open", origin: "rollback", legacyHistory: true }, "pending", "Rolled back; it will not cut over on its own"],
+  ])("cutover: %s", (_label, intake, state, detail) => {
+    expect(row(bare("cutover", { intake }), "cutover")).toMatchObject({ state, detail });
+  });
+
+  it("cutover: waits for the engine when it cuts over automatically", () => {
+    expect(row(bare("wait_engine", { autoCutover: true }), "cutover")).toMatchObject({ state: "pending", detail: "waiting for the engine" });
+  });
+
+  it.each<[string, Record<string, unknown>, SetupNextAction, string, string]>([
+    ["imported", { enabled: true, sessions: 42, turns: 318, lastAt: "2026-11-01T09:00:00Z" }, "none", "done", "42 sessions, 318 notes"],
+    ["imported one", { enabled: true, sessions: 1, turns: 1, lastAt: "2026-11-01T09:00:00Z" }, "none", "done", "1 session, 1 note"],
+    ["importing now", { enabled: true }, "import_memory", "active", "Reading what you typed"],
+    ["not yet", { enabled: true }, "cutover", "pending", "Not yet"],
+  ])("memory: %s", (_label, memoryImport, next, state, detail) => {
+    expect(row(bare(next, { memoryImport }), "memory")).toMatchObject({ state, detail });
+  });
+
+  it("earlier jobs: pending with a count, done with none", () => {
+    expect(row(bare("adopt", { adoptable: 3 }), "earlier_jobs")).toMatchObject({ state: "pending", detail: "3 can be handed over" });
+    expect(row(bare("none"), "earlier_jobs")).toMatchObject({ state: "done", detail: "None waiting" });
+  });
+
+  it("has at most one active row: the stage in progress", () => {
+    for (const next of SETUP_NEXT_ACTIONS) {
+      const status = bare(next, { engineEnabled: true, restartRequired: next === "restart_required", memoryImport: { enabled: true } });
+      expect(setupChecklist(status).filter((item) => item.state === "active").length).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it("is all done after an upgrade that cut over, imported and has nothing to adopt", () => {
+    const done = bare("none", {
+      engineEnabled: true,
+      engineState: "ready",
+      owner: { supervisorId: "sup-1", ownerPrincipal: "local:me" },
+      projects: 2,
+      intake: { unifiedOpen: true, legacy: "stopped", origin: "cutover", legacyHistory: true },
+      autoCutover: true,
+      memoryImport: { enabled: true, sessions: 4, turns: 20, lastAt: "2026-11-01T00:00:00Z" },
+    });
+    expect(setupChecklist(done).every((item) => item.state === "done")).toBe(true);
   });
 });
 

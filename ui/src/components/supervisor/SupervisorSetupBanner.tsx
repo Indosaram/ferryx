@@ -2,10 +2,11 @@
 // blocked; never while unknown, ready or working): what is missing and the one action that
 // finishes it. Transport-free: the desktop passes IPC actions, the phone its HTTP actions, and a
 // view-only device passes none and sees the text only.
-import { AlertCircle, Sparkles, X } from "lucide-react";
+import { AlertCircle, ChevronDown, Sparkles, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { cn } from "../../lib/cn";
+import { SetupChecklist } from "./SetupChecklist";
 import {
   actionFor,
   adoptSummary,
@@ -69,6 +70,7 @@ export function SupervisorSetupBanner({
   const [importMemory, setImportMemory] = useState(true);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [expanded, setExpanded] = useState(false);
   const kind = status?.nextAction ?? null;
   // A notice belongs to the step it answered; a new step starts clean.
   useEffect(() => setNotice(null), [kind]);
@@ -123,6 +125,20 @@ export function SupervisorSetupBanner({
           <p data-testid="supervisor-setup-description" className="mt-0.5 break-words text-muted-foreground">
             {action.description}
           </p>
+          <button
+            type="button"
+            data-testid="supervisor-setup-toggle-steps"
+            aria-expanded={expanded}
+            onClick={() => setExpanded((open) => !open)}
+            className={cn(
+              "mt-1 inline-flex items-center gap-1 rounded text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+              touch ? "min-h-11" : null,
+            )}
+          >
+            <ChevronDown aria-hidden="true" className={cn("size-3.5 transition-transform", expanded ? "rotate-180" : null)} />
+            {expanded ? "Hide setup steps" : "Show setup steps"}
+          </button>
+          {expanded ? <SetupChecklist status={status} touch={touch} className="mt-1" /> : null}
         </div>
         {dismissible ? (
           <button

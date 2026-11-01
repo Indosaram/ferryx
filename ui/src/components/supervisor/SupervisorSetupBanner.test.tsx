@@ -92,6 +92,16 @@ describe("SupervisorSetupBanner", () => {
     expect(screen.getByTestId("supervisor-setup-view-only")).toBeInTheDocument();
   });
 
+  it("expands to the setup checklist on request", () => {
+    render(<SupervisorSetupBanner surface="phone" status={status("create_owner")} actions={null} />);
+    expect(screen.queryByRole("list", { name: "Supervisor setup steps" })).toBeNull();
+    const toggle = screen.getByRole("button", { name: "Show setup steps" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+    expect(screen.getByRole("button", { name: "Hide setup steps" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("setup-checklist-owner")).toHaveAttribute("data-state", "pending");
+  });
+
   it("dismisses per next action and returns for a different one", () => {
     const { rerender } = render(<SupervisorSetupBanner surface="desktop" status={status("enable_engine")} actions={actions()} dismissible />);
     fireEvent.click(screen.getByRole("button", { name: "Not now" }));

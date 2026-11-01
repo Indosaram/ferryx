@@ -205,6 +205,87 @@ function jobs(n: number): string {
   return `${n} earlier job${n === 1 ? "" : "s"}`;
 }
 
+export type SetupChecklistRowId = "engine_on" | "engine_ready" | "owner" | "projects" | "cutover" | "memory" | "earlier_jobs";
+
+/** Done, waiting on something, cannot continue, or the one row in progress right now. */
+export type SetupChecklistState = "done" | "pending" | "blocked" | "active";
+
+export type SetupChecklistRow = {
+  id: SetupChecklistRowId;
+  label: string;
+  state: SetupChecklistState;
+  detail: string;
+};
+
+function plural(n: number, one: string, many = `${one}s`): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+function engineOnRow(status: SetupStatus): SetupChecklistRow {
+  const base = { id: "engine_on" as const, label: "Engine on" };
+  if (status.restartRequired) {
+    return { ...base, state: status.nextAction === "restart_required" ? "active" : "pending", detail: "Restarting to apply the change" };
+  }
+  if (status.engineEnabled && status.engineInstalled) return { ...base, state: "done", detail: "On" };
+  if (status.engineEnabled && !status.engineInstalled) return { ...base, state: "blocked", detail: "Not included in this install" };
+  return { ...base, state: "pending", detail: "Off" };
+}
+
+function engineReadyRow(status: SetupStatus): SetupChecklistRow {
+  const base = { id: "engine_ready" as const, label: "Engine ready" };
+  if (status.engineState === "ready" && !status.engineFault) return { ...base, state: "done", detail: "Ready" };
+  if (status.engineFault) return { ...base, state: "blocked", detail: status.engineFault.code || status.engineState };
+  if (status.nextAction === "fix_engine") return { ...base, state: "blocked", detail: status.engineState };
+  if (status.nextAction === "wait_engine") return { ...base, state: "active", detail: "Starting" };
+  return { ...base, state: "pending", detail: status.engineEnabled ? status.engineState : "Waits for the engine to be on" };
+}
+
+function cutoverRow(status: SetupStatus): SetupChecklistRow {
+  const base = { id: "cutover" as const, label: "Cut over to the supervisor" };
+  const { unifiedOpen, legacy, legacyHistory, origin } = status.intake;
+  if (unifiedOpen && legacy === "stopped") return { ...base, state: "done", detail: "Done" };
+  // A fresh install has no earlier job runner to stop: open intake is the whole cutover.
+  if (unifiedOpen && !legacyHistory) return { ...base, state: "done", detail: "Taking requests" };
+  if (origin === "rollback") return { ...base, state: "pending", detail: "Rolled back; it will not cut over on its own" };
+  if (status.autoCutover && !unifiedOpen) return { ...base, state: "pending", detail: "waiting for the engine" };
+  if (unifiedOpen) return { ...base, state: "pending", detail: "The earlier job runner is still on" };
+  return { ...base, state: "pending", detail: "Not yet" };
+}
+
+/**
+ * Every setup stage as a checklist row, derived only from the SetupStatus. Memory import is
+ * left out when it was not chosen. Only a stage the supervisor is working on right now is
+ * "active"; every other row is done, pending or blocked.
+ */
+export function setupChecklist(status: SetupStatus): SetupChecklistRow[] {
+  const rows: SetupChecklistRow[] = [
+    engineOnRow(status),
+    engineReadyRow(status),
+    status.owner
+      ? { id: "owner", label: "Owner", state: "done", detail: status.owner.ownerPrincipal || status.owner.supervisorId }
+      : { id: "owner", label: "Owner", state: "pending", detail: "Not set yet" },
+    status.projects > 0
+      ? { id: "projects", label: "Projects", state: "done", detail: plural(status.projects, "project") }
+      : { id: "projects", label: "Projects", state: "pending", detail: "None connected yet" },
+    cutoverRow(status),
+  ];
+  if (status.memoryImport.enabled) {
+    const { sessions, turns, lastAt } = status.memoryImport;
+    const importing = status.nextAction === "import_memory";
+    rows.push(
+      lastAt !== null
+        ? { id: "memory", label: "Learned from your sessions", state: "done", detail: `${plural(sessions, "session")}, ${plural(turns, "note")}` }
+        : { id: "memory", label: "Learned from your sessions", state: importing ? "active" : "pending", detail: importing ? "Reading what you typed" : "Not yet" },
+    );
+  }
+  rows.push(
+    status.adoptable > 0
+      ? { id: "earlier_jobs", label: "Earlier jobs", state: "pending", detail: `${status.adoptable} can be handed over` }
+      : { id: "earlier_jobs", label: "Earlier jobs", state: "done", detail: "None waiting" },
+  );
+  return rows;
+}
+
 function faultDescription(status: SetupStatus): string {
   const parts: string[] = [];
   if (status.engineFault?.message) parts.push(status.engineFault.message);
