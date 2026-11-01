@@ -2,7 +2,7 @@
 // what the phone home renders: one view per machine, merged lanes, pause, and resync, plus the
 // one account supervisor: the machine holding the supervisor lease. Every other machine is on
 // standby; the phone never starts a second supervisor, it can only move the one there is.
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { isStandbyRole } from "../../lib/supervisorModel";
 import type { SupervisorConnection, SupervisorMoveResult, UnifiedSupervisorClient, UnifiedSupervisorView } from "../../lib/unifiedSupervisor";
@@ -72,6 +72,14 @@ export function newHostMemory(): HostMemory {
 function holdsLease(machine: SupervisorMachineView): boolean {
   const role = machine.snapshot?.hub.role;
   return role === "holder" || role === "provisional";
+}
+
+/**
+ * The holder hint a SUPERVISOR_STANDBY refusal or a move left, while it is still needed: once
+ * any snapshot reports a holder (or provisional) role the snapshots decide, so the hint is dropped.
+ */
+export function pendingHint(machines: readonly SupervisorMachineView[], hint: string | null): string | null {
+  return machines.some(holdsLease) ? null : hint;
 }
 
 /**
@@ -188,9 +196,14 @@ export function usePhoneSupervisor({ enabled, discovery, active, bus }: PhoneSup
     return map;
   }, [discovery.machines, fetchFor, resync, watchStandby]);
   const memory = useRef(newHostMemory());
+  const hint = pendingHint(machines, standbyHint);
+  // A snapshot reported the holder: forget the hint so a later move or failover is not overridden.
+  useEffect(() => {
+    if (standbyHint !== null && hint === null) setStandbyHint(null);
+  }, [standbyHint, hint]);
   const host = useMemo(
-    () => accountHost(machines, memory.current, (machineId) => clients.get(machineId) ?? null, standbyHint),
-    [machines, clients, standbyHint],
+    () => accountHost(machines, memory.current, (machineId) => clients.get(machineId) ?? null, hint),
+    [machines, clients, hint],
   );
   const holderId = host?.machineId ?? null;
 

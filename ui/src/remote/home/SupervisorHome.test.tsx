@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdoptArchivedResult, LanePauseResult } from "../remoteSupervisor";
 import { fixtureAction, fixtureLane, fixtureMachine, fixtureSnapshot } from "./phoneHomeFixtures";
 import { SupervisorHome, type SupervisorHomeProps } from "./SupervisorHome";
-import { accountHost, newHostMemory } from "./usePhoneSupervisor";
+import { accountHost, newHostMemory, pendingHint } from "./usePhoneSupervisor";
 import { normalizeUnified, type SupervisorMoveResult } from "../../lib/unifiedSupervisor";
 import type { SupervisorHubState } from "../../lib/supervisorModel";
 
@@ -263,6 +263,31 @@ describe("SupervisorHome unified supervisor", () => {
     expect(accountHost(stale, newHostMemory(), () => null)?.machineId).toBe("laptop");
     expect(accountHost(stale, memory, () => null, "studio")?.machineId).toBe("studio");
   });
+
+  it("never takes a standby's archived supervisor as the account view, even when a hint or the last holder names it", () => {
+    const archived = normalizeUnified({ ...unifiedWire, identity: { supervisorId: "s-old", ownerPrincipal: "desktop:qa-owner" } })!;
+    // Standby with its own archived identity and no holder named yet.
+    const machines = [
+      fixtureMachine({ machineId: "laptop", label: "Laptop", snapshot: fixtureSnapshot({ hub: { available: true, running: false, role: "standby" }, supervisor: archived }) }),
+    ];
+    const hinted = newHostMemory();
+    expect(accountHost(machines, hinted, () => null, "laptop")).toBeNull();
+    expect(hinted.lastSeen.has("laptop")).toBe(false);
+    const remembered = newHostMemory();
+    remembered.lastHolder = "laptop";
+    expect(accountHost(machines, remembered, () => null)).toBeNull();
+    expect(remembered.lastSeen.has("laptop")).toBe(false);
+  });
+
+  it("drops the holder hint once any snapshot reports a holder", () => {
+    const standbyOnly = [fixtureMachine({ machineId: "laptop", snapshot: fixtureSnapshot({ hub: { available: true, running: false, role: "standby" } }) })];
+    expect(pendingHint(standbyOnly, "studio")).toBe("studio");
+    expect(pendingHint([], "studio")).toBe("studio");
+    const holder = [...standbyOnly, fixtureMachine({ machineId: "desk", snapshot: fixtureSnapshot({ hub: { available: true, running: true, role: "holder" } }) })];
+    expect(pendingHint(holder, "studio")).toBeNull();
+    const provisional = [fixtureMachine({ machineId: "desk", snapshot: fixtureSnapshot({ hub: { available: true, running: true, role: "provisional" } }) })];
+    expect(pendingHint(provisional, "studio")).toBeNull();
+  });
 });
 
 describe("SupervisorHome standby machines", () => {
@@ -284,6 +309,14 @@ describe("SupervisorHome standby machines", () => {
     renderHome({ onMoveHere: vi.fn(), machines: [fixtureMachine({ machineId: "laptop", snapshot: standbyHub({ available: false }) })] });
     expect(screen.getByTestId("supervisor-standby-text")).toHaveTextContent("Standby - supervisor runs on Studio");
     expect(screen.queryByTestId("supervisor-move-here")).toBeNull();
+  });
+
+  it("shows no hub-off note on a standby without a hub that still lists lanes", () => {
+    const snapshot = { ...standbyHub({ available: false }), lanes: [fixtureLane({ key: "k", title: "Docs" })] };
+    renderHome({ onMoveHere: vi.fn(), machines: [fixtureMachine({ machineId: "laptop", snapshot })] });
+    expect(screen.getByTestId("supervisor-standby-text")).toHaveTextContent("Standby - supervisor runs on Studio");
+    expect(screen.queryByTestId("supervisor-hub-off")).toBeNull();
+    expect(screen.getByTestId("supervisor-lane-card")).toHaveAttribute("data-lane-key", "k");
   });
 
   it("needs a second confirm for a forced move and shows the data-loss window", async () => {
