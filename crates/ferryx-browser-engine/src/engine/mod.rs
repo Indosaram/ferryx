@@ -416,6 +416,11 @@ fn focus_tab(tab: &str, address: bool) {
     } else {
         host.set_focus(1);
     }
+    let focused = TABS
+        .with_borrow(|tabs| tabs.get(tab).and_then(|pane| pane.window.clone()))
+        .and_then(|window| window.focused_view())
+        .map(|view| CefString::from(&view.type_string()).to_string());
+    eprintln!("ferryx-engine: focus {tab} address={address}: focused view now {focused:?}");
 }
 
 /// Ferryx closed stdin (it quit or dropped this engine): close every browser, then quit.
@@ -446,6 +451,19 @@ fn read_commands() {
     }
     let mut task = Quit::new();
     post_task(ThreadId::UI, Some(&mut task));
+}
+
+wrap_task! {
+    struct FocusTab {
+        tab: String,
+        address: bool,
+    }
+
+    impl Task {
+        fn execute(&self) {
+            focus_tab(&self.tab, self.address);
+        }
+    }
 }
 
 wrap_task! {
@@ -595,7 +613,10 @@ wrap_window_delegate! {
             }
             if let Some(address) = PENDING_FOCUS.with_borrow_mut(|pending| pending.remove(tab)) {
                 eprintln!("ferryx-engine: focus {tab} address={address}: window activated");
-                focus_tab(tab, address);
+                // Activation restores the widget's stored focused view after this callback
+                // returns, so the view is focused from a task that runs once that is done.
+                let mut task = FocusTab::new(tab.clone(), address);
+                post_task(ThreadId::UI, Some(&mut task));
             }
         }
 
