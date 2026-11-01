@@ -619,6 +619,9 @@ struct RelayInner {
 /// with any other deployment.
 pub const LEGACY_CONTROL_AUDIENCE: &str = "relay";
 
+const MACHINE_ID_CLAIMED: &str = "Machine ID already claimed by another public key";
+const ENROLLMENT_TOKEN_REQUIRED: &str = "Enrollment token required for private relay";
+
 const ADMISSION_WINDOW: Duration = Duration::from_secs(60);
 const CONTROL_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 const DEVICE_TOKEN_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -961,7 +964,7 @@ impl RelayState {
             return if key == &auth.public_key {
                 Ok(())
             } else {
-                Err("Machine ID already claimed by another public key".into())
+                Err(MACHINE_ID_CLAIMED.into())
             };
         }
         // A private relay requires an operator-issued enrollment token. An account-enrolled
@@ -974,7 +977,7 @@ impl RelayState {
                 .is_some_and(|token| self.validate_machine_token(token))
             && !account_enrolled
         {
-            return Err("Enrollment token required for private relay".into());
+            return Err(ENROLLMENT_TOKEN_REQUIRED.into());
         }
         let mut enrolled = keys.clone();
         if let Some(path) = &self.inner.key_store_path {
@@ -1014,7 +1017,7 @@ impl RelayState {
                             // A conflicting on-disk owner must not be silently replaced.
                             Some(existing) if existing != &key => {
                                 return Err(
-                                    "Machine ID already claimed by another public key".into()
+                                    MACHINE_ID_CLAIMED.into()
                                 );
                             }
                             Some(_) => {}
@@ -1034,7 +1037,7 @@ impl RelayState {
                 .get(&auth.machine_id)
                 .is_some_and(|key| key != &auth.public_key)
             {
-                return Err("Machine ID already claimed by another public key".into());
+                return Err(MACHINE_ID_CLAIMED.into());
             }
             enrolled.insert(auth.machine_id.clone(), auth.public_key.clone());
             #[cfg(test)]
@@ -3983,6 +3986,8 @@ async fn authenticate_control_socket(
         timestamp: current_time_secs(),
         audience: Some(state.inner.control_audience.clone()),
     };
+    // Set false when a refusal is not the caller's credential (billing, suspension, disk).
+    let mut credential_failure = true;
     let authenticate = async {
         socket
             .send(Message::Text(
@@ -4017,18 +4022,35 @@ async fn authenticate_control_socket(
         {
             return Err("Invalid machine signature".to_string());
         }
+        // The credential checks passed; from here a slow or failed bind (billing, disk) is not
+        // the caller's fault unless the bind itself refuses the key or enrollment token.
+        credential_failure = false;
         let auth_for_bind = auth.clone();
         let state_for_bind = state.clone();
-        crate::ipc::run_blocking(move || Ok(state_for_bind.bind_machine_key(&auth_for_bind)))
-            .await
-            .map_err(|error| error.to_string())??;
+        let bound =
+            crate::ipc::run_blocking(move || Ok(state_for_bind.bind_machine_key(&auth_for_bind)))
+                .await
+                .map_err(|error| error.to_string())?;
+        if let Err(error) = bound {
+            // Only a key or enrollment-token mismatch is the daemon's own credential problem;
+            // billing, suspension and persistence refusals are not.
+            credential_failure = error == MACHINE_ID_CLAIMED || error == ENROLLMENT_TOKEN_REQUIRED;
+            return Err(error);
+        }
         Ok(auth.machine_id)
     };
     let result = match timeout(CONTROL_AUTH_TIMEOUT, authenticate).await {
         Ok(result) => result,
         Err(_) => Err("Control authentication timed out".to_string()),
     };
-    state.record_auth(ip, result.is_ok());
+    // Only a credential the daemon got wrong counts toward the per-IP lockout. A billing
+    // outage, a suspended owner or a disk error is the relay's or the account's state, and
+    // locking the IP for it would lock out every daemon behind that address.
+    match &result {
+        Ok(_) => state.record_auth(ip, true),
+        Err(_) if credential_failure => state.record_auth(ip, false),
+        Err(_) => {}
+    }
     let response = ControlAuthResponse {
         success: result.is_ok(),
         error: result.as_ref().err().cloned(),
@@ -8517,6 +8539,33 @@ mod tests {
         };
         assert!(state.bind_machine_key(&auth).is_err());
         assert!(state.inner.machine_public_keys.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_server_side_bind_failure_does_not_count_toward_the_ip_lockout() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("blocked");
+        let state = RelayState::new_with_key_store(vec![], blocked.join("keys.json")).unwrap();
+        // The key store's directory cannot be created, so every bind fails on the relay's side.
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        for _ in 0..6 {
+            let (_, response) = authenticate(&base, &identity(39, "disk-machine"), false, false).await;
+            assert!(!response.success);
+            assert!(response.error.unwrap().starts_with("Failed to "));
+        }
+        {
+            let admission = state.inner.admission.lock();
+            let tracker = &admission[&ip];
+            assert_eq!(tracker.failures, 0);
+            assert!(tracker.locked_until.is_none());
+        }
+        // A bad signature still counts.
+        let (_, response) = authenticate(&base, &identity(39, "disk-machine"), true, false).await;
+        assert!(!response.success);
+        assert_eq!(state.inner.admission.lock()[&ip].failures, 1);
+        server.abort();
     }
 
     #[tokio::test]
