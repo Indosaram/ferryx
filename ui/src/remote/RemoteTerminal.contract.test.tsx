@@ -3048,7 +3048,7 @@ describe("remote terminal grid contract", () => {
     });
 
     it("dials through the relay E2E registry when no createWebSocket is provided", async () => {
-      const ticketFetch = vi.fn(async () => Response.json({ ticket: "plaintext-ticket" }));
+      const ticketFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ ticket: "plaintext-ticket" }));
       vi.stubGlobal("fetch", ticketFetch);
       const base = "https://relay.example.test/host/machine-e2e";
       const tunnelSocket = new MockWebSocket("tunnel://terminal");
@@ -3061,7 +3061,8 @@ describe("remote terminal grid contract", () => {
           "/api/v1/terminal/session-e2e?render=grid&cols=80&rows=20",
           { Authorization: "Bearer relay-device-token" },
         );
-        expect(ticketFetch).not.toHaveBeenCalled();
+        // Terminal preferences still load over plain fetch; only a plaintext socket ticket is forbidden.
+        expect(ticketFetch.mock.calls.filter(([url]) => String(url).includes("/socket-ticket"))).toEqual([]);
         view.unmount();
       } finally {
         unregister();

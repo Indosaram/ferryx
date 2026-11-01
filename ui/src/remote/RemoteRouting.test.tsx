@@ -111,7 +111,7 @@ it("switches API and event sockets to the selected host without reusing local cr
   const stateCalls = fetcher.mock.calls.filter(([url]) => String(url).includes("/api/v1/workspace/state"));
   expect(stateCalls.at(-1)).toEqual([
     "http://192.168.1.9:8787/api/v1/workspace/state",
-    { headers: { Authorization: "Bearer host-b-token" } },
+    { headers: { Authorization: "Bearer host-b-token" }, signal: expect.any(AbortSignal) },
   ]);
   expect(EventSocket.instances.at(-1)?.url).toBe("ws://192.168.1.9:8787/api/v1/events?ticket=ui-test-ticket");
   await act(async () => {});
