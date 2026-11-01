@@ -1,0 +1,50 @@
+/* Push/pop slide for the phone Session screen; keyed on html[data-phone-transition], which
+   runPhoneTransition sets for the life of one view transition. Push: the new screen slides in
+   from the right while the old one drifts left and dims. Pop: the reverse. */
+@media (prefers-reduced-motion: no-preference) {
+  html[data-phone-transition]::view-transition-old(root),
+  html[data-phone-transition]::view-transition-new(root) {
+    animation-duration: 300ms;
+    animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+    animation-fill-mode: both;
+    mix-blend-mode: normal;
+  }
+
+  html[data-phone-transition="push"]::view-transition-old(root) {
+    animation-name: phone-transition-recede;
+  }
+  html[data-phone-transition="push"]::view-transition-new(root) {
+    z-index: 1;
+    animation-name: phone-transition-enter;
+    box-shadow: -8px 0 24px rgb(0 0 0 / 0.25);
+  }
+
+  html[data-phone-transition="pop"]::view-transition-old(root) {
+    z-index: 1;
+    animation-name: phone-transition-exit;
+    box-shadow: -8px 0 24px rgb(0 0 0 / 0.25);
+  }
+  html[data-phone-transition="pop"]::view-transition-new(root) {
+    animation-name: phone-transition-return;
+  }
+}
+
+@keyframes phone-transition-enter {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+@keyframes phone-transition-recede {
+  from { transform: translateX(0); filter: brightness(1); }
+  to { transform: translateX(-30%); filter: brightness(0.7); }
+}
+
+@keyframes phone-transition-exit {
+  from { transform: translateX(0); }
+  to { transform: translateX(100%); }
+}
+
+@keyframes phone-transition-return {
+  from { transform: translateX(-30%); filter: brightness(0.7); }
+  to { transform: translateX(0); filter: brightness(1); }
+}
