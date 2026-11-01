@@ -28,7 +28,8 @@ export function isChatQaState(state: string): state is ChatQaState {
 }
 
 /** The on-screen keyboard height a 390x844 iPhone reports; the QA root shrinks by it. */
-export const QA_KEYBOARD_HEIGHT = "21rem";
+// px, not rem: the system keyboard does not grow with the page's text size.
+export const QA_KEYBOARD_HEIGHT = "336px";
 
 const APPROVAL_PROMPT: ReferencePrompt = {
   id: "qa-approval",
