@@ -820,6 +820,10 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
             aria-label="Workspace context"
             onKeyDown={trapTab}
             {...drawerDragHandlers}
+            // The shared sidebar body stops pointerdown from bubbling (desktop reorder), so a swipe
+            // that starts on a row is only seen in the capture phase.
+            onPointerDown={undefined}
+            onPointerDownCapture={drawerDragHandlers.onPointerDown}
             style={{ touchAction: "pan-y" }}
             className="absolute inset-y-0 left-0 z-40 flex min-h-0 w-[88%] max-w-[340px] animate-drawer-in flex-col border-r border-chat-border bg-chat-screen text-chat-foreground motion-reduce:animate-none"
           >
