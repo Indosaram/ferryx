@@ -8559,7 +8559,10 @@ pub async fn start_remote_server_with_resolver_and_insecure_opt_in(
                 // Use the actual bound loopback port when the caller requested
                 // an OS-assigned port (0), so the external listener matches it.
                 let extra_router = create_remote_router(Arc::clone(&state));
-                match bind_and_serve(extra_addr, Arc::clone(&state), extra_router, false).await {
+                let extra_bind_addr = external_listener_bind_addr(extra_addr);
+                match bind_and_serve(extra_bind_addr, Arc::clone(&state), extra_router, false)
+                    .await
+                {
                     Ok((_extra_local_addr, extra_shutdown_tx)) => {
                         extra_shutdown_txs.push(extra_shutdown_tx);
                     }
@@ -8687,6 +8690,49 @@ pub async fn start_remote_server_strict_with_resolver(
 #[cfg(test)]
 pub(crate) static DIRECT_GATE_TEST_MUTEX: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
+
+/// The socket the external (non-loopback) listener binds for a classified interface address.
+#[cfg(not(test))]
+fn external_listener_bind_addr(address: SocketAddr) -> SocketAddr {
+    address
+}
+
+#[cfg(test)]
+thread_local! {
+    static EXTERNAL_LISTENER_ON_LOOPBACK: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Test seam: while the returned guard lives, the external listener started on this thread binds
+/// an ephemeral loopback port instead of the resolved interface address. Gate classification
+/// still runs on the resolved address, so overlay tests can use a fixed CGNAT address without
+/// the host owning it.
+#[cfg(test)]
+pub(crate) struct ExternalListenerOnLoopback(());
+
+#[cfg(test)]
+impl ExternalListenerOnLoopback {
+    pub(crate) fn enable() -> Self {
+        EXTERNAL_LISTENER_ON_LOOPBACK.with(|redirect| redirect.set(true));
+        Self(())
+    }
+}
+
+#[cfg(test)]
+impl Drop for ExternalListenerOnLoopback {
+    fn drop(&mut self) {
+        EXTERNAL_LISTENER_ON_LOOPBACK.with(|redirect| redirect.set(false));
+    }
+}
+
+#[cfg(test)]
+fn external_listener_bind_addr(address: SocketAddr) -> SocketAddr {
+    if EXTERNAL_LISTENER_ON_LOOPBACK.with(std::cell::Cell::get) {
+        (std::net::Ipv4Addr::LOCALHOST, 0).into()
+    } else {
+        address
+    }
+}
 
 #[cfg(test)]
 #[path = "p19_insecure_direct_tests.rs"]
