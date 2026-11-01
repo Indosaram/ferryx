@@ -24,24 +24,12 @@ pub const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10)
 /// failed with code 5 "database is locked" despite `BUSY_TIMEOUT` (2026-10-28, q28: 9 of 10
 /// runs on Linux). The lock also keeps two openers from migrating at once.
 pub async fn connect(path: &Path) -> Result<SqlitePool> {
-    let lock_path = {
-        let mut name = path.as_os_str().to_owned();
-        name.push(".open-lock");
-        std::path::PathBuf::from(name)
-    };
-    let _open_lock = tokio::task::spawn_blocking(move || -> std::io::Result<std::fs::File> {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock_path)?;
-        file.lock()?;
-        Ok(file)
-    })
-    .await
-    .map_err(|error| {
-        crate::error::HubError::message(format!("hub database open lock: {error}"))
-    })??;
+    let db_path = path.to_owned();
+    let _open_lock = tokio::task::spawn_blocking(move || lock_open(&db_path))
+        .await
+        .map_err(|error| {
+            crate::error::HubError::message(format!("hub database open lock: {error}"))
+        })??;
     let uri = format!("sqlite://{}", path.display());
     let options = SqliteConnectOptions::from_str(&uri)
         .map_err(|error| crate::error::HubError::config(format!("hub database url: {error}")))?
@@ -56,6 +44,20 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
         .await?;
     migrate(&pool).await?;
     Ok(pool)
+}
+
+/// Takes the exclusive `<db_path>.open-lock` that [`connect`] holds while it opens and
+/// migrates; released when the returned file drops. Blocking.
+pub fn lock_open(db_path: &Path) -> std::io::Result<std::fs::File> {
+    let mut name = db_path.as_os_str().to_owned();
+    name.push(".open-lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(std::path::PathBuf::from(name))?;
+    file.lock()?;
+    Ok(file)
 }
 
 /// Opens an existing database without applying migrations. Import uses this so a

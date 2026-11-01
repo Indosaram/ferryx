@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -18,11 +18,13 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
 use crate::checkpoint::{
-    env_key_exported, memory_agent_dir, read_archive, render_env, sha256_hex, CheckpointError,
-    CheckpointManifest, MemorySource, PairedHostMapping, PrivateFileWriter, ARCHIVE_DATABASE,
-    ARCHIVE_ENV, ARCHIVE_MANIFEST, ARCHIVE_MEMORY_BUNDLE, ARCHIVE_PROFILE,
-    CHECKPOINT_FORMAT_VERSION, CHECKPOINT_MAX_COMPRESSED_BYTES, HOST_ID_TABLES, LOCAL_HOST_ID,
-    MACHINE_HOST_PREFIX, REMOTE_HOST_UNMAPPED, SUPERVISOR_IDENTITY_MISMATCH,
+    create_private, create_private_dir, env_key_exported, memory_agent_dir, render_env,
+    sha256_hex, visit_archive, CheckpointError, CheckpointManifest, MemorySource,
+    PairedHostMapping, PrivateFileWriter, ARCHIVE_DATABASE, ARCHIVE_ENV, ARCHIVE_MANIFEST,
+    ARCHIVE_MEMORY_BUNDLE, ARCHIVE_PROFILE, CHECKPOINT_FORMAT_VERSION,
+    CHECKPOINT_MAX_ARCHIVE_BYTES, CHECKPOINT_MAX_BUFFERED_ENTRY_BYTES,
+    CHECKPOINT_MAX_COMPRESSED_BYTES, HOST_ID_TABLES, LOCAL_HOST_ID, MACHINE_HOST_PREFIX,
+    REMOTE_HOST_UNMAPPED, SUPERVISOR_IDENTITY_MISMATCH, UNMAPPED_HOST_PREFIX,
 };
 
 /// The live hub database file name.
@@ -184,6 +186,35 @@ fn invalid(message: impl Into<String>) -> ImportError {
 /// Checks the size budget, reads the archive, verifies the manifest and unpacks the database
 /// and memory bundle into `staging`. Blocking.
 fn unpack(archive: &Path, staging: &Path) -> Result<Unpacked, ImportError> {
+    unpack_with_limit(archive, staging, CHECKPOINT_MAX_ARCHIVE_BYTES)
+}
+
+/// Streams `entry` into a new owner-only file at `path`.
+fn stream_private(entry: &mut dyn Read, path: &Path) -> Result<(), CheckpointError> {
+    let mut file = create_private(path)?;
+    io::copy(entry, &mut file)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Reads a small entry (manifest, env, profile) into memory, at most
+/// [`CHECKPOINT_MAX_BUFFERED_ENTRY_BYTES`].
+fn read_buffered(entry: &mut dyn Read) -> Result<Vec<u8>, CheckpointError> {
+    let mut data = Vec::new();
+    Read::take(&mut *entry, CHECKPOINT_MAX_BUFFERED_ENTRY_BYTES + 1).read_to_end(&mut data)?;
+    let bytes = data.len() as u64;
+    if bytes > CHECKPOINT_MAX_BUFFERED_ENTRY_BYTES {
+        return Err(CheckpointError::TooLarge {
+            bytes,
+            budget: CHECKPOINT_MAX_BUFFERED_ENTRY_BYTES,
+        });
+    }
+    Ok(data)
+}
+
+/// [`unpack`] with the decompressed bound `limit`: every entry is read through one bounded
+/// reader, the database and the memory bundle streamed to owner-only files in `staging`.
+fn unpack_with_limit(archive: &Path, staging: &Path, limit: u64) -> Result<Unpacked, ImportError> {
     let bytes = fs::metadata(archive)?.len();
     if bytes > CHECKPOINT_MAX_COMPRESSED_BYTES {
         return Err(CheckpointError::TooLarge {
@@ -194,13 +225,34 @@ fn unpack(archive: &Path, staging: &Path) -> Result<Unpacked, ImportError> {
     }
     let compressed = fs::read(archive)?;
     let checkpoint_id = sha256_hex(&compressed);
-    // Unknown entries (a sessions json in particular) are ignored: sessions start fresh.
-    let mut files = read_archive(&compressed)?;
+    let hub_db = staging.join(ARCHIVE_DATABASE);
+    let bundle_path = staging.join("supervisor.bundle");
+    let mut manifest: Option<Vec<u8>> = None;
+    let mut env_body: Option<Vec<u8>> = None;
+    let mut profile: Option<Vec<u8>> = None;
+    let (mut has_db, mut has_bundle) = (false, false);
+    // Unknown entries (a sessions json in particular) are skipped, still through the bounded
+    // reader: sessions start fresh.
+    visit_archive(&compressed, limit, |name, entry| {
+        match name {
+            ARCHIVE_DATABASE => {
+                stream_private(entry, &hub_db)?;
+                has_db = true;
+            }
+            ARCHIVE_MEMORY_BUNDLE => {
+                stream_private(entry, &bundle_path)?;
+                has_bundle = true;
+            }
+            ARCHIVE_MANIFEST => manifest = Some(read_buffered(entry)?),
+            ARCHIVE_ENV => env_body = Some(read_buffered(entry)?),
+            ARCHIVE_PROFILE => profile = Some(read_buffered(entry)?),
+            _ => {}
+        }
+        Ok(())
+    })?;
     drop(compressed);
 
-    let manifest = files
-        .remove(ARCHIVE_MANIFEST)
-        .ok_or_else(|| invalid(format!("missing {ARCHIVE_MANIFEST}")))?;
+    let manifest = manifest.ok_or_else(|| invalid(format!("missing {ARCHIVE_MANIFEST}")))?;
     let manifest: CheckpointManifest =
         serde_json::from_slice(&manifest).map_err(|error| invalid(error.to_string()))?;
     if manifest.format_version != CHECKPOINT_FORMAT_VERSION {
@@ -223,28 +275,21 @@ fn unpack(archive: &Path, staging: &Path) -> Result<Unpacked, ImportError> {
         )));
     }
 
-    let db = files
-        .remove(ARCHIVE_DATABASE)
-        .ok_or_else(|| invalid(format!("missing {ARCHIVE_DATABASE}")))?;
-    let hub_db = staging.join(ARCHIVE_DATABASE);
-    fs::write(&hub_db, db)?;
+    if !has_db {
+        return Err(invalid(format!("missing {ARCHIVE_DATABASE}")));
+    }
 
     let memory_bundle = match &manifest.memory {
+        MemorySource::Bundle { .. } if has_bundle => Some(bundle_path),
         MemorySource::Bundle { .. } => {
-            let bundle = files
-                .remove(ARCHIVE_MEMORY_BUNDLE)
-                .ok_or_else(|| invalid(format!("missing {ARCHIVE_MEMORY_BUNDLE}")))?;
-            let path = staging.join("supervisor.bundle");
-            fs::write(&path, bundle)?;
-            Some(path)
+            return Err(invalid(format!("missing {ARCHIVE_MEMORY_BUNDLE}")))
         }
         MemorySource::Absent | MemorySource::Remote { .. } => None,
     };
 
     // Only keys the manifest lists and the export allowlist admits: a machine-local key such
     // as FERRYX_HUB_DB never lands in the target env, even from a hand-made archive.
-    let env = files
-        .remove(ARCHIVE_ENV)
+    let env = env_body
         .map(|body| crate::hub_env::parse_env_file(&String::from_utf8_lossy(&body)))
         .unwrap_or_default()
         .into_iter()
@@ -252,10 +297,7 @@ fn unpack(archive: &Path, staging: &Path) -> Result<Unpacked, ImportError> {
         .collect();
 
     let profile = if manifest.has_profile {
-        let profile = files
-            .remove(ARCHIVE_PROFILE)
-            .ok_or_else(|| invalid(format!("missing {ARCHIVE_PROFILE}")))?;
-        Some(profile)
+        Some(profile.ok_or_else(|| invalid(format!("missing {ARCHIVE_PROFILE}")))?)
     } else {
         None
     };
@@ -338,7 +380,8 @@ async fn open_staged(path: &Path) -> Result<SqlitePool, sqlx::Error> {
 /// Maps exported `machine:<id>` host ids to this machine's view, in one transaction.
 ///
 /// `machine:<own>` becomes `local`, a paired machine becomes its paired host id, and any
-/// other id stays as it is. Every goal tied to an unmapped host (through its execution
+/// other id stays as it is. An `unmapped:<id>` host (the exporter could not scope it) is
+/// unmapped too. Every goal tied to an unmapped host (through its execution
 /// binding or its lane) has its ready dispatch released and is held `paused` with
 /// `held_detail = REMOTE_HOST_UNMAPPED`; it is never redirected to another pane. Run again
 /// (a later import, or after pairing), it maps hosts that became paired and restores the
@@ -367,10 +410,13 @@ pub async fn map_host_ids(
     let mut hosts = BTreeSet::new();
     for &table in &tables {
         let rows: Vec<String> = sqlx::query_scalar(&format!(
-            "SELECT DISTINCT host_id FROM {table} WHERE substr(host_id, 1, ?) = ?"
+            "SELECT DISTINCT host_id FROM {table}
+             WHERE substr(host_id, 1, ?) = ? OR substr(host_id, 1, ?) = ?"
         ))
         .bind(MACHINE_HOST_PREFIX.len() as i64)
         .bind(MACHINE_HOST_PREFIX)
+        .bind(UNMAPPED_HOST_PREFIX.len() as i64)
+        .bind(UNMAPPED_HOST_PREFIX)
         .fetch_all(&mut *tx)
         .await?;
         hosts.extend(rows);
@@ -684,7 +730,7 @@ async fn import_staged(
     let unpacked = {
         let (archive, staging) = (archive.to_owned(), staging.to_owned());
         tokio::task::spawn_blocking(move || -> Result<Unpacked, ImportError> {
-            fs::create_dir_all(&staging)?;
+            create_private_dir(&staging)?;
             unpack(&archive, &staging)
         })
         .await
@@ -767,13 +813,30 @@ async fn import_staged(
 }
 
 /// Swaps a staged `hub.sqlite.incoming` into place. Call at hub open, before any pool is
-/// created: nothing may hold the old file open (Windows refuses to rename an open file).
+/// created: nothing may hold the old file open (Windows refuses to rename an open file). Only
+/// the daemon's hub open swaps; other processes (`ferryx-cli mcp`) open the database plainly.
+/// The swap runs under the `hub.sqlite.open-lock` that [`crate::storage::connect`] takes, so
+/// it never overlaps another opener's open or migration.
 ///
 /// The old database and its `-wal`/`-shm` sidecars are kept as `hub.sqlite.pre-move-<ts>`
 /// (plus the same suffixes); a stale WAL must never meet the incoming file. Returns the path
 /// of the kept database, `None` when nothing was staged or no database existed before. A
 /// failed swap puts the old files back.
 pub fn apply_staged_swap(hub_dir: &Path, now_ts: i64) -> io::Result<Option<PathBuf>> {
+    if !hub_dir.join(INCOMING_DB).exists() {
+        return Ok(None);
+    }
+    let _open_lock = crate::storage::lock_open(&hub_dir.join(LIVE_DB))?;
+    // Checked again under the lock: another opener may have swapped it in meanwhile.
+    swap_in(hub_dir, now_ts, &|from: &Path, to: &Path| fs::rename(from, to))
+}
+
+/// The swap itself; `install` moves the incoming file onto the live name.
+fn swap_in(
+    hub_dir: &Path,
+    now_ts: i64,
+    install: &dyn Fn(&Path, &Path) -> io::Result<()>,
+) -> io::Result<Option<PathBuf>> {
     let incoming = hub_dir.join(INCOMING_DB);
     if !incoming.exists() {
         return Ok(None);
@@ -793,7 +856,7 @@ pub fn apply_staged_swap(hub_dir: &Path, now_ts: i64) -> io::Result<Option<PathB
         }
         moved.push((from, to));
     }
-    if let Err(error) = fs::rename(&incoming, &live) {
+    if let Err(error) = install(&incoming, &live) {
         undo_moves(&moved);
         return Err(error);
     }
@@ -817,9 +880,12 @@ async fn stage_database(
     now_ts: i64,
 ) -> Result<HostMapping, ImportError> {
     let (from, to) = (unpacked_db.to_owned(), tmp.to_owned());
-    tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || -> io::Result<()> {
         let _ = fs::remove_file(&to);
-        fs::copy(from, to)
+        // Owner-only like every staging copy: the database carries the hub's whole state.
+        let mut file = create_private(&to)?;
+        io::copy(&mut fs::File::open(&from)?, &mut file)?;
+        file.sync_all()
     })
     .await
     .map_err(io::Error::other)??;
@@ -831,7 +897,9 @@ async fn stage_database(
 
 /// Hub open with the staged swap: applies a pending `hub.sqlite.incoming` next to `db_path`
 /// (on a blocking thread), then opens and migrates the database. The swap runs before the
-/// pool exists, so no connection holds the old file.
+/// pool exists, so no connection of this process holds the old file. Only the daemon's
+/// [`crate::hub::Hub::open`] calls this; a process opening beside the daemon (`ferryx-cli mcp`)
+/// uses [`crate::storage::connect`] and leaves the staged file for the daemon.
 pub async fn open_with_staged_swap(
     db_path: &Path,
     now_ts: i64,
@@ -849,7 +917,8 @@ pub async fn open_with_staged_swap(
 mod tests {
     use super::*;
     use crate::checkpoint::{
-        build_archive, export, ExportRequest, CHECKPOINT_TOO_LARGE, SUPERVISOR_MEMORY_AGENT,
+        build_archive, export, read_archive, ExportRequest, CHECKPOINT_TOO_LARGE,
+        SUPERVISOR_MEMORY_AGENT,
     };
 
     const SUP: &str = "aaaaaaaa-0000-4000-8000-000000000001";
@@ -857,6 +926,7 @@ mod tests {
     const PROJECT: &str = "cccccccc-0000-4000-8000-000000000003";
     const G1: &str = "dddddddd-0000-4000-8000-000000000001";
     const G2: &str = "dddddddd-0000-4000-8000-000000000002";
+    const G3: &str = "dddddddd-0000-4000-8000-000000000003";
     const NOW: &str = "2026-11-01T00:00:00Z";
     const SEEN: [&str; 3] = ["1700000000.000100", "1700000000.000200", "1700000000.000300"];
 
@@ -1212,18 +1282,22 @@ mod tests {
 
     #[tokio::test]
     async fn an_unmapped_host_holds_its_goal_visibly_until_that_machine_is_paired() {
-        let goals = [("lane-a", G1, "local"), ("lane-c", G2, "mac-c")];
+        // `stranger` is neither local nor paired on machine-a: export marks it unmapped.
+        let goals = [("lane-a", G1, "local"), ("lane-c", G2, "mac-c"), ("lane-s", G3, "stranger")];
         let fx = fixture("unmapped", &goals, false).await;
         let hub = fx.root.join("hub");
         let outcome = import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, &hub, 1_800_000_000))
             .await
             .unwrap();
-        assert_eq!(outcome.unmapped_hosts, ["machine:machine-c"]);
-        assert_eq!(outcome.held_goals, [G2]);
-        assert_eq!(outcome.released_dispatches, 1);
+        assert_eq!(outcome.unmapped_hosts, ["machine:machine-c", "unmapped:stranger"]);
+        assert_eq!(outcome.held_goals, [G2, G3]);
+        assert_eq!(outcome.released_dispatches, 2);
         let status: serde_json::Value =
             serde_json::from_slice(&fs::read(hub.join(IMPORT_STATUS_FILE)).unwrap()).unwrap();
-        assert_eq!(status["unmapped_hosts"], serde_json::json!(["machine:machine-c"]));
+        assert_eq!(
+            status["unmapped_hosts"],
+            serde_json::json!(["machine:machine-c", "unmapped:stranger"])
+        );
 
         let pool = open_target(&hub).await;
         type Held = (String, Option<String>, Option<String>, Option<String>);
@@ -1244,6 +1318,7 @@ mod tests {
         assert_eq!(dispatch, "released");
         // Never redirected: the binding still names the remote machine, not another pane.
         assert_eq!(host_of(&pool, "supervisor_execution_bindings", "goal_id", G2).await, "machine:machine-c");
+        assert_eq!(host_of(&pool, "lanes", "key", "lane-s").await, "unmapped:stranger");
         let mapped_goal: String = sqlx::query_scalar("SELECT run_state FROM supervisor_goals WHERE goal_id = ?")
             .bind(G1)
             .fetch_one(&pool)
@@ -1255,7 +1330,8 @@ mod tests {
         let later = map_host_ids(&pool, "machine-a", &[paired("paired-c", "machine-c")], 1_800_000_100)
             .await
             .unwrap();
-        assert!(later.unmapped_hosts.is_empty());
+        assert_eq!(later.unmapped_hosts, ["unmapped:stranger"], "no machine id to map it by");
+        assert_eq!(later.held_goals, [G3]);
         assert_eq!(later.restored_goals, [G2]);
         let restored: (String, Option<String>) =
             sqlx::query_as("SELECT run_state, held_detail FROM supervisor_goals WHERE goal_id = ?")
@@ -1371,35 +1447,169 @@ mod tests {
         fs::remove_dir_all(&fx.root).unwrap();
     }
 
-    #[tokio::test]
-    async fn a_staged_import_swaps_only_at_the_next_open() {
-        let fx = fixture("swap", &[("lane-a", G1, "local")], false).await;
+    /// Identity rows and goal ids of a hub database: its logical content.
+    async fn hub_rows(pool: &SqlitePool) -> (Vec<String>, Vec<String>) {
+        let identity: Vec<String> = sqlx::query_scalar("SELECT supervisor_id FROM supervisor_identity ORDER BY supervisor_id")
+            .fetch_all(pool)
+            .await
+            .unwrap();
+        let goals: Vec<String> = sqlx::query_scalar("SELECT goal_id FROM supervisor_goals ORDER BY goal_id")
+            .fetch_all(pool)
+            .await
+            .unwrap();
+        (identity, goals)
+    }
+
+    /// A target hub holding only the supervisor identity, with an import staged next to it.
+    async fn staged_target(name: &str) -> (Fixture, PathBuf) {
+        let fx = fixture(name, &[("lane-a", G1, "local")], false).await;
         let hub = fx.root.join("hub");
-        let live = hub.join(LIVE_DB);
         fs::create_dir_all(&hub).unwrap();
-        let pool = crate::storage::connect(&live).await.unwrap();
+        let pool = crate::storage::connect(&hub.join(LIVE_DB)).await.unwrap();
         seed_identity(&pool, SUP).await;
         pool.close().await;
-        let before = fs::read(&live).unwrap();
-
         import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, &hub, 1_800_000_000))
             .await
             .unwrap();
-        assert_eq!(fs::read(&live).unwrap(), before, "the live database is untouched by import");
+        (fx, hub)
+    }
+
+    #[tokio::test]
+    async fn a_staged_import_swaps_only_at_the_next_open() {
+        let (fx, hub) = staged_target("swap").await;
+        let live = hub.join(LIVE_DB);
         assert!(hub.join(INCOMING_DB).exists());
         assert!(!hub.join(INCOMING_TMP).exists());
+        // Import left the live database's content alone.
+        let pool = crate::storage::connect(&live).await.unwrap();
+        assert_eq!(hub_rows(&pool).await, (vec![SUP.to_owned()], Vec::new()));
+        pool.close().await;
 
         let pool = open_with_staged_swap(&live, 1_800_000_050).await.unwrap();
-        let goals: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_goals")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(goals, 1, "the imported database is live after the open");
+        assert_eq!(
+            hub_rows(&pool).await,
+            (vec![SUP.to_owned()], vec![G1.to_owned()]),
+            "the imported database is live after the open"
+        );
         pool.close().await;
         assert!(!hub.join(INCOMING_DB).exists());
         let kept = hub.join("hub.sqlite.pre-move-1800000050");
         assert!(kept.exists(), "the old database is kept");
         assert_eq!(apply_staged_swap(&hub, 1_800_000_060).unwrap(), None, "nothing staged twice");
+        fs::remove_dir_all(&fx.root).unwrap();
+    }
+
+    /// `ferryx-cli mcp` opens the database beside the daemon with a plain open: it must never
+    /// swap the staged file in under the daemon's pool.
+    #[tokio::test]
+    async fn a_plain_open_leaves_the_staged_import_in_place() {
+        let (fx, hub) = staged_target("plain-open").await;
+        let staged = fs::read(hub.join(INCOMING_DB)).unwrap();
+        let pool = crate::storage::connect(&hub.join(LIVE_DB)).await.unwrap();
+        assert_eq!(hub_rows(&pool).await, (vec![SUP.to_owned()], Vec::new()));
+        pool.close().await;
+        assert_eq!(fs::read(hub.join(INCOMING_DB)).unwrap(), staged, "still staged, unchanged");
+        let kept = fs::read_dir(&hub)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry.file_name().to_string_lossy().contains(".pre-move-"));
+        assert!(!kept, "no swap happened");
+        fs::remove_dir_all(&fx.root).unwrap();
+    }
+
+    #[test]
+    fn a_failed_swap_puts_the_old_database_back() {
+        let hub = temp_root("swap-rollback");
+        fs::write(hub.join(LIVE_DB), b"old db").unwrap();
+        fs::write(hub.join("hub.sqlite-wal"), b"old wal").unwrap();
+        fs::write(hub.join(INCOMING_DB), b"new db").unwrap();
+        let error = swap_in(&hub, 1_800_000_070, &|_: &Path, _: &Path| -> io::Result<()> {
+            Err(io::Error::other("forced install failure"))
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "forced install failure");
+        assert_eq!(fs::read(hub.join(LIVE_DB)).unwrap(), b"old db");
+        assert_eq!(fs::read(hub.join("hub.sqlite-wal")).unwrap(), b"old wal");
+        assert_eq!(fs::read(hub.join(INCOMING_DB)).unwrap(), b"new db", "still staged");
+        assert!(!hub.join("hub.sqlite.pre-move-1800000070").exists());
+        assert!(!hub.join("hub.sqlite.pre-move-1800000070-wal").exists());
+        fs::remove_dir_all(&hub).unwrap();
+    }
+
+    /// A hand-built archive whose manifest lists machine-local env keys: import drops them,
+    /// whatever the manifest says.
+    #[tokio::test]
+    async fn machine_local_env_keys_in_a_hand_built_archive_are_dropped() {
+        let fx = fixture("hand-env", &[("lane-a", G1, "local")], false).await;
+        let files = read_archive(&fs::read(&fx.archive).unwrap()).unwrap();
+        let mut manifest: CheckpointManifest = serde_json::from_slice(&files[ARCHIVE_MANIFEST]).unwrap();
+        manifest.env_keys = vec![
+            "FERRYX_HUB_DB".to_owned(),
+            "FERRYX_HUB_WEB_ROOT".to_owned(),
+            "SLACK_BOT_TOKEN".to_owned(),
+        ];
+        let manifest = serde_json::to_vec(&manifest).unwrap();
+        let env = b"FERRYX_HUB_DB=/Users/a/.ferryx/hub/hub.sqlite\nFERRYX_HUB_WEB_ROOT=/Users/a/web\nSLACK_BOT_TOKEN=xoxb-hand\n";
+        let mut entries: Vec<(&str, &[u8])> =
+            vec![(ARCHIVE_MANIFEST, manifest.as_slice()), (ARCHIVE_ENV, env.as_slice())];
+        for (name, data) in &files {
+            if name != ARCHIVE_MANIFEST && name != ARCHIVE_ENV {
+                entries.push((name.as_str(), data.as_slice()));
+            }
+        }
+        let archive = fx.root.join("hand.tar.zst");
+        fs::write(&archive, build_archive(&entries).unwrap()).unwrap();
+        let hub = fx.root.join("hub");
+        import(&archive, &hub, "machine-a", &[], options(&fx.root, &hub, 1_800_000_000))
+            .await
+            .unwrap();
+        let env = crate::hub_env::parse_env_file(&fs::read_to_string(hub.join("env")).unwrap());
+        assert_eq!(env.keys().map(String::as_str).collect::<Vec<_>>(), ["SLACK_BOT_TOKEN"]);
+        assert_eq!(env["SLACK_BOT_TOKEN"], "xoxb-hand");
+        fs::remove_dir_all(&fx.root).unwrap();
+    }
+
+    /// A small archive expanding past the decompressed bound is refused, even through an
+    /// entry import never reads, and nothing past the bound reaches the disk.
+    #[test]
+    fn an_archive_expanding_past_the_bound_is_refused() {
+        let root = temp_root("bomb");
+        let zeros = vec![0u8; 1024 * 1024];
+        let archive = root.join("bomb.tar.zst");
+        let bytes = build_archive(&[("padding.bin", zeros.as_slice())]).unwrap();
+        assert!((bytes.len() as u64) < 64 * 1024, "compresses small");
+        fs::write(&archive, bytes).unwrap();
+        let staging = root.join("staging");
+        fs::create_dir_all(&staging).unwrap();
+        let error = match unpack_with_limit(&archive, &staging, 64 * 1024) {
+            Ok(_) => panic!("a bomb was unpacked"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), CHECKPOINT_TOO_LARGE);
+        assert_eq!(fs::read_dir(&staging).unwrap().count(), 0);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn staged_database_copies_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = fixture("staged-mode", &[("lane-a", G1, "local")], false).await;
+        let staging = fx.root.join("staging");
+        create_private_dir(&staging).unwrap();
+        let unpacked = unpack(&fx.archive, &staging).unwrap();
+        let hub = fx.root.join("hub");
+        import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, &hub, 1_800_000_000))
+            .await
+            .unwrap();
+        for (path, expected) in [
+            (staging.clone(), 0o700),
+            (unpacked.hub_db.clone(), 0o600),
+            (hub.join(INCOMING_DB), 0o600),
+        ] {
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, expected, "{}", path.display());
+        }
         fs::remove_dir_all(&fx.root).unwrap();
     }
 

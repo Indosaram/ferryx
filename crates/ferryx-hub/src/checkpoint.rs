@@ -7,9 +7,11 @@
 //! (git bundle, or the configured sync remote). `checkpoint_id` is the
 //! sha256 of the compressed archive.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -20,7 +22,12 @@ use sqlx::SqlitePool;
 /// Maximum compressed checkpoint size.
 pub const CHECKPOINT_MAX_COMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
 /// Upper bound for a decompressed checkpoint, so a small archive cannot expand without limit.
-pub const CHECKPOINT_MAX_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
+/// 512 MiB is eight times the compressed budget: a compacted hub database with its bulk
+/// tables emptied compresses roughly 3-6x with zstd level 3. Import streams the database and
+/// the memory bundle to disk, so this bounds disk use, not memory.
+pub const CHECKPOINT_MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
+/// Upper bound for one archive entry held in memory (manifest, env, profile).
+pub const CHECKPOINT_MAX_BUFFERED_ENTRY_BYTES: u64 = 16 * 1024 * 1024;
 /// Error code surfaced in status when the archive exceeds the budget.
 pub const CHECKPOINT_TOO_LARGE: &str = "CHECKPOINT_TOO_LARGE";
 /// Import refused: the target hub holds a different supervisor.
@@ -35,6 +42,9 @@ pub const SUPERVISOR_MEMORY_AGENT: &str = crate::supervisor::MEMORY_NAME;
 pub const LOCAL_HOST_ID: &str = "local";
 /// Prefix of a machine-scoped host id inside a checkpoint.
 pub const MACHINE_HOST_PREFIX: &str = "machine:";
+/// Prefix of a host id the exporting machine could not scope (neither local nor paired). The
+/// importer cannot map it to any machine: its goals stay held `REMOTE_HOST_UNMAPPED`.
+pub const UNMAPPED_HOST_PREFIX: &str = "unmapped:";
 
 pub const ARCHIVE_MANIFEST: &str = "manifest.json";
 pub const ARCHIVE_DATABASE: &str = "hub.sqlite";
@@ -182,7 +192,9 @@ pub struct ExportedCheckpoint {
 /// Export failure.
 #[derive(Debug, thiserror::Error)]
 pub enum CheckpointError {
-    #[error("CHECKPOINT_TOO_LARGE: compressed checkpoint is {bytes} bytes, budget {budget}")]
+    /// Over the compressed budget, or over a decompressed bound while reading; then `bytes`
+    /// is `budget + 1`, the archive is not read to its end.
+    #[error("CHECKPOINT_TOO_LARGE: checkpoint is {bytes} bytes, budget {budget}")]
     TooLarge { bytes: u64, budget: u64 },
     #[error("checkpoint io: {0}")]
     Io(#[from] std::io::Error),
@@ -254,7 +266,7 @@ pub async fn export(
         .hub_dir
         .join(format!(".checkpoint-staging-{}", uuid::Uuid::new_v4()));
     let dir = staging.clone();
-    blocking(move || Ok(std::fs::create_dir_all(dir)?)).await?;
+    blocking(move || Ok(create_private_dir(&dir)?)).await?;
     let result = export_staged(pool, request, &staging).await;
     let dir = staging.clone();
     if let Err(error) = blocking(move || Ok(std::fs::remove_dir_all(dir)?)).await {
@@ -269,10 +281,7 @@ async fn export_staged(
     staging: &Path,
 ) -> Result<ExportedCheckpoint, CheckpointError> {
     let db_path = staging.join(ARCHIVE_DATABASE);
-    sqlx::query("VACUUM INTO ?")
-        .bind(db_path.to_string_lossy().into_owned())
-        .execute(pool)
-        .await?;
+    snapshot_into(pool, &db_path).await?;
     let map = host_map(&request.own_machine_id, &request.paired);
     let supervisor_id = prepare_copy(&db_path, &map).await?;
     let request = request.clone();
@@ -347,6 +356,44 @@ async fn export_staged(
     .await
 }
 
+/// `VACUUM INTO` a new owner-only file (SQLite keeps the mode of an existing empty file): the
+/// copy carries the same data as the live hub database.
+async fn snapshot_into(pool: &SqlitePool, db_path: &Path) -> Result<(), CheckpointError> {
+    let target = db_path.to_owned();
+    blocking(move || Ok(create_private(&target).map(drop)?)).await?;
+    sqlx::query("VACUUM INTO ?")
+        .bind(db_path.to_string_lossy().into_owned())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Creates `path` as a new file, mode 0600 on unix. Blocking.
+pub(crate) fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+/// Creates the new directory `path` (and its missing parents), mode 0700 on unix. Blocking.
+pub(crate) fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+
 /// Empties excluded tables, rewrites host ids, compacts and checks the copy.
 /// Returns the supervisor id held by the copy.
 async fn prepare_copy(
@@ -400,6 +447,19 @@ async fn rewrite_copy(
                 .execute(&mut *conn)
                 .await?;
         }
+        // Neither local nor paired: no machine id to scope it with. Marked so the importer
+        // lists it as unmapped instead of taking it for one of its own host ids.
+        sqlx::query(&format!(
+            "UPDATE {table} SET host_id = ? || host_id
+             WHERE substr(host_id, 1, ?) != ? AND substr(host_id, 1, ?) != ?"
+        ))
+        .bind(UNMAPPED_HOST_PREFIX)
+        .bind(MACHINE_HOST_PREFIX.len() as i64)
+        .bind(MACHINE_HOST_PREFIX)
+        .bind(UNMAPPED_HOST_PREFIX.len() as i64)
+        .bind(UNMAPPED_HOST_PREFIX)
+        .execute(&mut *conn)
+        .await?;
     }
     let supervisor_id = if table_exists(&mut conn, "supervisor_identity").await? {
         sqlx::query_scalar::<_, String>(
@@ -549,40 +609,82 @@ pub(crate) fn build_archive(entries: &[(&str, &[u8])]) -> Result<Vec<u8>, Checkp
     Ok(builder.into_inner()?.finish()?)
 }
 
-/// Every file of a checkpoint archive by its archive path. Blocking.
+/// Every file of a checkpoint archive by its archive path, within
+/// [`CHECKPOINT_MAX_ARCHIVE_BYTES`] decompressed. Blocking.
 pub fn read_archive(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, CheckpointError> {
-    let decoder = zstd::stream::read::Decoder::new(bytes)?;
-    let mut archive = tar::Archive::new(BoundedReader {
-        inner: decoder,
-        left: CHECKPOINT_MAX_ARCHIVE_BYTES,
-    });
     let mut files = BTreeMap::new();
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let name = entry.path()?.to_string_lossy().into_owned();
+    visit_archive(bytes, CHECKPOINT_MAX_ARCHIVE_BYTES, |name, entry| {
         let mut data = Vec::new();
         entry.read_to_end(&mut data)?;
-        files.insert(name, data);
-    }
+        files.insert(name.to_owned(), data);
+        Ok(())
+    })?;
     Ok(files)
 }
 
-/// Fails a read once more than `left` bytes came through.
+/// Streams each archive entry to `visit` with its archive path. Every byte, including the
+/// entries `visit` leaves unread, comes through one reader bounded at `limit` decompressed
+/// bytes; past it the whole read fails with [`CHECKPOINT_TOO_LARGE`]. Blocking.
+pub(crate) fn visit_archive(
+    bytes: &[u8],
+    limit: u64,
+    mut visit: impl FnMut(&str, &mut dyn Read) -> Result<(), CheckpointError>,
+) -> Result<(), CheckpointError> {
+    let exceeded = Rc::new(Cell::new(false));
+    let result = visit_entries(bytes, limit, &exceeded, &mut visit);
+    if exceeded.get() {
+        return Err(CheckpointError::TooLarge {
+            bytes: limit.saturating_add(1),
+            budget: limit,
+        });
+    }
+    result
+}
+
+fn visit_entries(
+    bytes: &[u8],
+    limit: u64,
+    exceeded: &Rc<Cell<bool>>,
+    visit: &mut dyn FnMut(&str, &mut dyn Read) -> Result<(), CheckpointError>,
+) -> Result<(), CheckpointError> {
+    let decoder = zstd::stream::read::Decoder::new(bytes)?;
+    let mut archive = tar::Archive::new(BoundedReader {
+        inner: decoder,
+        left: limit,
+        exceeded: Rc::clone(exceeded),
+    });
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let name = entry.path()?.to_string_lossy().into_owned();
+        visit(&name, &mut entry)?;
+    }
+    Ok(())
+}
+
+/// Fails a read once more than `left` bytes came through, and records that it did: the
+/// tar reader may wrap the error, the flag stays exact.
 struct BoundedReader<R> {
     inner: R,
     left: u64,
+    exceeded: Rc<Cell<bool>>,
 }
 
 impl<R: Read> Read for BoundedReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = self.inner.read(buf)?;
-        self.left = self.left.checked_sub(n as u64).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("decompressed checkpoint exceeds {CHECKPOINT_MAX_ARCHIVE_BYTES} bytes"),
-            )
-        })?;
-        Ok(n)
+        match self.left.checked_sub(n as u64) {
+            Some(left) => {
+                self.left = left;
+                Ok(n)
+            }
+            None => {
+                self.exceeded.set(true);
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "decompressed checkpoint exceeds its bound",
+                ))
+            }
+        }
     }
 }
 
@@ -738,7 +840,7 @@ mod tests {
                 .fetch_all(&copy)
                 .await
                 .unwrap();
-        assert_eq!(hosts, ["machine:machine-a", "machine:machine-b", "stranger"]);
+        assert_eq!(hosts, ["machine:machine-a", "machine:machine-b", "unmapped:stranger"]);
         let lanes: Vec<String> = sqlx::query_scalar("SELECT host_id FROM lanes ORDER BY key")
             .fetch_all(&copy)
             .await
@@ -843,6 +945,22 @@ mod tests {
             .all(|data| !String::from_utf8_lossy(data).contains("provider-local")));
         assert_eq!(exported.manifest.memory_agent, SUPERVISOR_MEMORY_AGENT);
         assert!(exported.manifest.has_profile);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_database_snapshot_is_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new();
+        let pool = hub(dir.path()).await;
+        seed(&pool).await;
+        let path = dir.path().join("snapshot.sqlite");
+
+        snapshot_into(&pool, &path).await.unwrap();
+
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert!(metadata.len() > 0, "VACUUM INTO filled the private file");
     }
 
     #[tokio::test]

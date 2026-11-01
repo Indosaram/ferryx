@@ -2802,11 +2802,9 @@ pub fn run_mcp() -> i32 {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        // Swap in a staged checkpoint import before the pool exists, as the hub open does.
-        let now_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs() as i64);
-        let pool = match ferryx_hub::checkpoint_import::open_with_staged_swap(&path, now_ts).await {
+        // A plain open: only the daemon's hub open swaps in a staged checkpoint import. This
+        // process runs beside the daemon, whose pool may hold the database.
+        let pool = match ferryx_hub::storage::connect(&path).await {
             Ok(pool) => pool,
             Err(error) => {
                 eprintln!("ferryx mcp: {error}");
