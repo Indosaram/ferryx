@@ -85,21 +85,6 @@ fn set_plist_string(plist: &str, key: &str, value: &str) -> Option<String> {
     Some(format!("{}{escaped}{}", &plist[..open], &plist[close..]))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn usage_strings_replace_only_their_key() {
-        let plist = "<dict>\n\t<key>NSCameraUsageDescription</key>\n\t<string>ferryx_engine</string>\n\t<key>NSMicrophoneUsageDescription</key>\n\t<string>ferryx_engine</string>\n</dict>";
-        let updated = set_plist_string(plist, "NSCameraUsageDescription", CAMERA_USAGE).expect("camera key");
-        assert!(updated.contains(&format!("<key>NSCameraUsageDescription</key>\n\t<string>{CAMERA_USAGE}</string>")));
-        assert!(updated.contains("<key>NSMicrophoneUsageDescription</key>\n\t<string>ferryx_engine</string>"));
-        assert_eq!(set_plist_string(plist, "NSMissing", "x"), None);
-        assert_eq!(set_plist_string("<key>A</key><key>B</key><string>x</string>", "A", "y"), None);
-    }
-}
-
 #[cfg(target_os = "windows")]
 fn bundle(output: &std::path::Path, release: bool) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     Ok(cef::build_util::win::build_bundle(output, "ferryx_engine", release)?)
@@ -162,4 +147,21 @@ fn zip_dir(dir: &std::path::Path, archive: &std::path::Path) -> Result<(), Box<d
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn bundle(_output: &std::path::Path, _release: bool) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     Err("the engine is bundled on macOS, Windows and Linux only".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_strings_replace_only_their_key() {
+        let plist = "<dict>\n\t<key>NSCameraUsageDescription</key>\n\t<string>ferryx_engine</string>\n\t<key>NSMicrophoneUsageDescription</key>\n\t<string>ferryx_engine</string>\n</dict>";
+        let updated = set_plist_string(plist, "NSCameraUsageDescription", CAMERA_USAGE).expect("camera key");
+        assert!(updated.contains(&format!("<key>NSCameraUsageDescription</key>\n\t<string>{CAMERA_USAGE}</string>")));
+        assert!(updated.contains("<key>NSMicrophoneUsageDescription</key>\n\t<string>ferryx_engine</string>"));
+        let both = set_plist_string(&updated, "NSMicrophoneUsageDescription", MICROPHONE_USAGE).expect("microphone key");
+        assert!(both.contains(&format!("<key>NSMicrophoneUsageDescription</key>\n\t<string>{MICROPHONE_USAGE}</string>")));
+        assert_eq!(set_plist_string(plist, "NSMissing", "x"), None);
+        assert_eq!(set_plist_string("<key>A</key><key>B</key><string>x</string>", "A", "y"), None);
+    }
 }
