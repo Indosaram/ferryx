@@ -4058,6 +4058,16 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                                     let _ = task.await;
                                 }
                             }
+                            // A holder's clean stop hands the supervisor on: the final
+                            // checkpoint first (the release records it), then the lease.
+                            let holder = lease_handle().filter(|handle| handle.current_fence() != 0 && handle.is_holder_now());
+                            if let (Ok(()), Some(handle)) = (&persisted, holder) {
+                                crate::supervisor_checkpoint::publish_then_release(
+                                    || publish_checkpoint(&launch),
+                                    || async move { handle.release().await.is_some_and(|role| !role.runs_hub()) },
+                                )
+                                .await;
+                            }
                             match persisted {
                                 Ok(()) => "{\"status\":\"ok\",\"op\":\"stop\"}\n",
                                 Err(error) => {

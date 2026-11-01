@@ -244,14 +244,22 @@ pub async fn import_pending(hub_dir: &std::path::Path) {
         None => Vec::new(),
     };
     let importer = HubMoveImport { hub_dir: hub_dir.to_owned(), machine_id: crate::hub_runtime::lease_machine_id().await, paired };
-    let archive = cp::CheckpointStore::new(dir).path_of(&id);
-    match cp::MoveImport::import(&importer, &archive).await {
-        Ok(()) => {
-            state.set_own(&id);
-            tracing::info!(checkpoint = %id, "promotion imported the synced checkpoint");
-        }
-        Err(error) => tracing::warn!(code = %error.code, "promotion did not import the synced checkpoint: {}", error.message),
+    if let Err(error) = import_checkpoint(&state, &cp::CheckpointStore::new(dir), &importer, &id).await {
+        tracing::warn!(code = %error.code, "promotion did not import the synced checkpoint: {}", error.message);
     }
+}
+
+/// Stages stored checkpoint `id` through `importer`; on success the hub reflects it.
+async fn import_checkpoint(
+    state: &cp::CheckpointState,
+    store: &cp::CheckpointStore,
+    importer: &dyn cp::MoveImport,
+    id: &str,
+) -> Result<(), MoveError> {
+    cp::MoveImport::import(importer, &store.path_of(id)).await?;
+    state.set_own(id);
+    tracing::info!(checkpoint = %id, "promotion imported the synced checkpoint");
+    Ok(())
 }
 
 /// A standby's replication step: pulls the holder's newest checkpoint over the paired
@@ -282,13 +290,17 @@ pub async fn pull_from_holder() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paired_host::client::ClientError;
+    use crate::supervisor_checkpoint::{CheckpointState, CheckpointStore, MoveImport};
+    use std::path::{Path, PathBuf};
 
     const NOW: i64 = 1_800_000_000;
 
-    async fn provisioned_hub(dir: &std::path::Path, owner: &str) -> ferryx_hub::goals::SqlitePool {
+    /// A hub database in `dir` whose supervisor belongs to `owner` (a fresh supervisor id).
+    async fn hub_with_owner(dir: &Path, owner: &str) -> ferryx_hub::goals::SqlitePool {
         std::fs::create_dir_all(dir).unwrap();
         let pool = ferryx_hub::storage::connect(&dir.join("hub.sqlite")).await.unwrap();
-        ferryx_hub::supervisor::provision_owner(&pool, owner, "ferryx", "github.com/example/ferryx", "local", "/repo/.git")
+        ferryx_hub::supervisor::provision_owner(&pool, owner, "ferryx", "github.com/example/ferryx", "host-a", "/repo/.git")
             .await
             .unwrap();
         pool
@@ -300,7 +312,7 @@ mod tests {
     async fn a_move_onto_another_local_supervisor_archives_it_before_the_import() {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("source");
-        let pool = provisioned_hub(&source, "owner:u1").await;
+        let pool = hub_with_owner(&source, "owner:u1").await;
         let exported = ferryx_hub::checkpoint::export(
             &pool,
             &ferryx_hub::checkpoint::ExportRequest::new(
@@ -314,7 +326,7 @@ mod tests {
         .unwrap();
         pool.close().await;
         let target = root.path().join("target");
-        provisioned_hub(&target, "owner:u1").await.close().await;
+        hub_with_owner(&target, "owner:u1").await.close().await;
         let options = || ferryx_hub::checkpoint_import::ImportOptions {
             memory_root: root.path().join("memory-agents"),
             env_file: target.join("env"),
@@ -336,5 +348,84 @@ mod tests {
         assert!(target.join(format!("{}{NOW}", ferryx_hub::adoption::ARCHIVE_PREFIX)).is_file(), "archived first");
         assert!(target.join(ferryx_hub::checkpoint_import::INCOMING_DB).exists(), "the checkpoint is staged");
         assert_eq!(archives(), 1);
+    }
+
+    /// Machine A's hub exported and stored as a pulled checkpoint; returns its id.
+    async fn stored_checkpoint(root: &Path, store: &CheckpointStore) -> String {
+        let source = root.join("source");
+        let pool = hub_with_owner(&source, "slack:T1:U-owner").await;
+        let request = ferryx_hub::checkpoint::ExportRequest::new(
+            source,
+            "mach-a".to_owned(),
+            root.join("export.tar.zst"),
+            ferryx_hub::checkpoint_import::default_private_writer(),
+        );
+        let exported = ferryx_hub::checkpoint::export(&pool, &request).await.unwrap();
+        pool.close().await;
+        let bytes = std::fs::read(&exported.path).unwrap();
+        store.save(&exported.checkpoint_id, &bytes, 1_000, true).unwrap().id
+    }
+
+    fn importer(hub_dir: PathBuf) -> HubMoveImport {
+        HubMoveImport { hub_dir, machine_id: "mach-b".to_owned(), paired: Vec::new() }
+    }
+
+    #[tokio::test]
+    async fn a_promotion_import_stages_the_synced_checkpoint_in_the_hub_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::new(root.path().join(cp::CHECKPOINT_DIR));
+        let id = stored_checkpoint(root.path(), &store).await;
+        let hub_dir = root.path().join("hub");
+        std::fs::create_dir_all(&hub_dir).unwrap();
+        let (state, importer) = (CheckpointState::default(), importer(hub_dir.clone()));
+
+        assert_eq!(import_checkpoint(&state, &store, &importer, &id).await, Ok(()));
+
+        let incoming = hub_dir.join(ferryx_hub::checkpoint_import::INCOMING_DB);
+        assert!(incoming.exists(), "the checkpoint is staged for the next hub open");
+        assert!(state.reflects(&id));
+        importer.discard().await;
+        assert!(!incoming.exists(), "a discarded import leaves nothing staged");
+    }
+
+    #[tokio::test]
+    async fn a_promotion_import_into_a_hub_with_another_supervisor_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::new(root.path().join(cp::CHECKPOINT_DIR));
+        let id = stored_checkpoint(root.path(), &store).await;
+        let hub_dir = root.path().join("hub");
+        hub_with_owner(&hub_dir, "slack:T2:U-other").await.close().await;
+        let (state, importer) = (CheckpointState::default(), importer(hub_dir.clone()));
+
+        let error = import_checkpoint(&state, &store, &importer, &id).await.unwrap_err();
+
+        assert_eq!((error.status, error.code.as_str()), (409, ferryx_hub::checkpoint::SUPERVISOR_IDENTITY_MISMATCH));
+        assert!(!hub_dir.join(ferryx_hub::checkpoint_import::INCOMING_DB).exists(), "nothing staged");
+        assert!(!state.reflects(&id));
+    }
+
+    #[test]
+    fn the_paired_channel_maps_an_unreachable_holder_and_keeps_refusal_codes() {
+        let unreachable = ClientError { code: "HOST_UNAVAILABLE".into(), machine_error: None, request_id: None, ambiguous: false };
+        assert_eq!(peer_error(unreachable).code, cp::HOLDER_UNREACHABLE);
+        let refused = ClientError {
+            code: "SUPERVISOR_STANDBY".into(),
+            machine_error: Some(Box::new(crate::remote::machine_protocol::MachineError {
+                code: cp::SUPERVISOR_STANDBY.into(),
+                message: "another machine runs the supervisor".into(),
+                retryable: false,
+                request_id: "r1".into(),
+                details: Default::default(),
+            })),
+            request_id: None,
+            ambiguous: false,
+        };
+        let error = peer_error(refused);
+        assert_eq!((error.status, error.code.as_str()), (502, cp::SUPERVISOR_STANDBY));
+
+        let body = br#"{"error":{"code":"SUPERVISOR_STANDBY","message":"held"}}"#;
+        let error = peer_refusal(409, body);
+        assert_eq!((error.status, error.code.as_str(), error.message.as_str()), (409, cp::SUPERVISOR_STANDBY, "held"));
+        assert_eq!(peer_refusal(500, b"not json").code, "HOLDER_REFUSED");
     }
 }

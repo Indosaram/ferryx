@@ -549,7 +549,14 @@ pub async fn move_here(
                 if !force {
                     return Err(MoveError::force_required(ack.holder_label, &holder, local.map(|l| l.at)));
                 }
-                return acquire_or_discard(lease, importer, state, false, true).await;
+                // The forced takeover continues from this machine's newest pulled checkpoint
+                // (what the confirm said is kept). Its import runs todo 7's identity check, so
+                // a hub holding its own different supervisor is refused before the lease moves.
+                let mut imported = false;
+                if let Some(local) = local.as_ref().filter(|local| local.pulled) {
+                    imported = import_local(importer, store, state, &local.id).await?;
+                }
+                return acquire_or_discard(lease, importer, state, imported, true).await;
             }
             let mut imported = false;
             if let (Some(id), Some(local)) = (&ack.checkpoint_id, &local) {
@@ -559,6 +566,44 @@ pub async fn move_here(
             }
             acquire_or_discard(lease, importer, state, imported, false).await
         }
+    }
+}
+
+/// What a holder's clean `hub stop` did with the supervisor lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CleanStop {
+    /// The final checkpoint was published, then the lease released recording it.
+    Released { checkpoint: String },
+    /// No final checkpoint: the lease is kept rather than released with an older checkpoint
+    /// recorded (a standby would take over without the last changes).
+    NotPublished { error: String },
+    /// Published, but the lease client did not release.
+    NotReleased { checkpoint: String },
+}
+
+/// A holder's clean stop (plan todo 8): publishes the final checkpoint first, so the release
+/// carries it, then releases the lease. The caller checks that this machine holds the lease
+/// and has stopped its generation.
+pub async fn publish_then_release<P, PF, R, RF>(publish: P, release: R) -> CleanStop
+where
+    P: FnOnce() -> PF,
+    PF: std::future::Future<Output = Result<String, String>>,
+    R: FnOnce() -> RF,
+    RF: std::future::Future<Output = bool>,
+{
+    let checkpoint = match publish().await {
+        Ok(checkpoint) => checkpoint,
+        Err(error) => {
+            tracing::warn!(%error, "hub stop: the final supervisor checkpoint was not published; the lease is kept");
+            return CleanStop::NotPublished { error };
+        }
+    };
+    if release().await {
+        tracing::info!(checkpoint = %checkpoint, "hub stop: supervisor lease released with the final checkpoint");
+        CleanStop::Released { checkpoint }
+    } else {
+        tracing::warn!(checkpoint = %checkpoint, "hub stop: the supervisor lease was not released");
+        CleanStop::NotReleased { checkpoint }
     }
 }
 

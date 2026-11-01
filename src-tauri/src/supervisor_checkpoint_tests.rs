@@ -294,12 +294,69 @@ async fn a_stale_checkpoint_needs_force_and_names_what_is_lost() {
     assert!(lease.acquires.lock().is_empty(), "no acquire without the confirm flag");
     assert_eq!(relay.row().holder_machine_id, A);
 
-    // The explicit confirm takes over, forced, without importing the stale checkpoint.
+    // The explicit confirm takes over, forced, continuing from this machine's checkpoint.
     let moved = move_here(&lease, &holder, &importer, &store, &state, true, 1_200).await;
     assert_eq!(moved, Ok(true));
     assert_eq!(*lease.acquires.lock(), vec![true]);
-    assert!(importer.imported.lock().is_empty());
+    assert_eq!(*importer.imported.lock(), vec![store.path_of(&checkpoint_id_of(b"older"))]);
     assert_eq!(relay.row().holder_machine_id, B);
+}
+
+#[tokio::test]
+async fn a_forced_move_into_a_hub_with_another_supervisor_is_refused() {
+    let relay = Relay::new();
+    let fence = expired_with(&relay, b"synced");
+    let (_dir, store) = store();
+    let state = CheckpointState::default();
+    state.set_local(Some(store.save(&checkpoint_id_of(b"older"), b"older", 900, true).unwrap()));
+    let importer = Importer { refuse: Some(ferryx_hub::checkpoint::SUPERVISOR_IDENTITY_MISMATCH), ..Default::default() };
+    let (holder, lease) = (holder(&relay, fence, false), lease(&relay, &state));
+
+    let error = move_here(&lease, &holder, &importer, &store, &state, true, 1_200).await.unwrap_err();
+
+    assert_eq!(error.code, ferryx_hub::checkpoint::SUPERVISOR_IDENTITY_MISMATCH);
+    assert!(lease.acquires.lock().is_empty(), "force does not skip the identity check");
+    assert_eq!(relay.row().holder_machine_id, A);
+    assert!(!state.reflects(&checkpoint_id_of(b"older")));
+}
+
+#[tokio::test]
+async fn a_clean_stop_publishes_the_final_checkpoint_before_it_releases() {
+    let log = parking_lot::Mutex::new(Vec::new());
+    let steps = &log;
+    let outcome = publish_then_release(
+        move || async move {
+            steps.lock().push("publish");
+            Ok("final".to_owned())
+        },
+        move || async move {
+            steps.lock().push("release");
+            true
+        },
+    )
+    .await;
+    assert_eq!(outcome, CleanStop::Released { checkpoint: "final".into() });
+    assert_eq!(*log.lock(), vec!["publish", "release"]);
+
+    // The relay did not release: reported, not hidden.
+    let outcome = publish_then_release(|| async { Ok("final".to_owned()) }, || async { false }).await;
+    assert_eq!(outcome, CleanStop::NotReleased { checkpoint: "final".into() });
+}
+
+#[tokio::test]
+async fn a_clean_stop_without_a_final_checkpoint_keeps_the_lease() {
+    let flag = parking_lot::Mutex::new(false);
+    let released = &flag;
+    let outcome = publish_then_release(
+        || async { Err("export failed".to_owned()) },
+        move || async move {
+            *released.lock() = true;
+            true
+        },
+    )
+    .await;
+    assert_eq!(outcome, CleanStop::NotPublished { error: "export failed".into() });
+    assert!(!*flag.lock(), "no release recording an older checkpoint");
 }
 
 #[test]
