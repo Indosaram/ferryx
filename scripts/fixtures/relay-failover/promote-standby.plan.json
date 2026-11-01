@@ -27,6 +27,13 @@
       "command": "sudo systemctl start ferryx-standby-restore.service"
     },
     {
+      "id": "stop-relay",
+      "host": "root@standby.example.net",
+      "kind": "run",
+      "description": "the relay must not serve while the store turns writable",
+      "command": "sudo systemctl stop ferryx-relay.service"
+    },
+    {
       "id": "remove-marker",
       "host": "root@standby.example.net",
       "kind": "run",
@@ -34,11 +41,18 @@
       "command": "sudo rm -f '/var/lib/ferryx/account-data/standby.readonly'"
     },
     {
+      "id": "bump-lease-epoch",
+      "host": "root@standby.example.net",
+      "kind": "run",
+      "description": "every supervisor lease fence from here on is above any fence the old primary issued",
+      "command": "sudo -u 'ferryx' env FERRYX_ACCOUNT_DATA_DIR='/var/lib/ferryx/account-data' '/usr/local/bin/ferryx-relay' bump-lease-epoch"
+    },
+    {
       "id": "start-replication",
       "host": "root@standby.example.net",
       "kind": "run",
       "description": "the new primary replicates from now on",
-      "command": "sudo systemctl enable --now litestream.service && sudo systemctl restart ferryx-relay.service"
+      "command": "sudo systemctl enable --now litestream.service && sudo systemctl start ferryx-relay.service"
     },
     {
       "id": "promoted-health",

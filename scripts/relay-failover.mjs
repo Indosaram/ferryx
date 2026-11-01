@@ -10,7 +10,9 @@
 // Invariant: exactly one host writes the account database. The standby carries the marker
 // `<dataDir>/standby.readonly`, which makes ferryx-relay refuse every account write with
 // ACCOUNT_STORE_READ_ONLY, and it runs no Litestream replicator. `promote-standby` fences the
-// old primary first and removes the marker last.
+// old primary first, stops the standby's relay before the marker goes (a running relay turns
+// writable the instant the marker is removed), bumps the supervisor lease epoch, then starts
+// replication and the relay.
 //
 // Usage:
 //   bun scripts/relay-failover.mjs deploy-standby  --config <file> [--apply]
@@ -239,7 +241,11 @@ export function deployStandbyPlan(config) {
   };
 }
 
-/** Failover: fence the old primary, catch up, then make the standby writable. */
+/**
+ * Failover: fence the old primary, catch up, then make the standby writable. The standby's
+ * relay is stopped before the marker is removed and started only after the supervisor lease
+ * epoch is bumped, so it never grants a lease from the restored epoch.
+ */
 export function promoteStandbyPlan(config) {
   const s = config.standby;
   const sh = hostTarget(config, "standby");
@@ -258,8 +264,15 @@ export function promoteStandbyPlan(config) {
       ),
       run(sh, "stop-restore-timer", "stop refreshing from the replica", "sudo systemctl disable --now ferryx-standby-restore.timer"),
       run(sh, "final-restore", "take the newest replicated state", "sudo systemctl start ferryx-standby-restore.service"),
+      run(sh, "stop-relay", "the relay must not serve while the store turns writable", "sudo systemctl stop ferryx-relay.service"),
       run(sh, "remove-marker", "the standby becomes the only writable account database", `sudo rm -f ${q(`${s.dataDir}/${STANDBY_MARKER}`)}`),
-      run(sh, "start-replication", "the new primary replicates from now on", "sudo systemctl enable --now litestream.service && sudo systemctl restart ferryx-relay.service"),
+      run(
+        sh,
+        "bump-lease-epoch",
+        "every supervisor lease fence from here on is above any fence the old primary issued",
+        `sudo -u ${q(s.user)} env FERRYX_ACCOUNT_DATA_DIR=${q(s.dataDir)} ${q(s.binary)} bump-lease-epoch`,
+      ),
+      run(sh, "start-replication", "the new primary replicates from now on", "sudo systemctl enable --now litestream.service && sudo systemctl start ferryx-relay.service"),
       healthCheck("promoted-health", sh, config, "primary"),
     ],
   };

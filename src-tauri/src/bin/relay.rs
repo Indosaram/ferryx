@@ -26,10 +26,22 @@
 //!   serve an operator-provided certificate instead of ACME.
 //!
 //! With TLS enabled the port defaults to `443` instead of `8787`.
+//!
+//! Standby promotion:
+//!
+//! ```text
+//! ferryx-relay bump-lease-epoch
+//! ```
+//!
+//! Advances the supervisor lease epoch of the account store in `FERRYX_ACCOUNT_DATA_DIR`
+//! (default `<home>/.ferryx/account-data`) inside one write transaction and exits. The
+//! promotion runs it with the relay stopped and the `standby.readonly` marker removed, so every
+//! fence the promoted relay grants is above every fence the old primary issued.
 
 use base64::Engine as _;
 use ferryx_lib::remote::relay_server::{
-    relay_router_with_account, spawn_session_reaper, spawn_suspension_sweeper, RelayState,
+    bump_supervisor_lease_epoch, relay_router_with_account, spawn_session_reaper,
+    spawn_suspension_sweeper, RelayState,
 };
 use ferryx_lib::remote::relay_tls::{self, AcmeSettings, TlsAcceptorMode};
 use ferryx_lib::account::origin::{
@@ -208,6 +220,43 @@ fn default_account_data_dir() -> Option<PathBuf> {
     ferryx_home_dir().map(|dir| dir.join("account-data"))
 }
 
+/// `FERRYX_ACCOUNT_DATA_DIR`, else [`default_account_data_dir`]; exits when neither resolves.
+fn account_data_dir_or_exit() -> PathBuf {
+    match std::env::var_os("FERRYX_ACCOUNT_DATA_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => match default_account_data_dir() {
+            Some(dir) => dir,
+            None => {
+                eprintln!(
+                    "ferryx-relay: cannot resolve the account data directory; set \
+                     FERRYX_ACCOUNT_DATA_DIR or HOME (USERPROFILE on Windows), otherwise \
+                     persistent account data would be written relative to the working directory"
+                );
+                std::process::exit(2);
+            }
+        },
+    }
+}
+
+/// `ferryx-relay bump-lease-epoch`: one write transaction on the account store, then exit.
+fn run_bump_lease_epoch(extra_args: &[String]) -> ! {
+    if let Some(arg) = extra_args.first() {
+        eprintln!("ferryx-relay: bump-lease-epoch: unrecognized argument: {arg}");
+        std::process::exit(2);
+    }
+    let data_dir = account_data_dir_or_exit();
+    match bump_supervisor_lease_epoch(&data_dir) {
+        Ok(epoch) => {
+            println!("ferryx-relay: supervisor lease epoch is now {epoch}");
+            std::process::exit(0)
+        }
+        Err(err) => {
+            eprintln!("ferryx-relay: bump-lease-epoch failed: {err}");
+            std::process::exit(1)
+        }
+    }
+}
+
 /// Resolves the TLS configuration into an acceptor. Disk work (reading PEM files,
 /// creating the ACME cache) runs on a blocking thread.
 async fn prepare_tls(tls: TlsConfig) -> Result<Option<TlsAcceptorMode>, String> {
@@ -256,6 +305,9 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("bump-lease-epoch") {
+        run_bump_lease_epoch(&args[1..]);
+    }
     let config = match parse_args(&args) {
         Ok(config) => config,
         Err(err) => {
@@ -301,20 +353,7 @@ async fn main() {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| origin.clone());
-    let data_dir = match std::env::var_os("FERRYX_ACCOUNT_DATA_DIR") {
-        Some(dir) => PathBuf::from(dir),
-        None => match default_account_data_dir() {
-            Some(dir) => dir,
-            None => {
-                eprintln!(
-                    "ferryx-relay: cannot resolve the account data directory; set \
-                     FERRYX_ACCOUNT_DATA_DIR or HOME (USERPROFILE on Windows), otherwise \
-                     persistent account data would be written relative to the working directory"
-                );
-                std::process::exit(2);
-            }
-        },
-    };
+    let data_dir = account_data_dir_or_exit();
     let mailer = ferryx_lib::account::mailer::create_production_mailer(Some(data_dir.join("mail")));
     let account_state = Arc::new(
         ferryx_lib::account::service::AccountState::new(&data_dir, &origin, mailer)

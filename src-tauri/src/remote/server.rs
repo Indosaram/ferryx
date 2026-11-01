@@ -9710,6 +9710,7 @@ mod tests {
                 audience: None,
                 nonce: "startup-challenge".into(),
                 timestamp: 1234,
+                capabilities: Vec::new(),
             };
             socket
                 .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -12342,6 +12343,7 @@ mod tests {
                 audience: None,
                 nonce: "mock-test-challenge".into(),
                 timestamp: now_secs,
+                capabilities: Vec::new(),
             };
             socket
                 .send(tokio_tungstenite::tungstenite::Message::Text(

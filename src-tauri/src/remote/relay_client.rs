@@ -1165,6 +1165,7 @@ mod tests {
                 nonce: "unique-challenge".into(),
                 timestamp: 1234,
                 audience: None,
+                capabilities: Vec::new(),
             };
             socket
                 .send(Message::Text(

@@ -37,6 +37,11 @@ pub struct ControlChallenge {
     /// authenticates against the legacy audience.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audience: Option<String>,
+    /// Optional features this relay serves on the control channel (for example
+    /// [`SUPERVISOR_LEASE_CAPABILITY`]). Absent on the wire when empty, so a daemon that
+    /// predates the field ignores it and an older relay simply never sends it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +97,109 @@ pub struct AccountGrantOfferDelivered {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant_id: Option<String>,
     pub status: String,
+}
+
+/// Capability a relay advertises in its control challenge when it answers supervisor lease
+/// requests on the control channel.
+pub const SUPERVISOR_LEASE_CAPABILITY: &str = "supervisorLeaseV1";
+
+/// Asks for the account's supervisor lease. The machine and its account come from the
+/// authenticated control socket, never from this frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupervisorLeaseAcquire {
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupervisorLeaseRenew {
+    pub request_id: String,
+    pub fence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
+}
+
+/// Releases the lease and records the final checkpoint; `reserved_for` hands the released fence
+/// to another machine of the same account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupervisorLeaseRelease {
+    pub request_id: String,
+    pub fence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserved_for: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupervisorLeaseQuery {
+    pub request_id: String,
+}
+
+/// Daemon-to-relay supervisor lease frames, tagged like the relay's other control requests
+/// (`{"type":"SupervisorLeaseAcquire","requestId":...}`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum SupervisorLeaseRequest {
+    SupervisorLeaseAcquire(SupervisorLeaseAcquire),
+    SupervisorLeaseRenew(SupervisorLeaseRenew),
+    SupervisorLeaseRelease(SupervisorLeaseRelease),
+    SupervisorLeaseQuery(SupervisorLeaseQuery),
+}
+
+impl SupervisorLeaseRequest {
+    pub fn request_id(&self) -> &str {
+        match self {
+            SupervisorLeaseRequest::SupervisorLeaseAcquire(request) => &request.request_id,
+            SupervisorLeaseRequest::SupervisorLeaseRenew(request) => &request.request_id,
+            SupervisorLeaseRequest::SupervisorLeaseRelease(request) => &request.request_id,
+            SupervisorLeaseRequest::SupervisorLeaseQuery(request) => &request.request_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SupervisorLeaseOutcome {
+    Granted,
+    Renewed,
+    Released,
+    Refused,
+    Unavailable,
+}
+
+/// The relay's one reply to every supervisor lease request. Durations are seconds on the
+/// relay's clock at the moment it answered; the daemon never sends a time of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub struct SupervisorLeaseAck {
+    pub request_id: String,
+    pub outcome: SupervisorLeaseOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder_machine_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_secs: Option<u64>,
+    /// Set on a takeover acquire: seconds until the previous holder's local deadline could
+    /// still be live (its `expires_at + GRACE_SECS - now`, clamped at 0; 0 after a release).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_expires_in_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_machine_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -554,6 +662,7 @@ mod tests {
                 nonce: "nonce".into(),
                 timestamp: u64::MAX,
                 audience: None,
+                capabilities: Vec::new(),
             },
             json!({"nonce": "nonce", "timestamp": u64::MAX}),
         );
@@ -563,8 +672,19 @@ mod tests {
                 nonce: "nonce".into(),
                 timestamp: 7,
                 audience: Some("relay.ferryx.dev".into()),
+                capabilities: Vec::new(),
             },
             json!({"nonce": "nonce", "timestamp": 7, "audience": "relay.ferryx.dev"}),
+        );
+        // A relay that serves supervisor leases says so; an older daemon ignores the field.
+        assert_wire(
+            ControlChallenge {
+                nonce: "nonce".into(),
+                timestamp: 7,
+                audience: None,
+                capabilities: vec![SUPERVISOR_LEASE_CAPABILITY.into()],
+            },
+            json!({"nonce": "nonce", "timestamp": 7, "capabilities": ["supervisorLeaseV1"]}),
         );
         assert_wire(
             ControlAuth {
@@ -590,6 +710,43 @@ mod tests {
                 error: Some("invalid signature".into()),
             },
             json!({"success": false, "error": "invalid signature"}),
+        );
+    }
+
+    #[test]
+    fn supervisor_lease_wire_roundtrips() {
+        use serde_json::json;
+        assert_wire(
+            SupervisorLeaseRequest::SupervisorLeaseAcquire(SupervisorLeaseAcquire {
+                request_id: "r1".into(),
+                checkpoint_id: Some("ck1".into()),
+                force: false,
+            }),
+            json!({"type": "SupervisorLeaseAcquire", "requestId": "r1", "checkpointId": "ck1", "force": false}),
+        );
+        assert_wire(
+            SupervisorLeaseRequest::SupervisorLeaseRelease(SupervisorLeaseRelease {
+                request_id: "r2".into(),
+                fence: 3,
+                checkpoint_id: None,
+                reserved_for: Some("mach-b".into()),
+            }),
+            json!({"type": "SupervisorLeaseRelease", "requestId": "r2", "fence": 3, "reservedFor": "mach-b"}),
+        );
+        assert_wire(
+            SupervisorLeaseAck {
+                request_id: "r1".into(),
+                outcome: SupervisorLeaseOutcome::Unavailable,
+                fence: None,
+                holder_machine_id: None,
+                holder_label: None,
+                expires_in_secs: None,
+                previous_expires_in_secs: None,
+                checkpoint_id: None,
+                account_machine_count: None,
+                reason_code: Some("LEASE_UNSUPPORTED".into()),
+            },
+            json!({"type": "SupervisorLeaseAck", "requestId": "r1", "outcome": "unavailable", "reasonCode": "LEASE_UNSUPPORTED"}),
         );
     }
 

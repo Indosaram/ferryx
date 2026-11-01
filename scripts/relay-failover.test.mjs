@@ -55,6 +55,20 @@ test("promotion fences the old primary before the marker is removed", () => {
   expect(steps.find((step) => step.id === "remove-marker").command).toContain(STANDBY_MARKER);
 });
 
+test("promotion stops the standby relay before the marker goes and bumps the lease epoch before it starts", () => {
+  const steps = dryRun("promote-standby").steps;
+  const ids = steps.map((step) => step.id);
+  expect(ids.indexOf("stop-relay")).toBeGreaterThan(-1);
+  expect(ids.indexOf("stop-relay")).toBeLessThan(ids.indexOf("remove-marker"));
+  expect(ids.indexOf("remove-marker")).toBeLessThan(ids.indexOf("bump-lease-epoch"));
+  expect(ids.indexOf("bump-lease-epoch")).toBeLessThan(ids.indexOf("start-replication"));
+  expect(steps.find((step) => step.id === "bump-lease-epoch").command).toContain("ferryx-relay' bump-lease-epoch");
+  const before = ids.slice(0, ids.indexOf("bump-lease-epoch"));
+  for (const id of before) {
+    expect(steps.find((step) => step.id === id).command).not.toMatch(/(start|restart) ferryx-relay/);
+  }
+});
+
 test("a missing standby host leaves the plan printable but blocked", () => {
   const config = raw();
   config.standby.ssh = null;

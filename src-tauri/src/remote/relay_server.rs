@@ -30,8 +30,12 @@ use crate::remote::auth::{verify_control_challenge, write_private_json};
 use crate::remote::protocol::{
     AccountGrantOfferDelivered, AccountGrantOfferDelivery, ControlAuth, ControlAuthResponse,
     ControlChallenge, PairingState, RegisterPairingPin, RegisterPairingPinAck, SocketTicketRequest,
-    SocketTicketResponse,
+    SocketTicketResponse, SupervisorLeaseAck, SupervisorLeaseAcquire, SupervisorLeaseOutcome,
+    SupervisorLeaseQuery, SupervisorLeaseRelease, SupervisorLeaseRenew, SupervisorLeaseRequest,
+    SUPERVISOR_LEASE_CAPABILITY,
 };
+use crate::account::store::SupervisorLeaseRecord;
+use crate::account::supervisor_lease::{self as lease, LeaseError};
 pub use crate::remote::state::DEFAULT_RELAY_URL;
 use axum::{
     body::{to_bytes, Body, Bytes},
@@ -384,6 +388,12 @@ enum ControlRequest {
         opaque: bool,
     },
     RegisterPairingPin(RegisterPairingPin),
+    // Supervisor lease requests. The machine and its account come from the authenticated
+    // control socket; a machine id inside the frame is ignored.
+    SupervisorLeaseAcquire(SupervisorLeaseAcquire),
+    SupervisorLeaseRenew(SupervisorLeaseRenew),
+    SupervisorLeaseRelease(SupervisorLeaseRelease),
+    SupervisorLeaseQuery(SupervisorLeaseQuery),
 }
 
 struct RegisteredPairing {
@@ -549,6 +559,9 @@ struct RelayInner {
     data_pool: Mutex<HashMap<String, Vec<PooledDataSocket>>>,
     /// Refuse plaintext relay proxy routes (`FERRYX_RELAY_REQUIRE_E2E=1`).
     require_e2e: AtomicBool,
+    /// Supervisor lease renewals answered while this relay is a read-only standby, keyed by
+    /// account. Relay-clock expiry kept in memory only: the replica is never written.
+    standby_leases: Mutex<HashMap<String, StandbyLease>>,
     #[cfg(test)]
     spliced_taps: Mutex<HashMap<String, Arc<Mutex<Vec<u8>>>>>,
     #[cfg(test)]
@@ -648,6 +661,7 @@ impl RelayState {
                 pending_socket_tickets: Mutex::new(HashMap::new()),
                 data_pool: Mutex::new(HashMap::new()),
                 require_e2e: require_e2e_from_env(),
+                standby_leases: Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 spliced_taps: Mutex::new(HashMap::new()),
                 #[cfg(test)]
@@ -704,6 +718,7 @@ impl RelayState {
                 pending_socket_tickets: Mutex::new(HashMap::new()),
                 data_pool: Mutex::new(HashMap::new()),
                 require_e2e: require_e2e_from_env(),
+                standby_leases: Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 spliced_taps: Mutex::new(HashMap::new()),
                 #[cfg(test)]
@@ -713,7 +728,449 @@ impl RelayState {
             }),
         })
     }
+}
 
+/// A renewal a read-only standby answered for the replicated lease row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StandbyLease {
+    holder_machine_id: String,
+    fence: u64,
+    expires_at: u64,
+}
+
+/// Refusal code when `reservedFor` names a machine outside the releasing machine's account.
+pub const LEASE_RESERVED_FOR_FOREIGN_MACHINE: &str = "LEASE_RESERVED_FOR_FOREIGN_MACHINE";
+
+/// Reason a read-only standby gives for acquire and release.
+const LEASE_READ_ONLY: &str = crate::account::store::store_sqlite::READ_ONLY_ERROR_CODE;
+
+fn lease_ack(request_id: String, outcome: SupervisorLeaseOutcome) -> SupervisorLeaseAck {
+    SupervisorLeaseAck {
+        request_id,
+        outcome,
+        fence: None,
+        holder_machine_id: None,
+        holder_label: None,
+        expires_in_secs: None,
+        previous_expires_in_secs: None,
+        checkpoint_id: None,
+        account_machine_count: None,
+        reason_code: None,
+    }
+}
+
+fn lease_reason(ack: SupervisorLeaseAck, code: &str) -> SupervisorLeaseAck {
+    SupervisorLeaseAck {
+        reason_code: Some(code.to_string()),
+        ..ack
+    }
+}
+
+fn lease_error_ack(request_id: String, error: &LeaseError) -> SupervisorLeaseAck {
+    let (outcome, code) = match error {
+        LeaseError::Unsupported => (SupervisorLeaseOutcome::Unavailable, lease::LEASE_UNSUPPORTED),
+        // The standby marker appeared between the read-only check and the write.
+        LeaseError::Store(message) if message.starts_with(LEASE_READ_ONLY) => {
+            (SupervisorLeaseOutcome::Unavailable, LEASE_READ_ONLY)
+        }
+        LeaseError::Store(_) => {
+            tracing::warn!(%error, "supervisor lease store error");
+            (SupervisorLeaseOutcome::Unavailable, error.code())
+        }
+        _ => (SupervisorLeaseOutcome::Refused, error.code()),
+    };
+    lease_reason(lease_ack(request_id, outcome), code)
+}
+
+/// One `machines` row, read inside the lease connection instead of loading the whole store.
+struct LeaseMachine {
+    user_id: String,
+    public_key: String,
+    display_name: String,
+}
+
+fn lease_machine(
+    conn: &rusqlite::Connection,
+    machine_id: &str,
+) -> Result<Option<LeaseMachine>, LeaseError> {
+    use rusqlite::OptionalExtension as _;
+    conn.query_row(
+        "SELECT user_id, public_key, display_name FROM machines WHERE machine_id = ?1",
+        rusqlite::params![machine_id],
+        |row| {
+            Ok(LeaseMachine {
+                user_id: row.get(0)?,
+                public_key: row.get(1)?,
+                display_name: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|error| LeaseError::Store(format!("Failed to read lease machine: {error}")))
+}
+
+/// The account of the socket's machine: its enrolled record must carry the very key the
+/// control socket proved, so an operator-token enrollment of a foreign key under an account
+/// machine's id never speaks for that account.
+fn lease_owner(
+    conn: &rusqlite::Connection,
+    machine_id: &str,
+    public_key: &str,
+) -> Result<String, LeaseError> {
+    match lease_machine(conn, machine_id)? {
+        Some(machine) if machine.public_key == public_key => Ok(machine.user_id),
+        _ => Err(LeaseError::NotEnrolled),
+    }
+}
+
+fn account_machine_count(conn: &rusqlite::Connection, user_id: &str) -> Result<u32, LeaseError> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM machines WHERE user_id = ?1",
+            rusqlite::params![user_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| LeaseError::Store(format!("Failed to count account machines: {error}")))?;
+    Ok(u32::try_from(count).unwrap_or(u32::MAX))
+}
+
+/// Fills the holder fields of `ack` from `row`; `expires_at` overrides the row's expiry (a
+/// standby's in-memory renewal).
+fn describe_lease(
+    conn: &rusqlite::Connection,
+    user_id: &str,
+    ack: SupervisorLeaseAck,
+    row: Option<&SupervisorLeaseRecord>,
+    expires_at: Option<u64>,
+    now: u64,
+) -> Result<SupervisorLeaseAck, LeaseError> {
+    let Some(row) = row else {
+        return Ok(ack);
+    };
+    let holder_label = lease_machine(conn, &row.holder_machine_id)?
+        .filter(|machine| machine.user_id == user_id)
+        .map(|machine| machine.display_name);
+    Ok(SupervisorLeaseAck {
+        fence: Some(row.fence),
+        holder_machine_id: Some(row.holder_machine_id.clone()),
+        holder_label,
+        expires_in_secs: Some(expires_at.unwrap_or(row.expires_at).saturating_sub(now)),
+        checkpoint_id: row.checkpoint_id.clone(),
+        ..ack
+    })
+}
+
+/// A query answers `granted` when the asking machine holds a live lease, `refused` with
+/// `LEASE_HELD` when another machine does, and `released` when the lease is free.
+fn query_outcome(
+    machine_id: &str,
+    row: Option<&SupervisorLeaseRecord>,
+    expires_at: Option<u64>,
+    epoch: u64,
+    now: u64,
+) -> (SupervisorLeaseOutcome, Option<&'static str>) {
+    match row {
+        Some(row)
+            if !row.released
+                && lease::fence_epoch(row.fence) == epoch
+                && now < expires_at.unwrap_or(row.expires_at).saturating_add(lease::GRACE_SECS) =>
+        {
+            if row.holder_machine_id == machine_id {
+                (SupervisorLeaseOutcome::Granted, None)
+            } else {
+                (SupervisorLeaseOutcome::Refused, Some("LEASE_HELD"))
+            }
+        }
+        _ => (SupervisorLeaseOutcome::Released, None),
+    }
+}
+
+/// Answers one lease request on the writable primary, inside one lease transaction.
+fn primary_lease_step(
+    conn: &rusqlite::Connection,
+    machine_id: &str,
+    public_key: &str,
+    request: &SupervisorLeaseRequest,
+    now: u64,
+) -> Result<SupervisorLeaseAck, LeaseError> {
+    let epoch = lease::relay_epoch(conn)?;
+    let user_id = lease_owner(conn, machine_id, public_key)?;
+    let previous = lease::current(conn, &user_id)?;
+    let base = SupervisorLeaseAck {
+        account_machine_count: Some(account_machine_count(conn, &user_id)?),
+        ..lease_ack(request.request_id().to_string(), SupervisorLeaseOutcome::Refused)
+    };
+    let refuse = |code: &str| {
+        describe_lease(conn, &user_id, lease_reason(base.clone(), code), previous.as_ref(), None, now)
+    };
+    match request {
+        SupervisorLeaseRequest::SupervisorLeaseAcquire(acquire) => {
+            match lease::acquire(
+                conn,
+                &user_id,
+                machine_id,
+                now,
+                acquire.checkpoint_id.as_deref(),
+                acquire.force,
+            ) {
+                Ok(granted) => {
+                    // A new fence displaced the previous row. Its holder may still believe it
+                    // holds until its own expiry plus grace; a released row stood down already.
+                    let previous_expires_in_secs = previous
+                        .as_ref()
+                        .filter(|row| row.fence != granted.fence)
+                        .map(|row| {
+                            if row.released {
+                                0
+                            } else {
+                                row.expires_at
+                                    .saturating_add(lease::GRACE_SECS)
+                                    .saturating_sub(now)
+                            }
+                        });
+                    let ack = SupervisorLeaseAck {
+                        outcome: SupervisorLeaseOutcome::Granted,
+                        previous_expires_in_secs,
+                        ..base.clone()
+                    };
+                    describe_lease(conn, &user_id, ack, Some(&granted), None, now)
+                }
+                Err(
+                    error @ (LeaseError::Held { .. }
+                    | LeaseError::CheckpointMismatch { .. }
+                    | LeaseError::FenceExhausted),
+                ) => refuse(error.code()),
+                Err(error) => Err(error),
+            }
+        }
+        SupervisorLeaseRequest::SupervisorLeaseRenew(renew) => {
+            match lease::renew(
+                conn,
+                &user_id,
+                machine_id,
+                renew.fence,
+                now,
+                renew.checkpoint_id.as_deref(),
+            ) {
+                Ok(renewed) => {
+                    let ack = SupervisorLeaseAck {
+                        outcome: SupervisorLeaseOutcome::Renewed,
+                        ..base.clone()
+                    };
+                    describe_lease(conn, &user_id, ack, Some(&renewed), None, now)
+                }
+                Err(error @ LeaseError::NotHolder) => refuse(error.code()),
+                Err(error) => Err(error),
+            }
+        }
+        SupervisorLeaseRequest::SupervisorLeaseRelease(release) => {
+            if let Some(target) = release.reserved_for.as_deref() {
+                // The reservation may only name a machine enrolled to the same account.
+                let same_account = lease_machine(conn, target)?
+                    .is_some_and(|machine| machine.user_id == user_id);
+                if !same_account {
+                    return refuse(LEASE_RESERVED_FOR_FOREIGN_MACHINE);
+                }
+            }
+            let checkpoint = release.checkpoint_id.as_deref();
+            let released = match release.reserved_for.as_deref() {
+                Some(target) => lease::release_to(
+                    conn,
+                    &user_id,
+                    machine_id,
+                    release.fence,
+                    now,
+                    checkpoint,
+                    target,
+                )?,
+                None => lease::release(conn, &user_id, machine_id, release.fence, now, checkpoint)?,
+            };
+            if !released {
+                return refuse(LeaseError::NotHolder.code());
+            }
+            let row = lease::current(conn, &user_id)?;
+            let ack = SupervisorLeaseAck {
+                outcome: SupervisorLeaseOutcome::Released,
+                ..base.clone()
+            };
+            describe_lease(conn, &user_id, ack, row.as_ref(), None, now)
+        }
+        SupervisorLeaseRequest::SupervisorLeaseQuery(_) => {
+            let (outcome, code) = query_outcome(machine_id, previous.as_ref(), None, epoch, now);
+            let ack = SupervisorLeaseAck {
+                outcome,
+                reason_code: code.map(str::to_string),
+                ..base.clone()
+            };
+            describe_lease(conn, &user_id, ack, previous.as_ref(), None, now)
+        }
+    }
+}
+
+/// Advances the supervisor lease epoch of the account store in `dir` and returns the new epoch.
+///
+/// A standby promotion runs this (`ferryx-relay bump-lease-epoch`) after the relay is stopped
+/// and the read-only marker is gone, before the relay starts writable, so every fence the old
+/// primary issued is below every fence the promoted relay grants. Refused while the marker is
+/// still present.
+pub fn bump_supervisor_lease_epoch(dir: &std::path::Path) -> Result<u64, String> {
+    lease::lease_transaction(dir, |tx| lease::bump_relay_epoch(tx))
+        .map_err(|error: LeaseError| error.to_string())
+}
+
+impl RelayState {
+    /// Answers one supervisor lease request from the control socket of `machine_id`.
+    ///
+    /// `machine_id` is the identity the control socket proved; only an Ed25519-bound socket
+    /// (one with a key in the machine registry) can act on a lease. `now` is the relay's clock.
+    fn answer_supervisor_lease(
+        &self,
+        machine_id: &str,
+        request: &SupervisorLeaseRequest,
+        now: u64,
+    ) -> SupervisorLeaseAck {
+        let request_id = request.request_id().to_string();
+        let Some(account) = self.account_state() else {
+            return lease_reason(
+                lease_ack(request_id, SupervisorLeaseOutcome::Unavailable),
+                lease::LEASE_UNSUPPORTED,
+            );
+        };
+        let public_key = self.inner.machine_public_keys.lock().get(machine_id).cloned();
+        let Some(public_key) = public_key else {
+            return lease_error_ack(request_id, &LeaseError::NotEnrolled);
+        };
+        let result = if account.is_read_only() {
+            self.answer_standby_lease(&account.data_dir, machine_id, &public_key, request, now)
+        } else {
+            lease::lease_transaction(&account.data_dir, |tx| {
+                primary_lease_step(tx, machine_id, &public_key, request, now)
+            })
+        };
+        result.unwrap_or_else(|error| lease_error_ack(request_id, &error))
+    }
+
+    /// A read-only standby refuses acquire and release, and answers a renew only while the
+    /// replicated row (re-read on every request) still names the same holder and fence and is
+    /// not released. The renewed expiry lives in memory with this relay's clock and is dropped
+    /// as soon as the replicated row names another holder or fence.
+    fn answer_standby_lease(
+        &self,
+        dir: &std::path::Path,
+        machine_id: &str,
+        public_key: &str,
+        request: &SupervisorLeaseRequest,
+        now: u64,
+    ) -> Result<SupervisorLeaseAck, LeaseError> {
+        let request_id = request.request_id().to_string();
+        if matches!(
+            request,
+            SupervisorLeaseRequest::SupervisorLeaseAcquire(_)
+                | SupervisorLeaseRequest::SupervisorLeaseRelease(_)
+        ) {
+            return Ok(lease_reason(
+                lease_ack(request_id, SupervisorLeaseOutcome::Unavailable),
+                LEASE_READ_ONLY,
+            ));
+        }
+        lease::lease_read(dir, |conn| {
+            let epoch = lease::relay_epoch(conn)?;
+            let user_id = lease_owner(conn, machine_id, public_key)?;
+            let row = lease::current(conn, &user_id)?;
+            let base = SupervisorLeaseAck {
+                account_machine_count: Some(account_machine_count(conn, &user_id)?),
+                ..lease_ack(request_id, SupervisorLeaseOutcome::Refused)
+            };
+            let live_row = row.as_ref().filter(|row| !row.released);
+            let mut leases = self.inner.standby_leases.lock();
+            let stale = leases.get(&user_id).is_some_and(|entry| {
+                live_row.is_none_or(|row| {
+                    row.holder_machine_id != entry.holder_machine_id || row.fence != entry.fence
+                })
+            });
+            if stale {
+                leases.remove(&user_id);
+            }
+            match request {
+                SupervisorLeaseRequest::SupervisorLeaseRenew(renew) => {
+                    let matches = live_row.is_some_and(|row| {
+                        row.holder_machine_id == machine_id
+                            && row.fence == renew.fence
+                            && lease::fence_epoch(renew.fence) == epoch
+                    });
+                    if !matches {
+                        let ack = lease_reason(base, LeaseError::NotHolder.code());
+                        let expires_at = leases.get(&user_id).map(|entry| entry.expires_at);
+                        return describe_lease(conn, &user_id, ack, row.as_ref(), expires_at, now);
+                    }
+                    let expires_at = now + lease::TTL_SECS;
+                    leases.insert(
+                        user_id.clone(),
+                        StandbyLease {
+                            holder_machine_id: machine_id.to_string(),
+                            fence: renew.fence,
+                            expires_at,
+                        },
+                    );
+                    let ack = SupervisorLeaseAck {
+                        outcome: SupervisorLeaseOutcome::Renewed,
+                        ..base
+                    };
+                    describe_lease(conn, &user_id, ack, row.as_ref(), Some(expires_at), now)
+                }
+                _ => {
+                    let expires_at = leases
+                        .get(&user_id)
+                        .map(|entry| entry.expires_at)
+                        .max(live_row.map(|row| row.expires_at));
+                    let (outcome, code) =
+                        query_outcome(machine_id, row.as_ref(), expires_at, epoch, now);
+                    let ack = SupervisorLeaseAck {
+                        outcome,
+                        reason_code: code.map(str::to_string),
+                        ..base
+                    };
+                    describe_lease(conn, &user_id, ack, row.as_ref(), expires_at, now)
+                }
+            }
+        })
+    }
+}
+
+/// Answers a lease request off the async runtime and sends the ack; `false` ends the socket.
+async fn send_supervisor_lease_ack(
+    socket: &mut WebSocket,
+    state: &RelayState,
+    machine_id: &str,
+    request: SupervisorLeaseRequest,
+) -> bool {
+    let request_id = request.request_id().to_string();
+    let lease_state = state.clone();
+    let machine = machine_id.to_string();
+    let ack = match crate::ipc::run_blocking(move || {
+        Ok(lease_state.answer_supervisor_lease(&machine, &request, current_time_secs()))
+    })
+    .await
+    {
+        Ok(ack) => ack,
+        Err(error) => {
+            tracing::warn!(%error, "supervisor lease request failed");
+            lease_reason(
+                lease_ack(request_id, SupervisorLeaseOutcome::Unavailable),
+                LeaseError::Store(String::new()).code(),
+            )
+        }
+    };
+    let Ok(payload) = serde_json::to_string(&ack) else {
+        return true;
+    };
+    matches!(
+        timeout(TRANSFER_TIMEOUT, socket.send(Message::Text(payload.into()))).await,
+        Ok(Ok(()))
+    )
+}
+
+impl RelayState {
     #[cfg(test)]
     pub fn set_require_e2e(&self, on: bool) {
         self.inner.require_e2e.store(on, Ordering::Relaxed);
@@ -2660,6 +3117,10 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("POST", ["supervisor", "request"])
             | ("GET", ["supervisor", "conversation"])
             | ("GET" | "POST", ["supervisor", "memory"])
+            // Supervisor lease daemon routes (plan tasks 5 and 8). `GET supervisor/checkpoint`
+            // is deliberately absent: the checkpoint carries tokens and this proxied route
+            // forwards plaintext bodies, so it travels only over the paired end-to-end channel.
+            | ("POST", ["supervisor", "observe" | "move" | "release-to" | "fence"])
             | ("GET", ["attach"])
     )
 }
@@ -3821,6 +4282,13 @@ async fn authenticate_control_socket(
         nonce: uuid::Uuid::new_v4().to_string(),
         timestamp: current_time_secs(),
         audience: Some(state.inner.control_audience.clone()),
+        // Only an account-enabled relay can answer lease requests; without account state a
+        // daemon keeps today's single-machine behavior.
+        capabilities: if state.account_state().is_some() {
+            vec![SUPERVISOR_LEASE_CAPABILITY.to_string()]
+        } else {
+            Vec::new()
+        },
     };
     let authenticate = async {
         socket
@@ -4021,6 +4489,30 @@ async fn handle_control_socket(
                                 };
                                 if !matches!(timeout(TRANSFER_TIMEOUT, socket.send(Message::Text(serde_json::to_string(&ack).unwrap().into()))).await, Ok(Ok(()))) {
                                     tracing::warn!("relay pairing acknowledgment failed");
+                                    break;
+                                }
+                            }
+                            Ok(ControlRequest::SupervisorLeaseAcquire(request)) => {
+                                if !send_supervisor_lease_ack(&mut socket, &state, &machine_token, SupervisorLeaseRequest::SupervisorLeaseAcquire(request)).await {
+                                    tracing::warn!("relay supervisor lease acknowledgment failed");
+                                    break;
+                                }
+                            }
+                            Ok(ControlRequest::SupervisorLeaseRenew(request)) => {
+                                if !send_supervisor_lease_ack(&mut socket, &state, &machine_token, SupervisorLeaseRequest::SupervisorLeaseRenew(request)).await {
+                                    tracing::warn!("relay supervisor lease acknowledgment failed");
+                                    break;
+                                }
+                            }
+                            Ok(ControlRequest::SupervisorLeaseRelease(request)) => {
+                                if !send_supervisor_lease_ack(&mut socket, &state, &machine_token, SupervisorLeaseRequest::SupervisorLeaseRelease(request)).await {
+                                    tracing::warn!("relay supervisor lease acknowledgment failed");
+                                    break;
+                                }
+                            }
+                            Ok(ControlRequest::SupervisorLeaseQuery(request)) => {
+                                if !send_supervisor_lease_ack(&mut socket, &state, &machine_token, SupervisorLeaseRequest::SupervisorLeaseQuery(request)).await {
+                                    tracing::warn!("relay supervisor lease acknowledgment failed");
                                     break;
                                 }
                             }
@@ -4993,6 +5485,12 @@ mod tests {
         assert!(allowed_http_route(&Method::GET, "supervisor/conversation"));
         assert!(allowed_http_route(&Method::GET, "supervisor/memory"));
         assert!(allowed_http_route(&Method::POST, "supervisor/memory"));
+        for route in ["observe", "move", "release-to", "fence"] {
+            assert!(
+                allowed_http_route(&Method::POST, &format!("supervisor/{route}")),
+                "POST supervisor/{route} is a lease daemon route"
+            );
+        }
         assert!(
             validate_http_query("supervisor/conversation", Some("projectId=p&after=3")).is_ok()
         );
@@ -5016,6 +5514,13 @@ mod tests {
             (Method::DELETE, "supervisor/memory"),
             (Method::POST, "supervisor/conversation"),
             (Method::POST, "supervisor/request/x"),
+            // The checkpoint carries tokens; it never rides the plaintext proxied route.
+            (Method::GET, "supervisor/checkpoint"),
+            (Method::POST, "supervisor/checkpoint"),
+            (Method::GET, "supervisor/observe"),
+            (Method::GET, "supervisor/fence"),
+            (Method::POST, "supervisor/lease"),
+            (Method::POST, "supervisor/move/x"),
         ] {
             assert!(
                 !allowed_http_route(&method, path),
@@ -11661,6 +12166,406 @@ mod tests {
         assert_eq!(frame.code, CloseCode::Normal);
         assert_eq!(frame.reason.as_str(), "probe clean close");
 
+        relay.abort();
+    }
+
+    const LEASE_T0: u64 = 1_000_000;
+    const LEASE_USER: &str = "user-1";
+
+    /// Enrolls a second machine of `user-1` next to the fixture's `owned-machine`.
+    fn add_second_machine(account: &crate::account::service::AccountState) {
+        let now = crate::account::store::now_secs();
+        account
+            .mutate(|store| {
+                store.machines.insert(
+                    "rec-second".into(),
+                    crate::account::store::MachineRecord {
+                        machine_record_id: "rec-second".into(),
+                        owner_user_id: LEASE_USER.into(),
+                        machine_id: "second-machine".into(),
+                        display_name: "Second Machine".into(),
+                        public_key: "pubkey-3".into(),
+                        attach_public_key: "attachkey-3".into(),
+                        relay_origin: "https://relay.test".into(),
+                        platform: "linux".into(),
+                        enrollment_epoch: 1,
+                        enrolled_at: now,
+                        last_seen_at: now,
+                    },
+                );
+                Ok(())
+            })
+            .expect("enroll second machine");
+    }
+
+    /// A relay with account state: `owned-machine` and `second-machine` belong to `user-1`,
+    /// `other-machine` to another account. Each control key is bound as an authenticated
+    /// socket would bind it.
+    fn lease_relay(tmp: &std::path::Path) -> (RelayState, Arc<crate::account::service::AccountState>) {
+        let account =
+            test_account_state(tmp, LEASE_USER, "session-token", "owned-machine", "other-machine");
+        add_second_machine(&account);
+        let state = test_state(vec![]);
+        state.set_account_state(account.clone());
+        {
+            let mut keys = state.inner.machine_public_keys.lock();
+            keys.insert("owned-machine".into(), "pubkey-1".into());
+            keys.insert("other-machine".into(), "pubkey-2".into());
+            keys.insert("second-machine".into(), "pubkey-3".into());
+        }
+        (state, account)
+    }
+
+    fn acquire_req(checkpoint: Option<&str>, force: bool) -> SupervisorLeaseRequest {
+        SupervisorLeaseRequest::SupervisorLeaseAcquire(SupervisorLeaseAcquire {
+            request_id: "acquire".into(),
+            checkpoint_id: checkpoint.map(str::to_string),
+            force,
+        })
+    }
+
+    fn renew_req(fence: u64) -> SupervisorLeaseRequest {
+        SupervisorLeaseRequest::SupervisorLeaseRenew(SupervisorLeaseRenew {
+            request_id: "renew".into(),
+            fence,
+            checkpoint_id: None,
+        })
+    }
+
+    fn release_req(fence: u64, checkpoint: Option<&str>, reserved_for: Option<&str>) -> SupervisorLeaseRequest {
+        SupervisorLeaseRequest::SupervisorLeaseRelease(SupervisorLeaseRelease {
+            request_id: "release".into(),
+            fence,
+            checkpoint_id: checkpoint.map(str::to_string),
+            reserved_for: reserved_for.map(str::to_string),
+        })
+    }
+
+    fn query_req() -> SupervisorLeaseRequest {
+        SupervisorLeaseRequest::SupervisorLeaseQuery(SupervisorLeaseQuery {
+            request_id: "query".into(),
+        })
+    }
+
+    fn lease_row(account: &crate::account::service::AccountState, user_id: &str) -> Option<SupervisorLeaseRecord> {
+        lease::current_in(&account.data_dir, user_id).expect("read lease row")
+    }
+
+    fn set_standby(account: &crate::account::service::AccountState, on: bool) {
+        let marker = account
+            .data_dir
+            .join(crate::account::store::store_sqlite::STANDBY_MARKER_FILENAME);
+        if on {
+            std::fs::write(marker, b"").expect("write standby marker");
+        } else {
+            std::fs::remove_file(marker).expect("remove standby marker");
+        }
+    }
+
+    #[test]
+    fn supervisor_lease_frames_parse_as_control_requests_and_old_frames_still_do() {
+        assert!(matches!(
+            serde_json::from_str::<ControlRequest>(r#"{"type":"AllocateSession"}"#),
+            Ok(ControlRequest::AllocateSession { opaque: false })
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ControlRequest>(r#"{"type":"AllocateSession","opaque":true}"#),
+            Ok(ControlRequest::AllocateSession { opaque: true })
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ControlRequest>(
+                r#"{"type":"SupervisorLeaseRenew","requestId":"r","fence":5,"machineId":"spoof"}"#
+            ),
+            Ok(ControlRequest::SupervisorLeaseRenew(SupervisorLeaseRenew { fence: 5, .. }))
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ControlRequest>(r#"{"type":"SupervisorLeaseQuery","requestId":"q"}"#),
+            Ok(ControlRequest::SupervisorLeaseQuery(_))
+        ));
+    }
+
+    #[test]
+    fn first_machine_gets_fence_one_and_second_machine_is_refused_with_the_holder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _account) = lease_relay(tmp.path());
+
+        let first = state.answer_supervisor_lease("owned-machine", &acquire_req(Some("ck1"), false), LEASE_T0);
+        assert_eq!(first.request_id, "acquire");
+        assert_eq!(first.outcome, SupervisorLeaseOutcome::Granted);
+        assert_eq!(first.fence, Some(1));
+        assert_eq!(first.holder_machine_id.as_deref(), Some("owned-machine"));
+        assert_eq!(first.holder_label.as_deref(), Some("Owned Machine"));
+        assert_eq!(first.expires_in_secs, Some(lease::TTL_SECS));
+        assert_eq!(first.previous_expires_in_secs, None);
+        assert_eq!(first.checkpoint_id.as_deref(), Some("ck1"));
+        assert_eq!(first.account_machine_count, Some(2));
+
+        let second = state.answer_supervisor_lease("second-machine", &acquire_req(Some("ck1"), false), LEASE_T0 + 5);
+        assert_eq!(second.outcome, SupervisorLeaseOutcome::Refused);
+        assert_eq!(second.reason_code.as_deref(), Some("LEASE_HELD"));
+        assert_eq!(second.holder_machine_id.as_deref(), Some("owned-machine"));
+        assert_eq!(second.holder_label.as_deref(), Some("Owned Machine"));
+        assert_eq!(second.fence, Some(1));
+
+        let renewed = state.answer_supervisor_lease("owned-machine", &renew_req(1), LEASE_T0 + 20);
+        assert_eq!(renewed.outcome, SupervisorLeaseOutcome::Renewed);
+        assert_eq!(renewed.expires_in_secs, Some(lease::TTL_SECS));
+
+        let query = state.answer_supervisor_lease("second-machine", &query_req(), LEASE_T0 + 21);
+        assert_eq!(query.outcome, SupervisorLeaseOutcome::Refused);
+        assert_eq!(query.holder_machine_id.as_deref(), Some("owned-machine"));
+
+        // A takeover after expiry + grace reports how long the old holder could still act.
+        let expires_at = LEASE_T0 + 20 + lease::TTL_SECS;
+        let takeover_at = expires_at + lease::GRACE_SECS;
+        let taken = state.answer_supervisor_lease("second-machine", &acquire_req(Some("ck1"), false), takeover_at);
+        assert_eq!(taken.outcome, SupervisorLeaseOutcome::Granted);
+        assert_eq!(taken.fence, Some(2));
+        assert_eq!(taken.previous_expires_in_secs, Some(0));
+    }
+
+    /// The identity comes from the control socket's bound key, never from the account row
+    /// alone: a socket whose bound key differs from the enrolled one cannot act on the lease.
+    #[test]
+    fn a_socket_without_the_enrolled_key_cannot_act_on_the_lease() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, account) = lease_relay(tmp.path());
+        state
+            .inner
+            .machine_public_keys
+            .lock()
+            .insert("owned-machine".into(), "operator-enrolled-key".into());
+        let ack = state.answer_supervisor_lease("owned-machine", &acquire_req(None, false), LEASE_T0);
+        assert_eq!(ack.outcome, SupervisorLeaseOutcome::Refused);
+        assert_eq!(ack.reason_code.as_deref(), Some("LEASE_MACHINE_NOT_ENROLLED"));
+        assert_eq!(lease_row(&account, LEASE_USER), None);
+
+        // A legacy token socket has no bound key at all.
+        let ack = state.answer_supervisor_lease("legacy-token", &acquire_req(None, false), LEASE_T0);
+        assert_eq!(ack.outcome, SupervisorLeaseOutcome::Refused);
+        assert_eq!(ack.reason_code.as_deref(), Some("LEASE_MACHINE_NOT_ENROLLED"));
+    }
+
+    #[test]
+    fn a_machine_of_another_account_cannot_see_or_affect_the_lease() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, account) = lease_relay(tmp.path());
+        let held = state.answer_supervisor_lease("owned-machine", &acquire_req(Some("ck1"), false), LEASE_T0);
+        assert_eq!(held.fence, Some(1));
+        let before = lease_row(&account, LEASE_USER).expect("user-1 lease");
+
+        let query = state.answer_supervisor_lease("other-machine", &query_req(), LEASE_T0 + 1);
+        assert_eq!(query.outcome, SupervisorLeaseOutcome::Released);
+        assert_eq!(query.holder_machine_id, None);
+        assert_eq!(query.fence, None);
+        assert_eq!(query.account_machine_count, Some(1));
+
+        let renew = state.answer_supervisor_lease("other-machine", &renew_req(1), LEASE_T0 + 2);
+        assert_eq!(renew.outcome, SupervisorLeaseOutcome::Refused);
+        assert_eq!(renew.holder_machine_id, None);
+        let release = state.answer_supervisor_lease("other-machine", &release_req(1, None, None), LEASE_T0 + 3);
+        assert_eq!(release.outcome, SupervisorLeaseOutcome::Refused);
+        assert_eq!(lease_row(&account, LEASE_USER), Some(before.clone()));
+
+        // Its own account has its own lease and fence space.
+        let own = state.answer_supervisor_lease("other-machine", &acquire_req(None, false), LEASE_T0 + 4);
+        assert_eq!(own.outcome, SupervisorLeaseOutcome::Granted);
+        assert_eq!(own.fence, Some(1));
+        assert_eq!(own.holder_machine_id.as_deref(), Some("other-machine"));
+        assert_eq!(lease_row(&account, LEASE_USER), Some(before));
+        assert_eq!(
+            lease_row(&account, OTHER_MACHINE_OWNER_ID).map(|row| row.holder_machine_id),
+            Some("other-machine".to_string())
+        );
+    }
+
+    #[test]
+    fn release_reserved_for_a_sibling_hands_over_and_a_foreign_reservation_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, account) = lease_relay(tmp.path());
+        let held = state.answer_supervisor_lease("owned-machine", &acquire_req(Some("ck1"), false), LEASE_T0);
+        let fence = held.fence.expect("fence");
+
+        let foreign = state.answer_supervisor_lease(
+            "owned-machine",
+            &release_req(fence, Some("ck-final"), Some("other-machine")),
+            LEASE_T0 + 1,
+        );
+        assert_eq!(foreign.outcome, SupervisorLeaseOutcome::Refused);
+        assert_eq!(foreign.reason_code.as_deref(), Some(LEASE_RESERVED_FOR_FOREIGN_MACHINE));
+        let row = lease_row(&account, LEASE_USER).expect("row");
+        assert!(!row.released);
+        assert_eq!(row.reserved_for, None);
+
+        let released = state.answer_supervisor_lease(
+            "owned-machine",
+            &release_req(fence, Some("ck-final"), Some("second-machine")),
+            LEASE_T0 + 2,
+        );
+        assert_eq!(released.outcome, SupervisorLeaseOutcome::Released);
+        assert_eq!(released.checkpoint_id.as_deref(), Some("ck-final"));
+        let row = lease_row(&account, LEASE_USER).expect("row");
+        assert!(row.released);
+        assert_eq!(row.checkpoint_id.as_deref(), Some("ck-final"));
+        assert_eq!(row.reserved_for.as_deref(), Some("second-machine"));
+
+        let taken = state.answer_supervisor_lease(
+            "second-machine",
+            &acquire_req(Some("ck-final"), false),
+            LEASE_T0 + 3,
+        );
+        assert_eq!(taken.outcome, SupervisorLeaseOutcome::Granted);
+        assert_eq!(taken.fence, Some(fence + 1));
+        assert_eq!(taken.holder_machine_id.as_deref(), Some("second-machine"));
+        assert_eq!(taken.previous_expires_in_secs, Some(0));
+    }
+
+    #[test]
+    fn bump_lease_epoch_puts_the_new_epoch_in_the_next_fence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, account) = lease_relay(tmp.path());
+        let held = state.answer_supervisor_lease("owned-machine", &acquire_req(None, false), LEASE_T0);
+        assert_eq!(held.fence, Some(1));
+
+        assert_eq!(bump_supervisor_lease_epoch(&account.data_dir), Ok(1));
+        let stale = state.answer_supervisor_lease("owned-machine", &renew_req(1), LEASE_T0 + 1);
+        assert_eq!(stale.outcome, SupervisorLeaseOutcome::Refused);
+        assert_eq!(stale.reason_code.as_deref(), Some("LEASE_NOT_HOLDER"));
+
+        let next = state.answer_supervisor_lease("second-machine", &acquire_req(None, false), LEASE_T0 + 2);
+        assert_eq!(next.outcome, SupervisorLeaseOutcome::Granted);
+        let fence = next.fence.expect("fence");
+        assert_eq!(fence >> 32, 1);
+        assert_eq!(fence, (1 << 32) | 1);
+
+        // The bump is a write: a standby refuses it like every other account write.
+        set_standby(&account, true);
+        let refused = bump_supervisor_lease_epoch(&account.data_dir).expect_err("read-only");
+        assert!(refused.contains("ACCOUNT_STORE_READ_ONLY"), "{refused}");
+    }
+
+    #[test]
+    fn standby_renews_the_replicated_holder_in_memory_and_refuses_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, account) = lease_relay(tmp.path());
+        let held = state.answer_supervisor_lease("owned-machine", &acquire_req(Some("ck1"), false), LEASE_T0);
+        assert_eq!(held.fence, Some(1));
+        let replicated = lease_row(&account, LEASE_USER).expect("row");
+        set_standby(&account, true);
+
+        let acquire = state.answer_supervisor_lease("second-machine", &acquire_req(Some("ck1"), true), LEASE_T0 + 1);
+        assert_eq!(acquire.outcome, SupervisorLeaseOutcome::Unavailable);
+        assert_eq!(acquire.reason_code.as_deref(), Some("ACCOUNT_STORE_READ_ONLY"));
+        let release = state.answer_supervisor_lease("owned-machine", &release_req(1, None, None), LEASE_T0 + 2);
+        assert_eq!(release.outcome, SupervisorLeaseOutcome::Unavailable);
+        assert_eq!(release.reason_code.as_deref(), Some("ACCOUNT_STORE_READ_ONLY"));
+
+        // Past the replicated expiry, the holder keeps renewing on relay-clock time.
+        let renew_at = LEASE_T0 + 200;
+        let renewed = state.answer_supervisor_lease("owned-machine", &renew_req(1), renew_at);
+        assert_eq!(renewed.outcome, SupervisorLeaseOutcome::Renewed);
+        assert_eq!(renewed.fence, Some(1));
+        assert_eq!(renewed.expires_in_secs, Some(lease::TTL_SECS));
+        assert_eq!(lease_row(&account, LEASE_USER), Some(replicated.clone()), "never written");
+
+        let wrong_fence = state.answer_supervisor_lease("owned-machine", &renew_req(2), renew_at + 1);
+        assert_eq!(wrong_fence.outcome, SupervisorLeaseOutcome::Refused);
+        let wrong_holder = state.answer_supervisor_lease("second-machine", &renew_req(1), renew_at + 1);
+        assert_eq!(wrong_holder.outcome, SupervisorLeaseOutcome::Refused);
+        let query = state.answer_supervisor_lease("second-machine", &query_req(), renew_at + 50);
+        assert_eq!(query.outcome, SupervisorLeaseOutcome::Refused);
+        assert_eq!(query.reason_code.as_deref(), Some("LEASE_HELD"));
+
+        // The replica now names another holder: the in-memory renewal is dropped at once.
+        set_standby(&account, false);
+        let taken = state.answer_supervisor_lease(
+            "second-machine",
+            &acquire_req(Some("ck1"), false),
+            replicated.expires_at + lease::GRACE_SECS,
+        );
+        assert_eq!(taken.fence, Some(2));
+        set_standby(&account, true);
+        let stale = state.answer_supervisor_lease("owned-machine", &renew_req(1), renew_at + 60);
+        assert_eq!(stale.outcome, SupervisorLeaseOutcome::Refused);
+        assert_eq!(stale.holder_machine_id.as_deref(), Some("second-machine"));
+        assert!(state.inner.standby_leases.lock().get(LEASE_USER).is_none());
+    }
+
+    #[test]
+    fn a_relay_without_account_state_answers_lease_unsupported() {
+        let state = test_state(vec![]);
+        for request in [acquire_req(None, false), renew_req(1), release_req(1, None, None), query_req()] {
+            let ack = state.answer_supervisor_lease("any-machine", &request, LEASE_T0);
+            assert_eq!(ack.outcome, SupervisorLeaseOutcome::Unavailable);
+            assert_eq!(ack.reason_code.as_deref(), Some(lease::LEASE_UNSUPPORTED));
+            assert_eq!(ack.request_id, request.request_id());
+        }
+    }
+
+    /// End to end over the control socket: the challenge advertises the capability, and a
+    /// machine id inside the request frame is ignored in favor of the authenticated one.
+    #[tokio::test]
+    async fn control_socket_serves_lease_requests_bound_to_the_authenticated_machine() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ident = identity(31, "owned-machine");
+        let account =
+            test_account_state(tmp.path(), LEASE_USER, "session-token", "owned-machine", "other-machine");
+        add_second_machine(&account);
+        account
+            .mutate(|store| {
+                store
+                    .machines
+                    .get_mut("rec-owned")
+                    .expect("rec-owned fixture")
+                    .public_key = ident.public_key.clone();
+                Ok(())
+            })
+            .expect("pin enrolled public key");
+        let state = RelayState::new_with_key_store(vec![], tmp.path().join("keys.json")).unwrap();
+        let (base, relay) = spawn_test_relay_with_account_state(state, Some(account.clone())).await;
+
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/control"))
+            .await
+            .unwrap();
+        let challenge: ControlChallenge = receive_json(&mut socket).await;
+        assert_eq!(challenge.capabilities, vec![SUPERVISOR_LEASE_CAPABILITY.to_string()]);
+        let auth = ControlAuth {
+            enrollment_token: None,
+            machine_id: ident.machine_id.clone(),
+            display_name: ident.display_name.clone(),
+            public_key: ident.public_key.clone(),
+            timestamp: challenge.timestamp,
+            signature: crate::remote::auth::sign_control_challenge(
+                &ident,
+                challenge.audience.as_deref().unwrap(),
+                &challenge.nonce,
+                challenge.timestamp,
+            )
+            .unwrap(),
+        };
+        socket
+            .send(TMessage::Text(serde_json::to_string(&auth).unwrap().into()))
+            .await
+            .unwrap();
+        let response: ControlAuthResponse = receive_json(&mut socket).await;
+        assert!(response.success, "{:?}", response.error);
+
+        socket
+            .send(TMessage::Text(
+                r#"{"type":"SupervisorLeaseAcquire","requestId":"r1","machineId":"second-machine","force":false}"#.into(),
+            ))
+            .await
+            .unwrap();
+        let ack: SupervisorLeaseAck = receive_json(&mut socket).await;
+        assert_eq!(ack.request_id, "r1");
+        assert_eq!(ack.outcome, SupervisorLeaseOutcome::Granted);
+        assert_eq!(ack.fence, Some(1));
+        assert_eq!(ack.holder_machine_id.as_deref(), Some("owned-machine"));
+        assert_eq!(ack.account_machine_count, Some(2));
+        assert_eq!(
+            lease_row(&account, LEASE_USER).map(|row| row.holder_machine_id),
+            Some("owned-machine".to_string())
+        );
         relay.abort();
     }
 }
