@@ -1,10 +1,12 @@
 import type { CSSProperties } from "react";
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ChevronLeft, EllipsisVertical, SendHorizontal, Sun } from "lucide-react";
+import { ChevronLeft, ClipboardCopy, EllipsisVertical, Keyboard, SendHorizontal, Sun, Type } from "lucide-react";
 
 import {
   hasActiveModifier,
+  isSoftKeyboardOpen,
   MobileKeyDock,
+  useSoftKeyboardOpen,
   NO_DOCK_MODIFIERS,
   releaseOneShotModifiers,
   type DockModifiers,
@@ -28,6 +30,7 @@ import { isTauriRuntime } from "../lib/tauri";
 import { BUILD_STAMP } from "../lib/buildStamp";
 import { composeJamoRuns, isUncomposedJamoRun } from "./hangulComposition";
 import { remoteSocketUrl, SocketTicketError } from "./remoteClient";
+import { userFacingError } from "./userFacingError";
 import { MAX_OUTBOUND_BUFFER_BYTES } from "../lib/terminalTransport/remoteTransport";
 import { buildAttachSocketUrl, getOrCreateAttachKey, type AttachKeyPair } from "./accountAttach";
 import {
@@ -90,6 +93,8 @@ type RemoteTerminalProps = {
 };
 
 export const MIN_TERMINAL_FONT_SIZE = 10;
+/** Pinch never shrinks phone terminal text below this. */
+export const MIN_PHONE_TERMINAL_FONT_SIZE = 12;
 export const MAX_TERMINAL_FONT_SIZE = 36;
 export const SWIPE_THRESHOLD_PX = 40;
 
@@ -430,6 +435,30 @@ function runStyle(
   return style;
 }
 
+const BLOCKED_REASON_COPY: Record<string, string> = {
+  unauthorized: userFacingError({ code: "UNAUTHORIZED" }),
+  permission_denied: "Your computer refused access to this terminal.",
+};
+
+/** Plain sentence for a terminal outcome banner; wire states and reasons never reach the screen. */
+export function terminalOutcomeCopy(outcome: { readonly state: string; readonly blockedReason: string | null; readonly exitCode: number | null }): string {
+  if (outcome.state === "blocked") {
+    return (outcome.blockedReason ? BLOCKED_REASON_COPY[outcome.blockedReason] : undefined) ?? "This terminal is blocked on your computer.";
+  }
+  if (outcome.state === "affirmative_exit") {
+    return outcome.exitCode == null ? "This terminal has exited." : `This terminal has exited (code ${outcome.exitCode}).`;
+  }
+  return "The terminal is reconnecting.";
+}
+
+/** Visible text of the grid, one line per row, trailing blanks dropped. */
+export function gridScreenText(grid: TerminalGridState): string {
+  return grid.lines
+    .map((line) => line.runs.map((run) => run.text).join("").replace(/\s+$/, ""))
+    .join("\n")
+    .replace(/\n+$/, "");
+}
+
 type GridLineViewProps = {
   readonly line: GridLine;
   readonly cols: number;
@@ -720,6 +749,10 @@ export function RemoteTerminal({
 
   const [userFontSize, setUserFontSize] = useState<number | null>(null);
   const activeFontSize = clampTerminalFontSize(userFontSize ?? settings.fontSize);
+  const keyboardOpen = useSoftKeyboardOpen();
+  const [lineFocused, setLineFocused] = useState(false);
+  const [gestureHud, setGestureHud] = useState<string | null>(null);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
 
   const touchStartRef = useRef<{ readonly x: number; readonly y: number } | null>(null);
   const touchLastRef = useRef<{ readonly x: number; readonly y: number } | null>(null);
@@ -812,8 +845,14 @@ export function RemoteTerminal({
       const generationChanged = machineTransport
         ? machineGenerationRef.current !== lastSentMachineGenerationRef.current
         : generationRef.current !== lastSentGenerationRef.current;
+      // A soft keyboard or a pinch in progress only borrows rows; the host PTY keeps its size
+      // until the gesture ends or the keyboard closes, so the agent TUI never reflows on a toggle.
+      const lastGeometry = lastSentGeometryRef.current;
+      const transientShrink = lastGeometry !== null && showKeyDock && geometry.cols === lastGeometry.cols && geometry.rows < lastGeometry.rows && isSoftKeyboardOpen();
       if (
         followHostSize ||
+        transientShrink ||
+        isPinchActiveRef.current ||
         !socket ||
         socket.readyState !== WebSocket.OPEN ||
         !socketRequestMatches(activeSocketRequestRef.current, sessionId, token) ||
@@ -861,7 +900,44 @@ export function RemoteTerminal({
       observer.disconnect();
       if (requestResizeRef.current === measureAndResize) requestResizeRef.current = () => {};
     };
-  }, [sessionId, settings.fontFamily, activeFontSize, token, followHostSize]);
+  }, [sessionId, settings.fontFamily, activeFontSize, token, followHostSize, showKeyDock]);
+
+  useLayoutEffect(() => {
+    // With the host size held under an open keyboard, keep the cursor row in view.
+    const surface = surfaceRef.current;
+    if (!surface || followHostSize) return;
+    if (!keyboardOpen || !grid || cellMetrics.height <= 0) {
+      surface.scrollTop = 0;
+      return;
+    }
+    const visibleHeight = surface.clientHeight;
+    surface.scrollTop = Math.max(0, (grid.cursor.y + 1) * cellMetrics.height - visibleHeight);
+  }, [keyboardOpen, grid, cellMetrics.height, followHostSize]);
+
+  useEffect(() => {
+    if (gestureHud === null) return;
+    const timer = setTimeout(() => setGestureHud(null), 900);
+    return () => clearTimeout(timer);
+  }, [gestureHud]);
+
+  useEffect(() => {
+    if (copyState === "idle") return;
+    const timer = setTimeout(() => setCopyState("idle"), 2000);
+    return () => clearTimeout(timer);
+  }, [copyState]);
+
+  const copyScreen = () => {
+    if (!grid) return;
+    const text = gridScreenText(grid);
+    if (!navigator.clipboard) {
+      setCopyState("failed");
+      return;
+    }
+    navigator.clipboard.writeText(text).then(
+      () => setCopyState("copied"),
+      () => setCopyState("failed"),
+    );
+  };
 
   useEffect(() => {
     if (!socketRequest) return;
@@ -1573,8 +1649,12 @@ export function RemoteTerminal({
       const distance = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
       if (pinchStartRef.current.distance > 0) {
         const scale = distance / pinchStartRef.current.distance;
-        const targetSize = clampTerminalFontSize(pinchStartRef.current.initialFontSize * scale);
+        const targetSize = Math.max(
+          showKeyDock ? MIN_PHONE_TERMINAL_FONT_SIZE : MIN_TERMINAL_FONT_SIZE,
+          clampTerminalFontSize(pinchStartRef.current.initialFontSize * scale),
+        );
         setUserFontSize(targetSize);
+        setGestureHud(`Text size ${targetSize}`);
       }
     } else if (event.touches.length === 1 && touchStartRef.current && touchLastRef.current) {
       const touch = event.touches[0];
@@ -1632,11 +1712,16 @@ export function RemoteTerminal({
         const deltaX = endX - touchStartRef.current.x;
         const deltaY = endY - touchStartRef.current.y;
 
-        if (Math.abs(deltaX) >= SWIPE_THRESHOLD_PX && Math.abs(deltaX) > Math.abs(deltaY)) {
+        // A wide host grid scrolls sideways, so horizontal swipes there belong to the scroller.
+        if (!followHostSize && Math.abs(deltaX) >= SWIPE_THRESHOLD_PX && Math.abs(deltaX) > Math.abs(deltaY)) {
           if (deltaX < 0) {
-            onSwipeNextTab?.();
-          } else {
-            onSwipePreviousTab?.();
+            if (onSwipeNextTab) {
+              onSwipeNextTab();
+              setGestureHud("Next terminal");
+            }
+          } else if (onSwipePreviousTab) {
+            onSwipePreviousTab();
+            setGestureHud("Previous terminal");
           }
         } else if (touchGestureRef.current === null && Math.abs(deltaX) <= 8 && Math.abs(deltaY) <= 8) {
           focusInput();
@@ -1646,8 +1731,10 @@ export function RemoteTerminal({
       touchLastRef.current = null;
       touchGestureRef.current = null;
       accumulatedScrollDeltaYRef.current = 0;
+      const pinchEnded = isPinchActiveRef.current;
       pinchStartRef.current = null;
       isPinchActiveRef.current = false;
+      if (pinchEnded) requestResizeRef.current();
     } else if (event.touches.length === 1) {
       pinchStartRef.current = null;
     }
@@ -1658,8 +1745,10 @@ export function RemoteTerminal({
     touchLastRef.current = null;
     touchGestureRef.current = null;
     accumulatedScrollDeltaYRef.current = 0;
+    const pinchEnded = isPinchActiveRef.current;
     pinchStartRef.current = null;
     isPinchActiveRef.current = false;
+    if (pinchEnded) requestResizeRef.current();
   };
 
   const sendText = (text: string) => {
@@ -1917,9 +2006,20 @@ export function RemoteTerminal({
     lineInputRef.current?.focus({ preventScroll: true });
   };
 
+  const connectionLabel = connected
+    ? "Live"
+    : terminalOutcome?.state === "blocked"
+    ? "Blocked"
+    : terminalOutcome?.state === "affirmative_exit"
+    ? "Exited"
+    : "Connecting";
+  const chip = "flex items-center gap-1.5 rounded-full border border-chat-border bg-chat-surface px-2 py-0.5 text-xs leading-tight";
+  const iconButton = "flex size-7 shrink-0 items-center justify-center rounded-md text-chat-foreground-secondary transition-colors hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [@media(pointer:coarse)]:size-11";
+  const outcomeVisible = terminalOutcome?.state === "blocked" || terminalOutcome?.state === "affirmative_exit" || terminalOutcome?.generation === null;
+
   return (
-    <div className={`flex min-h-0 flex-col overflow-hidden bg-terminal text-[#f5f5f5] ${embedded ? "h-full flex-1" : "h-[100dvh]"}`}>
-      <div className={`flex shrink-0 items-center border-b border-chat-header-border bg-chat-header px-2 ${showTitleBar ? "h-11 justify-between" : "h-7 justify-end"}`}>
+    <div className={`flex min-h-0 flex-col overflow-hidden bg-terminal text-chat-foreground ${embedded ? "h-full flex-1" : "h-[100dvh]"}`}>
+      <div className={`flex shrink-0 items-center border-b border-chat-header-border bg-chat-header px-2 ${showTitleBar ? "h-11 justify-between" : "min-h-7 justify-end"} ${showKeyDock && !showTitleBar ? "[@media(pointer:coarse)]:min-h-11" : ""}`}>
         {showTitleBar ? (
           <div className="flex min-w-0 items-center gap-2">
             {onBack ? (
@@ -1928,7 +2028,7 @@ export function RemoteTerminal({
                 data-testid="remote-terminal-back"
                 aria-label="Back to chat"
                 onClick={onBack}
-                className="flex size-7 shrink-0 items-center justify-center rounded-md text-chat-foreground-secondary transition-colors hover:text-chat-foreground"
+                className={iconButton}
               >
                 <ChevronLeft className="size-4" aria-hidden="true" />
               </button>
@@ -1936,42 +2036,39 @@ export function RemoteTerminal({
             <div className="flex min-w-0 flex-col justify-center">
               <span className="truncate text-sm font-medium text-chat-foreground">Terminal</span>
               {title ? (
-                <span className="truncate font-mono text-[11px] text-chat-foreground-secondary">{title}</span>
+                <span className="truncate font-mono text-xs text-chat-foreground-secondary">{title}</span>
               ) : null}
             </div>
           </div>
         ) : null}
-        <span className="flex items-center gap-2">
+        <span className="flex min-w-0 items-center gap-2">
           {inputOverflow ? (
-            <span
-              data-testid="remote-terminal-overflow-indicator"
-              role="status"
-              className="flex items-center gap-1 rounded border border-rose-500/40 bg-rose-500/10 px-1.5 py-0.5 font-mono text-[10px] text-rose-300"
-            >
-              <span className="h-1.5 w-1.5 rounded-full bg-rose-400" />
-              <span>Input overflow</span>
+            <span data-testid="remote-terminal-overflow-indicator" role="status" className={`${chip} text-chat-danger`}>
+              <span className="size-1.5 rounded-full bg-current" aria-hidden="true" />
+              <span>Some typing was dropped</span>
             </span>
           ) : null}
           {pendingInputBytes > 0 ? (
-            <span
-              data-testid="remote-terminal-buffered-indicator"
-              className="flex items-center gap-1 rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 font-mono text-[10px] text-amber-300"
-            >
-              <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
-              <span>Buffered input</span>
+            <span data-testid="remote-terminal-buffered-indicator" className={`${chip} text-status-warning`}>
+              <span className="size-1.5 rounded-full bg-current" aria-hidden="true" />
+              <span>Sending typed keys…</span>
             </span>
           ) : null}
           {replayGap ? (
-            <span
-              data-testid="remote-terminal-replay-gap"
-              role="status"
-              className="flex items-center gap-1 rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 font-mono text-[10px] text-amber-300"
-            >
-              <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-              <span>Output gap</span>
+            <span data-testid="remote-terminal-replay-gap" role="status" className={`${chip} text-status-warning`}>
+              <span className="size-1.5 rounded-full bg-current" aria-hidden="true" />
+              <span>Some output was skipped</span>
             </span>
           ) : null}
-          {showKeyDock && wakeLockSupported ? (
+          <span
+            data-testid="remote-terminal-connection-status"
+            role="status"
+            className={connected ? "sr-only" : `${chip} text-chat-foreground-secondary`}
+          >
+            {connected ? null : <span className="size-1.5 rounded-full bg-current" aria-hidden="true" />}
+            {connectionLabel}
+          </span>
+          {showKeyDock ? (
             <button
               type="button"
               data-testid="remote-terminal-menu-button"
@@ -1980,21 +2077,13 @@ export function RemoteTerminal({
               aria-haspopup="dialog"
               aria-expanded={terminalMenuOpen}
               onClick={() => setTerminalMenuOpen(true)}
-              className="flex size-7 shrink-0 items-center justify-center rounded-md text-chat-foreground-secondary transition-colors hover:text-chat-foreground"
+              className={iconButton}
             >
               <EllipsisVertical className="size-4" aria-hidden="true" />
             </button>
-          ) : null}
-          <span data-testid="remote-terminal-build-stamp" className="font-mono text-[10px] text-[#838383]/70">{BUILD_STAMP}</span>
-          <span data-testid="remote-terminal-connection-status" role="status" className="font-mono text-[10px] text-[#838383]">
-            {connected
-              ? "Live"
-              : terminalOutcome?.state === "blocked"
-              ? "Blocked"
-              : terminalOutcome?.state === "affirmative_exit"
-              ? "Exited"
-              : "Connecting"}
-          </span>
+          ) : (
+            <span data-testid="remote-terminal-build-stamp" className="font-mono text-xs text-chat-foreground-secondary">{BUILD_STAMP}</span>
+          )}
         </span>
       </div>
       <div
@@ -2127,62 +2216,35 @@ export function RemoteTerminal({
           touchAction: followHostSize ? "pan-x" : "none",
         }}
       >
-        {(embedded && !connected) || terminalOutcome?.state === "blocked" || terminalOutcome?.state === "affirmative_exit" || terminalOutcome?.generation === null ? (
-          <div className="absolute inset-x-0 top-0 z-10 flex justify-center gap-2 pt-1.5">
-            {terminalOutcome?.state === "blocked" || terminalOutcome?.state === "affirmative_exit" ? (
-              <span role="status" data-testid="remote-terminal-outcome" className="rounded border border-amber-500/40 bg-[#111111]/95 px-2 py-1 font-mono text-[10px] text-amber-200 shadow-sm">
-                {terminalOutcome.state === "blocked" ? terminalOutcome.blockedReason ?? "Terminal blocked" : terminalOutcome.state === "affirmative_exit" ? `Terminal exited${terminalOutcome.exitCode == null ? "" : ` (${terminalOutcome.exitCode})`}` : terminalOutcome.state}
-                <button type="button" className="ml-2 underline" onClick={retryTerminal}>Retry</button>
+        {outcomeVisible ? (
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-terminal/80 p-4">
+            <div
+              role="status"
+              data-testid={terminalOutcome?.state === "blocked" || terminalOutcome?.state === "affirmative_exit" ? "remote-terminal-outcome" : "remote-terminal-outcome-unknown"}
+              className="flex max-w-xs flex-col items-center gap-3 rounded-lg border border-chat-border bg-chat-surface px-4 py-4 text-center text-sm text-chat-foreground"
+            >
+              <span>
+                {terminalOutcome && (terminalOutcome.state === "blocked" || terminalOutcome.state === "affirmative_exit")
+                  ? terminalOutcomeCopy(terminalOutcome)
+                  : "We couldn't confirm whether this terminal recovered."}
               </span>
-            ) : terminalOutcome?.generation === null ? (
-              <span role="status" data-testid="remote-terminal-outcome-unknown" className="rounded-full border border-[#191919] bg-[#111111]/95 px-2 py-0.5 font-mono text-[10px] leading-tight text-[#838383] shadow-sm">
-                Recovery outcome unknown
-                <button type="button" className="ml-2 underline" onClick={retryTerminal}>Retry</button>
-              </span>
-            ) : terminalOutcome ? (
-              <span role="status" data-testid="remote-terminal-outcome" className="rounded border border-amber-500/40 bg-[#111111]/95 px-2 py-1 font-mono text-[10px] text-amber-200 shadow-sm">
-                {terminalOutcome.state}
-                <button type="button" className="ml-2 underline" onClick={retryTerminal}>Retry</button>
-              </span>
-            ) : <span role="status" className="rounded-full border border-[#191919] bg-[#111111]/95 px-2 py-0.5 font-mono text-[10px] leading-tight text-[#838383] shadow-sm">Connecting</span>}
-            {inputOverflow ? (
-              <span
-                data-testid="remote-terminal-overflow-indicator"
-                role="status"
-                className="rounded-full border border-rose-500/40 bg-rose-500/20 px-2 py-0.5 font-mono text-[10px] leading-tight text-rose-300 shadow-sm"
+              <button
+                type="button"
+                onClick={retryTerminal}
+                className="min-h-11 rounded-md bg-chat-primary px-5 text-sm font-medium text-chat-primary-foreground transition-colors hover:bg-chat-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
-                Input overflow
-              </span>
-            ) : null}
-            {pendingInputBytes > 0 ? (
-              <span
-                data-testid="remote-terminal-buffered-indicator"
-                className="rounded-full border border-amber-500/40 bg-amber-500/20 px-2 py-0.5 font-mono text-[10px] leading-tight text-amber-300 shadow-sm"
-              >
-                Buffered input
-              </span>
-            ) : null}
-            {replayGap ? (
-              <span
-                data-testid="remote-terminal-replay-gap"
-                role="status"
-                className="rounded-full border border-amber-500/40 bg-amber-500/20 px-2 py-0.5 font-mono text-[10px] leading-tight text-amber-300 shadow-sm"
-              >
-                Output gap
-              </span>
-            ) : null}
+                Retry
+              </button>
+            </div>
           </div>
         ) : null}
-        {embedded && connected && inputOverflow ? (
-          <div className="pointer-events-none absolute top-1.5 right-2 z-20 flex items-center gap-1 rounded border border-rose-500/40 bg-rose-500/20 px-2 py-0.5 font-mono text-[10px] text-rose-300 shadow-sm">
-            <span className="h-1.5 w-1.5 rounded-full bg-rose-400" />
-            <span>Input overflow</span>
-          </div>
-        ) : null}
-        {embedded && connected && pendingInputBytes > 0 ? (
-          <div className="pointer-events-none absolute top-1.5 right-2 z-20 flex items-center gap-1 rounded border border-amber-500/40 bg-amber-500/20 px-2 py-0.5 font-mono text-[10px] text-amber-300 shadow-sm">
-            <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
-            <span>Buffered input</span>
+        {gestureHud !== null ? (
+          <div
+            data-testid="remote-terminal-gesture-hud"
+            aria-hidden="true"
+            className="pointer-events-none absolute left-1/2 top-3 z-20 -translate-x-1/2 rounded-full border border-chat-border bg-chat-surface px-3 py-1 text-xs text-chat-foreground"
+          >
+            {gestureHud}
           </div>
         ) : null}
         <span
@@ -2261,7 +2323,7 @@ export function RemoteTerminal({
           <span
             aria-hidden="true"
             data-terminal-cursor="true"
-            className={grid.cursor.blinking ? "animate-pulse" : undefined}
+            className={grid.cursor.blinking ? "animate-pulse motion-reduce:animate-none" : undefined}
             style={cursorOverlayStyle(grid.cursor, cellMetrics, settings.theme.cursor)}
           />
         ) : null}
@@ -2289,7 +2351,7 @@ export function RemoteTerminal({
       {lineMode ? (
         <form
           data-testid="remote-terminal-line-form"
-          className="flex shrink-0 items-end gap-1.5 border-t border-border bg-card px-2 py-1.5"
+          className="flex shrink-0 items-end gap-1.5 border-t border-chat-border bg-chat-surface px-2 py-1.5"
           onSubmit={(event) => {
             event.preventDefault();
             submitLine();
@@ -2307,6 +2369,8 @@ export function RemoteTerminal({
             spellCheck={false}
             enterKeyHint="send"
             onChange={(event) => setLineDraft(event.currentTarget.value)}
+            onFocus={() => setLineFocused(true)}
+            onBlur={() => setLineFocused(false)}
             onKeyDown={(event) => {
               // Enter sends; Shift+Enter keeps a newline in the line. An IME still composing owns
               // its Enter (it commits the candidate).
@@ -2315,14 +2379,14 @@ export function RemoteTerminal({
               event.preventDefault();
               submitLine();
             }}
-            className="max-h-24 min-h-11 min-w-0 flex-1 resize-none rounded border border-border bg-background px-2 py-2.5 font-mono text-base leading-5 text-foreground outline-none focus:border-primary"
+            className="max-h-24 min-h-11 min-w-0 flex-1 resize-none rounded border border-chat-border bg-chat-screen px-2 py-2.5 font-mono text-base leading-5 text-chat-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
           />
           <button
             type="submit"
             data-testid="remote-terminal-line-send"
             aria-label="Send line"
             title="Send line"
-            className="flex min-h-11 min-w-[44px] items-center justify-center rounded border border-primary bg-primary px-2 text-primary-foreground transition-all active:scale-95"
+            className="flex min-h-11 min-w-11 items-center justify-center rounded border border-chat-primary bg-chat-primary px-2 text-chat-primary-foreground transition-colors hover:bg-chat-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           >
             <SendHorizontal className="size-4" aria-hidden="true" />
           </button>
@@ -2335,36 +2399,83 @@ export function RemoteTerminal({
           onModifiersChange={setDockModifiers}
           inputMode={inputMode}
           onInputModeChange={setInputMode}
+          compact={lineMode && lineFocused}
+          keyboardOpen={keyboardOpen}
         />
       ) : null}
-      {showKeyDock && wakeLockSupported ? (
+      {showKeyDock ? (
         <MobileSheet
           open={terminalMenuOpen}
           onOpenChange={setTerminalMenuOpen}
           title="Terminal"
           ariaLabel="Terminal options"
           testId="remote-terminal-menu"
+          footer={<span data-testid="remote-terminal-build-stamp" className="block px-3 text-xs text-chat-foreground-secondary">Version {BUILD_STAMP}</span>}
         >
           <button
             type="button"
+            data-testid="remote-terminal-copy-screen"
+            disabled={!grid}
+            onClick={copyScreen}
+            className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+          >
+            <ClipboardCopy className="size-[18px] shrink-0 text-chat-foreground-secondary" aria-hidden="true" />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-base leading-5">Copy screen</span>
+              <span role="status" className="mt-0.5 block truncate text-sm text-chat-foreground-secondary">
+                {copyState === "copied" ? "Copied" : copyState === "failed" ? "This browser blocked copying" : "Copy the visible terminal text"}
+              </span>
+            </span>
+          </button>
+          <button
+            type="button"
+            data-testid="remote-terminal-reset-text-size"
+            disabled={userFontSize === null}
+            onClick={() => setUserFontSize(null)}
+            className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+          >
+            <Type className="size-[18px] shrink-0 text-chat-foreground-secondary" aria-hidden="true" />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-base leading-5">Reset text size</span>
+              <span className="mt-0.5 block truncate text-sm text-chat-foreground-secondary">Pinch the terminal to change it; now {activeFontSize}</span>
+            </span>
+          </button>
+          <button
+            type="button"
+            data-testid="remote-terminal-show-keyboard"
+            onClick={() => {
+              setTerminalMenuOpen(false);
+              focusInput();
+            }}
+            className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            <Keyboard className="size-[18px] shrink-0 text-chat-foreground-secondary" aria-hidden="true" />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-base leading-5">Show keyboard</span>
+              <span className="mt-0.5 block truncate text-sm text-chat-foreground-secondary">Or tap the terminal to type</span>
+            </span>
+          </button>
+          <button
+            type="button"
             role="switch"
-            aria-checked={keepScreenOn}
+            aria-checked={keepScreenOn && wakeLockSupported}
+            disabled={!wakeLockSupported}
             data-testid="remote-terminal-keep-screen-on"
             onClick={() => setKeepScreenOn(!keepScreenOn)}
-            className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
           >
             <Sun className="size-[18px] shrink-0 text-chat-foreground-secondary" aria-hidden="true" />
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-[15px] leading-5">Keep screen on</span>
-              <span className="mt-0.5 block truncate text-[13px] text-chat-foreground-secondary">
-                Stop the phone from dimming while this terminal is open
+              <span className="block truncate text-base leading-5">Keep screen on</span>
+              <span className="mt-0.5 block truncate text-sm text-chat-foreground-secondary">
+                {wakeLockSupported ? "Stop the phone from dimming while this terminal is open" : "This browser can't keep the screen on"}
               </span>
             </span>
             <span
               aria-hidden="true"
-              className={`relative inline-flex h-6 w-10 shrink-0 items-center rounded-full transition-colors ${keepScreenOn ? "bg-primary" : "bg-chat-foreground-secondary/40"}`}
+              className={`relative inline-flex h-6 w-10 shrink-0 items-center rounded-full transition-colors ${keepScreenOn && wakeLockSupported ? "bg-chat-primary" : "bg-chat-foreground-secondary/40"}`}
             >
-              <span className={`inline-block size-5 rounded-full bg-white shadow transition-transform ${keepScreenOn ? "translate-x-[18px]" : "translate-x-0.5"}`} />
+              <span className={`inline-block size-5 rounded-full bg-chat-primary-foreground transition-transform motion-reduce:transition-none ${keepScreenOn && wakeLockSupported ? "translate-x-[18px]" : "translate-x-0.5"}`} />
             </span>
           </button>
         </MobileSheet>

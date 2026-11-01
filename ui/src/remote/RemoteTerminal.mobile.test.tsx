@@ -560,11 +560,14 @@ describe("mobile terminal input lifecycle", () => {
       expect(sentinels[1].release).toHaveBeenCalledTimes(1);
     });
 
-    it("hides the toggle when the browser has no wake lock", () => {
+    it("keeps the options menu and explains the disabled toggle when the browser has no wake lock", () => {
       render(<RemoteTerminal sessionId="a" token="token-a" />);
       expect("wakeLock" in navigator).toBe(false);
-      expect(screen.queryByTestId("remote-terminal-menu-button")).toBeNull();
-      expect(screen.queryByRole("switch", { name: /keep screen on/i })).toBeNull();
+      fireEvent.click(screen.getByTestId("remote-terminal-menu-button"));
+      const toggle = screen.getByRole("switch", { name: /keep screen on/i });
+      expect(toggle).toBeDisabled();
+      expect(toggle).toHaveAttribute("aria-checked", "false");
+      expect(toggle).toHaveTextContent("This browser can't keep the screen on");
     });
   });
 
@@ -588,6 +591,64 @@ describe("mobile terminal input lifecycle", () => {
     expect(Socket.latest.send).toHaveBeenCalledWith(
       JSON.stringify({ type: "remoteResize", generation: "gen-1", cols: 80, rows: 10 })
     );
+  });
+
+  it("keeps the host PTY size while the soft keyboard shrinks the terminal, then resumes resizing", () => {
+    // Given: a connected terminal and a soft keyboard covering the bottom of the viewport
+    const listeners = new Set<() => void>();
+    const viewport = {
+      height: 300,
+      addEventListener: (_: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_: string, listener: () => void) => listeners.delete(listener),
+    };
+    vi.stubGlobal("visualViewport", viewport);
+    vi.stubGlobal("innerHeight", 800);
+    render(<RemoteTerminal sessionId="a" token="token-a" />);
+    act(() => Socket.latest.onopen?.());
+    Socket.latest.send.mockClear();
+
+    // When: the keyboard takes rows away from the grid
+    height = 200;
+    act(() => resize([], {} as ResizeObserver));
+
+    // Then: no resize reaches the host
+    expect(Socket.latest.send).not.toHaveBeenCalled();
+
+    // When: the keyboard closes and the layout changes for a real reason
+    viewport.height = 800;
+    act(() => listeners.forEach((listener) => listener()));
+    height = 600;
+    act(() => resize([], {} as ResizeObserver));
+
+    // Then: the new size is sent
+    expect(Socket.latest.send).toHaveBeenCalledWith(JSON.stringify({ type: "resize", cols: 80, rows: 30 }));
+  });
+
+  it("copies the visible screen text from the options sheet", async () => {
+    // Given: a grid with two rows of output
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    render(<RemoteTerminal sessionId="a" token="token-a" />);
+    act(() => {
+      Socket.latest.onopen?.();
+      Socket.latest.onmessage?.({ data: JSON.stringify({
+        type: "grid", cols: 80, rows: 20,
+        cursor: { x: 0, y: 1, visible: true, blinking: false, wideTail: false, visualStyle: "block" },
+        lines: [
+          { index: 0, runs: [{ text: "error: boom   ", fg: null, bg: null, attrs: 0 }] },
+          { index: 1, runs: [{ text: "$ ", fg: null, bg: null, attrs: 0 }] },
+        ],
+      }) } as MessageEvent);
+    });
+
+    // When: Copy screen is chosen
+    fireEvent.click(screen.getByTestId("remote-terminal-menu-button"));
+    await act(async () => { fireEvent.click(screen.getByTestId("remote-terminal-copy-screen")); });
+
+    // Then: the trimmed text is on the clipboard and the row confirms it
+    expect(writeText).toHaveBeenCalledWith("error: boom\n$");
+    expect(screen.getByTestId("remote-terminal-copy-screen")).toHaveTextContent("Copied");
+    Reflect.deleteProperty(navigator, "clipboard");
   });
 
   it("never puts cols/rows in socket URL and never sends resize or remoteResize when followHostSize is true", () => {

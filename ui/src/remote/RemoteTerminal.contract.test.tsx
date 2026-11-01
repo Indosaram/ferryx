@@ -223,10 +223,10 @@ describe("remote terminal grid contract", () => {
     act(() => sockets[0].onmessage?.({ data: JSON.stringify(frame) }));
     expect(screen.queryByTestId("remote-terminal-outcome")).toBeNull();
     act(() => sockets[1].onmessage?.({ data: JSON.stringify({ ...frame, generation: null, state: "affirmative_exit", exitCode: 7 }) }));
-    expect(screen.getByTestId("remote-terminal-outcome")).toHaveTextContent("Terminal exited (7)");
+    expect(screen.getByTestId("remote-terminal-outcome")).toHaveTextContent("This terminal has exited (code 7).");
     expect(screen.queryByTestId("remote-terminal-outcome-unknown")).toBeNull();
     act(() => sockets[1].onmessage?.({ data: JSON.stringify({ ...frame, generation: null, state: "recovering", exitCode: null }) }));
-    expect(screen.getByTestId("remote-terminal-outcome")).toHaveTextContent("Terminal exited (7)");
+    expect(screen.getByTestId("remote-terminal-outcome")).toHaveTextContent("This terminal has exited (code 7).");
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Retry" })); });
     await sockets[2].waitForHandlers();
     act(() => sockets[2].onmessage?.({ data: JSON.stringify({ ...frame, generation: null, state: "recovering", exitCode: null }) }));
@@ -1035,9 +1035,17 @@ describe("remote terminal grid contract", () => {
     expect(socket().send).toHaveBeenCalledWith(new TextEncoder().encode("ㄱ "));
   });
 
-  it("shows the build stamp of the client it is running", () => {
+  it("shows the build stamp in the options sheet, not in the phone header", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+    expect(screen.queryByTestId("remote-terminal-build-stamp")).toBeNull();
+    fireEvent.click(screen.getByTestId("remote-terminal-menu-button"));
+    expect(screen.getByTestId("remote-terminal-build-stamp").textContent).not.toBe("");
+  });
+
+  it("keeps the build stamp in the header of the desktop compatibility renderer", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" showKeyDock={false} />);
     expect(screen.getByTestId("remote-terminal-build-stamp").textContent).not.toBe("");
   });
 
@@ -1562,7 +1570,7 @@ describe("remote terminal grid contract", () => {
 
     // Assert that overflow is now observable via both UI indicator and callback
     expect(screen.getByTestId("remote-terminal-overflow-indicator")).toBeInTheDocument();
-    expect(screen.getByTestId("remote-terminal-overflow-indicator")).toHaveTextContent("Input overflow");
+    expect(screen.getByTestId("remote-terminal-overflow-indicator")).toHaveTextContent("Some typing was dropped");
     expect(onInputOverflow).toHaveBeenCalledWith(1);
 
     // Assert that socket send was not called while connecting
@@ -2197,7 +2205,7 @@ describe("remote terminal grid contract", () => {
     expect(screen.getByText("Terminal")).toBeInTheDocument();
     expect(screen.getByText("feature-branch")).toBeInTheDocument();
     expect(screen.getByTestId("remote-terminal-back")).toBeInTheDocument();
-    expect(screen.getByTestId("remote-terminal-build-stamp")).toBeInTheDocument();
+    expect(screen.getByTestId("remote-terminal-menu-button")).toBeInTheDocument();
     expect(screen.getByRole("status")).toBeInTheDocument();
     const titleBarTrue = screen.getByTestId("remote-terminal-back").closest("div.flex.shrink-0");
     expect(titleBarTrue?.className).toContain("h-11");
@@ -2218,9 +2226,9 @@ describe("remote terminal grid contract", () => {
     expect(screen.queryByText("feature-branch")).not.toBeInTheDocument();
     expect(screen.queryByTestId("remote-terminal-back")).not.toBeInTheDocument();
     // Status cluster remains with identical testids and roles
-    expect(screen.getByTestId("remote-terminal-build-stamp")).toBeInTheDocument();
+    expect(screen.getByTestId("remote-terminal-menu-button")).toBeInTheDocument();
     expect(screen.getByRole("status")).toBeInTheDocument();
-    const titleBarFalse = screen.getByTestId("remote-terminal-build-stamp").closest("div.flex.shrink-0");
+    const titleBarFalse = screen.getByTestId("remote-terminal-menu-button").closest("div.flex.shrink-0");
     expect(titleBarFalse?.className).toContain("h-7");
     expect(titleBarFalse?.className).toContain("justify-end");
   });
@@ -2530,7 +2538,8 @@ describe("remote terminal grid contract", () => {
       act(() => sockets[0].onmessage?.({ data: JSON.stringify(blockedFrame) }));
 
       const outcomeBanner = screen.getByTestId("remote-terminal-outcome");
-      expect(outcomeBanner).toHaveTextContent("permission_denied");
+      expect(outcomeBanner).toHaveTextContent("Your computer refused access to this terminal.");
+      expect(outcomeBanner).not.toHaveTextContent("permission_denied");
       expect(screen.queryByTestId("remote-terminal-outcome-unknown")).toBeNull();
       const blockedSnap = qa.snapshot(target);
       expect(blockedSnap).toMatchObject({
@@ -2564,7 +2573,7 @@ describe("remote terminal grid contract", () => {
       act(() => sockets[1].onmessage?.({ data: JSON.stringify(exitFrame) }));
 
       const exitBanner = screen.getByTestId("remote-terminal-outcome");
-      expect(exitBanner).toHaveTextContent("Terminal exited (42)");
+      expect(exitBanner).toHaveTextContent("This terminal has exited (code 42).");
       expect(screen.queryByTestId("remote-terminal-outcome-unknown")).toBeNull();
       const exitSnap = qa.snapshot(target);
       expect(exitSnap).toMatchObject({
@@ -2596,7 +2605,7 @@ describe("remote terminal grid contract", () => {
         exitCode: null,
       };
       act(() => sockets[2].onmessage?.({ data: JSON.stringify(nonAuthFrame) }));
-      expect(screen.getByTestId("remote-terminal-outcome-unknown")).toHaveTextContent("Recovery outcome unknown");
+      expect(screen.getByTestId("remote-terminal-outcome-unknown")).toHaveTextContent("We couldn't confirm whether this terminal recovered.");
       expect(screen.queryByTestId("remote-terminal-outcome")).toBeNull();
 
       view.unmount();
@@ -3010,7 +3019,8 @@ describe("remote terminal grid contract", () => {
 
       // Header status reflects Blocked, banner reflects unauthorized with Retry
       expect(connectionStatus()).toHaveTextContent("Blocked");
-      expect(screen.getByTestId("remote-terminal-outcome")).toHaveTextContent("unauthorized");
+      expect(screen.getByTestId("remote-terminal-outcome")).toHaveTextContent("You were signed out.");
+      expect(screen.getByTestId("remote-terminal-outcome")).not.toHaveTextContent("unauthorized");
       expect(screen.queryByTestId("remote-terminal-outcome-unknown")).toBeNull();
 
       // Timer progression does NOT auto-redial
@@ -3152,7 +3162,7 @@ describe("remote terminal grid contract", () => {
         });
       });
       const gapIndicator = screen.getByTestId("remote-terminal-replay-gap");
-      expect(gapIndicator).toHaveTextContent("Output gap");
+      expect(gapIndicator).toHaveTextContent("Some output was skipped");
 
       // Stale gap frame from old socket after redial does not corrupt fresh socket
       act(() => ws.onclose?.());
