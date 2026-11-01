@@ -7736,6 +7736,7 @@ impl DaemonServer {
                     capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_REQUEST_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_READ_CAPABILITY.into());
+                    capabilities.push(crate::hub_runtime::SUPERVISOR_SETUP_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_ENGINE_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY.into());
@@ -7844,6 +7845,16 @@ impl DaemonServer {
                             message: failure.message.clone(),
                             code: Some(failure.code.clone()),
                             details: Some(failure.to_json()),
+                        },
+                    }
+                }
+                Ok(DaemonRequest::SupervisorSetup { request }) => {
+                    match crate::hub_runtime::supervisor_setup(self.remote_state(), request).await {
+                        Ok(value) => DaemonResponse::SupervisorSetupOk { value },
+                        Err(error) => DaemonResponse::Error {
+                            message: error.to_string(),
+                            code: Some(error.code().into()),
+                            details: None,
                         },
                     }
                 }

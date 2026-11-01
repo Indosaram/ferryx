@@ -638,6 +638,22 @@ pub enum SupervisorEngineAction {
 }
 
 /// A read of the unified supervisor the desktop view needs besides the snapshot: one project's
+/// Automatic supervisor setup: read the shared SetupStatus, run setup, or adopt every adoptable
+/// legacy lane as the owner. Gated by `supervisorSetupV1`; only `status` writes nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SupervisorSetupAction {
+    Status,
+    Run {
+        #[serde(default)]
+        import_memory: bool,
+        #[serde(default)]
+        projects: Vec<crate::hub_runtime::SetupProject>,
+    },
+    AdoptAll,
+}
+
+/// A read of the unified supervisor the desktop view needs besides the snapshot: one project's
 /// owner-message conversation after a cursor, or the memory receipts. Gated by
 /// `supervisorReadV1`. Nothing is written.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -942,6 +958,11 @@ pub enum DaemonRequest {
     #[serde(rename = "supervisorReadV1", rename_all = "camelCase")]
     SupervisorReadV1 {
         request: SupervisorReadAction,
+    },
+    /// Automatic supervisor setup. Gated by `supervisorSetupV1`.
+    #[serde(rename_all = "camelCase")]
+    SupervisorSetup {
+        request: SupervisorSetupAction,
     },
     /// Host load and per-session process cost, sampled by the daemon on demand.
     ResourceUsage,
@@ -1572,6 +1593,11 @@ pub enum DaemonResponse {
     /// The view a `SupervisorReadV1` asked for.
     #[serde(rename = "supervisorReadV1Ok", rename_all = "camelCase")]
     SupervisorReadV1Ok {
+        value: serde_json::Value,
+    },
+    /// The SetupStatus (status, run) or the adoption report (adoptAll).
+    #[serde(rename_all = "camelCase")]
+    SupervisorSetupOk {
         value: serde_json::Value,
     },
     #[serde(rename_all = "camelCase")]
@@ -2469,6 +2495,24 @@ mod tests {
 
     #[test]
     fn the_supervisor_read_round_trips_on_the_daemon_wire() {
+        let run: DaemonRequest = serde_json::from_value(serde_json::json!({"type": "supervisorSetup",
+            "request": {"action": "run", "importMemory": true, "projects": [{"name": "qa", "path": "/r"}]}}))
+        .unwrap();
+        assert!(matches!(
+            &run,
+            DaemonRequest::SupervisorSetup { request: SupervisorSetupAction::Run { import_memory: true, projects } }
+                if projects.len() == 1 && projects[0].path == "/r"
+        ));
+        for (action, wire) in [(SupervisorSetupAction::Status, "status"), (SupervisorSetupAction::AdoptAll, "adoptAll")] {
+            let request = DaemonRequest::SupervisorSetup { request: action };
+            assert_eq!(
+                serde_json::to_value(&request).unwrap(),
+                serde_json::json!({"type": "supervisorSetup", "request": {"action": wire}})
+            );
+        }
+        let ok = DaemonResponse::SupervisorSetupOk { value: serde_json::json!({"nextAction": "none"}) };
+        assert!(serde_json::to_string(&ok).unwrap().contains(r#""type":"supervisorSetupOk""#));
+
         let conversation = DaemonRequest::SupervisorReadV1 {
             request: SupervisorReadAction::Conversation { project_id: "p1".into(), after: Some(3) },
         };

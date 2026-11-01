@@ -281,6 +281,129 @@ pub(crate) async fn run_setup_on(
     Ok(answer)
 }
 
+/// The generation's automatic setup task: on every engine transition to Ready it runs the
+/// automatic cutover (which itself refuses unless the owner opted in, never after a rollback),
+/// telling the Supervisor views when it moved the intake. After the first Ready it seeds owner
+/// memory once when the owner opted in and no import finished yet. It waits on the engine's
+/// health channel, never polls, and ends with the generation that spawned it.
+pub(super) async fn auto_setup(
+    engine: ferryx_hub::meta::mhc_supervisor::MhcSupervisor,
+    pool: ferryx_hub::goals::SqlitePool,
+    state: std::sync::Arc<RemoteGatewayState>,
+    home: PathBuf,
+) {
+    use ferryx_hub::meta::mhc_supervisor::HealthState;
+    let mut health = engine.subscribe_health();
+    let mut was_ready = false;
+    let mut seeded = false;
+    loop {
+        let current = health.borrow_and_update().clone();
+        let ready = current.state == HealthState::Ready;
+        if ready && !was_ready {
+            match ferryx_hub::supervisor::cutover::auto_cutover(&pool, Some(&current)).await {
+                Ok(Some(transition)) => {
+                    tracing::info!(steps = transition.steps.len(), "supervisor intake cut over automatically");
+                    crate::remote::server::agent_control_service::publish_supervisor_changed(
+                        &state,
+                        json!({ "setup": "cutover" }),
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(code = error.code(), "automatic cutover failed"),
+            }
+            if !seeded {
+                seeded = true;
+                seed_if_wanted(&engine, &pool, &state, home.clone()).await;
+            }
+        }
+        was_ready = ready;
+        if health.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn seed_if_wanted(
+    engine: &ferryx_hub::meta::mhc_supervisor::MhcSupervisor,
+    pool: &ferryx_hub::goals::SqlitePool,
+    state: &RemoteGatewayState,
+    home: PathBuf,
+) {
+    let status = match setup::setup_status(pool, EngineView::default()).await {
+        Ok(status) => status,
+        Err(error) => {
+            tracing::warn!(code = error.code(), "setup status was not read for memory seeding");
+            return;
+        }
+    };
+    let (Some(owner), true, None) = (status.owner, status.memory_import.enabled, status.memory_import.last_at) else {
+        return;
+    };
+    let memory: std::sync::Arc<dyn ferryx_hub::meta::mhc_supervisor::OwnerMemory> = std::sync::Arc::new(engine.clone());
+    match super::seed::seed_owner_memory(pool, memory, &owner.owner_principal, home).await {
+        Ok(_) => crate::remote::server::agent_control_service::publish_supervisor_changed(
+            state,
+            json!({ "setup": "memory" }),
+        ),
+        Err(error) => tracing::warn!(code = error.code(), "owner memory seeding failed"),
+    }
+}
+
+/// Adopts every adoptable legacy lane as the installation owner, each through the shared
+/// supervisor request service exactly as one owner adopt request from caller does. One
+/// refusal never fails the batch: it is listed with its code.
+pub async fn supervisor_adopt_all(
+    state: &RemoteGatewayState,
+    caller: super::SupervisorCaller,
+) -> Result<Value, SetupError> {
+    let (pool, _) = hub_pool(state)?;
+    let lanes = setup::adoptable_lane_keys(&pool).await?;
+    let mut adopted = Vec::new();
+    let mut refused = Vec::new();
+    for lane in lanes {
+        let envelope = json!({
+            "requestId": format!("adopt-all:{lane}"),
+            "action": "adopt",
+            "payload": { "laneKey": lane },
+        });
+        match super::supervisor_request(state, caller.clone(), envelope).await {
+            Ok(_) => adopted.push(Value::String(lane)),
+            Err(failure) => refused.push(json!({ "lane": lane, "code": failure.code, "message": failure.message })),
+        }
+    }
+    tracing::info!(adopted = adopted.len(), refused = refused.len(), "legacy lanes adopted");
+    Ok(json!({ "adopted": adopted, "refused": refused }))
+}
+
+/// Serves one daemon `supervisorSetup` request from the desktop (or the owner's CLI).
+pub async fn supervisor_setup(
+    state: &RemoteGatewayState,
+    request: crate::daemon::protocol::SupervisorSetupAction,
+) -> Result<Value, SetupError> {
+    use crate::daemon::protocol::SupervisorSetupAction;
+    match request {
+        SupervisorSetupAction::Status => supervisor_setup_status(state).await,
+        SupervisorSetupAction::Run { import_memory, projects } => {
+            supervisor_setup_run(state, SetupRunRequest { import_memory, projects }).await
+        }
+        SupervisorSetupAction::AdoptAll => supervisor_adopt_all(state, super::SupervisorCaller::Desktop).await,
+    }
+}
+
+/// The snapshot's `setup` field: the SetupStatus, or null when it cannot be read.
+pub(super) async fn snapshot_setup(pool: &ferryx_hub::goals::SqlitePool) -> Value {
+    let Ok(env_file) = env_file() else {
+        return Value::Null;
+    };
+    match setup::setup_status(pool, engine_view(&env_file)).await {
+        Ok(status) => serde_json::to_value(status).unwrap_or(Value::Null),
+        Err(error) => {
+            tracing::warn!(code = error.code(), "supervisor setup status was not read");
+            Value::Null
+        }
+    }
+}
+
 /// The shared SetupStatus of this installation. Reads only.
 pub async fn supervisor_setup_status(state: &RemoteGatewayState) -> Result<Value, SetupError> {
     let (pool, _) = hub_pool(state)?;
@@ -302,9 +425,183 @@ pub async fn supervisor_setup_run(
     Ok(answer)
 }
 
+pub(super) const HUB_SETUP_USAGE: &str =
+    "ferryx hub setup [--import-memory] [--project <path>]... [--json] | ferryx hub setup --status [--json]";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HubSetupArgs {
+    status: bool,
+    json: bool,
+    request: SetupRunRequest,
+}
+
+fn parse_hub_setup(args: &[String]) -> Result<HubSetupArgs, String> {
+    let mut parsed = HubSetupArgs { status: false, json: false, request: SetupRunRequest::default() };
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--status" => parsed.status = true,
+            "--json" => parsed.json = true,
+            "--import-memory" => parsed.request.import_memory = true,
+            "--project" => match rest.next().filter(|path| !path.starts_with("--") && !path.trim().is_empty()) {
+                Some(path) => parsed.request.projects.push(SetupProject { name: String::new(), path: path.clone() }),
+                None => return Err(format!("--project needs a path\nusage: {HUB_SETUP_USAGE}")),
+            },
+            other => return Err(format!("unknown argument {other}\nusage: {HUB_SETUP_USAGE}")),
+        }
+    }
+    if parsed.status && (parsed.request.import_memory || !parsed.request.projects.is_empty()) {
+        return Err(format!("--status takes no setup choices\nusage: {HUB_SETUP_USAGE}"));
+    }
+    Ok(parsed)
+}
+
+/// Through the running daemon when it serves setup; None when no daemon (or an older one)
+/// answers, so the caller sets up the hub database directly.
+async fn setup_via_daemon(action: crate::daemon::protocol::SupervisorSetupAction) -> Option<Result<Value, (String, String)>> {
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse};
+    let mutates = !matches!(action, crate::daemon::protocol::SupervisorSetupAction::Status);
+    let request = DaemonRequest::SupervisorSetup { request: action };
+    match crate::cli::supervisor_goal::exchange_once(super::SUPERVISOR_SETUP_CAPABILITY, request, mutates).await {
+        Ok(DaemonResponse::SupervisorSetupOk { value }) => Some(Ok(value)),
+        Ok(DaemonResponse::Error { message, code, .. }) => Some(Err((code.unwrap_or_else(|| "INTERNAL".into()), message))),
+        Ok(other) => Some(Err(("INTERNAL".into(), format!("unexpected daemon response: {other:?}")))),
+        Err((value, _)) => match value["code"].as_str() {
+            Some("NOT_FOUND" | "UNSUPPORTED") => None,
+            code => Some(Err((code.unwrap_or("INTERNAL").to_owned(), value["message"].as_str().unwrap_or_default().to_owned()))),
+        },
+    }
+}
+
+/// Setup over the hub database this user's hub opens, without a daemon: the env file and the
+/// owner, projects and choices are written; the engine starts with the next hub generation.
+async fn setup_locally(args: &HubSetupArgs) -> Result<Value, (String, String)> {
+    let fail = |error: SetupError| (error.code().to_owned(), error.to_string());
+    let config = ferryx_hub::HubConfig::load().map_err(|error| ("INVALID_REQUEST".to_owned(), format!("hub config: {error}")))?;
+    let path = config.database_path.clone().unwrap_or_else(ferryx_hub::hub::default_database_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| ("STORAGE".to_owned(), format!("cannot create {}: {error}", parent.display())))?;
+    }
+    let pool = ferryx_hub::storage::connect(&path).await.map_err(|error| ("STORAGE".to_owned(), error.to_string()))?;
+    let env_file = env_file().map_err(fail)?;
+    let answer = if args.status {
+        setup::setup_status(&pool, engine_view(&env_file))
+            .await
+            .map(|status| serde_json::to_value(status).unwrap_or(Value::Null))
+            .map_err(|error| fail(error.into()))
+    } else {
+        let slack = match config.owner_slack_id.clone() {
+            Some(user) => {
+                let team = match setup::known_slack_team(&pool).await.ok().flatten() {
+                    Some(team) => Some(team),
+                    None => slack_auth_team().await,
+                };
+                SlackOwner { team, user: Some(user) }
+            }
+            None => SlackOwner::default(),
+        };
+        run_setup_on(&pool, &env_file, args.request.clone(), &slack, &local_account(), false)
+            .await
+            .map_err(fail)
+    };
+    pool.close().await;
+    answer
+}
+
+fn print_human(value: &Value) {
+    let text = |key: &str| value[key].as_str().unwrap_or("-").to_owned();
+    println!("next action      {}", text("nextAction"));
+    println!("engine           enabled={} installed={} state={}", value["engineEnabled"], value["engineInstalled"], text("engineState"));
+    if let Some(fault) = value["engineFault"].as_object() {
+        println!("engine fault     {} {}", fault["code"].as_str().unwrap_or(""), fault["message"].as_str().unwrap_or(""));
+    }
+    println!("owner            {}", value["owner"]["ownerPrincipal"].as_str().unwrap_or("(none)"));
+    println!("projects         {}", value["projects"]);
+    println!("intake           unified={} legacy={}", value["intake"]["unifiedOpen"], value["intake"]["legacy"].as_str().unwrap_or("-"));
+    println!("auto cutover     {}", value["autoCutover"]);
+    println!("memory import    enabled={} sessions={} turns={}", value["memoryImport"]["enabled"], value["memoryImport"]["sessions"], value["memoryImport"]["turns"]);
+    println!("adoptable lanes  {}", value["adoptable"]);
+    for result in value["projectResults"].as_array().into_iter().flatten() {
+        match result["ok"].as_bool() {
+            Some(true) => println!("mapped           {} -> {}", result["path"].as_str().unwrap_or(""), result["repoIdentity"].as_str().unwrap_or("")),
+            _ => println!("refused          {} {}: {}", result["path"].as_str().unwrap_or(""), result["code"].as_str().unwrap_or(""), result["message"].as_str().unwrap_or("")),
+        }
+    }
+}
+
+/// `ferryx hub setup ...`: automatic supervisor setup from the command line, with or without a
+/// running daemon. Refused inside a Ferryx pane: setup is the owner's act.
+pub(super) fn hub_setup_cli(args: &[String]) -> i32 {
+    if std::env::var_os("FERRYX_SESSION_ID").is_some_and(|session| !session.is_empty()) {
+        eprintln!("hub setup is the owner's act and is refused inside a Ferryx pane (FERRYX_SESSION_ID is set)");
+        return crate::agent_control::EXIT_REFUSED;
+    }
+    let parsed = match parse_hub_setup(args) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            eprintln!("{message}");
+            return 2;
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("runtime: {error}");
+            return 1;
+        }
+    };
+    let action = if parsed.status {
+        crate::daemon::protocol::SupervisorSetupAction::Status
+    } else {
+        crate::daemon::protocol::SupervisorSetupAction::Run {
+            import_memory: parsed.request.import_memory,
+            projects: parsed.request.projects.clone(),
+        }
+    };
+    let answer = runtime.block_on(async {
+        match setup_via_daemon(action).await {
+            Some(answer) => answer,
+            None => setup_locally(&parsed).await,
+        }
+    });
+    match answer {
+        Ok(value) if parsed.json => {
+            println!("{value}");
+            0
+        }
+        Ok(value) => {
+            print_human(&value);
+            0
+        }
+        Err((code, message)) => {
+            if parsed.json {
+                println!("{}", json!({ "ok": false, "code": code, "message": message }));
+            } else {
+                eprintln!("{code}: {message}");
+            }
+            crate::agent_control::exit_code_for(&code)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn words(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_setup_cli_parses_status_run_and_refuses_the_rest() {
+        assert_eq!(parse_hub_setup(&words(&["--status", "--json"])), Ok(HubSetupArgs { status: true, json: true, request: SetupRunRequest::default() }));
+        let run = parse_hub_setup(&words(&["--import-memory", "--project", "/a", "--project", "/b"])).unwrap();
+        assert!(!run.status && !run.json && run.request.import_memory);
+        assert_eq!(run.request.projects.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(), vec!["/a", "/b"]);
+        assert!(parse_hub_setup(&words(&["--project"])).is_err());
+        assert!(parse_hub_setup(&words(&["--status", "--import-memory"])).is_err());
+        assert!(parse_hub_setup(&words(&["--bogus"])).is_err());
+    }
 
     fn git_repo(root: &Path) -> PathBuf {
         let repo = root.join("repo");

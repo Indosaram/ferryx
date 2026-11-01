@@ -330,6 +330,10 @@ mod status {
         assert!(import.auto_cutover && import.memory_import.enabled);
         assert_eq!(import.intake.legacy, "stopped");
         assert_eq!(import.adoptable, 1);
+        assert_eq!(
+            crate::supervisor::setup::adoptable_lane_keys(&pool).await.unwrap(),
+            vec!["nightly".to_owned()]
+        );
 
         set_setup_flags(&pool, None, Some(false)).await.unwrap();
         assert_eq!(next(&pool, ready()).await, NextAction::Adopt);

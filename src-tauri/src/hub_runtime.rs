@@ -19,7 +19,14 @@ use crate::remote::state::RemoteGatewayState;
 use crate::remote::reference_chat::types::{ReferencePart, ReferencePromptAnswer, ReferenceTurn};
 
 mod setup;
-pub use setup::{supervisor_setup_run, supervisor_setup_status, SetupError, SetupProject, SetupRunRequest};
+mod seed;
+pub use setup::{
+    supervisor_adopt_all, supervisor_setup, supervisor_setup_run, supervisor_setup_status, SetupError, SetupProject,
+    SetupRunRequest,
+};
+
+/// Capability a daemon advertises once it serves `DaemonRequest::SupervisorSetup`.
+pub const SUPERVISOR_SETUP_CAPABILITY: &str = "supervisorSetupV1";
 
 /// Maps a hub operation onto the daemon's agent-control request.
 /// The request id is the one the caller supplied. A lost answer is not given a new id.
@@ -422,12 +429,14 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
             };
         }
         Some("env") => return hub_env_cli(&args[3.min(args.len())..]),
+        Some("setup") => return setup::hub_setup_cli(&args[3.min(args.len())..]),
         Some("cron") => return hub_cron_cli(&args[3.min(args.len())..]),
         Some("migrate") => {}
         _ => {
             eprintln!("usage: ferryx hub migrate [--from-omo <db>] [--cwd <dir>] [--imported-from <db>] [--dry-run]");
             eprintln!("       ferryx hub stop | start | status [--check]");
             eprintln!("       ferryx hub cutover | rollback | intake");
+            eprintln!("       {}", setup::HUB_SETUP_USAGE);
             eprintln!(
                 "       ferryx hub env import [--from-plist <omo plist>] | ferryx hub env keys"
             );
@@ -786,9 +795,9 @@ pub async fn supervisor_snapshot(state: &RemoteGatewayState) -> Value {
         let test_hub = state.supervisor_test_hub.read().clone();
         #[cfg(test)]
         if let Some((pool, _)) = test_hub {
-            return json!({ "hub": { "available": true, "running": true, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": unified_snapshot(&pool).await });
+            return json!({ "hub": { "available": true, "running": true, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": unified_snapshot(&pool).await, "setup": setup::snapshot_setup(&pool).await });
         }
-        return json!({ "hub": { "available": false, "running": false, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": null });
+        return json!({ "hub": { "available": false, "running": false, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": null, "setup": null });
     };
     // A daemon that handed the hub to its successor no longer drives anything.
     let running = running.lock().await.is_some() && !HUB_TASKS.is_retired();
@@ -801,6 +810,7 @@ pub async fn supervisor_snapshot(state: &RemoteGatewayState) -> Value {
         "watched": watched.unwrap_or_default(),
         "actions": actions,
         "supervisor": unified_snapshot(&hub.pool).await,
+        "setup": setup::snapshot_setup(&hub.pool).await,
     })
 }
 
@@ -2212,6 +2222,12 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
             ferryx_hub::chat::slack_supervisor::SlackWorkTools::new(launch.hub.pool.clone()),
         ));
         tasks.push(tokio::spawn(runtime.clone().supervise()));
+        tasks.push(tokio::spawn(setup::auto_setup(
+            runtime.clone(),
+            launch.hub.pool.clone(),
+            Arc::clone(launch.server.remote_state()),
+            home_dir(),
+        )));
     }
     #[cfg(unix)]
     {
