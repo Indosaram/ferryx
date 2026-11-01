@@ -119,6 +119,75 @@ pub(crate) async fn http_start(
 }
 
 /// The machine error envelope a shared supervisor service refusal answers with: its own HTTP
+/// The machine error envelope a setup refusal answers with.
+fn setup_refusal(error: &crate::hub_runtime::SetupError) -> Response {
+    let code = error.code();
+    let status = match code {
+        SUPERVISOR_UNAVAILABLE_CODE => StatusCode::SERVICE_UNAVAILABLE,
+        // Retryable: Slack did not name the owner's team yet; nothing was provisioned.
+        crate::hub_runtime::SLACK_TEAM_UNRESOLVED => StatusCode::SERVICE_UNAVAILABLE,
+        SUPERVISOR_INVALID_STATE_CODE => StatusCode::CONFLICT,
+        other => StatusCode::from_u16(ferryx_hub::supervisor::request::status_for_code(other))
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    machine_error_with_details(status, code, &error.to_string(), serde_json::Map::new())
+}
+
+/// `GET /api/v1/supervisor/setup`: the shared SetupStatus. Any non-mirror device may read it.
+pub(crate) async fn http_setup_status(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = agent_control_service::http_device(&state, &headers, false) {
+        return response;
+    }
+    match crate::hub_runtime::supervisor_setup_status(&state).await {
+        Ok(value) => no_store(value),
+        Err(error) => setup_refusal(&error),
+    }
+}
+
+/// `POST /api/v1/supervisor/setup` `{importMemory, projects: [{name, path}]}`: runs automatic
+/// setup. Only a machine Control device the agent-control policy admits may run it; the daemon
+/// is never restarted, so live PTY sessions stay up.
+pub(crate) async fn http_setup_run(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    body: Result<Json<crate::hub_runtime::SetupRunRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(response) = agent_control_service::http_device(&state, &headers, true) {
+        return response;
+    }
+    let Ok(Json(request)) = body else {
+        return reference_chat_error(
+            ScopeErrorCode::InvalidRequest,
+            "the setup body must be {importMemory, projects: [{name, path}]}",
+        );
+    };
+    match crate::hub_runtime::supervisor_setup_run(&state, request).await {
+        Ok(value) => no_store(value),
+        Err(error) => setup_refusal(&error),
+    }
+}
+
+/// `POST /api/v1/supervisor/adopt-all`: adopts every adoptable legacy lane as the owner.
+/// Machine Control devices only.
+pub(crate) async fn http_adopt_all(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+) -> Response {
+    let device = match agent_control_service::http_device(&state, &headers, true) {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+    let caller = crate::hub_runtime::SupervisorCaller::Remote { device_id: device.id.clone() };
+    match crate::hub_runtime::supervisor_adopt_all(&state, caller).await {
+        Ok(value) => no_store(value),
+        Err(error) => setup_refusal(&error),
+    }
+}
+
+/// The machine error envelope a shared supervisor service refusal answers with: its own HTTP
 /// status (400/403/404/409/503) and stable code.
 fn service_refusal(failure: &ferryx_hub::supervisor::request::RequestFailure) -> Response {
     let status = StatusCode::from_u16(failure.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);

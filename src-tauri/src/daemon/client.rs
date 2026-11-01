@@ -673,6 +673,9 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::RetryRemoteSession { .. }
             | DaemonRequest::SupervisorSnapshot
             | DaemonRequest::SupervisorReadV1 { .. }
+            | DaemonRequest::SupervisorSetup {
+                request: crate::daemon::protocol::SupervisorSetupAction::Status
+            }
             | DaemonRequest::AgentControlSettingsGet
     )
 }
@@ -809,6 +812,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::SupervisorEngine { .. } => "supervisorEngine",
         DaemonRequest::SupervisorRequestV1 { .. } => "supervisorRequestV1",
         DaemonRequest::SupervisorReadV1 { .. } => "supervisorReadV1",
+        DaemonRequest::SupervisorSetup { .. } => "supervisorSetup",
         DaemonRequest::RemoteDesktopHostGet => "remoteDesktopHostGet",
         DaemonRequest::RemoteDesktopHostSet { .. } => "remoteDesktopHostSet",
         DaemonRequest::RemoteDesktopHostRespond { .. } => "remoteDesktopHostRespond",

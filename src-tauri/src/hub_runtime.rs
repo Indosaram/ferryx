@@ -18,6 +18,16 @@ use crate::daemon::server::DaemonServer;
 use crate::remote::state::RemoteGatewayState;
 use crate::remote::reference_chat::types::{ReferencePart, ReferencePromptAnswer, ReferenceTurn};
 
+mod setup;
+mod seed;
+pub use setup::{
+    supervisor_adopt_all, supervisor_setup, supervisor_setup_run, supervisor_setup_status, SetupError, SetupProject,
+    SetupRunRequest, SLACK_TEAM_UNRESOLVED,
+};
+
+/// Capability a daemon advertises once it serves `DaemonRequest::SupervisorSetup`.
+pub const SUPERVISOR_SETUP_CAPABILITY: &str = "supervisorSetupV1";
+
 /// Maps a hub operation onto the daemon's agent-control request.
 /// The request id is the one the caller supplied. A lost answer is not given a new id.
 pub fn to_agent_control_op(op: &AgentOp) -> Result<AgentControlOp, String> {
@@ -226,7 +236,7 @@ impl AgentControl for DaemonBridge {
 }
 
 /// A git remote URL in a form two checkouts of one repository share.
-fn remote_key(url: &str) -> String {
+pub(crate) fn remote_key(url: &str) -> String {
     let url = url.trim().trim_end_matches('/');
     url.strip_suffix(".git").unwrap_or(url).to_ascii_lowercase()
 }
@@ -419,12 +429,14 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
             };
         }
         Some("env") => return hub_env_cli(&args[3.min(args.len())..]),
+        Some("setup") => return setup::hub_setup_cli(&args[3.min(args.len())..]),
         Some("cron") => return hub_cron_cli(&args[3.min(args.len())..]),
         Some("migrate") => {}
         _ => {
             eprintln!("usage: ferryx hub migrate [--from-omo <db>] [--cwd <dir>] [--imported-from <db>] [--dry-run]");
             eprintln!("       ferryx hub stop | start | status [--check]");
             eprintln!("       ferryx hub cutover | rollback | intake");
+            eprintln!("       {}", setup::HUB_SETUP_USAGE);
             eprintln!(
                 "       ferryx hub env import [--from-plist <omo plist>] | ferryx hub env keys"
             );
@@ -783,9 +795,9 @@ pub async fn supervisor_snapshot(state: &RemoteGatewayState) -> Value {
         let test_hub = state.supervisor_test_hub.read().clone();
         #[cfg(test)]
         if let Some((pool, _)) = test_hub {
-            return json!({ "hub": { "available": true, "running": true, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": unified_snapshot(&pool).await });
+            return json!({ "hub": { "available": true, "running": true, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": unified_snapshot(&pool).await, "setup": setup::snapshot_setup(&pool).await });
         }
-        return json!({ "hub": { "available": false, "running": false, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": null });
+        return json!({ "hub": { "available": false, "running": false, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": null, "setup": null });
     };
     // A daemon that handed the hub to its successor no longer drives anything.
     let running = running.lock().await.is_some() && !HUB_TASKS.is_retired();
@@ -798,6 +810,7 @@ pub async fn supervisor_snapshot(state: &RemoteGatewayState) -> Value {
         "watched": watched.unwrap_or_default(),
         "actions": actions,
         "supervisor": unified_snapshot(&hub.pool).await,
+        "setup": setup::snapshot_setup(&hub.pool).await,
     })
 }
 
@@ -1925,8 +1938,21 @@ fn live_hub(running: bool, config: &HubConfig) -> ferryx_hub::control::LiveHub {
 }
 
 struct Generation {
-    #[cfg(unix)]
     tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Generation {
+    /// Aborts the generation's tasks and waits for them to end, so a following start
+    /// reconciles only after the predecessor dispatcher stopped. On every platform: a setup
+    /// restart ends the generation before it starts the next one.
+    async fn end(self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+        for task in self.tasks {
+            let _ = task.await;
+        }
+    }
 }
 
 /// The supervisor's dispatcher for this hub generation. It drains committed ready intents at
@@ -2171,7 +2197,15 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     // each generation supervises it (launch, owned-exit watch, 5s..300s relaunch backoff).
     // Aborting the generation's tasks (hub stop, handover retirement) closes the engine's stdin
     // and kills it after a short grace; the next generation's supervise call re-enables it.
-    let mhc_supervisor = ferryx_hub::meta::mhc_profile::MhcProfileConfig::from_env().map(|config| {
+    // from_env reads the hub env file: off the async runtime threads.
+    let mhc_config = match tokio::task::spawn_blocking(ferryx_hub::meta::mhc_profile::MhcProfileConfig::from_env).await {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(%error, "the mhc supervisor engine config was not read");
+            None
+        }
+    };
+    let mhc_supervisor = mhc_config.map(|config| {
         ferryx_hub::meta::mhc_supervisor::install_with(|| {
             let data_dir = ferryx_hub::meta::supervisor::state_dir_from_home()
                 .unwrap_or_else(|| std::path::PathBuf::from(".ferryx/hub"));
@@ -2193,6 +2227,12 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
             ferryx_hub::chat::slack_supervisor::SlackWorkTools::new(launch.hub.pool.clone()),
         ));
         tasks.push(tokio::spawn(runtime.clone().supervise()));
+        tasks.push(tokio::spawn(setup::auto_setup(
+            runtime.clone(),
+            launch.hub.pool.clone(),
+            Arc::clone(launch.server.remote_state()),
+            home_dir(),
+        )));
     }
     #[cfg(unix)]
     {
@@ -2420,10 +2460,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     for task in &tasks {
         HUB_TASKS.track(task);
     }
-    Generation {
-        #[cfg(unix)]
-        tasks,
-    }
+    Generation { tasks }
 }
 
 async fn post_cron_delivery(item: &ferryx_hub::schedule::DueDelivery) -> Option<String> {
@@ -2521,15 +2558,9 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                     let reply = match ferryx_hub::control::parse_control(&line) {
                         Ok(ferryx_hub::control::ControlOp::Stop) => {
                             let persisted = ferryx_hub::control::mark_stopped(&launch.hub.pool).await;
-                            if let Some(generation) = running.lock().await.take() {
-                                for task in &generation.tasks {
-                                    task.abort();
-                                }
-                                // Wait for the aborted tasks to end, so a later `hub start`
-                                // reconciles only after the predecessor dispatcher stopped.
-                                for task in generation.tasks {
-                                    let _ = task.await;
-                                }
+                            let previous = running.lock().await.take();
+                            if let Some(generation) = previous {
+                                generation.end().await;
                             }
                             match persisted {
                                 Ok(()) => "{\"status\":\"ok\",\"op\":\"stop\"}\n",

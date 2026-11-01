@@ -8052,6 +8052,13 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route("/api/v1/supervisor", get(supervisor_api::http_snapshot))
         .route("/api/v1/supervisor/start", post(supervisor_api::http_start))
         .route(
+            "/api/v1/supervisor/setup",
+            get(supervisor_api::http_setup_status)
+                .post(supervisor_api::http_setup_run)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route("/api/v1/supervisor/adopt-all", post(supervisor_api::http_adopt_all))
+        .route(
             "/api/v1/supervisor/request",
             post(supervisor_api::http_request).layer(axum::extract::DefaultBodyLimit::max(
                 crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,

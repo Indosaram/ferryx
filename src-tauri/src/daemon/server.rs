@@ -6425,15 +6425,21 @@ impl DaemonServer {
                     // admitted: it is answered HANDOVER_BUSY, retryable, and never half-served.
                     let mut busy_refusal = None;
                     // A pane process may read the supervisor but never make the owner's
-                    // decisions. Gated: every unified request (SupervisorRequestV1) and a
-                    // mutating SupervisorDispatch (submit: owner work into a chosen pane);
-                    // its read-only `status` stays allowed. A lane
+                    // decisions. Gated: every unified request (SupervisorRequestV1), a
+                    // mutating SupervisorDispatch (submit: owner work into a chosen pane) and
+                    // a SupervisorSetup run or adopt-all (engine on, owner identity, every lane
+                    // adopted as the owner); their read-only `status` stays allowed. A lane
                     // pause is checked here and applied only when it targets a supervisor
                     // goal (hub_runtime::set_lane_paused); the legacy lane-goal requests keep
                     // their pre-existing semantics for the owner's own shell in a pane, and a
                     // supervisor goal's lane refuses them SUPERVISOR_OWNED anyway.
                     let owner_decision = matches!(req.as_ref(), Ok(DaemonRequest::SupervisorRequestV1 { .. }))
-                        || matches!(req.as_ref(), Ok(DaemonRequest::SupervisorDispatch { request }) if request.mutates());
+                        || matches!(req.as_ref(), Ok(DaemonRequest::SupervisorDispatch { request }) if request.mutates())
+                        || matches!(
+                            req.as_ref(),
+                            Ok(DaemonRequest::SupervisorSetup { request })
+                                if !matches!(request, super::protocol::SupervisorSetupAction::Status)
+                        );
                     let peer_refusal = if owner_decision {
                         self.supervisor_peer_refusal(origin).await.map(|message| DaemonResponse::Error {
                             code: Some(super::supervisor_peer::FORBIDDEN.into()),
@@ -7736,6 +7742,7 @@ impl DaemonServer {
                     capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_REQUEST_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_READ_CAPABILITY.into());
+                    capabilities.push(crate::hub_runtime::SUPERVISOR_SETUP_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_ENGINE_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY.into());
@@ -7844,6 +7851,16 @@ impl DaemonServer {
                             message: failure.message.clone(),
                             code: Some(failure.code.clone()),
                             details: Some(failure.to_json()),
+                        },
+                    }
+                }
+                Ok(DaemonRequest::SupervisorSetup { request }) => {
+                    match crate::hub_runtime::supervisor_setup(self.remote_state(), request).await {
+                        Ok(value) => DaemonResponse::SupervisorSetupOk { value },
+                        Err(error) => DaemonResponse::Error {
+                            message: error.to_string(),
+                            code: Some(error.code().into()),
+                            details: None,
                         },
                     }
                 }

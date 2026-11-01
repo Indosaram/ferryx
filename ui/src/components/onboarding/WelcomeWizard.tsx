@@ -4,6 +4,7 @@ import { Check, X } from "lucide-react";
 import type { ResolvedAgent } from "../../lib/agentsSettings";
 import { cn } from "../../lib/cn";
 import type { OnboardingStepId } from "../../lib/onboarding";
+import type { SetupProject } from "../../lib/supervisorSetupModel";
 import type { RegisteredProject } from "../../lib/tauri";
 import type { CliLauncherStatus, Worktree } from "../../lib/types";
 import type { WorktreeAgentLaunch } from "../ProjectDialogs";
@@ -16,6 +17,7 @@ import { FeaturesStep } from "./FeaturesStep";
 import { FirstProjectStep } from "./FirstProjectStep";
 import { IntroStep } from "./IntroStep";
 import { PhoneStep } from "./PhoneStep";
+import { SupervisorStep } from "./SupervisorStep";
 import { TryWorktreeStep } from "./TryWorktreeStep";
 
 export type WelcomeWizardProps = {
@@ -34,6 +36,8 @@ export type WelcomeWizardProps = {
   initialStepIndex?: number;
   /** The local project the "try" step creates its first worktree in, when there is one. */
   tryProject?: RegisteredProject | null;
+  /** Registered local projects the supervisor step maps. */
+  supervisorProjects?: readonly SetupProject[];
   defaultAgentId?: string | null;
   onTryWorktreeCreated?: (worktree: Worktree, launch?: WorktreeAgentLaunch) => void | Promise<void>;
 };
@@ -45,6 +49,7 @@ const STEP_TITLES: Record<OnboardingStepId, string> = {
   agents: "Agents",
   cli: "Command line",
   project: "First project",
+  supervisor: "Supervisor",
   try: "First worktree",
   phone: "Phone",
 };
@@ -56,6 +61,7 @@ const STEP_HEADINGS: Record<OnboardingStepId, string> = {
   agents: "Choose your default agent",
   cli: "Install the command-line tool",
   project: "Open your first project",
+  supervisor: "Let the supervisor run your work",
   try: "Try your first worktree",
   phone: "Connect your phone",
 };
@@ -83,6 +89,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
     installCli,
     initialStepIndex = 0,
     tryProject = null,
+    supervisorProjects = [],
     defaultAgentId = null,
     onTryWorktreeCreated,
   } = props;
@@ -94,6 +101,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
     doneSteps.includes("account"),
   );
   const [phonePaired, setPhonePaired] = useState(false);
+  const [supervisorReady, setSupervisorReady] = useState(false);
   // True while the try step creates its worktree; the footer waits for it.
   const [tryBusy, setTryBusy] = useState(false);
 
@@ -108,7 +116,9 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
   // Optional steps record themselves when their action succeeds (a paired phone, a created
   // worktree); leaving one before that is a skip and is not recorded as completed.
   const skippingOptional =
-    (currentStep === "phone" && !phonePaired) || currentStep === "try";
+    (currentStep === "phone" && !phonePaired) ||
+    (currentStep === "supervisor" && !supervisorReady) ||
+    currentStep === "try";
 
   useEffect(() => {
     headingRef.current?.focus({ preventScroll: true });
@@ -183,6 +193,8 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
         return "Optional. Use ferryx from any terminal. You can also install it later in Settings > General.";
       case "project":
         return "Start with a folder on this computer, or pair another machine.";
+      case "supervisor":
+        return "Optional. Turn it on once and it picks up requests, runs them in your projects, and checks in when it needs you.";
       case "try":
         return "Optional. A worktree is an isolated checkout of your project with its own branch and agent tab.";
       case "phone":
@@ -243,6 +255,16 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
             onPaired={() => {
               setPhonePaired(true);
               onStepCompleted("phone");
+            }}
+          />
+        );
+      case "supervisor":
+        return (
+          <SupervisorStep
+            projects={supervisorProjects}
+            onReady={() => {
+              setSupervisorReady(true);
+              onStepCompleted("supervisor");
             }}
           />
         );

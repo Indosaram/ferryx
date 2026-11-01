@@ -311,7 +311,29 @@ pub struct LiveHub {
 /// The `status` reply. Counts and states only: no tokens, message text, or watcher stderr.
 /// `healthy` is false when the hub is stopped, HTTP is not bound, a configured Slack app has
 /// no open socket, or an inbox watcher's last run failed; each reason is in `problems`.
+/// The supervisor engine is this process's as [`crate::supervisor::setup::EngineView::read`]
+/// sees it (the hub env file is read off the runtime threads); see [`status_report_with`].
 pub async fn status_report(pool: &sqlx::SqlitePool, live: &LiveHub) -> Value {
+    // Tests never read the developer's hub env file.
+    let engine = if cfg!(test) {
+        crate::supervisor::setup::EngineView::default()
+    } else {
+        crate::supervisor::setup::EngineView::read().await
+    };
+    status_report_with(pool, live, &engine).await
+}
+
+/// [`status_report`] with the supervisor engine given. Supervisor setup is a problem only once
+/// the engine flag is on: the engine needs fixing (a fault, or a required capability missing),
+/// no owner identity exists, or the automatic cutover is set while the unified intake is still
+/// closed. An engine that is merely on its way (absent right after enabling, starting, or
+/// waiting without a fault) is a normal start and leaves `healthy` alone. With the flag off
+/// (fresh and legacy installs) it never affects `healthy`.
+pub async fn status_report_with(
+    pool: &sqlx::SqlitePool,
+    live: &LiveHub,
+    engine: &crate::supervisor::setup::EngineView,
+) -> Value {
     let mut problems = Vec::new();
     let stopped_flag = is_stopped(pool).await.unwrap_or(true);
     if !live.running {
@@ -345,6 +367,22 @@ pub async fn status_report(pool: &sqlx::SqlitePool, live: &LiveHub) -> Value {
         .await
         .map(|mode| mode.as_str())
         .unwrap_or("actionable");
+    let setup = crate::supervisor::setup::setup_status(pool, engine.clone()).await.ok();
+    if let Some(setup) = setup.as_ref().filter(|setup| setup.engine_enabled) {
+        if setup.next_action == crate::supervisor::setup::NextAction::FixEngine {
+            let why = setup.engine_fault.as_ref().map_or_else(
+                || setup.engine_state.clone(),
+                |fault| format!("{} ({})", setup.engine_state, fault.code),
+            );
+            problems.push(format!("supervisor engine is enabled but not ready: {why}"));
+        }
+        if setup.owner.is_none() {
+            problems.push("supervisor engine is enabled but no owner identity exists".to_owned());
+        }
+        if setup.auto_cutover && !setup.intake.unified_open {
+            problems.push("supervisor automatic cutover is set but the unified intake is still closed".to_owned());
+        }
+    }
     json!({
         "status": "ok",
         "op": "status",
@@ -368,6 +406,14 @@ pub async fn status_report(pool: &sqlx::SqlitePool, live: &LiveHub) -> Value {
             .await
             .ok()
             .and_then(|intake| serde_json::to_value(intake).ok()),
+        "supervisor_setup": setup.as_ref().map(|setup| json!({
+            "engine_enabled": setup.engine_enabled,
+            "engine_state": setup.engine_state,
+            "engine_fault": setup.engine_fault.as_ref().map(|fault| fault.code.clone()),
+            "identity": setup.owner.is_some(),
+            "intake": if setup.intake.unified_open { "unified" } else { "legacy" },
+            "auto_cutover": setup.auto_cutover,
+        })),
         "inbox_watchers": watchers
             .iter()
             .map(|(source, status, updated_at)| json!({"source": source, "status": status, "updated_at": updated_at}))
@@ -752,6 +798,87 @@ mod tests {
             !watcher.to_string().contains("secret stderr"),
             "watcher stderr is not part of status"
         );
+    }
+
+    #[tokio::test]
+    async fn supervisor_setup_is_a_problem_only_once_the_engine_flag_is_on() {
+        use crate::meta::mhc_supervisor::{HealthState, SupervisorHealth};
+        use crate::supervisor::setup::EngineView;
+        let pool = crate::storage::memory().await.unwrap();
+        clear_stopped(&pool).await.unwrap();
+        let live = LiveHub {
+            running: true,
+            http_addr: "127.0.0.1:9119".into(),
+            http_bound: true,
+            version: "test".into(),
+            ..LiveHub::default()
+        };
+        // A fresh or legacy hub without the engine flag stays healthy.
+        let off = status_report_with(&pool, &live, &EngineView::default()).await;
+        assert_eq!(off["healthy"], true, "{off}");
+        assert_eq!(off["supervisor_setup"]["engine_enabled"], false);
+        assert_eq!(off["supervisor_setup"]["identity"], false);
+
+        // The flag is on but the running generation has no engine yet and no owner exists:
+        // the engine is on its way, the missing owner is the problem.
+        let enabled = EngineView { enabled: true, installed: false, health: None };
+        let pending = status_report_with(&pool, &live, &enabled).await;
+        assert_eq!(pending["healthy"], false);
+        let problems = pending["problems"].to_string();
+        assert!(!problems.contains("not ready"), "{problems}");
+        assert!(problems.contains("no owner identity"), "{problems}");
+
+        let health = |state: HealthState, generation: u64, drop: Option<&str>| SupervisorHealth {
+            state,
+            generation,
+            pid: None,
+            capabilities: crate::meta::mhc_profile::REQUIRED_CAPABILITIES
+                .iter()
+                .filter(|capability| Some(**capability) != drop)
+                .map(|capability| (*capability).to_owned())
+                .collect(),
+            server_version: None,
+            fault: None,
+            detail: None,
+            queued_decisions: 0,
+        };
+        // An engine that has not started yet, without a fault, is a normal start.
+        let starting = EngineView {
+            enabled: true,
+            installed: true,
+            health: Some(health(HealthState::Stopped, 0, None)),
+        };
+        let problems = status_report_with(&pool, &live, &starting).await["problems"].to_string();
+        assert!(!problems.contains("not ready"), "{problems}");
+        // A ready engine short of a required capability needs fixing.
+        let short = EngineView {
+            enabled: true,
+            installed: true,
+            health: Some(health(HealthState::Ready, 1, Some("memory_forget"))),
+        };
+        let problems = status_report_with(&pool, &live, &short).await["problems"].to_string();
+        assert!(problems.contains("not ready"), "{problems}");
+        assert!(problems.contains("MHC_CAPABILITY_MISSING"), "{problems}");
+
+        // A ready engine with every capability, an owner, and auto cutover on a closed intake.
+        crate::supervisor::provision_identity(&pool, "local:owner").await.unwrap();
+        crate::supervisor::cutover::note_import(&pool).await.unwrap();
+        crate::supervisor::setup::set_setup_flags(&pool, Some(true), None).await.unwrap();
+        let ready = EngineView {
+            enabled: true,
+            installed: true,
+            health: Some(health(HealthState::Ready, 1, None)),
+        };
+        let closed = status_report_with(&pool, &live, &ready).await;
+        assert_eq!(closed["problems"].as_array().unwrap().len(), 1, "{closed}");
+        assert!(closed["problems"][0].as_str().unwrap().contains("automatic cutover"));
+        assert_eq!(closed["supervisor_setup"]["intake"], "legacy");
+
+        crate::supervisor::cutover::cutover(&pool, ready.health.as_ref()).await.unwrap();
+        let done = status_report_with(&pool, &live, &ready).await;
+        assert_eq!(done["healthy"], true, "{done}");
+        assert_eq!(done["supervisor_setup"]["intake"], "unified");
+        assert_eq!(done["supervisor_setup"]["engine_state"], "ready");
     }
 
     #[tokio::test]

@@ -207,6 +207,7 @@ describe("onboarding exports and constants", () => {
       "agents",
       "cli",
       "project",
+      "supervisor",
       "try",
       "phone",
       "account",
@@ -666,6 +667,7 @@ describe("wizardSteps", () => {
       "agents",
       "cli",
       "project",
+      "supervisor",
       "try",
       "phone",
       "account",
@@ -700,6 +702,7 @@ describe("wizardSteps", () => {
       "agents",
       "cli",
       "project",
+      "supervisor",
       "try",
       "phone",
       "account",
@@ -732,6 +735,7 @@ describe("satisfiedOnboardingSteps", () => {
       "agents",
       "cli",
       "project",
+      "supervisor",
       "phone",
       "account",
     ]);
@@ -750,7 +754,7 @@ describe("satisfiedOnboardingSteps", () => {
       projectCount: 0,
       accountLinked: true,
     };
-    expect(satisfiedOnboardingSteps(state, ctx)).toEqual(["phone", "account"]);
+    expect(satisfiedOnboardingSteps(state, ctx)).toEqual(["supervisor", "phone", "account"]);
   });
 
   it("reports only cli when its status is unknown and nothing else is done", () => {
@@ -766,7 +770,7 @@ describe("satisfiedOnboardingSteps", () => {
       projectCount: 0,
       accountLinked: true,
     };
-    expect(satisfiedOnboardingSteps(state, ctx)).toEqual(["cli", "phone", "account"]);
+    expect(satisfiedOnboardingSteps(state, ctx)).toEqual(["cli", "supervisor", "phone", "account"]);
   });
 });
 
@@ -897,6 +901,7 @@ describe("features step", () => {
       "agents",
       "cli",
       "project",
+      "supervisor",
       "phone",
       "account",
     ]);
@@ -986,10 +991,10 @@ describe("try step", () => {
     pairedDeviceCount: 1,
   };
 
-  it("sits between project and phone", () => {
+  it("sits between the supervisor and phone steps", () => {
     const steps = wizardSteps(ctx);
     const at = steps.indexOf("project");
-    expect(steps.slice(at, at + 3)).toEqual(["project", "try", "phone"]);
+    expect(steps.slice(at, at + 4)).toEqual(["project", "supervisor", "try", "phone"]);
   });
 
   it("is never pending, never forces auto-open, and is done only once recorded", () => {
@@ -1004,5 +1009,52 @@ describe("try step", () => {
     expect(
       satisfiedOnboardingSteps({ ...state, completedSteps: [...state.completedSteps, "try"] }, ctx),
     ).toContain("try");
+  });
+});
+
+describe("supervisor step", () => {
+  const ctx: OnboardingContext = {
+    permissions: macosPermissionsStatus,
+    agents: [{ name: "claude", available: true }],
+    cli: cliInstalled,
+    projectCount: 1,
+    accountLinked: true,
+    pairedDeviceCount: 1,
+  };
+  const finished: OnboardingState = {
+    version: 1,
+    completedSteps: ["intro", "features", "agents", "cli", "project"],
+    dismissed: false,
+  };
+
+  it("comes right after the project step", () => {
+    const at = ONBOARDING_STEP_ORDER.indexOf("project");
+    expect(ONBOARDING_STEP_ORDER[at + 1]).toBe("supervisor");
+  });
+
+  it.each([
+    ["unknown (absent)", undefined, true],
+    ["unknown (null)", null, true],
+    ["ready", true, true],
+    ["not ready", false, false],
+  ] as const)("is satisfied when %s: %s", (_label, supervisorReady, satisfied) => {
+    expect(isOnboardingStepSatisfied("supervisor", { ...ctx, supervisorReady })).toBe(satisfied);
+  });
+
+  it("is pending when setup is unfinished but never forces the wizard open", () => {
+    const notReady = { ...ctx, supervisorReady: false };
+    expect(pendingOnboardingSteps(finished, notReady)).toEqual(["supervisor"]);
+    expect(shouldAutoOpenOnboarding(finished, notReady)).toBe(false);
+  });
+
+  it("never nags when the daemon does not report setup", () => {
+    expect(pendingOnboardingSteps(finished, { ...ctx, supervisorReady: null })).toEqual([]);
+  });
+
+  it("loads a persisted supervisor completion", () => {
+    const storage = createMockStorage({
+      [ONBOARDING_STORAGE_KEY]: JSON.stringify({ version: 1, completedSteps: ["project", "supervisor"], dismissed: false }),
+    });
+    expect(loadOnboardingState(storage).completedSteps).toEqual(["project", "supervisor"]);
   });
 });

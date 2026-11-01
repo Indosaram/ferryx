@@ -9,6 +9,13 @@ import {
   type SupervisorSnapshot,
 } from "../lib/supervisorModel";
 import type { SupervisorCallResult, SupervisorEnvelope, UnifiedSupervisorClient } from "../lib/unifiedSupervisor";
+import {
+  parseAdoptAll,
+  setupStatusResult,
+  type AdoptAllResult,
+  type RunSetupOptions,
+  type SetupCallResult,
+} from "../lib/supervisorSetupModel";
 
 export const SUPERVISOR_CAPABILITY = "supervisorV1";
 export const SUPERVISOR_CHANGED_FRAME = "supervisorChanged";
@@ -135,6 +142,67 @@ export async function startRemoteSupervisor(fetchLike: SupervisorFetch): Promise
   }
   if (res.status < 200 || res.status >= 300) return { kind: "error", ...errorOf(res), status: res.status };
   return { kind: "ok", started: objectOf(decodeJson(res.body))?.started === true };
+}
+
+/**
+ * A view-only device asking to change setup: the machine answers 403. Its own code is kept when
+ * it sends one; a bare 403 maps to FORBIDDEN. Callers branch on this code, never the message.
+ */
+export const SETUP_FORBIDDEN = "FORBIDDEN";
+
+async function setupCall(
+  fetchLike: SupervisorFetch,
+  path: string,
+  init: { method?: string; headers?: Record<string, string>; body?: string } | undefined,
+): Promise<{ kind: "ok"; body: unknown } | { kind: "error"; code: string; message: string }> {
+  let res: SupervisorHttpResponse;
+  try {
+    res = init ? await fetchLike(path, init) : await fetchLike(path);
+  } catch (err) {
+    return { kind: "error", ...offline(err) };
+  }
+  if (res.status === 403) {
+    const refusal = errorOf(res);
+    return { kind: "error", code: refusal.code === "HTTP_ERROR" ? SETUP_FORBIDDEN : refusal.code, message: refusal.message };
+  }
+  if (res.status < 200 || res.status >= 300) return { kind: "error", ...errorOf(res) };
+  return { kind: "ok", body: decodeJson(res.body) };
+}
+
+/** `GET /api/v1/supervisor/setup`: the machine's SetupStatus. */
+export async function getRemoteSetup(fetchLike: SupervisorFetch): Promise<SetupCallResult> {
+  const result = await setupCall(fetchLike, "/api/v1/supervisor/setup", undefined);
+  return result.kind === "ok" ? setupStatusResult(result.body) : result;
+}
+
+/** `POST /api/v1/supervisor/setup`: run setup (Control devices only; a view device gets FORBIDDEN). */
+export async function runRemoteSetup(fetchLike: SupervisorFetch, opts: RunSetupOptions): Promise<SetupCallResult> {
+  const result = await setupCall(fetchLike, "/api/v1/supervisor/setup", postJson({ importMemory: opts.importMemory, projects: opts.projects }));
+  return result.kind === "ok" ? setupStatusResult(result.body) : result;
+}
+
+/** `POST /api/v1/supervisor/adopt-all`: hand every adoptable earlier job to the supervisor. */
+export async function adoptRemoteAll(fetchLike: SupervisorFetch): Promise<AdoptAllResult> {
+  const result = await setupCall(fetchLike, "/api/v1/supervisor/adopt-all", { method: "POST" });
+  return result.kind === "ok" ? parseAdoptAll(result.body) : result;
+}
+
+export type DevicePermission = "control" | "view";
+
+/**
+ * This device's permission on a machine, from `GET /api/v1/capabilities`; null when it cannot
+ * be read (offline, older machine). Unknown is treated as view-only by callers that change state.
+ */
+export async function fetchRemoteDevicePermission(fetchLike: SupervisorFetch): Promise<DevicePermission | null> {
+  let res: SupervisorHttpResponse;
+  try {
+    res = await fetchLike("/api/v1/capabilities");
+  } catch {
+    return null;
+  }
+  if (res.status < 200 || res.status >= 300) return null;
+  const permission = objectOf(decodeJson(res.body))?.permission;
+  return permission === "control" || permission === "view" ? permission : null;
 }
 
 /** One unified supervisor call (`/api/v1/supervisor/{request,conversation,memory}`). */
