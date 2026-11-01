@@ -146,7 +146,12 @@ async function bodyBytes(body: BodyInit | null | undefined): Promise<Uint8Array 
 
 function tunnelResponse(raw: TunnelResponse): Response {
   const nullBody = raw.status === 204 || raw.status === 205 || raw.status === 304;
-  return new Response(nullBody ? null : raw.body.slice(), { status: raw.status, headers: raw.headers });
+  if (nullBody) return new Response(null, { status: raw.status, headers: raw.headers });
+  // The tunnel hands over a fresh, exclusively owned body: wrap it as a view instead of copying
+  // (up to 16 MiB). Only a SharedArrayBuffer-backed body, which BodyInit rejects, is copied.
+  const { buffer, byteOffset, byteLength } = raw.body;
+  const body = buffer instanceof ArrayBuffer ? new Uint8Array(buffer, byteOffset, byteLength) : raw.body.slice();
+  return new Response(body, { status: raw.status, headers: raw.headers });
 }
 
 function errorCode(data: unknown): string | null {
