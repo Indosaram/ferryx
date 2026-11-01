@@ -74,6 +74,14 @@ export default {
         "chat-header": "var(--chat-header)",
         "chat-header-border": "var(--chat-header-border)",
       },
+      fontSize: {
+        "phone-meta": ["0.75rem", { lineHeight: "1rem" }],
+        "phone-label": ["0.8125rem", { lineHeight: "1.125rem" }],
+        "phone-body": ["0.875rem", { lineHeight: "1.25rem" }],
+        "phone-input": ["1rem", { lineHeight: "1.5rem" }],
+        "phone-title": ["1.0625rem", { lineHeight: "1.5rem" }],
+        "phone-display": ["1.75rem", { lineHeight: "2.125rem" }],
+      },
       fontFamily: {
         sans: ["Geist", "ui-sans-serif", "system-ui", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "sans-serif"],
       },
