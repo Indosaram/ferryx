@@ -1,4 +1,5 @@
-// Seeded mobile chat states for real-browser QA: open /mobile-chat-qa.html?state=empty|stream|running|long (dev server only).
+// Seeded mobile chat states for real-browser QA: open /mobile-chat-qa.html?state=<state> (dev server only).
+// Chat states: empty|stream|running|long plus CHAT_QA_STATES (chatQaStates.tsx).
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -9,6 +10,8 @@ import { RemoteWorkspaceMirror, type RemoteWorkspaceModel, type RemoteTerminalTa
 import { MobileChatWorkspace } from "../remote/chat/MobileChatWorkspace";
 import type { MobileChatMessageProps } from "../remote/chat/MobileChatMessage";
 import type { ChatAttachment, ChatWorkItem } from "../remote/chat/MobileChatComponents";
+import { MobileKeyDock } from "../components/MobileKeyDock";
+import { QA_KEYBOARD_HEIGHT, QaTerminalSurface, chatQaComposerProps } from "./chatQaStates";
 import { PHONE_HOME_QA_STATES, PhoneHomeQaState, QaSessionStrip, SESSION_STRIP_QA_STATES } from "./phoneHomeQaStates";
 import { SIDEBAR_PARITY_QA_STATES, SidebarParityQaState } from "./sidebarParityQa";
 
@@ -201,15 +204,8 @@ function buildMessages(state: string): MobileChatMessageProps[] {
     {
       id: "assistant-3",
       role: "assistant",
-      content: "Approval is required before I rewrite the shared token layer, since the desktop shell reads the same `:root` block.",
+      content: "I need your approval before I rewrite the shared token layer, since the desktop shell reads the same `:root` block.",
       timestamp: Date.now() - 120_000,
-      approvalAction: {
-        description: "Add 16 chat tokens to ui/src/index.css :root and map them in tailwind.config.js.",
-        confirmLabel: "Approve",
-        declineLabel: "Decline",
-        onAccept: () => undefined,
-        onDecline: () => undefined,
-      },
     },
   ];
 
@@ -272,8 +268,9 @@ const ChatQaHarness: React.FC = () => {
   const [switcherOpen, setSwitcherOpen] = useState(STATE === "switcher-open");
   const [menuOpen, setMenuOpen] = useState(STATE === "menu-open");
   const [viewMode, setViewMode] = useState<"chat" | "terminal">(
-    STATE === "terminal-mode" ? "terminal" : "chat"
+    STATE === "terminal-mode" || STATE === "terminal-dock" ? "terminal" : "chat"
   );
+  const composerState = useMemo(() => chatQaComposerProps(STATE), []);
 
   const attention: MobileTopBarAttention | null =
     STATE === "topbar-attention"
@@ -300,7 +297,11 @@ const ChatQaHarness: React.FC = () => {
   }, []);
 
   return (
-    <div className="remote-app-root h-[100dvh] w-full bg-chat-screen flex flex-col">
+    <div
+      className="remote-app-root h-[100dvh] w-full bg-chat-screen flex flex-col"
+      data-qa-keyboard={STATE === "keyboard-open" ? "open" : undefined}
+      style={STATE === "keyboard-open" ? { height: `calc(100dvh - ${QA_KEYBOARD_HEIGHT})` } : undefined}
+    >
       <div className="w-full">
         <MobileTopBar
           title={title}
@@ -342,11 +343,9 @@ const ChatQaHarness: React.FC = () => {
         onCreateWorktree={() => setPickerOpen(false)}
       >
       {viewMode === "terminal" ? (
-        <div
-          data-testid="qa-terminal-placeholder"
-          className="flex-1 min-h-0 w-full bg-black p-4 font-mono text-sm text-chat-foreground"
-        >
-          [terminal grid placeholder (socket offline)]
+        <div className="flex min-h-0 w-full flex-1 flex-col">
+          <QaTerminalSurface />
+          {STATE === "terminal-dock" ? <MobileKeyDock onSendKey={() => undefined} /> : null}
         </div>
       ) : (
         <div className="flex-1 min-h-0 w-full">
@@ -367,6 +366,7 @@ const ChatQaHarness: React.FC = () => {
             isRunning={isRunning}
             onSendMessage={handleSend}
             onStopExecution={() => setIsRunning(false)}
+            {...composerState}
           />
         </div>
       )}
