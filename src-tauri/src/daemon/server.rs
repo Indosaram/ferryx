@@ -7637,7 +7637,7 @@ impl DaemonServer {
                         Err(error) => DaemonResponse::Error {
                             message: error.message,
                             code: Some(error.code),
-                            details: Some(serde_json::Value::Object(error.details)),
+                            details: Some(serde_json::Value::Object(*error.details)),
                         },
                     }
                 }

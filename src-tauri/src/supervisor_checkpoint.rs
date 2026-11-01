@@ -382,12 +382,13 @@ pub fn refusal_of(ack: &SupervisorLeaseAck) -> Option<LeaseRefusal> {
 }
 
 /// A move refused or failed: the machine error envelope's status, code, message and details.
+/// `details` is boxed so the error stays small on every `Result` it rides in.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MoveError {
     pub status: u16,
     pub code: String,
     pub message: String,
-    pub details: serde_json::Map<String, serde_json::Value>,
+    pub details: Box<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// The wire code of a move the current holder keeps (its lease is live).
@@ -397,7 +398,7 @@ pub const HOLDER_UNREACHABLE: &str = "HOLDER_UNREACHABLE";
 
 impl MoveError {
     pub fn new(status: u16, code: &str, message: impl Into<String>) -> Self {
-        Self { status, code: code.to_owned(), message: message.into(), details: serde_json::Map::new() }
+        Self { status, code: code.to_owned(), message: message.into(), details: Box::default() }
     }
 
     fn standby(holder_machine_id: Option<String>, holder_label: Option<String>) -> Self {

@@ -313,7 +313,7 @@ mod tests;
 /// `{holderLabel, checkpointAt}`).
 fn move_refusal(error: crate::supervisor_checkpoint::MoveError) -> Response {
     let status = StatusCode::from_u16(error.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    machine_error_with_details(status, &error.code, &error.message, error.details)
+    machine_error_with_details(status, &error.code, &error.message, *error.details)
 }
 
 #[derive(serde::Deserialize)]
