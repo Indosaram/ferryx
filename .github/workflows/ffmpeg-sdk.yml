@@ -1,0 +1,86 @@
+name: FFmpeg SDK (one-off)
+
+# Temporary workflow on a ci/ branch: builds the LGPL FFmpeg 9.0.2 developer SDKs that Ferryx
+# fetches for its default remote desktop build. It builds a third-party dependency, not a Ferryx
+# release artifact, and is deleted with its branch once the assets are published.
+on:
+  push:
+    branches: ['ci/ffmpeg-sdk-20261101']
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential nasm pkg-config libva-dev patchelf curl
+      - name: Build
+        run: FERRYX_FFMPEG_OPENH264=0 FERRYX_FFMPEG_JOBS=4 bash scripts/build-ffmpeg-lgpl.sh "$RUNNER_TEMP/sdk/ffmpeg" "$RUNNER_TEMP/build"
+      - name: Package
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/sdk/ffmpeg/lib"
+          for f in lib*.so.*; do [ -L "$f" ] || patchelf --set-rpath '$ORIGIN' "$f"; done
+          rm -rf "$RUNNER_TEMP/sdk/ffmpeg/lib/pkgconfig" "$RUNNER_TEMP/sdk/ffmpeg/share/ffmpeg"
+          tar -C "$RUNNER_TEMP/sdk" -czf "$RUNNER_TEMP/ffmpeg-lgpl-9.0.2-x86_64-unknown-linux-gnu.tar.gz" ffmpeg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x86_64-unknown-linux-gnu
+          path: ${{ runner.temp }}/ffmpeg-lgpl-9.0.2-x86_64-unknown-linux-gnu.tar.gz
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install nasm
+      - name: Build arm64
+        run: FERRYX_FFMPEG_ARCH=arm64 FERRYX_FFMPEG_JOBS=4 bash scripts/build-ffmpeg-lgpl.sh "$RUNNER_TEMP/arm64" "$RUNNER_TEMP/build-arm64"
+      - name: Build x86_64
+        run: FERRYX_FFMPEG_ARCH=x86_64 FERRYX_FFMPEG_JOBS=4 bash scripts/build-ffmpeg-lgpl.sh "$RUNNER_TEMP/x86_64" "$RUNNER_TEMP/build-x86_64"
+      - name: Merge universal and package
+        run: |
+          set -euo pipefail
+          arm="$RUNNER_TEMP/arm64"; x86="$RUNNER_TEMP/x86_64"; out="$RUNNER_TEMP/sdk/ffmpeg"
+          mkdir -p "$out/lib"
+          cp -R "$arm/include" "$out/include"
+          mkdir -p "$out/share"; cp -R "$arm/share/ferryx-legal" "$out/share/ferryx-legal"
+          cd "$arm/lib"
+          for f in lib*.dylib; do
+            if [ -L "$f" ]; then cp -P "$f" "$out/lib/$f"; else lipo -create "$arm/lib/$f" "$x86/lib/$f" -output "$out/lib/$f"; fi
+          done
+          { printf '# slice aarch64-apple-darwin\n'; cat "$arm/build-receipt.txt"; printf '# slice x86_64-apple-darwin\n'; cat "$x86/build-receipt.txt"; } > "$out/build-receipt.txt"
+          for f in "$out"/lib/lib*.dylib; do [ -L "$f" ] || lipo -info "$f"; done
+          tar -C "$RUNNER_TEMP/sdk" -czf "$RUNNER_TEMP/ffmpeg-lgpl-9.0.2-universal-apple-darwin.tar.gz" ffmpeg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: universal-apple-darwin
+          path: ${{ runner.temp }}/ffmpeg-lgpl-9.0.2-universal-apple-darwin.tar.gz
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          path-type: inherit
+          install: make nasm pkgconf diffutils tar
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          # MSYS2's coreutils link.exe would shadow MSVC's linker on the inherited PATH.
+          rm -f /usr/bin/link.exe
+          tmp="$(cygpath -u "$RUNNER_TEMP")"
+          FERRYX_FFMPEG_JOBS=4 bash scripts/build-ffmpeg-lgpl.sh "$tmp/sdk/ffmpeg" "$tmp/build"
+          rm -rf "$tmp/sdk/ffmpeg/lib/pkgconfig" "$tmp/sdk/ffmpeg/share/ffmpeg"
+          tar -C "$tmp/sdk" -czf "$tmp/ffmpeg-lgpl-9.0.2-x86_64-pc-windows-msvc.tar.gz" ffmpeg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/ffmpeg-lgpl-9.0.2-x86_64-pc-windows-msvc.tar.gz
