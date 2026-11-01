@@ -1938,22 +1938,19 @@ fn live_hub(running: bool, config: &HubConfig) -> ferryx_hub::control::LiveHub {
 }
 
 struct Generation {
-    #[cfg(unix)]
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Generation {
     /// Aborts the generation's tasks and waits for them to end, so a following start
-    /// reconciles only after the predecessor dispatcher stopped.
+    /// reconciles only after the predecessor dispatcher stopped. On every platform: a setup
+    /// restart ends the generation before it starts the next one.
     async fn end(self) {
-        #[cfg(unix)]
-        {
-            for task in &self.tasks {
-                task.abort();
-            }
-            for task in self.tasks {
-                let _ = task.await;
-            }
+        for task in &self.tasks {
+            task.abort();
+        }
+        for task in self.tasks {
+            let _ = task.await;
         }
     }
 }
@@ -2455,10 +2452,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     for task in &tasks {
         HUB_TASKS.track(task);
     }
-    Generation {
-        #[cfg(unix)]
-        tasks,
-    }
+    Generation { tasks }
 }
 
 async fn post_cron_delivery(item: &ferryx_hub::schedule::DueDelivery) -> Option<String> {
