@@ -5575,6 +5575,109 @@ mod tests {
         set_lease_gate(None);
     }
 
+    /// A chat transport that counts what reached it.
+    #[derive(Default)]
+    struct CountingChat(std::sync::atomic::AtomicUsize);
+
+    #[async_trait]
+    impl ferryx_hub::chat::router::Outbound for CountingChat {
+        async fn send(&self, _session: &ferryx_hub::chat::session::SessionKey, _text: &str) -> ferryx_hub::error::Result<()> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// Effects whose flush is the daemon's real one ([`DaemonEffects`]), counted.
+    #[derive(Default)]
+    struct FlushingEffects(std::sync::atomic::AtomicUsize);
+
+    #[async_trait]
+    impl GenerationEffects for FlushingEffects {
+        async fn flush_pending(&self, pool: &ferryx_hub::goals::SqlitePool) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            DaemonEffects.flush_pending(pool).await;
+        }
+
+        async fn launch_pane(&self, _launch: &HubLaunch, _cwd: &str, _command: &[String]) {}
+
+        async fn spawn(&self, _launch: &HubLaunch) -> Generation {
+            Generation { tasks: Vec::new() }
+        }
+    }
+
+    /// A standby lease for the thread that created it only. The holder gate it backs is
+    /// process-wide, so tests running beside this one on other threads still see a holder.
+    struct StandbyOnThisThread(std::thread::ThreadId);
+
+    #[async_trait]
+    impl LeaseGate for StandbyOnThisThread {
+        fn allows_hub(&self) -> bool {
+            std::thread::current().id() != self.0
+        }
+
+        fn current_role(&self) -> Role {
+            if self.allows_hub() { Role::Holder { fence: 7 } } else { held_by_b() }
+        }
+
+        async fn try_acquire(&self) -> Option<Role> {
+            Some(self.current_role())
+        }
+    }
+
+    /// A standby start with the holder gate installed the way `spawn_lease_client` binds it:
+    /// a stored chat reply is neither flushed by the boot nor delivered by a flush under the
+    /// installed gate; it stays queued for the holder.
+    #[tokio::test]
+    async fn a_standby_start_leaves_a_stored_chat_reply_undelivered() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::control::clear_stopped(&pool).await.unwrap();
+        let session = ferryx_hub::chat::session::SessionKey::new("slack", None::<String>, "C1", None::<String>, "U1");
+        let standby: ferryx_hub::holder::HolderGate = Arc::new(|| false);
+        ferryx_hub::holder::scope(standby, ferryx_hub::chat::reply::chat_reply(&pool, &session, "queued", None))
+            .await
+            .unwrap();
+        assert_eq!(ferryx_hub::chat::reply::pending(&pool).await.unwrap().len(), 1, "seeded");
+        let counting = CountingEffects::new();
+        let (mut launch, control) = test_launch(pool.clone(), pane_config(), &counting);
+        let effects = Arc::new(FlushingEffects::default());
+        launch.effects = effects.clone();
+        let transport = Arc::new(CountingChat::default());
+        set_lease_gate(None);
+        let (_published, published) = tokio::sync::watch::channel(0u64);
+
+        let work = async {
+            let followers = start_opened(
+                launch,
+                false,
+                published,
+                move || Some(()),
+                move |(), _wanted: tokio::sync::watch::Sender<bool>| {
+                    let gate: Arc<dyn LeaseGate> = Arc::new(StandbyOnThisThread(std::thread::current().id()));
+                    // As `spawn_lease_client`: the bound client is the hub crate's holder gate.
+                    install_holder_gate(Some(Arc::clone(&gate)));
+                    let (generation, _ended) = pending_generation();
+                    let task = generation.tasks.into_iter().next().unwrap();
+                    async move { (gate, task) }
+                },
+                |_running, _launch| {},
+            )
+            .await;
+            for task in followers {
+                task.abort();
+            }
+            // Even a flush that ran now would ask the installed gate and post nothing.
+            DaemonEffects.flush_pending(&pool).await;
+        };
+        ferryx_hub::chat::reply::with_transport(transport.clone(), work).await;
+
+        assert_eq!(effects.0.load(std::sync::atomic::Ordering::SeqCst), 0, "the standby boot flushed nothing");
+        assert_eq!(transport.0.load(std::sync::atomic::Ordering::SeqCst), 0, "nothing reached the chat transport");
+        assert_eq!(ferryx_hub::chat::reply::pending(&pool).await.unwrap().len(), 1, "the reply stays queued");
+        assert!(control.ops().is_empty(), "nothing was sent");
+        install_holder_gate(None);
+        set_lease_gate(None);
+    }
+
     /// The same start on the lease holder runs the boot generation through the effects.
     #[tokio::test]
     async fn a_holder_start_runs_the_generation() {
