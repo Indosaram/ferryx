@@ -46,6 +46,8 @@ pub mod supervisor_windows;
 // systemd user unit and sd_notify for the Linux supervisor backend.
 #[cfg(unix)]
 pub mod supervisor_linux;
+// Todo 3: talks to the relay supervisor lease and publishes the hub role.
+pub mod supervisor_lease_client;
 // Todo 9: the pending-update state when the live owner speaks another data protocol; only the
 // control channel is used, and the owner is never ended without the user's exact-count consent.
 pub mod update_pending;

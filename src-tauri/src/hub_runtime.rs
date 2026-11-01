@@ -420,6 +420,7 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
         }
         Some("env") => return hub_env_cli(&args[3.min(args.len())..]),
         Some("cron") => return hub_cron_cli(&args[3.min(args.len())..]),
+        Some("lease") => return hub_lease_cli(&args[3.min(args.len())..]),
         Some("migrate") => {}
         _ => {
             eprintln!("usage: ferryx hub migrate [--from-omo <db>] [--cwd <dir>] [--imported-from <db>] [--dry-run]");
@@ -429,6 +430,7 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
                 "       ferryx hub env import [--from-plist <omo plist>] | ferryx hub env keys"
             );
             eprintln!("       ferryx hub cron list | ferryx hub cron model <job-id> <provider/model | --clear> | ferryx hub cron approve-rerun <problem-id>");
+            eprintln!("       ferryx hub lease reset-capability");
             return 2;
         }
     }
@@ -627,6 +629,35 @@ fn import_omo_env(plist: &std::path::Path) -> Result<Vec<String>, String> {
     }
     ferryx_hub::hub_env::write_merged(&dest, &incoming).map_err(|error| error.to_string())?;
     Ok(incoming.keys().cloned().collect())
+}
+
+/// `ferryx hub lease reset-capability` forgets that this daemon's relay once served the
+/// supervisor lease, for a deliberate downgrade to a relay without it. Without the reset such a
+/// relay leaves the hub `RELAY_LEASE_UNSUPPORTED` (standby), never holder.
+fn hub_lease_cli(args: &[String]) -> i32 {
+    use crate::daemon::supervisor_lease_client::{lease_file_path, reset_capability_latch};
+    match args.first().map(String::as_str) {
+        Some("reset-capability") if args.len() == 1 => {
+            let Some(path) = lease_file_path() else {
+                eprintln!("cannot resolve the Ferryx data directory");
+                return 1;
+            };
+            match reset_capability_latch(&path) {
+                Ok(()) => {
+                    println!("supervisor lease capability latch cleared ({})", path.display());
+                    0
+                }
+                Err(error) => {
+                    eprintln!("could not clear the lease capability latch: {error}");
+                    1
+                }
+            }
+        }
+        _ => {
+            eprintln!("usage: ferryx hub lease reset-capability");
+            2
+        }
+    }
 }
 
 fn hub_env_cli(args: &[String]) -> i32 {
