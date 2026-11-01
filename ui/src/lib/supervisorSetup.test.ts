@@ -159,6 +159,18 @@ describe("readiness and actionFor", () => {
     expect(actionFor(status("adopt", { adoptable: 1 })).label).toBe("1 earlier job can be handed to the supervisor");
   });
 
+  // The hub answers "none" after a rollback; an older daemon still says "cutover". Neither may nag.
+  it.each<SetupNextAction>(["none", "cutover"])("treats a rollback with nextAction %s as ready and offers nothing", (kind) => {
+    const current = status(kind, { intake: { unifiedOpen: false, legacy: "open", origin: "rollback", legacyHistory: true } });
+    expect(readiness(current)).toBe("ready");
+    expect(setupNeedsAttention(current)).toBe(false);
+    expect(setupFinished(current)).toBe(true);
+    const action = actionFor(current);
+    expect(action.primary).toBeNull();
+    expect(action.label).toBe("Supervisor is rolled back");
+    expect(action.description).toContain("ferryx hub cutover");
+  });
+
   it("explains an engine fault with its missing capabilities and fault code", () => {
     const description = actionFor(
       status("fix_engine", {
