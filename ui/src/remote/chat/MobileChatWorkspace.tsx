@@ -510,8 +510,8 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
         <div ref={messagesEndRef} className="h-2 w-full" />
       </div>
 
-      <footer className="relative z-20 shrink-0">
-        <div className="relative">
+      <footer className="relative z-20 flex max-h-[50%] shrink-0 flex-col">
+        <div className="relative flex min-h-0 flex-col">
           {showScrollPill && (
             <div className="absolute -top-14 right-3 z-20">
               <button
@@ -529,6 +529,8 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
               </button>
             </div>
           )}
+          {/* Scrolls on its own when the keyboard and large text leave less room than the composer needs. */}
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
           <MobileChatComposer
             ref={bindComposer}
             value={activeDraft}
@@ -554,6 +556,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             disabled={disabled}
             placeholder={composerPlaceholder}
           />
+          </div>
         </div>
       </footer>
     </div>
