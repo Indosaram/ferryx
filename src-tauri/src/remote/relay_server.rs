@@ -23,8 +23,9 @@
 //! `IncomingSessionNotice`. Trusted in-process callers can also issue via
 //! `notify_incoming_session`. Unknown IDs are rejected before upgrade;
 //! each issued ID accepts exactly one data half and one client half.
-//! Pending and active sessions share a 100-entry budget. Pairing expires
-//! after 30 seconds; sends time out after 30 seconds and sessions after one hour.
+//! Sessions still waiting for their second half share a 100-entry budget (20 per
+//! machine); paired sessions do not count. Pairing expires after 30 seconds; sends
+//! time out after 30 seconds and sessions after their kind's lifetime.
 
 use crate::remote::auth::{verify_control_challenge, write_private_json};
 use crate::remote::protocol::{
@@ -58,7 +59,11 @@ use tokio::time::timeout;
 /// How long a session may sit waiting for its data or client half before
 /// the relay gives up and evicts it from the registry.
 const SESSION_PAIRING_TIMEOUT: Duration = Duration::from_secs(30);
+/// Relay-wide cap on sessions still waiting for their second half. Paired (active) sessions
+/// live up to a session lifetime and are bounded by their sockets, so they do not count.
 const MAX_PENDING_SESSIONS: usize = 100;
+/// Per-machine share of [`MAX_PENDING_SESSIONS`], so one tenant cannot starve the others.
+const MAX_PENDING_SESSIONS_PER_MACHINE: usize = 20;
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(30);
 const SESSION_TRANSFER_TIMEOUT: Duration = Duration::from_secs(3600);
 /// Lifetime of a spliced remote desktop session. A viewer watches for hours, and the bytes stay
@@ -389,6 +394,30 @@ struct PooledDataSocket {
 struct ControlChannel {
     generation: u64,
     tx: mpsc::Sender<IncomingSessionNotice>,
+}
+
+/// Why a session could not be issued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueRejection {
+    /// No live control channel is registered for the machine.
+    Offline,
+    /// The caller's control generation is no longer the machine's live one.
+    StaleGeneration,
+    /// The pending-session budget (relay-wide or per machine) or the notice queue is full.
+    Busy,
+}
+
+/// True when another waiting (not yet paired) session for `owner` would exceed a budget.
+fn pending_budget_exhausted(sessions: &HashMap<String, WaitingHalf>, owner: &str) -> bool {
+    let mut total = 0;
+    let mut owned = 0;
+    for waiting in sessions.values().filter(|waiting| !waiting.active) {
+        total += 1;
+        if waiting.owner == owner {
+            owned += 1;
+        }
+    }
+    total >= MAX_PENDING_SESSIONS || owned >= MAX_PENDING_SESSIONS_PER_MACHINE
 }
 
 /// A sealed account grant on its way to a daemon, with the slot its acknowledgement must
@@ -1276,26 +1305,37 @@ impl RelayState {
         opaque: bool,
         session_kind: SessionKind,
     ) -> bool {
+        self.try_issue_session_of_kind(machine_token, session_id, generation, opaque, session_kind)
+            .is_ok()
+    }
+
+    /// [`Self::issue_session_of_kind`] with the reason a session was refused.
+    pub fn try_issue_session_of_kind(
+        &self,
+        machine_token: &str,
+        session_id: &str,
+        generation: Option<u64>,
+        opaque: bool,
+        session_kind: SessionKind,
+    ) -> Result<(), IssueRejection> {
         let channels = self.inner.control_channels.lock();
         let Some(channel) = channels.get(machine_token) else {
-            return false;
+            return Err(IssueRejection::Offline);
         };
         if generation.is_some_and(|id| id != channel.generation) {
-            return false;
+            return Err(IssueRejection::StaleGeneration);
         }
         let mut sessions = self.inner.pending_sessions.lock();
-        if sessions.len() >= MAX_PENDING_SESSIONS || sessions.contains_key(session_id) {
-            return false;
+        if pending_budget_exhausted(&sessions, machine_token) || sessions.contains_key(session_id) {
+            return Err(IssueRejection::Busy);
         }
-        if channel
-            .tx
-            .try_send(IncomingSessionNotice {
-                session_id: session_id.into(),
-                opaque,
-            })
-            .is_err()
-        {
-            return false;
+        match channel.tx.try_send(IncomingSessionNotice {
+            session_id: session_id.into(),
+            opaque,
+        }) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => return Err(IssueRejection::Busy),
+            Err(mpsc::error::TrySendError::Closed(_)) => return Err(IssueRejection::Offline),
         }
         sessions.insert(
             session_id.into(),
@@ -1312,7 +1352,7 @@ impl RelayState {
                 suspension: new_suspension_signal(),
             },
         );
-        true
+        Ok(())
     }
 
     /// The lifetime a splice of `session_id` gets; the default for an unknown session.
@@ -1655,7 +1695,7 @@ impl RelayState {
             }
             control_generation = channel.generation;
             let mut sessions = self.inner.pending_sessions.lock();
-            if sessions.len() >= MAX_PENDING_SESSIONS {
+            if pending_budget_exhausted(&sessions, machine) {
                 return Err(StatusCode::SERVICE_UNAVAILABLE);
             }
             sessions.insert(
@@ -2380,19 +2420,30 @@ async fn attach_session_handler(
     }
 
     let session_id = uuid::Uuid::new_v4().to_string();
-    if !state.issue_session_of_kind(
+    match state.try_issue_session_of_kind(
         &request.machine_id,
         &session_id,
         Some(channel.generation),
         true,
         request.session_kind,
     ) {
-        return crate::account::service::ApiError::new(
-            StatusCode::CONFLICT,
-            "MACHINE_OFFLINE",
-            "machine is offline",
-        )
-        .into_response();
+        Ok(()) => {}
+        Err(IssueRejection::Busy) => {
+            return crate::account::service::ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "RELAY_BUSY",
+                "the relay has too many sessions waiting for this machine; retry shortly",
+            )
+            .into_response();
+        }
+        Err(IssueRejection::Offline | IssueRejection::StaleGeneration) => {
+            return crate::account::service::ApiError::new(
+                StatusCode::CONFLICT,
+                "MACHINE_OFFLINE",
+                "machine is offline",
+            )
+            .into_response();
+        }
     }
 
     Json(AttachSessionResponse {
@@ -8645,7 +8696,8 @@ mod tests {
             state.reserve_half("session", HalfKind::Client),
             Err(StatusCode::CONFLICT)
         ));
-        for n in 1..MAX_PENDING_SESSIONS {
+        // The paired "session" above is active and no longer charges the waiting budget.
+        for n in 0..MAX_PENDING_SESSIONS_PER_MACHINE {
             assert!(state.notify_incoming_session("tok", &format!("session-{n}")));
             rx.try_recv().unwrap();
         }
@@ -8653,6 +8705,53 @@ mod tests {
         state.unregister_control_channel("tok", new);
         assert!(!state.notify_incoming_session("tok", "no-control"));
         drop((waiting, handoff));
+    }
+
+    #[test]
+    fn paired_sessions_do_not_consume_the_waiting_budget() {
+        let state = test_state(vec![]);
+        let mut receivers = Vec::new();
+        let mut generations = HashMap::new();
+        for machine in 0..=(MAX_PENDING_SESSIONS / MAX_PENDING_SESSIONS_PER_MACHINE) {
+            let name = format!("machine-{machine}");
+            let (generation, rx, grants) = state.register_control_channel(name.clone());
+            generations.insert(name, generation);
+            receivers.push((rx, grants));
+        }
+        // Fill machine-0 with live (paired) sessions well past the per-machine waiting cap.
+        for n in 0..(MAX_PENDING_SESSIONS_PER_MACHINE * 2) {
+            let id = format!("live-{n}");
+            assert_eq!(
+                state.try_issue_session_of_kind("machine-0", &id, None, false, SessionKind::Http),
+                Ok(())
+            );
+            state.inner.pending_sessions.lock().get_mut(&id).unwrap().active = true;
+            receivers[0].0.try_recv().unwrap();
+        }
+        // Waiting sessions are capped per machine with a typed reason.
+        for n in 0..MAX_PENDING_SESSIONS_PER_MACHINE {
+            assert!(state.notify_incoming_session("machine-0", &format!("wait-{n}")));
+        }
+        assert_eq!(
+            state.try_issue_session_of_kind("machine-0", "over", None, false, SessionKind::Http),
+            Err(IssueRejection::Busy)
+        );
+        // Another machine is unaffected by machine-0's budget.
+        assert!(state.notify_incoming_session("machine-1", "other"));
+        assert_eq!(
+            state.try_issue_session_of_kind("missing", "x", None, false, SessionKind::Http),
+            Err(IssueRejection::Offline)
+        );
+        assert_eq!(
+            state.try_issue_session_of_kind(
+                "machine-1",
+                "stale",
+                Some(generations["machine-1"] + 1_000),
+                false,
+                SessionKind::Http
+            ),
+            Err(IssueRejection::StaleGeneration)
+        );
     }
 
     #[tokio::test]
