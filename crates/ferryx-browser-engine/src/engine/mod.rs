@@ -411,16 +411,31 @@ fn execute(command: Command) {
 /// Focuses Chrome's address bar (`address`) or the page of a tab whose window is active.
 fn focus_tab(tab: &str, address: bool) {
     let Some(host) = browser_of(tab).and_then(|browser| browser.host()) else { return };
-    if address {
-        host.execute_chrome_command(sys::IDC_FOCUS_LOCATION, WindowOpenDisposition::CURRENT_TAB);
-    } else {
+    let window = TABS.with_borrow(|tabs| tabs.get(tab).and_then(|pane| pane.window.clone()));
+    let focused_view = || {
+        window
+            .as_ref()
+            .and_then(|window| window.focused_view())
+            .map(|view| CefString::from(&view.type_string()).to_string())
+    };
+    if !address {
         host.set_focus(1);
+        eprintln!("ferryx-engine: focus {tab}: focused view now {:?}", focused_view());
+        return;
     }
-    let focused = TABS
-        .with_borrow(|tabs| tabs.get(tab).and_then(|pane| pane.window.clone()))
-        .and_then(|window| window.focused_view())
-        .map(|view| CefString::from(&view.type_string()).to_string());
-    eprintln!("ferryx-engine: focus {tab} address={address}: focused view now {focused:?}");
+    let can = host.can_execute_chrome_command(sys::IDC_FOCUS_LOCATION);
+    host.execute_chrome_command(sys::IDC_FOCUS_LOCATION, WindowOpenDisposition::CURRENT_TAB);
+    let after_command = focused_view();
+    eprintln!("ferryx-engine: focus {tab} address: IDC_FOCUS_LOCATION enabled {can}, focused view now {after_command:?}");
+    // The page's BrowserView still focused means the command did not reach the omnibox: press
+    // Chrome's own Ctrl+L in the (active) window instead.
+    if after_command.as_deref() == Some("BrowserView")
+        && let Some(window) = window.as_ref()
+    {
+        // VKEY_L = 0x4C; EVENTFLAG_CONTROL_DOWN = 1 << 2.
+        window.send_key_press(0x4C, 1 << 2);
+        eprintln!("ferryx-engine: focus {tab} address: sent Ctrl+L, focused view now {:?}", focused_view());
+    }
 }
 
 /// Ferryx closed stdin (it quit or dropped this engine): close every browser, then quit.
