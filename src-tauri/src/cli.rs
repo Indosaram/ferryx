@@ -4413,10 +4413,13 @@ mod tests {
     #[test]
     fn browser_cli_runtime_has_timers_for_the_response_timeout() {
         let runtime = browser_cli_runtime().expect("runtime");
-        let waited = runtime.block_on(tokio::time::timeout(
-            std::time::Duration::from_millis(1),
-            std::future::pending::<()>(),
-        ));
+        let waited = runtime.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(1),
+                std::future::pending::<()>(),
+            )
+            .await
+        });
         assert!(waited.is_err());
     }
 
