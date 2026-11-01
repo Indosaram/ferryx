@@ -535,6 +535,16 @@ export async function downloadBrowserUrlWithSession(
   });
 }
 
+/** Saves `url` with the tab's session into the download folder (Settings, else the OS one). */
+export async function downloadBrowserUrlToFolder(browserId: string, url: string): Promise<DownloadRecord> {
+  return invoke<DownloadRecord>("cmd_browser_download_to_folder", { browserId, url });
+}
+
+/** Shows a saved download in the OS file manager (Finder, Explorer, the Linux file manager). */
+export async function revealDownloadedFile(path: string): Promise<void> {
+  return invoke<void>("cmd_path_reveal", { path });
+}
+
 export function onBrowserDownloadUpdated(
   listener: (payload: DownloadRecord) => void,
 ): Promise<UnlistenFn> {

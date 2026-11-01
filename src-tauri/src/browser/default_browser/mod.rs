@@ -234,9 +234,75 @@ pub fn linux_status_from_xdg(output: &str) -> DefaultBrowserStatus {
         DefaultBrowserStatus::Default
     } else {
         DefaultBrowserStatus::NotDefault {
-            current: (!current.is_empty()).then(|| current.to_string()),
+            current: browser_display_name(current).map(str::to_string),
         }
     }
+}
+
+/// Handler ids matched whole (after lowercasing and dropping a `.desktop` suffix).
+const EXACT_BROWSER_IDS: &[(&str, &str)] = &[
+    ("ie.http", "Internet Explorer"),
+    ("ie.https", "Internet Explorer"),
+    // The pre-Chromium Edge package ProgId.
+    ("appxq0fevzme2pys62n3e0fbqa7peapykr8v", "Microsoft Edge"),
+    ("zen", "Zen"),
+    ("archtml", "Arc"),
+    ("epiphany", "GNOME Web"),
+    ("org.gnome.epiphany", "GNOME Web"),
+];
+
+/// Handler id prefixes, most specific first: Windows ProgIds (`MSEdgeHTM`, `ChromeHTML`,
+/// `FirefoxURL-<hash>`), macOS bundle ids and Linux desktop file ids.
+const BROWSER_ID_PREFIXES: &[(&str, &str)] = &[
+    ("com.apple.safaritechnologypreview", "Safari Technology Preview"),
+    ("com.apple.safari", "Safari"),
+    ("com.google.chrome", "Google Chrome"),
+    ("google-chrome", "Google Chrome"),
+    ("chromehtml", "Google Chrome"),
+    ("chromebhtml", "Google Chrome"),
+    ("chromesshtm", "Google Chrome"),
+    ("chromebetahtml", "Google Chrome"),
+    ("chromedevhtml", "Google Chrome"),
+    ("org.chromium.chromium", "Chromium"),
+    ("chromium", "Chromium"),
+    ("com.microsoft.edge", "Microsoft Edge"),
+    ("microsoft-edge", "Microsoft Edge"),
+    ("msedge", "Microsoft Edge"),
+    ("org.mozilla.firefox", "Firefox"),
+    ("firefox", "Firefox"),
+    ("io.gitlab.librewolf", "LibreWolf"),
+    ("librewolf", "LibreWolf"),
+    ("com.brave.browser", "Brave"),
+    ("brave", "Brave"),
+    ("company.thebrowser.browser", "Arc"),
+    ("com.operasoftware.operagx", "Opera GX"),
+    ("opera gx", "Opera GX"),
+    ("com.operasoftware.opera", "Opera"),
+    ("opera", "Opera"),
+    ("com.vivaldi.vivaldi", "Vivaldi"),
+    ("vivaldi", "Vivaldi"),
+    ("app.zen-browser.zen", "Zen"),
+    ("app.zen_browser.zen", "Zen"),
+    ("com.kagi.kagimacos", "Orion"),
+    ("org.torproject.torbrowser", "Tor Browser"),
+    ("org.kde.falkon", "Falkon"),
+    ("falkon", "Falkon"),
+];
+
+/// The name to show for the app that handles http(s) links, from the OS handler id: a Windows
+/// ProgId, a macOS bundle id or a Linux desktop file id. `None` for ids it does not know, so the
+/// UI never shows a raw id.
+pub fn browser_display_name(handler: &str) -> Option<&'static str> {
+    let lowered = handler.trim().to_ascii_lowercase();
+    let id = lowered.strip_suffix(".desktop").unwrap_or(&lowered);
+    if id.is_empty() {
+        return None;
+    }
+    EXACT_BROWSER_IDS
+        .iter()
+        .find(|(known, _)| *known == id)
+        .or_else(|| BROWSER_ID_PREFIXES.iter().find(|(prefix, _)| id.starts_with(prefix)))
+        .map(|(_, name)| *name)
 }
 
 /// Whether the bundle ids handling http and https are both Ferryx's (case-insensitive, as
@@ -256,7 +322,7 @@ pub fn macos_status_from_handlers(
             .flatten()
             .find(|id| !id.eq_ignore_ascii_case(own_bundle_id));
         DefaultBrowserStatus::NotDefault {
-            current: other.map(str::to_string),
+            current: other.and_then(browser_display_name).map(str::to_string),
         }
     }
 }
@@ -275,6 +341,7 @@ pub fn windows_status_from_prog_ids(
                 .into_iter()
                 .flatten()
                 .find(|id| !is_own(Some(*id)))
+                .and_then(browser_display_name)
                 .map(str::to_string),
         }
     }

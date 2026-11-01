@@ -103,7 +103,7 @@ pub fn resolve_platform_key_source(
         let _ = kind;
         Err(cookie_import_error(
             InstalledCookieImportFailureReason::UnsupportedPlatform,
-            "Windows Chrome 127+ uses app-bound encryption (v20) which cannot be imported by external applications",
+            "on Windows, import Chrome or Edge cookies with Settings > Browser > Import browser data",
         ))
     }
 

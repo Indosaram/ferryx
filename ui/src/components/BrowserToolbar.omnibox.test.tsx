@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { saveBrowserSettings } from "../lib/browserSettings";
+import { BROWSER_SHORTCUT_EVENT } from "../lib/browserTauri";
 import type { HostHistoryEntry } from "../lib/browserLibrary";
 import type { BrowserTab } from "../lib/types";
 import { BrowserToolbar } from "./BrowserToolbar";
@@ -178,6 +179,33 @@ describe("BrowserToolbar omnibox", () => {
     render(<BrowserToolbar tab={tab} onNavigate={vi.fn()} onReload={vi.fn()} />);
     fireEvent.focus(screen.getByLabelText("URL address bar"));
     await act(async () => undefined);
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("closes the suggestion list once a navigation commits, on blur, and when the page takes focus", async () => {
+    const props = { onNavigate: vi.fn(), onReload: vi.fn() };
+    const { rerender } = render(<BrowserToolbar tab={tab} {...props} />);
+    await focusOmnibox();
+    // Focus stays in the omnibox; the committed url must not leave the old suggestions open.
+    rerender(<BrowserToolbar tab={{ ...tab, url: "https://start.example.com/next" }} {...props} />);
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+
+    const input = await focusOmnibox();
+    fireEvent.blur(input);
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+
+    // Clicking into the native page view is seen only as the app window losing focus.
+    await focusOmnibox();
+    act(() => {
+      window.dispatchEvent(new Event("blur"));
+    });
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+
+    // A page shortcut (find) closes it as well.
+    await focusOmnibox();
+    act(() => {
+      window.dispatchEvent(new CustomEvent(BROWSER_SHORTCUT_EVENT, { detail: { browserId: tab.browserId, action: "find" } }));
+    });
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 

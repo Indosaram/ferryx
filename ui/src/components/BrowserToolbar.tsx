@@ -285,7 +285,28 @@ export function BrowserToolbar({
     if (inputDirtyRef.current) return;
     setInputUrl(tab.url);
     setHistoryQuery("");
+    // A committed navigation ends the omnibox session: its suggestions describe the old page.
+    setOmniboxOpen(false);
+    setSelectedHistoryIndex(-1);
   }, [tab.url]);
+
+  useEffect(() => {
+    if (tab.loading && !inputDirtyRef.current) {
+      setOmniboxOpen(false);
+      setSelectedHistoryIndex(-1);
+    }
+  }, [tab.loading]);
+
+  // Clicking into the page moves focus to the native page view, which the toolbar sees only as
+  // the app window losing focus; the suggestion list must not stay drawn over the page then.
+  useEffect(() => {
+    const closeOnWindowBlur = () => {
+      setOmniboxOpen(false);
+      setSelectedHistoryIndex(-1);
+    };
+    window.addEventListener("blur", closeOnWindowBlur);
+    return () => window.removeEventListener("blur", closeOnWindowBlur);
+  }, []);
 
   useEffect(() => {
     setZoomFactor(tab.zoomFactor ?? 1.0);
@@ -436,6 +457,12 @@ export function BrowserToolbar({
   useEffect(() => {
     const runShortcut = (action: BrowserShortcutAction) => {
       const handlers = shortcutHandlersRef.current;
+      // Every shortcut but focus-address acts on the page (find, reload, history), so the
+      // suggestion list from an earlier omnibox session closes first.
+      if (action !== "focus-address") {
+        setOmniboxOpen(false);
+        setSelectedHistoryIndex(-1);
+      }
       switch (action) {
         case "focus-address":
           inputRef.current?.focus();
@@ -596,6 +623,7 @@ export function BrowserToolbar({
     // The optimistic value must not outlive a rejected IPC: showing 110% while the page stays at
     // 100% is exactly the lie the zoom readout must never tell.
     const previousZoom = zoomFactor;
+    setOmniboxOpen(false);
     setZoomFactor(nextZoom);
     try {
       const applied = await setBrowserZoom(tab.browserId, nextZoom);
@@ -819,6 +847,10 @@ export function BrowserToolbar({
             }}
             onBlur={() => {
               inputDirtyRef.current = false;
+              // Suggestion rows keep focus on mousedown, so a real blur means focus left the
+              // omnibox (the page, the find bar, another control).
+              setOmniboxOpen(false);
+              setSelectedHistoryIndex(-1);
             }}
             onKeyDown={handleAddressKeyDown}
             placeholder="Search or enter URL"

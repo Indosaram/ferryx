@@ -111,6 +111,7 @@ export async function invoke(command: string, rawArgs?: unknown): Promise<unknow
     case 'cmd_browser_download_list': return [];
     case 'cmd_browser_download_cancel': return false;
     case 'cmd_browser_download_pause': return false;
+    case 'cmd_browser_download_to_folder': return { id: 'mock-download', url: a.url, filePath: `/Users/demo/Downloads/${String(a.url).split('/').pop() || 'download'}`, status: 'completed', receivedBytes: 0, createdAtMs: Date.now(), updatedAtMs: Date.now() };
     case 'cmd_browser_set_download_preferences': return undefined;
     case 'cmd_browser_print': return undefined;
     case 'cmd_browser_save_pdf': return false;

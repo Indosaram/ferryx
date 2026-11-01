@@ -562,9 +562,11 @@ export function BrowserSection() {
           const isDefault = profile.id === settings.defaultProfileId;
           const isBuiltIn = isBuiltInBrowserProfileId(profile.id);
           return (
-            <div key={profile.id} className="flex items-center gap-3 py-3">
+            <div key={profile.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 py-3" data-testid={`browser-profile-row-${profile.id}`}>
               <Cookie className="size-4 shrink-0 text-muted-foreground" />
-              <div className="min-w-0 flex-1">
+              {/* The name column keeps a readable minimum; the actions wrap below it instead of
+                  squeezing it, so the pill and buttons never overlap the name or id. */}
+              <div className="min-w-[10rem] flex-1 basis-40">
                 <input
                   key={`${profile.id}:${profile.name}`}
                   defaultValue={profile.name}
@@ -583,18 +585,26 @@ export function BrowserSection() {
                   }}
                   className="h-7 w-full max-w-56 rounded border border-transparent bg-transparent px-1 text-[11px] font-medium outline-none hover:border-border focus:border-ring disabled:opacity-80"
                 />
-                <div className="px-1 font-mono text-[11px] text-muted-foreground">{profile.id}</div>
+                <div className="truncate px-1 font-mono text-[11px] text-muted-foreground" title={profile.id}>{profile.id}</div>
                 {importStatus[profile.id] ? <div className="mt-0.5 px-1 text-[11px] text-muted-foreground">{importStatus[profile.id]}</div> : null}
+                {!installedImportSupported ? (
+                  <div className="mt-0.5 px-1 text-[11px] text-muted-foreground" data-testid="browser-profile-import-hint">
+                    To bring cookies from Chrome or Edge, use Import browser data… under Import below.
+                  </div>
+                ) : isMac ? (
+                  <div className="mt-0.5 px-1 text-[11px] text-muted-foreground">macOS will ask for Keychain access</div>
+                ) : null}
               </div>
+              <div className="flex flex-wrap items-center justify-end gap-1.5">
               {isDefault ? (
-                <Badge variant="secondary" className="rounded-full px-2 py-0.5 text-[11px] font-medium">Default</Badge>
+                <Badge variant="secondary" className="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium">Default</Badge>
               ) : (
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
                   onClick={() => void update({ defaultProfileId: profile.id })}
-                  className="h-7 px-2 text-[11px]"
+                  className="h-7 shrink-0 px-2 text-[11px]"
                 >
                   Make Default
                 </Button>
@@ -605,20 +615,19 @@ export function BrowserSection() {
                 size="sm"
                 disabled={importingProfiles.has(profile.id)}
                 onClick={() => void importCookies(profile.id)}
-                className="h-7 gap-1 px-2 text-[11px]"
+                className="h-7 shrink-0 gap-1 px-2 text-[11px]"
               >
                 <FolderOpen className="size-3" /> Import Cookies
               </Button>
               {installedImportSupported ? (
-                <div className="flex flex-col items-end gap-1">
-                  <div className="flex items-center gap-1.5">
+                <>
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
                       disabled={importingProfiles.has(profile.id)}
                       onClick={() => void importInstalledCookies(profile.id, "chrome")}
-                      className="h-7 px-2 text-[11px]"
+                      className="h-7 shrink-0 px-2 text-[11px]"
                     >
                       Import from Chrome
                     </Button>
@@ -628,22 +637,12 @@ export function BrowserSection() {
                       size="sm"
                       disabled={importingProfiles.has(profile.id)}
                       onClick={() => void importInstalledCookies(profile.id, "edge")}
-                      className="h-7 px-2 text-[11px]"
+                      className="h-7 shrink-0 px-2 text-[11px]"
                     >
                       Import from Edge
                     </Button>
-                  </div>
-                  {isMac ? (
-                    <span className="text-[11px] text-muted-foreground">
-                      macOS will ask for Keychain access
-                    </span>
-                  ) : null}
-                </div>
-              ) : (
-                <span className="text-[11px] text-muted-foreground">
-                  Installed browser cookie import is unavailable on Windows (Chromium app-bound encryption)
-                </span>
-              )}
+                </>
+              ) : null}
               {pendingDeleteProfileId === profile.id ? (
                 <div role="group" aria-label={`Confirm delete profile ${profile.name}`} className="flex items-center gap-1.5">
                   <Button
@@ -680,6 +679,7 @@ export function BrowserSection() {
                   <Trash2 className="size-3.5" />
                 </Button>
               )}
+              </div>
             </div>
           );
         })}

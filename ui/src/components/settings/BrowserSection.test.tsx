@@ -184,7 +184,7 @@ describe("BrowserSection installed cookie import", () => {
     });
   });
 
-  it("renders no import buttons on Windows platform and shows muted unsupported note", () => {
+  it("on Windows, points to the Import browser data flow instead of the per-profile buttons", () => {
     vi.mocked(platform.isInstalledBrowserCookieImportSupported).mockReturnValue(false);
     vi.mocked(platform.isMacHost).mockReturnValue(false);
 
@@ -192,11 +192,24 @@ describe("BrowserSection installed cookie import", () => {
 
     expect(screen.queryByRole("button", { name: "Import from Chrome" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Import from Edge" })).toBeNull();
-    expect(
-      screen.getAllByText(
-        "Installed browser cookie import is unavailable on Windows (Chromium app-bound encryption)",
-      ).length,
-    ).toBeGreaterThan(0);
+    expect(screen.getAllByTestId("browser-profile-import-hint").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/app-bound/i)).toBeNull();
+    expect(screen.getByRole("button", { name: "Import browser data…" })).toBeTruthy();
+  });
+
+  it("keeps each profile's name and id in their own column, apart from the row actions", () => {
+    vi.mocked(platform.isInstalledBrowserCookieImportSupported).mockReturnValue(false);
+    vi.mocked(platform.isMacHost).mockReturnValue(false);
+
+    render(<BrowserSection />);
+
+    const row = screen.getByTestId("browser-profile-row-private");
+    expect(row.className).toContain("flex-wrap");
+    const nameColumn = screen.getByLabelText("Profile name private").parentElement as HTMLElement;
+    const actions = screen.getAllByRole("button", { name: "Make Default" })[0].parentElement as HTMLElement;
+    expect(nameColumn.contains(actions)).toBe(false);
+    expect(nameColumn.className).toContain("min-w-[10rem]");
+    expect(nameColumn.textContent).toContain("private");
   });
 
   it("renders macOS Keychain access hint on macOS platform", () => {

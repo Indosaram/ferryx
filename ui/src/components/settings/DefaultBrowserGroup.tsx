@@ -13,8 +13,10 @@ function describe(status: DefaultBrowserStatus | null, note: string | null): str
   if (note) return note;
   if (!status) return "Checking...";
   if (status.state === "default") return "Ferryx is your default browser. Links from other apps open in a Ferryx tab.";
-  if (status.state === "notDefault" && status.current) {
-    return `Links from other apps open in ${status.current}. Make Ferryx the default to open them in a Ferryx tab.`;
+  if (status.state === "notDefault") {
+    // The host names only browsers it recognizes; anything else is "another app", never a raw id.
+    const current = status.current?.trim() || "another app";
+    return `Links from other apps open in ${current}. Make Ferryx the default to open them in a Ferryx tab.`;
   }
   return "Make Ferryx the default browser so links from other apps open in a Ferryx tab.";
 }

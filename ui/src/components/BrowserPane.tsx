@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
-import { ChevronDown, ChevronUp, CircleAlert, Download, ExternalLink, RefreshCw, X } from "lucide-react";
+import { ChevronDown, ChevronUp, CircleAlert, Download, ExternalLink, Folder, MoreHorizontal, RefreshCw, X } from "lucide-react";
 
 import {
   BROWSER_SHORTCUT_EVENT,
   clearBrowserFind,
+  downloadBrowserUrlToFolder,
   downloadBrowserUrlWithSession,
   extractBrowserErrorCode,
   findBrowser,
@@ -13,6 +14,7 @@ import {
   onBrowserDownloadRequested,
   onBrowserShortcutRequested,
   openExternalUrl,
+  revealDownloadedFile,
   setBrowserBounds,
   setBrowserVisible,
   type BrowserDisplayError,
@@ -29,6 +31,7 @@ import {
 } from "../lib/browserLibrary";
 import { PRIVATE_BROWSER_PROFILE, useBrowserSettings } from "../lib/browserSettings";
 import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 import { BrowserToolbar } from "./BrowserToolbar";
 import { BrowserBookmarkBar } from "./BrowserBookmarkBar";
 import { BrowserLibraryPanel, type BrowserLibraryView } from "./BrowserLibraryPanel";
@@ -61,6 +64,9 @@ type BrowserStateChangedPayload = {
   loadError?: string | null;
   engine?: BrowserTab["engine"];
 };
+
+/** Where the pane's download row is: an offer the user acts on, a save in progress, or done. */
+type DownloadPhase = "offer" | "saving" | "saved" | "failed";
 
 function suggestedDownloadName(url: string): string {
   try {
@@ -115,6 +121,8 @@ export function BrowserPane({
   const [paneAlert, setPaneAlert] = useState<{ action: string; code: string } | null>(null);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [downloadStatus, setDownloadStatus] = useState<string | null>(null);
+  const [downloadPhase, setDownloadPhase] = useState<DownloadPhase>("offer");
+  const [savedDownloadPath, setSavedDownloadPath] = useState<string | null>(null);
   // A request the host could not attribute to the user (no trusted bridge): nothing is fetched
   // until the user confirms with Save.
   const [downloadNeedsConfirmation, setDownloadNeedsConfirmation] = useState(false);
@@ -128,6 +136,9 @@ export function BrowserPane({
   const [libraryView, setLibraryView] = useState<BrowserLibraryView | null>(null);
   const [openTabs, setOpenTabs] = useState<Array<{ browserId: string; url: string; title: string | null }>>([]);
   const { settings: browserSettings } = useBrowserSettings();
+  // The download listener subscribes once per browser; it reads the latest settings from here.
+  const askWhereToSaveRef = useRef(browserSettings.askWhereToSave);
+  askWhereToSaveRef.current = browserSettings.askWhereToSave;
   const { tree: bookmarkTree } = useBookmarks();
   const updateBoundsRef = useRef<() => void>(() => undefined);
   // Latest find request wins: async find/clear responses can resolve out of order, so a stale
@@ -254,12 +265,20 @@ export function BrowserPane({
     });
     void onBrowserDownloadRequested((payload) => {
       if (payload.browserId !== tab.browserId) return;
+      const needsConfirmation = payload.requiresConfirmation === true;
       setDownloadUrl(payload.targetUrl);
       setDownloadStatus(null);
-      setDownloadNeedsConfirmation(payload.requiresConfirmation === true);
+      setSavedDownloadPath(null);
+      setDownloadPhase("offer");
+      setDownloadNeedsConfirmation(needsConfirmation);
       // A new download re-reveals the shelf the user dismissed earlier, and refreshes it.
       setDownloadsShelfOpen(true);
       setDownloadsRefreshToken((current) => current + 1);
+      // A download the user clicked is saved to the download folder right away, as any browser
+      // does; an unattributed one waits for Save, and "ask where to save" waits for Save as.
+      if (!needsConfirmation && !askWhereToSaveRef.current) {
+        void runDownloadRef.current(payload.targetUrl, null);
+      }
     }).then((cleanup) => {
       if (disposed) cleanup();
       else downloadCleanup = cleanup;
@@ -428,23 +447,69 @@ export function BrowserPane({
     void clearBrowserFind(tab.browserId).catch(() => undefined);
   };
 
-  const saveDownload = async () => {
-    if (!downloadUrl) return;
-    let saveAttempted = false;
+  /** Saves `url` to `filePath`, or to a free name in the download folder when it is null. */
+  const runDownload = async (url: string, filePath: string | null) => {
+    setDownloadPhase("saving");
+    setDownloadStatus("Saving…");
+    setDownloadNeedsConfirmation(false);
     try {
-      const filePath = await save({ defaultPath: suggestedDownloadName(downloadUrl) });
-      if (!filePath) return;
-      saveAttempted = true;
-      setDownloadStatus("Saving…");
-      await downloadBrowserUrlWithSession(tab.browserId, downloadUrl, filePath);
+      const record = filePath
+        ? await downloadBrowserUrlWithSession(tab.browserId, url, filePath)
+        : await downloadBrowserUrlToFolder(tab.browserId, url);
+      setSavedDownloadPath(record?.filePath ?? filePath);
+      setDownloadPhase("saved");
       setDownloadStatus("Saved");
-      setDownloadNeedsConfirmation(false);
     } catch (error) {
+      setDownloadPhase("failed");
       setDownloadStatus(browserErrorText(extractBrowserErrorCode(error)));
     } finally {
       // The registry only gains a record (completed or failed) once this call settles.
-      if (saveAttempted) setDownloadsRefreshToken((current) => current + 1);
+      setDownloadsRefreshToken((current) => current + 1);
     }
+  };
+  const runDownloadRef = useRef(runDownload);
+  runDownloadRef.current = runDownload;
+
+  const saveDownloadAs = async () => {
+    if (!downloadUrl) return;
+    try {
+      const filePath = await save({ defaultPath: suggestedDownloadName(downloadUrl) });
+      if (!filePath) return;
+      await runDownload(downloadUrl, filePath);
+    } catch (error) {
+      setDownloadStatus(browserErrorText(extractBrowserErrorCode(error)));
+    }
+  };
+
+  const dismissDownload = () => {
+    setDownloadUrl(null);
+    setDownloadStatus(null);
+    setDownloadNeedsConfirmation(false);
+    setDownloadPhase("offer");
+    setSavedDownloadPath(null);
+  };
+
+  // An offer belongs to the page that made it: navigating away drops an unanswered one, while a
+  // save in progress or a finished one stays until dismissed (the shelf keeps it too).
+  const downloadOfferPageRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (downloadUrl && downloadPhase === "offer") {
+      if (downloadOfferPageRef.current === null) downloadOfferPageRef.current = liveTab.url;
+      else if (downloadOfferPageRef.current !== liveTab.url) {
+        downloadOfferPageRef.current = null;
+        setDownloadUrl(null);
+        setDownloadStatus(null);
+        setDownloadNeedsConfirmation(false);
+      }
+    } else {
+      downloadOfferPageRef.current = null;
+    }
+  }, [downloadPhase, downloadUrl, liveTab.url]);
+
+  const showDownloadInFolder = (path: string) => {
+    void Promise.resolve(revealDownloadedFile(path))
+      .then(() => setPaneAlert((current) => (current?.action === "Show in folder" ? null : current)))
+      .catch((error: unknown) => setPaneAlert({ action: "Show in folder", code: parseErrorCode(error) }));
   };
 
   const openDownloadExternally = (url: string) => {
@@ -521,10 +586,40 @@ export function BrowserPane({
                 Needs confirmation: the page started this without a click
               </span>
             ) : null}
-            {downloadStatus ? <span className="text-muted-foreground">{downloadStatus}</span> : null}
-            <button type="button" onClick={() => openDownloadExternally(downloadUrl)} className="flex items-center gap-1 rounded border border-border px-2 py-1 hover:bg-accent"><ExternalLink className="size-3" /> Open in system browser</button>
-            <button type="button" onClick={() => void saveDownload()} className="rounded border border-border px-2 py-1 hover:bg-accent">{downloadNeedsConfirmation ? "Save" : "Save as…"}</button>
-            <button type="button" aria-label="Dismiss download" onClick={() => { setDownloadUrl(null); setDownloadStatus(null); setDownloadNeedsConfirmation(false); }} className="rounded p-1 hover:bg-accent"><X className="size-3.5" /></button>
+            {downloadStatus ? (
+              <span
+                data-testid="browser-download-status"
+                data-phase={downloadPhase}
+                className={downloadPhase === "failed" ? "text-destructive" : "text-muted-foreground"}
+              >
+                {downloadStatus}
+              </span>
+            ) : null}
+            {downloadPhase === "saving" ? (
+              <span role="progressbar" aria-label="Saving download" className="h-1 w-16 shrink-0 overflow-hidden rounded-full bg-primary/15">
+                <span className="block h-full w-1/2 animate-pulse rounded-full bg-primary" />
+              </span>
+            ) : null}
+            {downloadPhase === "saved" && savedDownloadPath ? (
+              <button type="button" onClick={() => showDownloadInFolder(savedDownloadPath)} className="flex items-center gap-1 rounded border border-border px-2 py-1 hover:bg-accent"><Folder className="size-3" /> Show in folder</button>
+            ) : null}
+            {downloadPhase === "offer" || downloadPhase === "failed" ? (
+              <>
+                <button type="button" onClick={() => void runDownload(downloadUrl, null)} className="rounded bg-primary px-2 py-1 font-medium text-primary-foreground hover:bg-primary/90">{downloadPhase === "failed" ? "Retry" : "Save"}</button>
+                <button type="button" onClick={() => void saveDownloadAs()} className="rounded border border-border px-2 py-1 hover:bg-accent">Save as…</button>
+              </>
+            ) : null}
+            <DropdownMenu modal={false}>
+              <DropdownMenuTrigger asChild>
+                <button type="button" aria-label="More download actions" className="rounded p-1 hover:bg-accent"><MoreHorizontal className="size-3.5" /></button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onSelect={() => openDownloadExternally(downloadUrl)}>
+                  <ExternalLink className="size-3" /> Open in system browser
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <button type="button" aria-label="Dismiss download" onClick={dismissDownload} className="rounded p-1 hover:bg-accent"><X className="size-3.5" /></button>
           </div>
         ) : null}
         <BrowserEngineFallbackNotice browserId={tab.browserId} />

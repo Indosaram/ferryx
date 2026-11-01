@@ -101,6 +101,29 @@ fn choose_download_path<R: Runtime>(app: &AppHandle<R>, suggested: &str) -> Opti
     Some(unique_download_path(&dir, suggested, |path| path.exists()))
 }
 
+/// The file name a page-started download of `url` is saved under when the page gave none:
+/// the last non-empty path segment, else `download`.
+pub(crate) fn download_name_from_url(url: &str) -> String {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .path_segments()
+                .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()).map(str::to_string))
+        })
+        .map(|name| crate::browser::system::safe_file_name(&name))
+        .unwrap_or_else(|| "download".to_string())
+}
+
+/// A free file name for `url` in the download folder. Blocking (creates the folder).
+fn folder_download_path<R: Runtime>(app: &AppHandle<R>, url: &str) -> PathBuf {
+    let dir = download_dir(app);
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(%error, dir = %dir.display(), "could not create the download folder");
+    }
+    unique_download_path(&dir, &download_name_from_url(url), |path| path.exists())
+}
+
 // ---------------------------------------------------------------------------------------------
 // Per-site zoom
 // ---------------------------------------------------------------------------------------------
@@ -312,6 +335,29 @@ pub async fn cmd_browser_set_download_preferences(preferences: BrowserDownloadPr
 #[tauri::command]
 pub async fn cmd_browser_download_pause(download_id: String, pause: bool) -> Result<bool, IpcError> {
     Ok(crate::browser::download::pause_download(&download_id, pause))
+}
+
+/// Saves a download the page started (a link the trusted bridge intercepted) into the download
+/// folder under a free name, with the tab's session cookies. Progress and completion reach the
+/// downloads shelf through the registry's `browser_download_updated` events; the call resolves
+/// with the final record.
+#[tauri::command]
+pub async fn cmd_browser_download_to_folder<R: Runtime>(
+    app: AppHandle<R>,
+    manager: State<'_, Arc<BrowserManager>>,
+    browser_id: String,
+    url: String,
+) -> Result<crate::browser::download::DownloadRecord, IpcError> {
+    let folder_app = app.clone();
+    let name_url = url.clone();
+    let path = run_blocking(move || Ok(folder_download_path(&folder_app, &name_url))).await?;
+    let request = crate::browser::BrowserDownloadRequest {
+        url,
+        file_path: path.to_string_lossy().into_owned(),
+        browser_id: Some(browser_id),
+        cookies: None,
+    };
+    crate::ipc::browser::browser_download_with_session(&app, manager.inner(), request).await
 }
 
 /// Registry ids of live Chromium engine downloads by (profile, engine download id). Engine
@@ -657,6 +703,16 @@ mod tests {
     use super::*;
     use crate::browser::download::{DownloadRegistry, DownloadStatus};
     use ferryx_browser_engine_protocol::{DownloadFailure, DownloadState};
+
+    #[test]
+    fn page_download_names_come_from_the_url_path() {
+        assert_eq!(download_name_from_url("http://127.0.0.1:1/download/ferryx-qa.txt"), "ferryx-qa.txt");
+        assert_eq!(download_name_from_url("https://e.test/files/report.pdf?x=1#y"), "report.pdf");
+        assert_eq!(download_name_from_url("https://e.test/dir/"), "dir");
+        assert_eq!(download_name_from_url("https://e.test/"), "download");
+        assert_eq!(download_name_from_url("https://e.test/a/..%5C..%5Cevil"), "%5C..%5Cevil");
+        assert_eq!(download_name_from_url("not a url"), "download");
+    }
 
     #[test]
     fn engine_updates_drive_the_download_record_to_completion() {

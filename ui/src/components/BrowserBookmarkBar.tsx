@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ChevronDown, Folder, Globe } from "lucide-react";
 
 import { BOOKMARK_BAR_ROOT, bookmarkChildren, type BookmarkTree } from "../lib/browserLibrary";
+import { isMacHost } from "../lib/platform";
 
 interface BrowserBookmarkBarProps {
   tree: BookmarkTree;
@@ -19,7 +20,9 @@ export function BrowserBookmarkBar({ tree, onOpen }: BrowserBookmarkBarProps) {
       className="flex min-h-6 items-center gap-0.5 overflow-x-auto border-b border-border bg-card px-2 py-0.5 text-[11px]"
     >
       {items.length === 0 ? (
-        <span className="px-1 text-muted-foreground">Bookmark pages with the star or Cmd/Ctrl+D to see them here.</span>
+        <span className="px-1 text-muted-foreground">
+          Bookmark pages with the star or {isMacHost() ? "Cmd+D" : "Ctrl+D"} to see them here.
+        </span>
       ) : null}
       {items.map((entry) =>
         entry.kind === "bookmark" ? (

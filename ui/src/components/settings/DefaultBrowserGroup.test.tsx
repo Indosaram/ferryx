@@ -23,19 +23,25 @@ afterEach(() => {
 describe("DefaultBrowserGroup", () => {
   it("shows the current handler and makes Ferryx the default", async () => {
     getStatus
-      .mockResolvedValueOnce({ state: "notDefault", current: "com.apple.safari" })
+      .mockResolvedValueOnce({ state: "notDefault", current: "Safari" })
       .mockResolvedValueOnce({ state: "default" });
     makeDefault.mockResolvedValueOnce({ outcome: "requested" });
     render(<DefaultBrowserGroup />);
 
     await waitFor(() => expect(screen.getByTestId("default-browser-status").textContent).toBe("Not default"));
-    expect(screen.getByText(/com\.apple\.safari/)).toBeTruthy();
+    expect(screen.getByText(/open in Safari\./)).toBeTruthy();
 
     fireEvent.click(screen.getByTestId("default-browser-action"));
 
     await waitFor(() => expect(screen.getByTestId("default-browser-status").textContent).toBe("Default"));
     expect(makeDefault).toHaveBeenCalledOnce();
     expect(screen.queryByTestId("default-browser-action")).toBeNull();
+  });
+
+  it("names an unrecognized handler as another app", async () => {
+    getStatus.mockResolvedValue({ state: "notDefault", current: null });
+    render(<DefaultBrowserGroup />);
+    await waitFor(() => expect(screen.getByText(/Links from other apps open in another app\./)).toBeTruthy());
   });
 
   it("tells the user to finish in system settings when the OS needs it", async () => {

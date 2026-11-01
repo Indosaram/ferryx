@@ -114,7 +114,7 @@ fn reg_query_output_yields_the_prog_id() {
     assert_eq!(
         windows_status_from_prog_ids(Some("FerryxURL"), Some("ChromeHTML")),
         DefaultBrowserStatus::NotDefault {
-            current: Some("ChromeHTML".into())
+            current: Some("Google Chrome".into())
         }
     );
 }
@@ -137,7 +137,7 @@ fn linux_desktop_entry_claims_http_and_https_handlers() {
     assert_eq!(
         linux_status_from_xdg("firefox.desktop\n"),
         DefaultBrowserStatus::NotDefault {
-            current: Some("firefox.desktop".into())
+            current: Some("Firefox".into())
         }
     );
 }
@@ -159,11 +159,63 @@ fn macos_status_needs_both_schemes() {
             Some("com.apple.safari")
         ),
         DefaultBrowserStatus::NotDefault {
-            current: Some("com.apple.safari".into())
+            current: Some("Safari".into())
         }
     );
     assert_eq!(
         macos_status_from_handlers("com.ferryx.app", None, None),
+        DefaultBrowserStatus::NotDefault { current: None }
+    );
+}
+
+#[test]
+fn handler_ids_map_to_browser_names_on_every_os() {
+    for (id, name) in [
+        // Windows ProgIds.
+        ("MSEdgeHTM", "Microsoft Edge"),
+        ("ChromeHTML", "Google Chrome"),
+        ("FirefoxURL-308046B0AF4A39CB", "Firefox"),
+        ("BraveHTML", "Brave"),
+        ("VivaldiHTM.QWERTY", "Vivaldi"),
+        ("OperaStable", "Opera"),
+        ("Opera GXStable", "Opera GX"),
+        ("ChromiumHTM.ABC", "Chromium"),
+        ("IE.HTTP", "Internet Explorer"),
+        // macOS bundle ids.
+        ("com.apple.Safari", "Safari"),
+        ("com.google.Chrome", "Google Chrome"),
+        ("com.google.Chrome.canary", "Google Chrome"),
+        ("company.thebrowser.Browser", "Arc"),
+        ("com.brave.Browser", "Brave"),
+        ("org.mozilla.firefox", "Firefox"),
+        ("com.microsoft.edgemac", "Microsoft Edge"),
+        ("com.operasoftware.Opera", "Opera"),
+        ("com.vivaldi.Vivaldi", "Vivaldi"),
+        ("org.chromium.Chromium", "Chromium"),
+        // Linux desktop file ids.
+        ("com.google.Chrome.desktop", "Google Chrome"),
+        ("google-chrome.desktop", "Google Chrome"),
+        ("firefox_firefox.desktop", "Firefox"),
+        ("org.mozilla.firefox.desktop", "Firefox"),
+        ("microsoft-edge.desktop", "Microsoft Edge"),
+        ("chromium-browser.desktop", "Chromium"),
+        ("brave-browser.desktop", "Brave"),
+    ] {
+        assert_eq!(browser_display_name(id), Some(name), "{id}");
+    }
+}
+
+#[test]
+fn unknown_handlers_never_surface_their_raw_id() {
+    for id in ["", "  ", "SomeAppURL", "com.example.app", "x-www-browser.desktop"] {
+        assert_eq!(browser_display_name(id), None, "{id}");
+    }
+    assert_eq!(
+        windows_status_from_prog_ids(Some("SomeAppURL"), None),
+        DefaultBrowserStatus::NotDefault { current: None }
+    );
+    assert_eq!(
+        linux_status_from_xdg("custom-launcher.desktop\n"),
         DefaultBrowserStatus::NotDefault { current: None }
     );
 }

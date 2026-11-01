@@ -1894,6 +1894,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::browser_system::cmd_browser_save_pdf,
         ipc::browser_system::cmd_browser_set_download_preferences,
         ipc::browser_system::cmd_browser_download_pause,
+        ipc::browser_system::cmd_browser_download_to_folder,
         cmd_open_file_path,
         dag_list_runs,
         dag_get_run,

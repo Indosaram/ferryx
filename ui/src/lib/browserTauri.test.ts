@@ -7,6 +7,7 @@ import {
   browserTabSelectIndex,
   browserWorkspaceSelectIndex,
   closeBrowser,
+  downloadBrowserUrlToFolder,
   extractBrowserCookieImportReason,
   formatBrowserCookieImportError,
   getBrowserCookieImportActionableMessage,
@@ -16,6 +17,7 @@ import {
   importInstalledBrowserCookies,
   isBrowserTabShortcutAction,
   reloadBrowser,
+  revealDownloadedFile,
   setBrowserBounds,
   setBrowserVisible,
 } from "./browserTauri";
@@ -309,6 +311,25 @@ describe("browser automation ipc", () => {
       },
     });
     expect(result).toEqual({ importedCount: 42, skippedCount: 5 });
+  });
+
+  it("invokes cmd_browser_download_to_folder with the tab and url", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ id: "d1", status: "completed" });
+
+    await downloadBrowserUrlToFolder("browser-1", "https://e.test/a.zip");
+
+    expect(invoke).toHaveBeenCalledWith("cmd_browser_download_to_folder", {
+      browserId: "browser-1",
+      url: "https://e.test/a.zip",
+    });
+  });
+
+  it("reveals a saved download through cmd_path_reveal", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+
+    await revealDownloadedFile("/home/me/Downloads/a.zip");
+
+    expect(invoke).toHaveBeenCalledWith("cmd_path_reveal", { path: "/home/me/Downloads/a.zip" });
   });
 });
 

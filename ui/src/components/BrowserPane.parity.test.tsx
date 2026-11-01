@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BrowserTab } from "../lib/types";
 import { BROWSER_SHORTCUT_EVENT } from "../lib/browserTauri";
+import { saveBrowserSettings } from "../lib/browserSettings";
 import { BrowserPane } from "./BrowserPane";
 
 const callbackState = vi.hoisted(() => ({
@@ -33,6 +34,15 @@ const browserMocks = vi.hoisted(() => ({
   findBrowser: vi.fn(async () => ({ matchCount: 2, found: true })),
   clearBrowserFind: vi.fn(async () => undefined),
   downloadBrowserUrl: vi.fn(async () => undefined),
+  downloadBrowserUrlToFolder: vi.fn(async () => ({
+    id: "dl-folder",
+    url: "https://example.com/files/example.zip",
+    filePath: "/home/me/Downloads/example.zip",
+    status: "completed" as const,
+    receivedBytes: 1024,
+    createdAtMs: 1000,
+    updatedAtMs: 1000,
+  })),
   downloadBrowserUrlWithSession: vi.fn(async () => ({
     id: "dl-1",
     url: "https://example.com/files/example.zip",
@@ -43,6 +53,7 @@ const browserMocks = vi.hoisted(() => ({
     updatedAtMs: 1000,
   })),
   openExternalUrl: vi.fn(async () => undefined),
+  revealDownloadedFile: vi.fn(async () => undefined),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: eventMocks.listen }));
@@ -76,7 +87,9 @@ beforeEach(() => {
   browserMocks.findBrowser.mockClear();
   browserMocks.clearBrowserFind.mockClear();
   browserMocks.downloadBrowserUrl.mockClear();
+  browserMocks.downloadBrowserUrlToFolder.mockClear();
   browserMocks.downloadBrowserUrlWithSession.mockClear();
+  browserMocks.revealDownloadedFile.mockClear();
   browserMocks.openExternalUrl.mockClear();
   browserMocks.setBrowserBounds.mockClear();
   browserMocks.setBrowserVisible.mockClear();
@@ -140,14 +153,46 @@ describe("BrowserPane parity affordances", () => {
     expect(onNavigate).toHaveBeenCalledWith("https://example.com/dropped");
   });
 
-  it("offers system-browser and Save as actions for intercepted downloads", async () => {
+  it("saves a clicked download to the download folder at once and offers Show in folder", async () => {
+    render(<BrowserPane tab={baseTab} onNavigate={vi.fn()} onReload={vi.fn()} />);
+    await waitFor(() => expect(callbackState.download).not.toBeNull());
+
+    act(() => callbackState.download?.({ browserId: "browser-1", targetUrl: "https://example.com/files/example.zip" }));
+
+    await waitFor(() => expect(screen.getByTestId("browser-download-status")).toHaveAttribute("data-phase", "saved"));
+    expect(browserMocks.downloadBrowserUrlToFolder).toHaveBeenCalledWith("browser-1", "https://example.com/files/example.zip");
+    expect(dialogMocks.save).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /Open in system browser/i })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /Show in folder/i }));
+    expect(browserMocks.revealDownloadedFile).toHaveBeenCalledWith("/home/me/Downloads/example.zip");
+  });
+
+  it("drops an unanswered download offer when the tab navigates away", async () => {
+    saveBrowserSettings({ askWhereToSave: true });
+    const { rerender } = render(<BrowserPane tab={baseTab} onNavigate={vi.fn()} onReload={vi.fn()} />);
+    await waitFor(() => expect(callbackState.download).not.toBeNull());
+    act(() => callbackState.download?.({ browserId: "browser-1", targetUrl: "https://example.com/files/a.zip" }));
+    await screen.findByTestId("browser-download-prompt");
+
+    rerender(<BrowserPane tab={{ ...baseTab, url: "https://example.com/elsewhere" }} onNavigate={vi.fn()} onReload={vi.fn()} />);
+    await waitFor(() => expect(screen.queryByTestId("browser-download-prompt")).toBeNull());
+  });
+
+  it("with ask-where-to-save, leads with Save and keeps the system browser in the overflow menu", async () => {
+    saveBrowserSettings({ askWhereToSave: true });
     render(<BrowserPane tab={baseTab} onNavigate={vi.fn()} onReload={vi.fn()} />);
     await waitFor(() => expect(callbackState.download).not.toBeNull());
 
     act(() => callbackState.download?.({ browserId: "browser-1", targetUrl: "https://example.com/files/example.zip" }));
     expect(await screen.findByTestId("browser-download-prompt")).toHaveTextContent("example.zip");
+    expect(browserMocks.downloadBrowserUrlToFolder).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /Open in system browser/i })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: /Open in system browser/i }));
+    const more = screen.getByRole("button", { name: "More download actions" });
+    more.focus();
+    fireEvent.keyDown(more, { key: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Open in system browser/i }));
     expect(browserMocks.openExternalUrl).toHaveBeenCalledWith("https://example.com/files/example.zip");
 
     fireEvent.click(screen.getByRole("button", { name: "Save as…" }));
@@ -175,19 +220,21 @@ describe("BrowserPane parity affordances", () => {
     expect(screen.getByTestId("browser-download-needs-confirmation")).toHaveTextContent("Needs confirmation");
     expect(dialogMocks.save).not.toHaveBeenCalled();
     expect(browserMocks.downloadBrowserUrlWithSession).not.toHaveBeenCalled();
+    expect(browserMocks.downloadBrowserUrlToFolder).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => {
-      expect(browserMocks.downloadBrowserUrlWithSession).toHaveBeenCalledWith(
+      expect(browserMocks.downloadBrowserUrlToFolder).toHaveBeenCalledWith(
         "browser-1",
         "https://example.com/files/unattested.zip",
-        "/tmp/example.zip",
       );
     });
+    expect(dialogMocks.save).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByTestId("browser-download-needs-confirmation")).toBeNull());
   });
 
   it("treats a download without requiresConfirmation as user-initiated", async () => {
+    saveBrowserSettings({ askWhereToSave: true });
     render(<BrowserPane tab={baseTab} onNavigate={vi.fn()} onReload={vi.fn()} />);
     await waitFor(() => expect(callbackState.download).not.toBeNull());
     act(() => callbackState.download?.({ browserId: "browser-1", targetUrl: "https://example.com/files/a.zip" }));
@@ -199,6 +246,7 @@ describe("BrowserPane parity affordances", () => {
 
   it("surfaces a rejected save dialog in the download prompt instead of an unhandled rejection", async () => {
     dialogMocks.save.mockRejectedValueOnce({ code: "DIALOG_FAILED", message: "dialog unavailable" });
+    saveBrowserSettings({ askWhereToSave: true });
     render(<BrowserPane tab={baseTab} onNavigate={vi.fn()} onReload={vi.fn()} />);
     await waitFor(() => expect(callbackState.download).not.toBeNull());
     act(() => callbackState.download?.({ browserId: "browser-1", targetUrl: "https://example.com/files/a.zip" }));
@@ -211,11 +259,15 @@ describe("BrowserPane parity affordances", () => {
 
   it("surfaces a rejected open-in-system-browser as a pane alert", async () => {
     browserMocks.openExternalUrl.mockRejectedValueOnce({ code: "OPEN_EXTERNAL_FAILED", message: "no handler" });
+    saveBrowserSettings({ askWhereToSave: true });
     render(<BrowserPane tab={baseTab} onNavigate={vi.fn()} onReload={vi.fn()} />);
     await waitFor(() => expect(callbackState.download).not.toBeNull());
     act(() => callbackState.download?.({ browserId: "browser-1", targetUrl: "https://example.com/files/a.zip" }));
 
-    fireEvent.click(await screen.findByRole("button", { name: /Open in system browser/i }));
+    const more = await screen.findByRole("button", { name: "More download actions" });
+    more.focus();
+    fireEvent.keyDown(more, { key: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Open in system browser/i }));
 
     const alert = await screen.findByTestId("browser-pane-alert");
     expect(alert).toHaveTextContent("Open in system browser failed: OPEN_EXTERNAL_FAILED");
