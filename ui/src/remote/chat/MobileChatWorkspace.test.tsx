@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, cleanup } from "@testing-library/react";
-import { MobileChatWorkspace } from "./MobileChatWorkspace";
+import { MobileChatWorkspace, chatStarterPrompts } from "./MobileChatWorkspace";
 import type { MobileChatMessageProps } from "./MobileChatMessage";
 
 window.HTMLElement.prototype.scrollIntoView = vi.fn();
@@ -517,34 +517,39 @@ describe("MobileChatWorkspace", () => {
     expect(screen.queryByTestId("mobile-chat-header")).not.toBeInTheDocument();
   });
 
-  it("(a) empty state renders starter prompt chips", () => {
-    render(<MobileChatWorkspace messages={[]} onSendMessage={vi.fn()} />);
+  it("(a) empty state renders starter prompts that name the agent pane's worktree", () => {
+    render(<MobileChatWorkspace messages={[]} onSendMessage={vi.fn()} agentType="claude" worktreeLabel="feat-x" />);
 
     const starters = screen.getAllByTestId("chat-empty-starter");
-    expect(starters.length).toBeGreaterThanOrEqual(2);
-    expect(starters.length).toBeLessThanOrEqual(3);
-    expect(screen.getByText("Summarize the current state")).toBeInTheDocument();
-    expect(screen.getByText("What changed since my last message?")).toBeInTheDocument();
-    expect(screen.getByText("Run the tests")).toBeInTheDocument();
+    expect(starters.map((starter) => starter.textContent)).toEqual(chatStarterPrompts("claude", "feat-x"));
+    for (const starter of starters) expect(starter.textContent).toContain("feat-x");
+  });
+
+  it("(a2) a pane with no detected agent gets no starter prompts", () => {
+    render(<MobileChatWorkspace messages={[]} onSendMessage={vi.fn()} worktreeLabel="feat-x" />);
+    expect(screen.getByTestId("chat-empty-state")).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-empty-starter")).not.toBeInTheDocument();
+    expect(chatStarterPrompts(null, "feat-x")).toEqual([]);
   });
 
   it("(b) tapping a chip fills the composer with that text, focuses it, and does not call onSendMessage", () => {
     const handleSend = vi.fn();
-    render(<MobileChatWorkspace messages={[]} onSendMessage={handleSend} />);
+    render(<MobileChatWorkspace messages={[]} onSendMessage={handleSend} agentType="codex" />);
 
     const textarea = screen.getByTestId("chat-composer-textarea");
     expect(textarea).toHaveValue("");
 
-    const chip = screen.getByRole("button", { name: "Summarize the current state" });
+    const [first] = chatStarterPrompts("codex", undefined);
+    const chip = screen.getByRole("button", { name: first });
     fireEvent.click(chip);
 
-    expect(textarea).toHaveValue("Summarize the current state");
+    expect(textarea).toHaveValue(first);
     expect(textarea).toHaveFocus();
     expect(handleSend).not.toHaveBeenCalled();
   });
 
   it("(c) chips disappear once a message exists", () => {
-    const { rerender } = render(<MobileChatWorkspace messages={[]} onSendMessage={vi.fn()} />);
+    const { rerender } = render(<MobileChatWorkspace messages={[]} onSendMessage={vi.fn()} agentType="claude" />);
     expect(screen.getAllByTestId("chat-empty-starter").length).toBeGreaterThan(0);
 
     const messages: MobileChatMessageProps[] = [

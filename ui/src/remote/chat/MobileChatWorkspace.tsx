@@ -39,6 +39,8 @@ export interface MobileChatWorkspaceProps {
   readonly activityLabel?: string;
   readonly workspaceLabel?: string;
   readonly worktreeLabel?: string;
+  /** The agent detected in the pane (registry id); null or absent for a plain shell. */
+  readonly agentType?: string | null;
 
   /** Switch to the explicit terminal for this same session; never a replacement conversation. */
   readonly onOpenTerminal?: () => void;
@@ -104,11 +106,23 @@ function prefersReducedMotion(): boolean {
   );
 }
 
-const STARTER_PROMPTS = [
-  "Summarize the current state",
-  "What changed since my last message?",
-  "Run the tests",
-] as const;
+/**
+ * Starters built from what the client already knows about the pane. A pane with no detected agent
+ * (a plain shell) gets none: there is nobody to ask, and a canned prompt would be typed into a
+ * shell. An agent pane gets prompts that name its worktree, so they read as about this work.
+ */
+export function chatStarterPrompts(
+  agentType: string | null | undefined,
+  worktreeLabel: string | null | undefined,
+): readonly string[] {
+  if (!agentType || agentType.trim().length === 0) return [];
+  const where = worktreeLabel && worktreeLabel.trim().length > 0 ? ` on ${worktreeLabel.trim()}` : "";
+  return [
+    `Summarize where the work${where} stands`,
+    `Review the uncommitted changes${where}`,
+    `Run the tests${where} and fix what fails`,
+  ];
+}
 
 /**
  * Turns a `/tree` walked away from, composed for the page: the reference renders this once at
@@ -140,6 +154,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   activityLabel,
   workspaceLabel,
   worktreeLabel,
+  agentType = null,
   showHeader = true,
   onOpenTerminal,
   pageDisclosure = null,
@@ -305,6 +320,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   }, [messages, isRunning, activityState, isAtBottom, scrollToBottom]);
 
   const hasMessages = messages.length > 0;
+  const starterPrompts = chatStarterPrompts(agentType, worktreeLabel);
   // The page discloses abandoned branches once; a turn never repeats them.
   const abandoned = pageAbandoned ?? aggregateReferenceAbandoned(messages);
 
@@ -432,8 +448,9 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
                 Messages go to the agent in this session's terminal.
               </p>
             </div>
+            {starterPrompts.length > 0 ? (
             <div className="mt-3 flex flex-col gap-2 w-full">
-              {STARTER_PROMPTS.map((prompt) => (
+              {starterPrompts.map((prompt) => (
                 <button
                   key={prompt}
                   type="button"
@@ -446,6 +463,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
                 </button>
               ))}
             </div>
+            ) : null}
           </div>
         ) : (
           <>

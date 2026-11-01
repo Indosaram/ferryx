@@ -5712,6 +5712,7 @@ export const RemoteHostConnection: React.FC<{
                 headerSubtitle={model.context.worktreeLabel ?? model.context.workspaceId ?? undefined}
                 workspaceLabel={model.context.workspaceId ?? undefined}
                 worktreeLabel={model.context.worktreeLabel ?? undefined}
+                agentType={chatAgentType}
                 onBack={() => setSelectorOpen(true)}
                 messages={chatTranscript}
                 warnings={chatWarnings}
