@@ -134,7 +134,28 @@ impl PairingCoordinator {
         *self.state.read()
     }
 
+    /// Changes state and, for a terminal target, retires the active capabilities.
+    ///
+    /// For synchronous callers: the auth-store write runs inline, though never under a
+    /// coordinator lock. Async paths in this module use [`Self::transition_and_retire`],
+    /// which moves that write onto the blocking pool.
     pub fn transition(&self, target: PairingState) -> Result<(), String> {
+        for token in self.transition_locked(target)? {
+            self.auth.cancel_pairing_capability(&token);
+        }
+        Ok(())
+    }
+
+    async fn transition_and_retire(&self, target: PairingState) -> Result<(), String> {
+        let retired = self.transition_locked(target)?;
+        self.retire_capabilities(retired).await;
+        Ok(())
+    }
+
+    /// Applies the state change under the state lock and hands back the capabilities a
+    /// terminal target retires. No I/O happens here: the caller cancels them after every
+    /// guard is released.
+    fn transition_locked(&self, target: PairingState) -> Result<Vec<String>, String> {
         let mut state = self.state.write();
         if !state.can_transition_to(&target) {
             return Err(format!(
@@ -142,18 +163,34 @@ impl PairingCoordinator {
             ));
         }
         *state = target;
+        let mut retired = Vec::new();
         if matches!(
             target,
             PairingState::Consumed | PairingState::Expired | PairingState::Cancelled
         ) {
-            if let Some(pin) = self.active_pin.write().take() {
-                self.auth.cancel_pairing_capability(&pin);
-            }
-            if let Some(token) = self.active_token.write().take() {
-                self.auth.cancel_pairing_capability(&token);
-            }
+            retired.extend(self.active_pin.write().take());
+            retired.extend(self.active_token.write().take());
         }
-        Ok(())
+        Ok(retired)
+    }
+
+    /// Cancels retired capabilities in the auth store, which takes a file lock and writes
+    /// to disk, so it runs on the blocking pool.
+    async fn retire_capabilities(&self, tokens: Vec<String>) {
+        if tokens.is_empty() {
+            return;
+        }
+        let auth = self.auth.clone();
+        let cancelled = crate::ipc::run_blocking(move || {
+            for token in &tokens {
+                auth.cancel_pairing_capability(token);
+            }
+            Ok(())
+        })
+        .await;
+        if let Err(error) = cancelled {
+            tracing::warn!("Retiring pairing capabilities failed: {error}");
+        }
     }
 
     /// `timeout` is the PIN lifetime; registration itself has a five-second deadline.
@@ -205,21 +242,21 @@ impl PairingCoordinator {
             .duration_since(UNIX_EPOCH)
             .map_err(|e| e.to_string())?
             .as_secs();
-        let (generation, pin, pairing_token) = {
+        let (generation, pin, pairing_token, retired) = {
             let mut generation = self.generation_id.write();
             // An owner request replaces the previous offer, including after a
             // redemption that does not send a control-channel state transition.
             // Retire both local capabilities before publishing the next generation.
-            match self.state() {
+            let retired = match self.state() {
                 PairingState::Ready | PairingState::Claimed | PairingState::Cancelled => {
-                    self.transition(PairingState::Expired)?;
+                    self.transition_locked(PairingState::Expired)?
                 }
                 PairingState::Created
                 | PairingState::Registering
                 | PairingState::Consumed
-                | PairingState::Expired => {}
-            }
-            self.transition(PairingState::Registering)?;
+                | PairingState::Expired => Vec::new(),
+            };
+            self.transition_locked(PairingState::Registering)?;
             *generation = generation
                 .checked_add(1)
                 .ok_or("Pairing generation exhausted")?;
@@ -227,14 +264,40 @@ impl PairingCoordinator {
             let pairing_token = format!("{:032x}", rand::rngs::OsRng.gen::<u128>());
             *self.active_pin.write() = Some(pin.clone());
             *self.active_token.write() = Some(pairing_token.clone());
-            self.auth
-                .register_scoped_pairing_capability(&pairing_token, permission, scope)
-                .map_err(|error| error.to_string())?;
-            self.auth
-                .register_scoped_pairing_capability(&pin, permission, scope)
-                .map_err(|error| error.to_string())?;
-            (*generation, pin, pairing_token)
+            (*generation, pin, pairing_token, retired)
         };
+        // The auth store takes a file lock and writes to disk: do it on the blocking pool,
+        // with no coordinator lock held, retiring the previous offer before the new one.
+        let auth = self.auth.clone();
+        let (new_pin, new_token) = (pin.clone(), pairing_token.clone());
+        let registered = crate::ipc::run_blocking(move || {
+            for token in &retired {
+                auth.cancel_pairing_capability(token);
+            }
+            Ok(auth
+                .register_scoped_pairing_capability(&new_token, permission, scope)
+                .and_then(|()| auth.register_scoped_pairing_capability(&new_pin, permission, scope))
+                .map_err(|error| error.to_string()))
+        })
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|registered| registered);
+        if let Err(error) = registered {
+            // Do not leave the coordinator wedged in Registering with half-issued codes.
+            if let Err(cancel) = self.transition_and_retire(PairingState::Cancelled).await {
+                tracing::debug!("Pairing cancel after a failed registration ignored: {cancel}");
+            }
+            return Err(error);
+        }
+        // The codes were written without holding the coordinator locks. If this offer was
+        // cancelled meanwhile, its retirement may have run first: retire them again so a
+        // cancelled offer never stays redeemable.
+        let superseded = *self.generation_id.read() != generation
+            || self.state() != PairingState::Registering;
+        if superseded {
+            self.retire_capabilities(vec![pin, pairing_token]).await;
+            return Err("Pairing registration superseded".into());
+        }
         let registration = RegisterPairingPin {
             generation: Some(generation),
             pin: pin.clone(),
@@ -264,22 +327,23 @@ impl PairingCoordinator {
             Ok(())
         })
         .await;
-        let current_generation = self.generation_id.read();
-        if *current_generation != generation {
-            return Err("Pairing registration superseded".into());
-        }
+        let retired = {
+            let current_generation = self.generation_id.read();
+            if *current_generation != generation {
+                return Err("Pairing registration superseded".into());
+            }
+            self.transition_locked(match result {
+                Ok(Ok(())) => PairingState::Ready,
+                Ok(Err(_)) => PairingState::Cancelled,
+                Err(_) => PairingState::Expired,
+            })?
+        };
+        self.retire_capabilities(retired).await;
         match result {
-            Ok(Ok(())) => self.transition(PairingState::Ready)?,
-            Ok(Err(error)) => {
-                self.transition(PairingState::Cancelled)?;
-                return Err(error);
-            }
-            Err(_) => {
-                self.transition(PairingState::Expired)?;
-                return Err("Timed out waiting for relay registration ACK".into());
-            }
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Err("Timed out waiting for relay registration ACK".into()),
         }
-        drop(current_generation);
         let coordinator = self.clone();
         tokio::spawn(async move {
             let deadline = UNIX_EPOCH + Duration::from_secs(expires_at);
@@ -289,7 +353,7 @@ impl PairingCoordinator {
                     .unwrap_or_default(),
             )
             .await;
-            coordinator.expire_generation(generation);
+            coordinator.expire_generation(generation).await;
         });
         Ok(PairingSessionInfo {
             pin,
@@ -299,13 +363,21 @@ impl PairingCoordinator {
         })
     }
 
-    fn expire_generation(&self, generation: u64) {
-        let current = self.generation_id.read();
-        if *current == generation {
-            if let Err(error) = self.transition(PairingState::Expired) {
-                tracing::debug!("Pairing expiry ignored: {error}");
+    async fn expire_generation(&self, generation: u64) {
+        let retired = {
+            let current = self.generation_id.read();
+            if *current != generation {
+                return;
             }
-        }
+            match self.transition_locked(PairingState::Expired) {
+                Ok(retired) => retired,
+                Err(error) => {
+                    tracing::debug!("Pairing expiry ignored: {error}");
+                    return;
+                }
+            }
+        };
+        self.retire_capabilities(retired).await;
     }
 }
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1757,17 +1829,85 @@ mod tests {
             }
             previous = Some(session);
             assert_eq!(*coordinator.generation_id.read(), generation);
-            coordinator.expire_generation(generation - 1);
+            coordinator.expire_generation(generation - 1).await;
             assert_eq!(coordinator.state(), PairingState::Ready);
             if generation % 2 == 0 {
                 coordinator.transition(PairingState::Claimed).unwrap();
                 coordinator.transition(PairingState::Consumed).unwrap();
             } else if generation == 3 {
-                coordinator.expire_generation(generation);
+                coordinator.expire_generation(generation).await;
                 assert_eq!(coordinator.state(), PairingState::Expired);
             }
         }
         responder.await.unwrap();
+    }
+
+    /// The auth store's transaction takes a cross-process file lock. While another process
+    /// holds it, pairing must wait on the blocking pool, not freeze the async runtime.
+    #[tokio::test]
+    async fn pairing_waits_for_the_auth_file_lock_off_the_async_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("remote-auth.json");
+        let (tx, mut rx) = mpsc::channel::<RegisterPairingPinRequest>(1);
+        let coordinator = PairingCoordinator::new_with_auth(
+            "machine",
+            tx,
+            AuthManager::with_persistence(Some(store.clone())),
+        );
+
+        // Another process holds the auth transaction lock until told to release it. The
+        // receive deadline only bounds a broken run, where the runtime thread is blocked
+        // and the release signal can never be sent.
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(store.with_extension("tx.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let released_on_request = release_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+            drop(lock);
+            released_on_request
+        });
+
+        let generator = coordinator.clone();
+        let generation =
+            tokio::spawn(async move { generator.generate_pairing(Duration::from_secs(60)).await });
+        // On this single-threaded runtime the loop only runs again if the pairing task
+        // parked instead of blocking the thread on the file lock.
+        while coordinator.state() != PairingState::Registering {
+            tokio::task::yield_now().await;
+        }
+        release_tx.send(()).ok();
+        let released_on_request = tokio::task::spawn_blocking(move || holder.join().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            released_on_request,
+            "the pairing task blocked the async runtime on the auth file lock"
+        );
+
+        let request = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        request
+            .ack
+            .send(Ok(RegisterPairingPinAck {
+                generation: request.registration.generation,
+                pin: request.registration.pin,
+                machine_id: request.registration.machine_id,
+                status: "ready".into(),
+            }))
+            .unwrap();
+        let session = generation.await.unwrap().unwrap();
+        assert!(coordinator
+            .auth
+            .exchange_pairing_code(&session.pin, "phone")
+            .is_ok());
     }
 
     #[tokio::test]
