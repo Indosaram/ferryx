@@ -112,6 +112,7 @@ describe("shortcut registry", () => {
       "browser.back",
       "browser.forward",
       "browser.find",
+      "browser.bookmarkPage",
       "tab.next",
       "tab.previous",
       "tab.select1",

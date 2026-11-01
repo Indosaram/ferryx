@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BrowserLibraryPanel } from "./BrowserLibraryPanel";
@@ -60,12 +60,14 @@ describe("BrowserLibraryPanel history", () => {
 describe("BrowserLibraryPanel bookmarks", () => {
   it("lists a folder, searches across folders, moves and deletes", async () => {
     render(<BrowserLibraryPanel view="bookmarks" {...props} />);
-    expect(await screen.findByText("Docs")).toBeInTheDocument();
-    expect(screen.getByText("Work")).toBeInTheDocument();
-    expect(screen.queryByText("Wiki")).not.toBeInTheDocument();
+    // Folder names also appear as <option>s in the folder pickers, so scope to the list's rows.
+    const list = screen.getByRole("list", { name: "Bookmarks" });
+    expect(await within(list).findByText("Docs")).toBeInTheDocument();
+    expect(within(list).getByRole("button", { name: "Work" })).toBeInTheDocument();
+    expect(within(list).queryByText("Wiki")).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Search bookmarks"), { target: { value: "wiki" } });
-    expect(screen.getByText("Wiki")).toBeInTheDocument();
+    expect(within(list).getByText("Wiki")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Search bookmarks"), { target: { value: "" } });
 
     fireEvent.change(screen.getByLabelText("Move Docs"), { target: { value: "f1" } });
