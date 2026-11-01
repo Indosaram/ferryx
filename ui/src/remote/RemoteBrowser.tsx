@@ -480,14 +480,14 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
           />
         ) : (
           <div role="status" className="flex flex-col items-center justify-center text-chat-foreground-secondary text-sm">
-            {status === "opening" && <span>Connecting to remote browser...</span>}
-            {status === "ready" && <span>Waiting for screencast stream...</span>}
+            {status === "opening" && <span>Connecting to the browser...</span>}
+            {status === "ready" && <span>Waiting for the page...</span>}
             {status === "paused" && (
               <span>
-                Stream paused {browserState?.pauseReason ? `(${browserState.pauseReason})` : ""}
+                {browserState?.pauseReason === "hidden" ? "Paused while the page is hidden on your computer" : "Paused"}
               </span>
             )}
-            {status === "closed" && <span>Remote browser disconnected</span>}
+            {status === "closed" && <span>The browser disconnected</span>}
           </div>
         )}
 
@@ -507,7 +507,7 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
             role="status"
             className="absolute top-2 right-2 px-2 py-1 bg-chat-surface-raised text-status-warning border border-chat-border text-xs rounded font-medium pointer-events-none"
           >
-            Paused {browserState?.pauseReason ? `(${browserState.pauseReason})` : ""}
+            {browserState?.pauseReason === "hidden" ? "Paused while hidden on your computer" : "Paused"}
           </div>
         )}
 
