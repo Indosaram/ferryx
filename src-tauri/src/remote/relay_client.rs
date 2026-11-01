@@ -531,7 +531,7 @@ impl RelayClient {
     }
 
     pub async fn connect_control(&self) -> anyhow::Result<ControlSocket> {
-        let mut request = self.control_url().into_client_request()?;
+        let mut request = self.control_url()?.into_client_request()?;
         if self.identity.is_none() {
             request.headers_mut().insert(
                 AUTHORIZATION,
@@ -585,21 +585,21 @@ impl RelayClient {
         Ok(socket)
     }
 
-    fn control_url(&self) -> String {
-        let relay_url = self.active_relay_url();
-        format!(
+    /// A URL that fails relay validation is never dialed: falling back to the raw string
+    /// would reach a plaintext relay the security policy just refused.
+    fn control_url(&self) -> Result<String, RelayUrlSecurityError> {
+        Ok(format!(
             "{}/tunnel/control",
-            to_ws_base(relay_url).unwrap_or_else(|_| relay_url.to_string())
-        )
+            to_ws_base(self.active_relay_url())?
+        ))
     }
 
-    fn data_url(&self, session_id: &str) -> String {
-        let relay_url = self.active_relay_url();
-        format!(
+    fn data_url(&self, session_id: &str) -> Result<String, RelayUrlSecurityError> {
+        Ok(format!(
             "{}/tunnel/data/{}",
-            to_ws_base(relay_url).unwrap_or_else(|_| relay_url.to_string()),
+            to_ws_base(self.active_relay_url())?,
             session_id
-        )
+        ))
     }
 
     /// Runs the reverse tunnel client forever: connects the control
@@ -815,7 +815,7 @@ impl RelayClient {
     /// frames bidirectionally between it and the local loopback gateway
     /// until either side disconnects.
     async fn handle_session(&self, session_id: &str, opaque: bool) -> anyhow::Result<()> {
-        let (ws, _response) = tokio_tungstenite::connect_async(self.data_url(session_id)).await?;
+        let (ws, _response) = tokio_tungstenite::connect_async(self.data_url(session_id)?).await?;
         let gateway = TcpStream::connect(&self.gateway_addr).await?;
         if !opaque {
             return proxy_ws_to_tcp(ws, gateway).await;
@@ -1604,12 +1604,33 @@ mod tests {
     fn control_and_data_urls_are_built_from_relay_url() {
         let client = RelayClient::new("https://relay.example.com", "tok");
         assert_eq!(
-            client.control_url(),
+            client.control_url().unwrap(),
             "wss://relay.example.com/tunnel/control"
         );
         assert_eq!(
-            client.data_url("abc123"),
+            client.data_url("abc123").unwrap(),
             "wss://relay.example.com/tunnel/data/abc123"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_relay_url_that_fails_validation_is_never_dialed() {
+        // A public plaintext relay is refused by policy; the raw URL must not be used instead.
+        let client = RelayClient::new("http://public.example.com", "tok");
+        assert!(matches!(
+            client.control_url(),
+            Err(RelayUrlSecurityError::InsecurePublicRelayForbidden { .. })
+        ));
+        assert!(matches!(
+            client.data_url("s1"),
+            Err(RelayUrlSecurityError::InsecurePublicRelayForbidden { .. })
+        ));
+        let error = client.connect_control().await.unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<RelayUrlSecurityError>()
+                .map(RelayUrlSecurityError::code),
+            Some("INSECURE_PUBLIC_RELAY_FORBIDDEN")
         );
     }
 
@@ -1625,13 +1646,16 @@ mod tests {
             *client.fallback_urls,
             vec!["https://standby.example.com".to_string()]
         );
-        assert_eq!(client.control_url(), "wss://relay.example.com/tunnel/control");
+        assert_eq!(client.control_url().unwrap(), "wss://relay.example.com/tunnel/control");
 
         client.advance_endpoint();
         assert_eq!(client.active_relay_url(), "https://standby.example.com");
-        assert_eq!(client.control_url(), "wss://standby.example.com/tunnel/control");
+        assert_eq!(client.control_url().unwrap(), "wss://standby.example.com/tunnel/control");
         // A clone (the per-session task) follows the same endpoint as the control channel.
-        assert_eq!(client.clone().data_url("s1"), "wss://standby.example.com/tunnel/data/s1");
+        assert_eq!(
+            client.clone().data_url("s1").unwrap(),
+            "wss://standby.example.com/tunnel/data/s1"
+        );
 
         client.advance_endpoint();
         assert_eq!(client.active_relay_url(), "https://relay.example.com");
@@ -1659,9 +1683,9 @@ mod tests {
             RelayClient::with_gateway("http://localhost:8787/", "machine", "127.0.0.1:54321");
         assert_eq!(client.gateway_addr, "127.0.0.1:54321");
         assert_eq!(client.machine_token, "machine");
-        assert_eq!(client.control_url(), "ws://localhost:8787/tunnel/control");
+        assert_eq!(client.control_url().unwrap(), "ws://localhost:8787/tunnel/control");
         assert_eq!(
-            client.data_url("session"),
+            client.data_url("session").unwrap(),
             "ws://localhost:8787/tunnel/data/session"
         );
         assert_eq!(
