@@ -738,4 +738,84 @@ mod tests {
         assert_eq!(record.status, DownloadStatus::Failed);
         assert_eq!(record.failure, Some(DownloadFailureKind::DiskFull));
     }
+
+    fn print_app(browser_id: &str, with_webview: bool) -> tauri::App<tauri::test::MockRuntime> {
+        let app = tauri::test::mock_app();
+        let manager = Arc::new(BrowserManager::new());
+        let state = manager
+            .register_session(crate::browser::CreateBrowserRequest {
+                browser_id: Some(browser_id.into()),
+                workspace_id: None,
+                worktree_path: None,
+                url: "https://example.com/report".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: None,
+            })
+            .unwrap();
+        app.manage(manager);
+        if with_webview {
+            tauri::WebviewWindowBuilder::new(&app, &state.webview_label, Default::default())
+                .build()
+                .expect("mock webview");
+        }
+        app
+    }
+
+    /// A system-webview tab prints through its own webview; Save as PDF opens the same platform
+    /// print panel (its PDF button is the platform's save path) and reports success.
+    #[tokio::test]
+    async fn print_and_save_pdf_reach_the_tabs_webview() {
+        let app = print_app("print-wv", true);
+        cmd_browser_print(app.handle().clone(), app.state(), "print-wv".into()).await.expect("print");
+        assert!(cmd_browser_save_pdf(app.handle().clone(), app.state(), "print-wv".into()).await.expect("save pdf"));
+    }
+
+    #[tokio::test]
+    async fn print_and_save_pdf_fail_with_stable_codes() {
+        let app = print_app("print-gone", false);
+        let code = |result: Result<(), IpcError>| result.expect_err("must fail").code.to_string();
+        assert_eq!(
+            code(cmd_browser_print(app.handle().clone(), app.state(), "print-gone".into()).await),
+            "WEBVIEW_NOT_FOUND"
+        );
+        assert_eq!(
+            code(cmd_browser_save_pdf(app.handle().clone(), app.state(), "print-gone".into()).await.map(|_| ())),
+            "WEBVIEW_NOT_FOUND"
+        );
+        assert_eq!(
+            code(cmd_browser_print(app.handle().clone(), app.state(), "no-such-tab".into()).await),
+            "BROWSER_NOT_FOUND"
+        );
+        assert_eq!(
+            code(cmd_browser_save_pdf(app.handle().clone(), app.state(), "no-such-tab".into()).await.map(|_| ())),
+            "BROWSER_NOT_FOUND"
+        );
+    }
+
+    /// The Chromium engine's PDF answer reaches the UI as `browser_pdf_saved`, success or not.
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn an_engine_pdf_answer_is_emitted_to_the_ui() {
+        use tauri::Listener;
+        let app = tauri::test::mock_app();
+        let manager = Arc::new(BrowserManager::new());
+        let seen = Arc::new(Mutex::new(Vec::<BrowserPdfSavedPayload>::new()));
+        let sink = Arc::clone(&seen);
+        app.listen_any(BROWSER_PDF_SAVED_EVENT, move |event| {
+            sink.lock().push(serde_json::from_str(event.payload()).expect("payload"));
+        });
+        for (ok, path) in [(true, "/tmp/My Page.pdf"), (false, "/tmp/denied.pdf")] {
+            let event = ferryx_browser_engine_protocol::Event::PdfDone { tab: "pdf-tab".into(), ok, path: path.into() };
+            assert!(handle_cef_event(app.handle(), &manager, "default", event).is_none());
+        }
+        assert_eq!(
+            *seen.lock(),
+            vec![
+                BrowserPdfSavedPayload { browser_id: "pdf-tab".into(), ok: true, path: "/tmp/My Page.pdf".into() },
+                BrowserPdfSavedPayload { browser_id: "pdf-tab".into(), ok: false, path: "/tmp/denied.pdf".into() },
+            ]
+        );
+    }
 }

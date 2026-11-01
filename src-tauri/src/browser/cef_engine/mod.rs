@@ -569,4 +569,64 @@ mod tests {
         assert!(!is_cef_tab("stand-in-tab"));
         assert!(!ENGINES.lock().contains_key(profile));
     }
+
+    /// Print and Save as PDF on a Chromium tab: `cmd_browser_print` routes to the tab's engine
+    /// and `print_pdf` sends the chosen path, as the line protocol commands the engine reads. The
+    /// stand-in engine (`sort`, on every OS) writes what it received to a file when stdin closes.
+    #[tokio::test]
+    async fn print_and_pdf_commands_reach_the_tabs_engine() {
+        use tauri::Manager;
+        let dir = tempfile::tempdir().unwrap();
+        let received = dir.path().join("stdin.txt");
+        let mut child = Command::new("sort")
+            .stdin(Stdio::piped())
+            .stdout(std::fs::File::create(&received).unwrap())
+            .spawn()
+            .expect("stand-in engine starts");
+        let stdin = child.stdin.take().expect("stdin");
+        let profile = "print-profile";
+        let sink: EventSink = Arc::new(|_: &str, _: Event| {});
+        ENGINES.lock().insert(profile.to_string(), Engine { child, stdin, parent: 0, sink });
+        TABS.lock().insert("print-tab".into(), Tab { profile: profile.into(), handle: None });
+
+        let app = tauri::test::mock_app();
+        app.manage(Arc::new(crate::browser::BrowserManager::new()));
+        crate::ipc::browser_system::cmd_browser_print(app.handle().clone(), app.state(), "print-tab".into())
+            .await
+            .expect("print reaches the engine");
+        let pdf = dir.path().join("My Report.pdf").to_string_lossy().to_string();
+        system::print_pdf("print-tab", &pdf).expect("pdf reaches the engine");
+
+        TABS.lock().remove("print-tab");
+        let Engine { mut child, stdin, .. } = ENGINES.lock().remove(profile).expect("engine");
+        drop(stdin);
+        assert!(child.wait().expect("stand-in exits").success());
+        let mut lines: Vec<String> = std::fs::read_to_string(&received)
+            .unwrap()
+            .lines()
+            .map(|line| line.trim_end().to_string())
+            .filter(|line| !line.is_empty())
+            .collect();
+        lines.sort();
+        let pdf_line = EngineCommand::PrintPdf { tab: "print-tab".into(), path: pdf.clone() }.to_line();
+        assert_eq!(EngineCommand::parse(&pdf_line), Some(EngineCommand::PrintPdf { tab: "print-tab".into(), path: pdf }));
+        let mut expected = vec![EngineCommand::Print { tab: "print-tab".into() }.to_line(), pdf_line];
+        expected.sort();
+        assert_eq!(lines, expected);
+    }
+
+    /// A Chromium tab whose engine is gone: print fails with a code instead of opening anything.
+    #[tokio::test]
+    async fn print_on_a_tab_without_a_running_engine_fails() {
+        use tauri::Manager;
+        TABS.lock().insert("orphan-print-tab".into(), Tab { profile: "no-engine-profile".into(), handle: None });
+        let app = tauri::test::mock_app();
+        app.manage(Arc::new(crate::browser::BrowserManager::new()));
+        let error = crate::ipc::browser_system::cmd_browser_print(app.handle().clone(), app.state(), "orphan-print-tab".into())
+            .await
+            .expect_err("no engine");
+        assert_eq!(error.code.to_string(), "BROWSER_NAVIGATION_FAILED");
+        assert!(matches!(system::print_pdf("orphan-print-tab", "/tmp/x.pdf"), Err(BrowserError::NavigationFailed(_))));
+        TABS.lock().remove("orphan-print-tab");
+    }
 }

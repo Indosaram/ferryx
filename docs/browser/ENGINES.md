@@ -47,6 +47,30 @@ Once the engine is installed, new tabs use it. Tabs that are already open keep t
 - On Windows the install also grants read access to the AppContainer SIDs. The engine sandbox needs it.
 - On macOS the engine and its helper apps keep their executable bits from the zip.
 
+### Microsoft Store build
+
+The Store package can't take the engine the way the direct download does without care, because Store policy 10.2.2 forbids changing the app's described function by fetching code later. Policy 10.1.5 allows acquiring add-ons or extensions that enhance the product, with user consent, after the first install. Two paths fit that.
+
+| Path | How | Status |
+| --- | --- | --- |
+| Runtime download (chosen) | The same Settings > Browser > Chromium Engine download as the direct build: the user asks for it, the manifest is ed25519-signed, the archive is sha256-checked, and the engine lands in the app's data dir, never in the package's install dir. The Store listing names the optional Chromium engine and the download, so the function doesn't change behind the user's back | Same code as the direct build. Needs a release key in `TRUSTED_MANIFEST_KEYS` and the published manifest, the same as the direct build |
+| MSIX optional package | Ship the engine as an optional package in a related set with the main package, so the Store installs and updates it | Not built. An optional package that runs code must be in a related set, and submitting optional packages or related sets to the Store needs Microsoft's approval. Revisit if certification rejects the runtime download |
+
+Store policy 10.2.1 requires a browsing product to use Chromium or Gecko no more than 2 major versions behind upstream. The system webview (WebView2) is Chromium-based and updated by Windows. The pinned engine (CEF 156) has to be re-pinned in step with Chromium releases, which happens through the update model above.
+
+The packaged app runs with `runFullTrust`, so the engine process and its AppContainer read grant should work as in the direct build, and the engine under the app data dir should go with the package when the Store app is removed. Neither has been measured on a Store build yet.
+
+## Downloads: the reqwest re-fetch path
+
+Page downloads normally go through the engine's own download handler: the CEF `DownloadHandler` on Chromium tabs, and WKDownload, the WebView2 download operation or WebKitDownload on system-webview tabs. Ferryx still has one path that fetches the file again itself with reqwest and the tab's cookies (`browser_download_with_session` calling `download::download_url_with_cookies`). It stays, for these reasons:
+
+- On a system-webview tab, a link the trusted bridge intercepts (a download link the user clicked, or one that needs confirmation) is cancelled in the page and handed to Ferryx as a URL. The engine never starts that download, so Ferryx has to fetch it. The fetch sends the cookies the webview itself would send for that URL, `HttpOnly` included.
+- "Ask where to save" on a system-webview tab: the native download hook runs on the main thread and can't wait for a save dialog, so the download is handed to the pane's Save prompt, which saves through this path.
+- The browser CLI `download start` and the `cmd_browser_download_with_cookies` command save a URL that no page started.
+- Unlike the webview's native downloads, the reqwest path can be cancelled, and it reports progress on the shelf. The system webviews give no handle to stop a native download, so those show on the shelf without Cancel.
+
+Limits of the re-fetch: it is a second request, so a one-time URL or a POST-only download can fail where the engine's own download would work. Chromium tabs don't use it: their downloads go through the engine and support pause, resume and cancel.
+
 ## Capabilities per OS
 
 "Yes" means it was checked by hand or by a gate in the 2026-11-01 plan status. "Not verified" means the sources don't say. "Not available" means the engine doesn't exist on that OS yet.
