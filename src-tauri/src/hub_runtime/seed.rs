@@ -151,8 +151,7 @@ pub(crate) async fn seed_owner_memory(
     home: PathBuf,
 ) -> Result<ImportReport, SupervisorError> {
     let roots = crate::ipc::agent_history::provider_history_roots(&home);
-    let configured_root = ferryx_hub::hub_env::var("OMON_WORKSPACE_ROOT").ok();
-    seed_with_roots(pool, memory, principal, home, roots, configured_root).await
+    seed_with_roots(pool, memory, principal, home, roots, None).await
 }
 
 /// The hub workspace where legacy Slack turns run, resolved as the Slack bot resolves it
@@ -174,13 +173,16 @@ fn read_join<T>(joined: Result<T, tokio::task::JoinError>) -> Result<T, Supervis
     })
 }
 
+/// Seeds owner memory from `roots`. `configured_root` is the `OMON_WORKSPACE_ROOT` value to
+/// use (`Some(None)`: unset); `None` reads it from hub config. That read can load the hub env
+/// file, so it runs with the other file reads on the blocking pool.
 pub(crate) async fn seed_with_roots(
     pool: &ferryx_hub::goals::SqlitePool,
     memory: Arc<dyn OwnerMemory>,
     principal: &str,
     home: PathBuf,
     roots: Vec<(CanonicalProvider, PathBuf)>,
-    configured_root: Option<String>,
+    configured_root: Option<Option<String>>,
 ) -> Result<ImportReport, SupervisorError> {
     let bounds = ImportBounds::default();
     let file_bounds = ImportBounds {
@@ -188,6 +190,8 @@ pub(crate) async fn seed_with_roots(
         ..bounds
     };
     let joined = tokio::task::spawn_blocking(move || {
+        let configured_root =
+            configured_root.unwrap_or_else(|| ferryx_hub::hub_env::var("OMON_WORKSPACE_ROOT").ok());
         let hub_workspace = hub_workspace(configured_root, &home);
         (
             memory_file_sessions(&home, file_bounds.max_turns_per_session),
@@ -310,7 +314,7 @@ mod tests {
             "local:tester",
             home.path().to_path_buf(),
             vec![(CanonicalProvider::Claude, claude_root), (CanonicalProvider::Codex, codex_root)],
-            None,
+            Some(None),
         )
         .await
         .unwrap();
@@ -355,7 +359,7 @@ mod tests {
             ("configured persona", configured_value.clone(), configured.join("agents").join("bot-ops")),
             ("configured without persona", configured_value.clone(), configured.clone()),
         ] {
-            let sources = seed_owner_and_bot(home.path(), &bot_cwd, configured_root).await;
+            let sources = seed_owner_and_bot(home.path(), &bot_cwd, Some(configured_root)).await;
             assert_eq!(sources, vec![format!("import:claude:{OWNER_SESSION}:0")], "{case}");
         }
     }
@@ -364,7 +368,7 @@ mod tests {
 
     /// Seeds from one owner session in `home` and one bot session in `bot_cwd` on a fresh
     /// store; the import sources ingested.
-    async fn seed_owner_and_bot(home: &Path, bot_cwd: &Path, configured_root: Option<String>) -> Vec<String> {
+    async fn seed_owner_and_bot(home: &Path, bot_cwd: &Path, configured_root: Option<Option<String>>) -> Vec<String> {
         use serde_json::json;
         std::fs::create_dir_all(bot_cwd).unwrap();
         let claude_root = tempfile::tempdir().unwrap();
@@ -399,7 +403,8 @@ mod tests {
         .await
         .unwrap();
         assert_eq!((report.sessions, report.turns_ingested, report.failed), (1, 1, 0), "{report:?}");
-        learner.texts.lock().unwrap().iter().map(|(source, _)| source.clone()).collect()
+        let texts = learner.texts.lock().unwrap().clone();
+        texts.into_iter().map(|(source, _)| source).collect()
     }
 
     #[tokio::test]
@@ -412,7 +417,7 @@ mod tests {
         let pool = ferryx_hub::storage::memory().await.unwrap();
         ferryx_hub::supervisor::provision_identity(&pool, "local:tester").await.unwrap();
         let memory: Arc<dyn OwnerMemory> = Arc::new(Learner::default());
-        let first = seed_with_roots(&pool, memory.clone(), "local:tester", home.path().to_path_buf(), Vec::new(), None)
+        let first = seed_with_roots(&pool, memory.clone(), "local:tester", home.path().to_path_buf(), Vec::new(), Some(None))
             .await
             .unwrap();
         assert_eq!(first.turns_ingested, 2);
@@ -422,7 +427,7 @@ mod tests {
             "Run clippy before every commit.\n\nPrefer small focused commits.\n\nAnswer in Korean when I write Korean.\n",
         )
         .unwrap();
-        let second = seed_with_roots(&pool, memory, "local:tester", home.path().to_path_buf(), Vec::new(), None)
+        let second = seed_with_roots(&pool, memory, "local:tester", home.path().to_path_buf(), Vec::new(), Some(None))
             .await
             .unwrap();
         assert_eq!((second.turns_ingested, second.failed), (1, 0), "{second:?}");
@@ -445,11 +450,11 @@ mod tests {
         let pool = ferryx_hub::storage::memory().await.unwrap();
         ferryx_hub::supervisor::provision_identity(&pool, "local:tester").await.unwrap();
         let memory: Arc<dyn OwnerMemory> = Arc::new(Learner::default());
-        let first = seed_with_roots(&pool, memory.clone(), "local:tester", home.path().to_path_buf(), Vec::new(), None)
+        let first = seed_with_roots(&pool, memory.clone(), "local:tester", home.path().to_path_buf(), Vec::new(), Some(None))
             .await
             .unwrap();
         assert_eq!((first.sessions, first.turns_ingested, first.failed), (1, 2, 0));
-        let again = seed_with_roots(&pool, memory, "local:tester", home.path().to_path_buf(), Vec::new(), None)
+        let again = seed_with_roots(&pool, memory, "local:tester", home.path().to_path_buf(), Vec::new(), Some(None))
             .await
             .unwrap();
         assert_eq!(again.turns_ingested, 0);
