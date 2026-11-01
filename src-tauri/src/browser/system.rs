@@ -144,7 +144,8 @@ pub fn unique_download_path(dir: &Path, suggested: &str, exists: impl Fn(&Path) 
     if !exists(&candidate) {
         return candidate;
     }
-    let (stem, ext) = match name.rfind('.') {
+    // A compound extension like `.tar.gz` stays whole: the counter goes before the first dot.
+    let (stem, ext) = match name.find('.') {
         Some(dot) if dot > 0 => (&name[..dot], &name[dot..]),
         _ => (name.as_str(), ""),
     };

@@ -63,15 +63,16 @@ fn secret_service_secret(service_name: &str) -> Option<zeroize::Zeroizing<Vec<u8
     let items = ss
         .search_items(std::collections::HashMap::from([("application", service_name)]))
         .ok()?;
-    let secret = items
-        .unlocked
-        .into_iter()
-        .chain(items.locked)
-        .find_map(|item| {
-            let _ = item.unlock();
-            item.get_secret().ok().filter(|secret| !secret.is_empty())
-        })
-        .map(zeroize::Zeroizing::new);
+    // The items borrow `ss`; collect the secret into an owned value before the session drops.
+    let mut secret = None;
+    for item in items.unlocked.into_iter().chain(items.locked) {
+        let _ = item.unlock();
+        if let Some(found) = item.get_secret().ok().filter(|secret| !secret.is_empty()) {
+            secret = Some(zeroize::Zeroizing::new(found));
+            break;
+        }
+    }
+    drop(ss);
     secret
 }
 

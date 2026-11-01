@@ -10,6 +10,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("./SiteSettingsGroup", () => ({ SiteSettingsGroup: () => null }));
 vi.mock("./BrowserAgentAccessGroup", () => ({ BrowserAgentAccessGroup: () => null }));
 vi.mock("./DefaultBrowserGroup", () => ({ DefaultBrowserGroup: () => null }));
+vi.mock("./BrowserPasswordsGroup", () => ({ BrowserPasswordsGroup: () => null }));
 vi.mock("../../lib/browserTauri", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/browserTauri")>()),
   listBrowsers: vi.fn(async () => []),

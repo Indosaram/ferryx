@@ -255,7 +255,9 @@ pub fn get_wordlist() -> &'static [&'static str] {
         WORDLIST_RAW
             .lines()
             .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
+            // Words are joined with a user-chosen separator, so a word must be letters only:
+            // `yo-yo` would read as two words with the default `-`.
+            .filter(|s| !s.is_empty() && s.chars().all(|ch| ch.is_ascii_alphabetic()))
             .collect()
     })
 }

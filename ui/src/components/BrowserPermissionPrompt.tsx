@@ -31,7 +31,7 @@ export function BrowserPermissionPrompts({ browserId }: { browserId: string }) {
         if (!cancelled) {
           setPrompts((current) => {
             const known = new Set(current.map((prompt) => prompt.requestId));
-            return [...pending.filter((prompt) => !known.has(prompt.requestId)), ...current];
+            return [...(pending ?? []).filter((prompt) => !known.has(prompt.requestId)), ...current];
           });
         }
       },
