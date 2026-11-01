@@ -1,10 +1,11 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   ArrowUp,
   BookOpen,
   Check,
+  Copy,
   ChevronDown,
   CircleCheck,
   CircleSlash,
@@ -26,6 +27,7 @@ import {
   Brain,
   MessageSquare,
 } from "lucide-react";
+import { copyTextToClipboard } from "../../lib/clipboard";
 import { cn } from "../../lib/cn";
 import { handleExternalLinkClick } from "../../lib/externalLinks";
 import {
@@ -710,44 +712,191 @@ export const ChatMarkdownImage: React.FC<{ src?: string; alt?: string }> = ({ sr
   );
 };
 
+interface CodeBlockProps {
+  inline?: boolean;
+  className?: string;
+  children?: React.ReactNode;
+}
+
+const InlineCode: React.FC<CodeBlockProps> = ({ className, children, ...props }) => {
+  return (
+    <code
+      className={cn(
+        "bg-chat-surface-raised text-chat-code px-1 py-0.5 rounded font-mono text-[0.875em]",
+        className
+      )}
+      {...props}
+    >
+      {children}
+    </code>
+  );
+};
+
+const CodeBlock: React.FC<CodeBlockProps> = ({ className, children, ...props }) => {
+  const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
+  // long lines wrap by default: a phone has no room for a sideways scroller inside the stream
+  const [wrap, setWrap] = useState(true);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const match = /language-(\w+)/.exec(className || "");
+  const language = match ? match[1] : "";
+  const codeText = String(children).replace(/\n$/, "");
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+      }
+    };
+  }, []);
+
+  const handleCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+    }
+    const ok = await copyTextToClipboard(codeText);
+    setCopied(ok);
+    setCopyFailed(!ok);
+    timerRef.current = setTimeout(() => {
+      setCopied(false);
+      setCopyFailed(false);
+    }, 2000);
+  };
+
+  const isDiff = language === "diff" || language === "patch";
+  const codeBody = isDiff
+    ? codeText.split("\n").map((line, index) => (
+        <span
+          key={index}
+          className={cn(
+            "block",
+            line.startsWith("+") && !line.startsWith("+++") && "bg-status-success/15",
+            line.startsWith("-") && !line.startsWith("---") && "bg-chat-danger/15",
+          )}
+        >
+          {line.length > 0 ? line : " "}
+        </span>
+      ))
+    : children;
+
+  return (
+    <div className="my-2.5 rounded-xl border border-chat-border bg-chat-screen overflow-hidden">
+      <div className="flex items-center justify-between gap-2 bg-chat-surface pl-3 text-xs text-chat-foreground-secondary">
+        <span className="font-mono">{language || "code"}</span>
+        <span className="flex items-center">
+          <button
+            type="button"
+            aria-pressed={wrap}
+            onClick={() => setWrap((prev) => !prev)}
+            className="flex min-h-11 items-center px-3 text-xs text-chat-foreground-secondary transition-colors hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            Wrap
+          </button>
+          <button
+            type="button"
+            onClick={handleCopy}
+            aria-label={copied ? "Copied" : copyFailed ? "Copy failed" : "Copy code"}
+            className="flex min-h-11 items-center gap-1.5 px-3 text-xs text-chat-foreground-secondary transition-colors hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            {copied ? (
+              <>
+                <Check aria-hidden="true" className="size-3.5 text-status-success" />
+                <span>Copied</span>
+              </>
+            ) : copyFailed ? (
+              <>
+                <AlertCircle aria-hidden="true" className="size-3.5 text-chat-danger" />
+                <span className="text-chat-danger">Failed</span>
+              </>
+            ) : (
+              <>
+                <Copy aria-hidden="true" className="size-3.5" />
+                <span>Copy</span>
+              </>
+            )}
+          </button>
+        </span>
+        <span role="status" className="sr-only">
+          {copied ? "Code copied" : copyFailed ? "Couldn't copy the code" : ""}
+        </span>
+      </div>
+      <div
+        className={cn(
+          "p-3 text-[0.8125rem] font-mono text-chat-foreground leading-relaxed",
+          wrap ? "whitespace-pre-wrap break-words" : "overflow-x-auto scrollbar-sleek",
+        )}
+      >
+        <pre className={cn("!bg-transparent !p-0 !m-0", wrap && "whitespace-pre-wrap break-words")}>
+          <code className={className} {...props}>
+            {codeBody}
+          </code>
+        </pre>
+      </div>
+    </div>
+  );
+};
+
 /**
- * The prose vocabulary of a rich turn. It is hoisted because a map built inside the component
- * hands ReactMarkdown a NEW component identity on every render: React then unmounts and remounts
- * the rendered prose instead of updating it in place, which drops the reader's selection and
- * detaches any node a caller already holds (an assertion on the prose element fails on the next
- * re-render).
+ * The one chat prose vocabulary, shared by the plain assistant body and rich turns so code
+ * blocks (copy, wrap), inline code (0.875em) and blockquotes look the same on both paths. It is
+ * hoisted because a map built inside the component hands ReactMarkdown a NEW component identity on every render, which remounts the rendered prose
+ * (selection lost, code-block copy state reset) on every poll.
  */
-const REFERENCE_PROSE_COMPONENTS = {
-  p: ({ children }: any) => <p className="mb-2 last:mb-0">{children}</p>,
+export const CHAT_MARKDOWN_COMPONENTS = {
+  code: ({ node, inline, className, children, ...props }: any) => {
+    const contentStr = String(children);
+    const hasLang = Boolean(className && (className.startsWith("language-") || /language-(\w+)/.test(className)));
+    const hasNewline = contentStr.includes("\n");
+    const isFenced = hasLang || inline === false || (inline === undefined && hasNewline);
+    const isPureInline = !hasLang && !hasNewline && (inline === true || inline === undefined);
+
+    if (isPureInline && !isFenced) {
+      return (
+        <InlineCode className={className} {...props}>
+          {children}
+        </InlineCode>
+      );
+    }
+    return (
+      <CodeBlock className={className} {...props}>
+        {children}
+      </CodeBlock>
+    );
+  },
+  pre: ({ children }: any) => <>{children}</>,
+  p: ({ children }: any) => {
+    const childArray = React.Children.toArray(children);
+    const hasBlockChild = childArray.some(
+      (child) =>
+        React.isValidElement(child) &&
+        (child.type === CodeBlock ||
+          (typeof child.type === "string" && ["div", "pre", "blockquote", "ul", "ol", "table"].includes(child.type)))
+    );
+    if (hasBlockChild) {
+      return <div className="mb-2 last:mb-0">{children}</div>;
+    }
+    return <p className="mb-2 last:mb-0">{children}</p>;
+  },
+  ul: ({ children }: any) => <ul className="list-disc pl-4 mb-2 space-y-1">{children}</ul>,
+  ol: ({ children }: any) => <ol className="list-decimal pl-4 mb-2 space-y-1">{children}</ol>,
   a: ({ href, children }: any) => (
     <a
       href={href}
       target="_blank"
       onClick={handleExternalLinkClick}
       rel="noopener noreferrer"
-      className="text-chat-link underline underline-offset-2 decoration-chat-link/60 hover:decoration-chat-link"
+      className="text-chat-link decoration-chat-link/60 hover:decoration-chat-link underline underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
     >
       <MarkdownLinkContext.Provider value={true}>{children}</MarkdownLinkContext.Provider>
     </a>
   ),
-  pre: ({ children }: any) => (
-    <pre className="my-2 whitespace-pre-wrap break-words rounded-lg border border-chat-border bg-chat-screen p-3 font-mono text-[0.8125rem] leading-relaxed text-chat-foreground [&_code]:bg-transparent [&_code]:p-0 [&_code]:text-[1em] [&_code]:text-chat-foreground">
-      {children}
-    </pre>
-  ),
-  code: ({ children }: any) => (
-    <code className="rounded bg-chat-surface-raised px-1 py-0.5 font-mono text-[0.875em] text-chat-code">
-      {children}
-    </code>
-  ),
-  img: ChatMarkdownImage,
-  ul: ({ children }: any) => <ul className="list-disc pl-4 mb-2 space-y-1">{children}</ul>,
-  ol: ({ children }: any) => <ol className="list-decimal pl-4 mb-2 space-y-1">{children}</ol>,
   blockquote: ({ children }: any) => (
     <blockquote className="my-2 rounded-lg bg-chat-surface px-3 py-2 text-chat-foreground-secondary">
       {children}
     </blockquote>
   ),
+  img: ChatMarkdownImage,
 };
 
 /** Markdown the page already carries, drawn the way the rest of the chat draws prose. */
@@ -760,7 +909,7 @@ const ReferenceProse: React.FC<{ text: string; className?: string }> = ({ text, 
   >
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
-      components={REFERENCE_PROSE_COMPONENTS}
+      components={CHAT_MARKDOWN_COMPONENTS}
       urlTransform={chatMarkdownUrlTransform}
     >
       {text}
