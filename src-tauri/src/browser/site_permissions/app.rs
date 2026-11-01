@@ -3,7 +3,7 @@
 
 use super::{
     load_store, save_store, site_origin, Answer, Broker, MediaCapture, Outcome, PendingPrompt,
-    PermissionAsk, PermissionKind, SitePermission, SitePermissionStore, STORE_FILE,
+    PermissionAsk, PermissionKind, SitePermission, SitePermissionDecision, SitePermissionStore, STORE_FILE,
 };
 use crate::ipc::error::{IpcError, IpcErrorCode};
 use parking_lot::Mutex;
@@ -277,6 +277,12 @@ pub fn revoke(profile: &str, origin: &str, kind: Option<PermissionKind>) -> bool
         emit(BROWSER_SITE_PERMISSIONS_CHANGED_EVENT, json!({}));
     }
     changed
+}
+
+/// The remembered decision for `kind` on `origin` (`scheme://host[:port]`) in `profile`,
+/// without asking anyone. Before the store is loaded nothing is remembered, so it asks.
+pub fn site_decision(profile: &str, origin: &str, kind: PermissionKind) -> SitePermissionDecision {
+    STATE.lock().store.decision(profile, origin, kind)
 }
 
 /// A Chromium engine request; the engine holds it until [`decide`] or a dismissal.

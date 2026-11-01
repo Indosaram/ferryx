@@ -27,6 +27,8 @@ mod windows;
 #[cfg(target_os = "windows")]
 use windows as platform;
 
+pub mod system;
+
 pub use platform::ENGINE_EXE;
 #[cfg(target_os = "windows")]
 pub use windows::grant_sandbox_read;

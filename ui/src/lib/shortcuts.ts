@@ -38,6 +38,7 @@ export type ShortcutActionId =
   | "browser.forward"
   | "browser.find"
   | "browser.bookmarkPage"
+  | "browser.print"
   | "terminal.splitRight"
   | "terminal.splitDown"
   | "terminal.unsplit"
@@ -154,6 +155,14 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     title: "Bookmark this page",
     group: "Tabs",
     binding: { key: "d", mod: true },
+    source: "ferryx",
+  },
+  {
+    // Listed before commandPalette.open, whose Mod+P alias it takes over in a browser tab.
+    id: "browser.print",
+    title: "Print browser page",
+    group: "Tabs",
+    binding: { key: "p", mod: true },
     source: "ferryx",
   },
   {

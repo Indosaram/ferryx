@@ -93,6 +93,16 @@ pub enum Verdict {
     Ask,
 }
 
+/// A site's standing for one kind, for features that check before (or without) prompting,
+/// such as the page Notification shim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SitePermissionDecision {
+    Granted,
+    Denied,
+    /// Nothing remembered: a request has to ask the user.
+    Ask,
+}
+
 /// The remembered decisions.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SitePermissionStore {
@@ -159,6 +169,15 @@ impl SitePermissionStore {
             Verdict::Allow
         } else {
             Verdict::Ask
+        }
+    }
+
+    /// The remembered decision for one kind, as [`SitePermissionDecision`].
+    pub fn decision(&self, profile: &str, origin: &str, kind: PermissionKind) -> SitePermissionDecision {
+        match self.verdict(profile, origin, &[kind]) {
+            Verdict::Allow => SitePermissionDecision::Granted,
+            Verdict::Block => SitePermissionDecision::Denied,
+            Verdict::Ask => SitePermissionDecision::Ask,
         }
     }
 }

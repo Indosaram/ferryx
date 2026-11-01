@@ -6,12 +6,15 @@ import {
   type DownloadRecord,
   type DownloadStatus,
 } from "../lib/browserTauri";
+import { downloadFailureLabel, pauseBrowserDownload } from "../lib/browserSystem";
 import {
   AlertCircle,
   CheckCircle2,
   Download,
   ExternalLink,
   Folder,
+  Pause,
+  Play,
   RotateCw,
   X,
   XCircle,
@@ -176,6 +179,17 @@ export function BrowserDownloadsShelf({ onClose, className = "", refreshToken = 
     }
   };
 
+  const handlePause = async (id: string, pause: boolean) => {
+    try {
+      await pauseBrowserDownload(id, pause);
+    } catch (error) {
+      setActionErrors((prev) => ({
+        ...prev,
+        [id]: extractBrowserErrorCode(error),
+      }));
+    }
+  };
+
   const handleOpen = async (record: DownloadRecord) => {
     if (missingFileIds.has(record.id)) return;
     try {
@@ -270,7 +284,9 @@ export function BrowserDownloadsShelf({ onClose, className = "", refreshToken = 
             item.totalBytes && item.totalBytes > 0
               ? Math.min(100, Math.round((item.receivedBytes / item.totalBytes) * 100))
               : null;
-          const isInProgress = item.status === "inProgress" || item.status === "pending";
+          const isPaused = item.status === "paused";
+          const isInProgress = item.status === "inProgress" || item.status === "pending" || isPaused;
+          const canCancel = item.canCancel !== false;
           const isCompleted = item.status === "completed";
           const isFailed = item.status === "failed";
           const isCancelled = item.status === "cancelled";
@@ -290,6 +306,8 @@ export function BrowserDownloadsShelf({ onClose, className = "", refreshToken = 
                   <XCircle className="size-3.5 text-destructive" />
                 ) : isCancelled ? (
                   <XCircle className="size-3.5 text-muted-foreground" />
+                ) : isPaused ? (
+                  <Pause className="size-3.5 text-muted-foreground" />
                 ) : (
                   <RotateCw className="size-3.5 text-primary animate-spin" />
                 )}
@@ -305,12 +323,20 @@ export function BrowserDownloadsShelf({ onClose, className = "", refreshToken = 
                       Deleted on disk
                     </span>
                   ) : isFailed ? (
-                    <span className="rounded bg-destructive/10 px-1 py-0.2 text-[10px] text-destructive">
-                      {item.error || "Failed"}
+                    <span
+                      className="rounded bg-destructive/10 px-1 py-0.2 text-[10px] text-destructive"
+                      data-testid={`download-failure-${item.id}`}
+                      data-failure={item.failure ?? undefined}
+                    >
+                      {downloadFailureLabel(item.failure, item.error)}
                     </span>
                   ) : isCancelled ? (
                     <span className="rounded bg-muted px-1 py-0.2 text-[10px] text-muted-foreground">
                       Cancelled
+                    </span>
+                  ) : isPaused ? (
+                    <span className="rounded bg-muted px-1 py-0.2 text-[10px] text-muted-foreground">
+                      Paused
                     </span>
                   ) : null}
                 </div>
@@ -337,7 +363,18 @@ export function BrowserDownloadsShelf({ onClose, className = "", refreshToken = 
               </div>
 
               <div className="flex items-center gap-1 shrink-0">
-                {isInProgress ? (
+                {isInProgress && item.canPause ? (
+                  <button
+                    type="button"
+                    aria-label={isPaused ? "Resume download" : "Pause download"}
+                    onClick={() => void handlePause(item.id, !isPaused)}
+                    className="rounded border border-border p-1 hover:bg-accent text-muted-foreground hover:text-foreground"
+                  >
+                    {isPaused ? <Play className="size-3" /> : <Pause className="size-3" />}
+                  </button>
+                ) : null}
+
+                {isInProgress && canCancel ? (
                   <button
                     type="button"
                     onClick={() => void handleCancel(item.id)}

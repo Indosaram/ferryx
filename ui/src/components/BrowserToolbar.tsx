@@ -17,6 +17,8 @@ import {
   AppWindow,
   Bookmark as BookmarkIcon,
   Library as LibraryIcon,
+  Printer,
+  FileDown,
 } from "lucide-react";
 import {
   BROWSER_SHORTCUT_EVENT,
@@ -43,6 +45,7 @@ import {
   type DesignFeedbackTarget,
 } from "../lib/browserTauri";
 import { BrowserDesignFeedbackPopover } from "./BrowserDesignFeedbackPopover";
+import { printBrowser, saveBrowserPdf } from "../lib/browserSystem";
 import {
   addBookmark,
   clearAllBrowserHistory,
@@ -704,6 +707,33 @@ export function BrowserToolbar({
           </button>
           <button type="button" onClick={handleExternalOpen} title="Open in default browser" aria-label="Open in external browser" className="p-1 rounded hover:bg-muted transition-colors">
             <ExternalLink className="w-3.5 h-3.5 text-muted-foreground" />
+          </button>
+          {/* Print and Save as PDF (the shortcut is Cmd/Ctrl+P). */}
+          <button
+            type="button"
+            onClick={() => {
+              void printBrowser(tab.browserId)
+                .then(() => setActionError(null))
+                .catch((error: unknown) => setActionError(actionFailureMessage("Print", error)));
+            }}
+            title="Print"
+            aria-label="Print page"
+            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <Printer className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              void saveBrowserPdf(tab.browserId)
+                .then(() => setActionError(null))
+                .catch((error: unknown) => setActionError(actionFailureMessage("Save as PDF", error)));
+            }}
+            title="Save as PDF"
+            aria-label="Save page as PDF"
+            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <FileDown className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>
