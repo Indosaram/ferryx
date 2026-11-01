@@ -5382,6 +5382,12 @@ export const RemoteHostConnection: React.FC<{
           }}
           worktrees={phoneWorktrees}
           accountAction={<AccountButton onOpen={() => setAccountSheetOpen(true)} />}
+          onRefresh={(destination) => {
+            // Every list reads account discovery (worktrees, the inventory behind the Inbox), so a
+            // pull re-probes each computer; the Supervisor also re-reads every supervisor feed.
+            if (destination === "supervisor") phoneSupervisor.resync();
+            return Promise.allSettled(accountDiscovery.machines.map((machine) => accountDiscovery.retryMachine(machine.machineId)));
+          }}
           resume={
             token && model.context.workspaceId
               ? { title: mobileTitle, subtitle: contextName(model.context), onOpen: phoneNav.openSession }
