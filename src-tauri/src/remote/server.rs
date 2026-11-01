@@ -8176,6 +8176,7 @@ impl RemoteServerHandle {
         });
         *state.relay_client.write() = Some(client.clone());
         self.published_pairing = Some((state, epoch));
+        crate::hub_runtime::note_relay_published();
         self.relay_task = Some(tokio::spawn(async move { client.run().await }));
         prev_task
     }
@@ -8495,6 +8496,8 @@ pub async fn start_remote_server_with_resolver_and_insecure_opt_in(
             });
             published_pairing = Some((Arc::clone(&state), epoch));
             *state.relay_client.write() = Some(client.clone());
+            // The hub's lease client binds to this relay (it may have started without one).
+            crate::hub_runtime::note_relay_published();
             // run invokes connect_control and keeps servicing reverse tunnels/reconnects.
             tokio::spawn(async move { client.run().await })
         });
