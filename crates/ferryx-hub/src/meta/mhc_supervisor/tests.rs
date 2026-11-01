@@ -1782,6 +1782,28 @@ fn a_process_disable_wins_over_the_shared_enable_and_a_process_enable_is_ignored
 }
 
 #[test]
+fn the_engine_binary_defaults_to_the_bundled_mhc_and_the_shared_file_overrides_it() {
+    let on = BTreeMap::from([("FERRYX_HUB_MHC_SUPERVISOR".to_owned(), "1".to_owned())]);
+    // Unless the developer's environment names one, the default is what the hub resolves for
+    // per-turn mhc children: the bundled mhc next to this executable, else bare `mhc`.
+    if std::env::var_os("FERRYX_HUB_MHC_BIN").is_none() {
+        let config = MhcProfileConfig::from_env_in(&on, None).unwrap();
+        assert_eq!(
+            config.binary,
+            crate::meta::supervisor::resolve_mhc_bin(None, std::env::current_exe().ok().as_deref())
+        );
+        let named = BTreeMap::from([
+            ("FERRYX_HUB_MHC_SUPERVISOR".to_owned(), "1".to_owned()),
+            ("FERRYX_HUB_MHC_BIN".to_owned(), " /opt/mhc/bin/mhc ".to_owned()),
+            ("FERRYX_HUB_MHC_THINKING".to_owned(), "high".to_owned()),
+        ]);
+        let config = MhcProfileConfig::from_env_in(&named, None).unwrap();
+        assert_eq!(config.binary, "/opt/mhc/bin/mhc");
+        assert_eq!(config.thinking_level.as_deref(), Some("high"));
+    }
+}
+
+#[test]
 fn pathext_resolves_extensionless_names_in_pathext_order() {
     let dir = TempDir::new("pathext-order");
     let bin = dir.path().join("bin");

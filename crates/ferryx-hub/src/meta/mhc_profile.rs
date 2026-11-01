@@ -18,7 +18,8 @@ use crate::error::Result;
 
 /// Directory under the hub data directory the engine runs in.
 pub const PROFILE_DIRNAME: &str = "mhc-supervisor";
-/// Executable looked up on the hub child PATH when none is configured.
+/// Bare executable name, looked up on the hub child PATH when neither `FERRYX_HUB_MHC_BIN` nor
+/// a bundled mhc is found ([`MhcProfileConfig::from_env_in`] defaults to the bundled one).
 pub const DEFAULT_MHC_BIN: &str = "mhc";
 /// Arguments of the owned engine. `--no-model-fallback` keeps the engine from substituting a
 /// model on errors; the supervisor never does either.
@@ -166,9 +167,11 @@ impl Default for MhcProfileConfig {
     }
 }
 
-fn env_text(key: &str) -> Option<String> {
-    crate::hub_env::var(key)
+/// `key` from this process's environment, else from the hub env file entries `shared`.
+fn env_text(key: &str, shared: &BTreeMap<String, String>) -> Option<String> {
+    std::env::var(key)
         .ok()
+        .or_else(|| shared.get(key).cloned())
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
 }
@@ -205,10 +208,12 @@ impl MhcProfileConfig {
         shared.get(ENABLE_KEY).is_some_and(|value| is_on(value))
     }
 
-    /// [`Self::from_env_in`] over the hub env file entries and this process's [`ENABLE_KEY`].
+    /// [`Self::from_env_in`] over the hub env file entries as they are on disk now (re-read on
+    /// every call, so a hub generation restarted after the file changed sees the change) and
+    /// this process's [`ENABLE_KEY`].
     pub fn from_env() -> Option<Self> {
         let process = std::env::var(ENABLE_KEY).ok();
-        Self::from_env_in(crate::hub_env::file_env(), process.as_deref())
+        Self::from_env_in(&crate::hub_env::read_file_env(), process.as_deref())
     }
 
     /// `None` unless [`ENABLE_KEY`] in the shared hub env file entries (`shared`) turns the
@@ -219,7 +224,10 @@ impl MhcProfileConfig {
     /// value never turns the engine on. `FERRYX_HUB_MHC_BIN`,
     /// `FERRYX_HUB_MHC_PROVIDER` + `FERRYX_HUB_MHC_MODEL`,
     /// `FERRYX_HUB_MHC_THINKING` and `FERRYX_HUB_MHC_EFFECT_TOOLS` (extra comma-separated names)
-    /// refine it for the owning daemon.
+    /// refine it for the owning daemon (this process's environment first, then `shared`).
+    /// Without `FERRYX_HUB_MHC_BIN` the engine is the mhc bundled next to the running
+    /// executable, else bare `mhc` on the hub child PATH
+    /// ([`crate::meta::supervisor::resolve_mhc_bin`]).
     pub fn from_env_in(shared: &BTreeMap<String, String>, process: Option<&str>) -> Option<Self> {
         let process_off = process.is_some_and(is_off);
         if !Self::enabled_in(shared) {
@@ -237,10 +245,14 @@ impl MhcProfileConfig {
             return None;
         }
         let mut config = Self::default();
-        if let Some(binary) = env_text("FERRYX_HUB_MHC_BIN") {
-            config.binary = binary;
-        }
-        match (env_text("FERRYX_HUB_MHC_PROVIDER"), env_text("FERRYX_HUB_MHC_MODEL")) {
+        config.binary = crate::meta::supervisor::resolve_mhc_bin(
+            env_text("FERRYX_HUB_MHC_BIN", shared),
+            std::env::current_exe().ok().as_deref(),
+        );
+        match (
+            env_text("FERRYX_HUB_MHC_PROVIDER", shared),
+            env_text("FERRYX_HUB_MHC_MODEL", shared),
+        ) {
             (Some(provider), Some(model)) => {
                 config.provider = Some(provider);
                 config.model = Some(model);
@@ -250,8 +262,8 @@ impl MhcProfileConfig {
                 "FERRYX_HUB_MHC_PROVIDER and FERRYX_HUB_MHC_MODEL must be set together; the engine default model applies"
             ),
         }
-        config.thinking_level = env_text("FERRYX_HUB_MHC_THINKING");
-        if let Some(extra) = env_text("FERRYX_HUB_MHC_EFFECT_TOOLS") {
+        config.thinking_level = env_text("FERRYX_HUB_MHC_THINKING", shared);
+        if let Some(extra) = env_text("FERRYX_HUB_MHC_EFFECT_TOOLS", shared) {
             config.add_effect_tools(&extra);
         }
         Some(config)
