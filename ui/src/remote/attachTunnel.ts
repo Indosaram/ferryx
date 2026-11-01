@@ -731,6 +731,9 @@ function createTunnelWebSocketInstance(
   let onmessageCallback: ((event: TunnelMessageEvent) => void) | null = null;
   let onerrorCallback: ((event: TunnelErrorEvent) => void) | null = null;
   let oncloseCallback: ((event: TunnelCloseEvent) => void) | null = null;
+  // Messages that arrive before the caller assigns onmessage (frames glued to the 101, or read
+  // while the socket is still being handed over); flushed in order on assignment.
+  let undelivered: TunnelMessageEvent[] = [];
 
   let writeQueue: Promise<void> = Promise.resolve();
 
@@ -766,12 +769,18 @@ function createTunnelWebSocketInstance(
   }
 
   function deliverMessage(opcode: number, payload: Uint8Array) {
-    if (!onmessageCallback) return;
-    if (opcode === 0x1) {
-      const text = new TextDecoder("utf-8").decode(payload);
-      onmessageCallback({ data: text });
-    } else {
-      onmessageCallback({ data: payload });
+    const event: TunnelMessageEvent = { data: opcode === 0x1 ? new TextDecoder("utf-8").decode(payload) : payload };
+    if (!onmessageCallback || undelivered.length > 0) {
+      undelivered.push(event);
+      return;
+    }
+    onmessageCallback(event);
+  }
+
+  function flushUndelivered() {
+    while (onmessageCallback && undelivered.length > 0) {
+      const event = undelivered.shift()!;
+      onmessageCallback(event);
     }
   }
 
@@ -1007,6 +1016,7 @@ function createTunnelWebSocketInstance(
     },
     set onmessage(cb: ((event: TunnelMessageEvent) => void) | null) {
       onmessageCallback = cb;
+      flushUndelivered();
     },
     get onerror() {
       return onerrorCallback;

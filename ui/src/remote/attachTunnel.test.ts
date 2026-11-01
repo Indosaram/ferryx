@@ -288,6 +288,38 @@ describe("attachTunnel RFC 6455 WebSocket transport", () => {
     expect(ws.readyState).toBe(WS_OPEN);
   });
 
+  it("delivers a frame glued to the 101 response once onmessage is assigned later", async () => {
+    // Given an upgrade whose 101 response and first server frame arrive in one chunk
+    const stream = new ScriptedByteStream();
+    const transport = createTunnelTransport(stream);
+    const wsPromise = transport.openWebSocket("/api/v1/terminal/sess-glued");
+    await stream.waitForWrites(1);
+    const reqText = new TextDecoder().decode(concatAll(stream.written));
+    const secKey = reqText.match(/Sec-WebSocket-Key:\s*([^\r\n]+)/i)![1].trim();
+    const acceptKey = await computeAcceptKey(secKey);
+    const head = new TextEncoder().encode(
+      `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${acceptKey}\r\n\r\n`,
+    );
+    const first = new TextEncoder().encode("first");
+    const second = new TextEncoder().encode("second");
+    stream.pushIncoming(concatAll([
+      head,
+      new Uint8Array([0x81, first.length]), first,
+      new Uint8Array([0x81, second.length]), second,
+    ]));
+    const ws = await wsPromise;
+    // Let the receive loop drain everything it already holds before a handler exists.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // When the caller assigns onmessage only after the hand-over
+    const received: string[] = [];
+    ws.onmessage = (event) => received.push(event.data as string);
+
+    // Then both frames arrive, in order
+    expect(received).toEqual(["first", "second"]);
+  });
+
   it("reassembles a server frame split across two incoming chunks", async () => {
     // Given an established WebSocket
     const stream = new ScriptedByteStream();
