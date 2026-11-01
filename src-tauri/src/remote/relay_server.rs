@@ -3150,6 +3150,72 @@ async fn exchange_http(
         crate::remote::server::PAIRING_PEER_HEADER,
         HeaderValue::from_str(&ip.to_string()).unwrap(),
     );
+    // The owner's entitlement is checked before the host mints anything: a suspended owner
+    // must never end up with a paired device on the machine.
+    if let Some(account_state) = state.account_state() {
+        if account_state.deployment_mode.is_billing_enabled() {
+            let machine_id = claim.machine_id.clone();
+            let billing_res: Result<Result<(), crate::account::service::ApiError>, StatusCode> =
+                crate::ipc::run_blocking(move || {
+                    Ok((|| -> Result<(), crate::account::service::ApiError> {
+                        if let Some(record) = crate::account::service::enrolled_machine_by_id(
+                            &account_state,
+                            &machine_id,
+                        ) {
+                            let now = crate::account::billing::routes::billing_now();
+                            let entitlement = crate::account::billing::routes::entitlement_for_user(
+                                &account_state,
+                                &record.owner_user_id,
+                                now,
+                            )?;
+                            if !entitlement.remote_allowed {
+                                let stopped_at = crate::account::service::owner_stopped_at(
+                                    &account_state,
+                                    &record.owner_user_id,
+                                );
+                                return Err(crate::account::service::ApiError::new(
+                                    StatusCode::PAYMENT_REQUIRED,
+                                    "REMOTE_SUSPENDED",
+                                    "remote access is suspended for this account",
+                                )
+                                .with_details(serde_json::json!({
+                                    "plan": match entitlement.effective_plan {
+                                        crate::account::billing::entitlement::PlanKey::Free => "free",
+                                        crate::account::billing::entitlement::PlanKey::ProMonthly => "pro_monthly",
+                                        crate::account::billing::entitlement::PlanKey::ProAnnual => "pro_annual",
+                                        crate::account::billing::entitlement::PlanKey::TeamMonthly => "team_monthly",
+                                        crate::account::billing::entitlement::PlanKey::TeamAnnual => "team_annual",
+                                    },
+                                    "status": match entitlement.status {
+                                        crate::account::billing::entitlement::EntitlementStatus::Ok => "ok",
+                                        crate::account::billing::entitlement::EntitlementStatus::OverLimit => "over_limit",
+                                        crate::account::billing::entitlement::EntitlementStatus::PastDue => "past_due",
+                                        crate::account::billing::entitlement::EntitlementStatus::Stopped => "stopped",
+                                    },
+                                    "graceEndsAt": entitlement.grace_ends_at,
+                                    "stoppedAt": stopped_at,
+                                })));
+                            }
+                        }
+                        Ok(())
+                    })())
+                })
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+
+            match billing_res {
+                Ok(Err(error)) => {
+                    claim.rollback();
+                    return Ok(error.into_response());
+                }
+                Err(status) => {
+                    claim.rollback();
+                    return Err(status);
+                }
+                Ok(Ok(())) => {}
+            }
+        }
+    }
     let response = proxy_http(
         &state,
         &claim.machine_id,
@@ -3165,6 +3231,10 @@ async fn exchange_http(
         struct IssuedDeviceToken {
             token: String,
         }
+        // The host accepted the code and consumed it on its side, so the claim is spent
+        // whatever happens to the answer: rolling it back would offer a code the host already
+        // refuses.
+        claim.commit();
         let (parts, body) = response.into_parts();
         let body = to_bytes(body, MAX_HTTP_SIZE)
             .await
@@ -3174,72 +3244,7 @@ async fn exchange_http(
         if issued.token.is_empty() {
             return Err(StatusCode::BAD_GATEWAY);
         }
-        if let Some(account_state) = state.account_state() {
-            if account_state.deployment_mode.is_billing_enabled() {
-                let machine_id = claim.machine_id.clone();
-                let billing_res: Result<Result<(), crate::account::service::ApiError>, StatusCode> =
-                    crate::ipc::run_blocking(move || {
-                        Ok((|| -> Result<(), crate::account::service::ApiError> {
-                            if let Some(record) = crate::account::service::enrolled_machine_by_id(
-                                &account_state,
-                                &machine_id,
-                            ) {
-                                let now = crate::account::billing::routes::billing_now();
-                                let entitlement = crate::account::billing::routes::entitlement_for_user(
-                                    &account_state,
-                                    &record.owner_user_id,
-                                    now,
-                                )?;
-                                if !entitlement.remote_allowed {
-                                    let stopped_at = crate::account::service::owner_stopped_at(
-                                        &account_state,
-                                        &record.owner_user_id,
-                                    );
-                                    return Err(crate::account::service::ApiError::new(
-                                        StatusCode::PAYMENT_REQUIRED,
-                                        "REMOTE_SUSPENDED",
-                                        "remote access is suspended for this account",
-                                    )
-                                    .with_details(serde_json::json!({
-                                        "plan": match entitlement.effective_plan {
-                                            crate::account::billing::entitlement::PlanKey::Free => "free",
-                                            crate::account::billing::entitlement::PlanKey::ProMonthly => "pro_monthly",
-                                            crate::account::billing::entitlement::PlanKey::ProAnnual => "pro_annual",
-                                            crate::account::billing::entitlement::PlanKey::TeamMonthly => "team_monthly",
-                                            crate::account::billing::entitlement::PlanKey::TeamAnnual => "team_annual",
-                                        },
-                                        "status": match entitlement.status {
-                                            crate::account::billing::entitlement::EntitlementStatus::Ok => "ok",
-                                            crate::account::billing::entitlement::EntitlementStatus::OverLimit => "over_limit",
-                                            crate::account::billing::entitlement::EntitlementStatus::PastDue => "past_due",
-                                            crate::account::billing::entitlement::EntitlementStatus::Stopped => "stopped",
-                                        },
-                                        "graceEndsAt": entitlement.grace_ends_at,
-                                        "stoppedAt": stopped_at,
-                                    })));
-                                }
-                            }
-                            Ok(())
-                        })())
-                    })
-                    .await
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
-
-                match billing_res {
-                    Ok(Err(error)) => {
-                        claim.rollback();
-                        return Ok(error.into_response());
-                    }
-                    Err(status) => {
-                        claim.rollback();
-                        return Err(status);
-                    }
-                    Ok(Ok(())) => {}
-                }
-            }
-        }
         state.register_device_token(&claim.machine_id, &issued.token);
-        claim.commit();
         return Ok(Response::from_parts(parts, Body::from(body)));
     }
     claim.rollback();
@@ -9902,6 +9907,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_host_accepted_exchange_with_an_unreadable_answer_still_spends_the_code() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let owner = identity(43, "p01_daemon_garbled");
+        let (mut daemon_control, auth) = authenticate(&base, &owner, false, false).await;
+        assert!(auth.success);
+        register_security_pin(&mut daemon_control, "p01_daemon_garbled").await;
+        let claim = security_claim(&state, "123456");
+        let host = async {
+            let notice: IncomingSessionNotice = receive_json(&mut daemon_control).await;
+            let (mut data, _) =
+                tokio_tungstenite::connect_async(format!("{base}/tunnel/data/{}", notice.session_id))
+                    .await
+                    .unwrap();
+            let _request = timeout(Duration::from_secs(5), data.next()).await.unwrap();
+            // The host consumed the code and answered 2xx, but the body is not a token.
+            data.send(TMessage::Binary(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nnot json"
+                    .to_vec()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            let _ = timeout(Duration::from_secs(5), data.next()).await;
+        };
+        let (status, ()) = tokio::join!(claim, host);
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            state.inner.pairings.lock()["123456"].state,
+            PairingState::Consumed,
+            "a code the host already consumed must not be offered again"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn test_p01_regression_pair_exchange_transport_error_allows_retry() {
         let state = test_state(vec![]);
         let (base, server) = spawn_test_relay_with_state(state.clone()).await;
@@ -12547,6 +12588,40 @@ mod tests {
             .expect("the frame read must not error");
         assert_eq!(frame.to_text().unwrap(), "live");
         (control, client, data, notice)
+    }
+
+    #[tokio::test]
+    async fn a_suspended_owner_is_refused_before_the_host_mints_a_device() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(vec![]);
+        let machine_id = "suspended-pair-machine";
+        let now = crate::account::store::now_secs();
+        let account = test_suspension_account(tmp.path());
+        seed_suspension_owner(
+            &account,
+            "user-suspended-pair",
+            "user-suspended-pair-token",
+            machine_id,
+            &identity(202, machine_id).public_key,
+            Some(now.saturating_sub(crate::account::billing::entitlement::GRACE_SECS + 1000)),
+            crate::account::billing::entitlement::FREE_HOSTS as usize + 1,
+        );
+        let entitlement = crate::account::billing::routes::entitlement_for_user(
+            &account,
+            "user-suspended-pair",
+            crate::account::billing::routes::billing_now(),
+        )
+        .unwrap();
+        assert!(!entitlement.remote_allowed, "the fixture owner must be stopped");
+        state.set_account_state(account);
+        let (generation, mut notices, _grants) = state.register_control_channel(machine_id.into());
+        state
+            .register_pairing(machine_id, generation, security_registration(machine_id))
+            .unwrap();
+        assert_eq!(security_claim(&state, "123456").await, StatusCode::PAYMENT_REQUIRED);
+        // The exchange never reached the host: no data channel was requested.
+        assert!(matches!(notices.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+        assert_eq!(state.inner.pairings.lock()["123456"].state, PairingState::Ready);
     }
 
     #[tokio::test]
