@@ -27,6 +27,7 @@ import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
 import { BrowserToolbar } from "./BrowserToolbar";
 import { BrowserDownloadsShelf } from "./BrowserDownloadsShelf";
 import { BrowserEngineFallbackNotice } from "./BrowserEngineFallbackNotice";
+import { BrowserMediaCaptureIndicator, BrowserPermissionPrompts } from "./BrowserPermissionPrompt";
 import type { BrowserTab } from "../lib/types";
 
 interface BrowserPaneProps {
@@ -405,6 +406,11 @@ export function BrowserPane({
         {liveTab.engine === "chromium" ? null : (
           <BrowserToolbar tab={liveTab} onNavigate={onNavigate} onReload={onReload} designFeedbackTargets={designFeedbackTargets} />
         )}
+        {/* Shown for both engines: the Chromium tab hides the Ferryx toolbar. */}
+        <div className="flex justify-end px-3 empty:hidden">
+          <BrowserMediaCaptureIndicator browserId={tab.browserId} />
+        </div>
+        <BrowserPermissionPrompts browserId={tab.browserId} />
         {findOpen ? (
           <div className="flex items-center gap-1.5 border-b border-border bg-popover px-3 py-1.5" data-testid="browser-find-bar">
             <input

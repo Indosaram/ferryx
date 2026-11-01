@@ -14,6 +14,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
 }));
 
+vi.mock("./SiteSettingsGroup", () => ({ SiteSettingsGroup: () => null }));
 vi.mock("../../lib/browserTauri", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../lib/browserTauri")>();
   return {

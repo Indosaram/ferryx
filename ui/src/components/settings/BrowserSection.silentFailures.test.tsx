@@ -10,6 +10,7 @@ const browserMocks = vi.hoisted(() => ({
   getBrowserEngineStatus: vi.fn(async () => ({ state: "unsupported" as const })),
 }));
 
+vi.mock("./SiteSettingsGroup", () => ({ SiteSettingsGroup: () => null }));
 vi.mock("../../lib/browserTauri", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../lib/browserTauri")>();
   return { ...actual, ...browserMocks };
