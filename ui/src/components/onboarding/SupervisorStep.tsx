@@ -14,8 +14,9 @@ import {
   type SetupStatus,
 } from "../../lib/supervisorSetup";
 import { MEMORY_IMPORT_LABEL } from "../supervisor/SupervisorSetupBanner";
+import { SetupChecklist } from "../supervisor/SetupChecklist";
 import { Button } from "../ui/button";
-import { WizardRow, WizardRowList, WizardStatus } from "./WizardPrimitives";
+import { WizardRowList, WizardStatus } from "./WizardPrimitives";
 
 export type SupervisorStepProps = {
   /** Registered local projects; every one is mapped unless unchecked. */
@@ -147,6 +148,25 @@ export function SupervisorStep({ projects, onReady }: SupervisorStepProps): JSX.
         <p data-testid="onboarding-supervisor-description" className="mt-1 break-words text-[12px] leading-relaxed text-muted-foreground">
           {shown.description}
         </p>
+        <SetupChecklist
+          status={status}
+          className="mt-2 border-t border-border/60 pt-1.5"
+          earlierJobsAction={
+            finished ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                data-testid="onboarding-supervisor-adopt"
+                disabled={adopting}
+                onClick={() => void adopt()}
+                className="h-6 px-2 text-[11px]"
+              >
+                Adopt {status.adoptable} earlier job{status.adoptable === 1 ? "" : "s"}
+              </Button>
+            ) : null
+          }
+        />
       </div>
 
       {canRun ? (
@@ -188,7 +208,7 @@ export function SupervisorStep({ projects, onReady }: SupervisorStepProps): JSX.
               </WizardRowList>
             </div>
           ) : (
-            <p className="text-[12px] text-muted-foreground">No projects yet. Projects you open later are added automatically.</p>
+            <p className="text-[12px] text-muted-foreground">No projects yet. Run setup again after adding a project.</p>
           )}
 
           <Button type="button" size="sm" data-testid="onboarding-supervisor-run" disabled={running} onClick={() => void turnOn()}>
@@ -196,21 +216,6 @@ export function SupervisorStep({ projects, onReady }: SupervisorStepProps): JSX.
             {started ? "Finish setup" : "Turn on supervisor"}
           </Button>
         </>
-      ) : null}
-
-      {status.adoptable > 0 && finished ? (
-        <WizardRowList>
-          <WizardRow
-            testId="onboarding-supervisor-adopt-row"
-            title={`${status.adoptable} earlier job${status.adoptable === 1 ? "" : "s"} can be handed to the supervisor`}
-            description="It keeps their goals and tracks them with the rest of your work."
-            action={
-              <Button type="button" size="sm" variant="outline" data-testid="onboarding-supervisor-adopt" disabled={adopting} onClick={() => void adopt()}>
-                Adopt {status.adoptable} earlier job{status.adoptable === 1 ? "" : "s"}
-              </Button>
-            }
-          />
-        </WizardRowList>
       ) : null}
 
       {notice ? (

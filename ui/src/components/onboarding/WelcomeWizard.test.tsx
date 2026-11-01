@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ResolvedAgent } from "../../lib/agentsSettings";
@@ -890,6 +890,26 @@ describe("WelcomeWizard", () => {
       expect(onStepCompleted).not.toHaveBeenCalled();
     });
 
+    it("shows every setup stage as a checklist under the status box", async () => {
+      daemon(setup("enable_engine"), setup("enable_engine"));
+      await act(async () => {
+        render(<WelcomeWizard {...createDefaultProps({ steps, initialStepIndex: 1, supervisorProjects: [] })} />);
+      });
+      const list = within(screen.getByTestId("onboarding-supervisor-status")).getByRole("list", { name: "Supervisor setup steps" });
+      const states = within(list)
+        .getAllByRole("listitem")
+        .map((item) => [item.getAttribute("data-testid"), item.getAttribute("data-state")]);
+      expect(states).toEqual([
+        ["setup-checklist-engine_on", "pending"],
+        ["setup-checklist-engine_ready", "pending"],
+        ["setup-checklist-owner", "pending"],
+        ["setup-checklist-projects", "pending"],
+        ["setup-checklist-cutover", "pending"],
+        ["setup-checklist-earlier_jobs", "done"],
+      ]);
+      expect(screen.getByText("No projects yet. Run setup again after adding a project.")).toBeDefined();
+    });
+
     it("offers to adopt earlier jobs once the supervisor runs and summarises the result", async () => {
       daemon(setup("adopt", { adoptable: 3, engineState: "ready" }), setup("none"));
       const onStepCompleted = vi.fn();
@@ -897,13 +917,17 @@ describe("WelcomeWizard", () => {
         render(<WelcomeWizard {...createDefaultProps({ steps, initialStepIndex: 1, onStepCompleted })} />);
       });
       expect(onStepCompleted).toHaveBeenCalledWith("supervisor");
+      const jobsRow = screen.getByTestId("setup-checklist-earlier_jobs");
+      expect(jobsRow.getAttribute("data-state")).toBe("pending");
+      expect(within(jobsRow).getByTestId("setup-checklist-earlier_jobs-detail").textContent).toBe("3 can be handed over");
       await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "Adopt 3 earlier jobs" }));
+        fireEvent.click(within(jobsRow).getByRole("button", { name: "Adopt 3 earlier jobs" }));
       });
       expect(ipc.invoke).toHaveBeenCalledWith("cmd_supervisor_adopt_all");
       expect(screen.getByTestId("onboarding-supervisor-notice").textContent).toBe(
         "Handed 2 jobs to the supervisor. 1 could not be handed over (LEGACY_GOAL_OFF).",
       );
+      expect(screen.getByTestId("setup-checklist-earlier_jobs").getAttribute("data-state")).toBe("done");
     });
 
     it("says setup is unavailable on an older daemon and lets the person skip", async () => {
