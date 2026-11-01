@@ -3744,11 +3744,9 @@ mod tests {
 
     /// Stands in for `open_generation` (stored replies, supervisor pane, then the tasks):
     /// counts how often a start reached it.
-    fn counting_spawn(calls: &std::sync::atomic::AtomicUsize) -> impl std::future::Future<Output = Generation> + '_ {
-        async move {
-            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Generation { tasks: Vec::new() }
-        }
+    async fn counting_spawn(calls: &std::sync::atomic::AtomicUsize) -> Generation {
+        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Generation { tasks: Vec::new() }
     }
 
     #[tokio::test]
