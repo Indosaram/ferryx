@@ -1696,24 +1696,127 @@ fn spawn_pipe_guarded_cat() -> (tokio::process::Child, std::os::unix::io::RawFd)
 }
 
 /// Spawns a child that does not exit when its stdin closes, plus a duplicate of its stdout
-/// pipe handle.
+/// pipe handle and a probe that proves the child is alive.
 ///
 /// `cat` cannot be used where stdin EOF must be ruled out: it exits by itself once the
 /// transferred stdin pipe closes, which would make "still alive" assertions vacuous.
+///
+/// The child is a shell that answers SIGUSR1 on its own probe pipe (fd 3). Its sleeps run
+/// with stdio and fd 3 closed, so only the shell holds the stdout and probe pipes: once it is
+/// gone both reach EOF. The function returns only after the shell has installed its trap,
+/// because an untrapped SIGUSR1 would terminate it.
 #[cfg(unix)]
-fn spawn_pipe_guarded_sleeper(seconds: u32) -> (tokio::process::Child, std::os::unix::io::RawFd) {
-    let child = tokio::process::Command::new("/bin/sh")
+fn spawn_pipe_guarded_sleeper() -> (
+    tokio::process::Child,
+    std::os::unix::io::RawFd,
+    LivenessProbe,
+) {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let mut fds = [0; 2];
+    // SAFETY: `pipe` writes two new descriptors into `fds`.
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "create probe pipe");
+    let (read, write) = (fds[0], fds[1]);
+    // SAFETY: both descriptors were just created by `pipe` and are owned here. Neither may
+    // leak into another test's child; the write end reaches this child only as fd 3.
+    unsafe {
+        libc::fcntl(read, libc::F_SETFD, libc::FD_CLOEXEC);
+        libc::fcntl(write, libc::F_SETFD, libc::FD_CLOEXEC);
+    }
+    let mut command = tokio::process::Command::new("/bin/sh");
+    command
         .arg("-c")
-        .arg(format!("exec sleep {seconds}"))
+        .arg(
+            "trap 'echo alive >&3' USR1; echo ready >&3; \
+             while :; do sleep 1 </dev/null >/dev/null 2>&1 3>&- & wait $!; done",
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn sleeper child");
-    use std::os::unix::io::AsRawFd;
+        .stderr(Stdio::piped());
+    // SAFETY: the hook runs between fork and exec and calls only async-signal-safe functions.
+    // It hands the probe's write end to the child as fd 3 without close-on-exec.
+    unsafe {
+        command.pre_exec(move || {
+            let installed = if write == 3 {
+                libc::fcntl(3, libc::F_SETFD, 0)
+            } else {
+                libc::dup2(write, 3)
+            };
+            if installed < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    let child = command.spawn().expect("spawn sleeper child");
+    // SAFETY: the child holds its own copy; this one is no longer used.
+    unsafe { libc::close(write) };
+    // SAFETY: `read` is an open descriptor owned by nothing else.
+    let replies = unsafe { OwnedFd::from_raw_fd(read) };
+    let mut poll_fd = libc::pollfd {
+        fd: replies.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one valid pollfd; the shell announces its trap within the timeout.
+    assert_eq!(unsafe { libc::poll(&mut poll_fd, 1, 5000) }, 1, "sleeper never got ready");
+    let mut buf = [0u8; 16];
+    // SAFETY: `buf` is live and `replies` is readable.
+    let announced = unsafe { libc::read(replies.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+    assert_eq!(announced, 6, "sleeper must announce its trap");
+    assert_eq!(&buf[..6], b"ready\n");
     let stdout = child.stdout.as_ref().expect("child stdout");
     let duped = dup_fd(stdout.as_raw_fd()).expect("dup stdout fd");
-    (child, duped)
+    let probe = LivenessProbe {
+        pid: child.id().expect("child id"),
+        replies,
+    };
+    (child, duped, probe)
+}
+
+/// Positive proof that a sleeper from [`spawn_pipe_guarded_sleeper`] is running.
+#[cfg(unix)]
+struct LivenessProbe {
+    pid: u32,
+    replies: std::os::fd::OwnedFd,
+}
+
+#[cfg(unix)]
+impl LivenessProbe {
+    /// Asks the child to answer and waits for the answer.
+    ///
+    /// Only a running shell executes its trap, so an answer proves the child is alive now. A
+    /// child that was killed - even one still dying and not yet a zombie - never answers, and
+    /// its probe pipe reaches EOF once it is gone, so a regression that kills it too early
+    /// fails here instead of passing as "not exited yet".
+    async fn answers(&self) -> bool {
+        use std::os::fd::AsRawFd;
+        // SAFETY: plain signal to the test's own child.
+        if unsafe { libc::kill(self.pid as i32, libc::SIGUSR1) } != 0 {
+            return false;
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut poll_fd = libc::pollfd {
+                fd: self.replies.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd, zero timeout.
+            if unsafe { libc::poll(&mut poll_fd, 1, 0) } > 0 {
+                let mut buf = [0u8; 64];
+                // SAFETY: `buf` is live and the probe pipe is readable (data or EOF).
+                let read = unsafe {
+                    libc::read(self.replies.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len())
+                };
+                return read > 0;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 }
 
 /// Spawns a `sleep` child with a non-piped stdin, i.e. one `from_child` must reject.
@@ -1733,16 +1836,6 @@ fn spawn_stdinless_sleeper() -> (tokio::process::Child, std::os::unix::io::RawFd
     (child, duped)
 }
 
-/// True while the test child is still running.
-///
-/// `waitpid(WNOHANG)` returns `0` only for a process that has not exited: an exited child is
-/// either reported (and reaped here) or already reaped, so this cannot be satisfied by a
-/// zombie that someone else should have been keeping alive.
-#[cfg(unix)]
-fn child_still_running(pid: u32) -> bool {
-    let mut status = 0;
-    unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) == 0 }
-}
 
 /// Event barrier: bounded wait for the duplicated child-stdout pipe to reach EOF.
 ///
@@ -1878,7 +1971,7 @@ async fn ssh_bridge_child_exit_on_cancellation_with_event_barrier() {
 #[cfg(unix)]
 #[tokio::test]
 async fn ssh_bridge_imported_connection_has_no_kill_rights() {
-    let (child, stdout_fd) = spawn_pipe_guarded_sleeper(300);
+    let (child, stdout_fd, probe) = spawn_pipe_guarded_sleeper();
     let pid = child.id().expect("child id");
     let mut conn = BridgeConnection::from_child(child).expect("from_child");
 
@@ -1891,7 +1984,7 @@ async fn ssh_bridge_imported_connection_has_no_kill_rights() {
 
     // Detaching releases the handle without signalling the child.
     assert!(
-        child_still_running(pid),
+        probe.answers().await,
         "child must survive predecessor detach"
     );
 
@@ -1902,7 +1995,7 @@ async fn ssh_bridge_imported_connection_has_no_kill_rights() {
     assert_eq!(imported.child_id(), Some(pid));
     imported.close().await.expect("close imported");
     assert!(
-        child_still_running(pid),
+        probe.answers().await,
         "imported close must not kill a child owned by another process"
     );
 
@@ -1940,7 +2033,7 @@ async fn ssh_bridge_ownership_ordering_detach_rollback_commit() {
     // Part 2: Commit ordering - detach releases the local handle without killing it, and the
     // successor can never kill a child it does not own.
     {
-        let (child, stdout_fd) = spawn_pipe_guarded_sleeper(300);
+        let (child, stdout_fd, probe) = spawn_pipe_guarded_sleeper();
         let pid = child.id().expect("child id");
         let mut conn = BridgeConnection::from_child(child).expect("from_child");
 
@@ -1953,7 +2046,7 @@ async fn ssh_bridge_ownership_ordering_detach_rollback_commit() {
 
         // Barrier check: child MUST NOT be killed by predecessor death!
         assert!(
-            child_still_running(pid),
+            probe.answers().await,
             "predecessor death must not kill detached child"
         );
 
@@ -1962,7 +2055,7 @@ async fn ssh_bridge_ownership_ordering_detach_rollback_commit() {
         assert_eq!(successor.child_id(), Some(pid));
         drop(successor);
         assert!(
-            child_still_running(pid),
+            probe.answers().await,
             "successor drop must not kill a child it does not own"
         );
 
