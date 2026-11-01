@@ -65,7 +65,6 @@ import {
 import {
   referenceAnswerFromText,
   referenceAnswerHint,
-  REFERENCE_PROMPT_STALE_MESSAGE,
 } from "./chat/referencePromptAnswer";
 import {
   REFERENCE_OUTCOME_UNKNOWN_CODE,
@@ -817,6 +816,18 @@ const CHAT_AMBIGUOUS_ANSWER_WARNING = "That answer did not name exactly one opti
 const CHAT_NO_SESSION_WARNING = "This session is not attached yet, so nothing was sent.";
 const CHAT_SUBMIT_TOO_LONG_WARNING = "That message is longer than the composer allows, so it was not sent.";
 const CHAT_OLDER_FAILED_WARNING = "Could not load earlier messages.";
+const CHAT_PROMPT_CHANGED_MESSAGE = "The question changed on your computer. Check it and answer again.";
+const CHAT_HELD_REMOVED_NOTICE = "Held message removed.";
+/** How long a removed held message can be brought back. */
+const CHAT_HELD_UNDO_MS = 5000;
+
+/** A file refusal as one plain sentence: the limit codes name the limit, nothing else leaks. */
+function chatAttachErrorMessage(error: unknown): string {
+  const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+  if (code === "PAYLOAD_TOO_LARGE") return "That file is over the size limit for one message, so it wasn't attached.";
+  if (code === "UNSUPPORTED_MEDIA_TYPE") return "That kind of file can't be attached here.";
+  return userFacingError(error, { action: "attach that file" });
+}
 
 /** The reference-chat page size for the newest read and for an older page. */
 const CHAT_HISTORY_PAGE_LIMIT = 200;
@@ -4528,7 +4539,8 @@ export const RemoteHostConnection: React.FC<{
           );
           staged.push(receipt);
         } catch (error) {
-          failure = error instanceof Error ? error.message : String(error);
+          console.warn("Staging a chat file failed", error);
+          failure = chatAttachErrorMessage(error);
           break;
         }
         if (!chatTargetIsCurrent(target)) break;
@@ -4572,13 +4584,13 @@ export const RemoteHostConnection: React.FC<{
       const entry = chatStagedFiles.find((file) => file.receipt.attachmentId === attachmentId);
       if (!entry) return;
       if (heldChatFileIsReferenced(target, entry)) {
-        setChatAttachError("Edit or remove the held messages referencing this file before removing it.");
+        setChatAttachError("A held message uses this file. Edit or remove that message first.");
         return;
       }
       const cleaned = await cancelReferenceChatFile({ transport: chatFileTransport }, target, entry);
       const stillCurrent = chatTargetIsCurrent(target);
       if (!cleaned.cleaned) {
-        if (stillCurrent) setChatAttachError("The host did not confirm that the staged file was removed.");
+        if (stillCurrent) setChatAttachError("Your computer didn't confirm the file was removed. Try again.");
         return;
       }
       if (stillCurrent) {
@@ -4619,12 +4631,42 @@ export const RemoteHostConnection: React.FC<{
     setChatHeld([...referenceQueues.read(target)]);
   }, []);
 
+  /* Removing a held message is undoable for a few seconds: the row leaves the list at once and
+     is written back (as a new held entry with the same text) if the user taps Undo in time. */
+  const chatHeldUndoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (chatHeldUndoTimerRef.current !== null) clearTimeout(chatHeldUndoTimerRef.current);
+  }, []);
   const removeChatHeld = useCallback((id: string) => {
     const target = chatTargetRef.current;
     if (!target) return;
+    const removed = referenceQueues.read(target).find((message) => message.id === id);
     referenceQueues.remove(target, id);
     setChatHeld([...referenceQueues.read(target)]);
-  }, []);
+    if (!removed) return;
+    if (chatHeldUndoTimerRef.current !== null) clearTimeout(chatHeldUndoTimerRef.current);
+    setChatComposerNotice(CHAT_HELD_REMOVED_NOTICE);
+    const toastId = toast(CHAT_HELD_REMOVED_NOTICE, {
+      duration: CHAT_HELD_UNDO_MS,
+      action: {
+        label: "Undo",
+        onClick: () => {
+          if (chatHeldUndoTimerRef.current !== null) clearTimeout(chatHeldUndoTimerRef.current);
+          chatHeldUndoTimerRef.current = null;
+          referenceQueues.add(target, removed.text);
+          if (chatTargetIsCurrent(target)) {
+            setChatHeld([...referenceQueues.read(target)]);
+            setChatComposerNotice(null);
+          }
+        },
+      },
+    });
+    chatHeldUndoTimerRef.current = setTimeout(() => {
+      chatHeldUndoTimerRef.current = null;
+      toast.dismiss(toastId);
+      setChatComposerNotice((notice) => (notice === CHAT_HELD_REMOVED_NOTICE ? null : notice));
+    }, CHAT_HELD_UNDO_MS);
+  }, [chatTargetIsCurrent]);
 
   /** The composer's own send: a prompt turns the text into an answer, or holds it. */
   const handleChatComposerSend = useCallback(
@@ -4655,7 +4697,7 @@ export const RemoteHostConnection: React.FC<{
         }
         const revision = chatScreenRevision;
         if (revision === null) {
-          setChatPromptError(REFERENCE_PROMPT_STALE_MESSAGE);
+          setChatPromptError(CHAT_PROMPT_CHANGED_MESSAGE);
           return false;
         }
         const target = chatTargetRef.current;
@@ -4738,7 +4780,7 @@ export const RemoteHostConnection: React.FC<{
         onAnswer={answerChatPrompt}
         onPromptChanged={() => {
           // The screen moved under the answer: say so and re-read it before anything else.
-          setChatPromptError(REFERENCE_PROMPT_STALE_MESSAGE);
+          setChatPromptError(CHAT_PROMPT_CHANGED_MESSAGE);
           setChatPromptRefresh((generation) => generation + 1);
         }}
         onAnswered={(toMessageBox) => {

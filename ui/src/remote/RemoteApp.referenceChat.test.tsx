@@ -653,6 +653,45 @@ describe("reference chat lane (task 12)", () => {
     expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("something else");
   });
 
+  it("T-23: a removed held message can be brought back with Undo within five seconds", async () => {
+    setWidth(390);
+    const prompt = {
+      prompt: {
+        promptId: "prompt-undo",
+        agent: "claude",
+        kind: "question",
+        title: "Which file?",
+        question: "Which file?",
+        options: [{ label: "src/main.rs" }, { label: "src/lib.rs" }],
+        multiSelect: false,
+      },
+      screenRevision: "rev-undo",
+      cols: 80,
+      rows: 24,
+    };
+    installFetch({ prompt: () => prompt });
+    render(<RemoteApp />);
+    await screen.findByTestId("reference-prompt-card");
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "keep me" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    const held = await screen.findByTestId("chat-composer-held");
+    const remove = held.querySelector<HTMLButtonElement>('[data-testid^="held-message-remove-"]');
+    expect(remove).not.toBeNull();
+
+    await act(async () => {
+      fireEvent.click(remove!);
+    });
+    expect(screen.queryByText("keep me", { selector: '[data-testid="chat-composer-held"] *' })).not.toBeInTheDocument();
+    expect(screen.getByTestId("chat-composer-warning")).toHaveTextContent("Held message removed.");
+
+    await act(async () => {
+      fireEvent.click(await screen.findByRole("button", { name: "Undo" }));
+    });
+    expect(await screen.findByTestId("chat-composer-held")).toHaveTextContent("keep me");
+  });
+
   it("QA-07: a staged file becomes an editable mention through /files", async () => {
     setWidth(390);
     const harness = installFetch();
@@ -919,7 +958,7 @@ describe("reference chat lane (task 12)", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId("chat-composer-attach-error")).toHaveTextContent(/over the limit/i);
+      expect(screen.getByTestId("chat-composer-attach-error")).toHaveTextContent(/over the size limit/i);
     });
     // nothing was staged, so there is no chip and no mention, and the draft is untouched
     expect(screen.queryByTestId(/^attachment-preview-/)).not.toBeInTheDocument();
@@ -1525,6 +1564,9 @@ describe("reference chat lane review fixes", () => {
       fireEvent.keyDown(option, { key: "Enter" });
       fireEvent.click(option, { detail: 0 });
     });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("reference-prompt-submit"));
+    });
     await waitFor(() => {
       expect(screen.queryByTestId("reference-prompt-card")).not.toBeInTheDocument();
     });
@@ -1870,6 +1912,9 @@ describe("reference chat lane review fixes", () => {
       await screen.findByText("Question A");
       await act(async () => {
         fireEvent.click(screen.getByTestId("reference-prompt-option-0"));
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("reference-prompt-submit"));
       });
 
       moveTransportBase();
@@ -2575,6 +2620,9 @@ describe("reference chat lane review fixes", () => {
     const dispatched = bounded(arrived.promise);
     await act(async () => {
       fireEvent.click(screen.getByTestId("reference-prompt-option-0"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("reference-prompt-submit"));
       await dispatched;
     });
     expect(calls.find((call) => call.url.includes("/answer"))?.body).toMatchObject({
@@ -2664,6 +2712,9 @@ describe("reference chat lane review fixes", () => {
     await act(async () => {
       fireEvent.click(screen.getByTestId("reference-prompt-option-0"));
     });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("reference-prompt-submit"));
+    });
 
     await switchToSecondTab();
     await screen.findByText("Question B");
@@ -2695,6 +2746,9 @@ describe("reference chat lane review fixes", () => {
     await screen.findByText("Question A");
     await act(async () => {
       fireEvent.click(screen.getByTestId("reference-prompt-option-0"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("reference-prompt-submit"));
     });
 
     await switchToSecondTab();
@@ -2860,7 +2914,8 @@ describe("reference chat lane review fixes", () => {
 
     expect(calls.filter((call) => call.method === "POST" && call.url.includes("/files"))).toHaveLength(2);
     expect(screen.queryByTestId("attachment-preview-att-three.txt")).not.toBeInTheDocument();
-    expect(screen.getByTestId("chat-composer-attach-error")).toHaveTextContent(/must stay within/);
+    expect(screen.getByTestId("chat-composer-attach-error")).toHaveTextContent(/over the size limit/);
+    expect(screen.getByTestId("chat-composer-attach-error").textContent).not.toMatch(/bytes/);
   }, 30_000);
 
   it("ui-workspace-wiring-r15-2: a slide past a repeated turn keeps every turn it slid past", async () => {
