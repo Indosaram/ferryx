@@ -30,13 +30,16 @@ const UPGRADE_TIMEOUT: Duration = Duration::from_secs(10);
 const ACK_REPLY_WINDOW: Duration = Duration::from_secs(30);
 /// The `op` an owner puts on the error frame answering an outcome acknowledgement.
 const ACK_OP: &str = "acknowledgeAgentOutcome";
-/// Every code an owner without operation-tagged error frames answers a rejected
-/// acknowledgement with. Such an owner admits its machine socket only for a local
-/// PTY (`machine_pty`), so its router always takes the local branch: no SSH
-/// workspace is registered for the session, no paired chain or legacy peer is
-/// consulted, and the only backend failure is a missing mirror. The socket itself
-/// answers a stale-generation acknowledgement with INVALID_CONTROL_OR_GENERATION.
-/// STALE_GENERATION (authority revoked) stays fatal: the stream is fenced anyway.
+/// The codes an owner without operation-tagged error frames answers a rejected
+/// acknowledgement with while its session lives. Such an owner admits its machine
+/// socket only for a local PTY (`machine_pty`), so its router takes the local
+/// branch: no SSH workspace is registered for the session, no paired chain or
+/// legacy peer is consulted, and the only backend failure is a missing mirror. The
+/// socket itself answers a stale-generation acknowledgement with
+/// INVALID_CONTROL_OR_GENERATION. Left fatal on purpose: STALE_GENERATION
+/// (authority revoked, the stream is fenced anyway) and "Session unavailable",
+/// which such an owner sends only when the PTY vanished between its frame check
+/// and the router (the session is gone, its exit or expiry is on the way).
 const LEGACY_ACK_REJECTIONS: [&str; 2] =
     ["INVALID_CONTROL_OR_GENERATION", "Session has no program status mirror"];
 fn error(code: &str) -> ClientError {
