@@ -388,7 +388,7 @@ const norm = (text) => text.toLowerCase().replace(/[^a-z0-9:%./]/g, "");
 function findWord(words, text, { nth = 0, minX = 0, maxX = Infinity, pick = "first", match = null } = {}) {
   const test = match ?? ((word) => norm(word.text) === norm(text));
   const hits = (words ?? []).filter((word) => test(word) && word.left >= minX && word.left <= maxX).sort((a, b) => a.top - b.top || a.left - b.left);
-  const word = pick === "rightmost" ? [...hits].sort((a, b) => b.left - a.left)[0] : hits[nth];
+  const word = pick === "rightmost" ? [...hits].sort((a, b) => b.left - a.left)[0] : pick === "leftmost" ? [...hits].sort((a, b) => a.left - b.left)[0] : hits[nth];
   return word ? { x: word.left + Math.round(word.width / 2), y: word.top + Math.round(word.height / 2), right: word.left + word.width, height: word.height, left: word.left, hits: hits.length } : null;
 }
 function probeShot() {
@@ -552,18 +552,26 @@ if (app) {
 }
 
 /** Click a sidebar label so keyboard focus leaves an embedded webview and app shortcuts reach the UI. */
-const chromeFocus = ["optional click sidebar (focus app chrome)", () => clickText("Projects", { timeout: 3000 })];
+const chromeFocus = ["optional click sidebar 'Worktrees' (focus app chrome)", () => clickText("Worktrees", { timeout: 3000, match: (word) => word.text === "Worktrees" })];
 /** OCR the browser toolbar zoom label (e.g. "100%"). */
 function zoomLabel() {
   const words = ocr(probeShot()) ?? [];
   return words.map((word) => word.text).find((text) => /^\d{2,3}%$/.test(text)) ?? null;
 }
+/**
+ * Click inside the address bar. The sidebar's "Worktrees" segment shares the toolbar row, and the
+ * bar starts just right of the sidebar, so the bar is at (Worktrees.x + 400, Worktrees.y) on every
+ * OS at 1x. Falls back to Mod+L when the sidebar label is not readable.
+ */
 const typeUrl = (url) => [
-  clickOr("about:blank", [key("Mod+L", { key: "l", mods: ["mod"] })], {
-    timeout: 2000,
-    match: (word) => /^(about:blank|https?:\/\/|:\/\/127|\/\/127)/.test(word.text),
-    pick: "first",
-  }),
+  ["click address bar (Mod+L fallback)", async () => {
+    const anchor = findWord(ocr(probeShot()), "Worktrees", { match: (word) => word.text === "Worktrees" });
+    if (anchor) {
+      const at = [anchor.x + 400, anchor.y];
+      return { ...host.click(...at), via: "ocr-click", at };
+    }
+    return { ...host.key({ key: "l", mods: ["mod"] }), via: "keyboard" };
+  }],
   key("Mod+A", { key: "a", mods: ["mod"] }),
   ["type URL", () => host.type(url)],
   key("Enter", { key: "Enter" }),
@@ -586,7 +594,13 @@ await step(
   [focus, ...typeUrl("https://example.com"), 8000],
   { any: ["Domain", "documentation", "illustrative"] },
 );
-await step("settings-open", "Click the sidebar so the app has focus, then Mod+, opens Settings (General)", [focus, chromeFocus, key("Mod+,", { key: ",", mods: ["mod"] }), 2000], {
+await step("settings-open", "Click the sidebar so the app has focus, then Mod+, opens Settings (General)", [
+  focus,
+  chromeFocus,
+  key("Mod+,", { key: ",", mods: ["mod"] }),
+  2000,
+  ["optional dismiss Windows store toast", () => (platform === "win32" ? clickText("Got", { timeout: 1500, match: (word) => word.text === "Got" }) : { ok: true })],
+], {
   any: ["General", "Appearance"],
 });
 await step(
@@ -617,7 +631,15 @@ await step(
 await step(
   "settings-browser",
   "Click 'Browser' in the Settings nav (fallback: Tab x6, Enter)",
-  [focus, clickOr("Browser", [key("Escape", { key: "Escape" }), key("Mod+,", { key: ",", mods: ["mod"] }), ...repeat(6, "Tab", { key: "Tab" }), key("Enter", { key: "Enter" })]), 2500],
+  [
+    focus,
+    // Exact case and leftmost: "browser" also appears in General's row descriptions.
+    clickOr("Browser", [key("Escape", { key: "Escape" }), key("Mod+,", { key: ",", mods: ["mod"] }), ...repeat(6, "Tab", { key: "Tab" }), key("Enter", { key: "Enter" })], {
+      match: (word) => word.text === "Browser",
+      pick: "leftmost",
+    }),
+    2500,
+  ],
   { any: ["Chromium", "Engine", "engine", "Search"] },
 );
 if (engineZip) {
@@ -677,7 +699,7 @@ await step(
   [focus, ...typeUrl("https://example.com"), 6000],
   { any: ["Domain", "documentation", "illustrative"] },
 );
-await step("find-bar", "Mod+F opens the find bar; type 'Example'", [focus, key("Mod+F", { key: "f", mods: ["mod"] }), 1000, ["type query", () => host.type("Example")], 1500], {
+await step("find-bar", "Mod+F opens the find bar; type 'Example'", [focus, chromeFocus, key("Mod+F", { key: "f", mods: ["mod"] }), 1000, ["type query", () => host.type("Example")], 1500], {
   any: ["matches", "match", "1/1", "of"],
 });
 let zoomBefore = null;
@@ -687,6 +709,7 @@ await step(
   [
     focus,
     key("Escape", { key: "Escape" }),
+    chromeFocus,
     ["read zoom label", () => ((zoomBefore = zoomLabel()), { ok: true, zoom_before: zoomBefore })],
     key("Mod+= 1", { key: "=", mods: ["mod"] }),
     key("Mod+= 2", { key: "=", mods: ["mod"] }),
