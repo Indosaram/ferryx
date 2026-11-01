@@ -774,14 +774,14 @@ describe("Remote UI Components", () => {
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Machines" })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Remove pairing" })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Confirm disconnect" })); });
-    expect(screen.getByRole("heading", { name: "Sign In to Ferryx" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Sign in to Ferryx" })).toBeInTheDocument();
     expect(screen.queryByTestId("remote-terminal")).toBeNull();
   });
 
   it("PairingPage renders the Ferryx Desktop PIN flow", () => {
     render(<PairingPage onPaired={vi.fn()} />);
 
-    const input = screen.getByPlaceholderText(/6-digit PIN/i);
+    const input = screen.getByLabelText("Pairing code");
     expect(input).toHaveAttribute("maxLength", "6");
     expect(screen.getByText(/Ferryx Desktop settings/i)).toBeInTheDocument();
   });
@@ -1732,7 +1732,7 @@ describe("Remote UI Components", () => {
     render(<RemoteApp />);
 
     // Must navigate to account sign-in surface and clear token
-    expect(await screen.findByRole("heading", { name: /Sign In to Ferryx/i })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /Sign in to Ferryx/i })).toBeInTheDocument();
     expect(screen.getByPlaceholderText("name@example.com")).toBeInTheDocument();
     expect(localStorage.getItem("ferryx_remote_token")).toBeNull();
   });
@@ -2528,13 +2528,13 @@ describe("Remote UI Components", () => {
     fireEvent.click(screen.getByRole("button", { name: "Machines" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove pairing" }));
 
-    expect(screen.queryByRole("heading", { name: /Sign In to Ferryx/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /Sign in to Ferryx/i })).not.toBeInTheDocument();
     expect(screen.getByTestId("remote-terminal")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Confirm disconnect" }));
 
     expect(screen.queryByTestId("remote-terminal")).not.toBeInTheDocument();
-    expect(await screen.findByRole("heading", { name: /Sign In to Ferryx/i })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /Sign in to Ferryx/i })).toBeInTheDocument();
     expect(screen.getByPlaceholderText("name@example.com")).toBeInTheDocument();
   });
 

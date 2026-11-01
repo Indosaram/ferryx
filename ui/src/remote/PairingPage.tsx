@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { getOrCreateInstallationId } from "../lib/storageKeys";
 import { suggestDeviceName } from "./deviceIdentity";
+import { userFacingError } from "./userFacingError";
 
 /** Path of the phone pairing entry; the desktop's QR code opens it. */
 export const PAIR_ROUTE_PATH = "/pair";
@@ -25,12 +26,29 @@ async function pairingFailure(res: Response): Promise<{ code: string | null; rem
   }
 }
 
+/** The one sentence a refused exchange shows; the status and machine code stay out of the copy. */
+function pairingRefusalMessage(status: number, code: string | null, remaining: number | null): string {
+  if (status === 429 || code === "pairing_rate_limited") {
+    return "Too many attempts. Wait a minute, then get a new code from Ferryx on your computer.";
+  }
+  if (code === "PIN_EXPIRED") return "This code expired. Get a new code from Ferryx on your computer.";
+  if (code === "INVALID_PIN" && remaining !== null) {
+    return `Wrong code. ${remaining} ${remaining === 1 ? "attempt" : "attempts"} left.`;
+  }
+  return "That code didn't work. Get a new code from Ferryx on your computer and try again.";
+}
+
 type PairingPageProps = {
   onPaired: (token: string, metadata?: { machineId?: unknown; displayName?: unknown }) => void;
   transportUrl?: string;
+  /** Leaves the pairing entry for account sign-in. */
+  onUseAccount?: () => void;
 };
 
-export const PairingPage: React.FC<PairingPageProps> = ({ onPaired, transportUrl = window.location.origin }) => {
+const FIELD_CLASS =
+  "h-11 w-full rounded-lg border border-input bg-background px-3.5 text-base text-foreground placeholder:text-muted-foreground focus:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50";
+
+export const PairingPage: React.FC<PairingPageProps> = ({ onPaired, transportUrl = window.location.origin, onUseAccount }) => {
   const [code, setCode] = useState("");
   const [deviceName, setDeviceName] = useState(() => suggestDeviceName());
   const [error, setError] = useState<string | null>(null);
@@ -57,81 +75,91 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired, transportUrl
 
       if (!res.ok) {
         const failure = await pairingFailure(res);
-        if (res.status === 429 || failure.code === "pairing_rate_limited") {
-          throw new Error("Too many attempts. Wait a moment, then request a new code in Ferryx Desktop.");
-        }
-        if (failure.code === "PIN_EXPIRED") {
-          throw new Error("Code expired. Ask for a new code in Ferryx Desktop settings.");
-        }
-        const remaining = failure.remainingAttempts;
-        if (failure.code === "INVALID_PIN" && remaining !== null) {
-          throw new Error(`Wrong code. ${remaining} ${remaining === 1 ? "attempt" : "attempts"} left.`);
-        }
-        throw new Error(`Pairing failed (${res.status})`);
+        setError(pairingRefusalMessage(res.status, failure.code, failure.remainingAttempts));
+        return;
       }
 
       const data = await res.json();
       onPaired(data.token, { machineId: data.machineId, displayName: data.displayName });
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to pair device");
+      console.warn("Pair exchange failed", err);
+      setError(userFacingError(err, { action: "pair this phone" }));
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-[80vh] p-4">
-      <div className="w-full max-w-sm bg-card border border-border rounded-lg p-6 shadow-xl">
-        <h2 className="text-xl font-bold text-foreground mb-2">Pair Device</h2>
-        <p className="text-xs text-muted-foreground mb-6">
-          Enter the 6-digit code shown in Ferryx Desktop settings.
-        </p>
+    <main className="flex min-h-dvh w-full flex-col items-center justify-center bg-background px-4 pt-[max(env(safe-area-inset-top),1rem)] pb-[max(env(safe-area-inset-bottom),1rem)] text-foreground">
+      <div className="w-full max-w-sm space-y-6">
+        <div className="space-y-2">
+          <h1 className="text-xl font-semibold tracking-tight text-foreground">Pair this phone</h1>
+          <p className="text-sm text-muted-foreground">
+            Enter the 6-digit pairing code shown in Ferryx Desktop settings.
+          </p>
+        </div>
 
         {error && (
-          <div className="p-3 mb-4 text-xs bg-destructive/15 border border-destructive text-destructive-foreground rounded">
+          <div role="alert" data-testid="pairing-error" className="rounded-lg bg-destructive/10 p-3.5 text-sm leading-relaxed text-foreground">
             {error}
           </div>
         )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-1">
-              Device Name
+          <div className="space-y-2">
+            <label htmlFor="pairing-device-name" className="block text-sm font-medium text-foreground">
+              Phone name
             </label>
             <input
+              id="pairing-device-name"
               type="text"
               value={deviceName}
               onChange={(e) => setDeviceName(e.target.value)}
-              placeholder="Device name"
-              className="w-full px-3 py-2 bg-background border border-border text-foreground rounded text-sm focus:outline-none focus:border-ring"
+              placeholder="Phone name"
+              autoComplete="off"
+              className={FIELD_CLASS}
               disabled={loading}
             />
           </div>
 
-          <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-1">
-              Pairing PIN
+          <div className="space-y-2">
+            <label htmlFor="pairing-code" className="block text-sm font-medium text-foreground">
+              Pairing code
             </label>
             <input
+              id="pairing-code"
               type="text"
               value={code}
               onChange={(e) => setCode(e.target.value)}
-              placeholder="6-digit PIN" maxLength={6} inputMode="numeric" pattern="[0-9]*"
-              className="w-full px-3 py-2 bg-background border border-border text-foreground rounded font-mono text-sm focus:outline-none focus:border-ring"
+              placeholder="6-digit code"
+              maxLength={6}
+              inputMode="numeric"
+              pattern="[0-9]*"
+              autoComplete="one-time-code"
+              className={`${FIELD_CLASS} font-mono tracking-widest`}
               disabled={loading}
-              autoFocus
             />
           </div>
 
           <button
             type="submit"
             disabled={loading || !code.trim()}
-            className="w-full py-2 px-4 bg-primary hover:bg-primary/90 disabled:opacity-50 text-primary-foreground rounded text-sm font-medium transition-colors"
+            className="flex h-11 w-full items-center justify-center rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
           >
             {loading ? "Connecting..." : "Connect"}
           </button>
         </form>
+
+        {onUseAccount ? (
+          <button
+            type="button"
+            onClick={onUseAccount}
+            className="flex h-11 w-full items-center justify-center rounded-lg text-sm font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            Sign in with email instead
+          </button>
+        ) : null}
       </div>
-    </div>
+    </main>
   );
 };

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { AlertCircle, LoaderCircle } from "lucide-react";
+import { LoaderCircle } from "lucide-react";
 import { AccountLoginPage } from "./AccountLoginPage";
 import {
   AccountSessionError,
@@ -130,7 +130,7 @@ export const ApprovePage: React.FC<ApprovePageProps> = ({ relayUrl }) => {
 
   if (!origin) {
     return (
-      <main className="flex min-h-dvh items-center justify-center bg-background text-foreground">
+      <main className="flex min-h-dvh items-center justify-center bg-background pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] text-foreground">
         <LoaderCircle className="size-5 animate-spin motion-reduce:animate-none text-muted-foreground" aria-label="Loading" />
       </main>
     );
@@ -157,13 +157,20 @@ export const ApprovePage: React.FC<ApprovePageProps> = ({ relayUrl }) => {
     setUserCode(next);
   };
 
+  const signOut = () => {
+    clearStoredAccountSessionToken();
+    setRequest(null);
+    setError(null);
+    setToken(null);
+  };
+
   return (
-    <main className="flex min-h-dvh items-start justify-center bg-background p-4 text-foreground sm:items-center sm:p-6">
+    <main className="flex min-h-dvh items-start justify-center bg-background px-4 pt-[max(env(safe-area-inset-top),1rem)] pb-[max(env(safe-area-inset-bottom),1rem)] text-foreground sm:items-center sm:p-6">
       <div className="w-full max-w-sm space-y-4">
         <div className="space-y-1">
-          <h1 className="text-[16px] font-semibold">Approve a machine</h1>
-          <p className="text-[12px] text-muted-foreground">
-            A machine asked to join your Ferryx account. Check its details before you decide.
+          <h1 className="text-xl font-semibold">Approve a computer</h1>
+          <p className="text-sm text-muted-foreground">
+            A computer asked to join your Ferryx account. Check its details before you decide.
           </p>
         </div>
 
@@ -176,36 +183,44 @@ export const ApprovePage: React.FC<ApprovePageProps> = ({ relayUrl }) => {
           />
         ) : (
           <form className="space-y-3" onSubmit={submitCode}>
-            <label htmlFor="approve-page-code" className="block text-[12px] font-medium">Approval code</label>
+            <label htmlFor="approve-page-code" className="block text-sm font-medium">Approval code</label>
             <Input
               id="approve-page-code"
               aria-label="Approval code"
               autoComplete="off"
+              autoCapitalize="characters"
               spellCheck={false}
               maxLength={9}
               placeholder="XXXX-XXXX"
-              className="font-mono uppercase tracking-wider"
+              className="h-11 font-mono text-base uppercase tracking-wider"
               disabled={loading}
               value={codeDraft}
               onChange={(e) => setCodeDraft(e.target.value)}
             />
             {loading ? (
-              <p role="status" className="flex items-center gap-2 text-[12px] text-muted-foreground">
-                <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
-                Looking up the machine…
+              <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground">
+                <LoaderCircle className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                Looking up the computer...
               </p>
             ) : null}
             {error ? (
-              <div role="alert" className="flex items-start gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-3 text-[12px] text-destructive">
-                <AlertCircle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+              <div role="alert" className="rounded-lg bg-destructive/10 p-3.5 text-sm leading-relaxed text-foreground">
                 <span className="break-words">{error}</span>
               </div>
             ) : null}
-            <Button type="submit" size="sm" className="w-full text-[13px]" disabled={loading || !codeDraft.trim()}>
-              Find machine
+            <Button type="submit" className="h-11 w-full text-sm" disabled={loading || !codeDraft.trim()}>
+              Find computer
             </Button>
           </form>
         )}
+        <button
+          type="button"
+          data-testid="approve-page-sign-out"
+          onClick={signOut}
+          className="flex h-11 w-full items-center justify-center rounded-lg text-sm font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          Not your account? Sign out
+        </button>
       </div>
     </main>
   );

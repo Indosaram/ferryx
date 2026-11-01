@@ -106,7 +106,7 @@ import {
 
 import { AccountLoginPage } from "./AccountLoginPage";
 import { ApprovePage, isApproveRoute } from "./ApprovePage";
-import { isPairRoute, PairingPage } from "./PairingPage";
+import { isPairRoute, PAIR_ROUTE_PATH, PairingPage } from "./PairingPage";
 import {
   useAccountWorktrees,
   type AccountWorktreeOption,
@@ -1116,6 +1116,10 @@ export const RemoteApp: React.FC = () => {
     return (
       <PairingPage
         transportUrl={origin}
+        onUseAccount={() => {
+          window.history.replaceState(null, "", "/");
+          setPairRoute(false);
+        }}
         onPaired={(token, metadata) => {
           const machineId = optionalString(metadata?.machineId);
           const displayName = optionalString(metadata?.displayName);
@@ -1155,6 +1159,10 @@ export const RemoteApp: React.FC = () => {
       viewMode={viewMode}
       onViewModeChange={setViewMode}
       initialMagicLinkRequested={magicLinkOverridden}
+      onPairWithCode={() => {
+        window.history.pushState(null, "", PAIR_ROUTE_PATH);
+        setPairRoute(true);
+      }}
       onMagicLinkConsumed={() => {
         remoteHostStore.setActiveHost(null);
         setMagicLinkOverridden(false);
@@ -1216,7 +1224,8 @@ export const RemoteHostConnection: React.FC<{
   onViewModeChange?: (mode: "chat" | "terminal" | "browser") => void;
   initialMagicLinkRequested?: boolean;
   onMagicLinkConsumed?: () => void;
-}> = ({ hostId, relayUrl, readUrlHints, viewMode: controlledViewMode, onViewModeChange, initialMagicLinkRequested = false, onMagicLinkConsumed }) => {
+  onPairWithCode?: () => void;
+}> = ({ hostId, relayUrl, readUrlHints, viewMode: controlledViewMode, onViewModeChange, initialMagicLinkRequested = false, onMagicLinkConsumed, onPairWithCode }) => {
   const desktopSidebar = useRemoteDesktopSidebar();
   const [magicLinkActive, setMagicLinkActive] = useState(initialMagicLinkRequested);
   const [token, setToken] = useState<string | null>(() => {
@@ -1263,6 +1272,7 @@ export const RemoteHostConnection: React.FC<{
   const [menuOpen, setMenuOpen] = useState(false);
   const [phoneAlertsOpen, setPhoneAlertsOpen] = useState(false);
   const [creationError, setCreationError] = useState<string | null>(null);
+  const [signedOutNotice, setSignedOutNotice] = useState<string | null>(null);
   const creationSessionsRef = useRef<Set<string> | null>(null);
   const [viewportHeight, setViewportHeight] = useState(() => window.visualViewport?.height);
   useEffect(() => {
@@ -2049,6 +2059,7 @@ export const RemoteHostConnection: React.FC<{
       });
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
+          setSignedOutNotice("This phone was signed out of your computer. Pair it again or sign in to continue.");
           disconnect();
         }
         return null;
@@ -4583,7 +4594,10 @@ export const RemoteHostConnection: React.FC<{
     return (
       <AccountLoginPage
         relayUrl={relayUrl}
+        onPairWithCode={onPairWithCode}
+        notice={signedOutNotice}
         onLoginSuccess={(tok, email) => {
+          setSignedOutNotice(null);
           storeAccountEmail(email);
           setAccountEmail(email || null);
           setAccountSessionToken(tok);
