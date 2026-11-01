@@ -217,6 +217,20 @@ describe("MobileChatWorkspace", () => {
     expect(screen.getByTestId("chat-history-warning")).toHaveTextContent("not available");
   });
 
+  it("forwards the composer warning's action to the message box", () => {
+    const onAction = vi.fn();
+    render(
+      <MobileChatWorkspace
+        messages={[]}
+        onSendMessage={vi.fn()}
+        composerWarning="The stop request was not delivered."
+        composerWarningAction={{ label: "Try again", onAction }}
+      />
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(onAction).toHaveBeenCalledTimes(1);
+  });
+
   it("marks the owner's optimistic echo of a send as sending until the transcript carries it", () => {
     render(
       <MobileChatWorkspace

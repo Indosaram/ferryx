@@ -77,6 +77,8 @@ export interface MobileChatWorkspaceProps {
   readonly composerHandleRef?: React.MutableRefObject<MobileChatComposerHandle | null>;
   /** Something the user must know about this lane. */
   readonly composerWarning?: string | null;
+  /** One action for the composer warning (retry, reconnect), drawn as a 44px button beside it. */
+  readonly composerWarningAction?: { readonly label: string; readonly onAction: () => void } | null;
   /** Where a part bytes live when the page does not carry them. */
   readonly referenceContext?: ReferencePartRenderContext;
 
@@ -163,6 +165,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   promptCard,
   composerHandleRef,
   composerWarning = null,
+  composerWarningAction = null,
   referenceContext,
   className,
   warnings,
@@ -509,6 +512,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             onRemoveHeld={onRemoveHeld}
             promptCard={promptCard}
             warning={composerWarning}
+            warningAction={composerWarningAction}
             onSend={onSendMessage}
             onStop={onStopExecution}
             isRunning={isRunning}

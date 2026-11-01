@@ -54,6 +54,21 @@ describe("MobileOverflowSheet", () => {
     expect(signOut.parentElement).toHaveClass("border-t");
   });
 
+  it("offers Open browser only when the owner can open one", () => {
+    const onOpenBrowser = vi.fn();
+    const onOpenChange = vi.fn();
+    const { rerender } = render(<MobileOverflowSheet open onOpenChange={onOpenChange} />);
+    expect(screen.queryByTestId("overflow-action-open-browser")).not.toBeInTheDocument();
+
+    rerender(<MobileOverflowSheet open onOpenChange={onOpenChange} onOpenBrowser={onOpenBrowser} />);
+    const item = screen.getByTestId("overflow-action-open-browser");
+    expect(item).toHaveTextContent("Open browser");
+    expect(item).toHaveClass("min-h-12");
+    fireEvent.click(item);
+    expect(onOpenBrowser).toHaveBeenCalledTimes(1);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
   it("signs out only on a second, explicit press", () => {
     const onSignOut = vi.fn();
     const onOpenChange = vi.fn();

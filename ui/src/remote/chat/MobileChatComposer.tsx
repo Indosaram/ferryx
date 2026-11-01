@@ -60,6 +60,8 @@ export interface MobileChatComposerProps {
   readonly promptCard?: React.ReactNode;
   /** Something the user must know about this lane (a refused Stop, a held send, a lost host). */
   readonly warning?: string | null;
+  /** One thing the user can do about the warning (retry, reconnect), drawn beside it. */
+  readonly warningAction?: { readonly label: string; readonly onAction: () => void } | null;
   /** Send the draft. `false` means the owner kept it (held, refused) and the box must not clear. */
   readonly onSend: (text: string) => boolean | void;
   readonly onStop?: () => void;
@@ -109,6 +111,7 @@ export const MobileChatComposer = React.forwardRef<
   onRemoveHeld,
   promptCard,
   warning = null,
+  warningAction = null,
   onSend,
   onStop,
   onClearDraft,
@@ -300,7 +303,17 @@ export const MobileChatComposer = React.forwardRef<
           aria-live="polite"
           className="flex items-center gap-2 px-3 pt-2 pb-1 text-xs text-chat-foreground-secondary"
         >
-          <span>{warning}</span>
+          <span className="min-w-0 flex-1">{warning}</span>
+          {warningAction !== null && (
+            <button
+              type="button"
+              data-testid="chat-composer-warning-action"
+              onClick={warningAction.onAction}
+              className="flex min-h-11 shrink-0 items-center rounded-md px-3 text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              {warningAction.label}
+            </button>
+          )}
         </div>
       )}
       {attachError !== null && (

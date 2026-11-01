@@ -85,6 +85,32 @@ describe("MobileChatComposer touch safety", () => {
     expect(screen.getByTestId("held-message-remove-h")).toHaveClass("size-11");
   });
 
+  it("draws the warning's action as a 44px button and runs it", () => {
+    const onAction = vi.fn();
+    const { rerender } = render(<MobileChatComposer onSend={vi.fn()} warning="Lost the connection." />);
+    expect(screen.queryByTestId("chat-composer-warning-action")).not.toBeInTheDocument();
+
+    rerender(
+      <MobileChatComposer
+        onSend={vi.fn()}
+        warning="Lost the connection."
+        warningAction={{ label: "Reconnect", onAction }}
+      />,
+    );
+    const action = screen.getByRole("button", { name: "Reconnect" });
+    expect(action).toHaveClass("min-h-11");
+    expect(screen.getByTestId("chat-composer-warning")).toContainElement(action);
+    fireEvent.click(action);
+    expect(onAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives held-row send, edit and remove 44px hit areas", () => {
+    render(<MobileChatComposer onSend={vi.fn()} heldMessages={[{ id: "h", text: "later" }]} />);
+    for (const id of ["held-message-send-h", "held-message-edit-h", "held-message-remove-h"]) {
+      expect(screen.getByTestId(id)).toHaveClass("size-11");
+    }
+  });
+
   it("caps the banners, held rows and prompt in their own scroller so the message box stays reachable", () => {
     render(<MobileChatComposer onSend={vi.fn()} promptCard={<div>q</div>} warning="w" />);
     expect(screen.getByTestId("chat-composer-extras")).toHaveClass("overflow-y-auto");
