@@ -307,11 +307,13 @@ describe("attachTunnel RFC 6455 WebSocket transport", () => {
       head,
       new Uint8Array([0x81, first.length]), first,
       new Uint8Array([0x81, second.length]), second,
+      // A trailing ping: its pong proves the receive loop already processed both messages.
+      new Uint8Array([0x89, 0x00]),
     ]));
+    const writesBeforePong = stream.written.length;
     const ws = await wsPromise;
-    // Let the receive loop drain everything it already holds before a handler exists.
-    await Promise.resolve();
-    await Promise.resolve();
+    await stream.waitForWrites(writesBeforePong + 1);
+    expect(stream.written[writesBeforePong][0]).toBe(0x8a);
 
     // When the caller assigns onmessage only after the hand-over
     const received: string[] = [];
