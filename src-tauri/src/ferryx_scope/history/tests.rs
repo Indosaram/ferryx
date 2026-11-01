@@ -34,6 +34,8 @@ fn older_message_search_and_exact_identity() {
     assert_eq!(p.items.len(), 1, "older parsed message must be searchable");
     assert_eq!(p.items[0].provider_session.id, "019ec598-c800-7000-8000-000000000001");
     assert_eq!(h.read(&p.items[0].entry_key, None, 100).unwrap().items[0].text, "older-message-sentinel");
+    assert_eq!(h.source_path(&p.items[0].entry_key), Some(Path::new(&cwd).join("logs").join("older.jsonl").as_path()));
+    assert_eq!(h.source_path("missing-entry-key"), None);
 }
 struct NativeBoundary(Mutex<Vec<(ConversationClaimKey, TerminalStartup)>>);
 impl ResumeBoundary<TerminalStartup> for NativeBoundary {
