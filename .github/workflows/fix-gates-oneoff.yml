@@ -1,0 +1,85 @@
+name: fix-gates-oneoff
+on:
+  push:
+    branches: ['ci/fix-gates-20261102']
+jobs:
+  gate:
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: ['d516bf4412d09ffe2577ceef6348589eb91fe5d7']
+        suite: ['tauri', 'hub', 'ui']
+    runs-on: ubuntu-24.04
+    timeout-minutes: 170
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+    steps:
+      - name: Free disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL; df -h /
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+          submodules: recursive
+          fetch-depth: 0
+      - uses: mlugg/setup-zig@v2
+        if: matrix.suite == 'tauri'
+        with:
+          version: 0.17.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.suite != 'ui'
+        with:
+          components: clippy
+      - name: Linux deps
+        if: matrix.suite == 'tauri'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev clang libclang-dev libpipewire-0.3-dev libspa-0.2-dev libdbus-1-dev libva-dev libdrm-dev libgbm-dev libegl-dev libgl-dev libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev libx11-dev libxext-dev libxrandr-dev libxfixes-dev libxtst-dev libxi-dev libevdev-dev libudev-dev protobuf-compiler
+      - name: git identity and tmp
+        run: |
+          git config --global user.name ci; git config --global user.email ci@example.com; git config --global init.defaultBranch main
+          mkdir -p "$RUNNER_TEMP/t"; echo "TMPDIR=$RUNNER_TEMP/t" >> $GITHUB_ENV; echo "GIT_CEILING_DIRECTORIES=$RUNNER_TEMP/t" >> $GITHUB_ENV
+      - name: bun install
+        run: bun install --cwd ui --frozen-lockfile || bun install --cwd ui
+      - name: ui
+        if: matrix.suite == 'ui'
+        run: |
+          set +e
+          bun run --cwd ui build > ui-build.log 2>&1; echo "UI_BUILD_EXIT=$?" | tee -a summary.txt
+          bun run --cwd ui test > ui-test.log 2>&1; echo "UI_TEST_EXIT=$?" | tee -a summary.txt
+          grep -E "Tests +[0-9]|Test Files" ui-test.log | tail -3 | tee -a summary.txt
+          grep -E "FAIL|✗|×" ui-test.log | sort -u | head -80 > ui-fail.txt
+      - name: hub
+        if: matrix.suite == 'hub'
+        run: |
+          set +e
+          cargo test --manifest-path crates/ferryx-hub/Cargo.toml --all-features --no-fail-fast > hub-test.log 2>&1; echo "HUB_TEST_EXIT=$?" | tee -a summary.txt
+          cargo test --manifest-path crates/ferryx-hub/Cargo.toml --lib --no-run > hub-default-lib.log 2>&1; echo "HUB_DEFAULT_LIB_BUILD_EXIT=$?" | tee -a summary.txt
+          grep -E "^test result|FAILED|panicked" hub-test.log | head -60 | tee -a summary.txt
+          cargo clippy --manifest-path crates/ferryx-hub/Cargo.toml --all-targets --all-features -- -D warnings > hub-clippy.log 2>&1; echo "HUB_CLIPPY_EXIT=$?" | tee -a summary.txt
+      - name: tauri
+        if: matrix.suite == 'tauri'
+        run: |
+          set +e
+          bun run --cwd ui build > ui-build.log 2>&1 || true
+          cargo build --manifest-path remote-helper/Cargo.toml > helper.log 2>&1
+          bun scripts/fetch-ffmpeg.mjs --target x86_64-unknown-linux-gnu > ffmpeg.log 2>&1 || echo "FFMPEG_FETCH_FAILED" | tee -a summary.txt
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings > tauri-clippy.log 2>&1; echo "TAURI_CLIPPY_EXIT=$?" | tee -a summary.txt
+          grep -E "^(error|warning)" tauri-clippy.log | sort | uniq -c | head -40 | tee -a summary.txt
+          cargo test --manifest-path src-tauri/Cargo.toml --lib > tauri-test.log 2>&1; echo "TAURI_TEST_EXIT=$?" | tee -a summary.txt
+          grep -E "^test result|^    [a-z_:]+$|FAILED" tauri-test.log | head -120 | tee -a summary.txt
+          df -h / | tee -a summary.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gate-${{ matrix.suite }}-${{ matrix.ref }}
+          path: |
+            summary.txt
+            *.log
+            ui-fail.txt
+          retention-days: 3
