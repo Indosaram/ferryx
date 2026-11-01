@@ -244,11 +244,13 @@ impl MhcProfileConfig {
             );
             return None;
         }
-        let mut config = Self::default();
-        config.binary = crate::meta::supervisor::resolve_mhc_bin(
-            env_text("FERRYX_HUB_MHC_BIN", shared),
-            std::env::current_exe().ok().as_deref(),
-        );
+        let mut config = Self {
+            binary: crate::meta::supervisor::resolve_mhc_bin(
+                env_text("FERRYX_HUB_MHC_BIN", shared),
+                std::env::current_exe().ok().as_deref(),
+            ),
+            ..Self::default()
+        };
         match (
             env_text("FERRYX_HUB_MHC_PROVIDER", shared),
             env_text("FERRYX_HUB_MHC_MODEL", shared),
