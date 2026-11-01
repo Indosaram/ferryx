@@ -43,6 +43,8 @@ utilities. Components reference the **Tailwind semantic name**, never a hex valu
 | `--status-success` `#86efac` | `bg-status-success` | Healthy / exited cleanly |
 | `--status-idle` `#737373` | `bg-status-idle` | No agent attached |
 
+`StatusDot` encodes state by shape as well as colour: starting is a hollow `--status-warning` ring (pulsing, `motion-reduce:animate-none`), waiting a filled `--status-warning` dot, working a spinner. No halo rings.
+
 ### Radius and spacing
 - `--radius: 0.5rem` -> `rounded-lg` / `rounded-md` (`calc(radius - 2px)`) / `rounded-sm`.
   Sidebar rows use `rounded-md`.
@@ -72,9 +74,9 @@ These are the remote phone client's only palette. Chat components reference the 
 | `--chat-surface-hover` `#141414` | `bg-chat-surface-hover` | Hover state for interactive chat rows/buttons |
 | `--chat-user-bubble` `#161616` | `bg-chat-user-bubble` | User message bubble fill |
 | `--chat-foreground` `#f5f5f5` | `text-chat-foreground` | Primary text and headings |
-| `--chat-foreground-secondary` `#838383` | `text-chat-foreground-secondary` | Secondary labels, timestamps, metadata |
-| `--chat-foreground-tertiary` `#818181` | `text-chat-foreground-tertiary` | Tertiary/de-emphasized text and icons |
-| `--chat-border` `#191919` | `border-chat-border` | Standard card and separator border |
+| `--chat-foreground-secondary` `#a1a1a1` (light `#52525b`) | `text-chat-foreground-secondary` | Secondary labels, timestamps, metadata (>= 6.6:1 on every chat surface) |
+| `--chat-foreground-tertiary` `#858585` (light `#63636d`) | `text-chat-foreground-tertiary` | Tertiary/de-emphasized text and icons; >= 4.5:1 on screen and surface, at least 15% luminance away from secondary |
+| `--chat-border` `#363636` (light `#bdbdc3`) | `border-chat-border` | Card, sheet and separator boundary (>= 1.5:1 on the screen); not for input outlines |
 | `--chat-primary` `#346bf1` | `bg-chat-primary` / `text-chat-primary` | Primary action buttons and focus accents |
 | `--chat-primary-foreground` `#ffffff` | `text-chat-primary-foreground` | Text and icons on `chat-primary` fills (white on #346bf1 = 4.65:1) |
 | `--chat-link` `#4a7cf5` | `text-chat-link` | Markdown links in chat prose (5.18:1 on the chat screen; the primary blue is 4.26:1 and fails AA at text size) |
@@ -83,14 +85,18 @@ These are the remote phone client's only palette. Chat components reference the 
 | `--chat-row-hover` `rgba(255,255,255,0.04)` | `bg-chat-row-hover` | Subtle white-alpha hover on chat rows |
 | `--chat-composer-panel` `rgba(10,10,10,0.92)` | `bg-chat-composer-panel` | Backdrop panel for mobile composer |
 | `--chat-composer-surface` `rgba(26,27,27,0.9)` | `bg-chat-composer-surface` | Translucent input editor surface |
-| `--chat-composer-border` `rgba(25,25,25,0.8)` | `border-chat-composer-border` | Translucent composer border |
+| `--chat-composer-border` `#6b6b6b` (light `#85858e`) | `border-chat-composer-border` | Composer and text-input outline (>= 3:1 on the screen, WCAG 1.4.11) |
+
+Inside `.remote-app-root` the shared `--border` follows `--chat-border`, `--input` is `#6b6b6b` / light `#85858e` (3:1 for input outlines) and `--muted-foreground` is `#a1a1a1`. The light remote root also overrides `--status-working/-warning/-success/-idle` so every status colour reaches 4.5:1 on white (status used as text needs 4.5:1, as a glyph 3:1).
+
+**Font (V-03, brand decision).** Geist stays the single family on the phone as well as the desktop. It is the shipped brand face, self-hosted and variable; the phone gets its own decisions through size, weight and the rem phone scale (§6), not a second family. Revisit only with a brand brief, never as a drive-by swap.
 
 ## 2. Primitives
 
 Reusable, already shipped. Compose these; don't hand-roll equivalents.
 
 ### App Primitives
-- `ui/IconButton` (`ui/src/components/ui/IconButton.tsx`): Square icon control (`size-6` sm / `size-7` md), `aria-label` and `title` required.
+- `ui/IconButton` (`ui/src/components/ui/IconButton.tsx`): Square icon control (`size-6` sm / `size-7` md, desktop only; phone surfaces need a 44px hit area per §6), `aria-label` and `title` required.
 - `ui/SectionHeader` (`ui/src/components/ui/SectionHeader.tsx`): `h-8` section title with optional count pill and trailing actions.
 - `ui/StatusDot` (`ui/src/components/ui/StatusDot.tsx`): Maps `AgentState` to a status glyph; `working` pulses, `motion-reduce` safe.
 - `ui/SegmentedControl` (`ui/src/components/ui/SegmentedControl.tsx`): `role="tablist"` of equal-width `role="tab"` buttons with `aria-selected` and arrow-key roving. Track `bg-card rounded-md p-0.5`; segment `text-[11px] rounded-sm text-muted-foreground`; selected segment `bg-worktree-sidebar-accent text-foreground`. An optional count renders `text-status-warning` beside the label. Selection is a fill, never a border.
@@ -242,7 +248,10 @@ Rules:
   Failed connections stop the spinner and show the structured error plus a small retry button.
   Ready workspaces with no tabs retain the existing empty state.
 - No hover state may change anything other than color/opacity on a non-interactive element.
-- The chat terminal drawer opens and closes with a composited opacity/transform transition only (its 45vh/85vh height change is instant, never a layout animation); the chat's looping motion (animate-ping, animate-spin) carries motion-reduce:animate-none; the scroll-to-latest affordance has no looping animation; no hover transform on non-interactive elements.
+- The chat's looping motion (animate-ping, animate-spin, animate-pulse) carries `motion-reduce:animate-none`; the scroll-to-latest affordance has no looping animation; no hover transform on non-interactive elements.
+- The "working" label (`.work-shimmer-text`) is solid `--chat-foreground-secondary` text with a 1.6s opacity pulse that only runs under `prefers-reduced-motion: no-preference`. Gradient text is banned.
+- `.pane-inbox-flash` uses `--status-warning`; under reduced motion it holds and then disappears without a fade.
+- Buttons animate colour only (`transition-colors`); `transition-all` and press `scale` are not used on phone controls. Every `animate-*` or `transition-transform` carries a `motion-reduce:` guard.
 
 ## 6. Responsive Behavior
 
@@ -251,11 +260,40 @@ Every row must survive the 220px floor: names `truncate`; the state slot and act
 `shrink-0`; the host label truncates at `max-w-[88px]`.
 
 ### Mobile chat surface constants
-- Drawer heights: `45vh` collapsed / `85vh` expanded.
-- Control dimensions: `2.25rem` (`size-9`) composer controls and `1.75rem` (`size-7`) header controls.
+- There is no chat terminal drawer: the chat and the terminal are two modes of the Session screen, switched from the top bar.
 - Corner radii: `20px` user-bubble radius, `12px` card radius.
-- Typography: `16px` composer editor font (prevents iOS zoom-on-focus).
-- Safe-area rule: `ui/index.html` sets `viewport-fit=cover` and the composer uses `.pb-safe`, because `env(safe-area-inset-*)` is 0 without `viewport-fit=cover`.
+- Safe-area rule: `ui/index.html` sets `viewport-fit=cover`, because `env(safe-area-inset-*)` is 0 without it. Bottom-anchored bars use `.pb-safe`, headers `.pt-safe-header`, sheets `.pb-safe-sheet`; full-width roots and bottom bars also use `.px-safe` (or `.px-safe-4` where they already pad 1rem) so landscape notches never cover content.
+
+### Phone touch density (all remote surfaces below 768px)
+These rules override every compact desktop size in this file for the phone. The desktop keeps its
+compact scale; phone changes are gated on the remote root or the existing touch/mobile prop.
+- **Targets.** Every interactive control has a hit area of at least 44x44 CSS px (`min-h-11`,
+  `size-11`, or an invisible hit-slop covering 44x44 on both axes), with at least 8px between
+  neighbouring targets. Glyphs may stay `size-4`/`size-5`; the hit area grows, never the icon.
+  `IconButton` `sm`/`md` (24/28px) are desktop sizes and are not used bare on a phone.
+- **Text.** Body text is at least 14px (`text-sm` / `text-phone-body`); nothing is smaller than
+  12px (`text-xs` / `text-phone-meta`). `text-[10px]`, `text-[11px]` and `text-[10.5px]` are
+  banned on phone surfaces. Use rem sizes (Tailwind's scale or `text-phone-*`), never `text-[Npx]`,
+  so the density setting and 200% text scaling reach every label.
+- **Inputs.** Inputs and textareas render at 16px (`text-base` / `text-phone-input`) so iOS does
+  not zoom on focus; their outline uses `border-input` / `border-chat-composer-border` (3:1).
+- **Contrast.** Body text >= 4.5:1, non-text UI (outlines, icons that carry meaning, focus) >= 3:1,
+  in dark and light. Only semantic tokens: no hex, no `bg-white/x`, no `bg-black/x`, no palette
+  colours (`rose-`, `amber-`).
+- **No generated-UI tells.** No coloured side stripes (`border-l-*` accents, `before:w-[3px]`
+  bars), no decorative `ring-2` halos (status uses shape: hollow vs filled), no accent outline on a
+  rounded card, no gradient text, no sparkles icon, no icon-in-tinted-tile alerts, no
+  `backdrop-blur` on opaque surfaces, no decorative shadows on the dark opaque UI.
+- **Copy.** Sentence case. Plain language; machines are "computer". No raw codes, enums, session
+  ids or CLI commands on screen. Every user-visible error goes through
+  `ui/src/remote/userFacingError.ts`. An empty state always offers its next action as a button.
+  Actionable failures stay visible inline; a toast is a confirmation, never the only record.
+- **Toasts.** On phones the Toaster sits top-center below `safe-area-inset-top`, clear of the tab
+  bar, composer and keyboard.
+- **History.** Switching a tab *replaces* the history entry; opening a pushed screen (a session)
+  or an overlay (sheet, drawer, dialog) *pushes* one; the platform back gesture closes the topmost
+  overlay first, then returns from a pushed screen, then leaves the app. Back never walks through
+  tab taps.
 
 ## 7. Accessibility Constraints
 
@@ -267,7 +305,8 @@ Every row must survive the 220px floor: names `truncate`; the state slot and act
 - All icon-only controls carry `aria-label` (enforced by `IconButton`).
 - Focus is visible on every control: `focus-visible:ring-1 focus-visible:ring-ring`.
 - Nested action buttons must not be DOM descendants of the row button (no nested interactives).
-- Every icon-only chat control carries `aria-label`, every chat control carries `focus-visible:ring-1 focus-visible:ring-ring`, the running activity indicator is `role="status"`, a closed terminal drawer is inert and `aria-hidden`.
+- Every icon-only chat control carries `aria-label` (which includes any visible label text), every chat control carries `focus-visible:ring-1 focus-visible:ring-ring`, decorative icons are `aria-hidden`, the running activity indicator is `role="status"`, and one message is announced by one live region only.
+- Reading content inside `.remote-app-root` (paragraphs, list items, code, alerts, status text) is selectable; the desktop shell's `user-select: none` applies to controls only.
 
 ## 8. Accepted Debt
 
@@ -435,31 +474,35 @@ Applies to the remote web client below 768px when signed in to an account
 - Opening a session from any destination shows the Session screen (the existing
   `MobileTopBar` plus chat/terminal body). The tab bar is hidden there so the composer and
   keyboard keep the full height. `MobileTopBar` gains a back control (`mobile-session-back`).
-- `usePhoneNavigation` pushes a history entry on each tab switch and on entering a session;
-  `popstate` returns to the destination the session came from, so the platform back gesture
-  stays inside the app.
+- `usePhoneNavigation` *replaces* the history entry on a tab switch and *pushes* one only on
+  entering a session or opening an overlay (§6 History). `popstate` closes the topmost overlay,
+  then returns from a session to the destination it came from; back from a home tab leaves the
+  app instead of replaying earlier tab taps.
 
 ### Surfaces
 
-- Supervisor: header card (`bg-chat-surface-raised`) with the headline `off | paused |
-  typing | watching N` (same derivation as the desktop `SupervisorPanelView`) and one
-  sentence. Then one section per machine, with a state note when it is loading, offline,
+- Supervisor: header card (`bg-chat-surface-raised`) with a sentence-case status whose unit
+  matches the list below it (for example "Watching 3 lanes"), never a bare enum such as
+  `off` or `watching 4`, and one sentence. Then one section per machine, with a state note when it is loading, offline,
   not connected, unsupported ("Update Ferryx on this computer to see its supervisor") or
   has the hub stopped. Lane cards show the name (cwd leaf · title), one status slot (paused
   > typing > needs you > hub status), Goal, "Stopped: <reason>", and a 44px Pause/Resume
-  button. A typing lane uses the active fill `bg-accent`. Then a "Recent" audit list (time,
-  op or held, text), newest first, max 20.
+  button. A typing lane uses `bg-chat-surface-raised` plus a text label and icon (never
+  `bg-accent`, which is a desktop token with no light-theme value on the chat palette). Then a
+  "Recent" list of the last 3 actions with "Show all"; each row names its computer, opens its
+  session, and shows humanised text (no op names, refusal codes or session-id prefixes).
 - Inbox: needs-you sessions from every machine. Waiting and supervisor-held come first,
   then finished; each row states why in text ("Waiting for your answer", "Supervisor paused
   this lane", "Finished"). The dot colour only repeats that text.
 - Worktrees: the drawer's inventory rendered inline (`RemoteWorkspaceMirror inline`) with
-  New terminal, New worktree and Sign out, plus an Account button. The Account sheet holds
-  the email, Sign out and Delete account. Deletion asks the person to type their email; the
+  New terminal and New worktree, plus an Account button. Sign out lives only in the Account
+  sheet (one place, confirmed, out of the thumb zone); the sheet holds the email, Sign out and
+  Delete account. Deletion asks the person to type their email; the
   server's `CONFIRMATION_MISMATCH` / `SUBSCRIPTION_ACTIVE` answers are shown in text on
   `--chat-danger`.
 - Session strip (`SupervisorSessionStrip`) sits under the top bar only for a supervised
   session. Priority follows `paneSupervision`: paused (Resume) > left to you > held >
-  acting (quoted sent text on `bg-accent`, "Take over" pauses the lane, then focuses the
+  acting (quoted sent text on `bg-chat-surface-raised`, "Take over" pauses the lane, then focuses the
   composer or terminal input) > watching (Pause here).
 
 ### Test ids

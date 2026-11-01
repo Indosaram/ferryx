@@ -41,12 +41,19 @@ idle tokens and destructive errors; communicate status in text as well as color.
 ## 3. Typography
 
 Keep self-hosted Geist variable, `font-sans` system fallbacks, and `font-mono` for
-identifiers/code. Retain the existing compact scale rather than importing the
-reference's illustrative 14px minimum: 10px navigation overlines, 11px settings
+identifiers/code. Geist is a recorded brand decision for the phone too (V-03): the
+phone differs by size and weight, not by family.
+
+Desktop retains the existing compact scale: 10px navigation overlines, 11px settings
 descriptions, 12px explanatory text, 13px row labels, 15px semibold settings
 headings (`settings/primitives.tsx`, `SettingsDialog.tsx`). Use nearby component
 recipes; no display typography. Read-only history and paths use `selectable`
 because the application body otherwise disables text selection.
+
+The compact scale is desktop-only. The remote phone client (below 768px) follows
+`ui/DESIGN.md` §6 "Phone touch density": 14px body minimum, nothing below 12px,
+16px inputs, rem sizes only (`text-phone-*` or Tailwind's scale) so density and
+text scaling apply, and reading content inside `.remote-app-root` stays selectable.
 
 ## 4. Spacing & Layout
 
@@ -73,10 +80,10 @@ All paths below are under `ui/src/components/`; compose these existing controls.
 | Primitive / structure | Variants and states | Layout / accessibility |
 |---|---|---|
 | `ui/button.tsx`: `Button` (button or Radix Slot) | default, destructive, outline, secondary, ghost, link; default/sm/lg/icon sizes; hover and disabled styles | Inline cluster; visible focus ring; supply button type in forms. Loading is caller-owned, not a built-in variant. |
-| `ui/IconButton.tsx`: native button | sm 24px / md 28px; hover, focus, disabled | `label` supplies both title and accessible name; preserve compact desktop sizing. |
+| `ui/IconButton.tsx`: native button | sm 24px / md 28px; hover, focus, disabled | `label` supplies both title and accessible name; compact sizes are desktop-only, phone use needs a 44px hit area. |
 | `ui/input`, `label`, `select`, `switch`, `slider` | Existing text/selection/boolean/range controls and Radix states | Associate labels, retain keyboard semantics; no hand-built replacements. |
-| `ui/alert`, `badge`, `card`, `progress`, `separator`, `sonner` | Existing callouts, metadata, containers, progress, rules, toast wrapper | Error/empty/loading content belongs to the consuming feature; actionable failures must remain visible, not only transient toasts. |
-| `ui/SectionHeader`, `ui/StatusDot` | Header/count/actions; working spinner, starting pulse, waiting warning ring, unread primary dot, done/exited success, fallback failure | Status glyphs are aria-hidden; parent supplies status text. Do not assume unknown states render idle. |
+| `ui/alert`, `badge`, `card`, `progress`, `separator`, `sonner` | Existing callouts, metadata, containers, progress, rules, toast wrapper; toasts are bottom-right on desktop and top-center below the safe area on phones | Error/empty/loading content belongs to the consuming feature; actionable failures must remain visible, not only transient toasts. Phone error copy goes through `remote/userFacingError.ts`. |
+| `ui/SectionHeader`, `ui/StatusDot` | Header/count/actions; working spinner, starting hollow pulsing ring, waiting filled warning dot, unread primary dot, done/exited success, fallback failure | Status glyphs are aria-hidden; parent supplies status text. Do not assume unknown states render idle. |
 | `settings/primitives.tsx`: `SettingsHeading`, `SettingsGroup`, `SettingRow` | Heading/description; group/action slot; row label/description/control slot | Vertical stacks, row `gap-4 py-3`, internal `border-border/40`; scroll owned by SettingsDialog main. |
 
 Bounded feature placement and acceptance contract (required behavior, not a claim
@@ -98,7 +105,11 @@ navigation or placeholder screens for those domains.
 
 Retain existing color transitions, disclosure transforms, and `animate-enter`
 (140ms ease-out, 2px translation plus fade). `StatusDot` uses reduced-motion-safe
-spin/pulse; no new motion system. Preserve focus on return from settings, Escape
+spin/pulse; no new motion system. Animate only transform, opacity and filter; every
+looping or transform animation has a reduced-motion guard. No gradient text.
+
+Phone navigation history: a tab switch replaces the entry, a pushed screen or an
+overlay pushes one, and back closes the topmost overlay before leaving a screen. Preserve focus on return from settings, Escape
 behavior, native-surface masking during overlays/drag, and stable terminal sessions
 across pane movement. Subscribe to exact async state changes before actions in QA;
 do not use fixed sleeps to make assertions pass.
@@ -126,13 +137,15 @@ content does not justify changing terminal compositing or app-level z-index rule
 
 Require semantic labels, keyboard reachability, visible focus, non-color status,
 selectable conversation content, reduced-motion support, and recoverable error
-states. Verify light/dark, desktop minimum width, and a narrow phone viewport;
-this extraction does not certify contrast or WCAG conformance.
+states. Verify light/dark, desktop minimum width, and a narrow phone viewport.
+The phone client is held to 44px targets, 4.5:1 text and 3:1 non-text contrast in
+both themes (`ui/DESIGN.md` §6); `MobileChatTheme.contract.test.ts` pins the
+token contrast.
 
 Existing discrepancies (recorded, not permission for new debt): `ui/DESIGN.md`
 still lists old sidebar colors and describes working as a pulse; source now uses
 runtime theme overrides and a spinner. Settings is full-window with
 `aria-modal={false}` rather than a conventional modal. Compact typography and
-icon controls are existing desktop behavior, not a claim of mobile touch-target
-compliance. LSP is globally unreachable per task context; symbols were verified
+icon controls are desktop behavior only; they are not accepted debt on the phone,
+where any remaining sub-44px control or sub-12px text is a defect to fix. LSP is globally unreachable per task context; symbols were verified
 by direct source reads/searches. No product behavior or styling changed here.
