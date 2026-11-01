@@ -33,6 +33,11 @@ export class RelayE2EError extends Error {
 }
 
 export const CLIENT_BUILD_HEADER = "X-Ferryx-Client-Build";
+/**
+ * Response header a relay that understands `?e2e=1` sends on every `/attach/session` answer.
+ * With it present, a 4xx is a real refusal (typed RelayE2EError), never "unsupported".
+ */
+export const RELAY_E2E_AWARE_HEADER = "x-ferryx-relay-e2e";
 
 /**
  * The relay does not know the device-token `?e2e=1` allocation yet (400, 404, 405, or any 401 -
@@ -73,6 +78,8 @@ function registryKey(baseUrl: string): string {
 export function registerRelayE2E(baseUrl: string, transport: RelayE2ETransport): () => void {
   const key = registryKey(baseUrl);
   registry.set(key, transport);
+  // A fresh registration (new token, new connection) gets a fresh chance at encryption.
+  plaintextFallback.delete(key);
   return () => {
     if (registry.get(key) === transport) registry.delete(key);
   };
@@ -304,10 +311,19 @@ export async function allocateE2ESession(
   if (!response.ok) {
     const code = errorCode(data);
     if (code === E2E_REQUIRED || response.status === 426) throw new RelayRepairRequiredError();
-    // An old relay that does not know `?e2e=1` falls back to plaintext: 400, 404, 405, or any 401
+    // A relay that understands `?e2e=1` says so in a header; its 401 is an auth denial
+    // (sign out / repair), never a reason to downgrade.
+    const e2eAware = response.headers?.get(RELAY_E2E_AWARE_HEADER) === "1";
+    if (e2eAware && response.status === 401) {
+      throw new RelayE2EError("UNAUTHORIZED", "Encrypted session allocation was refused (401)", 401);
+    }
+    // Only an old relay without that header falls back to plaintext: 400, 404, 405, or any 401
     // (an old account relay answers a device token with 401 {"code":"UNAUTHORIZED"}). 426/E2E_REQUIRED,
     // 409, 402 and other statuses stay typed errors.
-    if (response.status === 400 || response.status === 401 || response.status === 404 || response.status === 405) {
+    if (
+      !e2eAware
+      && (response.status === 400 || response.status === 401 || response.status === 404 || response.status === 405)
+    ) {
       throw new RelayE2EUnsupportedError(response.status);
     }
     throw new RelayE2EError(
@@ -426,12 +442,13 @@ export function openRelayE2ETransport(params: OpenRelayE2ETransportParams): Rela
 
 /**
  * How traffic to `host` travels: "direct" when not through its relay, "e2e" when the relay only
- * carries ciphertext, REPAIR_REQUIRED for a relay host this client holds no attach info for.
+ * carries ciphertext, "plaintext-fallback" when an old relay forced this page session back to
+ * the plaintext path, REPAIR_REQUIRED for a relay host this client holds no attach info for.
  */
 export function relayE2EState(
   host: HostEndpoint | null,
   transportUrl: string,
-): "direct" | "e2e" | typeof REPAIR_REQUIRED {
+): "direct" | "e2e" | "plaintext-fallback" | typeof REPAIR_REQUIRED {
   if (!host?.relayOrigin || !host.machineId) return "direct";
   let origin: string;
   try {
@@ -440,5 +457,7 @@ export function relayE2EState(
     return "direct";
   }
   if (origin !== host.relayOrigin) return "direct";
-  return host.attachPublicKey && host.enrollmentEpoch ? "e2e" : REPAIR_REQUIRED;
+  if (!host.attachPublicKey || !host.enrollmentEpoch) return REPAIR_REQUIRED;
+  const base = registryKey(`${host.relayOrigin}/host/${encodeURIComponent(host.machineId)}`);
+  return plaintextFallback.has(base) ? "plaintext-fallback" : "e2e";
 }
