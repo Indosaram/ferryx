@@ -2389,11 +2389,7 @@ async fn transition_goal_in(
 ) -> Result<SupervisorGoal, SupervisorError> {
     // Every goal settle or complete write is a supervisor side effect: re-checked here,
     // immediately before it, so a holder whose lease ran out leaves the goal as it was.
-    if !crate::holder::is_holder_now() {
-        return Err(SupervisorError::Standby {
-            goal_id: goal_id.to_owned(),
-        });
-    }
+    require_holder(goal_id)?;
     if to == RunState::Dispatching {
         return Err(SupervisorError::Invalid(
             "a goal enters dispatching only by claiming its ready dispatch".into(),
@@ -2485,6 +2481,18 @@ async fn transition_goal_in(
         revision,
         updated_at: now,
         ..goal
+    })
+}
+
+/// Every goal, dispatch and receipt write is a supervisor side effect: the lease is asked
+/// immediately before it, so a standby (or a holder whose lease ran out) writes nothing and
+/// the row stays as it was for the holder. `subject` names the goal or dispatch held.
+fn require_holder(subject: &str) -> Result<(), SupervisorError> {
+    if crate::holder::is_holder_now() {
+        return Ok(());
+    }
+    Err(SupervisorError::Standby {
+        goal_id: subject.to_owned(),
     })
 }
 
@@ -2644,6 +2652,7 @@ pub async fn claim_dispatch(
     expected_revision: i64,
     generation: i64,
 ) -> Result<Dispatch, SupervisorError> {
+    require_holder(request_id)?;
     let mut tx = pool.begin_write().await?;
     let dispatch = require_dispatch(&mut tx, request_id).await?;
     let goal = require_goal(&mut tx, &dispatch.goal_id).await?;
@@ -2721,6 +2730,7 @@ pub async fn confirm_claim_before_transmit(
     pool: &SqlitePool,
     request_id: &str,
 ) -> Result<Dispatch, SupervisorError> {
+    require_holder(request_id)?;
     let mut tx = pool.begin_write().await?;
     let dispatch = require_dispatch(&mut tx, request_id).await?;
     if dispatch.state != DispatchState::Claimed {
@@ -2808,6 +2818,7 @@ pub async fn resolve_uncertain_delivery(
              {expected_state}"
         )));
     }
+    require_holder(goal_id)?;
     let mut tx = pool.begin_write().await?;
     let goal = require_goal(&mut tx, goal_id).await?;
     check_revision(&goal, expected_revision)?;
@@ -2904,6 +2915,7 @@ async fn mark_uncertain_resolved(
 pub async fn reconcile_claims_after_restart(
     pool: &SqlitePool,
 ) -> Result<Vec<Dispatch>, SupervisorError> {
+    require_holder("reconciled after restart")?;
     let mut tx = pool.begin_write().await?;
     let sql = format!(
         "SELECT {DISPATCH_COLUMNS} FROM supervisor_dispatches
@@ -3056,6 +3068,9 @@ async fn apply_receipt(
     generation: i64,
     receipt: &Receipt,
 ) -> Result<AppliedReceipt, SupervisorError> {
+    // The lowest common write of every receipt (accepted, started, settled, uncertain), from
+    // the dispatcher, the paired-host settle watch and the PTY observer alike.
+    require_holder(request_id)?;
     let dispatch = require_dispatch(conn, request_id).await?;
     let binding = require_binding(conn, &dispatch.goal_id).await?;
     check_generation(dispatch.generation, generation)?;

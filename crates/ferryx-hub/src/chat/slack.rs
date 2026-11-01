@@ -796,7 +796,8 @@ pub async fn upload_external(
     bytes: Vec<u8>,
     title: &str,
 ) -> Result<bool> {
-    if bot_token().is_none() || bytes.is_empty() {
+    // An upload is a bot post: only the lease holder makes one.
+    if !crate::holder::is_holder_now() || bot_token().is_none() || bytes.is_empty() {
         return Ok(false);
     }
     let ticket = slack_form(
@@ -877,6 +878,10 @@ pub async fn open_owner_dm(owner: &str) -> Option<(String, String)> {
 
 #[cfg(feature = "hub-slack")]
 async fn slack_form(method: &str, fields: &[(&str, &str)]) -> Result<Value> {
+    // auth.test, conversations.open and upload tickets leave only the lease holder.
+    if !crate::holder::is_holder_now() {
+        return Ok(json!({"ok": false, "error": crate::holder::SUPERVISOR_STANDBY}));
+    }
     let Some(token) = bot_token() else {
         return Ok(json!({"ok": false}));
     };
@@ -2788,5 +2793,57 @@ mod tests {
         assert_eq!(complete["thread_ts"], "1700.1");
         assert_eq!(complete["files"][0]["id"], "F1");
         assert_eq!(complete["files"][0]["title"], "Voice reply");
+    }
+
+    /// A standby's Slack egress stays local: no upload ticket, no byte POST, no
+    /// `auth.test` / `conversations.open`. The same fake Slack answers a holder, so the
+    /// zero count is the gate, not an unreachable server.
+    #[cfg(feature = "hub-slack")]
+    #[tokio::test]
+    async fn a_standby_uploads_nothing_and_opens_no_dm() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let counter = hits.clone();
+        let app = axum::Router::new().fallback(move || {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({
+                    "ok": true,
+                    "upload_url": format!("http://127.0.0.1:{port}/bytes"),
+                    "file_id": "F1",
+                    "user_id": "UBOT",
+                    "channel": {"id": "D1"}
+                }))
+            }
+        });
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let api = (format!("http://127.0.0.1:{port}"), "xoxb-test".to_owned());
+        let standby: crate::holder::HolderGate = std::sync::Arc::new(|| false);
+        let (uploaded, dm) = SLACK_API_TEST
+            .scope(
+                api.clone(),
+                crate::holder::scope(standby, async {
+                    let uploaded =
+                        upload_external("C1", Some("1700.1"), "table.png", vec![1, 2, 3], "t")
+                            .await;
+                    (uploaded, open_owner_dm("U-owner").await)
+                }),
+            )
+            .await;
+        assert!(!uploaded.unwrap(), "a standby uploads nothing");
+        assert_eq!(dm, None, "a standby opens no DM");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "zero calls reached the fake Slack");
+
+        let holder: crate::holder::HolderGate = std::sync::Arc::new(|| true);
+        let dm = SLACK_API_TEST
+            .scope(api, crate::holder::scope(holder, open_owner_dm("U-owner")))
+            .await;
+        assert_eq!(dm, Some(("D1".to_owned(), "UBOT".to_owned())));
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "the holder reaches the same fake Slack");
     }
 }

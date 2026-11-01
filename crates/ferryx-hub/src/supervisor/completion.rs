@@ -531,6 +531,8 @@ impl CompletionDriver {
             other => return Err(SupervisorError::Goal(other)),
         };
         self.note_judge_failure(&goal.goal_id);
+        // The visible reason is a supervisor write too: only the lease holder records it.
+        super::require_holder(&goal.goal_id)?;
         // The goal stays verifying with a visible reason; its wake stays pending and the judge
         // is asked again only once the backoff is due.
         sqlx::query(
