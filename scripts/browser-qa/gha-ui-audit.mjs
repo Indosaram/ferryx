@@ -50,7 +50,7 @@ const summary = {
     "New browser tab: registered shortcut tab.newBrowser (Mod+Shift+B); the command palette lists only worktrees, tabs and 'Show changes', so it has no browser-tab command.",
     "Downloads shelf: no shortcut or palette command; it renders only while a download exists, so the step navigates to a local attachment URL.",
     "Settings > Browser is hidden until General > Advanced features is on (fresh-install default is off), so the run enables it first.",
-    "Controls are located from their own on-screen text: the address bar by its URL/about:blank text, Settings nav items in the column of 'General', the Advanced features switch from the row's pixels. Settings groups are reached with real mouse-wheel input.",
+    "Controls are located from their own on-screen text: the address bar by its URL/about:blank text, Settings nav items in the column of 'General', the Advanced features switch from the row's pixels. Settings groups are reached with real mouse-wheel input: scroll until the exact heading (at the content column edge, nothing after it on the line) is read, turning around at the pane end, bounded by a step count.",
     "Page loads use a local fixture server (example.html, download.html), so results do not depend on the network.",
     "ui_check uses tesseract OCR on the step screenshot: pass = expected text visible, fail = not visible, unavailable = OCR missing.",
   ],
@@ -160,6 +160,16 @@ const linux = {
   },
   resize(width, height) {
     return run("xdotool", ["windowsize", "--sync", this.windowId, String(width), String(height)]);
+  },
+  /** Window box on the root screen (client area plus a 30px margin for the frame), or null. */
+  geometry() {
+    if (!this.windowId) return null;
+    const out = run("xdotool", ["getwindowgeometry", "--shell", this.windowId]);
+    const value = (name) => Number(new RegExp(`^${name}=(-?\\d+)`, "m").exec(out.stdout)?.[1]);
+    const [x, y, width, height] = ["X", "Y", "WIDTH", "HEIGHT"].map(value);
+    if (!out.ok || ![x, y, width, height].every(Number.isFinite) || width < 200 || height < 200) return null;
+    const left = Math.max(0, x - 30), top = Math.max(0, y - 30);
+    return { x: left, y: top, width: width + (x - left) + 30, height: height + (y - top) + 30 };
   },
   wheel(x, y, notches) {
     return run("xdotool", ["mousemove", "--sync", String(x), String(y), "click", "--repeat", String(Math.abs(notches)), "--delay", "60", notches > 0 ? "5" : "4"]);
@@ -457,11 +467,22 @@ function ocrVariants(path) {
   const x2 = path.replace(/\.png$/, ".x2.png");
   const neg = path.replace(/\.png$/, ".x2n.png");
   if (imageMagick && platform !== "win32") {
-    const variants = [{ file: path, factor: 1 }];
+    // Linux: the 1920x1080 root shot is mostly black around the 1280x870 window, and tesseract
+    // reads nothing from some of those frames (measured on run 41334976522 probes: 0 words full
+    // frame, 47 lines cropped). Crop every variant to the window; words are shifted back.
+    const box = platform === "linux" ? linux.geometry() : null;
+    const crop = box ? ["-crop", `${box.width}x${box.height}+${box.x}+${box.y}`, "+repage"] : [];
+    const base = { dx: box?.x ?? 0, dy: box?.y ?? 0 };
+    const variants = [];
+    if (box) {
+      const cropped = path.replace(/\.png$/, ".crop.png");
+      if (run(imageMagick, [path, ...crop, cropped]).ok) variants.push({ file: cropped, factor: 1, ...base });
+    }
+    if (!variants.length) variants.push({ file: path, factor: 1, dx: 0, dy: 0 });
     // Measured on run 41327378231 screenshots: 3x gray reads dark-on-light and Windows/macOS
     // settings rows; 2x inverted reads Linux light-on-dark nav and sidebar labels.
-    if (run(imageMagick, [path, "-colorspace", "gray", "-resize", "300%", x2]).ok) variants.push({ file: x2, factor: 3 });
-    if (run(imageMagick, [path, "-colorspace", "gray", "-negate", "-resize", "200%", neg]).ok) variants.push({ file: neg, factor: 2 });
+    if (run(imageMagick, [path, ...crop, "-colorspace", "gray", "-resize", "300%", x2]).ok) variants.push({ file: x2, factor: 3, ...base });
+    if (run(imageMagick, [path, ...crop, "-colorspace", "gray", "-negate", "-resize", "200%", neg]).ok) variants.push({ file: neg, factor: 2, ...base });
     return variants;
   }
   if (platform === "win32" && win.ps("upscale", ["-Path", path, "-Text", x2]).ok) {
@@ -473,7 +494,7 @@ function ocr(path) {
   if (!tesseract || !path || !existsSync(path)) return null;
   const words = [];
   let anyPass = false;
-  for (const { file, factor } of ocrVariants(path)) {
+  for (const { file, factor, dx = 0, dy = 0 } of ocrVariants(path)) {
     const result = run(tesseract, [file, "-", "--psm", "11", "tsv"], { timeout: 120000 });
     if (!result.ok) continue;
     anyPass = true;
@@ -484,8 +505,8 @@ function ocr(path) {
       if (cells.length < header.length || !cells[col("text")]?.trim() || Number(cells[col("conf")]) <= 0) continue;
       words.push({
         text: cells[col("text")].trim(),
-        left: Math.round(Number(cells[col("left")]) / factor),
-        top: Math.round(Number(cells[col("top")]) / factor),
+        left: Math.round(Number(cells[col("left")]) / factor) + dx,
+        top: Math.round(Number(cells[col("top")]) / factor) + dy,
         width: Math.round(Number(cells[col("width")]) / factor),
         height: Math.round(Number(cells[col("height")]) / factor),
       });
@@ -784,6 +805,32 @@ const typeUrl = (url) => [
   key("Mod+A", { key: "a", mods: ["mod"] }),
   ["type URL", () => host.type(url)],
   key("Enter", { key: "Enter" }),
+  ["optional address bar shows the typed URL (retyped once if not)", async () => {
+    const path = new URL(url).pathname.split("/").pop() || new URL(url).host;
+    const shows = (words) => (words ?? []).some((word) => word.text.includes(path));
+    if (shows(ocr(probeShot()))) return { ok: true, retyped: false };
+    await clickAddressBar();
+    host.key({ key: "a", mods: ["mod"] });
+    host.type(url);
+    host.key({ key: "Enter" });
+    await sleep(1500);
+    const ok = shows(ocr(probeShot()));
+    return { ok, retyped: true, stderr: ok ? "" : `address bar does not show ${path}` };
+  }],
+];
+/** Poll OCR until one of `texts` is visible (page painted), bounded; records how long it took. */
+const waitForText = (texts, timeout = 15000) => [
+  `optional wait for page text (${texts.join("/")})`,
+  async () => {
+    const started = Date.now();
+    do {
+      const words = ocr(probeShot()) ?? [];
+      const seen = texts.find((text) => words.some((word) => norm(word.text) === norm(text)));
+      if (seen) return { ok: true, seen, waited_ms: Date.now() - started };
+      await sleep(1000);
+    } while (Date.now() - started < timeout);
+    return { ok: false, waited_ms: Date.now() - started, stderr: `page text not visible after ${timeout}ms: ${texts.join("/")}` };
+  },
 ];
 /**
  * A Settings nav item, located by its own label in the nav column (the column of the leftmost
@@ -834,21 +881,119 @@ async function clickRowSwitch(label) {
   } while (Date.now() < deadline);
   return { ok: false, stderr: `row label not visible: ${label}` };
 }
-/** Scroll the Settings content pane until a group title is visible, then screenshot. */
-async function scrollSettingsTo(title, { notches = 4, attempts = 16 } = {}) {
-  for (let attempt = 0; attempt <= attempts; attempt += 1) {
-    const words = ocr(probeShot());
-    const hit = findWord(words, "", { match: exactly(title), pick: "first" });
+/** Left edge of the Settings nav column (leftmost nav label or "Back"), or null. */
+function navColumnLeft(words) {
+  const anchors = (words ?? []).filter((word) => [...NAV_ORDER, "Back"].includes(word.text));
+  return anchors.length ? Math.min(...anchors.map((word) => word.left)) : null;
+}
+/**
+ * A multi-word phrase read left to right on one OCR line: each next word starts within 40px of
+ * the previous word's end and within 8px vertically. Also reports the word that directly follows
+ * the phrase on that line, so a group heading ("Import") is not confused with a button label that
+ * merely starts with it ("Import Cookies", "Import from Chrome").
+ */
+function findPhrase(words, phrase, { minX = 0 } = {}) {
+  const parts = phrase.split(/\s+/);
+  const after = (prev, test) =>
+    (words ?? []).find((word) => test(word) && Math.abs(word.top - prev.top) <= 8 && word.left > prev.left && word.left - (prev.left + prev.width) < 40);
+  const hits = [];
+  for (const first of (words ?? []).filter((word) => word.text === parts[0] && word.left >= minX)) {
+    let prev = first;
+    for (const part of parts.slice(1)) {
+      prev = after(prev, (word) => word.text === part);
+      if (!prev) break;
+    }
+    if (!prev) continue;
+    const right = prev.left + prev.width;
+    hits.push({
+      x: Math.round((first.left + right) / 2),
+      y: first.top + Math.round(first.height / 2),
+      left: first.left,
+      top: first.top,
+      right,
+      height: first.height,
+      followedBy: after(prev, (word) => word !== prev && !parts.includes(word.text))?.text ?? null,
+    });
+  }
+  // The multi-pass OCR reports the same word once per variant; keep one hit per position.
+  const unique = new Map(hits.map((hit) => [`${Math.round(hit.left / 8)}:${Math.round(hit.top / 8)}`, hit]));
+  return [...unique.values()].sort((a, b) => a.top - b.top);
+}
+/**
+ * A Settings group heading: the exact title phrase with nothing glued after it on the same line,
+ * starting at the content column's left edge (the most common left edge of words right of the
+ * nav: headings and row labels share it; buttons and later words of descriptions do not).
+ */
+function findSettingsHeading(words, title) {
+  const nav = navColumnLeft(words);
+  const minX = nav === null ? 0 : nav + 150;
+  const lefts = new Map();
+  for (const word of words ?? []) {
+    if (word.left < minX) continue;
+    const bucket = Math.round(word.left / 6);
+    lefts.set(bucket, (lefts.get(bucket) ?? 0) + 1);
+  }
+  const column = [...lefts.entries()].sort((a, b) => b[1] - a[1])[0];
+  const contentLeft = column ? column[0] * 6 : null;
+  const candidates = findPhrase(words, title, { minX });
+  const heading = candidates.find((hit) => !hit.followedBy && (contentLeft === null || Math.abs(hit.left - contentLeft) <= 12)) ?? null;
+  return { heading, candidates, contentLeft, nav };
+}
+/** Content-pane text with positions, to tell "the wheel moved the pane" from "end of pane". */
+const paneFingerprint = (words, minX) =>
+  [...new Set((words ?? []).filter((word) => word.left >= minX).map((word) => `${word.text}@${Math.round(word.top / 12)}`))].sort().join("|");
+/**
+ * Scroll the Settings content pane with the mouse wheel until a group heading is visible.
+ * Starts downwards; when two consecutive probes read the same pane text that end is reached, so
+ * it turns around. Fails after both ends were seen (the group is absent, not off-screen) or after
+ * maxSteps wheel steps. A heading in the lower half is nudged up so its body is in the shot.
+ */
+async function scrollSettingsTo(title, { notches = 4, maxSteps = 30, direction = 1 } = {}) {
+  if (!host.wheel) return { ok: false, stderr: "no wheel input on this platform" };
+  let dir = direction;
+  let previous = null;
+  const ends = [];
+  const trail = [];
+  for (let count = 0; count <= maxSteps; count += 1) {
+    const path = probeShot();
+    const words = ocr(path);
+    if (!words) return { ok: false, stderr: "OCR unavailable" };
+    const found = findSettingsHeading(words, title);
     const general = findWord(words, "", { match: exactly("General"), pick: "leftmost" });
-    if (hit && (!general || hit.left > general.left + 100)) return { ok: true, at: [hit.x, hit.y], scrolled_notches: attempt * Math.abs(notches) };
     // Wheel over the content pane: well right of the nav column, mid-height.
-    const x = general ? general.x + 600 : 900;
-    const y = general ? general.y + 300 : 500;
-    if (!host.wheel) return { ok: false, stderr: "no wheel input on this platform" };
-    host.wheel(x, y, notches);
+    const wheelAt = [found.nav !== null ? found.nav + 640 : 900, general ? general.y + 300 : 500];
+    if (found.heading) {
+      let hit = found.heading;
+      const nudged = hit.y > wheelAt[1] + 60;
+      if (nudged) {
+        host.wheel(...wheelAt, 2);
+        await sleep(700);
+        const again = findSettingsHeading(ocr(probeShot()), title).heading;
+        if (again) hit = again;
+        else {
+          host.wheel(...wheelAt, -2);
+          await sleep(700);
+        }
+      }
+      return { ok: true, at: [hit.x, hit.y], wheel_steps: count, nudged, ends_seen: ends, probe: basename(path) };
+    }
+    const fingerprint = paneFingerprint(words, found.nav === null ? 0 : found.nav + 150);
+    if (previous !== null && fingerprint === previous) {
+      ends.push(dir > 0 ? "bottom" : "top");
+      if (ends.length >= 2) break;
+      dir = -dir;
+    }
+    previous = fingerprint;
+    trail.push({ probe: basename(path), dir, near_misses: found.candidates.map((hit) => `${hit.followedBy ? `${title} ${hit.followedBy}…` : title}@${hit.left},${hit.top}`) });
+    host.wheel(...wheelAt, dir * notches);
     await sleep(700);
   }
-  return { ok: false, stderr: `group title not visible after scrolling: ${title}` };
+  return {
+    ok: false,
+    stderr: ends.length >= 2 ? `group '${title}' absent: scrolled Settings > Browser to both ends` : `group heading not visible after ${maxSteps} wheel steps: ${title}`,
+    ends_seen: ends,
+    trail: trail.slice(-8),
+  };
 }
 /** Open Settings: Mod+, then, when the nav is not visible, click the app sidebar and retry once. */
 async function openSettings() {
@@ -910,7 +1055,7 @@ await step(
 await step(
   "page-load-fixture",
   "Address bar: local example page (fixture server), Enter; the page renders its heading",
-  [focus, ...typeUrl(`${fixtureBase}/example.html`), 5000],
+  [focus, ...typeUrl(`${fixtureBase}/example.html`), waitForText(["Domain", "illustrative"])],
   { any: ["Domain", "illustrative"] },
 );
 await step("settings-open", "Click the sidebar, Mod+, opens Settings (retried once after re-focusing the app)", [focus, chromeFocus, ["open Settings", openSettings], dismissStoreToast], {
@@ -928,12 +1073,21 @@ await step(
   [focus, dismissStoreToast, ["click nav Browser", () => clickNav("Browser")], 2500],
   { any: ["Web", "Navigation", "Chromium"] },
 );
-for (const [name, title] of [["extensions", "Extensions"], ["passwords", "Passwords"], ["import", "Import"]]) {
+// Settings > Browser group order (integration): Web & Navigation, Default Browser, Chromium Engine,
+// Extensions, Site settings, Agent access, Passwords, Link Routing, File Links, Session & Cookies,
+// Active Browser Tabs, Import. scrollSettingsTo scans both directions, so order only affects time.
+for (const [name, title] of [
+  ["default-browser", "Default Browser"],
+  ["extensions", "Extensions"],
+  ["site-settings", "Site settings"],
+  ["passwords", "Passwords"],
+  ["import", "Import"],
+]) {
   await step(
     `settings-browser-${name}`,
     `Settings > Browser: scroll the content pane with the mouse wheel to the '${title}' group`,
     [focus, dismissStoreToast, [`scroll to ${title}`, () => scrollSettingsTo(title)], 800],
-    { any: [title] },
+    { any: [title.split(" ")[0]] },
   );
 }
 await step(
@@ -943,17 +1097,32 @@ await step(
     focus,
     dismissStoreToast,
     ["click Import browser data", async () => {
-      // Not "Import Cookies" (opens a native file dialog): the "Import" whose next word on the
-      // same line is "browser".
-      const words = ocr(probeShot()) ?? [];
-      const button = words
-        .filter((word) => word.text === "Import")
-        .find((word) => words.some((next) => next.text === "browser" && Math.abs(next.top - word.top) <= 6 && next.left > word.left && next.left - (word.left + word.width) < 30));
-      if (!button) return { ok: false, stderr: "'Import browser data…' button not visible" };
-      const at = [button.left + Math.round(button.width / 2), button.top + Math.round(button.height / 2)];
-      return { ...host.click(...at), at };
+      // Target = the phrase "Import browser" (never "Import Cookies", which opens a native file
+      // dialog), on the Import group's heading line (the button is the group's header action).
+      const locate = (words) => {
+        const group = findSettingsHeading(words, "Import").heading;
+        const button = findPhrase(words, "Import browser").find((hit) => !group || Math.abs(hit.top - group.top) <= 40);
+        return { group, button };
+      };
+      let words = ocr(probeShot()) ?? [];
+      let { group, button } = locate(words);
+      if (!button) {
+        const scrolled = await scrollSettingsTo("Import");
+        if (!scrolled.ok) return { ...scrolled, stderr: `Import group not reachable: ${scrolled.stderr}` };
+        words = ocr(probeShot()) ?? [];
+        ({ group, button } = locate(words));
+      }
+      if (!button) return { ok: false, stderr: "'Import browser data…' button not visible next to the Import heading", group_at: group ? [group.x, group.y] : null };
+      const at = [button.x, button.y];
+      const clicked = host.click(...at);
+      await sleep(1500);
+      // Verify: the dialog title "Import browser data" is on screen and the button row is not the
+      // only match (dialog overlays the page, so the title is a second, separate hit).
+      const after = ocr(probeShot()) ?? [];
+      const dialogOpen = findPhrase(after, "Import browser data").some((hit) => Math.abs(hit.y - button.y) > 20) || findPhrase(after, "browser data").length > 1;
+      return { ...clicked, ok: clicked.ok && dialogOpen, at, group_at: group ? [group.x, group.y] : null, dialog_open: dialogOpen, stderr: dialogOpen ? "" : "clicked 'Import browser data…' but no import dialog title appeared" };
     }],
-    2000,
+    1000,
   ],
   { any: ["Bookmarks", "History", "Cookies", "Passwords", "Chrome", "Firefox", "Safari", "Edge"] },
 );
@@ -965,7 +1134,7 @@ if (engineZip) {
     [
       focus,
       // The Import step left the pane scrolled to the bottom; Chromium Engine sits above Extensions.
-      ["scroll up to the Chromium Engine group", () => scrollSettingsTo("Chromium", { notches: -4 })],
+      ["scroll up to the Chromium Engine group", () => scrollSettingsTo("Chromium Engine", { direction: -1 })],
       // Rightmost: the group also has a "Download size" row label on the left.
       ["click Download", () => clickText("Download", { timeout: 8000, match: exactly("Download"), pick: "rightmost" })],
       3000,
@@ -995,13 +1164,13 @@ await step("settings-closed", "Escape closes Settings", [focus, key("Escape", { 
 await step(
   "download-trigger",
   "Load the local download page and click its download link; the download prompt shows ferryx-qa.txt",
-  [closeStrayDialogs, focus, dismissStoreToast, ...typeUrl(`${fixtureBase}/download.html`), 4000, ["click download link", () => clickText("FERRYXDOWNLOAD", { timeout: 8000 })], 4000],
+  [closeStrayDialogs, focus, dismissStoreToast, ...typeUrl(`${fixtureBase}/download.html`), waitForText(["FERRYXDOWNLOAD"]), ["click download link", () => clickText("FERRYXDOWNLOAD", { timeout: 15000 })], 4000],
   { any: ["ferryx-qa.txt", "Save", "Download"] },
 );
 await step(
   "page-for-find",
   "Load the local example page again (find and zoom target)",
-  [focus, ...typeUrl(`${fixtureBase}/example.html`), 4000],
+  [focus, ...typeUrl(`${fixtureBase}/example.html`), waitForText(["Domain", "illustrative"])],
   { any: ["Domain", "illustrative"] },
 );
 await step("find-open", "Mod+F opens the find bar; type 'Example' (page has 4 matches)", [focus, chromeFocus, key("Mod+F", { key: "f", mods: ["mod"] }), 1000, ["type query", () => host.type("Example")], 1500], {
