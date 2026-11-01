@@ -16,6 +16,8 @@ export type AttentionRow = {
   at?: number;
   /** Set on supervisor hand-offs: the fixed stop-reason or awaiting-approval label. */
   supervisorLabel?: string;
+  /** Why the row cannot be opened from here right now (shown on the row, which is then disabled). */
+  unavailable?: string;
 };
 
 export type AttentionActivity = { state?: string; detail?: string; seen?: boolean };

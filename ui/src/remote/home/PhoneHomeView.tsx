@@ -1,11 +1,11 @@
-// The phone home container: the destination body, an optional resume bar for the session
+// The phone home container: the destination body, an optional resume row for the session
 // already open, and the bottom tab bar. RemoteApp supplies the Worktrees body because it owns
 // the selection callbacks.
 import { ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { InboxHome } from "./InboxHome";
-import { MobileHomeTabBar } from "./MobileHomeTabBar";
+import { MobileHomeTabBar, PHONE_HOME_PANEL_ID, phoneHomeTabId } from "./MobileHomeTabBar";
 import type { AttentionRow } from "../../features/ferryx/attention/attentionModel";
 import type { AttentionPrompts } from "../../features/ferryx/attention/attentionPrompts";
 import { SupervisorHome, type SupervisorHomeProps } from "./SupervisorHome";
@@ -24,38 +24,53 @@ export type PhoneHomeViewProps = {
   readonly worktrees: ReactNode;
   /** The session already open on this phone; tapping it returns to the Session screen. */
   readonly resume: { readonly title: string; readonly subtitle: string; readonly onOpen: () => void } | null;
+  /** The Account entry every destination's header carries. */
+  readonly accountAction?: ReactNode;
 };
 
-export function PhoneHomeView({ destination, onSelectTab, supervisor, inbox, worktrees, resume }: PhoneHomeViewProps) {
-  const waiting = inbox.rows.filter((row) => row.state === "needs-you").length;
+/** The badge, the Inbox's "Needs input" group and its empty line count the same rows. */
+export function inboxBadgeCount(rows: readonly AttentionRow[]): number {
+  return rows.filter((row) => row.state === "needs-you").length;
+}
+
+export function PhoneHomeView({ destination, onSelectTab, supervisor, inbox, worktrees, resume, accountAction }: PhoneHomeViewProps) {
   return (
-    <div data-testid="mobile-home" data-destination={destination} className="flex min-h-0 min-w-0 flex-1 flex-col bg-chat-screen pt-safe-header">
-      <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+    <div data-testid="mobile-home" data-destination={destination} className="flex min-h-0 min-w-0 flex-1 flex-col bg-chat-screen pt-[env(safe-area-inset-top)] px-safe">
+      <main id={PHONE_HOME_PANEL_ID} role="tabpanel" aria-labelledby={phoneHomeTabId(destination)} className="flex min-h-0 min-w-0 flex-1 flex-col">
         {destination === "supervisor" ? (
-          <SupervisorHome {...supervisor} />
+          <SupervisorHome {...supervisor} phoneHeader headerAction={accountAction} />
         ) : destination === "inbox" ? (
-          <InboxHome rows={inbox.rows} prompts={inbox.prompts} now={supervisor.now} loading={inbox.loading} onOpen={inbox.onOpen} />
+          <InboxHome
+            rows={inbox.rows}
+            prompts={inbox.prompts}
+            now={supervisor.now}
+            loading={inbox.loading}
+            onOpen={inbox.onOpen}
+            onBrowseWorktrees={() => onSelectTab("worktrees")}
+            headerAction={accountAction}
+          />
         ) : (
           worktrees
         )}
       </main>
       {resume ? (
-        <button
-          type="button"
-          data-testid="mobile-home-resume"
-          aria-label={`Back to ${resume.title}`}
-          onClick={resume.onOpen}
-          className="mx-3 mb-2 flex min-h-11 shrink-0 items-center gap-3 rounded-xl bg-chat-surface-raised px-3 py-2 text-left transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-        >
-          <span className="flex min-w-0 flex-1 flex-col">
-            <span className="text-[12px] text-chat-foreground-secondary">Open session</span>
-            <span className="min-w-0 truncate text-[14px] font-medium text-chat-foreground">{resume.title}</span>
-          </span>
-          <span className="min-w-0 max-w-[40%] truncate text-[12px] text-chat-foreground-secondary">{resume.subtitle}</span>
-          <ChevronRight aria-hidden="true" className="size-4 shrink-0 text-chat-foreground-secondary" />
-        </button>
+        <aside aria-label="Open session" className="shrink-0 border-t border-chat-border bg-chat-header">
+          <button
+            type="button"
+            data-testid="mobile-home-resume"
+            onClick={resume.onOpen}
+            className="flex min-h-11 w-full items-center gap-2 px-4 py-2 text-left transition-colors hover:bg-chat-row-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+          >
+            <span className="min-w-0 flex-1 truncate text-sm">
+              <span className="text-chat-foreground-secondary">Back to </span>
+              <span className="font-medium text-chat-foreground">{resume.title}</span>
+            </span>
+            <span className="min-w-0 max-w-[40%] truncate text-xs text-chat-foreground-secondary">{resume.subtitle}</span>
+            <ChevronRight aria-hidden="true" className="size-4 shrink-0 text-chat-foreground-secondary" />
+          </button>
+        </aside>
       ) : null}
-      <MobileHomeTabBar active={destination} inboxCount={waiting} onSelect={onSelectTab} />
+      <MobileHomeTabBar active={destination} inboxCount={inboxBadgeCount(inbox.rows)} onSelect={onSelectTab} />
     </div>
   );
 }

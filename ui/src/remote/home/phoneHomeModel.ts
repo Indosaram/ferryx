@@ -1,5 +1,6 @@
 // Pure derivations for the phone home: the supervisor headline across machines, lane status,
 // the cross-machine Inbox, and the merged audit list. No React, no transport.
+import { formatAttentionTime } from "../../features/ferryx/attention/attentionModel";
 import { actingSessionIds, type SupervisorAction, type SupervisorLane, type SupervisorSnapshot } from "../../lib/supervisorModel";
 import type { RemoteSupervisorEntry, RemoteSupervisorLane } from "../remoteSupervisor";
 import type { RemoteSessionInventory } from "../remoteSessionInventory";
@@ -14,61 +15,97 @@ export type SupervisorMachineView = {
   readonly error: { code: string; message: string } | null;
 };
 
-export type SupervisorHeadline = "off" | "paused" | "typing" | `watching ${number}`;
+/** What the top of the Supervisor home says. `unknown` means no computer could be read. */
+export type SupervisorHeadline =
+  | { readonly kind: "unknown" }
+  | { readonly kind: "off" }
+  | { readonly kind: "paused"; readonly lanes: number }
+  | { readonly kind: "typing"; readonly lanes: number }
+  | { readonly kind: "active"; readonly lanes: number; readonly watched: number };
 
 /** The SupervisorPanelView headline, over every machine whose snapshot is readable. */
 export function supervisorHeadline(machines: readonly SupervisorMachineView[], now: number): SupervisorHeadline {
   const snapshots = machines.flatMap((m) => (m.snapshot ? [m.snapshot] : []));
+  if (snapshots.length === 0) return { kind: "unknown" };
   const lanes = snapshots.flatMap((s) => s.lanes);
-  if (!snapshots.some((s) => s.hub.running)) return "off";
-  if (lanes.length > 0 && lanes.every((lane) => lane.paused)) return "paused";
+  if (!snapshots.some((s) => s.hub.running)) return { kind: "off" };
+  if (lanes.length > 0 && lanes.every((lane) => lane.paused)) return { kind: "paused", lanes: lanes.length };
   if (snapshots.some((s) => {
     const acting = actingSessionIds(s, now);
     return s.lanes.some((lane) => lane.sessionId !== null && acting.has(lane.sessionId));
-  })) return "typing";
+  })) return { kind: "typing", lanes: lanes.length };
   const watched = snapshots.reduce((sum, s) => sum + s.watched.length, 0);
-  return `watching ${lanes.length + watched}`;
+  return { kind: "active", lanes: lanes.length, watched };
+}
+
+function plural(count: number, word: string): string {
+  return `${count} ${word}${count === 1 ? "" : "s"}`;
 }
 
 export function headlineSentence(headline: SupervisorHeadline): string {
-  if (headline === "off") return "Nothing is typed into your sessions. Start it on a computer with ferryx hub start.";
-  if (headline === "paused") return "Paused. It still reads your sessions but sends nothing until you resume.";
-  if (headline === "typing") return "It is typing in a lane right now. Open the lane to take over.";
-  return "Acts only in the lanes below and holds input while you type.";
+  switch (headline.kind) {
+    case "unknown":
+      return "Can't reach the supervisor on your computers right now.";
+    case "off":
+      return "The supervisor isn't running on any of your computers.";
+    case "paused":
+      return "Paused on every lane. It still reads your sessions but sends nothing.";
+    case "typing":
+      return "Typing in a lane right now. Open the lane to take over.";
+    case "active": {
+      if (headline.lanes === 0 && headline.watched === 0) return "Running, with no lanes yet.";
+      const watched = headline.watched > 0 ? `, watching ${plural(headline.watched, "more session")}` : "";
+      return `Running ${plural(headline.lanes, "lane")}${watched}.`;
+    }
+    default: {
+      const unreachable: never = headline;
+      return unreachable;
+    }
+  }
 }
 
-export function laneName(lane: Pick<SupervisorLane, "cwd" | "title">): string {
-  const leaf = lane.cwd.split(/[\\/]/).filter(Boolean).pop();
-  return leaf ? `${leaf} · ${lane.title}` : lane.title;
+/** The folder a lane works in, shown as secondary meta under its title. */
+export function laneFolder(lane: Pick<SupervisorLane, "cwd">): string | null {
+  return lane.cwd.split(/[\\/]/).filter(Boolean).pop() ?? null;
 }
 
 export type LaneStatus = { readonly kind: "paused" | "typing" | "needs-you" | "status"; readonly label: string };
 
-/** One status slot per lane: paused > typing > needs you > the hub's own status. */
+const LANE_STATUS_LABEL: Readonly<Record<string, string>> = {
+  running: "Working",
+  working: "Working",
+  active: "Working",
+  idle: "Idle",
+  waiting: "Waiting",
+  waiting_on_review: "Waiting for review",
+  waiting_on_user: "Needs you",
+  blocked: "Blocked",
+  blocked_on_ci: "Waiting for checks",
+  done: "Done",
+  completed: "Done",
+  failed: "Failed",
+  stopped: "Stopped",
+};
+
+/** One status slot per lane: paused > typing > needs you > the hub's status, from a fixed label set. */
 export function laneStatus(lane: SupervisorLane, acting: ReadonlySet<string>, needsYou: boolean): LaneStatus {
   if (lane.paused) return { kind: "paused", label: "Paused" };
   if (lane.sessionId && acting.has(lane.sessionId)) return { kind: "typing", label: "Typing" };
   if (needsYou) return { kind: "needs-you", label: "Needs you" };
-  const text = lane.status.replace(/_/g, " ").trim();
-  return { kind: "status", label: text ? text[0].toUpperCase() + text.slice(1) : "Idle" };
+  return { kind: "status", label: LANE_STATUS_LABEL[lane.status.trim().toLowerCase()] ?? "Working" };
 }
 
-export function clock(atMs: number): string {
-  const date = new Date(atMs);
-  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-}
-
+/** The home's one time format: the Inbox's relative time. */
 export function relativeTime(atMs: number, now: number): string {
-  const seconds = Math.max(0, Math.round((now - atMs) / 1000));
-  if (seconds < 45) return "just now";
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
+  return formatAttentionTime(atMs, now);
 }
 
-export type RecentAction = SupervisorAction & { readonly machineId: string; readonly where: string };
+export type RecentAction = SupervisorAction & {
+  readonly machineId: string;
+  readonly machineLabel: string;
+  /** The lane title, or null when the session belongs to no lane. */
+  readonly where: string | null;
+};
 
 /** Every machine's audit entries, newest first, capped at `limit`. */
 export function recentActions(machines: readonly SupervisorMachineView[], limit = 20): RecentAction[] {
@@ -78,16 +115,16 @@ export function recentActions(machines: readonly SupervisorMachineView[], limit 
     if (!snapshot) continue;
     for (const action of snapshot.actions) {
       const lane = snapshot.lanes.find((item) => item.sessionId === action.sessionId);
-      merged.push({ ...action, machineId: machine.machineId, where: lane ? lane.title : (action.sessionId ?? "pane").slice(0, 8) });
+      merged.push({ ...action, machineId: machine.machineId, machineLabel: machine.label, where: lane ? lane.title : null });
     }
   }
   return merged.sort((a, b) => b.atMs - a.atMs).slice(0, limit);
 }
 
 export function actionText(action: RecentAction): string {
-  if (action.code === "CONTROL_CONFLICT") return `${action.where} · held, you were typing`;
-  if (action.code !== "OK") return `${action.where} · refused (${action.code.toLowerCase()})`;
-  return action.text ? `${action.where} · “${action.text}”` : action.where;
+  if (action.code === "CONTROL_CONFLICT") return "Held off while you were typing";
+  if (action.code !== "OK") return "Not sent";
+  return action.text ? `Typed \u201c${action.text}\u201d` : "Typed into the session";
 }
 
 export type InboxRowKind = "waiting" | "held" | "done";
@@ -106,7 +143,7 @@ export type InboxRow = {
 
 export const INBOX_WHY: Record<InboxRowKind, string> = {
   waiting: "Waiting for your answer",
-  held: "Supervisor paused this lane",
+  held: "Supervisor paused",
   done: "Finished",
 };
 
@@ -134,7 +171,7 @@ export function buildInboxRows(input: {
       kind: state === "done" ? "done" : held ? "held" : "waiting",
       machineId: option.machineId,
       sessionId: option.sessionId,
-      title: entry?.title ?? `Session ${option.sessionId.slice(0, 8)}`,
+      title: entry?.title ?? `Session in ${worktree}`,
       where: `${option.machineDisplayName} · ${option.workspaceLabel ? `${option.workspaceLabel} / ` : ""}${worktree}`,
       agentType: option.agentType ?? null,
       observedAt: entry?.activityObservedAt ?? null,

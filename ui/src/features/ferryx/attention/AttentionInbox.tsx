@@ -16,6 +16,7 @@ import {
   type AttentionState,
 } from "./attentionModel";
 import type { AttentionPrompts } from "./attentionPrompts";
+import { userFacingError } from "../../../remote/userFacingError";
 
 type AttentionFilter = "all" | AttentionState;
 
@@ -31,6 +32,11 @@ export type AttentionInboxProps = {
   /** Present where a needs-you row may answer its pane's prompt inline (the desktop). */
   prompts?: AttentionPrompts;
   compact?: boolean;
+  /**
+   * The phone layout: 44px controls, 16px inputs, text no smaller than 12px, chat tokens, and the
+   * session title as the row's primary line. Off on the desktop sidebar, which keeps its look.
+   */
+  touch?: boolean;
   now?: number;
   className?: string;
 };
@@ -47,11 +53,6 @@ function useMinuteClock(fixed: number | undefined): number {
   }, [fixed]);
   return fixed ?? now;
 }
-
-const ACCENT: Record<AttentionState, string> = {
-  "needs-you": "before:bg-status-warning",
-  done: "before:bg-status-success",
-};
 
 const KIND: Record<AttentionState, string> = {
   "needs-you": "bg-status-warning/15 text-status-warning",
@@ -139,6 +140,7 @@ export function AttentionInbox({
   onDismiss,
   prompts,
   compact = false,
+  touch = false,
   now: fixedNow,
   className,
 }: AttentionInboxProps) {
@@ -157,7 +159,6 @@ export function AttentionInbox({
         data-testid="attention-inbox-empty"
         className={cn("flex min-h-0 flex-1 flex-col items-center justify-center px-6 py-8 text-center", className)}
       >
-        <span aria-hidden="true" className="mb-3 text-2xl leading-none text-status-warning">✧</span>
         <p className="text-[12.5px] font-semibold text-worktree-sidebar-foreground">
           Nobody is <span className="text-status-warning">waiting on you</span>.
         </p>
@@ -174,7 +175,10 @@ export function AttentionInbox({
         <div
           role="group"
           aria-label="Status filter"
-          className="flex shrink-0 gap-1.5 overflow-x-auto border-b border-worktree-sidebar-border px-2.5 py-2 scrollbar-none"
+          className={cn(
+            "flex shrink-0 gap-1.5 overflow-x-auto scrollbar-none",
+            touch ? "gap-2 pb-2" : "border-b border-worktree-sidebar-border px-2.5 py-2",
+          )}
         >
           {(["all", "needs-you", "done"] as const).map((id) => (
             <button
@@ -183,34 +187,50 @@ export function AttentionInbox({
               aria-pressed={activeFilter === id}
               onClick={() => setFilter(id)}
               className={cn(
-                "inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                "inline-flex shrink-0 items-center gap-1.5 rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                touch ? "h-11 px-4 text-sm" : "h-6 px-2.5 text-[11px]",
                 activeFilter === id
                   ? "border-status-warning/35 bg-status-warning/15 font-semibold text-status-warning"
-                  : "border-worktree-sidebar-border text-muted-foreground hover:text-worktree-sidebar-foreground",
+                  : touch
+                    ? "border-chat-border text-chat-foreground-secondary hover:text-chat-foreground"
+                    : "border-worktree-sidebar-border text-muted-foreground hover:text-worktree-sidebar-foreground",
               )}
             >
-              {id === "all" ? "All" : ATTENTION_STATE_SHORT_LABEL[id]}
-              <span className="text-[10px] tabular-nums opacity-75">{counts[id]}</span>
+              {id === "all" ? "All" : touch ? ATTENTION_STATE_LABEL[id] : ATTENTION_STATE_SHORT_LABEL[id]}
+              <span className={cn("tabular-nums opacity-75", touch ? "text-xs" : "text-[10px]")}>{counts[id]}</span>
             </button>
           ))}
         </div>
       ) : null}
 
-      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2.5 pb-3.5 pt-2.5 scrollbar-sleek">
+      <div
+        className={cn(
+          "min-h-0 flex-1 overflow-x-hidden",
+          touch ? "pt-1" : "overflow-y-auto px-2.5 pb-3.5 pt-2.5 scrollbar-sleek",
+        )}
+      >
         {groups.map((group) => (
-          <section key={group.state} aria-label={ATTENTION_STATE_LABEL[group.state]} className="[&+&]:mt-3.5">
-            <h3 className="flex items-center gap-1.5 px-0.5 pb-1.5 text-[11px] font-semibold text-worktree-sidebar-foreground/80">
-              <span aria-hidden="true" className={cn("size-1.5 shrink-0 rounded-full", MARKER[group.state])} />
-              {ATTENTION_STATE_LABEL[group.state]}
-              <span className="ml-auto text-[10px] font-normal tabular-nums text-muted-foreground">{group.rows.length}</span>
-            </h3>
-            <ul className="flex flex-col gap-1.5">
+          <section key={group.state} aria-label={ATTENTION_STATE_LABEL[group.state]} className={touch ? "[&+&]:mt-5" : "[&+&]:mt-3.5"}>
+            {touch ? (
+              <h3 className="flex items-center gap-1.5 px-1 pb-2 text-sm font-semibold text-chat-foreground">
+                {ATTENTION_STATE_LABEL[group.state]}
+                <span className="ml-auto text-xs font-normal tabular-nums text-chat-foreground-secondary">{group.rows.length}</span>
+              </h3>
+            ) : (
+              <h3 className="flex items-center gap-1.5 px-0.5 pb-1.5 text-[11px] font-semibold text-worktree-sidebar-foreground/80">
+                <span aria-hidden="true" className={cn("size-1.5 shrink-0 rounded-full", MARKER[group.state])} />
+                {ATTENTION_STATE_LABEL[group.state]}
+                <span className="ml-auto text-[10px] font-normal tabular-nums text-muted-foreground">{group.rows.length}</span>
+              </h3>
+            )}
+            <ul className={cn("flex flex-col", touch ? "gap-2" : "gap-1.5")}>
               {group.rows.map((row) => (
                 <AttentionInboxRow
                   key={row.id}
                   row={row}
                   now={now}
                   compact={compact}
+                  touch={touch}
                   onOpen={onOpen}
                   onDismiss={onDismiss}
                   {...(prompts && row.state === "needs-you" ? { prompts } : {})}
@@ -224,10 +244,78 @@ export function AttentionInbox({
   );
 }
 
+function TouchInboxRow({
+  row,
+  now,
+  onOpen,
+  onDismiss,
+  prompts,
+}: {
+  row: AttentionRow;
+  now: number;
+  onOpen: (row: AttentionRow) => void;
+  onDismiss?: (row: AttentionRow) => void;
+  prompts?: AttentionPrompts;
+}) {
+  const when = row.at !== undefined ? formatAttentionTime(row.at, now) : undefined;
+  const title = row.text ?? row.who;
+  const agent = row.text ? row.who : undefined;
+  const meta = [agent, row.location].filter(Boolean).join(" · ");
+  const summary = [title, ATTENTION_KIND_LABEL[row.state], row.supervisorLabel, row.unavailable, meta, when].filter(Boolean).join(", ");
+  return (
+    <li className="rounded-xl bg-chat-surface">
+      <div className="flex min-w-0 items-stretch">
+        <button
+          type="button"
+          data-testid="attention-row"
+          data-attention-state={row.state}
+          aria-label={summary}
+          aria-disabled={row.unavailable ? "true" : undefined}
+          onClick={() => {
+            if (!row.unavailable) onOpen(row);
+          }}
+          className="flex min-h-11 min-w-0 flex-1 flex-col rounded-xl aria-disabled:cursor-not-allowed px-3 py-2.5 text-left transition-colors hover:bg-chat-row-hover active:bg-chat-row-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          <span className="flex min-w-0 items-start gap-2">
+            <span data-testid="attention-row-title" className="min-w-0 flex-1 line-clamp-2 break-words text-base font-medium text-chat-foreground">
+              {title}
+            </span>
+            <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold", KIND[row.state])}>
+              {row.state === "needs-you" ? "Needs you" : ATTENTION_KIND_LABEL[row.state]}
+            </span>
+          </span>
+          {meta ? <span className="mt-0.5 min-w-0 truncate text-sm text-chat-foreground-secondary">{meta}</span> : null}
+          <span className="mt-0.5 flex min-w-0 items-baseline gap-2 text-xs text-chat-foreground-secondary">
+            {row.supervisorLabel ? (
+              <span data-testid="attention-row-supervisor" className="min-w-0 truncate">{row.supervisorLabel}</span>
+            ) : null}
+            {row.unavailable ? (
+              <span data-testid="attention-row-unavailable" className="min-w-0 truncate">{row.unavailable}</span>
+            ) : null}
+            {when ? <span className="ml-auto shrink-0 tabular-nums">{when}</span> : null}
+          </span>
+        </button>
+        {onDismiss ? (
+          <button
+            type="button"
+            aria-label={`Dismiss ${title}`}
+            onClick={() => onDismiss(row)}
+            className="flex size-11 shrink-0 items-center justify-center self-center rounded-lg text-chat-foreground-secondary transition-colors hover:bg-chat-row-hover hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            <X className="size-4" aria-hidden="true" />
+          </button>
+        ) : null}
+      </div>
+      {prompts ? <AttentionPromptPanel row={row} prompts={prompts} touch /> : null}
+    </li>
+  );
+}
+
 function AttentionInboxRow({
   row,
   now,
   compact,
+  touch,
   onOpen,
   onDismiss,
   prompts,
@@ -235,10 +323,12 @@ function AttentionInboxRow({
   row: AttentionRow;
   now: number;
   compact: boolean;
+  touch: boolean;
   onOpen: (row: AttentionRow) => void;
   onDismiss?: (row: AttentionRow) => void;
   prompts?: AttentionPrompts;
 }) {
+  if (touch) return <TouchInboxRow row={row} now={now} onOpen={onOpen} {...(onDismiss ? { onDismiss } : {})} {...(prompts ? { prompts } : {})} />;
   const when = row.at !== undefined ? formatAttentionTime(row.at, now) : undefined;
   const summary = [row.who, row.supervisorLabel ?? ATTENTION_STATE_LABEL[row.state], row.location, row.text].filter(Boolean).join(", ");
   return (
@@ -253,8 +343,6 @@ function AttentionInboxRow({
         className={cn(
           "relative flex w-full min-w-0 flex-col rounded-lg border border-white/[0.06] bg-white/[0.035] py-2 pl-3 text-left transition-colors",
           "hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-          "before:absolute before:bottom-2 before:left-0 before:top-2 before:w-[3px] before:rounded-r before:content-['']",
-          ACCENT[row.state],
           onDismiss ? "pr-8" : "pr-2.5",
         )}
       >
@@ -313,7 +401,43 @@ const OPTION_BUTTON =
  * The question a needs-you row's pane is asking, answered in place. Read when the row renders and
  * again whenever its entry moves; a pane with no readable prompt shows nothing here.
  */
-function AttentionPromptPanel({ row, prompts }: { row: AttentionRow; prompts: AttentionPrompts }) {
+const TOUCH_PANEL = {
+  panel: "mx-3 mb-3 flex flex-col gap-2 rounded-lg bg-status-warning/[0.08] px-3 py-2.5",
+  question: "line-clamp-4 break-words text-sm font-medium leading-snug text-chat-foreground",
+  meta: "break-words text-sm text-chat-foreground-secondary",
+  strong: "font-semibold text-chat-foreground",
+  primary:
+    "flex h-11 items-center justify-center rounded-lg bg-status-warning/20 px-4 text-sm font-semibold text-status-warning transition-colors hover:bg-status-warning/30 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50",
+  secondary:
+    "flex h-11 items-center justify-center rounded-lg bg-chat-surface-raised px-4 text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50",
+  input:
+    "h-11 min-w-0 flex-1 rounded-lg border border-chat-border bg-chat-screen px-3 text-base text-chat-foreground placeholder:text-chat-foreground-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+  option:
+    "flex min-h-11 w-full min-w-0 items-center gap-2 rounded-lg bg-chat-surface-raised px-3 py-2 text-left text-sm text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50",
+  ordinal: "shrink-0 text-xs tabular-nums text-chat-foreground-secondary",
+  error: "break-words text-sm text-chat-danger",
+  stale: "mx-3 mb-3 text-sm text-status-warning",
+} as const;
+
+const COMPACT_PANEL = {
+  panel: "mx-1 mt-1 flex flex-col gap-1 rounded-md border border-status-warning/25 bg-status-warning/[0.06] px-2 py-1.5",
+  question: "line-clamp-3 break-words text-[11px] font-medium leading-snug text-worktree-sidebar-foreground",
+  meta: "break-words text-[11px] text-muted-foreground",
+  strong: "font-semibold text-worktree-sidebar-foreground",
+  primary:
+    "h-6 rounded-md bg-status-warning/20 px-2.5 text-[11px] font-semibold text-status-warning hover:bg-status-warning/30 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50",
+  secondary:
+    "h-6 rounded-md px-2.5 text-[11px] text-muted-foreground hover:bg-white/[0.07] hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50",
+  input:
+    "h-6 min-w-0 flex-1 rounded-md border border-worktree-sidebar-border bg-black/20 px-1.5 text-[11px] text-worktree-sidebar-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+  option: OPTION_BUTTON,
+  ordinal: "shrink-0 font-mono text-[10px] text-muted-foreground",
+  error: "break-words text-[10.5px] text-destructive",
+  stale: "mx-1 mt-1 text-[11px] text-status-warning",
+} as const;
+
+function AttentionPromptPanel({ row, prompts, touch = false }: { row: AttentionRow; prompts: AttentionPrompts; touch?: boolean }) {
+  const ui = touch ? TOUCH_PANEL : COMPACT_PANEL;
   const [prompt, setPrompt] = useState<AgentPrompt | null>(null);
   const [confirming, setConfirming] = useState<{ key: string; label: string } | null>(null);
   const [text, setText] = useState("");
@@ -360,7 +484,7 @@ function AttentionPromptPanel({ row, prompts }: { row: AttentionRow; prompts: At
 
   if (stale) {
     return (
-      <p data-testid="attention-prompt-stale" role="status" className="mx-1 mt-1 text-[11px] text-status-warning">
+      <p data-testid="attention-prompt-stale" role="status" className={ui.stale}>
         {PROMPT_CHANGED}
       </p>
     );
@@ -379,8 +503,12 @@ function AttentionPromptPanel({ row, prompts }: { row: AttentionRow; prompts: At
         promptsRef.current.onAnswered(row);
       }
     } catch (failure) {
-      const message = (failure as { message?: unknown } | null)?.message;
-      setError(typeof message === "string" && message ? message : "The answer could not be sent");
+      if (touch) {
+        setError(userFacingError(failure, { action: "send the answer" }));
+      } else {
+        const message = (failure as { message?: unknown } | null)?.message;
+        setError(typeof message === "string" && message ? message : "The answer could not be sent");
+      }
     } finally {
       setPending(false);
     }
@@ -403,22 +531,22 @@ function AttentionPromptPanel({ row, prompts }: { row: AttentionRow; prompts: At
     <div
       data-testid="attention-prompt"
       data-prompt-kind={prompt.kind}
-      className="mx-1 mt-1 flex flex-col gap-1 rounded-md border border-status-warning/25 bg-status-warning/[0.06] px-2 py-1.5"
+      className={ui.panel}
     >
-      <p className="line-clamp-3 break-words text-[11px] font-medium leading-snug text-worktree-sidebar-foreground">
+      <p className={ui.question}>
         {prompt.question}
       </p>
       {confirming ? (
-        <div className="flex flex-col gap-1">
-          <p className="break-words text-[11px] text-muted-foreground">
-            Send <span className="font-semibold text-worktree-sidebar-foreground">{confirming.label}</span>?
+        <div className={cn("flex flex-col", touch ? "gap-2" : "gap-1")}>
+          <p className={ui.meta}>
+            Send <span className={ui.strong}>{confirming.label}</span>?
           </p>
-          <div className="flex gap-1">
+          <div className={cn("flex", touch ? "justify-between gap-6" : "gap-1")}>
             <button
               type="button"
               disabled={pending}
               onClick={() => void send({ key: confirming.key })}
-              className="h-6 rounded-md bg-status-warning/20 px-2.5 text-[11px] font-semibold text-status-warning hover:bg-status-warning/30 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+              className={ui.primary}
             >
               Confirm
             </button>
@@ -426,32 +554,32 @@ function AttentionPromptPanel({ row, prompts }: { row: AttentionRow; prompts: At
               type="button"
               disabled={pending}
               onClick={() => setConfirming(null)}
-              className="h-6 rounded-md px-2.5 text-[11px] text-muted-foreground hover:bg-white/[0.07] hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+              className={ui.secondary}
             >
               Cancel
             </button>
           </div>
         </div>
       ) : prompt.kind === "freeText" || prompt.options.length === 0 ? (
-        <form onSubmit={submitText} className="flex gap-1">
+        <form onSubmit={submitText} className={cn("flex", touch ? "gap-2" : "gap-1")}>
           <input
             type="text"
             aria-label={`Answer ${row.who}`}
             value={text}
             disabled={pending}
             onChange={(event) => setText(event.target.value)}
-            className="h-6 min-w-0 flex-1 rounded-md border border-worktree-sidebar-border bg-black/20 px-1.5 text-[11px] text-worktree-sidebar-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            className={ui.input}
           />
           <button
             type="submit"
             disabled={pending || !text.trim()}
-            className="h-6 shrink-0 rounded-md bg-status-warning/20 px-2.5 text-[11px] font-semibold text-status-warning hover:bg-status-warning/30 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+            className={cn("shrink-0", ui.primary)}
           >
             Send
           </button>
         </form>
       ) : (
-        <div role="group" aria-label={prompt.question} className="flex flex-col gap-1">
+        <div role="group" aria-label={prompt.question} className={cn("flex flex-col", touch ? "gap-2" : "gap-1")}>
           {prompt.options.map((option, index) => (
             <button
               key={option.key}
@@ -460,15 +588,15 @@ function AttentionPromptPanel({ row, prompts }: { row: AttentionRow; prompts: At
               data-option-key={option.key}
               disabled={pending}
               onClick={() => pick(option)}
-              className={OPTION_BUTTON}
+              className={ui.option}
             >
-              <span aria-hidden="true" className="shrink-0 font-mono text-[10px] text-muted-foreground">{index + 1}.</span>
+              <span aria-hidden="true" className={ui.ordinal}>{index + 1}.</span>
               <span className="min-w-0 break-words">{option.label}</span>
             </button>
           ))}
         </div>
       )}
-      {error ? <p role="alert" className="break-words text-[10.5px] text-destructive">{error}</p> : null}
+      {error ? <p role="alert" className={ui.error}>{error}</p> : null}
     </div>
   );
 }

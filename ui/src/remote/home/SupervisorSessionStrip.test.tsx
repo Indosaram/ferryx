@@ -34,7 +34,7 @@ describe("SupervisorSessionStrip", () => {
     expect(order).toEqual(["pause:k:true", "focus"]);
   });
 
-  it("still hands the keyboard over when the pause is refused", async () => {
+  it("keeps the keyboard where it is when the pause is refused, and offers a retry", async () => {
     const onFocusInput = vi.fn();
     render(
       <SupervisorSessionStrip
@@ -45,6 +45,24 @@ describe("SupervisorSessionStrip", () => {
       />,
     );
     await act(async () => fireEvent.click(screen.getByTestId("supervisor-take-over")));
+    expect(onFocusInput).not.toHaveBeenCalled();
+    expect(screen.getByTestId("supervisor-take-over")).toHaveTextContent("Try again");
+  });
+
+  it("announces only a short state sentence, not the buttons or timestamps", () => {
+    render(
+      <SupervisorSessionStrip state={{ kind: "acting", text: "x", atMs: 0, lane: fixtureLane({ key: "k" }) }} now={120_000} onSetPaused={vi.fn()} onFocusInput={vi.fn()} />,
+    );
+    const live = screen.getByRole("status");
+    expect(live).toHaveTextContent("Supervisor is typing in this session");
+    expect(live.querySelector("button")).toBeNull();
+    expect(screen.getByTestId("supervisor-session-strip")).not.toHaveAttribute("role");
+  });
+
+  it("hands the keyboard over from the left-to-you state", () => {
+    const onFocusInput = vi.fn();
+    render(<SupervisorSessionStrip state={{ kind: "left-to-you" }} now={0} onSetPaused={vi.fn()} onFocusInput={onFocusInput} />);
+    fireEvent.click(screen.getByTestId("supervisor-answer"));
     expect(onFocusInput).toHaveBeenCalledTimes(1);
   });
 

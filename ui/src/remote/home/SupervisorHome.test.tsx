@@ -34,10 +34,53 @@ describe("SupervisorHome", () => {
         }),
       ],
     });
-    expect(screen.getByTestId("supervisor-home-headline")).toHaveTextContent("typing");
+    expect(screen.getByTestId("supervisor-home")).toHaveAttribute("data-headline", "typing");
     const card = screen.getByTestId("supervisor-lane-card");
     expect(within(card).getByTestId("supervisor-lane-status")).toHaveTextContent("Typing");
     expect(screen.getByTestId("supervisor-recent-action")).toHaveTextContent("“yes”");
+  });
+
+  it("names the lane by its title in both the open and the pause control", () => {
+    renderHome({ machines: [fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "a", title: "Docs", cwd: "/x/site" })] }) })] });
+    expect(screen.getByTestId("supervisor-lane-open")).toHaveAccessibleName(/^Open Docs,/);
+    expect(screen.getByTestId("supervisor-lane-pause")).toHaveAccessibleName("Pause Docs");
+    expect(screen.getByTestId("supervisor-lane-pause")).toHaveTextContent("Pause");
+  });
+
+  it("says it is still looking while discovery runs, and that nothing is linked once it settled", () => {
+    const { rerender, props } = renderHome({ discovering: true });
+    expect(screen.getByTestId("supervisor-home-discovering")).toBeInTheDocument();
+    expect(screen.queryByTestId("supervisor-home-empty")).toBeNull();
+    rerender(<SupervisorHome {...props} discovering={false} />);
+    expect(screen.getByTestId("supervisor-home-empty")).toBeInTheDocument();
+  });
+
+  it("does not claim the supervisor is off when no computer can be read, and offers a retry", () => {
+    const onRetry = vi.fn();
+    renderHome({ onRetry, machines: [fixtureMachine({ machineId: "m1", label: "Studio", state: "offline", snapshot: null })] });
+    expect(screen.getByTestId("supervisor-home")).toHaveAttribute("data-headline", "unknown");
+    expect(screen.getByTestId("supervisor-home-headline")).not.toHaveTextContent(/isn't running/);
+    fireEvent.click(screen.getByTestId("supervisor-machine-retry"));
+    expect(onRetry).toHaveBeenCalledWith("m1");
+  });
+
+  it("states the stopped supervisor once, without a command line", () => {
+    renderHome({ machines: [fixtureMachine({ machineId: "m1", label: "Studio", snapshot: fixtureSnapshot({ hub: { available: false, running: false } }) })] });
+    expect(screen.getByTestId("supervisor-hub-off")).toHaveTextContent("Start it from Ferryx on Studio.");
+    expect(screen.getByTestId("supervisor-home")).not.toHaveTextContent("ferryx hub start");
+  });
+
+  it("shows plain error copy instead of a raw code", () => {
+    renderHome({ machines: [fixtureMachine({ machineId: "m1", state: "error", snapshot: null, error: { code: "UNAVAILABLE", message: "x" } })] });
+    expect(screen.getByTestId("supervisor-machine-state")).not.toHaveTextContent("UNAVAILABLE");
+  });
+
+  it("shows the last three actions and expands to the rest", () => {
+    const actions = Array.from({ length: 5 }, (_, i) => fixtureAction({ atMs: NOW - (i + 1) * 60_000, text: `step ${i}` }));
+    renderHome({ machines: [fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ actions }) })] });
+    expect(screen.getAllByTestId("supervisor-recent-action")).toHaveLength(3);
+    fireEvent.click(screen.getByTestId("supervisor-recent-toggle"));
+    expect(screen.getAllByTestId("supervisor-recent-action")).toHaveLength(5);
   });
 
   it("pauses a lane with its key and disables the button until the machine answers", async () => {
@@ -87,10 +130,10 @@ describe("SupervisorHome", () => {
     );
   });
 
-  it("explains how to start a stopped hub", () => {
+  it("explains where to start a stopped hub", () => {
     renderHome({ machines: [fixtureMachine({ machineId: "m1", label: "Studio", snapshot: fixtureSnapshot({ hub: { available: true, running: false } }) })] });
-    expect(screen.getByTestId("supervisor-hub-off")).toHaveTextContent("The supervisor is not running on Studio. Start it with ferryx hub start.");
-    expect(screen.getByTestId("supervisor-home-headline")).toHaveTextContent("off");
+    expect(screen.getByTestId("supervisor-hub-off")).toHaveTextContent("Start it from Ferryx on Studio.");
+    expect(screen.getByTestId("supervisor-home")).toHaveAttribute("data-headline", "off");
   });
 
   it("starts a stopped hub from the phone and disables the button until the machine answers", async () => {
@@ -101,6 +144,7 @@ describe("SupervisorHome", () => {
     fireEvent.click(button);
     expect(onStartHub).toHaveBeenCalledWith("m1");
     expect(button).toBeDisabled();
+    expect(button).toHaveTextContent("Starting…");
     fireEvent.click(button);
     expect(onStartHub).toHaveBeenCalledTimes(1);
     await act(async () => answer({ kind: "ok", started: true }));
@@ -110,7 +154,7 @@ describe("SupervisorHome", () => {
   it("offers no start button where this machine has no hub at all", () => {
     renderHome({ onStartHub: vi.fn(), machines: [fixtureMachine({ machineId: "m1", label: "Studio", snapshot: fixtureSnapshot({ hub: { available: false, running: false } }) })] });
     expect(screen.queryByTestId("supervisor-hub-start")).toBeNull();
-    expect(screen.getByTestId("supervisor-hub-off")).toHaveTextContent("ferryx hub start");
+    expect(screen.getByTestId("supervisor-hub-off")).toHaveTextContent("Start it from Ferryx on Studio.");
   });
 
   it("opens the lane's session on that machine when its card is tapped", () => {

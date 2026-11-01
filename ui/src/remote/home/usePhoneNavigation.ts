@@ -1,6 +1,7 @@
 // Phone navigation for the supervisor-first home: three home destinations behind a bottom tab
-// bar, and a Session screen pushed on top. Every move pushes a history entry so the platform
-// back gesture walks back through the app instead of leaving it.
+// bar, and a Session screen pushed on top. A tab switch replaces the history entry (as platform
+// tab bars do); a Session screen and every overlay push one, so the back gesture closes the
+// topmost overlay first, then returns from the session, then leaves.
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export type PhoneDestination = "supervisor" | "inbox" | "worktrees";
@@ -56,8 +57,9 @@ export function usePhoneNavigation(enabled: boolean): PhoneNavigation {
 
   useEffect(() => {
     if (!enabled) {
-      // Signed out or widened past the phone layout: the next phone session starts at the default.
-      setScreen(HOME_DEFAULT);
+      // Widened past the phone layout: keep the person's tab and drop only the pushed Session
+      // screen, whose history entry the wide layout does not own. Sign-out calls reset().
+      setScreen((current) => (current.kind === "session" ? { kind: "home", destination: current.from } : current));
       return;
     }
     // Anchor the current entry as the home the back gesture lands on.
@@ -78,7 +80,7 @@ export function usePhoneNavigation(enabled: boolean): PhoneNavigation {
       if (current.kind === "home" && current.destination === destination) return;
       const next: PhoneScreen = { kind: "home", destination };
       setScreen(next);
-      if (enabled) writeHistory(next, "push");
+      if (enabled) writeHistory(next, "replace");
     },
     [enabled],
   );
@@ -112,4 +114,38 @@ export function usePhoneNavigation(enabled: boolean): PhoneNavigation {
     back,
     reset,
   };
+}
+
+/** The key an open overlay owns inside `history.state`. */
+export const OVERLAY_HISTORY_KEY = "ferryxOverlay";
+
+let overlaySeq = 0;
+
+/**
+ * Gives an open sheet or drawer its own history entry, so the platform back gesture closes it
+ * before it touches the page underneath. Closing it any other way pops that entry again. Works
+ * in every layout and in paired mode: it never reads or writes the phone screen key.
+ */
+export function useOverlayHistory(open: boolean, onClose: () => void): void {
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    if (!open) return;
+    const id = `overlay-${(overlaySeq += 1)}`;
+    const base = window.history.state && typeof window.history.state === "object" ? window.history.state : {};
+    window.history.pushState({ ...base, [OVERLAY_HISTORY_KEY]: id }, "");
+    let owned = true;
+    const onPop = (event: PopStateEvent) => {
+      const state = event.state as Record<string, unknown> | null;
+      if (state?.[OVERLAY_HISTORY_KEY] === id) return;
+      owned = false;
+      closeRef.current();
+    };
+    window.addEventListener("popstate", onPop);
+    return () => {
+      window.removeEventListener("popstate", onPop);
+      const state = window.history.state as Record<string, unknown> | null;
+      if (owned && state?.[OVERLAY_HISTORY_KEY] === id) window.history.back();
+    };
+  }, [open]);
 }
