@@ -14,6 +14,7 @@ import { MobileKeyDock } from "../components/MobileKeyDock";
 import { QA_KEYBOARD_HEIGHT, QaTerminalSurface, chatQaComposerProps } from "./chatQaStates";
 import { PHONE_HOME_QA_STATES, PhoneHomeQaState, QaSessionStrip, SESSION_STRIP_QA_STATES } from "./phoneHomeQaStates";
 import { SIDEBAR_PARITY_QA_STATES, SidebarParityQaState } from "./sidebarParityQa";
+import { PHONE_NAV_QA_STATE, PhoneNavQaState } from "./phoneNavQa";
 
 const STATE = (() => {
   if (typeof window === "undefined") return "stream";
@@ -255,6 +256,7 @@ export const MobileChatQaHarness: React.FC = () => {
   if ((SIDEBAR_PARITY_QA_STATES as readonly string[]).includes(STATE)) {
     return <SidebarParityQaState state={STATE} model={SEEDED_MODEL} />;
   }
+  if (STATE === PHONE_NAV_QA_STATE) return <PhoneNavQaState />;
   return <ChatQaHarness />;
 };
 
