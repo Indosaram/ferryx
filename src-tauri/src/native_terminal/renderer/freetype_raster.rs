@@ -99,6 +99,8 @@ unsafe extern "C" {
         value: *mut *mut u8,
     ) -> c_int;
     fn FcPatternDestroy(pattern: *mut c_void);
+    #[cfg(test)]
+    fn FcConfigAppFontAddDir(config: *mut c_void, dir: *const u8) -> c_int;
 }
 
 struct Library(*mut c_void);
@@ -133,9 +135,26 @@ fn fontconfig() -> Option<&'static FontConfig> {
             // SAFETY: FcInitLoadConfigAndFonts returns a config owned by this cache, which keeps
             // it alive for the process lifetime instead of leaking one per lookup.
             let handle = unsafe { FcInitLoadConfigAndFonts() };
+            #[cfg(test)]
+            if !handle.is_null() {
+                register_fixture_fonts(handle);
+            }
             (!handle.is_null()).then_some(FontConfig(handle))
         })
         .as_ref()
+}
+
+/// Test builds add `tests/fixtures/fonts` (a Noto Sans KR variable-font Hangul subset and a
+/// MesloLGS NF subset) to the application font set, so rasterization tests resolve the same
+/// faces on every Linux host instead of depending on which fonts happen to be installed.
+#[cfg(test)]
+fn register_fixture_fonts(config: *mut c_void) {
+    let dir = CString::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/fonts"))
+        .expect("fixture font directory has no interior NUL");
+    // SAFETY: `config` is the live handle FcInitLoadConfigAndFonts just returned, and
+    // fontconfig copies the directory string before returning.
+    let added = unsafe { FcConfigAppFontAddDir(config, dir.as_ptr() as *const u8) };
+    assert_ne!(added, 0, "fontconfig rejected the fixture font directory {dir:?}");
 }
 
 /// Splits a comma-separated font stack into family names, trimming whitespace and surrounding
