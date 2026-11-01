@@ -79,8 +79,7 @@ fn recent_sessions(roots: Vec<(CanonicalProvider, PathBuf)>, max_sessions: usize
     for provider in SESSION_PROVIDERS {
         let wire = crate::agent_history::history::provider_wire(provider);
         let mut cursor: Option<String> = None;
-        loop {
-            let Ok(page) = history.search(wire, None, "", cursor.as_deref(), PAGE) else { break };
+        while let Ok(page) = history.search(wire, None, "", cursor.as_deref(), PAGE) {
             entries.extend(page.items.into_iter().map(|entry| (wire, entry)));
             match page.next_cursor {
                 Some(next) => cursor = Some(next),
@@ -88,13 +87,12 @@ fn recent_sessions(roots: Vec<(CanonicalProvider, PathBuf)>, max_sessions: usize
             }
         }
     }
-    entries.sort_by(|(_, a), (_, b)| b.modified_ms.cmp(&a.modified_ms));
+    entries.sort_by_key(|(_, entry)| std::cmp::Reverse(entry.modified_ms));
     let mut sessions = Vec::new();
     for (wire, entry) in entries.into_iter().take(max_sessions) {
         let mut turns = Vec::new();
         let mut cursor: Option<String> = None;
-        loop {
-            let Ok(page) = history.read(&entry.entry_key, cursor.as_deref(), PAGE) else { break };
+        while let Ok(page) = history.read(&entry.entry_key, cursor.as_deref(), PAGE) {
             turns.extend(
                 page.items
                     .into_iter()

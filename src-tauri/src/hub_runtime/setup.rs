@@ -138,9 +138,7 @@ pub(crate) fn local_account() -> String {
 /// Slack's own auth.test team, when a bot token is configured.
 #[cfg(feature = "hub-slack")]
 async fn slack_auth_team() -> Option<String> {
-    if ferryx_hub::chat::slack::bot_token().is_none() {
-        return None;
-    }
+    ferryx_hub::chat::slack::bot_token()?;
     ferryx_hub::chat::slack_backfill::identity()
         .await
         .ok()
