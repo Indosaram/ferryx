@@ -2590,7 +2590,7 @@ async fn execute_request<R: tauri::Runtime>(
             }
         }
         BrowserCliRequest::Focus { browser_id } => {
-            match focus_browser_session(app, manager, &browser_id) {
+            match focus_browser_session(app, manager, &browser_id, false) {
                 Ok(()) => BrowserCliResponse::Focused,
                 Err(error) => error_response(error),
             }
@@ -2765,7 +2765,7 @@ async fn execute_request<R: tauri::Runtime>(
                 }
             };
 
-            if let Err(error) = focus_browser_session(app, manager, &session.browser_id) {
+            if let Err(error) = focus_browser_session(app, manager, &session.browser_id, false) {
                 return error_response(error);
             }
 

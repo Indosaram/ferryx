@@ -10,6 +10,7 @@ import {
   downloadBrowserUrlWithSession,
   extractBrowserErrorCode,
   findBrowser,
+  focusBrowser,
   listBrowsers,
   onBrowserDownloadRequested,
   onBrowserShortcutRequested,
@@ -108,6 +109,10 @@ export function BrowserPane({
   const toolbarRef = useRef<HTMLDivElement>(null);
   const findInputRef = useRef<HTMLInputElement>(null);
   const [liveTab, setLiveTab] = useState<BrowserTab>(tab);
+  // Mod+L reaches Ferryx while Ferryx has keyboard focus; a Chromium tab draws its own address
+  // bar, so the engine focuses that one.
+  const isChromiumRef = useRef(liveTab.engine === "chromium");
+  isChromiumRef.current = liveTab.engine === "chromium";
   // Parents rebuild `tab` from store state that never sees `browser_state_changed`, so a new
   // object with unchanged values must not roll the live url/title/navigation state back.
   const previousTabRef = useRef<BrowserTab>(tab);
@@ -246,9 +251,18 @@ export function BrowserPane({
       setFindOpen(true);
       setFindError(null);
     };
+    const focusChromiumAddress = (action: BrowserShortcutAction) => {
+      if (action !== "focus-address" || !isChromiumRef.current) return;
+      void focusBrowser(tab.browserId, { address: true }).catch((error: unknown) => {
+        setPaneAlert({ action: "Focus address bar", code: parseErrorCode(error) });
+      });
+    };
     const handleDomShortcut = (event: Event) => {
       const detail = (event as BrowserShortcutDomEvent).detail;
-      if (detail?.browserId === tab.browserId) openFind(detail.action);
+      if (detail?.browserId === tab.browserId) {
+        openFind(detail.action);
+        focusChromiumAddress(detail.action);
+      }
     };
     window.addEventListener(BROWSER_SHORTCUT_EVENT, handleDomShortcut);
 
@@ -256,7 +270,10 @@ export function BrowserPane({
     let shortcutCleanup: (() => void) | undefined;
     let downloadCleanup: (() => void) | undefined;
     void onBrowserShortcutRequested((payload) => {
-      if (payload.browserId === tab.browserId) openFind(payload.action);
+      if (payload.browserId === tab.browserId) {
+        openFind(payload.action);
+        focusChromiumAddress(payload.action);
+      }
     }).then((cleanup) => {
       if (disposed) cleanup();
       else shortcutCleanup = cleanup;

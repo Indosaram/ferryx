@@ -25,6 +25,7 @@ fn parent_switch(name: &str) -> Option<isize> {
 mod imp {
     use super::*;
     use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetWindowLongPtrW, SetForegroundWindow, SetParent, SetWindowLongPtrW, SetWindowPos,
         GWL_EXSTYLE, GWL_STYLE, HWND_TOP, SWP_FRAMECHANGED, SWP_NOACTIVATE,
@@ -90,6 +91,11 @@ mod imp {
     }
 
     pub fn raise(_window: &Window) {}
+
+    /// A child window takes keys only once it has focus (see `focus_on_click`).
+    pub fn focus(window: &Window) {
+        unsafe { SetFocus(hwnd(window)) };
+    }
 
     /// A child window is never activated, so Chrome never takes keyboard focus for it on its
     /// own: clicks reach the page while keys keep going to Ferryx. A mouse hook on the UI thread
@@ -187,6 +193,8 @@ mod imp {
         // NSWindowAbove = 1.
         let _: () = unsafe { msg_send![&*ns, orderWindow: 1isize, relativeTo: parent] };
     }
+
+    pub fn focus(_window: &Window) {}
 }
 
 #[cfg(target_os = "linux")]
@@ -208,6 +216,7 @@ mod imp {
             height: c_uint,
         ) -> c_int;
         fn XRaiseWindow(display: *mut c_void, window: c_ulong) -> c_int;
+        fn XSetInputFocus(display: *mut c_void, focus: c_ulong, revert: c_int, time: c_ulong) -> c_int;
         fn XFlush(display: *mut c_void) -> c_int;
         fn XSetErrorHandler(handler: Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int>) -> *mut c_void;
     }
@@ -316,6 +325,18 @@ mod imp {
         // SAFETY: as in `move_resize`.
         unsafe {
             XRaiseWindow(display, xid(window));
+            XFlush(display);
+        }
+    }
+
+    /// Gives the window X keyboard focus (the window manager only ever focuses the Ferryx
+    /// toplevel), for Ferryx's own focus requests such as Mod+L.
+    pub fn focus(window: &Window) {
+        let (Some(_), Some(display)) = (parent(), display()) else { return };
+        // SAFETY: as in `move_resize`; RevertToParent (2) hands focus back to Ferryx if the
+        // window goes away.
+        unsafe {
+            XSetInputFocus(display, xid(window), 2, 0);
             XFlush(display);
         }
     }
@@ -442,8 +463,11 @@ mod imp {
             let present = unsafe {
                 XQueryExtension(display, c"XInputExtension".as_ptr(), &mut opcode, &mut first_event, &mut first_error)
             };
-            // Raw events need XI 2.0, and the server only sends them to a client that said so.
-            let (mut major, mut minor) = (2, 0);
+            // Raw events need XI 2.0+, and the version this client announces decides their delivery: an
+            // XI 2.0 client gets no raw event while any client grabs the device, and every button press
+            // opens an implicit grab for the window under the pointer, so the release never arrived.
+            // From XI 2.1 raw events are delivered whatever the grab.
+            let (mut major, mut minor) = (2, 2);
             if present == 0 || unsafe { XIQueryVersion(display, &mut major, &mut minor) } != 0 {
                 eprintln!("ferryx-engine: no XInput extension; clicking a page does not give it keyboard focus");
                 return;
@@ -547,6 +571,8 @@ mod imp {
     }
 
     pub fn raise(_window: &Window) {}
+
+    pub fn focus(_window: &Window) {}
 }
 
-pub use imp::{embed, handle, place, raise};
+pub use imp::{embed, focus, handle, place, raise};

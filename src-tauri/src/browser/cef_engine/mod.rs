@@ -357,6 +357,11 @@ pub fn reload(browser_id: &str, ignore_cache: bool) -> Result<(), BrowserError> 
     send_to_tab(browser_id, EngineCommand::Reload { tab: browser_id.to_string(), ignore_cache })
 }
 
+/// Gives the tab keyboard focus: Chrome's address bar when `address`, else the page.
+pub fn focus(browser_id: &str, address: bool) -> Result<(), BrowserError> {
+    send_to_tab(browser_id, EngineCommand::Focus { tab: browser_id.to_string(), address })
+}
+
 /// Answers the profile engine's held permission request (see `site_permissions`). Returns
 /// false when that engine is not running; its requests went with it.
 pub fn answer_permission(profile: &str, request: u64, allow: bool) -> bool {

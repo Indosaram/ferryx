@@ -2776,27 +2776,52 @@ pub fn focus_browser_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
     manager: &BrowserManager,
     browser_id: &str,
+    address: bool,
 ) -> Result<(), IpcError> {
     set_browser_session_visible(app, manager, browser_id, true)?;
     record_session_created(browser_id);
+    // A Chromium-engine tab has no Tauri webview: its engine focuses the page or Chrome's own
+    // address bar. Refocusing an already focused Ferryx window would only race that request.
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    if crate::browser::cef_engine::is_cef_tab(browser_id) {
+        present_main_window(app, false)?;
+        crate::browser::cef_engine::focus(browser_id, address)?;
+        return Ok(());
+    }
     let state = manager.get_state(browser_id)?;
     let webview = app
         .get_webview(&state.webview_label)
         .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
-    if let Some(window) = app.get_window("main") {
-        window.show().map_err(|error| {
-            BrowserError::Internal(format!("failed to show the main window: {error}"))
-        })?;
-        window.unminimize().map_err(|error| {
-            BrowserError::Internal(format!("failed to unminimize the main window: {error}"))
-        })?;
+    present_main_window(app, true)?;
+    webview.set_focus().map_err(|error| {
+        BrowserError::Internal(format!("failed to focus browser webview: {error}"))
+    })?;
+    Ok(())
+}
+
+/// Shows and unminimizes the main window, and focuses it (`always_focus`, else only when it is
+/// not focused yet).
+fn present_main_window<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    always_focus: bool,
+) -> Result<(), IpcError> {
+    let Some(window) = app.get_window("main") else {
+        return Ok(());
+    };
+    window.show().map_err(|error| {
+        BrowserError::Internal(format!("failed to show the main window: {error}"))
+    })?;
+    window.unminimize().map_err(|error| {
+        BrowserError::Internal(format!("failed to unminimize the main window: {error}"))
+    })?;
+    let focused = window.is_focused().map_err(|error| {
+        BrowserError::Internal(format!("failed to read the main window focus: {error}"))
+    })?;
+    if always_focus || !focused {
         window.set_focus().map_err(|error| {
             BrowserError::Internal(format!("failed to focus the main window: {error}"))
         })?;
     }
-    webview.set_focus().map_err(|error| {
-        BrowserError::Internal(format!("failed to focus browser webview: {error}"))
-    })?;
     Ok(())
 }
 
@@ -2805,8 +2830,9 @@ pub async fn cmd_browser_focus<R: tauri::Runtime>(
     app: AppHandle<R>,
     manager: State<'_, Arc<BrowserManager>>,
     browser_id: String,
+    address: Option<bool>,
 ) -> Result<(), IpcError> {
-    focus_browser_session(&app, &manager, &browser_id)
+    focus_browser_session(&app, &manager, &browser_id, address.unwrap_or(false))
 }
 
 #[tauri::command]

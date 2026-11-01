@@ -396,8 +396,8 @@ export async function setBrowserZoom(browserId: string, zoomFactor: number): Pro
   return invoke<number>("cmd_browser_set_zoom", { browserId, zoomFactor });
 }
 
-export async function focusBrowser(browserId: string): Promise<void> {
-  return invoke<void>("cmd_browser_focus", { browserId });
+export async function focusBrowser(browserId: string, options: { address?: boolean } = {}): Promise<void> {
+  return invoke<void>("cmd_browser_focus", { browserId, address: options.address ?? false });
 }
 
 export async function openBrowserDevtools(browserId: string): Promise<void> {

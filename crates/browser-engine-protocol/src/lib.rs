@@ -119,6 +119,8 @@ pub enum Command {
     /// Password autofill: runs `script` in the tab's [`VAULT_WORLD_NAME`] isolated world of its
     /// top frame. The script fills only when the frame's origin is the one it expects.
     Fill { tab: String, script: String },
+    /// Gives the tab's window keyboard focus: Chrome's address bar when `address`, else the page.
+    Focus { tab: String, address: bool },
 }
 
 /// Engine to Ferryx.
@@ -500,6 +502,7 @@ impl Command {
             }
             Self::ImportCookies { path } => format!("import-cookies {}", one_line(path)),
             Self::Fill { tab, script } => format!("fill {tab} {}", one_line(script)),
+            Self::Focus { tab, address } => format!("focus {tab} {}", flag(*address)),
         }
     }
 
@@ -603,6 +606,10 @@ impl Command {
             "fill" => {
                 let (parts, script) = fields(rest, 1)?;
                 Some(Self::Fill { tab: parts[0].to_string(), script: script.to_string() })
+            }
+            "focus" => {
+                let (parts, _) = fields(rest, 2)?;
+                Some(Self::Focus { tab: parts[0].to_string(), address: parse_flag(parts[1])? })
             }
             _ => None,
         }
@@ -828,6 +835,8 @@ mod tests {
                 params: r#"{"expression":"document.title + ' x'","returnByValue":true}"#.into(),
             },
             Command::ImportCookies { path: "/data/browser-cef/default/ferryx import.tsv".into() },
+            Command::Focus { tab: tab.clone(), address: true },
+            Command::Focus { tab: tab.clone(), address: false },
         ];
         for command in commands {
             assert_eq!(Command::parse(&command.to_line()), Some(command));

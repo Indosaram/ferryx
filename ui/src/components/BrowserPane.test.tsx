@@ -50,6 +50,7 @@ const browserMocks = vi.hoisted(() => ({
     createdAtMs: 1000,
     updatedAtMs: 1000,
   })),
+  focusBrowser: vi.fn(async () => undefined),
   openExternalUrl: vi.fn(),
 }));
 

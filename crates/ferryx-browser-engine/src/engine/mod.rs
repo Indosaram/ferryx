@@ -383,6 +383,18 @@ fn execute(command: Command) {
                 vault::fill(&browser, &script);
             }
         }
+        Command::Focus { tab, address } => {
+            if let Some(window) = TABS.with_borrow(|tabs| tabs.get(&tab).and_then(|pane| pane.window.clone())) {
+                platform::focus(&window);
+            }
+            if let Some(host) = browser_of(&tab).and_then(|browser| browser.host()) {
+                if address {
+                    host.execute_chrome_command(sys::IDC_FOCUS_LOCATION, WindowOpenDisposition::CURRENT_TAB);
+                } else {
+                    host.set_focus(1);
+                }
+            }
+        }
     }
 }
 

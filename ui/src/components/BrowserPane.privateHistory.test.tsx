@@ -46,6 +46,7 @@ const browserMocks = vi.hoisted(() => ({
   findBrowser: vi.fn(),
   clearBrowserFind: vi.fn(),
   downloadBrowserUrl: vi.fn(),
+  focusBrowser: vi.fn(async () => undefined),
   openExternalUrl: vi.fn(),
 }));
 
