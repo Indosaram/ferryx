@@ -65,6 +65,54 @@ pub mod tests {
         assert!(matches!(err, WorktreeError::NotAGitRepository { .. }));
     }
 
+    fn init_repo_with_commit(path: &std::path::Path) {
+        git::run_git(path, &["init"]).expect("git init failed");
+        git::run_git(path, &["config", "user.name", "Orca Test"]).expect("git config failed");
+        git::run_git(path, &["config", "user.email", "test@orca.dev"]).expect("git config failed");
+        fs::write(path.join("README.md"), "# Later\n").expect("write README");
+        git::run_git(path, &["add", "README.md"]).expect("git add failed");
+        git::run_git(path, &["commit", "-m", "Initial commit"]).expect("git commit failed");
+    }
+
+    #[test]
+    fn registered_plain_folder_follows_a_later_git_init_and_removal() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let folder = temp_dir.path();
+        let registry = WorkspaceRegistry::new();
+        registry.register("later", folder).expect("plain folder registers");
+        assert!(!registry.manager("later").unwrap().is_git_backed());
+
+        init_repo_with_commit(folder);
+        // Registering the same root again keeps the cached manager, which must
+        // still see the repository instead of the plain folder it first saw.
+        registry.register("later", folder).expect("re-register");
+        let manager = registry.manager("later").unwrap();
+        assert!(manager.is_git_backed());
+        let listed = manager.list_worktrees().expect("list after git init");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, fs::canonicalize(folder).unwrap());
+
+        fs::remove_dir_all(folder.join(".git")).expect("remove .git");
+        let manager = registry.manager("later").unwrap();
+        assert!(!manager.is_git_backed());
+        assert!(manager.list_worktrees().unwrap().is_empty());
+    }
+
+    #[test]
+    fn plain_folder_stays_plain_when_a_parent_folder_becomes_a_repository() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let child = temp_dir.path().join("child");
+        fs::create_dir_all(&child).expect("mkdir failed");
+        let manager = WorktreeManager::try_new(&child).expect("plain folder registers");
+
+        init_repo_with_commit(temp_dir.path());
+        assert!(
+            !manager.is_git_backed(),
+            "a parent repository must not widen the child's root jail"
+        );
+        assert!(manager.list_worktrees().unwrap().is_empty());
+    }
+
     #[test]
     fn branch_namespace_formatting_and_validation() {
         assert_eq!(

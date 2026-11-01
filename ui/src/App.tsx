@@ -1145,10 +1145,17 @@ function WorkspaceApp({
           project.repoRoot === registered.repoRoot &&
           project.target?.kind !== "ssh");
         const previous = current[index];
-        if (!previous || (previous.gitRemote === registered.gitRemote &&
+        // gitRoot follows the folder: a later `git init` or removed `.git` flips it.
+        if (!previous || (previous.gitRoot === registered.gitRoot &&
+            previous.gitRemote === registered.gitRemote &&
             previous.gitCommonDir === registered.gitCommonDir)) return current;
         const next = [...current];
-        next[index] = { ...previous, gitRemote: registered.gitRemote, gitCommonDir: registered.gitCommonDir };
+        next[index] = {
+          ...previous,
+          gitRoot: registered.gitRoot,
+          gitRemote: registered.gitRemote,
+          gitCommonDir: registered.gitCommonDir,
+        };
         persistProjects(next);
         return next;
       });
