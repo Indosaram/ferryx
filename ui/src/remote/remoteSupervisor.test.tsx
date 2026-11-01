@@ -94,6 +94,34 @@ describe("remote supervisor client", () => {
     expect(older.kind === "ok" ? older.snapshot.hub.role : "wrong").toBeNull();
   });
 
+  it("reads the pinned lease status fields of a holder", async () => {
+    const hub = {
+      available: true, running: true, error: null, role: "holder", holderMachineId: "studio", holderLabel: "Studio", holderPaired: true,
+      unmappedHosts: [], adoptable: [], fence: 7, leaseExpiresIn: 42, checkpointId: "cp-9", checkpointAge: 12, observeDropped: 3,
+      promotionBlockReason: "the hub is stopped on this machine, so it does not take over", unreachableHosts: ["Laptop"],
+    };
+    const result = await fetchSupervisorSnapshot(() => Promise.resolve(json(200, snapshotBody({ hub }))));
+    expect(result.kind === "ok" ? result.snapshot.hub : null).toEqual(hub);
+  });
+
+  it("leaves the optional lease fields out when the daemon does not send them", async () => {
+    const hub = { available: true, running: false, role: "standby", holderMachineId: "studio", holderLabel: "Studio", fence: 2, leaseExpiresIn: 30, observeDropped: 0, unreachableHosts: [] };
+    const result = await fetchSupervisorSnapshot(() => Promise.resolve(json(200, snapshotBody({ hub }))));
+    const parsed = result.kind === "ok" ? result.snapshot.hub : null;
+    expect(parsed).not.toBeNull();
+    expect(parsed && "checkpointId" in parsed).toBe(false);
+    expect(parsed && "checkpointAge" in parsed).toBe(false);
+    expect(parsed && "promotionBlockReason" in parsed).toBe(false);
+    expect(parsed?.adoptable).toEqual([]);
+    expect(parsed).toMatchObject({ role: "standby", holderLabel: "Studio", fence: 2, leaseExpiresIn: 30, observeDropped: 0, unreachableHosts: [] });
+  });
+
+  it("reads unreachable hosts sent as pairs or objects", async () => {
+    const hub = { available: true, running: true, role: "holder", unreachableHosts: [["host-1", "timed out"], [null, "refused"], { host: "host-2", label: "Desk" }, 7] };
+    const result = await fetchSupervisorSnapshot(() => Promise.resolve(json(200, snapshotBody({ hub }))));
+    expect(result.kind === "ok" ? result.snapshot.hub.unreachableHosts : null).toEqual(["host-1", "this computer", "Desk"]);
+  });
+
   it.each([
     [403, "FORBIDDEN"],
     [503, "SUPERVISOR_UNAVAILABLE"],

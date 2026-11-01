@@ -359,4 +359,40 @@ describe("SupervisorHome standby machines", () => {
     expect(screen.getByTestId("supervisor-standby-unpaired")).toHaveTextContent("Laptop is not paired to Studio");
     expect(screen.getByTestId("supervisor-standby-unmapped")).toHaveTextContent("host-9");
   });
+
+  it("renders a standby without the optional lease fields: banner and move, no warnings", () => {
+    renderHome({ onMoveHere: vi.fn(), machines: [fixtureMachine({ machineId: "laptop", label: "Laptop", snapshot: standbyHub() })] });
+    expect(screen.getByTestId("supervisor-standby-text")).toHaveTextContent("Standby - supervisor runs on Studio");
+    expect(screen.getByTestId("supervisor-move-here")).toBeEnabled();
+    expect(screen.queryByTestId("supervisor-lease-notice")).toBeNull();
+    expect(screen.queryByTestId("supervisor-adoptable")).toBeNull();
+  });
+
+  it("warns about dropped observations and a blocked takeover on a standby", () => {
+    const snapshot = standbyHub({ observeDropped: 2, promotionBlockReason: "this machine has no checkpoint; the lease records cp-9" });
+    renderHome({ machines: [fixtureMachine({ machineId: "laptop", label: "Laptop", snapshot })] });
+    const notices = screen.getAllByTestId("supervisor-lease-notice");
+    expect(notices.map((notice) => notice.dataset.kind)).toEqual(["observe-dropped", "promotion-blocked"]);
+    expect(notices[0]).toHaveTextContent("Laptop dropped 2 pane updates");
+    expect(notices[1]).toHaveTextContent("this machine has no checkpoint; the lease records cp-9");
+  });
+
+  it("warns on the holder about hosts its fence cannot reach and offers no move there", () => {
+    const snapshot = fixtureSnapshot({ hub: { available: true, running: true, role: "holder", unreachableHosts: ["Laptop"], observeDropped: 0 } });
+    renderHome({ onMoveHere: vi.fn(), machines: [fixtureMachine({ machineId: "studio", label: "Studio", snapshot })] });
+    const notice = screen.getByTestId("supervisor-lease-notice");
+    expect(notice.dataset.kind).toBe("unreachable-hosts");
+    expect(notice).toHaveTextContent("The supervisor cannot reach Laptop.");
+    expect(screen.queryByTestId("supervisor-standby")).toBeNull();
+    expect(screen.queryByTestId("supervisor-move-here")).toBeNull();
+  });
+
+  it("shows a SUPERVISOR_STANDBY move refusal as an error, not a force confirm", async () => {
+    const onMoveHere = vi.fn(async (): Promise<SupervisorMoveResult> => ({ kind: "error", code: "SUPERVISOR_STANDBY", message: "runs on Studio", status: 409 }));
+    renderHome({ onMoveHere, machines: [fixtureMachine({ machineId: "laptop", snapshot: standbyHub() })] });
+    await act(async () => fireEvent.click(screen.getByTestId("supervisor-move-here")));
+    expect(onMoveHere).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("supervisor-move-force")).toBeNull();
+    expect(screen.getByTestId("supervisor-move-here")).toBeEnabled();
+  });
 });

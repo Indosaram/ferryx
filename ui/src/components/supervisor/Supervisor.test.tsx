@@ -366,6 +366,45 @@ describe("SupervisorPanelView standby", () => {
     await expect(adoptArchivedGoals(["old-1"])).resolves.toEqual({ kind: "ok", value: { adopted: 1 } });
     expect(ipc.invoke).toHaveBeenCalledWith("cmd_supervisor_adopt_archived", { goalIds: ["old-1"] });
   });
+
+  it("keeps a SUPERVISOR_STANDBY refusal of the move command a plain error by its code", async () => {
+    ipc.invoke.mockImplementation(async (command: string) => {
+      if (command === "cmd_supervisor_move_here") {
+        throw { code: "SUPERVISOR_STANDBY", message: "SUPERVISOR_FORCE_REQUIRED is not this", details: { holderMachineId: "studio", holderLabel: "Studio", status: 409 } };
+      }
+      return undefined;
+    });
+    await expect(moveSupervisorHere(true)).resolves.toEqual({ kind: "error", code: "SUPERVISOR_STANDBY", message: "SUPERVISOR_FORCE_REQUIRED is not this", status: 409 });
+    expect(ipc.invoke).toHaveBeenCalledWith("cmd_supervisor_move_here", { force: true });
+  });
+
+  it("shows no lease warnings on a standby whose optional fields are missing", () => {
+    render(<SupervisorPanelView snapshot={standby()} now={now} moveHere={vi.fn()} />);
+    expect(screen.getByTestId("supervisor-standby-text").textContent).toBe("Supervisor runs on Studio. This computer is on standby.");
+    expect(screen.queryByTestId("supervisor-lease-notice")).toBeNull();
+  });
+
+  it("warns on a standby about dropped observations and why it will not take over", () => {
+    render(<SupervisorPanelView snapshot={standby({ observeDropped: 1, promotionBlockReason: "the hub is stopped on this machine, so it does not take over" })} now={now} moveHere={vi.fn()} />);
+    const notices = screen.getAllByTestId("supervisor-lease-notice");
+    expect(notices.map((notice) => notice.dataset.kind)).toEqual(["observe-dropped", "promotion-blocked"]);
+    expect(notices[0]?.textContent).toBe("This computer dropped 1 pane update because no paired supervisor took it.");
+  });
+
+  it("warns on the holder about hosts it cannot reach and stays a live panel", () => {
+    const holder: SupervisorSnapshot = {
+      hub: { available: true, running: true, role: "holder", holderMachineId: "studio", holderLabel: "Studio", unreachableHosts: ["Laptop", "Desk"] },
+      lanes: [lane],
+      watched: [],
+      actions: [],
+    };
+    render(<SupervisorPanelView snapshot={holder} now={now} moveHere={vi.fn()} />);
+    expect(screen.getByTestId("supervisor-panel").dataset.supervisorState).not.toBe("standby");
+    expect(screen.queryByTestId("supervisor-standby")).toBeNull();
+    const notice = screen.getByTestId("supervisor-lease-notice");
+    expect(notice.dataset.kind).toBe("unreachable-hosts");
+    expect(notice.textContent).toBe("The supervisor cannot reach Laptop, Desk. Sessions there wait until it is reachable again.");
+  });
 });
 
 describe("desktopUnifiedClient", () => {

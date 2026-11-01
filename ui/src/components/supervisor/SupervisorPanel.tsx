@@ -20,7 +20,7 @@ import {
   type SupervisorRequirementStatus,
   type SupervisorSnapshot,
 } from "../../lib/supervisor";
-import { isStandbyRole } from "../../lib/supervisorModel";
+import { isStandbyRole, leaseNotices, type SupervisorHubState } from "../../lib/supervisorModel";
 import {
   forceMoveWarning,
   LANE_KEY_PREFIX,
@@ -177,6 +177,21 @@ export function desktopConnection(snapshot: SupervisorSnapshot): SupervisorConne
   return snapshot.hub.error ? "disconnected" : "unavailable";
 }
 
+/** Lease warnings of this computer: unreachable hosts, dropped observations, a blocked takeover. */
+function LeaseNotices({ hub, className }: { hub: SupervisorHubState; className?: string }) {
+  const notices = leaseNotices(hub, "This computer");
+  if (notices.length === 0) return null;
+  return (
+    <div className={cn("flex flex-col gap-1", className)}>
+      {notices.map((notice) => (
+        <p key={notice.kind} data-testid="supervisor-lease-notice" data-kind={notice.kind} role="status" className="rounded-md bg-destructive/10 px-2 py-1.5 text-[11px] leading-snug text-foreground">
+          {notice.text}
+        </p>
+      ))}
+    </div>
+  );
+}
+
 /**
  * This computer on standby: where the account supervisor runs, "Move supervisor here" (a forced
  * move shows the data-loss window and needs a second confirm), pairing and host-mapping notices,
@@ -248,6 +263,7 @@ function DesktopStandby({
           This computer is not paired to {holder}, so its panes are not supervised yet.
         </span>
       ) : null}
+      <LeaseNotices hub={hub} />
       {unmapped.length > 0 ? (
         <span data-testid="supervisor-standby-unmapped">
           Some goals name a computer this one does not know ({unmapped.join(", ")}). They stay held until it is paired.
@@ -389,6 +405,7 @@ export function SupervisorPanelView({
           <span className="font-mono text-[10.5px] text-muted-foreground">{hub.error}</span>
         </p>
       ) : null}
+      <LeaseNotices hub={hub} className="mx-2 mb-1.5" />
       {lanes.length === 0 && !hub.error ? (
         <p className="px-4 pb-2 text-[11px] text-muted-foreground">
           {watched.length > 0 ? `No lanes yet; watching ${watched.length} pane${watched.length === 1 ? "" : "s"}.` : "No lanes yet. Hand it a goal from the hub and it appears here."}

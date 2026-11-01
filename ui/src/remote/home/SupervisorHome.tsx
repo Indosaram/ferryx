@@ -7,7 +7,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { cn } from "../../lib/cn";
-import { actingSessionIds, isStandbyRole, type SupervisorLane, type SupervisorSnapshot } from "../../lib/supervisorModel";
+import { actingSessionIds, isStandbyRole, leaseNotices, type SupervisorLane, type SupervisorSnapshot } from "../../lib/supervisorModel";
 import { forceMoveWarning, type SupervisorMoveResult } from "../../lib/unifiedSupervisor";
 import { UnifiedSupervisorSection } from "../../components/supervisor/UnifiedSupervisorSection";
 import type { AdoptArchivedResult, LanePauseResult } from "../remoteSupervisor";
@@ -453,6 +453,7 @@ export function SupervisorHome({
             const acting = snapshot ? actingSessionIds(snapshot, now) : new Set<string>();
             const standby = snapshot !== null && isStandbyRole(snapshot.hub.role);
             const hubOff = snapshot && !standby && (!snapshot.hub.available || (!snapshot.hub.running && snapshot.lanes.length === 0));
+            const notices = snapshot ? leaseNotices(snapshot.hub, machine.label) : [];
             return (
               <section key={machine.machineId} data-testid={`supervisor-machine-${machine.machineId}`} aria-label={machine.label} className="flex flex-col gap-2">
                 <h2 className="truncate px-1 text-sm font-semibold text-chat-foreground">{machine.label}</h2>
@@ -467,6 +468,17 @@ export function SupervisorHome({
                     {...(onAdoptArchived ? { onAdoptArchived } : {})}
                   />
                 ) : null}
+                {notices.map((notice) => (
+                  <p
+                    key={notice.kind}
+                    data-testid="supervisor-lease-notice"
+                    data-kind={notice.kind}
+                    role="status"
+                    className="rounded-xl bg-status-warning/15 px-3 py-2 text-sm leading-snug text-chat-foreground"
+                  >
+                    {notice.text}
+                  </p>
+                ))}
                 {standby && snapshot?.lanes.length === 0 ? null : hubOff ? (
                   <div data-testid="supervisor-hub-off" className="flex min-w-0 items-center gap-2 rounded-xl bg-chat-surface px-3 py-2 text-sm leading-snug text-chat-foreground-secondary">
                     <span className="min-w-0 py-1">The supervisor isn't running. Start it from Ferryx on {machine.label}.</span>

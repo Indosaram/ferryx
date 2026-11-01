@@ -156,6 +156,20 @@ export type SupervisorHubState = {
   unmappedHosts?: string[];
   /** Open goals of this machine's archived supervisor, not adopted yet. */
   adoptable?: ArchivedGoal[];
+  /** Lease fence term this machine last saw. Absent from a daemon without the lease status. */
+  fence?: number;
+  /** Seconds until the holder's lease expires unless renewed. */
+  leaseExpiresIn?: number;
+  /** The newest supervisor checkpoint this machine stores. Absent: none or an older daemon. */
+  checkpointId?: string;
+  /** Age of that checkpoint in seconds. */
+  checkpointAge?: number;
+  /** Pane observations this standby dropped because no paired holder took them. */
+  observeDropped?: number;
+  /** Why this standby would not take over now. Absent: nothing blocks a promotion. */
+  promotionBlockReason?: string;
+  /** Machines the holder could not push its fence to; their sessions wait. */
+  unreachableHosts?: string[];
 };
 
 const LEASE_ROLES: ReadonlySet<string> = new Set(["holder", "provisional", "standby", "unleased"]);
@@ -165,8 +179,82 @@ export function isStandbyRole(role: SupervisorLeaseRole | null | undefined): boo
   return role === "standby" || role === "unleased";
 }
 
+/** A lease warning a surface shows next to the machine that reported it. */
+export type LeaseNotice = { kind: "unreachable-hosts" | "observe-dropped" | "promotion-blocked"; text: string };
+
+/**
+ * Warnings from the lease status of one machine (`here` names it: "This computer" or its
+ * label). Fields the daemon did not send add nothing.
+ */
+export function leaseNotices(hub: SupervisorHubState, here: string): LeaseNotice[] {
+  const notices: LeaseNotice[] = [];
+  const unreachable = hub.unreachableHosts ?? [];
+  if (unreachable.length > 0) {
+    notices.push({ kind: "unreachable-hosts", text: `The supervisor cannot reach ${unreachable.join(", ")}. Sessions there wait until it is reachable again.` });
+  }
+  const dropped = hub.observeDropped ?? 0;
+  if (dropped > 0) {
+    notices.push({ kind: "observe-dropped", text: `${here} dropped ${dropped} pane update${dropped === 1 ? "" : "s"} because no paired supervisor took ${dropped === 1 ? "it" : "them"}.` });
+  }
+  if (hub.promotionBlockReason) {
+    notices.push({ kind: "promotion-blocked", text: `${here} will not take over the supervisor: ${hub.promotionBlockReason}` });
+  }
+  return notices;
+}
+
 function optionalText(value: unknown): string | null {
   return typeof value === "string" && value ? value : null;
+}
+
+function optionalCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/** A block reason as text: the daemon may send the sentence or `{code, message}`. */
+function blockReason(value: unknown): string | undefined {
+  const text = optionalText(value);
+  if (text) return text;
+  const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+  return optionalText(raw?.message) ?? optionalText(raw?.reason) ?? optionalText(raw?.code) ?? undefined;
+}
+
+/**
+ * Host labels from `["host"]`, `[[host, reason]]` or `[{host, label, reason}]`; a null host is
+ * this machine's daemon.
+ */
+function hostList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.flatMap((item): string[] => {
+    if (typeof item === "string") return item ? [item] : [];
+    if (Array.isArray(item)) {
+      const host = optionalText(item[0]);
+      return host ? [host] : item[0] === null ? ["this computer"] : [];
+    }
+    const raw = item && typeof item === "object" ? (item as Record<string, unknown>) : null;
+    if (!raw) return [];
+    const host = optionalText(raw.label) ?? optionalText(raw.host);
+    return host ? [host] : raw.host === null ? ["this computer"] : [];
+  });
+}
+
+/** The optional lease status fields, each omitted when the daemon did not send it. */
+function leaseStatus(raw: Record<string, unknown>): Partial<SupervisorHubState> {
+  const status: Partial<SupervisorHubState> = {};
+  const fence = optionalCount(raw.fence);
+  if (fence !== undefined) status.fence = fence;
+  const leaseExpiresIn = optionalCount(raw.leaseExpiresIn);
+  if (leaseExpiresIn !== undefined) status.leaseExpiresIn = leaseExpiresIn;
+  const checkpointId = optionalText(raw.checkpointId);
+  if (checkpointId) status.checkpointId = checkpointId;
+  const checkpointAge = optionalCount(raw.checkpointAge);
+  if (checkpointAge !== undefined) status.checkpointAge = checkpointAge;
+  const observeDropped = optionalCount(raw.observeDropped);
+  if (observeDropped !== undefined) status.observeDropped = observeDropped;
+  const promotionBlockReason = blockReason(raw.promotionBlockReason);
+  if (promotionBlockReason) status.promotionBlockReason = promotionBlockReason;
+  const unreachableHosts = hostList(raw.unreachableHosts);
+  if (unreachableHosts) status.unreachableHosts = unreachableHosts;
+  return status;
 }
 
 function normalizeHub(value: unknown): SupervisorHubState {
@@ -190,6 +278,7 @@ function normalizeHub(value: unknown): SupervisorHubState {
     holderPaired: typeof raw.holderPaired === "boolean" ? raw.holderPaired : null,
     unmappedHosts: Array.isArray(raw.unmappedHosts) ? raw.unmappedHosts.filter((host): host is string => typeof host === "string" && host !== "") : [],
     adoptable,
+    ...leaseStatus(raw),
   };
 }
 
