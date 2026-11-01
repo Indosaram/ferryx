@@ -857,6 +857,10 @@ fn hub_control(op: ferryx_hub::control::ControlOp, check: bool) -> i32 {
             match ferryx_hub::control::send_control(&path, op).await {
                 Ok(reply) => {
                     println!("{}", reply.trim());
+                    // stdout stays one JSON line for scripts; the standby hint goes beside it.
+                    if let Some(line) = status_hint_line(op, &reply) {
+                        eprintln!("{line}");
+                    }
                     control_exit_code(&reply, check)
                 }
                 Err(error) => {
@@ -873,6 +877,15 @@ fn hub_control(op: ferryx_hub::control::ControlOp, check: bool) -> i32 {
         eprintln!("hub control uses a unix socket");
         1
     }
+}
+
+/// The plain-text `status_hint` line `hub status` prints on standby, naming the holder.
+#[cfg(any(unix, test))]
+fn status_hint_line(op: ferryx_hub::control::ControlOp, reply: &str) -> Option<String> {
+    if op != ferryx_hub::control::ControlOp::Status {
+        return None;
+    }
+    ferryx_hub::control::reply_status_hint(reply).map(|hint| format!("status_hint {hint}"))
 }
 
 /// Every hub task in this daemon: the generation (Slack, cron, HTTP, watchers) and the control
@@ -970,22 +983,34 @@ pub async fn supervisor_snapshot(state: &RemoteGatewayState) -> Value {
         let test_hub = state.supervisor_test_hub.read().clone();
         #[cfg(test)]
         if let Some((pool, _)) = test_hub {
-            return json!({ "hub": { "available": true, "running": true, "error": null, "holderPaired": holder_paired() }, "lanes": [], "watched": [], "actions": actions, "supervisor": unified_snapshot(&pool).await });
+            let lease = live_lease(Some(&pool)).await;
+            return json!({ "hub": snapshot_hub(json!({ "available": true, "running": true, "error": null }), &lease), "lanes": [], "watched": [], "actions": actions, "supervisor": unified_snapshot(&pool).await });
         }
-        return json!({ "hub": { "available": false, "running": false, "error": null, "holderPaired": holder_paired() }, "lanes": [], "watched": [], "actions": actions, "supervisor": null });
+        let lease = live_lease(None).await;
+        return json!({ "hub": snapshot_hub(json!({ "available": false, "running": false, "error": null }), &lease), "lanes": [], "watched": [], "actions": actions, "supervisor": null });
     };
     // A daemon that handed the hub to its successor no longer drives anything.
     let running = running.lock().await.is_some() && !HUB_TASKS.is_retired();
     let lanes = ferryx_hub::lanes::supervised::supervised_lanes(&hub.pool).await;
     let watched = ferryx_hub::lanes::supervised::watched_local_sessions(&hub.pool).await;
     let error = lanes.as_ref().err().or(watched.as_ref().err()).map(ToString::to_string);
+    let lease = live_lease(Some(&hub.pool)).await;
     json!({
-        "hub": { "available": true, "running": running, "error": error, "holderPaired": holder_paired() },
+        "hub": snapshot_hub(json!({ "available": true, "running": running, "error": error }), &lease),
         "lanes": lanes.unwrap_or_default(),
         "watched": watched.unwrap_or_default(),
         "actions": actions,
         "supervisor": unified_snapshot(&hub.pool).await,
     })
+}
+
+/// The snapshot's `hub` object: `base` plus the supervisor lease fields (camelCase), among
+/// them `holderPaired`.
+fn snapshot_hub(mut base: Value, lease: &ferryx_hub::control::LiveLease) -> Value {
+    if let (Some(hub), Ok(Value::Object(fields))) = (base.as_object_mut(), serde_json::to_value(lease)) {
+        hub.extend(fields);
+    }
+    base
 }
 
 /// The hub also relays a person's own words into panes over the owner socket: a Slack approval
@@ -1198,6 +1223,14 @@ trait LeaseGate: Send + Sync {
     fn takeover_wait(&self) -> std::time::Duration {
         std::time::Duration::ZERO
     }
+    /// Seconds left on the held grant; 0 without an expiring grant.
+    fn lease_expires_in(&self) -> u64 {
+        0
+    }
+    /// How long a standby has known no holder; `None` while it knows one or runs the hub.
+    fn no_holder_for(&self) -> Option<std::time::Duration> {
+        None
+    }
 }
 
 #[async_trait]
@@ -1217,6 +1250,14 @@ impl LeaseGate for crate::daemon::supervisor_lease_client::SupervisorLeaseHandle
     fn takeover_wait(&self) -> std::time::Duration {
         self.state().takeover_wait()
     }
+
+    fn lease_expires_in(&self) -> u64 {
+        self.state().lease_expires_in()
+    }
+
+    fn no_holder_for(&self) -> Option<std::time::Duration> {
+        self.state().no_holder_for()
+    }
 }
 
 hub_slot! {
@@ -1230,6 +1271,81 @@ fn lease_gate() -> Option<Arc<dyn LeaseGate>> {
 
 fn set_lease_gate(gate: Option<Arc<dyn LeaseGate>>) {
     slot_set(&LEASE_GATE, gate);
+}
+
+hub_slot! {
+    /// The running generation's dispatcher fence gate, for the hosts it could not reach.
+    FENCE_GATE: Arc<ferryx_hub::supervisor::fence_gate::FenceGate>
+}
+
+/// The checkpoint fields of the lease status: (checkpoint id, its age in seconds, why a
+/// standby would not take over). Filled by the checkpoint replication and promotion code.
+fn checkpoint_status_fields() -> (Option<String>, Option<u64>, Option<ferryx_hub::control::PromotionBlock>) {
+    (None, None, None)
+}
+
+/// Open goals of this machine's archived supervisor. Filled by the adoption code.
+fn adoptable_goals() -> Option<Vec<ferryx_hub::control::AdoptableGoal>> {
+    None
+}
+
+/// The supervisor lease as `status` and the snapshot report it. `pool` is the open hub
+/// database (for checkpoint hosts it could not map); `None` before the hub opened.
+async fn live_lease(pool: Option<&ferryx_hub::goals::SqlitePool>) -> ferryx_hub::control::LiveLease {
+    let unmapped_hosts = match pool {
+        Some(pool) => ferryx_hub::control::unmapped_hosts(pool).await,
+        None => Vec::new(),
+    };
+    let mut lease = lease_status(lease_gate().as_deref());
+    lease.unmapped_hosts = unmapped_hosts;
+    // Only the holder's own term pushes fences; a standby's last gate is a past term.
+    if lease.role == ferryx_hub::control::LeaseRole::Holder {
+        lease.unreachable_hosts = slot_get(&FENCE_GATE)
+            .map(|gate| gate.unreachable_hosts())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(host, reason)| ferryx_hub::control::UnreachableHost { host, reason })
+            .collect();
+    }
+    lease
+}
+
+/// The lease fields `gate` answers (role, holder, fence, expiry), plus the pairing, drop
+/// counter and checkpoint fields. No lease client: a holder with fence 0 (unleased hub).
+fn lease_status(gate: Option<&dyn LeaseGate>) -> ferryx_hub::control::LiveLease {
+    use crate::daemon::supervisor_lease_role::Role;
+    use ferryx_hub::control::{LeaseRole, LiveLease};
+    let (checkpoint_id, checkpoint_age, promotion_block_reason) = checkpoint_status_fields();
+    let mut lease = LiveLease {
+        role: LeaseRole::Holder,
+        holder_paired: holder_paired(),
+        checkpoint_id,
+        checkpoint_age,
+        promotion_block_reason,
+        adoptable: adoptable_goals(),
+        observe_dropped: observe_dropped(),
+        ..LiveLease::default()
+    };
+    let Some(gate) = gate else {
+        return lease;
+    };
+    match gate.current_role() {
+        Role::Holder { fence } => {
+            lease.fence = fence;
+            lease.lease_expires_in = gate.lease_expires_in();
+        }
+        Role::Provisional => {}
+        Role::Standby { holder_machine_id, holder_label, fence } => {
+            lease.role = LeaseRole::Standby;
+            lease.holder_machine_id = holder_machine_id;
+            lease.holder_label = holder_label;
+            lease.fence = fence.unwrap_or(0);
+            let ttl = std::time::Duration::from_secs(crate::account::supervisor_lease::TTL_SECS);
+            lease.no_holder_past_ttl = gate.no_holder_for().is_some_and(|unknown| unknown > ttl);
+        }
+        Role::Unleased { .. } => lease.role = LeaseRole::Unleased,
+    }
+    lease
 }
 
 /// The lease client's stop signal (the `wanted` watch [`follow_lease`] follows), installed by
@@ -2930,7 +3046,7 @@ impl Drop for HttpBound {
 }
 
 #[cfg(unix)]
-fn live_hub(running: bool, config: &HubConfig) -> ferryx_hub::control::LiveHub {
+fn live_hub(running: bool, config: &HubConfig, lease: ferryx_hub::control::LiveLease) -> ferryx_hub::control::LiveHub {
     ferryx_hub::control::LiveHub {
         running,
         http_addr: config.tracker_addr.clone().unwrap_or_else(|| "127.0.0.1:9119".into()),
@@ -2948,6 +3064,7 @@ fn live_hub(running: bool, config: &HubConfig) -> ferryx_hub::control::LiveHub {
         #[cfg(not(feature = "hub-discord"))]
         discord_configured: false,
         version: env!("CARGO_PKG_VERSION").to_owned(),
+        lease: Some(lease),
     }
 }
 
@@ -2964,6 +3081,12 @@ fn spawn_supervisor_dispatcher(
     launch: &HubLaunch,
     idle: Arc<ferryx_hub::supervisor::receipts::IdleLedger>,
 ) -> tokio::task::JoinHandle<()> {
+    // Each generation is one holder term: its fence reaches every daemon before a dispatch.
+    let fence_gate = crate::agent_control::fence::dispatcher_fence_gate(
+        launch.bridge.client.clone(),
+        launch.bridge.gateway.clone(),
+    );
+    slot_set(&FENCE_GATE, Some(Arc::clone(&fence_gate)));
     let dispatcher = ferryx_hub::supervisor::dispatcher::Dispatcher::new(
         launch.hub.pool.clone(),
         launch.bridge.clone(),
@@ -2971,11 +3094,7 @@ fn spawn_supervisor_dispatcher(
         ferryx_hub::agent_control::LOCAL_HOST_ID,
     )
     .with_idle_ledger(idle)
-    // Each generation is one holder term: its fence reaches every daemon before a dispatch.
-    .with_fence_gate(crate::agent_control::fence::dispatcher_fence_gate(
-        launch.bridge.client.clone(),
-        launch.bridge.gateway.clone(),
-    ));
+    .with_fence_gate(fence_gate);
     tokio::spawn(dispatcher.run(ferryx_hub::supervisor::dispatcher::dispatch_wake()))
 }
 
@@ -3625,9 +3744,10 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                         }
                         Ok(ferryx_hub::control::ControlOp::Status) => {
                             let running_now = running.lock().await.is_some();
+                            let lease = live_lease(Some(&launch.hub.pool)).await;
                             let report = ferryx_hub::control::status_report(
                                 &launch.hub.pool,
-                                &live_hub(running_now, &launch.config),
+                                &live_hub(running_now, &launch.config, lease),
                             )
                             .await;
                             let mut stream = reader.into_inner();
@@ -4396,6 +4516,114 @@ mod tests {
             assert!(ferryx_hub::holder::is_holder_now());
         })
         .await;
+    }
+
+    /// A standby that has known no holder for `unknown_for`.
+    struct NoHolder {
+        unknown_for: std::time::Duration,
+    }
+
+    #[async_trait]
+    impl LeaseGate for NoHolder {
+        fn allows_hub(&self) -> bool {
+            false
+        }
+
+        fn current_role(&self) -> Role {
+            Role::standby_unknown()
+        }
+
+        async fn try_acquire(&self) -> Option<Role> {
+            Some(Role::standby_unknown())
+        }
+
+        fn no_holder_for(&self) -> Option<std::time::Duration> {
+            Some(self.unknown_for)
+        }
+    }
+
+    #[test]
+    fn the_lease_status_reports_the_holder_and_the_standby_role() {
+        let holder = lease_status(Some(&FakeLease::new(true, false) as &dyn LeaseGate));
+        let wire = serde_json::to_value(&holder).unwrap();
+        assert_eq!(wire["role"], "holder");
+        assert_eq!(wire["fence"], 7);
+        assert_eq!(wire["leaseExpiresIn"], 0, "the fake holds no expiring grant");
+        assert!(wire["holderMachineId"].is_null());
+
+        let standby = lease_status(Some(&FakeLease::new(false, false) as &dyn LeaseGate));
+        let wire = serde_json::to_value(&standby).unwrap();
+        assert_eq!(wire["role"], "standby");
+        assert_eq!(wire["holderMachineId"], "mach-b");
+        assert_eq!(wire["holderLabel"], "Laptop B");
+        assert_eq!(wire["fence"], 7);
+        assert!(wire["holderPaired"].is_boolean());
+        assert!(wire["observeDropped"].is_u64());
+        assert!(!standby.no_holder_past_ttl);
+        for absent in ["checkpointId", "checkpointAge", "promotionBlockReason", "adoptable"] {
+            assert!(wire.get(absent).is_none(), "{absent} in {wire}");
+        }
+
+        let unleased = lease_status(None);
+        assert_eq!(unleased.role, ferryx_hub::control::LeaseRole::Holder, "no lease client runs the hub");
+        assert_eq!(unleased.fence, 0);
+    }
+
+    /// A standby is healthy; one that has known no holder for longer than the TTL is not.
+    #[tokio::test]
+    async fn a_standby_status_is_healthy_until_no_holder_is_known_past_the_ttl() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let ttl = std::time::Duration::from_secs(crate::account::supervisor_lease::TTL_SECS);
+        let live = |lease: ferryx_hub::control::LiveLease| ferryx_hub::control::LiveHub {
+            lease: Some(lease),
+            ..Default::default()
+        };
+
+        let known = ferryx_hub::control::status_report(
+            &pool,
+            &live(lease_status(Some(&FakeLease::new(false, false) as &dyn LeaseGate))),
+        )
+        .await;
+        assert_eq!(known["healthy"], true, "{known}");
+        assert_eq!(known["supervisor_lease"]["role"], "standby");
+        let hint = status_hint_line(ferryx_hub::control::ControlOp::Status, &known.to_string()).unwrap();
+        assert!(hint.starts_with("status_hint ") && hint.contains("Laptop B"), "{hint}");
+        assert!(status_hint_line(ferryx_hub::control::ControlOp::Start, &known.to_string()).is_none());
+
+        let at_ttl = lease_status(Some(&NoHolder { unknown_for: ttl } as &dyn LeaseGate));
+        assert!(!at_ttl.no_holder_past_ttl);
+        let past = ferryx_hub::control::status_report(
+            &pool,
+            &live(lease_status(Some(&NoHolder { unknown_for: ttl + std::time::Duration::from_secs(1) } as &dyn LeaseGate))),
+        )
+        .await;
+        assert_eq!(past["healthy"], false);
+        assert_eq!(past["problems"], json!(["no supervisor holds the lease"]));
+    }
+
+    /// The snapshot the desktop IPC and the phone API both serve carries the lease fields.
+    #[tokio::test]
+    async fn the_supervisor_snapshot_hub_reports_the_lease_role() {
+        let server = DaemonServer::new();
+        set_lease_gate(Some(Arc::new(FakeLease::new(false, false)) as Arc<dyn LeaseGate>));
+        let standby = supervisor_snapshot(server.remote_state()).await;
+        let hub = &standby["hub"];
+        assert_eq!(hub["available"], false);
+        assert_eq!(hub["role"], "standby");
+        assert_eq!(hub["holderMachineId"], "mach-b");
+        assert_eq!(hub["holderLabel"], "Laptop B");
+        assert!(hub["holderPaired"].is_boolean());
+        assert_eq!(hub["unmappedHosts"], json!([]));
+        assert_eq!(hub["unreachableHosts"], json!([]));
+        assert!(hub["observeDropped"].is_u64());
+
+        set_lease_gate(Some(Arc::new(FakeLease::new(true, false)) as Arc<dyn LeaseGate>));
+        let holder = supervisor_snapshot(server.remote_state()).await;
+        assert_eq!(holder["hub"]["role"], "holder");
+        assert_eq!(holder["hub"]["fence"], 7);
+        assert!(holder["hub"]["holderMachineId"].is_null());
+        assert!(holder["hub"]["leaseExpiresIn"].is_u64());
+        set_lease_gate(None);
     }
 
     #[tokio::test]

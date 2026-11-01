@@ -149,6 +149,14 @@ struct StateInner {
     /// The running client's command queue (weak, so the state never keeps the client alive);
     /// `None` for a state without a client.
     commands: Option<mpsc::WeakSender<LeaseCommand>>,
+    /// Since when (monotonic, lease clock) this daemon has been on standby without a known
+    /// holder; `None` while it knows one or runs the hub.
+    no_holder_since: parking_lot::Mutex<Option<std::time::Instant>>,
+}
+
+/// Standby that names no holder machine.
+fn holder_unknown(role: &Role) -> bool {
+    matches!(role, Role::Standby { holder_machine_id: None, holder_label: None, .. })
 }
 
 /// Cheap, cloneable view of the hub role shared with every side-effect gate.
@@ -167,6 +175,7 @@ impl SupervisorLeaseState {
         commands: Option<mpsc::WeakSender<LeaseCommand>>,
     ) -> Self {
         let (role_tx, _) = watch::channel(machine.role().clone());
+        let no_holder_since = holder_unknown(machine.role()).then(|| clock().mono);
         Self {
             inner: Arc::new(StateInner {
                 account,
@@ -179,6 +188,7 @@ impl SupervisorLeaseState {
                 handed_over: AtomicBool::new(false),
                 takeover: parking_lot::Mutex::new(None),
                 commands,
+                no_holder_since: parking_lot::Mutex::new(no_holder_since),
             }),
         }
     }
@@ -221,6 +231,25 @@ impl SupervisorLeaseState {
 
     pub fn snapshot(&self) -> PersistedLease {
         self.inner.machine.lock().snapshot().clone()
+    }
+
+    /// Seconds until the held grant's local stand-down deadline (TTL - margin from its send
+    /// time, wall clock); 0 without a leased grant for the current fence.
+    pub fn lease_expires_in(&self) -> u64 {
+        let fence = self.current_fence();
+        let grant = *self.inner.grant.lock();
+        match grant {
+            Some((granted, deadline)) if fence != 0 && granted == fence => deadline
+                .duration_since((self.inner.clock)().wall)
+                .map_or(0, |left| left.as_secs()),
+            _ => 0,
+        }
+    }
+
+    /// How long this standby has known no holder; `None` while it knows one or runs the hub.
+    pub fn no_holder_for(&self) -> Option<Duration> {
+        let since = (*self.inner.no_holder_since.lock())?;
+        Some((self.inner.clock)().mono.saturating_duration_since(since))
     }
 
     /// True while a handover commit froze this client (no lease request is sent).
@@ -288,6 +317,14 @@ impl SupervisorLeaseState {
             let actions = machine.handle(event, now);
             (actions, machine.role().clone())
         };
+        {
+            let mut since = self.inner.no_holder_since.lock();
+            if !holder_unknown(&role) {
+                *since = None;
+            } else if since.is_none() {
+                *since = Some(now.mono);
+            }
+        }
         if let Some((fence, deadline)) = granted {
             if role == (Role::Holder { fence }) {
                 let mut grant = self.inner.grant.lock();
@@ -1446,6 +1483,30 @@ mod tests {
         assert!(!source.is_holder_now());
         assert_eq!(stamp(Some(source)), Err(FenceRefusal::NotHolder));
         assert_eq!(state.role(), Role::Holder { fence: 5 }, "no tick ran; the role is not what refused");
+    }
+
+    /// Status reads: how long a standby has known no holder, then the grant's time left.
+    #[test]
+    fn status_reads_how_long_no_holder_is_known_and_the_grant_time_left() {
+        let latched = PersistedLease { last_role: LastRole::Standby, lease_capable: true, ..Default::default() };
+        let (state, secs) = state_at(Some("acct"), Some(latched));
+        assert_eq!(state.no_holder_for(), Some(Duration::ZERO));
+        assert_eq!(state.lease_expires_in(), 0);
+        *secs.lock() = 30;
+        assert_eq!(state.no_holder_for(), Some(Duration::from_secs(30)));
+
+        state.handle(Event::SessionOpened { lease_capable: true });
+        let sent_at = (state.inner.clock)();
+        state.handle(Event::AcquireAck {
+            sent_at,
+            ack: LeaseAck::Granted { fence: 5, account_machine_count: Some(2) },
+        });
+
+        assert_eq!(state.role(), Role::Holder { fence: 5 });
+        assert_eq!(state.no_holder_for(), None);
+        assert_eq!(state.lease_expires_in(), VALID_FOR.as_secs());
+        *secs.lock() = 70;
+        assert_eq!(state.lease_expires_in(), VALID_FOR.as_secs() - 40);
     }
 
     #[test]
