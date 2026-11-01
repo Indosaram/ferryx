@@ -44,4 +44,27 @@ describe("AccountSheet delete flow", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
     expect(onDeleted).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps the email out of the field and moves focus into the confirm step and back", () => {
+    render(<AccountSheet open onOpenChange={vi.fn()} email="me@example.com" onSignOut={vi.fn()} onDelete={vi.fn()} onDeleted={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("account-delete-open"));
+    const input = screen.getByTestId("account-delete-email");
+    expect(input).not.toHaveAttribute("placeholder");
+    expect(document.activeElement).toBe(input);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(document.activeElement).toBe(screen.getByTestId("account-delete-open"));
+  });
+
+  it("says the email is unavailable instead of a filler phrase", () => {
+    render(<AccountSheet open onOpenChange={vi.fn()} email={null} onSignOut={vi.fn()} onDelete={vi.fn()} onDeleted={vi.fn()} />);
+    expect(screen.getByTestId("account-email")).toHaveTextContent("Email unavailable");
+  });
+
+  it("shows plain copy for an unknown failure instead of the raw message", async () => {
+    render(<AccountSheet open onOpenChange={vi.fn()} email="me@example.com" onSignOut={vi.fn()} onDelete={async () => { throw new AccountSessionError("BOOM_42", "stack trace", 500); }} onDeleted={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("account-delete-open"));
+    fireEvent.change(screen.getByTestId("account-delete-email"), { target: { value: "me@example.com" } });
+    await act(async () => fireEvent.click(screen.getByTestId("account-delete-confirm")));
+    expect(screen.getByTestId("account-delete-error")).not.toHaveTextContent("stack trace");
+  });
 });

@@ -171,7 +171,7 @@ export function buildInboxRows(input: {
       kind: state === "done" ? "done" : held ? "held" : "waiting",
       machineId: option.machineId,
       sessionId: option.sessionId,
-      title: entry?.title ?? `Session ${option.sessionId.slice(0, 8)}`,
+      title: entry?.title ?? `Session in ${worktree}`,
       where: `${option.machineDisplayName} · ${option.workspaceLabel ? `${option.workspaceLabel} / ` : ""}${worktree}`,
       agentType: option.agentType ?? null,
       observedAt: entry?.activityObservedAt ?? null,

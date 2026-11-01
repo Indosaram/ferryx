@@ -57,7 +57,7 @@ describe("InboxHome", () => {
     expect(inbox.needsYou).toBe(3);
     expect(inbox.rows[0].location).toBe("laptop · ferryx / feat-a");
     expect(inbox.rows[1].location).toBe("laptop · other / feat-b");
-    expect(inbox.rows[2].supervisorLabel).toBe("Supervisor paused this lane");
+    expect(inbox.rows[2].supervisorLabel).toBe("Supervisor paused");
   });
 
   it("renders exactly the list the session sheet renders", () => {
@@ -65,7 +65,7 @@ describe("InboxHome", () => {
     render(<InboxHome rows={inbox.rows} prompts={inbox.prompts} now={1000} loading={false} onOpen={vi.fn()} />);
     const home = within(screen.getByTestId("inbox-home")).getAllByTestId("attention-row").map((row) => row.textContent);
     cleanup();
-    render(<AttentionInbox compact rows={inbox.rows} prompts={inbox.prompts} now={1000} onOpen={vi.fn()} />);
+    render(<AttentionInbox compact touch rows={inbox.rows} prompts={inbox.prompts} now={1000} onOpen={vi.fn()} />);
     const sheet = screen.getAllByTestId("attention-row").map((row) => row.textContent);
     expect(home).toHaveLength(4);
     expect(home).toEqual(sheet);
@@ -79,8 +79,63 @@ describe("InboxHome", () => {
     expect(onOpen).toHaveBeenCalledWith(inbox.rows[1]);
   });
 
-  it("says nothing needs the person once loading has settled", () => {
-    render(<InboxHome rows={[]} now={0} loading={false} onOpen={vi.fn()} />);
+  it("says nothing needs the person once loading has settled, and offers the next step", () => {
+    const onBrowseWorktrees = vi.fn();
+    render(<InboxHome rows={[]} now={0} loading={false} onOpen={vi.fn()} onBrowseWorktrees={onBrowseWorktrees} />);
     expect(screen.getByTestId("inbox-home")).toHaveTextContent("Nothing needs you");
+    fireEvent.click(screen.getByTestId("inbox-home-browse"));
+    expect(onBrowseWorktrees).toHaveBeenCalledTimes(1);
+  });
+
+  it("says nothing needs the person when only finished rows remain, and still lists them", () => {
+    const inbox = hostRows();
+    const done = inbox.rows.filter((row) => row.state === "done");
+    render(<InboxHome rows={done} now={1000} loading={false} onOpen={vi.fn()} />);
+    expect(screen.getByTestId("inbox-home-empty")).toHaveTextContent("Nothing needs you");
+    expect(screen.getAllByTestId("attention-row")).toHaveLength(1);
+  });
+
+  it("keeps saying it is still checking while rows are already listed", () => {
+    const inbox = hostRows();
+    render(<InboxHome rows={inbox.rows} now={1000} loading onOpen={vi.fn()} />);
+    expect(screen.getByTestId("inbox-home-loading")).toHaveTextContent("Still checking");
+    expect(screen.getAllByTestId("attention-row")).toHaveLength(4);
+  });
+
+  it("uses the session title as the row's primary line, keeping Needs you on a held row", () => {
+    const inbox = hostRows();
+    render(<InboxHome rows={inbox.rows} now={1000} loading={false} onOpen={vi.fn()} />);
+    const titles = screen.getAllByTestId("attention-row-title").map((el) => el.textContent);
+    expect(titles[0]).toBe("Fix the flaky test");
+    const held = screen.getAllByTestId("attention-row")[2];
+    expect(held).toHaveTextContent("Needs you");
+    expect(within(held).getByTestId("attention-row-supervisor")).toHaveTextContent("Supervisor paused");
+  });
+
+  it("marks a row whose computer is offline and does not open it", () => {
+    const options = [fixtureOption({ machineId: "laptop", sessionId: "w", inventoryActivityState: "waiting", machineOnline: false })];
+    const rows = buildInboxRows({ options, inventories: {}, lanes: [] });
+    const entries = remoteInboxEntries({ model, machineId: "studio", accountRows: rows });
+    const inbox = renderHook(() => useRemoteInbox({ entries, transport })).result.current;
+    const onOpen = vi.fn();
+    render(<InboxHome rows={inbox.rows} now={1000} loading={false} onOpen={onOpen} />);
+    expect(screen.getByTestId("attention-row-unavailable")).toHaveTextContent("Computer offline");
+    fireEvent.click(screen.getByTestId("attention-row"));
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it("sizes the inline answer controls for touch", async () => {
+    const options = [fixtureOption({ machineId: "laptop", sessionId: "w", inventoryActivityState: "waiting" })];
+    const rows = buildInboxRows({ options, inventories: {}, lanes: [] });
+    const entries = remoteInboxEntries({ model, machineId: "laptop", accountRows: rows });
+    const inbox = renderHook(() => useRemoteInbox({ entries, transport })).result.current;
+    const prompts = {
+      ...inbox.prompts,
+      read: vi.fn(async () => ({ promptId: "p", screenRevision: "1", question: "Name?", options: [], kind: "freeText" as const })),
+    };
+    render(<InboxHome rows={inbox.rows} prompts={prompts} now={1000} loading={false} onOpen={vi.fn()} />);
+    const input = await screen.findByRole("textbox", { name: /Answer/ });
+    expect(input).toHaveClass("h-11", "text-base");
+    expect(screen.getByRole("button", { name: "Send" })).toHaveClass("h-11");
   });
 });

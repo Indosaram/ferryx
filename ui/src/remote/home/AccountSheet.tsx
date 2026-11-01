@@ -1,10 +1,12 @@
 // The Account sheet: who is signed in, Sign out, and permanent account deletion behind a
 // typed-email confirmation. The server compares the email; this screen only reports its answer.
 import { LogOut, Trash2, UserRound } from "lucide-react";
-import { useEffect, useId, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 
 import { AccountSessionError } from "../accountSession";
 import { MobileSheet, MobileSheetItem } from "../chat/MobileSheet";
+import { userFacingError } from "../userFacingError";
+import { useOverlayHistory } from "./usePhoneNavigation";
 
 const ACCOUNT_EMAIL_KEY = "ferryx.account.email";
 
@@ -34,7 +36,7 @@ const DELETE_ERRORS: Record<string, string> = {
 
 function deleteErrorText(err: unknown): { code: string; text: string } {
   const code = err instanceof AccountSessionError ? err.code : "DELETE_ACCOUNT_FAILED";
-  const text = DELETE_ERRORS[code] ?? (err instanceof Error && err.message ? err.message : "The account could not be deleted. Try again.");
+  const text = DELETE_ERRORS[code] ?? userFacingError(err, { action: "delete the account" });
   return { code, text };
 }
 
@@ -58,6 +60,22 @@ export function AccountSheet({ open, onOpenChange, email, onSignOut, onDelete, o
   const [error, setError] = useState<{ code: string; text: string } | null>(null);
   const inputId = useId();
   const errorId = useId();
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const deleteOpenRef = useRef<HTMLButtonElement | null>(null);
+  // The step swap unmounts the focused control; hand focus to its replacement inside the sheet.
+  const focusAfterSwapRef = useRef(false);
+  useOverlayHistory(open, () => onOpenChange(false));
+
+  useEffect(() => {
+    if (!focusAfterSwapRef.current) return;
+    focusAfterSwapRef.current = false;
+    (step === "confirm" ? inputRef : deleteOpenRef).current?.focus();
+  }, [step]);
+
+  const goTo = (next: "summary" | "confirm") => {
+    focusAfterSwapRef.current = true;
+    setStep(next);
+  };
 
   useEffect(() => {
     if (open) return;
@@ -94,10 +112,10 @@ export function AccountSheet({ open, onOpenChange, email, onSignOut, onDelete, o
       {step === "summary" ? (
         <>
           <div className="flex min-h-12 items-center gap-3 px-3 py-2">
-            <UserRound aria-hidden="true" className="size-[18px] shrink-0 text-chat-foreground-secondary" />
+            <UserRound aria-hidden="true" className="size-5 shrink-0 text-chat-foreground-secondary" />
             <span className="min-w-0 flex-1">
-              <span className="block text-[13px] text-chat-foreground-secondary">Signed in as</span>
-              <span data-testid="account-email" className="block break-all text-[15px] text-chat-foreground">{email ?? "this account"}</span>
+              <span className="block text-sm text-chat-foreground-secondary">Signed in as</span>
+              <span data-testid="account-email" className="block break-all text-base text-chat-foreground">{email ?? "Email unavailable on this device"}</span>
             </span>
           </div>
           <MobileSheetItem
@@ -109,25 +127,35 @@ export function AccountSheet({ open, onOpenChange, email, onSignOut, onDelete, o
               onSignOut();
             }}
           />
-          <button
-            type="button"
-            data-testid="account-delete-open"
-            onClick={() => setStep("confirm")}
-            className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-chat-danger transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          >
-            <Trash2 aria-hidden="true" className="size-[18px] shrink-0" />
-            <span className="text-[15px]">Delete account</span>
-          </button>
+          <div className="mt-6 border-t border-chat-border pt-2">
+            <button
+              ref={deleteOpenRef}
+              type="button"
+              data-testid="account-delete-open"
+              onClick={() => goTo("confirm")}
+              className="flex min-h-12 w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-chat-danger transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <Trash2 aria-hidden="true" className="size-5 shrink-0" />
+              <span className="text-base">Delete account…</span>
+            </button>
+          </div>
         </>
       ) : (
         <form data-testid="account-delete-form" onSubmit={(event) => void submit(event)} className="flex flex-col gap-3 px-2 pb-2 pt-1">
-          <p className="text-[14px] leading-snug text-chat-foreground">
+          <p className="text-sm leading-snug text-chat-foreground">
             This permanently deletes your Ferryx account, unlinks every computer and signs you out everywhere. It cannot be undone.
           </p>
-          <label htmlFor={inputId} className="text-[13px] text-chat-foreground-secondary">
-            Type your account email to confirm
+          <label htmlFor={inputId} className="text-sm text-chat-foreground-secondary">
+            {email ? (
+              <>
+                Type <span className="break-all font-medium text-chat-foreground">{email}</span> to confirm
+              </>
+            ) : (
+              "Type your account email to confirm"
+            )}
           </label>
           <input
+            ref={inputRef}
             id={inputId}
             data-testid="account-delete-email"
             type="email"
@@ -135,15 +163,14 @@ export function AccountSheet({ open, onOpenChange, email, onSignOut, onDelete, o
             autoComplete="off"
             autoCapitalize="none"
             spellCheck={false}
-            placeholder={email ?? "you@example.com"}
             value={typed}
             onChange={(event) => setTyped(event.target.value)}
             aria-invalid={error ? true : undefined}
             aria-describedby={error ? errorId : undefined}
-            className="h-11 w-full rounded-xl border border-chat-border bg-chat-screen px-3 text-base text-chat-foreground placeholder:text-chat-foreground-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            className="h-11 w-full rounded-lg border border-chat-border bg-chat-screen px-3 text-base text-chat-foreground placeholder:text-chat-foreground-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           />
           {error ? (
-            <p id={errorId} data-testid="account-delete-error" data-code={error.code} role="alert" className="rounded-xl bg-chat-danger/10 px-3 py-2.5 text-[13px] leading-snug text-chat-danger">
+            <p id={errorId} data-testid="account-delete-error" data-code={error.code} role="alert" className="rounded-lg bg-chat-danger/10 px-3 py-2.5 text-sm leading-snug text-chat-danger">
               {error.text}
             </p>
           ) : null}
@@ -151,10 +178,10 @@ export function AccountSheet({ open, onOpenChange, email, onSignOut, onDelete, o
             <button
               type="button"
               onClick={() => {
-                setStep("summary");
+                goTo("summary");
                 setError(null);
               }}
-              className="flex h-11 flex-1 items-center justify-center rounded-xl bg-chat-surface-raised text-[15px] font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              className="flex h-11 flex-1 items-center justify-center rounded-lg bg-chat-surface-raised text-base font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
               Cancel
             </button>
@@ -162,7 +189,7 @@ export function AccountSheet({ open, onOpenChange, email, onSignOut, onDelete, o
               type="submit"
               data-testid="account-delete-confirm"
               disabled={busy || !typed.trim()}
-              className="flex h-11 flex-1 items-center justify-center rounded-xl bg-chat-danger text-[15px] font-medium text-chat-screen transition-colors hover:bg-chat-danger/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+              className="flex h-11 flex-1 items-center justify-center rounded-lg bg-chat-danger text-base font-medium text-chat-screen transition-colors hover:bg-chat-danger/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
             >
               {busy ? "Deleting…" : "Delete account"}
             </button>

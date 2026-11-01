@@ -86,6 +86,8 @@ export type RemoteInboxEntry = {
   machineId: string | null;
   /** The prompt routes of the connected host can read this session's card. */
   readable: boolean;
+  /** False when the session's computer cannot open it now (offline or unlisted). Absent: openable. */
+  openable?: boolean;
 };
 
 function inboxKey(machineId: string | null, sessionId: string): string {
@@ -163,7 +165,7 @@ export function remoteInboxEntries(input: {
       worktreeSlug: item.worktreeSlug,
       worktreeLabel,
       state: item.state,
-      ...whoAndText(item.agentType, `Session ${item.sessionId.slice(0, 8)}`),
+      ...whoAndText(item.agentType, `Session in ${worktreeLabel ?? "main"}`),
       location: formatAttentionLocation(labelOf(item.workspaceId), worktreeLabel ?? undefined),
       agentType: item.agentType,
       machineId,
@@ -176,7 +178,7 @@ export function remoteInboxEntries(input: {
     if (option.machineId || option.unavailable || !option.sessionId) continue;
     const state = inboxState(option.attention ?? option.activityState);
     if (!state) continue;
-    const label = option.sessionLabel ?? `Session ${option.sessionId.slice(0, 8)}`;
+    const label = option.sessionLabel ?? `Session in ${option.worktreeLabel ?? "main"}`;
     add({
       key: inboxKey(null, option.sessionId),
       sessionId: option.sessionId,
@@ -209,6 +211,7 @@ export function remoteInboxEntries(input: {
       ...(row.kind === "held" ? { supervisorLabel: INBOX_WHY.held } : {}),
       machineId: row.machineId,
       readable: row.machineId === machineId,
+      openable: row.option.unavailable !== true && row.option.machineOnline !== false,
     });
   }
   return entries;
@@ -334,6 +337,7 @@ export function useRemoteInbox({
                   ...(entry.text ? { text: entry.text } : {}),
                   ...(entry.at !== undefined ? { at: entry.at } : {}),
                   ...(entry.supervisorLabel ? { supervisorLabel: entry.supervisorLabel } : {}),
+                  ...(entry.openable === false ? { unavailable: "Computer offline" } : {}),
                 },
               ],
         ),
