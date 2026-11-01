@@ -4,19 +4,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BrowserAgentApprovalCard } from "./BrowserAgentApprovalCard";
 import type { BrowserAgentApproval, BrowserAgentOverview } from "../lib/browserAgent";
 
-const tauri = vi.hoisted(() => ({
-  invoke: vi.fn(),
-  listener: null as null | ((event: { payload: unknown }) => void),
+const agent = vi.hoisted(() => ({
+  getBrowserAgentOverview: vi.fn(),
+  resolveBrowserAgentApproval: vi.fn(),
+  onBrowserAgentApprovals: vi.fn(),
+  listener: null as null | ((pending: unknown) => void),
 }));
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: tauri.invoke }));
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async (event: string, handler: (event: { payload: unknown }) => void) => {
-    if (event === "browser_agent_approvals_changed") tauri.listener = handler;
-    return () => {
-      tauri.listener = null;
-    };
-  }),
+vi.mock("../lib/browserAgent", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/browserAgent")>()),
+  getBrowserAgentOverview: agent.getBrowserAgentOverview,
+  resolveBrowserAgentApproval: agent.resolveBrowserAgentApproval,
+  onBrowserAgentApprovals: agent.onBrowserAgentApprovals,
 }));
 
 const controllerId = "0f8fad5b-d9cb-469f-a165-70867728950e";
@@ -39,24 +38,27 @@ function overview(pending: BrowserAgentApproval[]): BrowserAgentOverview {
 }
 
 function backend(pending: BrowserAgentApproval[]) {
-  tauri.invoke.mockImplementation(async (command: string) => {
-    if (command === "cmd_browser_agent_overview") return overview(pending);
-    if (command === "cmd_browser_agent_resolve") return undefined;
-    throw new Error(`unexpected ${command}`);
+  agent.getBrowserAgentOverview.mockImplementation(async () => overview(pending));
+  agent.resolveBrowserAgentApproval.mockImplementation(async () => undefined);
+  agent.onBrowserAgentApprovals.mockImplementation(async (listener: (pending: unknown) => void) => {
+    agent.listener = listener;
+    return () => {
+      agent.listener = null;
+    };
   });
 }
 
 describe("BrowserAgentApprovalCard", () => {
   beforeEach(() => {
-    tauri.invoke.mockReset();
-    tauri.listener = null;
+    vi.resetAllMocks();
+    agent.listener = null;
   });
   afterEach(cleanup);
 
   it("renders nothing while no request is pending", async () => {
     backend([]);
     const { container } = render(<BrowserAgentApprovalCard />);
-    await vi.waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith("cmd_browser_agent_overview"));
+    await vi.waitFor(() => expect(agent.getBrowserAgentOverview).toHaveBeenCalled());
     expect(container).toBeEmptyDOMElement();
   });
 
@@ -66,9 +68,7 @@ describe("BrowserAgentApprovalCard", () => {
     expect(await screen.findByText(/Allow "qa-a" to control the browser\?/)).toBeInTheDocument();
     expect(screen.queryByTestId("browser-agent-approval-remember")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Allow" }));
-    await vi.waitFor(() =>
-      expect(tauri.invoke).toHaveBeenCalledWith("cmd_browser_agent_resolve", { approvalId: "a1", resolution: "approveOnce" }),
-    );
+    await vi.waitFor(() => expect(agent.resolveBrowserAgentApproval).toHaveBeenCalledWith("a1", "approveOnce"));
     await vi.waitFor(() => expect(screen.queryByTestId("browser-agent-approval")).toBeNull());
   });
 
@@ -78,37 +78,30 @@ describe("BrowserAgentApprovalCard", () => {
     expect(await screen.findByText("Let qa-a use http://127.0.0.1:18761?")).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("browser-agent-approval-remember"));
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
-    await vi.waitFor(() =>
-      expect(tauri.invoke).toHaveBeenCalledWith("cmd_browser_agent_resolve", { approvalId: "a2", resolution: "approvePersistent" }),
-    );
+    await vi.waitFor(() => expect(agent.resolveBrowserAgentApproval).toHaveBeenCalledWith("a2", "approvePersistent"));
   });
 
   it("denies the request", async () => {
     backend([grant]);
     render(<BrowserAgentApprovalCard />);
     fireEvent.click(await screen.findByRole("button", { name: "Deny" }));
-    await vi.waitFor(() =>
-      expect(tauri.invoke).toHaveBeenCalledWith("cmd_browser_agent_resolve", { approvalId: "a2", resolution: "deny" }),
-    );
+    await vi.waitFor(() => expect(agent.resolveBrowserAgentApproval).toHaveBeenCalledWith("a2", "deny"));
   });
 
   it("follows the backend's change event and shows the next request", async () => {
     backend([]);
     render(<BrowserAgentApprovalCard />);
-    await vi.waitFor(() => expect(tauri.listener).not.toBeNull());
-    act(() => tauri.listener?.({ payload: [pairing, grant] }));
+    await vi.waitFor(() => expect(agent.listener).not.toBeNull());
+    act(() => agent.listener?.([pairing, grant]));
     expect(await screen.findByText(/Allow "qa-a"/)).toBeInTheDocument();
     expect(screen.getByText("1 more waiting")).toBeInTheDocument();
-    act(() => tauri.listener?.({ payload: [] }));
+    act(() => agent.listener?.([]));
     await vi.waitFor(() => expect(screen.queryByTestId("browser-agent-approval")).toBeNull());
   });
 
   it("keeps the card and shows the code when resolving fails", async () => {
     backend([grant]);
-    tauri.invoke.mockImplementation(async (command: string) => {
-      if (command === "cmd_browser_agent_overview") return overview([grant]);
-      throw { code: "BROWSER_APPROVAL_NOT_FOUND", message: "expired" };
-    });
+    agent.resolveBrowserAgentApproval.mockRejectedValue({ code: "BROWSER_APPROVAL_NOT_FOUND", message: "expired" });
     render(<BrowserAgentApprovalCard />);
     fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("BROWSER_APPROVAL_NOT_FOUND");
