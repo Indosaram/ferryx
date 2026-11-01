@@ -1514,6 +1514,8 @@ export const RemoteHostConnection: React.FC<{
   const lateSelectionRef = useRef<RemoteContextOption | null>(null);
   const workspaceRefreshVersionRef = useRef(0);
   const confirmationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Aborted on unmount so a selection request that never answers does not outlive the page.
+  const selectionAbortRef = useRef(new AbortController());
 
 
   const [initialAccountTarget, setInitialAccountTarget] = useState<{
@@ -2054,10 +2056,15 @@ export const RemoteHostConnection: React.FC<{
     void fetchBrowserSessionsRef.current();
   }, [token, browserContextWorkspace, browserContextWorktree, transportBaseUrl]);
 
-  useEffect(() => () => {
-    workspaceRefreshVersionRef.current += 1;
-    pendingSelectionRef.current = null;
-    if (confirmationTimeoutRef.current !== null) clearTimeout(confirmationTimeoutRef.current);
+  useEffect(() => {
+    const selectionAbort = new AbortController();
+    selectionAbortRef.current = selectionAbort;
+    return () => {
+      workspaceRefreshVersionRef.current += 1;
+      pendingSelectionRef.current = null;
+      selectionAbort.abort();
+      if (confirmationTimeoutRef.current !== null) clearTimeout(confirmationTimeoutRef.current);
+    };
   }, []);
 
   const loadWorkspace = useCallback(async (): Promise<RemoteWorkspaceModel | null> => {
@@ -2872,6 +2879,7 @@ export const RemoteHostConnection: React.FC<{
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
             body: JSON.stringify(selectPayload),
+            signal: selectionAbortRef.current.signal,
           },
         );
         ok = response.ok;
