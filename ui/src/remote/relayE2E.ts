@@ -415,6 +415,15 @@ export function openRelayE2ETransport(params: OpenRelayE2ETransportParams): Rela
         tunnel.close();
         throw error;
       }
+      // close() ran during the upgrade: it no longer tracks this socket, so release it here.
+      if (closed) {
+        try {
+          socket.close();
+        } finally {
+          tunnel.close();
+        }
+        assertOpen();
+      }
       for (const entry of sockets) if (entry.socket.readyState === 3) sockets.delete(entry);
       sockets.add({ socket, tunnel });
       return socket;

@@ -250,6 +250,51 @@ describe("relay end-to-end encryption", () => {
     expect(relayE2EState(host, RELAY)).toBe("e2e");
     await expect(remoteFetch(BASE, "/api/v1/health")).rejects.toMatchObject({ code: "MACHINE_OFFLINE" });
   });
+
+  it("closes a socket whose upgrade finished after the connection was closed", async () => {
+    let finishUpgrade!: (socket: TunnelWebSocket) => void;
+    const socket = fakeSocket();
+    const tunnelClose = vi.fn();
+    let upgradeStarted!: () => void;
+    const started = new Promise<void>((resolve) => (upgradeStarted = resolve));
+    const openTunnel = vi.fn(async () => ({
+      transport: {
+        fetchLike: vi.fn(),
+        openWebSocket: vi.fn(() => {
+          upgradeStarted();
+          return new Promise<TunnelWebSocket>((resolve) => {
+            finishUpgrade = resolve;
+          });
+        }),
+        close: vi.fn(),
+        isClosed: false,
+      } as unknown as TunnelTransport,
+      close: tunnelClose,
+    }));
+    const connection = openRelayE2ETransport({
+      relayOrigin: RELAY,
+      machineId: MACHINE,
+      enrollmentEpoch: "7",
+      machineAttachPublicKey: "key",
+      attachKey: { publicKey: "pub", privateKey: "priv" },
+      bearer: "device-token",
+      deps: {
+        fetch: vi.fn(async () => jsonResponse(200, { sessionId: "sess-1" })) as unknown as typeof fetch,
+        openTunnel,
+      },
+    });
+    const pending = connection.openWebSocket("/api/v1/events");
+    await started;
+
+    // When the connection closes mid-upgrade and the upgrade then completes
+    connection.close();
+    finishUpgrade(socket);
+
+    // Then the late socket and its tunnel are released and the caller is told
+    await expect(pending).rejects.toMatchObject({ code: "CONNECTION_CLOSED" });
+    expect(socket.close).toHaveBeenCalled();
+    expect(tunnelClose).toHaveBeenCalled();
+  });
 });
 
 describe("plain host request deadlines", () => {
