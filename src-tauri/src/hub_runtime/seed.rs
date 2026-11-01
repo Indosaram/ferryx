@@ -85,47 +85,58 @@ fn memory_file_sessions(home: &Path, max_paragraphs: usize) -> Vec<ImportSession
     sessions
 }
 
-/// The owner turns of the most recent sessions across SESSION_PROVIDERS, newest first.
+/// The owner turns of the most recent sessions across SESSION_PROVIDERS, newest first. A fork
+/// or child session (an entry with a parent) and a sidechain stored under a `subagents`
+/// directory are skipped: their user turns are another agent's prompts, not the owner's.
+/// Each provider is read right after its own search, because a search replaces the history's
+/// entry locators and a later read of an earlier provider's entry would find nothing.
 fn recent_sessions(roots: Vec<(CanonicalProvider, PathBuf)>, max_sessions: usize) -> Vec<ImportSession> {
     let roots: Vec<_> = roots.into_iter().filter(|(provider, _)| SESSION_PROVIDERS.contains(provider)).collect();
     let mut history = History::new(roots);
-    let mut entries = Vec::new();
+    let mut sessions = Vec::new();
     for provider in SESSION_PROVIDERS {
         let wire = crate::agent_history::history::provider_wire(provider);
+        let mut entries = Vec::new();
         let mut cursor: Option<String> = None;
         while let Ok(page) = history.search(wire, None, "", cursor.as_deref(), PAGE) {
-            entries.extend(page.items.into_iter().map(|entry| (wire, entry)));
+            entries.extend(page.items.into_iter().filter(|entry| {
+                entry.parent_id.is_none()
+                    && !history
+                        .source_path(&entry.entry_key)
+                        .is_some_and(|path| path.components().any(|part| part.as_os_str() == "subagents"))
+            }));
             match page.next_cursor {
                 Some(next) => cursor = Some(next),
                 None => break,
             }
         }
-    }
-    entries.sort_by_key(|(_, entry)| std::cmp::Reverse(entry.modified_ms));
-    let mut sessions = Vec::new();
-    for (wire, entry) in entries.into_iter().take(max_sessions) {
-        let mut turns = Vec::new();
-        let mut cursor: Option<String> = None;
-        while let Ok(page) = history.read(&entry.entry_key, cursor.as_deref(), PAGE) {
-            turns.extend(
-                page.items
-                    .into_iter()
-                    .filter(|message| message.role == "user")
-                    .map(|message| ImportTurn { ordinal: message.ordinal, text: message.text }),
-            );
-            match page.next_cursor {
-                Some(next) => cursor = Some(next),
-                None => break,
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.modified_ms));
+        for entry in entries.into_iter().take(max_sessions) {
+            let mut turns = Vec::new();
+            let mut cursor: Option<String> = None;
+            while let Ok(page) = history.read(&entry.entry_key, cursor.as_deref(), PAGE) {
+                turns.extend(
+                    page.items
+                        .into_iter()
+                        .filter(|message| message.role == "user")
+                        .map(|message| ImportTurn { ordinal: message.ordinal, text: message.text }),
+                );
+                match page.next_cursor {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
             }
+            let session = ImportSession {
+                provider: wire.to_owned(),
+                session_id: entry.provider_session.id.clone(),
+                cwd: (!entry.cwd.is_empty()).then(|| entry.cwd.clone()),
+                turns,
+            };
+            sessions.push((entry.modified_ms, session));
         }
-        sessions.push(ImportSession {
-            provider: wire.to_owned(),
-            session_id: entry.provider_session.id.clone(),
-            cwd: (!entry.cwd.is_empty()).then(|| entry.cwd.clone()),
-            turns,
-        });
     }
-    sessions
+    sessions.sort_by_key(|(modified_ms, _)| std::cmp::Reverse(*modified_ms));
+    sessions.into_iter().take(max_sessions).map(|(_, session)| session).collect()
 }
 
 /// Seeds owner memory for principal from the agent stores under home. File reads run on the
@@ -200,6 +211,7 @@ mod tests {
     #[derive(Default)]
     struct Learner {
         seen: std::sync::Mutex<std::collections::HashSet<String>>,
+        texts: std::sync::Mutex<Vec<(String, String)>>,
     }
 
     #[async_trait]
@@ -207,7 +219,8 @@ mod tests {
         async fn memory_request(&self, name: &str, _data: Value) -> Result<Value, MemoryRequestError> {
             panic!("seeding sends no memory request ({name})")
         }
-        async fn ingest_owner_text(&self, source: &str, _text: &str) -> Result<IngestOutcome, SupervisorFault> {
+        async fn ingest_owner_text(&self, source: &str, text: &str) -> Result<IngestOutcome, SupervisorFault> {
+            self.texts.lock().unwrap().push((source.to_owned(), text.to_owned()));
             let fresh = self.seen.lock().unwrap().insert(source.to_owned());
             Ok(if fresh { IngestOutcome::Learned { reply: String::new() } } else { IngestOutcome::Duplicate })
         }
@@ -223,6 +236,84 @@ mod tests {
         let moved: Vec<_> = moved.iter().map(|turn| (turn.ordinal, turn.text.as_str())).collect();
         assert_eq!(moved, vec![(paragraph_id("zero"), "zero"), (turns[2].ordinal, "three"), (turns[0].ordinal, "one")]);
         assert_ne!(turns[0].ordinal, turns[1].ordinal);
+    }
+
+    /// Only the owner's own sessions teach: a Claude sidechain under `subagents` and a forked
+    /// Codex session are skipped, and both providers' sessions are read even though the history
+    /// is searched provider by provider.
+    #[tokio::test]
+    async fn subagent_and_forked_sessions_never_teach() {
+        use serde_json::json;
+        let home = tempfile::tempdir().unwrap();
+        let cwd = home.path().to_string_lossy().into_owned();
+        let claude_root = home.path().join("claude-projects");
+        let project = claude_root.join("proj");
+        std::fs::create_dir_all(project.join("s1").join("subagents")).unwrap();
+        let claude_line = |session: &str, text: &str| {
+            format!(
+                "{}\n",
+                json!({"type": "user", "sessionId": session, "cwd": cwd, "uuid": "9f0c1d2e-0000-4000-8000-000000000001",
+                    "parentUuid": null, "message": {"role": "user", "content": text}})
+            )
+        };
+        let owner_claude = "63ba88ec-b3cb-4a70-8a32-f5d1ad07e749";
+        std::fs::write(project.join("s1.jsonl"), claude_line(owner_claude, "Prefer small focused commits.")).unwrap();
+        std::fs::write(
+            project.join("s1").join("subagents").join("agent-1.jsonl"),
+            claude_line("7d1e2f3a-4b5c-4d6e-8f70-819293a4b5c6", "Search the repo for flaky tests."),
+        )
+        .unwrap();
+        let codex_root = home.path().join("codex-sessions");
+        std::fs::create_dir_all(&codex_root).unwrap();
+        let codex_file = |id: &str, forked_from: Option<&str>, text: &str| {
+            let mut meta = json!({"id": id, "cwd": cwd, "cli_version": "0.153.2"});
+            if let Some(parent) = forked_from {
+                meta["forked_from_id"] = json!(parent);
+            }
+            format!(
+                "{}\n{}\n",
+                json!({"type": "session_meta", "payload": meta}),
+                json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": text}]}})
+            )
+        };
+        let owner_codex = "019ec598-c800-7000-8000-000000000001";
+        std::fs::write(codex_root.join("owner.jsonl"), codex_file(owner_codex, None, "Use tabs in the Go code.")).unwrap();
+        std::fs::write(
+            codex_root.join("forked.jsonl"),
+            codex_file("019ec598-c800-7000-8000-000000000002", Some(owner_codex), "Retry the forked plan."),
+        )
+        .unwrap();
+
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::supervisor::provision_identity(&pool, "local:tester").await.unwrap();
+        let learner = Arc::new(Learner::default());
+        let report = seed_with_roots(
+            &pool,
+            learner.clone(),
+            "local:tester",
+            home.path().to_path_buf(),
+            vec![(CanonicalProvider::Claude, claude_root), (CanonicalProvider::Codex, codex_root)],
+        )
+        .await
+        .unwrap();
+        assert_eq!((report.sessions, report.turns_ingested, report.failed), (2, 2, 0), "{report:?}");
+        let mut texts = learner.texts.lock().unwrap().clone();
+        texts.sort();
+        assert_eq!(
+            texts,
+            vec![
+                (
+                    format!("import:claude:{owner_claude}:0"),
+                    ferryx_hub::chat::fence::fence_untrusted(&format!("import claude {owner_claude}"), "Prefer small focused commits."),
+                ),
+                (
+                    format!("import:codex:{owner_codex}:1"),
+                    ferryx_hub::chat::fence::fence_untrusted(&format!("import codex {owner_codex}"), "Use tabs in the Go code."),
+                ),
+            ]
+        );
+        assert!(texts[0].1.contains("```untrusted\norigin: import claude "));
     }
 
     #[tokio::test]
