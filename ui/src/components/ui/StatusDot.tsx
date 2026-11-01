@@ -27,7 +27,7 @@ export function StatusDot({ state, className }: StatusDotProps) {
       <span
         aria-hidden="true"
         data-status-state="starting"
-        className={cn("size-2 shrink-0 animate-pulse rounded-full bg-status-warning motion-reduce:animate-none", className)}
+        className={cn("size-2 shrink-0 animate-pulse rounded-full border border-status-warning motion-reduce:animate-none", className)}
       />
     );
   }
@@ -37,7 +37,7 @@ export function StatusDot({ state, className }: StatusDotProps) {
       <span
         aria-hidden="true"
         data-status-state="waiting"
-        className={cn("size-2 shrink-0 rounded-full bg-status-warning ring-2 ring-status-warning/20", className)}
+        className={cn("size-2 shrink-0 rounded-full bg-status-warning", className)}
       />
     );
   }
