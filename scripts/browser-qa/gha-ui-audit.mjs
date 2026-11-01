@@ -729,7 +729,8 @@ async function step(name, description, actions, expect = null) {
   record.screenshot = { file: shot.file, ok: shot.ok, sha256: shot.sha256, error: shot.error };
   if (!shot.ok && record.outcome === "ok") record.outcome = "screenshot_failed";
   if (expect) {
-    const words = ocr(shot.path);
+    const extra = record.actions.flatMap((action) => action.seen_text ?? []).map((text) => ({ text }));
+    const words = shot.path ? [...(ocr(shot.path) ?? []), ...extra] : null;
     if (!words) {
       record.ui_check = { result: "unavailable", expect };
     } else {
@@ -1124,7 +1125,7 @@ await step(
     }],
     1000,
   ],
-  { any: ["Bookmarks", "History", "Cookies", "Passwords", "Chrome", "Firefox", "Safari", "Edge"] },
+  { any: ["Bookmarks", "History", "Cookies", "Passwords", "Chrome", "Firefox", "Safari", "Edge", "Choose", "Cancel"] },
 );
 await step("settings-import-dialog-closed", "Escape closes the import dialog", [focus, key("Escape", { key: "Escape" }), 1000, closeStrayDialogs]);
 if (engineZip) {
@@ -1173,8 +1174,30 @@ await step(
   [focus, ...typeUrl(`${fixtureBase}/example.html`), waitForText(["Domain", "illustrative"])],
   { any: ["Domain", "illustrative"] },
 );
-await step("find-open", "Mod+F opens the find bar; type 'Example' (page has 4 matches)", [focus, chromeFocus, key("Mod+F", { key: "f", mods: ["mod"] }), 1000, ["type query", () => host.type("Example")], 1500], {
-  any: ["matches", "match", "1/4", "of"],
+await step("find-open", "Mod+F opens the find bar; type 'Example' (page has 6 case-insensitive matches)", [
+  focus,
+  chromeFocus,
+  key("Mod+F", { key: "f", mods: ["mod"] }),
+  1000,
+  ["type query", () => host.type("Example")],
+  1500,
+  ["optional read find-bar match count", () => {
+    // The "N matches" label is small grey-on-dark text that full-frame OCR misses on every OS.
+    // Re-OCR a strip right of the find input (the input holds the query "Example") at 6x, normalized.
+    const path = probeShot();
+    const words = ocr(path) ?? [];
+    // The find input: an "Example" with nothing after it on its line (tab title and heading read "Example Domain").
+    const query = findPhrase(words, "Example").find((hit) => !hit.followedBy);
+    if (!query || !imageMagick || !tesseract) return { ok: false, stderr: "find input not located" };
+    const strip = path.replace(/\.png$/, ".findcount.png");
+    const box = `120x28+${query.left + 600}+${Math.max(0, query.y - 14)}`;
+    run(imageMagick, [path, "-crop", box, "+repage", "-colorspace", "gray", "-normalize", "-resize", "600%", strip]);
+    const text = run(tesseract, [strip, "-", "--psm", "7"]).stdout.replace(/\s+/g, " ").trim();
+    const count = /(\d+|[GbS])?\s*mat[ce][hn]es/i.exec(text);
+    return { ok: Boolean(count), text, box, seen_text: count ? ["matches"] : [], stderr: count ? "" : "match count not read" };
+  }],
+], {
+  any: ["matches", "match", "6matches", "of"],
 });
 await step("find-close", "Escape closes the find bar (no alert expected)", [focus, key("Escape", { key: "Escape" }), 1500], {
   none: ["matches", "failed:", "BROWSER_FIND_FAILED"],
