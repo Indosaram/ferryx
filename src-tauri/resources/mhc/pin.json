@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "mhc": {
     "repo": "Indosaram/mhc",
-    "tag": "v2026.10.28",
+    "tag": "v2026.11.01",
     "publicKey": "untrusted comment: minisign public key DDF3224671031878\nRWR4GANxRiLz3QbBlgDTEW7J++qZ1fVmYPhYEN7cAnSsW4IJJ/smaLju\n",
     "assets": {
-      "aarch64-apple-darwin": { "name": "mhc-macos-aarch64.tar.gz", "sha256": "1cac9876509a17f1bbc914a8c45fd4c09b8761c99cba7e85a7034d21a66a3b0f" },
-      "x86_64-apple-darwin": { "name": "mhc-macos-x86_64.tar.gz", "sha256": "092727cabb70b3db4a97deca88537508b5d5b3f8cb286bda3c64e7956fb8875b" },
-      "x86_64-unknown-linux-gnu": { "name": "mhc-linux-x86_64.tar.gz", "sha256": "326ff8ef5923278a5eff872ad56cb25ed361bf3f0f4e9e73507d2db891020f7d" },
-      "aarch64-unknown-linux-gnu": { "name": "mhc-linux-aarch64.tar.gz", "sha256": "6ff7311704575dcff1ffec08448f556509793a7e5049f4da6ea7620b3583fa92" },
-      "x86_64-pc-windows-msvc": { "name": "mhc-windows-x86_64.zip", "sha256": "2898f73e6b1a1b5189e096a9ab946053532bdf8645e05c7aaba4139cc8749a9c" }
+      "aarch64-apple-darwin": { "name": "mhc-macos-aarch64.tar.gz", "sha256": "acdd1a3c085dccaaa5b52f142c4785c123803790800cb4a1c5abbdf5b39b528f" },
+      "x86_64-apple-darwin": { "name": "mhc-macos-x86_64.tar.gz", "sha256": "2fc3110c8d6f4d2c32149334b4f494db1acc24d90b252042e429df46128b9560" },
+      "x86_64-unknown-linux-gnu": { "name": "mhc-linux-x86_64.tar.gz", "sha256": "f24d1a7ea3ce864d3c1e0ac457ae9a7816be79c769a76d08203bdfe85750808c" },
+      "aarch64-unknown-linux-gnu": { "name": "mhc-linux-aarch64.tar.gz", "sha256": "b86c2c52f47b0f2e646b3dc2cda77c1ee5bf85d763d8bc96e3e18c9412a477ad" },
+      "x86_64-pc-windows-msvc": { "name": "mhc-windows-x86_64.zip", "sha256": "79491e2cda86f9cd0b472be05ad086e7563023ea206126bf64a751cb6fa2cd10" }
     }
   },
   "bun": {
