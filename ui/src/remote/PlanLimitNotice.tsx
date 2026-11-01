@@ -24,8 +24,10 @@ function unixSecondsToIso(value: number): string {
   return new Date(value * 1000).toISOString();
 }
 
+const DATE_FORMAT = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+
 function formatUnixSeconds(value: number): string {
-  return new Date(value * 1000).toLocaleString();
+  return DATE_FORMAT.format(new Date(value * 1000));
 }
 
 /** Drops values `toISOString` would throw on, so a bad prop can never crash the render. */
@@ -38,6 +40,8 @@ export interface PlanLimitNoticeProps {
   state: PlanLimitState;
   pricingUrl?: string;
   onRetry?: () => void;
+  /** Leaves a limited account; without it the notice would be a dead end. */
+  onSignOut?: () => void;
 }
 
 /**
@@ -49,6 +53,7 @@ export const PlanLimitNotice: React.FC<PlanLimitNoticeProps> = ({
   state,
   pricingUrl = DEFAULT_PRICING_URL,
   onRetry,
+  onSignOut,
 }) => {
   const suspended = state.code === REMOTE_SUSPENDED;
   const label = planLabel(state.plan);
@@ -76,7 +81,6 @@ export const PlanLimitNotice: React.FC<PlanLimitNoticeProps> = ({
       data-testid="remote-plan-limit-notice"
       data-code={state.code}
       data-plan={state.plan ?? ""}
-      role="alert"
       aria-labelledby="remote-plan-limit-title"
       className="flex min-h-0 min-w-0 flex-1 flex-col items-center justify-center gap-3 overflow-y-auto bg-chat-screen px-4 py-6 text-center text-chat-foreground"
     >
@@ -84,11 +88,12 @@ export const PlanLimitNotice: React.FC<PlanLimitNoticeProps> = ({
       <div className="flex w-full max-w-sm min-w-0 flex-col items-center gap-2">
         <h2
           id="remote-plan-limit-title"
-          className="text-sm font-semibold tracking-tight text-chat-foreground"
+          role="alert"
+          className="text-base font-semibold tracking-tight text-chat-foreground"
         >
           {suspended ? "Remote access suspended" : "Plan limit reached"}
         </h2>
-        <p className="min-w-0 break-words text-xs leading-relaxed text-chat-foreground-secondary">
+        <p className="min-w-0 break-words text-sm leading-relaxed text-chat-foreground-secondary">
           {description}
         </p>
         {limit !== undefined || used !== undefined ? (
@@ -96,7 +101,7 @@ export const PlanLimitNotice: React.FC<PlanLimitNoticeProps> = ({
             data-testid="remote-plan-limit-usage"
             data-limit={limit}
             data-used={used}
-            className="min-w-0 break-words text-xs text-chat-foreground-secondary"
+            className="min-w-0 break-words text-sm text-chat-foreground-secondary"
           >
             {limit !== undefined && used !== undefined
               ? `${used} of ${limit} computers in use`
@@ -109,7 +114,7 @@ export const PlanLimitNotice: React.FC<PlanLimitNoticeProps> = ({
           <time
             data-testid="remote-plan-limit-grace-ends"
             dateTime={unixSecondsToIso(graceEndsAt)}
-            className="min-w-0 break-words text-xs text-chat-foreground-secondary"
+            className="min-w-0 break-words text-sm text-chat-foreground-secondary"
           >
             {suspended ? "Grace period ended" : "Grace period ends"}{" "}
             {formatUnixSeconds(graceEndsAt)}
@@ -119,7 +124,7 @@ export const PlanLimitNotice: React.FC<PlanLimitNoticeProps> = ({
           <time
             data-testid="remote-plan-limit-stopped"
             dateTime={unixSecondsToIso(stoppedAt)}
-            className="min-w-0 break-words text-xs text-chat-foreground-secondary"
+            className="min-w-0 break-words text-sm text-chat-foreground-secondary"
           >
             Remote access stopped {formatUnixSeconds(stoppedAt)}
           </time>
@@ -127,9 +132,9 @@ export const PlanLimitNotice: React.FC<PlanLimitNoticeProps> = ({
       </div>
       <p
         data-testid="remote-plan-limit-coming-soon"
-        className="min-w-0 max-w-sm break-words text-xs text-chat-foreground-secondary"
+        className="min-w-0 max-w-sm break-words text-sm text-chat-foreground-secondary"
       >
-        Paid plans coming soon.
+        Paid plans with more computers are coming soon.
         {/* The iOS companion shows no outbound purchase link (App Store guideline 3.1.1). */}
         {isIosCompanion() ? null : (
           <>
@@ -140,7 +145,7 @@ export const PlanLimitNotice: React.FC<PlanLimitNoticeProps> = ({
               target="_blank"
               rel="noreferrer"
               onClick={handleExternalLinkClick}
-              className="underline underline-offset-2 hover:text-chat-foreground"
+              className="inline-flex min-h-11 items-center underline underline-offset-2 hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
               See planned pricing
             </a>
@@ -151,13 +156,22 @@ export const PlanLimitNotice: React.FC<PlanLimitNoticeProps> = ({
         {onRetry ? (
           <Button
             type="button"
-            variant="outline"
-            size="sm"
             data-testid="remote-plan-limit-retry"
-            className="border-chat-border bg-transparent text-chat-foreground hover:bg-chat-surface-hover hover:text-chat-foreground"
+            className="h-11 px-4 text-sm"
             onClick={onRetry}
           >
             Retry connection
+          </Button>
+        ) : null}
+        {onSignOut ? (
+          <Button
+            type="button"
+            variant="outline"
+            data-testid="remote-plan-limit-sign-out"
+            className="h-11 border-chat-border bg-transparent px-4 text-sm text-chat-foreground hover:bg-chat-surface-hover hover:text-chat-foreground"
+            onClick={onSignOut}
+          >
+            Sign out
           </Button>
         ) : null}
       </div>

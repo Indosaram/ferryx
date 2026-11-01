@@ -5103,6 +5103,17 @@ export const RemoteHostConnection: React.FC<{
     </Suspense>
   );
 
+  /* The last worktree an automatic restore is waiting on because its computer is offline or
+     failed its probe: the home says so instead of silently landing on Supervisor. */
+  const storedLastTarget = isAccountMode && !token ? getAccountLastSelectedTarget(relayUrl) : null;
+  const storedLastMachine = storedLastTarget
+    ? accountDiscovery.machines.find((machine) => machine.machineId === storedLastTarget.machineId) ?? null
+    : null;
+  const storedLastStatus = storedLastTarget ? accountDiscovery.machineStatuses[storedLastTarget.machineId]?.status : undefined;
+  const offlineLastTarget = storedLastTarget && storedLastMachine
+    && (storedLastMachine.online === false || storedLastStatus === "offline" || storedLastStatus === "error")
+    ? { ...storedLastTarget, machineName: storedLastMachine.displayName || "Your computer" }
+    : null;
   const canOpenBrowser = Boolean(token) && browserSessions.length > 0;
   const phoneAlertsSupported = !isMobileCompanion() && typeof navigator !== "undefined" && "serviceWorker" in navigator;
   const CONNECTION_SHORT: Record<string, string> = {
@@ -5325,7 +5336,16 @@ export const RemoteHostConnection: React.FC<{
           resume={
             token && model.context.workspaceId
               ? { title: mobileTitle, subtitle: contextName(model.context), onOpen: phoneNav.openSession }
-              : null
+              : offlineLastTarget
+                ? {
+                    title: offlineLastTarget.worktreeLabel ?? offlineLastTarget.worktreeSlug ?? "Your last worktree",
+                    subtitle: `${offlineLastTarget.machineName} is offline. Open Ferryx on it to continue.`,
+                    onOpen: () => {
+                      void accountDiscovery.retryMachine(offlineLastTarget.machineId);
+                      phoneNav.selectTab("worktrees");
+                    },
+                  }
+                : null
           }
         />
       ) : (
@@ -5436,7 +5456,12 @@ export const RemoteHostConnection: React.FC<{
           viewMode={viewMode === "browser" ? "chat" : viewMode}
           onViewModeChange={setViewMode}
           sessionCount={terminalTabs.length >= 1 ? terminalTabs.length : undefined}
-          inbox={model.context.workspaceId ? { count: remoteInbox.needsYou, open: inboxOpen, onOpen: () => setInboxOpen(true) } : undefined}
+          inbox={{
+            count: remoteInbox.needsYou,
+            open: inboxOpen,
+            // The phone home's Inbox is the one Inbox: the Session screen links back to it.
+            onOpen: phoneHome ? () => phoneNav.selectTab("inbox") : () => setInboxOpen(true),
+          }}
           switcherOpen={switcherOpen}
           onOpenSwitcher={() => setSwitcherOpen(true)}
           menuOpen={menuOpen}
@@ -5577,6 +5602,7 @@ export const RemoteHostConnection: React.FC<{
               setPlanLimitNotice(null);
               workspaceRefreshVersionRef.current += 1;
             }}
+            onSignOut={handleSignOut}
           />
         ) : accountPreselection ? (
           <div data-testid="remote-account-empty-body" className="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
@@ -5772,13 +5798,15 @@ export const RemoteHostConnection: React.FC<{
       </>
       )}
 
-      <MobileHostDrawer
-        open={hostDrawerOpen}
-        onOpenChange={setHostDrawerOpen}
-        onDisconnect={disconnect}
-        onSignOut={handleSignOut}
-        isAccountSession={Boolean(activeTunnelConnection)}
-      />
+      {isAccountMode ? null : (
+        <MobileHostDrawer
+          open={hostDrawerOpen}
+          onOpenChange={setHostDrawerOpen}
+          onDisconnect={disconnect}
+          onSignOut={handleSignOut}
+          isAccountSession={false}
+        />
+      )}
 
       <MobileSessionSwitcherSheet
         open={switcherOpen}

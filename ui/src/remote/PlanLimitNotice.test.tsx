@@ -16,7 +16,8 @@ describe("PlanLimitNotice", () => {
     const notice = screen.getByTestId("remote-plan-limit-notice");
     expect(notice.getAttribute("data-code")).toBe(PLAN_LIMIT_REACHED);
     expect(notice.getAttribute("data-plan")).toBe("free");
-    expect(notice.getAttribute("role")).toBe("alert");
+    expect(notice.getAttribute("role")).toBeNull();
+    expect(screen.getByRole("alert")).toHaveTextContent("Plan limit reached");
 
     const usage = screen.getByTestId("remote-plan-limit-usage");
     expect(usage.getAttribute("data-limit")).toBe("1");
@@ -60,6 +61,13 @@ describe("PlanLimitNotice", () => {
     expect(screen.getByTestId("remote-plan-limit-stopped").getAttribute("datetime")).toBe(
       new Date(stoppedAt * 1000).toISOString(),
     );
+  });
+
+  it("offers sign-out so a limited account is never a dead end", () => {
+    const onSignOut = vi.fn();
+    render(<PlanLimitNotice state={{ code: PLAN_LIMIT_REACHED }} onRetry={vi.fn()} onSignOut={onSignOut} />);
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    expect(onSignOut).toHaveBeenCalledTimes(1);
   });
 
   it("never fabricates timestamps or usage when only the close reason is known", () => {
