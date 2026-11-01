@@ -1704,7 +1704,8 @@ fn spawn_pipe_guarded_cat() -> (tokio::process::Child, std::os::unix::io::RawFd)
 /// The child is a shell that answers SIGUSR1 on its own probe pipe (fd 3). Its sleeps run
 /// with stdio and fd 3 closed, so only the shell holds the stdout and probe pipes: once it is
 /// gone both reach EOF. The function returns only after the shell has installed its trap,
-/// because an untrapped SIGUSR1 would terminate it.
+/// because an untrapped SIGUSR1 would terminate it. The loop is bounded so that a test that
+/// fails before its cleanup cannot leave the shell running for good.
 #[cfg(unix)]
 fn spawn_pipe_guarded_sleeper() -> (
     tokio::process::Child,
@@ -1712,22 +1713,14 @@ fn spawn_pipe_guarded_sleeper() -> (
     LivenessProbe,
 ) {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    let mut fds = [0; 2];
-    // SAFETY: `pipe` writes two new descriptors into `fds`.
-    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "create probe pipe");
-    let (read, write) = (fds[0], fds[1]);
-    // SAFETY: both descriptors were just created by `pipe` and are owned here. Neither may
-    // leak into another test's child; the write end reaches this child only as fd 3.
-    unsafe {
-        libc::fcntl(read, libc::F_SETFD, libc::FD_CLOEXEC);
-        libc::fcntl(write, libc::F_SETFD, libc::FD_CLOEXEC);
-    }
+    let (read, write) = cloexec_pipe();
     let mut command = tokio::process::Command::new("/bin/sh");
     command
         .arg("-c")
         .arg(
             "trap 'echo alive >&3' USR1; echo ready >&3; \
-             while :; do sleep 1 </dev/null >/dev/null 2>&1 3>&- & wait $!; done",
+             n=0; while [ \"$n\" -lt 300 ]; do n=$((n + 1)); \
+             sleep 1 </dev/null >/dev/null 2>&1 3>&- & wait $!; done",
         )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1753,18 +1746,12 @@ fn spawn_pipe_guarded_sleeper() -> (
     unsafe { libc::close(write) };
     // SAFETY: `read` is an open descriptor owned by nothing else.
     let replies = unsafe { OwnedFd::from_raw_fd(read) };
-    let mut poll_fd = libc::pollfd {
-        fd: replies.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: one valid pollfd; the shell announces its trap within the timeout.
-    assert_eq!(unsafe { libc::poll(&mut poll_fd, 1, 5000) }, 1, "sleeper never got ready");
-    let mut buf = [0u8; 16];
-    // SAFETY: `buf` is live and `replies` is readable.
-    let announced = unsafe { libc::read(replies.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
-    assert_eq!(announced, 6, "sleeper must announce its trap");
-    assert_eq!(&buf[..6], b"ready\n");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    assert_eq!(
+        read_probe_reply(replies.as_raw_fd(), deadline),
+        Some(b"ready\n".to_vec()),
+        "sleeper must announce its trap"
+    );
     let stdout = child.stdout.as_ref().expect("child stdout");
     let duped = dup_fd(stdout.as_raw_fd()).expect("dup stdout fd");
     let probe = LivenessProbe {
@@ -1772,6 +1759,70 @@ fn spawn_pipe_guarded_sleeper() -> (
         replies,
     };
     (child, duped, probe)
+}
+
+/// A pipe whose two ends are close-on-exec from the start where the platform allows it, so a
+/// child that another test forks meanwhile cannot inherit the probe's write end.
+#[cfg(unix)]
+fn cloexec_pipe() -> (std::os::unix::io::RawFd, std::os::unix::io::RawFd) {
+    let mut fds = [0; 2];
+    // SAFETY: `pipe2` writes two new descriptors into `fds`.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let created = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    // macOS has no `pipe2`; std itself sets close-on-exec right after `pipe` there.
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let created = {
+        // SAFETY: `pipe` writes two new descriptors into `fds`, which are owned here.
+        let created = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        if created == 0 {
+            // SAFETY: both descriptors were just created and are owned here.
+            unsafe {
+                libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC);
+                libc::fcntl(fds[1], libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+        }
+        created
+    };
+    assert_eq!(created, 0, "create probe pipe");
+    (fds[0], fds[1])
+}
+
+/// Reads one probe message, or `None` at EOF, on error, or once `deadline` passes.
+///
+/// Interrupted calls are retried. Every message is a single `echo` of a few bytes, which a
+/// pipe delivers whole, so one read returns exactly one message.
+#[cfg(unix)]
+fn read_probe_reply(fd: std::os::unix::io::RawFd, deadline: std::time::Instant) -> Option<Vec<u8>> {
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let timeout_ms = i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX);
+        let mut poll_fd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd.
+        let ready = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+        if ready < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return None;
+        }
+        if ready == 0 {
+            return None;
+        }
+        let mut buf = [0u8; 64];
+        // SAFETY: `buf` is live and `fd` is readable (data or EOF).
+        let read = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if read < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return None;
+        }
+        return (read > 0).then(|| buf[..read as usize].to_vec());
+    }
 }
 
 /// Positive proof that a sleeper from [`spawn_pipe_guarded_sleeper`] is running.
@@ -1789,33 +1840,44 @@ impl LivenessProbe {
     /// child that was killed - even one still dying and not yet a zombie - never answers, and
     /// its probe pipe reaches EOF once it is gone, so a regression that kills it too early
     /// fails here instead of passing as "not exited yet".
+    ///
+    /// The probe pipe must be quiet before signalling: a child that is already gone has closed
+    /// it (EOF reads as readable), and its pid may belong to another process by now, so it is
+    /// never signalled; a leftover reply would be just as wrong. The blocking wait is bounded
+    /// and runs off the async worker.
     async fn answers(&self) -> bool {
         use std::os::fd::AsRawFd;
-        // SAFETY: plain signal to the test's own child.
+        let fd = self.replies.as_raw_fd();
+        if probe_readable(fd) {
+            return false;
+        }
+        // SAFETY: plain signal to the test's own child, whose probe pipe is still open.
         if unsafe { libc::kill(self.pid as i32, libc::SIGUSR1) } != 0 {
             return false;
         }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let mut poll_fd = libc::pollfd {
-                fd: self.replies.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            // SAFETY: one valid pollfd, zero timeout.
-            if unsafe { libc::poll(&mut poll_fd, 1, 0) } > 0 {
-                let mut buf = [0u8; 64];
-                // SAFETY: `buf` is live and the probe pipe is readable (data or EOF).
-                let read = unsafe {
-                    libc::read(self.replies.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len())
-                };
-                return read > 0;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        tokio::task::spawn_blocking(move || read_probe_reply(fd, deadline))
+            .await
+            .expect("probe wait")
+            == Some(b"alive\n".to_vec())
+    }
+}
+
+/// True when the probe pipe holds a reply or its writer is gone, without reading it.
+#[cfg(unix)]
+fn probe_readable(fd: std::os::unix::io::RawFd) -> bool {
+    loop {
+        let mut poll_fd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd, zero timeout.
+        let ready = unsafe { libc::poll(&mut poll_fd, 1, 0) };
+        if ready < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
         }
+        return ready != 0;
     }
 }
 
@@ -1835,7 +1897,6 @@ fn spawn_stdinless_sleeper() -> (tokio::process::Child, std::os::unix::io::RawFd
     let duped = dup_fd(stdout.as_raw_fd()).expect("dup stdout fd");
     (child, duped)
 }
-
 
 /// Event barrier: bounded wait for the duplicated child-stdout pipe to reach EOF.
 ///
