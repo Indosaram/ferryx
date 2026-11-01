@@ -241,6 +241,9 @@ function ticketed(inner: typeof fetch): typeof fetch {
     }
     const lane = chatLaneFixture(url);
     if (lane !== null) return lane;
+    // The browser view's session probe fires once the context is known; answered by URL (no
+    // browsers listed) so it never consumes a response a test queued for its own sequence.
+    if (url.includes("/api/v1/browser/sessions")) return jsonResponse([]);
     const sidebar = sidebarFixtureResponse(url);
     if (sidebar !== null) return sidebar;
     return inner(input, init);
