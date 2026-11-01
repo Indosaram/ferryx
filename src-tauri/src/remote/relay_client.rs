@@ -322,6 +322,13 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// backoff. A relay that accepts and then drops at once must not cause a reconnect storm.
 const HEALTHY_SESSION_UPTIME: Duration = Duration::from_secs(30);
 
+/// A random delay in `[backoff / 2, backoff]`, so daemons dropped by one relay restart do not
+/// reconnect in lockstep and trip the relay's admission limit together.
+fn jittered(backoff: Duration, rng: &mut impl Rng) -> Duration {
+    let half = backoff / 2;
+    half + Duration::from_nanos(rng.gen_range(0..=(backoff - half).as_nanos() as u64))
+}
+
 /// Notification pushed down the control channel when a client asks to open
 /// a new session against this daemon. Mirrors
 /// [`crate::remote::relay_server::IncomingSessionNotice`] - kept as a
@@ -666,7 +673,10 @@ impl RelayClient {
                 ),
             }
 
-            tokio::time::sleep(backoff).await;
+            // Computed in its own statement: the thread-local rng is !Send and must not be
+            // held across the await.
+            let delay = jittered(backoff, &mut rand::thread_rng());
+            tokio::time::sleep(delay).await;
             backoff = std::cmp::min(backoff * 2, MAX_BACKOFF);
         }
     }
@@ -1782,6 +1792,18 @@ mod tests {
 
         client.advance_endpoint();
         assert_eq!(client.active_relay_url(), "https://relay.example.com");
+    }
+
+    #[test]
+    fn reconnect_delays_are_jittered_within_half_to_full_backoff() {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let backoff = Duration::from_secs(8);
+        let delays: Vec<Duration> = (0..256).map(|_| jittered(backoff, &mut rng)).collect();
+        assert!(delays.iter().all(|d| *d >= backoff / 2 && *d <= backoff));
+        // Spread across the window, not pinned to the full backoff.
+        assert!(delays.iter().any(|d| *d < backoff * 3 / 4));
+        assert!(delays.iter().any(|d| *d > backoff * 3 / 4));
     }
 
     #[test]
