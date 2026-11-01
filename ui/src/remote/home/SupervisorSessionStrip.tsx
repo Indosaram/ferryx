@@ -85,7 +85,8 @@ export function SupervisorSessionStrip({ state, now, onSetPaused, onFocusInput }
         <>
           <Bot aria-hidden="true" className="size-4 shrink-0" />
           <span className="flex min-w-0 flex-1 flex-col">
-            <span className="text-xs text-chat-foreground-secondary">
+            {/* Primary ink: the acting strip sits on the light accent, where secondary grey drops to 4:1. */}
+            <span className="text-xs text-chat-foreground">
               {takeOverFailed ? "Couldn't pause the supervisor. Try again." : `Supervisor typed ${relativeTime(state.atMs, now)}`}
             </span>
             <span className="min-w-0 truncate font-mono text-chat-foreground">{state.text ?? "Typed into this session"}</span>

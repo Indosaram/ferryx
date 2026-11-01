@@ -521,7 +521,7 @@ export const MobileChatComposer = React.forwardRef<
             onKeyDown={handleKeyDown}
             onCompositionStart={handleCompositionStart}
             onCompositionEnd={handleCompositionEnd}
-            className="w-full resize-none bg-transparent px-3.5 pt-2.5 font-sans text-base text-chat-foreground placeholder:text-chat-foreground-secondary focus:outline-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring max-h-36 overflow-y-auto leading-relaxed scrollbar-sleek"
+            className="min-h-11 w-full resize-none bg-transparent px-3.5 pt-2.5 font-sans text-base text-chat-foreground placeholder:text-chat-foreground-secondary focus:outline-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring max-h-36 overflow-y-auto leading-relaxed scrollbar-sleek"
           />
 
           {/* Stop sits at the left edge, Send at the right: a slip never turns an answer into a stop */}
