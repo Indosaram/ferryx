@@ -211,6 +211,12 @@ once that renew is granted. No other machine sees a free lease during the handov
 - `supervisor.request` from the owner's CLI or MCP is forwarded to the holder, and so are
   observations of this machine's own panes (keystrokes, relayed input, worker reports;
   `POST /api/v1/supervisor/observe` on the holder). The holder supervises the standby's panes.
+- `ferryx-cli mcp` asks the daemon for its role at startup and again every 5 s while it serves.
+  On standby it never opens the hub database, and supervisor reads and writes are refused with
+  `SUPERVISOR_STANDBY`, naming the holder. It fails closed: if this machine has a lease client and
+  the daemon does not answer, it refuses with `SUPERVISOR_UNAVAILABLE`. A process started on
+  standby keeps refusing (`SUPERVISOR_UNAVAILABLE`) after this machine takes over. Restart it
+  to serve supervisor state.
 - Forwarding needs an agent-control grant on the holder. A standby without one pairs itself:
   it redeems a grant through the account using the account session in
   `FERRYX_ACCOUNT_SESSION_TOKEN`. Without a session, or if redeeming fails (retried after
@@ -219,7 +225,8 @@ once that renew is granted. No other machine sees a free lease during the handov
 
 `hub_stopped` still means "the owner turned the supervisor off" and is independent of the
 lease. Losing the lease stops the hub tasks without setting it, so the machine starts again by
-itself when it becomes holder.
+itself when it becomes holder. In this version `ferryx hub stop` only stops the hub tasks; it
+does not publish a checkpoint or release the lease.
 
 ### Moving the supervisor
 
@@ -242,8 +249,11 @@ starts fresh ones. Before the import replaces anything, the target keeps its pre
 as `hub.sqlite.pre-move-<ts>` (with its `-wal`/`-shm`), and the previous env file and memory
 repo as `*.pre-move-<ts>`. Hosts are remapped to the target's paired hosts. A host the exporter
 could not scope is written as `unmapped:<id>`; its goals are held with `REMOTE_HOST_UNMAPPED`
-and never sent to another pane. A target hub that already has a different supervisor and was
-never archived refuses the import with `SUPERVISOR_IDENTITY_MISMATCH`.
+and never sent to another pane. If the target hub holds a different supervisor (the import
+refuses with `SUPERVISOR_IDENTITY_MISMATCH`), the target first archives that supervisor as
+`hub.sqlite.pre-lease-<ts>` and then imports again. The archive is written once and never
+deleted, and its open goals become adoptable (see "First rollout"). No flag is needed. A
+target with the same supervisor identity imports without an archive.
 
 If the holder cannot be reached, the move succeeds only when the lease expired past the grace
 period and this machine has the checkpoint the relay recorded last. Otherwise it fails with
@@ -269,7 +279,8 @@ stops once it unpacks past 512 MiB, so a small archive cannot fill the disk.
 When the holder's lease expired past the grace period, a standby takes over automatically only
 if its hub is not stopped and its newest checkpoint is the one the relay recorded. It imports
 that checkpoint (keeping `hub.sqlite.pre-move-<ts>`) before its hub reopens. The relay decides
-between several candidates. A standby that is blocked says why in `promotionBlockReason`:
+between several candidates. The same import runs here, including the archive of a different
+local supervisor. A standby that is blocked says why in `promotionBlockReason`:
 `HUB_STOPPED`, `CHECKPOINT_MISSING`, `CHECKPOINT_STALE`, `LEASE_HELD` or the relay's refusal
 code. Nothing forces a takeover automatically.
 
@@ -285,8 +296,9 @@ The supervisor snapshot's `hub` object reports:
 | field | shape | meaning |
 | --- | --- | --- |
 | `role` | `holder` \| `standby` \| `unleased` | `unleased`: no lease can be confirmed (for example `RELAY_LEASE_UNSUPPORTED`); treated like standby |
-| `holderMachineId`, `holderLabel` | string | the machine running the supervisor |
+| `holderMachineId`, `holderLabel` | string, null if unknown | the machine running the supervisor |
 | `holderPaired` | bool | this standby can forward to the holder |
+| `holderPairing` | `paired` \| `not paired to holder` \| `no holder` | the pairing state behind `holderPaired` |
 | `fence` | int | the lease fence this machine last saw |
 | `leaseExpiresIn` | int seconds | until the holder's lease expires unless renewed |
 | `checkpointId`, `checkpointAge` | string, int seconds; absent if none | the newest checkpoint stored here |
@@ -294,10 +306,14 @@ The supervisor snapshot's `hub` object reports:
 | `promotionBlockReason` | `{code, message}`; absent if nothing blocks | why this standby would not take over |
 | `unreachableHosts` | `[{host, reason}]`, `host` null for this machine | machines the holder could not push its fence to; their sessions wait |
 | `unmappedHosts` | `[string]` | host ids from an imported checkpoint this machine cannot map |
-| `adoptable` | list of goals | open goals of this machine's archived pre-lease supervisor |
+| `adoptable` | `[{goalId, title, supervisorId, fromMachine}]`; absent when empty | open goals of this machine's archived supervisor not adopted yet |
 
 The fields marked "absent" are omitted, not null. A daemon without lease support sends none of
 these fields and runs its own supervisor as before.
+
+`ferryx hub status` reports the same lease fields under `supervisor_lease`, including
+`supervisor_lease.holderPairing`. On standby it also prints a `status_hint` line naming the
+holder and the pairing state.
 
 ### First rollout
 
@@ -312,11 +328,30 @@ Slack socket:
 3. Upgrade every other daemon of the account before relying on the lease.
 
 Every other machine whose hub ran its own supervisor before the lease archives it the first
-time it becomes standby: it copies its database to `hub.sqlite.pre-lease-<ts>` (never deleted)
-and lists its open goals in `adoptable` and in the standby UI. Nothing is adopted
-automatically; adopting an archived goal is an owner action that submits it to the holder once.
-(The CLI command for it is not merged yet.) An archived hub counts as fresh for a later move
-into this machine.
+time it becomes standby for another machine. It copies its database (and `-wal`) to
+`hub.sqlite.pre-lease-<ts>` once and never writes or deletes that copy. A move onto a machine
+that holds a different supervisor archives it the same way before the import (see "Moving the
+supervisor"). An archived hub counts as fresh for a later move into this machine.
+
+The archive's open goals (neither completed nor cancelled) are listed in `adoptable` and in the
+standby UI ("Adoptable from <fromMachine>"). Nothing is adopted automatically. To adopt them,
+run this on the machine that holds the archive:
+
+```bash
+ferryx hub adopt-archived --goal <goalId>   # one goal
+ferryx hub adopt-archived --all             # every goal not adopted yet (also the default)
+```
+
+The desktop app does the same with `cmd_supervisor_adopt_archived` (`goalId`, or none for
+all). `cmd_supervisor_adoptable` returns `{"adoptable": [...]}`, whose entries also carry
+`projectName` and `runState`. Each adopted goal is sent to the holder as a `supervisor.request`
+`submit` with its original request text, contract and project identity; a standby forwards it
+over the paired channel. The `requestId` is `archived:<supervisor_id>:<goal_id>`. The holder
+admits it once by that id, so adopting the same goal again, from any adapter, returns the same
+goal. The reply is `{"adopted": [{goalId, sourceId, adopted, answer, error}]}`, and the
+command exits 1 if any goal was not adopted. Adopted goals are recorded in
+`adopted-goals.json` beside the hub database, not in the archive, and drop out of `adoptable`.
+A goal that failed is not recorded, so the next adopt retries it under the same `requestId`.
 
 If the relay is ever downgraded on purpose to a version without the lease, daemons that saw the
 lease stay on standby (`RELAY_LEASE_UNSUPPORTED`). Clear that with
