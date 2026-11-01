@@ -52,7 +52,9 @@ pub async fn chat_reply_card(
     .execute(pool)
     .await?;
     let id = inserted.last_insert_rowid();
-    let posted = if session.platform.eq_ignore_ascii_case("slack") {
+    let posted = if !crate::holder::is_holder_now() {
+        false
+    } else if session.platform.eq_ignore_ascii_case("slack") {
         super::slack::publish_card(session, text, card).await?
     } else {
         publish(session, text).await?
@@ -64,6 +66,10 @@ pub async fn chat_reply_card(
 }
 
 async fn publish(session: &SessionKey, text: &str) -> Result<bool> {
+    // Only the lease holder posts; on a standby the row stays queued for the holder's flush.
+    if !crate::holder::is_holder_now() {
+        return Ok(false);
+    }
     if session.platform.eq_ignore_ascii_case("slack") {
         return super::slack::publish(session, text).await;
     }

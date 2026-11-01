@@ -99,6 +99,16 @@ pub enum Operation {
     /// A new supervisor lease holder raises the host's fence for its account
     /// (`POST supervisor/fence`, `supervisorFenceV1`).
     SupervisorFence { account: String, fence: u64 },
+    /// One supervisor request envelope for the machine holding the supervisor lease
+    /// (`POST supervisor/request`), sent by a standby on behalf of its owner's CLI or MCP.
+    SupervisorRequest {
+        envelope: serde_json::Value,
+    },
+    /// A standby's observation of its own panes (keystrokes, a relayed input, a worker
+    /// report) for the holder that supervises them (`POST supervisor/observe`).
+    SupervisorObserve {
+        observation: serde_json::Value,
+    },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,6 +139,8 @@ pub enum OperationResult {
     FileRead(m::FileReadResult),
     AgentControl(serde_json::Value),
     Resources(crate::daemon::resource_usage::HostResourceSnapshot),
+    /// The holder's answer to a supervisor request or observation.
+    Supervisor(serde_json::Value),
 }
 /// Desktop projection of [m::Repositories]: a registered row carries the desktop
 /// workspace id (`daemon:<sha256>`) next to the host's own id, so the caller can open
@@ -384,6 +396,8 @@ impl Operation {
                 | Self::DeleteWorktree { .. }
                 | Self::CreateSession { .. }
                 | Self::CloseSession { .. }
+                | Self::SupervisorRequest { .. }
+                | Self::SupervisorObserve { .. }
         )
     }
 
@@ -418,6 +432,15 @@ impl Operation {
             Self::Resources => {
                 path = "resources";
                 r.capability = Some(crate::remote::resources_api::RESOURCE_USAGE_CAPABILITY);
+            }
+            Self::SupervisorRequest { .. } => {
+                path = "supervisor/request";
+                r.capability = Some(crate::remote::server::supervisor_api::SUPERVISOR_CAPABILITY);
+            }
+            Self::SupervisorObserve { .. } => {
+                path = "supervisor/observe";
+                r.capability =
+                    Some(crate::remote::server::supervisor_api::SUPERVISOR_OBSERVE_CAPABILITY);
             }
             Self::Directories {
                 path: p,
@@ -635,6 +658,13 @@ impl Operation {
                 r.body = Some(
                     serde_json::to_vec(request)
                         .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
+                );
+            }
+            Self::SupervisorRequest { envelope: body }
+            | Self::SupervisorObserve { observation: body } => {
+                r.method = Method::POST;
+                r.body = Some(
+                    serde_json::to_vec(body).map_err(|_| ClientError::local("INVALID_REQUEST"))?,
                 );
             }
             Self::AgentControl { op, fence } if op.is_input_mutation() => {
@@ -1964,6 +1994,9 @@ fn map_result(host: &HostView, operation: &Operation, bytes: &[u8]) -> Result<Op
         Operation::AgentControl { .. } => OperationResult::AgentControl(decode(bytes)?),
         Operation::SupervisorFence { .. } => OperationResult::AgentControl(decode(bytes)?),
         Operation::Resources => OperationResult::Resources(decode(bytes)?),
+        Operation::SupervisorRequest { .. } | Operation::SupervisorObserve { .. } => {
+            OperationResult::Supervisor(decode(bytes)?)
+        }
     })
 }
 

@@ -251,6 +251,26 @@ async fn only_an_admitted_machine_control_device_may_start_the_hub() {
     gateway.stop().await;
 }
 
+/// A phone request, conversation, memory or pause on a standby is 409 SUPERVISOR_STANDBY with
+/// the holder in `details`, so the phone switches to it.
+#[tokio::test]
+async fn a_request_on_standby_is_409_supervisor_standby_naming_the_holder() {
+    let failure = ferryx_hub::holder::standby_failure(Some("mach-b"), Some("Laptop B"));
+    for refused in [
+        service_refusal(&failure),
+        pause_refusal(&LanePauseError::Supervisor(failure.clone())),
+    ] {
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(refused.into_body(), 64 * 1024).await.expect("body"),
+        )
+        .expect("json");
+        assert_eq!(body["error"]["code"], SUPERVISOR_STANDBY_CODE);
+        assert_eq!(body["error"]["details"]["holderMachineId"], "mach-b");
+        assert_eq!(body["error"]["details"]["holderLabel"], "Laptop B");
+    }
+}
+
 #[tokio::test]
 async fn the_capability_is_absent_while_the_hub_is_closed() {
     let gateway = Gateway::start().await;

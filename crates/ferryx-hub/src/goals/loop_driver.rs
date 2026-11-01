@@ -420,6 +420,10 @@ pub async fn on_turn_settled<C: AgentControl + ?Sized>(
     lane_key: &str,
     worked: bool,
 ) -> Result<Option<LoopOutcome>, GoalError> {
+    // The legacy goal loop settles and judges only on the lease holder.
+    if !crate::holder::is_holder_now() {
+        return Ok(None);
+    }
     let Some(contract) = contract::contract_of(pool, lane_key).await? else {
         return Ok(None);
     };

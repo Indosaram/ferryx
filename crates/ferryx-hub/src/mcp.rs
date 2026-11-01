@@ -292,6 +292,15 @@ async fn call_tool(
     args: &Value,
 ) -> std::result::Result<Value, String> {
     let host = args.get("host").and_then(Value::as_str);
+    // Beside a standby daemon this process never opened the hub database: supervisor state is
+    // the holder's. `supervisor.request` still goes to the daemon (which refuses or forwards
+    // it to the holder); agent tools act on this machine's panes through the daemon.
+    if let Some(refusal) = crate::holder::standby_refusal() {
+        let routed = name == "supervisor.request" && context.owner_route.is_some();
+        if !routed && !name.starts_with("agents.") {
+            return Err(format!("{}: {}", refusal.code, refusal.message));
+        }
+    }
     if matches!(name, "agents.send" | "agents.answer" | "agents.stop") {
         refuse_paused_pane(context, host, args).await?;
     }
@@ -712,7 +721,8 @@ async fn supervisor_request(
     // A malformed envelope is refused before the owner is even looked up.
     let (_, action) = request::parse_envelope(args.clone()).map_err(fail)?;
     let workless_message = action == request::Action::Message
-        && args.pointer("/payload/work").is_none_or(Value::is_null);
+        && args.pointer("/payload/work").is_none_or(Value::is_null)
+        && crate::holder::standby_refusal().is_none();
     if !workless_message {
         if let Some(route) = &context.owner_route {
             return route.forward(args.clone()).await.map_err(fail);
@@ -785,6 +795,38 @@ mod tests {
         let sent = dispatch(&context, &send("pane-2")).await;
         assert!(!sent.to_string().contains(LANE_PAUSED), "{sent}");
         assert_eq!(control.ops.lock().unwrap().len(), 1);
+    }
+
+    /// Beside a standby daemon, supervisor state (reads and local writes) is refused with the
+    /// holder; agent tools still act on this machine's panes.
+    #[tokio::test]
+    async fn on_standby_supervisor_reads_and_writes_are_refused_with_the_holder() {
+        let control = Arc::new(RecordingControl::default());
+        *control.result.lock().unwrap() = json!({"sessions": []});
+        let context = McpContext {
+            control,
+            launcher: Arc::new(FixedLauncher::new("pane")),
+            pool: crate::storage::memory().await.unwrap(),
+            meta_session_id: "meta".into(),
+            tracker_token: "t".into(),
+            owner_route: None,
+        };
+        let standby = Some(crate::holder::standby_failure(Some("mach-b"), Some("Laptop B")));
+        let call = |name: &str, arguments: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name": name, "arguments": arguments}});
+        crate::holder::scope_standby(standby, async {
+            let chat = json!({"requestId": "mcp-chat", "action": "message", "payload": {"text": "status?"}});
+            for (tool, args) in [
+                ("lane.list", json!({})),
+                ("supervisor.request", chat),
+                ("chat.reply", json!({"channelId": "C1", "text": "hi"})),
+            ] {
+                let refused = dispatch(&context, &call(tool, args)).await.to_string();
+                assert!(refused.contains("SUPERVISOR_STANDBY") && refused.contains("Laptop B"), "{tool}: {refused}");
+            }
+            let listed = dispatch(&context, &call("agents.list", json!({}))).await.to_string();
+            assert!(!listed.contains("SUPERVISOR_STANDBY"), "{listed}");
+        })
+        .await;
     }
 
     #[tokio::test]

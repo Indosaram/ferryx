@@ -2460,6 +2460,11 @@ impl DaemonClient {
             // Idempotent: a holder's fence push raises a maximum and never types anything.
             Operation::SupervisorFence { .. } => None,
             Operation::AgentControl { op, .. } => op.mutation_request_id(),
+            Operation::SupervisorRequest { envelope } => envelope
+                .get("requestId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            Operation::SupervisorObserve { .. } => None,
         };
         let transport_error = |error: crate::paired_host::service::ServiceError| ClientError {
             code: error.code,
