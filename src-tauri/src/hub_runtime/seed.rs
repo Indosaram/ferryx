@@ -139,6 +139,16 @@ pub(crate) async fn seed_owner_memory(
     seed_with_roots(pool, memory, principal, home.clone(), crate::ipc::agent_history::provider_history_roots(&home)).await
 }
 
+/// The result of the blocking session read. A read that panicked or was cancelled is an error,
+/// not an empty read: importing nothing would still record a completed run, and setup would
+/// treat memory as seeded although no session was looked at.
+fn read_join<T>(joined: Result<T, tokio::task::JoinError>) -> Result<T, SupervisorError> {
+    joined.map_err(|error| {
+        tracing::warn!(%error, "reading agent sessions for owner memory failed");
+        SupervisorError::Invalid(format!("reading agent sessions failed: {error}"))
+    })
+}
+
 pub(crate) async fn seed_with_roots(
     pool: &ferryx_hub::goals::SqlitePool,
     memory: Arc<dyn OwnerMemory>,
@@ -151,14 +161,14 @@ pub(crate) async fn seed_with_roots(
         max_turns_per_session: bounds.max_turns_per_session * 3,
         ..bounds
     };
-    let (files, sessions) = tokio::task::spawn_blocking(move || {
+    let joined = tokio::task::spawn_blocking(move || {
         (
             memory_file_sessions(&home, file_bounds.max_turns_per_session),
             recent_sessions(roots, bounds.max_sessions),
         )
     })
-    .await
-    .unwrap_or_default();
+    .await;
+    let (files, sessions) = read_join(joined)?;
     let from_files = memory_import::import_sessions(pool, memory.as_ref(), principal, files, file_bounds).await?;
     let from_sessions = memory_import::import_sessions(pool, memory.as_ref(), principal, sessions, bounds).await?;
     let report = ImportReport {
@@ -213,6 +223,13 @@ mod tests {
         let moved: Vec<_> = moved.iter().map(|turn| (turn.ordinal, turn.text.as_str())).collect();
         assert_eq!(moved, vec![(paragraph_id("zero"), "zero"), (turns[2].ordinal, "three"), (turns[0].ordinal, "one")]);
         assert_ne!(turns[0].ordinal, turns[1].ordinal);
+    }
+
+    #[tokio::test]
+    async fn a_failed_session_read_is_an_error_not_an_empty_import() {
+        let joined: Result<(), _> = tokio::spawn(async { panic!("boom") }).await;
+        let error = read_join(joined).unwrap_err();
+        assert_eq!(error.code(), "INVALID_REQUEST");
     }
 
     #[tokio::test]
