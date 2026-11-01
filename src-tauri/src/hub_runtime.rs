@@ -1169,15 +1169,61 @@ async fn follow_lease<F, Fut>(
     }
 }
 
-/// `<hub.sqlite>.incoming`: a hub database staged by an import for the next promotion.
-fn staged_database(database: &std::path::Path) -> std::path::PathBuf {
-    let mut name = database.as_os_str().to_owned();
-    name.push(".incoming");
+/// `path` with `suffix` appended to its file name.
+fn with_suffix(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
     std::path::PathBuf::from(name)
 }
 
+/// `<hub.sqlite>.incoming`: a hub database staged by an import for the next promotion.
+fn staged_database(database: &std::path::Path) -> std::path::PathBuf {
+    with_suffix(database, ".incoming")
+}
+
+/// `<hub.sqlite>.pre-move-<ms>`: the backup a promotion keeps of the database it replaced.
+const PRE_MOVE_SUFFIX: &str = ".pre-move-";
+
+/// Folds the staged database's WAL into its main file and switches it to a rollback journal,
+/// so the one file moved into place carries every committed row (a `-wal` beside
+/// `.incoming` would not follow the rename).
+async fn seal_staged_database(incoming: std::path::PathBuf) -> Result<(), HubError> {
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&incoming).map_err(|error| error.to_string())?;
+        conn.busy_timeout(ferryx_hub::storage::BUSY_TIMEOUT).map_err(|error| error.to_string())?;
+        let busy: i64 = conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        if busy != 0 {
+            return Err("its WAL is still in use".into());
+        }
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        if !mode.eq_ignore_ascii_case("delete") {
+            return Err(format!("journal mode stayed {mode}"));
+        }
+        conn.close().map_err(|(_, error)| error.to_string())
+    })
+    .await
+    .map_err(|error| HubError::message(format!("staged hub database: {error}")))?
+    .map_err(|error| HubError::message(format!("staged hub database was not sealed: {error}")))
+}
+
+/// Puts files moved aside back where they were, last first. Best effort: it runs on a failed
+/// swap, whose own error is the one reported.
+async fn restore_moved(moved: &[(std::path::PathBuf, std::path::PathBuf)]) {
+    for (from, to) in moved.iter().rev() {
+        if let Err(error) = tokio::fs::rename(to, from).await {
+            tracing::warn!(%error, path = %from.display(), "hub database file was not restored after a failed swap");
+        }
+    }
+}
+
 /// Closes `pool` and moves a staged database over `database`. Returns whether one was staged.
-/// Only called while no generation runs, so nothing else writes the closed pool.
+/// Only called while no generation runs, so nothing else writes the closed pool. The replaced
+/// database and any `-wal`/`-shm` beside it are kept as `<hub.sqlite>.pre-move-<ms>`(+suffix);
+/// a failed move puts them back.
 async fn swap_staged_database(
     pool: &ferryx_hub::goals::SqlitePool,
     database: &std::path::Path,
@@ -1186,13 +1232,31 @@ async fn swap_staged_database(
     if !tokio::fs::try_exists(&incoming).await.unwrap_or(false) {
         return Ok(false);
     }
+    seal_staged_database(incoming.clone()).await?;
+    // Resolves once every connection of the old pool is closed.
     pool.close().await;
-    for suffix in ["-wal", "-shm"] {
-        let mut name = database.as_os_str().to_owned();
-        name.push(suffix);
-        let _ = tokio::fs::remove_file(std::path::PathBuf::from(name)).await;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    let backup = with_suffix(database, &format!("{PRE_MOVE_SUFFIX}{stamp}"));
+    let mut moved = Vec::new();
+    for suffix in ["", "-wal", "-shm"] {
+        let from = with_suffix(database, suffix);
+        if !tokio::fs::try_exists(&from).await.unwrap_or(false) {
+            continue;
+        }
+        let to = with_suffix(&backup, suffix);
+        if let Err(error) = tokio::fs::rename(&from, &to).await {
+            restore_moved(&moved).await;
+            return Err(error.into());
+        }
+        moved.push((from, to));
     }
-    tokio::fs::rename(&incoming, database).await?;
+    if let Err(error) = tokio::fs::rename(&incoming, database).await {
+        restore_moved(&moved).await;
+        return Err(error.into());
+    }
     Ok(true)
 }
 
@@ -3625,6 +3689,16 @@ mod tests {
         assert!(swap_staged_database(&local, &database).await.unwrap());
         assert!(local.is_closed(), "the old pool is closed before the swap");
         assert!(!incoming.exists());
+        assert!(!with_suffix(&incoming, "-wal").exists(), "the staged WAL was folded in");
+        let backups: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("hub.sqlite.pre-move-") && !name.ends_with("-wal") && !name.ends_with("-shm"))
+            .collect();
+        assert_eq!(backups.len(), 1, "the replaced database is kept: {backups:?}");
+        let backup = ferryx_hub::storage::connect(&dir.path().join(&backups[0])).await.unwrap();
+        assert!(sv::identities(&backup).await.unwrap().is_empty(), "the backup is the local database");
+        backup.close().await;
         let reopened = ferryx_hub::storage::connect(&database).await.unwrap();
         assert_eq!(sv::identities(&reopened).await.unwrap().len(), 1, "the imported supervisor is there");
         assert!(!swap_staged_database(&reopened, &database).await.unwrap(), "nothing staged: nothing swapped");
