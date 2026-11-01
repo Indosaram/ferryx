@@ -868,16 +868,36 @@ pub async fn try_handle(
 /// but no mhc engine runs in this daemon.
 pub const ENGINE_UNAVAILABLE_NOTICE: &str = "MHC_NOT_RUNNING: the supervisor engine is not running on this hub, so new work cannot be started. Earlier conversations stay readable; nothing was registered.";
 
-/// Answers an owner message the unified supervisor owns after an explicit cutover ([`route`]: the owner, a DM
-/// or bound channel) with [`ENGINE_UNAVAILABLE_NOTICE`] when no engine is installed. Returns
-/// false, touching nothing, for every other message, which keeps its legacy turn.
+/// Answers an owner message the unified supervisor owns ([`route`]: the owner, a DM or bound
+/// channel) with [`ENGINE_UNAVAILABLE_NOTICE`] when no engine is installed in this daemon:
+/// after an explicit cutover, and on a fresh hub (unified intake open, legacy idle) whose hub
+/// env file turns the engine on. Returns false, touching nothing, for every other message,
+/// which keeps its legacy turn; a fresh hub with the engine off keeps the legacy turn too.
 pub async fn refuse_without_engine(pool: &SqlitePool, admitted: &Admitted) -> bool {
-    // Only an explicit cutover stopped the legacy turn; a fresh install keeps it.
-    let cut_over = matches!(
-        crate::supervisor::cutover::installation_intake(pool).await,
-        Ok(intake) if intake.legacy == crate::supervisor::cutover::LegacyIntake::Stopped
-    );
-    if !cut_over || route(pool, admitted).await.is_none() {
+    // Tests never read the developer's hub env file.
+    let engine_enabled = !cfg!(test)
+        && crate::meta::mhc_profile::MhcProfileConfig::enabled_in(
+            &crate::hub_env::read_file_env(),
+        );
+    refuse_without_engine_in(pool, admitted, engine_enabled).await
+}
+
+/// [`refuse_without_engine`] with whether the hub env file turns the engine on.
+async fn refuse_without_engine_in(
+    pool: &SqlitePool,
+    admitted: &Admitted,
+    engine_enabled: bool,
+) -> bool {
+    use crate::supervisor::cutover::LegacyIntake;
+    let supervisor_owns = match crate::supervisor::cutover::installation_intake(pool).await {
+        // An explicit cutover stopped the legacy turn.
+        Ok(intake) if intake.legacy == LegacyIntake::Stopped => true,
+        // A fresh hub set up for the engine: the owner's message is the supervisor's, and a
+        // legacy turn would answer it with another model.
+        Ok(intake) => engine_enabled && intake.unified_open && intake.legacy == LegacyIntake::Idle,
+        Err(_) => false,
+    };
+    if !supervisor_owns || route(pool, admitted).await.is_none() {
         return false;
     }
     let storage_key = admitted.key.storage_key();
@@ -1884,5 +1904,47 @@ mod tests {
         assert!(!crate::chat::turns::is_active(&storage_key));
         assert!(posted(&calls).is_empty(), "{:?}", calls.lock().unwrap());
         assert_eq!(goals(&pool).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_hub_set_up_for_the_engine_refuses_without_one_and_keeps_the_legacy_turn_otherwise() {
+        // A fresh hub: no legacy history, so the unified intake is open and the legacy idle.
+        let (pool, _, _) = owner_pool().await;
+        let intake = crate::supervisor::cutover::installation_intake(&pool).await.unwrap();
+        assert!(intake.unified_open);
+        assert_eq!(intake.legacy, crate::supervisor::cutover::LegacyIntake::Idle);
+        let config = slack_config(false);
+        let owner = admit(&config, &dm("UOWNER", "D8", "7901.000001", WORK), "UBOT", false)
+            .unwrap();
+        let (base, calls) = serve_scripted("UBOT", Vec::new()).await;
+        let (off, on) = with_test_api(base, "xoxb-test".into(), async {
+            // The engine flag is off: the legacy turn answers, nothing is posted here.
+            let off = refuse_without_engine_in(&pool, &owner, false).await;
+            // The hub env file turns the engine on but none runs: the explicit notice.
+            let on = refuse_without_engine_in(&pool, &owner, true).await;
+            (off, on)
+        })
+        .await;
+        assert!(!off, "with the engine off a fresh hub keeps the legacy turn");
+        assert!(on, "with the engine on and absent the owner gets the notice");
+        let posts = posted(&calls);
+        assert_eq!(posts.len(), 1, "{posts:?}");
+        assert_eq!(posts[0]["text"], ENGINE_UNAVAILABLE_NOTICE);
+        assert_eq!(goals(&pool).await, 0);
+
+        // A stranger is never answered by the supervisor, whatever the flag.
+        let stranger_config = slack_config(true);
+        let stranger = admit(
+            &stranger_config,
+            &dm("USTRANGER", "D9", "7901.000002", WORK),
+            "UBOT",
+            false,
+        )
+        .unwrap();
+        assert!(!refuse_without_engine_in(&pool, &stranger, true).await);
+
+        // An upgraded hub before cutover keeps the legacy turn even with the flag on.
+        crate::supervisor::cutover::note_import(&pool).await.unwrap();
+        assert!(!refuse_without_engine_in(&pool, &owner, true).await);
     }
 }
