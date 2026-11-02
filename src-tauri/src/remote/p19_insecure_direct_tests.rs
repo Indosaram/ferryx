@@ -1,7 +1,6 @@
 use super::*;
 use crate::remote::state::{
-    set_test_overlay_proof_override, test_local_cgnat_address, InterfaceResolver,
-    RemoteGatewayState, RemoteNetworkMode,
+    set_test_overlay_proof_override, InterfaceResolver, RemoteGatewayState, RemoteNetworkMode,
 };
 use crate::terminal::{PtyManager, TerminalOutputHub, TerminalService};
 use crate::worktree::WorkspaceRegistry;
@@ -46,22 +45,14 @@ fn create_test_state() -> Arc<RemoteGatewayState> {
     ))
 }
 
-use super::DIRECT_GATE_TEST_MUTEX;
+use super::{ExternalListenerOnLoopback, DIRECT_GATE_TEST_MUTEX};
 
-/// A bindable CGNAT address for the overlay gate tests.
+/// The CGNAT overlay address the overlay gate tests classify.
 ///
-/// The overlay *proof* is injected by [`OverlayProofGuard`], so this needs an address the VM
-/// actually owns, not the Tailscale CLI. The address must sit on a non-loopback interface: the
-/// resolver enumerates interfaces with `IFF_UP` and without `IFF_LOOPBACK`, so an `lo0` alias is
-/// invisible here. The precheck job provisions one (`ifconfig <iface> alias 100.64.1.2 up`).
-fn overlay_test_address() -> Ipv4Addr {
-    test_local_cgnat_address().unwrap_or_else(|| {
-        panic!(
-            "overlay gate tests need a CGNAT address on a non-loopback interface; \
-             provision one with: sudo ifconfig <iface> alias 100.64.1.2 up"
-        )
-    })
-}
+/// The resolver is injected and returns this address, the overlay *proof* is injected by
+/// [`OverlayProofGuard`], and [`ExternalListenerOnLoopback`] moves the external listener to a
+/// loopback port, so the host does not need to own the address or run Tailscale.
+const OVERLAY_TEST_ADDRESS: Ipv4Addr = Ipv4Addr::new(100, 64, 1, 2);
 
 /// Injects overlay proof for one gate test and restores the real probe afterwards, so a leaked
 /// override cannot flip a sibling test's classification.
@@ -158,9 +149,10 @@ async fn test_p19_overlay_mode_tailscale_unaffected() {
     }
 
     let _overlay = OverlayProofGuard::proven();
-    let tailscale_ip = overlay_test_address();
-
-    let resolver = Arc::new(TailscaleInterfaceResolver { tailscale_ip });
+    let _listener = ExternalListenerOnLoopback::enable();
+    let resolver = Arc::new(TailscaleInterfaceResolver {
+        tailscale_ip: OVERLAY_TEST_ADDRESS,
+    });
 
     let (handle, local_addr) =
         start_remote_server_with_resolver_and_insecure_opt_in(Arc::clone(&state), resolver, false)
@@ -175,7 +167,8 @@ async fn test_p19_overlay_mode_tailscale_unaffected() {
     assert!(
         matches!(
             handle.gate_status(),
-            DirectGatewayGateStatus::OverlaySecure { .. }
+            DirectGatewayGateStatus::OverlaySecure { address }
+                if address.ip() == std::net::IpAddr::V4(OVERLAY_TEST_ADDRESS)
         ),
         "P19: Tailscale gate status must be OverlaySecure"
     );
@@ -281,10 +274,9 @@ async fn test_p19_cgnat_address_with_authoritative_overlay_proof_is_exempt() {
     }
 
     let _overlay = OverlayProofGuard::proven();
-    let tailscale_ip = overlay_test_address();
-
+    let _listener = ExternalListenerOnLoopback::enable();
     let resolver = Arc::new(LanInterfaceResolver {
-        lan_ip: tailscale_ip,
+        lan_ip: OVERLAY_TEST_ADDRESS,
     });
 
     let (handle, local_addr) =
@@ -300,7 +292,8 @@ async fn test_p19_cgnat_address_with_authoritative_overlay_proof_is_exempt() {
     assert!(
         matches!(
             handle.gate_status(),
-            DirectGatewayGateStatus::OverlaySecure { .. }
+            DirectGatewayGateStatus::OverlaySecure { address }
+                if address.ip() == std::net::IpAddr::V4(OVERLAY_TEST_ADDRESS)
         ),
         "Gate status must be OverlaySecure, got {:?}",
         handle.gate_status()
