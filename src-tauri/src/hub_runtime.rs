@@ -2255,8 +2255,8 @@ async fn publish_checkpoint(launch: &HubLaunch) -> Result<String, String> {
         ferryx_hub::checkpoint_import::default_private_writer(),
     );
     request.env_file = ferryx_hub::hub_env::env_file_path();
-    request.memory_root = std::env::var_os("HOME")
-        .map(|home| std::path::PathBuf::from(home).join(".omo").join("memory").join("agents"));
+    request.memory_root =
+        ferryx_hub::hub_env::home_dir().map(|home| home.join(".omo").join("memory").join("agents"));
     let exported = ferryx_hub::checkpoint::export(&launch.hub.pool, &request).await;
     let result = match exported {
         Ok(exported) => {
@@ -4397,7 +4397,8 @@ pub fn run_mcp() -> i32 {
         // On standby the hub database is not this machine's to serve: supervisor reads and
         // writes are refused with the holder, and the file is never opened (an empty
         // in-memory store backs the agent tools only). The role is re-read while serving.
-        let lease_configured = mcp_lease_configured();
+        // The lease file read is blocking: off the runtime thread; a failed read fails closed.
+        let lease_configured = tokio::task::spawn_blocking(mcp_lease_configured).await.unwrap_or(true);
         let standby = mcp_refusal(ask_daemon_role().await.as_ref(), lease_configured);
         let started_on_standby = standby.is_some();
         let opened = if standby.is_some() {

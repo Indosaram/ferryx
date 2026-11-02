@@ -611,6 +611,25 @@ async fn the_checkpoint_and_move_routes_refuse_a_device_without_the_agent_contro
     gateway.stop().await;
 }
 
+/// The checkpoint archive carries secrets: an admitted machine device that is view-only is
+/// refused 403, while the same device with Control passes the grant check.
+#[tokio::test]
+async fn a_view_only_machine_device_cannot_download_the_checkpoint() {
+    let gateway = Gateway::start().await;
+    let token = gateway.authorized_machine_token();
+    let device = gateway.state().auth_manager.validate_token(&token).expect("fixture device");
+    gateway.state().auth_manager.force_device_permission(&device.id, DevicePermission::View);
+
+    let (status, _, body) = gateway.get("/api/v1/supervisor/checkpoint", &token).await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"]["code"], "FORBIDDEN");
+
+    gateway.state().auth_manager.force_device_permission(&device.id, DevicePermission::Control);
+    let (status, _, _) = gateway.get("/api/v1/supervisor/checkpoint", &token).await;
+    assert_ne!(status, 403, "a Control device passes the grant check");
+    gateway.stop().await;
+}
+
 #[tokio::test]
 async fn a_move_without_an_open_hub_is_unavailable() {
     let gateway = Gateway::start().await;

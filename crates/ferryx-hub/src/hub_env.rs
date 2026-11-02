@@ -36,12 +36,25 @@ const PROCESS_KEYS: &[&str] = &[
 
 static FILE_ENV: OnceLock<BTreeMap<String, String>> = OnceLock::new();
 
+/// The user's home directory: `HOME`, else `USERPROFILE` (Windows). Empty values are unset.
+/// `None` when neither resolves; callers must not fall back to a relative path.
+pub fn home_dir() -> Option<PathBuf> {
+    home_dir_from(|key| std::env::var_os(key))
+}
+
+fn home_dir_from(lookup: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    ["HOME", "USERPROFILE"]
+        .into_iter()
+        .find_map(|key| lookup(key).filter(|value| !value.is_empty()))
+        .map(PathBuf::from)
+}
+
 /// `~/.ferryx/hub/env`, or `FERRYX_HUB_ENV_FILE`.
 pub fn env_file_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("FERRYX_HUB_ENV_FILE").filter(|path| !path.is_empty()) {
         return Some(PathBuf::from(path));
     }
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ferryx/hub/env"))
+    home_dir().map(|home| home.join(".ferryx").join("hub").join("env"))
 }
 
 /// Entries from the hub env file, read once. A missing or unreadable file is empty.
@@ -258,6 +271,34 @@ mod tests {
     }
 
     use super::*;
+
+    fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
+        move |key| pairs.iter().find(|(name, _)| *name == key).map(|(_, value)| OsString::from(value))
+    }
+
+    #[test]
+    fn home_is_home_then_userprofile_and_never_empty() {
+        assert_eq!(
+            home_dir_from(env_of(&[("HOME", "/home/me"), ("USERPROFILE", "/other")])),
+            Some(PathBuf::from("/home/me"))
+        );
+        assert_eq!(
+            home_dir_from(env_of(&[("HOME", ""), ("USERPROFILE", "/profile")])),
+            Some(PathBuf::from("/profile"))
+        );
+        assert_eq!(home_dir_from(env_of(&[("HOME", "")])), None);
+        assert_eq!(home_dir_from(env_of(&[])), None);
+    }
+
+    /// Windows sets `USERPROFILE`, not `HOME`: the home resolves to an absolute path.
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_userprofile_is_the_home() {
+        let home = home_dir_from(env_of(&[("USERPROFILE", r"C:\Users\me")])).unwrap();
+        assert!(home.is_absolute());
+        assert_eq!(home.join(".ferryx").join("hub").join("env"), PathBuf::from(r"C:\Users\me\.ferryx\hub\env"));
+        assert!(home_dir().is_some_and(|home| home.is_absolute()), "the test host resolves a home");
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

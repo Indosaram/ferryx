@@ -402,7 +402,6 @@ enum LeaseCommand {
     ReleaseTo { target: String, reply: oneshot::Sender<bool> },
     /// The relay's view of the lease (a move's first step); `None` without an answer.
     Query { reply: oneshot::Sender<Option<SupervisorLeaseAck>> },
-    ResetCapability { reply: oneshot::Sender<Role> },
     /// A daemon refused the held fence: release without a caller waiting.
     FenceStale,
 }
@@ -458,11 +457,6 @@ impl SupervisorLeaseHandle {
         let (reply, wait) = oneshot::channel();
         self.commands.send(LeaseCommand::Query { reply }).await.ok()?;
         wait.await.ok().flatten()
-    }
-
-    /// Forgets the capability latch (what `ferryx hub lease reset-capability` triggers).
-    pub async fn reset_capability(&self) -> Option<Role> {
-        self.command(|reply| LeaseCommand::ResetCapability { reply }).await
     }
 
     async fn command(&self, build: impl FnOnce(oneshot::Sender<Role>) -> LeaseCommand) -> Option<Role> {
@@ -635,7 +629,6 @@ impl<T: LeaseTransport + ?Sized, H: HubSwitch + ?Sized> Driver<T, H> {
                     let (event, reply) = match command {
                         LeaseCommand::Acquire { force, reply } => (Event::AcquireRequested { force }, Some(reply)),
                         LeaseCommand::Release { reply } => (Event::ReleaseRequested, Some(reply)),
-                        LeaseCommand::ResetCapability { reply } => (Event::CapabilityReset, Some(reply)),
                         LeaseCommand::FenceStale => (Event::ReleaseRequested, None),
                         LeaseCommand::ReleaseTo { target, reply } => {
                             *self.release_target.lock() = Some(target);

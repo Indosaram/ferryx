@@ -378,13 +378,14 @@ pub(crate) async fn http_release_to(
 }
 
 /// `GET /api/v1/supervisor/checkpoint`: this machine's newest checkpoint archive, its id in
-/// [`crate::supervisor_checkpoint::CHECKPOINT_ID_HEADER`]. Agent-control device grant
-/// required (403 otherwise); 404 when none was published.
+/// [`crate::supervisor_checkpoint::CHECKPOINT_ID_HEADER`]. The archive carries secrets, so
+/// a Control agent-control device grant is required (403 otherwise, view-only included); 404
+/// when none was published.
 pub(crate) async fn http_checkpoint(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = agent_control_service::http_device(&state, &headers, false) {
+    if let Err(response) = agent_control_service::http_device(&state, &headers, true) {
         return response;
     }
     let Some(dir) = crate::supervisor_checkpoint::checkpoint_dir() else {

@@ -111,7 +111,8 @@ struct HubMoveImport {
 #[async_trait]
 impl cp::MoveImport for HubMoveImport {
     async fn import(&self, archive: &std::path::Path) -> Result<(), MoveError> {
-        let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+        let home = ferryx_hub::hub_env::home_dir()
+            .ok_or_else(|| MoveError::new(500, "HOME_UNRESOLVED", "neither HOME nor USERPROFILE names a home directory"))?;
         let options = || ferryx_hub::checkpoint_import::ImportOptions {
             memory_root: home.join(".omo").join("memory").join("agents"),
             env_file: ferryx_hub::hub_env::env_file_path().unwrap_or_else(|| home.join(".ferryx/hub/env")),

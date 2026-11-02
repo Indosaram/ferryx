@@ -302,6 +302,22 @@ fn read_ledger(hub_dir: &Path) -> Result<Ledger, AdoptionError> {
     }
 }
 
+/// [`read_ledger`] off the async runtime's threads.
+async fn read_ledger_blocking(hub_dir: &Path) -> Result<Ledger, AdoptionError> {
+    let dir = hub_dir.to_owned();
+    tokio::task::spawn_blocking(move || read_ledger(&dir))
+        .await
+        .map_err(io::Error::other)?
+}
+
+/// [`record_adopted`] off the async runtime's threads.
+async fn record_adopted_blocking(hub_dir: &Path, entry: AdoptedEntry) -> Result<(), AdoptionError> {
+    let dir = hub_dir.to_owned();
+    tokio::task::spawn_blocking(move || record_adopted(&dir, entry))
+        .await
+        .map_err(io::Error::other)?
+}
+
 /// Adds `entry` to the ledger (one entry per source id), written atomically.
 fn record_adopted(hub_dir: &Path, entry: AdoptedEntry) -> Result<(), AdoptionError> {
     let mut ledger = read_ledger(hub_dir)?;
@@ -449,7 +465,7 @@ pub async fn adoptable_goals(
         Err(AdoptionError::NoArchive) => return Ok(Vec::new()),
         Err(error) => return Err(error),
     };
-    let ledger = read_ledger(hub_dir)?;
+    let ledger = read_ledger_blocking(hub_dir).await?;
     Ok(goals
         .into_iter()
         .filter(|goal| Some(goal.supervisor_id.as_str()) != holder_supervisor_id)
@@ -505,7 +521,7 @@ where
     let goals = archived_goals(hub_dir).await?;
     let selected: Vec<ArchivedGoal> = match selection {
         AdoptSelection::All => {
-            let ledger = read_ledger(hub_dir)?;
+            let ledger = read_ledger_blocking(hub_dir).await?;
             goals
                 .into_iter()
                 .filter(|goal| {
@@ -532,7 +548,7 @@ where
                     Some("admitted" | "awaiting_owner")
                 );
                 if registered {
-                    record_adopted(
+                    record_adopted_blocking(
                         hub_dir,
                         AdoptedEntry {
                             source_id: source_id.clone(),
@@ -544,7 +560,8 @@ where
                                 .map(str::to_owned),
                             adopted_at: crate::storage::now_rfc3339(),
                         },
-                    )?;
+                    )
+                    .await?;
                 }
                 AdoptReport {
                     goal_id: goal.goal_id,

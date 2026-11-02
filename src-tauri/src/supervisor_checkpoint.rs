@@ -69,11 +69,57 @@ impl CheckpointStore {
         self.dir.join(format!("{id}{CHECKPOINT_SUFFIX}"))
     }
 
+    /// The index, newest first. A missing index is empty; an unreadable or corrupt one is
+    /// logged and reads as `None`, so [`Self::save`] prunes by listing the archives instead.
+    fn read_index(&self) -> Option<Vec<StoredCheckpoint>> {
+        let path = self.dir.join(INDEX_FILE);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+            Err(error) => {
+                tracing::warn!(%error, path = %path.display(), "supervisor checkpoint index not read");
+                return None;
+            }
+        };
+        match serde_json::from_slice(&bytes) {
+            Ok(index) => Some(index),
+            Err(error) => {
+                tracing::warn!(%error, path = %path.display(), "supervisor checkpoint index is corrupt");
+                None
+            }
+        }
+    }
+
     fn index(&self) -> Vec<StoredCheckpoint> {
-        std::fs::read(self.dir.join(INDEX_FILE))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+        self.read_index().unwrap_or_default()
+    }
+
+    /// Ids of every `<id>.tar.zst` in the directory.
+    fn archive_ids(&self) -> Vec<String> {
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(%error, dir = %self.dir.display(), "supervisor checkpoint directory not listed");
+                return Vec::new();
+            }
+        };
+        entries
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let name = entry.file_name().into_string().ok()?;
+                let id = name.strip_suffix(CHECKPOINT_SUFFIX)?;
+                valid_id(id).then(|| id.to_owned())
+            })
+            .collect()
+    }
+
+    fn remove_archive(&self, id: &str) {
+        let path = self.path_of(id);
+        if let Err(error) = std::fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(%error, path = %path.display(), "old supervisor checkpoint not removed");
+            }
+        }
     }
 
     pub fn newest(&self) -> Option<StoredCheckpoint> {
@@ -104,15 +150,25 @@ impl CheckpointStore {
             let tmp = self.dir.join(format!(".{id}.{}.partial", uuid::Uuid::new_v4().simple()));
             ferryx_hub::checkpoint_import::write_private_file(&tmp, bytes)?;
             if let Err(error) = std::fs::rename(&tmp, &path) {
-                let _ = std::fs::remove_file(&tmp);
+                if let Err(remove) = std::fs::remove_file(&tmp) {
+                    tracing::warn!(error = %remove, path = %tmp.display(), "partial supervisor checkpoint not removed");
+                }
                 return Err(error);
             }
         }
         let entry = StoredCheckpoint { id: id.to_owned(), at, pulled };
-        let mut index: Vec<StoredCheckpoint> = self.index().into_iter().filter(|e| e.id != id).collect();
+        let read = self.read_index();
+        let corrupt = read.is_none();
+        let mut index: Vec<StoredCheckpoint> = read.unwrap_or_default().into_iter().filter(|e| e.id != id).collect();
         index.insert(0, entry.clone());
         for old in index.split_off(KEEP_NEWEST.min(index.len())) {
-            let _ = std::fs::remove_file(self.path_of(&old.id));
+            self.remove_archive(&old.id);
+        }
+        if corrupt {
+            // The index is lost: every archive but the one just stored is an orphan.
+            for orphan in self.archive_ids().into_iter().filter(|other| other != id) {
+                self.remove_archive(&orphan);
+            }
         }
         crate::account::store::write_private_json(&self.dir.join(INDEX_FILE), &index)?;
         Ok(entry)
@@ -229,11 +285,6 @@ static SHARED: LazyLock<Arc<CheckpointState>> = LazyLock::new(Arc::default);
 /// This daemon's state.
 pub fn shared() -> Arc<CheckpointState> {
     Arc::clone(&*SHARED)
-}
-
-/// [`CheckpointState::block_reason`] of this daemon (what `hub status` shows).
-pub fn promotion_block_reason() -> Option<PromotionBlock> {
-    SHARED.block_reason()
 }
 
 /// [`CheckpointState::status`] of this daemon at `now` (unix seconds).
