@@ -7,9 +7,10 @@ use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Security::Cryptography::{
     CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::{KeyStore, KeystoreError};
+use crate::browser::vault::store::write_durably;
 
 /// Optional DPAPI entropy: ties the blob to this use.
 const ENTROPY: &[u8] = b"ferryx.browser.vault.v1";
@@ -32,19 +33,24 @@ fn blob(bytes: &[u8]) -> CRYPT_INTEGER_BLOB {
     CRYPT_INTEGER_BLOB { cbData: bytes.len() as u32, pbData: bytes.as_ptr().cast_mut() }
 }
 
-/// Copies and frees a blob DPAPI allocated.
-fn take(out: CRYPT_INTEGER_BLOB) -> Vec<u8> {
+/// Copies, wipes and frees a blob DPAPI allocated.
+fn take(out: CRYPT_INTEGER_BLOB) -> Zeroizing<Vec<u8>> {
     if out.pbData.is_null() {
-        return Vec::new();
+        return Zeroizing::new(Vec::new());
     }
     // SAFETY: DPAPI returned `cbData` bytes at `pbData`, allocated with LocalAlloc.
-    let bytes = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) }.to_vec();
+    let bytes = Zeroizing::new(
+        unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) }.to_vec(),
+    );
+    // SAFETY: the same DPAPI-owned, writable `cbData` bytes at `pbData`; no other reference to
+    // them is alive, and they are wiped before the buffer is freed below.
+    unsafe { std::slice::from_raw_parts_mut(out.pbData, out.cbData as usize) }.zeroize();
     // SAFETY: the buffer came from DPAPI and is freed exactly once.
     unsafe { LocalFree(out.pbData.cast()) };
     bytes
 }
 
-fn protect(secret: &[u8]) -> Result<Vec<u8>, KeystoreError> {
+fn protect(secret: &[u8]) -> Result<Zeroizing<Vec<u8>>, KeystoreError> {
     let input = blob(secret);
     let entropy = blob(ENTROPY);
     let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
@@ -91,7 +97,7 @@ fn unprotect(protected: &[u8]) -> Result<Zeroizing<Vec<u8>>, KeystoreError> {
             std::io::Error::last_os_error()
         )));
     }
-    Ok(Zeroizing::new(take(out)))
+    Ok(take(out))
 }
 
 impl KeyStore for Dpapi {
@@ -112,8 +118,7 @@ impl KeyStore for Dpapi {
         std::fs::create_dir_all(&self.dir).map_err(|error| KeystoreError::Failed(error.to_string()))?;
         let path = self.path(account);
         let staging = path.with_extension("dpapi.tmp");
-        std::fs::write(&staging, protected)
-            .and_then(|()| std::fs::rename(&staging, &path))
+        write_durably(&path, &staging, &protected)
             .map_err(|error| KeystoreError::Failed(error.to_string()))
     }
 

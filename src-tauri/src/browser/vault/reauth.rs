@@ -3,8 +3,10 @@
 //! macOS: LocalAuthentication (Touch ID, Apple Watch or the login password,
 //! LAPolicyDeviceOwnerAuthentication). Windows: Windows Hello (UserConsentVerifier: face,
 //! fingerprint or the account PIN); when Hello is not set up, the request is refused with that
-//! reason rather than allowed. Linux: polkit's `pkcheck` with an auth dialog for the session
-//! user; without polkit the request is refused with the reason.
+//! reason rather than allowed. Linux: polkit's `pkcheck` against Ferryx's own action
+//! `com.ferryx.app.vault-reveal` (auth_self, shipped by the .deb/.rpm in
+//! /usr/share/polkit-1/actions) with an auth dialog for the session user; when polkit or the
+//! action is not installed (AppImage, source builds) the request is refused with the reason.
 //!
 //! Blocking: run it through `crate::ipc::run_blocking`.
 
@@ -85,14 +87,31 @@ mod platform {
 
 #[cfg(target_os = "linux")]
 mod platform {
-    /// A polkit action every desktop ships that requires the user's own password
-    /// (auth_self) for an active session.
-    const ACTION: &str = "org.freedesktop.policykit.exec";
+    use std::process::{Command, Stdio};
+
+    /// Ferryx's own polkit action (packaging/linux/com.ferryx.app.vault-reveal.policy), which
+    /// requires the user's own password (auth_self, no keep) for an active session. Only the
+    /// .deb/.rpm install it; without it the reveal is refused.
+    pub(super) const ACTION: &str = "com.ferryx.app.vault-reveal";
 
     pub(super) fn confirm_user(_reason: &str) -> Result<(), String> {
+        let installed = Command::new("pkaction")
+            .args(["--action-id", ACTION])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !installed {
+            return Err(format!(
+                "Ferryx's polkit action ({ACTION}) is not installed, so the system cannot confirm you; \
+                 install Ferryx from the .deb/.rpm package to show saved passwords"
+            ));
+        }
         let pid = std::process::id().to_string();
-        let status = std::process::Command::new("pkcheck")
+        let status = Command::new("pkcheck")
             .args(["--action-id", ACTION, "--process", &pid, "--allow-user-interaction"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .map_err(|error| format!("polkit (pkcheck) is unavailable to confirm the user: {error}"))?;
         if status.success() {
@@ -100,6 +119,16 @@ mod platform {
         } else {
             Err("the system did not confirm the user".into())
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    #[test]
+    fn action_matches_shipped_policy() {
+        let policy = include_str!("../../../packaging/linux/com.ferryx.app.vault-reveal.policy");
+        assert!(policy.contains(&format!("<action id=\"{}\">", super::platform::ACTION)));
+        assert!(policy.contains("<allow_active>auth_self</allow_active>"));
     }
 }
 

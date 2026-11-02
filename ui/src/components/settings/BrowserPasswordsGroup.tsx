@@ -30,6 +30,7 @@ export function BrowserPasswordsGroup() {
   const [query, setQuery] = useState("");
   const [revealed, setRevealed] = useState<Record<string, string>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
   const [draftUsername, setDraftUsername] = useState("");
   const [draftPassword, setDraftPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -135,6 +136,7 @@ export function BrowserPasswordsGroup() {
     void deleteVaultItem(id).then(() => {
       setItems((prev) => prev.filter((item) => item.id !== id));
       setRevealed(({ [id]: _removed, ...rest }) => rest);
+      setConfirmingDeleteId((prev) => (prev === id ? null : prev));
       if (editingId === id) setEditingId(null);
     }, fail);
   };
@@ -214,16 +216,46 @@ export function BrowserPasswordsGroup() {
                     >
                       <Pencil className="size-3" /> Edit
                     </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => remove(item.id)}
-                      className="h-7 gap-1 px-2 text-[11px]"
-                      data-testid="vault-delete"
-                    >
-                      <Trash2 className="size-3" /> Delete
-                    </Button>
+                    {confirmingDeleteId === item.id ? (
+                      <div className="flex items-center gap-1">
+                        <span className="text-[11px] text-muted-foreground">Delete?</span>
+                        <Button
+                          type="button"
+                          variant="destructive"
+                          size="sm"
+                          onClick={() => {
+                            setConfirmingDeleteId(null);
+                            remove(item.id);
+                          }}
+                          className="h-7 px-2 text-[11px]"
+                          data-testid="vault-delete-confirm"
+                          aria-label="Confirm delete"
+                        >
+                          Yes
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setConfirmingDeleteId(null)}
+                          className="h-7 px-2 text-[11px]"
+                          data-testid="vault-delete-cancel"
+                        >
+                          No
+                        </Button>
+                      </div>
+                    ) : (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setConfirmingDeleteId(item.id)}
+                        className="h-7 gap-1 px-2 text-[11px]"
+                        data-testid="vault-delete"
+                      >
+                        <Trash2 className="size-3" /> Delete
+                      </Button>
+                    )}
                   </div>
                   {editing ? (
                     <div className="flex items-center gap-1.5 pl-7">
