@@ -1,0 +1,129 @@
+name: macOS hang probe (temporary)
+
+on:
+  push:
+    branches:
+      - ci/macos-hang-probe-20261102
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: probe ${{ matrix.n }}
+    runs-on: macos-15
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 3]
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          shared-key: macos-15-tests-no-debuginfo-v1
+          save-if: false
+      - name: Configure git identity
+        run: |
+          git config --global user.name "ferryx-ci"
+          git config --global user.email "ferryx-ci@users.noreply.github.com"
+          git config --global init.defaultBranch main
+      - name: Isolate TMPDIR
+        run: |
+          ISOLATED_TMPDIR="${RUNNER_TEMP}/ferryx-ci-tmp"
+          mkdir -p "$ISOLATED_TMPDIR"
+          echo "TMPDIR=$ISOLATED_TMPDIR" >> "$GITHUB_ENV"
+          echo "GIT_CEILING_DIRECTORIES=$ISOLATED_TMPDIR" >> "$GITHUB_ENV"
+      - name: Install dependencies and build UI
+        run: |
+          bun install --frozen-lockfile || bun install
+          bun install --cwd ui --frozen-lockfile || bun install --cwd ui
+          bun run --cwd ui build
+      - run: cargo build --manifest-path remote-helper/Cargo.toml
+      - run: bun scripts/fetch-ffmpeg.mjs --target aarch64-apple-darwin
+      - name: Provision overlay address
+        run: |
+          OVERLAY_ADDRESS=100.64.1.2
+          for interface in $(ifconfig -l); do
+            case "$interface" in lo*) continue ;; esac
+            ifconfig "$interface" | grep -q 'inet ' || continue
+            if sudo -n ifconfig "$interface" alias "$OVERLAY_ADDRESS" netmask 255.255.255.255 up 2>/dev/null \
+              || sudo -n ifconfig "$interface" alias "$OVERLAY_ADDRESS" up 2>/dev/null; then
+              break
+            fi
+          done
+      - name: Compile Rust test targets
+        env:
+          CARGO_BUILD_TARGET: aarch64-apple-darwin
+        run: python3 scripts/ci-run-bounded.py --timeout-seconds 3000 --log "$RUNNER_TEMP/ferryx-ci-logs/rust-compile.log" -- bash scripts/ci-native-tests.sh compile
+      # A root watchdog outside the runner user's process space. It snapshots the
+      # runner processes, records every stopped/vanished runner-infrastructure
+      # process with the test log tail at that moment, and SIGCONTs the runner
+      # infrastructure so the job can still finish and upload this evidence.
+      - name: Start root watchdog
+        run: |
+          W="$RUNNER_TEMP/watchdog"; mkdir -p "$W"; chmod 777 "$W"
+          cat > "$RUNNER_TEMP/watchdog.sh" <<'EOF'
+          #!/bin/bash
+          W=$1; LOG=$2
+          prev=""
+          while true; do
+            ts=$(date -u +%FT%TZ)
+            infra=$(ps -axo pid=,ppid=,pgid=,stat=,command= | grep -E 'Runner\.(Worker|Listener)|ci-run-bounded|ci-native-tests|cargo test' | grep -v grep | awk '{print $1,$2,$3,$4,$5,$6}')
+            if [ "$infra" != "$prev" ]; then { echo "== $ts"; echo "$infra"; } >> "$W/infra.txt"; prev="$infra"; fi
+            stopped=$(ps -axo pid=,ppid=,pgid=,user=,stat=,etime=,command= | awk '$5 ~ /^T/')
+            if [ -n "$stopped" ]; then
+              { echo "== $ts STOPPED"; echo "$stopped" | cut -c1-300; echo "-- log tail"; tail -n 15 "$LOG" 2>/dev/null | cut -c1-300; } >> "$W/stopped.txt"
+              for p in $(ps -axo pid=,stat=,command= | awk '$2 ~ /^T/ && ($3 ~ /Runner\.(Worker|Listener)/ || $0 ~ /ci-run-bounded|ci-native-tests/) {print $1}'); do
+                { echo "== $ts INFRA_STOPPED pid=$p"; ps -axo pid,ppid,pgid,sess,user,stat,etime,command | cut -c1-300; } >> "$W/alerts.txt"
+                kill -CONT "$p"
+              done
+            fi
+            sleep 10
+          done
+          EOF
+          chmod +x "$RUNNER_TEMP/watchdog.sh"
+          sudo -n nohup "$RUNNER_TEMP/watchdog.sh" "$W" "$RUNNER_TEMP/ferryx-ci-logs/rust-tests.log" > "$W/watchdog.out" 2>&1 &
+          sleep 2; ps -axo pid,user,command | grep watchdog.sh | grep -v grep
+      - name: Cargo Test (unit and integration suites)
+        timeout-minutes: 40
+        env:
+          TEST_SUITE: full
+          CARGO_BUILD_TARGET: aarch64-apple-darwin
+        run: python3 scripts/ci-run-bounded.py --timeout-seconds 1800 --log "$RUNNER_TEMP/ferryx-ci-logs/rust-tests.log" -- bash scripts/ci-native-tests.sh run
+      - name: Remote Grid Frame Seam
+        if: always()
+        timeout-minutes: 7
+        env:
+          CARGO_BUILD_TARGET: aarch64-apple-darwin
+        run: python3 scripts/ci-run-bounded.py --timeout-seconds 300 --log "$RUNNER_TEMP/ferryx-ci-logs/grid-seam.log" -- bun run --cwd ui src/remote/gridFrameSeam.check.ts
+      - name: Print watchdog evidence
+        if: always()
+        run: |
+          for f in "$RUNNER_TEMP"/watchdog/*.txt; do echo "##### $f"; cat "$f"; done
+          cp "$RUNNER_TEMP"/watchdog/*.txt "$RUNNER_TEMP/ferryx-ci-logs/" 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-${{ matrix.n }}
+          path: ${{ runner.temp }}/ferryx-ci-logs/*
+          retention-days: 3
