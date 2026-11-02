@@ -64,6 +64,56 @@ fn parse_kinds(field: &str) -> Option<Vec<PermissionKind>> {
     field.split(',').map(PermissionKind::parse).collect()
 }
 
+/// Chromium extension ids are 32 letters from `a` to `p`.
+pub fn is_extension_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+}
+
+/// What [`Command::Extensions`] asks the engine's extension manager to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtensionCall {
+    /// Every installed extension, as a JSON array.
+    List,
+    SetEnabled { extension: String, enabled: bool },
+    Remove { extension: String },
+    /// Pins or unpins the extension's toolbar button.
+    Pin { extension: String, pinned: bool },
+}
+
+/// Exactly `count` fields, the first a valid extension id.
+fn extension_fields(rest: &str, count: usize) -> Option<Vec<&str>> {
+    let (parts, tail) = fields(rest, count)?;
+    (tail.is_empty() && is_extension_id(parts[0])).then_some(parts)
+}
+
+impl ExtensionCall {
+    fn fields(&self) -> String {
+        match self {
+            Self::List => "list".to_string(),
+            Self::SetEnabled { extension, enabled } => format!("enable {extension} {}", flag(*enabled)),
+            Self::Remove { extension } => format!("remove {extension}"),
+            Self::Pin { extension, pinned } => format!("pin {extension} {}", flag(*pinned)),
+        }
+    }
+
+    fn parse(line: &str) -> Option<Self> {
+        let (verb, rest) = line.split_once(' ').unwrap_or((line, ""));
+        match verb {
+            "list" if rest.is_empty() => Some(Self::List),
+            "enable" => {
+                let parts = extension_fields(rest, 2)?;
+                Some(Self::SetEnabled { extension: parts[0].to_string(), enabled: parse_flag(parts[1])? })
+            }
+            "remove" => Some(Self::Remove { extension: extension_fields(rest, 1)?[0].to_string() }),
+            "pin" => {
+                let parts = extension_fields(rest, 2)?;
+                Some(Self::Pin { extension: parts[0].to_string(), pinned: parse_flag(parts[1])? })
+            }
+            _ => None,
+        }
+    }
+}
+
 /// A pane rectangle: pixels inside the Ferryx window on Windows, screen points from the
 /// top-left on macOS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -121,6 +171,9 @@ pub enum Command {
     Fill { tab: String, script: String },
     /// Gives the tab's window keyboard focus: Chrome's address bar when `address`, else the page.
     Focus { tab: String, address: bool },
+    /// Manages the profile's extensions through the engine's hidden `chrome://extensions`
+    /// page; the answer is [`Event::Extensions`] with the same `id`. Not tab scoped.
+    Extensions { id: u32, call: ExtensionCall },
 }
 
 /// Engine to Ferryx.
@@ -161,6 +214,9 @@ pub enum Event {
     /// [`VAULT_CAPTURE_SCRIPT`] posted from its isolated world (`v`, `kind`, `origin`,
     /// `username`, `password`). Page script cannot reach that world's binding.
     FormSubmitted { tab: String, payload: String },
+    /// The answer to [`Command::Extensions`]: `result` is one line of JSON (the extension list
+    /// for [`ExtensionCall::List`]), or `{"message":...}` when `ok` is false.
+    Extensions { id: u32, ok: bool, result: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -503,6 +559,7 @@ impl Command {
             Self::ImportCookies { path } => format!("import-cookies {}", one_line(path)),
             Self::Fill { tab, script } => format!("fill {tab} {}", one_line(script)),
             Self::Focus { tab, address } => format!("focus {tab} {}", flag(*address)),
+            Self::Extensions { id, call } => format!("extensions {id} {}", call.fields()),
         }
     }
 
@@ -611,6 +668,10 @@ impl Command {
                 let (parts, _) = fields(rest, 2)?;
                 Some(Self::Focus { tab: parts[0].to_string(), address: parse_flag(parts[1])? })
             }
+            "extensions" => {
+                let (parts, call) = fields(rest, 1)?;
+                Some(Self::Extensions { id: parts[0].parse().ok()?, call: ExtensionCall::parse(call)? })
+            }
             _ => None,
         }
     }
@@ -668,6 +729,7 @@ impl Event {
                 format!("devtools {tab} {id} {} {}", flag(*ok), one_line(result))
             }
             Self::FormSubmitted { tab, payload } => format!("form {tab} {}", one_line(payload)),
+            Self::Extensions { id, ok, result } => format!("extensions {id} {} {}", flag(*ok), one_line(result)),
         };
         format!("{EVENT_PREFIX}{body}")
     }
@@ -791,6 +853,14 @@ impl Event {
             "form" => {
                 let (parts, payload) = fields(rest, 1)?;
                 Some(Self::FormSubmitted { tab: parts[0].to_string(), payload: payload.to_string() })
+            }
+            "extensions" => {
+                let (parts, result) = fields(rest, 2)?;
+                Some(Self::Extensions {
+                    id: parts[0].parse().ok()?,
+                    ok: parse_flag(parts[1])?,
+                    result: result.to_string(),
+                })
             }
             _ => None,
         }
@@ -1068,5 +1138,48 @@ mod tests {
     fn json_string_escapes_quotes_controls_and_line_separators() {
         assert_eq!(json_string("a\"b\\c\nd\u{1}\u{2028}"), r#""a\"b\\c\nd\u0001\u2028""#);
         assert!(VAULT_CAPTURE_SCRIPT.contains("formSubmitted"));
+    }
+
+    const EXTENSION: &str = "cjpalhdlnbpafiamejdnhcphjbkeiagm";
+
+    #[test]
+    fn every_extension_call_and_answer_survives_a_round_trip() {
+        let calls = [
+            ExtensionCall::List,
+            ExtensionCall::SetEnabled { extension: EXTENSION.into(), enabled: false },
+            ExtensionCall::SetEnabled { extension: EXTENSION.into(), enabled: true },
+            ExtensionCall::Remove { extension: EXTENSION.into() },
+            ExtensionCall::Pin { extension: EXTENSION.into(), pinned: true },
+        ];
+        for (id, call) in (1u32..).zip(calls) {
+            let command = Command::Extensions { id, call };
+            assert_eq!(Command::parse(&command.to_line()), Some(command));
+        }
+        let answers = [
+            Event::Extensions { id: 1, ok: true, result: r#"[{"id":"a","name":"A b"}]"#.into() },
+            Event::Extensions { id: 2, ok: false, result: r#"{"message":"cancelled"}"#.into() },
+        ];
+        for answer in answers {
+            assert!(!answer.to_line().contains('\n'));
+            assert_eq!(Event::parse(&answer.to_line()), Some(answer));
+        }
+    }
+
+    #[test]
+    fn extension_lines_with_bad_ids_or_fields_are_refused() {
+        assert!(is_extension_id(EXTENSION));
+        assert!(!is_extension_id("qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"));
+        assert!(!is_extension_id(&EXTENSION[..31]));
+        assert_eq!(Command::parse("extensions 1 remove ../../etc"), None);
+        assert_eq!(Command::parse(&format!("extensions 1 remove {}", EXTENSION.to_uppercase())), None);
+        assert_eq!(Command::parse(&format!("extensions 1 enable {EXTENSION} yes")), None);
+        assert_eq!(Command::parse(&format!("extensions 1 pin {EXTENSION}")), None);
+        assert_eq!(Command::parse(&format!("extensions 1 remove {EXTENSION} extra")), None);
+        assert_eq!(Command::parse("extensions x list"), None);
+        assert_eq!(Command::parse("extensions 1 list extra"), None);
+        assert_eq!(Command::parse("extensions 1 dance"), None);
+        assert_eq!(Command::parse("extensions 1"), None);
+        assert_eq!(Event::parse("@ferryx extensions 1 2 []"), None);
+        assert_eq!(Event::parse("@ferryx extensions x 1 []"), None);
     }
 }

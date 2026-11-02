@@ -255,6 +255,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSEnumerator",
     "NSJSONSerialization",
     "NSProcessInfo",
+    "NSURLRequest",
 ] }
 # ASWebAuthenticationSession for the in-app "Sign in with macOS" handoff.
 objc2-authentication-services = { version = "0.3.2", default-features = false, features = [
@@ -266,6 +267,7 @@ objc2-authentication-services = { version = "0.3.2", default-features = false, f
 ] }
 objc2-web-kit = { version = "0.3", default-features = false, features = [
     "block2",
+    "objc2-app-kit",
     "WKWebView",
     "WKNavigation",
     "WKContentWorld",
@@ -277,6 +279,8 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKSecurityOrigin",
     "WKWebViewConfiguration",
     "WKUIDelegate",
+    "WKDownload",
+    "WKDownloadDelegate",
 ] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
     "std",

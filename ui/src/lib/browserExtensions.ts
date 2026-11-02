@@ -18,11 +18,17 @@ export type InstalledExtension = {
   optionsUrl: string | null;
   homepageUrl: string | null;
   fromWebStore: boolean;
+  /** Whether the toolbar button is pinned; null when unknown (the engine is not running). */
+  pinned?: boolean | null;
+  /** False for extensions Chrome will not let the user remove. */
+  removable: boolean;
 };
 
 export type BrowserExtensionListing = {
   profile: string;
   engineInstalled: boolean;
+  /** The list came from the profile's running engine rather than its files. */
+  engineRunning: boolean;
   supported: boolean;
   extensions: InstalledExtension[];
 };
@@ -42,6 +48,28 @@ export type OpenBrowserUrlDetail = { url: string; profileId?: string };
 
 export async function listBrowserExtensions(profile?: string): Promise<BrowserExtensionListing> {
   return invoke<BrowserExtensionListing>("cmd_browser_extensions_list", { profile });
+}
+
+/** Changes go through the profile's engine (started without a tab when needed); each returns the fresh listing. */
+export async function setBrowserExtensionEnabled(
+  extensionId: string,
+  enabled: boolean,
+  profile?: string,
+): Promise<BrowserExtensionListing> {
+  return invoke<BrowserExtensionListing>("cmd_browser_extensions_set_enabled", { profile, extensionId, enabled });
+}
+
+/** Chrome also asks the user to confirm in its own dialog; cancelling rejects with details.reason "cancelled". */
+export async function removeBrowserExtension(extensionId: string, profile?: string): Promise<BrowserExtensionListing> {
+  return invoke<BrowserExtensionListing>("cmd_browser_extensions_remove", { profile, extensionId });
+}
+
+export async function setBrowserExtensionPinned(
+  extensionId: string,
+  pinned: boolean,
+  profile?: string,
+): Promise<BrowserExtensionListing> {
+  return invoke<BrowserExtensionListing>("cmd_browser_extensions_set_pinned", { profile, extensionId, pinned });
 }
 
 /** The backend emits browser_session_created and the app adopts the new tab itself. */

@@ -268,6 +268,33 @@ impl DownloadRegistry {
         self.update_progress(id, received_bytes);
     }
 
+    /// Hands a live native download the engine control that arrived after it was registered
+    /// (a system webview exposes its download object only once the download started). Cancel,
+    /// and Pause/Resume when `can_pause`, then reach the engine. False when the record is gone
+    /// or finished.
+    pub fn attach_control(&self, id: &str, control: Arc<dyn DownloadControl>, can_pause: bool) -> bool {
+        let updated = {
+            let mut records = self.records.write();
+            match records.get_mut(id) {
+                Some(record) if !record.status.is_terminal() => {
+                    self.controls.write().insert(id.to_string(), control);
+                    record.can_cancel = true;
+                    record.can_pause = can_pause;
+                    record.updated_at_ms = current_time_ms();
+                    Some(record.clone())
+                }
+                _ => None,
+            }
+        };
+        match updated {
+            Some(record) => {
+                self.notify(record);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Moves a live record between InProgress and Paused; emits only on a change.
     pub fn set_paused(&self, id: &str, paused: bool) {
         let target = if paused { DownloadStatus::Paused } else { DownloadStatus::InProgress };
@@ -478,6 +505,15 @@ impl DownloadRegistry {
 
     pub fn set_failed(&self, id: &str, error: String) {
         self.finish(id, DownloadStatus::Failed, Some(error));
+    }
+
+    /// The engine reports a native download as failed. Engines report the stop a pause causes
+    /// as a failure, so a Paused record stays Paused; a cancelled one stays Cancelled.
+    pub fn set_engine_failed(&self, id: &str, error: String) {
+        let paused = self.records.read().get(id).is_some_and(|record| record.status == DownloadStatus::Paused);
+        if !paused {
+            self.set_failed(id, error);
+        }
     }
 
     pub fn set_cancelled(&self, id: &str) {
@@ -1482,6 +1518,81 @@ mod tests {
         assert!(!registry.cancel("wv:1"));
         registry.set_committed("wv:1");
         assert_eq!(registry.get("wv:1").unwrap().status, DownloadStatus::Completed);
+    }
+
+    /// Registers a system-webview download the way the webview hook does: first without a
+    /// control, then with the one the engine hands over.
+    fn webview_download_with_control(registry: &DownloadRegistry, id: &str, can_pause: bool) -> Arc<RecordingControl> {
+        registry.register_native(id.into(), "https://a.test/f".into(), "/tmp/f".into(), None, None, false);
+        let control = Arc::new(RecordingControl::default());
+        assert!(registry.attach_control(id, control.clone(), can_pause));
+        control
+    }
+
+    #[test]
+    fn attach_control_turns_on_the_controls_and_routes_them_to_the_engine() {
+        let registry = DownloadRegistry::new();
+        let mut updates = registry.subscribe();
+        let control = webview_download_with_control(&registry, "wv:attach", true);
+        let record = registry.get("wv:attach").unwrap();
+        assert!(record.can_cancel && record.can_pause);
+        let mut last = None;
+        while let Ok(update) = updates.try_recv() {
+            last = Some(update);
+        }
+        assert!(last.is_some_and(|update| update.can_cancel && update.can_pause), "the shelf learns about the controls");
+
+        assert!(registry.request_pause("wv:attach", true));
+        assert!(registry.request_pause("wv:attach", false));
+        assert!(registry.cancel("wv:attach"));
+        assert_eq!(*control.calls.lock(), vec!["pause", "resume", "cancel"]);
+        assert!(!registry.attach_control("wv:attach", control, true), "a finished download takes no control");
+    }
+
+    #[test]
+    fn a_pause_the_engine_reports_as_a_failure_stays_paused() {
+        let registry = DownloadRegistry::new();
+        webview_download_with_control(&registry, "wv:pause", true);
+        assert!(registry.request_pause("wv:pause", true));
+        registry.set_paused("wv:pause", true);
+        registry.set_engine_failed("wv:pause", "download failed".into());
+        let record = registry.get("wv:pause").unwrap();
+        assert_eq!(record.status, DownloadStatus::Paused);
+        assert!(record.error.is_none());
+    }
+
+    #[test]
+    fn resuming_returns_a_paused_download_to_in_progress() {
+        let registry = DownloadRegistry::new();
+        let control = webview_download_with_control(&registry, "wv:resume", true);
+        registry.set_paused("wv:resume", true);
+        assert!(registry.request_pause("wv:resume", false));
+        registry.set_paused("wv:resume", false);
+        assert_eq!(registry.get("wv:resume").unwrap().status, DownloadStatus::InProgress);
+        assert_eq!(*control.calls.lock(), vec!["resume"]);
+        registry.set_engine_failed("wv:resume", "network".into());
+        assert_eq!(registry.get("wv:resume").unwrap().status, DownloadStatus::Failed, "a running download can fail");
+    }
+
+    #[test]
+    fn a_cancel_stays_cancelled_when_the_engine_then_reports_a_failure() {
+        let registry = DownloadRegistry::new();
+        webview_download_with_control(&registry, "wv:cancel", true);
+        assert!(registry.cancel("wv:cancel"));
+        registry.set_engine_failed("wv:cancel", "download failed".into());
+        assert_eq!(registry.get("wv:cancel").unwrap().status, DownloadStatus::Cancelled);
+    }
+
+    #[test]
+    fn a_cancel_only_control_refuses_pause() {
+        let registry = DownloadRegistry::new();
+        let control = webview_download_with_control(&registry, "wv:cancel-only", false);
+        let record = registry.get("wv:cancel-only").unwrap();
+        assert!(record.can_cancel && !record.can_pause);
+        assert!(!registry.request_pause("wv:cancel-only", true));
+        assert!(control.calls.lock().is_empty());
+        assert!(registry.cancel("wv:cancel-only"));
+        assert_eq!(*control.calls.lock(), vec!["cancel"]);
     }
 
     #[test]

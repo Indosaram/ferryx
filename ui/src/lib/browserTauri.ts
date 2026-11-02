@@ -69,8 +69,10 @@ export interface DownloadRecord {
   error?: string | null;
   createdAtMs: number;
   updatedAtMs: number;
-  /** False for a system-webview download, which the engine gives no way to stop. */
+  /** False until the engine hands over a way to stop the download (a system-webview download
+   * on an OS without the hook, or before its hook attached); absent means cancellable. */
   canCancel?: boolean;
+  /** The engine can pause and resume it (Chromium, WebView2, WKWebView; never WebKitGTK). */
   canPause?: boolean;
   failure?: DownloadFailureKind | null;
 }

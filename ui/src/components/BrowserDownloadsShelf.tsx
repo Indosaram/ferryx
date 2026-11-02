@@ -6,19 +6,11 @@ import {
   type DownloadRecord,
   type DownloadStatus,
 } from "../lib/browserTauri";
-import { downloadFailureLabel, pauseBrowserDownload } from "../lib/browserSystem";
-import {
-  AlertCircle,
-  CheckCircle2,
-  Download,
-  ExternalLink,
-  Folder,
-  Pause,
-  Play,
-  RotateCw,
-  X,
-  XCircle,
-} from "lucide-react";
+import { pauseBrowserDownload } from "../lib/browserSystem";
+import { AlertCircle, Download, X } from "lucide-react";
+import { BrowserDownloadRow } from "./BrowserDownloadRow";
+
+export { extractDownloadName, formatBytes, sanitizeDownloadFilename } from "./BrowserDownloadRow";
 
 export const MAX_RENDERED_DOWNLOADS = 10;
 
@@ -35,20 +27,6 @@ export interface BrowserDownloadsShelfProps {
   refreshToken?: number;
 }
 
-export function sanitizeDownloadFilename(raw: string): string {
-  if (!raw || typeof raw !== "string") return "download";
-  const base = raw.split(/[?#]/)[0] ?? "";
-  const parts = base.split(/[/\\]/).filter(Boolean);
-  const candidate = parts.pop() || "download";
-  const sanitized = candidate
-    .replace(/[\x00-\x1f\x7f]/g, "")
-    .replace(/\.\.+/g, "")
-    .replace(/[<>:"/\\|?*]/g, "_")
-    .trim();
-  const noLeadingDot = sanitized.replace(/^\.+/, "");
-  return noLeadingDot.length > 0 ? noLeadingDot : "download";
-}
-
 /** Merges a registry list into the rendered records by id. A record already rendered from a
  * newer `browser_download_updated` event wins over an older copy in the list, and records only
  * known from events are kept. */
@@ -60,21 +38,6 @@ export function mergeDownloadRecords(current: DownloadRecord[], incoming: Downlo
     return existing && existing.updatedAtMs > record.updatedAtMs ? existing : record;
   });
   return [...current.filter((record) => !incomingIds.has(record.id)), ...merged];
-}
-
-export function extractDownloadName(filePath: string, url: string): string {
-  if (filePath && filePath.trim()) {
-    const fromPath = sanitizeDownloadFilename(filePath);
-    if (fromPath !== "download") return fromPath;
-  }
-  return sanitizeDownloadFilename(url);
-}
-
-export function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /**
@@ -92,11 +55,10 @@ export function isMissingFilePathError(error: unknown): boolean {
   return (details as { reason?: unknown }).reason === "missing";
 }
 
-export function BrowserDownloadsShelf({ onClose, className = "", refreshToken = 0 }: BrowserDownloadsShelfProps) {
+/** The download registry's records, kept current from `browser_download_updated` events and
+ * re-read whenever `refreshToken` changes. */
+export function useBrowserDownloads(refreshToken = 0) {
   const [downloads, setDownloads] = useState<DownloadRecord[]>([]);
-  const [dismissedIds, setDismissedIds] = useState<Set<string>>(() => new Set());
-  const [missingFileIds, setMissingFileIds] = useState<Set<string>>(() => new Set());
-  const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
   const [loadErrorCode, setLoadErrorCode] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   // Overlapping list reads can resolve out of order; only the newest request may apply.
@@ -162,11 +124,13 @@ export function BrowserDownloadsShelf({ onClose, className = "", refreshToken = 
     });
   }, [fetchDownloads, refreshToken]);
 
-  const visibleDownloads = useMemo(() => {
-    return downloads
-      .filter((record) => !dismissedIds.has(record.id))
-      .slice(0, MAX_RENDERED_DOWNLOADS);
-  }, [downloads, dismissedIds]);
+  return { downloads, loadErrorCode, loading };
+}
+
+/** Cancel, pause/resume, open and reveal for download rows, with each row's last error. */
+export function useBrowserDownloadActions() {
+  const [missingFileIds, setMissingFileIds] = useState<Set<string>>(() => new Set());
+  const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
 
   const handleCancel = async (id: string) => {
     try {
@@ -233,6 +197,21 @@ export function BrowserDownloadsShelf({ onClose, className = "", refreshToken = 
     }
   };
 
+  return { missingFileIds, actionErrors, handleCancel, handlePause, handleOpen, handleReveal };
+}
+
+export function BrowserDownloadsShelf({ onClose, className = "", refreshToken = 0 }: BrowserDownloadsShelfProps) {
+  const { downloads, loadErrorCode, loading } = useBrowserDownloads(refreshToken);
+  const { missingFileIds, actionErrors, handleCancel, handlePause, handleOpen, handleReveal } =
+    useBrowserDownloadActions();
+  const [dismissedIds, setDismissedIds] = useState<Set<string>>(() => new Set());
+
+  const visibleDownloads = useMemo(() => {
+    return downloads
+      .filter((record) => !dismissedIds.has(record.id))
+      .slice(0, MAX_RENDERED_DOWNLOADS);
+  }, [downloads, dismissedIds]);
+
   const handleDismiss = (id: string) => {
     setDismissedIds((prev) => new Set(prev).add(id));
   };
@@ -277,147 +256,19 @@ export function BrowserDownloadsShelf({ onClose, className = "", refreshToken = 
           </div>
         ) : null}
 
-        {visibleDownloads.map((item) => {
-          const isMissing = missingFileIds.has(item.id);
-          const name = extractDownloadName(item.filePath, item.url);
-          const percent =
-            item.totalBytes && item.totalBytes > 0
-              ? Math.min(100, Math.round((item.receivedBytes / item.totalBytes) * 100))
-              : null;
-          const isPaused = item.status === "paused";
-          const isInProgress = item.status === "inProgress" || item.status === "pending" || isPaused;
-          const canCancel = item.canCancel !== false;
-          const isCompleted = item.status === "completed";
-          const isFailed = item.status === "failed";
-          const isCancelled = item.status === "cancelled";
-
-          return (
-            <div
-              key={item.id}
-              className="flex items-center gap-2 rounded border border-border/60 bg-background/80 px-2.5 py-1.5 text-[11px]"
-              data-testid={`download-row-${item.id}`}
-            >
-              <div className="shrink-0">
-                {isCompleted && !isMissing ? (
-                  <CheckCircle2 className="size-3.5 text-emerald-500" />
-                ) : isMissing ? (
-                  <AlertCircle className="size-3.5 text-amber-500" />
-                ) : isFailed ? (
-                  <XCircle className="size-3.5 text-destructive" />
-                ) : isCancelled ? (
-                  <XCircle className="size-3.5 text-muted-foreground" />
-                ) : isPaused ? (
-                  <Pause className="size-3.5 text-muted-foreground" />
-                ) : (
-                  <RotateCw className="size-3.5 text-primary animate-spin" />
-                )}
-              </div>
-
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1.5">
-                  <span className="font-medium truncate max-w-[220px]" title={item.filePath || item.url}>
-                    {name}
-                  </span>
-                  {isMissing ? (
-                    <span className="rounded bg-amber-500/10 px-1 py-0.2 text-[10px] text-amber-600 dark:text-amber-400">
-                      Deleted on disk
-                    </span>
-                  ) : isFailed ? (
-                    <span
-                      className="rounded bg-destructive/10 px-1 py-0.2 text-[10px] text-destructive"
-                      data-testid={`download-failure-${item.id}`}
-                      data-failure={item.failure ?? undefined}
-                    >
-                      {downloadFailureLabel(item.failure, item.error)}
-                    </span>
-                  ) : isCancelled ? (
-                    <span className="rounded bg-muted px-1 py-0.2 text-[10px] text-muted-foreground">
-                      Cancelled
-                    </span>
-                  ) : isPaused ? (
-                    <span className="rounded bg-muted px-1 py-0.2 text-[10px] text-muted-foreground">
-                      Paused
-                    </span>
-                  ) : null}
-                </div>
-
-                {isInProgress ? (
-                  <div className="mt-1 flex items-center gap-2">
-                    <div className="h-1 flex-1 rounded-full bg-secondary overflow-hidden">
-                      <div
-                        className="h-full bg-primary transition-all duration-200"
-                        style={{ width: `${percent ?? 100}%` }}
-                      />
-                    </div>
-                    <span className="shrink-0 text-[10px] text-muted-foreground">
-                      {percent !== null ? `${percent}%` : formatBytes(item.receivedBytes)}
-                    </span>
-                  </div>
-                ) : null}
-
-                {actionErrors[item.id] ? (
-                  <div className="text-[10px] text-destructive mt-0.5">
-                    {actionErrors[item.id]}
-                  </div>
-                ) : null}
-              </div>
-
-              <div className="flex items-center gap-1 shrink-0">
-                {isInProgress && item.canPause ? (
-                  <button
-                    type="button"
-                    aria-label={isPaused ? "Resume download" : "Pause download"}
-                    onClick={() => void handlePause(item.id, !isPaused)}
-                    className="rounded border border-border p-1 hover:bg-accent text-muted-foreground hover:text-foreground"
-                  >
-                    {isPaused ? <Play className="size-3" /> : <Pause className="size-3" />}
-                  </button>
-                ) : null}
-
-                {isInProgress && canCancel ? (
-                  <button
-                    type="button"
-                    onClick={() => void handleCancel(item.id)}
-                    className="rounded border border-border px-1.5 py-0.5 text-[10px] hover:bg-destructive/10 hover:text-destructive"
-                  >
-                    Cancel
-                  </button>
-                ) : null}
-
-                {isCompleted && !isMissing ? (
-                  <button
-                    type="button"
-                    onClick={() => void handleOpen(item)}
-                    className="flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[10px] hover:bg-accent"
-                  >
-                    <ExternalLink className="size-3" />
-                    Open
-                  </button>
-                ) : null}
-
-                {isCompleted && !isMissing ? (
-                  <button
-                    type="button"
-                    onClick={() => void handleReveal(item)}
-                    aria-label="Reveal in folder"
-                    className="rounded border border-border p-1 hover:bg-accent text-muted-foreground hover:text-foreground"
-                  >
-                    <Folder className="size-3" />
-                  </button>
-                ) : null}
-
-                <button
-                  type="button"
-                  aria-label="Dismiss download"
-                  onClick={() => handleDismiss(item.id)}
-                  className="rounded p-1 hover:bg-accent text-muted-foreground hover:text-foreground"
-                >
-                  <X className="size-3" />
-                </button>
-              </div>
-            </div>
-          );
-        })}
+        {visibleDownloads.map((item) => (
+          <BrowserDownloadRow
+            key={item.id}
+            record={item}
+            missing={missingFileIds.has(item.id)}
+            actionError={actionErrors[item.id]}
+            onCancel={(id) => void handleCancel(id)}
+            onPause={(id, pause) => void handlePause(id, pause)}
+            onOpen={(record) => void handleOpen(record)}
+            onReveal={(record) => void handleReveal(record)}
+            onDismiss={handleDismiss}
+          />
+        ))}
       </div>
     </div>
   );

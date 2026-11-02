@@ -1,13 +1,16 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BrowserLibraryPanel } from "./BrowserLibraryPanel";
+import type { DownloadRecord } from "../lib/browserTauri";
 
 const calls = vi.hoisted(() => [] as Array<{ command: string; args: Record<string, unknown> }>);
 const data = vi.hoisted(() => ({
   history: [] as unknown[],
   tree: { version: 1, folders: [] as unknown[], bookmarks: [] as unknown[] },
+  downloads: [] as unknown[],
 }));
+const eventListeners = vi.hoisted(() => new Map<string, (event: { payload: unknown }) => void>());
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async (command: string, args: Record<string, unknown> = {}) => {
@@ -15,13 +18,23 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (command === "cmd_browser_history_list") return data.history;
     if (command === "cmd_browser_bookmarks_get") return { tree: data.tree, recovery: null };
     if (command.startsWith("cmd_browser_bookmark")) return { tree: data.tree, recovery: null };
+    if (command === "cmd_browser_download_list") return data.downloads;
+    if (command === "cmd_browser_download_pause" || command === "cmd_browser_download_cancel") return true;
     return undefined;
   }),
 }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => undefined) }));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (event: string, listener: (event: { payload: unknown }) => void) => {
+    eventListeners.set(event, listener);
+    return () => {
+      if (eventListeners.get(event) === listener) eventListeners.delete(event);
+    };
+  }),
+}));
 
 beforeEach(() => {
   calls.length = 0;
+  data.downloads = [];
   data.history = [{ url: "https://a.example/", title: "A page", visitCount: 2, lastVisitedAt: 5_000, frecency: 200 }];
   data.tree = {
     version: 1,
@@ -74,5 +87,67 @@ describe("BrowserLibraryPanel bookmarks", () => {
     await waitFor(() => expect(calls).toContainEqual({ command: "cmd_browser_bookmark_move", args: { id: "b1", parentId: "f1", index: null } }));
     fireEvent.click(screen.getByRole("button", { name: "Delete Docs" }));
     await waitFor(() => expect(calls).toContainEqual({ command: "cmd_browser_bookmark_delete", args: { id: "b1" } }));
+  });
+});
+
+describe("BrowserLibraryPanel downloads", () => {
+  const download = (overrides: Partial<DownloadRecord>): DownloadRecord => ({
+    id: "wv-1",
+    url: "https://files.example/setup.exe",
+    filePath: "/Users/test/Downloads/setup.exe",
+    status: "inProgress",
+    totalBytes: 100,
+    receivedBytes: 25,
+    createdAtMs: 1,
+    updatedAtMs: 1,
+    ...overrides,
+  });
+
+  it("lists downloads with only the controls each one supports", async () => {
+    data.downloads = [
+      download({ id: "wv-1", canPause: true, canCancel: true }),
+      download({ id: "wv-2", url: "https://files.example/linux.tar", filePath: "", canPause: false, canCancel: true, createdAtMs: 2 }),
+      download({ id: "wv-3", url: "https://files.example/fixed.bin", filePath: "", canPause: false, canCancel: false, createdAtMs: 3 }),
+    ];
+    render(<BrowserLibraryPanel view="downloads" {...props} />);
+    expect(screen.getByRole("tab", { name: "downloads" })).toHaveAttribute("aria-selected", "true");
+
+    const pausable = await screen.findByTestId("download-row-wv-1");
+    expect(within(pausable).getByRole("button", { name: "Pause download" })).toBeInTheDocument();
+    expect(within(pausable).getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+
+    const cancelOnly = screen.getByTestId("download-row-wv-2");
+    expect(within(cancelOnly).queryByRole("button", { name: /download$/ })).not.toBeInTheDocument();
+    expect(within(cancelOnly).getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+
+    const uncontrolled = screen.getByTestId("download-row-wv-3");
+    expect(within(uncontrolled).queryByRole("button", { name: /download$/ })).not.toBeInTheDocument();
+    expect(within(uncontrolled).queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+  });
+
+  it("follows download updates and routes Pause, Resume and Cancel to the engine", async () => {
+    data.downloads = [download({ canPause: true, canCancel: true })];
+    render(<BrowserLibraryPanel view="downloads" {...props} />);
+    const row = await screen.findByTestId("download-row-wv-1");
+
+    fireEvent.click(within(row).getByRole("button", { name: "Pause download" }));
+    await waitFor(() => expect(calls).toContainEqual({ command: "cmd_browser_download_pause", args: { downloadId: "wv-1", pause: true } }));
+
+    const update = eventListeners.get("browser_download_updated");
+    expect(update).toBeDefined();
+    await act(async () => update?.({ payload: download({ status: "paused", canPause: true, canCancel: true, updatedAtMs: 2 }) }));
+    expect(within(row).getByText("Paused")).toBeInTheDocument();
+    fireEvent.click(within(row).getByRole("button", { name: "Resume download" }));
+    await waitFor(() => expect(calls).toContainEqual({ command: "cmd_browser_download_pause", args: { downloadId: "wv-1", pause: false } }));
+
+    fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(calls).toContainEqual({ command: "cmd_browser_download_cancel", args: { downloadId: "wv-1" } }));
+  });
+
+  it("switches to the downloads tab", () => {
+    const onViewChange = vi.fn();
+    render(<BrowserLibraryPanel view="history" {...props} onViewChange={onViewChange} />);
+    fireEvent.click(screen.getByRole("tab", { name: "downloads" }));
+    expect(onViewChange).toHaveBeenCalledWith("downloads");
   });
 });

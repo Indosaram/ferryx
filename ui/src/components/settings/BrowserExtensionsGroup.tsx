@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertCircle, ExternalLink, Loader2, Puzzle, RefreshCw, Settings2, Store } from "lucide-react";
+import { AlertCircle, ExternalLink, Loader2, Pin, PinOff, Puzzle, RefreshCw, Settings2, Store, Trash2 } from "lucide-react";
 
 import {
   CHROME_WEB_STORE_URL,
@@ -7,6 +7,9 @@ import {
   listBrowserExtensions,
   openBrowserExtensionPage,
   openBrowserUrlInNewTab,
+  removeBrowserExtension,
+  setBrowserExtensionEnabled,
+  setBrowserExtensionPinned,
   type BrowserExtensionListing,
   type BrowserExtensionPage,
   type InstalledExtension,
@@ -19,17 +22,26 @@ import {
 } from "../../lib/browserSettings";
 import { extractBrowserErrorCode } from "../../lib/browserTauri";
 import { isStructuredIpcError } from "../../lib/tauri";
-import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { IconButton } from "../ui/IconButton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
+import { Switch } from "../ui/switch";
 import { SettingRow, SettingsGroup } from "./primitives";
 
-const MANAGE_TOOLTIP = "Enable, disable or remove in Chrome's extension page";
+type ExtensionChange = { kind: "enabled"; enabled: boolean } | { kind: "pinned"; pinned: boolean } | { kind: "remove" };
 
 function failureMessage(failure: unknown): string {
   if (isStructuredIpcError(failure) && failure.message.trim()) return failure.message.trim();
   return "Extensions could not be loaded";
+}
+
+function changeFailure(failure: unknown): { message: string; reason: string | null } {
+  if (isStructuredIpcError(failure)) {
+    const reason = typeof failure.details?.reason === "string" ? failure.details.reason : null;
+    if (reason === "cancelled") return { message: "Removal was cancelled", reason };
+    return { message: failure.message.trim() || failure.code, reason };
+  }
+  return { message: extractBrowserErrorCode(failure), reason: null };
 }
 
 function focusEngineInstall(): void {
@@ -41,77 +53,159 @@ function focusEngineInstall(): void {
 
 function ExtensionRow({
   extension,
+  busy,
+  error,
   onOpen,
+  onChange,
 }: {
   extension: InstalledExtension;
+  busy: boolean;
+  error: { message: string; reason: string | null } | null;
   onOpen: (page: BrowserExtensionPage) => void;
+  onChange: (change: ExtensionChange) => void;
 }) {
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const pinned = typeof extension.pinned === "boolean" ? extension.pinned : null;
+
   return (
     <div
-      className="flex items-center justify-between gap-3 border-b border-border/40 py-3 last:border-0"
+      className="border-b border-border/40 py-3 last:border-0"
       data-testid="browser-extension-row"
       data-extension-id={extension.id}
+      data-busy={busy}
+      aria-busy={busy}
     >
-      <div className="flex min-w-0 items-center gap-3">
-        <div className="flex size-8 shrink-0 items-center justify-center rounded-md border border-border bg-muted/40">
-          {extension.iconDataUrl ? (
-            <img src={extension.iconDataUrl} alt="" className="size-5 rounded-sm" />
-          ) : (
-            <Puzzle className="size-4 text-muted-foreground" aria-hidden="true" />
-          )}
-        </div>
-        <div className="min-w-0">
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="truncate text-[13px] font-medium text-foreground" title={extension.name}>
-              {extension.name}
-            </span>
-            <span className="shrink-0 text-[11px] text-muted-foreground">{extension.version}</span>
-            <Badge
-              variant={extension.enabled ? "secondary" : "outline"}
-              className="shrink-0 text-[11px] font-medium"
-              data-testid="browser-extension-status"
-              data-enabled={extension.enabled}
-            >
-              {extension.enabled ? "Enabled" : "Disabled"}
-            </Badge>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex size-8 shrink-0 items-center justify-center rounded-md border border-border bg-muted/40">
+            {extension.iconDataUrl ? (
+              <img src={extension.iconDataUrl} alt="" className="size-5 rounded-sm" />
+            ) : (
+              <Puzzle className="size-4 text-muted-foreground" aria-hidden="true" />
+            )}
           </div>
-          {extension.description ? (
-            <p className="truncate text-[11px] text-muted-foreground" title={extension.description}>
-              {extension.description}
-            </p>
+          <div className="min-w-0">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="truncate text-[13px] font-medium text-foreground" title={extension.name}>
+                {extension.name}
+              </span>
+              <span className="shrink-0 text-[11px] text-muted-foreground">{extension.version}</span>
+              {busy ? <Loader2 className="size-3 shrink-0 animate-spin text-muted-foreground" aria-hidden="true" /> : null}
+            </div>
+            {extension.description ? (
+              <p className="truncate text-[11px] text-muted-foreground" title={extension.description}>
+                {extension.description}
+              </p>
+            ) : null}
+            <div className="mt-0.5 flex items-center gap-2 text-[11px]">
+              {extension.optionsUrl ? (
+                <button
+                  type="button"
+                  className="text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                  onClick={() => onOpen({ kind: "options", id: extension.id })}
+                  data-testid="browser-extension-options"
+                >
+                  Options
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                onClick={() => onOpen({ kind: "details", id: extension.id })}
+                data-testid="browser-extension-manage"
+              >
+                Details
+              </button>
+            </div>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {pinned !== null ? (
+            <IconButton
+              label={pinned ? `Unpin ${extension.name} from the toolbar` : `Pin ${extension.name} to the toolbar`}
+              size="sm"
+              disabled={busy}
+              aria-pressed={pinned}
+              onClick={() => onChange({ kind: "pinned", pinned: !pinned })}
+              data-testid="browser-extension-pin"
+              data-pinned={pinned}
+            >
+              {pinned ? <PinOff className="size-3.5" aria-hidden="true" /> : <Pin className="size-3.5" aria-hidden="true" />}
+            </IconButton>
           ) : null}
+          {extension.removable ? (
+            <IconButton
+              label={`Remove ${extension.name}`}
+              size="sm"
+              disabled={busy}
+              onClick={() => setConfirmingRemove(true)}
+              data-testid="browser-extension-remove"
+            >
+              <Trash2 className="size-3.5" aria-hidden="true" />
+            </IconButton>
+          ) : null}
+          <Switch
+            aria-label={`Enable ${extension.name}`}
+            checked={extension.enabled}
+            disabled={busy}
+            onCheckedChange={(enabled) => onChange({ kind: "enabled", enabled })}
+            data-testid="browser-extension-enabled"
+            data-enabled={extension.enabled}
+          />
         </div>
       </div>
-      <div className="flex shrink-0 items-center gap-2">
-        {extension.optionsUrl ? (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-7 px-2 text-[11px]"
-            onClick={() => onOpen({ kind: "options", id: extension.id })}
-            data-testid="browser-extension-options"
-          >
-            Options
-          </Button>
-        ) : null}
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="h-7 px-2 text-[11px]"
-          title={MANAGE_TOOLTIP}
-          onClick={() => onOpen({ kind: "details", id: extension.id })}
-          data-testid="browser-extension-manage"
+
+      {confirmingRemove ? (
+        <div
+          className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-muted/40 px-3 py-2"
+          data-testid="browser-extension-remove-confirm"
         >
-          Manage
-        </Button>
-      </div>
+          <p className="min-w-0 text-[12px] text-foreground">
+            Remove {extension.name}? Chrome may ask once more to confirm.
+          </p>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              className="h-7 px-2 text-[11px]"
+              onClick={() => {
+                setConfirmingRemove(false);
+                onChange({ kind: "remove" });
+              }}
+              data-testid="browser-extension-remove-confirm-yes"
+            >
+              Remove
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 px-2 text-[11px]"
+              onClick={() => setConfirmingRemove(false)}
+              data-testid="browser-extension-remove-confirm-cancel"
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {error ? (
+        <div
+          role="alert"
+          className="mt-2 text-[11px] text-destructive"
+          data-testid="browser-extension-error"
+          data-reason={error.reason ?? undefined}
+        >
+          {error.message}
+        </div>
+      ) : null}
     </div>
   );
 }
 
-/** Lists the extensions installed in a Chromium profile and opens Chrome's own pages to manage them. */
+/** Lists the extensions installed in a Chromium profile and enables, disables, pins and removes them through the engine. */
 export function BrowserExtensionsGroup() {
   const { settings } = useBrowserSettings();
   const profiles = useMemo(() => {
@@ -127,11 +221,14 @@ export function BrowserExtensionsGroup() {
   const [error, setError] = useState<string | null>(null);
   const [openError, setOpenError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
+  const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [rowErrors, setRowErrors] = useState<Record<string, { message: string; reason: string | null }>>({});
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setRowErrors({});
     void listBrowserExtensions(activeProfileId).then(
       (next) => {
         if (cancelled) return;
@@ -168,6 +265,41 @@ export function BrowserExtensionsGroup() {
     [activeProfileId],
   );
 
+  const change = useCallback(
+    (extensionId: string, next: ExtensionChange) => {
+      const profile = activeProfileId;
+      setBusyIds((ids) => new Set(ids).add(extensionId));
+      setRowErrors((errors) => {
+        const rest = { ...errors };
+        delete rest[extensionId];
+        return rest;
+      });
+      const request =
+        next.kind === "enabled"
+          ? setBrowserExtensionEnabled(extensionId, next.enabled, profile)
+          : next.kind === "pinned"
+            ? setBrowserExtensionPinned(extensionId, next.pinned, profile)
+            : removeBrowserExtension(extensionId, profile);
+      void request
+        .then(
+          (fresh) => {
+            if (fresh.profile === profile) setListing(fresh);
+          },
+          (failure: unknown) => {
+            setRowErrors((errors) => ({ ...errors, [extensionId]: changeFailure(failure) }));
+          },
+        )
+        .finally(() => {
+          setBusyIds((ids) => {
+            const rest = new Set(ids);
+            rest.delete(extensionId);
+            return rest;
+          });
+        });
+    },
+    [activeProfileId],
+  );
+
   const ready = listing != null && listing.supported && listing.engineInstalled;
 
   const actions = ready ? (
@@ -183,17 +315,13 @@ export function BrowserExtensionsGroup() {
         <Store className="size-3.5" aria-hidden="true" />
         Open Chrome Web Store
       </Button>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        className="h-7 gap-1.5 px-2 text-[11px]"
+      <IconButton
+        label="Open Chrome's extensions page"
         onClick={() => open({ kind: "manage" })}
         data-testid="browser-extensions-manage-all"
       >
         <Settings2 className="size-3.5" aria-hidden="true" />
-        Manage all
-      </Button>
+      </IconButton>
       <IconButton
         label="Refresh extensions"
         onClick={() => setReloadToken((token) => token + 1)}
@@ -278,9 +406,16 @@ export function BrowserExtensionsGroup() {
             No extensions installed in this profile yet.
           </p>
         ) : (
-          <div>
+          <div data-testid="browser-extensions-list" data-engine-running={listing.engineRunning}>
             {listing.extensions.map((extension) => (
-              <ExtensionRow key={extension.id} extension={extension} onOpen={open} />
+              <ExtensionRow
+                key={extension.id}
+                extension={extension}
+                busy={busyIds.has(extension.id)}
+                error={rowErrors[extension.id] ?? null}
+                onOpen={open}
+                onChange={(next) => change(extension.id, next)}
+              />
             ))}
           </div>
         )
@@ -290,12 +425,6 @@ export function BrowserExtensionsGroup() {
         <div role="alert" className="mt-2 text-[11px] text-destructive" data-testid="browser-extensions-open-error">
           {openError}
         </div>
-      ) : null}
-
-      {ready ? (
-        <p className="mt-2 text-[11px] text-muted-foreground">
-          Changes made in Chrome's extension page show here after Refresh.
-        </p>
       ) : null}
     </SettingsGroup>
   );

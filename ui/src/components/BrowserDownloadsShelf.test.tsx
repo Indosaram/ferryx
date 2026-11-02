@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -176,6 +176,54 @@ describe("BrowserDownloadsShelf lifecycle and events", () => {
       expect(screen.getByTestId("downloads-load-error")).toBeDefined();
       expect(screen.getByText("EVENT_LISTEN_FAILED")).toBeDefined();
     });
+  });
+
+  const engineRecord = (overrides: Partial<DownloadRecord>): DownloadRecord => ({
+    id: "wv-1",
+    url: "https://example.com/setup.exe",
+    filePath: "/Users/test/Downloads/setup.exe",
+    status: "inProgress",
+    totalBytes: 100,
+    receivedBytes: 40,
+    createdAtMs: 1,
+    updatedAtMs: 1,
+    ...overrides,
+  });
+
+  const showRecord = async (record: DownloadRecord) => {
+    render(<BrowserDownloadsShelf />);
+    await waitFor(() => expect(updateListener).not.toBeNull());
+    await act(async () => updateListener?.(record));
+    return screen.findByTestId(`download-row-${record.id}`);
+  };
+
+  it.each([
+    { label: "pausable running", record: { status: "inProgress", canPause: true, canCancel: true }, pause: "Pause download", cancel: true },
+    { label: "paused", record: { status: "paused", canPause: true, canCancel: true }, pause: "Resume download", cancel: true },
+    { label: "cancel-only", record: { status: "inProgress", canPause: false, canCancel: true }, pause: null, cancel: true },
+    { label: "uncontrolled", record: { status: "inProgress", canPause: false, canCancel: false }, pause: null, cancel: false },
+    { label: "legacy without flags", record: { status: "inProgress" }, pause: null, cancel: true },
+    { label: "completed", record: { status: "completed", canPause: true, canCancel: true }, pause: null, cancel: false },
+  ] as const)("renders only the controls a $label download supports", async ({ record, pause, cancel }) => {
+    const row = await showRecord(engineRecord(record));
+    const pauseButtons = within(row).queryAllByRole("button", { name: /^(Pause|Resume) download$/ });
+    expect(pauseButtons.map((button) => button.getAttribute("aria-label"))).toEqual(pause ? [pause] : []);
+    expect(within(row).queryByRole("button", { name: "Cancel" }) !== null).toBe(cancel);
+  });
+
+  it("pauses, resumes and cancels through the download commands", async () => {
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => (cmd === "cmd_browser_download_list" ? [] : true));
+    const row = await showRecord(engineRecord({ canPause: true, canCancel: true }));
+
+    fireEvent.click(within(row).getByRole("button", { name: "Pause download" }));
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_browser_download_pause", { downloadId: "wv-1", pause: true });
+
+    await act(async () => updateListener?.(engineRecord({ status: "paused", canPause: true, canCancel: true, updatedAtMs: 2 })));
+    fireEvent.click(within(row).getByRole("button", { name: "Resume download" }));
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_browser_download_pause", { downloadId: "wv-1", pause: false });
+
+    fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_browser_download_cancel", { downloadId: "wv-1" });
   });
 
   it("keeps a newer download event over an older list response and drops out-of-order list reads", async () => {
