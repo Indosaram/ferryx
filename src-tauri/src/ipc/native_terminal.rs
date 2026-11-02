@@ -1104,7 +1104,6 @@ fn install_pty_resize_dispatcher(
 /// state through this sequence, attach replays only the tail instead of the full ring.
 #[tauri::command]
 pub async fn cmd_native_terminal_attach<R: Runtime>(
-    app: AppHandle<R>,
     window: tauri::Window<R>,
     session_id: String,
     bounds: Option<NativeTerminalLogicalRect>,
@@ -1113,6 +1112,7 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
     attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
     remaining_ms: Option<u64>,
 ) -> Result<NativeTerminalAttachReceipt, IpcError> {
+    let app = window.app_handle().clone();
     let daemon_client = app.state::<Arc<DaemonClient>>();
     let state = app.state::<NativeTerminalSurfaceHostState>();
     let receipt_state = state.inner().clone();
@@ -1282,10 +1282,10 @@ async fn native_terminal_attach<R: Runtime>(
     });
     if result.is_err() && is_new_reservation {
         let active = state.session_attach_tuple(&session_id);
-        if active == initial_attach_tuple || active.is_none() {
-            if state.close_session_fenced(&session_id, active.as_ref()) {
-                crate::window_registry::release_owner(&rollback_app, &session_id);
-            }
+        if (active == initial_attach_tuple || active.is_none())
+            && state.close_session_fenced(&session_id, active.as_ref())
+        {
+            crate::window_registry::release_owner(&rollback_app, &session_id);
         }
     }
     result
@@ -3972,7 +3972,6 @@ mod tests {
             .build()
             .unwrap();
         let error = cmd_native_terminal_attach(
-            app.handle().clone(),
             window.as_ref().window(),
             "no-gpu-session".into(), None, None, None, None, None,
         )
@@ -4054,7 +4053,6 @@ mod tests {
             .build()
             .unwrap();
         let error = cmd_native_terminal_attach(
-            app.handle().clone(),
             window.as_ref().window(),
             "no-surface-session".into(), None, None, None, None, None,
         )
@@ -4338,7 +4336,6 @@ mod tests {
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(120),
                 cmd_native_terminal_attach(
-                    app.handle().clone(),
                     attach_window.as_ref().window(),
                     "qa-existing-session".into(), None, None, None, Some(tuple), None,
                 ),
@@ -4447,7 +4444,6 @@ mod tests {
 
         let action = async {
             let res = cmd_native_terminal_attach(
-                app.handle().clone(),
                 attach_window.as_ref().window(),
                 session_id.into(),
                 None,
