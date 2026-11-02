@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 #[cfg(feature = "native-terminal")]
-use tauri::{AppHandle, Manager, Runtime, State};
+use tauri::{AppHandle, Runtime, State};
 #[cfg(feature = "native-terminal")]
 use tokio::sync::oneshot;
 
@@ -184,6 +184,8 @@ async fn push_terminal_appearance(
 /// update arrives, so the backing would keep the previous appearance's color.
 #[cfg(all(feature = "native-terminal", target_os = "macos"))]
 fn refresh_window_background<R: Runtime>(app: &AppHandle<R>) -> Result<(), IpcError> {
+    use tauri::Manager;
+
     let windows: Vec<tauri::Window<R>> = app
         .windows()
         .into_iter()
