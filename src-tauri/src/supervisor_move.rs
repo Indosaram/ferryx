@@ -293,17 +293,73 @@ pub async fn pull_from_holder() {
     }
     let (Some(holder), Some(recorded)) = (ack.holder_machine_id, ack.checkpoint_id) else { return };
     let store = cp::CheckpointStore::new(dir);
-    if store.find(&recorded).is_some() {
-        return;
+    let stored = if store.find(&recorded).is_some() {
+        recorded
+    } else {
+        let peer = PairedMovePeer { hosts: &hosts };
+        match cp::MovePeer::fetch(&peer, &holder).await {
+            Ok((id, bytes)) => match cp::save_blocking(&store, &id, bytes, crate::hub_runtime::unix_now()).await {
+                Ok(saved) => {
+                    cp::shared().set_local(Some(saved));
+                    id
+                }
+                Err(error) => {
+                    tracing::warn!(code = %error.code, "pulled supervisor checkpoint not stored: {}", error.message);
+                    return;
+                }
+            },
+            Err(error) => {
+                tracing::debug!(code = %error.code, "supervisor checkpoint not pulled: {}", error.message);
+                return;
+            }
+        }
+    };
+    learn_holder_identity(&store, &stored).await;
+}
+
+/// The supervisor id of the holder, from the newest holder checkpoint this standby stored;
+/// `None` until one was read.
+static HOLDER_SUPERVISOR_ID: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// The holder's supervisor id as this standby last learned it from the holder's checkpoint;
+/// before any pull since this daemon started, the one the newest pulled checkpoint stored here
+/// names. `None` when no holder checkpoint was read.
+pub(crate) async fn known_holder_supervisor_id() -> Option<String> {
+    if let Some(known) = HOLDER_SUPERVISOR_ID.read().unwrap_or_else(|e| e.into_inner()).clone() {
+        return Some(known);
     }
-    let peer = PairedMovePeer { hosts: &hosts };
-    match cp::MovePeer::fetch(&peer, &holder).await {
-        Ok((id, bytes)) => match cp::save_blocking(&store, &id, bytes, crate::hub_runtime::unix_now()).await {
-            Ok(saved) => cp::shared().set_local(Some(saved)),
-            Err(error) => tracing::warn!(code = %error.code, "pulled supervisor checkpoint not stored: {}", error.message),
-        },
-        Err(error) => tracing::debug!(code = %error.code, "supervisor checkpoint not pulled: {}", error.message),
-    }
+    let dir = cp::checkpoint_dir()?;
+    tokio::task::spawn_blocking(move || {
+        let store = cp::CheckpointStore::new(dir);
+        let newest = store.newest().filter(|entry| entry.pulled)?;
+        ferryx_hub::adoption::checkpoint_supervisor_id(&store.path_of(&newest.id)).ok().flatten()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Reads the supervisor id stored checkpoint `id` names (the holder's identity), records it
+/// and archives this hub when it holds another identity (plan todo 13). A checkpoint without
+/// an identity, or one that cannot be read, leaves the holder's identity unknown: nothing is
+/// archived.
+async fn learn_holder_identity(store: &cp::CheckpointStore, id: &str) {
+    let path = store.path_of(id);
+    let read = tokio::task::spawn_blocking(move || ferryx_hub::adoption::checkpoint_supervisor_id(&path)).await;
+    let supervisor_id = match read {
+        Ok(Ok(Some(supervisor_id))) => supervisor_id,
+        Ok(Ok(None)) => return,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "the holder's supervisor id could not be read from its checkpoint");
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "the holder checkpoint read task failed");
+            return;
+        }
+    };
+    *HOLDER_SUPERVISOR_ID.write().unwrap_or_else(|e| e.into_inner()) = Some(supervisor_id.clone());
+    crate::hub_runtime::archive_for_holder(&supervisor_id).await;
 }
 
 #[cfg(test)]

@@ -1,10 +1,13 @@
 //! First-rollout identity adoption (plan todo 13): one surviving supervisor per account.
 //!
 //! The first machine that acquires the supervisor lease keeps its identity. Every other hub,
-//! once it learns it is Standby for another machine, archives its database once as
-//! `hub.sqlite.pre-lease-<ts>` ([`archive_before_replace`]); the archive is never written or
-//! deleted. Its open goals (not completed or cancelled) are listed as adoptable
-//! ([`adoptable_goals`]) until the owner adopts them: [`adopt_archived`] sends each one's
+//! once it learns it is Standby for a holder with a different supervisor id (the id the
+//! holder's checkpoint manifest names, [`checkpoint_supervisor_id`]), archives its database
+//! once as `hub.sqlite.pre-lease-<ts>` ([`archive_for_holder`]). A hub of the holder's own
+//! identity (a former holder that moved away) is never archived, and while the holder's
+//! identity is unknown nothing is archived yet. The archive is never written or deleted. Its
+//! open goals (not completed or cancelled) of an identity other than the holder's are listed
+//! as adoptable ([`adoptable_goals`]) until the owner adopts them: [`adopt_archived`] sends each one's
 //! original request text, contract and project identity to the holder as a
 //! `supervisor.request` `submit` whose `requestId` is `archived:<supervisor_id>:<goal_id>`.
 //! The holder admits it idempotently by that source id, so a re-adopt returns the same goal.
@@ -12,7 +15,7 @@
 //! merged and nothing is adopted without an owner action.
 use std::fs;
 use std::future::Future;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -49,13 +52,15 @@ pub enum AdoptionError {
     Sql(#[from] sqlx::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Checkpoint(#[from] crate::checkpoint::CheckpointError),
 }
 
 impl AdoptionError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::NoArchive | Self::NotFound(_) => "NOT_FOUND",
-            Self::Io(_) | Self::Sql(_) | Self::Json(_) => "STORAGE",
+            Self::Io(_) | Self::Sql(_) | Self::Json(_) | Self::Checkpoint(_) => "STORAGE",
         }
     }
 }
@@ -188,6 +193,87 @@ pub fn archive_before_replace(hub_dir: &Path, now: i64) -> io::Result<Option<Pat
     }
     fs::rename(&partial, &archive)?;
     Ok(Some(archive))
+}
+
+/// The supervisor id a checkpoint archive's manifest names (the identity of the hub that
+/// exported it); `None` for a checkpoint without one. Blocking.
+pub fn checkpoint_supervisor_id(archive: &Path) -> Result<Option<String>, AdoptionError> {
+    use crate::checkpoint::{
+        visit_archive, CheckpointManifest, ARCHIVE_MANIFEST, CHECKPOINT_MAX_ARCHIVE_BYTES,
+    };
+    let bytes = fs::read(archive)?;
+    let mut manifest: Option<Vec<u8>> = None;
+    visit_archive(&bytes, CHECKPOINT_MAX_ARCHIVE_BYTES, |name, entry| {
+        if name == ARCHIVE_MANIFEST {
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data)?;
+            manifest = Some(data);
+        }
+        Ok(())
+    })?;
+    let Some(manifest) = manifest else {
+        return Ok(None);
+    };
+    let manifest: CheckpointManifest = serde_json::from_slice(&manifest)?;
+    Ok(manifest.supervisor_id)
+}
+
+/// Every supervisor id of the hub database at `db` (empty without the table). Read-only.
+async fn local_supervisor_ids(db: &Path) -> Result<Vec<String>, AdoptionError> {
+    let options = SqliteConnectOptions::new()
+        .filename(db)
+        .read_only(true)
+        .create_if_missing(false);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?;
+    let ids = async {
+        let tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'supervisor_identity'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        if tables == 0 {
+            return Ok::<_, sqlx::Error>(Vec::new());
+        }
+        sqlx::query_scalar::<_, String>("SELECT supervisor_id FROM supervisor_identity")
+            .fetch_all(&pool)
+            .await
+    }
+    .await;
+    pool.close().await;
+    Ok(ids?)
+}
+
+/// The standby archive (plan todo 13): archives this hub once ([`archive_before_replace`])
+/// only when the holder's supervisor id is known and this hub holds a supervisor identity
+/// other than the holder's. An unknown holder identity (`None`) defers: nothing is written
+/// and a later call decides. A hub of the holder's own identity (a former holder that moved
+/// away) is never archived, so goals the holder already has never become adoptable
+/// duplicates. Returns the archive written now.
+pub async fn archive_for_holder(
+    hub_dir: &Path,
+    holder_supervisor_id: Option<&str>,
+    now: i64,
+) -> Result<Option<PathBuf>, AdoptionError> {
+    let Some(holder) = holder_supervisor_id else {
+        return Ok(None);
+    };
+    let live = hub_dir.join(LIVE_DB);
+    if !tokio::fs::try_exists(&live).await? {
+        return Ok(None);
+    }
+    let local = local_supervisor_ids(&live).await?;
+    if local.is_empty() || local.iter().any(|id| id == holder) {
+        return Ok(None);
+    }
+    let dir = hub_dir.to_owned();
+    Ok(
+        tokio::task::spawn_blocking(move || archive_before_replace(&dir, now))
+            .await
+            .map_err(io::Error::other)??,
+    )
 }
 
 /// One adoption recorded in [`ADOPTION_LEDGER`].
@@ -350,10 +436,13 @@ async fn open_goals(pool: &SqlitePool) -> Result<Vec<ArchivedGoal>, AdoptionErro
 }
 
 /// Open goals of the archived hub not yet recorded in the adoption ledger, as status and the
-/// standby UI list them ("Adoptable from `from_machine`"). Empty without an archive.
+/// standby UI list them ("Adoptable from `from_machine`"). Empty without an archive. Goals of
+/// the holder's own supervisor id (`holder_supervisor_id`, when known) are never listed: the
+/// holder already has them, so adopting one would duplicate it.
 pub async fn adoptable_goals(
     hub_dir: &Path,
     from_machine: &str,
+    holder_supervisor_id: Option<&str>,
 ) -> Result<Vec<AdoptableGoal>, AdoptionError> {
     let goals = match archived_goals(hub_dir).await {
         Ok(goals) => goals,
@@ -363,6 +452,7 @@ pub async fn adoptable_goals(
     let ledger = read_ledger(hub_dir)?;
     Ok(goals
         .into_iter()
+        .filter(|goal| Some(goal.supervisor_id.as_str()) != holder_supervisor_id)
         .filter(|goal| {
             let source = goal.source_id();
             !ledger.adopted.iter().any(|held| held.source_id == source)

@@ -358,9 +358,12 @@ Slack socket:
    supervisor identity, goals and memory.
 3. Upgrade every other daemon of the account before relying on the lease.
 
-Every other machine whose hub ran its own supervisor before the lease archives it the first
-time it becomes standby for another machine. It copies its database (and `-wal`) to
-`hub.sqlite.pre-lease-<ts>` once and never writes or deletes that copy. A move onto a machine
+Every other machine whose hub ran its own supervisor before the lease archives it once it is
+standby for a holder with a different supervisor id. The standby learns that id from the
+holder's checkpoint it pulls; until it has one, nothing is archived. It copies its database
+(and `-wal`) to `hub.sqlite.pre-lease-<ts>` once and never writes or deletes that copy. A
+former holder that moved away keeps the holder's own identity, so it is never archived and
+lists nothing as adoptable. A move onto a machine
 that still holds a different supervisor archives it the same way only with the owner's
 `--replace-local` (see "Moving the supervisor"); without it the move is refused. An archived
 hub counts as fresh for a later move into this machine.
