@@ -13,7 +13,7 @@
 //! env opt-in is the least invasive gate while the feature is QA'd. `cmd_window_new` itself is not
 //! gated: the UI decides whether to offer it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
@@ -450,6 +450,10 @@ pub struct WindowSessionsAdoptPayload {
     /// Workspace the tab came from, so a window showing another project can switch to it first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
+    /// Native attach generation each session last had, so the target can attach with a newer
+    /// generation than the source's now-detached binding (older ones are rejected as stale).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attempt_generations: BTreeMap<String, u64>,
 }
 
 /// What [`PendingWindowAdoptions::deliver`] decided for a request.
@@ -585,6 +589,7 @@ pub fn apply_move<R: Runtime>(
     target_label: &str,
     plan: MovePlan,
     workspace_id: Option<String>,
+    attempt_generations: BTreeMap<String, u64>,
 ) -> Result<WindowMoveOutcome, IpcError> {
     if !is_app_window_label(target_label) || app.get_window(target_label).is_none() {
         return Err(IpcError::new(
@@ -599,6 +604,7 @@ pub fn apply_move<R: Runtime>(
         backend_session_ids: plan.movable.clone(),
         activate: true,
         workspace_id,
+        attempt_generations,
     };
     let queued = match pending.deliver(target_label, payload) {
         AdoptionDelivery::Queued => true,
@@ -646,7 +652,16 @@ pub async fn cmd_window_move_sessions<R: Runtime>(
         Some(label) => label,
         None => create_app_window(&app, None).await?,
     };
-    apply_move(&app, &registry, &pending, &target, plan, workspace_id)
+    let attempt_generations: BTreeMap<String, u64> = app
+        .try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>()
+        .map(|host| {
+            plan.movable
+                .iter()
+                .filter_map(|id| host.session_attempt_generation(id).map(|generation| (id.clone(), generation)))
+                .collect()
+        })
+        .unwrap_or_default();
+    apply_move(&app, &registry, &pending, &target, plan, workspace_id, attempt_generations)
 }
 
 /// Adoption requests queued for the calling window while it booted. A window calls this once its
@@ -817,6 +832,7 @@ mod tests {
             backend_session_ids: ids.iter().map(|id| id.to_string()).collect(),
             activate: true,
             workspace_id: None,
+            attempt_generations: BTreeMap::new(),
         }
     }
 
@@ -933,6 +949,7 @@ mod tests {
             "ws-test",
             plan,
             Some("w1".into()),
+            BTreeMap::from([("s1".to_string(), 4)]),
         )
         .unwrap();
 
@@ -950,7 +967,12 @@ mod tests {
             serde_json::from_str(&ws_events.try_recv().expect("target is told to adopt")).unwrap();
         assert_eq!(
             payload,
-            serde_json::json!({ "backendSessionIds": ["s1"], "activate": true, "workspaceId": "w1" })
+            serde_json::json!({
+                "backendSessionIds": ["s1"],
+                "activate": true,
+                "workspaceId": "w1",
+                "attemptGenerations": { "s1": 4 },
+            })
         );
         assert!(main_events.try_recv().is_err(), "the source window is not a target");
     }
@@ -965,7 +987,8 @@ mod tests {
 
         let plan = plan_move(&registry, "main", Some("ws-test"), &["s1".to_string()]).unwrap();
         let outcome =
-            apply_move(app.handle(), &registry, &pending, "ws-test", plan, None).unwrap();
+            apply_move(app.handle(), &registry, &pending, "ws-test", plan, None, BTreeMap::new())
+                .unwrap();
 
         assert!(outcome.queued);
         assert_eq!(registry.owner("s1").as_deref(), Some("ws-test"));
@@ -984,7 +1007,10 @@ mod tests {
             movable: vec!["s1".into()],
             skipped: vec![],
         };
-        assert!(apply_move(app.handle(), &registry, &pending, "ws-gone", plan, None).is_err());
+        assert!(
+            apply_move(app.handle(), &registry, &pending, "ws-gone", plan, None, BTreeMap::new())
+                .is_err()
+        );
         assert_eq!(registry.owner("s1").as_deref(), Some("main"));
         assert!(pending.take("ws-gone").is_empty());
     }
