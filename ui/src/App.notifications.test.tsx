@@ -111,6 +111,9 @@ const { noteObservationInteraction } = await import("./lib/notificationCenter/ac
 
 vi.mock("./lib/tauri", () => ({
   listExternalWorktrees: vi.fn(async () => []),
+  discardWindowSession: vi.fn(async () => undefined),
+  onWindowSessionsOrphaned: vi.fn(async () => () => undefined),
+  openNewWindow: vi.fn(async () => undefined),
   listenDagRunUpdated: vi.fn(() => Promise.resolve(() => undefined)),
   listenDagWatchStatus: vi.fn(async () => () => undefined),
   // The notification coordinator re-consults the authoritative OS permission status before it

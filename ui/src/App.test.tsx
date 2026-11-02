@@ -189,6 +189,9 @@ const workspace = {
 
 vi.mock("./lib/tauri", () => ({
   listExternalWorktrees: vi.fn(async () => []),
+  discardWindowSession: vi.fn(async () => undefined),
+  onWindowSessionsOrphaned: vi.fn(async () => () => undefined),
+  openNewWindow: vi.fn(async () => undefined),
   DEFAULT_WORKSPACE_ID: "default",
   DEFAULT_TERMINAL_FONT_STACK: "monospace",
   listenDagRunUpdated: vi.fn(() => Promise.resolve(() => undefined)),

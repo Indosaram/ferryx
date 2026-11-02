@@ -1613,6 +1613,40 @@ export async function clearSession(): Promise<void> {
   return invokeCommand<void>('cmd_session_clear');
 }
 
+/**
+ * Deletes a closed secondary window's session file once its sessions were adopted elsewhere.
+ * Session save/load/clear above are already window-scoped: Tauri injects the calling window.
+ */
+export async function discardWindowSession(label: string): Promise<void> {
+  if (!isTauri()) return;
+  return invokeCommand<void>('cmd_session_discard_window', { label });
+}
+
+/** Opens a new empty desktop window (label `ws-<id>`). */
+export async function openNewWindow(): Promise<void> {
+  if (!isTauri()) return;
+  return invokeCommand<void>('cmd_window_new');
+}
+
+export const WINDOW_SESSIONS_ORPHANED_EVENT = 'window_sessions_orphaned';
+
+export type WindowSessionsOrphanedPayload = { fromLabel: string; sessionIds: string[] };
+
+/** A closed secondary window left live backend sessions for this window to adopt. */
+export async function onWindowSessionsOrphaned(
+  listener: (payload: WindowSessionsOrphanedPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<unknown>(WINDOW_SESSIONS_ORPHANED_EVENT, (event) => {
+    const payload = event.payload as Partial<WindowSessionsOrphanedPayload> | null;
+    if (!payload || typeof payload.fromLabel !== 'string' || !Array.isArray(payload.sessionIds)) return;
+    listener({
+      fromLabel: payload.fromLabel,
+      sessionIds: payload.sessionIds.filter((id): id is string => typeof id === 'string' && id.length > 0),
+    });
+  });
+}
+
 export type RemoteTerminalTabInfo = {
   id: string;
   label: string;

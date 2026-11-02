@@ -66,4 +66,23 @@ describe("CommandPalette", () => {
     fireEvent.keyDown(window, { key: "Escape" });
     expect(onClose).toHaveBeenCalledOnce();
   });
+  it("offers New Window only when the desktop shell provides it", () => {
+    const onNewWindow = vi.fn();
+    const onClose = vi.fn();
+    const { unmount } = render(
+      <CommandPalette open worktrees={worktrees} tabs={tabs} onSelectWorktree={vi.fn()} onSelectTab={vi.fn()} onClose={vi.fn()} />,
+    );
+    expect(screen.queryByRole("button", { name: "New Window" })).not.toBeInTheDocument();
+    unmount();
+
+    render(
+      <CommandPalette open worktrees={worktrees} tabs={tabs} onSelectWorktree={vi.fn()} onSelectTab={vi.fn()} onNewWindow={onNewWindow} onClose={onClose} />,
+    );
+    fireEvent.change(screen.getByPlaceholderText("Search worktrees and terminal tabs"), { target: { value: "window" } });
+    const command = screen.getByRole("button", { name: "New Window" });
+    expect(command).toHaveAttribute("data-command-id", "window.new");
+    fireEvent.click(command);
+    expect(onNewWindow).toHaveBeenCalledOnce();
+    expect(onClose).toHaveBeenCalledOnce();
+  });
 });
