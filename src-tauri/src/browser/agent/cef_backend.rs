@@ -17,6 +17,7 @@ use parking_lot::Mutex;
 use serde_json::{json, Value};
 
 use super::{cdp, observe};
+use super::service::recheck_act;
 use crate::browser::cef_engine;
 use crate::browser::model::BrowserAutomationAction;
 use crate::browser::snapshot_source::{BrowserSnapshot, BrowserSnapshotSource, SnapshotFormat, SnapshotOptions};
@@ -98,6 +99,9 @@ pub fn forget(browser_id: &str) {
 /// Runs an element action addressed by ref. Clicks are trusted mouse input at the element's
 /// center when nothing covers it; typing focuses the element and inserts the text as trusted
 /// input; everything else (and a covered click) runs the page-side action.
+///
+/// Every page script and input event is preceded by [`recheck_act`], so an act whose
+/// controller lost its session or tab lease midway dispatches nothing further.
 pub async fn act_element(
     browser_id: &str,
     action: &BrowserAutomationAction,
@@ -109,9 +113,11 @@ pub async fn act_element(
         _ => None,
     };
     if let (Some(clicks), Some(reference)) = (clicks, observe::action_reference(action)) {
+        recheck_act(browser_id)?;
         let raw = eval_isolated(browser_id, &observe::point_script(reference, expect, true)).await?;
         if let Some((x, y)) = observe::parse_point(&raw)? {
             for event in cdp::mouse_click_events(x, y, clicks) {
+                recheck_act(browser_id)?;
                 call(browser_id, "Input.dispatchMouseEvent", event).await?;
             }
             return Ok(());
@@ -121,12 +127,15 @@ pub async fn act_element(
         let focus = BrowserAutomationAction::Focus { reference: reference.clone() };
         let script = observe::act_script(&focus, expect, true)
             .ok_or_else(|| BrowserError::AutomationFailed("focus addresses no element".into()))?;
+        recheck_act(browser_id)?;
         observe::parse_act(&eval_isolated(browser_id, &script).await?)?;
+        recheck_act(browser_id)?;
         call(browser_id, "Input.insertText", json!({ "text": text })).await?;
         return Ok(());
     }
     let script = observe::act_script(action, expect, true)
         .ok_or_else(|| BrowserError::AutomationFailed("the action addresses no element".into()))?;
+    recheck_act(browser_id)?;
     observe::parse_act(&eval_isolated(browser_id, &script).await?)
 }
 
@@ -137,11 +146,13 @@ pub async fn act(browser_id: &str, action: &BrowserAutomationAction) -> Result<b
         BrowserAutomationAction::Keypress { key } => {
             let keypress = crate::ipc::browser::parse_keypress(key)?;
             for event in cdp::key_events(&keypress) {
+                recheck_act(browser_id)?;
                 call(browser_id, "Input.dispatchKeyEvent", event).await?;
             }
             Ok(true)
         }
         BrowserAutomationAction::Type { reference: None, text } => {
+            recheck_act(browser_id)?;
             call(browser_id, "Input.insertText", json!({ "text": text })).await?;
             Ok(true)
         }
@@ -506,5 +517,32 @@ mod tests {
             eval(&silent.tab, "1").await,
             Err(BrowserError::AutomationFailed("Runtime.evaluate timed out in the Chromium engine".into()))
         );
+    }
+
+    #[tokio::test]
+    async fn a_controller_revoked_during_a_click_dispatches_no_input() {
+        use super::super::service::{admitted_act_fence_for_test, with_state_for_test, ACT_FENCE};
+        let tab = "fake-cdp-fenced-click";
+        let (controller, fence) = admitted_act_fence_for_test(tab);
+        let cdp = FakeCdp::start("fenced-click", move |method, params| {
+            world(method, 4).unwrap_or_else(|| match op_of(params) {
+                // The desktop user revokes the controller while the act resolves its point.
+                "point" => {
+                    with_state_for_test(|state| state.revoke(&controller, std::time::Instant::now()));
+                    evaluated(json!({ "ok": true, "point": { "x": 5.0, "y": 6.0 } }))
+                }
+                _ => Reply::Ok(json!({})),
+            })
+        });
+        assert_eq!(cdp.tab, tab);
+        let result = ACT_FENCE.scope(fence, act_element(&cdp.tab, &click("d1.1"), SAVE)).await;
+        match result {
+            Err(BrowserError::Authority(error)) => {
+                assert_eq!(error.code(), super::super::BROWSER_CONTROLLER_REVOKED);
+            }
+            other => panic!("expected an authority refusal, got {other:?}"),
+        }
+        assert_eq!(cdp.expressions().len(), 1, "only the point script ran");
+        assert!(!cdp.methods().iter().any(|method| method.starts_with("Input.")));
     }
 }

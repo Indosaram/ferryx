@@ -34,6 +34,11 @@ pub const PAIRING_COMMAND: &str = "ferryx browser controllers pair --name <label
 pub const PAIRING_APPROVAL_TTL: Duration = Duration::from_secs(60);
 /// Pending approval cap per controller; duplicates coalesce.
 pub const MAX_PENDING_APPROVALS_PER_CONTROLLER: usize = 16;
+/// Unresolved pairing requests across all controllers; each new controller id is a new
+/// request, so the per-controller cap alone does not bound them.
+pub const MAX_PENDING_PAIRINGS: usize = 16;
+/// A resolved or expired approval stays readable by its requester this long, then is dropped.
+pub const RESOLVED_APPROVAL_RETENTION: Duration = Duration::from_secs(60);
 /// The only webview whose IPC may act as [`Principal::DesktopUser`].
 pub const APP_CHROME_WEBVIEW_LABEL: &str = "main";
 
@@ -199,6 +204,8 @@ pub enum ApprovalKind {
     FileCapability {
         controller: ControllerId,
         tool: ToolId,
+        /// The one file the approved call may write or read.
+        path: String,
     },
     NativeCapability {
         controller: ControllerId,

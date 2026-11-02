@@ -2179,16 +2179,19 @@ where
                     let auth = extras.and_then(|extras| extras.controller_auth);
                     match crate::browser::agent::service::admit_cli(&manager, auth.as_ref(), &envelope.request).await {
                         crate::browser::agent::service::Admission::Refused(error) => error_response(error),
-                        crate::browser::agent::service::Admission::Allowed(controller) => {
+                        crate::browser::agent::service::Admission::Allowed(admitted) => {
+                            use crate::browser::agent::service as agent;
                             if matches!(envelope.request, BrowserCliRequest::RemoteAttach { .. }) {
                                 is_remote_attach = true;
                             }
-                            match execute_request(&app, &manager, envelope.request).await {
-                                BrowserCliResponse::List { sessions } => BrowserCliResponse::List {
-                                    sessions: crate::browser::agent::service::filter_sessions(controller, sessions),
-                                },
-                                other => other,
-                            }
+                            let request = agent::with_resolved_tab(envelope.request, admitted.resolved_tab);
+                            let response = match admitted.fence {
+                                Some(fence) => {
+                                    agent::ACT_FENCE.scope(fence, execute_request(&app, &manager, request)).await
+                                }
+                                None => execute_request(&app, &manager, request).await,
+                            };
+                            agent::filter_response(admitted.listing, &manager, response)
                         }
                     }
                 }

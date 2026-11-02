@@ -65,7 +65,7 @@ pub fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 /// aspect ratio and respects the shared capture limits; without bounds the native size is kept.
 pub fn target_dimensions(width: u32, height: u32, options: SnapshotOptions) -> (u32, u32) {
     let (max_width, max_height) = match (options.max_width, options.max_height) {
-        (None, None) => return (width, height),
+        (None, None) => return clamp_capture_dimensions(width, height),
         (max_width, max_height) => (
             max_width.unwrap_or(MAX_CAPTURE_EDGE).max(1),
             max_height.unwrap_or(MAX_CAPTURE_EDGE).max(1),
@@ -336,6 +336,15 @@ mod tests {
             ..SnapshotOptions::png()
         };
         assert_eq!(target_dimensions(800, 200, width_only), (400, 100));
+    }
+
+    #[test]
+    fn unbounded_target_dimensions_respect_the_shared_capture_limits() {
+        use crate::browser::snapshot_source::MAX_CAPTURE_PIXELS;
+        let (width, height) = target_dimensions(20_000, 20_000, SnapshotOptions::png());
+        assert!(width <= MAX_CAPTURE_EDGE && height <= MAX_CAPTURE_EDGE);
+        assert!(u64::from(width) * u64::from(height) <= MAX_CAPTURE_PIXELS);
+        assert!(width > 1 && height > 1);
     }
 
     #[test]

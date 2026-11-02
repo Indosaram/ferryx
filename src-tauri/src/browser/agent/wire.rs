@@ -20,6 +20,9 @@ pub enum AgentRequest {
         scopes: Vec<GrantScope>,
         #[serde(default)]
         tool: Option<String>,
+        /// The one file a file-tool capability may write or read.
+        #[serde(default)]
+        path: Option<String>,
     },
     /// Waits until the desktop user resolves an approval or it expires.
     #[serde(rename_all = "camelCase")]
@@ -68,8 +71,8 @@ pub async fn execute<R: tauri::Runtime>(
         AgentRequest::Pair { id, label, secret } => service::request_pairing(app, &id, &label, &secret)
             .await
             .map(|approval| AgentResponse::Pending { approval_id: approval.to_string() }),
-        AgentRequest::Grant { origin, scopes, tool } => match need_auth() {
-            Ok(auth) => service::request_grant(app, auth, origin.as_deref(), &scopes, tool.as_deref())
+        AgentRequest::Grant { origin, scopes, tool, path } => match need_auth() {
+            Ok(auth) => service::request_grant(app, auth, origin.as_deref(), &scopes, tool.as_deref(), path.as_deref())
                 .await
                 .map(|approval| AgentResponse::Pending { approval_id: approval.to_string() }),
             Err(error) => Err(error),
@@ -114,6 +117,20 @@ mod tests {
                 origin: Some("http://127.0.0.1:18761".into()),
                 scopes: vec![GrantScope::Read, GrantScope::Interact],
                 tool: None,
+                path: None,
+            }
+        );
+        let capability: AgentRequest = serde_json::from_str(
+            r#"{"op":"grant","tool":"browser.screenshot","path":"/tmp/a.png"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            capability,
+            AgentRequest::Grant {
+                origin: None,
+                scopes: Vec::new(),
+                tool: Some("browser.screenshot".into()),
+                path: Some("/tmp/a.png".into()),
             }
         );
         assert!(serde_json::from_str::<AgentRequest>(r#"{"op":"grant","scopes":["admin"]}"#).is_err());

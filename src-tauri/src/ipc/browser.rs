@@ -2501,6 +2501,7 @@ pub async fn cmd_browser_go_back<R: tauri::Runtime>(
     manager: State<'_, Arc<BrowserManager>>,
     browser_id: String,
 ) -> Result<(), IpcError> {
+    crate::browser::agent::service::desktop_touched(&browser_id);
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     if crate::browser::cef_engine::is_cef_tab(&browser_id) {
         return Ok(crate::browser::cef_engine::history(&browser_id, false)?);
@@ -2514,6 +2515,7 @@ pub async fn cmd_browser_go_forward<R: tauri::Runtime>(
     manager: State<'_, Arc<BrowserManager>>,
     browser_id: String,
 ) -> Result<(), IpcError> {
+    crate::browser::agent::service::desktop_touched(&browser_id);
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     if crate::browser::cef_engine::is_cef_tab(&browser_id) {
         return Ok(crate::browser::cef_engine::history(&browser_id, true)?);
@@ -2674,6 +2676,7 @@ pub async fn cmd_browser_reload<R: tauri::Runtime>(
     browser_id: String,
     ignore_cache: Option<bool>,
 ) -> Result<(), IpcError> {
+    crate::browser::agent::service::desktop_touched(&browser_id);
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     if crate::browser::cef_engine::is_cef_tab(&browser_id) {
         let state = manager.begin_reload(&browser_id)?;
@@ -3126,6 +3129,7 @@ pub async fn cmd_browser_handle_dialog<R: tauri::Runtime>(
     manager: State<'_, Arc<BrowserManager>>,
     request: BrowserDialogHandleRequest,
 ) -> Result<BrowserDialogEntry, IpcError> {
+    crate::browser::agent::service::desktop_touched(&request.browser_id);
     browser_handle_dialog(&app, manager.inner(), request).await
 }
 
@@ -3233,6 +3237,7 @@ pub async fn cmd_browser_set_dialog_policy<R: tauri::Runtime>(
     manager: State<'_, Arc<BrowserManager>>,
     request: BrowserDialogPolicyRequest,
 ) -> Result<(), IpcError> {
+    crate::browser::agent::service::desktop_touched(&request.browser_id);
     browser_set_dialog_policy(&app, manager.inner(), &request.browser_id, &request.policy).await
 }
 #[tauri::command]
@@ -3303,6 +3308,7 @@ pub async fn cmd_browser_automation_act<R: tauri::Runtime>(
     manager: State<'_, Arc<BrowserManager>>,
     request: BrowserAutomationRequest,
 ) -> Result<crate::browser::model::BrowserActOutcome, IpcError> {
+    crate::browser::agent::service::desktop_touched(&request.browser_id);
     browser_automation_act(app, manager.inner(), request).await
 }
 
@@ -3397,6 +3403,7 @@ async fn dispatch_untargeted_act<R: tauri::Runtime>(
     if engine_tab {
         if !crate::browser::agent::page::trusted_act(&request.browser_id, &request.action).await? {
             let script = automation_script(&request.action)?;
+            crate::browser::agent::service::recheck_act(&request.browser_id)?;
             crate::browser::agent::page::eval(app, manager, &request.browser_id, script).await?;
         }
         return Ok(());
@@ -3409,12 +3416,14 @@ async fn dispatch_untargeted_act<R: tauri::Runtime>(
     #[cfg(target_os = "macos")]
     if let BrowserAutomationAction::Keypress { key } = &request.action {
         let keypress = parse_keypress(key)?;
+        crate::browser::agent::service::recheck_act(&request.browser_id)?;
         if dispatch_macos_keypress(&webview, &keypress).await? {
             return Ok(());
         }
     }
 
     let script = automation_script(&request.action)?;
+    crate::browser::agent::service::recheck_act(&request.browser_id)?;
     let _ = eval_webview(webview, script).await?;
     Ok(())
 }
@@ -5467,6 +5476,7 @@ pub async fn cmd_browser_highlight<R: tauri::Runtime>(
     browser_id: String,
     selector: String,
 ) -> Result<crate::browser::picker::BrowserHighlightResult, IpcError> {
+    crate::browser::agent::service::desktop_touched(&browser_id);
     highlight_browser_session(&app, manager.inner(), &browser_id, &selector).await
 }
 
@@ -7534,4 +7544,96 @@ mod popup_handle_tests {
         crate::browser::popup::clear_all();
     }
 
+}
+
+#[cfg(test)]
+mod desktop_reclaim_tests {
+    use super::*;
+    use crate::browser::agent::service::{lease_tab_for_test, tab_lease_epoch_for_test};
+
+    fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        app.manage(Arc::new(BrowserManager::new()));
+        app
+    }
+
+    /// Leases `browser_id` to an agent, so a later refusal proves the desktop reclaimed it.
+    fn leased(browser_id: &str) -> String {
+        assert!(
+            lease_tab_for_test(browser_id).expect("agent takes the lease").is_some(),
+            "the agent holds the tab before the desktop command"
+        );
+        browser_id.to_string()
+    }
+
+    fn assert_reclaimed(browser_id: &str) {
+        assert_eq!(
+            tab_lease_epoch_for_test(browser_id),
+            None,
+            "{browser_id}: the desktop command must end the agent lease"
+        );
+        assert!(
+            lease_tab_for_test(browser_id).is_err(),
+            "{browser_id}: the reclaimed tab stays off-limits to agents until resumed"
+        );
+    }
+
+    #[tokio::test]
+    async fn desktop_history_and_reload_commands_reclaim_an_agent_leased_tab() {
+        let app = mock_app();
+        let handle = app.handle();
+
+        let back = leased("desktop-reclaim-back");
+        let _ = cmd_browser_go_back(handle.clone(), app.state(), back.clone()).await;
+        assert_reclaimed(&back);
+
+        let forward = leased("desktop-reclaim-forward");
+        let _ = cmd_browser_go_forward(handle.clone(), app.state(), forward.clone()).await;
+        assert_reclaimed(&forward);
+
+        let reload = leased("desktop-reclaim-reload");
+        let _ = cmd_browser_reload(handle.clone(), app.state(), reload.clone(), None).await;
+        assert_reclaimed(&reload);
+    }
+
+    #[tokio::test]
+    async fn desktop_page_commands_reclaim_an_agent_leased_tab() {
+        let app = mock_app();
+        let handle = app.handle();
+
+        let highlight = leased("desktop-reclaim-highlight");
+        let selector = String::from("#x");
+        let _ =
+            cmd_browser_highlight(handle.clone(), app.state(), highlight.clone(), selector).await;
+        assert_reclaimed(&highlight);
+
+        let dialog = leased("desktop-reclaim-dialog");
+        let request = BrowserDialogHandleRequest {
+            browser_id: dialog.clone(),
+            action: "accept".into(),
+            prompt_text: None,
+        };
+        let _ = cmd_browser_handle_dialog(handle.clone(), app.state(), request).await;
+        assert_reclaimed(&dialog);
+
+        let policy = leased("desktop-reclaim-dialog-policy");
+        let request = BrowserDialogPolicyRequest {
+            browser_id: policy.clone(),
+            policy: "accept".into(),
+        };
+        let _ = cmd_browser_set_dialog_policy(handle.clone(), app.state(), request).await;
+        assert_reclaimed(&policy);
+
+        let act = leased("desktop-reclaim-act");
+        let request = BrowserAutomationRequest {
+            browser_id: act.clone(),
+            generation: 0,
+            action: BrowserAutomationAction::Click { reference: "e1".into() },
+            postcondition: None,
+        };
+        let _ = cmd_browser_automation_act(handle.clone(), app.state(), request).await;
+        assert_reclaimed(&act);
+    }
 }

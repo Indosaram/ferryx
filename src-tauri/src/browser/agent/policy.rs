@@ -53,6 +53,8 @@ pub struct Classification {
     pub target: Target,
     /// Destination URL for navigations/opens; needs a target-origin grant.
     pub destination: Option<String>,
+    /// File a file-scope tool writes or reads; its one-shot capability is bound to it.
+    pub file_path: Option<String>,
     pub asserted: AssertedIdentity,
 }
 
@@ -62,12 +64,18 @@ impl Classification {
             tool,
             target,
             destination: None,
+            file_path: None,
             asserted: AssertedIdentity::default(),
         }
     }
 
     fn with_destination(mut self, url: Option<&str>) -> Self {
         self.destination = url.map(str::to_string);
+        self
+    }
+
+    fn with_file_path(mut self, path: Option<&str>) -> Self {
+        self.file_path = path.map(str::to_string);
         self
     }
 
@@ -98,8 +106,8 @@ pub enum Obligation {
     TabLease,
     /// Remote device holds the global driver lease (existing broker semantics).
     DriverLease,
-    /// One-shot file capability approved in app chrome.
-    FileCapability,
+    /// One-shot file capability approved in app chrome for exactly this path.
+    FileCapability { path: Option<String> },
     /// Advertised native capability approved in app chrome.
     NativeCapability,
     /// Results are limited to tabs this controller is granted or owns.
@@ -215,9 +223,11 @@ pub fn classify_cli(request: &BrowserCliRequest) -> Result<Classification, Autho
             ToolId::TabActivate,
             tab_target(browser_id.as_deref(), *index),
         ),
-        R::Screenshot { browser_id, .. } => {
-            Classification::new(ToolId::Screenshot, browser(browser_id))
-        }
+        R::Screenshot {
+            browser_id,
+            out_path,
+        } => Classification::new(ToolId::Screenshot, browser(browser_id))
+            .with_file_path(Some(out_path.as_str())),
         R::Cookies {
             browser_id, action, ..
         } => {
@@ -238,12 +248,16 @@ pub fn classify_cli(request: &BrowserCliRequest) -> Result<Classification, Autho
             };
             Classification::new(tool, browser(browser_id))
         }
-        R::StateSave { browser_id, .. } => {
-            Classification::new(ToolId::StateExport, browser(browser_id))
-        }
-        R::StateLoad { browser_id, .. } => {
-            Classification::new(ToolId::StateImport, browser(browser_id))
-        }
+        R::StateSave {
+            browser_id,
+            out_path,
+        } => Classification::new(ToolId::StateExport, browser(browser_id))
+            .with_file_path(Some(out_path.as_str())),
+        R::StateLoad {
+            browser_id,
+            in_path,
+        } => Classification::new(ToolId::StateImport, browser(browser_id))
+            .with_file_path(Some(in_path.as_str())),
         R::Dialog {
             browser_id, action, ..
         } => {
@@ -260,13 +274,14 @@ pub fn classify_cli(request: &BrowserCliRequest) -> Result<Classification, Autho
             url,
             id,
             action,
-            ..
+            path,
         } => match action.as_str() {
             "start" => Classification::new(
                 ToolId::DownloadStart,
                 tab_target(browser_id.as_deref(), None),
             )
-            .with_destination(url.as_deref()),
+            .with_destination(url.as_deref())
+            .with_file_path(path.as_deref()),
             "list" => Classification::new(ToolId::DownloadList, Target::Global),
             "cancel" => Classification::new(
                 ToolId::DownloadCancel,
@@ -495,7 +510,9 @@ pub fn authorize(
                 obligations.push(Obligation::TabLease);
             }
             match spec.scope {
-                Scope::File => obligations.push(Obligation::FileCapability),
+                Scope::File => obligations.push(Obligation::FileCapability {
+                    path: classification.file_path.clone(),
+                }),
                 Scope::Native => obligations.push(Obligation::NativeCapability),
                 Scope::Read | Scope::Interact | Scope::Eval => {}
             }
@@ -1343,7 +1360,20 @@ mod tests {
         let obligations = authorize_cli(&caller, &state, &ctx)
             .expect("state")
             .obligations;
-        assert!(obligations.contains(&Obligation::FileCapability));
+        assert!(obligations.contains(&Obligation::FileCapability {
+            path: Some("s".into())
+        }));
+
+        let close = BrowserCliRequest::Close {
+            browser_id: "b1".into(),
+        };
+        let obligations = authorize_cli(&caller, &close, &ctx)
+            .expect("close")
+            .obligations;
+        assert!(obligations.contains(&Obligation::OriginGrant {
+            scope: GrantScope::Interact
+        }));
+        assert!(obligations.contains(&Obligation::TabLease));
 
         let navigate = BrowserCliRequest::Navigate {
             browser_id: "b1".into(),

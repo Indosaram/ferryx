@@ -17,7 +17,8 @@ use super::policy::{Authorization, Obligation};
 use super::protocol::{
     ApprovalId, ApprovalKind, ApprovalResolution, AuthorityError, ControllerDirectory,
     ControllerId, ControllerStanding, Principal, SessionEpoch,
-    MAX_PENDING_APPROVALS_PER_CONTROLLER, PAIRING_APPROVAL_TTL,
+    MAX_PENDING_APPROVALS_PER_CONTROLLER, MAX_PENDING_PAIRINGS, PAIRING_APPROVAL_TTL,
+    RESOLVED_APPROVAL_RETENTION,
 };
 
 /// A local tab lease lasts this long without a renewing action.
@@ -79,8 +80,20 @@ struct ControllerRecord {
 #[serde(rename_all = "camelCase")]
 pub struct OriginGrantEntry {
     pub origin: Origin,
+    /// Every scope the controller holds on the origin (this session's and the kept ones).
     pub scopes: Vec<GrantScope>,
+    /// Whether any scope on the origin survives a restart.
     pub persistent: bool,
+    /// The scopes that survive a restart.
+    #[serde(default)]
+    pub persistent_scopes: Vec<GrantScope>,
+}
+
+/// Scopes held on one origin: approved once (this GUI session only) and approved to persist.
+#[derive(Debug, Clone, Default)]
+struct OriginScopes {
+    session: HashSet<GrantScope>,
+    persistent: HashSet<GrantScope>,
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +103,9 @@ struct Pending {
     digest: Option<[u8; 32]>,
     expires: Instant,
     resolution: Option<ApprovalResolution>,
+    /// When the request was resolved, expired or denied by a revocation; it is dropped
+    /// [`RESOLVED_APPROVAL_RETENTION`] later.
+    settled_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,8 +153,9 @@ pub struct TabFacts<'a> {
 #[derive(Debug, Default)]
 pub struct AuthorityState {
     controllers: HashMap<ControllerId, ControllerRecord>,
-    grants: HashMap<ControllerId, HashMap<Origin, (HashSet<GrantScope>, bool)>>,
-    one_shot: HashMap<ControllerId, HashSet<ToolId>>,
+    grants: HashMap<ControllerId, HashMap<Origin, OriginScopes>>,
+    /// One-shot capabilities: the tool and, for file tools, the exact path it may use.
+    one_shot: HashMap<ControllerId, HashSet<(ToolId, Option<String>)>>,
     pending: HashMap<ApprovalId, Pending>,
     leases: HashMap<String, Lease>,
     /// Tabs the desktop user took back; an agent cannot lease them until the user resumes.
@@ -170,7 +187,10 @@ impl AuthorityState {
                 .grants
                 .entry(id)
                 .or_default()
-                .insert(entry.origin, (entry.scopes.into_iter().collect(), true));
+                .entry(entry.origin)
+                .or_default()
+                .persistent
+                .extend(entry.scopes);
         }
         state
     }
@@ -183,8 +203,19 @@ impl AuthorityState {
             .grants
             .iter()
             .flat_map(|(id, origins)| {
-                origins.iter().filter(|(_, (_, persistent))| *persistent).map(move |(origin, (scopes, _))| {
-                    (id.to_string(), OriginGrantEntry { origin: origin.clone(), scopes: sorted(scopes), persistent: true })
+                // Only the scopes approved to persist are written; approve-once scopes end
+                // with this GUI session even when the same origin also holds kept ones.
+                origins.iter().filter(|(_, scopes)| !scopes.persistent.is_empty()).map(move |(origin, scopes)| {
+                    let kept = sorted(&scopes.persistent);
+                    (
+                        id.to_string(),
+                        OriginGrantEntry {
+                            origin: origin.clone(),
+                            scopes: kept.clone(),
+                            persistent: true,
+                            persistent_scopes: kept,
+                        },
+                    )
                 })
             })
             .collect();
@@ -196,8 +227,12 @@ impl AuthorityState {
         for pending in self.pending.values_mut() {
             if pending.resolution.is_none() && now >= pending.expires {
                 pending.resolution = Some(ApprovalResolution::Expired);
+                pending.settled_at = Some(pending.expires);
             }
         }
+        self.pending.retain(|_, pending| {
+            pending.settled_at.is_none_or(|at| now.saturating_duration_since(at) < RESOLVED_APPROVAL_RETENTION)
+        });
         self.leases.retain(|_, lease| now < lease.expires);
     }
 
@@ -229,9 +264,26 @@ impl AuthorityState {
                 reason: "too many approval requests are waiting for this controller",
             });
         }
+        if matches!(kind, ApprovalKind::PairController { .. })
+            && self
+                .pending
+                .values()
+                .filter(|pending| {
+                    pending.resolution.is_none() && matches!(pending.kind, ApprovalKind::PairController { .. })
+                })
+                .count()
+                >= MAX_PENDING_PAIRINGS
+        {
+            return Err(AuthorityError::Forbidden {
+                tool: None,
+                reason: "too many pairing requests are waiting for the desktop user",
+            });
+        }
         let id = ApprovalId::generate();
-        self.pending
-            .insert(id, Pending { kind, digest, expires: now + PAIRING_APPROVAL_TTL, resolution: None });
+        self.pending.insert(
+            id,
+            Pending { kind, digest, expires: now + PAIRING_APPROVAL_TTL, resolution: None, settled_at: None },
+        );
         Ok(id)
     }
 
@@ -277,14 +329,22 @@ impl AuthorityState {
     }
 
     /// Opens a one-shot file or native capability request (screenshot, state export, focus).
+    /// A file capability is bound to the one `path` the approved call may use.
     pub fn request_capability(
         &mut self,
         controller: ControllerId,
         tool: ToolId,
+        path: Option<&str>,
         now: Instant,
     ) -> Result<ApprovalId, AuthorityError> {
         let kind = match tool.spec().scope {
-            super::catalog::Scope::File => ApprovalKind::FileCapability { controller, tool },
+            super::catalog::Scope::File => {
+                let path = path.map(str::trim).filter(|path| !path.is_empty()).ok_or(AuthorityError::Forbidden {
+                    tool: Some(tool),
+                    reason: "a file capability names the one path it may use (--path)",
+                })?;
+                ApprovalKind::FileCapability { controller, tool, path: path.to_string() }
+            }
             super::catalog::Scope::Native => ApprovalKind::NativeCapability { controller, tool },
             _ => {
                 return Err(AuthorityError::Forbidden {
@@ -311,6 +371,7 @@ impl AuthorityState {
             return Err(not_open);
         }
         pending.resolution = Some(resolution);
+        pending.settled_at = Some(now);
         let (kind, secret_digest) = (pending.kind.clone(), pending.digest);
         if resolution == ApprovalResolution::Deny {
             return Ok(kind);
@@ -335,12 +396,18 @@ impl AuthorityState {
                     .entry(*controller)
                     .or_default()
                     .entry(Origin(origin.clone()))
-                    .or_insert_with(|| (HashSet::new(), persistent));
-                entry.0.extend(scopes.iter().copied());
-                entry.1 |= persistent;
+                    .or_default();
+                if persistent {
+                    entry.persistent.extend(scopes.iter().copied());
+                } else {
+                    entry.session.extend(scopes.iter().copied());
+                }
             }
-            ApprovalKind::FileCapability { controller, tool } | ApprovalKind::NativeCapability { controller, tool } => {
-                self.one_shot.entry(*controller).or_default().insert(*tool);
+            ApprovalKind::FileCapability { controller, tool, path } => {
+                self.one_shot.entry(*controller).or_default().insert((*tool, Some(path.clone())));
+            }
+            ApprovalKind::NativeCapability { controller, tool } => {
+                self.one_shot.entry(*controller).or_default().insert((*tool, None));
             }
         }
         Ok(kind)
@@ -388,7 +455,7 @@ impl AuthorityState {
 
     /// Revokes a controller: its credential, sessions, leases, grants, one-shot capabilities
     /// and pending approvals end at once.
-    pub fn revoke(&mut self, controller: &ControllerId) -> bool {
+    pub fn revoke(&mut self, controller: &ControllerId, now: Instant) -> bool {
         let Some(record) = self.controllers.get_mut(controller) else {
             return false;
         };
@@ -400,6 +467,7 @@ impl AuthorityState {
         for pending in self.pending.values_mut() {
             if pending.resolution.is_none() && approval_controller(&pending.kind) == controller {
                 pending.resolution = Some(ApprovalResolution::Deny);
+                pending.settled_at = Some(now);
             }
         }
         true
@@ -416,7 +484,7 @@ impl AuthorityState {
         self.grants
             .get(controller)
             .and_then(|origins| origins.get(&origin))
-            .is_some_and(|(scopes, _)| scopes.contains(&scope))
+            .is_some_and(|scopes| scopes.session.contains(&scope) || scopes.persistent.contains(&scope))
     }
 
     pub fn controllers(&self) -> Vec<ControllerSummary> {
@@ -433,10 +501,11 @@ impl AuthorityState {
                     .map(|origins| {
                         let mut entries: Vec<_> = origins
                             .iter()
-                            .map(|(origin, (scopes, persistent))| OriginGrantEntry {
+                            .map(|(origin, scopes)| OriginGrantEntry {
                                 origin: origin.clone(),
-                                scopes: sorted(scopes),
-                                persistent: *persistent,
+                                scopes: sorted(&scopes.session.union(&scopes.persistent).copied().collect::<HashSet<_>>()),
+                                persistent: !scopes.persistent.is_empty(),
+                                persistent_scopes: sorted(&scopes.persistent),
                             })
                             .collect();
                         entries.sort_by(|a, b| a.origin.cmp(&b.origin));
@@ -497,6 +566,14 @@ impl AuthorityState {
         self.leases.get(browser_id).map(|lease| lease.epoch)
     }
 
+    /// The controller and epoch of the unexpired lease on a tab, if any.
+    pub fn lease_holder(&self, browser_id: &str, now: Instant) -> Option<(ControllerId, u64)> {
+        self.leases
+            .get(browser_id)
+            .filter(|lease| now < lease.expires)
+            .map(|lease| (lease.controller, lease.epoch))
+    }
+
     /// Enforces the obligations of an allowed request for a local controller. Desktop and
     /// remote principals are enforced by their own paths (implicit reclaim, driver broker).
     pub fn enforce(
@@ -545,8 +622,19 @@ impl AuthorityState {
                     let tab = tab.ok_or_else(|| missing("this request needs a target tab"))?;
                     self.take_lease(*id, tab.browser_id, now)?;
                 }
-                Obligation::FileCapability | Obligation::NativeCapability => {
-                    let granted = self.one_shot.get_mut(id).is_some_and(|tools| tools.remove(&tool));
+                Obligation::FileCapability { path } => {
+                    let path = path.as_ref().ok_or_else(|| missing("this file tool needs a path"))?;
+                    let key = (tool, Some(path.clone()));
+                    let granted = self.one_shot.get_mut(id).is_some_and(|tools| tools.remove(&key));
+                    if !granted {
+                        return Err(missing(
+                            "this tool needs a one-time approval from the desktop user for this exact path",
+                        ));
+                    }
+                }
+                Obligation::NativeCapability => {
+                    let granted =
+                        self.one_shot.get_mut(id).is_some_and(|tools| tools.remove(&(tool, None::<String>)));
                     if !granted {
                         return Err(missing("this tool needs a one-time approval from the desktop user"));
                     }
@@ -566,6 +654,17 @@ impl AuthorityState {
         is_blank(url)
             || self.has_grant(controller, url, GrantScope::Read)
             || self.leases.get(browser_id).is_some_and(|lease| lease.controller == *controller)
+    }
+
+    /// Test seam: takes a tab lease the way an enforced agent act does.
+    #[cfg(test)]
+    pub(crate) fn lease_for_test(
+        &mut self,
+        controller: ControllerId,
+        browser_id: &str,
+        now: Instant,
+    ) -> Result<(), AuthorityError> {
+        self.take_lease(controller, browser_id, now)
     }
 }
 
@@ -723,7 +822,7 @@ mod tests {
         act(&mut state, &principal, "http://127.0.0.1:18761/", now).unwrap();
         assert!(state.lease_epoch("b1").is_some());
         let waiting = state.request_origin_grant(id, "https://b.test", &[GrantScope::Read], now).unwrap();
-        assert!(state.revoke(&id));
+        assert!(state.revoke(&id, now));
         assert_eq!(state.lease_epoch("b1"), None);
         assert_eq!(state.resolution(waiting, now), Some(ApprovalResolution::Deny));
         assert_eq!(
@@ -770,11 +869,137 @@ mod tests {
         };
         let tab = Some(TabFacts { browser_id: "b1", url: ORIGIN });
         assert!(state.enforce(&principal, &authorization, tab, now).is_err());
-        let approval = state.request_capability(id, ToolId::Screenshot, now).unwrap();
+        let approval = state.request_capability(id, ToolId::Screenshot, Some("/tmp/x.png"), now).unwrap();
         state.resolve(approval, ApprovalResolution::ApproveOnce, now).unwrap();
         state.enforce(&principal, &authorization, tab, now).unwrap();
         assert!(state.enforce(&principal, &authorization, tab, now).is_err());
-        assert!(state.request_capability(id, ToolId::Act, now).is_err());
+        assert!(state.request_capability(id, ToolId::Act, None, now).is_err());
+        assert!(state.request_capability(id, ToolId::Screenshot, None, now).is_err());
+    }
+
+    #[test]
+    fn a_file_capability_is_bound_to_the_approved_path() {
+        let now = Instant::now();
+        let mut state = AuthorityState::default();
+        let (id, principal) = paired(&mut state, now);
+        grant(&mut state, id, &[GrantScope::Read], now);
+        let tab = Some(TabFacts { browser_id: "b1", url: ORIGIN });
+        let shot = |path: &str| BrowserCliRequest::Screenshot { browser_id: "b1".into(), out_path: path.into() };
+        let authorize = |state: &AuthorityState, request: &BrowserCliRequest| {
+            let ctx = PolicyContext { controllers: state, platform: Platform::MacOs };
+            authorize_cli(&Caller::Principal(principal.clone()), request, &ctx).unwrap()
+        };
+        let approval = state.request_capability(id, ToolId::Screenshot, Some("/tmp/a.png"), now).unwrap();
+        state.resolve(approval, ApprovalResolution::ApproveOnce, now).unwrap();
+
+        let other = authorize(&state, &shot("/tmp/b.png"));
+        assert_eq!(state.enforce(&principal, &other, tab, now).unwrap_err().code(), BROWSER_FORBIDDEN);
+        let approved = authorize(&state, &shot("/tmp/a.png"));
+        state.enforce(&principal, &approved, tab, now).unwrap();
+        assert!(state.enforce(&principal, &approved, tab, now).is_err(), "consumed once");
+
+        // A file obligation without a path never consumes a capability.
+        let approval = state.request_capability(id, ToolId::Screenshot, Some("/tmp/a.png"), now).unwrap();
+        state.resolve(approval, ApprovalResolution::ApproveOnce, now).unwrap();
+        let pathless = Authorization {
+            principal: None,
+            tool: ToolId::Screenshot,
+            obligations: vec![Obligation::FileCapability { path: None }],
+        };
+        assert!(state.enforce(&principal, &pathless, tab, now).is_err());
+        state.enforce(&principal, &approved, tab, now).unwrap();
+    }
+
+    #[test]
+    fn settled_approvals_are_dropped_after_the_retention() {
+        let now = Instant::now();
+        let mut state = AuthorityState::default();
+        let (id, _) = paired(&mut state, now);
+        let approval = state.request_origin_grant(id, ORIGIN, &[GrantScope::Read], now).unwrap();
+        state.resolve(approval, ApprovalResolution::Deny, now).unwrap();
+        let before = now + RESOLVED_APPROVAL_RETENTION - Duration::from_millis(1);
+        assert_eq!(state.resolution(approval, before), Some(ApprovalResolution::Deny));
+        assert_eq!(state.resolution(approval, now + RESOLVED_APPROVAL_RETENTION), None);
+
+        // An expired request is kept for the retention after its expiry, then dropped.
+        let waiting = state.request_origin_grant(id, ORIGIN, &[GrantScope::Interact], now).unwrap();
+        let expired = now + PAIRING_APPROVAL_TTL;
+        assert_eq!(state.resolution(waiting, expired), Some(ApprovalResolution::Expired));
+        assert_eq!(state.resolution(waiting, expired + RESOLVED_APPROVAL_RETENTION), None);
+
+        // A request a revocation denied, likewise.
+        let denied = state.request_origin_grant(id, "https://b.test", &[GrantScope::Read], now).unwrap();
+        state.revoke(&id, now);
+        assert_eq!(state.resolution(denied, before), Some(ApprovalResolution::Deny));
+        assert_eq!(state.resolution(denied, now + RESOLVED_APPROVAL_RETENTION), None);
+    }
+
+    #[test]
+    fn unresolved_pairings_are_capped_across_controllers() {
+        let now = Instant::now();
+        let mut state = AuthorityState::default();
+        for _ in 0..MAX_PENDING_PAIRINGS {
+            state.request_pairing(ControllerId::generate(), "qa", SECRET, now).unwrap();
+        }
+        let error = state.request_pairing(ControllerId::generate(), "qa", SECRET, now).unwrap_err();
+        assert_eq!(error.code(), BROWSER_FORBIDDEN);
+        // Once they expire, pairing is possible again.
+        let later = now + PAIRING_APPROVAL_TTL;
+        state.request_pairing(ControllerId::generate(), "qa", SECRET, later).unwrap();
+    }
+
+    #[test]
+    fn approve_once_scopes_are_never_persisted_beside_kept_ones() {
+        let now = Instant::now();
+        // Once first, then persistent on the same origin.
+        let mut state = AuthorityState::default();
+        let (id, _) = paired(&mut state, now);
+        grant(&mut state, id, &[GrantScope::Read], now);
+        let keep = state.request_origin_grant(id, ORIGIN, &[GrantScope::Interact], now).unwrap();
+        state.resolve(keep, ApprovalResolution::ApprovePersistent, now).unwrap();
+        assert!(state.has_grant(&id, ORIGIN, GrantScope::Read));
+        let summary = &state.controllers()[0].grants[0];
+        assert_eq!(summary.scopes, vec![GrantScope::Read, GrantScope::Interact]);
+        assert!(summary.persistent);
+        assert_eq!(summary.persistent_scopes, vec![GrantScope::Interact]);
+        let restored = AuthorityState::from_persisted(state.to_persisted());
+        assert!(restored.has_grant(&id, ORIGIN, GrantScope::Interact));
+        assert!(!restored.has_grant(&id, ORIGIN, GrantScope::Read));
+
+        // Persistent first, then once on the same origin.
+        let mut state = AuthorityState::default();
+        let (id, _) = paired(&mut state, now);
+        let keep = state.request_origin_grant(id, ORIGIN, &[GrantScope::Interact], now).unwrap();
+        state.resolve(keep, ApprovalResolution::ApprovePersistent, now).unwrap();
+        grant(&mut state, id, &[GrantScope::Eval], now);
+        let restored = AuthorityState::from_persisted(state.to_persisted());
+        assert!(restored.has_grant(&id, ORIGIN, GrantScope::Interact));
+        assert!(!restored.has_grant(&id, ORIGIN, GrantScope::Eval));
+
+        // An origin holding only approve-once scopes is not written at all.
+        let mut state = AuthorityState::default();
+        let (id, _) = paired(&mut state, now);
+        grant(&mut state, id, &[GrantScope::Read], now);
+        assert!(state.to_persisted().grants.is_empty());
+        // Revoking the origin removes both kinds.
+        let keep = state.request_origin_grant(id, ORIGIN, &[GrantScope::Interact], now).unwrap();
+        state.resolve(keep, ApprovalResolution::ApprovePersistent, now).unwrap();
+        assert!(state.revoke_grant(&id, ORIGIN));
+        assert!(!state.has_grant(&id, ORIGIN, GrantScope::Read));
+        assert!(!state.has_grant(&id, ORIGIN, GrantScope::Interact));
+    }
+
+    #[test]
+    fn lease_holder_reports_only_an_unexpired_lease() {
+        let now = Instant::now();
+        let mut state = AuthorityState::default();
+        let (id, principal) = paired(&mut state, now);
+        grant(&mut state, id, &[GrantScope::Interact], now);
+        assert_eq!(state.lease_holder("b1", now), None);
+        act(&mut state, &principal, ORIGIN, now).unwrap();
+        let epoch = state.lease_epoch("b1").unwrap();
+        assert_eq!(state.lease_holder("b1", now), Some((id, epoch)));
+        assert_eq!(state.lease_holder("b1", now + TAB_LEASE_TTL), None);
     }
 
     #[test]

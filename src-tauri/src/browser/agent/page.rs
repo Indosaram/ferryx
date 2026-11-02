@@ -74,6 +74,7 @@ pub async fn act_element<R: tauri::Runtime>(
     }
     let script = super::observe::act_script(action, expect, false)
         .ok_or_else(|| BrowserError::AutomationFailed("the action addresses no element".into()))?;
+    super::service::recheck_act(browser_id)?;
     super::observe::parse_act(&eval(app, manager, browser_id, script).await?)
 }
 

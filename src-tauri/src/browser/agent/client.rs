@@ -103,11 +103,11 @@ pub fn take_controller_option(args: &mut Vec<String>) -> Result<Option<String>, 
 pub enum ControllersCommand {
     Pair { label: String },
     List,
-    Grant { origin: Option<String>, scopes: Vec<GrantScope>, tool: Option<String> },
+    Grant { origin: Option<String>, scopes: Vec<GrantScope>, tool: Option<String>, path: Option<String> },
     Revoke,
 }
 
-pub const CONTROLLERS_USAGE: &str = "expected `ferryx browser controllers <pair --name <label>|list|grant (--origin <url> --scopes read,interact[,eval] | --tool <browser.tool>)|revoke> [--controller <uuid>]`";
+pub const CONTROLLERS_USAGE: &str = "expected `ferryx browser controllers <pair --name <label>|list|grant (--origin <url> --scopes read,interact[,eval] | --tool <browser.tool> [--path <file>])|revoke> [--controller <uuid>]`";
 
 fn option(args: &[String], name: &str) -> Result<Option<String>, String> {
     let Some(index) = args.iter().position(|arg| arg == name) else { return Ok(None) };
@@ -129,6 +129,7 @@ pub fn parse_controllers(args: &[String]) -> Result<ControllersCommand, String> 
         Some("grant") => {
             let origin = option(args, "--origin")?;
             let tool = option(args, "--tool")?;
+            let path = option(args, "--path")?;
             let scopes = option(args, "--scopes")?
                 .map(|list| {
                     list.split(',')
@@ -141,8 +142,10 @@ pub fn parse_controllers(args: &[String]) -> Result<ControllersCommand, String> 
                 .transpose()?
                 .unwrap_or_default();
             match (&origin, &tool) {
-                (Some(_), None) if !scopes.is_empty() => Ok(ControllersCommand::Grant { origin, scopes, tool }),
-                (None, Some(_)) => Ok(ControllersCommand::Grant { origin, scopes, tool }),
+                (Some(_), None) if !scopes.is_empty() && path.is_none() => {
+                    Ok(ControllersCommand::Grant { origin, scopes, tool, path })
+                }
+                (None, Some(_)) => Ok(ControllersCommand::Grant { origin, scopes, tool, path }),
                 _ => Err(CONTROLLERS_USAGE.into()),
             }
         }
@@ -213,9 +216,14 @@ where
                 }
             }
         }
-        ControllersCommand::Grant { origin, scopes, tool } => {
+        ControllersCommand::Grant { origin, scopes, tool, path } => {
             let auth = auth()?;
-            let approval = match send(Some(auth.clone()), AgentRequest::Grant { origin, scopes, tool }).await? {
+            // The app matches the path exactly against the file command's, which this CLI
+            // anchors to its working directory, so a relative path is anchored the same way.
+            let path = path.map(|path| {
+                std::path::absolute(&path).map_or(path, |absolute| absolute.to_string_lossy().into_owned())
+            });
+            let approval = match send(Some(auth.clone()), AgentRequest::Grant { origin, scopes, tool, path }).await? {
                 AgentResponse::Pending { approval_id } => approval_id,
                 other => return Err(response_error(other)),
             };
@@ -266,8 +274,19 @@ mod tests {
                 origin: Some("http://127.0.0.1:18761".into()),
                 scopes: vec![GrantScope::Read, GrantScope::Interact],
                 tool: None,
+                path: None,
             })
         );
+        assert_eq!(
+            parse_controllers(&args(&["grant", "--tool", "browser.screenshot", "--path", "/tmp/a.png"])),
+            Ok(ControllersCommand::Grant {
+                origin: None,
+                scopes: Vec::new(),
+                tool: Some("browser.screenshot".into()),
+                path: Some("/tmp/a.png".into()),
+            })
+        );
+        assert!(parse_controllers(&args(&["grant", "--tool", "browser.screenshot", "--path"])).is_err());
         assert!(parse_controllers(&args(&["grant", "--origin", "http://a.test"])).is_err());
         assert!(parse_controllers(&args(&["grant", "--origin", "http://a.test", "--scopes", "admin"])).is_err());
         assert!(parse_controllers(&args(&["pair"])).is_err());
