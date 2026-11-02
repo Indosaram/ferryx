@@ -35,7 +35,7 @@ type FakeTunnel = {
   isClosed: boolean;
   fetchLike: ReturnType<typeof vi.fn>;
   openWebSocket: ReturnType<typeof vi.fn>;
-  close: ReturnType<typeof vi.fn>;
+  close: ReturnType<typeof vi.fn<() => void>>;
 };
 
 function makeTunnel(): FakeTunnel {

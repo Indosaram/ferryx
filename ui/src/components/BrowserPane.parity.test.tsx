@@ -295,16 +295,23 @@ describe("BrowserPane parity affordances", () => {
       code: "BROWSER_DOWNLOAD_CANCELLED",
       message: "Browser download failed: download cancelled",
     });
+    // A clicked download goes straight to the download folder; the row (and its Save as) only
+    // appears when the user asked to choose where to save.
+    saveBrowserSettings({ askWhereToSave: true });
     render(<BrowserPane tab={baseTab} onNavigate={vi.fn()} onReload={vi.fn()} />);
     await waitFor(() => expect(callbackState.download).not.toBeNull());
     act(() => callbackState.download?.({ browserId: "browser-1", targetUrl: "https://example.com/files/a.zip" }));
 
     fireEvent.click(await screen.findByRole("button", { name: "Save as…" }));
 
+    // A started save leaves the row for the shelf; a cancelled one that never reached the
+    // registry comes back to the row as Cancelled with Save, not as a failure with Retry.
+    await waitFor(() => expect(screen.getByTestId("browser-download-prompt")).toHaveTextContent("Cancelled"));
     const prompt = screen.getByTestId("browser-download-prompt");
-    await waitFor(() => expect(prompt).toHaveTextContent("Cancelled"));
     expect(prompt).not.toHaveTextContent("BROWSER_DOWNLOAD_FAILED");
     expect(prompt).not.toHaveTextContent("BROWSER_DOWNLOAD_CANCELLED");
+    expect(screen.getByTestId("browser-download-status")).toHaveAttribute("data-phase", "offer");
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 
   it("surfaces a rejected open-in-system-browser as a pane alert", async () => {
