@@ -1,0 +1,47 @@
+name: fix-clippy
+on:
+  push:
+    branches: ['ci/win-triage-clippy-20261102']
+env:
+  CARGO_INCREMENTAL: '0'
+  CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+jobs:
+  clippy:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 50f1b8b8b63fd0fea7b0da252fc40ea7e6a8da80
+          submodules: recursive
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev clang libclang-dev libpipewire-0.3-dev libspa-0.2-dev libdbus-1-dev libva-dev libdrm-dev libgbm-dev libegl-dev libgl-dev libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev libx11-dev libxext-dev libxrandr-dev libxfixes-dev libxtst-dev libxi-dev libevdev-dev libudev-dev
+      - name: Windows perl
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe" >> "$GITHUB_ENV"
+      - name: UI build
+        shell: bash
+        run: |
+          bun install --frozen-lockfile || bun install
+          bun install --cwd ui --frozen-lockfile || bun install --cwd ui
+          bun run --cwd ui build
+          bun scripts/fetch-ffmpeg.mjs
+      - name: Clippy
+        timeout-minutes: 60
+        shell: bash
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --lib --tests -- -D warnings
