@@ -47,6 +47,16 @@ in `src-tauri/src/account/supervisor_lease.rs`:
 - Another machine gets a free lease (released, past `expires_at + GRACE_SECS`, or from an older
   epoch) only if it presents the last recorded checkpoint id, or the lease was released to it
   in this epoch, or it asks with `force`.
+- The row's own holder whose fence is from an older epoch (after a promotion) re-acquires
+  without the checkpoint check and gets a new fence in the current epoch. A replica restored
+  before the holder's newest checkpoint therefore cannot strand the account.
+- Startup quarantine: for `TTL_SECS + GRACE_SECS` (150 s) after a writable relay process
+  starts, it refuses with `LEASE_HELD` any acquire (including `force`) by a machine other than
+  the holder of an un-released row, in any epoch, and a query from such a machine reports the
+  lease as held. A holder may have run on renews that another relay answered and this one never
+  saw; it stands down before the quarantine ends. A grant that displaces another machine's row
+  reports `previousExpiresInSecs` as the later of the row's `expires_at + GRACE_SECS` and the
+  quarantine end, minus now.
 
 Daemons send the requests over their authenticated control channel. The relay takes the
 machine and account from the control socket's key, never from the message. Requests are
@@ -58,14 +68,16 @@ leases lists `supervisorLeaseV1` in the `capabilities` of its control challenge.
 | relay | acquire / release | renew | query |
 |-------|-------------------|-------|-------|
 | primary | decided in one write transaction | extends by `TTL_SECS` | current holder |
-| standby (`standby.readonly`) | `unavailable`, `ACCOUNT_STORE_READ_ONLY` | answered while the replicated row still names the same holder, fence and epoch and is not released | current holder |
+| standby (`standby.readonly`) | `unavailable`, `ACCOUNT_STORE_READ_ONLY` | `renewed` only while the replicated row names the same holder, fence and epoch, is not released, and `now + TTL_SECS` does not pass its `expires_at`; never extends the lease | current holder |
 | replica that predates schema v3, or no account store | `unavailable`, `LEASE_UNSUPPORTED` | same | same |
 
-On the standby the renewed expiry is kept in memory with the standby's own clock and is never
-written; it is dropped as soon as the replicated row names another holder or fence. So while
-the primary is down, the current holder keeps its lease through the standby, but no other
-machine can take it over, and nothing is released. A move or a takeover waits for the primary or
-for a promotion. A read-only store never runs the v3 migration.
+The standby never writes and never extends a lease. The primary never learns of a renew the
+standby answered, so a lease kept alive past the replicated `expires_at` could still be running
+when the primary is back and grants the lease to another machine. So while the primary is down,
+the current holder keeps the supervisor at most until the replicated `expires_at` (the last
+expiry the primary recorded, at most `TTL_SECS` after its last renew there), then stands down.
+No other machine can take the lease over and nothing is released. A move or a takeover waits for
+the primary or for a promotion. A read-only store never runs the v3 migration.
 
 In detail, a standby relay (`ferryx-relay` with `standby.readonly` in its data directory)
 answers lease requests like this (`answer_standby_lease` in `src-tauri/src/remote/relay_server.rs`):
@@ -73,24 +85,35 @@ answers lease requests like this (`answer_standby_lease` in `src-tauri/src/remot
 - `SupervisorLeaseAcquire` and `SupervisorLeaseRelease` get outcome `unavailable` with
   `reasonCode` `ACCOUNT_STORE_READ_ONLY`, without reading the store. This includes a forced
   acquire.
-- `SupervisorLeaseRenew` re-reads the replicated row on every request. It answers `renewed`,
-  with an expiry of the standby's `now + TTL_SECS`, only if the row is not released, names the
-  asking machine and the presented fence, and that fence is in the replica's current epoch.
-  Otherwise it answers `refused` with `LEASE_NOT_HOLDER`. The checkpoint id a renew carries is
-  not recorded.
-- `SupervisorLeaseQuery` reports the replicated holder. Its expiry is the later of the
-  replicated `expires_at` and the in-memory renewal.
+- `SupervisorLeaseRenew` re-reads the replicated row on every request. If the row is released,
+  names another machine or fence, or the fence is not in the replica's current epoch, it answers
+  `refused` with `LEASE_NOT_HOLDER`. Otherwise, on the standby's clock:
+  - `now + TTL_SECS <= expires_at`: `renewed`. The daemon counts a renew as valid for
+    `TTL_SECS` less its margin from when it sent it, so its deadline stays before the replicated
+    expiry.
+  - `now < expires_at`: `unavailable` with `ACCOUNT_STORE_READ_ONLY`. The holder keeps the
+    deadline of its last grant, which is before `expires_at`, and stands down when it passes.
+  - from `expires_at` on: `refused` with `LEASE_NOT_HOLDER`; the holder stands down at once.
+
+  Every ack reports the replicated expiry, never a later one. The checkpoint id a renew carries
+  is not recorded.
+- `SupervisorLeaseQuery` reports the replicated holder and expiry.
 
 What this means for daemons while only the standby relay is up:
 
+- The holder stops running the supervisor within `TTL_SECS` of its last renew on the primary,
+  even while the standby relay is up.
 - A holder's clean `ferryx hub stop` still publishes its final checkpoint, but its release is
-  not acknowledged. The holder has stopped renewing, so its lease runs out on its own (TTL plus
-  grace). No standby daemon can acquire it until the primary is back or promoted.
+  not acknowledged. Its lease runs out on its own (TTL plus grace). No standby daemon can acquire
+  it until the primary is back or promoted.
 - `ferryx hub move-here` (also with `--force`) cannot acquire the lease. A move that staged an
   import discards it, and the target keeps its own database.
 - A standby daemon does not take over automatically, because acquire is unavailable.
 - After a promotion, the epoch bump makes the old holder's fence unrenewable; the holder
   re-acquires and gets a new-epoch fence (see "Promotion and failback").
+- After failback (the primary relay restarts), the startup quarantine keeps every other machine
+  from taking the lease for `TTL_SECS + GRACE_SECS`, so the old holder has stood down before any
+  takeover.
 
 Refusal codes in `reasonCode`: `LEASE_HELD` (another machine holds a live or in-grace lease),
 `LEASE_CHECKPOINT_MISMATCH` (the lease is free but the caller's checkpoint is not the last
@@ -191,8 +214,12 @@ The epoch bump is what keeps fences safe across a promotion. The restored replic
 old primary, so it may not know the newest fence. After the bump every fence the new primary
 issues is in a higher epoch than anything the old primary issued. A lease row from the old epoch
 counts as free for acquire and cannot be renewed once it has expired, so a restored row cannot
-revive an old holder. The current holder re-acquires and gets a new-epoch fence; executing
-daemons then refuse any send stamped with an older fence.
+revive an old holder. The row's holder re-acquires without the checkpoint check, even when the
+restored row records an older checkpoint than the one it presents, and gets a new-epoch fence;
+any other machine still has to present the recorded checkpoint (or use `force`). The promoted
+relay's startup quarantine keeps every machine except the restored row's holder out for
+`TTL_SECS + GRACE_SECS` after it starts. Executing daemons refuse any send stamped with an
+older fence.
 
 Point the load balancer's pool order at the new primary, then run `demote primary` on the old
 one when it comes back, so it rejoins as the standby. Never remove a marker by hand while the
