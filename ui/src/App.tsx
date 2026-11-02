@@ -3956,7 +3956,8 @@ function WorkspaceApp({
       };
 
       openFilePreviewTab(source, request);
-    }).then((cleanup) => {
+      // Routed to the focused window (emit_to); only that window opens the file.
+    }, { target: currentWindowLabel() }).then((cleanup) => {
       if (disposed) cleanup();
       else unlisten = cleanup;
     }).catch(reportRuntimeError);

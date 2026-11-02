@@ -52,6 +52,7 @@ import {
   setNativeTerminalScrollbarOverlay,
   setNativeTerminalAttentionFrame,
 } from "../lib/tauri";
+import { currentWindowLabel } from "../lib/windowIdentity";
 import { decodeBase64 } from "../lib/terminalOutput";
 import { useNativeTerminalVisibilityState } from "../lib/nativeTerminalVisibility";
 import { classifyNativeTerminalAttachError } from "../lib/nativeTerminalAttachPolicy";
@@ -847,7 +848,8 @@ export function NativeTerminalPane({
       emitNativeTerminalPresentation(tuple);
       emitNativeObservationRef.current("presentation", { presented: true, producerComponent: "native-frontend-presentation" });
       presentNativeTerminalLifecycle(targetSessionId, tuple.bindingKey);
-    }).then((stop) => {
+      // Owner-routed (emit_to): listen on this window only, see listenToThisWindow in tauri.ts.
+    }, { target: currentWindowLabel() }).then((stop) => {
       if (disposed) stop();
       else unlisten = stop;
     }).catch((error: unknown) => {
@@ -2927,6 +2929,7 @@ export function NativeTerminalPane({
             });
             insertPathsIfInsidePane(paths ?? [], position.x, position.y);
           },
+          { target: currentWindowLabel() },
         );
 
         if (disposed) unlistenNative();
@@ -3663,7 +3666,7 @@ export function NativeTerminalPane({
           streamRecoveryPending = false;
         }
       })();
-    }).then((unlisten) => {
+    }, { target: currentWindowLabel() }).then((unlisten) => {
       if (!isSubscribed) { unlisten(); return; }
       unlistenStreamEnded = unlisten;
     }).catch((error: unknown) => {

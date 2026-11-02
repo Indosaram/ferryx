@@ -32,6 +32,7 @@ import {
   previewGitHubIssue,
   listTerminalSessions,
   onNativeTerminalScrollbar,
+  onNativeTerminalBell,
   onWindowSessionsOrphaned,
   onWindowSessionsAdopt,
   parseWindowSessionsAdopt,
@@ -171,7 +172,33 @@ describe("Tauri IPC wrapper contract", () => {
     deliver({ payload: null });
     expect(handler.mock.calls).toEqual([[{ fromLabel: "ws-abc", sessionIds: ["s-1", "s-2"] }]]);
   });
-
+  it("scopes owner-routed listeners to this window so another window's emit_to never reaches it", async () => {
+    // A plain listen() targets Any, and Tauri hands every emit_to(label) to Any listeners in all
+    // webviews: a bell routed to window 2 was also notified by main.
+    const scope = globalThis as { __TAURI_INTERNALS__?: unknown };
+    const hadInternals = "__TAURI_INTERNALS__" in scope;
+    scope.__TAURI_INTERNALS__ = {};
+    window.history.replaceState(null, "", "/?window=ws-abc");
+    try {
+      events.listen.mockReset();
+      events.listen.mockResolvedValue(vi.fn());
+      await onNativeTerminalBell(vi.fn());
+      await onWindowSessionsOrphaned(vi.fn());
+      await onWindowSessionsAdopt(vi.fn());
+      expect(events.listen.mock.calls.map((call) => [call[0], call[2]])).toEqual([
+        ["native_terminal_bell", { target: "ws-abc" }],
+        ["window_sessions_orphaned", { target: "ws-abc" }],
+        ["window_sessions_adopt", { target: "ws-abc" }],
+      ]);
+      window.history.replaceState(null, "", "/");
+      events.listen.mockClear();
+      await onNativeTerminalBell(vi.fn());
+      expect(events.listen.mock.calls[0][2]).toEqual({ target: "main" });
+    } finally {
+      window.history.replaceState(null, "", "/");
+      if (!hadInternals) delete scope.__TAURI_INTERNALS__;
+    }
+  });
   // The exact JSON the Rust test `apply_move` asserts for WindowSessionsAdoptPayload.
   const RUST_ADOPT_PAYLOAD = {
     backendSessionIds: ["s1"],

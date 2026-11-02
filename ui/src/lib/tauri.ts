@@ -5,10 +5,22 @@ import type { DeliveryReceipt, RunTarget } from "./scopedContracts";
 export const DEFAULT_TERMINAL_FONT_STACK = 'MesloLGS NF, "Noto Sans KR", monospace';
 import { defaultRemoteClient, getRemoteAuthToken, RemoteClient, type RemotePreferenceTarget } from "./remoteClient";
 import { invoke, isTauri as isTauriShell } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { listen, type EventCallback, type UnlistenFn } from "@tauri-apps/api/event";
 import { switchDebug } from "./switchDebug";
 import { shortcutContext, traceShortcutAction } from "./shortcutDiagnostics";
 import { getDurableNativeBinding } from "./nativeTerminalLifecycle";
+import { currentWindowLabel } from "./windowIdentity";
+
+/**
+ * Listens for an event the backend routes to one window with `emit_to(label)` (session-owner and
+ * focused-window events). A plain `listen()` registers with target `Any`, and Tauri delivers every
+ * `emit_to` to all `Any` listeners in every webview, so each window would act on the others'
+ * events. Scoping the listener to this window's label keeps `emit_to` targeted while a broadcast
+ * `emit` still reaches it.
+ */
+export function listenToThisWindow<T>(event: string, handler: EventCallback<T>): Promise<UnlistenFn> {
+  return listen<T>(event, handler, { target: currentWindowLabel() });
+}
 
 export type {
   AttachTerminalRequest,
@@ -890,7 +902,7 @@ export async function resizeTerminalRemote(request: { sessionId: string; generat
 
 export async function onTerminalRemoteStatus(handler: (status: import("./types").TerminalRemoteStatus) => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<import("./types").TerminalRemoteStatus>("terminal_remote_status", event => handler(event.payload));
+  return listenToThisWindow<import("./types").TerminalRemoteStatus>("terminal_remote_status", event => handler(event.payload));
 }
 
 export async function onTerminalOutput(handler: (payload: TerminalOutputPayload) => void): Promise<UnlistenFn> {
@@ -918,21 +930,21 @@ export async function onNativeTerminalTitle(
   handler: (payload: NativeTerminalTitlePayload) => void,
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<NativeTerminalTitlePayload>("native_terminal_title", (event) => handler(event.payload));
+  return listenToThisWindow<NativeTerminalTitlePayload>("native_terminal_title", (event) => handler(event.payload));
 }
 
 export async function onNativeTerminalBell(
   handler: (payload: NativeTerminalBellPayload) => void,
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<NativeTerminalBellPayload>("native_terminal_bell", (event) => handler(event.payload));
+  return listenToThisWindow<NativeTerminalBellPayload>("native_terminal_bell", (event) => handler(event.payload));
 }
 
 export async function onNativeTerminalAgentState(
   handler: (payload: NativeTerminalAgentStatePayload) => void,
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<NativeTerminalAgentStatePayload>("native_terminal_agent_state", (event) => handler(event.payload));
+  return listenToThisWindow<NativeTerminalAgentStatePayload>("native_terminal_agent_state", (event) => handler(event.payload));
 }
 
 export interface NativeTerminalInputReceiptPayload {
@@ -953,7 +965,7 @@ export async function onNativeTerminalInputReceipt(
   handler: (payload: NativeTerminalInputReceiptPayload) => void,
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<NativeTerminalInputReceiptPayload>("native_terminal_input_receipt", (event) =>
+  return listenToThisWindow<NativeTerminalInputReceiptPayload>("native_terminal_input_receipt", (event) =>
     handler(event.payload),
   );
 }
@@ -962,7 +974,7 @@ export async function onNativeTerminalScrollbar(
   handler: (payload: NativeTerminalScrollbarPayload) => void,
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<NativeTerminalScrollbarPayload>("native_terminal_scrollbar", (event) => handler(event.payload));
+  return listenToThisWindow<NativeTerminalScrollbarPayload>("native_terminal_scrollbar", (event) => handler(event.payload));
 }
 
 export async function setNativeTerminalScrollbarOverlay(
@@ -1048,7 +1060,7 @@ export async function onNativeTerminalFocus(
   handler: (sessionId: string) => void,
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<string>("native_terminal_focus", (event) => handler(event.payload));
+  return listenToThisWindow<string>("native_terminal_focus", (event) => handler(event.payload));
 }
 
 /**
@@ -1061,7 +1073,7 @@ async function listenShortcut<T>(action: string, handler: (payload: T) => void):
   const registration = ++nativeShortcutRegistration;
   switchDebug("shortcut.native.register.start", { action, registration });
   try {
-    const dispose = await listen<T>(action, (event) => {
+    const dispose = await listenToThisWindow<T>(action, (event) => {
       const details = { action, registration, ...shortcutContext() };
       switchDebug("shortcut.native.receipt", details);
       return traceShortcutAction(action, () => handler(event.payload), { registration, source: "native-event" });
@@ -1687,7 +1699,7 @@ export async function onWindowSessionsAdopt(
   listener: (payload: WindowSessionsAdoptPayload) => void,
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<unknown>(WINDOW_SESSIONS_ADOPT_EVENT, (event) => {
+  return listenToThisWindow<unknown>(WINDOW_SESSIONS_ADOPT_EVENT, (event) => {
     const payload = parseWindowSessionsAdopt(event.payload);
     if (payload) listener(payload);
   });
@@ -1734,7 +1746,7 @@ export async function onWindowSessionsOrphaned(
   listener: (payload: WindowSessionsOrphanedPayload) => void,
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<unknown>(WINDOW_SESSIONS_ORPHANED_EVENT, (event) => {
+  return listenToThisWindow<unknown>(WINDOW_SESSIONS_ORPHANED_EVENT, (event) => {
     // The backend payload is `{ label, sessionIds }` (WindowSessionsOrphanedPayload in lib.rs).
     const payload = event.payload as { label?: unknown; sessionIds?: unknown } | null;
     if (!payload || typeof payload.label !== 'string' || !Array.isArray(payload.sessionIds)) return;
