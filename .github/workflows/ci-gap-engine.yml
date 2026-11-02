@@ -1,0 +1,88 @@
+name: ci-gap-engine
+
+# Temporary gate: compile and lint the CEF engine crate on every desktop OS.
+on:
+  push:
+    branches: ['ci/gap-ext-downloads']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-gap-engine-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+  ENGINE_MANIFEST: crates/ferryx-browser-engine/Cargo.toml
+  PROTOCOL_MANIFEST: crates/browser-engine-protocol/Cargo.toml
+
+jobs:
+  engine:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2022, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: seanmiddleditch/gha-setup-ninja@v5
+      - name: MSVC developer environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Drop Git coreutils link.exe (shadows the MSVC linker in bash)
+        if: runner.os == 'Windows'
+        run: rm -f "/usr/bin/link.exe" && which link.exe
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config libxi-dev libnss3 libatk-bridge2.0-0 \
+            libgbm1 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libcups2 \
+            libpango-1.0-0 libasound2t64
+      - name: CEF SDK location
+        # A short path keeps the Windows libcef_dll_wrapper object paths under MAX_PATH.
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            echo "CEF_PATH=C:/cef-sdk" >> "$GITHUB_ENV"
+          else
+            echo "CEF_PATH=$RUNNER_TEMP/cef-sdk" >> "$GITHUB_ENV"
+          fi
+      - name: Download CEF SDK and build libcef_dll_wrapper
+        run: |
+          cargo build --manifest-path "$ENGINE_MANIFEST" -p cef-dll-sys
+          ls "$CEF_PATH"/*
+      - name: Engine clippy
+        run: cargo clippy --manifest-path "$ENGINE_MANIFEST" --all-targets -- -D warnings
+      - name: Engine tests
+        run: |
+          DEBUG_DIR="$GITHUB_WORKSPACE/crates/ferryx-browser-engine/target/debug"
+          if [ "$RUNNER_OS" = Linux ]; then
+            # The test harness lives in target/debug/deps, where $ORIGIN has no libcef.so.
+            export LD_LIBRARY_PATH="$DEBUG_DIR"
+          elif [ "$RUNNER_OS" = Windows ]; then
+            export PATH="$DEBUG_DIR:$PATH"
+          fi
+          cargo test --manifest-path "$ENGINE_MANIFEST" --bins
+      - name: Protocol clippy
+        if: always()
+        run: cargo clippy --manifest-path "$PROTOCOL_MANIFEST" --all-targets -- -D warnings
+      - name: Protocol tests
+        if: always()
+        run: cargo test --manifest-path "$PROTOCOL_MANIFEST"
