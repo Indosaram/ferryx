@@ -399,6 +399,17 @@ fn execute(command: Command) {
                 eprintln!("ferryx-engine: focus {tab}: the tab has no window yet");
                 return;
             };
+            // Linux: Chrome's location bar takes no programmatic focus inside the embedded
+            // window (IDC_FOCUS_LOCATION and Ctrl+L leave the page focused), only a click. The
+            // engine clicks it through the X server and selects its text.
+            #[cfg(target_os = "linux")]
+            if address && let Some((x, y)) = omnibox_point(&tab) {
+                let clicked = platform::click_and_select_all(&window, x, y);
+                eprintln!("ferryx-engine: focus {tab} address: clicked the location bar at ({x}, {y}): {clicked}");
+                if clicked {
+                    return;
+                }
+            }
             // Moving X focus into the window activates its widget only once Chromium handles the
             // FocusIn, and activation restores the widget's last focused view: a view focused
             // before that (Chrome's address bar) loses focus again. An inactive window gets its
@@ -444,6 +455,31 @@ fn focus_tab(tab: &str, address: bool) {
         window.send_key_press(0x4C, 1 << 2);
         eprintln!("ferryx-engine: focus {tab} address: sent Ctrl+L, focused view now {:?}", focused_view());
     }
+}
+
+/// Where Chrome's location bar is in the tab's window, in pixels: the middle of the toolbar
+/// row, past the back, forward and reload buttons (three 36 DIP buttons from an 8 DIP inset)
+/// and the site-info chip at the field's start.
+#[cfg(target_os = "linux")]
+fn omnibox_point(tab: &str) -> Option<(i32, i32)> {
+    const BUTTONS_END: i32 = 8 + 3 * 36;
+    const INTO_FIELD: i32 = 140;
+    let (toolbar, scale) = TABS.with_borrow(|tabs| {
+        let pane = tabs.get(tab)?;
+        let scale = pane
+            .window
+            .as_ref()
+            .and_then(|window| window.display())
+            .map_or(1.0, |display| display.device_scale_factor());
+        Some((pane.view.chrome_toolbar()?, scale))
+    })?;
+    let bounds = toolbar.bounds();
+    if bounds.width <= 0 || bounds.height <= 0 {
+        return None;
+    }
+    let x = (bounds.x + BUTTONS_END + INTO_FIELD).min(bounds.x + bounds.width / 2);
+    let y = bounds.y + bounds.height / 2;
+    Some(((x as f32 * scale).round() as i32, (y as f32 * scale).round() as i32))
 }
 
 /// Ferryx closed stdin (it quit or dropped this engine): close every browser, then quit.
