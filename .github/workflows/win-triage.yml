@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rev: [d516bf4412d09ffe2577ceef6348589eb91fe5d7, 2533ed70, 544be00e]
+        rev: [2533ed70af84afe5d4737477db9fd359e56fbcb2, 544be00e55f69b4bb81b8d3bad457359b9f2bc7d]
     runs-on: windows-2022
     timeout-minutes: 120
     steps:
