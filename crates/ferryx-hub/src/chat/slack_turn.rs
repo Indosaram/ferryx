@@ -75,6 +75,8 @@ fn split_list(raw: Option<String>) -> Vec<String> {
 }
 
 impl SlackTurnConfig {
+    /// Reads hub config (which can load the hub env file) and creates the Slack workspace
+    /// root: blocking file IO, so async callers run it on the blocking pool.
     pub fn from_env(
         binary: &str,
         owner: Option<&str>,

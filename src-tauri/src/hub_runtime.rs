@@ -2164,16 +2164,27 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         )
     {
         let owner = launch.config.owner_slack_id.clone();
-        let binary = ferryx_hub::meta::supervisor::mhc_bin();
-        let config = ferryx_hub::chat::slack_turn::SlackTurnConfig::from_env(&binary, owner.as_deref());
-        tracing::info!(
-            binary = %binary,
-            workspace = config.omo.workspace.is_some(),
-            idle_secs = config.omo.idle_timeout.as_secs(),
-            total_secs = config.omo.total_timeout.as_secs(),
-            "slack turn path is armed (mhc RPC)"
-        );
-        ferryx_hub::chat::slack_turn::install(config);
+        // mhc_bin and from_env read the hub env file, and from_env creates the Slack workspace
+        // root: off the async runtime threads.
+        let armed = tokio::task::spawn_blocking(move || {
+            let binary = ferryx_hub::meta::supervisor::mhc_bin();
+            let config = ferryx_hub::chat::slack_turn::SlackTurnConfig::from_env(&binary, owner.as_deref());
+            (binary, config)
+        })
+        .await;
+        match armed {
+            Ok((binary, config)) => {
+                tracing::info!(
+                    binary = %binary,
+                    workspace = config.omo.workspace.is_some(),
+                    idle_secs = config.omo.idle_timeout.as_secs(),
+                    total_secs = config.omo.total_timeout.as_secs(),
+                    "slack turn path is armed (mhc RPC)"
+                );
+                ferryx_hub::chat::slack_turn::install(config);
+            }
+            Err(error) => tracing::warn!(%error, "the slack turn config was not read; slack turns stay off"),
+        }
         // omo's startup sweep: claims a restart left pending are never re-run.
         match ferryx_hub::chat::report_claims::recover_stale(&launch.hub.pool).await {
             Ok(0) => {}
