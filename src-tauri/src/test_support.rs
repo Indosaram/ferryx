@@ -55,7 +55,7 @@ fn cli_build_command(
     let profile = if profile == "debug" { std::ffi::OsStr::new("dev") } else { profile };
     let mut command = std::process::Command::new(cargo);
     // `cargo test` gives this process its package environment (CARGO_MANIFEST_DIR,
-    // CARGO_PKG_*, ...). Build scripts such as ring's track those variables with
+    // CARGO_PKG_*, OUT_DIR, ...). Build scripts such as ring's track those variables with
     // rerun-if-env-changed, so a nested cargo that inherits them sees them "changed"
     // and rebuilds ring and everything above it, and the next ordinary cargo run in the
     // same target dir rebuilds it all again. Cargo sets them per package itself.
@@ -94,6 +94,7 @@ fn is_cargo_package_env(key: &str) -> bool {
                 | "CARGO_PRIMARY_PACKAGE"
                 | "CARGO_TARGET_TMPDIR"
                 | "CARGO_RUSTC_CURRENT_DIR"
+                | "OUT_DIR"
         )
 }
 
@@ -140,7 +141,7 @@ mod tests {
             .filter(|(_, value)| value.is_none())
             .map(|(key, _)| key.to_string_lossy().into_owned())
             .collect();
-        for key in ["CARGO_MANIFEST_DIR", "CARGO_PKG_NAME", "CARGO_PKG_VERSION"] {
+        for key in ["CARGO_MANIFEST_DIR", "CARGO_PKG_NAME", "CARGO_PKG_VERSION", "OUT_DIR"] {
             assert!(removed.iter().any(|k| k == key), "{key} must not reach the nested cargo");
         }
         assert!(removed.iter().all(|k| is_cargo_package_env(k) || k == "CARGO_BUILD_TARGET"));
