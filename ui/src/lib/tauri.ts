@@ -1632,6 +1632,103 @@ export const WINDOW_SESSIONS_ORPHANED_EVENT = 'window_sessions_orphaned';
 
 export type WindowSessionsOrphanedPayload = { fromLabel: string; sessionIds: string[] };
 
+/** Event telling this window to adopt backend sessions another window moved to it. */
+export const WINDOW_SESSIONS_ADOPT_EVENT = 'window_sessions_adopt';
+
+/**
+ * Mirrors `WindowSessionsAdoptPayload` in `src-tauri/src/ipc/window.rs` (serde camelCase). The
+ * backend omits `workspaceId` and `attemptGenerations` when empty, so both are optional on the
+ * wire; `attemptGenerations` is always present here (possibly empty).
+ */
+export type WindowSessionsAdoptPayload = {
+  backendSessionIds: string[];
+  activate: boolean;
+  workspaceId?: string;
+  /** Native attach generation each session last had; a new attach must use a higher one. */
+  attemptGenerations: Record<string, number>;
+};
+
+/** Mirrors `WindowMoveOutcome` in `src-tauri/src/ipc/window.rs`. */
+export type WindowMoveOutcome = {
+  targetLabel: string;
+  moved: string[];
+  skipped: string[];
+  queued: boolean;
+};
+
+/** Returns null for anything that is not a well-formed adopt payload. */
+export function parseWindowSessionsAdopt(raw: unknown): WindowSessionsAdoptPayload | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const payload = raw as Record<string, unknown>;
+  if (!Array.isArray(payload.backendSessionIds)) return null;
+  const backendSessionIds = payload.backendSessionIds.filter(
+    (id): id is string => typeof id === 'string' && id.length > 0,
+  );
+  if (backendSessionIds.length === 0) return null;
+  const attemptGenerations: Record<string, number> = {};
+  if (payload.attemptGenerations && typeof payload.attemptGenerations === 'object') {
+    for (const [id, generation] of Object.entries(payload.attemptGenerations)) {
+      if (typeof generation === 'number' && Number.isInteger(generation) && generation >= 0) {
+        attemptGenerations[id] = generation;
+      }
+    }
+  }
+  return {
+    backendSessionIds,
+    activate: payload.activate === true,
+    ...(typeof payload.workspaceId === 'string' && payload.workspaceId.length > 0
+      ? { workspaceId: payload.workspaceId }
+      : {}),
+    attemptGenerations,
+  };
+}
+
+export async function onWindowSessionsAdopt(
+  listener: (payload: WindowSessionsAdoptPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<unknown>(WINDOW_SESSIONS_ADOPT_EVENT, (event) => {
+    const payload = parseWindowSessionsAdopt(event.payload);
+    if (payload) listener(payload);
+  });
+}
+
+/**
+ * Adoption requests queued for this window while it booted. Call once, after the
+ * `window_sessions_adopt` listener is registered; later requests arrive as events.
+ */
+export async function takePendingWindowAdoptions(): Promise<WindowSessionsAdoptPayload[]> {
+  if (!isTauri()) return [];
+  const raw = await invokeCommand<unknown>('cmd_window_take_pending_adoptions');
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    const payload = parseWindowSessionsAdopt(entry);
+    return payload ? [payload] : [];
+  });
+}
+
+/** Labels of the open desktop windows (`main` and `ws-*`). */
+export async function listAppWindows(): Promise<string[]> {
+  if (!isTauri()) return [];
+  return invokeCommand<string[]>('cmd_window_list');
+}
+
+/**
+ * Moves live backend sessions to another window (`null` opens a new one). The sessions are never
+ * closed; the caller drops its own tabs after this resolves.
+ */
+export async function moveSessionsToWindow(request: {
+  targetLabel: string | null;
+  backendSessionIds: string[];
+  workspaceId: string | null;
+}): Promise<WindowMoveOutcome> {
+  return invokeCommand<WindowMoveOutcome>('cmd_window_move_sessions', {
+    targetLabel: request.targetLabel,
+    backendSessionIds: request.backendSessionIds,
+    workspaceId: request.workspaceId,
+  });
+}
+
 /** A closed secondary window left live backend sessions for this window to adopt. */
 export async function onWindowSessionsOrphaned(
   listener: (payload: WindowSessionsOrphanedPayload) => void,

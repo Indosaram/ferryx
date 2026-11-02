@@ -24,6 +24,17 @@ describe("planOrphanAdoption", () => {
     ]);
   });
 
+  it("passes the source window's attach generation through as a floor", () => {
+    const plan = planOrphanAdoption(["b1", "b2"], state({}), [
+      { sessionId: "b1", worktreePath: "/repo", daemonEpoch: "e1", incarnation: "i1" },
+      { sessionId: "b2", worktreePath: "/repo" },
+    ], { b1: 4 });
+    expect(plan.adopt.map((entry) => entry.backend)).toEqual([
+      { sessionId: "b1", daemonEpoch: "e1", incarnation: "i1", attemptGeneration: 4 },
+      { sessionId: "b2", daemonEpoch: null, incarnation: null },
+    ]);
+  });
+
   it("falls back to the active worktree for an unknown worktree path", () => {
     const plan = planOrphanAdoption(["b1"], state({}), [{ sessionId: "b1", worktreePath: "/elsewhere" }]);
     expect(plan.adopt[0].worktree.path).toBe("/repo");

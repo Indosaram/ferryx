@@ -48,7 +48,12 @@ import { getSupervisorSnapshot, startSupervisorFeed, subscribeSupervisorSnapshot
 import { getSetupStatus, setupFinished, setupProjectsFrom } from "./lib/supervisorSetup";
 import { DesktopSupervisorSetupBanner } from "./components/supervisor/DesktopSupervisorSetupBanner";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
-import { isPrimaryWindow, windowScopedStorageKey } from "./lib/windowIdentity";
+import { currentWindowLabel, isPrimaryWindow, windowScopedStorageKey } from "./lib/windowIdentity";
+import {
+  forwardNotificationTarget,
+  routeNotificationTarget,
+  subscribeForwardedNotificationTargets,
+} from "./lib/notificationForwarding";
 import {
   appBadgeTotal,
   forgetWindow,
@@ -58,6 +63,7 @@ import {
   subscribeWindowStateChanges,
 } from "./lib/notificationLeader";
 import { planOrphanAdoption } from "./state/orphanAdoption";
+import { movedEverySession, planTabMove } from "./state/windowMove";
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
 import { setLocalSplitPersistence } from "./lib/localSplitLifecycle";
 import { isMacShortcutPlatform, resolvedShortcuts, useShortcuts } from "./lib/shortcuts";
@@ -145,8 +151,13 @@ import {
   getTerminalRemoteStatus,
   listTerminalSessions,
   discardWindowSession,
+  listAppWindows,
+  moveSessionsToWindow,
   onWindowSessionsOrphaned,
+  onWindowSessionsAdopt,
   openNewWindow,
+  takePendingWindowAdoptions,
+  type WindowSessionsAdoptPayload,
   toIpcError,
   writeTerminal,
   bootTrace,
@@ -931,6 +942,7 @@ function WorkspaceApp({
     openRemoteDesktopTab,
     adoptBrowserSession,
     adoptBackendSession,
+    releaseTabsForMove,
     duplicateBrowserTab,
     navigateBrowserTab,
     reloadBrowserTab,
@@ -2811,17 +2823,43 @@ function WorkspaceApp({
 
   const handleNotificationTargetRef = useRef(handleNotificationTarget);
   handleNotificationTargetRef.current = handleNotificationTarget;
+  // This window's store holds the clicked session: same checks as handleNotificationTarget, so a
+  // click is only ever navigated by the window that can actually focus it.
+  const ownsNotificationTarget = useCallback((target: NotificationTarget) => {
+    if (!target?.workspaceId || !target.sessionId) return false;
+    if (!projectsRef.current.some((candidate) => candidate.workspaceId === target.workspaceId)) return false;
+    const live = target.workspaceId === activeProjectRef.current.workspaceId
+      ? stateRef.current
+      : getHmrWorkspaceState(target.workspaceId) ?? getWorkspaceSnapshot(target.workspaceId);
+    return Boolean(live && hasNavigableSession(live, target.sessionId));
+  }, []);
   // The activation queue is app-global and draining consumes it, so only the primary window
-  // drains; a secondary window would otherwise steal clicks it cannot navigate.
+  // drains (exactly once). It navigates the clicks it owns and forwards the rest to the other
+  // windows, where the owner navigates and raises itself; a secondary window never drains.
   useEffect(
     () => isPrimary
       ? subscribeNotificationActivations(
-        (target) => handleNotificationTargetRef.current(target),
+        (target) => routeNotificationTarget({
+          target,
+          ownsTarget: ownsNotificationTarget,
+          navigate: (owned) => handleNotificationTargetRef.current(owned),
+          forward: (foreign) => forwardNotificationTarget(currentWindowLabel(), foreign),
+        }),
         undefined,
         (error) => reportRuntimeErrorRef.current(error),
       )
       : undefined,
-    [isPrimary],
+    [isPrimary, ownsNotificationTarget],
+  );
+  useEffect(
+    () => isNativeRuntime && !isPrimary
+      ? subscribeForwardedNotificationTargets(
+        currentWindowLabel(),
+        ownsNotificationTarget,
+        (target) => handleNotificationTargetRef.current(target),
+      )
+      : undefined,
+    [isNativeRuntime, isPrimary, ownsNotificationTarget],
   );
 
   const handleAddTerminalTab = useCallback((shell?: string) => {
@@ -3451,6 +3489,115 @@ function WorkspaceApp({
       setIsCommandPaletteOpen(false);
     }
   }, [activeRemoteHost]);
+
+  // Sessions another window moved here (`window_sessions_adopt`). The listener is registered
+  // first and the boot-time queue drained once afterwards, so a request that arrived before this
+  // window booted is applied exactly once. Each request waits for its workspace to be mounted,
+  // then re-attaches by backendSessionId as a tab; nothing is spawned or closed.
+  const [pendingAdoptions, setPendingAdoptions] = useState<Array<WindowSessionsAdoptPayload & { attempts: number }>>([]);
+  const adoptionBusyRef = useRef(false);
+  const [adoptionTick, bumpAdoptionTick] = useState(0);
+  useEffect(() => {
+    if (!isNativeRuntime) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const enqueue = (payload: WindowSessionsAdoptPayload) => {
+      if (!disposed) setPendingAdoptions((queue) => [...queue, { ...payload, attempts: 0 }]);
+    };
+    void onWindowSessionsAdopt(enqueue)
+      .then(async (stop) => {
+        if (disposed) {
+          stop();
+          return;
+        }
+        unlisten = stop;
+        for (const payload of await takePendingWindowAdoptions()) enqueue(payload);
+      })
+      .catch((error: unknown) => reportRuntimeErrorRef.current(error));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [isNativeRuntime]);
+  useEffect(() => {
+    const head = pendingAdoptions[0];
+    if (!head || adoptionBusyRef.current) return;
+    if (head.workspaceId && head.workspaceId !== activeProject.workspaceId) {
+      const project = projectsRef.current.find((candidate) => candidate.workspaceId === head.workspaceId);
+      if (project) {
+        handleSelectProject(project);
+        return;
+      }
+      // The source project is unknown here: adopt into the project this window shows.
+      setPendingAdoptions((queue) => [{ ...queue[0]!, workspaceId: undefined }, ...queue.slice(1)]);
+      return;
+    }
+    if (
+      state.workspaceId !== activeProject.workspaceId ||
+      workspaceRestoreStatus === "idle" ||
+      workspaceRestoreStatus === "loading"
+    ) return;
+    adoptionBusyRef.current = true;
+    setPendingAdoptions((queue) => queue.slice(1));
+    void (async () => {
+      const live = await listTerminalSessions();
+      const plan = planOrphanAdoption(head.backendSessionIds, stateRef.current, live, head.attemptGenerations);
+      switchDebug("window.adopt.plan", {
+        adopt: plan.adopt.map((entry) => entry.backend.sessionId),
+        alreadyAttached: plan.alreadyAttached,
+        missing: plan.missing,
+      });
+      const retry: string[] = [];
+      let activateNext = head.activate;
+      for (const entry of plan.adopt) {
+        const tabId = await adoptBackendSessionRef.current(entry.worktree, entry.backend, undefined, { activate: activateNext });
+        if (tabId === null) retry.push(entry.backend.sessionId);
+        else activateNext = false;
+      }
+      if (plan.missing.length > 0) toast.warning("A terminal moved to this window is no longer running.");
+      // The workspace changed while adopting: the backend already made this window the owner, so
+      // try again once it settles rather than leave the session without a tab.
+      if (retry.length > 0 && head.attempts < 3) {
+        setPendingAdoptions((queue) => [
+          ...queue,
+          { ...head, backendSessionIds: retry, workspaceId: activeProjectRef.current.workspaceId, attempts: head.attempts + 1 },
+        ]);
+      } else if (retry.length > 0) {
+        toast.warning("A terminal moved to this window could not be opened.");
+      }
+    })()
+      .catch((error: unknown) => reportRuntimeErrorRef.current(error))
+      .finally(() => {
+        adoptionBusyRef.current = false;
+        bumpAdoptionTick((tick) => tick + 1);
+      });
+  }, [pendingAdoptions, adoptionTick, activeProject.workspaceId, state.workspaceId, workspaceRestoreStatus, handleSelectProject]);
+
+  // "Move to Window": the backend flips ownership and tells the target to adopt; only after it
+  // answers does this window drop the tab. The daemon session is never closed here.
+  const handleMoveTabToWindow = useCallback((tabId: string, targetLabel: string | null) => {
+    const plan = planTabMove(stateRef.current, tabId);
+    if (!plan.ok) {
+      toast.warning(plan.reason);
+      return;
+    }
+    void moveSessionsToWindow({
+      targetLabel,
+      backendSessionIds: plan.backendSessionIds,
+      workspaceId: stateRef.current.workspaceId ?? activeProjectRef.current.workspaceId,
+    })
+      .then((outcome) => {
+        releaseTabsForMove([tabId]);
+        if (!movedEverySession(outcome, plan.backendSessionIds)) {
+          toast.warning("Some terminals in this tab belong to another window and stayed there.");
+        }
+      })
+      .catch((error: unknown) => reportRuntimeErrorRef.current(error));
+  }, [releaseTabsForMove]);
+  const handleListOtherWindows = useCallback(
+    async () => (await listAppWindows()).filter((label) => label !== currentWindowLabel()),
+    [],
+  );
   const handleOpenSettings = useCallback((section?: SectionId, remoteContext?: RemoteContext) => {
     preloadSettingsDialog();
     const validSection =
@@ -4455,6 +4602,8 @@ function WorkspaceApp({
             onRenameTab={renameTab}
             onToggleTabPin={setTabPinned}
             onResetAgentState={handleResetTabAgentState}
+            onMoveTabToWindow={isNativeRuntime ? handleMoveTabToWindow : undefined}
+            listOtherWindows={isNativeRuntime ? handleListOtherWindows : undefined}
             onAddTab={handleAddTerminalTab}
             onAddBrowserTab={handleAddBrowserTab}
             onOpenSettings={handleOpenSettings}
