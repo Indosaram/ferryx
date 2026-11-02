@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager, Runtime, State};
+use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::daemon::DaemonClient;
@@ -1105,6 +1105,7 @@ fn install_pty_resize_dispatcher(
 #[tauri::command]
 pub async fn cmd_native_terminal_attach<R: Runtime>(
     app: AppHandle<R>,
+    window: tauri::Window<R>,
     session_id: String,
     bounds: Option<NativeTerminalLogicalRect>,
     scale_factor: Option<f64>,
@@ -1128,6 +1129,8 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
     if active != expected_tuple {
         return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
     }
+    // The attaching window owns the session until another window attaches it.
+    crate::window_registry::record_owner(&app, &session_id, window.label());
     Ok(NativeTerminalAttachReceipt { session_id, attach_tuple: active, presented: false })
 }
 
@@ -1181,6 +1184,7 @@ async fn native_terminal_attach<R: Runtime>(
     params: NativeTerminalAttachParams,
 ) -> Result<(), IpcError> {
     let NativeTerminalAttachParams { session_id, bounds, scale_factor, after_sequence, attach_tuple, deadline } = params;
+    let rollback_app = app.clone();
     install_pty_resize_dispatcher(state.inner(), Arc::clone(daemon_client.inner()));
     let logical_bounds = match (bounds, scale_factor) {
         (Some(rect), Some(scale)) if scale.is_finite() && scale > 0.0 => Some(LogicalBounds {
@@ -1279,7 +1283,9 @@ async fn native_terminal_attach<R: Runtime>(
     if result.is_err() && is_new_reservation {
         let active = state.session_attach_tuple(&session_id);
         if active == initial_attach_tuple || active.is_none() {
-            state.close_session_fenced(&session_id, active.as_ref());
+            if state.close_session_fenced(&session_id, active.as_ref()) {
+                crate::window_registry::release_owner(&rollback_app, &session_id);
+            }
         }
     }
     result
@@ -1311,7 +1317,7 @@ pub async fn cmd_native_terminal_detach<R: Runtime>(
 
 #[tauri::command]
 pub async fn cmd_native_terminal_close<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     state: State<'_, NativeTerminalSurfaceHostState>,
     session_id: String,
     attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
@@ -1319,12 +1325,13 @@ pub async fn cmd_native_terminal_close<R: Runtime>(
     if !state.close_session_fenced(&session_id, attach_tuple.as_ref()) {
         return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
     }
+    crate::window_registry::release_owner(&app, &session_id);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
-    app: AppHandle<R>,
+    window: tauri::Window<R>,
     state: State<'_, NativeTerminalSurfaceHostState>,
     session_id: String,
     bounds: NativeTerminalLogicalRect,
@@ -1342,9 +1349,6 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
             scale_factor,
         },
     };
-    let window = app
-        .get_window("main")
-        .ok_or_else(|| IpcError::internal("Main Ferryx window is unavailable"))?;
     let mut updates = state
         .subscribe_session_update(&session_id)
         .map_err(IpcError::from)?;
@@ -1518,15 +1522,11 @@ fn presented_after(
 
 #[tauri::command]
 pub async fn cmd_native_terminal_set_focus<R: Runtime>(
-    app: AppHandle<R>,
+    window: tauri::Window<R>,
     state: State<'_, NativeTerminalSurfaceHostState>,
     session_id: String,
     focused: bool,
 ) -> Result<NativeTerminalBoundsReceipt, IpcError> {
-    let window = match app.get_window("main") {
-        Some(window) => window,
-        None => return Err(IpcError::internal("Main Ferryx window is unavailable")),
-    };
     let state_inner = state.inner().clone();
     let surface_window = window.clone();
     let (sender, receiver) = oneshot::channel();
@@ -1552,15 +1552,11 @@ pub async fn cmd_native_terminal_set_focus<R: Runtime>(
 
 #[tauri::command]
 pub async fn cmd_native_terminal_set_preedit<R: Runtime>(
-    app: AppHandle<R>,
+    window: tauri::Window<R>,
     state: State<'_, NativeTerminalSurfaceHostState>,
     session_id: String,
     preedit: Option<String>,
 ) -> Result<NativeTerminalBoundsReceipt, IpcError> {
-    let window = match app.get_window("main") {
-        Some(window) => window,
-        None => return Err(IpcError::internal("Main Ferryx window is unavailable")),
-    };
     let state_inner = state.inner().clone();
     let surface_window = window.clone();
     let (sender, receiver) = oneshot::channel();
@@ -1815,9 +1811,9 @@ pub async fn dispatch_native_terminal_receipt<R: Runtime>(
     state: &NativeTerminalSurfaceHostState,
     session_id: &str,
 ) -> Result<NativeTerminalBoundsReceipt, IpcError> {
-    let window = match app.get_window("main") {
+    let window = match crate::window_registry::window_for_session(app, session_id) {
         Some(window) => window,
-        None => return Err(IpcError::internal("Main Ferryx window is unavailable")),
+        None => return Err(IpcError::internal("Ferryx window owning this terminal is unavailable")),
     };
     let state_inner = state.clone();
     let surface_window = window.clone();
@@ -1968,7 +1964,12 @@ fn schedule_native_terminal_input_receipt<R: Runtime>(
                 .await
             {
                 Ok(receipt) => {
-                    let _ = receipt_app.emit(NATIVE_TERMINAL_INPUT_RECEIPT_EVENT, receipt);
+                    let _ = crate::window_registry::emit_to_session_owner(
+                        &receipt_app,
+                        &receipt_session,
+                        NATIVE_TERMINAL_INPUT_RECEIPT_EVENT,
+                        receipt,
+                    );
                 }
                 Err(error) => {
                     // A missed anchor update is cosmetic; the keystroke already landed.
@@ -2199,7 +2200,7 @@ pub fn native_scroll_outcome<T: TerminalEngine>(
 
 #[tauri::command]
 pub async fn cmd_native_terminal_scroll<R: Runtime>(
-    app: AppHandle<R>,
+    window: tauri::Window<R>,
     state: State<'_, NativeTerminalSurfaceHostState>,
     daemon_client: State<'_, Arc<DaemonClient>>,
     session_id: String,
@@ -2250,15 +2251,6 @@ pub async fn cmd_native_terminal_scroll<R: Runtime>(
         serde_json::json!({ "inputWritten": true })
     } else {
         serde_json::json!({ "inputWritten": false })
-    };
-    let window = match app.get_window("main") {
-        Some(window) => window,
-        None => {
-            return Err(
-                IpcError::internal("Main Ferryx window is unavailable")
-                    .with_details(input_written_details.clone()),
-            )
-        }
     };
     let state_inner = state.inner().clone();
     let surface_window = window.clone();
@@ -2312,7 +2304,7 @@ pub async fn cmd_native_terminal_scrollbar(
 
 #[tauri::command]
 pub async fn cmd_native_terminal_set_scrollbar_overlay<R: Runtime>(
-    app: AppHandle<R>,
+    window: tauri::Window<R>,
     state: State<'_, NativeTerminalSurfaceHostState>,
     session_id: String,
     visible: bool,
@@ -2321,10 +2313,6 @@ pub async fn cmd_native_terminal_set_scrollbar_overlay<R: Runtime>(
         return Err(IpcError::internal(err.to_string()));
     }
 
-    let window = match app.get_window("main") {
-        Some(window) => window,
-        None => return Ok(()),
-    };
     let state_inner = state.inner().clone();
     let surface_window = window.clone();
     let (sender, receiver) = oneshot::channel();
@@ -2371,7 +2359,7 @@ pub async fn cmd_native_terminal_set_dom_overlay_input(
 
 #[tauri::command]
 pub async fn cmd_native_terminal_set_attention_frame<R: Runtime>(
-    app: AppHandle<R>,
+    window: tauri::Window<R>,
     state: State<'_, NativeTerminalSurfaceHostState>,
     session_id: String,
     attention: bool,
@@ -2380,10 +2368,6 @@ pub async fn cmd_native_terminal_set_attention_frame<R: Runtime>(
         return Err(IpcError::internal(err.to_string()));
     }
 
-    let window = match app.get_window("main") {
-        Some(window) => window,
-        None => return Ok(()),
-    };
     let state_inner = state.inner().clone();
     let surface_window = window.clone();
     let (sender, receiver) = oneshot::channel();
@@ -2421,7 +2405,7 @@ pub async fn cmd_native_terminal_set_attention_frame<R: Runtime>(
 
 #[tauri::command]
 pub async fn cmd_native_terminal_select<R: Runtime>(
-    app: AppHandle<R>,
+    window: tauri::Window<R>,
     state: State<'_, NativeTerminalSurfaceHostState>,
     session_id: String,
     mode: NativeTerminalSelectMode,
@@ -2432,28 +2416,26 @@ pub async fn cmd_native_terminal_select<R: Runtime>(
     // Keyboard copy mode moves the selection without any PTY output, so nothing else
     // would present the new highlight; render a frame the way mouse selection does.
     if matches!(mode, NativeTerminalSelectMode::Range { .. }) {
-        if let Some(window) = app.get_window("main") {
-            let state_inner = state.inner().clone();
-            let surface_window = window.clone();
-            let (sender, receiver) = oneshot::channel();
-            let session_id_clone = session_id.clone();
-            if window
-                .run_on_main_thread(move || {
-                    if let Some(bounds) = state_inner.session_logical_bounds(&session_id_clone) {
-                        let _ = state_inner.render(
-                            &surface_window,
-                            NativeTerminalBoundsRequest {
-                                session_id: session_id_clone,
-                                bounds,
-                            },
-                        );
-                    }
-                    let _ = sender.send(());
-                })
-                .is_ok()
-            {
-                let _ = receiver.await;
-            }
+        let state_inner = state.inner().clone();
+        let surface_window = window.clone();
+        let (sender, receiver) = oneshot::channel();
+        let session_id_clone = session_id.clone();
+        if window
+            .run_on_main_thread(move || {
+                if let Some(bounds) = state_inner.session_logical_bounds(&session_id_clone) {
+                    let _ = state_inner.render(
+                        &surface_window,
+                        NativeTerminalBoundsRequest {
+                            session_id: session_id_clone,
+                            bounds,
+                        },
+                    );
+                }
+                let _ = sender.send(());
+            })
+            .is_ok()
+        {
+            let _ = receiver.await;
         }
     }
 
@@ -3635,7 +3617,7 @@ pub fn native_mouse_routes(tracking: bool, event: &MouseEvent) -> (bool, bool) {
 
 #[tauri::command]
 pub async fn cmd_native_terminal_mouse<R: Runtime>(
-    app: AppHandle<R>,
+    window: tauri::Window<R>,
     daemon_client: State<'_, Arc<DaemonClient>>,
     state: State<'_, NativeTerminalSurfaceHostState>,
     session_id: String,
@@ -3746,7 +3728,7 @@ pub async fn cmd_native_terminal_mouse<R: Runtime>(
         }
     }
 
-    let receipt = if let Some(window) = app.get_window("main") {
+    let receipt = {
         let state_inner = state.inner().clone();
         let surface_window = window.clone();
         let (sender, receiver) = oneshot::channel();
@@ -3775,8 +3757,6 @@ pub async fn cmd_native_terminal_mouse<R: Runtime>(
         } else {
             None
         }
-    } else {
-        None
     };
 
     Ok(NativeTerminalMouseReceipt {
@@ -3811,14 +3791,10 @@ pub async fn cmd_native_terminal_line_at<R: Runtime>(
 
 #[tauri::command]
 pub async fn cmd_native_terminal_clipboard_content<R: Runtime>(
-    app: AppHandle<R>,
+    window: tauri::Window<R>,
 ) -> Result<NativeTerminalClipboardContent, IpcError> {
     #[cfg(target_os = "macos")]
     {
-        let window = match app.get_window("main") {
-            Some(window) => window,
-            None => return Err(IpcError::internal("Main Ferryx window is unavailable")),
-        };
         let (sender, receiver) = oneshot::channel();
         if let Err(error) = window.run_on_main_thread(move || {
             let (content, types) = read_native_pasteboard();
@@ -3864,7 +3840,7 @@ pub async fn cmd_native_terminal_clipboard_content<R: Runtime>(
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = app;
+        let _ = window;
         let (content, types) = tokio::task::spawn_blocking(read_native_pasteboard)
             .await
             .unwrap_or_else(|_| (NativeTerminalClipboardContent::Empty, Vec::new()));
@@ -3908,7 +3884,7 @@ pub async fn cmd_native_terminal_clipboard_content<R: Runtime>(
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let _ = app;
+        let _ = window;
         let (content, types) = tokio::task::spawn_blocking(read_native_pasteboard)
             .await
             .unwrap_or_else(|_| (NativeTerminalClipboardContent::Empty, Vec::new()));
@@ -3992,8 +3968,12 @@ mod tests {
             .unwrap();
 
         // When the pane attaches its native surface.
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
         let error = cmd_native_terminal_attach(
             app.handle().clone(),
+            window.as_ref().window(),
             "no-gpu-session".into(), None, None, None, None, None,
         )
         .await
@@ -4070,8 +4050,12 @@ mod tests {
             .unwrap();
 
         // When another pane attaches its native surface.
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
         let error = cmd_native_terminal_attach(
             app.handle().clone(),
+            window.as_ref().window(),
             "no-surface-session".into(), None, None, None, None, None,
         )
         .await
@@ -4326,6 +4310,9 @@ mod tests {
             .manage(NativeTerminalSurfaceHostState::default())
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
+        let attach_window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
         let (observed, handshake) = oneshot::channel();
         let peer = async {
             let (stream, _) = listener.accept().await.unwrap();
@@ -4352,6 +4339,7 @@ mod tests {
                 std::time::Duration::from_secs(120),
                 cmd_native_terminal_attach(
                     app.handle().clone(),
+                    attach_window.as_ref().window(),
                     "qa-existing-session".into(), None, None, None, Some(tuple), None,
                 ),
             ).await;
@@ -4397,6 +4385,9 @@ mod tests {
             .manage(Arc::new(DaemonClient::new_with_socket(path)))
             .manage(NativeTerminalSurfaceHostState::default())
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let attach_window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
             .unwrap();
 
         let session_id = "test-fail-rollback-session";
@@ -4457,6 +4448,7 @@ mod tests {
         let action = async {
             let res = cmd_native_terminal_attach(
                 app.handle().clone(),
+                attach_window.as_ref().window(),
                 session_id.into(),
                 None,
                 None,
