@@ -704,6 +704,18 @@ function sessions() {
   }
 }
 
+/**
+ * `cli` without blocking this process: the fixture server runs on this event loop, so a page
+ * the command waits on (wait, snapshot, act postconditions) could not load during spawnSync.
+ */
+async function cliAsync(...args) {
+  const child = Bun.spawn([binary, "browser", ...args], { env, stdout: "pipe", stderr: "pipe" });
+  const timer = setTimeout(() => child.kill(), 30000);
+  const [stdout, stderr, status] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+  clearTimeout(timer);
+  return { ok: status === 0, status, stdout: stdout.trim().slice(0, 4000), stderr: stderr.trim().slice(0, 2000) };
+}
+
 /** The error code a failed CLI call printed (first JSON line on stderr). */
 function cliCode(result) {
   for (const line of result.stderr.split("\n")) {
@@ -728,13 +740,13 @@ async function agentQa(engine, browserId) {
     return { ok: false, stderr: record.error };
   }
   const id = ["--browser-id", browserId];
-  const load = (label) => {
-    const waited = cli("wait", ...id, "--text", "Agent fixture", "--timeout-ms", "20000");
+  const load = async (label) => {
+    const waited = await cliAsync("wait", ...id, "--text", "Agent fixture", "--timeout-ms", "20000");
     record[label] = waited.ok ? "ok" : { status: waited.status, code: cliCode(waited), stderr: waited.stderr.slice(0, 500) };
     return waited.ok;
   };
-  const snapshot = (label) => {
-    const result = cli("snapshot", ...id);
+  const snapshot = async (label) => {
+    const result = await cliAsync("snapshot", ...id);
     try {
       const parsed = JSON.parse(result.stdout);
       const ref = (predicate) => parsed.elements.find(predicate)?.reference ?? null;
@@ -755,8 +767,8 @@ async function agentQa(engine, browserId) {
       return null;
     }
   };
-  const act = (verb, taken, ...args) => {
-    const result = cli(verb, ...id, "--generation", String(taken.generation), ...args);
+  const act = async (verb, taken, ...args) => {
+    const result = await cliAsync(verb, ...id, "--generation", String(taken.generation), ...args);
     let outcome = null;
     try {
       outcome = JSON.parse(result.stdout);
@@ -766,46 +778,46 @@ async function agentQa(engine, browserId) {
 
   // `navigate` returns once the load is requested; a navigation still settling from the UI
   // steps can replace it, so a page that did not arrive is navigated once more.
-  const navigate = (label) => {
-    const navigated = cli("navigate", ...id, "--url", `${fixtureBase}/agent.html`);
+  const navigate = async (label) => {
+    const navigated = await cliAsync("navigate", ...id, "--url", `${fixtureBase}/agent.html`);
     record[label] = navigated.ok ? "ok" : { status: navigated.status, code: cliCode(navigated), stderr: navigated.stderr.slice(0, 500) };
     return navigated.ok;
   };
-  const loaded = (label) => {
-    const waited = cli("wait", ...id, "--url-contains", "/agent.html", "--timeout-ms", "10000");
+  const loaded = async (label) => {
+    const waited = await cliAsync("wait", ...id, "--url-contains", "/agent.html", "--timeout-ms", "10000");
     record[label] = waited.ok ? "ok" : { status: waited.status, code: cliCode(waited) };
     return waited.ok;
   };
-  let arrived = navigate("navigate") && loaded("wait_url");
-  if (!arrived) arrived = navigate("navigate_retry") && loaded("wait_url_retry");
-  record.checks.fixture_loaded = arrived && load("wait_loaded");
+  let arrived = (await navigate("navigate")) && (await loaded("wait_url"));
+  if (!arrived) arrived = (await navigate("navigate_retry")) && (await loaded("wait_url_retry"));
+  record.checks.fixture_loaded = arrived && (await load("wait_loaded"));
   // What the page script sees when the wait does not match: where it runs and what it reads.
   if (!record.checks.fixture_loaded) {
-    const probe = cli("eval", ...id, "--script", "JSON.stringify({href: location.href, title: document.title, ready: document.readyState, text: (document.body && document.body.innerText || '').slice(0, 120)})");
+    const probe = await cliAsync("eval", ...id, "--script", "JSON.stringify({href: location.href, title: document.title, ready: document.readyState, text: (document.body && document.body.innerText || '').slice(0, 120)})");
     record.eval_probe = probe.ok ? probe.stdout.slice(0, 600) : { status: probe.status, code: cliCode(probe), stderr: probe.stderr.slice(0, 400) };
     const listed = sessions().list.find((entry) => entry.browserId === browserId);
     record.listed = listed ? { url: listed.url, title: listed.title, engine: listed.engine ?? null } : null;
   }
 
   // A ref observed before a reload names a node of the old document.
-  const before = snapshot("snapshot_before_reload");
+  const before = await snapshot("snapshot_before_reload");
   record.checks.snapshot = Boolean(before?.save && before?.email);
   record.checks.isolated_world = before?.isolated ?? null;
   if (before?.save) {
-    const reloaded = cli("reload", ...id);
+    const reloaded = await cliAsync("reload", ...id);
     record.reload = reloaded.ok ? "ok" : { status: reloaded.status, code: cliCode(reloaded) };
-    load("wait_reloaded");
-    record.stale_click = act("click", before, "--ref", before.save);
+    await load("wait_reloaded");
+    record.stale_click = await act("click", before, "--ref", before.save);
     record.checks.stale_ref_refused = !record.stale_click.ok && ["BROWSER_STALE_REF", "BROWSER_INVALID_REFERENCE"].includes(record.stale_click.code);
   }
 
-  const current = snapshot("snapshot");
+  const current = await snapshot("snapshot");
   if (current?.save && current?.email) {
-    record.fill = act("fill", current, "--ref", current.email, "--value", "agentqa");
+    record.fill = await act("fill", current, "--ref", current.email, "--value", "agentqa");
     record.checks.fill_dispatched = record.fill.ok && record.fill.outcome?.dispatched === true;
-    record.click = act("click", current, "--ref", current.save, "--expect-text", "Saved agentqa", "--expect-timeout-ms", "8000");
+    record.click = await act("click", current, "--ref", current.save, "--expect-text", "Saved agentqa", "--expect-timeout-ms", "8000");
     record.checks.click_applied = record.click.ok && record.click.outcome?.applied === true;
-    const read = cli("eval", ...id, "--script", "document.getElementById('s').textContent");
+    const read = await cliAsync("eval", ...id, "--script", "document.getElementById('s').textContent");
     record.page_text = read.ok ? read.stdout.slice(0, 200) : { status: read.status, code: cliCode(read) };
     record.checks.page_reflects_act = read.ok && read.stdout.includes("Saved agentqa");
   }
