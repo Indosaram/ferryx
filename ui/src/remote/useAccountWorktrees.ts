@@ -303,10 +303,14 @@ export function useAccountWorktrees(
       }
 
       if (isGenerationAlive()) {
+        // A re-probe of a computer that is already up (pull to refresh) keeps its rows usable
+        // while the tunnel round trip runs; only a computer that was not ready greys them out.
         setMachineStatuses((prev) => ({
           ...prev,
           [machine.machineId]: { ...prev[machine.machineId], machine, status: "tunneling",
-            options: (prev[machine.machineId]?.options ?? []).map((option) => ({ ...option, unavailable: true })) },
+            options: prev[machine.machineId]?.status === "ready"
+              ? prev[machine.machineId].options
+              : (prev[machine.machineId]?.options ?? []).map((option) => ({ ...option, unavailable: true })) },
         }));
       }
 

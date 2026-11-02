@@ -3,7 +3,7 @@
 // machine. A computer that does not hold the supervisor lease is on standby: it offers "Move
 // supervisor here", never a second supervisor.
 import { ArrowRightLeft, LoaderCircle, RotateCw } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { cn } from "../../lib/cn";
@@ -13,6 +13,8 @@ import { UnifiedSupervisorSection } from "../../components/supervisor/UnifiedSup
 import type { AdoptArchivedResult, LanePauseResult } from "../remoteSupervisor";
 import { userFacingError } from "../userFacingError";
 import { PhoneHomeHeader } from "./PhoneHomeHeader";
+import { PullToRefreshIndicator } from "./PullToRefreshIndicator";
+import { pullContentProps, usePullToRefresh, type RefreshHandler } from "./usePullToRefresh";
 import type { UnifiedHostView } from "./usePhoneSupervisor";
 import {
   actionText,
@@ -47,6 +49,8 @@ export type SupervisorHomeProps = {
   readonly phoneHeader?: boolean;
   /** Trailing header action (the Account entry). */
   readonly headerAction?: ReactNode;
+  /** Pull-to-refresh on the list. Absent: pulling does nothing. */
+  readonly onRefresh?: RefreshHandler;
 };
 
 const RECENT_COLLAPSED = 3;
@@ -359,7 +363,11 @@ export function SupervisorHome({
   onRetry,
   phoneHeader = false,
   headerAction,
+  onRefresh,
 }: SupervisorHomeProps) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const pull = usePullToRefresh(scrollRef, onRefresh);
+  const pullContent = pullContentProps(pull);
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
   const [recentExpanded, setRecentExpanded] = useState(false);
   // The lane's paused value the person asked for, shown until the next snapshot settles it.
@@ -416,8 +424,9 @@ export function SupervisorHome({
   return (
     <div data-testid="supervisor-home" data-headline={headline.kind} className="flex min-h-0 flex-1 flex-col bg-chat-screen">
       {phoneHeader ? <PhoneHomeHeader title="Supervisor" trailing={headerAction} /> : null}
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto scrollbar-sleek">
-        <div className={cn("flex w-full flex-col gap-5 px-4 pb-6", phoneHeader ? null : "pt-4")}>
+      <div ref={scrollRef} className="relative flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-y-contain scrollbar-sleek">
+        {onRefresh ? <PullToRefreshIndicator {...pull} /> : null}
+        <div className={cn("flex w-full flex-col gap-5 px-4 pb-6", phoneHeader ? null : "pt-4", pullContent.className)} style={pullContent.style}>
           {machines.length > 0 ? (
             <p data-testid="supervisor-home-headline" className="px-1 text-sm leading-snug text-chat-foreground-secondary">
               {headlineSentence(headline)}

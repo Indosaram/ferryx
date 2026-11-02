@@ -451,7 +451,21 @@ where
     F: Fn(&Path) -> ProbeOutcome,
 {
     if !manager.is_git_backed() {
-        return Vec::new();
+        // A plain folder has no worktrees, but it keeps a baseline so a later
+        // `git init` surfaces its main checkout (and a removed `.git` prunes
+        // the rows) instead of passing as a silent first observation.
+        let mut entries = cache.entries.lock();
+        let prior = entries.insert(
+            workspace_id.to_string(),
+            RescanEntry {
+                fingerprint: None,
+                worktrees: Vec::new(),
+                last_scan: now,
+            },
+        );
+        return prior
+            .map(|entry| diff_worktrees(&entry.worktrees, &[], workspace_id))
+            .unwrap_or_default();
     }
     let repo_root = manager.repo_root().to_path_buf();
     let prior_worktrees = {
@@ -829,8 +843,8 @@ mod tests {
             let entries = cache.entries.lock();
             assert!(entries.contains_key("ws-a"));
             assert!(
-                !entries.contains_key("plain"),
-                "non-git workspaces are never scanned"
+                entries.get("plain").is_some_and(|entry| entry.worktrees.is_empty()),
+                "non-git workspaces keep an empty baseline"
             );
         }
 
@@ -854,6 +868,38 @@ mod tests {
 
         let changes = sweep_registry_once(&cache, &registry, now + Duration::from_secs(60));
         assert!(changes.is_empty(), "steady state must not re-emit");
+    }
+
+    #[test]
+    fn sweep_reports_the_main_checkout_once_a_plain_folder_becomes_a_repository() {
+        let plain = tempfile::TempDir::new().unwrap();
+        let registry = WorkspaceRegistry::new();
+        registry.register("plain", plain.path()).unwrap();
+        let cache = WorktreeRescanCache::default();
+        let now = Instant::now();
+        assert!(sweep_registry_once(&cache, &registry, now).is_empty());
+        assert!(
+            sweep_registry_once(&cache, &registry, now + Duration::from_secs(30)).is_empty(),
+            "an unchanged plain folder stays silent"
+        );
+
+        let root = plain.path();
+        git::run_git(root, &["init"]).unwrap();
+        git::run_git(root, &["config", "user.name", "Orca Test"]).unwrap();
+        git::run_git(root, &["config", "user.email", "test@orca.dev"]).unwrap();
+        std::fs::write(root.join("README.md"), "# Later\n").unwrap();
+        git::run_git(root, &["add", "README.md"]).unwrap();
+        git::run_git(root, &["commit", "-m", "Initial commit"]).unwrap();
+
+        let changes = sweep_registry_once(&cache, &registry, now + Duration::from_secs(60));
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].workspace_id, "plain");
+        assert_eq!(changes[0].kind, WorktreeChangeKind::Created);
+
+        std::fs::remove_dir_all(root.join(".git")).unwrap();
+        let changes = sweep_registry_once(&cache, &registry, now + Duration::from_secs(90));
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind, WorktreeChangeKind::Pruned);
     }
 
     #[test]

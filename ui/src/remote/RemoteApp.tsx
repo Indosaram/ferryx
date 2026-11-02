@@ -172,6 +172,7 @@ import { buildInboxRows, optionForSession, type InboxRow } from "./home/phoneHom
 import { PhoneHomeView } from "./home/PhoneHomeView";
 import { SupervisorSessionStrip } from "./home/SupervisorSessionStrip";
 import { usePhoneNavigation } from "./home/usePhoneNavigation";
+import { edgeSwipeHostSupported, useEdgeSwipeBack } from "./home/useEdgeSwipeBack";
 import { usePhoneSupervisor } from "./home/usePhoneSupervisor";
 import { WorktreesHome } from "./home/WorktreesHome";
 import type { TunnelTransport, TunnelWebSocket } from "./attachTunnel";
@@ -3221,6 +3222,10 @@ export const RemoteHostConnection: React.FC<{
   useEffect(() => {
     if (phoneSessionLost) phoneBack();
   }, [phoneBack, phoneSessionLost]);
+  /* Edge swipe back on the Session screen, only where the app owns the left edge (installed
+     PWA or the Tauri mobile shell); a browser tab keeps the browser's own back swipe. */
+  const [edgeSwipeHost] = useState(edgeSwipeHostSupported);
+  const sessionScreenRef = useEdgeSwipeBack({ enabled: phoneHome && edgeSwipeHost, onBack: phoneBack });
   const activeMachineInventory = activeTunnelConnection
     ? accountDiscovery.sessionInventories[activeTunnelConnection.machine.machineId] ?? null
     : null;
@@ -5384,6 +5389,12 @@ export const RemoteHostConnection: React.FC<{
           }}
           worktrees={phoneWorktrees}
           accountAction={<AccountButton onOpen={() => setAccountSheetOpen(true)} />}
+          onRefresh={(destination) => {
+            // Every list reads account discovery (worktrees, the inventory behind the Inbox), so a
+            // pull re-probes each computer; the Supervisor also re-reads every supervisor feed.
+            if (destination === "supervisor") phoneSupervisor.resync();
+            return Promise.allSettled(accountDiscovery.machines.map((machine) => accountDiscovery.retryMachine(machine.machineId)));
+          }}
           resume={
             token && model.context.workspaceId
               ? { title: mobileTitle, subtitle: contextName(model.context), onOpen: phoneNav.openSession }
@@ -5400,7 +5411,7 @@ export const RemoteHostConnection: React.FC<{
           }
         />
       ) : (
-      <>
+      <div ref={sessionScreenRef} data-testid="phone-session-screen" className="flex min-h-0 min-w-0 flex-1 flex-col">
       {desktopSidebar ? (
       <header className="flex h-7 [@media(pointer:coarse)]:h-14 shrink-0 items-center justify-between border-b border-chat-border bg-chat-surface px-2.5">
         <button
@@ -5839,7 +5850,7 @@ export const RemoteHostConnection: React.FC<{
             />
           ) : null}
       </RemoteWorkspaceMirror>
-      </>
+      </div>
       )}
 
       {isAccountMode ? null : (

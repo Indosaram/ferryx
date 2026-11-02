@@ -4,6 +4,7 @@ import { Bot, FolderTree, Inbox, type LucideIcon } from "lucide-react";
 import { useRef, type KeyboardEvent } from "react";
 
 import { cn } from "../../lib/cn";
+import { haptic } from "../haptics";
 import type { PhoneDestination } from "./usePhoneNavigation";
 
 const TABS: ReadonlyArray<{ id: PhoneDestination; label: string; icon: LucideIcon }> = [
@@ -40,6 +41,7 @@ export function MobileHomeTabBar({ active, inboxCount, onSelect }: MobileHomeTab
               : null;
     if (target === null) return;
     event.preventDefault();
+    if (target !== index) haptic("selection");
     onSelect(TABS[target].id);
     refs.current[target]?.focus();
   };
@@ -64,7 +66,10 @@ export function MobileHomeTabBar({ active, inboxCount, onSelect }: MobileHomeTab
               aria-controls={selected ? PHONE_HOME_PANEL_ID : undefined}
               aria-label={count > 0 ? `${tab.label}, ${count} need you` : tab.label}
               tabIndex={selected ? 0 : -1}
-              onClick={() => onSelect(tab.id)}
+              onClick={() => {
+                if (!selected) haptic("selection");
+                onSelect(tab.id);
+              }}
               className={cn(
                 "relative flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring",
                 selected ? "text-chat-foreground" : "text-chat-foreground-secondary hover:text-chat-foreground",

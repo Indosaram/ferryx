@@ -199,6 +199,15 @@ function initialDestination(state: string): PhoneDestination {
   return "supervisor";
 }
 
+const QA_REFRESH_STATES: ReadonlySet<string> = new Set(["home-supervisor", "home-inbox", "home-worktrees"]);
+
+/** Pull-to-refresh for headless QA: counts each refresh on `window.__qaRefreshCount` and settles after 600ms. */
+function qaRefresh(): Promise<void> {
+  const qaWindow = window as typeof window & { __qaRefreshCount?: number };
+  qaWindow.__qaRefreshCount = (qaWindow.__qaRefreshCount ?? 0) + 1;
+  return new Promise((resolve) => setTimeout(resolve, 600));
+}
+
 const DELETE_FAILURES: Readonly<Record<string, AccountSessionError>> = {
   "account-delete-error-mismatch": new AccountSessionError("CONFIRMATION_MISMATCH", "mismatch", 400),
   "account-delete-error-subscription": new AccountSessionError("SUBSCRIPTION_ACTIVE", "subscription", 409),
@@ -238,6 +247,7 @@ export const PhoneHomeQaState: React.FC<{ state: string; model: RemoteWorkspaceM
         destination={destination}
         onSelectTab={setDestination}
         accountAction={accountAction}
+        {...(QA_REFRESH_STATES.has(state) ? { onRefresh: qaRefresh } : {})}
         supervisor={{
           machines,
           now: NOW,
@@ -253,7 +263,10 @@ export const PhoneHomeQaState: React.FC<{ state: string; model: RemoteWorkspaceM
           rows: inbox.rows,
           prompts: inbox.prompts,
           loading: state === "home-inbox-loading-partial",
-          onOpen: () => undefined,
+          onOpen: () => {
+            const qaWindow = window as typeof window & { __qaInboxOpenCount?: number };
+            qaWindow.__qaInboxOpenCount = (qaWindow.__qaInboxOpenCount ?? 0) + 1;
+          },
         }}
         worktrees={
           <WorktreesHome headerAction={accountAction}>
