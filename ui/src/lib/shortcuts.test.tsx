@@ -45,8 +45,8 @@ const TERMINAL_CHORD_CASES: readonly [string, ShortcutActionId, KeyboardEventIni
   ["open command palette primary", "commandPalette.open", { key: "k", metaKey: true }],
   ["open command palette alias cmd-p", "commandPalette.open", { key: "p", metaKey: true }],
   ["toggle settings", "settings.toggle", { key: ",", metaKey: true }],
-  ["toggle notification center primary", "notifications.toggle", { key: "n", metaKey: true, shiftKey: true }],
-  ["toggle notification center alias cmd-shift-i", "notifications.toggle", { key: "i", metaKey: true, shiftKey: true }],
+  ["new window", "window.new", { key: "n", metaKey: true, shiftKey: true }],
+  ["toggle notification center primary", "notifications.toggle", { key: "i", metaKey: true, shiftKey: true }],
   ["zoom in primary", "zoom.in", { key: "=", code: "Equal", metaKey: true }],
   ["zoom in alias shift-plus", "zoom.in", { key: "+", code: "Equal", metaKey: true, shiftKey: true }],
   ["zoom out", "zoom.out", { key: "-", code: "Minus", metaKey: true }],
@@ -146,6 +146,7 @@ describe("shortcut registry", () => {
       "sidebar.left.toggle",
       "project.add",
       "commandPalette.open",
+      "window.new",
       "settings.toggle",
       "notifications.toggle",
       "zoom.in",
@@ -161,10 +162,11 @@ describe("shortcut registry", () => {
     expect(shortcutLabel("project.add", false)).toBe("Ctrl+O");
     expect(shortcutAliasesLabels("project.add", true)).toEqual(["⌘N"]);
     expect(shortcutAliasesLabels("project.add", false)).toEqual(["Ctrl+N"]);
-    expect(shortcutLabel("notifications.toggle", true)).toBe("⌘⇧N");
-    expect(shortcutLabel("notifications.toggle", false)).toBe("Ctrl+Shift+N");
-    expect(shortcutAliasesLabels("notifications.toggle", true)).toEqual(["⌘⇧I"]);
-    expect(shortcutAliasesLabels("notifications.toggle", false)).toEqual(["Ctrl+Shift+I"]);
+    expect(shortcutLabel("window.new", true)).toBe("⌘⇧N");
+    expect(shortcutLabel("window.new", false)).toBe("Ctrl+Shift+N");
+    expect(shortcutLabel("notifications.toggle", true)).toBe("⌘⇧I");
+    expect(shortcutLabel("notifications.toggle", false)).toBe("Ctrl+Shift+I");
+    expect(shortcutAliasesLabels("notifications.toggle", true)).toEqual([]);
     expect(shortcutLabel("terminal.splitDown", true)).toBe("⌘⇧D");
     expect(shortcutLabel("terminal.focusNext", true)).toBe("⌘]");
     expect(shortcutLabel("terminal.focusNext", false)).toBe("Ctrl+]");
@@ -344,6 +346,7 @@ describe("shortcut registry", () => {
       "sidebar.left.toggle": vi.fn(),
       "project.add": vi.fn(),
       "commandPalette.open": vi.fn(),
+      "window.new": vi.fn(),
       "settings.toggle": vi.fn(),
       "notifications.toggle": vi.fn(),
       "zoom.in": vi.fn(),
@@ -383,7 +386,7 @@ describe("shortcut registry", () => {
     fireEvent.keyDown(input, { key: "k", ctrlKey: true });
     expect(handlers["commandPalette.open"]).toHaveBeenCalledOnce();
 
-    fireEvent.keyDown(input, { key: "n", ctrlKey: true, shiftKey: true });
+    fireEvent.keyDown(input, { key: "i", ctrlKey: true, shiftKey: true });
     expect(handlers["notifications.toggle"]).toHaveBeenCalledOnce();
     input.remove();
   });
