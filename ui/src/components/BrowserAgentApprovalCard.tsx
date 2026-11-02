@@ -155,6 +155,10 @@ function describeApproval(
         detail: `It could ${describeScopes(approval.scopes)} on this site only.`,
       };
     case "fileCapability":
+      return {
+        title: `Let ${controllerName(controllers, approval.controller)} run ${approval.tool} once?`,
+        detail: `It may write or read ${approval.path} once, for the next call only.`,
+      };
     case "nativeCapability":
       return {
         title: `Let ${controllerName(controllers, approval.controller)} run ${approval.tool} once?`,

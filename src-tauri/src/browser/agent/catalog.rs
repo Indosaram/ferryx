@@ -232,7 +232,7 @@ impl ToolId {
             Self::Back => spec(self, S::Interact, false, Some(G::Interact), true),
             Self::Forward => spec(self, S::Interact, false, Some(G::Interact), true),
             Self::Reload => spec(self, S::Interact, false, Some(G::Interact), true),
-            Self::Close => spec(self, S::Interact, false, None, true),
+            Self::Close => spec(self, S::Interact, false, Some(G::Interact), true),
             Self::Act => spec(self, S::Interact, false, Some(G::Interact), true),
             Self::Highlight => spec(self, S::Interact, false, Some(G::Interact), true),
             Self::DialogRespond => spec(self, S::Interact, false, Some(G::Interact), true),

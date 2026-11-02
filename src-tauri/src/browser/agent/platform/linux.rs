@@ -1,13 +1,14 @@
 //! Linux native browser capture (plan C4, T7c): WebKitGTK `webkit_web_view_get_snapshot`
 //! with `WEBKIT_SNAPSHOT_REGION_VISIBLE`, finished in the async callback, encoded in memory.
 //!
-//! Every GObject (WebView, cairo surface, GdkPixbuf) is created, used and dropped on the GTK
-//! main thread inside `with_webview` and the snapshot callback. Only the Rust
-//! [`BrowserSnapshot`] crosses threads, through the shared [`SnapshotCallbackCoordinator`]
+//! Every GObject (WebView, cairo surface) is created, used and dropped on the GTK main
+//! thread inside `with_webview` and the snapshot callback. The callback only copies the
+//! surface's pixels into a Rust [`RawSnapshot`]; scaling and encoding run on a blocking
+//! worker, which hands the [`BrowserSnapshot`] to the shared [`SnapshotCallbackCoordinator`]
 //! (single delivery, timeout and late-callback fence). Nothing touches the filesystem.
 //!
-//! Encoding uses gdk-pixbuf (`save_to_bufferv`) because the pinned cairo-rs 0.18 is built
-//! without its `png` feature; gdk-pixbuf is already linked through `gtk`.
+//! Encoding uses the pure-Rust `image` crate because the pinned cairo-rs 0.18 is built
+//! without its `png` feature.
 
 use crate::browser::snapshot_source::{
     await_coordinator_completion, clamp_capture_dimensions, BrowserSnapshot,
@@ -16,8 +17,6 @@ use crate::browser::snapshot_source::{
 use crate::browser::BrowserError;
 use crate::ipc::error::{IpcError, IpcErrorCode};
 use gtk::cairo;
-use gtk::gdk;
-use gtk::gdk_pixbuf;
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
@@ -45,20 +44,20 @@ pub(crate) fn target_dimensions(
     clamp_capture_dimensions(w, h)
 }
 
-/// gdk-pixbuf saver name and options for a snapshot format.
-pub(crate) fn pixbuf_encoder(format: SnapshotFormat) -> (&'static str, Option<String>) {
-    match format {
-        SnapshotFormat::Png => ("png", None),
-        SnapshotFormat::Jpeg { quality } => ("jpeg", Some(quality.min(100).to_string())),
-    }
+/// Pixels copied out of a cairo image surface: `stride`-byte rows of native-endian 32-bit
+/// words (`ARGB32` premultiplied, or `RGB24` whose top byte is unused when `opaque`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RawSnapshot {
+    pub width: u32,
+    pub height: u32,
+    pub stride: usize,
+    pub opaque: bool,
+    pub data: Vec<u8>,
 }
 
-/// Converts the WebKit snapshot surface to encoded bytes. GTK main thread only: the surface
-/// and every derived pixbuf are dropped before this returns; only Rust bytes leave.
-fn encode_snapshot_surface(
-    surface: cairo::Surface,
-    options: SnapshotOptions,
-) -> Result<BrowserSnapshot, IpcError> {
+/// Copies the WebKit snapshot surface's pixels into Rust memory. GTK main thread only: the
+/// surface is dropped before this returns; only the copied bytes leave.
+fn copy_snapshot_surface(surface: cairo::Surface) -> Result<RawSnapshot, IpcError> {
     surface.status().map_err(|error| {
         capture_error(format!("WebKitGTK snapshot surface is invalid: {error}"))
     })?;
@@ -68,48 +67,110 @@ fn encode_snapshot_surface(
     if pixel_w <= 0 || pixel_h <= 0 {
         return Err(capture_error("WebKitGTK snapshot is empty"));
     }
-    // The image surface stores device pixels; reset the HiDPI scale so the copy below reads
-    // exactly pixel_w x pixel_h instead of resampling through the device scale.
+    let opaque = match image.format() {
+        cairo::Format::ARgb32 => false,
+        cairo::Format::Rgb24 => true,
+        other => {
+            return Err(capture_error(format!(
+                "unsupported WebKitGTK snapshot pixel format: {other:?}"
+            )))
+        }
+    };
+    // The image surface stores device pixels; reset the HiDPI scale so the copy reads
+    // exactly pixel_w x pixel_h device pixels.
     image.set_device_scale(1.0, 1.0);
-    let pixbuf = gdk::pixbuf_get_from_surface(&image, 0, 0, pixel_w, pixel_h)
-        .ok_or_else(|| capture_error("cannot convert snapshot surface to a pixbuf"))?;
-    drop(image);
+    let stride = usize::try_from(image.stride())
+        .map_err(|_| capture_error("WebKitGTK snapshot has a negative stride"))?;
+    let mut data = Vec::new();
+    image
+        .with_data(|pixels| data.extend_from_slice(pixels))
+        .map_err(|error| capture_error(format!("cannot read snapshot pixels: {error}")))?;
+    Ok(RawSnapshot {
+        width: pixel_w as u32,
+        height: pixel_h as u32,
+        stride,
+        opaque,
+        data,
+    })
+}
 
+/// Converts cairo pixels to straight-alpha RGBA. Pure Rust; runs off the GTK thread.
+pub(crate) fn raw_to_rgba(raw: &RawSnapshot) -> Result<image::RgbaImage, IpcError> {
+    let (width, height) = (raw.width as usize, raw.height as usize);
+    let row_bytes = width * 4;
+    if width == 0
+        || height == 0
+        || raw.stride < row_bytes
+        || raw.data.len() < raw.stride * (height - 1) + row_bytes
+    {
+        return Err(capture_error(
+            "WebKitGTK snapshot pixel buffer is truncated",
+        ));
+    }
+    let mut rgba = Vec::with_capacity(row_bytes * height);
+    for row in raw.data.chunks(raw.stride).take(height) {
+        for pixel in row[..row_bytes].chunks_exact(4) {
+            let word = u32::from_ne_bytes([pixel[0], pixel[1], pixel[2], pixel[3]]);
+            let alpha = if raw.opaque { 255 } else { (word >> 24) as u8 };
+            let channel = |shift: u32| {
+                let premultiplied = (word >> shift) & 0xff;
+                match alpha {
+                    0 => 0,
+                    255 => premultiplied as u8,
+                    a => ((premultiplied * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8,
+                }
+            };
+            rgba.extend_from_slice(&[channel(16), channel(8), channel(0), alpha]);
+        }
+    }
+    image::RgbaImage::from_raw(raw.width, raw.height, rgba)
+        .ok_or_else(|| capture_error("WebKitGTK snapshot pixel buffer is truncated"))
+}
+
+/// Scales the copied pixels to the requested bounds and encodes them in memory.
+pub(crate) fn encode_raw(
+    raw: RawSnapshot,
+    options: SnapshotOptions,
+) -> Result<BrowserSnapshot, IpcError> {
+    let rgba = raw_to_rgba(&raw)?;
+    drop(raw);
     let (target_w, target_h) = target_dimensions(
-        pixel_w as u32,
-        pixel_h as u32,
+        rgba.width(),
+        rgba.height(),
         options.max_width,
         options.max_height,
     );
-    let pixbuf = if (target_w, target_h) == (pixel_w as u32, pixel_h as u32) {
-        pixbuf
+    let rgba = if (target_w, target_h) == rgba.dimensions() {
+        rgba
     } else {
-        pixbuf
-            .scale_simple(
-                target_w as i32,
-                target_h as i32,
-                gdk_pixbuf::InterpType::Bilinear,
-            )
-            .ok_or_else(|| capture_error("cannot scale snapshot to the requested bounds"))?
+        image::imageops::resize(
+            &rgba,
+            target_w,
+            target_h,
+            image::imageops::FilterType::Triangle,
+        )
     };
-
-    let (saver, quality) = pixbuf_encoder(options.format);
-    let save_options: Vec<(&str, &str)> = quality
-        .as_deref()
-        .map(|q| vec![("quality", q)])
-        .unwrap_or_default();
-    let bytes = pixbuf
-        .save_to_bufferv(saver, &save_options)
-        .map_err(|error| capture_error(format!("cannot encode snapshot as {saver}: {error}")))?;
+    let (width, height) = rgba.dimensions();
+    let mut bytes = Vec::new();
+    match options.format {
+        SnapshotFormat::Png => rgba
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .map_err(|error| capture_error(format!("cannot encode snapshot to PNG: {error}")))?,
+        SnapshotFormat::Jpeg { quality } => image::DynamicImage::ImageRgba8(rgba)
+            .to_rgb8()
+            .write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(
+                &mut bytes,
+                quality.clamp(1, 100),
+            ))
+            .map_err(|error| capture_error(format!("cannot encode snapshot to JPEG: {error}")))?,
+    }
     if bytes.is_empty() {
         return Err(capture_error("empty snapshot generated"));
     }
-    Ok(BrowserSnapshot::new(
-        bytes,
-        options.format,
-        pixbuf.width() as u32,
-        pixbuf.height() as u32,
-    ))
+    Ok(BrowserSnapshot::new(bytes, options.format, width, height))
 }
 
 /// Linux counterpart of the macOS `capture_webview_snapshot`.
@@ -124,8 +185,8 @@ pub async fn capture_webview_snapshot<R: tauri::Runtime>(
 
 /// Linux counterpart of the macOS `capture_webview_snapshot_with_coordinator`: same
 /// arguments, coordinator and timeout semantics. The native request is issued on the GTK
-/// main thread by `with_webview`; WebKit calls back on that thread, where the surface is
-/// encoded and the Rust result handed to the coordinator.
+/// main thread by `with_webview`; WebKit calls back on that thread, where the surface's
+/// pixels are copied out; a blocking worker encodes them and completes the coordinator.
 pub async fn capture_webview_snapshot_with_coordinator<R: tauri::Runtime>(
     app: &AppHandle<R>,
     webview_label: &str,
@@ -155,12 +216,21 @@ pub async fn capture_webview_snapshot_with_coordinator<R: tauri::Runtime>(
                 webkit2gtk::SnapshotOptions::NONE,
                 None::<&webkit2gtk::gio::Cancellable>,
                 move |result| {
-                    let snapshot = result
+                    let raw = result
                         .map_err(|error| {
                             capture_error(format!("WebKitGTK snapshot failed: {error}"))
                         })
-                        .and_then(|surface| encode_snapshot_surface(surface, options));
-                    let _ = coordinator.complete(snapshot);
+                        .and_then(copy_snapshot_surface);
+                    match raw {
+                        Ok(raw) => {
+                            let _encoding = tauri::async_runtime::spawn_blocking(move || {
+                                let _ = coordinator.complete(encode_raw(raw, options));
+                            });
+                        }
+                        Err(error) => {
+                            let _ = coordinator.complete(Err(error));
+                        }
+                    }
                 },
             );
         })
@@ -215,15 +285,103 @@ mod tests {
     }
 
     #[test]
-    fn encoder_matches_requested_format() {
-        assert_eq!(pixbuf_encoder(SnapshotFormat::Png), ("png", None));
+    fn raw_pixels_unpremultiply_and_skip_row_padding() {
+        let mut data = Vec::new();
+        // Row 0: opaque red, half-transparent premultiplied green (0x80 -> 0xff), transparent.
+        for word in [0xffff_0000u32, 0x8000_8000, 0x0000_0000, 0xff00_00ff] {
+            data.extend_from_slice(&word.to_ne_bytes());
+        }
+        data.extend_from_slice(&[0xaa; 8]); // stride padding
+        for word in [0xff10_2030u32; 4] {
+            data.extend_from_slice(&word.to_ne_bytes());
+        }
+        data.extend_from_slice(&[0xaa; 8]);
+        let raw = RawSnapshot {
+            width: 4,
+            height: 2,
+            stride: 24,
+            opaque: false,
+            data,
+        };
+        let rgba = raw_to_rgba(&raw).expect("convert");
+        assert_eq!(rgba.dimensions(), (4, 2));
+        assert_eq!(rgba.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(rgba.get_pixel(1, 0).0, [0, 255, 0, 128]);
+        assert_eq!(rgba.get_pixel(2, 0).0, [0, 0, 0, 0]);
+        assert_eq!(rgba.get_pixel(3, 0).0, [0, 0, 255, 255]);
+        assert_eq!(rgba.get_pixel(2, 1).0, [0x10, 0x20, 0x30, 255]);
+
+        let truncated = RawSnapshot {
+            width: 4,
+            height: 2,
+            stride: 16,
+            opaque: false,
+            data: vec![0; 20],
+        };
         assert_eq!(
-            pixbuf_encoder(SnapshotFormat::Jpeg { quality: 85 }),
-            ("jpeg", Some("85".to_string()))
+            raw_to_rgba(&truncated).expect_err("short").code,
+            IpcErrorCode::BrowserScreenshotFailed
         );
+    }
+
+    #[test]
+    fn opaque_rgb24_ignores_the_unused_byte() {
+        let data = 0x0011_2233u32.to_ne_bytes().to_vec();
+        let raw = RawSnapshot {
+            width: 1,
+            height: 1,
+            stride: 4,
+            opaque: true,
+            data,
+        };
         assert_eq!(
-            pixbuf_encoder(SnapshotFormat::Jpeg { quality: 255 }),
-            ("jpeg", Some("100".to_string()))
+            raw_to_rgba(&raw).expect("convert").get_pixel(0, 0).0,
+            [0x11, 0x22, 0x33, 255]
         );
+    }
+
+    fn solid_raw(width: u32, height: u32) -> RawSnapshot {
+        let data = (0..width * height)
+            .flat_map(|_| 0xff40_8020u32.to_ne_bytes())
+            .collect();
+        RawSnapshot {
+            width,
+            height,
+            stride: width as usize * 4,
+            opaque: false,
+            data,
+        }
+    }
+
+    #[test]
+    fn raw_snapshot_encodes_to_png_at_native_size() {
+        let snapshot = encode_raw(solid_raw(4, 2), SnapshotOptions::png()).expect("png");
+        assert_eq!(snapshot.format, SnapshotFormat::Png);
+        assert_eq!((snapshot.width, snapshot.height), (4, 2));
+        let decoded = image::load_from_memory_with_format(&snapshot.bytes, image::ImageFormat::Png)
+            .expect("decode")
+            .to_rgba8();
+        assert_eq!(decoded.dimensions(), (4, 2));
+        assert_eq!(decoded.get_pixel(3, 1).0, [0x40, 0x80, 0x20, 255]);
+    }
+
+    #[test]
+    fn raw_snapshot_is_downscaled_to_bounds() {
+        let snapshot = encode_raw(
+            solid_raw(40, 20),
+            SnapshotOptions::png().with_bounds(10, 10),
+        )
+        .expect("scaled");
+        assert_eq!((snapshot.width, snapshot.height), (10, 5));
+        let decoded = image::load_from_memory(&snapshot.bytes).expect("decode");
+        assert_eq!((decoded.width(), decoded.height()), (10, 5));
+    }
+
+    #[test]
+    fn raw_snapshot_encodes_to_jpeg() {
+        let snapshot = encode_raw(solid_raw(8, 6), SnapshotOptions::jpeg(70)).expect("jpeg");
+        assert!(snapshot.bytes.starts_with(&[0xff, 0xd8]));
+        assert_eq!(snapshot.format, SnapshotFormat::Jpeg { quality: 70 });
+        assert_eq!((snapshot.width, snapshot.height), (8, 6));
     }
 }

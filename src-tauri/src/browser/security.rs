@@ -41,6 +41,9 @@ pub enum BrowserError {
     AutomationFailed(String),
     #[error("Browser CLI unavailable: {0}")]
     CliUnavailable(String),
+    /// The controller's authority ended or changed while its request ran.
+    #[error("{0}")]
+    Authority(crate::browser::agent::AuthorityError),
     #[error("Internal browser error: {0}")]
     Internal(String),
 }

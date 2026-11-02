@@ -88,6 +88,21 @@ describe("BrowserAgentApprovalCard", () => {
     await vi.waitFor(() => expect(agent.resolveBrowserAgentApproval).toHaveBeenCalledWith("a2", "deny"));
   });
 
+  it("names the one file a file capability may use", async () => {
+    const capability: BrowserAgentApproval = {
+      id: "a3",
+      kind: "fileCapability",
+      controller: controllerId,
+      tool: "browser.screenshot",
+      path: "/tmp/shot.png",
+      expiresInMs: 60_000,
+    };
+    backend([capability]);
+    render(<BrowserAgentApprovalCard />);
+    expect(await screen.findByText("Let qa-a run browser.screenshot once?")).toBeInTheDocument();
+    expect(screen.getByText(/\/tmp\/shot\.png/)).toBeInTheDocument();
+  });
+
   it("follows the backend's change event and shows the next request", async () => {
     backend([]);
     render(<BrowserAgentApprovalCard />);

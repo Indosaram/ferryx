@@ -10,10 +10,16 @@ export type GrantScope = "read" | "interact" | "eval";
 export type BrowserAgentApproval =
   | { id: string; kind: "pairController"; controller: string; label: string; expiresInMs: number }
   | { id: string; kind: "originGrant"; controller: string; origin: string; scopes: GrantScope[]; expiresInMs: number }
-  | { id: string; kind: "fileCapability"; controller: string; tool: string; expiresInMs: number }
+  | { id: string; kind: "fileCapability"; controller: string; tool: string; path: string; expiresInMs: number }
   | { id: string; kind: "nativeCapability"; controller: string; tool: string; expiresInMs: number };
 
-export type BrowserAgentGrant = { origin: string; scopes: GrantScope[]; persistent: boolean };
+/** `scopes` holds every scope on the origin; `persistentScopes` the ones kept across restarts. */
+export type BrowserAgentGrant = {
+  origin: string;
+  scopes: GrantScope[];
+  persistent: boolean;
+  persistentScopes?: GrantScope[];
+};
 
 export type BrowserAgentController = {
   id: string;

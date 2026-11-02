@@ -549,6 +549,8 @@ impl From<crate::browser::BrowserError> for IpcError {
             crate::browser::BrowserError::CliUnavailable(_) => IpcErrorCode::BrowserCliUnavailable,
             crate::browser::BrowserError::PlatformUnsupported(_) => IpcErrorCode::Unsupported,
             crate::browser::BrowserError::Internal(_) => IpcErrorCode::InternalError,
+            // Keeps the authority code and details (pairing command, epochs, tool).
+            crate::browser::BrowserError::Authority(error) => return Self::from(error),
         };
         Self::new(code, message)
     }
@@ -725,5 +727,17 @@ mod tests {
         assert_eq!(err.code, IpcErrorCode::InvalidArgument);
         assert_eq!(serde_json::to_string(&err.code).unwrap(), "\"INVALID_ARGUMENT\"");
         assert!(err.message.contains("profile-x"));
+    }
+
+    #[test]
+    fn test_browser_authority_error_keeps_its_code_and_details() {
+        use crate::browser::agent::{AuthorityError, ControllerId, BROWSER_CONTROLLER_REVOKED};
+        use crate::browser::BrowserError;
+
+        let controller = ControllerId::generate();
+        let err = IpcError::from(BrowserError::Authority(AuthorityError::Revoked { controller }));
+        let value = serde_json::to_value(&err).unwrap();
+        assert_eq!(value["code"], BROWSER_CONTROLLER_REVOKED);
+        assert_eq!(value["details"]["controllerId"], controller.to_string());
     }
 }

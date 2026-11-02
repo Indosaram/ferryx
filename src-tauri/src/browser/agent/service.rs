@@ -11,9 +11,9 @@
 //! gateway's own connection, which authorizes each framed command for its paired device
 //! (moving it to a separate gateway token is plan T3).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
@@ -21,10 +21,14 @@ use tokio::sync::Notify;
 
 use super::authority::{AuthorityState, ControllerSummary, PendingApproval, PersistedRegistry, TabFacts};
 use super::catalog::{GrantScope, Platform, ToolId};
-use super::policy::{authorize, classify_cli, Caller, Classification, Obligation, PolicyContext, Target};
-use super::protocol::{ApprovalId, ApprovalResolution, AuthorityError, ControllerId, Principal, PAIRING_APPROVAL_TTL};
-use crate::browser::BrowserManager;
-use crate::ipc::browser_cli::{BrowserCliRequest, ControllerAuth};
+use super::policy::{authorize, classify_cli, Authorization, Caller, Classification, Obligation, PolicyContext, Target};
+use super::protocol::{
+    ApprovalId, ApprovalResolution, AuthorityError, ControllerDirectory, ControllerId, ControllerStanding, Principal,
+    SessionEpoch, PAIRING_APPROVAL_TTL,
+};
+use crate::browser::download::DownloadRecord;
+use crate::browser::{BrowserError, BrowserManager, BrowserSessionSummary};
+use crate::ipc::browser_cli::{BrowserCliRequest, BrowserCliResponse, ControllerAuth};
 use crate::ipc::error::{IpcError, IpcErrorCode};
 
 /// Emitted to the app chrome whenever the pending approval list changes.
@@ -61,11 +65,21 @@ struct Service {
     state: AuthorityState,
     settings: AgentSettings,
     loaded: bool,
+    /// Sequence number of the last registry snapshot taken; assigned under this lock so the
+    /// writer can drop a snapshot older than one already on disk.
+    next_persist_seq: u64,
 }
 
 static SERVICE: LazyLock<parking_lot::Mutex<Service>> = LazyLock::new(|| {
-    parking_lot::Mutex::new(Service { state: AuthorityState::default(), settings: initial_settings(), loaded: false })
+    parking_lot::Mutex::new(Service {
+        state: AuthorityState::default(),
+        settings: initial_settings(),
+        loaded: false,
+        next_persist_seq: 0,
+    })
 });
+/// Sequence number of the registry snapshot last written to disk; held across write+rename.
+static PERSIST_WRITTEN: LazyLock<parking_lot::Mutex<u64>> = LazyLock::new(|| parking_lot::Mutex::new(0));
 /// Wakes requesters waiting on an approval outcome.
 static RESOLVED: LazyLock<Arc<Notify>> = LazyLock::new(|| Arc::new(Notify::new()));
 
@@ -99,14 +113,7 @@ async fn ensure_loaded() -> Result<(), IpcError> {
     }
     let file = crate::ipc::run_blocking(|| {
         let Some(path) = store_path() else { return Ok(PersistedFile::default()) };
-        match std::fs::read(&path) {
-            Ok(bytes) => Ok(serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-                tracing::warn!(%error, path = %path.display(), "unreadable browser agent registry; starting empty");
-                PersistedFile::default()
-            })),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(PersistedFile::default()),
-            Err(error) => Err(IpcError::new(IpcErrorCode::IoError, error.to_string())),
-        }
+        load_registry_file(&path)
     })
     .await?;
     let mut service = SERVICE.lock();
@@ -120,27 +127,75 @@ async fn ensure_loaded() -> Result<(), IpcError> {
     Ok(())
 }
 
+/// Reads the registry file. A file that does not parse is kept aside as
+/// `<name>.corrupt-<unix millis>` (never silently overwritten) and the registry starts empty.
+fn load_registry_file(path: &Path) -> Result<PersistedFile, IpcError> {
+    let io = |error: std::io::Error| IpcError::new(IpcErrorCode::IoError, error.to_string());
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(PersistedFile::default()),
+        Err(error) => return Err(io(error)),
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(file) => Ok(file),
+        Err(error) => {
+            let millis = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_millis());
+            let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+            let aside = path.with_file_name(format!("{name}.corrupt-{millis}"));
+            // If it cannot be moved aside, refuse to start rather than overwrite it later.
+            std::fs::rename(path, &aside).map_err(io)?;
+            tracing::warn!(
+                %error,
+                path = %path.display(),
+                kept = %aside.display(),
+                "unreadable browser agent registry moved aside; starting empty"
+            );
+            Ok(PersistedFile::default())
+        }
+    }
+}
+
 /// Writes the registry (digests only, never secrets) with an atomic replace, owner-only.
 async fn persist() -> Result<(), IpcError> {
-    let file = {
-        let service = SERVICE.lock();
-        PersistedFile { settings: service.settings.clone(), registry: service.state.to_persisted() }
+    let (seq, file) = {
+        let mut service = SERVICE.lock();
+        service.next_persist_seq += 1;
+        let file = PersistedFile { settings: service.settings.clone(), registry: service.state.to_persisted() };
+        (service.next_persist_seq, file)
     };
     crate::ipc::run_blocking(move || {
         let Some(path) = store_path() else { return Ok(()) };
-        let io = |error: std::io::Error| IpcError::new(IpcErrorCode::IoError, error.to_string());
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(io)?;
-        }
-        let bytes = serde_json::to_vec_pretty(&file).map_err(|error| IpcError::internal(error.to_string()))?;
-        let temp = path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
-        write_private(&temp, &bytes).map_err(io)?;
-        std::fs::rename(&temp, &path).map_err(|error| {
-            let _ = std::fs::remove_file(&temp);
-            io(error)
-        })
+        write_registry_file(&path, seq, &PERSIST_WRITTEN, &file)
     })
     .await
+}
+
+/// Writes snapshot `seq` unless a newer one is already on disk. `written` is held across the
+/// write and the rename, so concurrent writers land in sequence order and a stale snapshot
+/// (taken before a revocation) never replaces a newer one.
+fn write_registry_file(
+    path: &Path,
+    seq: u64,
+    written: &parking_lot::Mutex<u64>,
+    file: &PersistedFile,
+) -> Result<(), IpcError> {
+    let mut last = written.lock();
+    if seq <= *last {
+        return Ok(());
+    }
+    let io = |error: std::io::Error| IpcError::new(IpcErrorCode::IoError, error.to_string());
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(io)?;
+    }
+    let bytes = serde_json::to_vec_pretty(file).map_err(|error| IpcError::internal(error.to_string()))?;
+    let temp = path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
+    write_private(&temp, &bytes).map_err(io)?;
+    std::fs::rename(&temp, path).map_err(|error| {
+        let _ = std::fs::remove_file(&temp);
+        io(error)
+    })?;
+    *last = seq;
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -170,9 +225,74 @@ fn notify_approvals<R: tauri::Runtime>(app: &AppHandle<R>) {
 
 /// What a CLI request may do after admission.
 pub enum Admission {
-    /// Run the request; `Some` carries the authenticated controller (listings are filtered).
-    Allowed(Option<ControllerId>),
+    Allowed(Admitted),
     Refused(IpcError),
+}
+
+/// An admitted CLI request and what its dispatch must still honor.
+#[derive(Debug, Default)]
+pub struct Admitted {
+    /// The controller whose listings are filtered to what it may see.
+    pub listing: Option<ControllerId>,
+    /// Authority the act's side effects are rechecked against (see [`recheck_act`]).
+    pub fence: Option<ActFence>,
+    /// A `tab close --index` resolved once at admission; see [`with_resolved_tab`].
+    pub resolved_tab: Option<String>,
+}
+
+/// The controller session and tab lease an act was admitted under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActFence {
+    controller: ControllerId,
+    session_epoch: SessionEpoch,
+    lease_epoch: u64,
+}
+
+tokio::task_local! {
+    /// Set while an admitted controller request runs, so every input it dispatches is
+    /// rechecked against the authority it was admitted under.
+    pub static ACT_FENCE: ActFence;
+}
+
+/// Rechecks, just before an act's side effect, that the controller it was admitted for is
+/// still paired in the same session and still holds the same tab lease. Desktop and
+/// token-only callers run without a fence and pass.
+pub fn recheck_act(browser_id: &str) -> Result<(), BrowserError> {
+    let Ok(fence) = ACT_FENCE.try_with(|fence| *fence) else { return Ok(()) };
+    let service = SERVICE.lock();
+    check_fence(&service.state, &fence, browser_id, Instant::now()).map_err(BrowserError::Authority)
+}
+
+fn check_fence(state: &AuthorityState, fence: &ActFence, browser_id: &str, now: Instant) -> Result<(), AuthorityError> {
+    match state.standing(&fence.controller) {
+        ControllerStanding::Active { session_epoch } if session_epoch == fence.session_epoch => {}
+        ControllerStanding::Active { session_epoch: current } => {
+            return Err(AuthorityError::StaleSession { presented: fence.session_epoch, current })
+        }
+        ControllerStanding::Revoked => return Err(AuthorityError::Revoked { controller: fence.controller }),
+        ControllerStanding::Unpaired => return Err(AuthorityError::PairingRequired),
+    }
+    if state.lease_holder(browser_id, now) != Some((fence.controller, fence.lease_epoch)) {
+        return Err(AuthorityError::Forbidden {
+            tool: Some(ToolId::Act),
+            reason: "the tab lease changed during this act",
+        });
+    }
+    Ok(())
+}
+
+fn act_fence(
+    state: &AuthorityState,
+    principal: &Principal,
+    authorization: &Authorization,
+    browser_id: Option<&str>,
+) -> Option<ActFence> {
+    let Principal::LocalController { id, session_epoch } = principal else { return None };
+    if !authorization.obligations.contains(&Obligation::TabLease) {
+        return None;
+    }
+    let lease_epoch = state.lease_epoch(browser_id?)?;
+    Some(ActFence { controller: *id, session_epoch: *session_epoch, lease_epoch })
 }
 
 fn tab_url(manager: &BrowserManager, target: &Target) -> Option<(String, String)> {
@@ -187,6 +307,25 @@ fn tab_url(manager: &BrowserManager, target: &Target) -> Option<(String, String)
     }
 }
 
+/// The tab a `tab close --index <n>` names right now; `None` for any other request or an
+/// index out of range (the dispatcher reports that).
+fn resolve_tab_close(manager: &BrowserManager, request: &BrowserCliRequest) -> Option<String> {
+    let BrowserCliRequest::TabClose { browser_id: None, index: Some(index) } = request else { return None };
+    let position = index.checked_sub(1)?;
+    manager.list_sessions().into_iter().nth(position).map(|session| session.browser_id)
+}
+
+/// Rewrites `tab close --index` to the tab admission resolved and authorized, so the
+/// dispatcher closes that tab and not whatever holds the index by then.
+pub fn with_resolved_tab(request: BrowserCliRequest, resolved: Option<String>) -> BrowserCliRequest {
+    match (request, resolved) {
+        (BrowserCliRequest::TabClose { browser_id: None, index: Some(_) }, Some(id)) => {
+            BrowserCliRequest::TabClose { browser_id: Some(id), index: None }
+        }
+        (request, _) => request,
+    }
+}
+
 /// Admits one local CLI request (the transport token was already checked).
 pub async fn admit_cli(
     manager: &BrowserManager,
@@ -196,10 +335,14 @@ pub async fn admit_cli(
     if let Err(error) = ensure_loaded().await {
         return Admission::Refused(error);
     }
-    let classification = match classify_cli(request) {
+    let mut classification = match classify_cli(request) {
         Ok(classification) => classification,
         Err(error) => return Admission::Refused(error.into()),
     };
+    let resolved_tab = resolve_tab_close(manager, request);
+    if let Some(browser_id) = &resolved_tab {
+        classification.target = Target::Browser(browser_id.clone());
+    }
     let mut service = SERVICE.lock();
     let caller = match auth {
         Some(auth) => match service.state.authenticate(&auth.id, &auth.secret) {
@@ -212,7 +355,7 @@ pub async fn admit_cli(
         },
     };
     match decide(&mut service.state, &caller, &classification, manager) {
-        Ok(controller) => Admission::Allowed(controller),
+        Ok(admitted) => Admission::Allowed(Admitted { resolved_tab, ..admitted }),
         Err(error) => Admission::Refused(error.into()),
     }
 }
@@ -222,7 +365,7 @@ pub async fn admit_cli(
 /// with `BROWSER_CONTROLLER_PAIRING_REQUIRED`).
 fn token_only_admission(settings: &AgentSettings, request: &BrowserCliRequest) -> Option<Admission> {
     if !settings.require_pairing || matches!(request, BrowserCliRequest::RemoteAttach { .. }) {
-        return Some(Admission::Allowed(None));
+        return Some(Admission::Allowed(Admitted::default()));
     }
     None
 }
@@ -232,34 +375,111 @@ fn decide(
     caller: &Caller,
     classification: &Classification,
     manager: &BrowserManager,
-) -> Result<Option<ControllerId>, AuthorityError> {
+) -> Result<Admitted, AuthorityError> {
     let authorization = {
         let ctx = PolicyContext { controllers: &*state, platform: Platform::current() };
         authorize(caller, classification, &ctx)?
     };
     let Caller::Principal(principal) = caller else {
-        return Ok(None);
+        return Ok(Admitted::default());
     };
     let tab = tab_url(manager, &classification.target);
     let facts = tab.as_ref().map(|(browser_id, url)| TabFacts { browser_id, url });
     state.enforce(principal, &authorization, facts, Instant::now())?;
-    Ok(match principal {
-        Principal::LocalController { id, .. } if authorization.obligations.contains(&Obligation::FilterToGranted) => Some(*id),
-        _ => None,
+    let Principal::LocalController { id, .. } = principal else {
+        return Ok(Admitted::default());
+    };
+    if let (ToolId::DownloadCancel, Target::Download(download)) = (authorization.tool, &classification.target) {
+        let record = crate::browser::download::get_download(download);
+        may_cancel_download(state, id, record.as_ref(), |browser_id| tab_url_of(manager, browser_id))?;
+    }
+    Ok(Admitted {
+        listing: authorization.obligations.contains(&Obligation::FilterToGranted).then_some(*id),
+        fence: act_fence(state, principal, &authorization, tab.as_ref().map(|(browser_id, _)| browser_id.as_str())),
+        resolved_tab: None,
     })
 }
 
-/// Limits a listing to the tabs the controller may see.
-pub fn filter_sessions(
-    controller: Option<ControllerId>,
-    sessions: Vec<crate::browser::BrowserSessionSummary>,
-) -> Vec<crate::browser::BrowserSessionSummary> {
-    let Some(controller) = controller else { return sessions };
+fn tab_url_of(manager: &BrowserManager, browser_id: &str) -> Option<String> {
+    manager.get_state(browser_id).ok().map(|state| state.url)
+}
+
+/// Whether a controller may see a download: it must belong to an open tab the controller
+/// may list at that tab's current URL. Downloads no tab owns are never shown.
+fn download_visible(
+    state: &AuthorityState,
+    controller: &ControllerId,
+    record: &DownloadRecord,
+    tab_url: &dyn Fn(&str) -> Option<String>,
+) -> bool {
+    record
+        .browser_id
+        .as_deref()
+        .is_some_and(|browser_id| tab_url(browser_id).is_some_and(|url| state.may_list(controller, browser_id, &url)))
+}
+
+/// A controller cancels only a download it may see; an unknown id is refused the same way.
+fn may_cancel_download(
+    state: &AuthorityState,
+    controller: &ControllerId,
+    record: Option<&DownloadRecord>,
+    tab_url: impl Fn(&str) -> Option<String>,
+) -> Result<(), AuthorityError> {
+    if record.is_some_and(|record| download_visible(state, controller, record, &tab_url)) {
+        return Ok(());
+    }
+    Err(AuthorityError::Forbidden {
+        tool: Some(ToolId::DownloadCancel),
+        reason: "no download with this id belongs to a tab this controller may see",
+    })
+}
+
+fn visible_sessions(
+    state: &AuthorityState,
+    controller: &ControllerId,
+    sessions: Vec<BrowserSessionSummary>,
+) -> Vec<BrowserSessionSummary> {
+    sessions.into_iter().filter(|session| state.may_list(controller, &session.browser_id, &session.url)).collect()
+}
+
+fn visible_identified(
+    state: &AuthorityState,
+    controller: &ControllerId,
+    browser: Option<BrowserSessionSummary>,
+) -> Option<BrowserSessionSummary> {
+    browser.filter(|session| state.may_list(controller, &session.browser_id, &session.url))
+}
+
+fn visible_downloads(
+    state: &AuthorityState,
+    controller: &ControllerId,
+    downloads: Vec<DownloadRecord>,
+    tab_url: impl Fn(&str) -> Option<String>,
+) -> Vec<DownloadRecord> {
+    downloads.into_iter().filter(|record| download_visible(state, controller, record, &tab_url)).collect()
+}
+
+/// Limits listings (tabs, the identified tab, downloads) to what the controller may see.
+pub fn filter_response(
+    listing: Option<ControllerId>,
+    manager: &BrowserManager,
+    response: BrowserCliResponse,
+) -> BrowserCliResponse {
+    let Some(controller) = listing else { return response };
     let service = SERVICE.lock();
-    sessions
-        .into_iter()
-        .filter(|session| service.state.may_list(&controller, &session.browser_id, &session.url))
-        .collect()
+    let state = &service.state;
+    match response {
+        BrowserCliResponse::List { sessions } => {
+            BrowserCliResponse::List { sessions: visible_sessions(state, &controller, sessions) }
+        }
+        BrowserCliResponse::Identified { browser } => {
+            BrowserCliResponse::Identified { browser: visible_identified(state, &controller, browser) }
+        }
+        BrowserCliResponse::Downloads { downloads } => BrowserCliResponse::Downloads {
+            downloads: visible_downloads(state, &controller, downloads, |browser_id| tab_url_of(manager, browser_id)),
+        },
+        other => other,
+    }
 }
 
 /// Starts a pairing request; the desktop user approves or denies it in the app.
@@ -283,6 +503,7 @@ pub async fn request_grant<R: tauri::Runtime>(
     origin: Option<&str>,
     scopes: &[GrantScope],
     tool: Option<&str>,
+    path: Option<&str>,
 ) -> Result<ApprovalId, IpcError> {
     ensure_loaded().await?;
     let approval = {
@@ -292,7 +513,9 @@ pub async fn request_grant<R: tauri::Runtime>(
         };
         match (origin, tool) {
             (Some(origin), None) => service.state.request_origin_grant(id, origin, scopes, Instant::now())?,
-            (None, Some(tool)) => service.state.request_capability(id, tool.parse::<ToolId>()?, Instant::now())?,
+            (None, Some(tool)) => {
+                service.state.request_capability(id, tool.parse::<ToolId>()?, path, Instant::now())?
+            }
             _ => {
                 return Err(IpcError::new(
                     IpcErrorCode::InvalidArgument,
@@ -353,7 +576,7 @@ pub async fn revoke_self<R: tauri::Runtime>(app: &AppHandle<R>, auth: &Controlle
         let Principal::LocalController { id, .. } = service.state.authenticate(&auth.id, &auth.secret)? else {
             return Err(AuthorityError::PairingRequired.into());
         };
-        service.state.revoke(&id);
+        service.state.revoke(&id, Instant::now());
     }
     persist().await?;
     notify_approvals(app);
@@ -428,7 +651,7 @@ pub async fn cmd_browser_agent_revoke<R: tauri::Runtime>(
         let mut service = SERVICE.lock();
         match origin.as_deref() {
             Some(origin) => service.state.revoke_grant(&controller, origin),
-            None => service.state.revoke(&controller),
+            None => service.state.revoke(&controller, Instant::now()),
         }
     };
     persist().await?;
@@ -465,9 +688,255 @@ pub async fn cmd_browser_agent_set_settings<R: tauri::Runtime>(
     persist().await
 }
 
+/// Test seam: a fresh agent controller takes the tab's lease; refused once the user reclaimed it.
+#[cfg(test)]
+pub(crate) fn lease_tab_for_test(browser_id: &str) -> Result<Option<u64>, AuthorityError> {
+    let mut service = SERVICE.lock();
+    service.state.lease_for_test(ControllerId::generate(), browser_id, Instant::now())?;
+    Ok(service.state.lease_epoch(browser_id))
+}
+
+/// Test seam: the epoch of the agent lease currently held on a tab, if any.
+#[cfg(test)]
+pub(crate) fn tab_lease_epoch_for_test(browser_id: &str) -> Option<u64> {
+    SERVICE.lock().state.lease_epoch(browser_id)
+}
+
+/// Test seam: runs `f` on the process-wide registry (marked loaded, so a later admission
+/// does not replace it with the empty test store).
+#[cfg(all(test, any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+pub(crate) fn with_state_for_test<T>(f: impl FnOnce(&mut AuthorityState) -> T) -> T {
+    let mut service = SERVICE.lock();
+    service.loaded = true;
+    f(&mut service.state)
+}
+
+/// Test seam: pairs a fresh controller with an interact grant on `https://fixture.test`,
+/// admits a click on `browser_id` for it (taking the tab lease) and returns the fence the
+/// admission captured.
+#[cfg(all(test, any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+pub(crate) fn admitted_act_fence_for_test(browser_id: &str) -> (ControllerId, ActFence) {
+    use crate::browser::model::{BrowserAutomationAction, BrowserAutomationRequest};
+    const SECRET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef";
+    with_state_for_test(|state| {
+        let now = Instant::now();
+        let id = ControllerId::generate();
+        let pairing = state.request_pairing(id, "fence-test", SECRET, now).expect("pairing request");
+        state.resolve(pairing, ApprovalResolution::ApproveOnce, now).expect("pairing approved");
+        let grant = state
+            .request_origin_grant(id, "https://fixture.test", &[GrantScope::Interact], now)
+            .expect("grant request");
+        state.resolve(grant, ApprovalResolution::ApproveOnce, now).expect("grant approved");
+        let principal = state.authenticate(&id.to_string(), SECRET).expect("paired");
+        let request = BrowserCliRequest::Act {
+            request: BrowserAutomationRequest {
+                postcondition: None,
+                browser_id: browser_id.into(),
+                generation: 1,
+                action: BrowserAutomationAction::Click { reference: "d1.1".into() },
+            },
+        };
+        let classification = classify_cli(&request).expect("act classifies");
+        let authorization = {
+            let ctx = PolicyContext { controllers: &*state, platform: Platform::current() };
+            authorize(&Caller::Principal(principal.clone()), &classification, &ctx).expect("act authorized")
+        };
+        let tab = TabFacts { browser_id, url: "https://fixture.test/form" };
+        state.enforce(&principal, &authorization, Some(tab), now).expect("act admitted");
+        let fence = act_fence(state, &principal, &authorization, Some(browser_id)).expect("an act is fenced");
+        (id, fence)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::browser::download::DownloadStatus;
+    use crate::browser::BrowserProfileId;
+
+    const SECRET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef";
+    const GRANTED: &str = "https://granted.test/page";
+
+    /// A registry with one paired controller holding a read grant on `GRANTED`'s origin.
+    fn granted_state(now: Instant) -> (AuthorityState, ControllerId) {
+        let mut state = AuthorityState::default();
+        let id = ControllerId::generate();
+        let pairing = state.request_pairing(id, "qa", SECRET, now).unwrap();
+        state.resolve(pairing, ApprovalResolution::ApproveOnce, now).unwrap();
+        let grant = state.request_origin_grant(id, GRANTED, &[GrantScope::Read], now).unwrap();
+        state.resolve(grant, ApprovalResolution::ApproveOnce, now).unwrap();
+        (state, id)
+    }
+
+    fn summary(browser_id: &str, url: &str) -> BrowserSessionSummary {
+        BrowserSessionSummary {
+            browser_id: browser_id.into(),
+            webview_label: format!("browser-{browser_id}"),
+            workspace_id: None,
+            profile_id: BrowserProfileId::Default,
+            url: url.into(),
+            title: None,
+            visible: true,
+        }
+    }
+
+    fn download(id: &str, browser_id: Option<&str>) -> DownloadRecord {
+        DownloadRecord {
+            id: id.into(),
+            url: "https://granted.test/f.zip".into(),
+            file_path: "/tmp/f.zip".into(),
+            status: DownloadStatus::InProgress,
+            total_bytes: None,
+            received_bytes: 0,
+            error: None,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            can_cancel: true,
+            can_pause: false,
+            failure: None,
+            browser_id: browser_id.map(str::to_string),
+        }
+    }
+
+    /// Open tabs: `granted` on the granted origin, `other` elsewhere.
+    fn tab_url(browser_id: &str) -> Option<String> {
+        match browser_id {
+            "granted" => Some(GRANTED.into()),
+            "other" => Some("https://other.test/".into()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn identify_shows_only_a_tab_the_controller_may_list() {
+        let (state, id) = granted_state(Instant::now());
+        let granted = summary("granted", GRANTED);
+        assert_eq!(visible_identified(&state, &id, Some(granted.clone())), Some(granted));
+        assert_eq!(visible_identified(&state, &id, Some(summary("other", "https://other.test/"))), None);
+        assert_eq!(visible_identified(&state, &id, None), None);
+    }
+
+    #[test]
+    fn downloads_are_limited_to_open_tabs_the_controller_may_list() {
+        let (state, id) = granted_state(Instant::now());
+        let downloads = vec![
+            download("d-granted", Some("granted")),
+            download("d-other", Some("other")),
+            download("d-closed", Some("closed")),
+            download("d-unowned", None),
+        ];
+        let visible = visible_downloads(&state, &id, downloads, tab_url);
+        assert_eq!(visible.iter().map(|record| record.id.as_str()).collect::<Vec<_>>(), ["d-granted"]);
+    }
+
+    #[test]
+    fn a_controller_cancels_only_a_download_it_may_see() {
+        let (state, id) = granted_state(Instant::now());
+        assert!(may_cancel_download(&state, &id, Some(&download("d1", Some("granted"))), tab_url).is_ok());
+        for record in [Some(download("d2", Some("other"))), Some(download("d3", None)), None] {
+            let error = may_cancel_download(&state, &id, record.as_ref(), tab_url).unwrap_err();
+            assert_eq!(error.code(), super::super::protocol::BROWSER_FORBIDDEN, "{record:?}");
+        }
+    }
+
+    #[test]
+    fn a_tab_close_by_index_is_rewritten_to_the_tab_admission_resolved() {
+        let by_index = BrowserCliRequest::TabClose { browser_id: None, index: Some(2) };
+        assert_eq!(
+            with_resolved_tab(by_index.clone(), Some("b2".into())),
+            BrowserCliRequest::TabClose { browser_id: Some("b2".into()), index: None }
+        );
+        // Out of range at admission: the dispatcher reports it.
+        assert_eq!(with_resolved_tab(by_index.clone(), None), by_index);
+        let by_id = BrowserCliRequest::TabClose { browser_id: Some("b1".into()), index: None };
+        assert_eq!(with_resolved_tab(by_id.clone(), Some("b2".into())), by_id);
+    }
+
+    #[test]
+    fn a_fence_holds_only_while_the_session_and_lease_are_unchanged() {
+        use crate::browser::model::{BrowserAutomationAction, BrowserAutomationRequest};
+        let now = Instant::now();
+        let (mut state, id) = granted_state(now);
+        let grant = state.request_origin_grant(id, GRANTED, &[GrantScope::Interact], now).unwrap();
+        state.resolve(grant, ApprovalResolution::ApproveOnce, now).unwrap();
+        let principal = state.authenticate(&id.to_string(), SECRET).unwrap();
+        let request = BrowserCliRequest::Act {
+            request: BrowserAutomationRequest {
+                postcondition: None,
+                browser_id: "granted".into(),
+                generation: 1,
+                action: BrowserAutomationAction::Click { reference: "d1.1".into() },
+            },
+        };
+        let classification = classify_cli(&request).unwrap();
+        let authorization = {
+            let ctx = PolicyContext { controllers: &state, platform: Platform::current() };
+            authorize(&Caller::Principal(principal.clone()), &classification, &ctx).unwrap()
+        };
+        state.enforce(&principal, &authorization, Some(TabFacts { browser_id: "granted", url: GRANTED }), now).unwrap();
+        let fence = act_fence(&state, &principal, &authorization, Some("granted")).unwrap();
+        assert_eq!(check_fence(&state, &fence, "granted", now), Ok(()));
+        // The lease is per tab.
+        assert_eq!(check_fence(&state, &fence, "other", now).unwrap_err().code(), super::super::protocol::BROWSER_FORBIDDEN);
+        // The user reclaimed the tab.
+        state.reclaim("granted");
+        assert_eq!(check_fence(&state, &fence, "granted", now).unwrap_err().code(), super::super::protocol::BROWSER_FORBIDDEN);
+        // The controller was revoked.
+        state.revoke(&id, now);
+        assert_eq!(
+            check_fence(&state, &fence, "granted", now).unwrap_err().code(),
+            super::super::protocol::BROWSER_CONTROLLER_REVOKED
+        );
+        // Read-only tools take no lease and get no fence.
+        let snapshot = classify_cli(&BrowserCliRequest::Snapshot { browser_id: "granted".into() }).unwrap();
+        let (state, id) = granted_state(now);
+        let principal = state.authenticate(&id.to_string(), SECRET).unwrap();
+        let ctx = PolicyContext { controllers: &state, platform: Platform::current() };
+        let read = authorize(&Caller::Principal(principal.clone()), &snapshot, &ctx).unwrap();
+        assert_eq!(act_fence(&state, &principal, &read, Some("granted")), None);
+    }
+
+    #[test]
+    fn recheck_without_a_fence_passes() {
+        assert_eq!(recheck_act("recheck-unfenced-tab"), Ok(()));
+    }
+
+    #[test]
+    fn a_corrupt_registry_is_moved_aside_and_the_registry_starts_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("agent-authority.json");
+        assert_eq!(load_registry_file(&path).unwrap().registry, PersistedRegistry::default());
+        std::fs::write(&path, b"{not json").unwrap();
+        let file = load_registry_file(&path).unwrap();
+        assert_eq!(file.registry, PersistedRegistry::default());
+        assert!(file.settings.require_pairing);
+        assert!(!path.exists());
+        let kept: Vec<_> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|kept| {
+                kept.file_name().unwrap().to_string_lossy().starts_with("agent-authority.json.corrupt-")
+            })
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read(&kept[0]).unwrap(), b"{not json");
+    }
+
+    #[test]
+    fn an_older_registry_snapshot_never_replaces_a_newer_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("browser").join("agent-authority.json");
+        let written = parking_lot::Mutex::new(0);
+        let newer = PersistedFile { settings: AgentSettings { require_pairing: false }, ..PersistedFile::default() };
+        let older = PersistedFile { settings: AgentSettings { require_pairing: true }, ..PersistedFile::default() };
+        write_registry_file(&path, 2, &written, &newer).unwrap();
+        write_registry_file(&path, 1, &written, &older).unwrap();
+        let on_disk = load_registry_file(&path).unwrap();
+        assert!(!on_disk.settings.require_pairing, "snapshot 2 stays on disk");
+        assert_eq!(*written.lock(), 2);
+        write_registry_file(&path, 3, &written, &older).unwrap();
+        assert!(load_registry_file(&path).unwrap().settings.require_pairing);
+    }
 
     #[test]
     fn pairing_is_required_by_default_and_for_files_written_before_the_setting() {
@@ -485,9 +954,15 @@ mod tests {
         let on = AgentSettings { require_pairing: true };
         assert!(token_only_admission(&on, &BrowserCliRequest::List).is_none());
         let attach = BrowserCliRequest::RemoteAttach { protocol_version: None };
-        assert!(matches!(token_only_admission(&on, &attach), Some(Admission::Allowed(None))));
+        assert!(matches!(
+            token_only_admission(&on, &attach),
+            Some(Admission::Allowed(Admitted { listing: None, fence: None, resolved_tab: None }))
+        ));
         let off = AgentSettings { require_pairing: false };
-        assert!(matches!(token_only_admission(&off, &BrowserCliRequest::List), Some(Admission::Allowed(None))));
+        assert!(matches!(
+            token_only_admission(&off, &BrowserCliRequest::List),
+            Some(Admission::Allowed(Admitted { listing: None, fence: None, resolved_tab: None }))
+        ));
     }
 
     #[test]
