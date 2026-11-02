@@ -538,6 +538,16 @@ pub fn webview_download_handler<R: Runtime>(
     move |webview, event| match event {
         tauri::webview::DownloadEvent::Requested { url, destination } => {
             let url = url.to_string();
+            // A link or address that turned into a download never commits, so the tab still
+            // shows the previous page: put its address and loading state back.
+            let manager = webview.app_handle().state::<Arc<BrowserManager>>();
+            if let Some(state) = manager.abandon_navigation_to(&browser_id, &url) {
+                crate::ipc::browser_library::observe_browser_state(webview.app_handle(), &state);
+                let _ = webview.app_handle().emit(
+                    crate::ipc::browser::BROWSER_STATE_CHANGED_EVENT,
+                    crate::browser::model::BrowserStateChangedPayload::from(&state),
+                );
+            }
             if DOWNLOAD_PREFERENCES.lock().ask_where_to_save {
                 let _ = webview.app_handle().emit(
                     crate::browser::BROWSER_DOWNLOAD_REQUESTED_EVENT,
