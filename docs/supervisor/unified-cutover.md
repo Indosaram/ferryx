@@ -317,8 +317,10 @@ code. Nothing forces a takeover automatically.
 
 An old holder that comes back (after sleep or a network cut) finds another machine holding the
 lease and becomes standby; every send it had queued is rejected with `STALE_SUPERVISOR_FENCE`.
-While the relay runs on its standby, the holder keeps renewing and nothing changes hands; a
-move or a takeover waits for the primary relay or its promotion.
+While the relay runs on its standby, nothing changes hands, but the standby cannot extend the
+lease: the holder keeps the supervisor at most until the expiry the primary last recorded, then
+stands down (see "Supervisor lease on the relay" in `docs/relay-failover.md`). A move or a
+takeover waits for the primary relay or its promotion.
 
 ### Status fields
 

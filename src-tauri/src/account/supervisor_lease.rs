@@ -249,10 +249,13 @@ fn granted(
 /// Grants (or extends) the account's supervisor lease to `machine_id`.
 ///
 /// Granted iff there is no row; or the row's holder is this machine and its fence is from the
-/// current epoch (same fence, extended, un-released); or the row is free (released, past
-/// `expires_at + GRACE_SECS`, or from an older epoch) and the checkpoint rule holds: no recorded
-/// checkpoint, the candidate matches it, a same-epoch release reserved it for this machine, or
-/// `force`. Every other grant mints a new fence above every fence recorded for the account.
+/// current epoch (same fence, extended, un-released); or the row's holder is this machine and
+/// its fence is from an older epoch (a new fence in the current epoch, no checkpoint check: a
+/// replica restored before the holder's newest checkpoint must not strand it); or the row is
+/// free (released, past `expires_at + GRACE_SECS`, or from an older epoch) and the checkpoint
+/// rule holds: no recorded checkpoint, the candidate matches it, a same-epoch release reserved
+/// it for this machine, or `force`. Every other grant mints a new fence above every fence
+/// recorded for the account.
 pub fn acquire(
     conn: &Connection,
     user_id: &str,
@@ -272,6 +275,9 @@ pub fn acquire(
             return Ok(lease);
         }
 
+        // The row's own holder across a promotion: the restored row may lag its checkpoint.
+        let own_older_epoch =
+            row.holder_machine_id == machine_id && fence_epoch(row.fence) < epoch;
         let free = row.released
             || now >= row.expires_at.saturating_add(GRACE_SECS)
             || fence_epoch(row.fence) < epoch;
@@ -285,7 +291,8 @@ pub fn acquire(
             && row.reserved_for.as_deref() == Some(machine_id)
             && row.reserved_fence == Some(row.fence)
             && row.reserved_fence.map(fence_epoch) == Some(epoch);
-        let checkpoint_ok = row.checkpoint_id.is_none()
+        let checkpoint_ok = own_older_epoch
+            || row.checkpoint_id.is_none()
             || candidate_checkpoint == row.checkpoint_id.as_deref()
             || reserved_here
             || force;
@@ -746,6 +753,77 @@ mod tests {
                 holder.fence
             );
         }
+    }
+
+    /// A copy of `primary`'s store as a lagging replica would restore it.
+    fn snapshot_of(primary: &Path) -> tempfile::TempDir {
+        let replica = tempfile::tempdir().expect("replica dir");
+        let snapshot = replica.path().join(STORE_SQLITE_FILENAME);
+        let snapshot_path = snapshot.to_str().expect("utf8 path").to_string();
+        lease_read(primary, |conn| {
+            conn.execute("VACUUM INTO ?1", params![snapshot_path])
+                .map_err(sql_error("Failed to snapshot primary"))
+        })
+        .expect("snapshot the lagging replica");
+        replica
+    }
+
+    /// The replica was restored before the holder's newest checkpoint reached it, then promoted.
+    /// The row's own holder re-acquires without the checkpoint check, whatever checkpoint it
+    /// presents, and gets a fence in the new epoch above every fence the old primary issued;
+    /// another machine still has to present the recorded checkpoint.
+    #[test]
+    fn own_holder_reacquires_across_epoch_bump_on_lagging_replica_without_checkpoint_match() {
+        let primary = seeded();
+        let first = acq(primary.path(), A, T0, Some("ck1"), false).expect("A acquires");
+        let lagging = snapshot_of(primary.path());
+        let lagging_older = snapshot_of(primary.path());
+        // The primary records a newer checkpoint the replicas never see.
+        ren(primary.path(), A, first.fence, T0 + 20, Some("ck2")).expect("renew ck2");
+
+        // Newer checkpoint than the replica's record.
+        assert_eq!(bump(lagging.path()), 1);
+        assert_eq!(row(lagging.path()).checkpoint_id.as_deref(), Some("ck1"));
+        assert!(matches!(
+            acq(lagging.path(), B, T0 + 21, Some("ck2"), false),
+            Err(LeaseError::CheckpointMismatch { expected }) if expected.as_deref() == Some("ck1")
+        ));
+        let again = acq(lagging.path(), A, T0 + 22, Some("ck2"), false).expect("A re-acquires");
+        assert_eq!(again.fence, (1 << 32) | 1);
+        assert!(again.fence > first.fence);
+        assert_eq!(again.holder_machine_id, A);
+        assert_eq!(again.checkpoint_id.as_deref(), Some("ck2"));
+        let renewed = ren(lagging.path(), A, again.fence, T0 + 23, None).expect("new fence renews");
+        assert_eq!(renewed.fence, again.fence);
+        // B is checkpoint-gated against what A recorded in the new epoch.
+        assert!(matches!(
+            acq(lagging.path(), B, past_grace(&renewed), Some("ck1"), false),
+            Err(LeaseError::CheckpointMismatch { expected }) if expected.as_deref() == Some("ck2")
+        ));
+
+        // Older (unknown) checkpoint and no checkpoint at all: still the row's own holder.
+        assert_eq!(bump(lagging_older.path()), 1);
+        let older = acq(lagging_older.path(), A, T0 + 22, Some("ck0"), false).expect("older ck");
+        assert_eq!(older.fence, (1 << 32) | 1);
+        let none = acq(lagging_older.path(), A, T0 + 23, None, false).expect("same fence again");
+        assert_eq!(none.fence, older.fence);
+    }
+
+    /// The own-holder exemption covers an older-epoch row only: in the same epoch a different
+    /// machine keeps needing the checkpoint, and after a takeover the old holder does too.
+    #[test]
+    fn checkpoint_exemption_is_only_for_the_row_holder_across_an_epoch_change() {
+        let dir = seeded();
+        let lease = acq(dir.path(), A, T0, Some("ck1"), false).expect("A acquires");
+        bump(dir.path());
+        let taken = acq(dir.path(), B, T0 + 1, Some("ck1"), false).expect("B with checkpoint");
+        assert!(taken.fence > lease.fence);
+        assert_eq!(
+            acq(dir.path(), A, past_grace(&taken), Some("stale"), false),
+            Err(LeaseError::CheckpointMismatch {
+                expected: Some("ck1".into())
+            })
+        );
     }
 
     #[test]

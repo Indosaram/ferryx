@@ -559,9 +559,11 @@ struct RelayInner {
     data_pool: Mutex<HashMap<String, Vec<PooledDataSocket>>>,
     /// Refuse plaintext relay proxy routes (`FERRYX_RELAY_REQUIRE_E2E=1`).
     require_e2e: AtomicBool,
-    /// Supervisor lease renewals answered while this relay is a read-only standby, keyed by
-    /// account. Relay-clock expiry kept in memory only: the replica is never written.
-    standby_leases: Mutex<HashMap<String, StandbyLease>>,
+    /// Relay-clock second until which a writable relay refuses supervisor lease acquires by a
+    /// machine other than the un-released row's holder: process start + `TTL_SECS` +
+    /// `GRACE_SECS`. Another relay (a standby, or the primary before a promotion) may have
+    /// answered renewals this relay never saw; their holder stands down before this passes.
+    lease_quarantine_until: AtomicU64,
     #[cfg(test)]
     spliced_taps: Mutex<HashMap<String, Arc<Mutex<Vec<u8>>>>>,
     #[cfg(test)]
@@ -661,7 +663,9 @@ impl RelayState {
                 pending_socket_tickets: Mutex::new(HashMap::new()),
                 data_pool: Mutex::new(HashMap::new()),
                 require_e2e: require_e2e_from_env(),
-                standby_leases: Mutex::new(HashMap::new()),
+                lease_quarantine_until: AtomicU64::new(
+                    state.inner.lease_quarantine_until.load(Ordering::Relaxed),
+                ),
                 #[cfg(test)]
                 spliced_taps: Mutex::new(HashMap::new()),
                 #[cfg(test)]
@@ -718,7 +722,7 @@ impl RelayState {
                 pending_socket_tickets: Mutex::new(HashMap::new()),
                 data_pool: Mutex::new(HashMap::new()),
                 require_e2e: require_e2e_from_env(),
-                standby_leases: Mutex::new(HashMap::new()),
+                lease_quarantine_until: AtomicU64::new(lease_quarantine_end(current_time_secs())),
                 #[cfg(test)]
                 spliced_taps: Mutex::new(HashMap::new()),
                 #[cfg(test)]
@@ -730,12 +734,10 @@ impl RelayState {
     }
 }
 
-/// A renewal a read-only standby answered for the replicated lease row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StandbyLease {
-    holder_machine_id: String,
-    fence: u64,
-    expires_at: u64,
+/// End of the startup lease quarantine for a relay started at `started_at`: the longest a
+/// holder can keep running on a renew another relay answered before this one started.
+fn lease_quarantine_end(started_at: u64) -> u64 {
+    started_at + lease::TTL_SECS + lease::GRACE_SECS
 }
 
 /// Refusal code when `reservedFor` names a machine outside the releasing machine's account.
@@ -834,8 +836,8 @@ fn account_machine_count(conn: &rusqlite::Connection, user_id: &str) -> Result<u
     Ok(u32::try_from(count).unwrap_or(u32::MAX))
 }
 
-/// Fills the holder fields of `ack` from `row`; `expires_at` overrides the row's expiry (a
-/// standby's in-memory renewal).
+/// Fills the holder fields of `ack` from `row`; `expires_at` overrides the row's expiry (the
+/// startup quarantine's expiry).
 fn describe_lease(
     conn: &rusqlite::Connection,
     user_id: &str,
@@ -858,6 +860,20 @@ fn describe_lease(
         checkpoint_id: row.checkpoint_id.clone(),
         ..ack
     })
+}
+
+/// While the startup quarantine runs, the expiry a writable relay reports to `machine_id` for an
+/// un-released row held by another machine (in any epoch): late enough that
+/// `expires_at + GRACE_SECS` is not before the quarantine end. `None` for the row's own holder,
+/// a released row, no row, or once the quarantine passed.
+fn quarantined_expiry(
+    row: Option<&SupervisorLeaseRecord>,
+    machine_id: &str,
+    quarantine_until: u64,
+    now: u64,
+) -> Option<u64> {
+    row.filter(|row| !row.released && row.holder_machine_id != machine_id && now < quarantine_until)
+        .map(|row| row.expires_at.max(quarantine_until.saturating_sub(lease::GRACE_SECS)))
 }
 
 /// A query answers `granted` when the asking machine holds a live lease, `refused` with
@@ -886,12 +902,14 @@ fn query_outcome(
 }
 
 /// Answers one lease request on the writable primary, inside one lease transaction.
+/// `quarantine_until` is this relay's startup quarantine end (`lease_quarantine_until`).
 fn primary_lease_step(
     conn: &rusqlite::Connection,
     machine_id: &str,
     public_key: &str,
     request: &SupervisorLeaseRequest,
     now: u64,
+    quarantine_until: u64,
 ) -> Result<SupervisorLeaseAck, LeaseError> {
     let epoch = lease::relay_epoch(conn)?;
     let user_id = lease_owner(conn, machine_id, public_key)?;
@@ -905,6 +923,14 @@ fn primary_lease_step(
     };
     match request {
         SupervisorLeaseRequest::SupervisorLeaseAcquire(acquire) => {
+            // Right after start no other machine may take the row, not even with `force`: a
+            // standby may have renewed its holder in a way the recorded expiry does not show.
+            if let Some(expires_at) =
+                quarantined_expiry(previous.as_ref(), machine_id, quarantine_until, now)
+            {
+                let ack = lease_reason(base.clone(), "LEASE_HELD");
+                return describe_lease(conn, &user_id, ack, previous.as_ref(), Some(expires_at), now);
+            }
             match lease::acquire(
                 conn,
                 &user_id,
@@ -916,16 +942,23 @@ fn primary_lease_step(
                 Ok(granted) => {
                     // A new fence displaced the previous row. Its holder may still believe it
                     // holds until its own expiry plus grace; a released row stood down already.
+                    // Until the startup quarantine ends, a holder this relay never saw (renewed
+                    // through a standby, or newer than a restored replica) may still run.
                     let previous_expires_in_secs = previous
                         .as_ref()
                         .filter(|row| row.fence != granted.fence)
                         .map(|row| {
-                            if row.released {
+                            let row_based = if row.released {
                                 0
                             } else {
                                 row.expires_at
                                     .saturating_add(lease::GRACE_SECS)
                                     .saturating_sub(now)
+                            };
+                            if row.holder_machine_id == machine_id {
+                                row_based
+                            } else {
+                                row_based.max(quarantine_until.saturating_sub(now))
                             }
                         });
                     let ack = SupervisorLeaseAck {
@@ -996,13 +1029,18 @@ fn primary_lease_step(
             describe_lease(conn, &user_id, ack, row.as_ref(), None, now)
         }
         SupervisorLeaseRequest::SupervisorLeaseQuery(_) => {
-            let (outcome, code) = query_outcome(machine_id, previous.as_ref(), None, epoch, now);
+            let quarantined = quarantined_expiry(previous.as_ref(), machine_id, quarantine_until, now);
+            let (outcome, code) = match quarantined {
+                // Held for everyone but the row's holder until the quarantine ends, in any epoch.
+                Some(_) => (SupervisorLeaseOutcome::Refused, Some("LEASE_HELD")),
+                None => query_outcome(machine_id, previous.as_ref(), None, epoch, now),
+            };
             let ack = SupervisorLeaseAck {
                 outcome,
                 reason_code: code.map(str::to_string),
                 ..base.clone()
             };
-            describe_lease(conn, &user_id, ack, previous.as_ref(), None, now)
+            describe_lease(conn, &user_id, ack, previous.as_ref(), quarantined, now)
         }
     }
 }
@@ -1041,100 +1079,96 @@ impl RelayState {
             return lease_error_ack(request_id, &LeaseError::NotEnrolled);
         };
         let result = if account.is_read_only() {
-            self.answer_standby_lease(&account.data_dir, machine_id, &public_key, request, now)
+            answer_standby_lease(&account.data_dir, machine_id, &public_key, request, now)
         } else {
+            let quarantine_until = self.inner.lease_quarantine_until.load(Ordering::Relaxed);
             lease::lease_transaction(&account.data_dir, |tx| {
-                primary_lease_step(tx, machine_id, &public_key, request, now)
+                primary_lease_step(tx, machine_id, &public_key, request, now, quarantine_until)
             })
         };
         result.unwrap_or_else(|error| lease_error_ack(request_id, &error))
     }
+}
 
-    /// A read-only standby refuses acquire and release, and answers a renew only while the
-    /// replicated row (re-read on every request) still names the same holder and fence and is
-    /// not released. The renewed expiry lives in memory with this relay's clock and is dropped
-    /// as soon as the replicated row names another holder or fence.
-    fn answer_standby_lease(
-        &self,
-        dir: &std::path::Path,
-        machine_id: &str,
-        public_key: &str,
-        request: &SupervisorLeaseRequest,
-        now: u64,
-    ) -> Result<SupervisorLeaseAck, LeaseError> {
-        let request_id = request.request_id().to_string();
-        if matches!(
-            request,
-            SupervisorLeaseRequest::SupervisorLeaseAcquire(_)
-                | SupervisorLeaseRequest::SupervisorLeaseRelease(_)
-        ) {
-            return Ok(lease_reason(
-                lease_ack(request_id, SupervisorLeaseOutcome::Unavailable),
-                LEASE_READ_ONLY,
-            ));
-        }
-        lease::lease_read(dir, |conn| {
-            let epoch = lease::relay_epoch(conn)?;
-            let user_id = lease_owner(conn, machine_id, public_key)?;
-            let row = lease::current(conn, &user_id)?;
-            let base = SupervisorLeaseAck {
-                account_machine_count: Some(account_machine_count(conn, &user_id)?),
-                ..lease_ack(request_id, SupervisorLeaseOutcome::Refused)
-            };
-            let live_row = row.as_ref().filter(|row| !row.released);
-            let mut leases = self.inner.standby_leases.lock();
-            let stale = leases.get(&user_id).is_some_and(|entry| {
-                live_row.is_none_or(|row| {
-                    row.holder_machine_id != entry.holder_machine_id || row.fence != entry.fence
-                })
-            });
-            if stale {
-                leases.remove(&user_id);
-            }
-            match request {
-                SupervisorLeaseRequest::SupervisorLeaseRenew(renew) => {
-                    let matches = live_row.is_some_and(|row| {
-                        row.holder_machine_id == machine_id
-                            && row.fence == renew.fence
-                            && lease::fence_epoch(renew.fence) == epoch
-                    });
-                    if !matches {
-                        let ack = lease_reason(base, LeaseError::NotHolder.code());
-                        let expires_at = leases.get(&user_id).map(|entry| entry.expires_at);
-                        return describe_lease(conn, &user_id, ack, row.as_ref(), expires_at, now);
-                    }
-                    let expires_at = now + lease::TTL_SECS;
-                    leases.insert(
-                        user_id.clone(),
-                        StandbyLease {
-                            holder_machine_id: machine_id.to_string(),
-                            fence: renew.fence,
-                            expires_at,
-                        },
-                    );
-                    let ack = SupervisorLeaseAck {
-                        outcome: SupervisorLeaseOutcome::Renewed,
-                        ..base
-                    };
-                    describe_lease(conn, &user_id, ack, row.as_ref(), Some(expires_at), now)
-                }
-                _ => {
-                    let expires_at = leases
-                        .get(&user_id)
-                        .map(|entry| entry.expires_at)
-                        .max(live_row.map(|row| row.expires_at));
-                    let (outcome, code) =
-                        query_outcome(machine_id, row.as_ref(), expires_at, epoch, now);
-                    let ack = SupervisorLeaseAck {
-                        outcome,
-                        reason_code: code.map(str::to_string),
-                        ..base
-                    };
-                    describe_lease(conn, &user_id, ack, row.as_ref(), expires_at, now)
-                }
-            }
-        })
+/// A read-only standby refuses acquire and release, and never extends a lease: the primary
+/// never learns of a standby renew, so a lease kept alive past the replicated `expires_at` could
+/// overlap a takeover after failback.
+///
+/// A renew re-reads the replicated row. If the row is released, names another machine or
+/// fence, or the fence is not in the current epoch, it is refused with `LEASE_NOT_HOLDER`.
+/// Otherwise, on this relay's clock:
+/// - `now + TTL_SECS <= expires_at`: `renewed`. A daemon treats `renewed` as valid for
+///   `TTL_SECS` (less its margin) from when it sent the renew, so its deadline stays at or
+///   before the replicated expiry.
+/// - `now < expires_at`: `unavailable` with `ACCOUNT_STORE_READ_ONLY`. The holder keeps the
+///   deadline of its last grant (always before `expires_at`) and stands down when it passes.
+/// - after `expires_at`: refused with `LEASE_NOT_HOLDER`, so the holder stands down at once.
+///
+/// Every ack reports the replicated `expires_at`, never a later one; a query reports the
+/// replicated row as is.
+fn answer_standby_lease(
+    dir: &std::path::Path,
+    machine_id: &str,
+    public_key: &str,
+    request: &SupervisorLeaseRequest,
+    now: u64,
+) -> Result<SupervisorLeaseAck, LeaseError> {
+    let request_id = request.request_id().to_string();
+    if matches!(
+        request,
+        SupervisorLeaseRequest::SupervisorLeaseAcquire(_)
+            | SupervisorLeaseRequest::SupervisorLeaseRelease(_)
+    ) {
+        return Ok(lease_reason(
+            lease_ack(request_id, SupervisorLeaseOutcome::Unavailable),
+            LEASE_READ_ONLY,
+        ));
     }
+    lease::lease_read(dir, |conn| {
+        let epoch = lease::relay_epoch(conn)?;
+        let user_id = lease_owner(conn, machine_id, public_key)?;
+        let row = lease::current(conn, &user_id)?;
+        let base = SupervisorLeaseAck {
+            account_machine_count: Some(account_machine_count(conn, &user_id)?),
+            ..lease_ack(request_id, SupervisorLeaseOutcome::Refused)
+        };
+        match request {
+            SupervisorLeaseRequest::SupervisorLeaseRenew(renew) => {
+                let held = row.as_ref().filter(|row| {
+                    !row.released
+                        && row.holder_machine_id == machine_id
+                        && row.fence == renew.fence
+                        && lease::fence_epoch(renew.fence) == epoch
+                });
+                let ack = match held {
+                    Some(row) if now.saturating_add(lease::TTL_SECS) <= row.expires_at => {
+                        SupervisorLeaseAck {
+                            outcome: SupervisorLeaseOutcome::Renewed,
+                            ..base
+                        }
+                    }
+                    Some(row) if now < row.expires_at => lease_reason(
+                        SupervisorLeaseAck {
+                            outcome: SupervisorLeaseOutcome::Unavailable,
+                            ..base
+                        },
+                        LEASE_READ_ONLY,
+                    ),
+                    _ => lease_reason(base, LeaseError::NotHolder.code()),
+                };
+                describe_lease(conn, &user_id, ack, row.as_ref(), None, now)
+            }
+            _ => {
+                let (outcome, code) = query_outcome(machine_id, row.as_ref(), None, epoch, now);
+                let ack = SupervisorLeaseAck {
+                    outcome,
+                    reason_code: code.map(str::to_string),
+                    ..base
+                };
+                describe_lease(conn, &user_id, ack, row.as_ref(), None, now)
+            }
+        }
+    })
 }
 
 /// Answers a lease request off the async runtime and sends the ack; `false` ends the socket.
@@ -12207,6 +12241,9 @@ mod tests {
         add_second_machine(&account);
         let state = test_state(vec![]);
         state.set_account_state(account.clone());
+        // Tests run on the synthetic `LEASE_T0` clock, long after this relay's real start: no
+        // startup quarantine unless a test simulates a restart with `restart_relay_at`.
+        state.inner.lease_quarantine_until.store(0, Ordering::Relaxed);
         {
             let mut keys = state.inner.machine_public_keys.lock();
             keys.insert("owned-machine".into(), "pubkey-1".into());
@@ -12260,6 +12297,14 @@ mod tests {
         } else {
             std::fs::remove_file(marker).expect("remove standby marker");
         }
+    }
+
+    /// Simulates a relay process start at `started_at` on the lease clock.
+    fn restart_relay_at(state: &RelayState, started_at: u64) {
+        state
+            .inner
+            .lease_quarantine_until
+            .store(lease_quarantine_end(started_at), Ordering::Relaxed);
     }
 
     #[test]
@@ -12444,13 +12489,17 @@ mod tests {
         assert!(refused.contains("ACCOUNT_STORE_READ_ONLY"), "{refused}");
     }
 
+    /// The standby never extends a lease past the replicated `expires_at`: `renewed` only while
+    /// a full TTL from now still fits, `unavailable` after that (the holder keeps the deadline of
+    /// its last primary grant), and `LEASE_NOT_HOLDER` once the replicated expiry has passed.
     #[test]
-    fn standby_renews_the_replicated_holder_in_memory_and_refuses_writes() {
+    fn standby_never_renews_past_the_replicated_expiry_and_refuses_writes() {
         let tmp = tempfile::tempdir().unwrap();
         let (state, account) = lease_relay(tmp.path());
         let held = state.answer_supervisor_lease("owned-machine", &acquire_req(Some("ck1"), false), LEASE_T0);
         assert_eq!(held.fence, Some(1));
         let replicated = lease_row(&account, LEASE_USER).expect("row");
+        assert_eq!(replicated.expires_at, LEASE_T0 + lease::TTL_SECS);
         set_standby(&account, true);
 
         let acquire = state.answer_supervisor_lease("second-machine", &acquire_req(Some("ck1"), true), LEASE_T0 + 1);
@@ -12460,35 +12509,146 @@ mod tests {
         assert_eq!(release.outcome, SupervisorLeaseOutcome::Unavailable);
         assert_eq!(release.reason_code.as_deref(), Some("ACCOUNT_STORE_READ_ONLY"));
 
-        // Past the replicated expiry, the holder keeps renewing on relay-clock time.
-        let renew_at = LEASE_T0 + 200;
-        let renewed = state.answer_supervisor_lease("owned-machine", &renew_req(1), renew_at);
+        // A full TTL from now still ends at the replicated expiry: renewed, capped at it.
+        let renewed = state.answer_supervisor_lease("owned-machine", &renew_req(1), LEASE_T0);
         assert_eq!(renewed.outcome, SupervisorLeaseOutcome::Renewed);
         assert_eq!(renewed.fence, Some(1));
         assert_eq!(renewed.expires_in_secs, Some(lease::TTL_SECS));
-        assert_eq!(lease_row(&account, LEASE_USER), Some(replicated.clone()), "never written");
 
-        let wrong_fence = state.answer_supervisor_lease("owned-machine", &renew_req(2), renew_at + 1);
+        // Later the standby cannot promise a full TTL: unavailable, with the replicated expiry.
+        let later = LEASE_T0 + lease::RENEW_SECS;
+        let capped = state.answer_supervisor_lease("owned-machine", &renew_req(1), later);
+        assert_eq!(capped.outcome, SupervisorLeaseOutcome::Unavailable);
+        assert_eq!(capped.reason_code.as_deref(), Some("ACCOUNT_STORE_READ_ONLY"));
+        assert_eq!(capped.fence, Some(1));
+        assert_eq!(capped.expires_in_secs, Some(lease::TTL_SECS - lease::RENEW_SECS));
+        let last_second = state.answer_supervisor_lease("owned-machine", &renew_req(1), replicated.expires_at - 1);
+        assert_eq!(last_second.outcome, SupervisorLeaseOutcome::Unavailable);
+        assert_eq!(last_second.expires_in_secs, Some(1));
+
+        let wrong_fence = state.answer_supervisor_lease("owned-machine", &renew_req(2), later);
         assert_eq!(wrong_fence.outcome, SupervisorLeaseOutcome::Refused);
-        let wrong_holder = state.answer_supervisor_lease("second-machine", &renew_req(1), renew_at + 1);
+        assert_eq!(wrong_fence.reason_code.as_deref(), Some("LEASE_NOT_HOLDER"));
+        let wrong_holder = state.answer_supervisor_lease("second-machine", &renew_req(1), later);
         assert_eq!(wrong_holder.outcome, SupervisorLeaseOutcome::Refused);
-        let query = state.answer_supervisor_lease("second-machine", &query_req(), renew_at + 50);
+        assert_eq!(wrong_holder.reason_code.as_deref(), Some("LEASE_NOT_HOLDER"));
+        let query = state.answer_supervisor_lease("second-machine", &query_req(), later);
         assert_eq!(query.outcome, SupervisorLeaseOutcome::Refused);
         assert_eq!(query.reason_code.as_deref(), Some("LEASE_HELD"));
+        assert_eq!(query.expires_in_secs, Some(lease::TTL_SECS - lease::RENEW_SECS));
 
-        // The replica now names another holder: the in-memory renewal is dropped at once.
+        // Once the replicated expiry passed, the holder is told it no longer holds.
+        let expired = state.answer_supervisor_lease("owned-machine", &renew_req(1), replicated.expires_at);
+        assert_eq!(expired.outcome, SupervisorLeaseOutcome::Refused);
+        assert_eq!(expired.reason_code.as_deref(), Some("LEASE_NOT_HOLDER"));
+        assert_eq!(expired.expires_in_secs, Some(0));
+        // The query never reports an expiry past the replicated one either.
+        let after_grace = replicated.expires_at + lease::GRACE_SECS;
+        let query = state.answer_supervisor_lease("second-machine", &query_req(), after_grace);
+        assert_eq!(query.outcome, SupervisorLeaseOutcome::Released);
+        assert_eq!(lease_row(&account, LEASE_USER), Some(replicated.clone()), "never written");
+
+        // The replica now names another holder: the old holder's renew is refused.
         set_standby(&account, false);
-        let taken = state.answer_supervisor_lease(
-            "second-machine",
-            &acquire_req(Some("ck1"), false),
-            replicated.expires_at + lease::GRACE_SECS,
-        );
+        let taken = state.answer_supervisor_lease("second-machine", &acquire_req(Some("ck1"), false), after_grace);
         assert_eq!(taken.fence, Some(2));
         set_standby(&account, true);
-        let stale = state.answer_supervisor_lease("owned-machine", &renew_req(1), renew_at + 60);
+        let stale = state.answer_supervisor_lease("owned-machine", &renew_req(1), after_grace + 1);
         assert_eq!(stale.outcome, SupervisorLeaseOutcome::Refused);
         assert_eq!(stale.holder_machine_id.as_deref(), Some("second-machine"));
-        assert!(state.inner.standby_leases.lock().get(LEASE_USER).is_none());
+    }
+
+    /// Failback: the holder ran on the primary's grant, the primary went down, the standby
+    /// served renews without extending the lease, and the primary came back. No other machine
+    /// can take the row until both the replicated expiry plus grace and the restarted primary's
+    /// startup quarantine have passed; the takeover reports the quarantine as the time the old
+    /// holder may still run.
+    #[test]
+    fn failback_primary_quarantines_takeover_until_ttl_plus_grace_after_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, account) = lease_relay(tmp.path());
+        let held = state.answer_supervisor_lease("owned-machine", &acquire_req(Some("ck1"), false), LEASE_T0);
+        assert_eq!(held.fence, Some(1));
+        let expires_at = LEASE_T0 + lease::TTL_SECS;
+
+        // Primary down: the standby never extends the lease.
+        set_standby(&account, true);
+        let on_standby = state.answer_supervisor_lease("owned-machine", &renew_req(1), LEASE_T0 + lease::RENEW_SECS);
+        assert_eq!(on_standby.outcome, SupervisorLeaseOutcome::Unavailable);
+        assert_eq!(lease_row(&account, LEASE_USER).map(|row| row.expires_at), Some(expires_at));
+
+        // The primary comes back right after the replicated expiry.
+        set_standby(&account, false);
+        let started_at = expires_at + 10;
+        restart_relay_at(&state, started_at);
+        let quarantine_end = lease_quarantine_end(started_at);
+        assert_eq!(quarantine_end, started_at + lease::TTL_SECS + lease::GRACE_SECS);
+
+        // Past expiry + grace by the row, but inside the quarantine: held, even with force.
+        let probe_at = expires_at + lease::GRACE_SECS;
+        for force in [false, true] {
+            let refused = state.answer_supervisor_lease("second-machine", &acquire_req(Some("ck1"), force), probe_at);
+            assert_eq!(refused.outcome, SupervisorLeaseOutcome::Refused);
+            assert_eq!(refused.reason_code.as_deref(), Some("LEASE_HELD"));
+            assert_eq!(refused.holder_machine_id.as_deref(), Some("owned-machine"));
+            assert_eq!(
+                refused.expires_in_secs,
+                Some(quarantine_end - lease::GRACE_SECS - probe_at)
+            );
+        }
+        let query = state.answer_supervisor_lease("second-machine", &query_req(), probe_at);
+        assert_eq!(query.outcome, SupervisorLeaseOutcome::Refused);
+        assert_eq!(query.reason_code.as_deref(), Some("LEASE_HELD"));
+        let last_second = state.answer_supervisor_lease("second-machine", &acquire_req(Some("ck1"), false), quarantine_end - 1);
+        assert_eq!(last_second.reason_code.as_deref(), Some("LEASE_HELD"));
+        let row = lease_row(&account, LEASE_USER).expect("row");
+        assert_eq!((row.holder_machine_id.as_str(), row.fence), ("owned-machine", 1));
+
+        // The row's own holder is not quarantined.
+        let own_query = state.answer_supervisor_lease("owned-machine", &query_req(), probe_at);
+        assert_eq!(own_query.outcome, SupervisorLeaseOutcome::Released, "expired by the row");
+
+        let taken = state.answer_supervisor_lease("second-machine", &acquire_req(Some("ck1"), false), quarantine_end);
+        assert_eq!(taken.outcome, SupervisorLeaseOutcome::Granted);
+        assert_eq!(taken.fence, Some(2));
+        assert_eq!(taken.previous_expires_in_secs, Some(0));
+    }
+
+    /// A grant that displaces another machine's row during the quarantine (here a released
+    /// row, which the quarantine does not hold) reports the remaining quarantine as the time the
+    /// previous holder may still run.
+    #[test]
+    fn quarantine_remaining_is_reported_as_previous_expiry_on_a_takeover() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _account) = lease_relay(tmp.path());
+        let held = state.answer_supervisor_lease("owned-machine", &acquire_req(Some("ck1"), false), LEASE_T0);
+        let released = state.answer_supervisor_lease("owned-machine", &release_req(held.fence.unwrap(), None, None), LEASE_T0 + 1);
+        assert_eq!(released.outcome, SupervisorLeaseOutcome::Released);
+
+        restart_relay_at(&state, LEASE_T0 + 2);
+        let at = LEASE_T0 + 10;
+        let taken = state.answer_supervisor_lease("second-machine", &acquire_req(Some("ck1"), false), at);
+        assert_eq!(taken.outcome, SupervisorLeaseOutcome::Granted);
+        assert_eq!(taken.fence, Some(2));
+        assert_eq!(taken.previous_expires_in_secs, Some(lease_quarantine_end(LEASE_T0 + 2) - at));
+
+        // The holder itself re-acquiring its own row is not a takeover: no quarantine wait.
+        let own = state.answer_supervisor_lease("second-machine", &acquire_req(None, false), at + 1);
+        assert_eq!(own.outcome, SupervisorLeaseOutcome::Granted);
+        assert_eq!(own.fence, Some(2));
+        assert_eq!(own.previous_expires_in_secs, None);
+    }
+
+    #[test]
+    fn a_new_relay_starts_its_lease_quarantine_at_process_start() {
+        let before = current_time_secs();
+        let state = test_state(vec![]);
+        let after = current_time_secs();
+        let until = state.inner.lease_quarantine_until.load(Ordering::Relaxed);
+        assert!(
+            (lease_quarantine_end(before)..=lease_quarantine_end(after)).contains(&until),
+            "{until} not within start + TTL + GRACE"
+        );
     }
 
     #[test]
