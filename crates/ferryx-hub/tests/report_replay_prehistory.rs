@@ -99,11 +99,16 @@ async fn slack_turn_replay_suppresses_intermediate_and_keeps_final() {
             "kind":"slack_turn","session":session,"trigger":"Why did the build fail?",
             "status_ts":"99.1","background":false,"final_answer":final_answer}}).to_string()).unwrap();
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_report_replay"));
-        command.args([&rows, &provenance]).kill_on_drop(true);
+        // The fixture owner is Korean (Asia/Seoul) and no judge answers, whatever the host has
+        // configured: English interim narration is then not owner-facing, the final answer is.
+        command.args([&rows, &provenance]).kill_on_drop(true).env_remove("FERRYX_HUB_ENV_FILE")
+            .env("HOME", &root).env("USERPROFILE", &root)
+            .env("FERRYX_HUB_OWNER_LANGUAGE", "ko").env("FERRYX_HUB_OWNER_TIMEZONE", "Asia/Seoul")
+            .env("OMON_JEV_ENABLED", "0").env("FERRYX_HUB_MHC_BIN", root.join("no-mhc"));
         let output = tokio::time::timeout(Duration::from_secs(15), command.output()).await.unwrap().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         let row: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(row["decision"], decision);
+        assert_eq!(row["decision"], decision, "{row}");
         assert_eq!(row["transport_executed"], false);
     }
     std::fs::remove_dir_all(root).unwrap();

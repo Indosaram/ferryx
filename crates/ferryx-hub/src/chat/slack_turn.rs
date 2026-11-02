@@ -75,6 +75,8 @@ fn split_list(raw: Option<String>) -> Vec<String> {
 }
 
 impl SlackTurnConfig {
+    /// Reads hub config (which can load the hub env file) and creates the Slack workspace
+    /// root: blocking file IO, so async callers run it on the blocking pool.
     pub fn from_env(
         binary: &str,
         owner: Option<&str>,
@@ -1482,9 +1484,10 @@ pub async fn handle(config: &SlackTurnConfig, pool: &SqlitePool, admitted: Admit
 async fn run_admitted_turn(config: &SlackTurnConfig, pool: &SqlitePool, admitted: Admitted) {
     let text = Box::pin(prepare_prompt(pool, &admitted)).await;
     // The owner's DM and the channels/threads the owner bound to the supervisor are the
-    // supervisor's conversation; every other message keeps the omo app-server turn.
-    let supervised = match super::slack_supervisor::conversation() {
-        Some(conversation) => Box::pin(super::slack_supervisor::try_handle(
+    // supervisor's conversation once its engine is ready; every other message keeps the omo
+    // app-server turn.
+    let supervised = match super::slack_supervisor::engine() {
+        Ok(conversation) => Box::pin(super::slack_supervisor::try_handle(
             config,
             pool,
             &admitted,
@@ -1493,9 +1496,9 @@ async fn run_admitted_turn(config: &SlackTurnConfig, pool: &SqlitePool, admitted
         ))
         .await
         .is_some(),
-        // After a cutover the owner's messages belong to the supervisor; with no engine they
-        // get an explicit unavailable reply, never a silent legacy turn.
-        None => super::slack_supervisor::refuse_without_engine(pool, &admitted).await,
+        // After a cutover the owner's messages belong to the supervisor; with no ready engine
+        // they get an explicit unavailable reply, never a silent legacy turn.
+        Err(gap) => super::slack_supervisor::refuse_without_engine(pool, &admitted, gap).await,
     };
     if !supervised {
         Box::pin(run_session_turn(

@@ -89,10 +89,10 @@ describe("deviceIdentity", () => {
       try {
         render(<PairingPage onPaired={onPaired} />);
 
-        const nameInput = screen.getByPlaceholderText(/Device name/i);
+        const nameInput = screen.getByLabelText(/Phone name/i);
         expect(nameInput).toHaveValue(suggestDeviceName());
         fireEvent.change(nameInput, { target: { value: "My Custom Laptop" } });
-        fireEvent.change(screen.getByPlaceholderText(/6-digit PIN/i), { target: { value: "654321" } });
+        fireEvent.change(screen.getByLabelText(/Pairing code/i), { target: { value: "654321" } });
 
         fireEvent.click(screen.getByRole("button", { name: /Connect/i }));
         expect(fetchMock).toHaveBeenCalledTimes(1);

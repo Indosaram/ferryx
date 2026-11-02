@@ -1111,8 +1111,8 @@ export function prepareMacosFfmpeg({ sourceDir, cacheRoot, exec = execFileSync }
   rmSync(sdkDir, { recursive: true, force: true });
   mkdirSync(join(sdkDir, "lib"), { recursive: true });
   cpSync(join(prefixes["aarch64-apple-darwin"], "include"), join(sdkDir, "include"), { recursive: true });
-  const stage = JSON.parse(readFileSync(join(payloadDir, "stage.json"), "utf8"));
-  for (const name of Object.keys(stage.runtime)) {
+  const staged = JSON.parse(readFileSync(join(payloadDir, "stage.json"), "utf8"));
+  for (const name of Object.keys(staged.runtime)) {
     // libavcodec.63.dylib -> lib/libavcodec.dylib, the name `-lavcodec` resolves.
     symlinkSync(join(payloadDir, "runtime", name), join(sdkDir, "lib", name.replace(/\.\d+\.dylib$/, ".dylib")));
   }

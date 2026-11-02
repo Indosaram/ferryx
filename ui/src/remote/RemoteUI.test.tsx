@@ -241,6 +241,9 @@ function ticketed(inner: typeof fetch): typeof fetch {
     }
     const lane = chatLaneFixture(url);
     if (lane !== null) return lane;
+    // The browser view's session probe fires once the context is known; answered by URL (no
+    // browsers listed) so it never consumes a response a test queued for its own sequence.
+    if (url.includes("/api/v1/browser/sessions")) return jsonResponse([]);
     const sidebar = sidebarFixtureResponse(url);
     if (sidebar !== null) return sidebar;
     return inner(input, init);
@@ -734,11 +737,22 @@ describe("Remote UI Components", () => {
     vi.stubGlobal("visualViewport", viewport);
     vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(focusedState))));
     await act(async () => { render(<RemoteApp />); });
-    const shell = screen.getByLabelText("Current desktop context").closest("header")?.parentElement;
+    const shell = screen.getByTestId("remote-context-label").closest(".remote-app-root");
     expect(shell).toHaveStyle({ height: "720px" });
     act(() => { viewport.height = 320; viewport.dispatchEvent(new Event("resize")); });
     expect(shell).toHaveStyle({ height: "320px" });
     expect(shell).not.toHaveClass("min-h-screen");
+  });
+
+  it("pins the shell to the visual viewport offset when iOS scrolls the layout viewport under the keyboard", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const viewport = Object.assign(new EventTarget(), { height: 720, offsetTop: 0 });
+    vi.stubGlobal("visualViewport", viewport);
+    vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(focusedState))));
+    await act(async () => { render(<RemoteApp />); });
+    const shell = screen.getByTestId("remote-context-label").closest(".remote-app-root");
+    act(() => { viewport.height = 380; viewport.offsetTop = 260; viewport.dispatchEvent(new Event("scroll")); });
+    expect(shell).toHaveStyle({ position: "fixed", top: "260px", height: "380px" });
   });
 
   it("keeps long workspace identifiers within the vertical worktree picker", async () => {
@@ -770,18 +784,18 @@ describe("Remote UI Components", () => {
     // Disconnect drops the session token, so the same mount renders the login
     // screen; a hook declared below that early return changes the hook count.
     await openWorktreeDrawer();
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Machines" })); });
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Machines" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Computers" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Computers" })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Remove pairing" })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Confirm disconnect" })); });
-    expect(screen.getByRole("heading", { name: "Sign In to Ferryx" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Sign in to Ferryx" })).toBeInTheDocument();
     expect(screen.queryByTestId("remote-terminal")).toBeNull();
   });
 
   it("PairingPage renders the Ferryx Desktop PIN flow", () => {
     render(<PairingPage onPaired={vi.fn()} />);
 
-    const input = screen.getByPlaceholderText(/6-digit PIN/i);
+    const input = screen.getByLabelText("Pairing code");
     expect(input).toHaveAttribute("maxLength", "6");
     expect(screen.getByText(/Ferryx Desktop settings/i)).toBeInTheDocument();
   });
@@ -799,7 +813,7 @@ describe("Remote UI Components", () => {
     const terminal = await screen.findByTestId("remote-terminal");
     expect(terminal).toHaveAttribute("data-session-id", "focused-terminal");
     expect(screen.getAllByTestId("remote-terminal")).toHaveLength(1);
-    expect(screen.getByLabelText("Current desktop context")).toHaveTextContent(
+    expect(screen.getByTestId("remote-context-label")).toHaveTextContent(
       "ferryx-ui / main",
     );
     expect(document.body).not.toHaveTextContent("/Users/alice/secret");
@@ -823,7 +837,7 @@ describe("Remote UI Components", () => {
       "data-session-id",
       "focused-terminal",
     );
-    expect(screen.getByLabelText("Current desktop context")).toHaveTextContent(
+    expect(screen.getByTestId("remote-context-label")).toHaveTextContent(
       "remote-e2e / mobile-control",
     );
     await openWorktreeDrawer();
@@ -856,7 +870,7 @@ describe("Remote UI Components", () => {
     expect(document.body).not.toHaveTextContent("/Users/alice/secret");
     expect(document.body).not.toHaveTextContent("/Volumes/private");
 
-    expect(screen.getByLabelText("Current desktop context")).toHaveTextContent(
+    expect(screen.getByTestId("remote-context-label")).toHaveTextContent(
       "ferryx-ui / main",
     );
     await openWorktreeDrawer();
@@ -899,13 +913,14 @@ describe("Remote UI Components", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByLabelText("Current desktop context")).toHaveTextContent(
+      expect(screen.getByTestId("remote-context-label")).toHaveTextContent(
         "api-service / feature/remote-safe",
       );
     });
     expect(screen.queryByTestId("remote-terminal")).not.toBeInTheDocument();
     expect(screen.getByText("No focused terminal")).toBeInTheDocument();
-    expect(screen.getByText(/mirror it here/i)).toBeInTheDocument();
+    // The phone shows the mirror's one empty state (e81e38ea), with its own phone copy.
+    expect(screen.getByTestId("remote-terminal-empty")).toHaveTextContent(/Pick a terminal from the tabs above|no terminal open in this worktree/);
     expect(document.body).not.toHaveTextContent("background-terminal");
   });
 
@@ -954,7 +969,7 @@ describe("Remote UI Components", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByLabelText("Current desktop context")).toHaveTextContent(
+      expect(screen.getByTestId("remote-context-label")).toHaveTextContent(
         "api-service / feature/remote-safe",
       );
     });
@@ -1051,7 +1066,7 @@ describe("Remote UI Components", () => {
         "new-focused-terminal",
       );
     });
-    expect(screen.getByLabelText("Current desktop context")).toHaveTextContent(
+    expect(screen.getByTestId("remote-context-label")).toHaveTextContent(
       "api-service / feature/remote-safe",
     );
   });
@@ -1732,7 +1747,7 @@ describe("Remote UI Components", () => {
     render(<RemoteApp />);
 
     // Must navigate to account sign-in surface and clear token
-    expect(await screen.findByRole("heading", { name: /Sign In to Ferryx/i })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /Sign in to Ferryx/i })).toBeInTheDocument();
     expect(screen.getByPlaceholderText("name@example.com")).toBeInTheDocument();
     expect(localStorage.getItem("ferryx_remote_token")).toBeNull();
   });
@@ -2525,16 +2540,16 @@ describe("Remote UI Components", () => {
 
     // Disconnect now lives in the Machines drawer, behind a confirmation step.
     await openWorktreeDrawer();
-    fireEvent.click(screen.getByRole("button", { name: "Machines" }));
+    fireEvent.click(screen.getByRole("button", { name: "Computers" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove pairing" }));
 
-    expect(screen.queryByRole("heading", { name: /Sign In to Ferryx/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /Sign in to Ferryx/i })).not.toBeInTheDocument();
     expect(screen.getByTestId("remote-terminal")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Confirm disconnect" }));
 
     expect(screen.queryByTestId("remote-terminal")).not.toBeInTheDocument();
-    expect(await screen.findByRole("heading", { name: /Sign In to Ferryx/i })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /Sign in to Ferryx/i })).toBeInTheDocument();
     expect(screen.getByPlaceholderText("name@example.com")).toBeInTheDocument();
   });
 
@@ -2552,7 +2567,7 @@ describe("Remote UI Components", () => {
     await screen.findByTestId("remote-terminal");
 
     await openWorktreeDrawer();
-    fireEvent.click(screen.getByRole("button", { name: "Machines" }));
+    fireEvent.click(screen.getByRole("button", { name: "Computers" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove pairing" }));
 
     expect(screen.queryByPlaceholderText(/6-digit PIN/i)).not.toBeInTheDocument();
@@ -2581,7 +2596,7 @@ describe("Remote UI Components", () => {
     await screen.findByTestId("remote-terminal");
 
     await openWorktreeDrawer();
-    fireEvent.click(screen.getByRole("button", { name: "Machines" }));
+    fireEvent.click(screen.getByRole("button", { name: "Computers" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove pairing" }));
     expect(screen.getByRole("button", { name: "Confirm disconnect" })).toBeInTheDocument();
 

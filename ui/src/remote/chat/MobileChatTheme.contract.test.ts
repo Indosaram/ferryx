@@ -24,6 +24,25 @@ function hexToRgb(hex: string): string {
   return `${r} ${g} ${b}`;
 }
 
+function luminance(hex: string): number {
+  const [r, g, b] = hexToRgb(hex).split(" ").map((part) => {
+    const channel = Number(part) / 255;
+    return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function contrast(a: string, b: string): number {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+function token(tokens: Map<string, string>, name: string): string {
+  const value = tokens.get(name);
+  if (!value || !value.startsWith("#") || value.length !== 7) throw new Error(`${name} is not an opaque hex token: ${value}`);
+  return value;
+}
+
 describe("Mobile chat theme tokens contract", () => {
   const cssPath = resolve(__dirname, "../../index.css");
   const css = readFileSync(cssPath, "utf-8");
@@ -114,5 +133,52 @@ describe("Mobile chat theme tokens contract", () => {
       }
     }
   });
-});
 
+  describe.each([
+    ["dark", darkTokens, parseTokens(css, /\.remote-app-root\s*\{([\s\S]*?)\n\}/)],
+    ["light", lightTokens, parseTokens(css, /:root\[data-theme="light"\]\s+\.remote-app-root\s*\{([\s\S]*?)\n\}/)],
+  ])("%s theme contrast", (_theme, chat, remote) => {
+    const surfaces = ["--chat-screen", "--chat-surface", "--chat-surface-raised"];
+
+    it("keeps secondary and tertiary text at AA on every chat surface", () => {
+      for (const surface of surfaces) {
+        expect(contrast(token(chat, "--chat-foreground-secondary"), token(chat, surface))).toBeGreaterThanOrEqual(4.5);
+      }
+      expect(contrast(token(chat, "--chat-foreground-tertiary"), token(chat, "--chat-screen"))).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(token(chat, "--chat-foreground-tertiary"), token(chat, "--chat-surface"))).toBeGreaterThanOrEqual(4.5);
+    });
+
+    it("keeps the tertiary tier visibly distinct from the secondary tier", () => {
+      const secondary = luminance(token(chat, "--chat-foreground-secondary"));
+      const tertiary = luminance(token(chat, "--chat-foreground-tertiary"));
+      expect(Math.abs(secondary - tertiary) / Math.max(secondary, tertiary)).toBeGreaterThanOrEqual(0.15);
+    });
+
+    it("draws card and input boundaries that are visible on the screen", () => {
+      const screen = token(chat, "--chat-screen");
+      expect(contrast(token(chat, "--chat-border"), screen)).toBeGreaterThanOrEqual(1.5);
+      expect(contrast(token(remote, "--border"), screen)).toBeGreaterThanOrEqual(1.5);
+      expect(contrast(token(chat, "--chat-composer-border"), screen)).toBeGreaterThanOrEqual(3);
+      expect(contrast(token(remote, "--input"), screen)).toBeGreaterThanOrEqual(3);
+    });
+  });
+
+  it("keeps light-theme status colours at text contrast on the light chat screen", () => {
+    const remoteLight = parseTokens(css, /:root\[data-theme="light"\]\s+\.remote-app-root\s*\{([\s\S]*?)\n\}/);
+    for (const name of ["--status-working", "--status-warning", "--status-success", "--status-idle"]) {
+      expect(contrast(token(remoteLight, name), token(lightTokens, "--chat-screen"))).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  it("renders the working label as solid tokenised text, never gradient text", () => {
+    const rules = css.match(/\.work-shimmer-text\s*\{[^}]*\}/g) ?? [];
+    expect(rules.length).toBeGreaterThan(0);
+    for (const rule of rules) {
+      expect(rule).not.toMatch(/gradient|background-clip|transparent|#[0-9a-fA-F]{3,6}\b/);
+    }
+  });
+
+  it("keeps reading content selectable inside the remote client", () => {
+    expect(css).toMatch(/\.remote-app-root :where\([^)]*\bp\b[^)]*\)\s*\{\s*user-select: text;/);
+  });
+});

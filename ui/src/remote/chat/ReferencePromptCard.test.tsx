@@ -5,7 +5,9 @@
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { userFacingError } from "../userFacingError";
 import { ReferencePromptCard, type ReferencePromptCardProps } from "./ReferencePromptCard";
+import { REFERENCE_PROMPT_STALE_MESSAGE } from "./referencePromptAnswer";
 import type { ReferencePrompt, ReferencePromptAnswerPayload } from "./referenceTypes";
 
 function prompt(overrides: Partial<ReferencePrompt> = {}): ReferencePrompt {
@@ -57,6 +59,12 @@ function renderCard(overrides: Partial<ReferencePromptCardProps> = {}) {
   return { view, onAnswer, props };
 }
 
+/** Pick an option (a tap only selects it) and return the button that sends it. */
+function pick(index: number): HTMLElement {
+  fireEvent.click(screen.getByTestId(`reference-prompt-option-${index}`), { detail: 1 });
+  return screen.getByTestId("reference-prompt-submit");
+}
+
 describe("ReferencePromptCard", () => {
   beforeEach(cleanup);
   afterEach(cleanup);
@@ -76,9 +84,35 @@ describe("ReferencePromptCard", () => {
     expect(screen.queryByTestId("reference-prompt-confirm")).not.toBeInTheDocument();
   });
 
-  it("sends the option the user pressed, bound to the card's prompt and screen revision", async () => {
+  it("only selects an option on tap: nothing is sent until Send answer", () => {
     const { onAnswer } = renderCard();
+    const submit = screen.getByTestId("reference-prompt-submit");
+    expect(submit).toBeDisabled();
+    const option = screen.getByTestId("reference-prompt-option-1");
+    expect(option).toHaveAttribute("role", "radio");
+    expect(option).toHaveAttribute("aria-checked", "false");
+    fireEvent.click(option, { detail: 1 });
+    expect(option).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByTestId("reference-prompt-option-0")).toHaveAttribute("aria-checked", "false");
+    expect(submit).not.toBeDisabled();
+    expect(onAnswer).not.toHaveBeenCalled();
+  });
+
+  it("asks for Send answer before a standing permission (\"don't ask again\") goes out", () => {
+    const { onAnswer } = renderCard({
+      prompt: prompt({
+        kind: "approval",
+        options: [{ label: "Yes" }, { label: "Yes, and don't ask again" }, { label: "No" }],
+      }),
+    });
     fireEvent.click(screen.getByTestId("reference-prompt-option-1"), { detail: 1 });
+    expect(onAnswer).not.toHaveBeenCalled();
+    expect(screen.getByTestId("reference-prompt-option-1")).toHaveTextContent("Remembered for later requests");
+  });
+
+  it("sends the option the user picked, bound to the card's prompt and screen revision", async () => {
+    const { onAnswer } = renderCard();
+    fireEvent.click(pick(1), { detail: 1 });
     await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(1));
     expect(onAnswer.mock.calls[0]?.[0]).toEqual({
       promptId: "p1",
@@ -87,13 +121,18 @@ describe("ReferencePromptCard", () => {
     });
   });
 
-  it("reaches its options by keyboard: each is a button, and a key press answers it", async () => {
+  it("reaches its options by keyboard: each is a button, and a key press picks then sends", async () => {
     const { onAnswer } = renderCard();
     const option = screen.getByTestId("reference-prompt-option-0");
     expect(option.tagName).toBe("BUTTON");
     option.focus();
     fireEvent.keyDown(option, { key: "Enter" });
     fireEvent.click(option, { detail: 0 });
+    expect(onAnswer).not.toHaveBeenCalled();
+    const submit = screen.getByTestId("reference-prompt-submit");
+    submit.focus();
+    fireEvent.keyDown(submit, { key: "Enter" });
+    fireEvent.click(submit, { detail: 0 });
     await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(1));
     expect(onAnswer.mock.calls[0]?.[0]?.answer).toEqual({ optionIndex: 0 });
   });
@@ -107,7 +146,7 @@ describe("ReferencePromptCard", () => {
     );
     renderCard({ onAnswer });
     const option = screen.getByTestId("reference-prompt-option-0");
-    fireEvent.click(option, { detail: 1 });
+    fireEvent.click(pick(0), { detail: 1 });
     await waitFor(() =>
       expect(screen.getByTestId("reference-prompt-card")).toHaveAttribute("aria-busy", "true"),
     );
@@ -121,11 +160,11 @@ describe("ReferencePromptCard", () => {
   it("keeps the keyboard out of the message box after a touch press", async () => {
     const onAnswered = vi.fn();
     renderCard({ onAnswered });
-    const option = screen.getByTestId("reference-prompt-option-0");
+    const submit = pick(0);
     const down = new MouseEvent("pointerdown", { bubbles: true, cancelable: true });
     Object.defineProperty(down, "pointerType", { value: "touch" });
-    fireEvent(option, down);
-    fireEvent.click(option, { detail: 1 });
+    fireEvent(submit, down);
+    fireEvent.click(submit, { detail: 1 });
     await waitFor(() => expect(onAnswered).toHaveBeenCalledTimes(1));
     expect(onAnswered).toHaveBeenCalledWith(false);
   });
@@ -133,9 +172,9 @@ describe("ReferencePromptCard", () => {
   it("does not take the focus on when the press did not start in the card", async () => {
     const onAnswered = vi.fn();
     renderCard({ onAnswered });
-    const option = screen.getByTestId("reference-prompt-option-0");
-    fireEvent.keyDown(option, { key: "Enter" });
-    fireEvent.click(option, { detail: 0 });
+    const submit = pick(0);
+    fireEvent.keyDown(submit, { key: "Enter" });
+    fireEvent.click(submit, { detail: 0 });
     await waitFor(() => expect(onAnswered).toHaveBeenCalledTimes(1));
     expect(onAnswered).toHaveBeenCalledWith(false);
   });
@@ -144,7 +183,7 @@ describe("ReferencePromptCard", () => {
     const onAnswered = vi.fn();
     const onAnswer = vi.fn(async () => false);
     renderCard({ onAnswer, onAnswered });
-    fireEvent.click(screen.getByTestId("reference-prompt-option-0"), { detail: 1 });
+    fireEvent.click(pick(0), { detail: 1 });
     await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(1));
     expect(onAnswered).not.toHaveBeenCalled();
   });
@@ -153,7 +192,7 @@ describe("ReferencePromptCard", () => {
     const flight = deferred<boolean>();
     const onAnswer = vi.fn(() => flight.promise);
     renderCard({ onAnswer });
-    fireEvent.click(screen.getByTestId("reference-prompt-option-0"), { detail: 1 });
+    fireEvent.click(pick(0), { detail: 1 });
     expect(screen.getByTestId("reference-prompt-card")).toHaveAttribute("aria-busy", "true");
     await act(async () => {
       flight.resolve(false);
@@ -171,26 +210,29 @@ describe("ReferencePromptCard", () => {
       throw { code: "REQUEST_CONFLICT", message: "staleScreen", retryable: true, details: null };
     });
     renderCard({ onAnswer, onPromptChanged, onAnswered });
-    fireEvent.click(screen.getByTestId("reference-prompt-option-0"), { detail: 1 });
+    fireEvent.click(pick(0), { detail: 1 });
     await waitFor(() =>
       expect(screen.getByTestId("reference-prompt-error")).toHaveTextContent(
-        "the prompt changed — re-read",
+        REFERENCE_PROMPT_STALE_MESSAGE,
       ),
     );
     expect(onPromptChanged).toHaveBeenCalledTimes(1);
     expect(onAnswered).not.toHaveBeenCalled();
   });
 
-  it("shows any other failure as its message, without asking for a re-read", async () => {
+  it("shows any other failure in plain language, never the raw transport text, without asking for a re-read", async () => {
     const onPromptChanged = vi.fn();
     const onAnswer = vi.fn(async () => {
       throw new Error("transport lost");
     });
     renderCard({ onAnswer, onPromptChanged });
-    fireEvent.click(screen.getByTestId("reference-prompt-option-0"), { detail: 1 });
+    fireEvent.click(pick(0), { detail: 1 });
     await waitFor(() =>
-      expect(screen.getByTestId("reference-prompt-error")).toHaveTextContent("transport lost"),
+      expect(screen.getByTestId("reference-prompt-error")).toHaveTextContent(
+        userFacingError(new Error("transport lost"), { action: "send your answer" }),
+      ),
     );
+    expect(screen.getByTestId("reference-prompt-error")).not.toHaveTextContent("transport lost");
     expect(onPromptChanged).not.toHaveBeenCalled();
   });
 
@@ -211,7 +253,8 @@ describe("ReferencePromptCard typed approval confirmation", () => {
     const onTypedAnswerDone = vi.fn();
     renderCard({ onAnswer, typedAnswer: typed, onTypedAnswerDone });
     const confirm = screen.getByTestId("reference-prompt-confirm");
-    expect(confirm).toHaveAttribute("role", "alert");
+    expect(confirm).toHaveAttribute("role", "group");
+    expect(document.activeElement).toBe(screen.getByTestId("reference-prompt-confirm-send"));
     expect(confirm).toHaveTextContent("Send 1. LM-O (Recommended)?");
     expect(onAnswer).not.toHaveBeenCalled();
 
@@ -232,7 +275,7 @@ describe("ReferencePromptCard typed approval confirmation", () => {
 
   it("marks the picked option as the typed one", () => {
     renderCard({ typedAnswer: typed });
-    expect(screen.getByTestId("reference-prompt-option-0").className).toContain("status-warning");
+    expect(screen.getByTestId("reference-prompt-option-0")).toHaveAttribute("aria-checked", "true");
   });
 
   it("does not clear the pick when the answer was dropped", async () => {
@@ -259,7 +302,7 @@ describe("ReferencePromptCard typed confirm failure", () => {
       flight.reject(new Error("host 503"));
       await flight.promise.catch(() => undefined);
     });
-    expect(screen.getByTestId("reference-prompt-error")).toHaveTextContent("host 503");
+    expect(screen.getByTestId("reference-prompt-error")).toHaveTextContent(/Couldn't send your answer/);
     expect(onTypedAnswerDone).not.toHaveBeenCalled();
     expect(screen.getByTestId("reference-prompt-confirm-send")).not.toBeDisabled();
   });
@@ -293,12 +336,12 @@ describe("ReferencePromptCard multiple choice", () => {
     renderCard({ prompt: multi, onAnswer });
     const submit = screen.getByTestId("reference-prompt-submit");
     expect(submit).toBeDisabled();
-    expect(submit).toHaveTextContent("Submit");
+    expect(submit).toHaveTextContent("Send answer");
 
     fireEvent.click(screen.getByTestId("reference-prompt-multi-2"));
     fireEvent.click(screen.getByTestId("reference-prompt-multi-0"));
     expect(submit).not.toBeDisabled();
-    expect(submit).toHaveTextContent("Submit (2)");
+    expect(submit).toHaveTextContent("Send answer (2)");
 
     fireEvent.click(submit, { detail: 1 });
     await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(1));
@@ -309,9 +352,9 @@ describe("ReferencePromptCard multiple choice", () => {
     renderCard({ prompt: multi });
     const second = screen.getByTestId("reference-prompt-multi-1");
     fireEvent.click(second);
-    expect(screen.getByTestId("reference-prompt-submit")).toHaveTextContent("Submit (1)");
+    expect(screen.getByTestId("reference-prompt-submit")).toHaveTextContent("Send answer (1)");
     fireEvent.click(second);
-    expect(screen.getByTestId("reference-prompt-submit")).toHaveTextContent("Submit");
+    expect(screen.getByTestId("reference-prompt-submit")).toHaveTextContent(/^Send answer$/);
     expect(screen.getByTestId("reference-prompt-submit")).toBeDisabled();
   });
 });
@@ -351,6 +394,10 @@ describe("ReferencePromptCard custom answer", () => {
     expect(onAnswer).not.toHaveBeenCalled();
     fireEvent.keyDown(input, { key: "Enter", keyCode: 229 });
     expect(onAnswer).not.toHaveBeenCalled();
+    fireEvent.compositionStart(input);
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 13 });
+    expect(onAnswer).not.toHaveBeenCalled();
+    fireEvent.compositionEnd(input);
 
     fireEvent.keyDown(input, { key: "Enter", keyCode: 13 });
     await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(1));
@@ -365,7 +412,7 @@ describe("ReferencePromptCard custom answer", () => {
     });
     expect(screen.queryByTestId("reference-prompt-option-0")).not.toBeInTheDocument();
     const input = screen.getByTestId("reference-prompt-custom-input");
-    expect(input).toHaveAttribute("aria-label", "Custom answer");
+    expect(input).toHaveAttribute("aria-label", "Your answer");
     fireEvent.change(input, { target: { value: "keep the logs" } });
     fireEvent.click(screen.getByTestId("reference-prompt-custom-send"), { detail: 1 });
     await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(1));
@@ -382,12 +429,14 @@ describe("ReferencePromptCard existing shells and disclosures", () => {
     renderCard({
       prompt: prompt({
         kind: "approval",
-        title: "Action Required",
-        question: "Action Required",
+        title: "Needs your approval",
+        question: "Needs your approval",
         options: [{ label: "Approve" }, { label: "Decline" }],
       }),
       onAnswer,
     });
+    // one card: the title is drawn once
+    expect(screen.getAllByText("Needs your approval")).toHaveLength(1);
     expect(screen.queryByTestId("reference-prompt-option-0")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
     await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(1));
@@ -402,8 +451,8 @@ describe("ReferencePromptCard existing shells and disclosures", () => {
     renderCard({
       prompt: prompt({
         kind: "approval",
-        title: "Action Required",
-        question: "Action Required",
+        title: "Needs your approval",
+        question: "Needs your approval",
         options: [{ label: "Approve" }, { label: "Decline" }],
       }),
       onAnswered,
@@ -434,18 +483,19 @@ describe("ReferencePromptCard existing shells and disclosures", () => {
     expect(screen.getByText("(answered)")).toBeInTheDocument();
   });
 
-  it("labels a queued question as still working, and shows the reference body", () => {
+  it("labels a queued question as still working with its own agent's name, and shows the reference body", () => {
     renderCard({
       prompt: prompt({ queued: "collapsed", body: "git push --force" }),
     });
-    expect(screen.getByText(/the message box still talks to Codex/)).toBeInTheDocument();
+    expect(screen.getByText(/the message box still talks to Claude/)).toBeInTheDocument();
+    expect(screen.queryByText(/Codex/)).not.toBeInTheDocument();
     expect(screen.getByText("git push --force")).toBeInTheDocument();
   });
 
   it("says the pane is blocked when no reader knows its prompt", () => {
     renderCard({ prompt: prompt({ fallback: true, options: [] }) });
     expect(screen.getByTestId("reference-prompt-fallback")).toHaveTextContent(
-      "answer it in the terminal",
+      "Answer it in the terminal",
     );
   });
 });

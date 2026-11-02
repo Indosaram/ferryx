@@ -8,7 +8,7 @@ import { MobileSheet, MobileSheetItem } from "./MobileSheet";
  * waiting -> "Approval", done recedes with no label. */
 function touchStatusLabel(activity: "working" | "waiting" | "done" | null): { text: string; className: string } | null {
   if (activity === "working") return { text: "Working", className: "text-status-working" };
-  if (activity === "waiting") return { text: "Approval", className: "text-status-warning" };
+  if (activity === "waiting") return { text: "Needs approval", className: "text-status-warning" };
   return null;
 }
 
@@ -52,7 +52,7 @@ export function MobileSessionSwitcherSheet({
         onNewTerminal();
         onOpenChange(false);
       }}
-      className="flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-chat-border bg-chat-surface-raised font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover disabled:cursor-not-allowed disabled:opacity-50"
+      className="flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-chat-border bg-chat-surface-raised font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
     >
       <Plus className="size-4 shrink-0" aria-hidden="true" />
       <span>New terminal</span>
@@ -95,7 +95,7 @@ export function MobileSessionSwitcherSheet({
         const status = touchStatusLabel(tab.activityState ?? null);
         const trailing = status ? (
           // not aria-hidden: the status is how a screen-reader user finds the session needing approval
-          <span className={cn("text-[12px] font-medium tabular-nums", status.className)}>
+          <span className={cn("text-xs font-medium tabular-nums", status.className)}>
             {status.text}
           </span>
         ) : null;

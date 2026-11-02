@@ -95,26 +95,32 @@ async function boot() {
 boot().catch((error: unknown) => {
   console.error("Ferryx boot failed", error);
   void bootTrace("boot.failed", { reason: describeRejection(error).slice(0, 200) });
-  // Plain DOM on purpose: React or the app bundle may be what failed to load.
+  // Plain DOM on purpose: React or the app bundle may be what failed to load. Tokens may be
+  // missing too, so the screen leans on the inline document colours set in index.html.
   const el = document.getElementById("root");
   if (!el) return;
-  const message = document.createElement("div");
-  message.setAttribute("role", "alert");
-  message.style.cssText = "padding:24px;font:14px system-ui,sans-serif";
-  message.textContent = "Ferryx failed to start. Reload the app; if this persists, check the console for details.";
-  el.replaceChildren(message);
+  const screen = document.createElement("main");
+  screen.setAttribute("role", "alert");
+  screen.style.cssText =
+    "min-height:100dvh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1rem;" +
+    "padding:max(env(safe-area-inset-top),1.5rem) 1.5rem max(env(safe-area-inset-bottom),1.5rem);" +
+    "font:1rem/1.5 system-ui,sans-serif;text-align:center";
+  const message = document.createElement("p");
+  message.textContent = navigator.onLine === false
+    ? "You're offline and Ferryx isn't saved on this device yet. Connect and reload."
+    : "Ferryx couldn't start. Reload to try again.";
+  const reload = document.createElement("button");
+  reload.type = "button";
+  reload.textContent = "Reload";
+  reload.style.cssText =
+    "min-height:2.75rem;padding:0 1.25rem;border-radius:0.5rem;border:1px solid currentColor;background:transparent;color:inherit;font:inherit";
+  reload.addEventListener("click", () => location.reload());
+  const build = document.createElement("p");
+  build.textContent = `Build ${BUILD_STAMP}`;
+  build.style.cssText = "font-size:0.75rem;opacity:0.7";
+  screen.replaceChildren(message, reload, build);
+  el.replaceChildren(screen);
 });
-
-// Short landscape phone viewports: when the soft keyboard shrinks the native view, keep the
-// focused field visible instead of leaving it below the fold.
-if (isMobileCompanion() && window.visualViewport) {
-  window.visualViewport.addEventListener("resize", () => {
-    const focused = document.activeElement;
-    if (focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement) {
-      focused.scrollIntoView({ block: "center" });
-    }
-  });
-}
 
 if (typeof window !== "undefined" && "serviceWorker" in navigator && !isTauriApp && !isMobileCompanion()) {
   const registerServiceWorker = () => {

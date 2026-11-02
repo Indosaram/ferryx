@@ -23,8 +23,9 @@
 //! `IncomingSessionNotice`. Trusted in-process callers can also issue via
 //! `notify_incoming_session`. Unknown IDs are rejected before upgrade;
 //! each issued ID accepts exactly one data half and one client half.
-//! Pending and active sessions share a 100-entry budget. Pairing expires
-//! after 30 seconds; sends time out after 30 seconds and sessions after one hour.
+//! Sessions still waiting for their second half share a 100-entry budget (20 per
+//! machine); paired sessions do not count. Pairing expires after 30 seconds; sends
+//! time out after 30 seconds and sessions after their kind's lifetime.
 
 use crate::remote::auth::{verify_control_challenge, write_private_json};
 use crate::remote::protocol::{
@@ -58,7 +59,11 @@ use tokio::time::timeout;
 /// How long a session may sit waiting for its data or client half before
 /// the relay gives up and evicts it from the registry.
 const SESSION_PAIRING_TIMEOUT: Duration = Duration::from_secs(30);
+/// Relay-wide cap on sessions still waiting for their second half. Paired (active) sessions
+/// live up to a session lifetime and are bounded by their sockets, so they do not count.
 const MAX_PENDING_SESSIONS: usize = 100;
+/// Per-machine share of [`MAX_PENDING_SESSIONS`], so one tenant cannot starve the others.
+const MAX_PENDING_SESSIONS_PER_MACHINE: usize = 20;
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(30);
 const SESSION_TRANSFER_TIMEOUT: Duration = Duration::from_secs(3600);
 /// Lifetime of a spliced remote desktop session. A viewer watches for hours, and the bytes stay
@@ -167,12 +172,18 @@ enum PairingWait {
     Paired(WebSocket),
     /// The suspension sweeper ended the session before the opposite half arrived.
     Suspended(String),
+    /// The registry entry was retired (pairing deadline) before the opposite half arrived.
+    Abandoned,
 }
 
 pub const RELAY_STAGE_HEADER: &str = "x-ferryx-relay-stage";
-/// Response headers a browser client may read across origins: the relay stage, and the
-/// replacement bearer token the host gateway answers after a transparent rotation.
-const RELAY_EXPOSED_HEADERS: &str = "x-ferryx-relay-stage, x-ferryx-rotated-token";
+/// Response headers a browser client may read across origins: the relay stage, the
+/// replacement bearer token the host gateway answers after a transparent rotation, and the
+/// e2e marker on attach allocations.
+const RELAY_EXPOSED_HEADERS: &str =
+    "x-ferryx-relay-stage, x-ferryx-rotated-token, x-ferryx-relay-e2e";
+/// Set on every response to an `?e2e=1` attach allocation.
+const RELAY_E2E_HEADER: &str = "x-ferryx-relay-e2e";
 pub const RELAY_STAGE_DATA_PAIRING_TIMEOUT: &str = "data_pairing_timeout";
 pub const RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT: &str = "upstream_transfer_timeout";
 
@@ -391,6 +402,30 @@ struct ControlChannel {
     tx: mpsc::Sender<IncomingSessionNotice>,
 }
 
+/// Why a session could not be issued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueRejection {
+    /// No live control channel is registered for the machine.
+    Offline,
+    /// The caller's control generation is no longer the machine's live one.
+    StaleGeneration,
+    /// The pending-session budget (relay-wide or per machine) or the notice queue is full.
+    Busy,
+}
+
+/// True when another waiting (not yet paired) session for `owner` would exceed a budget.
+fn pending_budget_exhausted(sessions: &HashMap<String, WaitingHalf>, owner: &str) -> bool {
+    let mut total = 0;
+    let mut owned = 0;
+    for waiting in sessions.values().filter(|waiting| !waiting.active) {
+        total += 1;
+        if waiting.owner == owner {
+            owned += 1;
+        }
+    }
+    total >= MAX_PENDING_SESSIONS || owned >= MAX_PENDING_SESSIONS_PER_MACHINE
+}
+
 /// A sealed account grant on its way to a daemon, with the slot its acknowledgement must
 /// fill. The relay only ever carries the sealed blob, never the plaintext pairing token.
 pub struct GrantDeliveryRequest {
@@ -571,6 +606,9 @@ struct RelayInner {
     /// tunnel resolves to the same live registration no matter which name the sweeper matched.
     control_suspensions: Mutex<HashMap<u64, SuspensionSignal>>,
     pending_socket_tickets: Mutex<HashMap<String, (String, String, String, u64)>>,
+    /// Device tokens a machine recently refused, keyed by (machine, token), so a repeated bad
+    /// bearer is answered without opening another data channel to the host.
+    rejected_device_tokens: Mutex<HashMap<(String, String), Instant>>,
     /// Lock order: always after `control_channels`.
     data_pool: Mutex<HashMap<String, Vec<PooledDataSocket>>>,
     /// Refuse plaintext relay proxy routes (`FERRYX_RELAY_REQUIRE_E2E=1`).
@@ -590,10 +628,18 @@ struct RelayInner {
 /// with any other deployment.
 pub const LEGACY_CONTROL_AUDIENCE: &str = "relay";
 
+const MACHINE_ID_CLAIMED: &str = "Machine ID already claimed by another public key";
+const ENROLLMENT_TOKEN_REQUIRED: &str = "Enrollment token required for private relay";
+
 const ADMISSION_WINDOW: Duration = Duration::from_secs(60);
 const CONTROL_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long an authenticated control socket may send nothing (not even a Ping) before the
+/// relay treats it as half-open.
+const CONTROL_READ_IDLE: Duration = Duration::from_secs(60);
 const DEVICE_TOKEN_CACHE_TTL: Duration = Duration::from_secs(30);
 const MAX_CACHED_DEVICE_TOKENS: usize = 1_000;
+const REJECTED_DEVICE_TOKEN_TTL: Duration = Duration::from_secs(30);
+const MAX_REJECTED_DEVICE_TOKENS: usize = 1_000;
 
 struct AttemptTracker {
     started: Instant,
@@ -672,6 +718,7 @@ impl RelayState {
                 pending_sessions: Mutex::new(HashMap::new()),
                 control_suspensions: Mutex::new(HashMap::new()),
                 pending_socket_tickets: Mutex::new(HashMap::new()),
+                rejected_device_tokens: Mutex::new(HashMap::new()),
                 data_pool: Mutex::new(HashMap::new()),
                 require_e2e: require_e2e_from_env(),
                 #[cfg(test)]
@@ -728,6 +775,7 @@ impl RelayState {
                 pending_sessions: Mutex::new(HashMap::new()),
                 control_suspensions: Mutex::new(HashMap::new()),
                 pending_socket_tickets: Mutex::new(HashMap::new()),
+                rejected_device_tokens: Mutex::new(HashMap::new()),
                 data_pool: Mutex::new(HashMap::new()),
                 require_e2e: require_e2e_from_env(),
                 #[cfg(test)]
@@ -816,6 +864,10 @@ impl RelayState {
     }
 
     pub fn register_device_token(&self, machine_id: &str, token: &str) {
+        self.inner
+            .rejected_device_tokens
+            .lock()
+            .remove(&(machine_id.to_owned(), token.to_owned()));
         let mut tokens = self.paired_tokens.lock();
         let now = Instant::now();
         tokens.retain(|_, cached| now.duration_since(cached.validated_at) < DEVICE_TOKEN_CACHE_TTL);
@@ -856,6 +908,16 @@ impl RelayState {
         if self.has_fresh_device_token(machine_id, token) {
             return Ok(true);
         }
+        let key = (machine_id.to_owned(), token.to_owned());
+        if self
+            .inner
+            .rejected_device_tokens
+            .lock()
+            .get(&key)
+            .is_some_and(|rejected_at| rejected_at.elapsed() < REJECTED_DEVICE_TOKEN_TTL)
+        {
+            return Ok(false);
+        }
         let mut headers = HeaderMap::new();
         let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}")) else {
             return Ok(false);
@@ -877,6 +939,14 @@ impl RelayState {
         } else if response.status() == StatusCode::UNAUTHORIZED
             || response.status() == StatusCode::FORBIDDEN
         {
+            let now = Instant::now();
+            let mut rejected = self.inner.rejected_device_tokens.lock();
+            if rejected.len() >= MAX_REJECTED_DEVICE_TOKENS {
+                rejected.retain(|_, at| now.duration_since(*at) < REJECTED_DEVICE_TOKEN_TTL);
+            }
+            if rejected.len() < MAX_REJECTED_DEVICE_TOKENS {
+                rejected.insert(key, now);
+            }
             Ok(false)
         } else {
             Err(response.status())
@@ -932,7 +1002,7 @@ impl RelayState {
             return if key == &auth.public_key {
                 Ok(())
             } else {
-                Err("Machine ID already claimed by another public key".into())
+                Err(MACHINE_ID_CLAIMED.into())
             };
         }
         // A private relay requires an operator-issued enrollment token. An account-enrolled
@@ -945,7 +1015,7 @@ impl RelayState {
                 .is_some_and(|token| self.validate_machine_token(token))
             && !account_enrolled
         {
-            return Err("Enrollment token required for private relay".into());
+            return Err(ENROLLMENT_TOKEN_REQUIRED.into());
         }
         let mut enrolled = keys.clone();
         if let Some(path) = &self.inner.key_store_path {
@@ -985,7 +1055,7 @@ impl RelayState {
                             // A conflicting on-disk owner must not be silently replaced.
                             Some(existing) if existing != &key => {
                                 return Err(
-                                    "Machine ID already claimed by another public key".into()
+                                    MACHINE_ID_CLAIMED.into()
                                 );
                             }
                             Some(_) => {}
@@ -1005,7 +1075,7 @@ impl RelayState {
                 .get(&auth.machine_id)
                 .is_some_and(|key| key != &auth.public_key)
             {
-                return Err("Machine ID already claimed by another public key".into());
+                return Err(MACHINE_ID_CLAIMED.into());
             }
             enrolled.insert(auth.machine_id.clone(), auth.public_key.clone());
             #[cfg(test)]
@@ -1020,11 +1090,9 @@ impl RelayState {
     }
 
     fn admit(&self, ip: IpAddr, now: Instant) -> bool {
+        // Expired trackers are pruned by the session sweeper, not on every request: a full
+        // scan per admission is O(n) under the global lock.
         let mut admission = self.inner.admission.lock();
-        admission.retain(|_, tracker| {
-            now.duration_since(tracker.started) < ADMISSION_WINDOW
-                || tracker.locked_until.is_some_and(|until| now < until)
-        });
         let tracker = admission.entry(ip).or_insert(AttemptTracker {
             started: now,
             attempts: 0,
@@ -1048,16 +1116,36 @@ impl RelayState {
     }
 
     fn record_auth(&self, ip: IpAddr, success: bool) {
-        if let Some(tracker) = self.inner.admission.lock().get_mut(&ip) {
-            if success {
+        let mut admission = self.inner.admission.lock();
+        if success {
+            if let Some(tracker) = admission.get_mut(&ip) {
                 tracker.failures = 0;
-            } else {
-                tracker.failures += 1;
-                if tracker.failures >= 5 {
-                    tracker.locked_until = Some(Instant::now() + ADMISSION_WINDOW);
-                }
             }
+            return;
         }
+        // A failure is recorded even for an address that never went through `admit` (the
+        // device-token routes), so repeated bad bearers reach the same lockout.
+        let now = Instant::now();
+        let tracker = admission.entry(ip).or_insert(AttemptTracker {
+            started: now,
+            attempts: 0,
+            failures: 0,
+            locked_until: None,
+        });
+        tracker.failures += 1;
+        if tracker.failures >= 5 {
+            tracker.locked_until = Some(now + ADMISSION_WINDOW);
+        }
+    }
+
+    /// True while `ip` is locked out by repeated authentication failures.
+    fn locked_out(&self, ip: IpAddr) -> bool {
+        let now = Instant::now();
+        self.inner
+            .admission
+            .lock()
+            .get(&ip)
+            .is_some_and(|tracker| tracker.locked_until.is_some_and(|until| now < until))
     }
 
     fn validate_machine_token(&self, token: &str) -> bool {
@@ -1081,21 +1169,38 @@ impl RelayState {
         mpsc::Receiver<IncomingSessionNotice>,
         mpsc::Receiver<GrantDeliveryRequest>,
     ) {
+        let (generation, rx, grant_rx, _, _) = self.register_control_channel_handle(machine_id);
+        (generation, rx, grant_rx)
+    }
+
+    /// [`Self::register_control_channel`], also returning the registered channel and grant
+    /// sender so the owning socket can bind aliases to exactly its own registration.
+    fn register_control_channel_handle(
+        &self,
+        machine_id: String,
+    ) -> (
+        u64,
+        mpsc::Receiver<IncomingSessionNotice>,
+        mpsc::Receiver<GrantDeliveryRequest>,
+        ControlChannel,
+        mpsc::Sender<GrantDeliveryRequest>,
+    ) {
         let (tx, rx) = mpsc::channel(MAX_PENDING_SESSIONS);
         let (grant_tx, grant_rx) = mpsc::channel(1);
         let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
+        let channel = ControlChannel { generation, tx };
         {
             // One lock order everywhere: `control_channels` before `grant_channels`.
             let mut channels = self.inner.control_channels.lock();
             let mut grants = self.inner.grant_channels.lock();
-            channels.insert(machine_id.clone(), ControlChannel { generation, tx });
-            grants.insert(machine_id, grant_tx);
+            channels.insert(machine_id.clone(), channel.clone());
+            grants.insert(machine_id, grant_tx.clone());
         }
         self.inner
             .control_suspensions
             .lock()
             .insert(generation, new_suspension_signal());
-        (generation, rx, grant_rx)
+        (generation, rx, grant_rx, channel, grant_tx)
     }
 
     fn unregister_control_channel(&self, _machine_token: &str, generation: u64) {
@@ -1188,20 +1293,47 @@ impl RelayState {
         }
     }
 
-    /// Makes the control socket registered under `machine_token` reachable as `alias` (the
-    /// machine id a token-authenticated daemon announces): session allocation and grant
+    /// Test shorthand for [`Self::bind_control_alias_for`] that binds whatever channel is
+    /// currently registered under `machine_token`.
+    #[cfg(test)]
+    pub fn bind_control_alias(&self, machine_token: &str, alias: String) -> bool {
+        let channel = self.inner.control_channels.lock().get(machine_token).cloned();
+        let grant = self.inner.grant_channels.lock().get(machine_token).cloned();
+        match (channel, grant) {
+            (Some(channel), Some(grant)) => self.bind_control_alias_for(&channel, &grant, alias),
+            _ => false,
+        }
+    }
+
+    /// Makes the caller's own control registration (`channel`, `grant`) reachable as `alias`
+    /// (the machine id a token-authenticated daemon announces): session allocation and grant
     /// delivery both look the machine up by that id, so both maps get the alias.
     /// Unregistering the generation retires every name it was bound to.
-    pub fn bind_control_alias(&self, machine_token: &str, alias: String) {
+    ///
+    /// The alias is bound to the caller's generation, never to whatever currently sits under
+    /// a shared token, and it is refused when another live control generation already holds
+    /// it or when an Ed25519 identity has enrolled that machine id: a token-authenticated
+    /// daemon must not take over another machine's routing.
+    fn bind_control_alias_for(
+        &self,
+        channel: &ControlChannel,
+        grant: &mpsc::Sender<GrantDeliveryRequest>,
+        alias: String,
+    ) -> bool {
+        if self.inner.machine_public_keys.lock().contains_key(&alias) {
+            return false;
+        }
         // One lock order everywhere: `control_channels` before `grant_channels`.
         let mut channels = self.inner.control_channels.lock();
         let mut grants = self.inner.grant_channels.lock();
-        if let Some(channel) = channels.get(machine_token).cloned() {
-            if let Some(grant) = grants.get(machine_token).cloned() {
-                grants.insert(alias.clone(), grant);
-            }
-            channels.insert(alias, channel);
+        if channels.get(&alias).is_some_and(|existing| {
+            existing.generation != channel.generation && !existing.tx.is_closed()
+        }) {
+            return false;
         }
+        grants.insert(alias.clone(), grant.clone());
+        channels.insert(alias, channel.clone());
+        true
     }
 
     /// Trusted in-process issuance API. The caller must supply an opaque,
@@ -1232,26 +1364,37 @@ impl RelayState {
         opaque: bool,
         session_kind: SessionKind,
     ) -> bool {
+        self.try_issue_session_of_kind(machine_token, session_id, generation, opaque, session_kind)
+            .is_ok()
+    }
+
+    /// [`Self::issue_session_of_kind`] with the reason a session was refused.
+    pub fn try_issue_session_of_kind(
+        &self,
+        machine_token: &str,
+        session_id: &str,
+        generation: Option<u64>,
+        opaque: bool,
+        session_kind: SessionKind,
+    ) -> Result<(), IssueRejection> {
         let channels = self.inner.control_channels.lock();
         let Some(channel) = channels.get(machine_token) else {
-            return false;
+            return Err(IssueRejection::Offline);
         };
         if generation.is_some_and(|id| id != channel.generation) {
-            return false;
+            return Err(IssueRejection::StaleGeneration);
         }
         let mut sessions = self.inner.pending_sessions.lock();
-        if sessions.len() >= MAX_PENDING_SESSIONS || sessions.contains_key(session_id) {
-            return false;
+        if pending_budget_exhausted(&sessions, machine_token) || sessions.contains_key(session_id) {
+            return Err(IssueRejection::Busy);
         }
-        if channel
-            .tx
-            .try_send(IncomingSessionNotice {
-                session_id: session_id.into(),
-                opaque,
-            })
-            .is_err()
-        {
-            return false;
+        match channel.tx.try_send(IncomingSessionNotice {
+            session_id: session_id.into(),
+            opaque,
+        }) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => return Err(IssueRejection::Busy),
+            Err(mpsc::error::TrySendError::Closed(_)) => return Err(IssueRejection::Offline),
         }
         sessions.insert(
             session_id.into(),
@@ -1268,7 +1411,7 @@ impl RelayState {
                 suspension: new_suspension_signal(),
             },
         );
-        true
+        Ok(())
     }
 
     /// The lifetime a splice of `session_id` gets; the default for an unknown session.
@@ -1344,21 +1487,31 @@ impl RelayState {
     /// `rx.await` to resolve to an error so it can close its socket.
     fn sweep_expired_sessions(&self) {
         let now = Instant::now();
+        let now_secs = current_time_secs();
         self.inner
             .pending_socket_tickets
             .lock()
-            .retain(|_, (_, _, _, expiry)| *expiry > current_time_secs());
+            .retain(|_, (_, _, _, expiry)| *expiry > now_secs);
         self.paired_tokens
             .lock()
             .retain(|_, cached| now.duration_since(cached.validated_at) < DEVICE_TOKEN_CACHE_TTL);
         self.inner
+            .rejected_device_tokens
+            .lock()
+            .retain(|_, at| now.duration_since(*at) < REJECTED_DEVICE_TOKEN_TTL);
+        self.inner
             .pairings
             .lock()
-            .retain(|_, p| p.registration.expires_at > current_time_secs());
-        self.inner.admission.lock().retain(|_, tracker| {
+            .retain(|_, p| p.registration.expires_at > now_secs);
+        let live = |tracker: &AttemptTracker| {
             now.duration_since(tracker.started) < ADMISSION_WINDOW
                 || tracker.locked_until.is_some_and(|until| now < until)
-        });
+        };
+        self.inner.admission.lock().retain(|_, tracker| live(tracker));
+        self.inner
+            .pairing_admission
+            .lock()
+            .retain(|_, tracker| live(tracker));
         let mut sessions = self.inner.pending_sessions.lock();
         sessions.retain(|_, waiting| {
             waiting.active || waiting.created_at.elapsed() < SESSION_PAIRING_TIMEOUT
@@ -1481,11 +1634,8 @@ impl RelayState {
         machine: Option<&str>,
     ) -> Result<PairingClaimGuard, StatusCode> {
         let now = Instant::now();
+        // Expired trackers are pruned by the session sweeper; a stale one is reset here.
         let mut admission = self.inner.pairing_admission.lock();
-        admission.retain(|_, t| {
-            now.duration_since(t.started) < ADMISSION_WINDOW
-                || t.locked_until.is_some_and(|until| now < until)
-        });
         let tracker = admission.entry(ip).or_insert(AttemptTracker {
             started: now,
             attempts: 0,
@@ -1493,7 +1643,15 @@ impl RelayState {
             locked_until: None,
         });
         if tracker.locked_until.is_some_and(|until| now < until) {
-            return Err(StatusCode::UNAUTHORIZED);
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+        if now.duration_since(tracker.started) >= ADMISSION_WINDOW {
+            *tracker = AttemptTracker {
+                started: now,
+                attempts: 0,
+                failures: 0,
+                locked_until: None,
+            };
         }
         // Snapshot live control generations first. register_pairing takes
         // control_channels before pairings, so acquiring them in that same order here
@@ -1568,6 +1726,17 @@ impl RelayState {
         Err(StatusCode::NOT_FOUND)
     }
 
+    /// How long `ip` stays locked out of pairing claims.
+    fn pairing_retry_after(&self, ip: IpAddr) -> Duration {
+        let now = Instant::now();
+        self.inner
+            .pairing_admission
+            .lock()
+            .get(&ip)
+            .and_then(|tracker| tracker.locked_until)
+            .map_or(Duration::ZERO, |until| until.saturating_duration_since(now))
+    }
+
     /// Reserve the relay's HTTP half before notifying the daemon, so even an
     /// immediate data connection hands its socket directly to this request.
     async fn open_session_channel(
@@ -1611,7 +1780,7 @@ impl RelayState {
             }
             control_generation = channel.generation;
             let mut sessions = self.inner.pending_sessions.lock();
-            if sessions.len() >= MAX_PENDING_SESSIONS {
+            if pending_budget_exhausted(&sessions, machine) {
                 return Err(StatusCode::SERVICE_UNAVAILABLE);
             }
             sessions.insert(
@@ -1637,10 +1806,12 @@ impl RelayState {
                 })
                 .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
         }
-        let socket = timeout(SESSION_PAIRING_TIMEOUT, rx)
-            .await
-            .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
-            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        let socket = match timeout(SESSION_PAIRING_TIMEOUT, rx).await {
+            Ok(Ok(socket)) => socket,
+            // The sweeper retires an unpaired entry at the same deadline this wait uses, so a
+            // dropped sender is the same pairing timeout, reported with its stage.
+            Err(_) | Ok(Err(_)) => return Err(StatusCode::GATEWAY_TIMEOUT),
+        };
         Ok((socket, guard, control_generation))
     }
 }
@@ -1652,25 +1823,29 @@ const MAX_ACTIVE_PAIRING_PINS_PER_MACHINE: usize = 5;
 /// rather than trusting the client-supplied `expires_at`.
 const MAX_PAIRING_LEASE: u64 = 600;
 
+/// The bearer a device presents, trimmed. Every device-token route parses it the same way,
+/// so a token that works over HTTP also works for a socket ticket.
+fn device_bearer(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+}
+
 async fn socket_ticket_handler(
     State(state): State<RelayState>,
     AxumPath(machine): AxumPath<String>,
+    peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     Json(mut body): Json<serde_json::Value>,
 ) -> Result<Response, StatusCode> {
+    let ip = peer_ip(peer);
     if let Err(refusal) = plaintext_gate(&state, &headers, &machine, "/api/v1/socket-ticket") {
         return Ok(refusal);
     }
-    let device_token = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|token| {
-            !token.is_empty()
-                && token
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"-._~+/=".contains(&b))
-        })
+    let device_token = device_bearer(&headers)
         .ok_or(StatusCode::UNAUTHORIZED)?
         .to_owned();
     // The public route supplies machineId; the shared wire type also supports
@@ -1693,9 +1868,14 @@ async fn socket_ticket_handler(
     {
         return Err(StatusCode::NOT_FOUND);
     }
+    // A locked-out address is refused before its bearer is probed against the host.
+    if state.locked_out(ip) {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
     match state.authorize_device_token(&machine, &device_token).await {
         Ok(true) => {}
         Ok(false) => {
+            state.record_auth(ip, false);
             return Ok((
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({
@@ -1777,15 +1957,35 @@ fn canonical_socket_dimension<'de, D: serde::Deserializer<'de>>(
     Ok(Some(number))
 }
 
+/// Status for a socket query the handler could not parse. A missing ticket or a key that
+/// carries a credential is an authorization failure (401); anything else is a malformed
+/// request (400), so a client bug in a resize parameter never reads as a revoked device.
+fn socket_query_rejection(raw: Option<&str>) -> StatusCode {
+    let mut ticket = false;
+    for (key, _) in url::form_urlencoded::parse(raw.unwrap_or_default().as_bytes()) {
+        let key = key.to_ascii_lowercase();
+        if matches!(key.as_str(), "token" | "access_token" | "authorization") {
+            return StatusCode::UNAUTHORIZED;
+        }
+        ticket |= key == "ticket";
+    }
+    if ticket {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::UNAUTHORIZED
+    }
+}
+
 fn consume_socket_ticket(
     state: &RelayState,
     query: Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection>,
+    raw_query: Option<&str>,
     machine: &str,
     target: &str,
 ) -> Result<String, StatusCode> {
     // Unknown query keys (including token/access_token/authorization) are
     // forbidden, even when accompanied by a valid one-time ticket.
-    let Query(query) = query.map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let Query(query) = query.map_err(|_| socket_query_rejection(raw_query))?;
     let ticket = query.ticket.ok_or(StatusCode::UNAUTHORIZED)?;
     let (issued_machine, issued_target, device_token, expiry) = state
         .inner
@@ -1803,6 +2003,7 @@ async fn browser_events_handler(
     State(state): State<RelayState>,
     AxumPath(machine): AxumPath<String>,
     query: Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection>,
+    RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
@@ -1810,7 +2011,7 @@ async fn browser_events_handler(
     if let Err(refusal) = plaintext_gate(&state, &headers, &machine, target) {
         return Ok(refusal);
     }
-    let device_token = consume_socket_ticket(&state, query, &machine, target)?;
+    let device_token = consume_socket_ticket(&state, query, raw_query.as_deref(), &machine, target)?;
     browser_socket(state, machine, target.into(), device_token, ws).await
 }
 
@@ -1818,6 +2019,7 @@ async fn browser_screencast_handler(
     State(state): State<RelayState>,
     AxumPath((machine, browser_id)): AxumPath<(String, String)>,
     query: Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection>,
+    RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
@@ -1828,7 +2030,8 @@ async fn browser_screencast_handler(
     if !valid_socket_target(&target) {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let device_token = consume_socket_ticket(&state, query, &machine, &target)?;
+    let device_token =
+        consume_socket_ticket(&state, query, raw_query.as_deref(), &machine, &target)?;
     browser_socket(state, machine, target, device_token, ws).await
 }
 
@@ -1838,6 +2041,7 @@ async fn dag_stream_handler(
     State(state): State<RelayState>,
     AxumPath(machine): AxumPath<String>,
     query: Result<Query<DagSocketQuery>, axum::extract::rejection::QueryRejection>,
+    RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
@@ -1849,7 +2053,7 @@ async fn dag_stream_handler(
     ) {
         return Ok(refusal);
     }
-    let Query(query) = query.map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let Query(query) = query.map_err(|_| socket_query_rejection(raw_query.as_deref()))?;
     if query.workspace_id.is_empty()
         || query.workspace_id.len() > 256
         || !query
@@ -1865,6 +2069,7 @@ async fn dag_stream_handler(
         Ok(Query(SocketQuery {
             ticket: Some(query.ticket),
         })),
+        None,
         &machine,
         base,
     )?;
@@ -1876,13 +2081,14 @@ async fn browser_terminal_handler(
     State(state): State<RelayState>,
     AxumPath((machine, terminal)): AxumPath<(String, String)>,
     query: Result<Query<TerminalSocketQuery>, axum::extract::rejection::QueryRejection>,
+    RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
     if let Err(refusal) = plaintext_gate(&state, &headers, &machine, "/api/v1/terminal") {
         return Ok(refusal);
     }
-    let Query(query) = query.map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let Query(query) = query.map_err(|_| socket_query_rejection(raw_query.as_deref()))?;
     let target = format!("/api/v1/terminal/{terminal}");
     if !valid_socket_target(&target)
         || query
@@ -1897,6 +2103,7 @@ async fn browser_terminal_handler(
         Ok(Query(SocketQuery {
             ticket: Some(query.ticket),
         })),
+        None,
         &machine,
         &target,
     )?;
@@ -1933,6 +2140,8 @@ async fn browser_terminal_handler(
 }
 
 const BROWSER_MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+/// Read buffer for one browser bridge's tunnel side.
+const BRIDGE_READ_BUFFER: usize = 64 * 1024;
 
 async fn browser_socket(
     state: RelayState,
@@ -1954,9 +2163,12 @@ async fn browser_socket(
         .max_message_size(max_size)
         .max_frame_size(max_size)
         .on_upgrade(move |browser| async move {
+            // The bridge ends itself at the deadline with a close frame; the outer bound only
+            // backstops that best-effort close.
+            let deadline = tokio::time::Instant::now() + SESSION_TRANSFER_TIMEOUT;
             match timeout(
-                SESSION_TRANSFER_TIMEOUT,
-                bridge_browser_socket(browser, data, &target, &device_token, &mut suspension),
+                SESSION_TRANSFER_TIMEOUT + TRANSFER_TIMEOUT,
+                bridge_browser_socket(browser, data, &target, &device_token, &mut suspension, deadline),
             )
             .await
             {
@@ -1977,6 +2189,7 @@ async fn bridge_browser_socket(
     target: &str,
     device_token: &str,
     suspension: &mut watch::Receiver<Option<String>>,
+    deadline: tokio::time::Instant,
 ) -> anyhow::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::tungstenite::Message as Wire;
@@ -1989,16 +2202,21 @@ async fn bridge_browser_socket(
     let (client_io, tunnel_io) = tokio::io::duplex(buffer_size);
     let (mut reader, mut writer) = tokio::io::split(tunnel_io);
     let tunnel = async {
-        let mut buffer = vec![0; buffer_size];
+        let result = async {
+        // One read never needs to hold a whole message: tungstenite reassembles frames, so a
+        // small read buffer bounds per-socket memory without limiting message size.
+        let mut buffer = bytes::BytesMut::with_capacity(BRIDGE_READ_BUFFER);
         loop {
             tokio::select! {
-                count = reader.read(&mut buffer) => {
+                count = reader.read_buf(&mut buffer) => {
                     let count = count?;
                     if count == 0 {
                         timeout(TRANSFER_TIMEOUT, data.send(Message::Close(None))).await??;
                         return Ok::<(), anyhow::Error>(());
                     }
-                    timeout(TRANSFER_TIMEOUT, data.send(Message::Binary(buffer[..count].to_vec().into()))).await??;
+                    let chunk = buffer.split().freeze();
+                    buffer.reserve(BRIDGE_READ_BUFFER);
+                    timeout(TRANSFER_TIMEOUT, data.send(Message::Binary(chunk))).await??;
                 }
                 frame = data.recv() => match frame {
                     Some(Ok(Message::Binary(bytes))) => timeout(TRANSFER_TIMEOUT, writer.write_all(&bytes)).await??,
@@ -2009,6 +2227,14 @@ async fn bridge_browser_socket(
                 }
             }
         }
+        }
+        .await;
+        if result.is_err() {
+            // End the inner stream so the application side sees the host go away and closes
+            // the browser with a reason instead of waiting out its own timeout.
+            let _ = timeout(TRANSFER_TIMEOUT, writer.shutdown()).await;
+        }
+        result
     };
     let application = async {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -2016,13 +2242,28 @@ async fn bridge_browser_socket(
         request
             .headers_mut()
             .insert("authorization", format!("Bearer {device_token}").parse()?);
-        let (mut daemon, _) = timeout(
+        let (mut daemon, _) = match timeout(
             TRANSFER_TIMEOUT,
             tokio_tungstenite::client_async(request, client_io),
         )
-        .await??;
+        .await
+        {
+            Ok(Ok(connected)) => connected,
+            Ok(Err(error)) => {
+                close_browser(&mut browser, axum::extract::ws::close_code::ERROR, "host disconnected").await;
+                return Err(anyhow::Error::from(error));
+            }
+            Err(error) => {
+                close_browser(&mut browser, axum::extract::ws::close_code::ERROR, "host disconnected").await;
+                return Err(anyhow::Error::from(error));
+            }
+        };
         loop {
             tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    close_browser(&mut browser, axum::extract::ws::close_code::AWAY, "session lifetime exceeded").await;
+                    return Ok(());
+                }
                 reason = next_suspension_reason(suspension) => {
                     // A stopped owner's browser stream ends with the exact reason rather than
                     // being cut off by the tunnel dropping.
@@ -2056,8 +2297,18 @@ async fn bridge_browser_socket(
                     }
                 }
                 frame = daemon.next() => {
-                    let Some(frame) = frame else { return Ok(()); };
-                    let frame = match frame? {
+                    let frame = match frame {
+                        Some(Ok(frame)) => frame,
+                        None => {
+                            close_browser(&mut browser, axum::extract::ws::close_code::ERROR, "host disconnected").await;
+                            return Ok(());
+                        }
+                        Some(Err(error)) => {
+                            close_browser(&mut browser, axum::extract::ws::close_code::ERROR, "host disconnected").await;
+                            return Err(anyhow::Error::from(error));
+                        }
+                    };
+                    let frame = match frame {
                         Wire::Text(text) => Message::Text(text.to_string().into()),
                         Wire::Binary(bytes) => Message::Binary(bytes),
                         Wire::Ping(bytes) => Message::Ping(bytes),
@@ -2075,9 +2326,13 @@ async fn bridge_browser_socket(
     tokio::pin!(tunnel);
     tokio::pin!(application);
     tokio::select! {
-        result = &mut tunnel => {
-            result?;
-            timeout(TRANSFER_TIMEOUT, &mut application).await?
+        result = &mut tunnel => match result {
+            Ok(()) => timeout(TRANSFER_TIMEOUT, &mut application).await?,
+            Err(error) => {
+                // Let the application side deliver its "host disconnected" close first.
+                let _ = timeout(TRANSFER_TIMEOUT, &mut application).await;
+                Err(error)
+            }
         },
         result = &mut application => {
             result?;
@@ -2173,6 +2428,26 @@ async fn attach_session_handler(
     peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     RawQuery(query): RawQuery,
+    body: Bytes,
+) -> Response {
+    // Every answer to an encrypted allocation request says this relay speaks e2e, so a client
+    // can tell this relay's 401 (a revoked token) from an older relay that lacks the route.
+    let e2e_requested = url::form_urlencoded::parse(query.as_deref().unwrap_or_default().as_bytes())
+        .any(|(key, value)| key == "e2e" && value == "1");
+    let mut response = attach_session(state, peer, headers, query, body).await;
+    if e2e_requested {
+        response
+            .headers_mut()
+            .insert(RELAY_E2E_HEADER, HeaderValue::from_static("1"));
+    }
+    response
+}
+
+async fn attach_session(
+    state: RelayState,
+    peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
+    query: Option<String>,
     body: Bytes,
 ) -> Response {
     let ip = peer_ip(peer);
@@ -2272,14 +2547,7 @@ async fn attach_session_handler(
             )
             .into_response()
         };
-        let Some(token) = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
-            .map(str::to_owned)
-        else {
+        let Some(token) = device_bearer(&headers).map(str::to_owned) else {
             return unauthorized();
         };
         match state.authorize_device_token(&request.machine_id, &token).await {
@@ -2336,19 +2604,30 @@ async fn attach_session_handler(
     }
 
     let session_id = uuid::Uuid::new_v4().to_string();
-    if !state.issue_session_of_kind(
+    match state.try_issue_session_of_kind(
         &request.machine_id,
         &session_id,
         Some(channel.generation),
         true,
         request.session_kind,
     ) {
-        return crate::account::service::ApiError::new(
-            StatusCode::CONFLICT,
-            "MACHINE_OFFLINE",
-            "machine is offline",
-        )
-        .into_response();
+        Ok(()) => {}
+        Err(IssueRejection::Busy) => {
+            return crate::account::service::ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "RELAY_BUSY",
+                "the relay has too many sessions waiting for this machine; retry shortly",
+            )
+            .into_response();
+        }
+        Err(IssueRejection::Offline | IssueRejection::StaleGeneration) => {
+            return crate::account::service::ApiError::new(
+                StatusCode::CONFLICT,
+                "MACHINE_OFFLINE",
+                "machine is offline",
+            )
+            .into_response();
+        }
     }
 
     Json(AttachSessionResponse {
@@ -2460,16 +2739,18 @@ async fn host_http_handler(
         let billing_owner = if let Some(owner) = session_owner {
             Some(owner)
         } else {
-            let bearer_token = parts
-                .headers
-                .get(axum::http::header::AUTHORIZATION)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.strip_prefix("Bearer "))
-                .map(str::trim)
-                .filter(|token| !token.is_empty());
+            let bearer_token = device_bearer(&parts.headers);
+            let ip = peer_ip(peer);
+            if bearer_token.is_some() && state.locked_out(ip) {
+                return Err(StatusCode::TOO_MANY_REQUESTS);
+            }
             let device_authorized = match bearer_token {
                 Some(token) => match state.authorize_device_token(&machine, token).await {
-                    Ok(authorized) => authorized,
+                    Ok(true) => true,
+                    Ok(false) => {
+                        state.record_auth(ip, false);
+                        false
+                    }
                     Err(status) => return Ok(device_token_unconfirmed(status)),
                 },
                 None => false,
@@ -2608,6 +2889,11 @@ async fn host_http_handler(
 }
 
 const MAX_HTTP_SIZE: usize = 8 * 1024 * 1024;
+/// Most informational (1xx) responses one forwarded request may receive before its final one.
+const MAX_INFORMATIONAL_RESPONSES: usize = 8;
+/// How long a request on a pooled (idle) data channel waits for its first response byte before
+/// the channel is presumed dead and the request is replayed on a fresh one.
+const POOLED_FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How large a forwarded response one reference-chat route may return.
 ///
@@ -2805,6 +3091,8 @@ pub(super) fn validate_http_query(path: &str, query: Option<&str>) -> Result<(),
         ["fs", "repositories"] => &["path", "depth", "includeHidden"],
         ["browser", "sessions"] | ["browser", "identify"] => &["workspaceId", "worktreeSlug"],
         ["workspace", "worktrees"] => &["workspaceId"],
+        // The remote sidebar lists desktop-scoped projects (`?scope=desktopLocal`).
+        ["workspace", "projects"] => &["scope"],
         ["workspace", "worktrees", "status"] => &["workspaceId", "wsId", "slug"],
         // Session listing is workspace-scoped; a single session is epoch-fenced.
         ["sessions"] => &["workspaceId", "daemonEpoch"],
@@ -2852,7 +3140,27 @@ async fn exchange_http(
         .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
     let payload: PublicPairExchangeRequest =
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let mut claim = state.claim_pairing(ip, &payload, machine)?;
+    let mut claim = match state.claim_pairing(ip, &payload, machine) {
+        Ok(claim) => claim,
+        // A locked-out source is told it is rate limited and when to retry, not that its
+        // code was wrong.
+        Err(StatusCode::TOO_MANY_REQUESTS) => {
+            let retry_after = state.pairing_retry_after(ip).as_secs().max(1);
+            let mut response = crate::account::service::ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "pairing_rate_limited",
+                "too many pairing attempts; wait before trying again",
+            )
+            .into_response();
+            response.headers_mut().insert(
+                header::RETRY_AFTER,
+                HeaderValue::from_str(&retry_after.to_string())
+                    .unwrap_or_else(|_| HeaderValue::from_static("60")),
+            );
+            return Ok(response);
+        }
+        Err(status) => return Err(status),
+    };
     // The loopback gateway calls its pairing secret `code`.
     let body = serde_json::to_vec(&serde_json::json!({
         "code": claim.pairing_token,
@@ -2868,6 +3176,72 @@ async fn exchange_http(
         crate::remote::server::PAIRING_PEER_HEADER,
         HeaderValue::from_str(&ip.to_string()).unwrap(),
     );
+    // The owner's entitlement is checked before the host mints anything: a suspended owner
+    // must never end up with a paired device on the machine.
+    if let Some(account_state) = state.account_state() {
+        if account_state.deployment_mode.is_billing_enabled() {
+            let machine_id = claim.machine_id.clone();
+            let billing_res: Result<Result<(), crate::account::service::ApiError>, StatusCode> =
+                crate::ipc::run_blocking(move || {
+                    Ok((|| -> Result<(), crate::account::service::ApiError> {
+                        if let Some(record) = crate::account::service::enrolled_machine_by_id(
+                            &account_state,
+                            &machine_id,
+                        ) {
+                            let now = crate::account::billing::routes::billing_now();
+                            let entitlement = crate::account::billing::routes::entitlement_for_user(
+                                &account_state,
+                                &record.owner_user_id,
+                                now,
+                            )?;
+                            if !entitlement.remote_allowed {
+                                let stopped_at = crate::account::service::owner_stopped_at(
+                                    &account_state,
+                                    &record.owner_user_id,
+                                );
+                                return Err(crate::account::service::ApiError::new(
+                                    StatusCode::PAYMENT_REQUIRED,
+                                    "REMOTE_SUSPENDED",
+                                    "remote access is suspended for this account",
+                                )
+                                .with_details(serde_json::json!({
+                                    "plan": match entitlement.effective_plan {
+                                        crate::account::billing::entitlement::PlanKey::Free => "free",
+                                        crate::account::billing::entitlement::PlanKey::ProMonthly => "pro_monthly",
+                                        crate::account::billing::entitlement::PlanKey::ProAnnual => "pro_annual",
+                                        crate::account::billing::entitlement::PlanKey::TeamMonthly => "team_monthly",
+                                        crate::account::billing::entitlement::PlanKey::TeamAnnual => "team_annual",
+                                    },
+                                    "status": match entitlement.status {
+                                        crate::account::billing::entitlement::EntitlementStatus::Ok => "ok",
+                                        crate::account::billing::entitlement::EntitlementStatus::OverLimit => "over_limit",
+                                        crate::account::billing::entitlement::EntitlementStatus::PastDue => "past_due",
+                                        crate::account::billing::entitlement::EntitlementStatus::Stopped => "stopped",
+                                    },
+                                    "graceEndsAt": entitlement.grace_ends_at,
+                                    "stoppedAt": stopped_at,
+                                })));
+                            }
+                        }
+                        Ok(())
+                    })())
+                })
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+
+            match billing_res {
+                Ok(Err(error)) => {
+                    claim.rollback();
+                    return Ok(error.into_response());
+                }
+                Err(status) => {
+                    claim.rollback();
+                    return Err(status);
+                }
+                Ok(Ok(())) => {}
+            }
+        }
+    }
     let response = proxy_http(
         &state,
         &claim.machine_id,
@@ -2883,6 +3257,10 @@ async fn exchange_http(
         struct IssuedDeviceToken {
             token: String,
         }
+        // The host accepted the code and consumed it on its side, so the claim is spent
+        // whatever happens to the answer: rolling it back would offer a code the host already
+        // refuses.
+        claim.commit();
         let (parts, body) = response.into_parts();
         let body = to_bytes(body, MAX_HTTP_SIZE)
             .await
@@ -2892,72 +3270,7 @@ async fn exchange_http(
         if issued.token.is_empty() {
             return Err(StatusCode::BAD_GATEWAY);
         }
-        if let Some(account_state) = state.account_state() {
-            if account_state.deployment_mode.is_billing_enabled() {
-                let machine_id = claim.machine_id.clone();
-                let billing_res: Result<Result<(), crate::account::service::ApiError>, StatusCode> =
-                    crate::ipc::run_blocking(move || {
-                        Ok((|| -> Result<(), crate::account::service::ApiError> {
-                            if let Some(record) = crate::account::service::enrolled_machine_by_id(
-                                &account_state,
-                                &machine_id,
-                            ) {
-                                let now = crate::account::billing::routes::billing_now();
-                                let entitlement = crate::account::billing::routes::entitlement_for_user(
-                                    &account_state,
-                                    &record.owner_user_id,
-                                    now,
-                                )?;
-                                if !entitlement.remote_allowed {
-                                    let stopped_at = crate::account::service::owner_stopped_at(
-                                        &account_state,
-                                        &record.owner_user_id,
-                                    );
-                                    return Err(crate::account::service::ApiError::new(
-                                        StatusCode::PAYMENT_REQUIRED,
-                                        "REMOTE_SUSPENDED",
-                                        "remote access is suspended for this account",
-                                    )
-                                    .with_details(serde_json::json!({
-                                        "plan": match entitlement.effective_plan {
-                                            crate::account::billing::entitlement::PlanKey::Free => "free",
-                                            crate::account::billing::entitlement::PlanKey::ProMonthly => "pro_monthly",
-                                            crate::account::billing::entitlement::PlanKey::ProAnnual => "pro_annual",
-                                            crate::account::billing::entitlement::PlanKey::TeamMonthly => "team_monthly",
-                                            crate::account::billing::entitlement::PlanKey::TeamAnnual => "team_annual",
-                                        },
-                                        "status": match entitlement.status {
-                                            crate::account::billing::entitlement::EntitlementStatus::Ok => "ok",
-                                            crate::account::billing::entitlement::EntitlementStatus::OverLimit => "over_limit",
-                                            crate::account::billing::entitlement::EntitlementStatus::PastDue => "past_due",
-                                            crate::account::billing::entitlement::EntitlementStatus::Stopped => "stopped",
-                                        },
-                                        "graceEndsAt": entitlement.grace_ends_at,
-                                        "stoppedAt": stopped_at,
-                                    })));
-                                }
-                            }
-                            Ok(())
-                        })())
-                    })
-                    .await
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
-
-                match billing_res {
-                    Ok(Err(error)) => {
-                        claim.rollback();
-                        return Ok(error.into_response());
-                    }
-                    Err(status) => {
-                        claim.rollback();
-                        return Err(status);
-                    }
-                    Ok(Ok(())) => {}
-                }
-            }
-        }
         state.register_device_token(&claim.machine_id, &issued.token);
-        claim.commit();
         return Ok(Response::from_parts(parts, Body::from(body)));
     }
     claim.rollback();
@@ -3015,6 +3328,9 @@ async fn proxy_http(
     };
     // Set once the request is handed to a fresh channel: from then on the host may act on it.
     let forwarded = std::sync::atomic::AtomicBool::new(false);
+    // Set once any attached data channel (pooled or fresh) carries the request, so a budget
+    // that runs out afterwards is an upstream timeout rather than a pairing timeout.
+    let attached = std::sync::atomic::AtomicBool::new(false);
     raw.extend(body);
     let head = method == Method::HEAD;
     let max_response = if path
@@ -3033,7 +3349,10 @@ async fn proxy_http(
             if let Some((socket, control_generation)) =
                 state.take_pooled_data(machine, expected_generation)
             {
-                match http_round_trip(socket, &raw, head, max_response).await {
+                attached.store(true, Ordering::SeqCst);
+                // An idle channel can die silently (a NAT drops it): bound the wait for its
+                // first response byte, then replay this safe request on a fresh channel.
+                match http_round_trip(socket, &raw, head, max_response, Some(POOLED_FIRST_RESPONSE_TIMEOUT)).await {
                     Ok((response, reusable)) => {
                         if let Some(socket) = reusable {
                             state.return_pooled_data(machine, control_generation, socket);
@@ -3049,7 +3368,8 @@ async fn proxy_http(
             .open_session_channel_at(machine, expected_generation)
             .await?;
         forwarded.store(true, Ordering::SeqCst);
-        match http_round_trip(socket, &raw, head, max_response).await {
+        attached.store(true, Ordering::SeqCst);
+        match http_round_trip(socket, &raw, head, max_response, None).await {
             Ok((response, reusable)) => {
                 if let Some(socket) = reusable {
                     state.return_pooled_data(machine, control_generation, socket);
@@ -3083,14 +3403,44 @@ async fn proxy_http(
         Ok(Err(StatusCode::GATEWAY_TIMEOUT)) => {
             Ok(relay_timeout_response(RELAY_STAGE_DATA_PAIRING_TIMEOUT))
         }
-        Ok(Err(status)) => Err(status),
+        // The relay's own refusals keep their status but carry the typed machine envelope, so
+        // a client can tell "machine offline" from a missing route.
+        Ok(Err(status)) => relay_refusal(status).ok_or(status),
         Err(_) if mutation && forwarded.load(Ordering::SeqCst) => {
             Ok(reference_chat_outcome_unknown(&request_id))
+        }
+        // The budget ran out before a data channel ever carried the request: the machine
+        // never attached, which is a pairing timeout, not a slow upstream.
+        Err(_) if !attached.load(Ordering::SeqCst) => {
+            Ok(relay_timeout_response(RELAY_STAGE_DATA_PAIRING_TIMEOUT))
         }
         Err(_) => {
             Ok(relay_timeout_response(RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT))
         }
     }
+}
+
+/// The typed envelope for a status the relay itself produced while reaching a machine, or
+/// `None` for a status that needs no explanation.
+fn relay_refusal(status: StatusCode) -> Option<Response> {
+    let (code, message) = match status {
+        StatusCode::NOT_FOUND => ("MACHINE_OFFLINE", "machine is offline"),
+        StatusCode::SERVICE_UNAVAILABLE => (
+            "RELAY_BUSY",
+            "the relay has too many sessions waiting for this machine; retry shortly",
+        ),
+        StatusCode::GONE => (
+            "MACHINE_RECONNECTED",
+            "the machine reconnected; retry the request",
+        ),
+        _ => return None,
+    };
+    Some(crate::remote::server::machine_error_with_details(
+        status,
+        code,
+        message,
+        serde_json::Map::new(),
+    ))
 }
 
 enum RoundTripError {
@@ -3106,6 +3456,9 @@ async fn http_round_trip(
     raw: &[u8],
     head: bool,
     max_response: usize,
+    // When set, an empty response after this long is `Unanswered` (the channel is presumed
+    // dead before the host saw the request).
+    first_response_timeout: Option<Duration>,
 ) -> Result<(Response, Option<WebSocket>), RoundTripError> {
     for chunk in raw.chunks(MAX_MESSAGE_SIZE) {
         socket
@@ -3121,8 +3474,16 @@ async fn http_round_trip(
             RoundTripError::Failed(StatusCode::BAD_GATEWAY)
         }
     };
+    let first_deadline = first_response_timeout.map(|limit| tokio::time::Instant::now() + limit);
     loop {
-        let eof = match socket.recv().await {
+        let received = match first_deadline.filter(|_| response.is_empty()) {
+            Some(deadline) => match tokio::time::timeout_at(deadline, socket.recv()).await {
+                Ok(received) => received,
+                Err(_) => return Err(RoundTripError::Unanswered),
+            },
+            None => socket.recv().await,
+        };
+        let eof = match received {
             Some(Ok(Message::Binary(bytes))) => {
                 response.extend_from_slice(&bytes);
                 false
@@ -3219,25 +3580,37 @@ fn parse_http_response_within(
     max_body: usize,
 ) -> Result<Option<Response>, StatusCode> {
     let bad = StatusCode::BAD_GATEWAY;
-    let Some(end) = raw.windows(4).position(|b| b == b"\r\n\r\n") else {
-        return Ok(None);
-    };
-    let text = std::str::from_utf8(&raw[..end]).map_err(|_| bad)?;
-    let mut lines = text.split("\r\n");
-    let mut status_line = lines.next().ok_or(bad)?.split_whitespace();
-    if !matches!(status_line.next(), Some("HTTP/1.1" | "HTTP/1.0")) {
-        return Err(bad);
-    }
-    let status = StatusCode::from_u16(status_line.next().ok_or(bad)?.parse().map_err(|_| bad)?)
-        .map_err(|_| bad)?;
-    if status.is_informational() {
+    // Informational (1xx) blocks precede the final response. Skip them iteratively, and
+    // refuse a host that sends more than a handful: each one used to be a recursive call.
+    let mut raw = raw;
+    let mut informational = 0usize;
+    let (end, mut lines, status) = loop {
+        let Some(end) = raw.windows(4).position(|b| b == b"\r\n\r\n") else {
+            return Ok(None);
+        };
+        let text = std::str::from_utf8(&raw[..end]).map_err(|_| bad)?;
+        let mut lines = text.split("\r\n");
+        let mut status_line = lines.next().ok_or(bad)?.split_whitespace();
+        if !matches!(status_line.next(), Some("HTTP/1.1" | "HTTP/1.0")) {
+            return Err(bad);
+        }
+        let status =
+            StatusCode::from_u16(status_line.next().ok_or(bad)?.parse().map_err(|_| bad)?)
+                .map_err(|_| bad)?;
+        if !status.is_informational() {
+            break (end, lines, status);
+        }
         if status == StatusCode::SWITCHING_PROTOCOLS {
             return Err(bad);
         }
-        return parse_http_response_within(&raw[end + 4..], head, eof, max_body);
-    }
+        informational += 1;
+        if informational > MAX_INFORMATIONAL_RESPONSES {
+            return Err(bad);
+        }
+        raw = &raw[end + 4..];
+    };
     let mut headers = HeaderMap::new();
-    for line in lines {
+    for line in lines.by_ref() {
         let (name, value) = line.split_once(':').ok_or(bad)?;
         headers.append(
             name.parse::<axum::http::HeaderName>().map_err(|_| bad)?,
@@ -3248,7 +3621,14 @@ fn parse_http_response_within(
     let body = if head || status == StatusCode::NO_CONTENT || status == StatusCode::NOT_MODIFIED {
         Vec::new()
     } else if let Some(encoding) = headers.get("transfer-encoding") {
-        if encoding != "chunked" {
+        // Coding names are case-insensitive. Only plain chunked is accepted: the relay cannot
+        // undo another transfer coding, and stripping the hop header would leave the client
+        // with bytes it cannot decode.
+        let encoding = encoding.to_str().map_err(|_| bad)?;
+        let mut codings = encoding.split(',').map(str::trim);
+        if !(codings.next().is_some_and(|coding| coding.eq_ignore_ascii_case("chunked"))
+            && codings.next().is_none())
+        {
             return Err(bad);
         }
         let mut remaining = data;
@@ -3464,9 +3844,17 @@ pub fn relay_router_with_grant_key(state: RelayState, account_public_key: Option
 /// `primary` serves a writable account store, `standby` a read-only replica, and `relay` has
 /// no embedded account service.
 async fn healthz_handler(State(state): State<RelayState>) -> Response {
-    let role = match state.inner.account_state.lock().as_ref() {
-        Some(account) if account.is_read_only() => "standby",
-        Some(_) => "primary",
+    // `is_read_only` touches the filesystem: run it off the async worker and without holding
+    // the account-state lock every `/host/...` request also takes.
+    let role = match state.account_state() {
+        Some(account) => match crate::ipc::run_blocking(move || Ok(account.is_read_only())).await {
+            Ok(true) => "standby",
+            Ok(false) => "primary",
+            Err(error) => {
+                tracing::warn!(%error, "healthz could not read the account store role");
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+        },
         None => "relay",
     };
     let mut response = Json(serde_json::json!({ "ok": true, "role": role })).into_response();
@@ -3545,20 +3933,53 @@ struct SuspensionTargets {
 /// to its account record, evaluates each distinct owner once at `now`, and returns the
 /// machines owned by an owner whose grace period has ended.
 ///
-/// A store read error propagates instead of being defaulted: an owner the relay cannot
-/// evaluate is never silently treated as healthy, and the pass is retried.
+/// A store read error is never defaulted to healthy, but it also does not abort the pass: the
+/// failing machine or owner is logged and retried on the next tick while every other owner is
+/// still enforced.
 fn suspension_targets(
     account: &crate::account::service::AccountState,
     candidates: &[String],
     now: u64,
 ) -> Result<SuspensionTargets, crate::account::service::ApiError> {
+    Ok(suspension_targets_with(
+        candidates,
+        |machine_id| {
+            crate::account::service::try_enrolled_machine_by_id(account, machine_id)
+                .map(|record| record.map(|record| (record.machine_id, record.owner_user_id)))
+        },
+        |owner_user_id| {
+            crate::account::billing::routes::entitlement_for_user(account, owner_user_id, now)
+                .map(|entitlement| {
+                    entitlement.status
+                        == crate::account::billing::entitlement::EntitlementStatus::Stopped
+                })
+        },
+    ))
+}
+
+/// [`suspension_targets`] over injected reads: `machine` resolves a candidate to its
+/// `(machine_id, owner_user_id)`, `stopped` evaluates one owner.
+fn suspension_targets_with(
+    candidates: &[String],
+    machine: impl Fn(&str) -> Result<Option<(String, String)>, crate::account::service::ApiError>,
+    stopped: impl Fn(&str) -> Result<bool, crate::account::service::ApiError>,
+) -> SuspensionTargets {
     let mut owned: Vec<(String, String)> = Vec::new();
     for machine_id in candidates {
-        match crate::account::service::try_enrolled_machine_by_id(account, machine_id)? {
-            Some(record) => owned.push((record.machine_id, record.owner_user_id)),
+        match machine(machine_id) {
+            Ok(Some(record)) => owned.push(record),
             // A machine that never enrolled with this account is outside billing, so the
             // operator-token path stays exactly as it was.
-            None => continue,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::error!(
+                    %machine_id,
+                    code = error.code,
+                    message = %error.message,
+                    "suspension sweep could not read a machine; the next tick retries it"
+                );
+                continue;
+            }
         }
     }
 
@@ -3566,22 +3987,24 @@ fn suspension_targets(
     let mut targets = SuspensionTargets::default();
     for (machine_id, owner_user_id) in owned {
         if evaluated.insert(owner_user_id.clone()) {
-            let entitlement = crate::account::billing::routes::entitlement_for_user(
-                account,
-                &owner_user_id,
-                now,
-            )?;
-            if entitlement.status
-                == crate::account::billing::entitlement::EntitlementStatus::Stopped
-            {
-                targets.owners.insert(owner_user_id.clone());
+            match stopped(&owner_user_id) {
+                Ok(true) => {
+                    targets.owners.insert(owner_user_id.clone());
+                }
+                Ok(false) => {}
+                Err(error) => tracing::error!(
+                    %owner_user_id,
+                    code = error.code,
+                    message = %error.message,
+                    "suspension sweep could not evaluate an owner; the next tick retries it"
+                ),
             }
         }
         if targets.owners.contains(&owner_user_id) {
             targets.machines.insert(machine_id);
         }
     }
-    Ok(targets)
+    targets
 }
 
 impl RelayState {
@@ -3772,14 +4195,30 @@ async fn download_cli_artifact_from_candidate_dirs(
         let file_path = dir.join(artifact);
         if let Ok(meta) = tokio::fs::symlink_metadata(&file_path).await {
             if meta.file_type().is_file() {
-                if let Ok(bytes) = tokio::fs::read(&file_path).await {
-                    return (
-                        [
-                            (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
-                            (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"ferryx-cli\""),
-                        ],
-                        bytes,
-                    ).into_response();
+                if let Ok(file) = tokio::fs::File::open(&file_path).await {
+                    // Stream the binary instead of reading tens of MB into memory per request.
+                    let body = futures_util::stream::unfold(file, |mut file| async move {
+                        use tokio::io::AsyncReadExt as _;
+                        let mut chunk = bytes::BytesMut::with_capacity(64 * 1024);
+                        match file.read_buf(&mut chunk).await {
+                            Ok(0) => None,
+                            Ok(_) => Some((Ok::<_, std::io::Error>(chunk.freeze()), file)),
+                            Err(error) => Some((Err(error), file)),
+                        }
+                    });
+                    // Every name comes from the fixed allowlist above, so it is safe to quote.
+                    let disposition = format!("attachment; filename=\"{artifact}\"");
+                    let mut response = Body::from_stream(body).into_response();
+                    let headers = response.headers_mut();
+                    headers.insert(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/octet-stream"),
+                    );
+                    if let Ok(value) = HeaderValue::from_str(&disposition) {
+                        headers.insert(header::CONTENT_DISPOSITION, value);
+                    }
+                    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(meta.len()));
+                    return response;
                 }
             }
         }
@@ -3880,7 +4319,7 @@ async fn authenticate_control_socket(
 ) {
     if let Some(token) = token {
         state.record_auth(ip, true);
-        handle_control_socket(socket, state, token, machine_id).await;
+        handle_control_socket(socket, state, token, machine_id, false).await;
         return;
     }
     let challenge = ControlChallenge {
@@ -3888,6 +4327,8 @@ async fn authenticate_control_socket(
         timestamp: current_time_secs(),
         audience: Some(state.inner.control_audience.clone()),
     };
+    // Set false when a refusal is not the caller's credential (billing, suspension, disk).
+    let mut credential_failure = true;
     let authenticate = async {
         socket
             .send(Message::Text(
@@ -3895,10 +4336,16 @@ async fn authenticate_control_socket(
             ))
             .await
             .map_err(|error| error.to_string())?;
-        let auth = match socket.recv().await {
-            Some(Ok(Message::Text(text))) => serde_json::from_str::<ControlAuth>(&text)
-                .map_err(|_| "Invalid ControlAuth frame".to_string())?,
-            _ => return Err("Expected ControlAuth text frame".to_string()),
+        // Keepalives may precede the auth frame; the outer timeout still bounds the wait.
+        let auth = loop {
+            match socket.recv().await {
+                Some(Ok(Message::Text(text))) => {
+                    break serde_json::from_str::<ControlAuth>(&text)
+                        .map_err(|_| "Invalid ControlAuth frame".to_string())?
+                }
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                _ => return Err("Expected ControlAuth text frame".to_string()),
+            }
         };
         if auth.machine_id.is_empty() || state.validate_machine_token(&auth.machine_id) {
             return Err("Invalid or reserved machine ID".to_string());
@@ -3922,18 +4369,35 @@ async fn authenticate_control_socket(
         {
             return Err("Invalid machine signature".to_string());
         }
+        // The credential checks passed; from here a slow or failed bind (billing, disk) is not
+        // the caller's fault unless the bind itself refuses the key or enrollment token.
+        credential_failure = false;
         let auth_for_bind = auth.clone();
         let state_for_bind = state.clone();
-        crate::ipc::run_blocking(move || Ok(state_for_bind.bind_machine_key(&auth_for_bind)))
-            .await
-            .map_err(|error| error.to_string())??;
+        let bound =
+            crate::ipc::run_blocking(move || Ok(state_for_bind.bind_machine_key(&auth_for_bind)))
+                .await
+                .map_err(|error| error.to_string())?;
+        if let Err(error) = bound {
+            // Only a key or enrollment-token mismatch is the daemon's own credential problem;
+            // billing, suspension and persistence refusals are not.
+            credential_failure = error == MACHINE_ID_CLAIMED || error == ENROLLMENT_TOKEN_REQUIRED;
+            return Err(error);
+        }
         Ok(auth.machine_id)
     };
     let result = match timeout(CONTROL_AUTH_TIMEOUT, authenticate).await {
         Ok(result) => result,
         Err(_) => Err("Control authentication timed out".to_string()),
     };
-    state.record_auth(ip, result.is_ok());
+    // Only a credential the daemon got wrong counts toward the per-IP lockout. A billing
+    // outage, a suspended owner or a disk error is the relay's or the account's state, and
+    // locking the IP for it would lock out every daemon behind that address.
+    match &result {
+        Ok(_) => state.record_auth(ip, true),
+        Err(_) if credential_failure => state.record_auth(ip, false),
+        Err(_) => {}
+    }
     let response = ControlAuthResponse {
         success: result.is_ok(),
         error: result.as_ref().err().cloned(),
@@ -3952,7 +4416,7 @@ async fn authenticate_control_socket(
         return;
     }
     match result {
-        Ok(machine_id) => handle_control_socket(socket, state, machine_id, None).await,
+        Ok(machine_id) => handle_control_socket(socket, state, machine_id, None, true).await,
         Err(ref err) => {
             if err == "REMOTE_SUSPENDED" {
                 let close_frame = axum::extract::ws::CloseFrame {
@@ -3984,17 +4448,38 @@ async fn handle_control_socket(
     state: RelayState,
     machine_token: String,
     machine_id: Option<String>,
+    // True when `machine_token` is the Ed25519-authenticated machine id itself. Such a socket
+    // speaks only for that id and may never bind an alias.
+    key_authenticated: bool,
 ) {
-    let (generation, mut notices, mut grants) = state.register_control_channel(machine_token.clone());
+    let (generation, mut notices, mut grants, own_channel, own_grant) =
+        state.register_control_channel_handle(machine_token.clone());
     let mut pending_grant: Option<oneshot::Sender<AccountGrantOfferDelivered>> = None;
-    if let Some(ref id) = machine_id {
-        if id != &machine_token {
-            state.bind_control_alias(&machine_token, id.clone());
+    // An announced alias another live generation still holds (for example this daemon's own
+    // previous, half-open socket) is retried on later inbound frames until that holder is gone.
+    let mut pending_alias = machine_id.filter(|id| id != &machine_token);
+    if let Some(id) = pending_alias.clone() {
+        if state.bind_control_alias_for(&own_channel, &own_grant, id) {
+            pending_alias = None;
+        } else {
+            tracing::warn!("relay deferred a control alias another live machine holds");
         }
     }
     let mut suspension = state.control_suspension_receiver(generation);
+    // The daemon pings every 15 s. A socket that sends nothing at all for this long is
+    // half-open, and must stop being offered sessions it will never answer.
+    let mut read_deadline = tokio::time::Instant::now() + CONTROL_READ_IDLE;
     loop {
         tokio::select! {
+            _ = tokio::time::sleep_until(read_deadline) => {
+                tracing::warn!("relay control socket idle; closing");
+                let close_frame = axum::extract::ws::CloseFrame {
+                    code: axum::extract::ws::close_code::AWAY,
+                    reason: "control channel idle".into(),
+                };
+                let _ = timeout(TRANSFER_TIMEOUT, socket.send(Message::Close(Some(close_frame)))).await;
+                break;
+            }
             reason = next_suspension_reason(&mut suspension) => {
                 // The owner's grace period ended: end the tunnel with the exact reason
                 // instead of leaving a live control channel behind for a stopped account.
@@ -4010,7 +4495,17 @@ async fn handle_control_socket(
                 }
                 break;
             }
-            grant = grants.recv() => {
+            // One delivery at a time: the daemon's ack carries no reliable correlation, so a
+            // second grant waits until the first is acknowledged or its caller gave up.
+            _ = async {
+                if let Some(ack) = pending_grant.as_mut() {
+                    ack.closed().await;
+                }
+            }, if pending_grant.is_some() => {
+                // The caller timed out; its slot must not capture the next delivery's ack.
+                pending_grant = None;
+            }
+            grant = grants.recv(), if pending_grant.is_none() => {
                 let Some(GrantDeliveryRequest { delivery, ack }) = grant else { break };
                 let Ok(payload) = serde_json::to_string(&delivery) else { continue };
                 if !matches!(timeout(TRANSFER_TIMEOUT, socket.send(Message::Text(payload.into()))).await, Ok(Ok(()))) {
@@ -4028,6 +4523,12 @@ async fn handle_control_socket(
                 }
             }
             incoming = socket.recv() => {
+                read_deadline = tokio::time::Instant::now() + CONTROL_READ_IDLE;
+                if let Some(id) = pending_alias.clone() {
+                    if state.bind_control_alias_for(&own_channel, &own_grant, id) {
+                        pending_alias = None;
+                    }
+                }
                 match incoming {
                     Some(Ok(Message::Close(_))) => {
                         // Flush tungstenite's queued close acknowledgement back to the client
@@ -4062,28 +4563,56 @@ async fn handle_control_socket(
                         }) {
                             Ok(ControlRequest::AllocateSession { opaque }) => {
                                 let id = uuid::Uuid::new_v4().to_string();
-                                if !state.issue_session(&machine_token, &id, Some(generation), opaque) {
-                                    tracing::warn!("relay session allocation rejected");
-                                    break;
+                                match state.try_issue_session_of_kind(&machine_token, &id, Some(generation), opaque, SessionKind::Http) {
+                                    Ok(()) => {}
+                                    // A full budget is transient: tell the daemon and keep its
+                                    // control channel, or every busy moment becomes a reconnect.
+                                    Err(IssueRejection::Busy) => {
+                                        tracing::warn!("relay session allocation rejected: busy");
+                                        let payload = serde_json::json!({"type": "AllocateSessionRejected", "reason": "busy"}).to_string();
+                                        if !matches!(timeout(TRANSFER_TIMEOUT, socket.send(Message::Text(payload.into()))).await, Ok(Ok(()))) {
+                                            tracing::warn!("relay allocation rejection send failed or timed out");
+                                            break;
+                                        }
+                                    }
+                                    Err(rejection) => {
+                                        tracing::warn!(?rejection, "relay session allocation rejected");
+                                        break;
+                                    }
                                 }
                             }
                             Ok(ControlRequest::RegisterPairingPin(registration)) => {
-                                if !registration.machine_id.is_empty() && registration.machine_id != machine_token {
-                                    state.bind_control_alias(&machine_token, registration.machine_id.clone());
-                                }
+                                let foreign = !registration.machine_id.is_empty()
+                                    && registration.machine_id != machine_token;
+                                // An Ed25519 socket speaks only for its authenticated id; a token
+                                // socket may alias an id no other live machine holds.
+                                let alias_refused = foreign
+                                    && (key_authenticated
+                                        || !state.bind_control_alias_for(
+                                            &own_channel,
+                                            &own_grant,
+                                            registration.machine_id.clone(),
+                                        ));
                                 let target_machine = if !registration.machine_id.is_empty() {
                                     registration.machine_id.clone()
                                 } else {
                                     machine_token.clone()
                                 };
-                                let ack = RegisterPairingPinAck {
-                                    generation: registration.generation,
-                                    pin: registration.pin.clone(),
-                                    machine_id: target_machine.clone(),
-                                    status: match state.register_pairing(&target_machine, generation, registration) {
+                                let ack_generation = registration.generation;
+                                let ack_pin = registration.pin.clone();
+                                let status = if alias_refused {
+                                    "Machine ID does not match this control identity"
+                                } else {
+                                    match state.register_pairing(&target_machine, generation, registration) {
                                         Ok(()) => "ready",
                                         Err(error) => error,
-                                    }.into(),
+                                    }
+                                };
+                                let ack = RegisterPairingPinAck {
+                                    generation: ack_generation,
+                                    pin: ack_pin,
+                                    machine_id: target_machine,
+                                    status: status.into(),
                                 };
                                 if !matches!(timeout(TRANSFER_TIMEOUT, socket.send(Message::Text(serde_json::to_string(&ack).unwrap().into()))).await, Ok(Ok(()))) {
                                     tracing::warn!("relay pairing acknowledgment failed");
@@ -4213,6 +4742,7 @@ async fn handle_half_socket(
             } else {
                 BrowserSide::Own
             };
+            let deadline = tokio::time::Instant::now() + lifetime;
             let transfer = async {
                 let mut buffered = Vec::new();
                 let mut bytes = 0;
@@ -4221,9 +4751,10 @@ async fn handle_half_socket(
                     while suspended.is_none() {
                         tokio::select! {
                             peer = &mut rx => {
-                                return Ok::<PairingWait, anyhow::Error>(PairingWait::Paired(
-                                    peer.map_err(anyhow::Error::from)?,
-                                ));
+                                return Ok::<PairingWait, anyhow::Error>(match peer {
+                                    Ok(peer) => PairingWait::Paired(peer),
+                                    Err(_) => PairingWait::Abandoned,
+                                });
                             }
                             reason = next_suspension_reason(&mut suspension) => {
                                 suspended = Some(reason);
@@ -4252,9 +4783,18 @@ async fn handle_half_socket(
                     Ok(PairingWait::Suspended(suspended.unwrap_or_default()))
                 };
                 let pairing_result = timeout(SESSION_PAIRING_TIMEOUT, pairing).await;
-                let mut peer = match pairing_result?? {
-                    PairingWait::Paired(peer) => peer,
-                    PairingWait::Suspended(reason) => {
+                let mut peer = match pairing_result {
+                    Ok(Ok(PairingWait::Paired(peer))) => peer,
+                    // Timed out, or the entry was retired (by the sweeper at the same deadline)
+                    // before the opposite half arrived.
+                    Err(_) | Ok(Ok(PairingWait::Abandoned)) => {
+                        if browser_side == BrowserSide::Own {
+                            close_browser(&mut socket, axum::extract::ws::close_code::AGAIN, "machine did not connect").await;
+                        }
+                        anyhow::bail!("relay session pairing timed out");
+                    }
+                    Ok(Err(error)) => return Err(error),
+                    Ok(Ok(PairingWait::Suspended(reason))) => {
                         if browser_side == BrowserSide::Own {
                             close_suspended_browser(&mut socket, &reason).await;
                         }
@@ -4287,18 +4827,36 @@ async fn handle_half_socket(
                     peer,
                     browser_side,
                     suspension,
+                    deadline,
                     #[cfg(test)]
                     tap,
                 )
                 .await
             };
-            match timeout(lifetime, transfer).await {
+            // The browser-facing pump closes with a reason at `deadline`; the outer bound only
+            // backstops that best-effort close.
+            match timeout(lifetime + TRANSFER_TIMEOUT, transfer).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => tracing::warn!(%error, "relay session failed"),
                 Err(error) => tracing::warn!(%error, "relay session lifetime exceeded"),
             }
             drop(guard);
         }
+    }
+}
+
+/// Best-effort close of a browser-facing socket with a code and reason, bounded by
+/// [`TRANSFER_TIMEOUT`].
+async fn close_browser(socket: &mut WebSocket, code: u16, reason: &'static str) {
+    let frame = axum::extract::ws::CloseFrame {
+        code,
+        reason: reason.into(),
+    };
+    if !matches!(
+        timeout(TRANSFER_TIMEOUT, socket.send(Message::Close(Some(frame)))).await,
+        Ok(Ok(()))
+    ) {
+        tracing::debug!(reason, "relay browser close frame was not delivered");
     }
 }
 
@@ -4327,6 +4885,7 @@ async fn proxy_sockets(
     b: WebSocket,
     browser_side: BrowserSide,
     suspension: watch::Receiver<Option<String>>,
+    deadline: tokio::time::Instant,
     #[cfg(test)] tap: Option<Arc<Mutex<Vec<u8>>>>,
 ) -> anyhow::Result<()> {
     let (mut a_tx, mut a_rx) = a.split();
@@ -4337,10 +4896,13 @@ async fn proxy_sockets(
     // `a_to_b` writes to the peer half; `b_to_a` writes to this task's own half.
     let mut peer_suspension = (browser_side == BrowserSide::Peer).then(|| suspension.clone());
     let mut own_suspension = (browser_side == BrowserSide::Own).then_some(suspension);
+    let peer_deadline = (browser_side == BrowserSide::Peer).then_some(deadline);
+    let own_deadline = (browser_side == BrowserSide::Own).then_some(deadline);
     let a_to_b = pump_relay_direction(
         &mut a_rx,
         &mut b_tx,
         &mut peer_suspension,
+        peer_deadline,
         #[cfg(test)]
         tap_a.as_ref(),
     );
@@ -4350,6 +4912,7 @@ async fn proxy_sockets(
         &mut b_rx,
         &mut a_tx,
         &mut own_suspension,
+        own_deadline,
         #[cfg(test)]
         tap_b.as_ref(),
     );
@@ -4367,35 +4930,83 @@ async fn pump_relay_direction(
     rx: &mut futures_util::stream::SplitStream<WebSocket>,
     tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     suspension: &mut Option<watch::Receiver<Option<String>>>,
+    // Set only on the direction that writes to the browser half: at the session lifetime the
+    // browser is told why its socket ends instead of seeing an abnormal close.
+    deadline: Option<tokio::time::Instant>,
     #[cfg(test)] tap: Option<&Arc<Mutex<Vec<u8>>>>,
 ) -> anyhow::Result<()> {
+    use futures_util::FutureExt as _;
+    // Frames are queued with `feed` and flushed only when the next frame is not already
+    // waiting, so a burst of small frames costs one write rather than one per frame.
+    // A burst is capped so a peer that never pauses still gets flushed and the suspension and
+    // lifetime signals are still observed.
+    const MAX_UNFLUSHED_FRAMES: usize = 32;
+    let mut unflushed = 0usize;
     loop {
-        tokio::select! {
-            incoming = rx.next() => {
-                let Some(msg) = incoming else { return Ok(()) };
-                let msg = msg?;
-                let is_close = matches!(msg, Message::Close(_));
-                #[cfg(test)]
-                if let Some(tap) = tap {
-                    match &msg {
-                        Message::Binary(bytes) => tap.lock().extend_from_slice(bytes),
-                        Message::Text(text) => tap.lock().extend_from_slice(text.as_bytes()),
-                        _ => {}
+        let ready = if unflushed < MAX_UNFLUSHED_FRAMES {
+            rx.next().now_or_never()
+        } else {
+            None
+        };
+        let incoming = match ready {
+            Some(incoming) => incoming,
+            None => {
+                if unflushed > 0 {
+                    timeout(TRANSFER_TIMEOUT, tx.flush()).await??;
+                    unflushed = 0;
+                }
+                tokio::select! {
+                    incoming = rx.next() => incoming,
+                    reason = await_suspension(suspension) => {
+                        let frame = axum::extract::ws::CloseFrame {
+                            code: axum::extract::ws::close_code::POLICY,
+                            reason: reason.into(),
+                        };
+                        timeout(TRANSFER_TIMEOUT, tx.send(Message::Close(Some(frame)))).await??;
+                        return Ok(());
+                    }
+                    _ = async { tokio::time::sleep_until(deadline.unwrap_or_else(tokio::time::Instant::now)).await }, if deadline.is_some() => {
+                        let frame = axum::extract::ws::CloseFrame {
+                            code: axum::extract::ws::close_code::AWAY,
+                            reason: "session lifetime exceeded".into(),
+                        };
+                        timeout(TRANSFER_TIMEOUT, tx.send(Message::Close(Some(frame)))).await??;
+                        return Ok(());
                     }
                 }
-                timeout(TRANSFER_TIMEOUT, tx.send(msg)).await??;
-                if is_close {
-                    return Ok(());
+            }
+        };
+        let Some(msg) = incoming else {
+            if unflushed > 0 {
+                timeout(TRANSFER_TIMEOUT, tx.flush()).await??;
+            }
+            return Ok(());
+        };
+        let msg = match msg {
+            Ok(msg) => msg,
+            Err(error) => {
+                // A peer that sent its last frame and then dropped the socket surfaces the drop
+                // here; frames already fed must still reach the other side.
+                if unflushed > 0 {
+                    let _ = timeout(TRANSFER_TIMEOUT, tx.flush()).await;
                 }
+                return Err(error.into());
             }
-            reason = await_suspension(suspension) => {
-                let frame = axum::extract::ws::CloseFrame {
-                    code: axum::extract::ws::close_code::POLICY,
-                    reason: reason.into(),
-                };
-                timeout(TRANSFER_TIMEOUT, tx.send(Message::Close(Some(frame)))).await??;
-                return Ok(());
+        };
+        let is_close = matches!(msg, Message::Close(_));
+        #[cfg(test)]
+        if let Some(tap) = tap {
+            match &msg {
+                Message::Binary(bytes) => tap.lock().extend_from_slice(bytes),
+                Message::Text(text) => tap.lock().extend_from_slice(text.as_bytes()),
+                _ => {}
             }
+        }
+        timeout(TRANSFER_TIMEOUT, tx.feed(msg)).await??;
+        unflushed += 1;
+        if is_close {
+            timeout(TRANSFER_TIMEOUT, tx.flush()).await??;
+            return Ok(());
         }
     }
 }
@@ -4719,6 +5330,15 @@ mod tests {
         .is_ok());
     }
     #[test]
+    fn workspace_projects_admits_its_scope_query() {
+        assert_eq!(validate_http_query("workspace/projects", Some("scope=desktopLocal")), Ok(()));
+        assert_eq!(
+            validate_http_query("workspace/projects", Some("other=1")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
     fn r4_strict_utf8_query() {
         assert!(validate_http_query("fs/directories", Some("path=%2Ftmp%2F%EF%BF%BD")).is_ok());
         for query in [
@@ -4897,7 +5517,7 @@ mod tests {
                 assert!(state.inner.pending_sessions.lock().is_empty());
             }
             let mut waiting = Vec::new();
-            for _ in 0..MAX_PENDING_SESSIONS {
+            for _ in 0..MAX_PENDING_SESSIONS_PER_MACHINE {
                 let mut request = Box::pin(state.open_session_channel("load", Some(generation)));
                 tokio::select! {
                     result = &mut request => panic!("unexpected completion: {:?}", result.err()),
@@ -4911,7 +5531,7 @@ mod tests {
             state.unregister_control_channel("load", generation);
             server.abort();
             assert!(server.await.unwrap_err().is_cancelled());
-            println!("R4 admission: 60 issued data-channel requests bypass exhausted guess budget; invalid guesses/429; 100 waiting requests/503; cancellation registry=0");
+            println!("R4 admission: 60 issued data-channel requests bypass exhausted guess budget; invalid guesses/429; per-machine waiting cap/503; cancellation registry=0");
         })
         }));
         drop(runtime);
@@ -5294,6 +5914,71 @@ mod tests {
     }
 
     #[test]
+    fn chunked_transfer_coding_is_matched_case_insensitively() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n";
+        let parsed = parse_http_response(raw, false, false).unwrap().unwrap();
+        assert_eq!(parsed.status(), StatusCode::OK);
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding:  CHUNKED \r\n\r\n0\r\n\r\n";
+        assert!(parse_http_response(raw, false, false).unwrap().is_some());
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n";
+        assert_eq!(parse_http_response(raw, false, false).err(), Some(StatusCode::BAD_GATEWAY));
+    }
+
+    #[test]
+    fn informational_responses_are_skipped_but_bounded() {
+        let final_response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+        let mut one = b"HTTP/1.1 100 Continue\r\n\r\n".to_vec();
+        one.extend_from_slice(final_response);
+        let parsed = parse_http_response(&one, false, false).unwrap().unwrap();
+        assert_eq!(parsed.status(), StatusCode::OK);
+        let mut many = b"HTTP/1.1 100 Continue\r\n\r\n".repeat(50);
+        many.extend_from_slice(final_response);
+        assert_eq!(
+            parse_http_response(&many, false, false).err(),
+            Some(StatusCode::BAD_GATEWAY)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_silent_pooled_channel_falls_through_to_a_fresh_one() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (generation, mut notices, _grants) = state.register_control_channel("pool".into());
+        let first = async {
+            let notice = notices.recv().await.unwrap();
+            let (mut data, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/data/{}", notice.session_id)).await.unwrap();
+            answer_one(&mut data, b"GET /api/v1/capabilities HTTP/1.1\r\n").await;
+            data
+        };
+        let (status, mut silent) = tokio::join!(get_via_relay(&state, "pool", generation), first);
+        assert_eq!(status, StatusCode::OK);
+        // The pooled channel stays open but never answers (a NAT dropped it): the request
+        // reaches it, then the relay must give up quickly and open a fresh channel.
+        let request = get_via_relay(&state, "pool", generation);
+        tokio::pin!(request);
+        let seen = tokio::select! {
+            status = &mut request => panic!("answered before reaching the pooled channel: {status}"),
+            frame = silent.next() => frame.unwrap().unwrap(),
+        };
+        assert!(seen.into_data().starts_with(b"GET /api/v1/capabilities HTTP/1.1\r\n"));
+        tokio::time::pause();
+        let notice = tokio::select! {
+            status = &mut request => panic!("no fresh channel was opened: {status}"),
+            notice = notices.recv() => notice.unwrap(),
+        };
+        tokio::time::resume();
+        let fresh = async {
+            let (mut data, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/data/{}", notice.session_id)).await.unwrap();
+            answer_one(&mut data, b"GET /api/v1/capabilities HTTP/1.1\r\n").await;
+            data
+        };
+        let (status, _fresh) = tokio::join!(request, fresh);
+        assert_eq!(status, StatusCode::OK);
+        drop(silent);
+        server.abort();
+    }
+
+    #[test]
     fn only_exactly_framed_keep_alive_responses_are_reusable() {
         assert!(response_is_reusable(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}", false));
         assert!(response_is_reusable(b"HTTP/1.1 204 No Content\r\n\r\n", false));
@@ -5349,6 +6034,7 @@ mod tests {
         let response = socket_ticket_handler(
             State(state.clone()),
             AxumPath("browser-machine".into()),
+            None,
             headers,
             Json(serde_json::json!({"target": target})),
         )
@@ -5531,6 +6217,187 @@ mod tests {
         server.abort();
     }
 
+    async fn token_control(base: &str, machine_id: &str) -> TestSocket {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = format!("{base}/tunnel/control").into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("authorization", "Bearer test-machine-token".parse().unwrap());
+        request
+            .headers_mut()
+            .insert("x-ferryx-machine-id", machine_id.parse().unwrap());
+        tokio_tungstenite::connect_async(request).await.unwrap().0
+    }
+
+    /// Waits until the relay has processed every frame sent before this point: a Ping's Pong
+    /// is written by the same control loop, in order.
+    async fn control_barrier(socket: &mut TestSocket) {
+        socket.send(TMessage::Ping(b"barrier".to_vec().into())).await.unwrap();
+        loop {
+            match timeout(Duration::from_secs(5), socket.next()).await.unwrap() {
+                Some(Ok(TMessage::Pong(payload))) if payload.as_ref() == b"barrier" => return,
+                Some(Ok(_)) => continue,
+                other => panic!("control socket ended before the barrier: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_second_token_daemon_cannot_steal_a_live_alias() {
+        let state = test_state(vec!["test-machine-token".into()]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let mut first = token_control(&base, "machine-a").await;
+        control_barrier(&mut first).await;
+        let first_generation = state.inner.control_channels.lock()["machine-a"].generation;
+        // A second daemon sharing the operator token announces the same machine id, then
+        // registers a PIN under it.
+        let mut second = token_control(&base, "machine-a").await;
+        control_barrier(&mut second).await;
+        let mut registration = security_registration("machine-a");
+        registration.pin = "654321".into();
+        second
+            .send(TMessage::Text(serde_json::to_string(&registration).unwrap().into()))
+            .await
+            .unwrap();
+        let ack: RegisterPairingPinAck = receive_json(&mut second).await;
+        assert_ne!(ack.status, "ready");
+        assert_eq!(
+            state.inner.control_channels.lock()["machine-a"].generation,
+            first_generation,
+            "the alias must stay routed to the daemon that holds it"
+        );
+        assert!(!state.inner.pairings.lock().contains_key("654321"));
+        drop(first);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_ed25519_daemon_cannot_register_a_pin_for_another_machine() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (_victim, auth) = authenticate(&base, &identity(34, "machine_victim"), false, false).await;
+        assert!(auth.success);
+        let victim_generation = state.inner.control_channels.lock()["machine_victim"].generation;
+        let (mut attacker, auth) =
+            authenticate(&base, &identity(35, "machine_attacker"), false, false).await;
+        assert!(auth.success);
+        attacker
+            .send(TMessage::Text(
+                serde_json::to_string(&security_registration("machine_victim")).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        let ack: RegisterPairingPinAck = receive_json(&mut attacker).await;
+        assert_eq!(ack.status, "Machine ID does not match this control identity");
+        assert_eq!(
+            state.inner.control_channels.lock()["machine_victim"].generation,
+            victim_generation
+        );
+        assert!(state.inner.pairings.lock().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_busy_allocation_is_answered_without_dropping_the_control_socket() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (mut daemon, auth) = authenticate(&base, &identity(36, "busy_machine"), false, false).await;
+        assert!(auth.success);
+        for _ in 0..MAX_PENDING_SESSIONS_PER_MACHINE {
+            allocate(&mut daemon).await;
+        }
+        daemon
+            .send(TMessage::Text(r#"{"type":"AllocateSession"}"#.into()))
+            .await
+            .unwrap();
+        let rejected: serde_json::Value = receive_json(&mut daemon).await;
+        assert_eq!(rejected["type"], "AllocateSessionRejected");
+        assert_eq!(rejected["reason"], "busy");
+        // The control socket survives and keeps its registration.
+        control_barrier(&mut daemon).await;
+        assert!(state.inner.control_channels.lock().contains_key("busy_machine"));
+        server.abort();
+    }
+
+    fn grant_envelope() -> crate::remote::account_protocol::AccountGrantOfferEnvelope {
+        crate::remote::account_protocol::AccountGrantOfferEnvelope {
+            machine_id: "grant_machine".into(),
+            enrollment_epoch: "1".into(),
+            sealed: "c2VhbGVk".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_grant_deliveries_each_get_their_own_ack() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (mut daemon, auth) = authenticate(&base, &identity(37, "grant_machine"), false, false).await;
+        assert!(auth.success);
+        let first_state = state.clone();
+        let first = tokio::spawn(async move {
+            first_state.deliver_grant_offer("grant_machine", grant_envelope()).await
+        });
+        let delivery: AccountGrantOfferDelivery = receive_json(&mut daemon).await;
+        assert_eq!(delivery.machine_id, "grant_machine");
+        // A second grant is queued while the first is unacknowledged; it must not be sent
+        // yet, so the daemon's first ack cannot be mistaken for it.
+        let second_state = state.clone();
+        let second = tokio::spawn(async move {
+            second_state.deliver_grant_offer("grant_machine", grant_envelope()).await
+        });
+        let ack = |id: &str| {
+            TMessage::Text(
+                serde_json::to_string(&AccountGrantOfferDelivered {
+                    grant_id: Some(id.into()),
+                    status: "ready".into(),
+                })
+                .unwrap()
+                .into(),
+            )
+        };
+        daemon.send(ack("grant-1")).await.unwrap();
+        assert_eq!(first.await.unwrap().unwrap().grant_id.as_deref(), Some("grant-1"));
+        let _: AccountGrantOfferDelivery = receive_json(&mut daemon).await;
+        daemon.send(ack("grant-2")).await.unwrap();
+        assert_eq!(second.await.unwrap().unwrap().grant_id.as_deref(), Some("grant-2"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_grant_ack_slot_does_not_capture_the_next_delivery() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (mut daemon, auth) = authenticate(&base, &identity(38, "grant_machine"), false, false).await;
+        assert!(auth.success);
+        let first_state = state.clone();
+        let first = tokio::spawn(async move {
+            first_state.deliver_grant_offer("grant_machine", grant_envelope()).await
+        });
+        let _: AccountGrantOfferDelivery = receive_json(&mut daemon).await;
+        // The first caller gives up (as its 10 s timeout would) without any ack.
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let second_state = state.clone();
+        let second = tokio::spawn(async move {
+            second_state.deliver_grant_offer("grant_machine", grant_envelope()).await
+        });
+        // The second delivery is forwarded once the abandoned slot is released.
+        let _: AccountGrantOfferDelivery = receive_json(&mut daemon).await;
+        daemon
+            .send(TMessage::Text(
+                serde_json::to_string(&AccountGrantOfferDelivered {
+                    grant_id: Some("grant-2".into()),
+                    status: "ready".into(),
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(second.await.unwrap().unwrap().grant_id.as_deref(), Some("grant-2"));
+        server.abort();
+    }
+
     #[tokio::test]
     async fn test_security_fleet_pin_brute_force_lockout() {
         let state = test_state(vec![]);
@@ -5545,10 +6412,10 @@ mod tests {
         for pin in ["000001", "000002", "000003", "000004", "000005"] {
             assert_eq!(security_claim(&state, pin).await, StatusCode::NOT_FOUND);
         }
-        // The current pairing API represents lockout with 401 (control admission uses 429).
+        // A locked-out source is told it is rate limited, not that its code was wrong.
         assert_eq!(
             security_claim(&state, "123456").await,
-            StatusCode::UNAUTHORIZED
+            StatusCode::TOO_MANY_REQUESTS
         );
         let admission = state.inner.pairing_admission.lock();
         let tracker = &admission[&"192.0.2.1".parse::<IpAddr>().unwrap()];
@@ -5838,6 +6705,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refused_device_token_is_not_probed_again_and_repeated_refusals_lock_out() {
+        let state = test_state(vec![]);
+        let (base, relay) = spawn_test_relay_with_state(state.clone()).await;
+        let (mut control, auth) =
+            authenticate(&base, &identity(44, "authority-machine"), false, false).await;
+        assert!(auth.success);
+        let request = ticket_status(&base, "authority-machine", "refused-device");
+        let authority =
+            answer_token_authority(&mut control, &base, "refused-device", StatusCode::UNAUTHORIZED);
+        let (status, ()) = tokio::join!(request, authority);
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // The same bearer is refused from the negative cache. A probe would open a session the
+        // test never answers, so the request would time out instead of returning 401.
+        for _ in 0..3 {
+            assert_eq!(
+                ticket_status(&base, "authority-machine", "refused-device").await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert!(state.inner.pending_sessions.lock().is_empty());
+        // Every refusal counted toward the per-IP lockout (1 probed + 3 cached = 4); the
+        // fifth locks the address and the sixth is refused before any probe.
+        assert_eq!(
+            ticket_status(&base, "authority-machine", "refused-device").await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            ticket_status(&base, "authority-machine", "another-device").await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        relay.abort();
+    }
+
+    #[tokio::test]
     async fn test_socket_ticket_cache_keeps_two_valid_tokens_for_one_machine() {
         let state = test_state(vec![]);
         let (base, relay) = spawn_test_relay_with_state(state.clone()).await;
@@ -5860,6 +6761,64 @@ mod tests {
         relay.abort();
     }
 
+    #[test]
+    fn a_malformed_socket_query_is_a_bad_request_not_an_auth_failure() {
+        assert_eq!(socket_query_rejection(Some("ticket=t&cols=080")), StatusCode::BAD_REQUEST);
+        assert_eq!(socket_query_rejection(Some("ticket=t&rows=70000")), StatusCode::BAD_REQUEST);
+        assert_eq!(socket_query_rejection(Some("ticket=t&unknown=1")), StatusCode::BAD_REQUEST);
+        // A missing ticket or a credential-carrying key stays an authorization failure.
+        assert_eq!(socket_query_rejection(None), StatusCode::UNAUTHORIZED);
+        assert_eq!(socket_query_rejection(Some("cols=80")), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            socket_query_rejection(Some("ticket=t&access_token=permanent")),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(socket_query_rejection(Some("token=permanent")), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_terminal_socket_with_a_noncanonical_dimension_answers_400() {
+        let (base, server) = spawn_test_relay().await;
+        assert_socket_rejected(
+            &base,
+            "/host/browser-machine/api/v1/terminal/t1?ticket=t&cols=080",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        server.abort();
+    }
+
+    #[test]
+    fn every_device_route_trims_the_bearer_the_same_way() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer  padded-token ".parse().unwrap());
+        assert_eq!(device_bearer(&headers), Some("padded-token"));
+        headers.insert("authorization", "Bearer    ".parse().unwrap());
+        assert_eq!(device_bearer(&headers), None);
+        headers.insert("authorization", "Basic abc".parse().unwrap());
+        assert_eq!(device_bearer(&headers), None);
+    }
+
+    #[tokio::test]
+    async fn a_socket_ticket_accepts_a_bearer_with_surrounding_whitespace() {
+        let state = test_state(vec![]);
+        let (_generation, _notices, _grants) =
+            state.register_control_channel("browser-machine".into());
+        state.register_device_token("browser-machine", "padded-token");
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer padded-token ".parse().unwrap());
+        let response = socket_ticket_handler(
+            State(state.clone()),
+            AxumPath("browser-machine".into()),
+            None,
+            headers,
+            Json(serde_json::json!({"target": "/api/v1/events"})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
     #[tokio::test]
     async fn test_relay_socket_ticket_issuance_and_single_use() {
         let state = test_state(vec![]);
@@ -5877,6 +6836,7 @@ mod tests {
             consume_socket_ticket(
                 &state,
                 ticket_query(&ticket.ticket),
+                None,
                 "browser-machine",
                 "/api/v1/events"
             ),
@@ -5886,6 +6846,7 @@ mod tests {
             consume_socket_ticket(
                 &state,
                 ticket_query(&ticket.ticket),
+                None,
                 "browser-machine",
                 "/api/v1/events"
             ),
@@ -5897,7 +6858,7 @@ mod tests {
         ] {
             let ticket = issue_test_ticket(&state, "/api/v1/events").await;
             assert_eq!(
-                consume_socket_ticket(&state, ticket_query(&ticket.ticket), machine, target),
+                consume_socket_ticket(&state, ticket_query(&ticket.ticket), None, machine, target),
                 Err(StatusCode::UNAUTHORIZED)
             );
             assert!(!state
@@ -5924,6 +6885,7 @@ mod tests {
             consume_socket_ticket(
                 &state,
                 ticket_query(&ticket.ticket),
+                None,
                 "browser-machine",
                 "/api/v1/events"
             ),
@@ -6549,6 +7511,7 @@ mod tests {
             .await
             .expect("allocation request");
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[RELAY_E2E_HEADER], "1");
         let allocated: AttachSessionResponse = response.json().await.expect("allocation body");
         assert!(allocated.opaque, "an e2e allocation must be opaque");
         assert_eq!(allocated.machine_id, machine);
@@ -6927,6 +7890,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(unknown.headers()[RELAY_E2E_HEADER], "1");
+        // The account-only allocation (no e2e query) is not marked.
+        let plain = client
+            .post(format!("{http_base}/api/v1/attach/session"))
+            .bearer_auth(device_token)
+            .json(&serde_json::json!({ "machineId": "strict-machine" }))
+            .send()
+            .await
+            .unwrap();
+        assert!(plain.headers().get(RELAY_E2E_HEADER).is_none());
         let stranger = client
             .post(format!("{http_base}/api/v1/attach/session?e2e=1"))
             .bearer_auth("not-a-device-token")
@@ -6940,6 +7913,12 @@ mod tests {
         });
         let stranger = stranger.unwrap();
         assert_eq!(stranger.status(), StatusCode::UNAUTHORIZED);
+        // A current relay marks even its refusal, so the client knows the token was revoked.
+        assert_eq!(stranger.headers()[RELAY_E2E_HEADER], "1");
+        assert!(stranger.headers()["access-control-expose-headers"]
+            .to_str()
+            .unwrap()
+            .contains(RELAY_E2E_HEADER));
         let body: serde_json::Value = stranger.json().await.unwrap();
         assert_eq!(body["code"], "UNAUTHORIZED");
 
@@ -7709,9 +8688,20 @@ mod tests {
                 if attempt < 5 {
                     StatusCode::NOT_FOUND
                 } else {
-                    StatusCode::UNAUTHORIZED
+                    StatusCode::TOO_MANY_REQUESTS
                 }
             );
+            if attempt == 5 {
+                let retry_after: u64 = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.parse().ok())
+                    .expect("a lockout names when to retry");
+                assert!((1..=ADMISSION_WINDOW.as_secs()).contains(&retry_after));
+                let body: serde_json::Value = response.json().await.unwrap();
+                assert_eq!(body["code"], "pairing_rate_limited");
+            }
         }
         server.abort();
     }
@@ -7755,7 +8745,7 @@ mod tests {
         )
         .await;
         // Then routing succeeds and the offline machine is reported, not forbidden.
-        assert_eq!(result.unwrap_err(), StatusCode::NOT_FOUND);
+        assert_eq!(result.unwrap().status(), StatusCode::NOT_FOUND);
     }
 
     #[test]
@@ -7935,12 +8925,18 @@ mod tests {
     }
 
     async fn receive_json<T: serde::de::DeserializeOwned>(socket: &mut TestSocket) -> T {
-        let frame = timeout(Duration::from_secs(5), socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        serde_json::from_str(frame.to_text().unwrap()).unwrap()
+        loop {
+            let frame = timeout(Duration::from_secs(5), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            // Keepalive replies (tungstenite's automatic Pong plus the relay's own) carry no JSON.
+            if matches!(frame, TMessage::Ping(_) | TMessage::Pong(_)) {
+                continue;
+            }
+            return serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        }
     }
 
     async fn authenticate(
@@ -8192,6 +9188,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_server_side_bind_failure_does_not_count_toward_the_ip_lockout() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("blocked");
+        let state = RelayState::new_with_key_store(vec![], blocked.join("keys.json")).unwrap();
+        // The key store's directory cannot be created, so every bind fails on the relay's side.
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        for _ in 0..6 {
+            let (_, response) = authenticate(&base, &identity(39, "disk-machine"), false, false).await;
+            assert!(!response.success);
+            assert!(response.error.unwrap().starts_with("Failed to "));
+        }
+        {
+            let admission = state.inner.admission.lock();
+            let tracker = &admission[&ip];
+            assert_eq!(tracker.failures, 0);
+            assert!(tracker.locked_until.is_none());
+        }
+        // A bad signature still counts.
+        let (_, response) = authenticate(&base, &identity(39, "disk-machine"), true, false).await;
+        assert!(!response.success);
+        assert_eq!(state.inner.admission.lock()[&ip].failures, 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_keepalive_before_control_auth_does_not_fail_the_handshake() {
+        let (base, server) = spawn_test_relay().await;
+        let identity = identity(45, "pinging-machine");
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/control"))
+            .await
+            .unwrap();
+        let challenge: ControlChallenge = receive_json(&mut socket).await;
+        socket.send(TMessage::Ping(b"early".to_vec().into())).await.unwrap();
+        socket.send(TMessage::Pong(b"early".to_vec().into())).await.unwrap();
+        let auth = ControlAuth {
+            enrollment_token: Some("test-machine-token".into()),
+            machine_id: identity.machine_id.clone(),
+            display_name: identity.display_name.clone(),
+            public_key: identity.public_key.clone(),
+            timestamp: challenge.timestamp,
+            signature: crate::remote::auth::sign_control_challenge(
+                &identity,
+                "relay",
+                &challenge.nonce,
+                challenge.timestamp,
+            )
+            .unwrap(),
+        };
+        socket
+            .send(TMessage::Text(serde_json::to_string(&auth).unwrap().into()))
+            .await
+            .unwrap();
+        // The relay answers the Ping with a Pong; skip it to reach the auth response.
+        let response = loop {
+            match timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap() {
+                TMessage::Text(text) => break serde_json::from_str::<ControlAuthResponse>(&text).unwrap(),
+                _ => continue,
+            }
+        };
+        assert!(response.success, "{:?}", response.error);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_silent_control_socket_is_closed_and_unregistered() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (mut daemon, auth) = authenticate(&base, &identity(46, "silent_machine"), false, false).await;
+        assert!(auth.success);
+        control_barrier(&mut daemon).await;
+        // The socket task owns the grant receiver; it is dropped only after the task has
+        // unregistered, so the sender closing is the signal that the registration is gone.
+        let grant = state.inner.grant_channels.lock()["silent_machine"].clone();
+        // Paused time auto-advances to the idle deadline once the relay waits on it.
+        tokio::time::pause();
+        assert_close(&mut daemon, 1001, "control channel idle").await;
+        tokio::time::resume();
+        timeout(Duration::from_secs(5), grant.closed()).await.unwrap();
+        assert!(!state.inner.control_channels.lock().contains_key("silent_machine"));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn test_relay_ed25519_control_handshake_success() {
         let (base, server) = spawn_test_relay().await;
         let (mut socket, response) =
@@ -8281,6 +9362,32 @@ mod tests {
         server.abort();
     }
 
+    #[test]
+    fn the_sweeper_prunes_expired_pairing_admission_trackers() {
+        let state = test_state(vec![]);
+        let ip: IpAddr = "192.0.2.9".parse().unwrap();
+        let expired = Instant::now()
+            .checked_sub(ADMISSION_WINDOW + Duration::from_secs(1))
+            .unwrap();
+        for map in [&state.inner.admission, &state.inner.pairing_admission] {
+            map.lock().insert(
+                ip,
+                AttemptTracker {
+                    started: expired,
+                    attempts: 3,
+                    failures: 3,
+                    locked_until: None,
+                },
+            );
+        }
+        // Admitting another address no longer scans the map; the sweeper owns pruning.
+        assert!(state.admit("192.0.2.10".parse().unwrap(), Instant::now()));
+        assert!(state.inner.admission.lock().contains_key(&ip));
+        state.sweep_expired_sessions();
+        assert!(!state.inner.admission.lock().contains_key(&ip));
+        assert!(!state.inner.pairing_admission.lock().contains_key(&ip));
+    }
+
     #[tokio::test]
     async fn test_relay_admission_rate_limiting() {
         let state = test_state(vec![]);
@@ -8350,6 +9457,164 @@ mod tests {
     /// either side are proxied through to the other - i.e. the relay's
     /// reverse-tunnel multiplexing bridges the two independently-opened
     /// WebSocket connections into one bidirectional pipe.
+    /// Reads past keepalive frames to the next frame and asserts it is the expected close.
+    /// No timeout of its own: callers on paused time rely on auto-advance to reach the relay's
+    /// deadline, and a real-time caller wraps the call in one.
+    async fn assert_close(socket: &mut TestSocket, code: u16, reason: &str) {
+        loop {
+            match socket.next().await {
+                Some(Ok(TMessage::Ping(_) | TMessage::Pong(_))) => continue,
+                Some(Ok(TMessage::Close(Some(close)))) => {
+                    assert_eq!(u16::from(close.code), code);
+                    assert_eq!(close.reason.as_str(), reason);
+                    return;
+                }
+                other => panic!("expected close {code} {reason:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_half_whose_machine_never_connects_is_closed_with_a_reason() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (_generation, mut notices, _grants) = state.register_control_channel("lonely".into());
+        assert!(state.notify_incoming_session("lonely", "lonely-session"));
+        notices.try_recv().unwrap();
+        let (mut client, _) =
+            tokio_tungstenite::connect_async(format!("{base}/tunnel/client/lonely-session"))
+                .await
+                .unwrap();
+        // Paused time auto-advances to the pairing deadline once every task is idle.
+        tokio::time::pause();
+        assert_close(&mut client, 1013, "machine did not connect").await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_session_past_its_lifetime_tells_the_browser_why() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (_generation, mut notices, _grants) = state.register_control_channel("aging".into());
+        assert!(state.notify_incoming_session("aging", "aging-session"));
+        notices.try_recv().unwrap();
+        let (mut client, _) =
+            tokio_tungstenite::connect_async(format!("{base}/tunnel/client/aging-session"))
+                .await
+                .unwrap();
+        let (mut data, _) =
+            tokio_tungstenite::connect_async(format!("{base}/tunnel/data/aging-session"))
+                .await
+                .unwrap();
+        // The splice is live once a frame crosses it.
+        client.send(TMessage::Text("ping".into())).await.unwrap();
+        assert_eq!(data.next().await.unwrap().unwrap(), TMessage::Text("ping".into()));
+        tokio::time::pause();
+        assert_close(&mut client, 1001, "session lifetime exceeded").await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_browser_socket_whose_host_goes_away_is_closed_with_a_reason() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (_generation, mut notices, _grants) =
+            state.register_control_channel("browser-machine".into());
+        let ticket = issue_test_ticket(&state, "/api/v1/events").await;
+        let browser = tokio::spawn({
+            let base = base.clone();
+            async move {
+                tokio_tungstenite::connect_async(format!(
+                    "{base}/host/browser-machine/api/v1/events?ticket={}",
+                    ticket.ticket
+                ))
+                .await
+                .unwrap()
+                .0
+            }
+        });
+        let notice = timeout(Duration::from_secs(5), notices.recv()).await.unwrap().unwrap();
+        let (mut data, _) =
+            tokio_tungstenite::connect_async(format!("{base}/tunnel/data/{}", notice.session_id))
+                .await
+                .unwrap();
+        let mut browser = browser.await.unwrap();
+        // The relay's inner WebSocket upgrade reaches the host; the host then goes away.
+        let upgrade = timeout(Duration::from_secs(5), data.next()).await.unwrap().unwrap().unwrap();
+        assert!(upgrade.into_data().starts_with(b"GET /api/v1/events HTTP/1.1\r\n"));
+        data.close(None).await.unwrap();
+        timeout(Duration::from_secs(5), assert_close(&mut browser, 1011, "host disconnected"))
+            .await
+            .unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_frames_crosses_the_splice_intact_and_in_order() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (_generation, mut notices, _grants) = state.register_control_channel("burst".into());
+        assert!(state.notify_incoming_session("burst", "burst-session"));
+        notices.try_recv().unwrap();
+        let (mut client, _) =
+            tokio_tungstenite::connect_async(format!("{base}/tunnel/client/burst-session"))
+                .await
+                .unwrap();
+        let (mut data, _) =
+            tokio_tungstenite::connect_async(format!("{base}/tunnel/data/burst-session"))
+                .await
+                .unwrap();
+        // More frames than one unflushed batch, queued before any is read.
+        for n in 0..200u32 {
+            client.feed(TMessage::Binary(n.to_be_bytes().to_vec().into())).await.unwrap();
+        }
+        client.flush().await.unwrap();
+        for n in 0..200u32 {
+            let frame = timeout(Duration::from_secs(5), data.next()).await.unwrap().unwrap().unwrap();
+            assert_eq!(frame.into_data().as_ref(), n.to_be_bytes().as_slice());
+        }
+        // A lone frame after the burst is flushed without another frame behind it.
+        client.send(TMessage::Text("tail".into())).await.unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(5), data.next()).await.unwrap().unwrap().unwrap(),
+            TMessage::Text("tail".into())
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_last_frame_before_the_host_drops_its_socket_still_reaches_the_client() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (_generation, mut notices, _grants) = state.register_control_channel("abrupt".into());
+        assert!(state.notify_incoming_session("abrupt", "abrupt-session"));
+        notices.try_recv().unwrap();
+        let (mut client, _) =
+            tokio_tungstenite::connect_async(format!("{base}/tunnel/client/abrupt-session"))
+                .await
+                .unwrap();
+        let (mut data, _) =
+            tokio_tungstenite::connect_async(format!("{base}/tunnel/data/abrupt-session"))
+                .await
+                .unwrap();
+        // The splice is live once a frame crosses it.
+        client.send(TMessage::Text("hello".into())).await.unwrap();
+        assert_eq!(data.next().await.unwrap().unwrap(), TMessage::Text("hello".into()));
+        // The host answers and drops its socket without a close handshake, as a daemon task
+        // that returns right after its last send does. The relay reads the frame and the
+        // abrupt end together; the frame it already queued must still be delivered.
+        data.send(TMessage::Binary(b"last reply".to_vec().into())).await.unwrap();
+        drop(data);
+        let reply = loop {
+            match timeout(Duration::from_secs(5), client.next()).await.unwrap() {
+                Some(Ok(TMessage::Ping(_) | TMessage::Pong(_))) => continue,
+                other => break other,
+            }
+        };
+        assert_eq!(reply.unwrap().unwrap().into_data().as_ref(), b"last reply");
+        server.abort();
+    }
+
     #[tokio::test]
     async fn test_relay_reverse_tunnel_multiplex() {
         let (base_url, _server) = spawn_test_relay().await;
@@ -8492,7 +9757,8 @@ mod tests {
             state.reserve_half("session", HalfKind::Client),
             Err(StatusCode::CONFLICT)
         ));
-        for n in 1..MAX_PENDING_SESSIONS {
+        // The paired "session" above is active and no longer charges the waiting budget.
+        for n in 0..MAX_PENDING_SESSIONS_PER_MACHINE {
             assert!(state.notify_incoming_session("tok", &format!("session-{n}")));
             rx.try_recv().unwrap();
         }
@@ -8500,6 +9766,53 @@ mod tests {
         state.unregister_control_channel("tok", new);
         assert!(!state.notify_incoming_session("tok", "no-control"));
         drop((waiting, handoff));
+    }
+
+    #[test]
+    fn paired_sessions_do_not_consume_the_waiting_budget() {
+        let state = test_state(vec![]);
+        let mut receivers = Vec::new();
+        let mut generations = HashMap::new();
+        for machine in 0..=(MAX_PENDING_SESSIONS / MAX_PENDING_SESSIONS_PER_MACHINE) {
+            let name = format!("machine-{machine}");
+            let (generation, rx, grants) = state.register_control_channel(name.clone());
+            generations.insert(name, generation);
+            receivers.push((rx, grants));
+        }
+        // Fill machine-0 with live (paired) sessions well past the per-machine waiting cap.
+        for n in 0..(MAX_PENDING_SESSIONS_PER_MACHINE * 2) {
+            let id = format!("live-{n}");
+            assert_eq!(
+                state.try_issue_session_of_kind("machine-0", &id, None, false, SessionKind::Http),
+                Ok(())
+            );
+            state.inner.pending_sessions.lock().get_mut(&id).unwrap().active = true;
+            receivers[0].0.try_recv().unwrap();
+        }
+        // Waiting sessions are capped per machine with a typed reason.
+        for n in 0..MAX_PENDING_SESSIONS_PER_MACHINE {
+            assert!(state.notify_incoming_session("machine-0", &format!("wait-{n}")));
+        }
+        assert_eq!(
+            state.try_issue_session_of_kind("machine-0", "over", None, false, SessionKind::Http),
+            Err(IssueRejection::Busy)
+        );
+        // Another machine is unaffected by machine-0's budget.
+        assert!(state.notify_incoming_session("machine-1", "other"));
+        assert_eq!(
+            state.try_issue_session_of_kind("missing", "x", None, false, SessionKind::Http),
+            Err(IssueRejection::Offline)
+        );
+        assert_eq!(
+            state.try_issue_session_of_kind(
+                "machine-1",
+                "stale",
+                Some(generations["machine-1"] + 1_000),
+                false,
+                SessionKind::Http
+            ),
+            Err(IssueRejection::StaleGeneration)
+        );
     }
 
     #[tokio::test]
@@ -8791,6 +10104,42 @@ mod tests {
             PairingState::Consumed
         );
 
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_host_accepted_exchange_with_an_unreadable_answer_still_spends_the_code() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let owner = identity(43, "p01_daemon_garbled");
+        let (mut daemon_control, auth) = authenticate(&base, &owner, false, false).await;
+        assert!(auth.success);
+        register_security_pin(&mut daemon_control, "p01_daemon_garbled").await;
+        let claim = security_claim(&state, "123456");
+        let host = async {
+            let notice: IncomingSessionNotice = receive_json(&mut daemon_control).await;
+            let (mut data, _) =
+                tokio_tungstenite::connect_async(format!("{base}/tunnel/data/{}", notice.session_id))
+                    .await
+                    .unwrap();
+            let _request = timeout(Duration::from_secs(5), data.next()).await.unwrap();
+            // The host consumed the code and answered 2xx, but the body is not a token.
+            data.send(TMessage::Binary(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nnot json"
+                    .to_vec()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            let _ = timeout(Duration::from_secs(5), data.next()).await;
+        };
+        let (status, ()) = tokio::join!(claim, host);
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            state.inner.pairings.lock()["123456"].state,
+            PairingState::Consumed,
+            "a code the host already consumed must not be offered again"
+        );
         server.abort();
     }
 
@@ -9275,6 +10624,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_waiter_retired_by_the_sweeper_reports_the_data_pairing_timeout() {
+        let state = test_state(vec![]);
+        let (generation, mut notices, _grants) =
+            state.register_control_channel("machine_stage_swept".into());
+        let http_fut = proxy_http(
+            &state,
+            "machine_stage_swept",
+            Some(generation),
+            Method::GET,
+            "/api/v1/capabilities",
+            HeaderMap::new(),
+            Vec::new(),
+        );
+        tokio::pin!(http_fut);
+        let notice = tokio::select! {
+            res = &mut http_fut => panic!("completed prematurely: {:?}", res.map(|r| r.status())),
+            n = notices.recv() => n.expect("session notice"),
+        };
+        // The sweeper retires the entry (as it does at SESSION_PAIRING_TIMEOUT) before the
+        // waiter's own timer fires.
+        state.inner.pending_sessions.lock().remove(&notice.session_id);
+        let res = http_fut.await.expect("stage timeout is a response");
+        assert_eq!(res.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            res.headers().get(RELAY_STAGE_HEADER).and_then(|v| v.to_str().ok()),
+            Some(RELAY_STAGE_DATA_PAIRING_TIMEOUT)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_offline_machine_answers_404_with_a_typed_envelope() {
+        let state = test_state(vec![]);
+        let response = proxy_http(
+            &state,
+            "nobody-home",
+            None,
+            Method::GET,
+            "/api/v1/capabilities",
+            HeaderMap::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("a relay refusal is a typed response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), MAX_MESSAGE_SIZE).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["error"]["code"], "MACHINE_OFFLINE");
+        assert!(relay_refusal(StatusCode::GONE).is_some());
+        assert_eq!(relay_refusal(StatusCode::SERVICE_UNAVAILABLE).unwrap().status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(relay_refusal(StatusCode::BAD_GATEWAY).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_budget_spent_before_any_channel_attached_reports_the_pairing_stage() {
+        tokio::time::pause();
+        let state = test_state(vec![]);
+        let (generation, mut notices, _grants) =
+            state.register_control_channel("machine_stage_budget".into());
+        // A short agent-control wait's budget runs out before the pairing timeout, while the
+        // machine never attaches a data channel.
+        let path = "/api/v1/agent-control/sessions/s1/wait?timeoutMs=1000";
+        let budget = agent_control_wait_budget(path).expect("wait path has its own budget");
+        assert!(budget < SESSION_PAIRING_TIMEOUT, "the budget must expire before pairing does");
+        let http_fut = proxy_http(
+            &state,
+            "machine_stage_budget",
+            Some(generation),
+            Method::GET,
+            path,
+            HeaderMap::new(),
+            Vec::new(),
+        );
+        tokio::pin!(http_fut);
+        tokio::select! {
+            res = &mut http_fut => panic!("completed prematurely: {:?}", res.map(|r| r.status())),
+            n = notices.recv() => { n.expect("session notice"); }
+        }
+        let res = http_fut.await.expect("stage timeout is a response");
+        assert_eq!(res.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            res.headers().get(RELAY_STAGE_HEADER).and_then(|v| v.to_str().ok()),
+            Some(RELAY_STAGE_DATA_PAIRING_TIMEOUT)
+        );
+    }
+
+    #[tokio::test]
     async fn test_relay_504_stage_discriminator_upstream_transfer_timeout() {
         let state = test_state(vec![]);
         let (base, server) = spawn_test_relay_with_state(state.clone()).await;
@@ -9370,6 +10807,15 @@ mod tests {
             .await
             .expect("download request");
         assert_eq!(staged.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            staged.headers().get("content-disposition").and_then(|v| v.to_str().ok()),
+            Some("attachment; filename=\"ferryx-cli-linux-amd64\""),
+            "the saved file keeps its artifact name (and .exe on Windows)"
+        );
+        assert_eq!(
+            staged.headers().get("content-length").and_then(|v| v.to_str().ok()),
+            Some(artifact_bytes.len().to_string().as_str())
+        );
         let served = staged.bytes().await.expect("download body");
         assert_eq!(
             served.as_ref(),
@@ -9529,6 +10975,26 @@ mod tests {
             fallback_real_bytes.as_slice(),
             "must serve regular file bytes from second candidate directory"
         );
+    }
+
+    #[tokio::test]
+    async fn a_multi_chunk_artifact_is_streamed_whole() {
+        let staging = tempfile::tempdir().expect("staging dir");
+        let artifact: Vec<u8> = (0..(200 * 1024u32)).map(|n| (n % 251) as u8).collect();
+        std::fs::write(staging.path().join("ferryx-cli-windows-amd64.exe"), &artifact).unwrap();
+        let response = download_cli_artifact_from_candidate_dirs(
+            "ferryx-cli-windows-amd64.exe",
+            vec![staging.path().to_path_buf()],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_DISPOSITION],
+            "attachment; filename=\"ferryx-cli-windows-amd64.exe\""
+        );
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], artifact.len().to_string());
+        let body = axum::body::to_bytes(response.into_body(), artifact.len() + 1).await.unwrap();
+        assert_eq!(body.as_ref(), artifact.as_slice());
     }
 
     async fn spawn_test_relay_with_account_state(
@@ -11381,6 +12847,63 @@ mod tests {
             .expect("the frame read must not error");
         assert_eq!(frame.to_text().unwrap(), "live");
         (control, client, data, notice)
+    }
+
+    #[tokio::test]
+    async fn a_suspended_owner_is_refused_before_the_host_mints_a_device() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(vec![]);
+        let machine_id = "suspended-pair-machine";
+        let now = crate::account::store::now_secs();
+        let account = test_suspension_account(tmp.path());
+        seed_suspension_owner(
+            &account,
+            "user-suspended-pair",
+            "user-suspended-pair-token",
+            machine_id,
+            &identity(202, machine_id).public_key,
+            Some(now.saturating_sub(crate::account::billing::entitlement::GRACE_SECS + 1000)),
+            crate::account::billing::entitlement::FREE_HOSTS as usize + 1,
+        );
+        let entitlement = crate::account::billing::routes::entitlement_for_user(
+            &account,
+            "user-suspended-pair",
+            crate::account::billing::routes::billing_now(),
+        )
+        .unwrap();
+        assert!(!entitlement.remote_allowed, "the fixture owner must be stopped");
+        state.set_account_state(account);
+        let (generation, mut notices, _grants) = state.register_control_channel(machine_id.into());
+        state
+            .register_pairing(machine_id, generation, security_registration(machine_id))
+            .unwrap();
+        assert_eq!(security_claim(&state, "123456").await, StatusCode::PAYMENT_REQUIRED);
+        // The exchange never reached the host: no data channel was requested.
+        assert!(matches!(notices.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+        assert_eq!(state.inner.pairings.lock()["123456"].state, PairingState::Ready);
+    }
+
+    #[test]
+    fn one_unreadable_machine_or_owner_does_not_abort_the_suspension_sweep() {
+        let candidates: Vec<String> =
+            ["broken-machine", "stopped-machine", "broken-owner-machine"]
+                .into_iter()
+                .map(String::from)
+                .collect();
+        let targets = suspension_targets_with(
+            &candidates,
+            |machine| match machine {
+                "broken-machine" => Err(crate::account::service::ApiError::internal("corrupt row")),
+                "stopped-machine" => Ok(Some((machine.into(), "stopped-owner".into()))),
+                _ => Ok(Some((machine.into(), "broken-owner".into()))),
+            },
+            |owner| match owner {
+                "stopped-owner" => Ok(true),
+                _ => Err(crate::account::service::ApiError::internal("unreadable billing")),
+            },
+        );
+        assert_eq!(targets.owners, HashSet::from(["stopped-owner".to_string()]));
+        assert_eq!(targets.machines, HashSet::from(["stopped-machine".to_string()]));
     }
 
     #[tokio::test]

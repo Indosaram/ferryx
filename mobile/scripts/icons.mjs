@@ -6,7 +6,7 @@ import { readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-export const SHELL_BACKGROUND = "#23262D";
+export const SHELL_BACKGROUND = "#0a0a0a";
 const mobile = fileURLToPath(new URL("..", import.meta.url));
 const iosIcons = path.join(mobile, "src-tauri/icons/ios");
 

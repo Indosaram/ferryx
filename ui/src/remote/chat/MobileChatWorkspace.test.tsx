@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, cleanup } from "@testing-library/react";
-import { MobileChatWorkspace } from "./MobileChatWorkspace";
+import { MobileChatWorkspace, chatStarterPrompts } from "./MobileChatWorkspace";
 import type { MobileChatMessageProps } from "./MobileChatMessage";
 
 window.HTMLElement.prototype.scrollIntoView = vi.fn();
@@ -46,7 +46,7 @@ describe("MobileChatWorkspace", () => {
 
     expect(screen.getByTestId("chat-empty-state")).toBeInTheDocument();
     expect(screen.getByTestId("chat-empty-context")).toHaveTextContent("ferryx-ui · main");
-    expect(screen.getByText("Prompts run against the focused terminal.")).toBeInTheDocument();
+    expect(screen.getByText("Messages go to the agent in this session's terminal.")).toBeInTheDocument();
     expect(screen.queryByText("How can I help you today?")).not.toBeInTheDocument();
     expect(screen.queryByTestId(/starter-prompt-/)).not.toBeInTheDocument();
   });
@@ -163,8 +163,38 @@ describe("MobileChatWorkspace", () => {
     const scrollPill = screen.getByTestId("scroll-to-latest-pill");
     expect(scrollPill).toBeInTheDocument();
 
+    expect(scrollPill).toHaveClass("min-h-11");
     fireEvent.click(scrollPill);
-    expect(window.HTMLElement.prototype.scrollIntoView).toHaveBeenCalled();
+    expect(window.HTMLElement.prototype.scrollIntoView).toHaveBeenLastCalledWith({ behavior: "smooth", block: "end" });
+  });
+
+  it("follows a growing stream without animating it", () => {
+    vi.mocked(window.HTMLElement.prototype.scrollIntoView).mockClear();
+    const first: MobileChatMessageProps[] = [{ id: "a", role: "assistant", content: "one", timestamp: 1 }];
+    const { rerender } = render(<MobileChatWorkspace messages={first} onSendMessage={vi.fn()} />);
+    rerender(
+      <MobileChatWorkspace
+        messages={[...first, { id: "b", role: "assistant", content: "two", timestamp: 2 }]}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    expect(window.HTMLElement.prototype.scrollIntoView).toHaveBeenLastCalledWith({ behavior: "auto", block: "end" });
+  });
+
+  it("offers the pill exactly where it stops following the stream", () => {
+    render(
+      <MobileChatWorkspace
+        messages={[{ id: "a", role: "assistant", content: "one", timestamp: 1 }]}
+        onSendMessage={vi.fn()}
+      />,
+    );
+    const stream = screen.getByTestId("chat-message-stream");
+    Object.defineProperty(stream, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(stream, "clientHeight", { value: 300, configurable: true });
+    // 90px from the bottom: previously neither following nor offering the pill
+    Object.defineProperty(stream, "scrollTop", { value: 610, configurable: true, writable: true });
+    fireEvent.scroll(stream);
+    expect(screen.getByTestId("scroll-to-latest-pill")).toBeInTheDocument();
   });
 
   it("9. onStopExecution triggers stop when the pane is running", () => {
@@ -187,12 +217,38 @@ describe("MobileChatWorkspace", () => {
     expect(screen.getByTestId("chat-history-warning")).toHaveTextContent("not available");
   });
 
+  it("forwards the composer warning's action to the message box", () => {
+    const onAction = vi.fn();
+    render(
+      <MobileChatWorkspace
+        messages={[]}
+        onSendMessage={vi.fn()}
+        composerWarning="The stop request was not delivered."
+        composerWarningAction={{ label: "Try again", onAction }}
+      />
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(onAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks the owner's optimistic echo of a send as sending until the transcript carries it", () => {
+    render(
+      <MobileChatWorkspace
+        messages={[{ id: "pending-r1", role: "user", content: "please review", timestamp: 1 }]}
+        onSendMessage={vi.fn()}
+      />
+    );
+    expect(screen.getByTestId("user-message-sending")).toHaveTextContent("Sending");
+  });
+
   it("10. header degrades safely when optional header props are absent", () => {
     render(<MobileChatWorkspace messages={[]} onSendMessage={vi.fn()} />);
 
     expect(screen.queryByTestId("thread-header-back")).toBeNull();
     expect(screen.queryByTestId("open-terminal-button")).toBeNull();
-    expect(screen.getByText("Agent Workspace")).toBeInTheDocument();
+    expect(screen.getByText("Chat")).toBeInTheDocument();
+    // no invented "connected" dot when the connection state is unknown
+    expect(screen.queryByText("ferryx remote")).not.toBeInTheDocument();
     expect(screen.getByTestId("mobile-chat-header")).toBeInTheDocument();
     expect(screen.getByTestId("chat-composer-textarea")).toBeInTheDocument();
     expect(screen.getByTestId("chat-empty-state")).toBeInTheDocument();
@@ -280,7 +336,7 @@ describe("MobileChatWorkspace", () => {
     expect(screen.getByTestId("assistant-reference-body")).toHaveTextContent("rich turn body");
   });
 
-  it("15. draws the prompt card above the message box", () => {
+  it("15. draws the prompt card in the message stream, not the composer footer", () => {
     render(
       <MobileChatWorkspace
         messages={[]}
@@ -288,7 +344,11 @@ describe("MobileChatWorkspace", () => {
         promptCard={<div data-testid="stub-prompt-card">waiting</div>}
       />
     );
-    expect(screen.getByTestId("chat-composer-prompt")).toHaveTextContent("waiting");
+    expect(screen.getByTestId("chat-stream-prompt")).toHaveTextContent("waiting");
+    expect(screen.getByTestId("chat-message-stream")).toContainElement(screen.getByTestId("stub-prompt-card"));
+    expect(screen.getByTestId("mobile-chat-composer")).not.toContainElement(screen.getByTestId("stub-prompt-card"));
+    // the box still answers the prompt: Send stays beside Stop
+    expect(screen.getByTestId("send-button")).toBeInTheDocument();
   });
 
   it("16. keeps the reader's place when an older page lands above them", () => {
@@ -333,8 +393,8 @@ describe("MobileChatWorkspace", () => {
     const { rerender } = render(<MobileChatWorkspace messages={firstPage} onSendMessage={vi.fn()} />);
 
     const stream = screen.getByTestId("chat-message-stream");
-    // the stream is smooth-scrolled by class; record the inline scroll-behavior each write runs under
-    expect(stream).toHaveClass("scroll-smooth");
+    // record the inline scroll-behavior each write runs under
+    expect(stream).not.toHaveClass("scroll-smooth");
     let top = 100;
     const writes: { top: number; behavior: string }[] = [];
     Object.defineProperty(stream, "clientHeight", { value: 300, configurable: true });
@@ -358,9 +418,9 @@ describe("MobileChatWorkspace", () => {
     Object.defineProperty(stream, "scrollHeight", { value: 1200, configurable: true });
     rerender(<MobileChatWorkspace messages={[...older, ...firstPage]} onSendMessage={vi.fn()} />);
 
-    // the anchor write overrides the smooth class so the reader's place never animates
+    // the anchor write never animates the reader's place
     expect(writes).toEqual([{ top: 300, behavior: "auto" }]);
-    // and the container's own smooth scrolling is restored afterwards
+    // and the inline override is cleared afterwards
     expect(stream.style.scrollBehavior).toBe("");
   });
 
@@ -461,34 +521,39 @@ describe("MobileChatWorkspace", () => {
     expect(screen.queryByTestId("mobile-chat-header")).not.toBeInTheDocument();
   });
 
-  it("(a) empty state renders starter prompt chips", () => {
-    render(<MobileChatWorkspace messages={[]} onSendMessage={vi.fn()} />);
+  it("(a) empty state renders starter prompts that name the agent pane's worktree", () => {
+    render(<MobileChatWorkspace messages={[]} onSendMessage={vi.fn()} agentType="claude" worktreeLabel="feat-x" />);
 
     const starters = screen.getAllByTestId("chat-empty-starter");
-    expect(starters.length).toBeGreaterThanOrEqual(2);
-    expect(starters.length).toBeLessThanOrEqual(3);
-    expect(screen.getByText("Summarize the current state")).toBeInTheDocument();
-    expect(screen.getByText("What changed since my last message?")).toBeInTheDocument();
-    expect(screen.getByText("Run the tests")).toBeInTheDocument();
+    expect(starters.map((starter) => starter.textContent)).toEqual(chatStarterPrompts("claude", "feat-x"));
+    for (const starter of starters) expect(starter.textContent).toContain("feat-x");
+  });
+
+  it("(a2) a pane with no detected agent gets no starter prompts", () => {
+    render(<MobileChatWorkspace messages={[]} onSendMessage={vi.fn()} worktreeLabel="feat-x" />);
+    expect(screen.getByTestId("chat-empty-state")).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-empty-starter")).not.toBeInTheDocument();
+    expect(chatStarterPrompts(null, "feat-x")).toEqual([]);
   });
 
   it("(b) tapping a chip fills the composer with that text, focuses it, and does not call onSendMessage", () => {
     const handleSend = vi.fn();
-    render(<MobileChatWorkspace messages={[]} onSendMessage={handleSend} />);
+    render(<MobileChatWorkspace messages={[]} onSendMessage={handleSend} agentType="codex" />);
 
     const textarea = screen.getByTestId("chat-composer-textarea");
     expect(textarea).toHaveValue("");
 
-    const chip = screen.getByRole("button", { name: "Summarize the current state" });
+    const [first] = chatStarterPrompts("codex", undefined);
+    const chip = screen.getByRole("button", { name: first });
     fireEvent.click(chip);
 
-    expect(textarea).toHaveValue("Summarize the current state");
+    expect(textarea).toHaveValue(first);
     expect(textarea).toHaveFocus();
     expect(handleSend).not.toHaveBeenCalled();
   });
 
   it("(c) chips disappear once a message exists", () => {
-    const { rerender } = render(<MobileChatWorkspace messages={[]} onSendMessage={vi.fn()} />);
+    const { rerender } = render(<MobileChatWorkspace messages={[]} onSendMessage={vi.fn()} agentType="claude" />);
     expect(screen.getAllByTestId("chat-empty-starter").length).toBeGreaterThan(0);
 
     const messages: MobileChatMessageProps[] = [

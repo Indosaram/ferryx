@@ -131,7 +131,7 @@ describe("ApprovePage", () => {
     await flush();
     expect(lookup).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText("Approval code"), { target: { value: "wxyz2345" } });
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Find machine" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Find computer" })); });
     await flush();
     expect(lookup).toHaveBeenCalledWith(relayUrl, "tok", "WXYZ-2345");
   });
@@ -158,7 +158,7 @@ describe("RemoteApp /approve route", () => {
     await flush();
 
     expect(lookup).toHaveBeenCalledWith(relayUrl, "tok", "ABCD-EFGH");
-    expect(screen.getByRole("heading", { name: "Approve a machine" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Approve a computer" })).toBeInTheDocument();
     expect(screen.getByTestId("machine-approval-card")).toBeInTheDocument();
   });
 });

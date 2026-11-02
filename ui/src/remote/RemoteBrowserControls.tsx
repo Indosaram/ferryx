@@ -2,13 +2,30 @@
  * Remote Browser Controls Toolbar (§4.4, Phase 6)
  *
  * Designed to fit into RemoteBrowser's `controls` slot.
- * Includes URL bar, driver claim/release badge, mainframe point click toggle,
- * semantic reference fill controls, keypress inputs for allowlisted keys,
- * and a collapsible advanced eval UI with owner warning and 64 KiB truncation note.
+ * Desktop: URL bar, claim/release, point click toggle, reference fill, allowlisted keys and a
+ * confirm-gated advanced eval. Phone: one navigation row plus claim and a Tools sheet; eval is not offered.
  */
 
-import React, { useState } from "react";
-import { buildRemoteInputRefusal, type RemoteInputRefusal } from "./RemoteBrowser";
+import React, { useEffect, useState } from "react";
+import {
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
+  Delete,
+  RotateCw,
+  SlidersHorizontal,
+  X,
+  type LucideIcon,
+} from "lucide-react";
+import {
+  BROWSER_FOCUS_RING,
+  buildRemoteInputRefusal,
+  describeRemoteInputRefusal,
+  useCoarsePointer,
+  type RemoteInputRefusal,
+} from "./RemoteBrowser";
+import { MobileSheet } from "./chat/MobileSheet";
 import type { BrowserErrorDetails } from "./browserProtocol";
 import type { RemoteDriverState } from "./useRemoteBrowserDriver";
 
@@ -29,17 +46,23 @@ export const FORBIDDEN_APP_CHROME_KEYS = new Set([
   "ctrl+t",
 ]);
 
-export const ALLOWLISTED_KEYS = [
+interface AllowlistedKey {
+  label: string;
+  key: string;
+  icon?: LucideIcon;
+}
+
+export const ALLOWLISTED_KEYS: readonly AllowlistedKey[] = [
   { label: "Enter", key: "Enter" },
   { label: "Tab", key: "Tab" },
   { label: "Esc", key: "Escape" },
-  { label: "←", key: "ArrowLeft" },
-  { label: "→", key: "ArrowRight" },
-  { label: "↑", key: "ArrowUp" },
-  { label: "↓", key: "ArrowDown" },
-  { label: "⌫", key: "Backspace" },
+  { label: "Arrow left", key: "ArrowLeft", icon: ArrowLeft },
+  { label: "Arrow right", key: "ArrowRight", icon: ArrowRight },
+  { label: "Arrow up", key: "ArrowUp", icon: ArrowUp },
+  { label: "Arrow down", key: "ArrowDown", icon: ArrowDown },
+  { label: "Backspace", key: "Backspace", icon: Delete },
   { label: "Del", key: "Delete" },
-] as const;
+];
 
 export interface RemoteBrowserControlsProps {
   url?: string;
@@ -60,6 +83,8 @@ export interface RemoteBrowserControlsProps {
   refusal?: RemoteInputRefusal | null;
   onRefusal?: (refusal: RemoteInputRefusal) => void;
   onClearRefusal?: () => void;
+  /** Overrides the touch-device check: true renders the phone layout, false the desktop one. */
+  phone?: boolean;
   className?: string;
 }
 
@@ -93,13 +118,19 @@ export const RemoteBrowserControls: React.FC<RemoteBrowserControlsProps> = ({
   refusal: propRefusal,
   onRefusal,
   onClearRefusal,
+  phone: phoneProp,
   className = "",
 }) => {
+  const coarsePointer = useCoarsePointer();
+  const phone = phoneProp ?? coarsePointer;
   const [inputUrl, setInputUrl] = useState(url);
   const [reference, setReference] = useState("");
   const [fillValue, setFillValue] = useState("");
   const [customKey, setCustomKey] = useState("");
   const [showAdvancedEval, setShowAdvancedEval] = useState(false);
+  const [evalConfirming, setEvalConfirming] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const [claimConfirming, setClaimConfirming] = useState(false);
   const [evalScript, setEvalScript] = useState("");
   const [evalResult, setEvalResult] = useState<string | null>(null);
   const [evalLoading, setEvalLoading] = useState(false);
@@ -113,6 +144,18 @@ export const RemoteBrowserControls: React.FC<RemoteBrowserControlsProps> = ({
   }, [url]);
 
   const isDriving = driverState === "driving";
+
+  useEffect(() => {
+    setClaimConfirming(false);
+  }, [driverState]);
+
+  const handleClaimClick = () => {
+    if (driverState === "occupied") {
+      setClaimConfirming(true);
+      return;
+    }
+    onClaim?.();
+  };
 
   const handleNavigateSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -217,7 +260,7 @@ export const RemoteBrowserControls: React.FC<RemoteBrowserControlsProps> = ({
     setCustomKey("");
   };
 
-  const handleRunEval = async () => {
+  const handleRunEvalClick = () => {
     if (!isDriving || !evalScript.trim()) return;
     const scriptBytes = new TextEncoder().encode(evalScript).length;
     if (scriptBytes > 32 * 1024) {
@@ -232,8 +275,12 @@ export const RemoteBrowserControls: React.FC<RemoteBrowserControlsProps> = ({
       setEvalResult(`Refused: eval script too large (${scriptBytes} bytes > 32 KiB limit)`);
       return;
     }
+    setEvalConfirming(true);
+  };
 
-    if (!onEval) return;
+  const handleConfirmEval = async () => {
+    setEvalConfirming(false);
+    if (!isDriving || !evalScript.trim() || !onEval) return;
     setEvalLoading(true);
     setEvalResult(null);
     try {
@@ -260,331 +307,450 @@ export const RemoteBrowserControls: React.FC<RemoteBrowserControlsProps> = ({
     }
   };
 
-  return (
-    <div
-      data-testid="remote-browser-controls"
-      className={`flex flex-col gap-2 p-2 bg-[#111111] border-b border-[#191919] text-[#f5f5f5] text-xs ${className}`}
+  const focus = BROWSER_FOCUS_RING;
+  const iconBtn = `flex items-center justify-center rounded bg-chat-surface-raised hover:bg-chat-surface-hover text-chat-foreground disabled:opacity-40 disabled:cursor-not-allowed transition-colors ${focus} ${
+    phone ? "size-11" : "size-7"
+  }`;
+  const secondaryBtn = `rounded border border-chat-border bg-chat-surface-raised hover:bg-chat-surface-hover text-chat-foreground font-medium disabled:opacity-40 disabled:cursor-not-allowed transition-colors ${focus} ${
+    phone ? "min-h-11 px-4 text-sm" : "px-2 py-1 text-xs"
+  }`;
+  const primaryBtn = `rounded bg-chat-primary text-chat-primary-foreground hover:brightness-110 font-medium disabled:opacity-40 disabled:cursor-not-allowed transition-colors ${focus} ${
+    phone ? "min-h-11 px-4 text-sm" : "px-2 py-1 text-xs"
+  }`;
+  const inputCls = `rounded bg-chat-screen border border-chat-border text-chat-foreground disabled:opacity-50 disabled:cursor-not-allowed ${focus} ${
+    phone ? "min-h-11 px-3 text-base" : "px-1.5 py-1 text-xs"
+  }`;
+
+  const navButtons = (
+    <div className="flex items-center gap-1">
+      <button
+        type="button"
+        data-testid="remote-browser-back-btn"
+        disabled={!isDriving}
+        onClick={onBack}
+        aria-label="Go back"
+        className={iconBtn}
+      >
+        <ArrowLeft className="size-4" aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        data-testid="remote-browser-forward-btn"
+        disabled={!isDriving}
+        onClick={onForward}
+        aria-label="Go forward"
+        className={iconBtn}
+      >
+        <ArrowRight className="size-4" aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        data-testid="remote-browser-reload-btn"
+        disabled={!isDriving}
+        onClick={onReload}
+        aria-label="Reload"
+        className={iconBtn}
+      >
+        <RotateCw className="size-4" aria-hidden="true" />
+      </button>
+    </div>
+  );
+
+  const urlForm = (
+    <form onSubmit={handleNavigateSubmit} className={`flex-1 flex items-center gap-1 ${phone ? "min-w-0" : "min-w-[180px]"}`}>
+      <input
+        type="text"
+        inputMode="url"
+        autoCapitalize="none"
+        autoCorrect="off"
+        spellCheck={false}
+        enterKeyHint="go"
+        data-testid="remote-browser-url-input"
+        value={inputUrl}
+        onChange={(e) => {
+          urlEditedRef.current = true;
+          setInputUrl(e.target.value);
+        }}
+        disabled={!isDriving}
+        aria-label="Page URL"
+        placeholder={isDriving ? "https://example.com" : "Take control to navigate"}
+        className={`w-full min-w-0 font-mono ${inputCls}`}
+      />
+      {!phone && (
+        <button
+          type="submit"
+          data-testid="remote-browser-navigate-btn"
+          disabled={!isDriving || !inputUrl.trim()}
+          className={primaryBtn}
+        >
+          Go
+        </button>
+      )}
+    </form>
+  );
+
+  const driverLabel =
+    driverState === "driving"
+      ? "Driving"
+      : driverState === "claiming"
+      ? "Taking control..."
+      : driverState === "occupied"
+      ? "Occupied"
+      : driverState === "revoked"
+      ? "Revoked"
+      : "Viewing";
+
+  const driverBadge = (
+    <span
+      data-testid="remote-browser-driver-badge"
+      role="status"
+      className={`rounded px-2 py-0.5 text-xs font-medium bg-chat-surface-raised ${
+        phone ? "sr-only" : ""
+      } ${
+        driverState === "driving"
+          ? "text-status-success"
+          : driverState === "claiming"
+          ? "text-status-warning"
+          : driverState === "occupied" || driverState === "revoked"
+          ? "text-chat-danger"
+          : "text-chat-foreground-secondary"
+      }`}
     >
-      {/* Top row: Navigation bar, Status badge, Claim/Release */}
-      <div className="flex flex-wrap items-center gap-2">
-        {/* Nav history buttons */}
+      {driverLabel}
+    </span>
+  );
+
+  const claimButton =
+    driverState === "driving" ? (
+      <button
+        type="button"
+        data-testid="remote-browser-release-btn"
+        onClick={onRelease}
+        className={`${secondaryBtn} ${phone ? "flex-1" : ""}`}
+      >
+        Release control
+      </button>
+    ) : (
+      <button
+        type="button"
+        data-testid="remote-browser-claim-btn"
+        disabled={driverState === "claiming"}
+        onClick={handleClaimClick}
+        className={`${primaryBtn} ${phone ? "flex-1" : ""}`}
+      >
+        {driverState === "claiming" ? "Taking control..." : "Take control"}
+      </button>
+    );
+
+  const occupiedNotice =
+    driverState === "occupied" ? (
+      <div data-testid="remote-browser-occupied-notice" className="flex flex-col gap-2 text-xs text-chat-foreground-secondary">
+        <p>Someone else is controlling this browser. Taking control will stop them.</p>
+        {claimConfirming && (
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              data-testid="remote-browser-claim-confirm-btn"
+              onClick={() => {
+                setClaimConfirming(false);
+                onClaim?.();
+              }}
+              className={primaryBtn}
+            >
+              Take control anyway
+            </button>
+            <button
+              type="button"
+              data-testid="remote-browser-claim-cancel-btn"
+              onClick={() => setClaimConfirming(false)}
+              className={secondaryBtn}
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+      </div>
+    ) : null;
+
+  const fillForm = (
+    <form onSubmit={handleFillSubmit} className={`flex items-center gap-1.5 flex-wrap ${phone ? "w-full" : ""}`}>
+      <span className="text-chat-foreground-secondary text-xs font-medium">Ref:</span>
+      <input
+        type="text"
+        data-testid="remote-browser-ref-input"
+        value={reference}
+        onChange={(e) => setReference(e.target.value)}
+        disabled={!isDriving}
+        aria-label="Element reference"
+        placeholder="e.g. e1"
+        autoCapitalize="none"
+        autoCorrect="off"
+        spellCheck={false}
+        className={`font-mono ${phone ? "w-20" : "w-16"} ${inputCls}`}
+      />
+      <input
+        type="text"
+        data-testid="remote-browser-fill-input"
+        value={fillValue}
+        onChange={(e) => setFillValue(e.target.value)}
+        disabled={!isDriving}
+        aria-label="Text to fill"
+        placeholder="Text to fill"
+        className={`${phone ? "flex-1 min-w-0" : "w-40"} ${inputCls}`}
+      />
+      <button
+        type="submit"
+        data-testid="remote-browser-fill-btn"
+        disabled={!isDriving || !reference.trim()}
+        className={secondaryBtn}
+      >
+        Fill
+      </button>
+    </form>
+  );
+
+  const showPointClick = canPointClick && !pointClickDisabledReason;
+  const pointClickToggle = showPointClick ? (
+    <label
+      data-testid="remote-browser-point-click-toggle"
+      title={isDriving ? "Toggle coordinate point click" : "Take control to enable point click"}
+      className={`flex items-center gap-2 select-none text-xs cursor-pointer ${phone ? "min-h-11" : ""}`}
+    >
+      <input
+        type="checkbox"
+        checked={pointClickEnabled}
+        disabled={!isDriving}
+        onChange={onTogglePointClick}
+        className={`rounded accent-chat-primary disabled:opacity-40 ${focus} ${phone ? "size-5" : ""}`}
+      />
+      <span className={isDriving ? "text-chat-foreground" : "text-chat-foreground-secondary"}>Point click</span>
+    </label>
+  ) : null;
+
+  const keysRow = (
+    <div className="flex items-center gap-1 flex-wrap">
+      <span className="text-chat-foreground-secondary text-xs">Keys:</span>
+      {ALLOWLISTED_KEYS.map(({ label, key, icon: Icon }) => (
+        <button
+          key={key}
+          type="button"
+          data-testid={`remote-browser-key-${key}`}
+          disabled={!isDriving}
+          onClick={() => dispatchKeypress(key)}
+          aria-label={Icon ? label : undefined}
+          className={`flex items-center justify-center rounded border border-chat-border bg-chat-surface-raised hover:bg-chat-surface-hover text-chat-foreground-secondary text-xs font-mono disabled:opacity-40 disabled:cursor-not-allowed transition-colors ${focus} ${
+            phone ? "min-h-11 min-w-11 px-3" : "px-1.5 py-0.5"
+          }`}
+        >
+          {Icon ? <Icon className="size-4" aria-hidden="true" /> : label}
+        </button>
+      ))}
+      <form onSubmit={handleCustomKeySubmit} className="inline-flex items-center gap-1 ml-1">
+        <input
+          type="text"
+          data-testid="remote-browser-custom-key-input"
+          value={customKey}
+          onChange={(e) => setCustomKey(e.target.value)}
+          disabled={!isDriving}
+          aria-label="Custom key"
+          placeholder="Key"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          className={`font-mono ${phone ? "w-24" : "w-14"} ${inputCls}`}
+        />
+        <button
+          type="submit"
+          data-testid="remote-browser-send-key-btn"
+          disabled={!isDriving || !customKey.trim()}
+          className={secondaryBtn}
+        >
+          Send
+        </button>
+      </form>
+    </div>
+  );
+
+  const refusalBanner = activeRefusal ? (
+    <div
+      data-testid="remote-browser-controls-refusal-banner"
+      role="alert"
+      className="flex items-start justify-between gap-2 pl-2.5 pr-1 py-1 bg-chat-surface-raised border border-chat-border text-chat-foreground rounded text-xs"
+    >
+      <div className="flex flex-col flex-1 min-w-0 gap-1 py-1.5">
+        <span data-testid="remote-browser-controls-refusal-message" className="font-medium">
+          {describeRemoteInputRefusal(activeRefusal)}
+        </span>
+        <details className="text-chat-foreground-secondary">
+          <summary className={`cursor-pointer w-fit rounded ${focus}`}>Details</summary>
+          <div className="mt-1 flex flex-col gap-0.5 font-mono break-words">
+            <span data-testid="remote-browser-controls-refusal-code">{activeRefusal.code}</span>
+            <span data-testid="remote-browser-controls-refusal-reason">{activeRefusal.reason}</span>
+          </div>
+        </details>
+      </div>
+      <button
+        type="button"
+        data-testid="remote-browser-controls-refusal-dismiss"
+        onClick={() => {
+          setLocalRefusal(null);
+          onClearRefusal?.();
+        }}
+        className={`shrink-0 flex items-center justify-center rounded text-chat-foreground-secondary hover:text-chat-foreground hover:bg-chat-surface-hover transition-colors ${focus} ${
+          phone ? "size-11" : "size-7"
+        }`}
+        aria-label="Dismiss notice"
+      >
+        <X className="size-4" aria-hidden="true" />
+      </button>
+    </div>
+  ) : null;
+
+  const rootCls = `flex flex-col gap-2 p-2 bg-chat-surface border-b border-chat-border text-chat-foreground text-xs ${className}`;
+
+  if (phone) {
+    return (
+      <div data-testid="remote-browser-controls" className={rootCls}>
         <div className="flex items-center gap-1">
+          {navButtons}
+          {urlForm}
+        </div>
+        <div className="flex items-center gap-2">
+          {driverBadge}
+          {claimButton}
           <button
             type="button"
-            data-testid="remote-browser-back-btn"
-            disabled={!isDriving}
-            onClick={onBack}
-            aria-label="Go back"
-            className="p-1 rounded bg-[#1a1b1b] hover:bg-[#141414] text-[#f5f5f5] disabled:opacity-40 disabled:cursor-not-allowed transition"
+            data-testid="remote-browser-tools-btn"
+            onClick={() => setToolsOpen(true)}
+            aria-haspopup="dialog"
+            className={`${secondaryBtn} flex items-center gap-2`}
           >
-            ←
-          </button>
-          <button
-            type="button"
-            data-testid="remote-browser-forward-btn"
-            disabled={!isDriving}
-            onClick={onForward}
-            aria-label="Go forward"
-            className="p-1 rounded bg-[#1a1b1b] hover:bg-[#141414] text-[#f5f5f5] disabled:opacity-40 disabled:cursor-not-allowed transition"
-          >
-            →
-          </button>
-          <button
-            type="button"
-            data-testid="remote-browser-reload-btn"
-            disabled={!isDriving}
-            onClick={onReload}
-            aria-label="Reload"
-            className="p-1 rounded bg-[#1a1b1b] hover:bg-[#141414] text-[#f5f5f5] disabled:opacity-40 disabled:cursor-not-allowed transition"
-          >
-            ↻
+            <SlidersHorizontal className="size-4" aria-hidden="true" />
+            Tools
           </button>
         </div>
+        {occupiedNotice}
+        {!toolsOpen && refusalBanner}
+        <MobileSheet
+          open={toolsOpen}
+          onOpenChange={setToolsOpen}
+          title="Tools"
+          ariaLabel="Browser tools"
+          testId="remote-browser-tools-sheet"
+        >
+          <div className="flex flex-col gap-4 p-2">
+            {refusalBanner}
+            {fillForm}
+            {pointClickToggle}
+            {keysRow}
+          </div>
+        </MobileSheet>
+      </div>
+    );
+  }
 
-        {/* URL input */}
-        <form onSubmit={handleNavigateSubmit} className="flex-1 min-w-[180px] flex items-center gap-1">
-          <input
-            type="text"
-            data-testid="remote-browser-url-input"
-            value={inputUrl}
-            onChange={(e) => {
-              urlEditedRef.current = true;
-              setInputUrl(e.target.value);
-            }}
-            disabled={!isDriving}
-            aria-label="Page URL"
-            placeholder={isDriving ? "https://example.com" : "Claim control to navigate"}
-            className="w-full px-2 py-1 rounded bg-[#0a0a0a] border border-[#191919] focus:outline-none focus:border-[#346bf1] disabled:opacity-50 disabled:cursor-not-allowed text-[#f5f5f5] text-base sm:text-xs font-mono"
-          />
-          <button
-            type="submit"
-            data-testid="remote-browser-navigate-btn"
-            disabled={!isDriving || !inputUrl.trim()}
-            className="px-2 py-1 rounded bg-[#346bf1] hover:bg-[#346bf1]/90 disabled:opacity-40 disabled:cursor-not-allowed text-[#ffffff] font-medium transition"
-          >
-            Go
-          </button>
-        </form>
-
-        {/* Driver Status Badge */}
+  return (
+    <div data-testid="remote-browser-controls" className={rootCls}>
+      <div className="flex flex-wrap items-center gap-2">
+        {navButtons}
+        {urlForm}
         <div className="flex items-center gap-1.5 shrink-0">
-          <span
-            data-testid="remote-browser-driver-badge"
-            role="status"
-            className={`px-2 py-0.5 rounded text-[11px] font-semibold uppercase tracking-wider ${
-              driverState === "driving"
-                ? "bg-[#4bb8f0]/15 text-[#4bb8f0] border border-[#4bb8f0]/30"
-                : driverState === "claiming"
-                ? "bg-[#ffb900]/15 text-[#ffb900] border border-[#ffb900]/30"
-                : driverState === "occupied"
-                ? "bg-[#ff6467]/15 text-[#ff6467] border border-[#ff6467]/30"
-                : driverState === "revoked"
-                ? "bg-[#ff6467]/15 text-[#ff6467] border border-[#ff6467]/30"
-                : "bg-[#1a1b1b] text-[#838383] border border-[#191919]"
-            }`}
-          >
-            {driverState === "driving"
-              ? "Driving"
-              : driverState === "claiming"
-              ? "Claiming..."
-              : driverState === "occupied"
-              ? "Occupied"
-              : driverState === "revoked"
-              ? "Revoked"
-              : "Viewing"}
-          </span>
-
-          {/* Claim / Release Action Button */}
-          {driverState === "driving" ? (
-            <button
-              type="button"
-              data-testid="remote-browser-release-btn"
-              onClick={onRelease}
-              className="px-2 py-1 rounded bg-[#1a1b1b] hover:bg-[#141414] text-[#f5f5f5] text-xs font-medium border border-[#191919] transition"
-            >
-              Release Control
-            </button>
-          ) : (
-            <button
-              type="button"
-              data-testid="remote-browser-claim-btn"
-              disabled={driverState === "claiming"}
-              onClick={onClaim}
-              className="px-2 py-1 rounded bg-[#ffb900] hover:bg-[#ffb900]/90 disabled:opacity-40 disabled:cursor-not-allowed text-[#0a0a0a] text-xs font-medium transition"
-            >
-              {driverState === "claiming" ? "Claiming..." : "Take Control"}
-            </button>
-          )}
+          {driverBadge}
+          {claimButton}
         </div>
       </div>
 
-      {/* Second row: Reference fill, point-click toggle, keypress quick actions */}
-      <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-[#191919]">
-        {/* Semantic reference manipulation */}
-        <form onSubmit={handleFillSubmit} className="flex items-center gap-1.5 flex-wrap">
-          <span className="text-[#838383] text-[11px] font-medium">Ref:</span>
-          <input
-            type="text"
-            data-testid="remote-browser-ref-input"
-            value={reference}
-            onChange={(e) => setReference(e.target.value)}
-            disabled={!isDriving}
-            aria-label="Element reference"
-            placeholder="e.g. e1"
-            className="w-16 px-1.5 py-0.5 rounded bg-[#0a0a0a] border border-[#191919] focus:outline-none focus:border-[#346bf1] disabled:opacity-50 text-[#f5f5f5] text-base sm:text-xs font-mono"
-          />
-          <input
-            type="text"
-            data-testid="remote-browser-fill-input"
-            value={fillValue}
-            onChange={(e) => setFillValue(e.target.value)}
-            disabled={!isDriving}
-            aria-label="Text to fill"
-            placeholder="Text to fill"
-            className="w-28 sm:w-40 px-1.5 py-0.5 rounded bg-[#0a0a0a] border border-[#191919] focus:outline-none focus:border-[#346bf1] disabled:opacity-50 text-[#f5f5f5] text-base sm:text-xs"
-          />
-          <button
-            type="submit"
-            data-testid="remote-browser-fill-btn"
-            disabled={!isDriving || !reference.trim()}
-            className="px-2 py-0.5 rounded bg-[#1a1b1b] hover:bg-[#141414] disabled:opacity-40 disabled:cursor-not-allowed text-[#f5f5f5] text-xs font-medium transition border border-[#191919]"
-          >
-            Fill
-          </button>
-        </form>
+      {occupiedNotice}
 
-        {/* Point click toggle (visible ONLY when capability indicates point click is supported) */}
-        {canPointClick ? (
-          <label
-            data-testid="remote-browser-point-click-toggle"
-            title={
-              pointClickDisabledReason ||
-              (isDriving ? "Toggle coordinate point click" : "Claim control to enable point click")
-            }
-            className={`flex items-center gap-1.5 select-none text-[11px] ${
-              pointClickDisabledReason ? "cursor-not-allowed opacity-60" : "cursor-pointer"
-            }`}
-          >
-            <input
-              type="checkbox"
-              checked={pointClickEnabled && !pointClickDisabledReason}
-              disabled={!isDriving || Boolean(pointClickDisabledReason)}
-              onChange={onTogglePointClick}
-              className="rounded bg-[#0a0a0a] border-[#191919] text-[#346bf1] focus:ring-0 focus:ring-offset-0 disabled:opacity-40"
-            />
-            <span
-              className={
-                pointClickDisabledReason
-                  ? "text-[#ff6467] line-through"
-                  : isDriving
-                  ? "text-[#f5f5f5]"
-                  : "text-[#818181]"
-              }
-            >
-              Point Click
-            </span>
-            {pointClickDisabledReason && (
-              <span
-                data-testid="remote-browser-point-click-disabled-badge"
-                className="text-[10px] text-[#ff6467] bg-[#ff6467]/10 border border-[#ff6467]/30 px-1 rounded ml-0.5"
-              >
-                Refused
-              </span>
-            )}
-          </label>
-        ) : (
-          <div
-            data-testid="remote-browser-point-click-unsupported"
-            className="flex items-center gap-1 text-[11px] text-[#818181] opacity-50 cursor-not-allowed select-none"
-            title="Point click unsupported in v1; use reference-based interaction instead"
-          >
-            <span className="line-through">Point Click</span>
-            <span className="text-[10px] text-[#838383] bg-[#1a1b1b] border border-[#191919] px-1 rounded">
-              Unsupported
-            </span>
-          </div>
-        )}
-
-        {/* Allowlisted keypress quick buttons & custom key input */}
-        <div className="flex items-center gap-1 flex-wrap">
-          <span className="text-[#838383] text-[11px]">Keys:</span>
-          {ALLOWLISTED_KEYS.map(({ label, key }) => (
-            <button
-              key={key}
-              type="button"
-              data-testid={`remote-browser-key-${key}`}
-              disabled={!isDriving}
-              onClick={() => dispatchKeypress(key)}
-              className="px-1.5 py-0.5 rounded bg-[#1a1b1b] hover:bg-[#141414] disabled:opacity-40 disabled:cursor-not-allowed text-[#838383] text-[11px] font-mono transition border border-[#191919]"
-            >
-              {label}
-            </button>
-          ))}
-          <form onSubmit={handleCustomKeySubmit} className="inline-flex items-center gap-1 ml-1">
-            <input
-              type="text"
-              data-testid="remote-browser-custom-key-input"
-              value={customKey}
-              onChange={(e) => setCustomKey(e.target.value)}
-              disabled={!isDriving}
-              placeholder="Key"
-              className="w-14 px-1 py-0.5 rounded bg-[#0a0a0a] border border-[#191919] text-[#f5f5f5] text-[11px] font-mono focus:outline-none focus:border-[#346bf1] disabled:opacity-50"
-            />
-            <button
-              type="submit"
-              data-testid="remote-browser-send-key-btn"
-              disabled={!isDriving || !customKey.trim()}
-              className="px-1.5 py-0.5 rounded bg-[#1a1b1b] hover:bg-[#141414] disabled:opacity-40 disabled:cursor-not-allowed text-[#f5f5f5] text-[11px] font-medium transition border border-[#191919]"
-            >
-              Send
-            </button>
-          </form>
-        </div>
-
-        {/* Collapsible advanced eval toggle */}
+      <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-chat-border">
+        {fillForm}
+        {pointClickToggle}
+        {keysRow}
         <button
           type="button"
           data-testid="remote-browser-eval-toggle"
-          onClick={() => setShowAdvancedEval((prev) => !prev)}
-          className="text-[11px] text-[#838383] hover:text-[#f5f5f5] underline underline-offset-2 ml-auto transition"
+          onClick={() => {
+            setShowAdvancedEval((prev) => !prev);
+            setEvalConfirming(false);
+          }}
+          className={`text-xs text-chat-foreground-secondary hover:text-chat-foreground underline underline-offset-2 ml-auto rounded transition-colors ${focus}`}
         >
-          {showAdvancedEval ? "Hide Advanced JS Eval" : "Advanced JS Eval"}
+          {showAdvancedEval ? "Hide advanced JS eval" : "Advanced JS eval"}
         </button>
       </div>
 
-      {/* Controls Refusal Explanation Banner (T22) */}
-      {activeRefusal && (
-        <div
-          data-testid="remote-browser-controls-refusal-banner"
-          role="alert"
-          className="flex items-center justify-between gap-2 px-2.5 py-1.5 bg-[#ff6467]/15 border border-[#ff6467]/30 text-[#ff6467] rounded text-xs"
-        >
-          <div className="flex items-center gap-1.5 flex-1 min-w-0">
-            <span
-              data-testid="remote-browser-controls-refusal-code"
-              className="font-semibold text-[10px] uppercase tracking-wider px-1 py-0.5 bg-[#ff6467]/20 border border-[#ff6467]/30 rounded shrink-0"
-            >
-              {activeRefusal.code}
-            </span>
-            <span
-              data-testid="remote-browser-controls-refusal-reason"
-              className="text-[#f5f5f5] font-mono text-[11px] truncate"
-            >
-              {activeRefusal.reason}
-            </span>
-          </div>
-          <button
-            type="button"
-            data-testid="remote-browser-controls-refusal-dismiss"
-            onClick={() => {
-              setLocalRefusal(null);
-              onClearRefusal?.();
-            }}
-            className="text-[#838383] hover:text-[#f5f5f5] text-xs px-1 hover:bg-[#ff6467]/10 rounded"
-            aria-label="Dismiss refusal notice"
-          >
-            ×
-          </button>
-        </div>
-      )}
+      {refusalBanner}
 
-      {/* Collapsible Advanced Eval Section */}
       {showAdvancedEval && (
         <div
           data-testid="remote-browser-eval-panel"
-          className="flex flex-col gap-1.5 p-2 bg-[#0a0a0a] border border-[#191919] rounded mt-1"
+          className="flex flex-col gap-1.5 p-2 bg-chat-screen border border-chat-border rounded mt-1"
         >
-          {/* Owner warning and truncation reminder */}
-          <div className="flex flex-col gap-0.5 text-[11px] text-[#ffb900] font-medium">
-            <p>Warning: Remote eval executes arbitrary JavaScript on the page with session privileges.</p>
-            <p className="text-[#838383]">Result truncated to 64 KiB (65,536 UTF-8 bytes).</p>
+          <div className="flex flex-col gap-0.5 text-xs font-medium">
+            <p className="text-status-warning">
+              Warning: Remote eval executes arbitrary JavaScript on the page with session privileges.
+            </p>
+            <p className="text-chat-foreground-secondary">Result truncated to 64 KiB (65,536 UTF-8 bytes).</p>
           </div>
 
           <div className="flex gap-2">
             <textarea
               data-testid="remote-browser-eval-input"
               value={evalScript}
-              onChange={(e) => setEvalScript(e.target.value)}
+              onChange={(e) => {
+                setEvalScript(e.target.value);
+                setEvalConfirming(false);
+              }}
               disabled={!isDriving}
-              placeholder='document.title or window.location.href'
+              aria-label="Script to run"
+              placeholder="document.title or window.location.href"
               rows={2}
-              className="flex-1 p-1.5 rounded bg-[#111111] border border-[#191919] text-[#f5f5f5] text-xs font-mono focus:outline-none focus:border-[#346bf1] disabled:opacity-50"
+              className={`flex-1 p-1.5 rounded bg-chat-surface border border-chat-border text-chat-foreground text-base sm:text-xs font-mono disabled:opacity-50 ${focus}`}
             />
             <button
               type="button"
               data-testid="remote-browser-eval-run-btn"
-              disabled={!isDriving || !evalScript.trim() || evalLoading}
-              onClick={handleRunEval}
-              className="px-3 py-1 bg-[#ffb900]/20 hover:bg-[#ffb900]/30 border border-[#ffb900]/40 disabled:opacity-40 disabled:cursor-not-allowed text-[#ffb900] text-xs font-medium rounded self-start transition"
+              disabled={!isDriving || !evalScript.trim() || evalLoading || evalConfirming}
+              onClick={handleRunEvalClick}
+              className={`${secondaryBtn} self-start [@media(pointer:coarse)]:min-h-11`}
             >
-              {evalLoading ? "Running..." : "Run Eval"}
+              {evalLoading ? "Running..." : "Run eval"}
             </button>
           </div>
+
+          {evalConfirming && (
+            <div
+              data-testid="remote-browser-eval-confirm"
+              role="alertdialog"
+              aria-label="Confirm script"
+              className="flex flex-col gap-2 p-2 bg-chat-surface-raised border border-chat-border rounded"
+            >
+              <p className="text-chat-foreground">Run this script on the page? It can read and change anything you can see.</p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  data-testid="remote-browser-eval-confirm-btn"
+                  onClick={handleConfirmEval}
+                  className={`${primaryBtn} [@media(pointer:coarse)]:min-h-11`}
+                >
+                  Run script
+                </button>
+                <button
+                  type="button"
+                  data-testid="remote-browser-eval-cancel-btn"
+                  onClick={() => setEvalConfirming(false)}
+                  className={`${secondaryBtn} [@media(pointer:coarse)]:min-h-11`}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
 
           {evalResult && (
             <div
               data-testid="remote-browser-eval-result"
-              className="p-1.5 bg-[#111111] rounded border border-[#191919] text-[11px] font-mono text-[#f5f5f5] max-h-32 overflow-y-auto whitespace-pre-wrap break-all"
+              className="p-1.5 bg-chat-surface rounded border border-chat-border text-xs font-mono text-chat-foreground max-h-32 overflow-y-auto whitespace-pre-wrap break-all"
             >
               {evalResult}
             </div>

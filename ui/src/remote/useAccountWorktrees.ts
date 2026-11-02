@@ -13,6 +13,7 @@ import {
 import { getOrCreateAttachKey, type AttachKeyPair } from "./accountAttach";
 import type { TunnelTransport } from "./attachTunnel";
 import { suggestDeviceName } from "./deviceIdentity";
+import { userFacingError } from "./userFacingError";
 import { getOrCreateInstallationId } from "../lib/storageKeys";
 import { type RemoteContextOption } from "./RemoteSessionList";
 import {
@@ -305,10 +306,14 @@ export function useAccountWorktrees(
       }
 
       if (isGenerationAlive()) {
+        // A re-probe of a computer that is already up (pull to refresh) keeps its rows usable
+        // while the tunnel round trip runs; only a computer that was not ready greys them out.
         setMachineStatuses((prev) => ({
           ...prev,
           [machine.machineId]: { ...prev[machine.machineId], machine, status: "tunneling",
-            options: (prev[machine.machineId]?.options ?? []).map((option) => ({ ...option, unavailable: true })) },
+            options: prev[machine.machineId]?.status === "ready"
+              ? prev[machine.machineId].options
+              : (prev[machine.machineId]?.options ?? []).map((option) => ({ ...option, unavailable: true })) },
         }));
       }
 
@@ -554,7 +559,7 @@ export function useAccountWorktrees(
               ...prev[machine.machineId],
               machine,
               status: "error",
-              error: err instanceof Error ? err.message : "Tunnel discovery failed",
+              error: userFacingError(err, { action: "reach this computer" }),
               errorCode,
               options: (prev[machine.machineId]?.options ?? []).map((option) => ({ ...option, unavailable: true })),
             },
@@ -634,7 +639,8 @@ export function useAccountWorktrees(
           onUnauthorizedRef.current?.();
           return;
         }
-        setError(err instanceof Error ? err.message : "Failed to load account machines");
+        console.warn("Account machine list failed", err);
+        setError(userFacingError(err, { action: "load your computers" }));
         setLoading(false);
         setInitialized(true);
       });
@@ -706,7 +712,7 @@ export function useAccountWorktrees(
               ...prev[machine.machineId],
               machine,
               status: "error",
-              error: err instanceof Error ? err.message : "Retry failed",
+              error: userFacingError(err, { action: "reach this computer" }),
               options: (prev[machine.machineId]?.options ?? []).map((option) => ({ ...option, unavailable: true })),
             },
           }));

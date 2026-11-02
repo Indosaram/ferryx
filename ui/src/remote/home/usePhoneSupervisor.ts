@@ -1,15 +1,20 @@
 // Joins account discovery, the active machine connection and the remote supervisor feed into
 // what the phone home renders: one view per machine, merged lanes, pause, and resync.
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import type { SetupActions } from "../../lib/supervisorSetupModel";
 import type { SupervisorConnection, UnifiedSupervisorClient, UnifiedSupervisorView } from "../../lib/unifiedSupervisor";
 import type { AccountConnection } from "../accountSession";
 import {
+  adoptRemoteAll,
+  fetchRemoteDevicePermission,
   remoteUnifiedClient,
+  runRemoteSetup,
   setRemoteLanePaused,
   startRemoteSupervisor,
   SUPERVISOR_OFFLINE,
   useRemoteSupervisor,
+  type DevicePermission,
   type HubStartResult,
   type LanePauseResult,
   type RemoteSupervisorLane,
@@ -31,6 +36,8 @@ export type PhoneSupervisor = {
   readonly now: number;
   readonly setPaused: (machineId: string, laneKey: string, paused: boolean) => Promise<LanePauseResult>;
   readonly startHub: (machineId: string) => Promise<HubStartResult>;
+  /** Setup actions for one machine; null unless this device has Control on it (view-only: text only). */
+  readonly setupActions: (machineId: string) => SetupActions | null;
   readonly resync: (machineId?: string) => void;
   /** Every machine that hosts (or last hosted) the unified supervisor. */
   readonly unified: UnifiedHostView[];
@@ -164,5 +171,46 @@ export function usePhoneSupervisor({ enabled, discovery, active, bus }: PhoneSup
     [machines, clients],
   );
 
-  return { machines, lanes: feed.lanes, now: feed.now, setPaused, startHub, resync, unified };
+  // This device's permission per machine, read once per link; unknown never offers a change.
+  const [permissions, setPermissions] = useState<Readonly<Record<string, DevicePermission | null>>>({});
+  const setupNeeded = machines.filter((machine) => machine.snapshot?.setup && machine.snapshot.setup.nextAction !== "none");
+  const permissionKey = setupNeeded.map((machine) => `${machine.machineId}:${fetchFor(machine.machineId) ? "1" : "0"}`).join("|");
+  const permissionInputs = useRef({ setupNeeded, fetchFor });
+  permissionInputs.current = { setupNeeded, fetchFor };
+  useEffect(() => {
+    let live = true;
+    const inputs = permissionInputs.current;
+    for (const machine of inputs.setupNeeded) {
+      const fetchLike = inputs.fetchFor(machine.machineId);
+      if (!fetchLike) continue;
+      void fetchRemoteDevicePermission(fetchLike).then((permission) => {
+        if (live) setPermissions((prev) => (prev[machine.machineId] === permission ? prev : { ...prev, [machine.machineId]: permission }));
+      });
+    }
+    return () => {
+      live = false;
+    };
+  }, [permissionKey]);
+
+  const setupActions = useCallback(
+    (machineId: string): SetupActions | null => {
+      const fetchLike = fetchFor(machineId);
+      if (!fetchLike || permissions[machineId] !== "control") return null;
+      return {
+        run: async (opts) => {
+          const result = await runRemoteSetup(fetchLike, opts);
+          resync(machineId);
+          return result;
+        },
+        adopt: async () => {
+          const result = await adoptRemoteAll(fetchLike);
+          resync(machineId);
+          return result;
+        },
+      };
+    },
+    [fetchFor, permissions, resync],
+  );
+
+  return { machines, lanes: feed.lanes, now: feed.now, setPaused, startHub, setupActions, resync, unified };
 }

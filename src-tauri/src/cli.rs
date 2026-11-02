@@ -4432,6 +4432,15 @@ mod tests {
     }
 
     #[test]
+    fn browser_cli_runtime_supports_the_request_timeout() {
+        let runtime = browser_cli_runtime().expect("runtime");
+        let result = runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async { 7 }).await
+        });
+        assert_eq!(result.expect("ready future must not time out"), 7);
+    }
+
+    #[test]
     fn up_parses_every_flag() {
         let command = parse_up_cli(up_args(&[
             "--key-env",

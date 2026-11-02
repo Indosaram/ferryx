@@ -530,6 +530,20 @@ export function BrowserPane({
     }
   };
 
+  /** Puts a save that never reached the registry back in the row. A cancel the user asked for
+   * is not a failure: it reads Cancelled and offers Save again instead of Retry. */
+  const showUnrecordedDownloadError = (url: string, error: unknown) => {
+    const code = extractBrowserErrorCode(error);
+    setDownloadUrl(url);
+    if (code === "BROWSER_DOWNLOAD_CANCELLED") {
+      setDownloadPhase("offer");
+      setDownloadStatus("Cancelled");
+    } else {
+      setDownloadPhase("failed");
+      setDownloadStatus(browserErrorText(code));
+    }
+  };
+
   /** Saves `url` to `filePath`, or to a free name in the download folder when it is null. The
    * started save lives on the shelf, so the row goes away. */
   const runDownload = async (url: string, filePath: string | null) => {
@@ -546,9 +560,7 @@ export function BrowserPane({
       // A failure after the registry took the download shows on its shelf row. One before that
       // (a refused URL or destination) has no record, so the row keeps it with Retry.
       if (!(await hasOwnDownloadSince(startedAtMs))) {
-        setDownloadUrl(url);
-        setDownloadPhase("failed");
-        setDownloadStatus(browserErrorText(extractBrowserErrorCode(error)));
+        showUnrecordedDownloadError(url, error);
       }
     } finally {
       // The registry only gains a record (completed or failed) once this call settles.
@@ -565,8 +577,7 @@ export function BrowserPane({
       if (!filePath) return;
       await runDownload(downloadUrl, filePath);
     } catch (error) {
-      setDownloadPhase("failed");
-      setDownloadStatus(browserErrorText(extractBrowserErrorCode(error)));
+      showUnrecordedDownloadError(downloadUrl, error);
     }
   };
 

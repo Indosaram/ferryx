@@ -470,7 +470,7 @@ async function awaitSelectedWorktree(
     "view-mode switch after worktree selection",
   );
   await awaitDomTransition(() => {
-    const label = screen.queryByLabelText("Current desktop context");
+    const label = screen.queryByTestId("remote-context-label");
     return label && (label.textContent ?? "").includes(slug) ? label : null;
   }, `current context showing ${slug}`);
   expect(harness.selectPosts.count()).toBe(0);

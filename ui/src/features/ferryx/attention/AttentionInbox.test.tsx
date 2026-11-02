@@ -116,6 +116,11 @@ describe("AttentionInbox", () => {
     expect(screen.getAllByTestId("attention-row").map((el) => el.dataset.attentionState)).toEqual(["needs-you"]);
   });
 
+  it("draws no coloured side stripe on a row", () => {
+    render(<AttentionInbox rows={[waiting, finished]} onOpen={vi.fn()} now={NOW} />);
+    for (const el of screen.getAllByTestId("attention-row")) expect(el.className).not.toMatch(/before:w-\[3px\]|before:bg-status/);
+  });
+
   it("says nobody is waiting when empty, leaving the session count to the sidebar footer", () => {
     render(<AttentionInbox rows={[]} onOpen={vi.fn()} now={NOW} />);
     const empty = screen.getByTestId("attention-inbox-empty");

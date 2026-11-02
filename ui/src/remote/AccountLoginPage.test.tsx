@@ -353,7 +353,7 @@ describe("AccountLoginPage", () => {
 
       const errorBanner = screen.getByTestId("account-login-error");
       expect(errorBanner).not.toBeNull();
-      expect(errorBanner.textContent).toContain("The login link has expired. Please request a new link.");
+      expect(errorBanner.textContent).toContain("This sign-in link expired. Send a new one.");
 
       const pollCallsBefore = pollSpy.mock.calls.length;
       await act(async () => {
@@ -449,6 +449,60 @@ describe("AccountLoginPage", () => {
       expect(pollSpy).toHaveBeenCalledTimes(2);
       expect(storeSpy).toHaveBeenCalledWith("tok-magic-auto", relayUrl);
       expect(onLoginSuccess).toHaveBeenCalledWith("tok-magic-auto", "magic-user@example.com");
+    });
+  });
+  describe("user-facing copy", () => {
+    it("never shows a raw network message when the link request fails", async () => {
+      vi.spyOn(accountSessionModule, "resolveAccountOrigin").mockResolvedValue(relayUrl);
+      vi.spyOn(accountSessionModule, "requestLogin").mockRejectedValue(new TypeError("Failed to fetch"));
+      render(<AccountLoginPage relayUrl={relayUrl} onLoginSuccess={vi.fn()} />);
+
+      fireEvent.change(screen.getByTestId("account-email-input"), { target: { value: "a@b.c" } });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("request-magic-link-btn"));
+      });
+
+      const banner = await screen.findByTestId("account-login-error");
+      expect(banner.textContent).toContain("Couldn't reach Ferryx");
+      expect(banner.textContent).not.toContain("Failed to fetch");
+    });
+
+    it("maps a used sign-in link by its code instead of showing the code", async () => {
+      delete (window as any).location;
+      window.location = { ...originalLocation, search: "?code=deadbeef", hash: "", pathname: "/" } as any;
+      vi.spyOn(accountSessionModule, "resolveAccountOrigin").mockResolvedValue(relayUrl);
+      vi.spyOn(accountSessionModule, "consumeLogin").mockRejectedValue(
+        new accountSessionModule.AccountSessionError("LOGIN_CODE_USED", "LOGIN_CODE_USED", 400),
+      );
+      render(<AccountLoginPage relayUrl={relayUrl} onLoginSuccess={vi.fn()} />);
+
+      const banner = await screen.findByTestId("account-login-error");
+      expect(banner.textContent).toContain("already used");
+      expect(banner.textContent).not.toContain("LOGIN_CODE_USED");
+    });
+
+    it("enables resending the link after 30 seconds of waiting", async () => {
+      vi.useFakeTimers();
+      vi.spyOn(accountSessionModule, "resolveAccountOrigin").mockResolvedValue(relayUrl);
+      const requestSpy = vi.spyOn(accountSessionModule, "requestLogin").mockResolvedValue({ loginHandle: "h".repeat(64) });
+      vi.spyOn(accountSessionModule, "pollLogin").mockResolvedValue({ status: "pending" });
+      render(<AccountLoginPage relayUrl={relayUrl} onLoginSuccess={vi.fn()} />);
+
+      fireEvent.change(screen.getByTestId("account-email-input"), { target: { value: "a@b.c" } });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("request-magic-link-btn"));
+      });
+      const resend = screen.getByTestId("resend-magic-link-btn");
+      expect(resend).toBeDisabled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(resend).not.toBeDisabled();
+      await act(async () => {
+        fireEvent.click(resend);
+      });
+      expect(requestSpy).toHaveBeenCalledTimes(2);
     });
   });
 });

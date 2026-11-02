@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RemoteBrowserControls } from "./RemoteBrowserControls";
+import type { RemoteInputRefusal } from "./RemoteBrowser";
 
 afterEach(() => {
   cleanup();
@@ -27,6 +28,9 @@ async function runEvalWith(onEval: (script: string) => Promise<unknown>) {
   });
   await act(async () => {
     fireEvent.click(screen.getByTestId("remote-browser-eval-run-btn"));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("remote-browser-eval-confirm-btn"));
   });
 }
 
@@ -145,5 +149,160 @@ describe("RemoteBrowserControls command failures and URL sync", () => {
     fireEvent.change(input, { target: { value: "https://typed.example" } });
     rerender(<RemoteBrowserControls url="https://redirect.example" driverState="driving" />);
     expect(input).toHaveValue("https://typed.example");
+  });
+});
+
+describe("RemoteBrowserControls eval confirmation (desktop)", () => {
+  async function typeScript(onEval: () => Promise<unknown>) {
+    render(<RemoteBrowserControls url="https://example.com" driverState="driving" phone={false} onEval={onEval} />);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("remote-browser-eval-toggle"));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("remote-browser-eval-input"), { target: { value: "document.title" } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("remote-browser-eval-run-btn"));
+    });
+  }
+
+  it("does not run the script until the confirm step is accepted", async () => {
+    const onEval = vi.fn().mockResolvedValue("ok");
+    await typeScript(onEval);
+    expect(onEval).not.toHaveBeenCalled();
+    expect(screen.getByTestId("remote-browser-eval-confirm")).toBeDefined();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("remote-browser-eval-confirm-btn"));
+    });
+    expect(onEval).toHaveBeenCalledWith("document.title");
+  });
+
+  it("cancelling the confirm step never runs the script", async () => {
+    const onEval = vi.fn().mockResolvedValue("ok");
+    await typeScript(onEval);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("remote-browser-eval-cancel-btn"));
+    });
+    expect(onEval).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("remote-browser-eval-confirm")).toBeNull();
+  });
+
+  it("gives the eval textarea a 16px base size so iOS does not zoom", () => {
+    render(<RemoteBrowserControls url="" driverState="driving" phone={false} />);
+    fireEvent.click(screen.getByTestId("remote-browser-eval-toggle"));
+    expect(screen.getByTestId("remote-browser-eval-input").className).toContain("text-base");
+  });
+});
+
+describe("RemoteBrowserControls phone layout", () => {
+  it("keeps one primary row with 44px controls and offers no eval", () => {
+    render(<RemoteBrowserControls url="https://example.com" driverState="driving" phone />);
+    expect(screen.getByLabelText("Go back").className).toContain("size-11");
+    expect(screen.getByLabelText("Reload").className).toContain("size-11");
+    expect(screen.getByTestId("remote-browser-url-input").className).toContain("min-h-11");
+    expect(screen.getByTestId("remote-browser-release-btn").className).toContain("min-h-11");
+    expect(screen.queryByTestId("remote-browser-eval-toggle")).toBeNull();
+    expect(screen.queryByTestId("remote-browser-eval-panel")).toBeNull();
+  });
+
+  it("moves Ref, Fill, keys and point click behind a Tools button", () => {
+    render(<RemoteBrowserControls url="" driverState="driving" phone canPointClick pointClickEnabled />);
+    expect(screen.queryByTestId("remote-browser-fill-btn")).toBeNull();
+    expect(screen.queryByTestId("remote-browser-key-Enter")).toBeNull();
+    expect(screen.queryByTestId("remote-browser-point-click-toggle")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("remote-browser-tools-btn"));
+
+    const sheet = screen.getByRole("dialog", { name: "Browser tools" });
+    expect(sheet).toBeDefined();
+    expect(screen.getByTestId("remote-browser-fill-btn")).toBeDefined();
+    expect(screen.getByTestId("remote-browser-key-Enter")).toBeDefined();
+    expect(screen.getByTestId("remote-browser-point-click-toggle")).toBeDefined();
+    expect(screen.getByTestId("remote-browser-key-Enter").className).toContain("min-h-11");
+    expect(screen.getByTestId("remote-browser-custom-key-input").className).toContain("text-base");
+  });
+});
+
+describe("RemoteBrowserControls claim button", () => {
+  it("uses token styling for Take control and claims immediately when nobody else drives", () => {
+    const onClaim = vi.fn();
+    render(<RemoteBrowserControls driverState="viewing" phone={false} onClaim={onClaim} />);
+    const button = screen.getByTestId("remote-browser-claim-btn");
+    expect(button.textContent).toBe("Take control");
+    expect(button.className).toContain("bg-chat-primary");
+    expect(button.className).toContain("text-chat-primary-foreground");
+    fireEvent.click(button);
+    expect(onClaim).toHaveBeenCalledTimes(1);
+  });
+
+  it("explains the consequence and asks for confirmation when someone else is driving", () => {
+    const onClaim = vi.fn();
+    render(<RemoteBrowserControls driverState="occupied" phone={false} onClaim={onClaim} />);
+    expect(screen.getByTestId("remote-browser-occupied-notice").textContent).toContain(
+      "Someone else is controlling this browser. Taking control will stop them.",
+    );
+
+    fireEvent.click(screen.getByTestId("remote-browser-claim-btn"));
+    expect(onClaim).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("remote-browser-claim-cancel-btn"));
+    expect(onClaim).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("remote-browser-claim-btn"));
+    fireEvent.click(screen.getByTestId("remote-browser-claim-confirm-btn"));
+    expect(onClaim).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("RemoteBrowserControls inputs and copy", () => {
+  it("configures the URL field for typing addresses", () => {
+    render(<RemoteBrowserControls url="" driverState="driving" />);
+    const input = screen.getByTestId("remote-browser-url-input");
+    expect(input).toHaveAttribute("inputmode", "url");
+    expect(input).toHaveAttribute("autocapitalize", "none");
+    expect(input).toHaveAttribute("autocorrect", "off");
+    expect(input).toHaveAttribute("spellcheck", "false");
+    expect(input).toHaveAttribute("enterkeyhint", "go");
+  });
+
+  it("hides point click when the page cannot take it instead of striking it through", () => {
+    const { rerender } = render(<RemoteBrowserControls url="" driverState="driving" phone={false} />);
+    expect(screen.queryByText(/point click/i)).toBeNull();
+    rerender(
+      <RemoteBrowserControls
+        url=""
+        driverState="driving"
+        phone={false}
+        canPointClick
+        pointClickDisabledReason="refused by page"
+      />,
+    );
+    expect(screen.queryByText(/point click/i)).toBeNull();
+  });
+
+  it("labels glyph-free icon buttons for assistive tech", () => {
+    render(<RemoteBrowserControls url="" driverState="driving" phone={false} />);
+    expect(screen.getByLabelText("Go back")).toBeDefined();
+    expect(screen.getByLabelText("Go forward")).toBeDefined();
+    expect(screen.getByLabelText("Arrow left")).toBeDefined();
+    expect(screen.getByLabelText("Backspace")).toBeDefined();
+  });
+
+  it("shows a plain sentence for a refusal and keeps the raw code under details", () => {
+    const refusal: RemoteInputRefusal = {
+      code: "BROWSER_INVALID_REFERENCE",
+      reason: "invalid element reference: reference cannot be empty",
+      inputClass: "fill",
+    };
+    render(<RemoteBrowserControls url="" driverState="driving" phone={false} refusal={refusal} />);
+    const banner = screen.getByTestId("remote-browser-controls-refusal-banner");
+    expect(screen.getByTestId("remote-browser-controls-refusal-message").textContent).toBe(
+      "That page element is no longer there.",
+    );
+    const details = banner.querySelector("details");
+    expect(details).not.toBeNull();
+    expect(details?.open).toBe(false);
+    expect(screen.getByLabelText("Dismiss notice")).toBeDefined();
   });
 });

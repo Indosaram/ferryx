@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, renderHook, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 
 import {
@@ -111,6 +111,36 @@ describe("sonner Toaster and useToastTheme", () => {
       expect(container.querySelectorAll("[data-sonner-toast]").length).toBe(0);
       expect(container.querySelector("[data-testid='toast-clear-all']")).toBeNull();
     });
+  });
+
+  it("places toasts at the top below the safe area on a phone, clear of the bottom tab bar and composer", async () => {
+    const original = window.matchMedia;
+    const matchMedia = vi.fn((media: string) =>
+      Object.assign(new EventTarget(), {
+        media,
+        matches: media === "(max-width: 600px)",
+        onchange: null,
+        addListener() {},
+        removeListener() {},
+      }),
+    );
+    Object.defineProperty(window, "matchMedia", { configurable: true, writable: true, value: matchMedia });
+    try {
+      const { container } = render(<Toaster />);
+      act(() => {
+        toast.error("This session can't be opened from here right now", { duration: Infinity });
+      });
+      await waitFor(() => {
+        const toaster = document.querySelector<HTMLElement>("[data-sonner-toaster]");
+        expect(toaster).toHaveAttribute("data-y-position", "top");
+        expect(toaster?.style.getPropertyValue("--mobile-offset-top")).toContain("safe-area-inset-top");
+      });
+      const clearAll = container.querySelector<HTMLElement>("[data-testid='toast-clear-all']");
+      expect(clearAll).toHaveAttribute("data-placement", "phone-top");
+      expect(clearAll?.style.bottom).toBe("");
+    } finally {
+      Object.defineProperty(window, "matchMedia", { configurable: true, writable: true, value: original });
+    }
   });
 
   it("has sonner styles imported in index.css", async () => {

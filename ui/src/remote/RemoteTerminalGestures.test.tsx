@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   MAX_TERMINAL_FONT_SIZE,
+  MIN_PHONE_TERMINAL_FONT_SIZE,
   MIN_TERMINAL_FONT_SIZE,
   RemoteTerminal,
 } from "./RemoteTerminal";
@@ -214,13 +215,36 @@ describe("RemoteTerminal touch gestures", () => {
     );
     expect(Number.parseFloat(grid.style.fontSize)).toBe(MAX_TERMINAL_FONT_SIZE);
 
-    // Extreme pinch-in: clamped to MIN_TERMINAL_FONT_SIZE
+    // Extreme pinch-in: the phone terminal stops at a readable size
     pinch(
       grid,
       [{ x: 0, y: 100 }, { x: 600, y: 100 }],
       [{ x: 295, y: 100 }, { x: 305, y: 100 }],
     );
-    expect(Number.parseFloat(grid.style.fontSize)).toBe(MIN_TERMINAL_FONT_SIZE);
+    expect(Number.parseFloat(grid.style.fontSize)).toBe(MIN_PHONE_TERMINAL_FONT_SIZE);
+    expect(MIN_PHONE_TERMINAL_FONT_SIZE).toBeGreaterThan(MIN_TERMINAL_FONT_SIZE);
+  });
+
+  it("does not switch tabs on a horizontal swipe when the wide host grid scrolls sideways", () => {
+    const onSwipeNextTab = vi.fn();
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" followHostSize onSwipeNextTab={onSwipeNextTab} />);
+    swipe(surface(), { x: 200, y: 100 }, { x: 100, y: 100 });
+    expect(onSwipeNextTab).not.toHaveBeenCalled();
+  });
+
+  it("holds the host resize until the pinch ends", () => {
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+    const grid = surface();
+    act(() => socket().onopen?.());
+    socket().send.mockClear();
+
+    fireEvent.touchStart(grid, { touches: [{ clientX: 100, clientY: 100 }, { clientX: 200, clientY: 100 }] });
+    fireEvent.touchMove(grid, { touches: [{ clientX: 50, clientY: 100 }, { clientX: 250, clientY: 100 }] });
+    expect(screen.getByTestId("remote-terminal-gesture-hud")).toHaveTextContent("Text size 26");
+    expect(socket().send.mock.calls.some(([arg]) => typeof arg === "string" && arg.includes('"type":"resize"'))).toBe(false);
+
+    fireEvent.touchEnd(grid, { touches: [], changedTouches: [{ clientX: 50, clientY: 100 }, { clientX: 250, clientY: 100 }] });
+    expect(socket().send.mock.calls.some(([arg]) => typeof arg === "string" && arg.includes('"type":"resize"'))).toBe(true);
   });
 
   it("sends recomputed cols and rows through WebSocket resize path after pinch settles", async () => {

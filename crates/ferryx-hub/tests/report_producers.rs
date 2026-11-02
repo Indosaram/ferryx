@@ -15,6 +15,12 @@ impl ModelTurn for Scripted {
 
 #[tokio::test]
 async fn generated_nudges_suppress_rewording_but_deliver_a_new_owner_blocker() {
+    // The fixture owner is Korean in Asia/Seoul: the 11:00-14:00 local wakes are outside quiet
+    // hours and the Korean report bodies are in the owner's language, whatever the host locale.
+    ferryx_hub::locale::scope(ferryx_hub::locale::OwnerLocale::korean(), nudges_for_the_fixture_owner()).await;
+}
+
+async fn nudges_for_the_fixture_owner() {
     use ferryx_hub::chat::{session::SessionKey, slack_turn::{SessionTurn, turn_report}};
     use ferryx_hub::report_gate::{Decision as GateDecision, queue};
     let pool = ferryx_hub::storage::memory().await.unwrap();

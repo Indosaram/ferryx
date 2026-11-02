@@ -1,12 +1,15 @@
 // Ferryx Remote Service Worker - offline shell cache and phone alert (Web Push) display.
 // The shell is network-first so a rebuilt client reaches an installed phone on its next load;
-// cached hashed files under /assets are immutable and stay cache-first.
-const CACHE_NAME = 'ferryx-remote-v2';
+// hashed files under /assets are immutable: cached on first fetch, then served cache-first, so
+// the shell the last online load used boots offline too.
+const CACHE_NAME = 'ferryx-remote-v3';
 const ASSETS_TO_CACHE = [
   '/',
   '/index.html',
   '/manifest.webmanifest',
-  '/ferryx-icon.png'
+  '/ferryx-icon.png',
+  '/icon-192.png',
+  '/badge-mono.png'
 ];
 
 self.addEventListener('install', (event) => {
@@ -50,6 +53,22 @@ self.addEventListener('fetch', (event) => {
     );
     return;
   }
+  const url = new URL(event.request.url);
+  if (url.origin === self.location.origin && url.pathname.startsWith('/assets/')) {
+    event.respondWith(
+      caches.match(event.request).then((cachedResponse) => {
+        if (cachedResponse) return cachedResponse;
+        return fetch(event.request).then(async (response) => {
+          if (response && response.ok) {
+            const cache = await caches.open(CACHE_NAME);
+            await cache.put(event.request, response.clone());
+          }
+          return response;
+        });
+      })
+    );
+    return;
+  }
   event.respondWith(
     caches.match(event.request).then((cachedResponse) => {
       return cachedResponse || fetch(event.request);
@@ -72,11 +91,12 @@ function notificationFromPush(payload) {
   return {
     title: typeof data.title === 'string' && data.title ? data.title : 'Ferryx',
     options: {
-      body: typeof data.body === 'string' ? data.body : '',
+      body: typeof data.body === 'string' && data.body ? data.body : 'An agent on your computer needs you.',
       tag: sessionId || TEST_ALERT_TAG,
       renotify: true,
       icon: '/icon-192.png',
-      badge: '/icon-192.png',
+      badge: '/badge-mono.png',
+      actions: sessionId ? [{ action: 'open', title: 'Open' }] : [],
       data: { sessionId, state: typeof data.state === 'string' ? data.state : '', url: sessionUrl(sessionId) },
     },
   };

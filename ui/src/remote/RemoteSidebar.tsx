@@ -5,12 +5,14 @@ import { useState, type ReactNode } from "react";
 
 import { sidebarLiveState } from "../components/sidebar/sidebarModel";
 import type { SidebarModel, SidebarProjectNode, SidebarWorktreeNode } from "../components/sidebar/sidebarModel";
+import { SidebarFilter } from "../components/sidebar/SidebarFilter";
 import { SidebarView, type SidebarInbox } from "../components/sidebar/SidebarView";
 import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
 import type { PublishedAttentionRow } from "../components/sidebar/sidebarSessionSignals";
 import type { SidebarViewId } from "../components/sidebar/SidebarViewTabs";
 import { SidebarWorktreeRow, type SidebarDensity } from "../components/sidebar/SidebarWorktreeRow";
 import { cn } from "../lib/cn";
+import { userFacingError } from "./userFacingError";
 import type { RemoteSidebarSection } from "./useRemoteSidebarModel";
 
 export const REMOTE_COLLAPSED_KEY_PREFIX = "ferryx.remote.sidebarCollapsed.";
@@ -92,14 +94,20 @@ function isPendingRow(pending: RemoteSidebarPending | null, machineId: string, n
     pending.worktreeSlug === node.worktreeSlug;
 }
 
-function SectionState({ section }: { readonly section: RemoteSidebarSection }) {
+function SectionState({ section, touch }: { readonly section: RemoteSidebarSection; readonly touch: boolean }) {
+  const classes = cn("px-3 py-2 text-muted-foreground", touch ? "text-sm" : "text-[11px]");
   if (section.state === "loading") {
-    return <p role="status" className="px-3 py-2 text-[11px] text-muted-foreground">Loading worktrees…</p>;
+    return <p role="status" className={classes}>Loading worktrees…</p>;
   }
   if (!section.error) return null;
-  const text = section.state === "offline" ? "Can't reach this computer right now." : `Worktrees unavailable: ${section.error.message}`;
+  const text =
+    section.state === "offline"
+      ? "Can't reach this computer right now."
+      : touch
+        ? userFacingError(section.error, { action: "load the worktrees" })
+        : `Worktrees unavailable: ${section.error.message}`;
   return (
-    <p role="status" className="px-3 py-2 text-[11px] text-muted-foreground">
+    <p role="status" className={classes}>
       {section.model ? `${text} Showing the last list.` : text}
     </p>
   );
@@ -133,6 +141,8 @@ type SectionProps = {
   readonly heading: boolean;
   /** The Inbox the first section shows: the desktops' published rows, or the remote's own. */
   readonly inbox: SidebarInbox | undefined;
+  /** Touch: the page-wide filter the parent owns, so every machine shares one box. */
+  readonly sharedQuery?: string;
 };
 
 /** A desktop-published Inbox row and the machine whose desktop published it. */
@@ -178,9 +188,11 @@ function sidebarInbox(sidebar: RemoteSidebarProps): SidebarInbox | undefined {
   };
 }
 
-function MachineSection({ section, sidebar, first, heading, inbox }: SectionProps) {
+function MachineSection({ section, sidebar, first, heading, inbox, sharedQuery }: SectionProps) {
   const [collapsed, setCollapsed] = useState<string[] | null>(() => readCollapsed(section.machineId));
-  const [query, setQuery] = useState("");
+  const [ownQuery, setQuery] = useState("");
+  const query = sharedQuery ?? ownQuery;
+  const touch = sidebar.density === "touch";
   const model: SidebarModel | null = section.model
     ? { ...section.model, collapsedGroupIds: collapsed ?? section.model.collapsedGroupIds }
     : null;
@@ -206,20 +218,30 @@ function MachineSection({ section, sidebar, first, heading, inbox }: SectionProp
       data-testid="remote-sidebar-section"
       data-machine-id={section.machineId}
       aria-label={section.label}
-      className={cn("flex min-h-0 flex-col", sectionFillsHeight(section) ? "flex-1" : "max-h-[40%] flex-none")}
+      className={cn(
+        "flex flex-col",
+        touch ? "flex-none" : cn("min-h-0", sectionFillsHeight(section) ? "flex-1" : "max-h-[40%] flex-none"),
+      )}
     >
       {heading || notSynced ? (
-        <div className="flex min-h-6 shrink-0 items-center gap-2 px-3 pt-1.5 text-[11px]">
+        <div
+          className={cn(
+            "flex shrink-0 items-center gap-2 px-3",
+            touch ? "sticky top-0 z-10 min-h-11 bg-chat-screen text-sm" : "min-h-6 pt-1.5 text-[11px]",
+          )}
+        >
           {heading ? (
-            <h2 className="min-w-0 flex-1 truncate font-medium text-worktree-sidebar-foreground/80">{section.label}</h2>
+            <h2 className={cn("min-w-0 flex-1 truncate", touch ? "font-semibold text-chat-foreground" : "font-medium text-worktree-sidebar-foreground/80")}>
+              {section.label}
+            </h2>
           ) : <span className="flex-1" />}
           {notSynced ? (
-            <span data-testid="remote-sidebar-not-synced" className="shrink-0 text-muted-foreground">{NOT_SYNCED_CAPTION}</span>
+            <span data-testid="remote-sidebar-not-synced" className={cn("shrink-0 text-muted-foreground", touch && "text-xs")}>{NOT_SYNCED_CAPTION}</span>
           ) : null}
         </div>
       ) : null}
       {first ? sidebar.status : null}
-      <SectionState section={section} />
+      <SectionState section={section} touch={touch} />
       {model && live ? (
         <SidebarView
           model={model}
@@ -248,6 +270,12 @@ function MachineSection({ section, sidebar, first, heading, inbox }: SectionProp
                 live={live}
                 density={sidebar.density}
                 disabled={locked || node.stale}
+                {...(touch
+                  ? {
+                      busy: isPendingRow(sidebar.pending, section.machineId, node),
+                      ...(node.stale ? { statusText: "Out of date" } : {}),
+                    }
+                  : {})}
                 onSelect={() => select(project, node)}
               />
             </div>
@@ -258,17 +286,36 @@ function MachineSection({ section, sidebar, first, heading, inbox }: SectionProp
   );
 }
 
-/** One SidebarView per machine; the view tabs, inbox and supervisor ride on the first section. */
+/**
+ * One SidebarView per machine; the view tabs, inbox and supervisor ride on the first section.
+ * Touch (the phone): one filter for the page and one scroller with sticky machine headings,
+ * instead of a filter and a scroller per machine.
+ */
 export function RemoteSidebar(sidebar: RemoteSidebarProps) {
+  const [query, setQuery] = useState("");
   const heading = sidebar.sections.length > 1;
   const sections = sidebar.view === "worktrees" ? sidebar.sections : sidebar.sections.slice(0, 1);
   if (sections.length === 0) return <>{sidebar.status}</>;
   const inbox = sidebarInbox(sidebar);
+  const touch = sidebar.density === "touch";
+  const list = sections.map((section, index) => (
+    <MachineSection
+      key={section.machineId}
+      section={section}
+      sidebar={sidebar}
+      first={index === 0}
+      heading={heading}
+      inbox={inbox}
+      {...(touch ? { sharedQuery: query } : {})}
+    />
+  ));
+  if (!touch) return <>{list}</>;
   return (
     <>
-      {sections.map((section, index) => (
-        <MachineSection key={section.machineId} section={section} sidebar={sidebar} first={index === 0} heading={heading} inbox={inbox} />
-      ))}
+      {sidebar.view === "worktrees" ? <SidebarFilter value={query} onChange={setQuery} density="touch" /> : null}
+      <div data-testid="remote-sidebar-scroller" className="flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden scrollbar-sleek">
+        {list}
+      </div>
     </>
   );
 }

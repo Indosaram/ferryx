@@ -307,7 +307,7 @@ describe("remoteAppChatFrames", () => {
     render(<RemoteApp />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/not available/i);
+      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/can't be shown on this phone/i);
     });
     expect(screen.queryByTestId("assistant-message-body")).not.toBeInTheDocument();
   });

@@ -93,6 +93,7 @@ export function SidebarView({
   renderRow,
   reorder,
 }: SidebarViewProps) {
+  const touch = density === "touch";
   const showSupervisor = Boolean(supervisor) && model.advancedFeatures;
   const activeView: SidebarViewId = view === "supervisor" && !showSupervisor ? "worktrees" : view;
   const worktreesHidden = activeView !== "worktrees";
@@ -131,8 +132,8 @@ export function SidebarView({
       );
     });
     const list = rows.length === 0 ? (
-      <SidebarEmptyStatus>
-        <SidebarWorktreesEmpty text={project.worktreesEmptyHint ?? SIDEBAR_EMPTY_TEXT.noWorktrees} onCreateWorktree={onCreateWorktree} />
+      <SidebarEmptyStatus density={density}>
+        <SidebarWorktreesEmpty text={project.worktreesEmptyHint ?? SIDEBAR_EMPTY_TEXT.noWorktrees} onCreateWorktree={onCreateWorktree} density={density} />
       </SidebarEmptyStatus>
     ) : (
       <div role="list" aria-label={`${project.groupId} worktrees`} className="m-0 p-0">{rowElements}</div>
@@ -198,17 +199,25 @@ export function SidebarView({
         hidden={worktreesHidden || undefined}
         className={cn("min-h-0 flex-1 flex-col", worktreesHidden ? "hidden" : "flex")}
       >
-        <SidebarFilter value={filter.query} onChange={filter.onChange} density={density} />
-        <SectionHeader title="Projects" count={model.projects.length} className="shrink-0" />
-        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2 scrollbar-sleek">
+        {touch ? null : <SidebarFilter value={filter.query} onChange={filter.onChange} density={density} />}
+        {touch ? (
+          <h3 className="flex min-h-8 shrink-0 items-center gap-1.5 px-4 text-sm font-semibold text-chat-foreground">
+            Projects
+            <span className="text-xs font-normal tabular-nums text-chat-foreground-secondary">{model.projects.length}</span>
+          </h3>
+        ) : (
+          <SectionHeader title="Projects" count={model.projects.length} className="shrink-0" />
+        )}
+        <div className={cn("min-h-0 flex-1 overflow-x-hidden px-2 pb-2", touch ? null : "overflow-y-auto scrollbar-sleek")}>
           {model.emptyState === "noProjects" ? (
-            <p className="px-2 py-3 text-[11px] leading-relaxed text-muted-foreground">{SIDEBAR_EMPTY_TEXT.noProjects}</p>
+            <p className={cn("px-2 py-3 leading-relaxed text-muted-foreground", touch ? "text-sm" : "text-[11px]")}>{SIDEBAR_EMPTY_TEXT.noProjects}</p>
           ) : null}
           {reorder ? reorder.projects(sections) : sections}
         </div>
       </div>
 
       <SidebarFooter
+        density={density}
         summary={live.footer}
         onOpenResources={actions.openResources}
         onOpenSettings={actions.openSettings}

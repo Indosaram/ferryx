@@ -1,6 +1,7 @@
 // The hub supervisor's pure model: snapshot shape, per-pane derivation, and expiry timing.
 // No Tauri or transport imports, so the desktop feed and the remote phone client share it.
 import { normalizeUnified, type UnifiedSupervisorView } from "./unifiedSupervisor";
+import { normalizeSetupStatus, type SetupStatus } from "./supervisorSetupModel";
 /** How long a supervisor keystroke keeps its pane bar in the active fill. */
 export const SUPERVISOR_ACTING_MS = 8_000;
 /** A refusal because a person typed stays visible this long (HUMAN_TYPING_WINDOW_MS plus margin). */
@@ -134,6 +135,8 @@ export type SupervisorSnapshot = {
   actions: SupervisorAction[];
   /** The unified supervisor (identity, engine health, projects, goals); null or absent for an older daemon or a closed hub. */
   supervisor?: UnifiedSupervisorView | null;
+  /** Automatic setup progress; absent on an older daemon, which reads as unknown (never nag). */
+  setup?: SetupStatus | null;
 };
 
 export type PaneSupervision =
@@ -212,6 +215,7 @@ export function nextSupervisionExpiry(snapshot: SupervisorSnapshot, now: number)
 export function normalizeSnapshot(value: unknown): SupervisorSnapshot {
   if (!value || typeof value !== "object") return EMPTY_SNAPSHOT;
   const raw = value as Partial<SupervisorSnapshot>;
+  const setup = normalizeSetupStatus((value as { setup?: unknown }).setup);
   return {
     hub: {
       available: Boolean(raw.hub?.available),
@@ -224,5 +228,6 @@ export function normalizeSnapshot(value: unknown): SupervisorSnapshot {
     watched: Array.isArray(raw.watched) ? raw.watched : [],
     actions: Array.isArray(raw.actions) ? raw.actions : [],
     supervisor: normalizeUnified((value as { supervisor?: unknown }).supervisor),
+    ...(setup ? { setup } : {}),
   };
 }

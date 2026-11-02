@@ -1,14 +1,37 @@
 import { describe, expect, it } from "vitest";
 
 import { fixtureAction, fixtureInventory, fixtureLane, fixtureMachine, fixtureOption, fixtureSnapshot } from "./phoneHomeFixtures";
-import { buildInboxRows, laneName, laneStatus, optionForSession, recentActions, supervisorHeadline } from "./phoneHomeModel";
+import { normalizeSetupStatus, type SetupNextAction } from "../../lib/supervisorSetupModel";
+import { actionText, buildInboxRows, headlineSentence, laneFolder, laneStatus, optionForSession, recentActions, supervisorHeadline } from "./phoneHomeModel";
 
 const NOW = 1_000_000;
+
+const setup = (nextAction: SetupNextAction) => normalizeSetupStatus({ nextAction })!;
 
 describe("supervisorHeadline", () => {
   it("is off when no readable machine runs a hub", () => {
     const machines = [fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ hub: { available: true, running: false } }) })];
-    expect(supervisorHeadline(machines, NOW)).toBe("off");
+    expect(supervisorHeadline(machines, NOW)).toEqual({ kind: "off" });
+  });
+
+  it("is unknown, not off, when no machine can be read", () => {
+    const machines = [fixtureMachine({ machineId: "m1", state: "offline", snapshot: null })];
+    expect(supervisorHeadline(machines, NOW)).toEqual({ kind: "unknown" });
+    expect(headlineSentence({ kind: "unknown" })).not.toMatch(/isn't running/);
+  });
+
+  it("is checking, not unknown, while a machine's read is still loading", () => {
+    const machines = [
+      fixtureMachine({ machineId: "m1", state: "loading", snapshot: null }),
+      fixtureMachine({ machineId: "m2", state: "offline", snapshot: null }),
+    ];
+    expect(supervisorHeadline(machines, NOW)).toEqual({ kind: "checking" });
+    expect(headlineSentence({ kind: "checking" })).not.toMatch(/can't reach/i);
+  });
+
+  it("is checking while account discovery has not returned any machine yet", () => {
+    expect(supervisorHeadline([], NOW, true)).toEqual({ kind: "checking" });
+    expect(supervisorHeadline([], NOW, false)).toEqual({ kind: "unknown" });
   });
 
   it("is paused when every lane on every machine is paused", () => {
@@ -16,13 +39,13 @@ describe("supervisorHeadline", () => {
       fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "a", paused: true })] }) }),
       fixtureMachine({ machineId: "m2", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "b", paused: true })] }) }),
     ];
-    expect(supervisorHeadline(machines, NOW)).toBe("paused");
+    expect(supervisorHeadline(machines, NOW).kind).toBe("paused");
   });
 
   it("is typing when a lane's session got a fresh OK input", () => {
     const lane = fixtureLane({ key: "a" });
     const snapshot = fixtureSnapshot({ lanes: [lane], actions: [fixtureAction({ atMs: NOW - 1000, sessionId: lane.sessionId })] });
-    expect(supervisorHeadline([fixtureMachine({ machineId: "m1", snapshot })], NOW)).toBe("typing");
+    expect(supervisorHeadline([fixtureMachine({ machineId: "m1", snapshot })], NOW).kind).toBe("typing");
   });
 
   it("counts lanes and watched sessions across machines", () => {
@@ -31,7 +54,39 @@ describe("supervisorHeadline", () => {
       fixtureMachine({ machineId: "m2", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "b", paused: true })] }) }),
       fixtureMachine({ machineId: "m3", state: "offline", snapshot: null }),
     ];
-    expect(supervisorHeadline(machines, NOW)).toBe("watching 3");
+    expect(supervisorHeadline(machines, NOW)).toEqual({ kind: "active", lanes: 2, watched: 1 });
+  });
+
+  it("ranks needs_setup after off and before paused", () => {
+    const pausedNeedsSetup = fixtureSnapshot({ lanes: [fixtureLane({ key: "a", paused: true })], setup: setup("enable_engine") });
+    expect(supervisorHeadline([fixtureMachine({ machineId: "m1", snapshot: pausedNeedsSetup })], NOW)).toEqual({ kind: "needs_setup", machine: "m1" });
+    const offNeedsSetup = fixtureSnapshot({ hub: { available: true, running: false }, setup: setup("enable_engine") });
+    expect(supervisorHeadline([fixtureMachine({ machineId: "m1", snapshot: offNeedsSetup })], NOW)).toEqual({ kind: "off" });
+  });
+
+  it.each<SetupNextAction>(["enable_engine", "fix_engine", "create_owner", "map_projects", "cutover", "adopt"])(
+    "needs setup when a machine reports %s",
+    (kind) => {
+      const machines = [
+        fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "a" })] }) }),
+        fixtureMachine({ machineId: "m2", snapshot: fixtureSnapshot({ setup: setup(kind) }) }),
+      ];
+      expect(supervisorHeadline(machines, NOW)).toEqual({ kind: "needs_setup", machine: "m2" });
+    },
+  );
+
+  it.each<SetupNextAction>(["none", "wait_engine", "restart_required", "import_memory"])("does not need setup for %s", (kind) => {
+    const machines = [fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "a" })], setup: setup(kind) }) })];
+    expect(supervisorHeadline(machines, NOW).kind).toBe("active");
+  });
+
+  it("never needs setup for an older machine that does not report it", () => {
+    const machines = [fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "a", paused: true })] }) })];
+    expect(supervisorHeadline(machines, NOW).kind).toBe("paused");
+  });
+
+  it("names the machine in the needs_setup sentence", () => {
+    expect(headlineSentence({ kind: "needs_setup", machine: "Studio Mac" })).toBe("Supervisor setup isn't finished on Studio Mac.");
   });
 });
 
@@ -42,12 +97,16 @@ describe("laneStatus", () => {
     expect(laneStatus({ ...lane, paused: true }, acting, true).kind).toBe("paused");
     expect(laneStatus(lane, acting, true).kind).toBe("typing");
     expect(laneStatus(lane, new Set(), true).kind).toBe("needs-you");
-    expect(laneStatus(lane, new Set(), false)).toEqual({ kind: "status", label: "Waiting on review" });
+    expect(laneStatus(lane, new Set(), false)).toEqual({ kind: "status", label: "Waiting for review" });
   });
 
-  it("names a lane by its cwd leaf and title", () => {
-    expect(laneName({ cwd: "/a/b/ferryx/", title: "Inbox" })).toBe("ferryx · Inbox");
-    expect(laneName({ cwd: "", title: "Inbox" })).toBe("Inbox");
+  it("never shows a raw hub status: unknown values read as Working", () => {
+    expect(laneStatus(fixtureLane({ key: "a", status: "blocked_on_flux_capacitor" }), new Set(), false).label).toBe("Working");
+  });
+
+  it("takes the folder from the lane's cwd leaf", () => {
+    expect(laneFolder({ cwd: "/a/b/ferryx/" })).toBe("ferryx");
+    expect(laneFolder({ cwd: "" })).toBeNull();
   });
 });
 
@@ -57,6 +116,13 @@ describe("recentActions", () => {
     const m2 = fixtureMachine({ machineId: "m2", snapshot: fixtureSnapshot({ actions: [fixtureAction({ atMs: 20 })] }) });
     expect(recentActions([m1, m2]).map((a) => [a.machineId, a.atMs])).toEqual([["m1", 30], ["m2", 20], ["m1", 10]]);
     expect(recentActions([m1, m2], 2)).toHaveLength(2);
+  });
+
+  it("describes refused actions without codes or session ids", () => {
+    const m1 = fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ actions: [fixtureAction({ atMs: 1, code: "RATE_LIMITED", sessionId: "abcdef123456" })] }) });
+    const [action] = recentActions([m1]);
+    expect(action.where).toBeNull();
+    expect(actionText(action)).toBe("Not sent");
   });
 });
 

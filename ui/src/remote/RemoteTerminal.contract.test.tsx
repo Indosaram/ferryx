@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RemoteTerminal } from "./RemoteTerminal";
+import { registerRelayE2E } from "./relayE2E";
 import { REMOTE_TERMINAL_FRAME_PREFIX, REMOTE_TERMINAL_FRAME_TERMINATOR } from "./remoteTerminalFrames";
 import { FALLBACK_PREFERENCES } from "../lib/terminalSettings";
 
@@ -225,10 +226,10 @@ describe("remote terminal grid contract", () => {
     act(() => sockets[0].onmessage?.({ data: JSON.stringify(frame) }));
     expect(screen.queryByTestId("remote-terminal-outcome")).toBeNull();
     act(() => sockets[1].onmessage?.({ data: JSON.stringify({ ...frame, generation: null, state: "affirmative_exit", exitCode: 7 }) }));
-    expect(screen.getByTestId("remote-terminal-outcome")).toHaveTextContent("Terminal exited (7)");
+    expect(screen.getByTestId("remote-terminal-outcome")).toHaveTextContent("This terminal has exited (code 7).");
     expect(screen.queryByTestId("remote-terminal-outcome-unknown")).toBeNull();
     act(() => sockets[1].onmessage?.({ data: JSON.stringify({ ...frame, generation: null, state: "recovering", exitCode: null }) }));
-    expect(screen.getByTestId("remote-terminal-outcome")).toHaveTextContent("Terminal exited (7)");
+    expect(screen.getByTestId("remote-terminal-outcome")).toHaveTextContent("This terminal has exited (code 7).");
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Retry" })); });
     await sockets[2].waitForHandlers();
     act(() => sockets[2].onmessage?.({ data: JSON.stringify({ ...frame, generation: null, state: "recovering", exitCode: null }) }));
@@ -1037,9 +1038,17 @@ describe("remote terminal grid contract", () => {
     expect(socket().send).toHaveBeenCalledWith(new TextEncoder().encode("ㄱ "));
   });
 
-  it("shows the build stamp of the client it is running", () => {
+  it("shows the build stamp in the options sheet, not in the phone header", () => {
     vi.stubGlobal("WebSocket", MockWebSocket);
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+    expect(screen.queryByTestId("remote-terminal-build-stamp")).toBeNull();
+    fireEvent.click(screen.getByTestId("remote-terminal-menu-button"));
+    expect(screen.getByTestId("remote-terminal-build-stamp").textContent).not.toBe("");
+  });
+
+  it("keeps the build stamp in the header of the desktop compatibility renderer", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" showKeyDock={false} />);
     expect(screen.getByTestId("remote-terminal-build-stamp").textContent).not.toBe("");
   });
 
@@ -1096,9 +1105,9 @@ describe("remote terminal grid contract", () => {
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
     establishReady();
 
-    const buttons = screen.getAllByRole("button");
-    fireEvent.click(buttons[0]);
-    fireEvent.click(buttons[5]);
+    // Ctrl as a one-shot modifier, then the dock's Left arrow: the pair sends Ctrl-Left.
+    fireEvent.click(screen.getByRole("button", { name: "Ctrl" }));
+    fireEvent.click(screen.getByRole("button", { name: "Left" }));
 
     expect(socket().send).toHaveBeenCalledWith(new TextEncoder().encode("\u001b[1;5D"));
   });
@@ -1566,7 +1575,7 @@ describe("remote terminal grid contract", () => {
 
     // Assert that overflow is now observable via both UI indicator and callback
     expect(screen.getByTestId("remote-terminal-overflow-indicator")).toBeInTheDocument();
-    expect(screen.getByTestId("remote-terminal-overflow-indicator")).toHaveTextContent("Input overflow");
+    expect(screen.getByTestId("remote-terminal-overflow-indicator")).toHaveTextContent("Some typing was dropped");
     expect(onInputOverflow).toHaveBeenCalledWith(1);
 
     // Assert that socket send was not called while connecting
@@ -2201,7 +2210,7 @@ describe("remote terminal grid contract", () => {
     expect(screen.getByText("Terminal")).toBeInTheDocument();
     expect(screen.getByText("feature-branch")).toBeInTheDocument();
     expect(screen.getByTestId("remote-terminal-back")).toBeInTheDocument();
-    expect(screen.getByTestId("remote-terminal-build-stamp")).toBeInTheDocument();
+    expect(screen.getByTestId("remote-terminal-menu-button")).toBeInTheDocument();
     expect(screen.getByRole("status")).toBeInTheDocument();
     const titleBarTrue = screen.getByTestId("remote-terminal-back").closest("div.flex.shrink-0");
     expect(titleBarTrue?.className).toContain("h-11");
@@ -2222,9 +2231,9 @@ describe("remote terminal grid contract", () => {
     expect(screen.queryByText("feature-branch")).not.toBeInTheDocument();
     expect(screen.queryByTestId("remote-terminal-back")).not.toBeInTheDocument();
     // Status cluster remains with identical testids and roles
-    expect(screen.getByTestId("remote-terminal-build-stamp")).toBeInTheDocument();
+    expect(screen.getByTestId("remote-terminal-menu-button")).toBeInTheDocument();
     expect(screen.getByRole("status")).toBeInTheDocument();
-    const titleBarFalse = screen.getByTestId("remote-terminal-build-stamp").closest("div.flex.shrink-0");
+    const titleBarFalse = screen.getByTestId("remote-terminal-menu-button").closest("div.flex.shrink-0");
     expect(titleBarFalse?.className).toContain("h-7");
     expect(titleBarFalse?.className).toContain("justify-end");
   });
@@ -2534,7 +2543,8 @@ describe("remote terminal grid contract", () => {
       act(() => sockets[0].onmessage?.({ data: JSON.stringify(blockedFrame) }));
 
       const outcomeBanner = screen.getByTestId("remote-terminal-outcome");
-      expect(outcomeBanner).toHaveTextContent("permission_denied");
+      expect(outcomeBanner).toHaveTextContent("Your computer refused access to this terminal.");
+      expect(outcomeBanner).not.toHaveTextContent("permission_denied");
       expect(screen.queryByTestId("remote-terminal-outcome-unknown")).toBeNull();
       const blockedSnap = qa.snapshot(target);
       expect(blockedSnap).toMatchObject({
@@ -2568,7 +2578,7 @@ describe("remote terminal grid contract", () => {
       act(() => sockets[1].onmessage?.({ data: JSON.stringify(exitFrame) }));
 
       const exitBanner = screen.getByTestId("remote-terminal-outcome");
-      expect(exitBanner).toHaveTextContent("Terminal exited (42)");
+      expect(exitBanner).toHaveTextContent("This terminal has exited (code 42).");
       expect(screen.queryByTestId("remote-terminal-outcome-unknown")).toBeNull();
       const exitSnap = qa.snapshot(target);
       expect(exitSnap).toMatchObject({
@@ -2600,7 +2610,7 @@ describe("remote terminal grid contract", () => {
         exitCode: null,
       };
       act(() => sockets[2].onmessage?.({ data: JSON.stringify(nonAuthFrame) }));
-      expect(screen.getByTestId("remote-terminal-outcome-unknown")).toHaveTextContent("Recovery outcome unknown");
+      expect(screen.getByTestId("remote-terminal-outcome-unknown")).toHaveTextContent("We couldn't confirm whether this terminal recovered.");
       expect(screen.queryByTestId("remote-terminal-outcome")).toBeNull();
 
       view.unmount();
@@ -3014,7 +3024,8 @@ describe("remote terminal grid contract", () => {
 
       // Header status reflects Blocked, banner reflects unauthorized with Retry
       expect(connectionStatus()).toHaveTextContent("Blocked");
-      expect(screen.getByTestId("remote-terminal-outcome")).toHaveTextContent("unauthorized");
+      expect(screen.getByTestId("remote-terminal-outcome")).toHaveTextContent("You were signed out.");
+      expect(screen.getByTestId("remote-terminal-outcome")).not.toHaveTextContent("unauthorized");
       expect(screen.queryByTestId("remote-terminal-outcome-unknown")).toBeNull();
 
       // Timer progression does NOT auto-redial
@@ -3033,6 +3044,55 @@ describe("remote terminal grid contract", () => {
       });
       expect(ticketCalls()).toHaveLength(2);
 
+      view.unmount();
+    });
+
+    it("dials through the relay E2E registry when no createWebSocket is provided", async () => {
+      const ticketFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ ticket: "plaintext-ticket" }));
+      vi.stubGlobal("fetch", ticketFetch);
+      const base = "https://relay.example.test/host/machine-e2e";
+      const tunnelSocket = new MockWebSocket("tunnel://terminal");
+      const openWebSocket = vi.fn(async () => tunnelSocket);
+      const unregister = registerRelayE2E(base, { fetchLike: vi.fn(), openWebSocket });
+      try {
+        const view = render(<RemoteTerminal sessionId="session-e2e" token="relay-device-token" transportUrl={base} />);
+        await tunnelSocket.waitForHandlers();
+        expect(openWebSocket).toHaveBeenCalledWith(
+          "/api/v1/terminal/session-e2e?render=grid&cols=80&rows=20",
+          { Authorization: "Bearer relay-device-token" },
+        );
+        // Terminal preferences still load over plain fetch; only a plaintext socket ticket is forbidden.
+        expect(ticketFetch.mock.calls.filter(([url]) => String(url).includes("/socket-ticket"))).toEqual([]);
+        view.unmount();
+      } finally {
+        unregister();
+      }
+    });
+
+    it.each([401, 403])("treats a %s tunnel upgrade refusal as an auth denial and never auto-redials", async (status) => {
+      vi.useFakeTimers();
+      const upgradeRefusal = Object.assign(new Error(`WEBSOCKET_UPGRADE_FAILED: server returned status ${status}`), {
+        code: "WEBSOCKET_UPGRADE_FAILED",
+        status,
+      });
+      const createWebSocket = vi.fn(() => Promise.reject(upgradeRefusal));
+      const view = render(
+        <RemoteTerminal
+          sessionId="session-upgrade-denied"
+          token="relay-device-token"
+          transportUrl="https://relay.example.test/host/machine-1"
+          createWebSocket={createWebSocket}
+        />,
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(connectionStatus()).toHaveTextContent("Blocked");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60000);
+      });
+      expect(createWebSocket).toHaveBeenCalledTimes(1);
       view.unmount();
     });
 
@@ -3156,7 +3216,7 @@ describe("remote terminal grid contract", () => {
         });
       });
       const gapIndicator = screen.getByTestId("remote-terminal-replay-gap");
-      expect(gapIndicator).toHaveTextContent("Output gap");
+      expect(gapIndicator).toHaveTextContent("Some output was skipped");
 
       // Stale gap frame from old socket after redial does not corrupt fresh socket
       act(() => ws.onclose?.());
