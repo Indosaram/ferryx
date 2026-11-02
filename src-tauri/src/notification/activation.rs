@@ -64,6 +64,15 @@ impl NotificationActivations {
         std::mem::take(&mut *self.pending.lock())
     }
 
+    /// Session id of the most recently enqueued target, without draining. The wake sink uses
+    /// it to raise the window that owns the clicked session.
+    pub fn latest_session_id(&self) -> Option<String> {
+        self.pending
+            .lock()
+            .last()
+            .map(|target| target.session_id.clone())
+    }
+
     /// Pending count without draining. Test-only.
     #[cfg(test)]
     pub fn len(&self) -> usize {
