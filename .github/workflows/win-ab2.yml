@@ -53,11 +53,12 @@ jobs:
         shell: bash
         run: |
           set +e
+          export CARGO_TERM_COLOR=never NO_COLOR=1
           mkdir -p src-tauri/.config
           printf '[profile.ab]\nslow-timeout = { period = "60s", terminate-after = 2 }\nfail-fast = false\ntest-threads = 2\nstatus-level = "all"\nfinal-status-level = "none"\n' > src-tauri/.config/nextest.toml
           for round in 1 2 3; do
-            for f in 'test(/^daemon::session_service::machine_tests::/)' 'test(/^remote::machine_operation_journal::contention_tests::/)'; do
-              cargo nextest run --manifest-path src-tauri/Cargo.toml --lib --profile ab --no-fail-fast -E "$f" 2>&1 | tee o.txt | grep -E '^\s+(PASS|FAIL|TIMEOUT|SIGSEGV|ABORT)' | perl -ne 'print "AB2 '"${{ matrix.rev }}"' r'"$round"' $1 $2\n" if /^\s+(\S+) \[.*\) ferryx (\S+)/'
+            for f in 'test(/^daemon::session_service::machine_tests::/)' 'test(/^remote::machine_operation_journal::contention_tests::/) | test(=remote::server::p19_insecure_direct_tests::test_p19_overlay_mode_tailscale_unaffected) | test(=remote::server::p19_insecure_direct_tests::test_p19_cgnat_address_with_authoritative_overlay_proof_is_exempt) | test(=daemon::session_service::tests::regression_local_pty_create_2_subdirectory_spawn_preserves_worktree_root) | test(=native_terminal::surface_host::tests::resize_absorbs_sigwinch_redraw_instead_of_painting_it_frame_by_frame) | test(=remote::relay_server::tests::coordinator_pairs_through_relay_to_real_gateway) | test(=terminal::tests::test_multiple_concurrent_sessions) | test(=terminal::tests::test_spawn_write_echo_and_read)'; do
+              cargo nextest run --manifest-path src-tauri/Cargo.toml --lib --profile ab --no-fail-fast -E "$f" 2>&1 | tee -a all.txt | grep -E '^\s+(PASS|FAIL|TIMEOUT|SIGSEGV|ABORT)' | perl -ne 'print "AB2 '"${{ matrix.rev }}"' r'"$round"' $1 $2\n" if /^\s+(\S+) \[.*\) ferryx (\S+)/'
             done
           done
           exit 0
