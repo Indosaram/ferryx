@@ -1078,7 +1078,7 @@ describe("App notification coordinator wiring", () => {
       const view = render(<App />);
       const shortcut = () => act(() => {
         window.dispatchEvent(new KeyboardEvent("keydown", {
-          key: "n", code: "KeyN", metaKey: isMac, ctrlKey: !isMac, shiftKey: true, bubbles: true, cancelable: true,
+          key: "i", code: "KeyI", metaKey: isMac, ctrlKey: !isMac, shiftKey: true, bubbles: true, cancelable: true,
         }));
       });
       expect(view.getByTestId("mock-sidebar").dataset.inboxOpen).toBe("false");
