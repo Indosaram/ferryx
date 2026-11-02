@@ -99,7 +99,7 @@ async fn standby_archives_once_and_lists_only_open_goals() {
     assert_eq!(archive_before_replace(&dir, NOW + 60).unwrap(), None);
     assert!(!dir.join(format!("{ARCHIVE_PREFIX}{}", NOW + 60)).exists());
 
-    let listed = adoptable_goals(&dir, "Laptop B").await.unwrap();
+    let listed = adoptable_goals(&dir, "Laptop B", None).await.unwrap();
     assert_eq!(listed.len(), 1, "{listed:?}");
     assert_eq!(listed[0].goal_id, open);
     assert_eq!(listed[0].from_machine, "Laptop B");
@@ -113,7 +113,7 @@ async fn standby_archives_once_and_lists_only_open_goals() {
 async fn a_hub_without_a_database_or_archive_has_nothing_to_archive_or_adopt() {
     let dir = temp_dir("empty");
     assert_eq!(archive_before_replace(&dir, NOW).unwrap(), None);
-    assert!(adoptable_goals(&dir, "Laptop B").await.unwrap().is_empty());
+    assert!(adoptable_goals(&dir, "Laptop B", None).await.unwrap().is_empty());
     assert_eq!(
         adopt_archived(&dir, &AdoptSelection::All, |_| async { Ok(json!({})) })
             .await
@@ -172,7 +172,7 @@ async fn adopt_submits_each_goal_once_and_re_adopt_is_idempotent() {
     let ledger = adopted(&dir).unwrap();
     assert_eq!(ledger.len(), 1);
     assert_eq!(ledger[0].holder_goal_id.as_deref(), Some(holder_goal.as_str()));
-    assert!(adoptable_goals(&dir, "Laptop B").await.unwrap().is_empty());
+    assert!(adoptable_goals(&dir, "Laptop B", None).await.unwrap().is_empty());
     let again = adopt_archived(&dir, &AdoptSelection::All, send).await.unwrap();
     assert!(again.is_empty());
 
@@ -205,7 +205,7 @@ async fn a_failed_send_is_not_recorded_and_stays_adoptable() {
     assert!(!refused[0].adopted);
     assert_eq!(refused[0].error.as_ref().unwrap()["code"], "SUPERVISOR_STANDBY");
     assert!(adopted(&dir).unwrap().is_empty());
-    let listed = adoptable_goals(&dir, "Laptop B").await.unwrap();
+    let listed = adoptable_goals(&dir, "Laptop B", None).await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].goal_id, open);
     fs::remove_dir_all(&dir).unwrap();
@@ -266,6 +266,93 @@ async fn replace_local_archives_then_imports() {
         .unwrap();
     assert!(target.join("hub.sqlite.incoming").exists(), "the checkpoint is staged");
     assert!(archive.exists(), "the archive stays");
-    assert_eq!(adoptable_goals(&target, "Laptop B").await.unwrap().len(), 1);
+    assert_eq!(adoptable_goals(&target, "Laptop B", None).await.unwrap().len(), 1);
+    fs::remove_dir_all(&root).unwrap();
+}
+
+/// A former holder that moved away and is now standby for a holder of its own supervisor
+/// identity: nothing is archived and nothing is adoptable (the holder already has its goals).
+#[tokio::test]
+async fn a_standby_of_the_holders_own_identity_archives_nothing() {
+    let dir = temp_dir("same-identity");
+    let (supervisor_id, _, _) = second_machine(&dir).await;
+
+    let archived = archive_for_holder(&dir, Some(supervisor_id.as_str()), NOW).await.unwrap();
+    assert_eq!(archived, None);
+    assert_eq!(latest_archive(&dir).unwrap(), None, "no archive is written");
+    assert!(adoptable_goals(&dir, "Laptop B", Some(supervisor_id.as_str()))
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(adoptable_goals(&dir, "Laptop B", None).await.unwrap().is_empty());
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The holder's identity not known yet: the archive waits; once it is known and differs,
+/// the hub is archived once and its open goals are adoptable.
+#[tokio::test]
+async fn a_standby_archives_only_once_a_different_holder_identity_is_known() {
+    let dir = temp_dir("other-identity");
+    let (supervisor_id, open, _) = second_machine(&dir).await;
+    let holder = uuid::Uuid::new_v4().to_string();
+    assert_ne!(holder, supervisor_id);
+
+    assert_eq!(archive_for_holder(&dir, None, NOW).await.unwrap(), None);
+    assert_eq!(latest_archive(&dir).unwrap(), None, "unknown holder identity defers");
+
+    let archive = archive_for_holder(&dir, Some(holder.as_str()), NOW)
+        .await
+        .unwrap()
+        .expect("a different holder identity archives");
+    assert_eq!(archive, dir.join(format!("{ARCHIVE_PREFIX}{NOW}")));
+    assert_eq!(archive_for_holder(&dir, Some(holder.as_str()), NOW + 60).await.unwrap(), None);
+    let listed = adoptable_goals(&dir, "Laptop B", Some(holder.as_str())).await.unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].goal_id, open);
+    assert_eq!(listed[0].supervisor_id, supervisor_id);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// An archive already written for the holder's own identity (before this check existed) is
+/// never listed as adoptable while the holder's identity is known.
+#[tokio::test]
+async fn adoptable_goals_skip_an_archive_of_the_holders_identity() {
+    let dir = temp_dir("filter");
+    let (supervisor_id, _, _) = second_machine(&dir).await;
+    archive_before_replace(&dir, NOW).unwrap().unwrap();
+
+    assert_eq!(adoptable_goals(&dir, "Laptop B", None).await.unwrap().len(), 1);
+    assert!(adoptable_goals(&dir, "Laptop B", Some(supervisor_id.as_str()))
+        .await
+        .unwrap()
+        .is_empty());
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A standby learns the holder's supervisor id from the holder's checkpoint manifest.
+#[tokio::test]
+async fn the_holder_identity_is_read_from_its_checkpoint() {
+    let root = temp_dir("manifest");
+    let source = root.join("source");
+    fs::create_dir_all(&source).unwrap();
+    let pool = crate::storage::connect(&source.join(LIVE_DB)).await.unwrap();
+    let supervisor_id = provisioned(&pool, "local").await;
+    let exported = export(
+        &pool,
+        &ExportRequest::new(
+            source.clone(),
+            "machine-a".into(),
+            root.join("checkpoint.tar.zst"),
+            default_private_writer(),
+        ),
+    )
+    .await
+    .unwrap();
+    pool.close().await;
+
+    assert_eq!(
+        checkpoint_supervisor_id(&exported.path).unwrap().as_deref(),
+        Some(supervisor_id.as_str())
+    );
     fs::remove_dir_all(&root).unwrap();
 }

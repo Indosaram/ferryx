@@ -2000,10 +2000,8 @@ async fn spawn_lease_client(
         .await
         .ok()
         .flatten();
-    let (machine_id, account) = match enrollment {
-        Some(record) => (record.machine_record_id, Some(record.account_id)),
-        None => ("local".to_owned(), None),
-    };
+    let account = enrollment.map(|record| record.account_id);
+    let machine_id = lease_machine_id().await;
     // A handover successor renews the lease its predecessor handed over at commit (same
     // machine id and fence) instead of acquiring a new one; a rebind finds it already taken.
     let own_machine_id = machine_id.clone();
@@ -2045,9 +2043,11 @@ fn daemon_hub_dir() -> std::path::PathBuf {
 }
 
 /// First-rollout adoption (plan todo 13): the first time this daemon learns another machine
-/// holds the supervisor lease, it archives its own hub database once as
-/// `hub.sqlite.pre-lease-<ts>` (a copy; nothing is deleted), so its open goals become
-/// adoptable into the holder by an owner action. Later standbys are no-ops.
+/// holds the supervisor lease, it pulls the holder's checkpoint right away
+/// ([`crate::supervisor_move::pull_from_holder`]), which learns the holder's supervisor id
+/// from that checkpoint and archives this hub only when its identity differs
+/// ([`archive_for_holder`]). Until the holder's identity is known nothing is archived; the
+/// standby's periodic pull retries.
 async fn archive_on_first_standby(
     mut roles: tokio::sync::watch::Receiver<crate::daemon::supervisor_lease_role::Role>,
     own_machine_id: String,
@@ -2059,19 +2059,7 @@ async fn archive_on_first_standby(
             Role::Standby { holder_machine_id: Some(holder), .. } if *holder != own_machine_id
         );
         if other_holder {
-            let dir = daemon_hub_dir();
-            match tokio::task::spawn_blocking(move || {
-                ferryx_hub::adoption::archive_before_replace(&dir, unix_now() as i64)
-            })
-            .await
-            {
-                Ok(Ok(Some(archive))) => {
-                    tracing::info!(archive = %archive.display(), "standby for another holder: hub database archived; its open goals are adoptable");
-                }
-                Ok(Ok(None)) => {}
-                Ok(Err(error)) => tracing::warn!(%error, "the hub database was not archived on standby"),
-                Err(error) => tracing::warn!(%error, "the hub database archive task failed"),
-            }
+            crate::supervisor_move::pull_from_holder().await;
             return;
         }
         if roles.changed().await.is_err() {
@@ -2080,21 +2068,43 @@ async fn archive_on_first_standby(
     }
 }
 
-/// This machine's name in "Adoptable from <machine>": its account machine id, or `local`.
-fn own_machine_label() -> String {
-    crate::account::enroll_client::load_enrollment_record()
-        .map(|record| record.machine_record_id)
-        .unwrap_or_else(|| "local".to_owned())
+/// Standby for a holder whose supervisor id is `holder_supervisor_id` (read from its
+/// checkpoint): archives this hub once when it holds another supervisor identity, so its open
+/// goals become adoptable into the holder by an owner action. A hub of the holder's own
+/// identity (a former holder that moved away) is left alone.
+pub(crate) async fn archive_for_holder(holder_supervisor_id: &str) {
+    let dir = daemon_hub_dir();
+    match ferryx_hub::adoption::archive_for_holder(&dir, Some(holder_supervisor_id), unix_now() as i64).await {
+        Ok(Some(archive)) => {
+            tracing::info!(archive = %archive.display(), "standby for a holder of another supervisor identity: hub database archived; its open goals are adoptable");
+        }
+        Ok(None) => {}
+        Err(error) => tracing::warn!(%error, "the hub database was not archived on standby"),
+    }
+}
+
+/// The holder's supervisor id: the open hub's own identity while this machine holds the
+/// lease, else the one the holder's last pulled checkpoint names; `None` when not known.
+async fn holder_supervisor_id() -> Option<String> {
+    if lease_handle().is_some_and(|handle| handle.is_holder_now()) {
+        let launch = supervisor_launch()?;
+        return ferryx_hub::supervisor::identities(&launch.hub.pool)
+            .await
+            .ok()?
+            .into_iter()
+            .next()
+            .map(|identity| identity.supervisor_id);
+    }
+    crate::supervisor_move::known_holder_supervisor_id().await
 }
 
 /// Open goals of this machine's archived hub not yet adopted into the holder, for the status
 /// snapshot's `adoptable` field and the standby UI ("Adoptable from <fromMachine>"). Empty
 /// when this hub was never archived; a read failure is logged and reported as empty.
 pub async fn adoptable_goals() -> Vec<ferryx_hub::adoption::AdoptableGoal> {
-    let from = crate::ipc::run_blocking(|| Ok(own_machine_label()))
-        .await
-        .unwrap_or_else(|_| "local".to_owned());
-    match ferryx_hub::adoption::adoptable_goals(&daemon_hub_dir(), &from).await {
+    let from = lease_machine_id().await;
+    let holder = holder_supervisor_id().await;
+    match ferryx_hub::adoption::adoptable_goals(&daemon_hub_dir(), &from, holder.as_deref()).await {
         Ok(goals) => goals,
         Err(error) => {
             tracing::warn!(%error, "adoptable archived goals could not be read");
@@ -2270,13 +2280,24 @@ async fn publish_checkpoint(launch: &HubLaunch) -> Result<String, String> {
     result
 }
 
-/// This machine's lease id (the enrollment's machine record id; `local` without one).
+/// This machine's lease id: the machine id the relay authenticates its control socket by and
+/// records as `holder_machine_id` / `reserved_for` (the account's `machines.machine_id`, the
+/// one paired hosts know it by), not the enrollment's `machine_record_id`, which the relay
+/// never sees. `local` without an enrollment.
 pub(crate) async fn lease_machine_id() -> String {
-    crate::ipc::run_blocking(|| Ok(crate::account::enroll_client::load_enrollment_record()))
-        .await
-        .ok()
-        .flatten()
-        .map_or_else(|| "local".to_owned(), |record| record.machine_record_id)
+    crate::ipc::run_blocking(|| {
+        if crate::account::enroll_client::load_enrollment_record().is_none() {
+            return Ok(None);
+        }
+        Ok(crate::remote::auth::canonical_identity_dir()
+            .ok()
+            .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir).ok())
+            .map(|identity| identity.machine_id))
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| "local".to_owned())
 }
 
 /// The holder side of a move (`POST /api/v1/supervisor/release-to`): stops the generation,
