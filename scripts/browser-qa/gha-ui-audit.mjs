@@ -20,7 +20,7 @@
 // Usage: bun scripts/browser-qa/gha-ui-audit.mjs --binary <path> --out <dir>
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { inflateSync } from "node:zlib";
 
@@ -880,7 +880,17 @@ async function step(name, description, actions, expect = null) {
     if (!words) {
       record.ui_check = { result: "unavailable", expect };
     } else {
-      const seen = (list) => list.filter((text) => words.some((word) => norm(word.text) === norm(text) || (text.endsWith("*") && norm(word.text).startsWith(norm(text.slice(0, -1))))));
+      // "text" = exact word, "text*" = word starts with text, "~text" = word contains text
+      // (tab titles and caret-adjacent page text glue extra characters onto the word).
+      const visible = (text) => (word) => {
+        const read = norm(word.text);
+        if (text.startsWith("~")) {
+          const needle = norm(text.slice(1));
+          return needle.length > 0 && read.includes(needle);
+        }
+        return read === norm(text) || (text.endsWith("*") && read.startsWith(norm(text.slice(0, -1))));
+      };
+      const seen = (list) => list.filter((text) => words.some(visible(text)));
       const anySeen = expect.any ? seen(expect.any) : [];
       const noneSeen = expect.none ? seen(expect.none) : [];
       const pass = (expect.any ? anySeen.length > 0 : true) && noneSeen.length === 0;
@@ -1307,19 +1317,25 @@ if (engineZip) {
       ["click Download", () => clickText("Download", { timeout: 8000, match: exactly("Download"), pick: "rightmost" })],
       3000,
       ["wait for ferryx_engine on disk", async () => {
+        // The install unpacks into <root>/.staging-<uuid>/ (ferryx_engine is there before the
+        // unpack ends), then renames it and writes the "active" pointer last. Only the directory
+        // the pointer names counts as installed.
         const root = join(dirs.data, "browser-engine");
+        const pointer = join(root, "active");
         const deadline = Date.now() + 240000;
         while (Date.now() < deadline) {
-          if (existsSync(root)) {
-            for (const name of readdirSync(root)) {
-              if (existsSync(join(root, name, "ferryx_engine"))) return { ok: true, dir: join(root, name) };
+          if (existsSync(pointer)) {
+            const name = readFileSync(pointer, "utf8").trim();
+            if (name && !name.startsWith(".") && !/[\\/]/.test(name) && existsSync(join(root, name, "ferryx_engine"))) {
+              return { ok: true, dir: join(root, name), active: name };
             }
           }
           await sleep(2000);
         }
-        return { ok: false, stderr: `no ferryx_engine under ${root}` };
+        return { ok: false, stderr: `no "active" pointer naming a directory with ferryx_engine under ${root}` };
       }],
-      2000,
+      // The UI resolves the install after the pointer is written; wait for its result, bounded.
+      waitForText(["Remove", "Installed"], 90000),
     ],
     { any: ["Remove", "Installed"] },
   );
@@ -1331,7 +1347,7 @@ await step("settings-closed", "Escape closes Settings", [focus, key("Escape", { 
 // ---------------------------------------------------------------- page interactions (every OS)
 await step(
   "download-trigger",
-  "Load the local download page and click its download link; the download prompt shows ferryx-qa.txt",
+  "Load the local download page and click its download link; the downloads surface (prompt or shelf) shows ferryx-qa.txt, Save or Download",
   [closeStrayDialogs, focus, dismissStoreToast, ...typeUrl(`${fixtureBase}/download.html`), waitForText(["FERRYXDOWNLOAD"]), ["click download link", () => clickText("FERRYXDOWNLOAD", { timeout: 15000 })], 4000],
   { any: ["ferryx-qa.txt", "Save", "Download"] },
 );
@@ -1356,12 +1372,33 @@ await step("find-open", "Mod+F opens the find bar; type 'Example' (page has 6 ca
     // The find input: an "Example" with nothing after it on its line (tab title and heading read "Example Domain").
     const query = findPhrase(words, "Example").find((hit) => !hit.followedBy);
     if (!query || !imageMagick || !tesseract) return { ok: false, stderr: "find input not located" };
-    const strip = path.replace(/\.png$/, ".findcount.png");
-    const box = `120x28+${query.left + 600}+${Math.max(0, query.y - 14)}`;
-    run(imageMagick, [path, "-crop", box, "+repage", "-colorspace", "gray", "-normalize", "-resize", "600%", strip]);
-    const text = run(tesseract, [strip, "-", "--psm", "7"]).stdout.replace(/\s+/g, " ").trim();
-    const count = /(\d+|[GbS])?\s*mat[ce][hn]es/i.exec(text);
-    return { ok: Boolean(count), text, box, seen_text: count ? ["matches"] : [], stderr: count ? "" : "match count not read" };
+    const top = Math.max(0, query.y - 14);
+    const readStrip = (strip, box) => {
+      const file = path.replace(/\.png$/, `.${strip}.png`);
+      run(imageMagick, [path, "-crop", box, "+repage", "-colorspace", "gray", "-normalize", "-resize", "600%", file]);
+      const text = run(tesseract, [file, "-", "--psm", "7"]).stdout.replace(/\s+/g, " ").trim();
+      return { strip, box, text, count: /(\d+|[GbS])?\s*mat[ce][hn]es/i.test(text) };
+    };
+    const tries = [readStrip("findcount", `120x28+${query.left + 600}+${top}`)];
+    if (!tries[0].count) {
+      // Linux: the 1280-wide window puts the count ~870px right of the query, outside the box
+      // above; read a strip from just right of the query to the window (or screen) right edge.
+      const x0 = query.left + 300;
+      const frame = platform === "linux" ? linux.geometry() : null;
+      const right = frame ? frame.x + frame.width : decodePng(path).width;
+      if (right > x0) tries.push(readStrip("findcount-right", `${right - x0}x28+${x0}+${top}`));
+    }
+    const hit = tries.find((attempt) => attempt.count) ?? null;
+    const last = hit ?? tries.at(-1);
+    return {
+      ok: Boolean(hit),
+      text: last.text,
+      box: last.box,
+      matched_strip: hit?.strip ?? null,
+      tries: tries.map(({ strip, box, text }) => ({ strip, box, text })),
+      seen_text: hit ? ["matches"] : [],
+      stderr: hit ? "" : "match count not read",
+    };
   }],
 ], {
   any: ["matches", "match", "6matches", "of"],
@@ -1489,7 +1526,7 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
   summary.engine.checks.fixture_loaded = summary.steps.at(-1).actions.at(-1)?.ok ?? false;
   await step(
     "chromium-typing",
-    "Click the page centre, type 'ferryxqa'; the fixture echoes it into its title",
+    "Click the page centre, type 'ferryxqa'; the fixture echoes it into its title and page (substring match); no downloads shelf on this tab",
     [
       focus,
       ["click page", async () => {
@@ -1505,7 +1542,7 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
         return { ok: titles.includes("typed:ferryxqa"), titles, stderr: titles.includes("typed:ferryxqa") ? "" : "typed title not reported" };
       }],
     ],
-    { any: ["ferryxqa"] },
+    { any: ["~ferryxqa"], none: ["DOWNLOADS"] },
   );
   summary.engine.checks.typing_reaches_page = summary.steps.at(-1).ui_check?.result === "pass" || (summary.steps.at(-1).actions.at(-1)?.ok ?? false);
   await step(
@@ -1526,7 +1563,8 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
     "chromium-tab-switch",
     "Mod+T (terminal tab) hides the engine view; Mod+Shift+[ returns to the Chromium tab",
     [focus, key("Mod+T", { key: "t", mods: ["mod"] }), 3000, ["screenshot hidden", () => ({ ok: screenshot("chromium-hidden-on-terminal-tab").ok })], key("Mod+Shift+[", { key: "bracketleft", mods: ["mod", "shift"] }), 3000],
-    { any: ["ferryxqa", "fixture:", "CEF"] },
+    // agent-chromium navigated this tab to /agent.html, so its page/title read "agentqa" now.
+    { any: ["~agentqa", "~ferryxqa", "fixture:"] },
   );
   await step(
     "engine-kill",
