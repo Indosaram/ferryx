@@ -121,6 +121,9 @@ pub struct ImportTypeResult {
     /// Records Ferryx already had (bookmarks, history and passwords).
     #[serde(default)]
     pub duplicates: usize,
+    /// Passwords not imported because Ferryx already saved a different password for the login.
+    #[serde(default)]
+    pub conflicts: usize,
     pub skipped: usize,
     pub notes: Vec<String>,
     pub error: Option<ImportTypeError>,

@@ -54,6 +54,12 @@ describe("describeBrowserImportResult", () => {
       describeBrowserImportResult({ type: "bookmarks", imported: 5, duplicates: 2, skipped: 1, notes: [], error: null }),
     ).toBe("Bookmarks: 5 imported, 2 already in Ferryx, 1 skipped");
     expect(
+      describeBrowserImportResult({ type: "passwords", imported: 1, conflicts: 3, skipped: 0, notes: [], error: null }),
+    ).toBe("Passwords: 1 imported, 3 logins kept because Ferryx already has a different password");
+    expect(
+      describeBrowserImportResult({ type: "passwords", imported: 0, conflicts: 1, skipped: 0, notes: [], error: null }),
+    ).toBe("Passwords: 0 imported, 1 login kept because Ferryx already has a different password");
+    expect(
       describeBrowserImportResult({
         type: "passwords",
         imported: 0,

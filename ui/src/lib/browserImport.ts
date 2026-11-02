@@ -27,6 +27,8 @@ export type BrowserImportTypeResult = {
   imported: number;
   /** Records Ferryx already had; absent from older hosts. */
   duplicates?: number;
+  /** Passwords not imported because Ferryx already saved a different one; absent from older hosts. */
+  conflicts?: number;
   skipped: number;
   notes: string[];
   error: { code: string; message: string } | null;
@@ -120,8 +122,11 @@ export function describeBrowserImportResult(result: BrowserImportTypeResult): st
     return `${label}: ${reason}`;
   }
   const duplicates = result.duplicates ? `, ${result.duplicates} already in Ferryx` : "";
+  const conflicts = result.conflicts
+    ? `, ${result.conflicts} ${result.conflicts === 1 ? "login" : "logins"} kept because Ferryx already has a different password`
+    : "";
   const skipped = result.skipped > 0 ? `, ${result.skipped} skipped` : "";
-  return `${label}: ${result.imported} imported${duplicates}${skipped}`;
+  return `${label}: ${result.imported} imported${duplicates}${conflicts}${skipped}`;
 }
 
 const RUN_ERROR_MESSAGES: Record<string, string> = {

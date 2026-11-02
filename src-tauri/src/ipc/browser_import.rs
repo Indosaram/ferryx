@@ -24,8 +24,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
 
-/// The import in progress (one at a time per app), so it can be cancelled.
-static ACTIVE: Mutex<Option<Arc<ImportRun>>> = Mutex::new(None);
+/// What holds the one import slot. Both kinds share the pending dir and its ingest.
+enum Active {
+    /// A browser import, kept so it can be cancelled.
+    Run(Arc<ImportRun>),
+    PasswordFile,
+}
+
+/// The import in progress (one at a time per app).
+static ACTIVE: Mutex<Option<Active>> = Mutex::new(None);
 
 fn import_failed(reason: &str, message: impl Into<String>) -> IpcError {
     IpcError::new(IpcErrorCode::BrowserImportFailed, message)
@@ -76,12 +83,13 @@ fn library_changed(results: &[ImportTypeResult]) -> bool {
 }
 
 /// The sink for `profile`: staging under the data dir, cookies into its Chromium cache (when
-/// the engine is installed) and its open system webviews.
+/// `engine_installed`, checked by the caller off the async thread) and its open system webviews.
 fn profile_sink<R: tauri::Runtime>(
     app: &AppHandle<R>,
     manager: &Arc<BrowserManager>,
     profile: &BrowserProfileId,
     source_name: &str,
+    engine_installed: bool,
 ) -> Result<ProfileSink, IpcError> {
     let data_dir = crate::ipc::browser::engine_data_dir(app)
         .map_err(|error| import_failed("no-data-dir", error.message))?;
@@ -89,8 +97,7 @@ fn profile_sink<R: tauri::Runtime>(
 
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     let (cef_cache_dir, notify): (Option<PathBuf>, crate::browser::import::cookie_sink::EngineNotify) = {
-        let installed = crate::browser::cef_engine::engine_dir(&data_dir).is_some();
-        let dir = installed.then(|| crate::browser::data_paths::cef_profile_dir(&data_dir, profile.as_str()));
+        let dir = engine_installed.then(|| crate::browser::data_paths::cef_profile_dir(&data_dir, profile.as_str()));
         let name = profile.as_str().to_string();
         (
             dir,
@@ -98,8 +105,10 @@ fn profile_sink<R: tauri::Runtime>(
         )
     };
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    let (cef_cache_dir, notify): (Option<PathBuf>, crate::browser::import::cookie_sink::EngineNotify) =
-        (None, Box::new(|_: &std::path::Path| false));
+    let (cef_cache_dir, notify): (Option<PathBuf>, crate::browser::import::cookie_sink::EngineNotify) = {
+        let _ = engine_installed;
+        (None, Box::new(|_: &std::path::Path| false))
+    };
 
     let labels = manager.webview_labels_for_profile(profile);
     let app = app.clone();
@@ -136,6 +145,18 @@ pub struct BrowserImportRunRequest {
 /// Clears [`ACTIVE`] when the import ends, however it ends.
 struct ActiveGuard;
 
+impl ActiveGuard {
+    /// Takes the import slot, or the typed `busy` error when another import holds it.
+    fn claim(active: Active) -> Result<Self, IpcError> {
+        let mut slot = ACTIVE.lock();
+        if slot.is_some() {
+            return Err(import_failed("busy", "another import is running"));
+        }
+        *slot = Some(active);
+        Ok(Self)
+    }
+}
+
 impl Drop for ActiveGuard {
     fn drop(&mut self) {
         *ACTIVE.lock() = None;
@@ -151,30 +172,34 @@ pub async fn cmd_browser_import_run<R: tauri::Runtime>(
     let profile = target_profile(&request.profile_id)?;
     let manager = Arc::clone(manager.inner());
     let source_id = request.source_id.clone();
-    let browser = crate::ipc::run_blocking(move || {
-        detect_sources()
+    let blocking_app = app.clone();
+    let (browser, engine_installed) = crate::ipc::run_blocking(move || {
+        let browser = detect_sources()
             .into_iter()
             .find(|(source, _)| source.id == source_id)
             .map(|(_, browser)| browser)
-            .ok_or_else(|| import_failed("unknown-source", format!("no importable browser {source_id}")))
+            .ok_or_else(|| import_failed("unknown-source", format!("no importable browser {source_id}")))?;
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        let engine_installed = crate::ipc::browser::engine_data_dir(&blocking_app)
+            .is_ok_and(|data_dir| crate::browser::cef_engine::engine_dir(&data_dir).is_some());
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        let engine_installed = {
+            let _ = blocking_app;
+            false
+        };
+        Ok((browser, engine_installed))
     })
     .await?;
 
-    let sink = profile_sink(&app, &manager, &profile, &browser.display_name)?;
+    let sink = profile_sink(&app, &manager, &profile, &browser.display_name, engine_installed)?;
     let stores = Stores::of(&app, &profile)?;
     let password_file = request.password_csv_path.map(PathBuf::from);
     let has_password_file = password_file.is_some();
     let run = Arc::new(ImportRun::new(Arc::new(sink), password_file));
-    {
-        let mut active = ACTIVE.lock();
-        if active.is_some() {
-            return Err(import_failed("busy", "another import is running"));
-        }
-        *active = Some(Arc::clone(&run));
-    }
+    let guard = ActiveGuard::claim(Active::Run(Arc::clone(&run)))?;
     let types = request.types;
     let report = crate::ipc::run_blocking(move || {
-        let _guard = ActiveGuard;
+        let _guard = guard;
         let mut report = run.run(&browser, &types, has_password_file);
         stores.ingest(&mut report.results);
         Ok(report)
@@ -189,11 +214,11 @@ pub async fn cmd_browser_import_run<R: tauri::Runtime>(
 #[tauri::command]
 pub async fn cmd_browser_import_cancel() -> Result<bool, IpcError> {
     Ok(match ACTIVE.lock().as_ref() {
-        Some(run) => {
+        Some(Active::Run(run)) => {
             run.cancel();
             true
         }
-        None => false,
+        Some(Active::PasswordFile) | None => false,
     })
 }
 
@@ -217,9 +242,12 @@ pub async fn cmd_browser_import_password_file<R: tauri::Runtime>(
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "password export".to_string());
-    let sink = profile_sink(&app, manager.inner(), &profile, &source_name)?;
+    // A password export has no cookies, so the Chromium engine is never needed.
+    let sink = profile_sink(&app, manager.inner(), &profile, &source_name, false)?;
     let stores = Stores::of(&app, &profile)?;
+    let guard = ActiveGuard::claim(Active::PasswordFile)?;
     let mut results = crate::ipc::run_blocking(move || {
+        let _guard = guard;
         let mut results = vec![import_password_file(&sink, request.format, &file)];
         stores.ingest(&mut results);
         Ok(results)
@@ -270,5 +298,17 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(file.format, PasswordFileFormat::BitwardenJson);
+    }
+
+    #[test]
+    fn a_second_import_is_busy_until_the_first_ends() {
+        let first = ActiveGuard::claim(Active::PasswordFile).unwrap();
+        let Err(busy) = ActiveGuard::claim(Active::PasswordFile) else {
+            panic!("a second import must be refused while the first runs");
+        };
+        assert_eq!(busy.code, IpcErrorCode::BrowserImportFailed);
+        assert_eq!(busy.details.unwrap()["reason"], "busy");
+        drop(first);
+        drop(ActiveGuard::claim(Active::PasswordFile).unwrap());
     }
 }

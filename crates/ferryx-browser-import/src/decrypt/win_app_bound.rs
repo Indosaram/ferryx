@@ -26,10 +26,13 @@ use windows::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_B
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_LOCAL_SERVER, COINIT_MULTITHREADED,
 };
+#[cfg(windows)]
+use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 /// Decryptor for Windows Chrome / Edge / Brave cookies.
 pub struct WindowsAppBoundDecryptor {
-    aes_key: Vec<u8>,
+    aes_key: Zeroizing<Vec<u8>>,
 }
 
 impl WindowsAppBoundDecryptor {
@@ -104,13 +107,15 @@ impl WindowsAppBoundDecryptor {
 
                 if ok.is_ok() {
                     let key = unsafe {
-                        let slice = std::slice::from_raw_parts(
+                        let slice = std::slice::from_raw_parts_mut(
                             output_blob.pbData,
                             output_blob.cbData as usize,
                         );
-                        let vec = slice.to_vec();
+                        let key = Zeroizing::new(slice.to_vec());
+                        // The DPAPI buffer holds the key too; clear it before handing it back.
+                        slice.zeroize();
                         let _ = LocalFree(Some(HLOCAL(output_blob.pbData as *mut std::ffi::c_void)));
-                        vec
+                        key
                     };
                     return Some(Self { aes_key: key });
                 }
@@ -122,7 +127,8 @@ impl WindowsAppBoundDecryptor {
     /// Decrypts a cookie value using AES-256-GCM.
     pub fn decrypt_cookie(&self, encrypted_value: &[u8]) -> Result<String, String> {
         let decrypted = self.decrypt_bytes(encrypted_value)?;
-        String::from_utf8(decrypted)
+        std::str::from_utf8(&decrypted)
+            .map(str::to_owned)
             .map_err(|e| format!("Invalid UTF-8 in decrypted cookie: {}", e))
     }
 
@@ -145,11 +151,12 @@ impl WindowsAppBoundDecryptor {
         } else {
             &decrypted[..]
         };
-        String::from_utf8(value.to_vec())
+        std::str::from_utf8(value)
+            .map(str::to_owned)
             .map_err(|e| format!("Invalid UTF-8 in decrypted cookie: {}", e))
     }
 
-    fn decrypt_bytes(&self, encrypted_value: &[u8]) -> Result<Vec<u8>, String> {
+    fn decrypt_bytes(&self, encrypted_value: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
         // Windows cookie format for GCM:
         // ciphertext starts with 3-byte prefix (e.g. "v10" or "v20"), which is stripped.
         // The remaining payload is: 12-byte IV + ciphertext + 16-byte authentication tag.
@@ -166,6 +173,7 @@ impl WindowsAppBoundDecryptor {
 
         cipher
             .decrypt(nonce, payload)
+            .map(Zeroizing::new)
             .map_err(|e| format!("AES-GCM decryption failed: {}", e))
     }
 }
@@ -205,7 +213,7 @@ fn get_browser_config(browser_name: &str) -> Option<BrowserComConfig> {
 }
 
 #[cfg(windows)]
-fn decrypt_via_com(browser_name: &str, encrypted_key: &[u8]) -> Result<Vec<u8>, String> {
+fn decrypt_via_com(browser_name: &str, encrypted_key: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
     let config = get_browser_config(browser_name)
         .ok_or_else(|| format!("COM configuration missing for browser {}", browser_name))?;
 
@@ -250,7 +258,7 @@ unsafe fn call_decrypt_data(
     unknown_ptr: *mut std::ffi::c_void,
     slot: usize,
     input: &[u8],
-) -> Result<Vec<u8>, String> {
+) -> Result<Zeroizing<Vec<u8>>, String> {
     let vtable_ptr = *(unknown_ptr as *mut *mut *mut std::ffi::c_void);
     let func_ptr = *vtable_ptr.add(slot);
 
@@ -286,7 +294,10 @@ unsafe fn call_decrypt_data(
         return Err("COM DecryptData returned null or empty output".into());
     }
 
-    Ok(std::slice::from_raw_parts(plaintext_raw as *const u8, size).to_vec())
+    let key = Zeroizing::new(std::slice::from_raw_parts(plaintext_raw as *const u8, size).to_vec());
+    // The BSTR frees on drop without clearing; wipe the key out of it first.
+    std::slice::from_raw_parts_mut(plaintext_raw as *mut u8, size).zeroize();
+    Ok(key)
 }
 
 #[cfg(test)]
@@ -296,7 +307,7 @@ mod review_tests {
     #[test]
     fn review_invalid_windows_key_returns_error_without_panicking() {
         for len in [0, 16, 31, 33] {
-            let decryptor = WindowsAppBoundDecryptor { aes_key: vec![0; len] };
+            let decryptor = WindowsAppBoundDecryptor { aes_key: Zeroizing::new(vec![0; len]) };
             assert!(decryptor.decrypt_cookie(&[0; 28]).is_err());
         }
     }
@@ -311,7 +322,7 @@ mod review_tests {
         let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
         let mut blob = iv.to_vec();
         blob.extend(cipher.encrypt(Nonce::from_slice(&iv), plain.as_slice()).unwrap());
-        let decryptor = WindowsAppBoundDecryptor { aes_key: key.to_vec() };
+        let decryptor = WindowsAppBoundDecryptor { aes_key: Zeroizing::new(key.to_vec()) };
 
         assert_eq!(
             decryptor.decrypt_bound_cookie(&blob, 24, ".example.com").unwrap(),

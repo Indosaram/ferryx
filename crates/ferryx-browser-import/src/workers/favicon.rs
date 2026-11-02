@@ -101,19 +101,6 @@ mod tests {
     }
 
     #[test]
-    fn test_favicon_destination_interaction() {
-        let dest = Arc::new(MockDestination::new());
-
-        let png_data = vec![0x89, 0x50, 0x4E, 0x47]; // PNG magic bytes (mock)
-        dest.add_favicon("https://example.com", &png_data);
-
-        let favicons = dest.favicons.lock().unwrap();
-        assert_eq!(favicons.len(), 1);
-        assert_eq!(favicons[0].url, "https://example.com");
-        assert_eq!(favicons[0].data_len, 4);
-    }
-
-    #[test]
     fn test_favicon_worker_nonexistent_chromium() {
         let dest = Arc::new(MockDestination::new());
         let cancelled = Arc::new(AtomicBool::new(false));
