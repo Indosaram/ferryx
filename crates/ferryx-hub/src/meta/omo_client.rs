@@ -1913,7 +1913,11 @@ mod lifecycle_tests {
             assert_eq!(workspace.cwd, root.display().to_string(), "{persona:?}");
             assert_eq!(workspace.roots, vec![root.display().to_string()]);
             assert!(root.is_dir());
-            assert_eq!(std::fs::metadata(&root).unwrap().permissions().mode() & 0o777, 0o700);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(std::fs::metadata(&root).unwrap().permissions().mode() & 0o777, 0o700);
+            }
         }
         std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
