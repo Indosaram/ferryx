@@ -159,7 +159,7 @@ fn a_second_import_of_the_same_data_adds_nothing_and_counts_duplicates() {
 
     stage_everything(&fixture);
     fixture.stage("Chrome", |w| {
-        // Same origin and username with a new password updates the saved login.
+        // Same origin and username with another password keeps the saved login as it is.
         w.add_password(login("https://a.test", "alice", "S3NTINEL-a2")).unwrap();
         // Same url at a new time is a new visit.
         w.add_history(visit("https://example.com/", 1_700_000_200.0)).unwrap();
@@ -170,9 +170,11 @@ fn a_second_import_of_the_same_data_adds_nothing_and_counts_duplicates() {
         vec![
             (ImportDataType::Bookmarks, 0, 2, 1, None),
             (ImportDataType::History, 1, 2, 1, None),
-            (ImportDataType::Passwords, 1, 2, 1, None),
+            (ImportDataType::Passwords, 0, 2, 1, None),
         ]
     );
+    let conflicts: Vec<usize> = outcomes.iter().map(|o| o.conflicts).collect();
+    assert_eq!(conflicts, vec![0, 0, 1]);
     assert_eq!(fixture.tree().bookmarks.len(), 2);
     assert_eq!(fixture.tree().folders.len(), 2);
     let history = fixture.library.with_history(|h| h.list("", None, 10)).unwrap();
@@ -180,7 +182,7 @@ fn a_second_import_of_the_same_data_adds_nothing_and_counts_duplicates() {
     let store = vault.open();
     assert_eq!(store.list(None).len(), 2);
     let alice = store.list(None).into_iter().find(|item| item.username == "alice").unwrap();
-    assert_eq!(store.credential(&alice.id).unwrap().password.as_str(), "S3NTINEL-a2");
+    assert_eq!(store.credential(&alice.id).unwrap().password.as_str(), "S3NTINEL-a");
     assert!(fixture.files().is_empty());
 }
 
@@ -261,6 +263,7 @@ fn apply_replaces_staged_counts_with_stored_counts_and_appends_leftovers() {
         data_type: ImportDataType::Bookmarks,
         imported: 5,
         duplicates: 0,
+        conflicts: 0,
         skipped: 1,
         notes: vec!["note".into()],
         error: None,
@@ -270,13 +273,16 @@ fn apply_replaces_staged_counts_with_stored_counts_and_appends_leftovers() {
     bookmarks.duplicates = 2;
     let mut passwords = TypeIngest::new(ImportDataType::Passwords);
     passwords.stored = 1;
+    passwords.conflicts = 3;
     passwords.fail(ImportTypeError::new("vault-unavailable", "no keychain"));
     apply(&mut results, vec![bookmarks, passwords]);
 
     assert_eq!((results[0].imported, results[0].duplicates, results[0].skipped), (3, 2, 1));
     assert_eq!(results[0].notes, vec!["note".to_string()]);
     assert_eq!(results[1].data_type, ImportDataType::Passwords);
+    assert_eq!(results[1].conflicts, 3);
     assert_eq!(results[1].error.as_ref().map(|e| e.code.as_str()), Some("vault-unavailable"));
     let wire = serde_json::to_value(&results[0]).unwrap();
     assert_eq!(wire["duplicates"], 2);
+    assert_eq!(serde_json::to_value(&results[1]).unwrap()["conflicts"], 3);
 }

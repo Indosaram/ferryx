@@ -108,6 +108,11 @@ fn cookie_notes(delivery: &CookieDelivery) -> Vec<String> {
     if delivery.staged_for_engine && !delivery.engine_running {
         notes.push("The Chromium engine applies the cookies when this profile next opens".into());
     }
+    if let Some(error) = &delivery.webview_error {
+        notes.push(format!(
+            "The Chromium engine has the cookies, but open system-webview tabs did not get them: {error}"
+        ));
+    }
     notes
 }
 
@@ -259,6 +264,7 @@ fn cancelled_result(data_type: ImportDataType) -> ImportTypeResult {
         data_type,
         imported: 0,
         duplicates: 0,
+        conflicts: 0,
         skipped: 0,
         notes: Vec::new(),
         error: Some(ImportTypeError::new("cancelled", "the import was cancelled")),
@@ -290,6 +296,7 @@ impl ImportRun {
                         data_type,
                         imported: 0,
                         duplicates: 0,
+                        conflicts: 0,
                         skipped: 0,
                         notes: Vec::new(),
                         error: Some(ImportTypeError::new(
@@ -306,6 +313,7 @@ impl ImportRun {
                         data_type,
                         imported: 0,
                         duplicates: 0,
+                        conflicts: 0,
                         skipped: 0,
                         notes: Vec::new(),
                         error: Some(ImportTypeError::new(
@@ -347,7 +355,15 @@ impl ImportRun {
         };
         if let Some(error) = failure {
             sink.discard(data_type);
-            return ImportTypeResult { data_type, imported: 0, duplicates: 0, skipped, notes, error: Some(error) };
+            return ImportTypeResult {
+                data_type,
+                imported: 0,
+                duplicates: 0,
+                conflicts: 0,
+                skipped,
+                notes,
+                error: Some(error),
+            };
         }
         match sink.finish(data_type) {
             Ok(kept) => {
@@ -356,6 +372,7 @@ impl ImportRun {
                     data_type,
                     imported: kept.kept,
                     duplicates: 0,
+                    conflicts: 0,
                     skipped: skipped + kept.skipped,
                     notes,
                     error: None,
@@ -365,6 +382,7 @@ impl ImportRun {
                 data_type,
                 imported: 0,
                 duplicates: 0,
+                conflicts: 0,
                 skipped,
                 notes,
                 error: Some(ImportTypeError::from_sink(&error)),
@@ -425,6 +443,7 @@ pub fn import_password_file(
         data_type: ImportDataType::Passwords,
         imported: 0,
         duplicates: 0,
+        conflicts: 0,
         skipped: 0,
         notes: Vec::new(),
         error: Some(error),
@@ -464,6 +483,7 @@ pub fn import_password_file(
             data_type: ImportDataType::Passwords,
             imported: kept.kept,
             duplicates: 0,
+            conflicts: 0,
             skipped: parsed.preview.skipped,
             notes: parsed.preview.safe_messages,
             error: None,

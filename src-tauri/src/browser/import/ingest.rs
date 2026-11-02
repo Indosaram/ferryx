@@ -5,7 +5,8 @@
 //!   url already in its target folder is a duplicate.
 //! - History: a visit whose url already has a visit at the same time is a duplicate.
 //! - Passwords go into the vault through its normal save path, keyed by origin and username: the
-//!   same password is a duplicate, a new password updates the saved login.
+//!   same password is a duplicate. A login Ferryx already saved with a different password is a
+//!   conflict and is left as it is: the saved password may be newer than the export.
 //!
 //! Every staged file is overwritten with zeros and deleted once it was read, whether or not its
 //! records were stored, so plaintext passwords never outlive the import that wrote them. A
@@ -41,10 +42,12 @@ pub trait PasswordVault {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeIngest {
     pub data_type: ImportDataType,
-    /// Records added (or, for passwords, saved logins updated).
+    /// Records added.
     pub stored: usize,
     /// Records the store already had.
     pub duplicates: usize,
+    /// Passwords not imported because Ferryx already saved a different password for the login.
+    pub conflicts: usize,
     /// Records the store cannot hold (an unsupported url, an empty password, a torn line).
     pub skipped: usize,
     pub error: Option<ImportTypeError>,
@@ -52,7 +55,7 @@ pub struct TypeIngest {
 
 impl TypeIngest {
     fn new(data_type: ImportDataType) -> Self {
-        Self { data_type, stored: 0, duplicates: 0, skipped: 0, error: None }
+        Self { data_type, stored: 0, duplicates: 0, conflicts: 0, skipped: 0, error: None }
     }
 
     fn fail(&mut self, error: ImportTypeError) {
@@ -64,6 +67,7 @@ impl TypeIngest {
     fn merge(&mut self, other: Self) {
         self.stored += other.stored;
         self.duplicates += other.duplicates;
+        self.conflicts += other.conflicts;
         self.skipped += other.skipped;
         if let Some(error) = other.error {
             self.fail(error);
@@ -212,12 +216,20 @@ fn ingest_passwords(text: &str, vault: &dyn PasswordVault) -> TypeIngest {
     if logins.is_empty() {
         return ingest;
     }
-    let (mut stored, mut duplicates, mut skipped) = (0, 0, 0);
+    let (mut stored, mut duplicates, mut conflicts, mut skipped) = (0, 0, 0, 0);
     let saved = vault.with_vault(&mut |store: &mut VaultStore| {
         for login in &logins {
-            if store.classify(&login.origin, &login.username, &login.password)? == SaveKind::Unchanged {
-                duplicates += 1;
-                continue;
+            match store.classify(&login.origin, &login.username, &login.password)? {
+                SaveKind::New => {}
+                SaveKind::Unchanged => {
+                    duplicates += 1;
+                    continue;
+                }
+                // The saved password may be newer than the export; an import never replaces it.
+                SaveKind::Update { .. } => {
+                    conflicts += 1;
+                    continue;
+                }
             }
             match store.save(login.origin.as_str(), &login.username, &login.password) {
                 Ok(_) => stored += 1,
@@ -229,6 +241,7 @@ fn ingest_passwords(text: &str, vault: &dyn PasswordVault) -> TypeIngest {
     });
     ingest.stored = stored;
     ingest.duplicates = duplicates;
+    ingest.conflicts = conflicts;
     ingest.skipped += skipped;
     if let Err(error) = saved {
         ingest.fail(vault_failed(&error));
@@ -309,6 +322,7 @@ pub fn apply(results: &mut Vec<ImportTypeResult>, ingested: Vec<TypeIngest>) {
             Some(result) => {
                 result.imported = ingest.stored;
                 result.duplicates = ingest.duplicates;
+                result.conflicts = ingest.conflicts;
                 result.skipped += ingest.skipped;
                 if result.error.is_none() {
                     result.error = ingest.error;
@@ -318,6 +332,7 @@ pub fn apply(results: &mut Vec<ImportTypeResult>, ingested: Vec<TypeIngest>) {
                 data_type: ingest.data_type,
                 imported: ingest.stored,
                 duplicates: ingest.duplicates,
+                conflicts: ingest.conflicts,
                 skipped: ingest.skipped,
                 notes: Vec::new(),
                 error: ingest.error,

@@ -39,6 +39,9 @@ pub struct CookieDelivery {
     pub staged_for_engine: bool,
     pub engine_running: bool,
     pub webviews: usize,
+    /// Why the open system webviews did not get the cookies, when setting them failed after the
+    /// Chromium engine already had them.
+    pub webview_error: Option<String>,
 }
 
 /// Chromium and Firefox share these SameSite numbers; Safari reports -1.
@@ -164,7 +167,13 @@ impl CookieSink {
             .into_iter()
             .filter_map(|cookie| cookie_from_imported(cookie).ok())
             .collect();
-        delivery.webviews = (self.apply_webviews)(&webview_cookies).map_err(SinkError::Failed)?;
+        match (self.apply_webviews)(&webview_cookies) {
+            Ok(webviews) => delivery.webviews = webviews,
+            // The engine already has the cookies; failing the whole delivery would report an
+            // import that partly happened as one that did not.
+            Err(error) if delivery.staged_for_engine => delivery.webview_error = Some(error),
+            Err(error) => return Err(SinkError::Failed(error)),
+        }
         Ok(delivery)
     }
 
@@ -228,7 +237,14 @@ mod tests {
         let delivery = sink.finish().unwrap();
         assert_eq!(
             delivery,
-            CookieDelivery { cookies: 1, google_skipped: 1, staged_for_engine: true, engine_running: true, webviews: 1 }
+            CookieDelivery {
+                cookies: 1,
+                google_skipped: 1,
+                staged_for_engine: true,
+                engine_running: true,
+                webviews: 1,
+                webview_error: None,
+            }
         );
         let staged_path = cache.path().join(STAGED_COOKIES_FILE);
         assert_eq!(*notified.lock(), vec![staged_path.clone()]);
@@ -251,5 +267,25 @@ mod tests {
         let delivery = sink.finish().unwrap();
         assert!(!delivery.staged_for_engine);
         assert_eq!(delivery.webviews, 1);
+    }
+
+    #[test]
+    fn a_webview_failure_after_the_engine_has_the_cookies_is_a_partial_delivery() {
+        let cache = tempfile::tempdir().unwrap();
+        let failing = || -> WebviewApply {
+            Box::new(|_: &[cookie::Cookie<'static>]| -> Result<usize, String> { Err("webview gone".into()) })
+        };
+        let sink = CookieSink::new(Some(cache.path().to_path_buf()), Box::new(|_: &std::path::Path| false), failing());
+        sink.add(&entry("a.test", "x", 0)).unwrap();
+        let delivery = sink.finish().unwrap();
+        assert!(delivery.staged_for_engine);
+        assert_eq!(delivery.webviews, 0);
+        assert_eq!(delivery.webview_error.as_deref(), Some("webview gone"));
+        assert!(cache.path().join(STAGED_COOKIES_FILE).is_file());
+
+        // Without the engine nothing received the cookies, so the delivery fails.
+        let sink = CookieSink::new(None, Box::new(|_: &std::path::Path| false), failing());
+        sink.add(&entry("a.test", "x", 0)).unwrap();
+        assert!(sink.finish().is_err());
     }
 }
