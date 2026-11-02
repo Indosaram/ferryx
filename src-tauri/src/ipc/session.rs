@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, Runtime, Window};
 
 /// Today's single-window session file. The primary window keeps exactly this path.
-fn get_session_file_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, IpcError> {
+pub(crate) fn get_session_file_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, IpcError> {
     let override_dir = crate::daemon::server::session_dir_override();
     if override_dir.is_some() {
         return Ok(crate::daemon::server::resolve_session_path(

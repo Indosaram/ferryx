@@ -2,7 +2,8 @@
 //!
 //! `main` is created from `tauri.conf.json`; every other app window is built here with the same
 //! attributes and loads `index.html?window=<label>` so the UI knows which window it is.
-//! Secondary window placement is kept in `<app data dir>/windows.json` as
+//! Secondary window placement is kept in `windows.json` beside the primary session file (so it
+//! follows the same `FERRYX_SESSION_DIR` / dev-runtime isolation as the per-window sessions) as
 //! `[{ label, x, y, width, height }]` (logical pixels). The file is rewritten when a secondary
 //! window is created, moved, resized or closed by the user, and those windows are recreated after
 //! `main` on startup.
@@ -25,7 +26,7 @@ use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder, Windo
 use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
 use crate::window_registry::{is_app_window_label, PRIMARY_WINDOW_LABEL, SECONDARY_WINDOW_PREFIX};
 
-/// File (in the app data dir) holding the secondary window list.
+/// File (beside the primary session file) holding the secondary window list.
 pub const WINDOWS_FILE_NAME: &str = "windows.json";
 /// Env opt-in for restoring secondary windows and the native "New Window" item.
 pub const MULTI_WINDOW_ENV: &str = "FERRYX_MULTI_WINDOW";
@@ -164,13 +165,16 @@ pub fn merge_windows(
 }
 
 fn windows_file_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, IpcError> {
-    let dir = app.path().app_data_dir().map_err(|error| {
-        IpcError::new(
-            IpcErrorCode::IoError,
-            format!("Failed to resolve app data dir: {error}"),
-        )
-    })?;
-    Ok(dir.join(WINDOWS_FILE_NAME))
+    let session_path = crate::ipc::session::get_session_file_path(app)?;
+    Ok(windows_file_beside(&session_path))
+}
+
+/// `windows.json` lives in the directory of the primary session file.
+fn windows_file_beside(session_path: &Path) -> PathBuf {
+    session_path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(WINDOWS_FILE_NAME)
 }
 
 fn read_windows_file(path: &Path) -> Vec<PersistedWindow> {
@@ -434,6 +438,15 @@ pub fn cmd_window_list<R: Runtime>(app: AppHandle<R>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_file_sits_beside_the_primary_session_file() {
+        let session = Path::new("/qa/sessions/dev/session_state.json");
+        assert_eq!(
+            windows_file_beside(session),
+            PathBuf::from("/qa/sessions/dev").join(WINDOWS_FILE_NAME)
+        );
+    }
 
     fn entry(label: &str, x: f64) -> PersistedWindow {
         PersistedWindow {
