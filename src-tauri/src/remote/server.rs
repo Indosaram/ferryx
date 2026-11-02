@@ -3864,9 +3864,6 @@ pub(crate) async fn serve_static_or_index(uri: axum::http::Uri) -> Response {
     if uri.path().starts_with("/api/") {
         return machine_error(StatusCode::NOT_FOUND, "NOT_FOUND");
     }
-    let Some(path) = static_relative_path(uri.path()) else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
     // Discovery uses synchronous filesystem metadata, so keep it off the reactor.
     let dist_dir = match crate::ipc::run_blocking(|| Ok(resolve_dist_dir())).await {
         Ok(path) => path,
@@ -3874,6 +3871,14 @@ pub(crate) async fn serve_static_or_index(uri: axum::http::Uri) -> Response {
             tracing::warn!(%error, "remote asset root discovery failed");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
+    };
+    serve_static_from(dist_dir, uri).await
+}
+
+/// Serves `uri` from the asset root `dist_dir`, falling back to its index.html.
+pub(crate) async fn serve_static_from(dist_dir: PathBuf, uri: axum::http::Uri) -> Response {
+    let Some(path) = static_relative_path(uri.path()) else {
+        return StatusCode::BAD_REQUEST.into_response();
     };
     let Ok(root) = tokio::fs::canonicalize(dist_dir).await else {
         return Html(EMBEDDED_FALLBACK_HTML).into_response();
