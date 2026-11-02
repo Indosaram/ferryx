@@ -1,0 +1,57 @@
+name: win-scope-probe
+on:
+  push:
+    branches: ['ci/win-scope-20261102']
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+jobs:
+  scope:
+    runs-on: windows-2022
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@stable
+      - name: env
+        shell: bash
+        run: |
+          echo "OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe" >> "$GITHUB_ENV"
+          git config --global user.name ferryx-ci
+          git config --global user.email ferryx-ci@users.noreply.github.com
+      - name: JS deps + UI build
+        shell: bash
+        run: |
+          bun install --frozen-lockfile || bun install
+          bun install --cwd ui --frozen-lockfile || bun install --cwd ui
+          bun run --cwd ui build
+          bun scripts/fetch-ffmpeg.mjs
+      - name: Build tests
+        timeout-minutes: 60
+        shell: bash
+        run: |
+          cargo build --manifest-path remote-helper/Cargo.toml
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --no-run
+      - name: Scope (each filter separately, per-filter timeout)
+        timeout-minutes: 60
+        shell: bash
+        run: |
+          set +e
+          for f in browser cli:: automation_snapshot worktree daemon::server::agent_state_transport_tests; do
+            echo "::group::$f"
+            timeout 900 cargo test --manifest-path src-tauri/Cargo.toml --lib -- "$f" --test-threads=1 2>&1 | tee "out-$f.txt" | grep -vE '\.\.\. ok$'
+            echo "SCOPE-RC $f ${PIPESTATUS[0]}"
+            echo "::endgroup::"
+            grep -E "\.\.\. FAILED|has been running|test result" "out-$f.txt" | sed "s/^/SCOPE $f: /"
+          done
+          exit 0
