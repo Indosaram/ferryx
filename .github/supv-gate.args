@@ -1,0 +1,6 @@
+# int6c: early compile gate at f59960ae (t13fix + f4relay + f2misc on int5)
+sh cd src-tauri && cargo check --all-targets
+sh cd crates/ferryx-hub && cargo check --all-features --all-targets
+lib supervisor daemon::supervisor_lease account::supervisor_lease account::store remote::supervisor_api remote::relay_server hub_runtime agent_control::fence supervisor_move supervisor_checkpoint --test-threads=1
+hub --all-features
+sh grep -hE '^test .*FAILED$|^error(\[|:)|^warning: unused' out/*.log | sort | uniq | head -120; true
