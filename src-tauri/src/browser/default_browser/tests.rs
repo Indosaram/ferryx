@@ -123,7 +123,7 @@ fn reg_query_output_yields_the_prog_id() {
 fn linux_desktop_entry_claims_http_and_https_handlers() {
     let entry = linux_desktop_entry("/opt/Ferryx App/ferryx");
     assert!(entry.contains("MimeType=x-scheme-handler/http;x-scheme-handler/https;"));
-    assert!(entry.contains("Exec=/opt/Ferryx\\sApp/ferryx %u\n"));
+    assert!(entry.contains("\nExec=\"/opt/Ferryx App/ferryx\" %u\n"));
     let commands = linux_registration_commands();
     assert_eq!(commands[0].0, "xdg-settings");
     assert_eq!(
@@ -140,6 +140,21 @@ fn linux_desktop_entry_claims_http_and_https_handlers() {
             current: Some("Firefox".into())
         }
     );
+}
+
+#[test]
+fn linux_desktop_entry_quotes_and_escapes_the_exec_path() {
+    let exec = |path: &str| {
+        linux_desktop_entry(path)
+            .lines()
+            .find(|line| line.starts_with("Exec="))
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(exec("/opt/a$b/ferryx"), r#"Exec="/opt/a\\$b/ferryx" %u"#);
+    assert_eq!(exec("/opt/a`b/ferryx"), r#"Exec="/opt/a\\`b/ferryx" %u"#);
+    assert_eq!(exec("/opt/50%/ferryx"), r#"Exec="/opt/50%%/ferryx" %u"#);
+    assert_eq!(exec(r#"/opt/a\b"c/ferryx"#), r#"Exec="/opt/a\\\\b\\"c/ferryx" %u"#);
 }
 
 #[test]

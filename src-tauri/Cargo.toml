@@ -51,6 +51,11 @@ name = "native_terminal_macos_background"
 harness = false
 required-features = ["desktop"]
 
+[[test]]
+name = "wry_delegate_classes_macos"
+harness = false
+required-features = ["desktop"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -343,6 +348,10 @@ zbus = { version = "5.19", default-features = false, features = ["async-io", "bl
 tempfile = "3.17"
 tokio-test = "0.4"
 tokio = { version = "1.53", features = ["test-util"] }
+
+# tests/wry_delegate_classes_macos.rs builds a wry webview directly; the same wry tauri runs on.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+wry = { version = "0.55", default-features = false }
 
 [profile.release]
 lto = "thin"

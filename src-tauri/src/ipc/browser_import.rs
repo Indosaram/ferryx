@@ -76,8 +76,8 @@ fn library_changed(results: &[ImportTypeResult]) -> bool {
 }
 
 /// The sink for `profile`: staging under the data dir, cookies into its Chromium cache (when
-/// the engine is installed) and its open system webviews.
-fn profile_sink<R: tauri::Runtime>(
+/// the engine is installed, checked on a blocking thread) and its open system webviews.
+async fn profile_sink<R: tauri::Runtime>(
     app: &AppHandle<R>,
     manager: &Arc<BrowserManager>,
     profile: &BrowserProfileId,
@@ -89,7 +89,9 @@ fn profile_sink<R: tauri::Runtime>(
 
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     let (cef_cache_dir, notify): (Option<PathBuf>, crate::browser::import::cookie_sink::EngineNotify) = {
-        let installed = crate::browser::cef_engine::engine_dir(&data_dir).is_some();
+        let root = data_dir.clone();
+        let installed =
+            crate::ipc::run_blocking(move || Ok(crate::browser::cef_engine::engine_dir(&root).is_some())).await?;
         let dir = installed.then(|| crate::browser::data_paths::cef_profile_dir(&data_dir, profile.as_str()));
         let name = profile.as_str().to_string();
         (
@@ -160,7 +162,7 @@ pub async fn cmd_browser_import_run<R: tauri::Runtime>(
     })
     .await?;
 
-    let sink = profile_sink(&app, &manager, &profile, &browser.display_name)?;
+    let sink = profile_sink(&app, &manager, &profile, &browser.display_name).await?;
     let stores = Stores::of(&app, &profile)?;
     let password_file = request.password_csv_path.map(PathBuf::from);
     let has_password_file = password_file.is_some();
@@ -217,7 +219,7 @@ pub async fn cmd_browser_import_password_file<R: tauri::Runtime>(
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "password export".to_string());
-    let sink = profile_sink(&app, manager.inner(), &profile, &source_name)?;
+    let sink = profile_sink(&app, manager.inner(), &profile, &source_name).await?;
     let stores = Stores::of(&app, &profile)?;
     let mut results = crate::ipc::run_blocking(move || {
         let mut results = vec![import_password_file(&sink, request.format, &file)];

@@ -32,6 +32,9 @@ thread_local! {
     static DOWNLOADS: RefCell<HashMap<u32, Download>> = RefCell::new(HashMap::new());
     static FILE_DIALOGS: RefCell<HashMap<u32, FileDialogCallback>> = RefCell::new(HashMap::new());
     static NEXT_DIALOG: Cell<u32> = const { Cell::new(1) };
+    /// Tab to the nonce its current main-frame shim logs after the prefix; console lines without
+    /// it (another frame, an older document) are not the shim's.
+    static SHIM_NONCES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
 fn tab_of(browser: Option<&mut Browser>) -> String {
@@ -205,35 +208,69 @@ pub(super) fn notification_permission(tab: &str, state: PagePermission) {
     }
 }
 
-/// The page's Notification shim reports over the console, which the engine already sees.
-fn shim_source() -> String {
+/// The page's Notification shim reports over the console, which the engine already sees; each
+/// line carries `nonce`, which only the main frame's shim knows.
+fn shim_source(nonce: &str) -> String {
+    let prefix = format!("{PAGE_MESSAGE_CONSOLE_PREFIX}{nonce}:");
     let post = format!(
-        "(() => {{ const log = console.log.bind(console); return (message) => log({prefix:?} + message); }})()",
-        prefix = PAGE_MESSAGE_CONSOLE_PREFIX
+        "(() => {{ const log = console.log.bind(console); return (message) => log({prefix:?} + message); }})()"
     );
     notification_shim(&post)
 }
 
-/// Installs the Notification shim when a tab's main frame starts loading a document.
+/// 128 random bits as hex, or `None` when the OS has no randomness to give.
+fn new_nonce() -> Option<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).ok()?;
+    Some(format!("{:032x}", u128::from_le_bytes(bytes)))
+}
+
+/// The message of a shim console line carrying `nonce`; `None` for any other line.
+fn page_message_body<'a>(line: &'a str, nonce: &str) -> Option<&'a str> {
+    if nonce.is_empty() {
+        return None;
+    }
+    line.strip_prefix(PAGE_MESSAGE_CONSOLE_PREFIX)?.strip_prefix(nonce)?.strip_prefix(':')
+}
+
+/// Installs the Notification shim, with a fresh nonce, when a tab's main frame starts loading
+/// a document.
 pub(super) fn on_load_start(browser: Option<&mut Browser>, frame: Option<&mut Frame>) {
     let (Some(browser), Some(frame)) = (browser, frame) else { return };
-    if frame.is_main() == 0 || !matches!(key_of(browser), Some(Key::Tab(_))) {
+    if frame.is_main() == 0 {
         return;
     }
-    frame.execute_java_script(Some(&CefString::from(shim_source().as_str())), None, 0);
+    let Some(Key::Tab(tab)) = key_of(browser) else { return };
+    let Some(nonce) = new_nonce() else {
+        SHIM_NONCES.with_borrow_mut(|nonces| nonces.remove(&tab));
+        eprintln!("ferryx-engine: no randomness for the notification shim nonce; shim not installed");
+        return;
+    };
+    let source = shim_source(&nonce);
+    SHIM_NONCES.with_borrow_mut(|nonces| nonces.insert(tab, nonce));
+    frame.execute_java_script(Some(&CefString::from(source.as_str())), None, 0);
+}
+
+/// The tab's browser closed: its shim nonce goes.
+pub(super) fn forget_tab(tab: &str) {
+    SHIM_NONCES.with_borrow_mut(|nonces| nonces.remove(tab));
 }
 
 /// Turns a Notification shim console line into [`Event::PageMessage`]; true when it was one.
+/// Prefixed lines without the tab's current nonce are swallowed and dropped.
 pub(super) fn on_console_message(browser: Option<&mut Browser>, message: Option<&CefString>) -> bool {
     let message = text(message);
-    let Some(body) = message.strip_prefix(PAGE_MESSAGE_CONSOLE_PREFIX) else {
+    if !message.starts_with(PAGE_MESSAGE_CONSOLE_PREFIX) {
         return false;
-    };
-    let Some(browser) = browser else { return true };
-    let url = browser.main_frame().map(|frame| user_text(frame.url())).unwrap_or_default();
-    if let Some(Key::Tab(tab)) = key_of(browser) {
-        emit(Event::PageMessage { tab, url, message: body.to_string() });
     }
+    let Some(browser) = browser else { return true };
+    let Some(Key::Tab(tab)) = key_of(browser) else { return true };
+    let body = SHIM_NONCES.with_borrow(|nonces| {
+        nonces.get(&tab).and_then(|nonce| page_message_body(&message, nonce)).map(str::to_string)
+    });
+    let Some(body) = body else { return true };
+    let url = browser.main_frame().map(|frame| user_text(frame.url())).unwrap_or_default();
+    emit(Event::PageMessage { tab, url, message: body });
     true
 }
 
@@ -402,5 +439,26 @@ wrap_dialog_handler! {
             });
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_lines_with_the_tabs_nonce_are_page_messages() {
+        let nonce = new_nonce().unwrap();
+        assert_eq!(nonce.len(), 32);
+        assert_ne!(new_nonce().unwrap(), nonce);
+        let line = format!("{PAGE_MESSAGE_CONSOLE_PREFIX}{nonce}:{{\"op\":\"request\"}}");
+        assert_eq!(page_message_body(&line, &nonce), Some("{\"op\":\"request\"}"));
+        assert!(shim_source(&nonce).contains(&format!("{PAGE_MESSAGE_CONSOLE_PREFIX}{nonce}:")));
+
+        assert_eq!(page_message_body(&format!("{PAGE_MESSAGE_CONSOLE_PREFIX}{{\"op\":\"request\"}}"), &nonce), None);
+        assert_eq!(page_message_body(&format!("{PAGE_MESSAGE_CONSOLE_PREFIX}{}:{{}}", "0".repeat(32)), &nonce), None);
+        assert_eq!(page_message_body(&format!("{PAGE_MESSAGE_CONSOLE_PREFIX}{nonce}{{}}"), &nonce), None);
+        assert_eq!(page_message_body(&format!("{PAGE_MESSAGE_CONSOLE_PREFIX}:{{}}"), ""), None);
+        assert_eq!(page_message_body(&format!("x{PAGE_MESSAGE_CONSOLE_PREFIX}{nonce}:{{}}"), &nonce), None);
     }
 }

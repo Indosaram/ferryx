@@ -3729,6 +3729,8 @@ pub async fn close_browser_session<R: tauri::Runtime>(
     crate::browser::bridge::forget_webview(app, &session.webview_label);
     CREATED_SESSION_IDS.lock().retain(|id| id != browser_id);
     crate::browser::site_permissions::forget_browser(browser_id);
+    crate::browser::sign_in_handoff::untrack(browser_id);
+    crate::ipc::browser_library::forget_tab(browser_id);
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     if crate::browser::cef_engine::close(browser_id) {
         crate::browser::popup::forget_opener(browser_id);
@@ -3827,9 +3829,7 @@ pub async fn cmd_browser_engine_install<R: tauri::Runtime>(
     use crate::browser::engine_install;
     let data_dir = engine_data_dir(&app)?;
     let guard = engine_install::InstallGuard::acquire().map_err(engine_install_error)?;
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("Ferryx/", env!("CARGO_PKG_VERSION")))
-        .build()
+    let client = engine_install::http_client(engine_install::CONNECT_TIMEOUT, engine_install::READ_TIMEOUT)
         .map_err(|error| IpcError::internal(error.to_string()))?;
     let cleanup_dir = data_dir.clone();
     let inactive = engine_inactive_reason(&app);

@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 const FILE_NAME: &str = "history.sqlite";
@@ -88,6 +88,27 @@ fn escape_like(term: &str) -> String {
     term.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }
 
+/// Upserts one url row and adds its visit on `conn`, which the caller wraps in a transaction.
+fn insert_row(conn: &Connection, url: &str, title: Option<&str>, visited_at: i64, count: u32) -> Result<(), HistoryError> {
+    let title = title.map(str::trim).filter(|title| !title.is_empty());
+    conn.execute(
+        "INSERT INTO urls (url, title, visit_count, last_visited_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(url) DO UPDATE SET
+             title = COALESCE(excluded.title, urls.title),
+             visit_count = urls.visit_count + excluded.visit_count,
+             last_visited_at = MAX(urls.last_visited_at, excluded.last_visited_at)",
+        params![url, title, count.max(1), visited_at],
+    )?;
+    let url_id: i64 = conn.query_row("SELECT id FROM urls WHERE url = ?1", [url], |row| row.get(0))?;
+    conn.execute("INSERT INTO visits (url_id, visited_at) VALUES (?1, ?2)", params![url_id, visited_at])?;
+    conn.execute(
+        "DELETE FROM visits WHERE url_id = ?1 AND id NOT IN
+             (SELECT id FROM visits WHERE url_id = ?1 ORDER BY visited_at DESC LIMIT ?2)",
+        params![url_id, VISITS_PER_URL],
+    )?;
+    Ok(())
+}
+
 impl HistoryStore {
     /// `<data>/browser/history.sqlite`.
     pub fn default_path(data_dir: &Path) -> PathBuf {
@@ -147,23 +168,8 @@ impl HistoryStore {
     }
 
     fn insert(&mut self, url: &str, title: Option<&str>, visited_at: i64, count: u32) -> Result<(), HistoryError> {
-        let title = title.map(str::trim).filter(|title| !title.is_empty());
         let tx = self.conn.transaction()?;
-        tx.execute(
-            "INSERT INTO urls (url, title, visit_count, last_visited_at) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(url) DO UPDATE SET
-                 title = COALESCE(excluded.title, urls.title),
-                 visit_count = urls.visit_count + excluded.visit_count,
-                 last_visited_at = MAX(urls.last_visited_at, excluded.last_visited_at)",
-            params![url, title, count.max(1), visited_at],
-        )?;
-        let url_id: i64 = tx.query_row("SELECT id FROM urls WHERE url = ?1", [url], |row| row.get(0))?;
-        tx.execute("INSERT INTO visits (url_id, visited_at) VALUES (?1, ?2)", params![url_id, visited_at])?;
-        tx.execute(
-            "DELETE FROM visits WHERE url_id = ?1 AND id NOT IN
-                 (SELECT id FROM visits WHERE url_id = ?1 ORDER BY visited_at DESC LIMIT ?2)",
-            params![url_id, VISITS_PER_URL],
-        )?;
+        insert_row(&tx, url, title, visited_at, count)?;
         tx.commit()?;
         Ok(())
     }
@@ -261,6 +267,28 @@ impl HistoryStore {
             inserted += 1;
         }
         Ok(inserted)
+    }
+
+    /// One-time import guarded by meta `key`: the check, every visit and `key = stamp` commit in
+    /// one transaction, so a failure leaves nothing behind and a retry starts over. Returns the
+    /// rows inserted, or `None` when `key` is already set.
+    pub fn import_once(&mut self, key: &str, stamp: &str, visits: &[ImportedVisit]) -> Result<Option<usize>, HistoryError> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let done = tx.query_row("SELECT 1 FROM meta WHERE key = ?1", [key], |_| Ok(())).optional()?.is_some();
+        if done {
+            return Ok(None);
+        }
+        let mut inserted = 0;
+        for visit in visits {
+            if !is_recordable_url(&visit.url) || visit.visited_at <= 0 {
+                continue;
+            }
+            insert_row(&tx, visit.url.trim(), visit.title.as_deref(), visit.visited_at, visit.visit_count)?;
+            inserted += 1;
+        }
+        tx.execute("INSERT INTO meta (key, value) VALUES (?1, ?2)", params![key, stamp])?;
+        tx.commit()?;
+        Ok(Some(inserted))
     }
 
     /// [`Self::import`] for another browser's history: a visit whose url already has a visit at

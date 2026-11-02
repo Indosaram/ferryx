@@ -57,18 +57,24 @@ pub fn origin_string(protocol: &str, host: &str, port: isize) -> String {
     }
 }
 
-/// Replaces the media capture method on the class of `webview`'s UI delegate. wry declares that
-/// class without an explicit runtime name, so objc2 names it after the module path and wry's
-/// version (`wry::wkwebview::class::wry_web_view_ui_delegate::WryWebViewUIDelegate0.55.1`), and a
-/// lookup by the bare name never finds it. The live delegate's class is the right one.
+/// The class of a WKWebView's UI delegate. wry declares that class without an explicit runtime
+/// name, so objc2 names it after the module path and wry's version
+/// (`wry::wkwebview::class::wry_web_view_ui_delegate::WryWebViewUIDelegate0.55.1`), and a lookup
+/// by the bare name never finds it. The live delegate's class is the right one.
+pub fn ui_delegate_class(webview: &AnyObject) -> Option<&'static AnyClass> {
+    // SAFETY: `webview` is a live WKWebView, and `UIDelegate` is a property read that returns nil
+    // or an object.
+    let delegate: *mut AnyObject = unsafe { msg_send![webview, UIDelegate] };
+    // SAFETY: a non-null delegate is a live Objective-C object for the duration of the call.
+    unsafe { delegate.as_ref() }.map(|delegate| delegate.class())
+}
+
+/// Replaces the media capture method on the class of `webview`'s UI delegate.
 fn swizzle(webview: *mut AnyObject) {
     SWIZZLE.call_once(|| {
         let selector = sel!(webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:);
-        // SAFETY: `webview` is the live WKWebView wry hands to `with_webview` on the main thread,
-        // and `UIDelegate` is a property read that returns nil or an object.
-        let delegate: *mut AnyObject = unsafe { msg_send![webview, UIDelegate] };
-        // SAFETY: a non-null delegate is a live Objective-C object for the duration of the call.
-        let Some(class): Option<&AnyClass> = (unsafe { delegate.as_ref() }).map(|delegate| delegate.class()) else {
+        // SAFETY: `webview` is the live WKWebView wry hands to `with_webview` on the main thread.
+        let Some(class) = unsafe { webview.as_ref() }.and_then(ui_delegate_class) else {
             tracing::warn!("the browser webview has no UI delegate: browser media requests keep WebKit's default prompt");
             return;
         };
