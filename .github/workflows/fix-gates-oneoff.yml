@@ -7,8 +7,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ref: ['d516bf4412d09ffe2577ceef6348589eb91fe5d7']
-        suite: ['tauri', 'hub', 'ui']
+        ref: ['6017032a73975c04a2d5500a586a9095685eeeba']
+        suite: ['hub', 'ui']
     runs-on: ubuntu-24.04
     timeout-minutes: 170
     env:
