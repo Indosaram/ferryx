@@ -1,7 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { useState } from "react";
 import { Server } from "lucide-react";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MobileSheet, MobileSheetItem } from "./MobileSheet";
@@ -77,13 +77,16 @@ describe("MobileSheet", () => {
     expect(layer).toHaveClass("fixed", "inset-0", "z-50");
 
     const backdrop = screen.getByTestId("sheet-backdrop");
-    expect(backdrop).toHaveAttribute("aria-label", "Close Actions");
-    expect(backdrop).toHaveClass("bg-black/50");
+    // the scrim is a pointer target only: one named Close control, not two
+    expect(backdrop).toHaveAttribute("aria-hidden", "true");
+    expect(backdrop.tagName).not.toBe("BUTTON");
+    expect(backdrop).toHaveClass("bg-chat-screen/80");
+    expect(screen.getAllByRole("button", { name: "Close Actions" })).toHaveLength(1);
 
     const dialog = screen.getByRole("dialog", { name: "Actions" });
     expect(dialog).toHaveAttribute("aria-modal", "true");
     expect(dialog).toHaveClass(
-      "rounded-t-[20px]",
+      "rounded-t-2xl",
       "bg-chat-surface",
       "border-t",
       "border-chat-border",
@@ -91,18 +94,20 @@ describe("MobileSheet", () => {
       "animate-sheet-in",
     );
 
-    const handle = dialog.querySelector("span.h-1.w-9");
-    expect(handle).toBeInTheDocument();
-    expect(handle).toHaveClass("rounded-full", "bg-chat-foreground-secondary/40");
+    // the grabber draws the swipe-down affordance and is hidden from assistive tech
+    const grabber = dialog.querySelector("span.w-9.rounded-full.bg-chat-border");
+    expect(grabber).toBeInTheDocument();
+    expect(grabber?.parentElement).toHaveAttribute("aria-hidden", "true");
 
     const title = dialog.querySelector("h2");
     expect(title).toHaveTextContent("Actions");
-    expect(title).toHaveClass("text-[15px]", "font-semibold");
+    expect(title).toHaveClass("text-[0.9375rem]", "font-semibold");
     expect(dialog.querySelector('[aria-label="Close Actions"] svg')).toBeInTheDocument();
 
-    const scroller = dialog.querySelector(".pb-safe-sheet");
-    expect(scroller).toBeInTheDocument();
-    expect(scroller).toHaveClass("overflow-y-auto");
+    // the footer sits outside the scroller and carries the safe-area padding itself
+    const footer = screen.getByRole("button", { name: "New terminal" }).parentElement as HTMLElement;
+    expect(footer).toHaveClass("pb-safe-sheet");
+    expect(footer.closest(".overflow-y-auto")).toBeNull();
 
     expect(screen.getByText("Machines")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "New terminal" })).toBeInTheDocument();
@@ -115,6 +120,32 @@ describe("MobileSheet", () => {
     fireEvent.keyDown(window, { key: "Escape" });
 
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("closes only the topmost of two stacked sheets on Escape", () => {
+    const closeLower = vi.fn();
+    const closeUpper = vi.fn();
+    render(
+      <>
+        <MobileSheet open onOpenChange={closeLower} title="Actions" ariaLabel="Actions" />
+        <MobileSheet open onOpenChange={closeUpper} title="Options" ariaLabel="Options" />
+      </>,
+    );
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(closeUpper).toHaveBeenCalledWith(false);
+    expect(closeLower).not.toHaveBeenCalled();
+  });
+
+  it("makes the page behind it inert while open and restores it on close", () => {
+    render(
+      <div>
+        <button type="button" data-testid="behind">Behind</button>
+        <ControlledSheetHarness initialOpen />
+      </div>,
+    );
+    expect(screen.getByTestId("behind")).toHaveAttribute("inert");
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByTestId("behind")).not.toHaveAttribute("inert");
   });
 
   it("closes when the backdrop is tapped", () => {
@@ -392,12 +423,165 @@ describe("MobileSheetItem", () => {
 
     const active = screen.getByTestId("row-active");
     expect(active).toHaveClass("min-h-12");
-    expect(active.querySelector("svg")).toHaveClass("size-[18px]");
-    expect(screen.getByText("build box")).toHaveClass("text-[15px]");
-    expect(screen.getByText("orca/ws/main")).toHaveClass("text-[13px]", "text-chat-foreground-secondary");
+    expect(active.querySelector("svg")).toHaveClass("size-[1.125rem]");
+    expect(screen.getByText("build box")).toHaveClass("text-[0.9375rem]");
+    expect(screen.getByText("orca/ws/main")).toHaveClass("text-[0.8125rem]", "text-chat-foreground-secondary");
     expect(active).toHaveAttribute("aria-current", "true");
     expect(active).not.toHaveAttribute("aria-selected");
     expect(screen.getByTestId("row-idle")).not.toHaveAttribute("aria-current");
     expect(screen.getByTestId("row-idle")).not.toHaveAttribute("aria-selected");
+  });
+});
+
+describe("MobileSheet swipe to dismiss", () => {
+  const SHEET_HEIGHT = 400;
+
+  /** Drives performance.now so velocity is decided by the test, not by how fast jsdom runs. */
+  function clock() {
+    let now = 1_000;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    return { advance: (ms: number) => { now += ms; } };
+  }
+
+  function renderSheet() {
+    const onOpenChange = vi.fn();
+    render(
+      <MobileSheet open onOpenChange={onOpenChange} title="Actions" ariaLabel="Actions" testId="sheet">
+        <MobileSheetItem testId="sheet-item" label="New terminal" onSelect={vi.fn()} />
+      </MobileSheet>,
+    );
+    const dialog = screen.getByRole("dialog", { name: "Actions" });
+    vi.spyOn(dialog, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 444, top: 444, left: 0, right: 390, bottom: 844, width: 390, height: SHEET_HEIGHT,
+      toJSON: () => ({}),
+    } as DOMRect);
+    return { onOpenChange, dialog };
+  }
+
+  /** Down, then `steps` evenly spaced moves of `stepMs` each to `distance`, then up. */
+  function drag(target: HTMLElement, distance: number, { steps = 4, stepMs = 120 } = {}, tick: (ms: number) => void) {
+    const startY = 450;
+    fireEvent.pointerDown(target, { clientX: 100, clientY: startY, button: 0 });
+    for (let i = 1; i <= steps; i += 1) {
+      tick(stepMs);
+      fireEvent.pointerMove(target, { clientX: 100, clientY: startY + (distance * i) / steps });
+    }
+    tick(stepMs);
+    fireEvent.pointerUp(target, { clientX: 100, clientY: startY + distance });
+  }
+
+  it("closes through onOpenChange(false) after a slow drag past 30% of the sheet height", () => {
+    const { advance } = clock();
+    const { onOpenChange, dialog } = renderSheet();
+
+    drag(screen.getByTestId("sheet-handle"), SHEET_HEIGHT * 0.4, {}, advance);
+
+    expect(onOpenChange).toHaveBeenCalledTimes(1);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    // the exit continues downward from the finger instead of snapping back up first
+    expect(dialog.style.transform).toBe("translate3d(0, 100%, 0)");
+    expect(dialog.style.getPropertyPriority("transform")).toBe("important");
+  });
+
+  it("closes on a quick flick shorter than the distance threshold", () => {
+    const { advance } = clock();
+    const { onOpenChange } = renderSheet();
+
+    // 60px in 2 x 16ms moves: ~1.9 px/ms, well over the flick velocity
+    drag(screen.getByTestId("sheet-handle"), 60, { steps: 2, stepMs: 16 }, advance);
+
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("springs back without closing after a short slow drag", () => {
+    const { advance } = clock();
+    const { onOpenChange, dialog } = renderSheet();
+
+    drag(screen.getByTestId("sheet-handle"), 40, {}, advance);
+
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(dialog.style.transform).toBe("translate3d(0, 0, 0)");
+    expect(dialog.style.transition).toContain("220ms");
+  });
+
+  it("follows the finger while dragging and dims the backdrop with progress", () => {
+    const { advance } = clock();
+    const { dialog } = renderSheet();
+    const handle = screen.getByTestId("sheet-handle");
+
+    fireEvent.pointerDown(handle, { clientX: 100, clientY: 450, button: 0 });
+    advance(100);
+    fireEvent.pointerMove(handle, { clientX: 100, clientY: 550 });
+
+    expect(dialog.style.transform).toBe("translate3d(0, 100px, 0)");
+    expect(dialog.style.transition).toBe("none");
+    expect(screen.getByTestId("sheet-backdrop").style.opacity).toBe("0.75");
+  });
+
+  it("does not drag from content that is scrolled down: the swipe scrolls it instead", () => {
+    const { advance } = clock();
+    const { onOpenChange, dialog } = renderSheet();
+    screen.getByTestId("sheet-body").scrollTop = 80;
+
+    drag(screen.getByTestId("sheet-item"), SHEET_HEIGHT * 0.6, {}, advance);
+
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(dialog.style.transform).toBe("");
+  });
+
+  it("drags from content resting at the top", () => {
+    const { advance } = clock();
+    const { onOpenChange } = renderSheet();
+
+    drag(screen.getByTestId("sheet-item"), SHEET_HEIGHT * 0.4, {}, advance);
+
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("ignores sideways and upward movement, and swallows only the click that ends a drag", () => {
+    const { advance } = clock();
+    const { onOpenChange, dialog } = renderSheet();
+    const item = screen.getByTestId("sheet-item");
+
+    // sideways: not a dismiss gesture
+    fireEvent.pointerDown(item, { clientX: 100, clientY: 450, button: 0 });
+    advance(100);
+    fireEvent.pointerMove(item, { clientX: 200, clientY: 460 });
+    fireEvent.pointerUp(item, { clientX: 200, clientY: 460 });
+    // upward: toward open, not ours either
+    fireEvent.pointerDown(item, { clientX: 100, clientY: 450, button: 0 });
+    advance(100);
+    fireEvent.pointerMove(item, { clientX: 100, clientY: 350 });
+    fireEvent.pointerUp(item, { clientX: 100, clientY: 350 });
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(dialog.style.transform).toBe("");
+
+    // a plain tap still reaches the close button
+    fireEvent.pointerDown(screen.getByLabelText("Close Actions"), { clientX: 360, clientY: 470, button: 0 });
+    fireEvent.pointerUp(screen.getByLabelText("Close Actions"), { clientX: 360, clientY: 470 });
+    fireEvent.click(screen.getByLabelText("Close Actions"));
+    expect(onOpenChange).toHaveBeenCalledTimes(1);
+
+    // the click synthesized right after a drag that sprang back does not hit the button under it
+    drag(screen.getByLabelText("Close Actions"), 40, {}, advance);
+    fireEvent.click(screen.getByLabelText("Close Actions"));
+    expect(onOpenChange).toHaveBeenCalledTimes(1);
+  });
+
+  it("a drag close plays the normal exit and restores focus to the trigger", async () => {
+    const { advance } = clock();
+    render(<FocusHarness />);
+    const trigger = screen.getByTestId("trigger");
+    trigger.focus();
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "Actions" });
+    vi.spyOn(dialog, "getBoundingClientRect").mockReturnValue({ height: SHEET_HEIGHT, width: 390 } as DOMRect);
+
+    drag(screen.getByTestId("sheet-handle"), SHEET_HEIGHT * 0.5, {}, advance);
+
+    expect(dialog).toHaveClass("animate-sheet-out");
+    fireEvent.animationEnd(dialog);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(document.activeElement).toBe(trigger);
   });
 });

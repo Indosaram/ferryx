@@ -17,7 +17,7 @@ export function SidebarFilter({ value, onChange, density = "compact" }: SidebarF
         value={value}
         placeholder="Filter worktrees"
         aria-label="Filter worktrees"
-        className={cn(density === "touch" ? "h-11 text-[14px] md:text-[14px]" : "h-7 text-[12px] md:text-[12px]")}
+        className={cn(density === "touch" ? "h-11 text-base md:text-base" : "h-7 text-[12px] md:text-[12px]")}
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={(event) => {
           if (event.key !== "Escape" || value === "") return;

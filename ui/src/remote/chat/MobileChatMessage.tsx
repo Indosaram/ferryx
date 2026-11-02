@@ -1,20 +1,19 @@
 import React, { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { AlertCircle, Check, ChevronRight, Copy } from "lucide-react";
+import { AlertCircle, Check, ChevronRight, Copy, Loader2 } from "lucide-react";
 import { copyTextToClipboard } from "../../lib/clipboard";
+import { formatWorkedDuration } from "../agentConversation";
 import { cn } from "../../lib/cn";
-import { handleExternalLinkClick } from "../../lib/externalLinks";
 import {
   ActivityIndicator,
   ActivityState,
   ApprovalActionCard,
   ApprovalActionCardProps,
   AttachmentList,
-  ChatMarkdownImage,
-  MarkdownLinkContext,
   ChatAttachment,
   ChatWorkItem,
+  CHAT_MARKDOWN_COMPONENTS,
   chatMarkdownUrlTransform,
   formatReferenceTimestamp,
   ReferenceAbandonedBranchDisclosure,
@@ -42,6 +41,10 @@ export interface MobileChatMessageProps {
   approvalAction?: ApprovalActionCardProps;
   activityState?: ActivityState;
   durationLabel?: string;
+  /** Epoch ms the running turn started: its "Worked for" ticks once a second instead of jumping per poll. */
+  durationStartedAt?: number;
+  /** The user's message is on its way to the host and not yet in the transcript. */
+  pending?: boolean;
   className?: string;
   /**
    * Herdr reference rich parts (plan task 5). When present they are the turn's body:
@@ -56,202 +59,27 @@ export interface MobileChatMessageProps {
   referenceContext?: ReferencePartRenderContext;
 }
 
-interface CodeBlockProps {
-  inline?: boolean;
-  className?: string;
-  children?: React.ReactNode;
-}
-
-const InlineCode: React.FC<CodeBlockProps> = ({ className, children, ...props }) => {
-  return (
-    <code
-      className={cn(
-        "bg-chat-surface-raised text-chat-code px-1.5 py-0.5 rounded font-mono text-xs",
-        className
-      )}
-      {...props}
-    >
-      {children}
-    </code>
-  );
-};
-
-const CodeBlock: React.FC<CodeBlockProps> = ({ className, children, ...props }) => {
-  const [copied, setCopied] = useState(false);
-  const [copyFailed, setCopyFailed] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const match = /language-(\w+)/.exec(className || "");
-  const language = match ? match[1] : "";
-  const codeText = String(children).replace(/\n$/, "");
-
+/** The "Worked for" time of a running turn, ticking on its own between polls. */
+function useTickingDuration(startedAt: number | undefined, fallback: string | undefined): string | undefined {
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    return () => {
-      if (timerRef.current) {
-        clearTimeout(timerRef.current);
-      }
-    };
-  }, []);
-
-  const handleCopy = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
-    }
-    const ok = await copyTextToClipboard(codeText);
-    setCopied(ok);
-    setCopyFailed(!ok);
-    timerRef.current = setTimeout(() => {
-      setCopied(false);
-      setCopyFailed(false);
-    }, 2000);
-  };
-
-  return (
-    <div className="relative group my-2.5 rounded-xl border border-chat-border bg-chat-screen/90 overflow-hidden shadow-xs">
-      <div className="flex items-center justify-between px-3 py-1.5 bg-chat-surface/60 border-b border-chat-border text-[11px] font-mono text-chat-foreground-secondary">
-        <span className="uppercase text-[10px] tracking-wider text-chat-foreground-tertiary font-semibold">
-          {language || "code"}
-        </span>
-        <button
-          type="button"
-          onClick={handleCopy}
-          aria-label={copied ? "Copied" : copyFailed ? "Copy failed" : "Copy code"}
-          className="flex items-center gap-1 text-[10px] text-chat-foreground-secondary hover:text-chat-foreground transition-colors p-1 rounded hover:bg-chat-row-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-        >
-          {copied ? (
-            <>
-              <Check className="w-3 h-3 text-status-success" />
-              <span className="text-status-success font-sans">Copied</span>
-            </>
-          ) : copyFailed ? (
-            <>
-              <AlertCircle aria-hidden="true" className="w-3 h-3 text-chat-danger" />
-              <span className="text-chat-danger font-sans">Failed</span>
-            </>
-          ) : (
-            <>
-              <Copy className="w-3 h-3" />
-              <span className="font-sans">Copy</span>
-            </>
-          )}
-        </button>
-      </div>
-      <div className="overflow-x-auto p-3 text-[11px] font-mono text-chat-foreground leading-relaxed scrollbar-sleek">
-        <pre className="!bg-transparent !p-0 !m-0">
-          <code className={className} {...props}>
-            {children}
-          </code>
-        </pre>
-      </div>
-    </div>
-  );
-};
-
-/**
- * The assistant prose vocabulary. It is hoisted because a map built inside the component hands
- * ReactMarkdown a NEW component identity on every render, which remounts the rendered prose
- * (selection lost, code-block copy state reset) on every poll.
- */
-const ASSISTANT_MARKDOWN_COMPONENTS = {
-  code: ({ node, inline, className, children, ...props }: any) => {
-    const contentStr = String(children);
-    const hasLang = Boolean(className && (className.startsWith("language-") || /language-(\w+)/.test(className)));
-    const hasNewline = contentStr.includes("\n");
-    const isFenced = hasLang || inline === false || (inline === undefined && hasNewline);
-    const isPureInline = !hasLang && !hasNewline && (inline === true || inline === undefined);
-
-    if (isPureInline && !isFenced) {
-      return (
-        <InlineCode className={className} {...props}>
-          {children}
-        </InlineCode>
-      );
-    }
-    return (
-      <CodeBlock className={className} {...props}>
-        {children}
-      </CodeBlock>
-    );
-  },
-  pre: ({ children }: any) => <>{children}</>,
-  p: ({ children }: any) => {
-    const childArray = React.Children.toArray(children);
-    const hasBlockChild = childArray.some(
-      (child) =>
-        React.isValidElement(child) &&
-        (child.type === CodeBlock ||
-          (typeof child.type === "string" && ["div", "pre", "blockquote", "ul", "ol", "table"].includes(child.type)))
-    );
-    if (hasBlockChild) {
-      return <div className="mb-2 last:mb-0">{children}</div>;
-    }
-    return <p className="mb-2 last:mb-0">{children}</p>;
-  },
-  ul: ({ children }: any) => <ul className="list-disc pl-4 mb-2 space-y-1">{children}</ul>,
-  ol: ({ children }: any) => <ol className="list-decimal pl-4 mb-2 space-y-1">{children}</ol>,
-  a: ({ href, children }: any) => (
-    <a
-      href={href}
-      target="_blank"
-      onClick={handleExternalLinkClick}
-      rel="noopener noreferrer"
-      className="text-chat-link decoration-chat-link/60 hover:decoration-chat-link underline underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
-    >
-      <MarkdownLinkContext.Provider value={true}>{children}</MarkdownLinkContext.Provider>
-    </a>
-  ),
-  blockquote: ({ children }: any) => (
-    <blockquote className="border-l-2 border-chat-border pl-2.5 my-2 text-chat-foreground-secondary italic">
-      {children}
-    </blockquote>
-  ),
-  img: ChatMarkdownImage,
-};
+    if (startedAt === undefined) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [startedAt]);
+  return startedAt === undefined ? fallback : formatWorkedDuration(Math.max(0, now - startedAt));
+}
 
 interface WorkRowsContainerProps {
   children: React.ReactNode;
   count: number;
 }
 
-const WorkRowsContainer: React.FC<WorkRowsContainerProps> = ({ children, count }) => {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [overflows, setOverflows] = useState(false);
-
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const checkOverflow = () => {
-      setOverflows(el.scrollHeight > el.clientHeight);
-    };
-    checkOverflow();
-    if (typeof ResizeObserver !== "undefined") {
-      const observer = new ResizeObserver(checkOverflow);
-      observer.observe(el);
-      return () => observer.disconnect();
-    }
-  }, [children, count]);
-
-  const shouldFade = count > 8 || overflows;
-
-  return (
-    <div
-      ref={containerRef}
-      style={
-        shouldFade
-          ? {
-              maskImage:
-                "linear-gradient(to bottom, transparent 0, black 12px, black calc(100% - 12px), transparent 100%)",
-              WebkitMaskImage:
-                "linear-gradient(to bottom, transparent 0, black 12px, black calc(100% - 12px), transparent 100%)",
-            }
-          : undefined
-      }
-      className="flex flex-col gap-px max-h-64 overflow-y-auto w-full my-1 scrollbar-sleek"
-    >
-      {children}
-    </div>
-  );
-};
+// The work list grows inline: a nested scroller inside the stream traps a thumb scroll on a phone.
+const WorkRowsContainer: React.FC<WorkRowsContainerProps> = ({ children }) => (
+  <div className="flex flex-col gap-px w-full my-1">{children}</div>
+);
 
 const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
   role,
@@ -261,7 +89,9 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
   toolCalls = [],
   approvalAction,
   activityState,
-  durationLabel,
+  durationLabel: settledDurationLabel,
+  durationStartedAt,
+  pending = false,
   referenceParts,
   referenceAbandoned,
   referenceSource,
@@ -269,6 +99,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
   className,
 }) => {
   const isUser = role === "user";
+  const durationLabel = useTickingDuration(durationStartedAt, settledDurationLabel);
   // A native turn's start is an ISO instant; it prints as a local time like every other turn.
   const formattedTime = formatReferenceTimestamp(timestamp);
   const [copied, setCopied] = useState(false);
@@ -323,7 +154,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
   };
 
   const metaRow = (
-    <div className="flex items-center gap-1.5">
+    <div className="flex items-center gap-1">
       {formattedTime && (
         <span className="font-mono text-xs text-chat-foreground-secondary select-none">
           {formattedTime}
@@ -335,18 +166,28 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
         onClick={handleCopy}
         title={copyFailed ? "Copy unavailable" : "Copy message"}
         aria-label={copyFailed ? "Copy failed" : "Copy message"}
-        className="p-0.5 rounded text-chat-foreground-tertiary hover:text-chat-foreground-secondary hover:bg-chat-surface-raised/60 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="-my-2.5 flex size-11 items-center justify-center rounded text-chat-foreground-secondary hover:text-chat-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       >
         {copied ? (
-          <Check aria-hidden="true" className="size-3 text-status-success" />
+          <Check aria-hidden="true" className="size-3.5 text-status-success" />
         ) : copyFailed ? (
-          <AlertCircle aria-hidden="true" className="size-3 text-chat-danger" />
+          <AlertCircle aria-hidden="true" className="size-3.5 text-chat-danger" />
         ) : (
-          <Copy className="size-3" />
+          <Copy aria-hidden="true" className="size-3.5" />
         )}
       </button>
+      <span role="status" className="sr-only">
+        {copied ? "Message copied" : copyFailed ? "Couldn't copy the message" : ""}
+      </span>
     </div>
   );
+
+  const turnLabel = [
+    isRuntime ? "Runtime message" : isUser ? "You" : role === "system" ? "System" : "Assistant",
+    formattedTime,
+  ]
+    .filter(Boolean)
+    .join(", ");
 
   if (isUser) {
     // A runtime turn, or a native user turn made only of parts nobody typed (a compaction, a
@@ -361,16 +202,16 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
       );
     if (isRuntime || nobodyTyped) {
       return (
-        <div className={cn("mb-5 flex flex-col items-start gap-1 w-full", className)}>
-          {isRuntime && <span className="sr-only">Runtime message</span>}
+        <article aria-label={turnLabel} className={cn("mb-5 flex flex-col items-start gap-1 w-full", className)}>
           <ReferencePartList parts={visibleParts} context={referenceContext} timestamp={timestamp} />
           {hasProse && metaRow}
           <ReferenceTurnSkills parts={richParts} />
-        </div>
+        </article>
       );
     }
     return (
-      <div
+      <article
+        aria-label={turnLabel}
         className={cn(
           "mb-5 flex flex-col items-end gap-1 max-w-[88%] ml-auto",
           className
@@ -381,6 +222,15 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
           className="min-w-0 gap-2 rounded-[20px] px-3.5 py-2.5 bg-chat-user-bubble text-chat-foreground leading-relaxed text-base break-words select-text"
         >
           <p className="whitespace-pre-wrap">{copyText}</p>
+          {pending && (
+            <span
+              data-testid="user-message-sending"
+              className="mt-1 flex items-center gap-1.5 text-xs text-chat-foreground-secondary"
+            >
+              <Loader2 aria-hidden="true" className="size-3 animate-spin motion-reduce:animate-none" />
+              Sending…
+            </span>
+          )}
           {attachments.length > 0 && (
             <AttachmentList attachments={attachments} className="mt-1" />
           )}
@@ -395,14 +245,30 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
         </div>
         {metaRow}
         <ReferenceTurnSkills parts={richParts} />
-      </div>
+      </article>
+    );
+  }
+
+  // System and runtime output is not the agent speaking: a quiet centred caption, not prose.
+  if (role === "system" && !hasRichParts) {
+    return (
+      <article
+        aria-label={turnLabel}
+        data-testid="system-message"
+        className={cn("my-3 flex w-full justify-center", className)}
+      >
+        <p className="max-w-[90%] whitespace-pre-wrap break-words text-center text-xs text-chat-foreground-secondary select-text">
+          {content}
+        </p>
+      </article>
     );
   }
 
   return (
-    <div
+    <article
+      aria-label={turnLabel}
       className={cn(
-        "flex flex-col items-start gap-1 my-2 max-w-[94%] mr-auto",
+        "flex flex-col items-start gap-1 my-2 w-full",
         className
       )}
     >
@@ -412,19 +278,18 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
 
       <ReferenceTurnSkills parts={richParts} />
 
-      {isRuntime && <span className="sr-only">Runtime message</span>}
-
       {durationLabel && hasWork && (
         <button
           type="button"
           data-testid="worked-for-toggle"
           aria-expanded={workExpanded}
           onClick={() => setWorkExpanded((prev) => !prev)}
-          className="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-xs font-mono text-chat-foreground-secondary hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="flex min-h-11 items-center gap-1.5 pr-3 rounded-md text-sm text-chat-foreground-secondary transition-colors hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           <ChevronRight
+            aria-hidden="true"
             className={cn(
-              "size-3 transition-transform duration-200 ease-out",
+              "size-3.5 transition-transform duration-200 ease-out motion-reduce:transition-none",
               workExpanded && "rotate-90"
             )}
           />
@@ -463,7 +328,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
         >
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
-            components={ASSISTANT_MARKDOWN_COMPONENTS}
+            components={CHAT_MARKDOWN_COMPONENTS}
             urlTransform={chatMarkdownUrlTransform}
           >
             {content}
@@ -488,7 +353,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
       )}
 
       {hasProse && metaRow}
-    </div>
+    </article>
   );
 };
 

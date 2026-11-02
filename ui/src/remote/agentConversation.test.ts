@@ -235,7 +235,8 @@ describe("mapAgentConversation tool calls and thinking", () => {
 
     expect(assistant.role).toBe("assistant");
     expect(assistant.content).toBe("Done, 3 files.");
-    expect(assistant.durationLabel).toBeDefined();
+    // no timestamps, no tool durations: the time is unknown and is not shown
+    expect(assistant.durationLabel).toBeUndefined();
     expect(assistant.toolCalls).toEqual([
       { kind: "thinking", text: "Checking.", source: "prose", workKey: "prose-1" },
       expect.objectContaining({
@@ -307,7 +308,7 @@ describe("mapAgentConversation tool calls and thinking", () => {
     expect(mapped[0].id).toBe("assistant-1");
     expect(mapped[0].role).toBe("assistant");
     expect(mapped[0].content).toBe("");
-    expect(mapped[0].durationLabel).toBeDefined();
+    expect(mapped[0].durationLabel).toBeUndefined();
     expect(mapped[0].toolCalls).toEqual([
       expect.objectContaining({
         toolName: "eval",
@@ -672,7 +673,21 @@ describe("mapAgentConversation tool calls and thinking", () => {
     expect(assistantTurns).toHaveLength(2);
     const firstAssistant = assistantTurns[0];
 
-    expect(firstAssistant.durationLabel).toBe("0s");
+    // the historical turn has no timing evidence: it gets no label, and certainly not the active one
+    expect(firstAssistant.durationLabel).toBeUndefined();
+    expect(firstAssistant.durationStartedAt).toBeUndefined();
+  });
+
+  it("marks only the running turn with its start so its Worked for can tick", () => {
+    const start = 1_700_000_000_000;
+    const items: ConversationMessage[] = [
+      { ordinal: 0, role: "user", text: "go", timestamp: start },
+      { ordinal: 1, role: "assistant", text: "→ read", timestamp: start + 1000 },
+    ];
+    const mapped = mapAgentConversation(items, { activeTurnStartedAt: start });
+    expect(mapped[1].durationStartedAt).toBe(start);
+    const idle = mapAgentConversation(items);
+    expect(idle[1].durationStartedAt).toBeUndefined();
   });
 
   it("matches toolResult to structured toolCall by id when span also contains id-less marker card", () => {

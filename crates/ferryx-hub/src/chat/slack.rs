@@ -72,7 +72,7 @@ fn slack_test_api() -> Option<(String, String)> {
 }
 
 /// Runs `future` with the Slack Web API pointed at a test stand-in (base URL, token).
-#[cfg(all(test, feature = "hub-slack"))]
+#[cfg(test)]
 pub(crate) async fn with_test_api<F: std::future::Future>(
     base: String,
     token: String,

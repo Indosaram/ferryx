@@ -402,10 +402,21 @@ async function run() {
         "menu-open",
         "terminal-mode",
         "drawer-open",
+        "prompt-approval",
+        "prompt-multi",
+        "prompt-custom",
+        "held",
+        "attach",
+        "attach-error",
+        "unsaved",
+        "offline",
+        "keyboard-open",
+        "terminal-dock",
       ]) {
         await page.goto(`${args.url}?state=${state}`, { waitUntil: "domcontentloaded" });
         await page.waitForSelector('[data-testid="mobile-top-bar"]', { timeout: 15000 });
-        if (state === "terminal-mode") {
+        const terminalState = state === "terminal-mode" || state === "terminal-dock";
+        if (terminalState) {
           await page.waitForSelector('[data-testid="qa-terminal-placeholder"]', { timeout: 15000 });
         } else if (state === "drawer-open") {
           await page.waitForSelector('[data-testid="remote-sidebar-drawer"]', { timeout: 15000 });
@@ -419,7 +430,7 @@ async function run() {
         if (label === "390x844" && state !== "terminal-mode") {
           report.probes[`unnamed-buttons-${state}`] = await page.evaluate(UNNAMED_BUTTON_PROBE);
         }
-        if (state !== "terminal-mode") {
+        if (!terminalState) {
           report.probes[`layout-${state}-${label}`] = await page.evaluate(LAYOUT_PROBE, viewport.width);
         }
         report.probes[`topbar-${state}-${label}`] = await page.evaluate(TOP_BAR_PROBE, viewport.width);

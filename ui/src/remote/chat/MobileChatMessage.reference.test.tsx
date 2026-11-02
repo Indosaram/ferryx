@@ -103,6 +103,22 @@ describe("MobileChatMessage reference rich parts", () => {
     expect(prose).not.toHaveClass("text-chat-foreground-secondary");
   });
 
+  it("draws a rich turn's code, inline code and quotes with the same markdown map as the plain body", () => {
+    const markdown = "Run `ls` first.\n\n> quoted\n\n```ts\nconst x = 1;\n```";
+    const { container } = render(
+      <MobileChatMessage id="msg-rich-md" role="assistant" content="" referenceParts={[{ kind: "text", text: markdown }]} />,
+    );
+    expect(screen.getByRole("button", { name: "Copy code" })).toBeInTheDocument();
+    expect(screen.getByText("ls")).toHaveClass("text-[0.875em]");
+    expect(container.querySelector("blockquote")).toHaveClass("bg-chat-surface");
+    cleanup();
+
+    const plain = render(<MobileChatMessage id="msg-plain-md" role="assistant" content={markdown} />);
+    expect(screen.getByRole("button", { name: "Copy code" })).toBeInTheDocument();
+    expect(screen.getByText("ls")).toHaveClass("text-[0.875em]");
+    expect(plain.container.querySelector("blockquote")).toHaveClass("bg-chat-surface");
+  });
+
   it("takes the turn's prose from its text parts and copies exactly that", async () => {
     const copySpy = vi.spyOn(clipboardModule, "copyTextToClipboard").mockResolvedValue(true);
 
@@ -167,7 +183,7 @@ describe("MobileChatMessage reference rich parts", () => {
       />,
     );
 
-    expect(screen.getByText("Runtime message")).toBeInTheDocument();
+    expect(screen.getByRole("article", { name: /^Runtime message/ })).toBeInTheDocument();
   });
 });
 
@@ -800,7 +816,7 @@ describe("native turn props as mapReferenceTurns builds them", () => {
       />,
     );
 
-    expect(screen.getByText("Runtime message")).toBeInTheDocument();
+    expect(screen.getByRole("article", { name: /^Runtime message/ })).toBeInTheDocument();
     expect(screen.queryByTestId("user-message-bubble")).not.toBeInTheDocument();
     expect(screen.getByTestId("reference-notice")).toBeInTheDocument();
     expect(screen.queryByTestId("message-copy-button")).not.toBeInTheDocument();

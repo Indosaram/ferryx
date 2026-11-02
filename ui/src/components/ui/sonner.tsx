@@ -49,37 +49,56 @@ export function useToastTheme(): ToasterProps["theme"] {
 }
 
 // Mirrors sonner's viewport-offset defaults (desktop 24px, mobile 16px at <= 600px width)
-// and reserves one row under the toast stack so the clear-all pill never overlaps toasts.
+// and reserves one row beside the toast stack so the clear-all pill never overlaps toasts.
 const TOAST_EDGE_OFFSET_PX = 24;
 const TOAST_EDGE_OFFSET_MOBILE_PX = 16;
 const TOAST_CLEAR_ROW_PX = 36;
+export const TOAST_PHONE_QUERY = "(max-width: 600px)";
+const TOAST_CLEAR_ROW_PHONE_PX = 52;
+const SAFE_TOP = "env(safe-area-inset-top, 0px)";
+
+/**
+ * Phones get toasts at the top, below the notch: the bottom of a phone screen belongs to the
+ * tab bar, the composer and the keyboard, and a toast there covers the control the user needs.
+ */
+export function useToastOnPhone(): boolean {
+  const [phone, setPhone] = useState(() =>
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia(TOAST_PHONE_QUERY).matches === true
+      : false,
+  );
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia(TOAST_PHONE_QUERY);
+    if (typeof query.addEventListener !== "function") return;
+    setPhone(query.matches === true);
+    const onChange = (event: MediaQueryListEvent) => setPhone(event.matches === true);
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, []);
+  return phone;
+}
 
 const Toaster = ({ ...props }: ToasterProps) => {
   const theme = useToastTheme();
+  const phone = useToastOnPhone();
   const { toasts } = useSonner();
   const hasToasts = toasts.length > 0;
 
   return (
     <div data-native-terminal-yield="off" className="selectable">
-      <style>{`
-@media (max-width: 600px) {
-  .toast-clear-all {
-    right: ${TOAST_EDGE_OFFSET_MOBILE_PX}px !important;
-    bottom: ${TOAST_EDGE_OFFSET_MOBILE_PX}px !important;
-  }
-}
-`}</style>
       <Sonner
         theme={theme}
-        position="bottom-right"
+        position={phone ? "top-center" : "bottom-right"}
         closeButton
         offset={{
           bottom: TOAST_EDGE_OFFSET_PX + TOAST_CLEAR_ROW_PX,
           right: TOAST_EDGE_OFFSET_PX,
         }}
         mobileOffset={{
-          bottom: TOAST_EDGE_OFFSET_MOBILE_PX + TOAST_CLEAR_ROW_PX,
+          top: `calc(${SAFE_TOP} + ${TOAST_EDGE_OFFSET_MOBILE_PX + TOAST_CLEAR_ROW_PHONE_PX}px)`,
           right: TOAST_EDGE_OFFSET_MOBILE_PX,
+          left: TOAST_EDGE_OFFSET_MOBILE_PX,
         }}
         toastOptions={{ className: "font-sans text-sm", ...props.toastOptions }}
         className="toaster group"
@@ -111,10 +130,12 @@ const Toaster = ({ ...props }: ToasterProps) => {
           aria-label="Dismiss all notifications"
           title="Dismiss all notifications"
           onClick={() => toast.dismiss()}
+          data-placement={phone ? "phone-top" : "desktop-bottom"}
           style={{
             position: "fixed",
-            right: TOAST_EDGE_OFFSET_PX,
-            bottom: TOAST_EDGE_OFFSET_PX,
+            ...(phone
+              ? { top: `calc(${SAFE_TOP} + ${TOAST_EDGE_OFFSET_MOBILE_PX}px)`, right: TOAST_EDGE_OFFSET_MOBILE_PX, minHeight: 44 }
+              : { right: TOAST_EDGE_OFFSET_PX, bottom: TOAST_EDGE_OFFSET_PX }),
             zIndex: 1000000000,
             display: "inline-flex",
             alignItems: "center",

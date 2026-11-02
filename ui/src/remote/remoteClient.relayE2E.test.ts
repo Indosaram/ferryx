@@ -3,15 +3,19 @@ import type { HostEndpoint } from "../state/remoteHostStore";
 import type { OpenTunnelParams } from "./accountSession";
 import type { TunnelTransport, TunnelWebSocket } from "./attachTunnel";
 import {
+  allocateE2ESession,
   CLIENT_BUILD_HEADER,
   openRelayE2ETransport,
+  RELAY_E2E_AWARE_HEADER,
+  RelayE2EError,
+  RelayE2EUnsupportedError,
   registerRelayE2E,
   REPAIR_REQUIRED,
   RelayRepairRequiredError,
   relayE2EState,
   resetRelayE2EFallbacks,
 } from "./relayE2E";
-import { remoteFetch, remoteOpenSocket } from "./remoteClient";
+import { remoteFetch, remoteOpenSocket, remoteSocketUrl, RemoteRequestTimeoutError, REMOTE_REQUEST_TIMEOUT_MS } from "./remoteClient";
 
 const RELAY = "https://relay.example.test";
 const MACHINE = "machine-1";
@@ -183,5 +187,239 @@ describe("relay end-to-end encryption", () => {
       connection.close();
     }
     expect(globalFetch).not.toHaveBeenCalled();
+  });
+
+  function connectionWith(allocate: () => Promise<Response>) {
+    return openRelayE2ETransport({
+      relayOrigin: RELAY,
+      machineId: MACHINE,
+      enrollmentEpoch: "7",
+      machineAttachPublicKey: "key",
+      attachKey: { publicKey: "pub", privateKey: "priv" },
+      bearer: "device-token",
+      deps: { fetch: vi.fn(allocate) as unknown as typeof fetch, openTunnel: vi.fn() },
+    });
+  }
+
+  it.each([400, 401, 404, 405])(
+    "never downgrades a relay that marks itself e2e-aware when it answers %s",
+    async (status) => {
+      const globalFetch = vi.fn(async () => jsonResponse(200, { ok: true }));
+      vi.stubGlobal("fetch", globalFetch);
+      const connection = connectionWith(async () => new Response(JSON.stringify({ code: status === 401 ? "UNAUTHORIZED" : "BAD_REQUEST" }), {
+        status,
+        headers: { "content-type": "application/json", [RELAY_E2E_AWARE_HEADER]: "1" },
+      }));
+      unregister.push(registerRelayE2E(BASE, connection), () => connection.close());
+
+      const error = await remoteFetch(BASE, "/api/v1/health").then(() => null, (err: unknown) => err);
+      expect(error).toBeInstanceOf(RelayE2EError);
+      expect(error).not.toBeInstanceOf(RelayE2EUnsupportedError);
+      expect(error).toMatchObject({ status });
+      if (status === 401) expect(error).toMatchObject({ code: "UNAUTHORIZED" });
+      expect(globalFetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("reports and clears a plaintext fallback per registration", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(200, { ok: true })));
+    const host: HostEndpoint = {
+      hostId: BASE,
+      name: "Machine",
+      address: RELAY,
+      transport: "relay",
+      machineId: MACHINE,
+      relayOrigin: RELAY,
+      online: true,
+      authStatus: "paired",
+      attachPublicKey: "key",
+      enrollmentEpoch: "7",
+    };
+    const old = connectionWith(async () => new Response("not found", { status: 404 }));
+    const unregisterOld = registerRelayE2E(BASE, old);
+    expect(relayE2EState(host, RELAY)).toBe("e2e");
+    expect((await remoteFetch(BASE, "/api/v1/health")).status).toBe(200);
+    expect(relayE2EState(host, RELAY)).toBe("plaintext-fallback");
+    unregisterOld();
+    old.close();
+
+    // When the host is registered again (e.g. after a token change)
+    const fresh = connectionWith(async () => jsonResponse(409, { code: "MACHINE_OFFLINE" }));
+    unregister.push(registerRelayE2E(BASE, fresh), () => fresh.close());
+
+    // Then encryption is tried again instead of staying on plaintext
+    expect(relayE2EState(host, RELAY)).toBe("e2e");
+    await expect(remoteFetch(BASE, "/api/v1/health")).rejects.toMatchObject({ code: "MACHINE_OFFLINE" });
+  });
+
+  it.each(["MACHINE_OFFLINE", "RATE_LIMITED"])(
+    "caches a %s allocation failure with a growing backoff instead of re-POSTing every poll",
+    async (code) => {
+      vi.useFakeTimers();
+      try {
+        const status = code === "RATE_LIMITED" ? 429 : 409;
+        let answer: () => Response = () => jsonResponse(status, { code });
+        const allocate = vi.fn(async () => answer());
+        const connection = openRelayE2ETransport({
+          relayOrigin: RELAY,
+          machineId: MACHINE,
+          enrollmentEpoch: "7",
+          machineAttachPublicKey: "key",
+          attachKey: { publicKey: "pub", privateKey: "priv" },
+          bearer: "device-token",
+          deps: {
+            fetch: allocate as unknown as typeof fetch,
+            openTunnel: vi.fn(async () => ({
+              transport: {
+                fetchLike: vi.fn(async () => ({ status: 200, headers: {}, body: new Uint8Array(0) })),
+                openWebSocket: vi.fn(),
+                close: vi.fn(),
+                isClosed: false,
+              } as unknown as TunnelTransport,
+              close: vi.fn(),
+            })),
+          },
+        });
+
+        // Given one failed allocation
+        await expect(connection.fetchLike("/api/v1/health")).rejects.toMatchObject({ code });
+        expect(allocate).toHaveBeenCalledTimes(1);
+
+        // When polls arrive inside the 2s backoff, they get the cached rejection
+        await expect(connection.fetchLike("/api/v1/health")).rejects.toMatchObject({ code });
+        expect(allocate).toHaveBeenCalledTimes(1);
+
+        // After 2s one retry is allowed; it fails again and the backoff doubles to 4s
+        await vi.advanceTimersByTimeAsync(2_000);
+        await expect(connection.fetchLike("/api/v1/health")).rejects.toMatchObject({ code });
+        expect(allocate).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(2_000);
+        await expect(connection.fetchLike("/api/v1/health")).rejects.toMatchObject({ code });
+        expect(allocate).toHaveBeenCalledTimes(2);
+
+        // Then a success after the backoff resets it
+        await vi.advanceTimersByTimeAsync(2_000);
+        answer = () => jsonResponse(200, { sessionId: "sess-ok" });
+        expect((await connection.fetchLike("/api/v1/health")).status).toBe(200);
+        expect(allocate).toHaveBeenCalledTimes(3);
+        connection.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("times out an allocation whose response body stalls", async () => {
+    vi.useFakeTimers();
+    try {
+      // Given a relay that sends headers and then never finishes the body
+      const allocate = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            init?.signal?.addEventListener("abort", () => controller.error(new DOMException("aborted", "AbortError")), { once: true });
+          },
+        });
+        return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+      });
+      const result = expect(
+        allocateE2ESession(RELAY, "device-token", MACHINE, allocate as unknown as typeof fetch),
+      ).rejects.toMatchObject({ code: "RELAY_TIMEOUT" });
+
+      // When the allocation deadline passes
+      await vi.advanceTimersByTimeAsync(15_000);
+
+      // Then the stalled body is a typed timeout
+      await result;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("types an unreachable relay as RELAY_UNREACHABLE", async () => {
+    const allocate = vi.fn(async () => {
+      throw new TypeError("Failed to fetch");
+    });
+    await expect(
+      allocateE2ESession(RELAY, "device-token", MACHINE, allocate as unknown as typeof fetch),
+    ).rejects.toMatchObject({ code: "RELAY_UNREACHABLE" });
+  });
+
+  it("closes a socket whose upgrade finished after the connection was closed", async () => {
+    let finishUpgrade!: (socket: TunnelWebSocket) => void;
+    const socket = fakeSocket();
+    const tunnelClose = vi.fn();
+    let upgradeStarted!: () => void;
+    const started = new Promise<void>((resolve) => (upgradeStarted = resolve));
+    const openTunnel = vi.fn(async () => ({
+      transport: {
+        fetchLike: vi.fn(),
+        openWebSocket: vi.fn(() => {
+          upgradeStarted();
+          return new Promise<TunnelWebSocket>((resolve) => {
+            finishUpgrade = resolve;
+          });
+        }),
+        close: vi.fn(),
+        isClosed: false,
+      } as unknown as TunnelTransport,
+      close: tunnelClose,
+    }));
+    const connection = openRelayE2ETransport({
+      relayOrigin: RELAY,
+      machineId: MACHINE,
+      enrollmentEpoch: "7",
+      machineAttachPublicKey: "key",
+      attachKey: { publicKey: "pub", privateKey: "priv" },
+      bearer: "device-token",
+      deps: {
+        fetch: vi.fn(async () => jsonResponse(200, { sessionId: "sess-1" })) as unknown as typeof fetch,
+        openTunnel,
+      },
+    });
+    const pending = connection.openWebSocket("/api/v1/events");
+    await started;
+
+    // When the connection closes mid-upgrade and the upgrade then completes
+    connection.close();
+    finishUpgrade(socket);
+
+    // Then the late socket and its tunnel are released and the caller is told
+    await expect(pending).rejects.toMatchObject({ code: "CONNECTION_CLOSED" });
+    expect(socket.close).toHaveBeenCalled();
+    expect(tunnelClose).toHaveBeenCalled();
+  });
+});
+
+describe("plain host request deadlines", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  function hangingFetch() {
+    return vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    }));
+  }
+
+  it.each([
+    ["socket ticket", () => remoteSocketUrl(BASE, "/api/v1/events", "device-token", new AbortController().signal)],
+    ["plaintext remoteFetch", () => remoteFetch(BASE, "/api/v1/workspace/state", { signal: new AbortController().signal })],
+  ])("bounds a %s request that never answers", async (_label, start) => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", hangingFetch());
+    const result = expect(start()).rejects.toBeInstanceOf(RemoteRequestTimeoutError);
+    await vi.advanceTimersByTimeAsync(REMOTE_REQUEST_TIMEOUT_MS);
+    await result;
+  });
+
+  it("still honours the caller's own abort before the deadline", async () => {
+    vi.stubGlobal("fetch", hangingFetch());
+    const controller = new AbortController();
+    const pending = remoteFetch(BASE, "/api/v1/workspace/state", { signal: controller.signal });
+    controller.abort();
+    const error = await pending.then(() => null, (err: unknown) => err);
+    expect(error).not.toBeInstanceOf(RemoteRequestTimeoutError);
+    expect((error as Error).name).toBe("AbortError");
   });
 });

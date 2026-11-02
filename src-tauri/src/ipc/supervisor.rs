@@ -3,7 +3,9 @@
 
 use super::error::{IpcError, IpcErrorCode};
 use crate::daemon::client::DaemonClient;
-use crate::daemon::protocol::{DaemonRequest, DaemonResponse, SupervisorGoalAction, SupervisorReadAction};
+use crate::daemon::protocol::{
+    DaemonRequest, DaemonResponse, SupervisorGoalAction, SupervisorReadAction, SupervisorSetupAction,
+};
 use std::sync::Arc;
 
 /// A daemon that knows these requests types every failure, so an untyped error is an older daemon.
@@ -135,9 +137,65 @@ pub async fn cmd_supervisor_read(
     read_from(daemon_client.send_request(DaemonRequest::SupervisorReadV1 { request }).await?)
 }
 
+fn setup_from(response: DaemonResponse) -> Result<serde_json::Value, IpcError> {
+    match response {
+        DaemonResponse::SupervisorSetupOk { value } => Ok(value),
+        DaemonResponse::Error { message, code, .. } => Err(failure(message, code)),
+        _ => Err(IpcError::internal("Unexpected daemon supervisor setup response")),
+    }
+}
+
+/// The shared supervisor SetupStatus.
+#[tauri::command]
+pub async fn cmd_supervisor_setup_status(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+) -> Result<serde_json::Value, IpcError> {
+    setup_from(
+        daemon_client
+            .send_request(DaemonRequest::SupervisorSetup { request: SupervisorSetupAction::Status })
+            .await?,
+    )
+}
+
+/// Runs automatic supervisor setup in the daemon-hosted hub; returns the fresh SetupStatus.
+#[tauri::command]
+pub async fn cmd_supervisor_setup_run(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+    import_memory: bool,
+    projects: Vec<crate::hub_runtime::SetupProject>,
+) -> Result<serde_json::Value, IpcError> {
+    setup_from(
+        daemon_client
+            .send_request(DaemonRequest::SupervisorSetup {
+                request: SupervisorSetupAction::Run { import_memory, projects },
+            })
+            .await?,
+    )
+}
+
+/// Adopts every adoptable legacy lane as the owner: {adopted: [lane], refused: [{lane, code, message}]}.
+#[tauri::command]
+pub async fn cmd_supervisor_adopt_all(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+) -> Result<serde_json::Value, IpcError> {
+    setup_from(
+        daemon_client
+            .send_request(DaemonRequest::SupervisorSetup { request: SupervisorSetupAction::AdoptAll })
+            .await?,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_setup_answer_is_its_value_and_an_untyped_error_is_an_older_daemon() {
+        let value = serde_json::json!({"nextAction": "map_projects"});
+        assert_eq!(setup_from(DaemonResponse::SupervisorSetupOk { value: value.clone() }).unwrap(), value);
+        let older = setup_from(DaemonResponse::Error { message: "unknown".into(), code: None, details: None }).unwrap_err();
+        assert_eq!(older.code, IpcErrorCode::DaemonUpgradeRequired);
+    }
 
     #[test]
     fn an_untyped_error_means_the_daemon_is_older() {

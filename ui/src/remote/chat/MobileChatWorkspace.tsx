@@ -39,6 +39,8 @@ export interface MobileChatWorkspaceProps {
   readonly activityLabel?: string;
   readonly workspaceLabel?: string;
   readonly worktreeLabel?: string;
+  /** The agent detected in the pane (registry id); null or absent for a plain shell. */
+  readonly agentType?: string | null;
 
   /** Switch to the explicit terminal for this same session; never a replacement conversation. */
   readonly onOpenTerminal?: () => void;
@@ -71,12 +73,17 @@ export interface MobileChatWorkspaceProps {
   readonly onSendHeld?: (id: string) => void;
   readonly onRemoveHeld?: (id: string) => void;
 
-  /** A prompt waiting on the original pane, drawn above the message box. */
+  /**
+   * A prompt waiting on the original pane. It is drawn at the end of the message stream, not in
+   * the composer footer, so the message box stays reachable with the keyboard open.
+   */
   readonly promptCard?: React.ReactNode;
   /** The owner's handle on the message box, so an answered prompt can pass the focus on to it. */
   readonly composerHandleRef?: React.MutableRefObject<MobileChatComposerHandle | null>;
   /** Something the user must know about this lane. */
   readonly composerWarning?: string | null;
+  /** One action for the composer warning (retry, reconnect), drawn as a 44px button beside it. */
+  readonly composerWarningAction?: { readonly label: string; readonly onAction: () => void } | null;
   /** Where a part bytes live when the page does not carry them. */
   readonly referenceContext?: ReferencePartRenderContext;
 
@@ -92,11 +99,33 @@ export interface MobileChatWorkspaceProps {
   readonly headerActions?: React.ReactNode;
 }
 
-const STARTER_PROMPTS = [
-  "Summarize the current state",
-  "What changed since my last message?",
-  "Run the tests",
-] as const;
+/** One distance from the bottom decides both following the stream and offering the pill. */
+const FOLLOW_THRESHOLD_PX = 80;
+
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true
+  );
+}
+
+/**
+ * Starters built from what the client already knows about the pane. A pane with no detected agent
+ * (a plain shell) gets none: there is nobody to ask, and a canned prompt would be typed into a
+ * shell. An agent pane gets prompts that name its worktree, so they read as about this work.
+ */
+export function chatStarterPrompts(
+  agentType: string | null | undefined,
+  worktreeLabel: string | null | undefined,
+): readonly string[] {
+  if (!agentType || agentType.trim().length === 0) return [];
+  const where = worktreeLabel && worktreeLabel.trim().length > 0 ? ` on ${worktreeLabel.trim()}` : "";
+  return [
+    `Summarize where the work${where} stands`,
+    `Review the uncommitted changes${where}`,
+    `Run the tests${where} and fix what fails`,
+  ];
+}
 
 /**
  * Turns a `/tree` walked away from, composed for the page: the reference renders this once at
@@ -128,6 +157,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   activityLabel,
   workspaceLabel,
   worktreeLabel,
+  agentType = null,
   showHeader = true,
   onOpenTerminal,
   pageDisclosure = null,
@@ -153,6 +183,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   promptCard,
   composerHandleRef,
   composerWarning = null,
+  composerWarningAction = null,
   referenceContext,
   className,
   warnings,
@@ -213,10 +244,11 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
     firstId: string | null;
   }>({ top: 0, height: 0, count: 0, atBottom: true, firstId: null });
 
-  const scrollToBottom = useCallback((smooth = true) => {
+  // Only a press on the pill animates; following a stream jumps, and reduced motion never animates.
+  const scrollToBottom = useCallback((smooth = false) => {
     if (messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({
-        behavior: smooth ? "smooth" : "auto",
+        behavior: smooth && !prefersReducedMotion() ? "smooth" : "auto",
         block: "end",
       });
     }
@@ -227,7 +259,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
     if (!el) return;
 
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    const atBottom = distanceFromBottom < 48;
+    const atBottom = distanceFromBottom < FOLLOW_THRESHOLD_PX;
     viewportRef.current = {
       top: el.scrollTop,
       height: el.scrollHeight,
@@ -236,7 +268,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
       firstId: messages[0]?.id ?? null,
     };
     setIsAtBottom(atBottom);
-    setShowScrollPill(distanceFromBottom > 100);
+    setShowScrollPill(!atBottom);
   }, [messages]);
 
   useEffect(() => {
@@ -270,7 +302,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
       !previous.atBottom &&
       el.scrollHeight > previous.height
     ) {
-      // the container is scroll-smooth; an animated anchor would show the reader's place jump
+      // an animated anchor would show the reader's place jump
       el.style.scrollBehavior = "auto";
       el.scrollTop = previous.top + (el.scrollHeight - previous.height);
       el.style.scrollBehavior = "";
@@ -279,18 +311,26 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
       top: el.scrollTop,
       height: el.scrollHeight,
       count: messages.length,
-      atBottom: el.scrollHeight - el.scrollTop - el.clientHeight < 48,
+      atBottom: el.scrollHeight - el.scrollTop - el.clientHeight < FOLLOW_THRESHOLD_PX,
       firstId,
     };
   }, [messages]);
 
+  // Set by a pill press: its own smooth scroll already heads to the bottom, so the follow effect
+  // that the press re-runs (isAtBottom flips) must not cut that animation short with a jump.
+  const pillScrollRef = useRef(false);
   useEffect(() => {
-    if (isAtBottom) {
-      scrollToBottom(true);
+    if (pillScrollRef.current) {
+      pillScrollRef.current = false;
+      return;
     }
-  }, [messages, isRunning, activityState, isAtBottom, scrollToBottom]);
+    if (isAtBottom) {
+      scrollToBottom(false);
+    }
+  }, [messages, isRunning, activityState, isAtBottom, scrollToBottom, promptCard]);
 
   const hasMessages = messages.length > 0;
+  const starterPrompts = chatStarterPrompts(agentType, worktreeLabel);
   // The page discloses abandoned branches once; a turn never repeats them.
   const abandoned = pageAbandoned ?? aggregateReferenceAbandoned(messages);
 
@@ -298,14 +338,14 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
     <div
       data-testid="mobile-chat-workspace"
       className={cn(
-        "relative flex flex-col w-full h-full min-h-0 bg-chat-screen text-chat-foreground overflow-hidden select-none",
+        "relative flex flex-col w-full h-full min-h-0 bg-chat-screen text-chat-foreground overflow-hidden",
         className
       )}
     >
       {showHeader && (
       <header
         data-testid="mobile-chat-header"
-        className="flex items-center justify-between px-3 py-2 bg-chat-screen border-b border-chat-border backdrop-blur-md shrink-0 z-10"
+        className="flex items-center justify-between px-1 py-1 bg-chat-screen border-b border-chat-border shrink-0 z-10 select-none"
       >
         <div className="flex items-center gap-2 min-w-0">
           {onBack && (
@@ -314,14 +354,14 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
               data-testid="thread-header-back"
               aria-label="Back"
               onClick={onBack}
-              className="flex size-7 shrink-0 items-center justify-center rounded-md text-chat-foreground-secondary hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              className="flex size-11 shrink-0 items-center justify-center rounded-md text-chat-foreground-secondary transition-colors hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
               <ChevronLeft className="size-4" aria-hidden="true" />
             </button>
           )}
           <div className="flex flex-col min-w-0">
-            <span className="text-base font-medium text-chat-foreground tracking-tight">
-              {headerTitle ?? "Agent Workspace"}
+            <span className="text-base font-medium text-chat-foreground">
+              {headerTitle ?? "Chat"}
             </span>
             {headerSubtitle ? (
               <span
@@ -338,24 +378,13 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
                 {workspaceLabel}
                 {worktreeLabel ? ` · ${worktreeLabel}` : ""}
               </span>
-            ) : (
-              <div className="flex items-center gap-1.5">
-                <span className="inline-block size-1.5 rounded-full bg-status-success shrink-0" />
-                <span className="font-mono text-xs text-chat-foreground-secondary truncate">
-                  ferryx remote
-                </span>
-              </div>
-            )}
+            ) : null}
           </div>
         </div>
 
         <div className="flex items-center gap-2">
           {activityState !== "idle" && (
-            <ActivityIndicator
-              state={activityState}
-              label={activityLabel}
-              className="scale-90 origin-right"
-            />
+            <ActivityIndicator state={activityState} label={activityLabel} />
           )}
 
           {onOpenTerminal && (
@@ -365,9 +394,9 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
               aria-label="Open the terminal for this session"
               title="Open the terminal for this session"
               onClick={onOpenTerminal}
-              className="flex size-7 shrink-0 items-center justify-center rounded-md border border-chat-border bg-chat-surface/90 text-chat-foreground-secondary transition-colors hover:bg-chat-surface-hover hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              className="flex size-11 shrink-0 items-center justify-center rounded-md text-chat-foreground-secondary transition-colors hover:bg-chat-surface-hover hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
-              <TerminalIcon className="size-3.5" aria-hidden="true" />
+              <TerminalIcon className="size-4" aria-hidden="true" />
             </button>
           )}
 
@@ -385,13 +414,13 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
         onScroll={handleScroll}
         data-testid="chat-message-stream"
         aria-busy={isRunning}
-        className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-3.5 scroll-smooth overscroll-contain select-text"
+        className="flex-1 min-h-0 overflow-y-auto px-3 pt-4 pb-14 space-y-3.5 overscroll-contain select-text sm:px-5"
       >
         {warnings && warnings.length > 0 ? (
           <div
             data-testid="chat-history-warning"
             role="status"
-            className="mb-3 rounded-md border border-chat-border bg-chat-surface px-3 py-2 font-mono text-xs text-chat-foreground-secondary"
+            className="mb-3 rounded-md border border-chat-border bg-chat-surface px-3 py-2 text-sm text-chat-foreground"
           >
             {warnings.join(" ")}
           </div>
@@ -414,35 +443,37 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
         {!hasMessages ? (
           <div
             data-testid="chat-empty-state"
-            className="flex flex-col items-start justify-center min-h-[40vh] max-w-md mx-auto w-full px-2 my-auto select-none"
+            className="flex flex-col items-start justify-center min-h-[40vh] max-w-md mx-auto w-full px-2 my-auto select-text"
           >
             <div className="w-full rounded-lg border border-chat-border bg-chat-surface px-3 py-2.5 space-y-1">
-              <div
-                data-testid="chat-empty-context"
-                className="font-mono text-xs text-chat-foreground-secondary truncate"
-              >
-                {workspaceLabel
-                  ? `${workspaceLabel}${worktreeLabel ? ` · ${worktreeLabel}` : ""}`
-                  : "ferryx remote"}
-              </div>
-              <p className="font-mono text-xs text-chat-foreground-secondary">
-                Prompts run against the focused terminal.
+              {workspaceLabel ? (
+                <div
+                  data-testid="chat-empty-context"
+                  className="font-mono text-xs text-chat-foreground-secondary truncate"
+                >
+                  {`${workspaceLabel}${worktreeLabel ? ` · ${worktreeLabel}` : ""}`}
+                </div>
+              ) : null}
+              <p className="text-sm text-chat-foreground">
+                Messages go to the agent in this session's terminal.
               </p>
             </div>
+            {starterPrompts.length > 0 ? (
             <div className="mt-3 flex flex-col gap-2 w-full">
-              {STARTER_PROMPTS.map((prompt) => (
+              {starterPrompts.map((prompt) => (
                 <button
                   key={prompt}
                   type="button"
                   data-testid="chat-empty-starter"
                   aria-label={prompt}
                   onClick={() => handleSelectStarter(prompt)}
-                  className="flex items-center text-left min-h-[44px] w-full px-3 py-2.5 rounded-lg border border-chat-border bg-chat-surface hover:bg-chat-surface-hover active:bg-chat-surface-raised text-xs font-medium text-chat-foreground-secondary hover:text-chat-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  className="flex items-center text-left min-h-11 w-full px-3 py-2.5 rounded-lg border border-chat-border bg-chat-surface hover:bg-chat-surface-hover active:bg-chat-surface-raised text-[0.9375rem] text-chat-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 >
                   {prompt}
                 </button>
               ))}
             </div>
+            ) : null}
           </div>
         ) : (
           <>
@@ -460,6 +491,8 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
                 approvalAction={msg.approvalAction}
                 activityState={msg.activityState}
                 durationLabel={msg.durationLabel}
+                durationStartedAt={msg.durationStartedAt}
+                pending={msg.pending ?? msg.id.startsWith("pending-")}
                 referenceParts={msg.referenceParts}
                 referenceSource={msg.referenceSource}
                 referenceContext={referenceContext}
@@ -468,27 +501,36 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
           </>
         )}
 
+        {promptCard !== undefined && promptCard !== null ? (
+          <div data-testid="chat-stream-prompt" className="w-full">
+            {promptCard}
+          </div>
+        ) : null}
+
         <div ref={messagesEndRef} className="h-2 w-full" />
       </div>
 
-      <footer className="relative z-20 shrink-0">
-        <div className="relative">
+      <footer className="relative z-20 flex max-h-[50%] shrink-0 flex-col">
+        <div className="relative flex min-h-0 flex-col">
           {showScrollPill && (
-            <div className="absolute -top-12 right-4 z-20">
+            <div className="absolute -top-14 right-3 z-20">
               <button
                 type="button"
                 data-testid="scroll-to-latest-pill"
                 onClick={() => {
+                  pillScrollRef.current = !isAtBottom;
                   setIsAtBottom(true);
                   scrollToBottom(true);
                 }}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-chat-surface-raised/95 hover:bg-chat-surface-hover text-chat-foreground text-xs font-medium shadow-lg border border-chat-border backdrop-blur-md active:scale-95 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                className="flex min-h-11 items-center gap-1.5 px-4 rounded-full bg-chat-surface-raised hover:bg-chat-surface-hover text-chat-foreground text-sm font-medium border border-chat-border transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
-                <ArrowDown className="size-3.5 text-chat-code" />
+                <ArrowDown aria-hidden="true" className="size-4" />
                 <span>Scroll to latest</span>
               </button>
             </div>
           )}
+          {/* Scrolls on its own when the keyboard and large text leave less room than the composer needs. */}
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
           <MobileChatComposer
             ref={bindComposer}
             value={activeDraft}
@@ -505,14 +547,16 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             onEditHeld={onEditHeld}
             onSendHeld={onSendHeld}
             onRemoveHeld={onRemoveHeld}
-            promptCard={promptCard}
+            promptOpen={promptCard !== undefined && promptCard !== null}
             warning={composerWarning}
+            warningAction={composerWarningAction}
             onSend={onSendMessage}
             onStop={onStopExecution}
             isRunning={isRunning}
             disabled={disabled}
             placeholder={composerPlaceholder}
           />
+          </div>
         </div>
       </footer>
     </div>

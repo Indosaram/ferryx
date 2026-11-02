@@ -199,7 +199,11 @@ describe("RemoteApp phone home", () => {
     const strip = await screen.findByTestId("supervisor-session-strip", undefined, { timeout: 3000 });
     expect(strip).toHaveAttribute("data-state", "watching");
 
+    // Back pops the pushed session entry with history.back(), whose popstate lands later; wait
+    // for it here so it cannot arrive inside the next test and flip that test's tab.
+    const popped = new Promise<void>((resolve) => window.addEventListener("popstate", () => resolve(), { once: true }));
     act(() => fireEvent.click(screen.getByTestId("mobile-session-back")));
+    await act(async () => { await popped; });
     const home = await screen.findByTestId("mobile-home");
     expect(home).toHaveAttribute("data-destination", "supervisor");
     // The session stays open: the home offers a way back to it.

@@ -25,6 +25,8 @@ pub enum BrowserError {
     FindFailed(String),
     #[error("Browser download failed: {0}")]
     DownloadFailed(String),
+    #[error("Browser download cancelled")]
+    DownloadCancelled,
     #[error("Cookie import failed: {0}")]
     CookieImport(String),
     #[error("Failed to close browser: {0}")]

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 type WakeLockSentinelLike = {
   readonly released: boolean;
@@ -20,15 +20,22 @@ export function isScreenWakeLockSupported(): boolean {
   return screenWakeLock() !== undefined;
 }
 
+/** Whether the requested lock is actually held: "refused" lets the setting say it did not take effect. */
+export type ScreenWakeLockStatus = "off" | "held" | "refused";
+
 /**
  * Holds a screen wake lock while `enabled`. The browser drops the lock whenever the page is
  * hidden, so it is requested again each time the page becomes visible; disabling or unmounting
  * releases it. Browsers without `navigator.wakeLock` are a no-op.
  */
-export function useScreenWakeLock(enabled: boolean): void {
+export function useScreenWakeLock(enabled: boolean): ScreenWakeLockStatus {
+  const [status, setStatus] = useState<ScreenWakeLockStatus>("off");
   useEffect(() => {
     const wakeLock = screenWakeLock();
-    if (!enabled || !wakeLock) return undefined;
+    if (!enabled || !wakeLock) {
+      setStatus("off");
+      return undefined;
+    }
     let active = true;
     let sentinel: WakeLockSentinelLike | null = null;
     let requesting = false;
@@ -42,14 +49,19 @@ export function useScreenWakeLock(enabled: boolean): void {
           requesting = false;
           if (active) {
             sentinel = next;
+            setStatus("held");
+            next.addEventListener?.("release", () => {
+              if (active) setStatus("off");
+            });
           } else {
             void next.release().catch(() => undefined);
           }
         },
         () => {
           // Refused (battery saver, not visible, permissions policy): the next visibility change
-          // retries; nothing else depends on the lock.
+          // retries, and the setting shows that the screen may still turn off.
           requesting = false;
+          if (active) setStatus("refused");
         },
       );
     };
@@ -67,4 +79,5 @@ export function useScreenWakeLock(enabled: boolean): void {
       sentinel = null;
     };
   }, [enabled]);
+  return status;
 }

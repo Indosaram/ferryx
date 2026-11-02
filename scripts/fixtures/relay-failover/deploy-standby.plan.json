@@ -9,7 +9,7 @@
       "host": "local",
       "kind": "run",
       "description": "release-profile relay binary (todo 33)",
-      "command": "cd src-tauri && cargo build --release --bin ferryx-relay"
+      "command": "cd src-tauri && cargo build --release --no-default-features --bin ferryx-relay"
     },
     {
       "id": "primary-secrets-present",

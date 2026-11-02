@@ -27,14 +27,16 @@ describe("SupervisorSessionStrip", () => {
       />,
     );
     expect(screen.getByTestId("supervisor-session-strip")).toHaveAttribute("data-state", "acting");
-    expect(screen.getByTestId("supervisor-session-strip")).toHaveTextContent("“run the tests”");
+    // H-56: the typed text is shown as-is, with no decorative curly quotes around it.
+    expect(screen.getByText("run the tests")).toBeInTheDocument();
+    expect(screen.getByTestId("supervisor-session-strip").textContent).not.toMatch(/[“”]/);
     fireEvent.click(screen.getByTestId("supervisor-take-over"));
     expect(onFocusInput).not.toHaveBeenCalled();
     await act(async () => answer(ok));
     expect(order).toEqual(["pause:k:true", "focus"]);
   });
 
-  it("still hands the keyboard over when the pause is refused", async () => {
+  it("keeps the keyboard where it is when the pause is refused, and offers a retry", async () => {
     const onFocusInput = vi.fn();
     render(
       <SupervisorSessionStrip
@@ -45,6 +47,24 @@ describe("SupervisorSessionStrip", () => {
       />,
     );
     await act(async () => fireEvent.click(screen.getByTestId("supervisor-take-over")));
+    expect(onFocusInput).not.toHaveBeenCalled();
+    expect(screen.getByTestId("supervisor-take-over")).toHaveTextContent("Try again");
+  });
+
+  it("announces only a short state sentence, not the buttons or timestamps", () => {
+    render(
+      <SupervisorSessionStrip state={{ kind: "acting", text: "x", atMs: 0, lane: fixtureLane({ key: "k" }) }} now={120_000} onSetPaused={vi.fn()} onFocusInput={vi.fn()} />,
+    );
+    const live = screen.getByRole("status");
+    expect(live).toHaveTextContent("Supervisor is typing in this session");
+    expect(live.querySelector("button")).toBeNull();
+    expect(screen.getByTestId("supervisor-session-strip")).not.toHaveAttribute("role");
+  });
+
+  it("hands the keyboard over from the left-to-you state", () => {
+    const onFocusInput = vi.fn();
+    render(<SupervisorSessionStrip state={{ kind: "left-to-you" }} now={0} onSetPaused={vi.fn()} onFocusInput={onFocusInput} />);
+    fireEvent.click(screen.getByTestId("supervisor-answer"));
     expect(onFocusInput).toHaveBeenCalledTimes(1);
   });
 
