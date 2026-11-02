@@ -36,14 +36,17 @@ const PROCESS_KEYS: &[&str] = &[
 
 static FILE_ENV: OnceLock<BTreeMap<String, String>> = OnceLock::new();
 
-/// `~/.ferryx/hub/env`, or `FERRYX_HUB_ENV_FILE`. The home is `HOME`, else `USERPROFILE`
-/// (Windows).
+/// `~/.ferryx/hub/env`, or `FERRYX_HUB_ENV_FILE`. The home is [`home`].
 pub fn env_file_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("FERRYX_HUB_ENV_FILE").filter(|path| !path.is_empty()) {
         return Some(PathBuf::from(path));
     }
+    home().map(|home| home.join(".ferryx").join("hub").join("env"))
+}
+
+/// The owner's home: `HOME`, else `USERPROFILE` (Windows).
+pub fn home() -> Option<PathBuf> {
     home_from(std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
-        .map(|home| home.join(".ferryx").join("hub").join("env"))
 }
 
 fn home_from(home: Option<OsString>, profile: Option<OsString>) -> Option<PathBuf> {

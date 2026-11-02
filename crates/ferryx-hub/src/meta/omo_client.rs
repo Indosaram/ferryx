@@ -1171,7 +1171,7 @@ fn relay(pending: &mut String, progress: &Option<UnboundedSender<String>>, deliv
 /// owner-memory seed skips sessions there). Absent only when no root resolves or it cannot
 /// be created.
 pub fn slack_workspace() -> Option<protocol::Workspace> {
-    let home = crate::hub_env::var_os("HOME").map(PathBuf::from);
+    let home = crate::hub_env::home();
     let root = workspace_root(home.as_deref())?;
     workspace_in(&root, crate::hub_env::var("OMON_SLACK_PERSONA_FROM").ok().as_deref())
 }

@@ -2530,7 +2530,7 @@ async fn post_discord_delivery(channel: &str, text: &str) -> ferryx_hub::Result<
 }
 
 fn home_dir() -> std::path::PathBuf {
-    std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("."))
+    ferryx_hub::hub_env::home().unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
 fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: HubLaunch) {
