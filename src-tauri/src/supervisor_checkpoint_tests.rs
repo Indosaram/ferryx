@@ -434,3 +434,27 @@ fn the_store_keeps_the_newest_two_owner_only() {
         assert_eq!(mode, 0o600);
     }
 }
+
+/// A corrupt index does not leak archives: the next save keeps only the archive it stores
+/// and rewrites a readable index.
+#[test]
+fn a_corrupt_index_prunes_orphaned_archives_on_the_next_save() {
+    let (_dir, store) = store();
+    let old: Vec<String> = [b"one".as_slice(), b"two".as_slice()]
+        .iter()
+        .enumerate()
+        .map(|(at, bytes)| store.save(&checkpoint_id_of(bytes), bytes, at as u64, true).unwrap().id)
+        .collect();
+    std::fs::write(store.dir.join(INDEX_FILE), b"{not json").unwrap();
+    assert_eq!(store.newest(), None, "a corrupt index lists nothing");
+
+    let fresh = store.save(&checkpoint_id_of(b"three"), b"three", 5, false).unwrap();
+
+    for id in &old {
+        assert!(!store.path_of(id).exists(), "orphan {id} is pruned");
+    }
+    assert_eq!(store.newest(), Some(fresh.clone()));
+    let index: Vec<StoredCheckpoint> =
+        serde_json::from_slice(&std::fs::read(store.dir.join(INDEX_FILE)).unwrap()).unwrap();
+    assert_eq!(index, vec![fresh]);
+}

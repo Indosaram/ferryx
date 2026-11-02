@@ -1475,6 +1475,15 @@ impl AuthManager {
         *self.last_persisted_at.write() = instant;
     }
 
+    /// Test-only hook: sets a device's permission without the machine-grant rule, modelling a
+    /// view-only machine device (e.g. persisted by an older build) that pairing cannot issue.
+    #[cfg(test)]
+    pub(crate) fn force_device_permission(&self, device_id: &str, permission: DevicePermission) {
+        if let Some(device) = self.devices.write().get_mut(device_id) {
+            device.permission = permission;
+        }
+    }
+
     /// Test-only hook: backdates an active pairing PIN's creation time so
     /// expiration logic can be exercised deterministically, without a real
     /// 60-second sleep in the test suite.

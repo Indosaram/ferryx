@@ -40,6 +40,7 @@ pub fn standby_refusal() -> Option<crate::supervisor::request::RequestFailure> {
 }
 
 /// Runs `future` with `refusal` as this task's standby state only (tests).
+#[cfg(test)]
 pub async fn scope_standby<F: std::future::Future>(
     refusal: Option<crate::supervisor::request::RequestFailure>,
     future: F,
