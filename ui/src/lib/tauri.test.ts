@@ -32,6 +32,7 @@ import {
   previewGitHubIssue,
   listTerminalSessions,
   onNativeTerminalScrollbar,
+  onWindowSessionsOrphaned,
   setNativeTerminalScrollbarOverlay,
   setNativeTerminalAttentionFrame,
   setNativeTerminalDomOverlayInput,
@@ -154,6 +155,17 @@ describe("Tauri IPC wrapper contract", () => {
     expect(events.listen.mock.calls[0][0]).toBe("terminal_remote_status");
     events.listen.mock.calls[0][1]({ payload: { sessionId: "stable", state: "reconnecting" } });
     expect(handler).toHaveBeenCalledWith({ sessionId: "stable", state: "reconnecting" });
+  });
+  it("parses the backend window_sessions_orphaned payload ({ label, sessionIds })", async () => {
+    events.listen.mockResolvedValueOnce(vi.fn());
+    const handler = vi.fn();
+    await onWindowSessionsOrphaned(handler);
+    expect(events.listen.mock.calls[0][0]).toBe("window_sessions_orphaned");
+    const deliver = events.listen.mock.calls[0][1];
+    deliver({ payload: { label: "ws-abc", sessionIds: ["s-1", "", 7, "s-2"] } });
+    deliver({ payload: { fromLabel: "ws-abc", sessionIds: ["s-1"] } });
+    deliver({ payload: null });
+    expect(handler.mock.calls).toEqual([[{ fromLabel: "ws-abc", sessionIds: ["s-1", "s-2"] }]]);
   });
   beforeEach(() => {
     core.invoke.mockReset();

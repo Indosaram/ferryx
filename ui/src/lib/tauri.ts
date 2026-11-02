@@ -1638,10 +1638,11 @@ export async function onWindowSessionsOrphaned(
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
   return listen<unknown>(WINDOW_SESSIONS_ORPHANED_EVENT, (event) => {
-    const payload = event.payload as Partial<WindowSessionsOrphanedPayload> | null;
-    if (!payload || typeof payload.fromLabel !== 'string' || !Array.isArray(payload.sessionIds)) return;
+    // The backend payload is `{ label, sessionIds }` (WindowSessionsOrphanedPayload in lib.rs).
+    const payload = event.payload as { label?: unknown; sessionIds?: unknown } | null;
+    if (!payload || typeof payload.label !== 'string' || !Array.isArray(payload.sessionIds)) return;
     listener({
-      fromLabel: payload.fromLabel,
+      fromLabel: payload.label,
       sessionIds: payload.sessionIds.filter((id): id is string => typeof id === 'string' && id.length > 0),
     });
   });
