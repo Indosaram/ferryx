@@ -1,0 +1,62 @@
+name: win-triage-worktree
+on:
+  push:
+    branches: ['ci/win-triage-wt-20261102']
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+jobs:
+  wt:
+    strategy:
+      fail-fast: false
+      matrix:
+        rev: [d516bf4412d09ffe2577ceef6348589eb91fe5d7, 50f1b8b8b63fd0fea7b0da252fc40ea7e6a8da80]
+    runs-on: windows-2022
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.rev }}
+          submodules: recursive
+          fetch-depth: 0
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - name: env
+        shell: bash
+        run: |
+          echo "OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe" >> "$GITHUB_ENV"
+          git config --global user.name ferryx-ci
+          git config --global user.email ferryx-ci@users.noreply.github.com
+      - name: JS deps + UI build
+        shell: bash
+        run: |
+          bun install --frozen-lockfile || bun install
+          bun install --cwd ui --frozen-lockfile || bun install --cwd ui
+          bun run --cwd ui build
+          bun scripts/fetch-ffmpeg.mjs
+      - name: Build tests
+        timeout-minutes: 75
+        shell: bash
+        run: |
+          cargo build --manifest-path remote-helper/Cargo.toml
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --no-run
+      - name: Each worktree test alone
+        timeout-minutes: 50
+        shell: bash
+        run: |
+          set +e
+          cargo test --manifest-path src-tauri/Cargo.toml --lib -- worktree --list 2>/dev/null | sed -n 's/: test$//p' > wt.txt
+          wc -l wt.txt
+          while read -r t; do
+            timeout 90 cargo test --manifest-path src-tauri/Cargo.toml --lib -q -- --exact "$t" --test-threads=1 > o.txt 2>&1
+            rc=$?
+            case $rc in 0) r=PASS;; 124) r=HANG;; *) r="FAIL($rc)";; esac
+            echo "WT-RESULT ${{ matrix.rev }} $t $r"
+            if [ $rc -ne 0 ]; then echo "::group::$t"; tail -40 o.txt; echo "::endgroup::"; fi
+          done < wt.txt
+          exit 0
