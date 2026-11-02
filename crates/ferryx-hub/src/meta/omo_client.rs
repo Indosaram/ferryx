@@ -1167,9 +1167,10 @@ fn relay(pending: &mut String, progress: &Option<UnboundedSender<String>>, deliv
 /// The workspace omo-gateway gives Slack turns: `<root>/agents/bot-<persona>` plus
 /// `<root>/shared`, where root is [`workspace_root`] and the persona is
 /// `OMON_SLACK_PERSONA_FROM`. Without a configured persona whose directory exists, the turn
-/// runs in the root itself, so every Slack bot session lies under the hub-owned root (the
-/// owner-memory seed skips sessions there). Absent only when no root resolves or it cannot
-/// be created.
+/// runs in the root itself (a configured persona whose directory is missing is logged), so
+/// every Slack bot session lies under the hub-owned root (the owner-memory seed skips sessions
+/// there). The root is created when missing (mode 0700 on unix). Absent only when no root
+/// resolves or it cannot be created. Blocking file IO.
 pub fn slack_workspace() -> Option<protocol::Workspace> {
     let home = crate::hub_env::home();
     let root = workspace_root(home.as_deref())?;
@@ -1196,7 +1197,13 @@ fn workspace_in(root: &std::path::Path, persona: Option<&str>) -> Option<protoco
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|persona| root.join("agents").join(format!("bot-{persona}")))
-        .filter(|cwd| cwd.is_dir());
+        .filter(|cwd| {
+            let present = cwd.is_dir();
+            if !present {
+                tracing::warn!(persona_dir = %cwd.display(), "the configured Slack persona directory is missing; Slack turns run in the workspace root");
+            }
+            present
+        });
     if let Some(cwd) = persona_dir {
         return Some(protocol::Workspace {
             cwd: cwd.display().to_string(),
@@ -1206,7 +1213,14 @@ fn workspace_in(root: &std::path::Path, persona: Option<&str>) -> Option<protoco
             ],
         });
     }
-    if let Err(error) = std::fs::create_dir_all(root) {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    if let Err(error) = builder.create(root) {
         tracing::warn!(%error, root = %root.display(), "the hub workspace root was not created; Slack turns run in the engine's default directory");
         return None;
     }
@@ -1899,6 +1913,7 @@ mod lifecycle_tests {
             assert_eq!(workspace.cwd, root.display().to_string(), "{persona:?}");
             assert_eq!(workspace.roots, vec![root.display().to_string()]);
             assert!(root.is_dir());
+            assert_eq!(std::fs::metadata(&root).unwrap().permissions().mode() & 0o777, 0o700);
         }
         std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
