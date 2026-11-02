@@ -54,6 +54,16 @@ fn cli_build_command(
     let profile = profile_dir.file_name().expect("profile directory has a name");
     let profile = if profile == "debug" { std::ffi::OsStr::new("dev") } else { profile };
     let mut command = std::process::Command::new(cargo);
+    // `cargo test` gives this process its package environment (CARGO_MANIFEST_DIR,
+    // CARGO_PKG_*, ...). Build scripts such as ring's track those variables with
+    // rerun-if-env-changed, so a nested cargo that inherits them sees them "changed"
+    // and rebuilds ring and everything above it, and the next ordinary cargo run in the
+    // same target dir rebuilds it all again. Cargo sets them per package itself.
+    for (key, _) in std::env::vars_os() {
+        if key.to_str().is_some_and(is_cargo_package_env) {
+            command.env_remove(key);
+        }
+    }
     command
         .args(["build", "--bin", "ferryx-cli", "--manifest-path"])
         .arg(manifest_dir.join("Cargo.toml"))
@@ -69,6 +79,22 @@ fn cli_build_command(
     }
     let binary = profile_dir.join(format!("ferryx-cli{}", std::env::consts::EXE_SUFFIX));
     (command, binary)
+}
+
+/// Variables cargo sets for the package it builds or runs, never for cargo itself.
+fn is_cargo_package_env(key: &str) -> bool {
+    key.starts_with("CARGO_PKG_")
+        || matches!(
+            key,
+            "CARGO_MANIFEST_DIR"
+                | "CARGO_MANIFEST_PATH"
+                | "CARGO_MANIFEST_LINKS"
+                | "CARGO_CRATE_NAME"
+                | "CARGO_BIN_NAME"
+                | "CARGO_PRIMARY_PACKAGE"
+                | "CARGO_TARGET_TMPDIR"
+                | "CARGO_RUSTC_CURRENT_DIR"
+        )
 }
 
 #[cfg(test)]
@@ -97,6 +123,27 @@ mod tests {
     #[test]
     fn native_debug_reuses_the_existing_target_root() {
         assert_layout("target/debug/deps/tests", "target", "dev", false);
+    }
+
+    #[test]
+    fn nested_cargo_drops_the_inherited_package_environment() {
+        // This test binary runs under cargo test, so the package variables are set.
+        assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+        let (command, _) = cli_build_command(
+            std::ffi::OsStr::new("cargo"),
+            Path::new("target/debug/deps/tests"),
+            Path::new("checkout/src-tauri"),
+            "aarch64-apple-darwin",
+        );
+        let removed: Vec<_> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+        for key in ["CARGO_MANIFEST_DIR", "CARGO_PKG_NAME", "CARGO_PKG_VERSION"] {
+            assert!(removed.iter().any(|k| k == key), "{key} must not reach the nested cargo");
+        }
+        assert!(removed.iter().all(|k| is_cargo_package_env(k) || k == "CARGO_BUILD_TARGET"));
     }
 
     #[test]

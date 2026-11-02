@@ -53,6 +53,22 @@ fn state() -> Arc<RemoteGatewayState> {
     ))
 }
 
+/// A private asset root, so these tests never write into the checkout's ui/dist (a
+/// tauri build input: touching it makes the next cargo build recompile the crate).
+fn fixture_dist(parent: &std::path::Path) -> PathBuf {
+    let dist = parent.join("dist");
+    std::fs::create_dir_all(&dist).unwrap();
+    std::fs::write(dist.join("index.html"), "INDEX_SENTINEL").unwrap();
+    dist
+}
+
+async fn start_static(dist: PathBuf) -> SecurityServer {
+    SecurityServer::start_router(axum::Router::new().fallback(move |uri: axum::http::Uri| {
+        crate::remote::server::serve_static_from(dist.clone(), uri)
+    }))
+    .await
+}
+
 fn pair(
     state: &RemoteGatewayState,
     permission: DevicePermission,
@@ -66,11 +82,12 @@ fn pair(
 
 #[tokio::test]
 async fn static_raw_traversal_is_rejected() {
-    // Given an actual dist directory and a private sibling file, not a system secret.
-    let dist = crate::remote::server::resolve_dist_dir();
-    let outside = tempfile::tempdir_in(dist.parent().unwrap()).unwrap();
+    // Given a dist directory and a private sibling file, not a system secret.
+    let root = tempfile::tempdir().unwrap();
+    let dist = fixture_dist(root.path());
+    let outside = tempfile::tempdir_in(root.path()).unwrap();
     std::fs::write(outside.path().join("secret.txt"), "PRIVATE_SENTINEL").unwrap();
-    let server = SecurityServer::start(state()).await;
+    let server = start_static(dist).await;
     let outside_name = outside.path().file_name().unwrap().to_str().unwrap();
     // When raw HTTP bypasses URL client normalization.
     let (status, body) = server
@@ -85,12 +102,13 @@ async fn static_raw_traversal_is_rejected() {
 #[cfg(unix)]
 #[tokio::test]
 async fn static_symlinks_cannot_escape_dist() {
-    let dist = crate::remote::server::resolve_dist_dir();
+    let root = tempfile::tempdir().unwrap();
+    let dist = fixture_dist(root.path());
     let assets = tempfile::tempdir_in(&dist).unwrap();
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("secret.txt"), "SYMLINK_SENTINEL").unwrap();
     std::os::unix::fs::symlink(outside.path(), assets.path().join("escape")).unwrap();
-    let server = SecurityServer::start(state()).await;
+    let server = start_static(dist).await;
     let assets_name = assets.path().file_name().unwrap().to_str().unwrap();
     let (status, body) = server
         .request(
@@ -107,10 +125,11 @@ async fn static_symlinks_cannot_escape_dist() {
 
 #[tokio::test]
 async fn static_portable_paths_and_assets() {
-    let dist = crate::remote::server::resolve_dist_dir();
+    let root = tempfile::tempdir().unwrap();
+    let dist = fixture_dist(root.path());
     let assets = tempfile::tempdir_in(&dist).unwrap();
     std::fs::write(assets.path().join("hello world.js"), "ASSET_SENTINEL").unwrap();
-    let server = SecurityServer::start(state()).await;
+    let server = start_static(dist).await;
     for path in [
         "/%2e%2e/secret",
         "/..%2fsecret",
