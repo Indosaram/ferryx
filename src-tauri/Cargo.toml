@@ -52,7 +52,8 @@ harness = false
 required-features = ["desktop"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+# `codegen` generates the app context in build.rs (see build.rs) instead of in generate_context!.
+tauri-build = { version = "2", features = ["codegen"] }
 
 [features]
 default = ["desktop", "hub-slack", "hub-discord", "hub-voice", "remote-desktop"]
