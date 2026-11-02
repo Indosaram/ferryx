@@ -109,8 +109,9 @@ pub(crate) fn raw_to_rgba(raw: &RawSnapshot) -> Result<image::RgbaImage, IpcErro
     }
     let mut rgba = Vec::with_capacity(row_bytes * height);
     for row in raw.data.chunks(raw.stride).take(height) {
-        for pixel in row[..row_bytes].chunks_exact(4) {
-            let word = u32::from_ne_bytes([pixel[0], pixel[1], pixel[2], pixel[3]]);
+        let (pixels, _) = row[..row_bytes].as_chunks::<4>();
+        for pixel in pixels {
+            let word = u32::from_ne_bytes(*pixel);
             let alpha = if raw.opaque { 255 } else { (word >> 24) as u8 };
             let channel = |shift: u32| {
                 let premultiplied = (word >> shift) & 0xff;
