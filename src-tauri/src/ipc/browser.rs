@@ -1088,9 +1088,13 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
         None
     };
     // A native Wayland window has no X window to host the engine's: those tabs stay on the
-    // system webview (Settings > Browser says why).
+    // system webview. Settings > Browser says why, and so does the pane once it is registered.
     #[cfg(target_os = "linux")]
-    let cef_engine_dir = cef_engine_dir.filter(|_| linux_engine_parent(app).is_some());
+    let has_x_parent = linux_engine_parent(app).is_some();
+    #[cfg(target_os = "linux")]
+    let wayland_notice = wayland_engine_notice(cef_engine_dir.is_some(), has_x_parent);
+    #[cfg(target_os = "linux")]
+    let cef_engine_dir = cef_engine_dir.filter(|_| has_x_parent);
     // The Chromium engine keeps a named profile in its own directory; WebKit cannot.
     #[cfg(target_os = "macos")]
     if cef_engine_dir.is_none()
@@ -1106,6 +1110,13 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
     }
     let state = manager.register_session(request.clone())?;
     record_session_created(&state.browser_id);
+    // Without this the tab would quietly open on the system webview, leaving the user to guess
+    // why the Chromium engine they installed is not used.
+    #[cfg(target_os = "linux")]
+    if let Some(message) = wayland_notice {
+        let notice = crate::browser::engine_install::record_fallback(&state.browser_id, message);
+        let _ = app.emit(crate::ipc::browser_engine::BROWSER_ENGINE_FALLBACK_EVENT, notice);
+    }
 
     #[cfg(not(target_os = "macos"))]
     let profile_data_dir = match request.profile.as_ref() {
@@ -3925,6 +3936,13 @@ fn linux_engine_parent<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<isize> {
     app.get_window("main").and_then(|window| crate::browser::cef_engine::parent_xid(&window))
 }
 
+/// The pane notice for a tab that would have used the installed engine but cannot, because the
+/// session has no X window to put it in. Nothing to say when the engine is not installed.
+#[cfg(target_os = "linux")]
+fn wayland_engine_notice(engine_installed: bool, has_x_parent: bool) -> Option<&'static str> {
+    (engine_installed && !has_x_parent).then_some(crate::browser::cef_engine::WAYLAND_FALLBACK_MESSAGE)
+}
+
 /// Where a pane's engine window goes, in the units the platform module places it in: pixels
 /// inside the main window on Windows and Linux, screen points (top-left origin) on macOS,
 /// where the engine window is a separate window over the main one.
@@ -4262,6 +4280,18 @@ async fn resolve_session_cwd(
 mod tests {
     use super::*;
     use super::{windows_open_request, WindowsOpenRequest};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wayland_notice_only_when_installed_engine_has_no_x_parent() {
+        assert_eq!(
+            wayland_engine_notice(true, false),
+            Some(crate::browser::cef_engine::WAYLAND_FALLBACK_MESSAGE)
+        );
+        assert_eq!(wayland_engine_notice(true, true), None);
+        assert_eq!(wayland_engine_notice(false, false), None);
+        assert_eq!(wayland_engine_notice(false, true), None);
+    }
 
     #[test]
     fn failed_creation_forgets_the_installed_bridge_world() {

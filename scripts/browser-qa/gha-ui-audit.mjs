@@ -18,6 +18,13 @@
 // in the Chromium engine tab; outcomes go to summary.agent.<engine>.
 //
 // Usage: bun scripts/browser-qa/gha-ui-audit.mjs --binary <path> --out <dir>
+//        [--scenario full|drag-mask]
+//
+// --scenario drag-mask (needs FERRYX_UI_AUDIT_ENGINE_DIR, an unpacked engine dir, passed to the
+// app as FERRYX_CEF_ENGINE_DIR so new browser tabs open on Chromium): opens a browser tab on the
+// fixture page, drags that tab in the tab bar with real OS mouse input and checks from the
+// screenshot pixels that the engine's native window is hidden mid-drag and shown again after
+// the drop. Results go to summary.drag_mask; none of the full flow runs.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
@@ -32,21 +39,30 @@ const option = (name) => {
 const platform = process.platform; // linux | darwin | win32
 const binary = resolve(option("binary") ?? "");
 const out = resolve(option("out") ?? "ui-audit");
+const scenario = option("scenario") ?? "full";
+if (!["full", "drag-mask"].includes(scenario)) throw new Error(`unknown --scenario ${scenario} (full | drag-mask)`);
 const shots = join(out, "screenshots");
 const ocrDir = join(out, "ocr");
 mkdirSync(shots, { recursive: true });
 mkdirSync(ocrDir, { recursive: true });
 
-const isolation = join(process.env.RUNNER_TEMP ?? out, "ferryx-ui-audit-isolation");
+// One isolation dir per scenario: two invocations in one job must not share FERRYX_* dirs.
+const isolation = join(process.env.RUNNER_TEMP ?? out, scenario === "full" ? "ferryx-ui-audit-isolation" : `ferryx-ui-audit-isolation-${scenario}`);
 const dirs = Object.fromEntries(["data", "runtime", "session", "tmp", "home"].map((name) => [name, join(isolation, name)]));
 for (const dir of Object.values(dirs)) mkdirSync(dir, { recursive: true });
 
-const engineZip = process.env.FERRYX_UI_AUDIT_ENGINE_ZIP && existsSync(process.env.FERRYX_UI_AUDIT_ENGINE_ZIP)
+// The Settings install flow is part of the full scenario only; drag-mask uses a local engine dir.
+const engineZip = scenario === "full" && process.env.FERRYX_UI_AUDIT_ENGINE_ZIP && existsSync(process.env.FERRYX_UI_AUDIT_ENGINE_ZIP)
   ? resolve(process.env.FERRYX_UI_AUDIT_ENGINE_ZIP)
   : null;
+const dragEngineDir = scenario === "drag-mask" && process.env.FERRYX_UI_AUDIT_ENGINE_DIR ? resolve(process.env.FERRYX_UI_AUDIT_ENGINE_DIR) : null;
+if (scenario === "drag-mask" && (!dragEngineDir || !existsSync(dragEngineDir))) {
+  throw new Error("--scenario drag-mask needs FERRYX_UI_AUDIT_ENGINE_DIR naming an unpacked engine directory");
+}
 
 const summary = {
   platform,
+  scenario,
   binary,
   commit: process.env.GITHUB_SHA ?? null,
   started_at: new Date().toISOString(),
@@ -60,7 +76,10 @@ const summary = {
     "ui_check uses tesseract OCR on the step screenshot: pass = expected text visible, fail = not visible, unavailable = OCR missing.",
     "Agent automation runs with Settings > Browser > Agent access 'require pairing' off (seeded agent-authority.json), so the CLI uses the transport token only.",
   ],
-  engine: engineZip ? { zip: engineZip, checks: {} } : { skipped: "FERRYX_UI_AUDIT_ENGINE_ZIP not set or missing" },
+  engine: engineZip
+    ? { zip: engineZip, checks: {} }
+    : { skipped: scenario === "full" ? "FERRYX_UI_AUDIT_ENGINE_ZIP not set or missing" : `not part of the ${scenario} scenario` },
+  drag_mask: dragEngineDir ? { engine_dir: dragEngineDir } : undefined,
   agent: {},
   steps: [],
 };
@@ -172,6 +191,16 @@ const linux = {
   click(x, y) {
     return run("xdotool", ["mousemove", "--sync", String(x), String(y), "click", "1"]);
   },
+  // Left button press, move with the button held, release: a real pointer drag for dnd-kit.
+  mouseDown(x, y) {
+    return run("xdotool", ["mousemove", "--sync", String(x), String(y), "mousedown", "1"]);
+  },
+  mouseMove(x, y) {
+    return run("xdotool", ["mousemove", "--sync", String(x), String(y)]);
+  },
+  mouseUp(x, y) {
+    return run("xdotool", ["mousemove", "--sync", String(x), String(y), "mouseup", "1"]);
+  },
   resize(width, height) {
     return run("xdotool", ["windowsize", "--sync", this.windowId, String(width), String(height)]);
   },
@@ -228,6 +257,20 @@ const mac = {
   click(x, y) {
     const scale = this.scale();
     return run("cliclick", [`c:${Math.round(x / scale)},${Math.round(y / scale)}`]);
+  },
+  // cliclick dd/dm/du: button down, drag-move with the button held, button up (points, like click).
+  cliMouse(command, x, y) {
+    const scale = this.scale();
+    return run("cliclick", [`${command}:${Math.round(x / scale)},${Math.round(y / scale)}`]);
+  },
+  mouseDown(x, y) {
+    return this.cliMouse("dd", x, y);
+  },
+  mouseMove(x, y) {
+    return this.cliMouse("dm", x, y);
+  },
+  mouseUp(x, y) {
+    return this.cliMouse("du", x, y);
   },
   resize(width, height) {
     return this.osa(`tell application "System Events" to tell (first process whose unix id is ${this.pid}) to set size of window 1 to {${width}, ${height}}`);
@@ -298,6 +341,17 @@ const win = {
   },
   click(x, y) {
     return this.ps("click", ["-Hwnd", this.hwnd, "-Width", String(x), "-Height", String(y)]);
+  },
+  // Each call is a separate helper process, so moves are slower than on the other hosts; the
+  // button state lives in the OS, so it stays held between calls.
+  mouseDown(x, y) {
+    return this.ps("down", ["-Width", String(x), "-Height", String(y)]);
+  },
+  mouseMove(x, y) {
+    return this.ps("move", ["-Width", String(x), "-Height", String(y)]);
+  },
+  mouseUp(x, y) {
+    return this.ps("up", ["-Width", String(x), "-Height", String(y)]);
   },
   resize(width, height) {
     return this.ps("resize", ["-Hwnd", this.hwnd, "-Width", String(width), "-Height", String(height)]);
@@ -383,6 +437,11 @@ public static class FxInput {
     SetCursorPos(x, y);
     return SendInput(2, new INPUT[] { Mouse(0x0002), Mouse(0x0004) }, Marshal.SizeOf(typeof(INPUT)));
   }
+  /** Cursor to (x, y), then one mouse event: 0x0002 left down, 0x0001 move, 0x0004 left up. */
+  public static uint Button(int x, int y, uint flags) {
+    SetCursorPos(x, y);
+    return SendInput(1, new INPUT[] { Mouse(flags) }, Marshal.SizeOf(typeof(INPUT)));
+  }
   public static bool Focus(IntPtr h) {
     // Already foreground: touch nothing. An Alt tap here opens the window menu or moves
     // keyboard focus off the page, which swallowed typed text in the first smoke run.
@@ -408,6 +467,9 @@ switch ($Action) {
   "keys" { [void][FxInput]::Focus($handle); $n = [FxInput]::Chord([uint16[]]($Codes -split "," | ForEach-Object { [uint16]$_ })); if ($n -eq 0) { exit 4 } }
   "type" { [void][FxInput]::Focus($handle); $n = [FxInput]::Type($Text); if ($n -eq 0) { exit 4 } }
   "click" { $n = [FxInput]::Click($Width, $Height); if ($n -eq 0) { exit 4 } }
+  "down" { $n = [FxInput]::Button($Width, $Height, 0x0002); if ($n -eq 0) { exit 4 } }
+  "move" { $n = [FxInput]::Button($Width, $Height, 0x0001); if ($n -eq 0) { exit 4 } }
+  "up" { $n = [FxInput]::Button($Width, $Height, 0x0004); if ($n -eq 0) { exit 4 } }
   "closedialogs" { Write-Output ([FxInput]::CloseDialogs([uint32]$ProcessId)) }
   "wheel" { $n = [FxInput]::Wheel($Width, $Height, [int]$Codes); if ($n -eq 0) { exit 4 } }
   "resize" { if (-not [FxInput]::SetWindowPos($handle, [IntPtr]::Zero, 40, 40, $Width, $Height, 0x0004)) { exit 5 } }
@@ -663,6 +725,7 @@ const env = {
   RUST_LOG: process.env.RUST_LOG ?? "info",
   FERRYX_BROWSER_ENGINE_MANIFEST_URL: `${fixtureBase}/manifest.json`,
   ...(engineKeyPublic ? { FERRYX_BROWSER_ENGINE_PUBLIC_KEY: engineKeyPublic } : {}),
+  ...(dragEngineDir ? { FERRYX_CEF_ENGINE_DIR: dragEngineDir } : {}),
 };
 if (platform === "linux") Object.assign(env, { GDK_BACKEND: "x11", LIBGL_ALWAYS_SOFTWARE: "1", WEBKIT_DISABLE_DMABUF_RENDERER: "1", WEBKIT_DISABLE_COMPOSITING_MODE: "1" });
 
@@ -1191,6 +1254,169 @@ const closeStrayDialogs = [
   () => (platform === "win32" ? win.closeDialogs() : { ok: true, skipped: "not Windows" }),
 ];
 
+const enginePids = () => (platform === "linux" ? run("pgrep", ["-f", "ferryx_engine"]).stdout.split(/\s+/).filter(Boolean).map(Number) : []);
+
+// ---------------------------------------------------------------- drag-mask scenario
+// While a tab is dragged, TerminalSplitView renders browser panes hidden (browserPanesVisible is
+// activeDrag === null), which hides the Chromium engine's native window. That window sits above
+// the web UI, so fixture green in a mid-drag screenshot means the mask failed.
+const FIXTURE_GREEN = [0, 168, 107];
+const FIXTURE_YELLOW = [255, 212, 0];
+const FIXTURE_TOLERANCE = 30;
+const FIXTURE_SAMPLE_STEP = 4;
+// Counts are of every 4th pixel in both directions. The fixture's 40px green frame around a
+// ~1000x700 pane gives several thousand samples; a hidden pane gives (near) none.
+const FIXTURE_VISIBLE_MIN = 800;
+const FIXTURE_MASKED_MAX = 40;
+function fixturePixels(path) {
+  if (!path || !existsSync(path)) return { error: "no screenshot" };
+  try {
+    const image = decodePng(path);
+    const near = (pixel, expected) => pixel.every((value, index) => Math.abs(value - expected[index]) <= FIXTURE_TOLERANCE);
+    let green = 0, yellow = 0;
+    for (let y = 0; y < image.height; y += FIXTURE_SAMPLE_STEP) {
+      for (let x = 0; x < image.width; x += FIXTURE_SAMPLE_STEP) {
+        const pixel = image.rgb(x, y);
+        if (near(pixel, FIXTURE_GREEN)) green += 1;
+        else if (near(pixel, FIXTURE_YELLOW)) yellow += 1;
+      }
+    }
+    return { green, yellow, width: image.width, height: image.height };
+  } catch (error) {
+    return { error: String(error?.message ?? error) };
+  }
+}
+/** Any ferryx_engine process (pgrep on mac/linux, tasklist on Windows). */
+const engineProcessRunning = () =>
+  platform === "win32"
+    ? run("tasklist", ["/FI", "IMAGENAME eq ferryx_engine.exe", "/NH"]).stdout.toLowerCase().includes("ferryx_engine")
+    : run("pgrep", ["-f", "ferryx_engine"]).ok;
+
+async function dragMaskFlow() {
+  const record = summary.drag_mask;
+  record.thresholds = { visible_min: FIXTURE_VISIBLE_MIN, masked_max: FIXTURE_MASKED_MAX, tolerance: FIXTURE_TOLERANCE, sample_step: FIXTURE_SAMPLE_STEP };
+  const shotPath = (entry) => (entry.screenshot?.file ? join(out, entry.screenshot.file) : null);
+
+  await step(
+    "drag-mask-open-browser",
+    "Mod+Shift+B opens a browser tab (Chromium via FERRYX_CEF_ENGINE_DIR); the CLI navigates it to the fixture page; wait until its pixels are on screen",
+    [
+      focus,
+      chromeFocus,
+      key("Mod+Shift+B", { key: "b", mods: ["mod", "shift"] }),
+      ["optional wait for the engine process", async () => {
+        const deadline = Date.now() + 30000;
+        while (Date.now() < deadline) {
+          if (engineProcessRunning()) return { ok: true };
+          await sleep(1000);
+        }
+        return { ok: false, stderr: "no ferryx_engine process after 30s" };
+      }],
+      ["navigate the tab to the fixture (CLI)", async () => {
+        const deadline = Date.now() + 30000;
+        let listed = sessions();
+        while (!listed.list.length && Date.now() < deadline) {
+          await sleep(1000);
+          listed = sessions();
+        }
+        record.browser_list_after_open = listed.raw;
+        const tab = listed.list.find((entry) => entry.engine === "chromium") ?? listed.list.at(-1);
+        record.browser_id = tab?.browserId ?? null;
+        record.engine = tab?.engine ?? null;
+        record.chromium = tab?.engine === "chromium";
+        if (!tab) return { ok: false, stderr: "browser list reported no tab" };
+        const navigated = await cliAsync("navigate", "--browser-id", tab.browserId, "--url", `${fixtureBase}/fixture.html`);
+        return { ok: navigated.ok, status: navigated.status, engine: record.engine, stderr: navigated.stderr };
+      }],
+      ["wait for fixture pixels", async () => {
+        const started = Date.now();
+        let pixels = null;
+        do {
+          pixels = fixturePixels(probeShot());
+          if ((pixels.green ?? 0) >= FIXTURE_VISIBLE_MIN) return { ok: true, waited_ms: Date.now() - started, pixels };
+          await sleep(1000);
+        } while (Date.now() - started < 60000);
+        return { ok: false, waited_ms: Date.now() - started, pixels, stderr: "fixture green not on screen after 60s" };
+      }],
+    ],
+  );
+  const listedAfter = sessions();
+  record.browser_list_after_navigate = listedAfter.raw;
+  record.title = listedAfter.list.find((entry) => entry.browserId === record.browser_id)?.title ?? null;
+
+  const before = await step("drag-mask-before", "Fixture page in the browser tab before any drag: fixture green on screen", [focus, 1000]);
+  record.before = fixturePixels(shotPath(before));
+  record.visible_before = (record.before.green ?? 0) >= FIXTURE_VISIBLE_MIN;
+
+  // dnd-kit's PointerSensor activates after 12px of movement; 8 moves of 10px with ~100ms
+  // between them start the drag well before the hold, and the button stays down for the shot.
+  const drag = { start: null, at: null, pressed: false };
+  const mid = await step(
+    "drag-mask-mid-drag",
+    "Press the left button on the browser tab (found by its 'fixture' title), drag 80px right in 8 steps, hold for 1s; the engine window must be hidden",
+    [
+      ["locate the browser tab by its title (OCR, topmost hit)", async () => {
+        const deadline = Date.now() + 10000;
+        do {
+          const words = ocr(probeShot());
+          if (!words) return { ok: false, stderr: "OCR unavailable" };
+          // Topmost: the tab bar is above the address bar, which also contains "fixture".
+          const hit = findWord(words, "", { match: (word) => norm(word.text).includes("fixture") });
+          if (hit) {
+            drag.start = [hit.x, hit.y];
+            return { ok: true, at: drag.start, hits: hit.hits };
+          }
+          await sleep(1000);
+        } while (Date.now() < deadline);
+        return { ok: false, stderr: "no OCR word containing 'fixture' (the browser tab title) on screen" };
+      }],
+      ["press, drag right 80px in 8 steps, keep holding", async () => {
+        if (!drag.start) return { ok: false, stderr: "browser tab not located" };
+        const [x, y] = drag.start;
+        const down = host.mouseDown(x, y);
+        if (!down.ok) return { ...down, stage: "down" };
+        drag.pressed = true;
+        await sleep(150);
+        for (let index = 1; index <= 8; index += 1) {
+          const moved = host.mouseMove(x + index * 10, y);
+          if (!moved.ok) return { ...moved, stage: `move ${index}` };
+          drag.at = [x + index * 10, y];
+          await sleep(100);
+        }
+        return { ok: true, from: drag.start, to: drag.at };
+      }],
+      1000,
+    ],
+  );
+  record.tab_found = Boolean(drag.start);
+  record.tab_at = drag.start;
+  record.mid_drag = fixturePixels(shotPath(mid));
+  record.masked_mid_drag = drag.pressed && Boolean(drag.at) && (record.mid_drag.green ?? Infinity) <= FIXTURE_MASKED_MAX;
+
+  const after = await step(
+    "drag-mask-after",
+    "Move back to the start and release (no reorder); 2s later the fixture is visible again",
+    [
+      ["move back and release", async () => {
+        if (!drag.pressed) return { ok: false, stderr: "the button was never pressed" };
+        const [x, y] = drag.start;
+        for (let px = (drag.at ?? drag.start)[0] - 10; px > x; px -= 10) {
+          host.mouseMove(px, y);
+          await sleep(100);
+        }
+        const up = host.mouseUp(x, y);
+        if (up.ok) drag.pressed = false;
+        return { ...up, stage: "up" };
+      }],
+      2000,
+    ],
+  );
+  record.after = fixturePixels(shotPath(after));
+  record.restored_after_drop = (record.after.green ?? 0) >= FIXTURE_VISIBLE_MIN;
+  record.pass = record.visible_before && record.masked_mid_drag && record.restored_after_drop;
+  writeSummary();
+}
+
 // ---------------------------------------------------------------- base flow
 await step("launch", "App window after startup", [focus, dismissStoreToast]);
 await step(
@@ -1199,6 +1425,10 @@ await step(
   [focus, clickOr("Skip", [key("Tab", { key: "Tab" }), key("Escape", { key: "Escape" })], { timeout: 5000 }), 2000],
   { none: ["Skip"] },
 );
+if (scenario === "drag-mask") {
+  await dragMaskFlow();
+  await teardown();
+}
 await step("new-browser-tab", "Mod+Shift+B (tab.newBrowser) opens a browser tab", [focus, chromeFocus, key("Mod+Shift+B", { key: "b", mods: ["mod", "shift"] }), 5000], {
   any: ["about:blank", "Browser"],
 });
@@ -1434,7 +1664,6 @@ await step("narrow-900-settings", "At 900px, open Settings > Browser", [closeStr
 await step("narrow-900-settings-closed", "Escape closes Settings at 900px", [focus, key("Escape", { key: "Escape" }), 1500]);
 
 // ---------------------------------------------------------------- Chromium engine checks (Linux)
-const enginePids = () => (platform === "linux" ? run("pgrep", ["-f", "ferryx_engine"]).stdout.split(/\s+/).filter(Boolean).map(Number) : []);
 let xStateIndex = 0;
 /** Writes the X window tree, the raw focus window and its properties to x-state/<n>-<name>.txt. */
 const captureXState = (name) => {
@@ -1591,30 +1820,54 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
 }
 
 // ---------------------------------------------------------------- teardown
-summary.finished_at = new Date().toISOString();
-summary.totals = summary.steps.reduce((counts, entry) => ({ ...counts, [entry.outcome]: (counts[entry.outcome] ?? 0) + 1 }), {});
-summary.ui_checks = summary.steps.reduce((counts, entry) => (entry.ui_check ? { ...counts, [entry.ui_check.result]: (counts[entry.ui_check.result] ?? 0) + 1 } : counts), {});
-writeSummary();
-if (app && !summary.app_exit) {
-  if (platform === "win32") run("taskkill", ["/PID", String(app.pid), "/T", "/F"]);
-  else {
+await teardown();
+
+/** Totals, stop the app, its engine and the fixture server, print the verdict, exit 0. */
+async function teardown() {
+  summary.finished_at = new Date().toISOString();
+  summary.totals = summary.steps.reduce((counts, entry) => ({ ...counts, [entry.outcome]: (counts[entry.outcome] ?? 0) + 1 }), {});
+  summary.ui_checks = summary.steps.reduce((counts, entry) => (entry.ui_check ? { ...counts, [entry.ui_check.result]: (counts[entry.ui_check.result] ?? 0) + 1 } : counts), {});
+  writeSummary();
+  if (app && !summary.app_exit) {
+    if (platform === "win32") run("taskkill", ["/PID", String(app.pid), "/T", "/F"]);
+    else {
+      try {
+        process.kill(-app.pid, "SIGTERM");
+      } catch {}
+    }
+  }
+  for (const pid of enginePids()) {
     try {
-      process.kill(-app.pid, "SIGTERM");
+      process.kill(pid, "SIGKILL");
     } catch {}
   }
+  // A local engine dir is launched on every OS; do not leave it running for the next step.
+  if (scenario === "drag-mask") {
+    if (platform === "win32") run("taskkill", ["/F", "/IM", "ferryx_engine.exe"]);
+    else run("pkill", ["-f", "ferryx_engine"]);
+  }
+  await sleep(1500);
+  server.stop(true);
+  writeSummary();
+  const dragMask = summary.drag_mask;
+  console.log(JSON.stringify({
+    scenario,
+    totals: summary.totals,
+    ui_checks: summary.ui_checks,
+    engine: summary.engine.checks ?? summary.engine.skipped,
+    agent: Object.fromEntries(Object.entries(summary.agent).map(([engine, record]) => [engine, { ok: record.ok ?? false, checks: record.checks }])),
+    ...(dragMask
+      ? {
+          drag_mask: {
+            pass: dragMask.pass ?? false,
+            chromium: dragMask.chromium ?? null,
+            visible_before: dragMask.visible_before ?? null,
+            masked_mid_drag: dragMask.masked_mid_drag ?? null,
+            restored_after_drop: dragMask.restored_after_drop ?? null,
+            green: [dragMask.before?.green, dragMask.mid_drag?.green, dragMask.after?.green],
+          },
+        }
+      : {}),
+  }));
+  process.exit(0);
 }
-for (const pid of enginePids()) {
-  try {
-    process.kill(pid, "SIGKILL");
-  } catch {}
-}
-await sleep(1500);
-server.stop(true);
-writeSummary();
-console.log(JSON.stringify({
-  totals: summary.totals,
-  ui_checks: summary.ui_checks,
-  engine: summary.engine.checks ?? summary.engine.skipped,
-  agent: Object.fromEntries(Object.entries(summary.agent).map(([engine, record]) => [engine, { ok: record.ok ?? false, checks: record.checks }])),
-}));
-process.exit(0);
