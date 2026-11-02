@@ -282,6 +282,15 @@ impl BrowserManager {
             .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))
     }
 
+    /// The tab's recorded addresses, oldest first (newest last); empty for an unknown tab.
+    pub fn history_snapshot(&self, browser_id: &str) -> Vec<String> {
+        self.sessions
+            .read()
+            .get(browser_id)
+            .map(|session| session.history.clone())
+            .unwrap_or_default()
+    }
+
     pub fn webview_labels_for_profile(&self, profile_id: &BrowserProfileId) -> Vec<String> {
         self.sessions
             .read()
@@ -917,6 +926,18 @@ pub fn order_sessions_by_creation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_snapshot_lists_a_tab_addresses_oldest_first() {
+        let manager = BrowserManager::new();
+        manager.register_session(create_request("history-a")).unwrap();
+        manager.update_url("history-a", "https://accounts.google.com/").unwrap();
+        assert_eq!(
+            manager.history_snapshot("history-a"),
+            vec!["https://example.com/".to_string(), "https://accounts.google.com/".to_string()]
+        );
+        assert!(manager.history_snapshot("history-missing").is_empty());
+    }
 
     #[test]
     fn identity_snapshot_reads_the_live_session_and_fails_after_close() {
