@@ -1327,6 +1327,19 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
     request: CreateBrowserRequest,
     opener: Option<crate::browser::BrowserOpenerLink>,
 ) -> Result<BrowserState, IpcError> {
+    create_browser_session_in_window(app, manager, request, opener, None).await
+}
+
+/// Creates a browser session whose webview mounts in `host_window`: the calling window for UI
+/// commands. Without one (CLI, remote and other background callers) it mounts in the focused app
+/// window, which is `main` while only one window exists.
+pub async fn create_browser_session_in_window<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &Arc<BrowserManager>,
+    request: CreateBrowserRequest,
+    opener: Option<crate::browser::BrowserOpenerLink>,
+    host_window: Option<tauri::Window<R>>,
+) -> Result<BrowserState, IpcError> {
     if let Some(restored_browser_id) = request.browser_id.as_deref() {
         if let Ok(existing) = manager.get_state(restored_browser_id) {
             record_session_created(&existing.browser_id);
@@ -1392,7 +1405,10 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
         return create_cef_browser_session(app, manager, state, engine_dir).await;
     }
 
-    if let Some(main_window) = app.get_window("main") {
+    let host_window = host_window
+        .filter(|window| crate::window_registry::is_app_window_label(window.label()))
+        .or_else(|| crate::window_registry::focused_window(app));
+    if let Some(host_window) = host_window {
         let label = state.webview_label.clone();
         let target_url = state.url.clone();
         let bounds = request.bounds.clone();
@@ -1456,8 +1472,8 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
             }
         }
 
-        let window_clone = main_window.clone();
-        let run_result = main_window.run_on_main_thread(move || {
+        let window_clone = host_window.clone();
+        let run_result = host_window.run_on_main_thread(move || {
             let target_parsed: Option<tauri::Url> = target_url.parse().ok();
             let parsed_url: tauri::WebviewUrl = match "about:blank".parse() {
                 Ok(blank) => tauri::WebviewUrl::External(blank),
@@ -1807,7 +1823,7 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
         // No host window to attach to: a session without a webview would be picked as the
         // active tab and fail every later command with WEBVIEW_NOT_FOUND.
         discard_failed_session(manager, &state.browser_id);
-        return Err(BrowserError::CreateFailed("main window unavailable".into()).into());
+        return Err(BrowserError::CreateFailed("no host window available".into()).into());
     }
 
     if let Some(link) = opener.as_ref() {
@@ -2150,11 +2166,12 @@ pub(crate) async fn dispatch_trusted_action<R: tauri::Runtime>(
 #[tauri::command]
 pub async fn cmd_browser_create<R: tauri::Runtime>(
     app: AppHandle<R>,
+    window: tauri::Window<R>,
     manager: State<'_, Arc<BrowserManager>>,
     request: CreateBrowserRequest,
     opener: Option<crate::browser::BrowserOpenerLink>,
 ) -> Result<BrowserState, IpcError> {
-    create_browser_session_with_opener(&app, manager.inner(), request, opener).await
+    create_browser_session_in_window(&app, manager.inner(), request, opener, Some(window)).await
 }
 
 #[tauri::command]
@@ -2956,15 +2973,18 @@ pub fn focus_browser_session<R: tauri::Runtime>(
     let webview = app
         .get_webview(&state.webview_label)
         .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
-    if let Some(window) = app.get_window("main") {
+    // Raise the window that hosts this browser's webview, not a fixed window.
+    let host_window = webview.window();
+    if crate::window_registry::is_app_window_label(host_window.label()) {
+        let window = host_window;
         window.show().map_err(|error| {
-            BrowserError::Internal(format!("failed to show the main window: {error}"))
+            BrowserError::Internal(format!("failed to show the browser's window: {error}"))
         })?;
         window.unminimize().map_err(|error| {
-            BrowserError::Internal(format!("failed to unminimize the main window: {error}"))
+            BrowserError::Internal(format!("failed to unminimize the browser's window: {error}"))
         })?;
         window.set_focus().map_err(|error| {
-            BrowserError::Internal(format!("failed to focus the main window: {error}"))
+            BrowserError::Internal(format!("failed to focus the browser's window: {error}"))
         })?;
     }
     webview.set_focus().map_err(|error| {
