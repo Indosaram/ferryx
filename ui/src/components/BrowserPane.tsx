@@ -11,6 +11,7 @@ import {
   extractBrowserErrorCode,
   findBrowser,
   focusBrowser,
+  focusAppWebview,
   listBrowsers,
   onBrowserDownloadRequested,
   onBrowserShortcutRequested,
@@ -174,7 +175,22 @@ export function BrowserPane({
   }, [tab]);
 
   useEffect(() => {
-    if (findOpen) findInputRef.current?.focus();
+    if (!findOpen) return;
+    // The page view (a native child webview or the Chromium engine window) keeps OS keyboard
+    // focus after Ctrl+F, so focusing the DOM input alone sends typed keys to the page. The app
+    // webview is asked to take the keyboard back first, then the input is focused, and focused
+    // again once the native focus moved (also when that call fails).
+    let cancelled = false;
+    const nativeFocus = focusAppWebview();
+    findInputRef.current?.focus();
+    void nativeFocus
+      .catch(() => undefined)
+      .then(() => {
+        if (!cancelled) findInputRef.current?.focus();
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [findOpen]);
 
   useEffect(() => {

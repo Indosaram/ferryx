@@ -403,6 +403,14 @@ export async function focusBrowser(browserId: string, options: { address?: boole
   return invoke<void>("cmd_browser_focus", { browserId, address: options.address ?? false });
 }
 
+/**
+ * Moves OS keyboard focus from a native page view back to the app webview. Call it before
+ * focusing an app input that must take typed keys while a page is shown.
+ */
+export async function focusAppWebview(): Promise<void> {
+  return invoke<void>("cmd_browser_focus_app");
+}
+
 export async function openBrowserDevtools(browserId: string): Promise<void> {
   return invoke<void>("cmd_browser_open_devtools", { browserId });
 }

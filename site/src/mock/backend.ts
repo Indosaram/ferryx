@@ -106,6 +106,7 @@ export async function invoke(command: string, rawArgs?: unknown): Promise<unknow
     case 'cmd_browser_set_visible': { const b = browsers.get(a.browserId); if (b) b.visible = a.visible; return undefined; }
     case 'cmd_browser_set_zoom': { const b = browsers.get(a.browserId); if (b) b.zoomFactor = a.zoomFactor; return a.zoomFactor; }
     case 'cmd_browser_focus': return undefined;
+    case 'cmd_browser_focus_app': return undefined;
     case 'cmd_browser_close': browsers.delete(a.browserId); return undefined;
     case 'cmd_browser_open_external': return undefined;
     case 'cmd_browser_download_list': return [];

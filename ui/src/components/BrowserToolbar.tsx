@@ -27,6 +27,7 @@ import {
   BROWSER_SHORTCUT_EVENT,
   extractBrowserErrorCode,
   focusBrowser,
+  focusAppWebview,
   getBrowserEngineStatus,
   getBrowserState,
   getBrowserSnapshotCapability,
@@ -467,12 +468,24 @@ export function BrowserToolbar({
       }
       switch (action) {
         case "focus-address":
-          inputRef.current?.focus();
-          inputRef.current?.select();
           setHistoryQuery("");
           setHistoryOpen(false);
           setSelectedHistoryIndex(-1);
           setOmniboxOpen(true);
+          {
+            // Ctrl+L from the page: the page view holds OS keyboard focus until the app webview
+            // takes it back, so that is requested before the address bar is focused, and the
+            // bar is focused again once the native focus moved.
+            const nativeFocus = focusAppWebview();
+            inputRef.current?.focus();
+            inputRef.current?.select();
+            void nativeFocus
+              .catch(() => undefined)
+              .then(() => {
+                inputRef.current?.focus();
+                inputRef.current?.select();
+              });
+          }
           break;
         case "bookmark-page":
           void handlers.toggleBookmark();
@@ -608,9 +621,13 @@ export function BrowserToolbar({
   const handleAddressKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Escape") {
       event.preventDefault();
+      // Like other browsers: Escape drops the edit and shows the current page's address again.
       inputDirtyRef.current = false;
+      setInputUrl(tab.url);
+      setHistoryQuery("");
       setOmniboxOpen(false);
       setSelectedHistoryIndex(-1);
+      event.currentTarget.select();
       return;
     }
     if (omniboxEntries.length === 0) return;

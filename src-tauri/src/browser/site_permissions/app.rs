@@ -70,11 +70,7 @@ pub(crate) fn run_on_main(task: MainTask) {
 }
 
 fn data_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<PathBuf> {
-    use tauri::Manager;
-    if let Some(dir) = std::env::var_os("FERRYX_DATA_DIR").filter(|dir| !dir.is_empty()) {
-        return Some(PathBuf::from(dir));
-    }
-    app.path().app_data_dir().ok()
+    crate::browser::data_paths::app_data_root(app).ok()
 }
 
 /// Wires site permissions to the app and loads the remembered decisions. Until they are
