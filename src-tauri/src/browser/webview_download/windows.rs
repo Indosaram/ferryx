@@ -6,7 +6,7 @@ use crate::browser::download::{registry, DownloadControl};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2DownloadOperation, ICoreWebView2_4, COREWEBVIEW2_DOWNLOAD_STATE,
     COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED, COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS,
