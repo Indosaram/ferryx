@@ -86,6 +86,30 @@ fn store(state: &mut VaultState) -> &mut VaultStore {
     state.store.as_mut().expect("with_store opened the store")
 }
 
+/// The app's shared vault for the browser import, which saves logins on its own blocking thread.
+pub(crate) struct AppVault {
+    dir: PathBuf,
+}
+
+pub(crate) fn app_vault<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<AppVault, IpcError> {
+    Ok(AppVault { dir: vault_dir(app)? })
+}
+
+impl crate::browser::import::ingest::PasswordVault for AppVault {
+    fn with_vault(
+        &self,
+        f: &mut dyn FnMut(&mut VaultStore) -> Result<(), VaultError>,
+    ) -> Result<(), VaultError> {
+        let mut state = VAULT.lock();
+        if state.store.is_none() {
+            let keystore = keystore::platform(&self.dir);
+            state.backend = keystore.backend();
+            state.store = Some(VaultStore::open(&self.dir, keystore.as_ref())?);
+        }
+        f(store(&mut state))
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultStatus {

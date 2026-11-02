@@ -3,14 +3,15 @@
 //!
 //! Contract (the stores' ingesters rely on it):
 //! - Directory: `<data>/browser-import/<profile>/pending/`.
-//! - One file per import run and data type: `<type>-<unix millis>-<pid>.jsonl`, `<type>` one of
-//!   `bookmarks`, `history`, `passwords`. A file appears only complete: it is written as
+//! - One file per import run and data type: `<type>-<unix millis>-<run>-<pid>.jsonl`, `<type>`
+//!   one of `bookmarks`, `history`, `passwords`, `<run>` a zero-padded per-process counter so
+//!   names sort in write order. A file appears only complete: it is written as
 //!   `….jsonl.partial` and renamed when its type finishes, so an ingester never sees a torn file
 //!   and ignores `.partial` files (a crash leaves one behind; it is safe to delete).
 //! - One JSON object per line, camelCase: [`StagedRecord`] = `{"source": "<browser name>", …}`
 //!   flattened with [`ImportedBookmark`], [`ImportedHistoryEntry`] or [`ImportedPassword`].
-//! - The ingester deletes a file after it has stored every line. Password files hold
-//!   plaintext secrets: they are created owner-only (0600) on Unix and must be deleted promptly.
+//! - The ingester (`super::ingest`) wipes and deletes a file once it has read it, stored or
+//!   not. Password files hold plaintext secrets: they are created owner-only (0600) on Unix.
 
 use super::{
     ImportDataType, ImportedBookmark, ImportedHistoryEntry, ImportedPassword, SinkError,
@@ -22,7 +23,10 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 pub const PENDING_DIR: &str = "pending";
-const PARTIAL_SUFFIX: &str = ".partial";
+pub const PARTIAL_SUFFIX: &str = ".partial";
+
+/// Distinguishes two runs started in the same millisecond.
+static RUN_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// `<data>/browser-import/<profile>/pending`.
 pub fn pending_dir(data_dir: &Path, profile: &str) -> PathBuf {
@@ -74,10 +78,11 @@ impl StagingWriter {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or_default();
+        let run = RUN_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Self {
             dir,
             source: source.into(),
-            run_tag: format!("{millis}-{}", std::process::id()),
+            run_tag: format!("{millis}-{run:08}-{}", std::process::id()),
             files: Mutex::new(Vec::new()),
         }
     }
@@ -135,20 +140,27 @@ impl StagingWriter {
         file.sync_all().map_err(|error| failed(&partial, error))?;
         drop(file);
         let target = self.final_path(data_type);
-        std::fs::rename(&partial, &target).map_err(|error| failed(&target, error))?;
+        if let Err(error) = std::fs::rename(&partial, &target) {
+            discard_file(&partial);
+            return Err(failed(&target, error));
+        }
         Ok(count)
     }
 
-    /// Deletes the unfinished file of `data_type` (a cancelled or failed type).
+    /// Wipes and deletes the unfinished file of `data_type` (a cancelled or failed type).
     pub fn discard(&self, data_type: ImportDataType) {
         let mut files = self.files.lock();
         if let Some(index) = files.iter().position(|(kind, _)| *kind == data_type) {
             let (_, open) = files.remove(index);
             drop(open.writer);
-            if let Err(error) = std::fs::remove_file(&open.partial) {
-                tracing::warn!(path = %open.partial.display(), %error, "could not remove staging file");
-            }
+            discard_file(&open.partial);
         }
+    }
+}
+
+fn discard_file(path: &Path) {
+    if let Err(error) = super::ingest::shred(path) {
+        tracing::warn!(path = %path.display(), %error, "could not remove staging file");
     }
 }
 

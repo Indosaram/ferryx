@@ -51,6 +51,9 @@ describe("describeBrowserImportResult", () => {
       describeBrowserImportResult({ type: "cookies", imported: 3, skipped: 2, notes: [], error: null }),
     ).toBe("Cookies: 3 imported, 2 skipped");
     expect(
+      describeBrowserImportResult({ type: "bookmarks", imported: 5, duplicates: 2, skipped: 1, notes: [], error: null }),
+    ).toBe("Bookmarks: 5 imported, 2 already in Ferryx, 1 skipped");
+    expect(
       describeBrowserImportResult({
         type: "passwords",
         imported: 0,

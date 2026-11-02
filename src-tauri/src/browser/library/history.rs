@@ -263,6 +263,31 @@ impl HistoryStore {
         Ok(inserted)
     }
 
+    /// [`Self::import`] for another browser's history: a visit whose url already has a visit at
+    /// the same time is a duplicate and is not added again. Returns (inserted, duplicates).
+    pub fn import_new(&mut self, visits: &[ImportedVisit]) -> Result<(usize, usize), HistoryError> {
+        let (mut inserted, mut duplicates) = (0, 0);
+        for visit in visits {
+            let url = visit.url.trim();
+            if !is_recordable_url(url) || visit.visited_at <= 0 {
+                continue;
+            }
+            let seen: bool = self.conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM urls WHERE url = ?1 AND (last_visited_at = ?2
+                     OR EXISTS (SELECT 1 FROM visits WHERE visits.url_id = urls.id AND visited_at = ?2)))",
+                params![url, visit.visited_at],
+                |row| row.get(0),
+            )?;
+            if seen {
+                duplicates += 1;
+                continue;
+            }
+            self.insert(url, visit.title.as_deref(), visit.visited_at, visit.visit_count)?;
+            inserted += 1;
+        }
+        Ok((inserted, duplicates))
+    }
+
     pub fn meta(&self, key: &str) -> Result<Option<String>, HistoryError> {
         Ok(self
             .conn

@@ -39,7 +39,7 @@ fn library_data_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, Ip
         .map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string()))
 }
 
-fn library<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Arc<BrowserLibrary>, IpcError> {
+pub(crate) fn library<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Arc<BrowserLibrary>, IpcError> {
     if let Some(library) = LIBRARY.get() {
         return Ok(Arc::clone(library));
     }
@@ -77,6 +77,12 @@ enum LibraryChange {
 
 fn notify<R: tauri::Runtime>(app: &AppHandle<R>, change: LibraryChange) {
     let _ = app.emit(BROWSER_LIBRARY_CHANGED_EVENT, change);
+}
+
+/// Tells every window that an import changed bookmarks and history.
+pub(crate) fn notify_imported<R: tauri::Runtime>(app: &AppHandle<R>) {
+    notify(app, LibraryChange::Bookmarks);
+    notify(app, LibraryChange::History);
 }
 
 /// Feeds a browser state change from either engine into history. Called from the places that

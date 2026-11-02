@@ -23,7 +23,10 @@ export type BrowserImportSource = {
 
 export type BrowserImportTypeResult = {
   type: BrowserImportType;
+  /** Records the Ferryx store kept (bookmarks, history and passwords) or cookies applied. */
   imported: number;
+  /** Records Ferryx already had; absent from older hosts. */
+  duplicates?: number;
   skipped: number;
   notes: string[];
   error: { code: string; message: string } | null;
@@ -104,6 +107,9 @@ const TYPE_ERROR_MESSAGES: Record<string, string> = {
   unsupported: "This browser does not offer this data.",
   "no-file": "Choose the passwords file exported from the browser.",
   "sink-failed": "Ferryx could not save the imported data.",
+  "store-failed": "Ferryx could not save the imported data.",
+  "vault-unavailable": "The password vault is unavailable, so no passwords were saved.",
+  "cleanup-failed": "The import finished, but Ferryx could not delete its temporary file.",
 };
 
 /** One line per type: counts, or the reason the type failed. */
@@ -113,8 +119,9 @@ export function describeBrowserImportResult(result: BrowserImportTypeResult): st
     const reason = TYPE_ERROR_MESSAGES[result.error.code] ?? result.error.message;
     return `${label}: ${reason}`;
   }
+  const duplicates = result.duplicates ? `, ${result.duplicates} already in Ferryx` : "";
   const skipped = result.skipped > 0 ? `, ${result.skipped} skipped` : "";
-  return `${label}: ${result.imported} imported${skipped}`;
+  return `${label}: ${result.imported} imported${duplicates}${skipped}`;
 }
 
 const RUN_ERROR_MESSAGES: Record<string, string> = {

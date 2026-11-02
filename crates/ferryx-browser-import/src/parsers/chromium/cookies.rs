@@ -76,7 +76,9 @@ pub fn detect_encryption_version(data: &[u8]) -> EncryptionVersion {
 /// Returns cookies with metadata. Encrypted cookies have `value` empty and
 /// `encrypted_value` populated. Decryption is deferred to Phase 3.
 pub fn parse_chromium_cookies(profile_dir: &Path) -> ImportResult<Vec<ChromiumCookieEntry>> {
-    let cookies_path = profile_dir.join("Cookies");
+    // Chromium 96+ keeps the database in `Network/`; older profiles and fixtures at the top.
+    let network_path = profile_dir.join("Network").join("Cookies");
+    let cookies_path = if network_path.is_file() { network_path } else { profile_dir.join("Cookies") };
 
     if !cookies_path.exists() {
         return Err(ImportError::FileNotFound(
