@@ -235,8 +235,8 @@ fn install_app_menu<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()>
         .minimize()
         .item(&PredefinedMenuItem::maximize(app, None)?)
         .separator();
-    // Multi-window is experimental: without the opt-in the menu (and Cmd+Shift+N, which the UI
-    // binds to the notification center) is unchanged.
+    // Multi-window is experimental: without the opt-in the menu is unchanged and Cmd+Shift+N
+    // reaches the webview, whose own `window.new` shortcut calls `cmd_window_new`.
     if crate::ipc::window::multi_window_enabled() {
         let new_window = MenuItemBuilder::with_id("window.new", "New Window")
             .accelerator("CmdOrCtrl+Shift+N")
@@ -3002,6 +3002,70 @@ fn handle_app_window_destroyed<R: tauri::Runtime>(window: &tauri::Window<R>) {
     };
     if let Err(error) = app.emit_to(target.label(), WINDOW_SESSIONS_ORPHANED_EVENT, payload) {
         tracing::warn!(%error, from = label, "Could not hand orphaned sessions to a window");
+    }
+}
+
+#[cfg(all(test, feature = "desktop"))]
+mod window_lifecycle_tests {
+    use super::*;
+    use tauri::Listener;
+
+    type MockWindow = tauri::WebviewWindow<tauri::test::MockRuntime>;
+
+    fn two_windows() -> (tauri::App<tauri::test::MockRuntime>, MockWindow, MockWindow) {
+        let app = tauri::test::mock_app();
+        app.manage(window_registry::WindowRegistry::default());
+        let main = tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::default())
+            .build()
+            .expect("main window");
+        let secondary =
+            tauri::WebviewWindowBuilder::new(&app, "ws-test", tauri::WebviewUrl::default())
+                .build()
+                .expect("secondary window");
+        (app, main, secondary)
+    }
+
+    fn record(window: &MockWindow) -> std::sync::mpsc::Receiver<String> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        window.listen(WINDOW_SESSIONS_ORPHANED_EVENT, move |event| {
+            let _ = sender.send(event.payload().to_owned());
+        });
+        receiver
+    }
+
+    #[test]
+    fn closing_a_secondary_window_hands_its_sessions_to_the_primary() {
+        let (app, main, secondary) = two_windows();
+        let registry = app.state::<window_registry::WindowRegistry>();
+        registry.set_owner("s-2", "ws-test");
+        registry.set_owner("s-1", "ws-test");
+        registry.set_owner("s-main", "main");
+        let main_events = record(&main);
+        let secondary_events = record(&secondary);
+
+        handle_window_destroyed(&secondary.as_ref().window());
+
+        let payload: serde_json::Value = serde_json::from_str(
+            &main_events
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("primary window is told to adopt the sessions"),
+        )
+        .expect("json payload");
+        assert_eq!(
+            payload,
+            serde_json::json!({ "label": "ws-test", "sessionIds": ["s-1", "s-2"] })
+        );
+        assert!(secondary_events.try_recv().is_err(), "the closing window is not a target");
+        assert_eq!(registry.owner("s-1"), None);
+        assert_eq!(registry.owner("s-main").as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn closing_a_window_without_sessions_emits_nothing() {
+        let (_app, main, secondary) = two_windows();
+        let main_events = record(&main);
+        handle_window_destroyed(&secondary.as_ref().window());
+        assert!(main_events.try_recv().is_err());
     }
 }
 

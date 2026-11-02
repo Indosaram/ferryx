@@ -135,6 +135,16 @@ mod tests {
     }
 
     #[test]
+    fn latest_session_id_peeks_without_draining() {
+        let queue = NotificationActivations::new();
+        assert_eq!(queue.latest_session_id(), None);
+        queue.push(target("a"));
+        queue.push(target("b"));
+        assert_eq!(queue.latest_session_id().as_deref(), Some("b"));
+        assert_eq!(queue.len(), 2);
+    }
+
+    #[test]
     fn drain_returns_pushed_targets_in_order_then_empties() {
         let queue = NotificationActivations::new();
         queue.push(target("a"));
