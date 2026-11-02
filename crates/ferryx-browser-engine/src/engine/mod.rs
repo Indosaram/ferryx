@@ -5,6 +5,7 @@
 //! buttons, menus) in a frameless window the platform module keeps over the tab's pane. Windows
 //! the browser opens on its own (a new tab, a sign-in popup) are reported to Ferryx, which makes
 //! a tab for them and adopts them.
+//! A hidden `chrome://extensions` browser, never a tab, manages extensions (`extensions.rs`).
 
 use cef::*;
 use ferryx_browser_engine_protocol::{Command, Event, Rect as PaneRect};
@@ -15,6 +16,7 @@ use std::io::{BufRead, Write};
 mod platform;
 mod permissions;
 mod system;
+mod extensions;
 mod import_cookies;
 mod vault;
 
@@ -97,6 +99,8 @@ enum Key {
     Popup(u32),
     /// DevTools: an ordinary window of its own.
     Free,
+    /// The hidden extensions page (`extensions.rs`): never a tab, never shown to Ferryx.
+    Manager,
 }
 
 struct Pane {
@@ -163,6 +167,9 @@ fn key_of(browser: &mut Browser) -> Option<Key> {
     if let Some(tab) = tab {
         return Some(Key::Tab(tab));
     }
+    if extensions::is_manager(browser) {
+        return Some(Key::Manager);
+    }
     POPUPS.with_borrow(|popups| {
         popups.iter().find(|(_, pane)| same(&pane.view, browser)).map(|(id, _)| Key::Popup(*id))
     })
@@ -205,7 +212,7 @@ fn with_pane<T>(key: &Key, f: impl FnOnce(&mut Pane) -> T) -> Option<T> {
     match key {
         Key::Tab(tab) => TABS.with_borrow_mut(|tabs| tabs.get_mut(tab).map(f)),
         Key::Popup(id) => POPUPS.with_borrow_mut(|popups| popups.get_mut(id).map(f)),
-        Key::Free => None,
+        Key::Free | Key::Manager => None,
     }
 }
 
@@ -395,6 +402,7 @@ fn execute(command: Command) {
                 }
             }
         }
+        Command::Extensions { id, call } => extensions::call(id, call),
     }
 }
 
@@ -405,6 +413,7 @@ fn quit() {
         .with_borrow_mut(|tabs| tabs.drain().map(|(_, pane)| pane.view).collect::<Vec<_>>())
         .into_iter()
         .chain(POPUPS.with_borrow_mut(|popups| popups.drain().map(|(_, pane)| pane.view).collect::<Vec<_>>()))
+        .chain(extensions::take_view())
         .collect();
     for view in views {
         if let Some(host) = view.browser().and_then(|browser| browser.host()) {
@@ -540,6 +549,8 @@ wrap_window_delegate! {
 
             match &self.key {
                 Key::Free => window.show(),
+                // Hidden: it is shown only while Chrome's remove dialog is open.
+                Key::Manager => extensions::window_created(window),
                 key => {
                     platform::embed(window);
                     let handle = platform::handle(window);
@@ -569,7 +580,7 @@ wrap_window_delegate! {
         }
 
         fn is_frameless(&self, _window: Option<&mut Window>) -> ::std::os::raw::c_int {
-            (self.key != Key::Free) as _
+            !matches!(self.key, Key::Free | Key::Manager) as _
         }
 
         fn can_close(&self, _window: Option<&mut Window>) -> ::std::os::raw::c_int {
@@ -744,6 +755,10 @@ wrap_load_handler! {
             let Some(browser) = browser else { return };
             let state = (is_loading != 0, can_go_back != 0, can_go_forward != 0);
             let Some(key) = key_of(browser) else { return };
+            if key == Key::Manager {
+                extensions::on_loading_state_change(browser, state.0);
+                return;
+            }
             with_pane(&key, |pane| pane.loading = Some(state));
             if let Key::Tab(tab) = key {
                 emit(Event::Loading { tab, loading: state.0, can_go_back: state.1, can_go_forward: state.2 });
@@ -759,6 +774,10 @@ wrap_life_span_handler! {
         fn on_after_created(&self, browser: Option<&mut Browser>) {
             LIVE_BROWSERS.set(LIVE_BROWSERS.get() + 1);
             let Some(browser) = browser else { return };
+            // The hidden extensions page is no site: no password hooks, never a stray.
+            if extensions::is_manager(browser) {
+                return;
+            }
             vault::attach(browser);
             if key_of(browser).is_some() {
                 return;
@@ -783,6 +802,7 @@ wrap_life_span_handler! {
                     Some(Key::Popup(id)) => {
                         POPUPS.with_borrow_mut(|popups| popups.remove(&id));
                     }
+                    Some(Key::Manager) => extensions::on_closed(),
                     _ => {}
                 }
             }

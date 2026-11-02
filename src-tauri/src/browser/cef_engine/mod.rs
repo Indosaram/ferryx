@@ -11,7 +11,7 @@
 
 use crate::browser::{BrowserError, LogicalRect};
 pub use ferryx_browser_engine_protocol::Event;
-use ferryx_browser_engine_protocol::{Command as EngineCommand, Rect};
+use ferryx_browser_engine_protocol::{Command as EngineCommand, ExtensionCall, Rect};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -88,6 +88,9 @@ struct PendingDevtools {
 
 static DEVTOOLS_CALLS: LazyLock<Mutex<HashMap<u32, PendingDevtools>>> = LazyLock::new(Default::default);
 static NEXT_DEVTOOLS_ID: AtomicU32 = AtomicU32::new(1);
+/// Extension calls waiting for their answer, like [`DEVTOOLS_CALLS`] (ids of their own).
+static EXTENSION_CALLS: LazyLock<Mutex<HashMap<u32, PendingDevtools>>> = LazyLock::new(Default::default);
+static NEXT_EXTENSION_ID: AtomicU32 = AtomicU32::new(1);
 
 /// Ids at and above this belong to the engine's own vault DevTools calls on the same browser
 /// (`engine/vault.rs`), so Ferryx's calls stay below it and never collide with them.
@@ -170,6 +173,7 @@ fn engine_gone(profile: &str, pid: u32) {
     let _ = engine.child.wait();
     // Dropping the waiters tells every DevTools call in flight that the engine is gone.
     DEVTOOLS_CALLS.lock().retain(|_, pending| pending.profile != profile);
+    EXTENSION_CALLS.lock().retain(|_, pending| pending.profile != profile);
     let orphaned: Vec<String> = {
         let mut tabs = TABS.lock();
         let ids: Vec<String> =
@@ -206,6 +210,35 @@ pub struct EngineLaunch<'a> {
     pub parent: isize,
 }
 
+/// Whether the profile's engine process is running.
+pub fn is_running(profile: &str) -> bool {
+    ENGINES.lock().contains_key(profile)
+}
+
+/// Starts the profile's engine when it is not running, without opening a tab.
+/// Blocking: run it through `run_blocking`.
+pub fn ensure_running(launch: &EngineLaunch<'_>, profile: &str, sink: EventSink) -> Result<(), BrowserError> {
+    // An engine that died since its last command is replaced, not written to.
+    let dead = ENGINES.lock().get_mut(profile).and_then(|engine| {
+        matches!(engine.child.try_wait(), Ok(Some(_))).then(|| engine.child.id())
+    });
+    if let Some(pid) = dead {
+        engine_gone(profile, pid);
+    }
+    if is_running(profile) {
+        return Ok(());
+    }
+    let failed = |error: std::io::Error| BrowserError::CreateFailed(format!("CEF engine: {error}"));
+    let mut command = Command::new(launch.engine_dir.join(ENGINE_EXE));
+    command.current_dir(launch.engine_dir);
+    if let Some(cache_dir) = launch.cache_dir {
+        std::fs::create_dir_all(cache_dir).map_err(failed)?;
+        command.env("FERRYX_CEF_CACHE", cache_dir);
+    }
+    platform::configure(&mut command, launch.parent);
+    start(command, profile, launch.parent, sink).map_err(failed)
+}
+
 /// Opens a tab in its profile's engine, starting the engine first when it is not running.
 /// Blocking: run it through `run_blocking`.
 pub fn open(
@@ -217,24 +250,7 @@ pub fn open(
     url: &str,
     visible: bool,
 ) -> Result<(), BrowserError> {
-    // An engine that died since its last command is replaced, not written to.
-    let dead = ENGINES.lock().get_mut(profile).and_then(|engine| {
-        matches!(engine.child.try_wait(), Ok(Some(_))).then(|| engine.child.id())
-    });
-    if let Some(pid) = dead {
-        engine_gone(profile, pid);
-    }
-    if !ENGINES.lock().contains_key(profile) {
-        let failed = |error: std::io::Error| BrowserError::CreateFailed(format!("CEF engine: {error}"));
-        let mut command = Command::new(launch.engine_dir.join(ENGINE_EXE));
-        command.current_dir(launch.engine_dir);
-        if let Some(cache_dir) = launch.cache_dir {
-            std::fs::create_dir_all(cache_dir).map_err(failed)?;
-            command.env("FERRYX_CEF_CACHE", cache_dir);
-        }
-        platform::configure(&mut command, launch.parent);
-        start(command, profile, launch.parent, sink).map_err(failed)?;
-    }
+    ensure_running(launch, profile, sink)?;
     TABS.lock().insert(
         browser_id.to_string(),
         Tab { profile: profile.to_string(), handle: None },
@@ -286,6 +302,12 @@ fn read_events(stdout: std::process::ChildStdout, profile: &str, pid: u32, sink:
             Event::Devtools { id, ok, result, .. } => {
                 // An answer goes to the call that asked for it, not to the tab's event sink.
                 if let Some(pending) = DEVTOOLS_CALLS.lock().remove(id) {
+                    let _ = pending.reply.send((*ok, result.clone()));
+                }
+                continue;
+            }
+            Event::Extensions { id, ok, result } => {
+                if let Some(pending) = EXTENSION_CALLS.lock().remove(id) {
                     let _ = pending.reply.send((*ok, result.clone()));
                 }
                 continue;
@@ -418,6 +440,52 @@ fn devtools_answer(method: &str, ok: bool, raw: &str) -> Result<serde_json::Valu
     Err(BrowserError::AutomationFailed(format!("{method}: {message}")))
 }
 
+/// What an extension call failing with `message` returns: `"cancelled"` (the user cancelled
+/// Chrome's remove dialog) is its own message.
+pub const EXTENSION_CALL_CANCELLED: &str = "cancelled";
+
+/// Runs one extension call in the profile's running engine (its hidden `chrome://extensions`
+/// page) and returns the call's JSON value; for [`ExtensionCall::List`] the extension array.
+pub async fn extensions(
+    profile: &str,
+    call: ExtensionCall,
+    timeout: Duration,
+) -> Result<serde_json::Value, BrowserError> {
+    let id = loop {
+        let id = NEXT_EXTENSION_ID.fetch_add(1, Ordering::Relaxed);
+        if id != 0 {
+            break id;
+        }
+    };
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    EXTENSION_CALLS.lock().insert(id, PendingDevtools { profile: profile.to_string(), reply });
+    if !send(profile, &EngineCommand::Extensions { id, call }) {
+        EXTENSION_CALLS.lock().remove(&id);
+        return Err(BrowserError::AutomationFailed("the Chromium engine is not running".into()));
+    }
+    let outcome = tokio::time::timeout(timeout, answer).await;
+    EXTENSION_CALLS.lock().remove(&id);
+    let (ok, raw) = outcome
+        .map_err(|_| BrowserError::AutomationFailed("the extension change timed out in the Chromium engine".into()))?
+        .map_err(|_| BrowserError::AutomationFailed("the Chromium engine stopped".into()))?;
+    extensions_answer(ok, &raw)
+}
+
+/// Turns an engine extensions answer into its JSON value or a typed failure.
+fn extensions_answer(ok: bool, raw: &str) -> Result<serde_json::Value, BrowserError> {
+    let value: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
+        BrowserError::AutomationFailed(format!("the extensions page returned malformed JSON: {error}"))
+    })?;
+    if ok {
+        return Ok(value);
+    }
+    let message = value
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("the extension change failed");
+    Err(BrowserError::AutomationFailed(message.to_string()))
+}
+
 /// Tells a running engine of `profile` to apply the cookie file Ferryx staged at `path`.
 /// Returns false when that engine is not running; it applies the file when it next starts.
 pub fn import_cookies(profile: &str, path: &Path) -> bool {
@@ -481,6 +549,64 @@ mod tests {
             Err(BrowserError::AutomationFailed(_))
         ));
         assert!(next_devtools_id() > 0 && next_devtools_id() <= i32::MAX as u32);
+    }
+
+    #[test]
+    fn extensions_answers_map_to_values_and_typed_failures() {
+        assert_eq!(extensions_answer(true, "[]").unwrap(), serde_json::json!([]));
+        assert_eq!(extensions_answer(true, "null").unwrap(), serde_json::Value::Null);
+        assert_eq!(
+            extensions_answer(false, r#"{"message":"cancelled"}"#),
+            Err(BrowserError::AutomationFailed(EXTENSION_CALL_CANCELLED.into()))
+        );
+        assert!(matches!(extensions_answer(true, "not json"), Err(BrowserError::AutomationFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn an_extension_call_without_a_running_engine_fails_at_once() {
+        assert!(!is_running("no-such-profile"));
+        let error = extensions("no-such-profile", ExtensionCall::List, Duration::from_secs(1))
+            .await
+            .expect_err("no engine");
+        assert!(matches!(error, BrowserError::AutomationFailed(_)));
+        assert!(!EXTENSION_CALLS.lock().values().any(|pending| pending.profile == "no-such-profile"));
+    }
+
+    /// A stand-in engine answers an extension call: the answer reaches the caller, and the
+    /// first event the sink sees is the tab closing when the engine exits, not the answer.
+    #[tokio::test]
+    async fn an_extensions_answer_reaches_its_caller() {
+        let id = NEXT_EXTENSION_ID.fetch_add(1, Ordering::Relaxed);
+        let line = format!("@ferryx extensions {id} 1 [7]");
+        #[cfg(target_os = "windows")]
+        let command = {
+            let mut command = Command::new("cmd");
+            command.args(["/C", &format!("echo {line}")]);
+            command
+        };
+        #[cfg(not(target_os = "windows"))]
+        let command = {
+            let mut command = Command::new("sh");
+            command.args(["-c", &format!("echo '{line}'")]);
+            command
+        };
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        EXTENSION_CALLS.lock().insert(id, PendingDevtools { profile: "ext-profile".into(), reply });
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let sender = Mutex::new(sender);
+        let sink: EventSink = Arc::new(move |_: &str, event: Event| {
+            let _ = sender.lock().send(event);
+        });
+        TABS.lock().insert("ext-tab".into(), Tab { profile: "ext-profile".into(), handle: None });
+        start(command, "ext-profile", 0, sink).expect("stand-in engine starts");
+        let (ok, raw) = tokio::time::timeout(Duration::from_secs(10), answer)
+            .await
+            .expect("answer in time")
+            .expect("answer delivered");
+        assert_eq!(extensions_answer(ok, &raw).unwrap(), serde_json::json!([7]));
+        let first = receiver.recv_timeout(Duration::from_secs(10)).expect("closed event");
+        assert_eq!(first, Event::Closed { tab: "ext-tab".into() });
+        assert!(!EXTENSION_CALLS.lock().contains_key(&id));
     }
 
     #[tokio::test]

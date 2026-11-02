@@ -1693,6 +1693,48 @@ pub(crate) async fn create_cef_browser_session<R: tauri::Runtime>(
     Ok(state)
 }
 
+/// Starts the profile's Chromium engine without opening a tab (Settings > Extensions talks to
+/// it), with the same window, data dir and event sink as the profile's tabs.
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+pub(crate) async fn ensure_cef_engine<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &Arc<BrowserManager>,
+    profile: &BrowserProfileId,
+    engine_dir: std::path::PathBuf,
+) -> Result<(), IpcError> {
+    use crate::browser::cef_engine;
+    let main_window = app
+        .get_window("main")
+        .ok_or_else(|| BrowserError::CreateFailed("main window unavailable".into()))?;
+    #[cfg(target_os = "windows")]
+    let parent = main_window
+        .hwnd()
+        .map(|hwnd| hwnd.0 as isize)
+        .map_err(|error| BrowserError::CreateFailed(format!("main window handle: {error}")))?;
+    #[cfg(target_os = "macos")]
+    let parent = cef_engine::window_number(&main_window)
+        .ok_or_else(|| BrowserError::CreateFailed("main window number unavailable".into()))?;
+    #[cfg(target_os = "linux")]
+    let parent = cef_engine::parent_xid(&main_window)
+        .ok_or_else(|| BrowserError::CreateFailed("main window has no X11 window (Wayland session)".into()))?;
+    let profile_id = profile.as_str().to_string();
+    let cache_dir = if profile.is_private() {
+        None
+    } else {
+        Some(engine_data_dir(app)?.join("browser-cef").join(&profile_id))
+    };
+    let sink = cef_event_sink(app.clone(), Arc::clone(manager));
+    crate::ipc::run_blocking(move || {
+        let launch = cef_engine::EngineLaunch {
+            engine_dir: &engine_dir,
+            cache_dir: cache_dir.as_deref(),
+            parent,
+        };
+        cef_engine::ensure_running(&launch, &profile_id, sink).map_err(IpcError::from)
+    })
+    .await
+}
+
 /// Applies a Chromium engine's events: page state to the tab, a closed browser to a closed tab,
 /// and a window the engine opened on its own (a new tab, a sign-in popup) to a new tab.
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]

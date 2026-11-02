@@ -1,5 +1,7 @@
-//! Extensions installed in a Chromium engine profile, read from the profile's files on disk.
-//! CEF has no extension API, so changes go through Chrome's own `chrome://extensions` page.
+//! Extensions installed in a Chromium engine profile. While the profile's engine runs, the
+//! list and every change go through the engine's control channel (its hidden
+//! `chrome://extensions` page, see `cef_engine::extensions`); otherwise the list is read from
+//! the profile's files on disk, which are never written here.
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
@@ -9,6 +11,8 @@ use std::path::{Component, Path, PathBuf};
 
 /// Icons larger than this are left out of the listing.
 const MAX_ICON_BYTES: u64 = 256 * 1024;
+/// Engine icons arrive as data URLs; longer ones (base64 of [`MAX_ICON_BYTES`]) are left out.
+const MAX_ICON_DATA_URL_LEN: usize = (MAX_ICON_BYTES as usize) * 4 / 3 + 64;
 /// Chromium's `Manifest::Location` values for extensions built into the browser.
 const COMPONENT_LOCATIONS: [i64; 2] = [5, 10];
 /// `Manifest::Location::INTERNAL`, an extension installed from a package (the Web Store).
@@ -27,6 +31,10 @@ pub struct InstalledExtension {
     pub options_url: Option<String>,
     pub homepage_url: Option<String>,
     pub from_web_store: bool,
+    /// Whether the toolbar button is pinned; `None` when unknown (read from files).
+    pub pinned: Option<bool>,
+    /// False for extensions Chrome will not let the user remove (policy installed).
+    pub removable: bool,
 }
 
 /// A Chrome page that manages extensions.
@@ -82,13 +90,64 @@ pub fn list_installed(profile_root: &Path) -> std::io::Result<Vec<InstalledExten
             .filter_map(|(id, entry)| from_settings(&extensions_root, id, entry))
             .collect()
     };
+    sort_by_name(&mut extensions);
+    Ok(extensions)
+}
+
+fn sort_by_name(extensions: &mut [InstalledExtension]) {
     extensions.sort_by(|a, b| {
         a.name
             .to_lowercase()
             .cmp(&b.name.to_lowercase())
             .then_with(|| a.id.cmp(&b.id))
     });
-    Ok(extensions)
+}
+
+/// The extensions in the engine's list answer (a JSON array built by its extensions page),
+/// sorted by name. Entries without a valid id are dropped; icons that are not image data URLs
+/// or are too large, options pages of another extension and non-web homepages are left out.
+pub fn from_engine_list(list: &Value) -> Vec<InstalledExtension> {
+    let mut extensions: Vec<InstalledExtension> = list
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(from_engine_entry)
+        .collect();
+    sort_by_name(&mut extensions);
+    extensions
+}
+
+fn from_engine_entry(entry: &Value) -> Option<InstalledExtension> {
+    let id = entry.get("id")?.as_str()?;
+    if !is_valid_extension_id(id) {
+        return None;
+    }
+    let text = |key: &str| {
+        entry
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let flag = |key: &str| entry.get(key).and_then(Value::as_bool);
+    let own_prefix = format!("chrome-extension://{id}/");
+    Some(InstalledExtension {
+        id: id.to_string(),
+        name: text("name").unwrap_or_else(|| id.to_string()),
+        version: text("version").unwrap_or_default(),
+        description: text("description"),
+        enabled: flag("enabled").unwrap_or(false),
+        icon_data_url: text("iconDataUrl")
+            .filter(|url| url.starts_with("data:image/") && url.len() <= MAX_ICON_DATA_URL_LEN),
+        options_url: text("optionsUrl").filter(|url| url.starts_with(&own_prefix)),
+        homepage_url: text("homepageUrl")
+            .filter(|url| url.starts_with("https://") || url.starts_with("http://")),
+        from_web_store: flag("fromWebStore").unwrap_or(false),
+        pinned: flag("pinnedToToolbar"),
+        removable: flag("removable").unwrap_or(false),
+    })
 }
 
 /// Chromium keeps a profile in `Default` under its data dir.
@@ -259,6 +318,10 @@ fn describe(
         options_url: options_page.map(|page| format!("chrome-extension://{id}/{page}")),
         homepage_url: text("homepage_url").map(str::to_string),
         from_web_store,
+        // The files do not say whether the button is pinned. Chrome refuses removing a
+        // policy-installed extension itself and reports why.
+        pinned: None,
+        removable: true,
     }
 }
 
@@ -474,5 +537,117 @@ mod tests {
         let options: ExtensionPage =
             serde_json::from_value(json!({ "kind": "options", "id": STORE_ID })).unwrap();
         assert_eq!(options, ExtensionPage::Options(STORE_ID.into()));
+    }
+
+    #[test]
+    fn reads_the_engine_list() {
+        let icon = format!("data:image/png;base64,{}", STANDARD.encode(PNG));
+        let listed = from_engine_list(&json!([
+            {
+                "id": STORE_ID,
+                "name": "Zeta",
+                "version": "1.2",
+                "description": "Blocks ads",
+                "enabled": true,
+                "iconDataUrl": icon.clone(),
+                "pinnedToToolbar": true,
+                "optionsUrl": format!("chrome-extension://{STORE_ID}/options.html"),
+                "homepageUrl": "https://example.com",
+                "fromWebStore": true,
+                "removable": true,
+            },
+            {
+                "id": DISABLED_ID,
+                "name": "alpha",
+                "version": "2",
+                "description": null,
+                "enabled": false,
+                "iconDataUrl": null,
+                "pinnedToToolbar": false,
+                "optionsUrl": null,
+                "homepageUrl": null,
+                "fromWebStore": false,
+                "removable": false,
+            },
+        ]));
+        assert_eq!(
+            listed,
+            vec![
+                InstalledExtension {
+                    id: DISABLED_ID.into(),
+                    name: "alpha".into(),
+                    version: "2".into(),
+                    description: None,
+                    enabled: false,
+                    icon_data_url: None,
+                    options_url: None,
+                    homepage_url: None,
+                    from_web_store: false,
+                    pinned: Some(false),
+                    removable: false,
+                },
+                InstalledExtension {
+                    id: STORE_ID.into(),
+                    name: "Zeta".into(),
+                    version: "1.2".into(),
+                    description: Some("Blocks ads".into()),
+                    enabled: true,
+                    icon_data_url: Some(icon),
+                    options_url: Some(format!("chrome-extension://{STORE_ID}/options.html")),
+                    homepage_url: Some("https://example.com".into()),
+                    from_web_store: true,
+                    pinned: Some(true),
+                    removable: true,
+                },
+            ]
+        );
+        let serialized = serde_json::to_value(&listed[0]).unwrap();
+        assert_eq!(serialized["pinned"], json!(false));
+        assert_eq!(serialized["removable"], json!(false));
+        assert_eq!(serialized["iconDataUrl"], Value::Null);
+    }
+
+    #[test]
+    fn engine_entries_with_missing_fields_get_safe_defaults() {
+        let listed = from_engine_list(&json!([{ "id": STORE_ID }]));
+        assert_eq!(listed.len(), 1);
+        let only = &listed[0];
+        assert_eq!(only.name, STORE_ID);
+        assert_eq!(only.version, "");
+        assert!(!only.enabled);
+        assert_eq!(only.pinned, None);
+        assert!(!only.removable);
+        assert!(!only.from_web_store);
+        assert!(from_engine_list(&json!({ "not": "a list" })).is_empty());
+        assert!(from_engine_list(&Value::Null).is_empty());
+    }
+
+    #[test]
+    fn engine_entries_with_bad_ids_and_unsafe_urls_are_filtered() {
+        let listed = from_engine_list(&json!([
+            { "id": "../../etc", "name": "Bad" },
+            { "id": STORE_ID.to_uppercase(), "name": "Upper" },
+            { "name": "No id" },
+            "not an object",
+            {
+                "id": STORE_ID,
+                "name": "Kept",
+                "iconDataUrl": "chrome://extension-icon/x/128/0",
+                "optionsUrl": format!("chrome-extension://{DISABLED_ID}/options.html"),
+                "homepageUrl": "javascript:alert(1)",
+            },
+        ]));
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, STORE_ID);
+        assert_eq!(listed[0].icon_data_url, None);
+        assert_eq!(listed[0].options_url, None);
+        assert_eq!(listed[0].homepage_url, None);
+    }
+
+    #[test]
+    fn an_oversized_engine_icon_is_dropped() {
+        let huge = format!("data:image/png;base64,{}", "A".repeat(MAX_ICON_DATA_URL_LEN));
+        let listed = from_engine_list(&json!([{ "id": STORE_ID, "iconDataUrl": huge }]));
+        assert_eq!(listed[0].icon_data_url, None);
     }
 }
