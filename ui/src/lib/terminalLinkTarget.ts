@@ -1,5 +1,6 @@
 import type { TerminalToken } from "./linkRouting";
-import { stitchHardWrappedLine } from "./hardWrappedPath";
+import { charIndexToGridCol, gridColToCharIndex, resolveTokenAtCol } from "./linkRouting";
+import { terminalWrapsInto, tuiWrapIndent, type WrappedRow } from "./hardWrappedPath";
 
 export type TerminalFileToken = Extract<TerminalToken, { type: "file" }>;
 
@@ -72,6 +73,90 @@ export function tokenFromHyperlink(
   }
 }
 
+/** Rows a link may span above or below the pointer row; matches the backend URL scan bound. */
+const MAX_LINK_ROWS = 8;
+
+type LineReceipt = WrappedRow & { readonly col?: number };
+
+/** One physical row's share of a joined link line, in grid columns. */
+export interface LinkLineSegment {
+  row: number;
+  joinedCol: number;
+  rowCol: number;
+  width: number;
+}
+
+export interface LinkLine {
+  /** Text of the logical line around the pointer, rows joined. */
+  text: string;
+  /** Pointer grid column within `text`; -1 when the pointer is on a dropped margin. */
+  col: number;
+  segments: LinkLineSegment[];
+  /**
+   * Set when `text` includes rows joined only by the TUI wrap heuristic: the same line
+   * joined across terminal soft wraps alone, to fall back to when the guess is refuted.
+   */
+  exact?: LinkLine;
+}
+
+type JoinKind = "terminal" | "tui";
+interface JoinedRow {
+  row: number;
+  text: string;
+  /** How this row joins the row above it; null for the first row. */
+  join: JoinKind | null;
+  indent: number;
+}
+
+function joinKind(from: WrappedRow, to: WrappedRow, cols: number): { kind: JoinKind; indent: number } | null {
+  if (terminalWrapsInto(from, to, cols)) return { kind: "terminal", indent: 0 };
+  const indent = tuiWrapIndent(from, to, cols);
+  return indent === null ? null : { kind: "tui", indent };
+}
+
+function buildLinkLine(rows: JoinedRow[], pointerIndex: number, pointerCol: number): LinkLine {
+  let text = "";
+  let col = -1;
+  const segments: LinkLineSegment[] = [];
+  rows.forEach((row, index) => {
+    const start = row.join === "tui" ? row.indent : 0;
+    const end = rows[index + 1]?.join === "tui" ? row.text.trimEnd().length : row.text.length;
+    const slice = row.text.slice(start, end);
+    const joinedCol = charIndexToGridCol(text, text.length);
+    if (index === pointerIndex) {
+      const charIndex = gridColToCharIndex(row.text, pointerCol);
+      const lastRow = index === rows.length - 1;
+      if (charIndex >= start && (charIndex < end || lastRow)) {
+        col = joinedCol + charIndexToGridCol(slice, charIndex - start)
+          + Math.max(0, pointerCol - charIndexToGridCol(row.text, row.text.length));
+      }
+    }
+    segments.push({
+      row: row.row,
+      joinedCol,
+      rowCol: charIndexToGridCol(row.text, start),
+      width: charIndexToGridCol(slice, slice.length),
+    });
+    text += slice;
+  });
+  return { text, col, segments };
+}
+
+function toLinkLine(rows: JoinedRow[], pointerIndex: number, pointerCol: number): LinkLine {
+  const line = buildLinkLine(rows, pointerIndex, pointerCol);
+  if (!rows.some((row) => row.join === "tui")) return line;
+  let first = pointerIndex;
+  while (first > 0 && rows[first].join === "terminal") first--;
+  let last = pointerIndex;
+  while (last + 1 < rows.length && rows[last + 1].join === "terminal") last++;
+  const exactRows = rows.slice(first, last + 1).map((row, index) => (index === 0 ? { ...row, join: null } : row));
+  return { ...line, exact: buildLinkLine(exactRows, pointerIndex - first, pointerCol) };
+}
+
+/**
+ * Read the logical line under the pointer: rows the terminal soft-wrapped are joined exactly,
+ * and rows a TUI wrapped with its own newlines are joined as a guess (see `LinkLine.exact`).
+ */
 export async function readLinkLine(
   invokeFn: TerminalInvokeFn,
   sessionId: string,
@@ -79,56 +164,113 @@ export async function readLinkLine(
   row: number,
   rows?: number,
   cols?: number,
-): Promise<{ text: string; col: number } | null> {
-  let current: { text: string; col: number; row: number };
+): Promise<LinkLine | null> {
+  const readRow = (target: number) =>
+    invokeFn<LineReceipt & { row: number }>("cmd_native_terminal_line_at", { sessionId, col: target === row ? col : 0, row: target });
+
+  let current: LineReceipt;
   try {
-    current = await invokeFn<{ text: string; col: number; row: number }>(
-      "cmd_native_terminal_line_at",
-      {
-        sessionId,
-        col,
-        row,
-      },
-    );
+    current = await readRow(row);
   } catch {
     return null;
   }
-
-  if (!current || typeof current.text !== "string") {
-    return null;
-  }
+  if (!current || typeof current.text !== "string") return null;
+  const pointerCol = typeof current.col === "number" ? current.col : col;
+  const pointerRow: JoinedRow = { row, text: current.text, join: null, indent: 0 };
 
   if (cols === undefined || cols <= 0) {
-    return { text: current.text, col: current.col };
+    return buildLinkLine([pointerRow], 0, pointerCol);
   }
 
-  const prevPromise =
-    row > 0 && (rows === undefined || row - 1 < rows)
-      ? invokeFn<{ text: string }>("cmd_native_terminal_line_at", {
-          sessionId,
-          col: 0,
-          row: row - 1,
-        }).catch(() => null)
+  const readNeighbour = (target: number) =>
+    target >= 0 && (rows === undefined || target < rows)
+      ? readRow(target).then((receipt) => (receipt && typeof receipt.text === "string" ? receipt : null), () => null)
       : Promise.resolve(null);
 
-  const nextPromise =
-    rows === undefined || row + 1 < rows
-      ? invokeFn<{ text: string }>("cmd_native_terminal_line_at", {
-          sessionId,
-          col: 0,
-          row: row + 1,
-        }).catch(() => null)
-      : Promise.resolve(null);
+  const joined: JoinedRow[] = [pointerRow];
+  let below: LineReceipt = current;
+  for (let offset = 1; offset <= MAX_LINK_ROWS; offset++) {
+    const above = await readNeighbour(row - offset);
+    const join = above && joinKind(above, below, cols);
+    if (!above || !join) break;
+    joined[0] = { ...joined[0], join: join.kind, indent: join.indent };
+    joined.unshift({ row: row - offset, text: above.text, join: null, indent: 0 });
+    below = above;
+  }
+  const pointerIndex = joined.length - 1;
+  let previous: LineReceipt = current;
+  for (let offset = 1; offset <= MAX_LINK_ROWS; offset++) {
+    const next = await readNeighbour(row + offset);
+    const join = next && joinKind(previous, next, cols);
+    if (!next || !join) break;
+    joined.push({ row: row + offset, text: next.text, join: join.kind, indent: join.indent });
+    previous = next;
+  }
 
-  const [prev, next] = await Promise.all([prevPromise, nextPromise]);
+  return toLinkLine(joined, pointerIndex, pointerCol);
+}
 
-  return stitchHardWrappedLine(
-    prev && typeof prev.text === "string" ? { text: prev.text } : null,
-    { text: current.text },
-    next && typeof next.text === "string" ? { text: next.text } : null,
-    current.col,
-    cols,
-  );
+function sameToken(a: TerminalToken | null, b: TerminalToken | null): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+export interface LinkResolution {
+  token: TerminalToken;
+  /** The line the token was resolved from; its span maps back to rows through `segments`. */
+  line: LinkLine;
+}
+
+/**
+ * Resolve the link under the pointer. A token that only exists because of a TUI-wrap guess is
+ * kept when `confirmFile` accepts its path (or for URLs, which have nothing to check);
+ * otherwise the token from the exactly joined line wins.
+ */
+export async function resolveLinkLine(
+  line: LinkLine,
+  confirmFile?: (path: string) => Promise<boolean>,
+): Promise<LinkResolution | null> {
+  const token = resolveTokenAtCol(line.text, line.col);
+  if (!line.exact) return token ? { token, line } : null;
+  const exactToken = resolveTokenAtCol(line.exact.text, line.exact.col);
+  const exact = exactToken ? { token: exactToken, line: line.exact } : null;
+  if (!token || sameToken(token, exactToken)) return exact;
+  if (token.type === "file" && confirmFile && !(await confirmFile(token.path))) return exact;
+  return { token, line };
+}
+
+/** Grid cells `{ row, start, end }` (end exclusive) covered by the resolved token, per row. */
+export function linkTokenSpans(resolution: LinkResolution): Array<{ row: number; start: number; end: number }> {
+  const { line, token } = resolution;
+  const key = JSON.stringify(token);
+  const covers = (col: number) => JSON.stringify(resolveTokenAtCol(line.text, col)) === key;
+  const lineWidth = charIndexToGridCol(line.text, line.text.length);
+  let start = line.col;
+  let end = line.col + 1;
+  while (start > 0 && covers(start - 1)) start--;
+  while (end < lineWidth && covers(end)) end++;
+  return linkLineSpans(line, start, end);
+}
+
+/** Grid cells of the whitespace-delimited word under the pointer, for links the line cannot name. */
+export function linkWordSpans(line: LinkLine): Array<{ row: number; start: number; end: number }> {
+  const text = line.text;
+  const pointer = gridColToCharIndex(text, line.col);
+  let start = Math.min(pointer, Math.max(0, text.length - 1));
+  while (start > 0 && !/\s/.test(text[start - 1])) start--;
+  let end = Math.min(pointer + 1, text.length);
+  while (end < text.length && !/\s/.test(text[end])) end++;
+  const startCol = charIndexToGridCol(text, start);
+  return linkLineSpans(line, startCol, Math.max(startCol + 1, charIndexToGridCol(text, end)));
+}
+
+function linkLineSpans(line: LinkLine, start: number, end: number): Array<{ row: number; start: number; end: number }> {
+  return line.segments.flatMap((segment) => {
+    const from = Math.max(start, segment.joinedCol);
+    const to = Math.min(end, segment.joinedCol + segment.width);
+    return from < to
+      ? [{ row: segment.row, start: segment.rowCol + from - segment.joinedCol, end: segment.rowCol + to - segment.joinedCol }]
+      : [];
+  });
 }
 
 export interface OpenRemoteFileTokenOptions {

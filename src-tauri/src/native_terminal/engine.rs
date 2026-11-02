@@ -164,6 +164,10 @@ pub trait TerminalEngine {
     /// Read the unwrapped text of the line at a visible viewport coordinate (col, row).
     fn line_text_at(&self, col: u16, row: u16) -> Result<String, NativeTerminalError>;
 
+    /// Soft-wrap state of a visible viewport row: `(wraps into the next row, continues the
+    /// previous row)`.
+    fn line_wrap_at(&self, row: u16) -> Result<(bool, bool), NativeTerminalError>;
+
     /// Returns the cumulative number of BEL (0x07) characters received.
     fn bell_count(&self) -> u64;
 

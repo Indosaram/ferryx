@@ -1,134 +1,53 @@
 import { describe, expect, it } from "vitest";
-import { stitchHardWrappedLine, type WrappedRow } from "./hardWrappedPath";
+import { terminalWrapsInto, tuiWrapIndent, type WrappedRow } from "./hardWrappedPath";
 
-describe("stitchHardWrappedLine", () => {
-  it("does not stitch when rows are shorter than cols", () => {
-    const prev: WrappedRow = { text: "src/short/" };
-    const current: WrappedRow = { text: "index.ts" };
-    const next: WrappedRow = { text: ":42" };
-
-    const result = stitchHardWrappedLine(prev, current, next, 3, 80);
-    expect(result).toEqual({
-      text: "index.ts",
-      col: 3,
-    });
+describe("terminalWrapsInto", () => {
+  it("trusts the terminal's soft-wrap flag over row shape", () => {
+    const full = "a".repeat(20);
+    expect(terminalWrapsInto({ text: full, wrapped: false }, { text: "bcd" }, 20)).toBe(false);
+    expect(terminalWrapsInto({ text: "short ", wrapped: true }, { text: " x" }, 20)).toBe(true);
   });
 
-  it("stitches with next continuation when current row length >= cols and boundaries have no whitespace", () => {
-    const current: WrappedRow = {
-      text: "https://example.com/very/long/path/that/reaches/terminal/width/and/keeps/going/",
-    };
-    const next: WrappedRow = { text: "target_file.rs:120:5" };
-    const cols = current.text.length;
+  it("falls back to a full row with no blank at the boundary when the flag is absent", () => {
+    expect(terminalWrapsInto({ text: "a".repeat(20) }, { text: "bcd" }, 20)).toBe(true);
+    expect(terminalWrapsInto({ text: `${"a".repeat(19)} ` }, { text: "bcd" }, 20)).toBe(false);
+    expect(terminalWrapsInto({ text: "a".repeat(20) }, { text: " bcd" }, 20)).toBe(false);
+    expect(terminalWrapsInto({ text: "src/short/" }, { text: "index.ts" }, 80)).toBe(false);
+  });
+});
 
-    const result = stitchHardWrappedLine(null, current, next, 10, cols);
-    expect(result).toEqual({
-      text: `${current.text}${next.text}`,
-      col: 10,
-    });
+describe("tuiWrapIndent", () => {
+  it("joins a path a TUI word-wrapped after a separator short of the terminal width", () => {
+    const from: WrappedRow = { text: "/Users/indo/.aside/u/1/sessions/2026-11-02_sIAW3lPLLPzn4OMC/" };
+    expect(tuiWrapIndent(from, { text: "qr-fresh.png" }, 66)).toBe(0);
   });
 
-  it("stitches with prev continuation and shifts col by prev.text.length", () => {
-    const prev: WrappedRow = {
-      text: "src/components/extremely_long_directory_name_that_wraps_across_the_line/",
-    };
-    const current: WrappedRow = { text: "SubComponent.tsx:15" };
-    const cols = prev.text.length;
-
-    const result = stitchHardWrappedLine(prev, current, null, 4, cols);
-    expect(result).toEqual({
-      text: `${prev.text}${current.text}`,
-      col: 4 + prev.text.length,
-    });
+  it("drops the continuation row's margin", () => {
+    expect(tuiWrapIndent({ text: "  /very/long/directory/name/" }, { text: "  file.ts" }, 34)).toBe(2);
   });
 
-  it("stitches both prev and next continuation when both meet wrap criteria", () => {
-    const prev: WrappedRow = {
-      text: "https://git.example.internal/org/very_long_repo_name/blob/main/packages/core/",
-    };
-    const current: WrappedRow = {
-      text: "src/subsystem/very_long_nested_path_that_is_also_wrapping_across_terminal/",
-    };
-    const next: WrappedRow = { text: "index.ts#L42" };
-    const cols = 70;
-
-    expect(prev.text.length).toBeGreaterThanOrEqual(cols);
-    expect(current.text.length).toBeGreaterThanOrEqual(cols);
-
-    const result = stitchHardWrappedLine(prev, current, next, 7, cols);
-    expect(result).toEqual({
-      text: `${prev.text}${current.text}${next.text}`,
-      col: 7 + prev.text.length,
-    });
+  it("joins a token the TUI had to break because it fills the row", () => {
+    const from: WrappedRow = { text: "  https://example.com/a-very-long-path-segment-that-did-not-fit-on-one-ro" };
+    expect(tuiWrapIndent(from, { text: "  w?query=1 and more" }, 80)).toBe(2);
   });
 
-  it("does not stitch across whitespace boundary at end of prev row", () => {
-    const prev: WrappedRow = {
-      text: "cargo test --manifest-path src-tauri/Cargo.toml ".padEnd(80, " "),
-    };
-    const current: WrappedRow = { text: "some_file.rs" };
-
-    const result = stitchHardWrappedLine(prev, current, null, 2, 80);
-    expect(result).toEqual({
-      text: "some_file.rs",
-      col: 2,
-    });
+  it("does not join when the next word would have fit beside the row", () => {
+    expect(tuiWrapIndent({ text: "see src/" }, { text: "next.ts and more" }, 80)).toBeNull();
+    expect(tuiWrapIndent({ text: "ends with a word" }, { text: "next line" }, 80)).toBeNull();
   });
 
-  it("does not stitch across whitespace boundary at start of current row", () => {
-    const prev: WrappedRow = { text: "a".repeat(80) };
-    const current: WrappedRow = { text: " indented_continuation.ts" };
-
-    const result = stitchHardWrappedLine(prev, current, null, 5, 80);
-    expect(result).toEqual({
-      text: current.text,
-      col: 5,
-    });
+  it("does not join a short complete token followed by a long next row", () => {
+    const from: WrappedRow = { text: "Open https://ferryx.dev/docs" };
+    expect(tuiWrapIndent(from, { text: "a".repeat(70) }, 80)).toBeNull();
   });
 
-  it("does not stitch across whitespace boundary at end of current row", () => {
-    const current: WrappedRow = { text: "const x = 123; ".padEnd(80, " ") };
-    const next: WrappedRow = { text: "next_line.ts" };
-
-    const result = stitchHardWrappedLine(null, current, next, 0, 80);
-    expect(result).toEqual({
-      text: current.text,
-      col: 0,
-    });
+  it("never joins a row that starts a new URL", () => {
+    const from: WrappedRow = { text: `${"x".repeat(70)}/` };
+    expect(tuiWrapIndent(from, { text: "https://ferryx.dev" }, 80)).toBeNull();
   });
 
-  it("does not stitch across whitespace boundary at start of next row", () => {
-    const current: WrappedRow = { text: "a".repeat(80) };
-    const next: WrappedRow = { text: " trailing_output" };
-
-    const result = stitchHardWrappedLine(null, current, next, 10, 80);
-    expect(result).toEqual({
-      text: current.text,
-      col: 10,
-    });
-  });
-
-  it("handles null prev and next cleanly", () => {
-    const current: WrappedRow = { text: "isolated_line.ts:1" };
-    const result = stitchHardWrappedLine(null, current, null, 5, 80);
-    expect(result).toEqual({
-      text: "isolated_line.ts:1",
-      col: 5,
-    });
-  });
-
-  it("handles empty current or sibling rows without throwing", () => {
-    const emptyRow: WrappedRow = { text: "" };
-    const validRow: WrappedRow = { text: "valid_path.ts" };
-
-    expect(stitchHardWrappedLine(emptyRow, validRow, null, 2, 80)).toEqual({
-      text: "valid_path.ts",
-      col: 2,
-    });
-
-    expect(stitchHardWrappedLine(null, validRow, emptyRow, 2, 80)).toEqual({
-      text: "valid_path.ts",
-      col: 2,
-    });
+  it("handles empty rows without joining", () => {
+    expect(tuiWrapIndent({ text: "" }, { text: "valid_path.ts" }, 80)).toBeNull();
+    expect(tuiWrapIndent({ text: "dir/" }, { text: "" }, 80)).toBeNull();
   });
 });

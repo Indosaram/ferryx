@@ -208,6 +208,10 @@ pub struct NativeTerminalLineReceipt {
     pub text: String,
     pub col: u16,
     pub row: u16,
+    /// The terminal soft-wrapped this row into the next one (no newline between them).
+    pub wrapped: bool,
+    /// This row continues the previous row's soft wrap.
+    pub wrap_continuation: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1798,7 +1802,14 @@ pub fn line_text_attached_native_terminal(
     require_attached_surface(state, session_id)?;
     state.with_session_terminal(session_id, |term| {
         let text = term.line_text_at(col, row)?;
-        Ok(NativeTerminalLineReceipt { text, col, row })
+        let (wrapped, wrap_continuation) = term.line_wrap_at(row)?;
+        Ok(NativeTerminalLineReceipt {
+            text,
+            col,
+            row,
+            wrapped,
+            wrap_continuation,
+        })
     })
 }
 

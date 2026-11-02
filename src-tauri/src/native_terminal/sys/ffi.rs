@@ -7,7 +7,7 @@ use super::types::{
     GhosttyGridRef, GhosttyKeyEncoder, GhosttyKeyEvent,
     GhosttyMouseEncoder, GhosttyMouseEvent, GhosttyMousePosition, GhosttyPoint,
     GhosttyPointCoordinate, GhosttyRenderState, GhosttyRenderStateRowCells,
-    GhosttyRenderStateRowIterator, GhosttySelection, GhosttySelectionGesture,
+    GhosttyRenderStateRowIterator, GhosttyRow, GhosttySelection, GhosttySelectionGesture,
     GhosttySelectionGestureEvent, GhosttySnapshotDecoder, GhosttyTerminal,
     GhosttyTerminalScrollViewport, GhosttyTerminalSelectLineOptions,
     GhosttyTerminalSelectWordOptions, GhosttyTerminalSelectionFormatOptions, GhosttyWriter,
@@ -95,6 +95,8 @@ extern "C" {
         buf_len: usize,
         out_len: *mut usize,
     ) -> c_int;
+    pub fn ghostty_grid_ref_row(grid_ref: *const GhosttyGridRef, out_row: *mut GhosttyRow) -> c_int;
+    pub fn ghostty_row_get(row: GhosttyRow, data: c_int, out: *mut c_void) -> c_int;
 
     pub fn ghostty_terminal_select_all(
         terminal: GhosttyTerminal,
