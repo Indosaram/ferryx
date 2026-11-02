@@ -377,6 +377,17 @@ pub fn parse_json_loose(raw: &str) -> Option<serde_json::Value> {
 /// A scripted `choice` answer: `(purpose, state, options) -> selected`. See [`Judge::scripted`].
 pub type ScriptedAnswer = Arc<dyn Fn(Purpose, &str, &[&str]) -> String + Send + Sync>;
 
+/// A judge's fallback model.
+#[derive(Clone)]
+enum FallbackModel {
+    /// Given explicitly ([`Judge::with_fallback`]), or none.
+    Set(Option<Arc<dyn crate::lanes::kibitzer::ModelTurn>>),
+    /// The hub's configured model ([`crate::meta::mhc_supervisor::configured_model`], else
+    /// [`default_fallback`]), resolved on first use: the decision reads the hub env file, which
+    /// happens on the blocking pool rather than where the judge is built.
+    Configured(Arc<tokio::sync::OnceCell<Option<Arc<dyn crate::lanes::kibitzer::ModelTurn>>>>),
+}
+
 #[derive(Clone)]
 pub struct Judge {
     typesafe: BTreeMap<String, String>,
@@ -392,7 +403,7 @@ pub struct Judge {
     /// `judge_calls` rows (omo usage); also the source of the daily counts.
     pool: Option<SqlitePool>,
     /// omo `Fallback`: one bounded small-model omo turn answering as a JSON classifier.
-    fallback: Option<Arc<dyn crate::lanes::kibitzer::ModelTurn>>,
+    fallback: FallbackModel,
     bin: Option<PathBuf>,
     jev_cap: usize,
     fallback_cap: usize,
@@ -414,7 +425,7 @@ impl Judge {
             pool: ALERTS.get().map(|(pool, _)| pool.clone()),
             // The retained mhc supervisor, when this hub configured one, is the only model the
             // judge uses; it never falls back to the omo app-server.
-            fallback: crate::meta::mhc_supervisor::configured_model().or_else(default_fallback),
+            fallback: FallbackModel::Configured(Arc::default()),
             bin: None,
             jev_cap: env_usize("OMON_JEV_DAILY_CAP", JEV_DAILY_CAP),
             fallback_cap: env_usize("OMON_JUDGE_FALLBACK_DAILY_CAP", FALLBACK_DAILY_CAP),
@@ -461,7 +472,7 @@ impl Judge {
             forced: None,
             forced_noul: None,
             pool: None,
-            fallback: None,
+            fallback: FallbackModel::Set(None),
             bin: None,
             jev_cap: JEV_DAILY_CAP,
             fallback_cap: FALLBACK_DAILY_CAP,
@@ -490,7 +501,7 @@ impl Judge {
     }
 
     pub fn with_fallback(mut self, fallback: Arc<dyn crate::lanes::kibitzer::ModelTurn>) -> Self {
-        self.fallback = Some(fallback);
+        self.fallback = FallbackModel::Set(Some(fallback));
         self
     }
 
@@ -530,9 +541,24 @@ impl Judge {
         state.lock().unwrap_or_else(|poison| poison.into_inner())
     }
 
-    fn engine_fallback(&self) -> bool {
-        self.fallback
-            .as_ref()
+    /// The fallback model; a configured one is resolved once, on first use.
+    async fn fallback_model(&self) -> Option<Arc<dyn crate::lanes::kibitzer::ModelTurn>> {
+        match &self.fallback {
+            FallbackModel::Set(model) => model.clone(),
+            FallbackModel::Configured(cell) => cell
+                .get_or_init(|| async {
+                    crate::meta::mhc_supervisor::configured_model()
+                        .await
+                        .or_else(default_fallback)
+                })
+                .await
+                .clone(),
+        }
+    }
+
+    async fn engine_fallback(&self) -> bool {
+        self.fallback_model()
+            .await
             .is_some_and(|model| model.is_supervisor_engine())
     }
 
@@ -553,7 +579,7 @@ impl Judge {
         prompt: &str,
     ) -> std::result::Result<String, crate::goals::GoalError> {
         use crate::goals::GoalError;
-        let Some(model) = &self.fallback else {
+        let Some(model) = self.fallback_model().await else {
             return Err(GoalError::JudgeUnavailable);
         };
         let engine = model.is_supervisor_engine();
@@ -731,7 +757,7 @@ impl Judge {
         } else {
             choice.selected.clone()
         };
-        let kind = if self.engine_fallback() {
+        let kind = if self.engine_fallback().await {
             SUPERVISOR_CHOICE_KIND
         } else {
             "choice"
@@ -865,7 +891,7 @@ impl Judge {
         instructions: &str,
         options: &[&str],
     ) -> Choice {
-        let engine = self.engine_fallback();
+        let engine = self.engine_fallback().await;
         if engine {
             if self.supervisor_budget_fault().await.is_some() {
                 return Choice::capped(purpose.conservative_choice());
@@ -877,7 +903,7 @@ impl Judge {
             }
         }
         let conservative = Choice::fallback(purpose.conservative_choice());
-        let Some(model) = &self.fallback else {
+        let Some(model) = self.fallback_model().await else {
             return conservative;
         };
         let question = serde_json::json!({

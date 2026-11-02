@@ -104,7 +104,8 @@ pub enum EngineGap {
 
 /// The engine may take new work: ready, with every required capability
 /// ([`crate::supervisor::cutover::require_engine`]), or exited without a fault, since the
-/// next use relaunches it and a Slack turn is such a use.
+/// next use relaunches it and a Slack turn is such a use. An engine that exited early keeps
+/// its fault in health until its backoff ends and a launch succeeds, so it is not ready.
 fn engine_ready(health: Option<&crate::meta::mhc_supervisor::SupervisorHealth>) -> bool {
     use crate::meta::mhc_supervisor::HealthState;
     if health.is_some_and(|health| health.state == HealthState::Exited && health.fault.is_none()) {
@@ -2038,12 +2039,18 @@ mod tests {
     }
 
     /// An engine that exited without a fault relaunches on its next use, so the owner's Slack
-    /// turn must still reach it; an exit with a fault does not.
+    /// turn must still reach it; an exit with a fault does not, including an early exit that
+    /// waits out its backoff (the legacy turn answers before cutover).
     #[test]
     fn an_exited_engine_without_a_fault_still_takes_slack_turns() {
         use crate::meta::mhc_supervisor::HealthState;
         let exited = engine_health(HealthState::Exited, None);
         assert!(engine_ready(Some(&exited)));
+        let early = crate::meta::mhc_supervisor::SupervisorHealth {
+            fault: Some(crate::meta::mhc_fault::SupervisorFault::engine_exited("exited 2s after its launch")),
+            ..exited.clone()
+        };
+        assert!(!engine_ready(Some(&early)));
         let faulted = crate::meta::mhc_supervisor::SupervisorHealth {
             fault: Some(crate::meta::mhc_fault::SupervisorFault::Protocol { detail: "bad reply".into() }),
             ..exited

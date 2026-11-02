@@ -1010,7 +1010,7 @@ impl Inner {
         state.backoff = MIN_BACKOFF;
         if let Some(engine) = state.current.take() {
             engine.terminate(SHUTDOWN_GRACE).await;
-            self.note_exit(&engine);
+            self.note_exit(&engine, None);
         }
         // Still under the engine lock: a successor launch cannot be overwritten as stopped.
         self.health.send_modify(|health| {
@@ -1040,7 +1040,7 @@ impl Inner {
         if self.is_stopped() {
             if let Some(engine) = state.current.take() {
                 engine.terminate(SHUTDOWN_GRACE).await;
-                self.note_exit(&engine);
+                self.note_exit(&engine, None);
             }
             return Err(SupervisorFault::not_running(
                 "the supervisor engine stopped with the hub",
@@ -1212,7 +1212,10 @@ impl Inner {
         }
     }
 
-    fn note_exit(&self, engine: &Engine) {
+    /// Marks the engine exited in health. `fault` is set when the exit counts as a failed
+    /// launch ([`Self::record_exit`]), so a reader of health alone (the Slack gate) sees that
+    /// the next use waits out the backoff instead of relaunching.
+    fn note_exit(&self, engine: &Engine, fault: Option<SupervisorFault>) {
         let reason = engine
             .client
             .gone_reason()
@@ -1226,6 +1229,7 @@ impl Inner {
                 health.state = HealthState::Exited;
                 health.pid = None;
                 health.detail = Some(redact(&reason));
+                health.fault = fault;
             }
         });
     }
@@ -1245,11 +1249,12 @@ impl Inner {
 
     /// Notes an engine that exited on its own. One that exited within [`STABLE_UPTIME`] of its
     /// launch counts as a failed launch: the next launch waits out the backoff, which doubles.
-    /// One that ran longer resets the backoff.
+    /// Its fault is kept in health until a launch succeeds. One that ran longer resets the
+    /// backoff and leaves health without a fault, so its next use relaunches it.
     fn record_exit(&self, state: &mut EngineState, engine: &Engine) {
-        self.note_exit(engine);
         let uptime = engine.launched_at.elapsed();
         if uptime >= STABLE_UPTIME {
+            self.note_exit(engine, None);
             state.backoff = MIN_BACKOFF;
             return;
         }
@@ -1262,6 +1267,7 @@ impl Inner {
             uptime.as_secs()
         ));
         tracing::warn!(%fault, backoff_secs = state.backoff.as_secs(), "mhc supervisor engine exited early; the relaunch backs off");
+        self.note_exit(engine, Some(fault.clone()));
         state.last_fault = Some(fault);
         state.retry_at = Some(tokio::time::Instant::now() + state.backoff);
         state.backoff = (state.backoff * 2).min(MAX_BACKOFF);
@@ -2134,7 +2140,8 @@ impl MhcSupervisor {
 
     /// Keeps the engine supervised: launches it, watches the owned process, retries failed
     /// launches with a 5s..300s backoff. A turn in flight when the engine exits is never resent;
-    /// after an exit the engine relaunches on its next use.
+    /// after an exit the engine relaunches on its next use, and after an early exit
+    /// ([`STABLE_UPTIME`]) also once its backoff ends.
     ///
     /// Calling it re-enables a stopped runtime at once (before the future is polled), so the
     /// new hub generation's first decision does not race it. Dropping the future (the hub
@@ -2157,10 +2164,13 @@ impl MhcSupervisor {
                         let generation = engine.generation;
                         self.inner.engine_gone(&engine).await;
                         drop(engine);
+                        // An early exit leaves its fault in health: the loop then relaunches
+                        // once the backoff ends, since health alone keeps Slack turns off it.
                         let changed = health
                             .wait_for(|current| {
                                 current.generation != generation
                                     || current.state == HealthState::Degraded
+                                    || current.fault.is_some()
                             })
                             .await;
                         if changed.is_err() {
@@ -2310,15 +2320,33 @@ pub async fn installed_engine_snapshot() -> Result<Value, SupervisorFault> {
 /// engine installed in this process, the decision reads only sources every hub process shares
 /// (see [`configured_in`]), never one process's environment, so the MCP server and CLI agree
 /// with the daemon and report [`SupervisorFault::NotRunning`] instead of using the omo model.
-pub fn configured_model() -> Option<Arc<dyn ModelTurn>> {
+/// The shared sources are files, so they are read on the blocking pool, never on a runtime
+/// worker.
+pub async fn configured_model() -> Option<Arc<dyn ModelTurn>> {
     // Tests never read the developer's hub env file or data directory. The file is read fresh,
     // so an engine turned on after this process started is seen without a restart.
-    let configured = installed().is_some()
-        || (!cfg!(test)
+    configured_model_with(|| {
+        !cfg!(test)
             && configured_in(
                 &crate::hub_env::read_file_env(),
                 super::supervisor::state_dir_from_home().as_deref(),
-            ));
+            )
+    })
+    .await
+}
+
+/// [`configured_model`] with the blocking shared-source read given (tests pass their own).
+/// A read that cannot finish (its task panicked or was cancelled) counts as not configured.
+pub(crate) async fn configured_model_with(
+    shared: impl FnOnce() -> bool + Send + 'static,
+) -> Option<Arc<dyn ModelTurn>> {
+    if installed().is_some() {
+        return model_when(true);
+    }
+    let configured = tokio::task::spawn_blocking(shared).await.unwrap_or_else(|error| {
+        tracing::warn!(%error, "the hub env file was not read; the supervisor engine counts as not configured");
+        false
+    });
     model_when(configured)
 }
 
