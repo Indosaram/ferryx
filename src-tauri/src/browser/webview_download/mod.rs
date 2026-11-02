@@ -103,7 +103,7 @@ mod tests {
     }
 
     fn register(id: &str, url: &str) {
-        registry().register_native(id.into(), url.into(), "/tmp/f".into(), None, None, false);
+        registry().register_native(id.into(), url.into(), "/tmp/f".into(), None, None, None);
         expect(url, id);
     }
 

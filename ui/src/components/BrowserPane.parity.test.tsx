@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BrowserTab } from "../lib/types";
-import { BROWSER_SHORTCUT_EVENT } from "../lib/browserTauri";
+import { BROWSER_SHORTCUT_EVENT, type DownloadRecord } from "../lib/browserTauri";
 import { saveBrowserSettings } from "../lib/browserSettings";
 import { BrowserPane } from "./BrowserPane";
 
@@ -17,6 +17,16 @@ const eventMocks = vi.hoisted(() => ({
 
 const dialogMocks = vi.hoisted(() => ({
   save: vi.fn(async () => "/tmp/example.zip"),
+}));
+
+// The download registry as the shelf and the pane read it.
+const registryState = vi.hoisted(() => ({ records: [] as DownloadRecord[] }));
+
+const coreMocks = vi.hoisted(() => ({
+  invoke: vi.fn(async (cmd: string) => {
+    if (cmd === "cmd_browser_download_list") return registryState.records;
+    throw new Error(`unmocked command ${cmd}`);
+  }),
 }));
 
 const browserMocks = vi.hoisted(() => ({
@@ -53,10 +63,11 @@ const browserMocks = vi.hoisted(() => ({
     updatedAtMs: 1000,
   })),
   openExternalUrl: vi.fn(async () => undefined),
-  revealDownloadedFile: vi.fn(async () => undefined),
+  listBrowserDownloads: vi.fn(async () => registryState.records),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: eventMocks.listen }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: coreMocks.invoke }));
 vi.mock("./BrowserPermissionPrompt", () => ({ BrowserPermissionPrompts: () => null, BrowserMediaCaptureIndicator: () => null }));
 vi.mock("./BrowserVaultBar", () => ({ BrowserVaultBar: () => null }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: dialogMocks.save }));
@@ -83,13 +94,14 @@ afterEach(cleanup);
 beforeEach(() => {
   callbackState.shortcut = null;
   callbackState.download = null;
+  registryState.records = [];
   dialogMocks.save.mockClear();
   browserMocks.findBrowser.mockClear();
   browserMocks.clearBrowserFind.mockClear();
   browserMocks.downloadBrowserUrl.mockClear();
   browserMocks.downloadBrowserUrlToFolder.mockClear();
   browserMocks.downloadBrowserUrlWithSession.mockClear();
-  browserMocks.revealDownloadedFile.mockClear();
+  browserMocks.listBrowserDownloads.mockClear();
   browserMocks.openExternalUrl.mockClear();
   browserMocks.setBrowserBounds.mockClear();
   browserMocks.setBrowserVisible.mockClear();
@@ -153,19 +165,39 @@ describe("BrowserPane parity affordances", () => {
     expect(onNavigate).toHaveBeenCalledWith("https://example.com/dropped");
   });
 
-  it("saves a clicked download to the download folder at once and offers Show in folder", async () => {
+  it("saves a clicked download to the download folder at once and shows it only on the shelf", async () => {
+    registryState.records = [{
+      id: "dl-folder",
+      url: "https://example.com/files/example.zip",
+      filePath: "/home/me/Downloads/example.zip",
+      status: "completed",
+      receivedBytes: 1024,
+      createdAtMs: 1000,
+      updatedAtMs: 1000,
+      browserId: "browser-1",
+    }];
     render(<BrowserPane tab={baseTab} onNavigate={vi.fn()} onReload={vi.fn()} />);
     await waitFor(() => expect(callbackState.download).not.toBeNull());
 
     act(() => callbackState.download?.({ browserId: "browser-1", targetUrl: "https://example.com/files/example.zip" }));
 
-    await waitFor(() => expect(screen.getByTestId("browser-download-status")).toHaveAttribute("data-phase", "saved"));
+    expect(await screen.findByTestId("download-row-dl-folder")).toBeInTheDocument();
     expect(browserMocks.downloadBrowserUrlToFolder).toHaveBeenCalledWith("browser-1", "https://example.com/files/example.zip");
     expect(dialogMocks.save).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("browser-download-prompt")).toBeNull();
     expect(screen.queryByRole("button", { name: /Open in system browser/i })).toBeNull();
+  });
 
-    fireEvent.click(screen.getByRole("button", { name: /Show in folder/i }));
-    expect(browserMocks.revealDownloadedFile).toHaveBeenCalledWith("/home/me/Downloads/example.zip");
+  it("keeps a save refused before the registry took it in the row, with Retry", async () => {
+    browserMocks.downloadBrowserUrlToFolder.mockRejectedValueOnce({ code: "DOWNLOAD_FAILED", message: "refused" });
+    render(<BrowserPane tab={baseTab} onNavigate={vi.fn()} onReload={vi.fn()} />);
+    await waitFor(() => expect(callbackState.download).not.toBeNull());
+
+    act(() => callbackState.download?.({ browserId: "browser-1", targetUrl: "https://example.com/files/example.zip" }));
+
+    expect(await screen.findByTestId("browser-download-status")).toHaveAttribute("data-phase", "failed");
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.queryByTestId("browser-downloads-shelf")).toBeNull();
   });
 
   it("drops an unanswered download offer when the tab navigates away", async () => {
@@ -231,6 +263,7 @@ describe("BrowserPane parity affordances", () => {
     });
     expect(dialogMocks.save).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByTestId("browser-download-needs-confirmation")).toBeNull());
+    expect(screen.queryByTestId("browser-download-prompt")).toBeNull();
   });
 
   it("treats a download without requiresConfirmation as user-initiated", async () => {

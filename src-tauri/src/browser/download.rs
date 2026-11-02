@@ -89,6 +89,9 @@ pub struct DownloadRecord {
     pub can_pause: bool,
     #[serde(default)]
     pub failure: Option<DownloadFailureKind>,
+    /// The browser tab that started the download; `None` when no tab owns it.
+    #[serde(default)]
+    pub browser_id: Option<String>,
 }
 
 fn current_time_ms() -> u64 {
@@ -160,7 +163,7 @@ impl DownloadRegistry {
     }
 
     pub fn register(&self, id: String, url: String, file_path: String) -> Arc<AtomicBool> {
-        self.register_cancellable(id, url, file_path).0
+        self.register_cancellable(id, url, file_path, None).0
     }
 
     fn register_cancellable(
@@ -168,6 +171,7 @@ impl DownloadRegistry {
         id: String,
         url: String,
         file_path: String,
+        browser_id: Option<String>,
     ) -> (Arc<AtomicBool>, Arc<Notify>) {
         let now = current_time_ms();
         let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -194,6 +198,7 @@ impl DownloadRegistry {
             can_cancel: true,
             can_pause: false,
             failure: None,
+            browser_id,
         };
         self.insert_live(record);
         (cancel_flag, cancel_notify)
@@ -213,22 +218,24 @@ impl DownloadRegistry {
         self.notify(record);
     }
 
-    /// Registers a download the engine performs. With a `control`, Cancel (and Pause/Resume
-    /// when `can_pause`) reach the engine; without one the record only reports progress.
+    /// Registers a download the engine performs for the tab `browser_id`. With a `control`
+    /// (the engine handle and whether it can pause), Cancel and Pause/Resume reach the engine;
+    /// without one the record only reports progress.
     pub fn register_native(
         &self,
         id: String,
         url: String,
         file_path: String,
+        browser_id: Option<String>,
         total_bytes: Option<u64>,
-        control: Option<Arc<dyn DownloadControl>>,
-        can_pause: bool,
+        control: Option<(Arc<dyn DownloadControl>, bool)>,
     ) {
         let now = current_time_ms();
         self.finished_order.write().retain(|finished| finished != &id);
         let can_cancel = control.is_some();
+        let can_pause = control.as_ref().is_some_and(|(_, can_pause)| *can_pause);
         match control {
-            Some(control) => {
+            Some((control, _)) => {
                 self.controls.write().insert(id.clone(), control);
             }
             None => {
@@ -246,8 +253,9 @@ impl DownloadRegistry {
             created_at_ms: now,
             updated_at_ms: now,
             can_cancel,
-            can_pause: can_pause && can_cancel,
+            can_pause,
             failure: None,
+            browser_id,
         });
     }
 
@@ -698,6 +706,7 @@ pub async fn download_url_with_cookies(
     path: &Path,
     cookies: Option<&str>,
     download_id: Option<&str>,
+    browser_id: Option<&str>,
 ) -> Result<String, BrowserError> {
     let url = validate_url(url)?;
     if url == "about:blank" {
@@ -713,7 +722,7 @@ pub async fn download_url_with_cookies(
 
     let path_str = path.to_string_lossy().to_string();
     let (cancel_flag, cancel_notify) =
-        DOWNLOAD_REGISTRY.register_cancellable(id.clone(), url.clone(), path_str);
+        DOWNLOAD_REGISTRY.register_cancellable(id.clone(), url.clone(), path_str, browser_id.map(str::to_string));
     let is_cancelled = || cancel_flag.load(Ordering::SeqCst);
 
     let client = match reqwest::Client::builder()
@@ -826,7 +835,7 @@ pub async fn download_url_with_cookies(
 }
 
 pub async fn download_url_to_path(url: &str, path: &Path) -> Result<(), BrowserError> {
-    download_url_with_cookies(url, path, None, None).await.map(|_| ())
+    download_url_with_cookies(url, path, None, None, None).await.map(|_| ())
 }
 
 #[cfg(test)]
@@ -914,13 +923,33 @@ mod tests {
             can_cancel: true,
             can_pause: false,
             failure: None,
+            browser_id: Some("browser-1".into()),
         };
 
         let json = serde_json::to_string(&rec).unwrap();
         assert!(json.contains("\"status\":\"inProgress\""));
         assert!(json.contains("\"totalBytes\":2048"));
+        assert!(json.contains("\"browserId\":\"browser-1\""));
         let parsed: DownloadRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, rec);
+    }
+
+    /// Records written before downloads had an owner still parse, as unowned.
+    #[test]
+    fn download_record_deserializes_without_browser_id() {
+        let json = serde_json::json!({
+            "id": "dl-old",
+            "url": "https://example.com/a.pdf",
+            "filePath": "/tmp/a.pdf",
+            "status": "completed",
+            "totalBytes": 10,
+            "receivedBytes": 10,
+            "error": null,
+            "createdAtMs": 1,
+            "updatedAtMs": 2
+        });
+        let parsed: DownloadRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.browser_id, None);
     }
 
     #[tokio::test]
@@ -939,7 +968,7 @@ mod tests {
     async fn test_download_rejects_unusable_destination_and_unsafe_id() {
         let url = "https://example.invalid/file.bin";
         for path in [Path::new(""), Path::new("/"), Path::new("/tmp/..")] {
-            let result = download_url_with_cookies(url, path, None, None).await;
+            let result = download_url_with_cookies(url, path, None, None, None).await;
             assert_eq!(
                 result,
                 Err(BrowserError::DownloadFailed(
@@ -950,7 +979,7 @@ mod tests {
         }
         for id in ["../escape", "a/b", "a\\b", "", "dl id"] {
             let result =
-                download_url_with_cookies(url, Path::new("/tmp/ok.bin"), None, Some(id)).await;
+                download_url_with_cookies(url, Path::new("/tmp/ok.bin"), None, Some(id), None).await;
             assert!(
                 matches!(&result, Err(BrowserError::DownloadFailed(m)) if m.contains("download id")),
                 "{id:?}: {result:?}"
@@ -1310,7 +1339,7 @@ mod tests {
         let (url, ready) = spawn_http_stub(StubBehavior::DropMidBody).await;
         let result = tokio::time::timeout(
             SIGNAL_TIMEOUT,
-            download_url_with_cookies(&url, &dest, None, Some("dl-acore4-drop")),
+            download_url_with_cookies(&url, &dest, None, Some("dl-acore4-drop"), Some("tab-acore4")),
         )
         .await
         .expect("download must finish after the server drops the connection");
@@ -1325,10 +1354,9 @@ mod tests {
             b"original contents"
         );
         assert!(!part_path_of(&dest, "dl-acore4-drop").exists(), "no .part file may remain");
-        assert_eq!(
-            get_download("dl-acore4-drop").unwrap().status,
-            DownloadStatus::Failed
-        );
+        let record = get_download("dl-acore4-drop").unwrap();
+        assert_eq!(record.status, DownloadStatus::Failed);
+        assert_eq!(record.browser_id.as_deref(), Some("tab-acore4"), "the tab that started it owns it");
     }
 
     async fn assert_cancel_unblocks(behavior: StubBehavior, id: &'static str) {
@@ -1340,7 +1368,7 @@ mod tests {
 
         let dest_for_task = dest.clone();
         let task = tokio::spawn(async move {
-            download_url_with_cookies(&url, &dest_for_task, None, Some(id)).await
+            download_url_with_cookies(&url, &dest_for_task, None, Some(id), None).await
         });
         tokio::time::timeout(SIGNAL_TIMEOUT, ready)
             .await
@@ -1472,9 +1500,9 @@ mod tests {
             "cef:1:7".into(),
             "https://a.test/big.iso".into(),
             "/tmp/big.iso".into(),
+            None,
             Some(1000),
-            Some(control.clone()),
-            true,
+            Some((control.clone() as Arc<dyn DownloadControl>, true)),
         );
         let record = registry.get("cef:1:7").unwrap();
         assert_eq!(record.status, DownloadStatus::InProgress);
@@ -1510,7 +1538,7 @@ mod tests {
             "/tmp/f".into(),
             None,
             None,
-            true,
+            None,
         );
         let record = registry.get("wv:1").unwrap();
         assert!(!record.can_cancel && !record.can_pause);
@@ -1520,10 +1548,27 @@ mod tests {
         assert_eq!(registry.get("wv:1").unwrap().status, DownloadStatus::Completed);
     }
 
+    /// A download remembers the tab that started it; a plain registration has no owner.
+    #[test]
+    fn native_download_records_its_owning_tab() {
+        let registry = DownloadRegistry::new();
+        registry.register_native(
+            "wv:own".into(),
+            "https://a.test/f".into(),
+            "/tmp/f".into(),
+            Some("browser-7".into()),
+            None,
+            None,
+        );
+        assert_eq!(registry.get("wv:own").unwrap().browser_id.as_deref(), Some("browser-7"));
+        registry.register("dl-unowned".into(), "https://a.test/g".into(), "/tmp/g".into());
+        assert_eq!(registry.get("dl-unowned").unwrap().browser_id, None);
+    }
+
     /// Registers a system-webview download the way the webview hook does: first without a
     /// control, then with the one the engine hands over.
     fn webview_download_with_control(registry: &DownloadRegistry, id: &str, can_pause: bool) -> Arc<RecordingControl> {
-        registry.register_native(id.into(), "https://a.test/f".into(), "/tmp/f".into(), None, None, false);
+        registry.register_native(id.into(), "https://a.test/f".into(), "/tmp/f".into(), None, None, None);
         let control = Arc::new(RecordingControl::default());
         assert!(registry.attach_control(id, control.clone(), can_pause));
         control

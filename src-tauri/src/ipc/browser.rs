@@ -3097,6 +3097,7 @@ pub async fn browser_download_with_session<R: tauri::Runtime>(
         std::path::Path::new(&request.file_path),
         cookie_header.as_deref(),
         None,
+        request.browser_id.as_deref(),
     )
     .await?;
 

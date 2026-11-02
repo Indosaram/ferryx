@@ -8704,6 +8704,7 @@ mod tests {
             can_cancel: true,
             can_pause: false,
             failure: None,
+            browser_id: None,
         };
         let list_output = format_browser_cli_response(
             &BrowserCliCommand::Download {

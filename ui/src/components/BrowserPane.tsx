@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
-import { ArrowLeft, ArrowRight, ChevronDown, ChevronUp, CircleAlert, Download, ExternalLink, Folder, MoreHorizontal, RefreshCw, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, ChevronDown, ChevronUp, CircleAlert, Download, ExternalLink, MoreHorizontal, RefreshCw, X } from "lucide-react";
 
 import {
   BROWSER_SHORTCUT_EVENT,
@@ -12,11 +12,12 @@ import {
   findBrowser,
   focusBrowser,
   focusAppWebview,
+  listBrowserDownloads,
   listBrowsers,
   onBrowserDownloadRequested,
+  onBrowserDownloadUpdated,
   onBrowserShortcutRequested,
   openExternalUrl,
-  revealDownloadedFile,
   setBrowserBounds,
   setBrowserVisible,
   type BrowserDisplayError,
@@ -68,8 +69,10 @@ type BrowserStateChangedPayload = {
   engine?: BrowserTab["engine"];
 };
 
-/** Where the pane's download row is: an offer the user acts on, a save in progress, or done. */
-type DownloadPhase = "offer" | "saving" | "saved" | "failed";
+/** The pane's download row exists only while a download needs the user: an offer to answer, or a
+ * save that failed before the registry took it (so the shelf has no row for it). Every started
+ * download lives on the shelf. */
+type DownloadPhase = "offer" | "failed";
 
 function suggestedDownloadName(url: string): string {
   try {
@@ -129,7 +132,6 @@ export function BrowserPane({
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [downloadStatus, setDownloadStatus] = useState<string | null>(null);
   const [downloadPhase, setDownloadPhase] = useState<DownloadPhase>("offer");
-  const [savedDownloadPath, setSavedDownloadPath] = useState<string | null>(null);
   // A request the host could not attribute to the user (no trusted bridge): nothing is fetched
   // until the user confirms with Save.
   const [downloadNeedsConfirmation, setDownloadNeedsConfirmation] = useState(false);
@@ -138,6 +140,10 @@ export function BrowserPane({
   // The download registry emits no lifecycle event of its own, so every shelf refresh is driven
   // by an explicit signal: the page's `browser_download_requested` event, or a finished save.
   const [downloadsRefreshToken, setDownloadsRefreshToken] = useState(0);
+  // Downloads of this tab already seen on `browser_download_updated`; a new one re-reveals the
+  // shelf (engine downloads emit no `browser_download_requested`). Older records do not.
+  const seenDownloadIdsRef = useRef<Set<string>>(new Set());
+  const mountedAtMsRef = useRef(Date.now());
   // The Library (bookmarks manager / history page) replaces the page view while open; the
   // native page view is hidden then, because DOM cannot be drawn over it.
   const [libraryView, setLibraryView] = useState<BrowserLibraryView | null>(null);
@@ -304,6 +310,7 @@ export function BrowserPane({
     let disposed = false;
     let shortcutCleanup: (() => void) | undefined;
     let downloadCleanup: (() => void) | undefined;
+    let downloadUpdateCleanup: (() => void) | undefined;
     void onBrowserShortcutRequested((payload) => {
       if (payload.browserId === tab.browserId) {
         openFind(payload.action);
@@ -318,22 +325,34 @@ export function BrowserPane({
     void onBrowserDownloadRequested((payload) => {
       if (payload.browserId !== tab.browserId) return;
       const needsConfirmation = payload.requiresConfirmation === true;
-      setDownloadUrl(payload.targetUrl);
-      setDownloadStatus(null);
-      setSavedDownloadPath(null);
-      setDownloadPhase("offer");
-      setDownloadNeedsConfirmation(needsConfirmation);
       // A new download re-reveals the shelf the user dismissed earlier, and refreshes it.
       setDownloadsShelfOpen(true);
       setDownloadsRefreshToken((current) => current + 1);
       // A download the user clicked is saved to the download folder right away, as any browser
-      // does; an unattributed one waits for Save, and "ask where to save" waits for Save as.
+      // does, and shows only on the shelf; an unattributed one waits for Save, and "ask where to
+      // save" waits for Save as, in the pane's download row.
       if (!needsConfirmation && !askWhereToSaveRef.current) {
         void runDownloadRef.current(payload.targetUrl, null);
+        return;
       }
+      setDownloadUrl(payload.targetUrl);
+      setDownloadStatus(null);
+      setDownloadPhase("offer");
+      setDownloadNeedsConfirmation(needsConfirmation);
     }).then((cleanup) => {
       if (disposed) cleanup();
       else downloadCleanup = cleanup;
+    }).catch((error: unknown) => {
+      if (!disposed) setPaneAlert({ action: "Download listener", code: parseErrorCode(error) });
+    });
+    void onBrowserDownloadUpdated((record) => {
+      if (record.browserId !== tab.browserId || record.createdAtMs < mountedAtMsRef.current) return;
+      if (seenDownloadIdsRef.current.has(record.id)) return;
+      seenDownloadIdsRef.current.add(record.id);
+      setDownloadsShelfOpen(true);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else downloadUpdateCleanup = cleanup;
     }).catch((error: unknown) => {
       if (!disposed) setPaneAlert({ action: "Download listener", code: parseErrorCode(error) });
     });
@@ -342,6 +361,7 @@ export function BrowserPane({
       disposed = true;
       shortcutCleanup?.();
       downloadCleanup?.();
+      downloadUpdateCleanup?.();
       window.removeEventListener(BROWSER_SHORTCUT_EVENT, handleDomShortcut);
     };
   }, [tab.browserId]);
@@ -500,21 +520,36 @@ export function BrowserPane({
     void clearBrowserFind(tab.browserId).catch(() => undefined);
   };
 
-  /** Saves `url` to `filePath`, or to a free name in the download folder when it is null. */
-  const runDownload = async (url: string, filePath: string | null) => {
-    setDownloadPhase("saving");
-    setDownloadStatus("Saving…");
-    setDownloadNeedsConfirmation(false);
+  /** Whether the registry holds a download of this tab created since `sinceMs`. */
+  const hasOwnDownloadSince = async (sinceMs: number) => {
     try {
-      const record = filePath
-        ? await downloadBrowserUrlWithSession(tab.browserId, url, filePath)
-        : await downloadBrowserUrlToFolder(tab.browserId, url);
-      setSavedDownloadPath(record?.filePath ?? filePath);
-      setDownloadPhase("saved");
-      setDownloadStatus("Saved");
+      const records = await listBrowserDownloads();
+      return records.some((record) => record.browserId === tab.browserId && record.createdAtMs >= sinceMs - 1000);
+    } catch {
+      return false;
+    }
+  };
+
+  /** Saves `url` to `filePath`, or to a free name in the download folder when it is null. The
+   * started save lives on the shelf, so the row goes away. */
+  const runDownload = async (url: string, filePath: string | null) => {
+    const startedAtMs = Date.now();
+    setDownloadUrl(null);
+    setDownloadStatus(null);
+    setDownloadPhase("offer");
+    setDownloadNeedsConfirmation(false);
+    setDownloadsShelfOpen(true);
+    try {
+      if (filePath) await downloadBrowserUrlWithSession(tab.browserId, url, filePath);
+      else await downloadBrowserUrlToFolder(tab.browserId, url);
     } catch (error) {
-      setDownloadPhase("failed");
-      setDownloadStatus(browserErrorText(extractBrowserErrorCode(error)));
+      // A failure after the registry took the download shows on its shelf row. One before that
+      // (a refused URL or destination) has no record, so the row keeps it with Retry.
+      if (!(await hasOwnDownloadSince(startedAtMs))) {
+        setDownloadUrl(url);
+        setDownloadPhase("failed");
+        setDownloadStatus(browserErrorText(extractBrowserErrorCode(error)));
+      }
     } finally {
       // The registry only gains a record (completed or failed) once this call settles.
       setDownloadsRefreshToken((current) => current + 1);
@@ -530,6 +565,7 @@ export function BrowserPane({
       if (!filePath) return;
       await runDownload(downloadUrl, filePath);
     } catch (error) {
+      setDownloadPhase("failed");
       setDownloadStatus(browserErrorText(extractBrowserErrorCode(error)));
     }
   };
@@ -539,11 +575,10 @@ export function BrowserPane({
     setDownloadStatus(null);
     setDownloadNeedsConfirmation(false);
     setDownloadPhase("offer");
-    setSavedDownloadPath(null);
   };
 
   // An offer belongs to the page that made it: navigating away drops an unanswered one, while a
-  // save in progress or a finished one stays until dismissed (the shelf keeps it too).
+  // failed save stays until dismissed or retried.
   const downloadOfferPageRef = useRef<string | null>(null);
   useEffect(() => {
     if (downloadUrl && downloadPhase === "offer") {
@@ -558,12 +593,6 @@ export function BrowserPane({
       downloadOfferPageRef.current = null;
     }
   }, [downloadPhase, downloadUrl, liveTab.url]);
-
-  const showDownloadInFolder = (path: string) => {
-    void Promise.resolve(revealDownloadedFile(path))
-      .then(() => setPaneAlert((current) => (current?.action === "Show in folder" ? null : current)))
-      .catch((error: unknown) => setPaneAlert({ action: "Show in folder", code: parseErrorCode(error) }));
-  };
 
   const openDownloadExternally = (url: string) => {
     void Promise.resolve(openExternalUrl(url))
@@ -675,20 +704,8 @@ export function BrowserPane({
                 {downloadStatus}
               </span>
             ) : null}
-            {downloadPhase === "saving" ? (
-              <span role="progressbar" aria-label="Saving download" className="h-1 w-16 shrink-0 overflow-hidden rounded-full bg-primary/15">
-                <span className="block h-full w-1/2 animate-pulse rounded-full bg-primary" />
-              </span>
-            ) : null}
-            {downloadPhase === "saved" && savedDownloadPath ? (
-              <button type="button" onClick={() => showDownloadInFolder(savedDownloadPath)} className="flex items-center gap-1 rounded border border-border px-2 py-1 hover:bg-accent"><Folder className="size-3" /> Show in folder</button>
-            ) : null}
-            {downloadPhase === "offer" || downloadPhase === "failed" ? (
-              <>
-                <button type="button" onClick={() => void runDownload(downloadUrl, null)} className="rounded bg-primary px-2 py-1 font-medium text-primary-foreground hover:bg-primary/90">{downloadPhase === "failed" ? "Retry" : "Save"}</button>
-                <button type="button" onClick={() => void saveDownloadAs()} className="rounded border border-border px-2 py-1 hover:bg-accent">Save as…</button>
-              </>
-            ) : null}
+            <button type="button" onClick={() => void runDownload(downloadUrl, null)} className="rounded bg-primary px-2 py-1 font-medium text-primary-foreground hover:bg-primary/90">{downloadPhase === "failed" ? "Retry" : "Save"}</button>
+            <button type="button" onClick={() => void saveDownloadAs()} className="rounded border border-border px-2 py-1 hover:bg-accent">Save as…</button>
             <DropdownMenu modal={false}>
               <DropdownMenuTrigger asChild>
                 <button type="button" aria-label="More download actions" className="rounded p-1 hover:bg-accent"><MoreHorizontal className="size-3.5" /></button>
@@ -737,6 +754,7 @@ export function BrowserPane({
         ) : null}
         {downloadsShelfOpen ? (
           <BrowserDownloadsShelf
+            browserId={tab.browserId}
             onClose={() => setDownloadsShelfOpen(false)}
             refreshToken={downloadsRefreshToken}
           />

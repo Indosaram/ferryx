@@ -75,6 +75,8 @@ export interface DownloadRecord {
   /** The engine can pause and resume it (Chromium, WebView2, WKWebView; never WebKitGTK). */
   canPause?: boolean;
   failure?: DownloadFailureKind | null;
+  /** The tab that started the download; absent or null when no tab owns it. */
+  browserId?: string | null;
 }
 
 export type BrowserShortcutAction =
@@ -556,6 +558,11 @@ export async function downloadBrowserUrlToFolder(browserId: string, url: string)
 /** Shows a saved download in the OS file manager (Finder, Explorer, the Linux file manager). */
 export async function revealDownloadedFile(path: string): Promise<void> {
   return invoke<void>("cmd_path_reveal", { path });
+}
+
+/** Every record in the download registry. */
+export async function listBrowserDownloads(): Promise<DownloadRecord[]> {
+  return invoke<DownloadRecord[]>("cmd_browser_download_list");
 }
 
 export function onBrowserDownloadUpdated(
