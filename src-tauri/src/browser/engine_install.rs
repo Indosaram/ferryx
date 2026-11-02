@@ -630,11 +630,14 @@ pub async fn download(
     })?;
     let network = |error: reqwest::Error| InstallError::Network { detail: error.to_string() };
     let url = manifest_url();
-    let manifest = client
-        .get(&url)
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
+    let manifest = client.get(&url).send().await.map_err(network)?;
+    // No manifest at the pinned release means no engine is published for this build yet; that
+    // is not a connection problem, and telling the user to check the connection misleads them.
+    if manifest.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(InstallError::Unsupported { platform: platform.to_string() });
+    }
+    let manifest = manifest
+        .error_for_status()
         .map_err(network)?
         .bytes()
         .await
