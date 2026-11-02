@@ -11,6 +11,11 @@ pub const ENGINE_EXE: &str = "ferryx_engine";
 /// Why an installed engine cannot run in this session, shown in Settings.
 pub const WAYLAND_REASON: &str = "wayland-session";
 
+/// What the pane says when a tab falls back to the system webview because of Wayland. The UI
+/// prefixes it with "Chromium could not open this tab, so it uses the system browser engine: ".
+pub const WAYLAND_FALLBACK_MESSAGE: &str =
+    "this Wayland session has no X11 window to hold Chromium tabs. Start Ferryx with GDK_BACKEND=x11 to use Chromium.";
+
 pub fn configure(command: &mut std::process::Command, parent: isize) {
     command.arg(format!("--ferryx-parent-xid={parent}"));
 }
