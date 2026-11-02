@@ -41,6 +41,8 @@ pub mod system;
 #[cfg(test)]
 pub mod tests;
 pub mod vault;
+#[cfg(feature = "desktop")]
+pub mod webview_download;
 
 pub use cookies::{cookie_from_imported, parse_cookie_file, ImportedCookie};
 pub use bridge::{TrustedAction, TrustedBridgeKind};

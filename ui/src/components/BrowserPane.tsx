@@ -35,7 +35,7 @@ import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 import { BrowserToolbar } from "./BrowserToolbar";
 import { BrowserBookmarkBar } from "./BrowserBookmarkBar";
-import { BrowserLibraryPanel, type BrowserLibraryView } from "./BrowserLibraryPanel";
+import { BrowserLibraryPanel, type BrowserLibraryOpenRequest, type BrowserLibraryView } from "./BrowserLibraryPanel";
 import { BrowserSignInHandoffBar } from "./BrowserSignInHandoffBar";
 import { BrowserDownloadsShelf } from "./BrowserDownloadsShelf";
 import { BrowserEngineFallbackNotice } from "./BrowserEngineFallbackNotice";
@@ -313,7 +313,8 @@ export function BrowserPane({
 
   useEffect(() => {
     const openLibrary = (event: Event) => {
-      const detail = (event as CustomEvent<BrowserLibraryOpenDetail>).detail;
+      // The toolbar also opens the Downloads view, which the shared detail type predates.
+      const detail = (event as CustomEvent<BrowserLibraryOpenDetail | BrowserLibraryOpenRequest>).detail;
       if (detail?.browserId === tab.browserId) setLibraryView(detail.view);
     };
     window.addEventListener(BROWSER_LIBRARY_OPEN_EVENT, openLibrary);

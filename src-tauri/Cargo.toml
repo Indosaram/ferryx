@@ -258,9 +258,11 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSData",
     "NSEnumerator",
     "NSJSONSerialization",
+    "NSURLRequest",
 ] }
 objc2-web-kit = { version = "0.3", default-features = false, features = [
     "block2",
+    "objc2-app-kit",
     "WKWebView",
     "WKNavigation",
     "WKContentWorld",
@@ -272,6 +274,8 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKSecurityOrigin",
     "WKWebViewConfiguration",
     "WKUIDelegate",
+    "WKDownload",
+    "WKDownloadDelegate",
 ] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
     "std",

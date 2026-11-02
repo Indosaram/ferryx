@@ -4,7 +4,7 @@
 //!
 //! New commands live here so `ipc/browser.rs` only gains small hooks.
 
-use crate::browser::download::{registry, DownloadFailureKind};
+use crate::browser::download::{registry, DownloadFailureKind, DownloadStatus};
 use crate::browser::site_permissions;
 use crate::browser::system::{
     accept_extensions, page_notification_action, page_permission_state, parse_page_notification, step_zoom,
@@ -532,8 +532,8 @@ fn pick_files<R: Runtime>(
 /// The system webview's native download hook (WKDownload, WebView2 DownloadOperation,
 /// WebKitDownload through wry). A download the page starts lands in the download folder and is
 /// tracked on the shelf; with "ask where to save" it is handed to the pane's Save prompt
-/// instead, because the hook runs on the main thread and cannot wait for a dialog. The engine
-/// gives no handle to stop it, so the shelf shows it without Cancel.
+/// instead, because the hook runs on the main thread and cannot wait for a dialog. The
+/// per-OS hook in `browser::webview_download` then hands the record the engine's controls.
 pub fn webview_download_handler<R: Runtime>(
     browser_id: String,
 ) -> impl Fn(tauri::Webview<R>, tauri::webview::DownloadEvent<'_>) -> bool + Send + Sync + 'static {
@@ -561,18 +561,29 @@ pub fn webview_download_handler<R: Runtime>(
             *destination = path.clone();
             let id = format!("wv-{}", uuid::Uuid::new_v4());
             live.lock().insert(url.clone(), id.clone());
+            crate::browser::webview_download::expect(&url, &id);
             registry().register_native(id, url, path.to_string_lossy().to_string(), None, None, false);
             true
         }
         tauri::webview::DownloadEvent::Finished { url, path, success } => {
-            let Some(id) = live.lock().remove(url.as_str()) else { return true };
+            let Some(id) = live.lock().get(url.as_str()).cloned() else { return true };
+            // A pause stops the engine download, which wry reports as a failed finish. The
+            // download is still live: keep it so its real finish after a resume is found.
+            let paused = registry().get(&id).is_some_and(|record| record.status == DownloadStatus::Paused);
+            if !success && (paused || crate::browser::webview_download::engine_paused(&id)) {
+                registry().set_paused(&id, true);
+                return true;
+            }
+            live.lock().remove(url.as_str());
+            crate::browser::webview_download::finished(url.as_str(), &id);
             if let Some(path) = path {
                 registry().update_native(&id, 0, None, Some(&path.to_string_lossy()));
             }
             if success {
                 registry().set_committed(&id);
             } else {
-                registry().set_failed(&id, "download failed".to_string());
+                // A user cancel stays Cancelled; finish() keeps the first terminal state.
+                registry().set_engine_failed(&id, "download failed".to_string());
             }
             true
         }
@@ -701,7 +712,7 @@ pub fn handle_page_notification<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::download::{DownloadRegistry, DownloadStatus};
+    use crate::browser::download::DownloadRegistry;
     use ferryx_browser_engine_protocol::{DownloadFailure, DownloadState};
 
     #[test]

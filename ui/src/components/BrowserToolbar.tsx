@@ -17,6 +17,7 @@ import {
   AppWindow,
   Bookmark as BookmarkIcon,
   Library as LibraryIcon,
+  Download as DownloadIcon,
   Printer,
   FileDown,
   MoreHorizontal,
@@ -50,6 +51,7 @@ import {
   type DesignFeedbackTarget,
 } from "../lib/browserTauri";
 import { BrowserDesignFeedbackPopover } from "./BrowserDesignFeedbackPopover";
+import { openBrowserLibraryView } from "./BrowserLibraryPanel";
 import { printBrowser, saveBrowserPdf } from "../lib/browserSystem";
 import {
   addBookmark,
@@ -1055,6 +1057,9 @@ export function BrowserToolbar({
               </button>
               <button type="button" role="menuitem" onClick={() => { setHistoryOpen(false); openBrowserLibrary({ browserId: tab.browserId, view: "bookmarks" }); }} className="flex flex-1 items-center gap-1.5 px-3 py-2 text-left text-[11px] hover:bg-accent">
                 <LibraryIcon className="size-3" aria-hidden="true" /> Bookmarks manager
+              </button>
+              <button type="button" role="menuitem" onClick={() => { setHistoryOpen(false); openBrowserLibraryView({ browserId: tab.browserId, view: "downloads" }); }} className="flex flex-1 items-center gap-1.5 px-3 py-2 text-left text-[11px] hover:bg-accent">
+                <DownloadIcon className="size-3" aria-hidden="true" /> Downloads
               </button>
             </div>
             <label className="flex items-center justify-between gap-3 border-t border-border px-3 py-2 text-[11px] text-muted-foreground">

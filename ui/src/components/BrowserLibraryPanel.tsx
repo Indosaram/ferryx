@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Folder, FolderPlus, Globe, Pencil, Trash2, X } from "lucide-react";
 
 import {
+  BROWSER_LIBRARY_OPEN_EVENT,
   BOOKMARK_BAR_ROOT,
   BOOKMARK_OTHER_ROOT,
   bookmarkChildren,
@@ -18,8 +19,19 @@ import {
   type BookmarkTree,
   type HostHistoryEntry,
 } from "../lib/browserLibrary";
+import { BrowserDownloadRow } from "./BrowserDownloadRow";
+import { useBrowserDownloadActions, useBrowserDownloads } from "./BrowserDownloadsShelf";
 
-export type BrowserLibraryView = "bookmarks" | "history";
+export type BrowserLibraryView = "bookmarks" | "history" | "downloads";
+const LIBRARY_VIEWS: readonly BrowserLibraryView[] = ["bookmarks", "history", "downloads"];
+
+/** The library-open event's detail, with the downloads view this panel adds. */
+export type BrowserLibraryOpenRequest = { browserId: string; view: BrowserLibraryView };
+
+/** Opens a browser pane's library on `view`, including Downloads. */
+export function openBrowserLibraryView(detail: BrowserLibraryOpenRequest): void {
+  window.dispatchEvent(new CustomEvent<BrowserLibraryOpenRequest>(BROWSER_LIBRARY_OPEN_EVENT, { detail }));
+}
 
 interface BrowserLibraryPanelProps {
   view: BrowserLibraryView;
@@ -34,13 +46,13 @@ const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const HISTORY_PAGE = 100;
 
-/** Bookmarks manager and full history page, shown in place of the page inside a browser pane. */
+/** Bookmarks manager, full history and downloads, shown in place of the page inside a browser pane. */
 export function BrowserLibraryPanel({ view, onViewChange, onOpen, onClose, now = Date.now }: BrowserLibraryPanelProps) {
   return (
     <div className="absolute inset-0 z-20 flex flex-col bg-background text-xs" data-testid="browser-library">
       <div className="flex items-center gap-1 border-b border-border px-3 py-1.5">
         <div role="tablist" aria-label="Library" className="flex gap-1">
-          {(["bookmarks", "history"] as const).map((candidate) => (
+          {LIBRARY_VIEWS.map((candidate) => (
             <button
               key={candidate}
               type="button"
@@ -57,7 +69,48 @@ export function BrowserLibraryPanel({ view, onViewChange, onOpen, onClose, now =
           <X className="size-3.5" />
         </button>
       </div>
-      {view === "bookmarks" ? <BookmarksManager onOpen={onOpen} /> : <HistoryPage onOpen={onOpen} now={now} />}
+      {view === "bookmarks" ? (
+        <BookmarksManager onOpen={onOpen} />
+      ) : view === "downloads" ? (
+        <DownloadsPage />
+      ) : (
+        <HistoryPage onOpen={onOpen} now={now} />
+      )}
+    </div>
+  );
+}
+
+/** Every download the registry still holds, live from `browser_download_updated`. */
+function DownloadsPage() {
+  const { downloads, loadErrorCode, loading } = useBrowserDownloads();
+  const { missingFileIds, actionErrors, handleCancel, handlePause, handleOpen, handleReveal } =
+    useBrowserDownloadActions();
+  const sorted = useMemo(() => [...downloads].sort((a, b) => b.createdAtMs - a.createdAtMs), [downloads]);
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto p-3" data-testid="browser-library-downloads">
+      {loadErrorCode ? (
+        <div className="rounded border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-[11px] text-destructive">
+          Could not read the download list <span className="font-mono text-[10px]">{loadErrorCode}</span>
+        </div>
+      ) : null}
+      {sorted.length === 0 && !loading && !loadErrorCode ? (
+        <div className="py-6 text-center text-muted-foreground">No downloads yet.</div>
+      ) : null}
+      <div role="list" aria-label="Downloads" className="flex flex-col gap-1.5">
+        {sorted.map((record) => (
+          <div role="listitem" key={record.id}>
+            <BrowserDownloadRow
+              record={record}
+              missing={missingFileIds.has(record.id)}
+              actionError={actionErrors[record.id]}
+              onCancel={(id) => void handleCancel(id)}
+              onPause={(id, pause) => void handlePause(id, pause)}
+              onOpen={(item) => void handleOpen(item)}
+              onReveal={(item) => void handleReveal(item)}
+            />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

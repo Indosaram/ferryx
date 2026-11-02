@@ -1445,6 +1445,8 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
                             // Camera, microphone and other site permissions ask the user
                             // instead of the engine's default (wry grants media on macOS).
                             crate::browser::site_permissions::install_webview(&child, &browser_id);
+                            // Cancel, Pause and Resume for the downloads this tab's engine runs.
+                            crate::browser::webview_download::install(&child);
                             let bridge_kind =
                                 crate::browser::bridge::install(&child, &install_ctx);
                             if let Err(error) =
