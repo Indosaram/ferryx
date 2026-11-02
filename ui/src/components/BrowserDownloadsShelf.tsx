@@ -17,6 +17,8 @@ export const MAX_RENDERED_DOWNLOADS = 10;
 export type { DownloadRecord, DownloadStatus };
 
 export interface BrowserDownloadsShelfProps {
+  /** The pane's tab: the shelf lists only the downloads this tab started. */
+  browserId: string;
   onClose?: () => void;
   className?: string;
   /**
@@ -200,23 +202,24 @@ export function useBrowserDownloadActions() {
   return { missingFileIds, actionErrors, handleCancel, handlePause, handleOpen, handleReveal };
 }
 
-export function BrowserDownloadsShelf({ onClose, className = "", refreshToken = 0 }: BrowserDownloadsShelfProps) {
-  const { downloads, loadErrorCode, loading } = useBrowserDownloads(refreshToken);
+export function BrowserDownloadsShelf({ browserId, onClose, className = "", refreshToken = 0 }: BrowserDownloadsShelfProps) {
+  const { downloads, loadErrorCode } = useBrowserDownloads(refreshToken);
   const { missingFileIds, actionErrors, handleCancel, handlePause, handleOpen, handleReveal } =
     useBrowserDownloadActions();
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(() => new Set());
 
   const visibleDownloads = useMemo(() => {
     return downloads
-      .filter((record) => !dismissedIds.has(record.id))
+      .filter((record) => record.browserId === browserId && !dismissedIds.has(record.id))
       .slice(0, MAX_RENDERED_DOWNLOADS);
-  }, [downloads, dismissedIds]);
+  }, [downloads, dismissedIds, browserId]);
 
   const handleDismiss = (id: string) => {
     setDismissedIds((prev) => new Set(prev).add(id));
   };
 
-  if (visibleDownloads.length === 0 && !loading && !loadErrorCode) {
+  // A tab that started no download shows no shelf, not even while the list loads.
+  if (visibleDownloads.length === 0 && !loadErrorCode) {
     return null;
   }
 

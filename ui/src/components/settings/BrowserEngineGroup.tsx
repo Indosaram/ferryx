@@ -79,6 +79,11 @@ function percentOf(progress: InstallProgress | null): number | null {
   return Math.max(0, Math.min(100, Math.floor((progress.receivedBytes / progress.totalBytes) * 100)));
 }
 
+/** The whole archive has arrived; the backend still unpacks it before the install resolves. */
+function downloadComplete(progress: InstallProgress | null): boolean {
+  return progress != null && progress.totalBytes != null && progress.totalBytes > 0 && progress.receivedBytes >= progress.totalBytes;
+}
+
 /** The Chromium engine is installed but this session cannot run it (a native Wayland window). */
 function inactiveText(status: BrowserEngineStatus | null): string | null {
   if (status?.state !== "installed" || !status.inactive) return null;
@@ -186,10 +191,14 @@ export function BrowserEngineGroup() {
     else run(failure.retry);
   };
 
-  const percent = percentOf(progress);
+  const unpacking = installing && downloadComplete(progress);
+  // While unpacking the bar is indeterminate again: a frozen 100% reads as a stalled download.
+  const percent = unpacking ? null : percentOf(progress);
   const sizes = engineSizes();
   const stateKey = busyAction === "install"
-    ? "downloading"
+    ? unpacking
+      ? "installing"
+      : "downloading"
     : busyAction === "remove"
       ? "removing"
       : busyAction === "rollback"
@@ -200,8 +209,10 @@ export function BrowserEngineGroup() {
   const stateLabel =
     stateKey === "downloading"
       ? "Downloading..."
-      : stateKey === "removing"
-        ? "Removing..."
+      : stateKey === "installing"
+        ? "Installing..."
+        : stateKey === "removing"
+          ? "Removing..."
         : stateKey === "switching"
           ? "Switching..."
           : stateKey === "installed" && status?.state === "installed"

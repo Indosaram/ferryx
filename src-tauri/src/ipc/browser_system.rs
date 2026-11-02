@@ -428,7 +428,8 @@ pub fn handle_cef_event<R: Runtime>(
         Event::PdfDone { tab, ok, path } => {
             let _ = app.emit(BROWSER_PDF_SAVED_EVENT, BrowserPdfSavedPayload { browser_id: tab, ok, path });
         }
-        Event::DownloadBegin { download, total, url, name, .. } => {
+        Event::DownloadBegin { download, tab, total, url, name } => {
+            let owner = (!tab.is_empty()).then_some(tab);
             let id = format!("cef-{}", uuid::Uuid::new_v4());
             CEF_DOWNLOADS.lock().insert((profile.to_string(), download), id.clone());
             let app = app.clone();
@@ -446,8 +447,9 @@ pub fn handle_cef_event<R: Runtime>(
                     return;
                 };
                 let path = path.to_string_lossy().to_string();
-                let control = Arc::new(system::EngineDownloadControl { profile: profile.clone(), download });
-                registry().register_native(id, url, path.clone(), total, Some(control), true);
+                let control: Arc<dyn crate::browser::download::DownloadControl> =
+                    Arc::new(system::EngineDownloadControl { profile: profile.clone(), download });
+                registry().register_native(id, url, path.clone(), owner, total, Some((control, true)));
                 system::download_path(&profile, download, &path);
             });
         }
@@ -559,7 +561,14 @@ pub fn webview_download_handler<R: Runtime>(
             let id = format!("wv-{}", uuid::Uuid::new_v4());
             live.lock().insert(url.clone(), id.clone());
             crate::browser::webview_download::expect(&url, &id);
-            registry().register_native(id, url, path.to_string_lossy().to_string(), None, None, false);
+            registry().register_native(
+                id,
+                url,
+                path.to_string_lossy().to_string(),
+                Some(browser_id.clone()),
+                None,
+                None,
+            );
             true
         }
         tauri::webview::DownloadEvent::Finished { url, path, success } => {
@@ -725,7 +734,7 @@ mod tests {
     #[test]
     fn engine_updates_drive_the_download_record_to_completion() {
         let registry = DownloadRegistry::new();
-        registry.register_native("d1".into(), "https://a.test/f".into(), "/tmp/f".into(), None, None, false);
+        registry.register_native("d1".into(), "https://a.test/f".into(), "/tmp/f".into(), None, None, None);
         apply_download_update(&registry, "d1", 10, Some(100), DownloadState::InProgress, "/tmp/f");
         apply_download_update(&registry, "d1", 40, Some(100), DownloadState::Paused, "/tmp/f");
         assert_eq!(registry.get("d1").unwrap().status, DownloadStatus::Paused);
@@ -740,7 +749,7 @@ mod tests {
     #[test]
     fn an_engine_disk_full_failure_is_reported_as_such() {
         let registry = DownloadRegistry::new();
-        registry.register_native("d2".into(), "https://a.test/f".into(), "/tmp/f".into(), None, None, false);
+        registry.register_native("d2".into(), "https://a.test/f".into(), "/tmp/f".into(), None, None, None);
         apply_download_update(&registry, "d2", 5, None, DownloadState::Failed(DownloadFailure::DiskFull), "/tmp/f");
         let record = registry.get("d2").unwrap();
         assert_eq!(record.status, DownloadStatus::Failed);

@@ -483,6 +483,34 @@ impl BrowserManager {
         Ok(browser_state(s))
     }
 
+    /// An engine tab started loading a main-frame document: a reload, a history move, a form
+    /// post or a navigation the engine began on its own, possibly to the same URL. Unless a
+    /// load is already pending (`begin_reload`, `update_url` or a history dispatch already
+    /// invalidated the document), refs observed on the previous document become stale.
+    pub fn begin_engine_load(
+        &self,
+        browser_id: &str,
+        can_go_back: bool,
+        can_go_forward: bool,
+    ) -> Result<BrowserState, BrowserError> {
+        let mut guard = self.sessions.write();
+        let s = guard
+            .get_mut(browser_id)
+            .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+        if !s.loading {
+            s.generation += 1;
+            s.automation_targets.clear();
+            s.remote_targets.clear();
+            s.remote_snapshot_id = None;
+            s.loading = true;
+            s.load_error = None;
+        }
+        s.can_go_back = can_go_back;
+        s.can_go_forward = can_go_forward;
+        s.native_history_flags = true;
+        Ok(browser_state(s))
+    }
+
     pub fn set_bounds(&self, browser_id: &str, bounds: LogicalRect) -> Result<(), BrowserError> {
         if !bounds.is_valid() {
             return Err(BrowserError::InvalidBounds);
@@ -1254,5 +1282,64 @@ mod tests {
         assert_eq!(sequences.len(), 2);
         assert!(sequences[0] < sequences[1]);
         assert_ne!(first.browser_id, second.browser_id);
+    }
+
+    #[test]
+    fn engine_load_start_invalidates_refs_of_the_previous_document() {
+        // A same-URL reload the engine starts on its own (toolbar, location.reload(), a form
+        // post) sends no new address, only a load start; refs from the old page must go stale.
+        let manager = BrowserManager::new();
+        let state = manager
+            .register_session(create_request("engine-load"))
+            .expect("register");
+        manager
+            .record_observed_refs(
+                "engine-load",
+                state.generation,
+                vec![("e1".to_string(), "button|Submit".to_string())],
+            )
+            .expect("record refs");
+        assert!(manager.observed_ref("engine-load", state.generation, "e1").is_ok());
+
+        let loading = manager
+            .begin_engine_load("engine-load", true, false)
+            .expect("engine load start");
+        assert!(loading.loading);
+        assert_eq!(loading.url, state.url);
+        assert_eq!(loading.generation, state.generation + 1);
+        assert!(loading.can_go_back && !loading.can_go_forward);
+        assert!(matches!(
+            manager.observed_ref("engine-load", state.generation, "e1"),
+            Err(BrowserError::AutomationSnapshotStale)
+        ));
+        assert!(matches!(
+            manager.automation_target("engine-load", loading.generation, "e1"),
+            Err(BrowserError::AutomationTargetNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn reload_followed_by_engine_load_start_bumps_generation_once() {
+        let manager = BrowserManager::new();
+        let state = manager
+            .register_session(create_request("engine-reload"))
+            .expect("register");
+        let reloading = manager.begin_reload("engine-reload").expect("begin reload");
+        assert_eq!(reloading.generation, state.generation + 1);
+
+        let loading = manager
+            .begin_engine_load("engine-reload", false, false)
+            .expect("engine load start");
+        assert_eq!(loading.generation, reloading.generation);
+        assert!(loading.loading);
+
+        // Once that load finished, the next load start is a new document again.
+        manager
+            .update_navigation_state("engine-reload", None, None, Some(false), Some(false), Some(false), None)
+            .expect("load finished");
+        let next = manager
+            .begin_engine_load("engine-reload", false, false)
+            .expect("next engine load start");
+        assert_eq!(next.generation, reloading.generation + 1);
     }
 }

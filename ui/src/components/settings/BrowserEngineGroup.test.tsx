@@ -86,6 +86,35 @@ describe("BrowserEngineGroup", () => {
     expect(screen.getByTestId("browser-engine-percent")).toHaveTextContent("25");
   });
 
+  it("switches to installing once the whole archive has arrived, then to installed when the install resolves", async () => {
+    engine.getBrowserEngineStatus.mockResolvedValue({ state: "notInstalled" });
+    let finish: (value: unknown) => void = () => undefined;
+    engine.installBrowserEngine.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    let emit: (payload: { receivedBytes: number; totalBytes: number | null }) => void = () => undefined;
+    events.listen.mockImplementation(async (_name: string, handler: (event: { payload: unknown }) => void) => {
+      emit = (payload) => handler({ payload });
+      return () => undefined;
+    });
+    render(<BrowserEngineGroup />);
+    const action = await screen.findByTestId("browser-engine-action");
+    await vi.waitFor(() => expect(action).toBeEnabled());
+    fireEvent.click(action);
+    await vi.waitFor(() => expect(events.listen).toHaveBeenCalledWith("browser_engine_install_progress", expect.any(Function)));
+    act(() => emit({ receivedBytes: 150, totalBytes: 200 }));
+    expect(state()).toBe("downloading");
+    act(() => emit({ receivedBytes: 200, totalBytes: 200 }));
+    expect(state()).toBe("installing");
+    expect(screen.getByRole("progressbar")).not.toHaveAttribute("aria-valuenow");
+    expect(screen.queryByTestId("browser-engine-percent")).toBeNull();
+    await act(async () => finish({ state: "installed", version: "156.2.0-ferryx.1" }));
+    await vi.waitFor(() => expect(state()).toBe("installed"));
+    expect(screen.queryByTestId("browser-engine-progress")).toBeNull();
+  });
+
   it("shows the structured message and code on failure and retry re-runs the install", async () => {
     engine.getBrowserEngineStatus.mockResolvedValue({ state: "notInstalled" });
     engine.installBrowserEngine
