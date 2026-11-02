@@ -56,9 +56,22 @@ describe("BrowserPasswordsGroup", () => {
     render(<BrowserPasswordsGroup />);
     expect(await screen.findAllByTestId("vault-row")).toHaveLength(1);
     fireEvent.click(screen.getByTestId("vault-delete"));
+    expect(vault.deleteVaultItem).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("vault-delete-confirm"));
     await vi.waitFor(() => expect(screen.queryByTestId("vault-row")).toBeNull());
     expect(vault.deleteVaultItem).toHaveBeenCalledWith("v1");
     expect(screen.getByTestId("vault-empty")).toBeInTheDocument();
+  });
+
+  it("cancelling the delete confirm keeps the login", async () => {
+    render(<BrowserPasswordsGroup />);
+    fireEvent.click(await screen.findByTestId("vault-delete"));
+    expect(screen.queryByTestId("vault-delete")).toBeNull();
+    fireEvent.click(screen.getByTestId("vault-delete-cancel"));
+    expect(vault.deleteVaultItem).not.toHaveBeenCalled();
+    expect(screen.getAllByTestId("vault-row")).toHaveLength(1);
+    expect(screen.getByTestId("vault-delete")).toBeInTheDocument();
+    expect(screen.queryByTestId("vault-delete-confirm")).toBeNull();
   });
 
   it("reveals the password inline", async () => {

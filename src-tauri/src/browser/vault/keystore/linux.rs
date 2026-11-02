@@ -1,10 +1,14 @@
 //! Linux: the vault key as an item in the Secret Service default collection
 //! (org.freedesktop.secrets: GNOME Keyring, KeePassXC, KWallet's provider), over the session
 //! bus with the blocking zbus API. A session without the service reports `Unavailable`.
+//! A keyring prompt (unlock, create) is bounded by `PROMPT_TIMEOUT`, then dismissed.
 
 use std::collections::HashMap;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use zbus::blocking::{Connection, Proxy};
+use zbus::message::Message;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 use super::{KeyStore, KeystoreError, KEY_SERVICE};
@@ -18,6 +22,10 @@ const ITEM_IFACE: &str = "org.freedesktop.Secret.Item";
 const PROMPT_IFACE: &str = "org.freedesktop.Secret.Prompt";
 /// The "no prompt needed" object path.
 const NO_PROMPT: &str = "/";
+/// How long the user has to answer a keyring prompt before it is dismissed.
+const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long subscribing to the prompt's Completed signal may take.
+const SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Secret Service `Secret` struct: (session, parameters, value, content type).
 type Secret = (OwnedObjectPath, Vec<u8>, Vec<u8>, String);
@@ -81,15 +89,47 @@ impl Session {
         Ok(unlocked)
     }
 
-    /// Runs a Secret Service prompt and waits for its Completed signal.
+    /// Runs a Secret Service prompt and waits up to `PROMPT_TIMEOUT` for its Completed signal;
+    /// an unanswered prompt is dismissed and reported as a failure.
     fn prompt(&self, path: &OwnedObjectPath) -> Result<(), KeystoreError> {
         let prompt = self.proxy(path.as_str(), PROMPT_IFACE)?;
-        // Subscribe before triggering, so the signal cannot be missed.
-        let mut completed = prompt.receive_signal("Completed").map_err(failed)?;
+        // The blocking signal iterator has no timeout, so it waits on its own thread. It
+        // subscribes before the prompt is triggered, so the signal cannot be missed.
+        let (subscribed_tx, subscribed_rx) = mpsc::channel::<Result<(), KeystoreError>>();
+        let (done_tx, done_rx) = mpsc::channel::<Option<Message>>();
+        let connection = self.connection.clone();
+        let waiter_path = path.clone().into_inner();
+        std::thread::Builder::new()
+            .name("secret-service-prompt".into())
+            .spawn(move || {
+                let completed = Proxy::new_owned(connection, DEST, waiter_path, PROMPT_IFACE)
+                    .and_then(|proxy| proxy.receive_signal("Completed").map(|signal| (proxy, signal)));
+                match completed {
+                    Ok((_proxy, mut signal)) => {
+                        let _ = subscribed_tx.send(Ok(()));
+                        let _ = done_tx.send(signal.next());
+                    }
+                    Err(error) => {
+                        let _ = subscribed_tx.send(Err(failed(error)));
+                    }
+                }
+            })
+            .map_err(|error| KeystoreError::Failed(format!("could not wait for the keyring prompt: {error}")))?;
+        subscribed_rx
+            .recv_timeout(SUBSCRIBE_TIMEOUT)
+            .map_err(|_| KeystoreError::Failed("could not subscribe to the keyring prompt".into()))??;
         prompt.call::<_, _, ()>("Prompt", &("",)).map_err(failed)?;
-        let message = completed
-            .next()
-            .ok_or_else(|| KeystoreError::Failed("the Secret Service prompt ended without an answer".into()))?;
+        let message = match done_rx.recv_timeout(PROMPT_TIMEOUT) {
+            Ok(Some(message)) => message,
+            Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(KeystoreError::Failed("the Secret Service prompt ended without an answer".into()))
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Closing the prompt also ends the waiting thread (Completed with dismissed).
+                let _ = prompt.call::<_, _, ()>("Dismiss", &());
+                return Err(KeystoreError::Failed("the keyring unlock prompt timed out".into()));
+            }
+        };
         let (dismissed, _result): (bool, OwnedValue) = message.body().deserialize().map_err(failed)?;
         if dismissed {
             return Err(KeystoreError::Failed("the keyring unlock prompt was dismissed".into()));

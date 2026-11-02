@@ -168,3 +168,16 @@ fn bad_inputs_are_rejected() {
     assert!(matches!(store.save("https://example.com", "a", ""), Err(VaultError::InvalidArgument(_))));
     assert!(matches!(store.credential("nope"), Err(VaultError::NotFound(_))));
 }
+
+#[test]
+fn write_durably_replaces_the_file_and_leaves_no_staging_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.json");
+    let staging = dir.path().join("data.json.tmp");
+    std::fs::write(&path, b"old contents").unwrap();
+
+    write_durably(&path, &staging, b"new").unwrap();
+
+    assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    assert!(!staging.exists());
+}

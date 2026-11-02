@@ -99,7 +99,15 @@
           "libasound2 | libasound2t64"
         ],
         "section": "devel",
-        "priority": "optional"
+        "priority": "optional",
+        "files": {
+          "/usr/share/polkit-1/actions/com.ferryx.app.vault-reveal.policy": "packaging/linux/com.ferryx.app.vault-reveal.policy"
+        }
+      },
+      "rpm": {
+        "files": {
+          "/usr/share/polkit-1/actions/com.ferryx.app.vault-reveal.policy": "packaging/linux/com.ferryx.app.vault-reveal.policy"
+        }
       },
       "appimage": {
         "bundleMediaFramework": false

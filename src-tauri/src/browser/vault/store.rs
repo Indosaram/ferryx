@@ -4,8 +4,9 @@
 //! password; the record is bound by AAD to its item id and origin, so a record copied onto
 //! another item or origin fails to decrypt. The 256-bit key lives only in the OS keystore,
 //! under the store's random `keyId`. The origin is public metadata so matching needs no
-//! decryption. Writes are atomic (temp file + rename). A store that cannot be parsed or whose
-//! records do not decrypt with the keystore's key is reported as corrupted and never rewritten.
+//! decryption. Writes are atomic and durable (temp file fsynced, renamed over the store, then
+//! the directory fsynced on unix). A store that cannot be parsed or whose records do not
+//! decrypt with the keystore's key is reported as corrupted and never rewritten.
 //!
 //! Record payload and item shape follow Maho's vault_manager/record.rs and vault_items
 //! (Project-Maho/maho-browser@c2830251), reduced to logins.
@@ -145,6 +146,25 @@ fn validate(username: &str, password: &str) -> Result<(), VaultError> {
     Ok(())
 }
 
+/// Replaces `path` with `bytes` atomically and durably: writes and fsyncs `staging`, renames it
+/// over `path`, then (on unix) fsyncs the parent directory so the rename itself survives a crash.
+pub(crate) fn write_durably(path: &Path, staging: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let mut file = std::fs::File::create(staging)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(staging, path)?;
+    #[cfg(unix)]
+    {
+        if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            std::fs::File::open(dir)?.sync_all()?;
+        }
+    }
+    Ok(())
+}
+
 impl VaultStore {
     /// Opens the store in `dir`, creating it and its key on first use. Blocking.
     pub fn open(dir: &Path, keystore: &dyn KeyStore) -> Result<Self, VaultError> {
@@ -230,8 +250,7 @@ impl VaultStore {
         let bytes = serde_json::to_vec_pretty(&self.file)
             .map_err(|error| VaultError::InvalidArgument(error.to_string()))?;
         let staging = self.path.with_extension("json.tmp");
-        std::fs::write(&staging, bytes)?;
-        std::fs::rename(&staging, &self.path)?;
+        write_durably(&self.path, &staging, &bytes)?;
         Ok(())
     }
 
