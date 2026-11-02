@@ -746,7 +746,7 @@ mod tests {
         let previous = SITE_ZOOM.lock().replace(store.clone());
         let results: Vec<Result<(), IpcError>> = std::thread::scope(|scope| {
             let workers: Vec<_> = (0..8)
-                .map(|_| scope.spawn(|| (0..25).map(|_| save_site_zoom_to(&path)).collect::<Result<(), _>>()))
+                .map(|_| scope.spawn(|| (0..25).try_for_each(|_| save_site_zoom_to(&path))))
                 .collect();
             workers.into_iter().map(|worker| worker.join().unwrap()).collect()
         });
