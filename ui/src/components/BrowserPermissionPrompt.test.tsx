@@ -3,6 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BrowserMediaCaptureIndicator, BrowserPermissionPrompts } from "./BrowserPermissionPrompt";
 import type { BrowserPermissionPrompt } from "../lib/browserSitePermissions";
+import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
+
+function NativeSurfaceProbe() {
+  return <span data-testid="native-surface-probe">{String(useNativeTerminalVisibility())}</span>;
+}
 
 type Handler = (event: { payload: unknown }) => void;
 const events = vi.hoisted(() => ({ handlers: new Map<string, Handler[]>() }));
@@ -93,6 +98,23 @@ describe("BrowserPermissionPrompts", () => {
   });
 
   it("shows the structured error code when the decision fails", async () => {
+  it("stays in flow without hiding its own pane's native page view", async () => {
+    render(
+      <>
+        <NativeSurfaceProbe />
+        <BrowserPermissionPrompts browserId="b1" />
+      </>,
+    );
+    await subscribed("browser_permission_prompt");
+    fire("browser_permission_prompt", cameraPrompt);
+    const prompt = await screen.findByTestId("browser-permission-prompt");
+    expect(prompt).toHaveAttribute("role", "alertdialog");
+    expect(prompt).toHaveAttribute("data-native-terminal-yield", "off");
+    // Flush the visibility hook's MutationObserver callback before reading the probe.
+    await act(async () => {});
+    expect(screen.getByTestId("native-surface-probe")).toHaveTextContent("true");
+  });
+
     ipc.invoke.mockImplementation(async (command: string) => {
       if (command === "cmd_browser_permission_pending") return [];
       throw { code: "INTERNAL_ERROR", message: "gone" };

@@ -116,6 +116,39 @@ describe("browser tab navigation persistence", () => {
     visit(store, "browser-1", ["https://a.test/", "https://b.test/"]);
     expect(storage.getItem(BROWSER_TAB_NAVIGATION_STORAGE_KEY)).toBeNull();
   });
+
+  function storedStack() {
+    return serializeBrowserTabNavigation({
+      "browser-1": { entries: [{ url: "https://old.test/", title: "Old" }], index: 0, updatedAt: 1 },
+    });
+  }
+
+  it("is not persisted when browsing history is off, and purges a stored stack", async () => {
+    const storage = memoryStorage({ [BROWSER_TAB_NAVIGATION_STORAGE_KEY]: storedStack() });
+    saveBrowserSettings({ rememberBrowsingHistory: false }, storage);
+    const store = new BrowserTabNavigationStore(() => storage);
+    visit(store, "browser-1", ["https://a.test/", "https://b.test/"]);
+    expect(storage.getItem(BROWSER_TAB_NAVIGATION_STORAGE_KEY)).toBeNull();
+
+    // The in-memory stack still drives back/forward for this session.
+    expect(store.snapshot("browser-1")).toEqual({
+      entries: [
+        { url: "https://a.test/", title: "Title https://a.test/" },
+        { url: "https://b.test/", title: "Title https://b.test/" },
+      ],
+      index: 1,
+    });
+    await goBackInBrowserTab("browser-1", store);
+    expect(native.goBackBrowser).toHaveBeenCalledExactlyOnceWith("browser-1");
+    store.record("browser-1", "https://a.test/", "A", "default");
+    expect(store.snapshot("browser-1")?.index).toBe(0);
+  });
+
+  it("does not restore a stored stack when browsing history is off", () => {
+    const storage = memoryStorage({ [BROWSER_TAB_NAVIGATION_STORAGE_KEY]: storedStack() });
+    saveBrowserSettings({ rememberBrowsingHistory: false }, storage);
+    expect(new BrowserTabNavigationStore(() => storage).snapshot("browser-1")).toBeNull();
+  });
 });
 
 describe("browser tab back/forward after restore", () => {

@@ -196,6 +196,21 @@ describe("BrowserSignInHandoffBar", () => {
     await waitFor(() => expect(bar()).toBeNull());
   });
 
+  it("lays the declined options menu out in flow so the bar grows above the native page view", async () => {
+    getPlan.mockResolvedValue(plan());
+    render(<BrowserSignInHandoffBar tab={tab()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Not now" }));
+    fireEvent.click(screen.getByRole("button", { name: "More options" }));
+
+    // The native page view paints over anything hanging below the bar, so the menu must be a
+    // direct in-flow row of the bar rather than a popover anchored in a positioned wrapper.
+    const menu = screen.getByRole("menu", { name: "Sign-in options" });
+    expect(menu.parentElement).toBe(bar());
+    expect(menu.className).not.toMatch(/\babsolute\b/);
+    expect(bar()?.className).not.toMatch(/\brelative\b/);
+  });
+
   it("dismiss leaves the tab unchanged and requests no handoff", async () => {
     getPlan.mockResolvedValue(plan());
     const handoff = vi.fn();

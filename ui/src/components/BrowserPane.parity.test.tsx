@@ -63,7 +63,6 @@ const browserMocks = vi.hoisted(() => ({
     updatedAtMs: 1000,
   })),
   openExternalUrl: vi.fn(async () => undefined),
-  listBrowserDownloads: vi.fn(async () => registryState.records),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: eventMocks.listen }));
@@ -101,7 +100,6 @@ beforeEach(() => {
   browserMocks.downloadBrowserUrl.mockClear();
   browserMocks.downloadBrowserUrlToFolder.mockClear();
   browserMocks.downloadBrowserUrlWithSession.mockClear();
-  browserMocks.listBrowserDownloads.mockClear();
   browserMocks.openExternalUrl.mockClear();
   browserMocks.setBrowserBounds.mockClear();
   browserMocks.setBrowserVisible.mockClear();
@@ -189,15 +187,65 @@ describe("BrowserPane parity affordances", () => {
   });
 
   it("keeps a save refused before the registry took it in the row, with Retry", async () => {
-    browserMocks.downloadBrowserUrlToFolder.mockRejectedValueOnce({ code: "DOWNLOAD_FAILED", message: "refused" });
+    // A concurrent download of this tab, just created, must not be mistaken for this one.
+    registryState.records = [{
+      id: "dl-other",
+      url: "https://example.com/files/other.zip",
+      filePath: "/home/me/Downloads/other.zip",
+      status: "inProgress",
+      receivedBytes: 10,
+      createdAtMs: Date.now(),
+      updatedAtMs: Date.now(),
+      browserId: "browser-1",
+    }];
+    browserMocks.downloadBrowserUrlToFolder.mockRejectedValueOnce({
+      code: "BROWSER_DOWNLOAD_FAILED",
+      message: "refused",
+      details: { downloadRegistered: false },
+    });
     render(<BrowserPane tab={baseTab} onNavigate={vi.fn()} onReload={vi.fn()} />);
     await waitFor(() => expect(callbackState.download).not.toBeNull());
 
     act(() => callbackState.download?.({ browserId: "browser-1", targetUrl: "https://example.com/files/example.zip" }));
 
-    expect(await screen.findByTestId("browser-download-status")).toHaveAttribute("data-phase", "failed");
+    const status = await screen.findByTestId("browser-download-status");
+    expect(status).toHaveAttribute("data-phase", "failed");
+    expect(status).toHaveTextContent("The download failed.");
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
-    expect(screen.queryByTestId("browser-downloads-shelf")).toBeNull();
+  });
+
+  it("leaves a save that failed after the registry took it to the shelf", async () => {
+    // Its record carries a timestamp from another clock; the host signal alone decides.
+    registryState.records = [{
+      id: "dl-failed",
+      url: "https://example.com/files/example.zip",
+      filePath: "/home/me/Downloads/example.zip",
+      status: "failed",
+      receivedBytes: 0,
+      error: "server returned HTTP 404",
+      createdAtMs: 1000,
+      updatedAtMs: 1000,
+      browserId: "browser-1",
+    }];
+    browserMocks.downloadBrowserUrlToFolder.mockRejectedValueOnce({
+      code: "BROWSER_DOWNLOAD_FAILED",
+      message: "Browser download failed: server returned HTTP 404",
+      details: { downloadRegistered: true, downloadId: "dl-failed" },
+    });
+    coreMocks.invoke.mockClear();
+    render(<BrowserPane tab={baseTab} onNavigate={vi.fn()} onReload={vi.fn()} />);
+    await waitFor(() => expect(callbackState.download).not.toBeNull());
+
+    act(() => callbackState.download?.({ browserId: "browser-1", targetUrl: "https://example.com/files/example.zip" }));
+
+    await waitFor(() => expect(browserMocks.downloadBrowserUrlToFolder).toHaveBeenCalled());
+    expect(await screen.findByTestId("download-row-dl-failed")).toBeInTheDocument();
+    // The shelf re-reads the registry from runDownload's `finally`, so the catch has run by then.
+    await waitFor(() =>
+      expect(coreMocks.invoke.mock.calls.filter(([cmd]) => cmd === "cmd_browser_download_list").length).toBeGreaterThanOrEqual(2),
+    );
+    expect(screen.queryByTestId("browser-download-prompt")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 
   it("drops an unanswered download offer when the tab navigates away", async () => {
@@ -211,21 +259,24 @@ describe("BrowserPane parity affordances", () => {
     await waitFor(() => expect(screen.queryByTestId("browser-download-prompt")).toBeNull());
   });
 
-  it("with ask-where-to-save, leads with Save and keeps the system browser in the overflow menu", async () => {
+  it("with ask-where-to-save, leads with Save and offers the system browser inline in the row", async () => {
     saveBrowserSettings({ askWhereToSave: true });
     render(<BrowserPane tab={baseTab} onNavigate={vi.fn()} onReload={vi.fn()} />);
     await waitFor(() => expect(callbackState.download).not.toBeNull());
 
     act(() => callbackState.download?.({ browserId: "browser-1", targetUrl: "https://example.com/files/example.zip" }));
-    expect(await screen.findByTestId("browser-download-prompt")).toHaveTextContent("example.zip");
+    const prompt = await screen.findByTestId("browser-download-prompt");
+    expect(prompt).toHaveTextContent("example.zip");
     expect(browserMocks.downloadBrowserUrlToFolder).not.toHaveBeenCalled();
-    expect(screen.queryByRole("button", { name: /Open in system browser/i })).toBeNull();
 
-    const more = screen.getByRole("button", { name: "More download actions" });
-    more.focus();
-    fireEvent.keyDown(more, { key: "Enter" });
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Open in system browser/i }));
+    // The native page view paints over portaled popovers, so the action must live in the row itself.
+    expect(screen.queryByRole("button", { name: "More download actions" })).toBeNull();
+    const openExternal = screen.getByRole("button", { name: "Open in system browser" });
+    expect(prompt).toContainElement(openExternal);
+    expect(openExternal).not.toHaveAttribute("aria-haspopup");
+    fireEvent.click(openExternal);
     expect(browserMocks.openExternalUrl).toHaveBeenCalledWith("https://example.com/files/example.zip");
+    expect(screen.queryByRole("menu")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Save as…" }));
     await waitFor(() => {
@@ -297,10 +348,7 @@ describe("BrowserPane parity affordances", () => {
     await waitFor(() => expect(callbackState.download).not.toBeNull());
     act(() => callbackState.download?.({ browserId: "browser-1", targetUrl: "https://example.com/files/a.zip" }));
 
-    const more = await screen.findByRole("button", { name: "More download actions" });
-    more.focus();
-    fireEvent.keyDown(more, { key: "Enter" });
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Open in system browser/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open in system browser" }));
 
     const alert = await screen.findByTestId("browser-pane-alert");
     expect(alert).toHaveTextContent("Open in system browser failed: OPEN_EXTERNAL_FAILED");

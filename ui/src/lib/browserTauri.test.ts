@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   browserAutomationAct,
   browserAutomationSnapshot,
+  browserDownloadErrorRegistered,
   browserTabSelectIndex,
   browserWorkspaceSelectIndex,
   closeBrowser,
@@ -330,6 +331,29 @@ describe("browser automation ipc", () => {
     await revealDownloadedFile("/home/me/Downloads/a.zip");
 
     expect(invoke).toHaveBeenCalledWith("cmd_path_reveal", { path: "/home/me/Downloads/a.zip" });
+  });
+});
+
+describe("browserDownloadErrorRegistered", () => {
+  it("is true only when the host says the registry took the download", () => {
+    expect(browserDownloadErrorRegistered({
+      code: "BROWSER_DOWNLOAD_FAILED",
+      message: "Browser download failed: server returned HTTP 404",
+      details: { downloadRegistered: true, downloadId: "dl-1" },
+    })).toBe(true);
+  });
+
+  it("is false for a refusal before registration and for errors without the signal", () => {
+    expect(browserDownloadErrorRegistered({
+      code: "BROWSER_DOWNLOAD_FAILED",
+      message: "refused",
+      details: { downloadRegistered: false },
+    })).toBe(false);
+    expect(browserDownloadErrorRegistered({ code: "BROWSER_DOWNLOAD_FAILED", message: "refused" })).toBe(false);
+    expect(browserDownloadErrorRegistered({ details: { downloadRegistered: "true" } })).toBe(false);
+    expect(browserDownloadErrorRegistered({ details: null })).toBe(false);
+    expect(browserDownloadErrorRegistered("BROWSER_DOWNLOAD_FAILED")).toBe(false);
+    expect(browserDownloadErrorRegistered(null)).toBe(false);
   });
 });
 

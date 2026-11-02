@@ -238,7 +238,7 @@ export function BrowserSignInHandoffBar({ tab }: { tab: BrowserTab }) {
   return (
     <div
       role="status"
-      className="relative flex items-center gap-2 border-b border-border bg-popover px-3 py-1.5 text-[11px]"
+      className="flex flex-wrap items-center gap-2 border-b border-border bg-popover px-3 py-1.5 text-[11px]"
       data-testid="browser-sign-in-handoff"
     >
       <span className="flex-1">
@@ -248,39 +248,15 @@ export function BrowserSignInHandoffBar({ tab }: { tab: BrowserTab }) {
         {busy === "install" ? <span className="ml-2 text-muted-foreground">{progressText(progress)}</span> : null}
       </span>
       {declined ? (
-        <div className="relative">
-          <button
-            type="button"
-            aria-haspopup="menu"
-            aria-expanded={menuOpen}
-            onClick={() => setMenuOpen((open) => !open)}
-            className="rounded border border-border px-2 py-0.5 hover:bg-accent"
-          >
-            More options
-          </button>
-          {menuOpen ? (
-            <div
-              role="menu"
-              aria-label="Sign-in options"
-              className="absolute right-0 top-full z-10 mt-1 flex min-w-44 flex-col rounded-md border border-border bg-popover py-1 shadow-lg"
-            >
-              {shownPlan.onDecline.map((action) => (
-                <button
-                  key={action.kind}
-                  type="button"
-                  role="menuitem"
-                  onClick={() => perform(action)}
-                  className="px-3 py-1 text-left hover:bg-accent"
-                >
-                  {ACTION_LABEL[action.kind]}
-                </button>
-              ))}
-              <button type="button" role="menuitem" onClick={hide} className="px-3 py-1 text-left hover:bg-accent">
-                Dismiss
-              </button>
-            </div>
-          ) : null}
-        </div>
+        <button
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen((open) => !open)}
+          className="rounded border border-border px-2 py-0.5 hover:bg-accent"
+        >
+          More options
+        </button>
       ) : (
         <>
           {primary ? (
@@ -315,6 +291,30 @@ export function BrowserSignInHandoffBar({ tab }: { tab: BrowserTab }) {
         </>
       )}
       {error ? <span className="text-destructive">{error}</span> : null}
+      {declined && menuOpen ? (
+        // Rendered in flow (not as a floating popover) so the bar grows and the native page
+        // view, which DOM cannot cover, moves below it.
+        <div
+          role="menu"
+          aria-label="Sign-in options"
+          className="flex basis-full flex-wrap items-center gap-1 border-t border-border/70 pt-1"
+        >
+          {shownPlan.onDecline.map((action) => (
+            <button
+              key={action.kind}
+              type="button"
+              role="menuitem"
+              onClick={() => perform(action)}
+              className="rounded px-2 py-0.5 hover:bg-accent"
+            >
+              {ACTION_LABEL[action.kind]}
+            </button>
+          ))}
+          <button type="button" role="menuitem" onClick={hide} className="rounded px-2 py-0.5 hover:bg-accent">
+            Dismiss
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
-import { ArrowLeft, ArrowRight, ChevronDown, ChevronUp, CircleAlert, Download, ExternalLink, MoreHorizontal, RefreshCw, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, ChevronDown, ChevronUp, CircleAlert, Download, ExternalLink, RefreshCw, X } from "lucide-react";
 
 import {
   BROWSER_SHORTCUT_EVENT,
+  browserDownloadErrorRegistered,
   clearBrowserFind,
   downloadBrowserUrlToFolder,
   downloadBrowserUrlWithSession,
@@ -12,7 +13,6 @@ import {
   findBrowser,
   focusBrowser,
   focusAppWebview,
-  listBrowserDownloads,
   listBrowsers,
   onBrowserDownloadRequested,
   onBrowserDownloadUpdated,
@@ -35,7 +35,6 @@ import {
 import { PRIVATE_BROWSER_PROFILE, useBrowserSettings } from "../lib/browserSettings";
 import { goBackInBrowserTab, goForwardInBrowserTab, useBrowserTabNavigation } from "../lib/browserTabNavigation";
 import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 import { BrowserToolbar } from "./BrowserToolbar";
 import { BrowserBookmarkBar } from "./BrowserBookmarkBar";
 import { BrowserLibraryPanel, type BrowserLibraryOpenRequest, type BrowserLibraryView } from "./BrowserLibraryPanel";
@@ -520,20 +519,9 @@ export function BrowserPane({
     void clearBrowserFind(tab.browserId).catch(() => undefined);
   };
 
-  /** Whether the registry holds a download of this tab created since `sinceMs`. */
-  const hasOwnDownloadSince = async (sinceMs: number) => {
-    try {
-      const records = await listBrowserDownloads();
-      return records.some((record) => record.browserId === tab.browserId && record.createdAtMs >= sinceMs - 1000);
-    } catch {
-      return false;
-    }
-  };
-
   /** Saves `url` to `filePath`, or to a free name in the download folder when it is null. The
    * started save lives on the shelf, so the row goes away. */
   const runDownload = async (url: string, filePath: string | null) => {
-    const startedAtMs = Date.now();
     setDownloadUrl(null);
     setDownloadStatus(null);
     setDownloadPhase("offer");
@@ -543,9 +531,9 @@ export function BrowserPane({
       if (filePath) await downloadBrowserUrlWithSession(tab.browserId, url, filePath);
       else await downloadBrowserUrlToFolder(tab.browserId, url);
     } catch (error) {
-      // A failure after the registry took the download shows on its shelf row. One before that
-      // (a refused URL or destination) has no record, so the row keeps it with Retry.
-      if (!(await hasOwnDownloadSince(startedAtMs))) {
+      // The host says whether the registry took the download: if so the failure shows on its
+      // shelf row; if not (a refused URL, destination or cookie read) the row keeps it with Retry.
+      if (!browserDownloadErrorRegistered(error)) {
         setDownloadUrl(url);
         setDownloadPhase("failed");
         setDownloadStatus(browserErrorText(extractBrowserErrorCode(error)));
@@ -706,16 +694,16 @@ export function BrowserPane({
             ) : null}
             <button type="button" onClick={() => void runDownload(downloadUrl, null)} className="rounded bg-primary px-2 py-1 font-medium text-primary-foreground hover:bg-primary/90">{downloadPhase === "failed" ? "Retry" : "Save"}</button>
             <button type="button" onClick={() => void saveDownloadAs()} className="rounded border border-border px-2 py-1 hover:bg-accent">Save as…</button>
-            <DropdownMenu modal={false}>
-              <DropdownMenuTrigger asChild>
-                <button type="button" aria-label="More download actions" className="rounded p-1 hover:bg-accent"><MoreHorizontal className="size-3.5" /></button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem onSelect={() => openDownloadExternally(downloadUrl)}>
-                  <ExternalLink className="size-3" /> Open in system browser
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            {/* Inline, not a portaled menu: the native page view paints over any popover below this row. */}
+            <button
+              type="button"
+              aria-label="Open in system browser"
+              title="Open in system browser"
+              onClick={() => openDownloadExternally(downloadUrl)}
+              className="rounded p-1 hover:bg-accent"
+            >
+              <ExternalLink className="size-3.5" />
+            </button>
             <button type="button" aria-label="Dismiss download" onClick={dismissDownload} className="rounded p-1 hover:bg-accent"><X className="size-3.5" /></button>
           </div>
         ) : null}

@@ -89,9 +89,12 @@ export function BrowserPermissionPrompts({ browserId }: { browserId: string }) {
   };
 
   return (
+    // In flow inside the pane's toolbar wrapper, so the native page view already sits below it;
+    // yielding would hide the very page asking for the permission.
     <div
       role="alertdialog"
       aria-label="Site permission request"
+      data-native-terminal-yield="off"
       data-testid="browser-permission-prompt"
       className="flex flex-wrap items-center gap-2 border-b border-border bg-popover px-3 py-1.5 text-[11px]"
     >
