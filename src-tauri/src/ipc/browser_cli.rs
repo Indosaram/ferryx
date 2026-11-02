@@ -727,6 +727,14 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                 .map_err(|e| IpcError::new(IpcErrorCode::BrowserAutomationFailed, e.to_string()))
         }
         RemoteBrowserOperation::Reload { browser_id } => {
+            #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+            if crate::browser::cef_engine::is_cef_tab(&browser_id) {
+                let state = manager.begin_reload(&browser_id)?;
+                crate::browser::cef_engine::reload(&browser_id, false)?;
+                return serde_json::to_value(&state).map_err(|e| {
+                    IpcError::new(IpcErrorCode::BrowserAutomationFailed, e.to_string())
+                });
+            }
             let state = manager.begin_reload(&browser_id)?;
             let webview = app
                 .get_webview(&state.webview_label)
@@ -2393,7 +2401,7 @@ where
 /// CLI reload, matching `cmd_browser_reload` without a hard reload: the GUI toolbar is told
 /// about the loading state, and a failed reload clears `loading` and records the error
 /// instead of leaving the session stuck. The webview is resolved first, so a missing one
-/// leaves the session untouched.
+/// leaves the session untouched. An engine (CEF) tab has no webview and reloads in the engine.
 #[cfg(feature = "desktop")]
 fn reload_browser_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -2406,14 +2414,7 @@ fn reload_browser_session<R: tauri::Runtime>(
             crate::browser::BrowserStateChangedPayload::from(state),
         );
     };
-    let label = manager.get_webview_label(browser_id)?;
-    let webview = app
-        .get_webview(&label)
-        .ok_or_else(|| BrowserError::WebviewNotFound(label.clone()))?;
-    let state = manager.begin_reload(browser_id)?;
-    emit_state(&state);
-    if let Err(error) = webview.reload() {
-        let message = error.to_string();
+    let reload_failed = |message: String| -> IpcError {
         if let Ok(error_state) = manager.update_navigation_state(
             browser_id,
             None,
@@ -2425,9 +2426,24 @@ fn reload_browser_session<R: tauri::Runtime>(
         ) {
             emit_state(&error_state);
         }
-        return Err(BrowserError::NavigationFailed(message).into());
+        BrowserError::NavigationFailed(message).into()
+    };
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    if crate::browser::cef_engine::is_cef_tab(browser_id) {
+        let state = manager.begin_reload(browser_id)?;
+        emit_state(&state);
+        return crate::browser::cef_engine::reload(browser_id, false)
+            .map_err(|error| reload_failed(error.to_string()));
     }
-    Ok(())
+    let label = manager.get_webview_label(browser_id)?;
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| BrowserError::WebviewNotFound(label.clone()))?;
+    let state = manager.begin_reload(browser_id)?;
+    emit_state(&state);
+    webview
+        .reload()
+        .map_err(|error| reload_failed(error.to_string()))
 }
 
 #[cfg(feature = "desktop")]

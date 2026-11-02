@@ -1774,15 +1774,21 @@ fn cef_event_sink<R: tauri::Runtime>(
                 (tab, update)
             }
             Event::Loading { tab, loading, can_go_back, can_go_forward } => {
-                let update = manager.update_navigation_state(
-                    &tab,
-                    None,
-                    None,
-                    Some(loading),
-                    Some(can_go_back),
-                    Some(can_go_forward),
-                    None,
-                );
+                // A main-frame load start is a new document even at the same URL (an engine
+                // reload, a form post), so refs observed on the previous one must go stale.
+                let update = if loading {
+                    manager.begin_engine_load(&tab, can_go_back, can_go_forward)
+                } else {
+                    manager.update_navigation_state(
+                        &tab,
+                        None,
+                        None,
+                        Some(false),
+                        Some(can_go_back),
+                        Some(can_go_forward),
+                        None,
+                    )
+                };
                 (tab, update)
             }
             Event::Closed { tab } => {
@@ -2394,6 +2400,25 @@ pub(crate) fn history_navigation<R: tauri::Runtime>(
     browser_id: &str,
     forward: bool,
 ) -> Result<(), IpcError> {
+    // An engine tab has no webview: the engine moves its own history. The dispatch
+    // invalidates refs first, since the move loads another document.
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    if crate::browser::cef_engine::is_cef_tab(browser_id) {
+        let (state, dispatch) = manager.begin_history_dispatch(browser_id, forward)?;
+        emit_session_state(app, &state);
+        if !dispatch {
+            return Ok(());
+        }
+        if let Err(error) = crate::browser::cef_engine::history(browser_id, forward) {
+            if state.loading {
+                if let Ok(restored) = manager.cancel_history_navigation(browser_id, forward) {
+                    emit_session_state(app, &restored);
+                }
+            }
+            return Err(error.into());
+        }
+        return Ok(());
+    }
     // Resolve the webview before the dispatch records anything, so a missing webview
     // leaves the session's loading state and generation untouched.
     let label = manager.get_webview_label(browser_id)?;
