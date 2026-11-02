@@ -10,7 +10,7 @@
 use super::{Answer, PermissionKind};
 use block2::{Block, RcBlock};
 use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
-use objc2::sel;
+use objc2::{msg_send, sel};
 use objc2_web_kit::{WKMediaCaptureType, WKPermissionDecision, WKSecurityOrigin};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -57,11 +57,19 @@ pub fn origin_string(protocol: &str, host: &str, port: isize) -> String {
     }
 }
 
-fn swizzle() {
+/// Replaces the media capture method on the class of `webview`'s UI delegate. wry declares that
+/// class without an explicit runtime name, so objc2 names it after the module path and wry's
+/// version (`wry::wkwebview::class::wry_web_view_ui_delegate::WryWebViewUIDelegate0.55.1`), and a
+/// lookup by the bare name never finds it. The live delegate's class is the right one.
+fn swizzle(webview: *mut AnyObject) {
     SWIZZLE.call_once(|| {
         let selector = sel!(webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:);
-        let Some(class) = AnyClass::get(c"WryWebViewUIDelegate") else {
-            tracing::warn!("wry's UI delegate class is missing: browser media requests keep WebKit's default prompt");
+        // SAFETY: `webview` is the live WKWebView wry hands to `with_webview` on the main thread,
+        // and `UIDelegate` is a property read that returns nil or an object.
+        let delegate: *mut AnyObject = unsafe { msg_send![webview, UIDelegate] };
+        // SAFETY: a non-null delegate is a live Objective-C object for the duration of the call.
+        let Some(class): Option<&AnyClass> = (unsafe { delegate.as_ref() }).map(|delegate| delegate.class()) else {
+            tracing::warn!("the browser webview has no UI delegate: browser media requests keep WebKit's default prompt");
             return;
         };
         let Some(method) = class.instance_method(selector) else {
@@ -82,8 +90,8 @@ fn swizzle() {
 pub fn install<R: tauri::Runtime>(webview: &tauri::Webview<R>, browser_id: &str) {
     let browser_id = browser_id.to_string();
     let result = webview.with_webview(move |platform| {
-        swizzle();
         let view = platform.inner() as usize;
+        swizzle(view as *mut AnyObject);
         TAB_VIEWS.with_borrow_mut(|views| views.insert(view, browser_id));
     });
     if let Err(error) = result {

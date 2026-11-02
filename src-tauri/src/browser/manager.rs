@@ -335,6 +335,25 @@ impl BrowserManager {
         Ok(valid_url)
     }
 
+    /// Rolls back a navigation that turned into a download: the engine never committed it, so the
+    /// page (and its URL) is still the previous one, and no load event will ever clear `loading`.
+    /// Only a session whose current URL is `url` is touched. Returns the restored state, if any.
+    pub fn abandon_navigation_to(&self, browser_id: &str, url: &str) -> Option<BrowserState> {
+        let mut guard = self.sessions.write();
+        let s = guard.get_mut(browser_id)?;
+        if s.url != url {
+            return None;
+        }
+        if s.history_index > 0 && s.history.get(s.history_index).is_some_and(|entry| entry == url) {
+            s.history.remove(s.history_index);
+            s.history_index -= 1;
+            s.url = s.history[s.history_index].clone();
+        }
+        s.loading = false;
+        sync_history_flags(s);
+        Some(browser_state(s))
+    }
+
     pub fn begin_reload(&self, browser_id: &str) -> Result<BrowserState, BrowserError> {
         let mut guard = self.sessions.write();
         let s = guard
@@ -954,6 +973,18 @@ pub fn order_sessions_by_creation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_navigation_that_became_a_download_restores_the_page_url() {
+        let manager = BrowserManager::new();
+        manager.register_session(create_request("download-a")).unwrap();
+        manager.update_url("download-a", "https://example.com/file.zip").unwrap();
+        let state = manager.abandon_navigation_to("download-a", "https://example.com/file.zip").unwrap();
+        assert_eq!(state.url, "https://example.com/");
+        assert!(!state.loading);
+        assert_eq!(manager.history_snapshot("download-a"), vec!["https://example.com/".to_string()]);
+        assert!(manager.abandon_navigation_to("download-a", "https://example.com/other.zip").is_none());
+    }
 
     #[test]
     fn history_snapshot_lists_a_tab_addresses_oldest_first() {
