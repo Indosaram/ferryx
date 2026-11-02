@@ -695,6 +695,9 @@ export type PreSpawnedBackend = {
   sessionId: string;
   daemonEpoch: string | null;
   incarnation: string | null;
+  /** Attach generation the session last had in another window. The new pane attaches with a
+   *  strictly higher one, because the backend rejects an attach older than its resident binding. */
+  attemptGeneration?: number;
 };
 
 export {
@@ -1349,6 +1352,19 @@ export function useWorkspaceStore({
         backendSessionId,
         ...(daemonEpoch !== null ? { daemonEpoch } : {}),
         ...(incarnation !== null ? { incarnation } : {}),
+        ...(backendOverride?.attemptGeneration !== undefined
+          ? {
+              attachTuple: {
+                backendSessionId: backendOverride.sessionId,
+                incarnation,
+                daemonEpoch: daemonEpoch ?? "",
+                frontendSessionId: sessionId,
+                paneIdentity: sessionId,
+                bindingKey: "",
+                attemptGeneration: backendOverride.attemptGeneration,
+              },
+            }
+          : {}),
         lifecycle: "working",
         ...(isRemoteWorkspaceId(workspaceId) || isPairedWorkspaceId(workspaceId)
           ? {
@@ -1429,13 +1445,15 @@ export function useWorkspaceStore({
    * leaving the backend session untouched.
    */
   const adoptBackendSession = useCallback(
-    async (worktree: Worktree, backend: PreSpawnedBackend, label?: string) => {
+    async (worktree: Worktree, backend: PreSpawnedBackend, label?: string, options?: { activate?: boolean }) => {
       const binding = await createSpawnedTab(worktree, label, backend);
       if (mountedWorkspaceIdRef.current !== workspaceId) return null;
       if (!stateRef.current.worktrees.some((candidate) => candidate.path === worktree.path)) {
         dispatch({ type: "SET_WORKTREES", worktrees: [...stateRef.current.worktrees, worktree] });
       }
-      dispatch({ type: "ADD_TAB_WITH_SESSION", ...binding, targetWorktreePath: worktree.path, activate: false });
+      const activate = options?.activate === true;
+      dispatch({ type: "ADD_TAB_WITH_SESSION", ...binding, targetWorktreePath: worktree.path, activate });
+      if (activate) dispatch({ type: "SELECT_WORKTREE", path: worktree.path });
       return binding.tab.id;
     },
     [createSpawnedTab, dispatch, workspaceId],
@@ -2171,6 +2189,18 @@ export function useWorkspaceStore({
     [closeTab],
   );
 
+  /**
+   * Drops tabs whose sessions now belong to another window. Unlike `closeTab` this never closes
+   * a backend session: the daemon PTY keeps running and the new owner attaches to it. Unmounting
+   * the pane only detaches its native surface.
+   */
+  const releaseTabsForMove = useCallback(
+    (tabIds: readonly string[]) => {
+      for (const tabId of tabIds) dispatch({ type: "CLOSE_TAB", tabId });
+    },
+    [dispatch],
+  );
+
   const closeOtherTabs = useCallback(
     async (tabId: string) => {
       const snapshot = stateRef.current;
@@ -2697,6 +2727,7 @@ export function useWorkspaceStore({
     dispatchWorkspaceAction: dispatch,
     closeTab,
     closeOtherTabs,
+    releaseTabsForMove,
     closeTabsToRight,
     closeTabsToLeft,
     splitPane,

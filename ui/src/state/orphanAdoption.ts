@@ -21,6 +21,8 @@ export function planOrphanAdoption(
   sessionIds: readonly string[],
   state: WorkspaceState,
   liveSessions: readonly TerminalSessionSummary[],
+  /** Attach generations a source window reported, so the new pane attaches with a newer one. */
+  attemptGenerations: Readonly<Record<string, number>> = {},
 ): OrphanAdoptionPlan {
   const plan: OrphanAdoptionPlan = { adopt: [], alreadyAttached: [], missing: [] };
   const attached = new Set(
@@ -51,6 +53,7 @@ export function planOrphanAdoption(
         sessionId,
         daemonEpoch: summary.daemonEpoch ?? null,
         incarnation: summary.incarnation ?? null,
+        ...(attemptGenerations[sessionId] !== undefined ? { attemptGeneration: attemptGenerations[sessionId] } : {}),
       },
     });
   }
