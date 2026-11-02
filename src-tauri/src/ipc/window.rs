@@ -13,17 +13,19 @@
 //! env opt-in is the least invasive gate while the feature is QA'd. `cmd_window_new` itself is not
 //! gated: the UI decides whether to offer it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder, Window};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewUrl, WebviewWindowBuilder, Window};
 
 use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
-use crate::window_registry::{is_app_window_label, PRIMARY_WINDOW_LABEL, SECONDARY_WINDOW_PREFIX};
+use crate::window_registry::{
+    is_app_window_label, WindowRegistry, PRIMARY_WINDOW_LABEL, SECONDARY_WINDOW_PREFIX,
+};
 
 /// File (in the app data dir) holding the secondary window list.
 pub const WINDOWS_FILE_NAME: &str = "windows.json";
@@ -292,14 +294,17 @@ fn windows_focus_registrations() -> &'static Mutex<std::collections::HashMap<Str
 
 /// Window event hook: releases per-window native state of a destroyed secondary window.
 pub fn note_window_destroyed<R: Runtime>(window: &Window<R>) {
+    // Adoptions queued for a window that never booted must not outlive it; the sessions they
+    // named were re-owned to this window and are handed on as orphans by the destroy hook.
+    if let Some(pending) = window.app_handle().try_state::<PendingWindowAdoptions>() {
+        pending.forget(window.label());
+    }
     #[cfg(all(target_os = "windows", feature = "native-terminal"))]
     if let Some(root_hwnd) = windows_focus_registrations().lock().remove(window.label()) {
         crate::native_terminal::platform::windows_focus::unregister_windows_terminal_focus_window(
             root_hwnd,
         );
     }
-    #[cfg(not(all(target_os = "windows", feature = "native-terminal")))]
-    let _ = window;
 }
 
 /// Builds a secondary app window with the `main` window's attributes and runs the per-window
@@ -429,6 +434,229 @@ pub async fn cmd_window_new<R: Runtime>(
 #[tauri::command]
 pub fn cmd_window_list<R: Runtime>(app: AppHandle<R>) -> Vec<String> {
     app_window_labels(&app)
+}
+
+/// Event telling one window to adopt backend sessions moved to it from another window.
+/// Payload: [`WindowSessionsAdoptPayload`]. Emitted only to the target window (`emit_to`).
+pub const WINDOW_SESSIONS_ADOPT_EVENT: &str = "window_sessions_adopt";
+
+/// Live backend sessions a window should adopt as tabs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowSessionsAdoptPayload {
+    pub backend_session_ids: Vec<String>,
+    /// Make the adopted tab the active one.
+    pub activate: bool,
+    /// Workspace the tab came from, so a window showing another project can switch to it first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+}
+
+/// What [`PendingWindowAdoptions::deliver`] decided for a request.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AdoptionDelivery {
+    /// The window is listening: emit the request to it now.
+    Emit(WindowSessionsAdoptPayload),
+    /// The window has not booted yet: the request waits for its `take`.
+    Queued,
+}
+
+#[derive(Debug, Default)]
+struct PendingAdoptionsInner {
+    /// Windows that already pulled their queue, so their event listener is registered.
+    booted: HashSet<String>,
+    queued: HashMap<String, Vec<WindowSessionsAdoptPayload>>,
+}
+
+/// Adoption requests for windows that have not booted yet, keyed by window label.
+///
+/// A window registers its `window_sessions_adopt` listener first and then calls
+/// `cmd_window_take_pending_adoptions`. `take` marks the window booted under the same lock that
+/// drains the queue, so a request is either in the drained queue or emitted to a live listener,
+/// never lost between the two.
+#[derive(Debug, Default)]
+pub struct PendingWindowAdoptions {
+    inner: Mutex<PendingAdoptionsInner>,
+}
+
+impl PendingWindowAdoptions {
+    pub fn deliver(&self, label: &str, payload: WindowSessionsAdoptPayload) -> AdoptionDelivery {
+        let mut inner = self.inner.lock();
+        if inner.booted.contains(label) {
+            return AdoptionDelivery::Emit(payload);
+        }
+        inner.queued.entry(label.to_string()).or_default().push(payload);
+        AdoptionDelivery::Queued
+    }
+
+    /// Puts back a request whose emit failed; the window is treated as not booted again.
+    pub fn requeue(&self, label: &str, payload: WindowSessionsAdoptPayload) {
+        let mut inner = self.inner.lock();
+        inner.booted.remove(label);
+        inner.queued.entry(label.to_string()).or_default().push(payload);
+    }
+
+    /// Drains the queued requests of `label` in arrival order and marks the window booted.
+    pub fn take(&self, label: &str) -> Vec<WindowSessionsAdoptPayload> {
+        let mut inner = self.inner.lock();
+        inner.booted.insert(label.to_string());
+        inner.queued.remove(label).unwrap_or_default()
+    }
+
+    /// Drops everything known about a destroyed window.
+    pub fn forget(&self, label: &str) {
+        let mut inner = self.inner.lock();
+        inner.booted.remove(label);
+        inner.queued.remove(label);
+    }
+}
+
+/// Which of the requested sessions a window may hand over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MovePlan {
+    pub movable: Vec<String>,
+    /// Sessions another window owns; they are left alone.
+    pub skipped: Vec<String>,
+}
+
+/// Result of `cmd_window_move_sessions`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowMoveOutcome {
+    pub target_label: String,
+    pub moved: Vec<String>,
+    pub skipped: Vec<String>,
+    /// True when the target had not booted and the request waits for its first pull.
+    pub queued: bool,
+}
+
+/// Validates a move request without touching any window or session. A session may leave the
+/// calling window only when that window owns it or nobody has recorded an owner yet.
+pub fn plan_move(
+    registry: &WindowRegistry,
+    source_label: &str,
+    target_label: Option<&str>,
+    backend_session_ids: &[String],
+) -> Result<MovePlan, IpcError> {
+    if let Some(target) = target_label {
+        if !is_app_window_label(target) {
+            return Err(IpcError::new(
+                IpcErrorCode::InvalidArgument,
+                format!("{target} is not an app window"),
+            ));
+        }
+        if target == source_label {
+            return Err(IpcError::new(
+                IpcErrorCode::InvalidArgument,
+                "The sessions already live in that window",
+            ));
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut plan = MovePlan {
+        movable: Vec::new(),
+        skipped: Vec::new(),
+    };
+    for id in backend_session_ids {
+        if id.is_empty() || !seen.insert(id.as_str()) {
+            continue;
+        }
+        match registry.owner(id) {
+            Some(owner) if owner != source_label => plan.skipped.push(id.clone()),
+            _ => plan.movable.push(id.clone()),
+        }
+    }
+    if plan.movable.is_empty() {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidArgument,
+            "None of the sessions can be moved out of this window",
+        ));
+    }
+    Ok(plan)
+}
+
+/// Flips ownership of the planned sessions to `target_label` and tells only that window to adopt
+/// them. Nothing here closes, kills or re-spawns a session: the daemon PTY keeps running and the
+/// target attaches a new surface to it, replaying from the ring buffer.
+pub fn apply_move<R: Runtime>(
+    app: &AppHandle<R>,
+    registry: &WindowRegistry,
+    pending: &PendingWindowAdoptions,
+    target_label: &str,
+    plan: MovePlan,
+    workspace_id: Option<String>,
+) -> Result<WindowMoveOutcome, IpcError> {
+    if !is_app_window_label(target_label) || app.get_window(target_label).is_none() {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidArgument,
+            format!("Window {target_label} is not open"),
+        ));
+    }
+    for session_id in &plan.movable {
+        registry.set_owner(session_id, target_label);
+    }
+    let payload = WindowSessionsAdoptPayload {
+        backend_session_ids: plan.movable.clone(),
+        activate: true,
+        workspace_id,
+    };
+    let queued = match pending.deliver(target_label, payload) {
+        AdoptionDelivery::Queued => true,
+        AdoptionDelivery::Emit(payload) => {
+            match app.emit_to(target_label, WINDOW_SESSIONS_ADOPT_EVENT, payload.clone()) {
+                Ok(()) => false,
+                Err(error) => {
+                    tracing::warn!(%error, target = target_label, "Could not deliver an adoption request; queued it");
+                    pending.requeue(target_label, payload);
+                    true
+                }
+            }
+        }
+    };
+    Ok(WindowMoveOutcome {
+        target_label: target_label.to_string(),
+        moved: plan.movable,
+        skipped: plan.skipped,
+        queued,
+    })
+}
+
+/// Moves live terminal sessions to another window (`None` opens a new one).
+///
+/// The caller must already have detached its native surfaces; the sessions are never closed.
+/// Keystrokes typed while a session is between windows are not buffered: the source stops
+/// sending input once its surface is detached and the target does only after its attach.
+#[tauri::command]
+pub async fn cmd_window_move_sessions<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    registry: State<'_, WindowRegistry>,
+    pending: State<'_, PendingWindowAdoptions>,
+    target_label: Option<String>,
+    backend_session_ids: Vec<String>,
+    workspace_id: Option<String>,
+) -> Result<WindowMoveOutcome, IpcError> {
+    let plan = plan_move(
+        &registry,
+        window.label(),
+        target_label.as_deref(),
+        &backend_session_ids,
+    )?;
+    let target = match target_label {
+        Some(label) => label,
+        None => create_app_window(&app, None).await?,
+    };
+    apply_move(&app, &registry, &pending, &target, plan, workspace_id)
+}
+
+/// Adoption requests queued for the calling window while it booted. A window calls this once its
+/// `window_sessions_adopt` listener is registered; later requests arrive as events.
+#[tauri::command]
+pub fn cmd_window_take_pending_adoptions<R: Runtime>(
+    window: Window<R>,
+    pending: State<'_, PendingWindowAdoptions>,
+) -> Vec<WindowSessionsAdoptPayload> {
+    pending.take(window.label())
 }
 
 #[cfg(test)]
@@ -580,6 +808,185 @@ mod tests {
         assert!(!multi_window_enabled_from(None));
         assert!(!multi_window_enabled_from(Some("0")));
         assert!(!multi_window_enabled_from(Some("")));
+    }
+
+    type MockWindow = tauri::WebviewWindow<tauri::test::MockRuntime>;
+
+    fn adopt(ids: &[&str]) -> WindowSessionsAdoptPayload {
+        WindowSessionsAdoptPayload {
+            backend_session_ids: ids.iter().map(|id| id.to_string()).collect(),
+            activate: true,
+            workspace_id: None,
+        }
+    }
+
+    fn two_window_app() -> (tauri::App<tauri::test::MockRuntime>, MockWindow, MockWindow) {
+        let app = tauri::test::mock_app();
+        let main = tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::default())
+            .build()
+            .expect("main window");
+        let secondary =
+            tauri::WebviewWindowBuilder::new(&app, "ws-test", tauri::WebviewUrl::default())
+                .build()
+                .expect("secondary window");
+        (app, main, secondary)
+    }
+
+    fn record_adoptions(window: &MockWindow) -> std::sync::mpsc::Receiver<String> {
+        use tauri::Listener;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        window.listen(WINDOW_SESSIONS_ADOPT_EVENT, move |event| {
+            let _ = sender.send(event.payload().to_owned());
+        });
+        receiver
+    }
+
+    #[test]
+    fn pending_adoptions_queue_until_the_window_boots_then_emit_directly() {
+        let pending = PendingWindowAdoptions::default();
+        assert_eq!(pending.deliver("ws-a", adopt(&["s1"])), AdoptionDelivery::Queued);
+        assert_eq!(pending.deliver("ws-a", adopt(&["s2"])), AdoptionDelivery::Queued);
+        // Another window's queue is independent.
+        assert_eq!(pending.deliver("ws-b", adopt(&["s3"])), AdoptionDelivery::Queued);
+
+        assert_eq!(pending.take("ws-a"), vec![adopt(&["s1"]), adopt(&["s2"])]);
+        assert!(pending.take("ws-a").is_empty(), "each request is delivered once");
+        assert_eq!(
+            pending.deliver("ws-a", adopt(&["s4"])),
+            AdoptionDelivery::Emit(adopt(&["s4"]))
+        );
+        assert_eq!(pending.take("ws-b"), vec![adopt(&["s3"])]);
+    }
+
+    #[test]
+    fn requeue_and_forget_reset_a_window() {
+        let pending = PendingWindowAdoptions::default();
+        assert!(pending.take("ws-a").is_empty());
+        pending.requeue("ws-a", adopt(&["s1"]));
+        assert_eq!(pending.deliver("ws-a", adopt(&["s2"])), AdoptionDelivery::Queued);
+        pending.forget("ws-a");
+        assert!(pending.take("ws-a").is_empty(), "a destroyed window keeps no queue");
+        assert_eq!(
+            pending.deliver("ws-a", adopt(&["s3"])),
+            AdoptionDelivery::Emit(adopt(&["s3"])),
+            "take after forget booted it again"
+        );
+        pending.forget("ws-a");
+        assert_eq!(pending.deliver("ws-a", adopt(&["s4"])), AdoptionDelivery::Queued);
+    }
+
+    #[test]
+    fn adopt_payload_serializes_camel_case_without_an_empty_workspace() {
+        let json = serde_json::to_value(adopt(&["s1"])).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "backendSessionIds": ["s1"], "activate": true })
+        );
+        let with_workspace = WindowSessionsAdoptPayload {
+            workspace_id: Some("w1".into()),
+            ..adopt(&["s1"])
+        };
+        assert_eq!(serde_json::to_value(with_workspace).unwrap()["workspaceId"], "w1");
+    }
+
+    #[test]
+    fn plan_move_keeps_owned_and_unowned_sessions_and_skips_foreign_ones() {
+        let registry = WindowRegistry::default();
+        registry.set_owner("mine", "main");
+        registry.set_owner("theirs", "ws-other");
+        let ids: Vec<String> = ["mine", "unowned", "theirs", "mine", ""]
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
+        let plan = plan_move(&registry, "main", Some("ws-test"), &ids).unwrap();
+        assert_eq!(plan.movable, vec!["mine", "unowned"]);
+        assert_eq!(plan.skipped, vec!["theirs"]);
+    }
+
+    #[test]
+    fn plan_move_rejects_bad_targets_and_empty_plans() {
+        let registry = WindowRegistry::default();
+        registry.set_owner("theirs", "ws-other");
+        let ids = vec!["s1".to_string()];
+        assert!(plan_move(&registry, "main", Some("browser-1"), &ids).is_err());
+        assert!(plan_move(&registry, "main", Some("main"), &ids).is_err());
+        assert!(plan_move(&registry, "main", None, &["theirs".to_string()]).is_err());
+        assert!(plan_move(&registry, "main", None, &[]).is_err());
+        assert!(plan_move(&registry, "main", None, &ids).is_ok());
+    }
+
+    #[test]
+    fn move_to_a_booted_window_flips_ownership_and_emits_only_to_it() {
+        let (app, main, secondary) = two_window_app();
+        let registry = WindowRegistry::default();
+        registry.set_owner("s1", "main");
+        let pending = PendingWindowAdoptions::default();
+        assert!(pending.take("ws-test").is_empty());
+        let main_events = record_adoptions(&main);
+        let ws_events = record_adoptions(&secondary);
+
+        let plan = plan_move(&registry, "main", Some("ws-test"), &["s1".to_string()]).unwrap();
+        let outcome = apply_move(
+            app.handle(),
+            &registry,
+            &pending,
+            "ws-test",
+            plan,
+            Some("w1".into()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            WindowMoveOutcome {
+                target_label: "ws-test".into(),
+                moved: vec!["s1".into()],
+                skipped: vec![],
+                queued: false,
+            }
+        );
+        assert_eq!(registry.owner("s1").as_deref(), Some("ws-test"));
+        let payload: serde_json::Value =
+            serde_json::from_str(&ws_events.try_recv().expect("target is told to adopt")).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({ "backendSessionIds": ["s1"], "activate": true, "workspaceId": "w1" })
+        );
+        assert!(main_events.try_recv().is_err(), "the source window is not a target");
+    }
+
+    #[test]
+    fn move_to_a_window_that_has_not_booted_queues_for_its_first_pull() {
+        let (app, main, secondary) = two_window_app();
+        let registry = WindowRegistry::default();
+        let pending = PendingWindowAdoptions::default();
+        let main_events = record_adoptions(&main);
+        let ws_events = record_adoptions(&secondary);
+
+        let plan = plan_move(&registry, "main", Some("ws-test"), &["s1".to_string()]).unwrap();
+        let outcome =
+            apply_move(app.handle(), &registry, &pending, "ws-test", plan, None).unwrap();
+
+        assert!(outcome.queued);
+        assert_eq!(registry.owner("s1").as_deref(), Some("ws-test"));
+        assert!(ws_events.try_recv().is_err(), "nothing is emitted to a window that cannot listen yet");
+        assert!(main_events.try_recv().is_err());
+        assert_eq!(pending.take("ws-test"), vec![adopt(&["s1"])]);
+    }
+
+    #[test]
+    fn move_to_a_closed_window_is_refused_without_changing_ownership() {
+        let (app, _main, _secondary) = two_window_app();
+        let registry = WindowRegistry::default();
+        registry.set_owner("s1", "main");
+        let pending = PendingWindowAdoptions::default();
+        let plan = MovePlan {
+            movable: vec!["s1".into()],
+            skipped: vec![],
+        };
+        assert!(apply_move(app.handle(), &registry, &pending, "ws-gone", plan, None).is_err());
+        assert_eq!(registry.owner("s1").as_deref(), Some("main"));
+        assert!(pending.take("ws-gone").is_empty());
     }
 
     #[test]

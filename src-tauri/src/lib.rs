@@ -1755,6 +1755,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .manage(in_process_backend)
         .manage(crate::ipc::updater::UpdaterDownloadState::default());
     let builder = builder.manage(window_registry::WindowRegistry::default());
+    let builder = builder.manage(crate::ipc::window::PendingWindowAdoptions::default());
     let builder = match file_preview_service {
         Some(service) => builder.manage(service),
         None => builder,
@@ -1954,6 +1955,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::ipc::session::cmd_session_discard_window,
         crate::ipc::window::cmd_window_new,
         crate::ipc::window::cmd_window_list,
+        crate::ipc::window::cmd_window_move_sessions,
+        crate::ipc::window::cmd_window_take_pending_adoptions,
         cmd_cli_launcher_status,
         cmd_cli_launcher_install,
         cmd_agents_detect,
