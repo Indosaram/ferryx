@@ -221,6 +221,36 @@ mod imp {
         fn XSync(display: *mut c_void, discard: c_int) -> c_int;
         fn XFlush(display: *mut c_void) -> c_int;
         fn XSetErrorHandler(handler: Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int>) -> *mut c_void;
+        fn XDefaultRootWindow(display: *mut c_void) -> c_ulong;
+        fn XTranslateCoordinates(
+            display: *mut c_void,
+            src: c_ulong,
+            dest: c_ulong,
+            src_x: c_int,
+            src_y: c_int,
+            dest_x: *mut c_int,
+            dest_y: *mut c_int,
+            child: *mut c_ulong,
+        ) -> c_int;
+        fn XQueryPointer(
+            display: *mut c_void,
+            window: c_ulong,
+            root: *mut c_ulong,
+            child: *mut c_ulong,
+            root_x: *mut c_int,
+            root_y: *mut c_int,
+            x: *mut c_int,
+            y: *mut c_int,
+            mask: *mut c_uint,
+        ) -> c_int;
+        fn XKeysymToKeycode(display: *mut c_void, keysym: c_ulong) -> u8;
+    }
+
+    #[link(name = "Xtst")]
+    unsafe extern "C" {
+        fn XTestFakeMotionEvent(display: *mut c_void, screen: c_int, x: c_int, y: c_int, delay: c_ulong) -> c_int;
+        fn XTestFakeButtonEvent(display: *mut c_void, button: c_uint, is_press: c_int, delay: c_ulong) -> c_int;
+        fn XTestFakeKeyEvent(display: *mut c_void, keycode: c_uint, is_press: c_int, delay: c_ulong) -> c_int;
     }
 
     /// Xlib's default error handler exits the process. A pane window can vanish between a
@@ -348,6 +378,40 @@ mod imp {
             XGetInputFocus(display, &mut focused, &mut revert);
         }
         eprintln!("ferryx-engine: focus: XSetInputFocus({target:#x}), X focus now {focused:#x}");
+    }
+
+    /// Clicks the window at (`x`, `y`) (window pixels) through the X server, the way a user
+    /// would, then presses Ctrl+A, and puts the pointer back. For Chrome's location bar, which
+    /// takes focus from a click but not from IDC_FOCUS_LOCATION inside the embedded window.
+    pub fn click_and_select_all(window: &Window, x: c_int, y: c_int) -> bool {
+        const XK_CONTROL_L: c_ulong = 0xffe3;
+        const XK_A: c_ulong = 0x0061;
+        let (Some(_), Some(display)) = (parent(), display()) else { return false };
+        // SAFETY: as in `move_resize`; plain out-parameters, and fake input events on a live
+        // display.
+        unsafe {
+            let root = XDefaultRootWindow(display);
+            let (mut root_x, mut root_y, mut child) = (0, 0, 0);
+            if XTranslateCoordinates(display, xid(window), root, x, y, &mut root_x, &mut root_y, &mut child) == 0 {
+                return false;
+            }
+            let (mut r, mut c, mut px, mut py, mut wx, mut wy, mut mask) = (0, 0, 0, 0, 0, 0, 0);
+            let had_pointer = XQueryPointer(display, root, &mut r, &mut c, &mut px, &mut py, &mut wx, &mut wy, &mut mask) != 0;
+            let (control, a) = (XKeysymToKeycode(display, XK_CONTROL_L), XKeysymToKeycode(display, XK_A));
+            let mut sent = XTestFakeMotionEvent(display, -1, root_x, root_y, 0) != 0
+                && XTestFakeButtonEvent(display, 1, 1, 0) != 0
+                && XTestFakeButtonEvent(display, 1, 0, 0) != 0;
+            if sent && control != 0 && a != 0 {
+                sent = [(control, 1), (a, 1), (a, 0), (control, 0)]
+                    .into_iter()
+                    .all(|(code, press)| XTestFakeKeyEvent(display, c_uint::from(code), press, 0) != 0);
+            }
+            if had_pointer {
+                XTestFakeMotionEvent(display, -1, px, py, 0);
+            }
+            XFlush(display);
+            sent
+        }
     }
 
     /// The window manager focuses the Ferryx toplevel on a click and never a child window of
@@ -588,3 +652,5 @@ mod imp {
 }
 
 pub use imp::{embed, focus, handle, place, raise};
+#[cfg(target_os = "linux")]
+pub use imp::click_and_select_all;
