@@ -109,17 +109,27 @@ impl SiteZoomStore {
         }
     }
 
-    /// Writes the store through a temp file and a rename. Blocking: run through `run_blocking`.
+    /// Writes the store through a unique temp file and a rename, so concurrent saves never
+    /// share a temp file. Blocking: run through `run_blocking`.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let parent = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        std::fs::create_dir_all(parent)?;
         let json = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
-        let temp = path.with_extension("json.tmp");
-        std::fs::write(&temp, json)?;
-        std::fs::rename(&temp, path)
+        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+        std::io::Write::write_all(&mut temp, &json)?;
+        temp.persist(path).map_err(|error| error.error)?;
+        Ok(())
     }
 }
+
+/// Device names Windows reserves in every directory, with any extension.
+const WINDOWS_RESERVED_NAMES: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1",
+    "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
 
 /// A file name a page suggested, reduced to one safe path component.
 pub fn safe_file_name(suggested: &str) -> String {
@@ -130,7 +140,12 @@ pub fn safe_file_name(suggested: &str) -> String {
         .collect();
     let cleaned = cleaned.trim().trim_start_matches('.').trim_end_matches(['.', ' ']).to_string();
     if cleaned.is_empty() {
-        "download".to_string()
+        return "download".to_string();
+    }
+    // On every OS: the file may sync to a Windows machine.
+    let stem = cleaned.split('.').next().unwrap_or_default().trim_end_matches(' ');
+    if WINDOWS_RESERVED_NAMES.iter().any(|name| stem.eq_ignore_ascii_case(name)) {
+        format!("_{cleaned}")
     } else {
         cleaned
     }
@@ -356,6 +371,14 @@ mod tests {
         assert_eq!(safe_file_name("C:\\x\\a?b.txt"), "a_b.txt");
         assert_eq!(safe_file_name("..."), "download");
         assert_eq!(safe_file_name(".bashrc"), "bashrc");
+        assert_eq!(safe_file_name("CON"), "_CON");
+        assert_eq!(safe_file_name("nul.txt"), "_nul.txt");
+        assert_eq!(safe_file_name("Com1.tar.gz"), "_Com1.tar.gz");
+        assert_eq!(safe_file_name("lpt9"), "_lpt9");
+        assert_eq!(safe_file_name("aux .txt"), "_aux .txt");
+        assert_eq!(safe_file_name("CONSOLE.txt"), "CONSOLE.txt");
+        assert_eq!(safe_file_name("COM10"), "COM10");
+        assert_eq!(safe_file_name("aux_file"), "aux_file");
         let dir = Path::new("/d");
         let taken = [PathBuf::from("/d/a.tar.gz"), PathBuf::from("/d/a (1).tar.gz")];
         assert_eq!(

@@ -10,6 +10,8 @@
 //!    against the signed manifest (a short, cut off, oversized or changed download is refused
 //!    and its part file removed);
 //! 3. unpacks it into `<root>/.staging-*` and renames that to `<root>/<version>_<sha12>`;
+//!    a version dir is complete only with its `.ferryx-complete` marker, written last;
+//!    symlinks are restored (Unix only) when they point inside the engine dir;
 //! 4. points `<root>/active` at the new directory (written to a temp file and renamed over the
 //!    old pointer, so a crash leaves either the old or the new engine active, never neither),
 //!    remembers the one it replaced in `<root>/previous` for rollback, and removes older ones.
@@ -26,6 +28,7 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
+use std::time::Duration;
 
 /// The engine version this build drives. The engine's switches and window handling change with
 /// the Ferryx side, so the app only installs the build made for it.
@@ -54,6 +57,23 @@ pub const DEBUG_PUBLIC_KEY_ENV: &str = "FERRYX_BROWSER_ENGINE_PUBLIC_KEY";
 
 const ACTIVE_POINTER: &str = "active";
 const PREVIOUS_POINTER: &str = "previous";
+/// Written last into an unpacked engine dir; a dir without it is damaged and unpacked again.
+const COMPLETE_MARKER: &str = ".ferryx-complete";
+
+/// How long the engine download waits to connect.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the engine download waits for the next bytes before giving up on a stalled server.
+pub const READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The client for engine downloads. Per-read rather than whole-request timeouts, so a slow but
+/// moving download finishes while a stalled one fails instead of keeping the install busy.
+pub fn http_client(connect: Duration, read: Duration) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(concat!("Ferryx/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(connect)
+        .read_timeout(read)
+        .build()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -236,14 +256,26 @@ fn read_pointer(root: &Path, pointer: &str) -> Option<String> {
     is_single_component(name).then(|| name.to_string())
 }
 
-/// Replaces a pointer file in one rename, so readers see the old or the new name.
+/// Replaces a pointer file in one rename, so readers see the old or the new name. The temp file
+/// is synced before the rename, so a crash cannot leave the pointer empty.
 fn write_pointer(root: &Path, pointer: &str, name: &str) -> Result<(), InstallError> {
+    use std::io::Write;
     let temp = root.join(format!(".{pointer}-{}", uuid::Uuid::new_v4()));
-    let result = std::fs::write(&temp, name).and_then(|()| std::fs::rename(&temp, root.join(pointer)));
+    let result = std::fs::File::create(&temp)
+        .and_then(|mut file| {
+            file.write_all(name.as_bytes())?;
+            file.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&temp, root.join(pointer)));
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
     }
-    Ok(result?)
+    result?;
+    #[cfg(unix)]
+    if let Err(error) = std::fs::File::open(root).and_then(|dir| dir.sync_all()) {
+        tracing::warn!(root = %root.display(), "could not sync the engine dir: {error}");
+    }
+    Ok(())
 }
 
 /// Picks this platform's artifact from a manifest made for this build.
@@ -444,7 +476,7 @@ pub fn install_archive(
         return Err(InstallError::BadManifest { detail: format!("bad version {version}") });
     }
     let target = root.join(&name);
-    if !target.join(executable).is_file() {
+    if !target.join(COMPLETE_MARKER).is_file() {
         let file = std::fs::File::open(archive)?;
         let staging = root.join(format!(".staging-{}", uuid::Uuid::new_v4()));
         let result = unpack_into(file, &staging, executable).and_then(|()| {
@@ -543,11 +575,24 @@ fn unpack_into(reader: impl Read + std::io::Seek, staging: &Path, executable: &s
     let bad = |error: zip::result::ZipError| InstallError::BadArchive { detail: error.to_string() };
     let mut archive = zip::ZipArchive::new(reader).map_err(bad)?;
     std::fs::create_dir_all(staging)?;
+    // Links are made after every other entry, so no entry is written through one.
+    let mut links = Vec::new();
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(bad)?;
         let relative = safe_relative(entry.name()).ok_or_else(|| InstallError::BadArchive {
             detail: format!("unsafe entry {}", entry.name()),
         })?;
+        if entry.is_symlink() {
+            let mut target = String::new();
+            entry.read_to_string(&mut target)?;
+            if !link_stays_inside(&relative, &target) {
+                return Err(InstallError::BadArchive {
+                    detail: format!("symlink entry {} points outside the engine", entry.name()),
+                });
+            }
+            links.push((relative, target));
+            continue;
+        }
         let path = staging.join(relative);
         if entry.is_dir() {
             std::fs::create_dir_all(&path)?;
@@ -564,11 +609,77 @@ fn unpack_into(reader: impl Read + std::io::Seek, staging: &Path, executable: &s
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode & 0o777))?;
         }
+        out.sync_all()?;
+    }
+    for (relative, target) in links {
+        restore_link(staging, &relative, &target)?;
     }
     if !staging.join(executable).is_file() {
         return Err(InstallError::MissingExecutable { executable: executable.to_string() });
     }
+    std::fs::File::create(staging.join(COMPLETE_MARKER))?.sync_all()?;
+    // Some volumes refuse to sync a directory; the synced files and marker still stand.
+    #[cfg(unix)]
+    if let Err(error) = std::fs::File::open(staging).and_then(|dir| dir.sync_all()) {
+        tracing::warn!(dir = %staging.display(), "could not sync the unpacked engine dir: {error}");
+    }
     Ok(())
+}
+
+/// Whether `target`, resolved against the parent of the link at `relative`, stays inside the
+/// unpack dir without passing above it. `..` may only lead the target: after a name it could
+/// climb out of another link's target, which a lexical check cannot follow.
+fn link_stays_inside(relative: &Path, target: &str) -> bool {
+    if target.is_empty() {
+        return false;
+    }
+    let mut depth = relative.components().count().saturating_sub(1);
+    let mut descended = false;
+    for component in Path::new(target).components() {
+        match component {
+            Component::Normal(_) => {
+                depth += 1;
+                descended = true;
+            }
+            Component::CurDir => {}
+            Component::ParentDir if descended => return false,
+            Component::ParentDir => match depth.checked_sub(1) {
+                Some(up) => depth = up,
+                None => return false,
+            },
+            Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    true
+}
+
+/// Makes a checked link. One under another link would resolve from somewhere other than where it
+/// was checked, and one over another entry would replace it; both are refused.
+#[cfg(unix)]
+fn restore_link(staging: &Path, relative: &Path, target: &str) -> Result<(), InstallError> {
+    let is_link = |path: &Path| path.symlink_metadata().is_ok_and(|meta| meta.file_type().is_symlink());
+    let path = staging.join(relative);
+    if relative.ancestors().skip(1).any(|ancestor| is_link(&staging.join(ancestor))) {
+        return Err(InstallError::BadArchive {
+            detail: format!("symlink entry {} is inside another symlink", relative.display()),
+        });
+    }
+    if path.symlink_metadata().is_ok() {
+        return Err(InstallError::BadArchive {
+            detail: format!("symlink entry {} replaces another entry", relative.display()),
+        });
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::os::unix::fs::symlink(target, &path)?;
+    Ok(())
+}
+
+/// Engines for this platform carry no symlinks; one would otherwise become a regular file.
+#[cfg(not(unix))]
+fn restore_link(_staging: &Path, relative: &Path, _target: &str) -> Result<(), InstallError> {
+    Err(InstallError::BadArchive { detail: format!("symlink entry {}", relative.display()) })
 }
 
 fn safe_relative(name: &str) -> Option<PathBuf> {
@@ -1008,6 +1119,7 @@ mod tests {
         let dir = unpack(&bytes, data.path(), "engine.exe").expect("unpack");
         assert_eq!(dir, install_dir(data.path()));
         assert_eq!(std::fs::read(dir.join("locales/en-US.pak")).expect("pak"), b"pak");
+        assert!(dir.join(COMPLETE_MARKER).is_file());
         assert!(leftovers(data.path()).is_empty(), "{:?}", leftovers(data.path()));
         assert_eq!(
             status_for_any_platform(data.path(), "engine.exe"),
@@ -1022,6 +1134,115 @@ mod tests {
     }
 
     #[test]
+    fn reinstalling_repairs_a_damaged_engine_dir() {
+        let data = tempfile::tempdir().expect("tempdir");
+        let bytes = zip_of(&[("engine.exe", b"bin"), ("locales/en-US.pak", b"pak")]);
+        let dir = unpack(&bytes, data.path(), "engine.exe").expect("first");
+        std::fs::remove_file(dir.join("locales/en-US.pak")).expect("damage");
+        std::fs::remove_file(dir.join(COMPLETE_MARKER)).expect("unmark");
+        let again = unpack(&bytes, data.path(), "engine.exe").expect("again");
+        assert_eq!(again, dir);
+        assert_eq!(std::fs::read(dir.join("locales/en-US.pak")).expect("pak"), b"pak");
+        assert!(dir.join(COMPLETE_MARKER).is_file());
+        assert!(leftovers(data.path()).is_empty(), "{:?}", leftovers(data.path()));
+    }
+
+    /// A zip with `links` (name, target) first, then `files` and an `engine.exe`.
+    fn zip_with_links(links: &[(&str, &str)], files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(&mut out);
+        for (name, target) in links {
+            writer
+                .add_symlink(*name, *target, zip::write::SimpleFileOptions::default())
+                .expect("symlink entry");
+        }
+        let mut files = files.to_vec();
+        files.push(("engine.exe", &b"bin"[..]));
+        for (name, body) in &files {
+            writer
+                .start_file(*name, zip::write::SimpleFileOptions::default())
+                .expect("start entry");
+            writer.write_all(body).expect("write entry");
+        }
+        writer.finish().expect("finish zip");
+        out.into_inner()
+    }
+
+    /// A refused archive leaves no staging dir, version dir or pointer behind.
+    fn assert_nothing_installed(data: &Path) {
+        let entries: Vec<_> = std::fs::read_dir(engine_root(data))
+            .expect("root")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect();
+        assert!(entries.is_empty(), "{entries:?}");
+        assert_eq!(active_dir(data), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unpack_restores_symlinks_that_stay_inside_the_engine() {
+        let data = tempfile::tempdir().expect("tempdir");
+        let bytes = zip_with_links(&[("Versions/Current", "A")], &[("Versions/A/x", b"x")]);
+        let dir = unpack(&bytes, data.path(), "engine.exe").expect("unpack");
+        let link = dir.join("Versions/Current");
+        assert!(link.symlink_metadata().expect("link").file_type().is_symlink());
+        assert_eq!(std::fs::read_link(&link).expect("target"), Path::new("A"));
+        assert_eq!(std::fs::read(link.join("x")).expect("through the link"), b"x");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unpack_rejects_symlinks_that_leave_the_engine() {
+        for target in ["/etc", "../../escape", "../..", "A/../../.."] {
+            let data = tempfile::tempdir().expect("tempdir");
+            let bytes = zip_with_links(&[("Versions/Current", target)], &[]);
+            assert_eq!(
+                unpack(&bytes, data.path(), "engine.exe"),
+                Err(InstallError::BadArchive {
+                    detail: "symlink entry Versions/Current points outside the engine".into()
+                }),
+                "{target}"
+            );
+            assert_nothing_installed(data.path());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unpack_never_writes_through_a_symlinked_dir() {
+        let data = tempfile::tempdir().expect("tempdir");
+        let bytes = zip_with_links(&[("lib", "A")], &[("A/keep", b"k"), ("lib/x", b"x")]);
+        assert_eq!(
+            unpack(&bytes, data.path(), "engine.exe"),
+            Err(InstallError::BadArchive { detail: "symlink entry lib replaces another entry".into() })
+        );
+        assert_nothing_installed(data.path());
+
+        let data = tempfile::tempdir().expect("tempdir");
+        let bytes = zip_with_links(&[("Versions", "real"), ("Versions/Current", "B")], &[("real/B/x", b"x")]);
+        assert_eq!(
+            unpack(&bytes, data.path(), "engine.exe"),
+            Err(InstallError::BadArchive {
+                detail: "symlink entry Versions/Current is inside another symlink".into()
+            })
+        );
+        assert_nothing_installed(data.path());
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn unpack_rejects_symlinks_where_they_cannot_be_restored() {
+        let data = tempfile::tempdir().expect("tempdir");
+        let bytes = zip_with_links(&[("Versions/Current", "A")], &[("Versions/A/x", b"x")]);
+        assert!(matches!(
+            unpack(&bytes, data.path(), "engine.exe"),
+            Err(InstallError::BadArchive { .. })
+        ));
+        assert_nothing_installed(data.path());
+    }
+
+    #[test]
     fn unpack_rejects_escaping_entries_and_missing_executable() {
         let data = tempfile::tempdir().expect("tempdir");
         let escaping = zip_of(&[("../evil.exe", b"x"), ("engine.exe", b"bin")]);
@@ -1029,6 +1250,7 @@ mod tests {
             unpack(&escaping, data.path(), "engine.exe"),
             Err(InstallError::BadArchive { .. })
         ));
+        assert!(!engine_root(data.path()).join("evil.exe").exists());
         assert!(!data.path().join("evil.exe").exists());
         let incomplete = zip_of(&[("readme.txt", b"x")]);
         assert_eq!(
@@ -1122,6 +1344,46 @@ mod tests {
         assert!(matches!(InstallGuard::acquire(), Err(InstallError::Busy)));
         drop(guard);
         assert!(InstallGuard::acquire().is_ok());
+    }
+
+    /// A server that accepts, sends `head` and then neither sends more nor closes.
+    async fn stalled_server(head: &'static [u8]) -> String {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let url = format!("http://{}/engine.zip", listener.local_addr().expect("addr"));
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            socket.write_all(head).await.expect("write");
+            std::future::pending::<()>().await;
+        });
+        url
+    }
+
+    async fn fetch_stalled(head: &'static [u8]) -> reqwest::Result<bytes::Bytes> {
+        let url = stalled_server(head).await;
+        let client = http_client(Duration::from_secs(1), Duration::from_millis(300)).expect("client");
+        let fetch = async {
+            match client.get(&url).send().await {
+                Ok(response) => response.bytes().await,
+                Err(error) => Err(error),
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), fetch)
+            .await
+            .expect("a stalled server must not hang the download")
+    }
+
+    #[tokio::test]
+    async fn a_download_stalled_mid_body_times_out() {
+        let head = b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n0123456789";
+        let error = fetch_stalled(head).await.expect_err("stalled body");
+        assert!(error.is_timeout(), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn a_server_that_never_answers_times_out() {
+        let error = fetch_stalled(b"").await.expect_err("no response");
+        assert!(error.is_timeout(), "{error:?}");
     }
 
     #[test]

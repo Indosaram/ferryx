@@ -140,6 +140,7 @@ pub async fn cmd_browser_sign_in_auth_session<R: Runtime>(
 /// signed-in site are copied into the profile's system-webview tabs.
 #[tauri::command]
 pub async fn cmd_browser_sign_in_track(
+    manager: State<'_, Arc<BrowserManager>>,
     chromium_browser_id: String,
     profile_id: String,
     target_url: String,
@@ -151,18 +152,55 @@ pub async fn cmd_browser_sign_in_track(
             format!("unknown browser profile: {profile_id}"),
         )
     })?;
-    if idp_host.trim().is_empty() {
-        return Err(IpcError::new(
-            IpcErrorCode::InvalidArgument,
-            "the identity provider host is empty",
-        ));
-    }
+    let idp_host = idp_host.trim().to_ascii_lowercase();
+    // `cef_engine::open` adds the tab to the engine's tabs before the create command resolves,
+    // so the UI's track call after `createBrowserTab` sees it. The engine tab's profile is the
+    // session's `profile_id`, so the session's profile is the one to compare.
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    let chromium_tab = crate::browser::cef_engine::is_cef_tab(&chromium_browser_id);
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    let chromium_tab = false;
+    let tab_profile = manager
+        .get_state(&chromium_browser_id)
+        .ok()
+        .map(|state| state.profile_id);
+    check_sign_in_track(
+        &idp_host,
+        &target_url,
+        chromium_tab,
+        tab_profile.as_ref(),
+        &profile,
+    )?;
     sign_in_handoff::track(PendingHandoff {
         chromium_browser_id,
         profile_id: profile.as_str().to_string(),
         target_url,
-        idp_host: idp_host.trim().to_ascii_lowercase(),
+        idp_host,
     });
+    Ok(())
+}
+
+/// A tracked handoff needs a known identity provider host, an https target and a live Chromium
+/// tab (`chromium_tab`) whose session belongs to `profile`.
+fn check_sign_in_track(
+    idp_host: &str,
+    target_url: &str,
+    chromium_tab: bool,
+    tab_profile: Option<&BrowserProfileId>,
+    profile: &BrowserProfileId,
+) -> Result<(), IpcError> {
+    let invalid = |message: &str| -> Result<(), IpcError> {
+        Err(IpcError::new(IpcErrorCode::InvalidArgument, message))
+    };
+    if !sign_in_handoff::is_identity_provider_host(idp_host) {
+        return invalid("the host is not a known identity provider");
+    }
+    if !url::Url::parse(target_url).is_ok_and(|parsed| parsed.scheme() == "https") {
+        return invalid("the sign-in target URL must be https");
+    }
+    if !chromium_tab || tab_profile != Some(profile) {
+        return invalid("the sign-in tab is not a live Chromium tab of the profile");
+    }
     Ok(())
 }
 
@@ -257,4 +295,37 @@ pub fn deliver_inbound_url<R: Runtime>(app: &AppHandle<R>, url: &str) -> bool {
         let _ = window.set_focus();
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TARGET: &str = "https://mail.google.com/mail/";
+
+    fn rejected(result: Result<(), IpcError>) -> bool {
+        result.is_err_and(|error| error.code == IpcErrorCode::InvalidArgument)
+    }
+
+    #[test]
+    fn sign_in_track_accepts_a_live_chromium_tab_of_the_profile() {
+        let profile = BrowserProfileId::Default;
+        assert!(check_sign_in_track("accounts.google.com", TARGET, true, Some(&profile), &profile).is_ok());
+    }
+
+    #[test]
+    fn sign_in_track_rejects_bad_hosts_targets_and_tabs() {
+        let profile = BrowserProfileId::Default;
+        let other = BrowserProfileId::Named("work".into());
+        let host = "accounts.google.com";
+        assert!(rejected(check_sign_in_track("evil.test", TARGET, true, Some(&profile), &profile)));
+        assert!(rejected(check_sign_in_track("", TARGET, true, Some(&profile), &profile)));
+        assert!(rejected(check_sign_in_track(host, "http://mail.google.com/", true, Some(&profile), &profile)));
+        assert!(rejected(check_sign_in_track(host, "not a url", true, Some(&profile), &profile)));
+        // An unknown or empty tab id has no session and no engine tab.
+        assert!(rejected(check_sign_in_track(host, TARGET, false, None, &profile)));
+        // A system-webview tab of the profile.
+        assert!(rejected(check_sign_in_track(host, TARGET, false, Some(&profile), &profile)));
+        assert!(rejected(check_sign_in_track(host, TARGET, true, Some(&other), &profile)));
+    }
 }

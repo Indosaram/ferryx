@@ -87,6 +87,17 @@ pub fn detect_sign_in_block(url: &str, title: Option<&str>) -> SignInBlock {
     classify(&parsed, title, &provider_for)
 }
 
+/// Whether `host` (a bare host name, no port or credentials) is a known identity provider's.
+pub fn is_identity_provider_host(host: &str) -> bool {
+    Url::parse(&format!("https://{host}/")).is_ok_and(|url| {
+        url.port().is_none()
+            && url.username().is_empty()
+            && url.path() == "/"
+            && url.host_str().is_some_and(|parsed| parsed.eq_ignore_ascii_case(host))
+            && provider_for(&url).is_some()
+    })
+}
+
 /// Detection with the host check passed in, so a test can point it at a local fixture.
 fn classify(
     parsed: &Url,
@@ -445,6 +456,11 @@ pub fn take_completed(tab: &str, url: &str) -> Option<PendingHandoff> {
         return None;
     }
     pending.remove(tab).map(|tracked| tracked.handoff)
+}
+
+/// Drops the handoff of a closed tab, so it neither leaks nor completes for a reused id.
+pub fn untrack(tab: &str) {
+    PENDING.lock().remove(tab);
 }
 
 #[cfg(test)]
@@ -1003,6 +1019,28 @@ mod tests {
         );
         assert!(take_completed(tab, "https://mail.google.com/mail/u/0/").is_some());
         assert_eq!(take_completed(tab, "https://mail.google.com/mail/u/0/"), None);
+    }
+
+    #[test]
+    fn an_untracked_handoff_never_completes() {
+        let tab = "signin:test-untracked";
+        track(pending(tab, "https://accounts.google.com/v3/signin/identifier"));
+        assert_eq!(
+            take_completed(tab, "https://accounts.google.com/v3/signin/challenge"),
+            None
+        );
+        untrack(tab);
+        assert_eq!(take_completed(tab, "https://mail.google.com/mail/"), None);
+    }
+
+    #[test]
+    fn identity_provider_hosts_are_known_hosts_only() {
+        for host in ["accounts.google.com", "appleid.apple.com", "login.live.com", "acme.okta.com"] {
+            assert!(is_identity_provider_host(host), "{host}");
+        }
+        for host in ["", "evil.test", "accounts.google.com:444", "x@accounts.google.com", "accounts.google.com/x"] {
+            assert!(!is_identity_provider_host(host), "{host}");
+        }
     }
 
     fn title_of(html: &str) -> Option<String> {

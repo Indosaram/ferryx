@@ -864,6 +864,7 @@ wrap_life_span_handler! {
                     Some(Key::Tab(tab)) => {
                         TABS.with_borrow_mut(|tabs| tabs.remove(&tab));
                         permissions::forget_tab(&tab);
+                        system::forget_tab(&tab);
                         emit(Event::Closed { tab });
                     }
                     Some(Key::Popup(id)) => {

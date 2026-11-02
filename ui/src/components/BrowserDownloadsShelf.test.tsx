@@ -35,6 +35,7 @@ const browserTauriMocks = vi.hoisted(() => ({
       }
     };
   }),
+  revealDownloadedFile: vi.fn(async (_path: string) => undefined),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: tauriCoreMocks.invoke }));
@@ -256,6 +257,21 @@ describe("BrowserDownloadsShelf lifecycle and events", () => {
 
     fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_browser_download_cancel", { downloadId: "wv-1" });
+  });
+
+  it("reveals the downloaded file itself, so a drive-root file keeps its full path", async () => {
+    const row = await showRecord(engineRecord({ status: "completed", filePath: "C:\\file.bin" }));
+
+    await act(async () => {
+      fireEvent.click(within(row).getByRole("button", { name: "Reveal in folder" }));
+    });
+    expect(browserTauriMocks.revealDownloadedFile).toHaveBeenCalledWith("C:\\file.bin");
+
+    browserTauriMocks.revealDownloadedFile.mockRejectedValueOnce({ code: "PATH_NOT_FOUND", message: "gone" });
+    await act(async () => {
+      fireEvent.click(within(row).getByRole("button", { name: "Reveal in folder" }));
+    });
+    expect(await within(row).findByText("PATH_NOT_FOUND")).toBeDefined();
   });
 
   it("keeps a newer download event over an older list response and drops out-of-order list reads", async () => {

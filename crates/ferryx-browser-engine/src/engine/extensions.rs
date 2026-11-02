@@ -9,7 +9,8 @@
 //! Removing: Chromium always shows its own confirm dialog when a WebUI page uninstalls an
 //! extension (`management_api.cc`: `show_confirm_dialog |= !self_uninstall`), so the page's
 //! window comes up on top while that call runs and hides again once it is answered. A
-//! cancelled dialog answers with `{"message":"cancelled"}`.
+//! cancelled dialog (Chrome's exact `kUninstallCanceledError`) answers with
+//! `{"message":"cancelled"}`; every other error passes through.
 
 use super::{emit, same, EngineBrowserViewDelegate, EngineClient, EngineWindowDelegate, Key, QUITTING};
 use cef::*;
@@ -24,6 +25,10 @@ const MAX_ICON_BYTES: usize = 64 * 1024;
 /// DevTools message ids of these calls stay below the vault's own ids (`vault.rs`), which
 /// share this browser's DevTools channel.
 const MAX_MESSAGE_ID: i32 = 999_999;
+/// Chrome's `kUninstallCanceledError` is `"Extension " + id + UNINSTALL_CANCELED_SUFFIX`
+/// (`management_api_constants.h`).
+const UNINSTALL_CANCELED_PREFIX: &str = "Extension ";
+const UNINSTALL_CANCELED_SUFFIX: &str = " uninstall canceled by user.";
 
 const LIST_BODY: &str = r#"(async () => {
   const icon = async (url) => {
@@ -122,15 +127,23 @@ fn body(call: &ExtensionCall) -> Option<String> {
 }
 
 /// The whole script: it never throws, and resolves to a JSON string `{"ok":true,"value":...}`
-/// or `{"ok":false,"message":...}` (`"cancelled"` when the user cancelled Chrome's dialog).
+/// or `{"ok":false,"message":...}` with the error's own message; `answer` classifies it.
 fn script(call: &ExtensionCall) -> Option<String> {
     let body = body(call)?;
     Some(format!(
         "(async () => {{ try {{ const value = await ({body}); \
          return JSON.stringify({{ok: true, value: value === undefined ? null : value}}); }} \
          catch (error) {{ const message = String((error && error.message) || error); \
-         return JSON.stringify({{ok: false, message: /cancel/i.test(message) ? 'cancelled' : message}}); }} }})()"
+         return JSON.stringify({{ok: false, message}}); }} }})()"
     ))
+}
+
+/// Whether `message` is exactly Chrome's error for a cancelled uninstall dialog.
+fn is_uninstall_canceled(message: &str) -> bool {
+    message
+        .strip_prefix(UNINSTALL_CANCELED_PREFIX)
+        .and_then(|rest| rest.strip_suffix(UNINSTALL_CANCELED_SUFFIX))
+        .is_some_and(is_extension_id)
 }
 
 /// The `Runtime.evaluate` params for `script`.
@@ -164,7 +177,8 @@ fn answer(success: bool, raw: &[u8]) -> (bool, String) {
     if outcome["ok"].as_bool() == Some(true) {
         (true, outcome["value"].to_string())
     } else {
-        (false, failure(outcome["message"].as_str().unwrap_or("the extension change failed")))
+        let message = outcome["message"].as_str().unwrap_or("the extension change failed");
+        (false, failure(if is_uninstall_canceled(message) { "cancelled" } else { message }))
     }
 }
 
@@ -370,6 +384,7 @@ mod tests {
         assert!(!list.contains("__MAX_ICON_BYTES__"));
         assert_eq!(script(&ExtensionCall::Remove { extension: "x\"); evil(\"".into() }), None);
         assert_eq!(script(&ExtensionCall::Pin { extension: String::new(), pinned: true }), None);
+        assert!(!remove.contains("/cancel/i"));
     }
 
     #[test]
@@ -402,6 +417,23 @@ mod tests {
         assert_eq!(answer(true, thrown), (false, r#"{"message":"TypeError: x"}"#.to_string()));
         assert!(!answer(true, b"not json").0);
         assert!(!answer(true, br#"{"result":{"type":"number","value":3}}"#).0);
+    }
+
+    #[test]
+    fn only_chromes_exact_uninstall_cancel_error_is_cancelled() {
+        let failed = |message: &str| answer(true, &evaluated(&json!({ "ok": false, "message": message })));
+        assert_eq!(
+            failed(&format!("Extension {ID} uninstall canceled by user.")),
+            (false, r#"{"message":"cancelled"}"#.to_string())
+        );
+        for message in [
+            "Could not cancel the request".to_string(),
+            "Extension x uninstall canceled by user.".to_string(),
+            format!("Extension {ID} uninstall canceled by user. Try again"),
+            format!("Error: Extension {ID} uninstall canceled by user."),
+        ] {
+            assert_eq!(failed(&message), (false, failure(&message)));
+        }
     }
 
     #[test]

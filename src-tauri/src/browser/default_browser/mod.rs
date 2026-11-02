@@ -179,8 +179,21 @@ pub fn windows_registry_values(exe_path: &str) -> Vec<RegistryValue> {
 pub const WINDOWS_DEFAULT_APPS_URI: &str = "ms-settings:defaultapps?registeredAppUser=Ferryx";
 
 /// The `.desktop` entry that lets Linux desktops pick Ferryx for http(s) links.
+///
+/// `Exec` holds the path as one quoted argument (Desktop Entry spec): `"`, `` ` ``, `$` and `\`
+/// are backslash-escaped inside the quotes, then the value's backslashes are doubled (string
+/// escaping) and `%` becomes `%%` so it is not read as a field code.
 pub fn linux_desktop_entry(exe_path: &str) -> String {
-    let exec = exe_path.replace('\\', "\\\\").replace(' ', "\\s");
+    let mut quoted = String::with_capacity(exe_path.len() + 2);
+    quoted.push('"');
+    for c in exe_path.chars() {
+        if matches!(c, '"' | '`' | '$' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(c);
+    }
+    quoted.push('"');
+    let exec = quoted.replace('\\', "\\\\").replace('%', "%%");
     format!(
         "[Desktop Entry]\n\
          Type=Application\n\

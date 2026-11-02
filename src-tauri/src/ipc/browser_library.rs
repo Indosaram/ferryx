@@ -30,6 +30,11 @@ fn recorder() -> &'static HistoryRecorder {
     RECORDER.get_or_init(HistoryRecorder::default)
 }
 
+/// Forgets a closed tab's last recorded page.
+pub fn forget_tab(browser_id: &str) {
+    recorder().forget(browser_id);
+}
+
 fn library_data_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, IpcError> {
     crate::browser::data_paths::app_data_root(app).map_err(|error| IpcError::new(IpcErrorCode::IoError, error))
 }
@@ -293,7 +298,7 @@ pub struct LegacyMigration {
 }
 
 /// One-time move of the UI's old localStorage history into the host store. A second call
-/// (another window, a later launch) imports nothing.
+/// (another window, a later launch) imports nothing; a failed one leaves nothing to re-import.
 #[tauri::command]
 pub async fn cmd_browser_history_migrate_legacy<R: tauri::Runtime>(
     app: AppHandle<R>,
@@ -301,14 +306,12 @@ pub async fn cmd_browser_history_migrate_legacy<R: tauri::Runtime>(
 ) -> Result<LegacyMigration, IpcError> {
     let library = library(&app)?;
     let result = crate::ipc::run_blocking(move || {
-        Ok(library.with_history(|history| {
-            if history.meta(LEGACY_MIGRATION_KEY)?.is_some() {
-                return Ok(LegacyMigration { imported: 0, already_migrated: true });
-            }
-            let imported = history.import(&visits)?;
-            history.set_meta(LEGACY_MIGRATION_KEY, &now_ms().to_string())?;
-            Ok(LegacyMigration { imported, already_migrated: false })
-        })?)
+        let imported = library
+            .with_history(|history| history.import_once(LEGACY_MIGRATION_KEY, &now_ms().to_string(), &visits))?;
+        Ok(match imported {
+            Some(imported) => LegacyMigration { imported, already_migrated: false },
+            None => LegacyMigration { imported: 0, already_migrated: true },
+        })
     })
     .await?;
     if result.imported > 0 {

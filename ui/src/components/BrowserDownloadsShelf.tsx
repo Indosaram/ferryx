@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   extractBrowserErrorCode,
   onBrowserDownloadUpdated,
+  revealDownloadedFile,
   type DownloadRecord,
   type DownloadStatus,
 } from "../lib/browserTauri";
@@ -185,12 +186,8 @@ export function useBrowserDownloadActions() {
   };
 
   const handleReveal = async (record: DownloadRecord) => {
-    const parentDir = record.filePath.replace(/[/\\][^/\\]+$/, "");
     try {
-      await invoke<boolean>("cmd_open_file_path", {
-        path: parentDir || record.filePath,
-        editor: "system",
-      });
+      await revealDownloadedFile(record.filePath);
     } catch (error) {
       setActionErrors((prev) => ({
         ...prev,

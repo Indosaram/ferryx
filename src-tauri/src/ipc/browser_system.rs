@@ -16,7 +16,7 @@ use crate::ipc::error::{IpcError, IpcErrorCode};
 use crate::ipc::run_blocking;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tauri_plugin_dialog::DialogExt;
@@ -133,10 +133,15 @@ fn with_site_zoom<T>(app: &AppHandle<impl Runtime>, f: impl FnOnce(&mut SiteZoom
 }
 
 fn save_site_zoom<R: Runtime>(app: &AppHandle<R>) -> Result<(), IpcError> {
-    let path = data_dir(app)?.join(SITE_ZOOM_FILE);
-    let snapshot = SITE_ZOOM.lock().clone();
-    if let Some(store) = snapshot {
-        store.save(&path).map_err(io_error)?;
+    save_site_zoom_to(&data_dir(app)?.join(SITE_ZOOM_FILE))
+}
+
+/// Writes the remembered zoom to `path`. The lock is held across the write so saves never
+/// overlap and a newer store never lands before an older one.
+fn save_site_zoom_to(path: &Path) -> Result<(), IpcError> {
+    let guard = SITE_ZOOM.lock();
+    if let Some(store) = &*guard {
+        store.save(path).map_err(io_error)?;
     }
     Ok(())
 }
@@ -536,7 +541,7 @@ fn pick_files<R: Runtime>(
 pub fn webview_download_handler<R: Runtime>(
     browser_id: String,
 ) -> impl Fn(tauri::Webview<R>, tauri::webview::DownloadEvent<'_>) -> bool + Send + Sync + 'static {
-    let live: Arc<Mutex<std::collections::HashMap<String, String>>> = Arc::default();
+    let live: Arc<Mutex<crate::browser::webview_download::UrlQueue>> = Arc::default();
     move |webview, event| match event {
         tauri::webview::DownloadEvent::Requested { url, destination } => {
             let url = url.to_string();
@@ -569,7 +574,7 @@ pub fn webview_download_handler<R: Runtime>(
             let path = unique_download_path(&dir, &suggested, |path| path.exists());
             *destination = path.clone();
             let id = format!("wv-{}", uuid::Uuid::new_v4());
-            live.lock().insert(url.clone(), id.clone());
+            live.lock().push(&url, &id);
             crate::browser::webview_download::expect(&url, &id);
             registry().register_native(
                 id,
@@ -582,7 +587,8 @@ pub fn webview_download_handler<R: Runtime>(
             true
         }
         tauri::webview::DownloadEvent::Finished { url, path, success } => {
-            let Some(id) = live.lock().get(url.as_str()).cloned() else { return true };
+            // wry names only the URL: the oldest live download of it is the one that ended.
+            let Some(id) = live.lock().oldest(url.as_str()).map(str::to_string) else { return true };
             // A pause stops the engine download, which wry reports as a failed finish. The
             // download is still live: keep it so its real finish after a resume is found.
             let paused = registry().get(&id).is_some_and(|record| record.status == DownloadStatus::Paused);
@@ -590,7 +596,7 @@ pub fn webview_download_handler<R: Runtime>(
                 registry().set_paused(&id, true);
                 return true;
             }
-            live.lock().remove(url.as_str());
+            live.lock().remove(url.as_str(), &id);
             crate::browser::webview_download::finished(url.as_str(), &id);
             if let Some(path) = path {
                 registry().update_native(&id, 0, None, Some(&path.to_string_lossy()));
@@ -730,6 +736,24 @@ mod tests {
     use super::*;
     use crate::browser::download::DownloadRegistry;
     use ferryx_browser_engine_protocol::{DownloadFailure, DownloadState};
+
+    #[test]
+    fn concurrent_site_zoom_saves_all_succeed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SITE_ZOOM_FILE);
+        let mut store = SiteZoomStore::default();
+        assert!(store.set("https://docs.test/", 1.5));
+        let previous = SITE_ZOOM.lock().replace(store.clone());
+        let results: Vec<Result<(), IpcError>> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| (0..25).map(|_| save_site_zoom_to(&path)).collect::<Result<(), _>>()))
+                .collect();
+            workers.into_iter().map(|worker| worker.join().unwrap()).collect()
+        });
+        *SITE_ZOOM.lock() = previous;
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        assert_eq!(SiteZoomStore::load(&path), store);
+    }
 
     #[test]
     fn page_download_names_come_from_the_url_path() {

@@ -166,6 +166,41 @@ fn history_meta_marks_one_time_migration() {
     assert_eq!(history.meta("migrated").unwrap().as_deref(), Some("1"));
 }
 
+#[test]
+fn history_import_once_is_all_or_nothing_and_runs_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = HistoryStore::default_path(dir.path());
+    let mut history = HistoryStore::open(&path).unwrap();
+    let probe = rusqlite::Connection::open(&path).unwrap();
+    let rows = |table: &str| -> i64 {
+        probe.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap()
+    };
+    probe
+        .execute_batch(
+            "CREATE TRIGGER fail_bad_url BEFORE INSERT ON urls WHEN NEW.url = 'https://bad.example/'
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .unwrap();
+    let visit = |url: &str, visited_at: i64| ImportedVisit { url: url.into(), title: None, visited_at, visit_count: 1 };
+    let visits = [
+        visit("https://a.example/", 1_000),
+        visit("https://b.example/", 2_000),
+        visit("https://bad.example/", 3_000),
+        visit("https://c.example/", 4_000),
+    ];
+
+    assert!(history.import_once("migrated", "1", &visits).is_err());
+    assert_eq!((rows("urls"), rows("visits")), (0, 0));
+    assert_eq!(history.meta("migrated").unwrap(), None);
+
+    probe.execute_batch("DROP TRIGGER fail_bad_url;").unwrap();
+    assert_eq!(history.import_once("migrated", "1", &visits).unwrap(), Some(4));
+    assert_eq!((rows("urls"), rows("visits")), (4, 4));
+    assert_eq!(history.meta("migrated").unwrap().as_deref(), Some("1"));
+    assert_eq!(history.import_once("migrated", "2", &visits).unwrap(), None);
+    assert_eq!((rows("urls"), rows("visits")), (4, 4));
+}
+
 fn session(manager: &BrowserManager, id: &str, profile: Option<BrowserProfileId>) {
     manager
         .register_session(CreateBrowserRequest {

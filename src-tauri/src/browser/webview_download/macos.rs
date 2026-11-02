@@ -174,7 +174,7 @@ unsafe extern "C-unwind" fn decide_destination(
 
 /// wry's download delegate class. Its runtime name is generated from wry's module path and
 /// version, so it is found by suffix.
-fn wry_download_delegate() -> Option<&'static AnyClass> {
+pub fn wry_download_delegate() -> Option<&'static AnyClass> {
     AnyClass::get(c"WryDownloadDelegate").or_else(|| {
         AnyClass::classes().iter().copied().find(|class| {
             class.name().to_str().is_ok_and(|name| name.contains("::WryDownloadDelegate"))

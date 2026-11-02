@@ -125,6 +125,15 @@ a{display:flex;align-items:center;justify-content:center;position:fixed;inset:0;
     type: "text/html",
   }],
   ["/download/ferryx-qa.txt", { body: "ferryx ui audit download\n", type: "text/plain", headers: { "Content-Disposition": 'attachment; filename="ferryx-qa.txt"' } }],
+  ["/media.html", {
+    body: `<!doctype html><title>media-fixture</title><style>html,body{margin:0;height:100%;background:#fff}
+button{position:fixed;inset:0;width:100%;height:100%;font:bold 40px sans-serif;background:#fff;color:#000;border:0}</style>
+<button id=m type=button>MEDIAREQUEST</button>
+<script>m.addEventListener('click',()=>{document.title='media:asking';navigator.mediaDevices.getUserMedia({video:true,audio:true})
+.then((stream)=>{stream.getTracks().forEach((track)=>track.stop());document.title='media:granted'})
+.catch((error)=>{document.title='media:'+error.name})})</script>`,
+    type: "text/html",
+  }],
 ]);
 let engineKeyPublic = null;
 if (engineZip) {
@@ -1581,6 +1590,19 @@ await step(
   [closeStrayDialogs, focus, dismissStoreToast, ...typeUrl(`${fixtureBase}/download.html`), waitForText(["FERRYXDOWNLOAD"]), ["click download link", () => clickText("FERRYXDOWNLOAD", { timeout: 15000 })], 4000],
   { any: ["ferryx-qa.txt", "Save", "Download"] },
 );
+if (platform === "darwin") {
+  // WKWebView routes camera and microphone requests through Ferryx's own permission prompt.
+  await step(
+    "media-prompt",
+    "Load the local media page and click its button (getUserMedia camera+microphone); Ferryx's prompt shows '<origin> wants to use camera and microphone' with Block and Allow",
+    [focus, ...typeUrl(`${fixtureBase}/media.html`), waitForText(["MEDIAREQUEST"]), ["click media request button", () => clickText("MEDIAREQUEST", { timeout: 15000 })], waitForText(["wants", "Allow", "Block"], 15000)],
+    { any: ["wants", "Allow", "Block"] },
+  );
+  summary.media_prompt = summary.steps.at(-1).ui_check?.result ?? null;
+  await step("media-prompt-dismissed", "Block dismisses the media prompt so later steps are not covered", [
+    ["optional click Block", () => clickText("Block")],
+  ]);
+}
 await step(
   "page-for-find",
   "Load the local example page again (find and zoom target)",
