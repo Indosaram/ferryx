@@ -158,18 +158,26 @@ pub fn canonical_git_common_dir(host: &str, dir: &str) -> Result<String, (&'stat
 }
 
 /// The git common dir `dir` names on paired host `host`, normalized lexically: it cannot be
-/// resolved from this machine. Absolute, trailing separators stripped, and refused with
-/// NOT_A_GIT_DIR when any component is empty, `.` or `..`, or the last one is not `.git` (the
-/// common dir itself, not a checkout root). `local` is resolved by [`canonical_git_common_dir`].
+/// resolved from this machine. Absolute on the paired host, judged by its spelling and never by
+/// this machine's OS: POSIX (`/`-rooted, `/` separators) or Windows (`X:\` or `X:/`, either
+/// separator). Trailing separators stripped, and refused with NOT_A_GIT_DIR when any component
+/// is empty, `.` or `..`, or the last one is not `.git` (the common dir itself, not a checkout
+/// root). `local` is resolved by [`canonical_git_common_dir`].
 pub fn remote_git_common_dir(host: &str, dir: &str) -> Result<String, (&'static str, String)> {
     if host == ferryx_hub::agent_control::LOCAL_HOST_ID {
         return Err(("INVALID_REQUEST", "a remote mapping names a paired host, not local".into()));
     }
     let refuse = |why: &str| (NOT_A_GIT_DIR, format!("{dir} is not an absolute <repo>/.git path on host {host}: {why}"));
-    if !Path::new(dir).is_absolute() {
+    let bytes = dir.as_bytes();
+    let windows_drive =
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'/' | b'\\');
+    let separators: &[char] = if windows_drive {
+        &['/', '\\']
+    } else if dir.starts_with('/') {
+        &['/']
+    } else {
         return Err(refuse("it is not absolute"));
-    }
-    let separators: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
+    };
     let trimmed = dir.trim_end_matches(separators);
     let components: Vec<&str> = trimmed.split(separators).collect();
     // The first component is the root (empty on POSIX, the drive on Windows).
@@ -825,6 +833,12 @@ mod tests {
         assert_eq!(remote_git_common_dir(paired, "/r/.git//").unwrap(), "/r/.git");
         assert!(remote_git_common_dir("local", "/r/.git").is_err());
         for refused in ["r/.git", "/r/../r/.git", "/r/./.git", "/r//.git", "/r", "/r/", "/r/.git/objects", "/.git.bak", "/"] {
+            assert_eq!(remote_git_common_dir(paired, refused).unwrap_err().0, NOT_A_GIT_DIR, "{refused}");
+        }
+        // A paired Windows host's dir is judged by its own spelling, whatever OS runs this.
+        assert_eq!(remote_git_common_dir(paired, r"C:\r\.git\").unwrap(), r"C:\r\.git");
+        assert_eq!(remote_git_common_dir(paired, "D:/r/.git").unwrap(), "D:/r/.git");
+        for refused in [r"\r\.git", r"C:r\.git", r"C:\r\..\.git", r"C:\", r"\\server\share\.git"] {
             assert_eq!(remote_git_common_dir(paired, refused).unwrap_err().0, NOT_A_GIT_DIR, "{refused}");
         }
 
