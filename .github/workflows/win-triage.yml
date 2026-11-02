@@ -1,0 +1,77 @@
+name: win-triage-ab
+on:
+  push:
+    branches: ['ci/win-triage-20261102']
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+jobs:
+  ab:
+    strategy:
+      fail-fast: false
+      matrix:
+        rev: [d516bf4412d09ffe2577ceef6348589eb91fe5d7, 2533ed70, 544be00e]
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.rev }}
+          submodules: recursive
+          fetch-depth: 0
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@stable
+      - name: env
+        shell: bash
+        run: |
+          echo "OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe" >> "$GITHUB_ENV"
+          git config --global user.name ferryx-ci
+          git config --global user.email ferryx-ci@users.noreply.github.com
+          git log --oneline -1
+      - name: JS deps + UI build
+        shell: bash
+        run: |
+          bun install --frozen-lockfile || bun install
+          bun install --cwd ui --frozen-lockfile || bun install --cwd ui
+          bun run --cwd ui build
+          bun scripts/fetch-ffmpeg.mjs
+      - name: Build tests
+        timeout-minutes: 60
+        shell: bash
+        run: |
+          cargo build --manifest-path remote-helper/Cargo.toml
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --no-run
+      - name: A/B named tests
+        timeout-minutes: 40
+        shell: bash
+        run: |
+          set +e
+          cargo test --manifest-path src-tauri/Cargo.toml --lib -- --list > list.txt 2>/dev/null
+          for t in \
+            agent_history::tests::antigravity_lists_from_the_summary_index_and_reads_the_transcript \
+            agent_history::tests::antigravity_reads_planner_responses_as_assistant_and_tool_records \
+            agent_history::tests::cline_reads_the_sibling_messages_document_and_unwraps_user_input \
+            agent_history::tests::droid_lists_sessions_with_turns_and_reports_read_as_unsettled \
+            agent_history::tests::grok_rejoins_message_chunks_from_the_update_stream \
+            agent_history::tests::senpi_family_lists_reads_and_targets_resume_for_omo_pi_omp_gjc \
+            cli::supervisor_goal::tests::setup_remote_form_maps_a_paired_host_lexically \
+            daemon::agent_extension::p09_tests::disabled_integration_skips_the_hook_install \
+            daemon::session_service::machine_tests::desktop_inventory_isolated_parent \
+            daemon::session_service::machine_tests::dropped_http_reply_replays_original_process_and_controller_fences_close \
+            daemon::session_service::machine_tests::interrupted_spawn_never_repeats_preallocated_intent ; do
+            if ! grep -q "^$t: test" list.txt; then echo "AB-RESULT ${{ matrix.rev }} $t ABSENT"; continue; fi
+            echo "::group::$t"
+            RUST_BACKTRACE=1 timeout 240 cargo test --manifest-path src-tauri/Cargo.toml --lib -- --exact "$t" --test-threads=1 --nocapture
+            rc=$?
+            echo "::endgroup::"
+            case $rc in 0) r=PASS;; 124) r=HANG;; *) r="FAIL($rc)";; esac
+            echo "AB-RESULT ${{ matrix.rev }} $t $r"
+          done
+          exit 0
