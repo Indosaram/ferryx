@@ -86,6 +86,8 @@ fn lines_of(turns: &[ReferenceTurn]) -> Vec<String> {
         .collect()
 }
 
+pub(crate) mod panel_autonomy;
+
 struct DaemonBridge {
     client: DaemonClient,
     /// The in-process gateway, when the bridge runs inside the daemon. A confirmed send needs
@@ -1530,7 +1532,7 @@ pub async fn supervisor_read(
         SupervisorReadAction::Memory => supervisor_memory(state, SupervisorCaller::Desktop).await,
         SupervisorReadAction::Transcript { cursor } => supervisor_transcript(state, cursor.unwrap_or(0)).await,
         SupervisorReadAction::Panel => Ok(json!(supervisor_panel(state).await)),
-        SupervisorReadAction::Fleet => Ok(json!({ "sessions": local_fleet_sessions(state).await })),
+        SupervisorReadAction::Fleet => Ok(json!({ "sessions": panel_autonomy::fleet_sessions(state).await })),
     }
 }
 
@@ -1548,9 +1550,9 @@ fn unix_ms() -> i64 {
 
 /// This computer's sessions in the fleet shape (`GET /api/v1/fleet/sessions`).
 ///
-/// The gateway has no path to the hub's paired-host fleet, so this is the local machine only,
-/// mapped exactly as the hub's `fleet::merge_sessions` maps one machine of many. A failed local
-/// list is a stale, empty machine rather than an error.
+/// This computer only, mapped exactly as the hub's `fleet::merge_sessions` maps one machine of
+/// many. A failed local list is a stale, empty machine rather than an error. Readers of the
+/// whole fleet use [`panel_autonomy::fleet_sessions`], which adds the paired hosts.
 pub async fn local_fleet_sessions(state: &Arc<RemoteGatewayState>) -> Vec<ferryx_hub::supervisor::panel_contract::FleetSession> {
     let host_id = crate::remote::reference_chat::files::reference_host_id();
     let entry = match crate::remote::server::agent_control_service::handle(state, AgentControlOp::List).await {
@@ -1675,7 +1677,7 @@ async fn hub_running(state: &RemoteGatewayState) -> bool {
 /// Everything the Supervisor panel renders, in one snapshot. With no hub running it asks for
 /// setup (`setupRequired`); the fleet still lists this computer's sessions.
 pub async fn supervisor_panel(state: &Arc<RemoteGatewayState>) -> ferryx_hub::supervisor::panel_contract::PanelSnapshot {
-    let sessions = local_fleet_sessions(state).await;
+    let sessions = panel_autonomy::fleet_sessions(state).await;
     let sources = PANEL_SOURCES.read().clone();
     ferryx_hub::fleet::assemble_panel(
         &sources,
@@ -2098,6 +2100,9 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
         #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
         meta_session_id,
     };
+    // Autonomy first: the panel sources, the rule store and the engine's session tools exist
+    // before any generation (or the engine) can use them.
+    panel_autonomy::install(&launch).await;
     let generation = if stopped {
         None
     } else {
@@ -2339,6 +2344,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
                             observation.session_id.clone(),
                         );
                     }
+                    panel_autonomy::observed(watch_server.remote_state(), &observation);
                     let run = state_run(&mut runs, &observation);
                     if let Err(error) = on_agent_event(&watch_hub, watch_bridge.as_ref(), &mut agents, omo_polled, run, observation).await {
                         tracing::debug!(%error, "hub observer event was not applied");
@@ -2433,11 +2439,19 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         // The app conversation calls the typed work tools as the installation's owner
         // (`AppWorkTools`, independent of Slack); Slack owner conversations go to the Slack
         // handler, which acts only for the authenticated Slack turn in flight.
-        let work_tools = ferryx_hub::supervisor::app_work::AppWorkTools::new(launch.hub.pool.clone());
+        let sessions = panel_autonomy::session_tools();
+        let mut work_tools = ferryx_hub::supervisor::app_work::AppWorkTools::new(launch.hub.pool.clone());
+        if let Some(sessions) = &sessions {
+            work_tools = work_tools.with_sessions(sessions.clone());
+        }
         #[cfg(feature = "hub-slack")]
-        let work_tools = work_tools.with_fallback(std::sync::Arc::new(
-            ferryx_hub::chat::slack_supervisor::SlackWorkTools::new(launch.hub.pool.clone()),
-        ));
+        {
+            let mut slack = ferryx_hub::chat::slack_supervisor::SlackWorkTools::new(launch.hub.pool.clone());
+            if let Some(sessions) = sessions {
+                slack = slack.with_sessions(sessions);
+            }
+            work_tools = work_tools.with_fallback(std::sync::Arc::new(slack));
+        }
         runtime.set_work_handler(std::sync::Arc::new(work_tools));
         tasks.push(tokio::spawn(runtime.clone().supervise()));
     }

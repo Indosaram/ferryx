@@ -62,7 +62,7 @@ pub(crate) async fn http_fleet_sessions(
     if let Err(response) = agent_control_service::http_device(&state, &headers, true) {
         return response;
     }
-    no_store(serde_json::json!({ "sessions": crate::hub_runtime::local_fleet_sessions(&state).await }))
+    no_store(serde_json::json!({ "sessions": crate::hub_runtime::panel_autonomy::fleet_sessions(&state).await }))
 }
 
 pub(crate) async fn http_pause(

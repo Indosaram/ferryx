@@ -472,7 +472,7 @@ struct StopPayload {
     session_ref: String,
 }
 
-fn parse_work_call(data: &Value) -> Result<WorkToolCall, WorkToolRejection> {
+pub(crate) fn parse_work_call(data: &Value) -> Result<WorkToolCall, WorkToolRejection> {
     let payload = data.get("payload").cloned().unwrap_or(Value::Null);
     let invalid = |error: serde_json::Error| {
         WorkToolRejection::new("SUPERVISOR_WORK_INVALID", &error.to_string())
@@ -542,46 +542,35 @@ pub trait FleetSource: Send + Sync {
 
 /// The decision gate for an answer the supervisor itself initiates. Owner taps on a card never
 /// pass through it.
+#[async_trait]
 pub trait AnswerGate: Send + Sync {
-    /// `Err(reason)` refuses to answer `prompt` with option `option_index`.
-    fn allow(&self, prompt: &PendingPrompt, option_index: usize) -> Result<(), String>;
+    /// `Err(reason)` refuses to answer `prompt` of `session` with option `option_index`.
+    async fn allow(
+        &self,
+        session: &FleetSession,
+        prompt: &PendingPrompt,
+        option_index: usize,
+    ) -> Result<(), String>;
 }
 
-/// Words that mark a prompt as an irreversible or sensitive (D1a) decision.
-const IRREVERSIBLE_WORDS: [&str; 9] = [
-    "deploy",
-    "migrat",
-    "delete",
-    "publish",
-    "credential",
-    "password",
-    "secret",
-    "api key",
-    "token",
-];
+/// The default gate: with no decision installed the supervisor answers nothing by itself.
+/// Production installs [`crate::supervisor::autonomy::DecisionGate`].
+pub struct RefuseUnlearned;
 
-/// Refuses every prompt that looks irreversible; the learned decision (todo 5) replaces it.
-pub struct RefuseIrreversible;
-
-impl AnswerGate for RefuseIrreversible {
-    fn allow(&self, prompt: &PendingPrompt, _option_index: usize) -> Result<(), String> {
-        let text = std::iter::once(prompt.question.as_str())
-            .chain(prompt.command.as_deref())
-            .chain(prompt.options.iter().map(String::as_str))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .to_lowercase();
-        match IRREVERSIBLE_WORDS.iter().find(|word| text.contains(**word)) {
-            Some(word) => Err(format!(
-                "the prompt looks irreversible ({word}); the owner decides"
-            )),
-            None => Ok(()),
-        }
+#[async_trait]
+impl AnswerGate for RefuseUnlearned {
+    async fn allow(
+        &self,
+        _session: &FleetSession,
+        _prompt: &PendingPrompt,
+        _option_index: usize,
+    ) -> Result<(), String> {
+        Err("no answer decision is installed; the owner decides".to_owned())
     }
 }
 
 /// Executes the session work tools over agent control. Constructed with its dependencies like
-/// the other work-tool services; the answer gate defaults to [`RefuseIrreversible`].
+/// the other work-tool services; the answer gate defaults to [`RefuseUnlearned`].
 pub struct SessionTools {
     control: Arc<dyn SessionControl>,
     fleet: Arc<dyn FleetSource>,
@@ -593,7 +582,7 @@ impl SessionTools {
         Self {
             control,
             fleet,
-            gate: Arc::new(RefuseIrreversible),
+            gate: Arc::new(RefuseUnlearned),
         }
     }
 
@@ -628,17 +617,21 @@ impl SessionTools {
                 option_index,
             } => {
                 let sessions = self.fleet.list().await.map_err(failed)?;
-                let prompt = sessions
+                let not_found = || {
+                    WorkToolRejection::new(
+                        "SUPERVISOR_PROMPT_NOT_FOUND",
+                        "the session has no such pending prompt",
+                    )
+                };
+                let session = sessions
                     .iter()
                     .find(|session| session.session_ref == session_ref)
-                    .and_then(|session| session.pending_prompt.as_ref())
+                    .ok_or_else(not_found)?;
+                let prompt = session
+                    .pending_prompt
+                    .as_ref()
                     .filter(|prompt| prompt.prompt_id == prompt_id)
-                    .ok_or_else(|| {
-                        WorkToolRejection::new(
-                            "SUPERVISOR_PROMPT_NOT_FOUND",
-                            "the session has no such pending prompt",
-                        )
-                    })?;
+                    .ok_or_else(not_found)?;
                 if option_index >= prompt.options.len() {
                     return Err(WorkToolRejection::new(
                         "SUPERVISOR_WORK_INVALID",
@@ -646,7 +639,8 @@ impl SessionTools {
                     ));
                 }
                 self.gate
-                    .allow(prompt, option_index)
+                    .allow(session, prompt, option_index)
+                    .await
                     .map_err(|reason| WorkToolRejection::new("SUPERVISOR_ANSWER_REFUSED", &reason))?;
                 self.control
                     .answer(&session_ref, &prompt_id, screen_revision.as_deref(), option_index)

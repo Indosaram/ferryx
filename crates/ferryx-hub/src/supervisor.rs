@@ -3682,10 +3682,12 @@ pub async fn attach_legacy_pane(
 mod tests;
 
 pub mod activity;
+pub mod adapters;
 pub mod admission;
 pub mod answer_history;
 pub mod answers;
 pub mod app_work;
+pub mod autonomy;
 pub mod changes;
 pub mod completion;
 pub mod panel_contract;

@@ -361,9 +361,15 @@ pub(crate) async fn handle_as(
     actor: &str,
     authorize: Option<Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>>,
 ) -> Result<serde_json::Value, ScopeError> {
+    // An answer the owner types (a card tap, the phone, Slack, the terminal helper) joins the
+    // answer history once it went through; the supervisor's own answers never do.
+    let owner_answer = crate::hub_runtime::panel_autonomy::owner_answer_of(&op);
     let result = dispatch(state, op.clone(), authorize).await;
     if result.is_ok() && op.is_input_mutation() {
         crate::hub_runtime::note_agent_control_input(&op);
+    }
+    if let (Ok(_), Some(answer)) = (&result, owner_answer) {
+        tokio::spawn(answer.recorded());
     }
     record_audit(
         state,
@@ -778,6 +784,8 @@ pub(crate) async fn prompt_answer(
     answer: crate::daemon::protocol::AgentPromptAnswerInput,
     registry_id: Option<String>,
 ) -> Result<crate::scoped_contracts::DeliveryReceipt, ScopeError> {
+    let owner_answer =
+        crate::hub_runtime::panel_autonomy::owner_prompt_answer_of(&session_id, &prompt_id, answer.key.as_deref());
     let answer = reference_answer(answer)?;
     live(state, &session_id).await?;
     let Some(agent) = prompt_agent(state, &session_id, registry_id).await? else {
@@ -819,7 +827,12 @@ pub(crate) async fn prompt_answer(
         runtime.answers.answer(&request, &step, &screen, &writer, &clock).await
     });
     match transaction.await {
-        Ok(reference_input::ReferenceInputOutcome::Accepted { receipt }) => Ok(receipt),
+        Ok(reference_input::ReferenceInputOutcome::Accepted { receipt }) => {
+            if let Some(answer) = owner_answer {
+                tokio::spawn(answer.recorded());
+            }
+            Ok(receipt)
+        }
         Ok(reference_input::ReferenceInputOutcome::NotTyped { error }) => Err(error),
         Ok(reference_input::ReferenceInputOutcome::OutcomeUnknown { message, .. }) => {
             Err(reference_chat_scope(ScopeErrorCode::OperationOutcomeUnknown, message))

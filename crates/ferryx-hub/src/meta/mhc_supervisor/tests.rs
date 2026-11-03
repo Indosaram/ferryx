@@ -2312,9 +2312,28 @@ async fn stop_and_send_reach_session_control_with_the_parsed_ref() {
     );
 }
 
+/// A gate that allows option 0 of a prompt whose question does not mention "Deploy".
+struct RoutineOnly;
+
+#[async_trait]
+impl AnswerGate for RoutineOnly {
+    async fn allow(
+        &self,
+        _session: &FleetSession,
+        prompt: &PendingPrompt,
+        option_index: usize,
+    ) -> Result<(), String> {
+        if prompt.question.contains("Deploy") || option_index != 0 {
+            Err("refused".to_owned())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 #[tokio::test]
-async fn a_supervisor_answer_passes_the_gate_and_an_irreversible_one_is_refused() {
-    let (control, tools, _) = session_tools();
+async fn a_supervisor_answer_passes_the_installed_gate_and_is_refused_by_default() {
+    let (control, tools, fleet) = session_tools();
     let answer = |id: &str| {
         session_call(
             "answer_prompt",
@@ -2322,6 +2341,12 @@ async fn a_supervisor_answer_passes_the_gate_and_an_irreversible_one_is_refused(
                 "screenRevision": "r1", "optionIndex": 0}),
         )
     };
+    // With no decision installed nothing is answered by the supervisor.
+    let refused = tools.execute(answer("s1")).await.unwrap_err();
+    assert_eq!(refused.code, "SUPERVISOR_ANSWER_REFUSED");
+    assert!(control.calls.lock().unwrap().is_empty());
+
+    let tools = SessionTools::new(control.clone(), Arc::new(FakeFleet(fleet))).with_gate(Arc::new(RoutineOnly));
     tools.execute(answer("s1")).await.unwrap();
     assert_eq!(
         *control.calls.lock().unwrap(),
