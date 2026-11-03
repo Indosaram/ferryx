@@ -82,6 +82,27 @@ struct Inner {
     size: PtySize,
 }
 
+/// The answer to the cursor-position query the console host sends at startup.
+const STARTUP_CURSOR_REPORT: &[u8] = b"\x1b[1;1R";
+
+impl Drop for Inner {
+    /// `PsuedoCon::new` passes `PSUEDOCONSOLE_INHERIT_CURSOR`, so the console host starts by asking
+    /// for the cursor position and, holding the console lock, reads input until the report
+    /// arrives. The inbox host on Windows Server 2022 / Windows 10 never gives up on that wait, and
+    /// a broken input pipe does not end it either. `ClosePseudoConsole`, which runs when `con` drops
+    /// below, then waits for that host to exit, so a pseudoconsole closed before a terminal answered
+    /// the query never finishes closing, and the thread that dropped it is lost. The report is sent
+    /// here, through the master's own input handle (still open, since fields drop after this),
+    /// which lets a host still waiting on the query proceed and shut down. A host that already got
+    /// its answer receives these bytes as input during teardown, which nothing reads any more. The
+    /// pipe is non-blocking, so this write can never wait.
+    fn drop(&mut self) {
+        if let Err(error) = std::io::Write::write_all(&mut self.input_handle, STARTUP_CURSOR_REPORT) {
+            log::debug!("startup cursor report before ClosePseudoConsole was not delivered: {error}");
+        }
+    }
+}
+
 impl Inner {
     pub fn resize(
         &mut self,
