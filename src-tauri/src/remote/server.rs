@@ -3998,6 +3998,54 @@ async fn push_preferences(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionMuteRequest {
+    session_ref: String,
+    muted: bool,
+}
+
+/// Mutes or unmutes phone push for one session (`<hostId>:<sessionId>`); the panel still lists
+/// it. Muting changes what every paired phone receives, so only a Control device may do it.
+async fn push_session_mute(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    Json(payload): Json<SessionMuteRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let device = push_device(&state, &headers)?;
+    if device.permission != DevicePermission::Control {
+        return Err((StatusCode::FORBIDDEN, "Control permission required".into()));
+    }
+    state
+        .set_session_push_muted(&payload.session_ref, payload.muted)
+        .await
+        .map_err(|error| {
+            let status = match error.code {
+                crate::ipc::IpcErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, error.message)
+        })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+struct PanelPresenceRequest {
+    visible: bool,
+}
+
+/// A paired client says whether it shows the panel (on show, on hide, and on a heartbeat while
+/// shown). While any client does, decision pushes are held back.
+async fn push_panel_presence(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    Json(payload): Json<PanelPresenceRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let device = push_device(&state, &headers)?;
+    state.set_panel_visible(&device.id, payload.visible);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PushTestResponse {
@@ -7751,6 +7799,8 @@ pub(crate) fn cors_origin_allowed(
                 | "/api/v1/push/subscribe"
                 | "/api/v1/push/unsubscribe"
                 | "/api/v1/push/preferences"
+                | "/api/v1/push/session-mute"
+                | "/api/v1/push/panel-presence"
         )
     {
         return false;
@@ -7997,6 +8047,8 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             get(super::dag_api::ws_dag_handler),
         )
         .route("/api/v1/push/test", post(push_test))
+        .route("/api/v1/push/session-mute", post(push_session_mute))
+        .route("/api/v1/push/panel-presence", post(push_panel_presence))
         .route("/api/v1/push/vapid-public-key", get(push_vapid_public_key))
         .route("/api/v1/push/subscribe", post(push_subscribe))
         .route("/api/v1/push/unsubscribe", post(push_unsubscribe))
@@ -10103,6 +10155,68 @@ mod tests {
                 assert_eq!(paired, *authorized, "{path} with a paired token");
             }
         }
+
+        server.abort();
+    }
+
+    /// Mute and panel presence are owner controls: they need a paired token, mute needs
+    /// Control, a malformed ref is refused, and the mute lands in the push store.
+    #[tokio::test]
+    async fn session_mute_and_panel_presence_routes_are_authenticated_and_effective() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(RemoteGatewayState::new_with_paths(
+            Arc::new(TerminalService::default()),
+            WorkspaceRegistry::new(),
+            Some(dir.path().join("remote-config.json")),
+            Some(dir.path().join("remote-auth.json")),
+        ));
+        let pair = |permission| {
+            let code = state.auth_manager.create_pairing_code(permission);
+            state.auth_manager.exchange_pairing_code(&code, "Phone").unwrap()
+        };
+        let (control, _) = pair(crate::remote::auth::DevicePermission::Control);
+        let (view, _) = pair(crate::remote::auth::DevicePermission::View);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn({
+            let router = create_remote_router(Arc::clone(&state));
+            async move { axum::serve(listener, router).await.unwrap() }
+        });
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let post = |path: &'static str, bearer: Option<&str>, body: serde_json::Value| {
+            let mut request = http.post(format!("http://{addr}/api/v1/push/{path}")).json(&body);
+            if let Some(bearer) = bearer {
+                request = request.bearer_auth(bearer);
+            }
+            async move { request.send().await.unwrap().status() }
+        };
+        let mute = serde_json::json!({"sessionRef": "mac:s1", "muted": true});
+
+        assert_eq!(post("session-mute", None, mute.clone()).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(post("session-mute", Some(view.as_str()), mute.clone()).await, StatusCode::FORBIDDEN);
+        assert!(!state.push.store.is_session_muted("mac:s1"), "a View device cannot mute");
+        assert_eq!(
+            post("session-mute", Some(control.as_str()), serde_json::json!({"sessionRef": "nocolon", "muted": true})).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(post("session-mute", Some(control.as_str()), mute).await, StatusCode::NO_CONTENT);
+        assert!(state.push.store.is_session_muted("mac:s1"));
+        assert_eq!(
+            post("session-mute", Some(control.as_str()), serde_json::json!({"sessionRef": "mac:s1", "muted": false})).await,
+            StatusCode::NO_CONTENT
+        );
+        assert!(!state.push.store.is_session_muted("mac:s1"));
+
+        let shown = serde_json::json!({"visible": true});
+        assert_eq!(post("panel-presence", None, shown.clone()).await, StatusCode::UNAUTHORIZED);
+        assert!(!state.panel_shown(std::time::Instant::now()));
+        assert_eq!(post("panel-presence", Some(control.as_str()), shown).await, StatusCode::NO_CONTENT);
+        assert!(state.panel_shown(std::time::Instant::now()), "the report holds pushes back");
+        assert_eq!(
+            post("panel-presence", Some(control.as_str()), serde_json::json!({"visible": false})).await,
+            StatusCode::NO_CONTENT
+        );
+        assert!(!state.panel_shown(std::time::Instant::now()));
 
         server.abort();
     }

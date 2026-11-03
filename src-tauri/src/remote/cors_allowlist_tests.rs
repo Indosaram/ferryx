@@ -76,6 +76,8 @@ async fn cors_rejects_an_unlisted_origin_and_allows_the_relay_origin() {
         "/api/v1/push/subscribe",
         "/api/v1/push/unsubscribe",
         "/api/v1/push/preferences",
+        "/api/v1/push/session-mute",
+        "/api/v1/push/panel-presence",
     ] {
         assert_eq!(
             preflight(&http, addr, same_origin_only, crate::remote::state::DEFAULT_RELAY_URL)
