@@ -65,7 +65,7 @@ export function TranscriptSection({ messages, touch, onExport }: TranscriptSecti
     setStatus(null);
     const result = await onExport();
     setExporting(false);
-    setStatus(result.ok ? { ok: true, text: `Saved ${result.where}` } : { ok: false, text: result.message });
+    setStatus(result.ok ? { ok: true, text: result.summary } : { ok: false, text: result.message });
   };
   return (
     <section aria-label="Conversation" data-testid="supervisor-transcript" className={cn('flex flex-col gap-2', touch ? 'text-sm' : 'text-xs')}>

@@ -46,12 +46,12 @@ describe('TranscriptSection', () => {
   it('exports through the host and shows where the file went, or why not', async () => {
     const onExport = vi
       .fn()
-      .mockResolvedValueOnce({ ok: true, where: 'supervisor-transcript.txt' })
+      .mockResolvedValueOnce({ ok: true, summary: 'Downloaded supervisor-transcript.txt' })
       .mockResolvedValueOnce({ ok: false, message: 'disk full' });
     render(<TranscriptSection messages={ROWS} onExport={onExport} />);
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Export transcript' })));
     expect(onExport).toHaveBeenCalledTimes(1);
-    expect(screen.getByTestId('transcript-export-status')).toHaveTextContent('Saved supervisor-transcript.txt');
+    expect(screen.getByTestId('transcript-export-status')).toHaveTextContent('Downloaded supervisor-transcript.txt');
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Export transcript' })));
     expect(screen.getByRole('alert')).toHaveTextContent('disk full');
   });

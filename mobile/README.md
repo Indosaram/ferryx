@@ -6,9 +6,13 @@ Use an existing Ferryx desktop/relay to sign in and control remote sessions.
 Production network access is HTTPS/WSS only; insecure LAN HTTP hosts are
 intentionally not supported yet.
 
-The only native capability is `tauri-plugin-opener` (`=2.7.2`, requires tauri
+Native capabilities: `tauri-plugin-opener` (`=2.7.2`, requires tauri
 `^2.12`), scoped in `src-tauri/capabilities/mobile.json` to `opener:allow-open-url`
-for `https://*` and `mailto:*` (privacy policy, support mail), plus `core:default`.
+for `https://*` and `mailto:*` (privacy policy, support mail), plus `core:default`; and
+the app command `share_text_file` (`src-tauri/src/share.rs`), which stages text as a file
+and opens the iOS share sheet. The shell has no browser download handler, so this is how
+the supervisor transcript export reaches Files, AirDrop or Mail on the iPhone. Android has
+no such route yet and its export control says so.
 
 ## Identity and versioning
 

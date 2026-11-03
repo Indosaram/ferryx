@@ -2,7 +2,13 @@
 // Reply rows and its long reports, read from the existing transcript routes. Desktop reads the
 // daemon view through `cmd_supervisor_read`; the remote web and the phone read
 // `GET /api/v1/supervisor/transcript`. Both return the same stored page; nothing is kept twice.
-import { isTauriRuntime, readSupervisorTranscriptPage, saveSupervisorTranscriptFile } from "../tauri";
+import { isIosCompanion, isMobileCompanion } from "../clientRuntime";
+import {
+  isTauriRuntime,
+  readSupervisorTranscriptPage,
+  saveSupervisorTranscriptFile,
+  shareSupervisorTranscriptFile,
+} from "../tauri";
 import type { EvidenceRef } from "./contract";
 
 export type TranscriptMessage = {
@@ -22,8 +28,12 @@ export type TranscriptPage = {
 
 export type TranscriptPageLoader = (cursor: number) => Promise<TranscriptPage>;
 
-/** Request-id prefix of a worker report the supervisor stored (`report:<wake event id>`). */
-const REPORT_REQUEST_PREFIX = "report:";
+/**
+ * Request-id prefix of a worker report the supervisor stored (`report:<wake event id>`). The
+ * hub reserves it (`REPORT_PREFIX` in `supervisor/transcript.rs`): an owner request id never
+ * starts with it, so a `report:` row is always a worker report.
+ */
+export const REPORT_PREFIX = "report:";
 /** More pages than this in one read means the cursor is not advancing; stop rather than spin. */
 const MAX_PAGES = 500;
 
@@ -82,7 +92,7 @@ export async function readTranscriptAfter(
 }
 
 export function isReportMessage(message: TranscriptMessage): boolean {
-  return message.role === "supervisor" && message.requestId.startsWith(REPORT_REQUEST_PREFIX);
+  return message.role === "supervisor" && message.requestId.startsWith(REPORT_PREFIX);
 }
 
 /**
@@ -115,7 +125,8 @@ export function transcriptFileName(nowMs: number): string {
   return `supervisor-transcript-${new Date(nowMs).toISOString().replace(/[:.]/g, "-")}.txt`;
 }
 
-export type ExportResult = { readonly ok: true; readonly where: string } | { readonly ok: false; readonly message: string };
+/** `summary` says what really happened to the file: where it was saved, or that it was shared. */
+export type ExportResult = { readonly ok: true; readonly summary: string } | { readonly ok: false; readonly message: string };
 
 function downloadInBrowser(fileName: string, text: string): void {
   const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
@@ -129,19 +140,32 @@ function downloadInBrowser(fileName: string, text: string): void {
 }
 
 /**
- * Saves the transcript as a file. The desktop webview has no download handler, so the desktop
- * writes it into the Downloads folder through a command; the remote web downloads it in the browser.
+ * Saves the transcript as a file. Each shell has its own real route:
+ * - the native iPhone/iPad companion writes the file and opens the system share sheet (Save to
+ *   Files, AirDrop, Mail); only a completed share counts, a dismissed sheet is not an export;
+ * - the desktop webview has no download handler, so it writes into the Downloads folder;
+ * - the remote web downloads it in the browser.
+ * The Android companion has no such route yet and says so rather than claiming a save.
  */
 export async function exportTranscriptFile(messages: readonly TranscriptMessage[], nowMs: number): Promise<ExportResult> {
   const fileName = transcriptFileName(nowMs);
   const text = formatTranscript(messages);
   try {
+    if (isMobileCompanion()) {
+      if (!isIosCompanion()) {
+        return { ok: false, message: "Export is available on iPhone and iPad, and in the web app." };
+      }
+      const shared = await shareSupervisorTranscriptFile(fileName, text);
+      return shared
+        ? { ok: true, summary: `Shared ${fileName}` }
+        : { ok: false, message: "Export cancelled. Nothing was saved." };
+    }
     if (isTauriRuntime()) {
       const path = await saveSupervisorTranscriptFile(fileName, text);
-      return { ok: true, where: path };
+      return { ok: true, summary: `Saved ${path}` };
     }
     downloadInBrowser(fileName, text);
-    return { ok: true, where: fileName };
+    return { ok: true, summary: `Downloaded ${fileName}` };
   } catch (error) {
     const message = error instanceof Error && error.message ? error.message : "The transcript was not saved.";
     return { ok: false, message };

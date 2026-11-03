@@ -154,11 +154,27 @@ fn converse_from(response: DaemonResponse) -> Result<serde_json::Value, IpcError
     }
 }
 
-/// Saves transcript text as a new file in `<home>/Downloads` and returns its path. The desktop
-/// webview has no download handler, so the panel's "Export transcript" lands here. The name is a
-/// plain file name (no path parts) and an existing file is never overwritten.
-fn write_download(downloads: &std::path::Path, file_name: &str, text: &str) -> Result<std::path::PathBuf, IpcError> {
-    use std::io::Write;
+/// Saves transcript text as a new file in the user's Downloads folder and returns its path. The
+/// desktop webview has no download handler, so the panel's "Export transcript" lands here. The
+/// name is a plain file name (no path parts), an existing file is never overwritten, and a write
+/// that fails leaves no partial file behind.
+fn write_download(
+    downloads: &std::path::Path,
+    file_name: &str,
+    text: &str,
+) -> Result<std::path::PathBuf, IpcError> {
+    write_download_with(downloads, file_name, text, |file, bytes| {
+        use std::io::Write;
+        file.write_all(bytes)
+    })
+}
+
+fn write_download_with(
+    downloads: &std::path::Path,
+    file_name: &str,
+    text: &str,
+    write: impl Fn(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> Result<std::path::PathBuf, IpcError> {
     let plain = !file_name.is_empty()
         && file_name.len() <= 128
         && file_name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
@@ -174,7 +190,11 @@ fn write_download(downloads: &std::path::Path, file_name: &str, text: &str) -> R
         let path = downloads.join(name);
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
-                file.write_all(text.as_bytes()).map_err(io)?;
+                if let Err(error) = write(&mut file, text.as_bytes()) {
+                    drop(file);
+                    let _ = std::fs::remove_file(&path);
+                    return Err(io(error));
+                }
                 return Ok(path);
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -188,9 +208,12 @@ fn write_download(downloads: &std::path::Path, file_name: &str, text: &str) -> R
 /// app transcript is saved to the Downloads folder; the reply is the saved path.
 #[tauri::command]
 pub async fn cmd_supervisor_transcript_export(file_name: String, text: String) -> Result<String, IpcError> {
-    let home = ferryx_hub::hub_env::home()
-        .ok_or_else(|| IpcError::new(IpcErrorCode::IoError, "the transcript was not saved: this account has no home folder"))?;
-    let path = write_download(&home.join("Downloads"), &file_name, &text)?;
+    // The platform's Downloads folder (Known Folder redirection on Windows, XDG on Linux); a
+    // home-relative `Downloads` only when the platform names none.
+    let downloads = dirs::download_dir()
+        .or_else(|| ferryx_hub::hub_env::home().map(|home| home.join("Downloads")))
+        .ok_or_else(|| IpcError::new(IpcErrorCode::IoError, "the transcript was not saved: this account has no Downloads folder"))?;
+    let path = write_download(&downloads, &file_name, &text)?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -720,5 +743,21 @@ mod tests {
             let refused = write_download(&downloads, bad, "x").unwrap_err();
             assert_eq!(refused.code, IpcErrorCode::InvalidRequest, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_failed_write_removes_the_partial_file_and_a_retry_can_reuse_the_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let failing = write_download_with(dir.path(), "t.txt", "text", |file, _| {
+            use std::io::Write;
+            file.write_all(b"par")?;
+            Err(std::io::Error::other("disk full"))
+        })
+        .unwrap_err();
+        assert_eq!(failing.code, IpcErrorCode::IoError);
+        assert!(failing.message.contains("disk full"));
+        assert!(!dir.path().join("t.txt").exists(), "no partial file is left");
+        let again = write_download(dir.path(), "t.txt", "text").unwrap();
+        assert_eq!(again, dir.path().join("t.txt"));
     }
 }

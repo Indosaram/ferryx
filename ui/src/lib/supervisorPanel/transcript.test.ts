@@ -2,12 +2,20 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const tauri = vi.hoisted(() => ({
   desktop: false,
+  mobile: false,
+  ios: false,
   save: vi.fn(async (_name: string, _text: string) => "/home/me/Downloads/saved.txt"),
+  share: vi.fn(async (_name: string, _text: string) => true),
 }));
 vi.mock("../tauri", () => ({
   isTauriRuntime: () => tauri.desktop,
   readSupervisorTranscriptPage: vi.fn(),
   saveSupervisorTranscriptFile: tauri.save,
+  shareSupervisorTranscriptFile: tauri.share,
+}));
+vi.mock("../clientRuntime", () => ({
+  isMobileCompanion: () => tauri.mobile,
+  isIosCompanion: () => tauri.mobile && tauri.ios,
 }));
 
 import {
@@ -17,13 +25,26 @@ import {
   parseTranscriptPage,
   readTranscriptAfter,
   reportExcerpt,
+  REPORT_PREFIX,
   type TranscriptMessage,
   type TranscriptPage,
 } from "./transcript";
 
+const realCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+const realRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+function restoreUrl(name: "createObjectURL" | "revokeObjectURL", original: PropertyDescriptor | undefined) {
+  if (original) Object.defineProperty(URL, name, original);
+  else delete (URL as unknown as Record<string, unknown>)[name];
+}
+
 afterEach(() => {
   tauri.desktop = false;
+  tauri.mobile = false;
+  tauri.ios = false;
   tauri.save.mockClear();
+  tauri.share.mockClear();
+  restoreUrl("createObjectURL", realCreate);
+  restoreUrl("revokeObjectURL", realRevoke);
   vi.restoreAllMocks();
 });
 
@@ -70,8 +91,9 @@ describe("report excerpt", () => {
   });
 
   it("recognizes a stored worker report by its request id", () => {
-    expect(isReportMessage(message(3, "supervisor", report, "report:lane_event:9"))).toBe(true);
+    expect(isReportMessage(message(3, "supervisor", report, `${REPORT_PREFIX}lane_event:9`))).toBe(true);
     expect(isReportMessage(PAIR[1])).toBe(false);
+    expect(isReportMessage(message(4, "owner", report, `${REPORT_PREFIX}x`))).toBe(false);
   });
 });
 
@@ -91,7 +113,7 @@ describe("transcript export", () => {
       download = this.download;
     });
     const result = await exportTranscriptFile(PAIR, Date.UTC(2026, 10, 3, 9, 30, 0));
-    expect(result).toEqual({ ok: true, where: "supervisor-transcript-2026-11-03T09-30-00-000Z.txt" });
+    expect(result).toEqual({ ok: true, summary: "Downloaded supervisor-transcript-2026-11-03T09-30-00-000Z.txt" });
     expect(download).toBe("supervisor-transcript-2026-11-03T09-30-00-000Z.txt");
     const blob = create.mock.calls[0][0];
     expect(blob.type).toContain("text/plain");
@@ -100,9 +122,40 @@ describe("transcript export", () => {
 
   it("saves through the desktop command and reports a refusal", async () => {
     tauri.desktop = true;
-    expect(await exportTranscriptFile(PAIR, 0)).toEqual({ ok: true, where: "/home/me/Downloads/saved.txt" });
+    expect(await exportTranscriptFile(PAIR, 0)).toEqual({ ok: true, summary: "Saved /home/me/Downloads/saved.txt" });
     expect(tauri.save.mock.calls[0][1]).toContain("Done: retrying every 5 min.");
     tauri.save.mockRejectedValueOnce(new Error("disk full"));
     expect(await exportTranscriptFile(PAIR, 0)).toEqual({ ok: false, message: "disk full" });
+  });
+
+  it("the iPhone companion shares the file through the native share sheet, never the browser path", async () => {
+    tauri.desktop = true;
+    tauri.mobile = true;
+    tauri.ios = true;
+    const create = vi.fn(() => "blob:never");
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, writable: true, value: create });
+    const result = await exportTranscriptFile(PAIR, Date.UTC(2026, 10, 3, 9, 30, 0));
+    expect(result).toEqual({ ok: true, summary: "Shared supervisor-transcript-2026-11-03T09-30-00-000Z.txt" });
+    expect(tauri.share).toHaveBeenCalledTimes(1);
+    expect(tauri.share.mock.calls[0][0]).toBe("supervisor-transcript-2026-11-03T09-30-00-000Z.txt");
+    expect(tauri.share.mock.calls[0][1]).toContain("Owner prompt\nRetry every 5 min");
+    expect(tauri.share.mock.calls[0][1]).toContain("Supervisor reply\nDone: retrying every 5 min.");
+    expect(create).not.toHaveBeenCalled();
+    expect(tauri.save).not.toHaveBeenCalled();
+  });
+
+  it("a dismissed share sheet, a failed stage and the Android companion are never reported as saved", async () => {
+    tauri.desktop = true;
+    tauri.mobile = true;
+    tauri.ios = true;
+    tauri.share.mockResolvedValueOnce(false);
+    expect(await exportTranscriptFile(PAIR, 0)).toEqual({ ok: false, message: "Export cancelled. Nothing was saved." });
+    tauri.share.mockRejectedValueOnce(new Error("the export file was not staged: disk full"));
+    expect(await exportTranscriptFile(PAIR, 0)).toEqual({ ok: false, message: "the export file was not staged: disk full" });
+    tauri.ios = false;
+    const android = await exportTranscriptFile(PAIR, 0);
+    expect(android.ok).toBe(false);
+    expect(tauri.share).toHaveBeenCalledTimes(2);
+    expect(tauri.save).not.toHaveBeenCalled();
   });
 });

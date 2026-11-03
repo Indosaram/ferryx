@@ -941,12 +941,10 @@ pub async fn supervisor_worker_report((session_id, event_id, body): (String, Str
             value["ok"] = json!(true);
             // The owner reads the report in the app transcript: one supervisor row per report,
             // keyed by its wake event so a replayed report never stores a second copy.
-            let stored = ferryx_hub::supervisor::transcript::append(
+            let stored = ferryx_hub::supervisor::transcript::store_report(
                 &hub.pool,
-                ferryx_hub::supervisor::transcript::Role::Supervisor,
+                &report.wake_event_id,
                 &body,
-                &[],
-                &format!("report:{}", report.wake_event_id),
                 ferryx_hub::supervisor::transcript::now_ms(),
             )
             .await;
@@ -962,6 +960,19 @@ pub async fn supervisor_worker_report((session_id, event_id, body): (String, Str
 /// True once this daemon opened the hub, so the Supervisor view has lanes to show.
 pub fn supervisor_available() -> bool {
     SUPERVISOR_VIEW.get().is_some()
+}
+
+/// Tells every Supervisor view to read again after a worker report was accepted and stored.
+/// A refused report (`ok: false`) stored nothing, so it announces nothing. Returns whether it did.
+pub fn announce_worker_report(state: &RemoteGatewayState, reply: &Value) -> bool {
+    if reply.get("ok").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    crate::remote::server::agent_control_service::publish_supervisor_changed(
+        state,
+        json!({ "supervisorReport": true }),
+    );
+    true
 }
 
 /// What a start needs besides the running slot: the hub, its config and its bridge.
@@ -3370,6 +3381,29 @@ pub fn run_mcp() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_accepted_worker_report_tells_the_views_to_read_again() {
+        let daemon = crate::daemon::server::DaemonServer::new_with_paths(None, None);
+        let state = daemon.remote_state();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
+        let sink = Arc::clone(&seen);
+        state.set_desktop_event_sink(Arc::new(move |event, payload| {
+            sink.lock().unwrap().push((event.to_owned(), payload));
+        }));
+
+        let refused = json!({"ok": false, "code": "NOT_FOUND", "message": "not bound"});
+        assert!(!announce_worker_report(state, &refused));
+        assert!(!announce_worker_report(state, &json!({"laneKey": "x"})));
+        assert!(seen.lock().unwrap().is_empty(), "a refused report announces nothing");
+
+        let accepted = json!({"ok": true, "wakeEventId": "lane_event:3", "duplicate": false});
+        assert!(announce_worker_report(state, &accepted));
+        let events = seen.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, crate::remote::server::agent_control_service::SUPERVISOR_CHANGED_EVENT);
+        assert_eq!(events[0].1["supervisorReport"], true);
+    }
 
     #[test]
     fn each_hub_pane_launch_gets_its_own_spawn_request_id() {
