@@ -1696,7 +1696,7 @@ fn install_agent_stamp_persistence(
             }
         }
     });
-    if let Err(error) = spawned {
+    if let Err(error) = &spawned {
         tracing::warn!(%error, "the agent stamp writer did not start");
     }
     spawned.ok()
