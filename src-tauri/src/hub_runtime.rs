@@ -762,6 +762,70 @@ fn hub_control(op: ferryx_hub::control::ControlOp, check: bool) -> i32 {
     }
 }
 
+/// Why the desktop's hub start over the control socket did not start the hub.
+#[derive(Debug, thiserror::Error)]
+pub enum HubControlStartError {
+    /// No hub answers on the control socket (the daemon has not opened it).
+    #[error("the supervisor hub is not reachable on its control socket: {0}")]
+    Unreachable(String),
+    /// The hub answered and refused (handed over, or the stop flag was not cleared).
+    #[error("{0}")]
+    Refused(String),
+    /// This platform has no unix control socket.
+    #[error("hub control uses a unix socket, which this platform does not have")]
+    Unsupported,
+}
+
+impl HubControlStartError {
+    /// The stable wire code a refusal carries.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Unreachable(_) => "SUPERVISOR_UNAVAILABLE",
+            Self::Refused(_) => "INVALID_STATE",
+            Self::Unsupported => "UNSUPPORTED",
+        }
+    }
+}
+
+/// `ferryx hub start` for the desktop's setup card: the same `start` line on the hub control
+/// socket, never a daemon restart. Returns whether this call started the hub, as
+/// [`start_supervisor`] does: `false` when the `status` read first already saw it running.
+/// Blocking (it runs its own runtime); call it through `crate::ipc::run_blocking`.
+pub fn start_hub_over_control_socket() -> Result<bool, HubControlStartError> {
+    let path = ferryx_hub::control::control_socket(&home_dir());
+    #[cfg(unix)]
+    {
+        use ferryx_hub::control::{reply_ok, send_control, ControlOp};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| HubControlStartError::Unreachable(error.to_string()))?;
+        runtime.block_on(async move {
+            let unreachable = |error: HubError| HubControlStartError::Unreachable(error.to_string());
+            let status = send_control(&path, ControlOp::Status).await.map_err(unreachable)?;
+            let was_running = serde_json::from_str::<Value>(status.trim())
+                .ok()
+                .and_then(|value| value.get("running").and_then(Value::as_bool))
+                .unwrap_or(false);
+            let reply = send_control(&path, ControlOp::Start).await.map_err(unreachable)?;
+            if !reply_ok(&reply) {
+                let message = serde_json::from_str::<Value>(reply.trim())
+                    .ok()
+                    .and_then(|value| value.get("error").and_then(Value::as_str).map(str::to_owned))
+                    .unwrap_or_else(|| "the hub refused to start".to_owned());
+                return Err(HubControlStartError::Refused(message));
+            }
+            tracing::info!(started = !was_running, "supervisor hub start requested by the desktop");
+            Ok(!was_running)
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(HubControlStartError::Unsupported)
+    }
+}
+
 /// Every hub task in this daemon: the generation (Slack, cron, HTTP, watchers) and the control
 /// listener. A handover commit retires it from a synchronous callback.
 static HUB_TASKS: ferryx_hub::lifecycle::TaskRegistry = ferryx_hub::lifecycle::TaskRegistry::new();
@@ -1240,16 +1304,43 @@ pub async fn supervisor_settings(
     }))
 }
 
-/// The panel's Undo on one action-log line: runs the entry's undo handle through the T2 action
-/// log and rule store. A handle nobody can reverse is `UNSUPPORTED`; a spent or missing one is
-/// `NOT_FOUND`.
+/// Whether an undo handle of this kind belongs to the autonomy service (an autonomous answer
+/// taken back) rather than the action log and rule store (`restoreRule`).
+fn undo_belongs_to_autonomy(kind: &str) -> bool {
+    kind == ferryx_hub::supervisor::autonomy::RESTORE_DECISION
+}
+
+/// The panel's Undo on one action-log line: runs the entry's undo handle. `restoreDecision`
+/// goes to the installed autonomy service (it reopens the decision card); every other kind goes
+/// through the T2 action log and rule store (`restoreRule`). Both clear the handle once, so a
+/// second undo is `NOT_FOUND`. A handle nobody can reverse is `UNSUPPORTED`; a spent or missing
+/// one is `NOT_FOUND`; a `restoreDecision` without autonomy installed is `SUPERVISOR_UNAVAILABLE`.
 pub async fn undo_supervisor_action(
     state: &RemoteGatewayState,
     id: i64,
 ) -> Result<(), SupervisorControlError> {
+    use ferryx_hub::supervisor::panel_contract::ActionLog;
     use ferryx_hub::supervisor::undo::{ActionUndo, LoggedUndo};
     use ferryx_hub::supervisor::{activity::SqliteActionLog, rules::SqliteRuleStore};
     let pool = control_pool(state).await?;
+    let log = SqliteActionLog::new(pool.clone());
+    let decision = log
+        .list_today(0)
+        .await
+        .map_err(control_storage)?
+        .into_iter()
+        .find(|entry| entry.id == id)
+        .and_then(|entry| entry.undo)
+        .is_some_and(|handle| undo_belongs_to_autonomy(&handle.kind));
+    if decision {
+        let autonomy = panel_autonomy::installed().ok_or(SupervisorControlError::Unavailable)?;
+        autonomy.undo(id).await.map_err(SupervisorControlError::Undo)?;
+        crate::remote::server::agent_control_service::publish_supervisor_changed(
+            state,
+            json!({ "actionId": id }),
+        );
+        return Ok(());
+    }
     let now_ms = || {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1257,7 +1348,7 @@ pub async fn undo_supervisor_action(
     };
     let rules = SqliteRuleStore::open(pool.clone(), now_ms()).await.map_err(control_storage)?;
     let undo = LoggedUndo::new(
-        Arc::new(SqliteActionLog::new(pool)),
+        Arc::new(log),
         Arc::new(rules),
         Arc::new(now_ms),
     );

@@ -74,6 +74,10 @@ import {
   getAccountEnrollmentStatus,
   enrollThisMachine,
   type AccountEnrollmentStatus,
+  undoSupervisorAction,
+  supervisorAnswer,
+  startSupervisor,
+  enableAgentControlOwner,
 } from "./tauri";
 import { registerDurableNativeBinding, resetNativeTerminalLifecycleForTest } from "./nativeTerminalLifecycle";
 
@@ -1123,5 +1127,36 @@ describe("account enrollment API", () => {
       enrollmentCode: "code-123",
     });
     expect(result).toEqual(status);
+  });
+});
+
+describe("supervisor panel IPC wrappers", () => {
+  beforeEach(() => {
+    core.invoke.mockReset();
+    core.isTauri.mockReturnValue(true);
+  });
+
+  it("keeps the full session ref when answering a supervisor decision", async () => {
+    await supervisorAnswer({ sessionRef: "omarchy:s-1", promptId: "p-1", screenRevision: "r-7", optionIndex: 2 });
+    expect(core.invoke).toHaveBeenCalledWith("cmd_supervisor_answer", {
+      sessionRef: "omarchy:s-1",
+      promptId: "p-1",
+      screenRevision: "r-7",
+      optionIndex: 2,
+    });
+  });
+
+  it("passes an action Undo under the backend's id argument", async () => {
+    await undoSupervisorAction(42);
+    expect(core.invoke).toHaveBeenCalledWith("cmd_supervisor_action_undo", { id: 42 });
+  });
+
+  it("uses owner-only enablement and the hub start command", async () => {
+    await enableAgentControlOwner();
+    await startSupervisor();
+    expect(core.invoke.mock.calls.map(([command]) => command)).toEqual([
+      "cmd_agent_control_enable_owner",
+      "cmd_supervisor_start",
+    ]);
   });
 });

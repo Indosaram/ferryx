@@ -1,13 +1,13 @@
 // The desktop's PanelActions: every write goes to a real Tauri command and is reported as
 // failed when the command is absent or refuses. Nothing here resolves ok on its own.
 import {
-  answerAgentPrompt,
   converseSupervisor,
-  getAgentControlSettings,
-  setAgentControlSettings,
+  enableAgentControlOwner,
   isStructuredIpcError,
   setSupervisorPanelPaused,
+  startSupervisor,
   stopSupervisedSession,
+  supervisorAnswer,
   undoSupervisorAction,
 } from "../tauri";
 import { setSupervisorLanePaused } from "../supervisor";
@@ -42,11 +42,6 @@ async function run(call: () => Promise<unknown>, fallback: string): Promise<Pane
   }
 }
 
-/** `<hostId>:<backendSessionId>`: the daemon session id is what the answer command takes. */
-function backendSessionId(sessionRef: string): string {
-  return sessionRef.slice(sessionRef.indexOf(":") + 1);
-}
-
 export function desktopPanelActions(input: {
   readonly openSession: (sessionRef: string) => void;
   /** Called after a write the backend accepted, so the panel reads the truth again. */
@@ -68,11 +63,11 @@ export function desktopPanelActions(input: {
       return changed(
         await run(
           () =>
-            answerAgentPrompt({
-              sessionId: backendSessionId(decision.sessionRef),
+            supervisorAnswer({
+              sessionRef: decision.sessionRef,
               promptId: decision.promptId,
               screenRevision,
-              answer: { key: String(optionIndex) },
+              optionIndex,
             }),
           "That answer didn't go through.",
         ),
@@ -90,15 +85,11 @@ export function desktopPanelActions(input: {
       ),
     stop: async (sessionRef) => changed(await run(() => stopSupervisedSession(sessionRef), "Couldn't stop that session.")),
     undo: async (actionId) => changed(await run(() => undoSupervisorAction(actionId), "Couldn't undo that.")),
-    // The one real enablement step on this surface: agent control on for the owner's devices,
-    // exclusions kept. Starting the hub itself has no desktop command; if it is still stopped
-    // the panel's own reload keeps showing setup rather than claiming it is on.
     turnOn: async () =>
       changed(
         await run(async () => {
-          const current = await getAgentControlSettings();
-          if (!current) throw new Error("Agent control is configured only in the desktop app");
-          await setAgentControlSettings({ enabled: true, excludedDeviceIds: current.excludedDeviceIds });
+          await enableAgentControlOwner();
+          await startSupervisor();
         }, "Couldn't turn the supervisor on."),
       ),
   };

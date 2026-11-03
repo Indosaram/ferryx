@@ -416,6 +416,19 @@ pub async fn cmd_supervisor_action_undo(
     control_result(daemon_client.send_request(DaemonRequest::SupervisorActionUndo { id }).await?)
 }
 
+/// The setup card's "start the supervisor": sends `start` on the local hub control socket, as
+/// `ferryx hub start` does. The daemon is never restarted, so live PTY sessions stay up. Returns
+/// whether this call started the hub (`false` when it already ran). Without a unix control
+/// socket (Windows) it is refused as `UNSUPPORTED`.
+#[tauri::command]
+pub async fn cmd_supervisor_start() -> Result<bool, IpcError> {
+    super::run_blocking(|| {
+        crate::hub_runtime::start_hub_over_control_socket()
+            .map_err(|error| IpcError::new(IpcErrorCode::from_code_str(error.code()), error.to_string()))
+    })
+    .await
+}
+
 /// "Start a session": submit owner work to an explicit project. A request without a project
 /// is refused here, before the daemon is asked: the panel never guesses one.
 fn dispatch_request(

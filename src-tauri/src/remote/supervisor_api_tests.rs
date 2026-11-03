@@ -900,3 +900,42 @@ async fn an_action_undo_restores_a_rule_once_then_has_nothing_left() {
     assert_eq!(status, 400, "{body}");
     gateway.stop().await;
 }
+
+#[tokio::test]
+async fn a_decision_undo_goes_to_autonomy_not_the_rule_store() {
+    use ferryx_hub::supervisor::activity::SqliteActionLog;
+    use ferryx_hub::supervisor::panel_contract::{ActionEntry, ActionKind, ActionLog, SessionRef, UndoHandle};
+    let gateway = Gateway::start().await;
+    let (pool, _, _) = populate(&gateway).await;
+    let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    let log = SqliteActionLog::new(pool.clone());
+    let stored = log
+        .upsert_incident(ActionEntry {
+            id: 0,
+            incident_key: "answer-1".into(),
+            session_ref: Some(SessionRef::new("local", "s-1")),
+            kind: ActionKind::Answered,
+            summary: "Answered npm".into(),
+            basis: "you chose npm before".into(),
+            evidence: Vec::new(),
+            undo: Some(UndoHandle {
+                kind: ferryx_hub::supervisor::autonomy::RESTORE_DECISION.into(),
+                payload: serde_json::json!({ "sessionRef": "local:s-1", "promptId": "p1", "screenRevision": "rev-1", "optionIndex": 0 }),
+            }),
+            live: false,
+            created_at_ms: 10,
+            updated_at_ms: 10,
+        })
+        .await
+        .unwrap();
+
+    // The gateway tests never install the autonomy service, so the decision handle is routed to
+    // it and refused as unavailable: not the rule store's 422 UNSUPPORTED.
+    let path = format!("/api/v1/supervisor/actions/{}/undo", stored.id);
+    let (status, _, body) = gateway.post_to(&path, &token, "").await;
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body["error"]["code"], SUPERVISOR_UNAVAILABLE_CODE);
+    let kept = log.list_today(0).await.unwrap().into_iter().find(|entry| entry.id == stored.id).unwrap();
+    assert!(kept.undo.is_some(), "a refused undo keeps its handle");
+    gateway.stop().await;
+}

@@ -613,7 +613,27 @@ export async function stopSupervisedSession(sessionRef: string): Promise<void> {
 
 export async function undoSupervisorAction(actionId: number): Promise<void> {
   if (!isTauri()) throw toIpcError(new Error("The supervisor is reachable only in the desktop app"));
-  await invokeCommand<unknown>("cmd_supervisor_action_undo", { actionId });
+  await invokeCommand<unknown>("cmd_supervisor_action_undo", { id: actionId });
+}
+
+export async function supervisorAnswer(request: {
+  sessionRef: string;
+  promptId: string;
+  screenRevision: string;
+  optionIndex: number;
+}): Promise<Record<string, unknown> | null> {
+  if (!isTauri()) throw toIpcError(new Error("The supervisor is reachable only in the desktop app"));
+  return invokeCommand<Record<string, unknown> | null>("cmd_supervisor_answer", {
+    sessionRef: request.sessionRef,
+    promptId: request.promptId,
+    screenRevision: request.screenRevision,
+    optionIndex: request.optionIndex,
+  });
+}
+
+export async function startSupervisor(): Promise<boolean> {
+  if (!isTauri()) throw toIpcError(new Error("The supervisor hub starts only in the desktop app"));
+  return invokeCommand<boolean>("cmd_supervisor_start");
 }
 
 /** `panel.*` owner frames forwarded by the desktop shell as `supervisor_panel_event`. */
@@ -1523,6 +1543,11 @@ export async function setAgentControlSettings(request: {
   excludedDeviceIds: string[];
 }): Promise<AgentControlSettings> {
   return invokeCommand<AgentControlSettings>("cmd_agent_control_set", request);
+}
+
+export async function enableAgentControlOwner(): Promise<AgentControlSettings> {
+  if (!isTauri()) throw toIpcError(new Error("Agent control is configured only in the desktop app"));
+  return invokeCommand<AgentControlSettings>("cmd_agent_control_enable_owner");
 }
 
 export type DirectAutoTrustStatus = {

@@ -1037,11 +1037,11 @@ describe("App notification coordinator wiring", () => {
       key("KeyB", false);
       expect(view.queryByTestId("mock-sidebar")).toBeNull();
 
-      key("KeyN", true);
+      key("KeyI", true);
       expect(view.getByTestId("mock-sidebar")).toBeInTheDocument();
 
       // Already open: the shortcut leaves it open.
-      key("KeyN", true);
+      key("KeyI", true);
       expect(view.getByTestId("mock-sidebar")).toBeInTheDocument();
     });
 

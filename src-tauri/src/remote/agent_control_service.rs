@@ -1722,8 +1722,8 @@ mod tests {
             _: &str,
             _: Option<&str>,
             _: usize,
-        ) -> ferryx_hub::error::Result<()> {
-            Ok(())
+        ) -> ferryx_hub::error::Result<Option<String>> {
+            Ok(None)
         }
         async fn read_tail(&self, _: &ferryx_hub::supervisor::panel_contract::SessionRef, _: usize) -> ferryx_hub::error::Result<String> {
             Ok(String::new())
@@ -1765,6 +1765,7 @@ mod tests {
             last_assistant_line: None,
             updated_at_ms: 1,
             stale: false,
+            health: None,
         }
     }
 

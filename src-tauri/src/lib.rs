@@ -1990,6 +1990,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::supervisor::cmd_supervisor_pause,
         ipc::supervisor::cmd_supervisor_settings,
         ipc::supervisor::cmd_supervisor_action_undo,
+        ipc::supervisor::cmd_supervisor_start,
         ipc::supervisor::cmd_supervisor_dispatch,
         cmd_browser_create,
         cmd_browser_open_devtools,
