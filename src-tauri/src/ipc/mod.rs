@@ -77,6 +77,8 @@ pub mod terminal_grid;
 pub mod pane_liveness_contract;
 #[cfg(feature = "desktop")]
 pub mod updater;
+#[cfg(feature = "desktop")]
+pub mod window;
 pub mod worktree;
 #[cfg(feature = "desktop")]
 pub mod worktree_disk;

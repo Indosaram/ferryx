@@ -43,6 +43,8 @@ mod shortcut_dispatch;
 pub mod ssh;
 pub mod terminal;
 pub mod util;
+#[cfg(feature = "desktop")]
+pub mod window_registry;
 pub mod worktree;
 pub use worktree::naming as worktree_naming;
 #[cfg(feature = "desktop")]
@@ -229,12 +231,19 @@ fn install_app_menu<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()>
 
     let view_menu = SubmenuBuilder::new(app, "View").fullscreen().build()?;
 
-    let window_menu = SubmenuBuilder::new(app, "Window")
+    let mut window_menu = SubmenuBuilder::new(app, "Window")
         .minimize()
         .item(&PredefinedMenuItem::maximize(app, None)?)
-        .separator()
-        .item(&close_window)
-        .build()?;
+        .separator();
+    // Multi-window is experimental: without the opt-in the menu is unchanged and Cmd+Shift+N
+    // reaches the webview, whose own `window.new` shortcut calls `cmd_window_new`.
+    if crate::ipc::window::multi_window_enabled() {
+        let new_window = MenuItemBuilder::with_id("window.new", "New Window")
+            .accelerator("CmdOrCtrl+Shift+N")
+            .build(app)?;
+        window_menu = window_menu.item(&new_window);
+    }
+    let window_menu = window_menu.item(&close_window).build()?;
 
     let menu = Menu::new(app.handle())?;
     menu.append(&app_menu)?;
@@ -276,9 +285,17 @@ fn install_app_menu<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()>
                 shortcut_dispatch::dispatch(app, "menu_close_tab", ());
             }
             "window.close" => {
-                if let Some(window) = app.get_window("main") {
+                if let Some(window) = window_registry::focused_window(app) {
                     let _ = window.close();
                 }
+            }
+            "window.new" => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = crate::ipc::window::create_app_window(&app, None).await {
+                        tracing::warn!(?error, "Failed to open a new window from the menu");
+                    }
+                });
             }
             _ => {}
         }
@@ -722,6 +739,61 @@ fn macos_first_responder_has_marked_text(event: &objc2_app_kit::NSEvent) -> bool
     composing
 }
 
+/// The app window (`main` or `ws-*`) whose NSWindow has `window_number`, if any.
+#[cfg(feature = "desktop")]
+#[cfg(target_os = "macos")]
+fn macos_app_window_by_number<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    window_number: isize,
+) -> Option<tauri::Window<R>> {
+    use objc2_app_kit::NSWindow;
+    if window_number == 0 {
+        return None;
+    }
+    app.windows()
+        .into_iter()
+        .filter(|(label, _)| window_registry::is_app_window_label(label))
+        .map(|(_, window)| window)
+        .find(|window| {
+            window.ns_window().is_ok_and(|raw_window| {
+                !raw_window.is_null() && {
+                    // SAFETY: Tauri returns a live NSWindow pointer; monitors run on the main thread.
+                    let ns_window = unsafe { &*(raw_window as *const NSWindow) };
+                    ns_window.windowNumber() == window_number
+                }
+            })
+        })
+}
+
+/// The app window an NSEvent was delivered to, else the focused app window (an event without a
+/// window, such as a key event while a panel is key, still targets the window the user works in).
+#[cfg(feature = "desktop")]
+#[cfg(target_os = "macos")]
+fn macos_event_app_window<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    event: &objc2_app_kit::NSEvent,
+) -> Option<tauri::Window<R>> {
+    macos_app_window_by_number(app, event.windowNumber())
+        .or_else(|| window_registry::focused_window(app))
+}
+
+/// The attached session under a point of `window`'s content view, restricted to the sessions that
+/// window owns: surfaces of other windows share the same logical coordinate space.
+#[cfg(all(target_os = "macos", feature = "native-terminal"))]
+fn macos_window_session_at<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    surface_host: &NativeTerminalSurfaceHostState,
+    window: &tauri::Window<R>,
+    logical_x: f64,
+    logical_y: f64,
+) -> Option<String> {
+    let label = window.label();
+    surface_host.session_at_logical_point_matching(logical_x, logical_y, |session_id| {
+        window_registry::window_for_session(app, session_id)
+            .is_some_and(|owner| owner.label() == label)
+    })
+}
+
 #[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
@@ -870,8 +942,12 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
                     );
                 }
                 if has_focused_terminal {
-                    if let Some(window) = app_handle.get_window("main") {
-                        let _ = window.emit(NATIVE_TERMINAL_COPY_OR_INTERRUPT_EVENT, ());
+                    if let Some(window) = macos_event_app_window(&app_handle, event) {
+                        let _ = app_handle.emit_to(
+                            window.label(),
+                            NATIVE_TERMINAL_COPY_OR_INTERRUPT_EVENT,
+                            (),
+                        );
                     }
                     ptr::null_mut()
                 } else {
@@ -898,8 +974,9 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
                 }
                 match action {
                     NativeTerminalPasteAction::EmitAndConsume => {
-                        if let Some(window) = app_handle.get_window("main") {
-                            let _ = window.emit("native_terminal_paste", ());
+                        if let Some(window) = macos_event_app_window(&app_handle, event) {
+                            let _ =
+                                app_handle.emit_to(window.label(), "native_terminal_paste", ());
                         }
                         ptr::null_mut()
                     }
@@ -923,21 +1000,58 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
     Ok(())
 }
 
+/// Per-window setup every app window (`main` at setup, `ws-*` on creation) needs: on macOS the
+/// themed window backing, the webview as first responder, the window-level drag registration
+/// released and the Finder file drop destination installed; on every platform initial focus.
+/// Must run on the main thread.
+#[cfg(feature = "desktop")]
+pub(crate) fn configure_app_window<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+) -> tauri::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(raw_window) = window.ns_window() {
+            if !raw_window.is_null() {
+                // SAFETY: Tauri returns a live NSWindow pointer; this runs on the main thread.
+                let native_window = unsafe { &*(raw_window as *const objc2_app_kit::NSWindow) };
+                #[cfg(feature = "native-terminal")]
+                crate::native_terminal::platform::macos::configure_window_background(
+                    native_window,
+                    crate::native_terminal::renderer::RendererTheme::default().background,
+                );
+                if let Ok(raw_webview) = window.ns_view() {
+                    if !raw_webview.is_null() {
+                        unsafe {
+                            let webview_view = &*(raw_webview as *const objc2_app_kit::NSView);
+                            let _ = native_window.makeFirstResponder(Some(webview_view));
+                        }
+                    }
+                }
+            }
+        }
+        let _ = window.set_focus();
+        release_macos_window_drag_destination(window)?;
+        install_macos_file_drop_destination(window)?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window.set_focus();
+    }
+    Ok(())
+}
+
 #[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 fn install_macos_file_drop_destination<R: tauri::Runtime>(
-    app: &tauri::App<R>,
+    window: &tauri::WebviewWindow<R>,
 ) -> tauri::Result<()> {
-    let Some(window) = app.get_webview_window("main") else {
-        tracing::warn!("main window is missing during setup; file drops will not be delivered");
-        return Ok(());
-    };
     let raw_window = window.ns_window()?;
-    let app_handle = app.handle().clone();
+    let app_handle = window.app_handle().clone();
+    let label = window.label().to_string();
 
     if let Err(error) = crate::macos_file_drop::install(raw_window, move |paths, x, y| {
         let payload = serde_json::json!({ "paths": paths, "position": { "x": x, "y": y } });
-        if let Err(error) = app_handle.emit("ferryx://file-drop", payload) {
+        if let Err(error) = app_handle.emit_to(label.as_str(), "ferryx://file-drop", payload) {
             tracing::warn!("failed to forward file drop to the frontend: {error}");
         }
     }) {
@@ -950,16 +1064,10 @@ fn install_macos_file_drop_destination<R: tauri::Runtime>(
 #[cfg(feature = "desktop")]
 #[cfg(target_os = "macos")]
 fn release_macos_window_drag_destination<R: tauri::Runtime>(
-    app: &tauri::App<R>,
+    window: &tauri::WebviewWindow<R>,
 ) -> tauri::Result<()> {
     use objc2_app_kit::NSWindow;
 
-    let Some(window) = app.get_webview_window("main") else {
-        tracing::warn!(
-            "main window is missing during setup; file drops stay owned by the tao window delegate"
-        );
-        return Ok(());
-    };
     let raw_window = window.ns_window()?;
     if raw_window.is_null() {
         return Ok(());
@@ -995,22 +1103,30 @@ fn install_macos_terminal_focus_monitor<R: tauri::Runtime>(
     let focus_gate = crate::native_terminal::focus_gesture::PressReleaseFocusGate::new();
     let block = RcBlock::new(move |event_ptr: NonNull<NSEvent>| -> *mut NSEvent {
         let event = unsafe { event_ptr.as_ref() };
-        if let Some(window) = app_handle.get_window("main") {
+        if let Some(window) = macos_app_window_by_number(&app_handle, event.windowNumber()) {
             if let Ok(raw_window) = window.ns_window() {
                 if !raw_window.is_null() {
                     let ns_window = unsafe { &*(raw_window as *const NSWindow) };
-                    if event.windowNumber() == ns_window.windowNumber() {
-                        if let Some(content_view) = ns_window.contentView() {
-                            let location = event.locationInWindow();
-                            let content_height = content_view.bounds().size.height;
-                            let logical_x = location.x;
-                            let logical_y = content_height - location.y;
-                            let hit = surface_host.session_at_logical_point(logical_x, logical_y);
-                            if event.r#type() == NSEventType::LeftMouseDown {
-                                focus_gate.press(hit);
-                            } else if let Some(session_id) = focus_gate.release(hit) {
-                                let _ = app_handle.emit(NATIVE_TERMINAL_FOCUS_EVENT, &session_id);
-                            }
+                    if let Some(content_view) = ns_window.contentView() {
+                        let location = event.locationInWindow();
+                        let content_height = content_view.bounds().size.height;
+                        let logical_x = location.x;
+                        let logical_y = content_height - location.y;
+                        let hit = macos_window_session_at(
+                            &app_handle,
+                            &surface_host,
+                            &window,
+                            logical_x,
+                            logical_y,
+                        );
+                        if event.r#type() == NSEventType::LeftMouseDown {
+                            focus_gate.press(hit);
+                        } else if let Some(session_id) = focus_gate.release(hit) {
+                            let _ = app_handle.emit_to(
+                                window.label(),
+                                NATIVE_TERMINAL_FOCUS_EVENT,
+                                &session_id,
+                            );
                         }
                     }
                 }
@@ -1048,11 +1164,11 @@ fn install_macos_terminal_scroll_monitor<R: tauri::Runtime>(
         .clone();
     let block = RcBlock::new(move |event_ptr: NonNull<NSEvent>| -> *mut NSEvent {
         let event = unsafe { event_ptr.as_ref() };
-        if let Some(window) = app_handle.get_window("main") {
+        if let Some(window) = macos_app_window_by_number(&app_handle, event.windowNumber()) {
             if let Ok(raw_window) = window.ns_window() {
                 if !raw_window.is_null() {
                     let ns_window = unsafe { &*(raw_window as *const NSWindow) };
-                    if event.windowNumber() == ns_window.windowNumber() {
+                    {
                         if let Some(content_view) = ns_window.contentView() {
                             let location = event.locationInWindow();
                             let content_height = content_view.bounds().size.height;
@@ -1063,7 +1179,13 @@ fn install_macos_terminal_scroll_monitor<R: tauri::Runtime>(
                             // only by dragging its scrollbar.
                             let session_id = match crate::native_terminal::native_wheel_dispatch(
                                 surface_host.dom_overlay_owns_input(),
-                                surface_host.session_at_logical_point(logical_x, logical_y),
+                                macos_window_session_at(
+                                    &app_handle,
+                                    &surface_host,
+                                    &window,
+                                    logical_x,
+                                    logical_y,
+                                ),
                             ) {
                                 crate::native_terminal::NativeWheelDispatch::PassThrough => {
                                     return event_ptr.as_ptr();
@@ -1216,11 +1338,17 @@ fn install_notification_activation_routing<R: tauri::Runtime>(
     // The wake sink fires only when a real click enqueues a target (startup
     // drain never pushes), so foregrounding here cannot hijack focus on launch.
     let app_handle = app.handle().clone();
+    let wake_activations = Arc::downgrade(&activations);
     activations.set_wake_sink(Arc::new(move || {
+        // Peeked before the wake event: the frontend drains the queue as soon as it hears it.
+        let clicked_session = wake_activations
+            .upgrade()
+            .and_then(|queue| queue.latest_session_id());
         if let Err(error) = app_handle.emit(NOTIFICATION_ACTIVATED_EVENT, ()) {
             tracing::error!("notification activation event failed: {error}");
         }
-        if let Some(window) = app_handle.get_webview_window("main") {
+        if let Some(window) = notification_activation_window(&app_handle, clicked_session.as_deref())
+        {
             // AppKit/window ops must run on the main thread; schedule rather
             // than touch the window from the notification callback thread.
             let main_window = window.clone();
@@ -1249,6 +1377,25 @@ fn install_notification_activation_routing<R: tauri::Runtime>(
     }
 
     Ok(())
+}
+
+/// The window a notification click raises: the live owner of the clicked session when the
+/// registry knows it, else the focused window (the primary window when nothing is focused).
+/// Notification targets carry the frontend session id, which matches a registry owner only when
+/// the frontend uses the backend id; otherwise the focused window is the best target.
+#[cfg(feature = "desktop")]
+fn notification_activation_window<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    session_id: Option<&str>,
+) -> Option<tauri::Window<R>> {
+    session_id
+        .and_then(|session_id| {
+            app.try_state::<window_registry::WindowRegistry>()?
+                .owner(session_id)
+        })
+        .filter(|label| window_registry::is_app_window_label(label))
+        .and_then(|label| app.get_window(&label))
+        .or_else(|| window_registry::focused_window(app))
 }
 
 #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
@@ -1359,8 +1506,24 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
 
     let builder = builder
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Destroyed = event {
-                handle_window_destroyed(window);
+            match event {
+                tauri::WindowEvent::Destroyed => handle_window_destroyed(window),
+                tauri::WindowEvent::Focused(true)
+                    if window_registry::is_app_window_label(window.label()) =>
+                {
+                    if let Some(registry) =
+                        window.try_state::<window_registry::WindowRegistry>()
+                    {
+                        registry.note_focused(window.label());
+                    }
+                }
+                tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                    crate::ipc::window::note_window_geometry_changed(window);
+                }
+                tauri::WindowEvent::CloseRequested { .. } => {
+                    crate::ipc::window::note_window_close_requested(window);
+                }
+                _ => {}
             }
             // Chromium panes on macOS are separate windows that must follow the main one.
             #[cfg(all(feature = "desktop", target_os = "macos"))]
@@ -1466,41 +1629,29 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 ),
             });
             #[cfg(target_os = "macos")]
-            if let Some(window) = app.get_webview_window("main") {
-                if let Ok(raw_window) = window.ns_window() {
-                    if !raw_window.is_null() {
-                        let native_window =
-                            unsafe { &*(raw_window as *const objc2_app_kit::NSWindow) };
-                        #[cfg(feature = "native-terminal")]
-                        crate::native_terminal::platform::macos::configure_window_background(
-                            native_window,
-                            crate::native_terminal::renderer::RendererTheme::default().background,
-                        );
-                        if let Ok(raw_webview) = window.ns_view() {
-                            if !raw_webview.is_null() {
-                                unsafe {
-                                    let webview_view =
-                                        &*(raw_webview as *const objc2_app_kit::NSView);
-                                    let _ = native_window.makeFirstResponder(Some(webview_view));
-                                }
-                            }
-                        }
-                    }
-                }
-                let _ = window.set_focus();
-            }
-            #[cfg(not(target_os = "macos"))]
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_focus();
-            }
-            #[cfg(target_os = "macos")]
             install_app_menu(app)?;
             #[cfg(target_os = "macos")]
             install_macos_key_monitor(app)?;
-            #[cfg(target_os = "macos")]
-            release_macos_window_drag_destination(app)?;
-            #[cfg(target_os = "macos")]
-            install_macos_file_drop_destination(app)?;
+            // The initial window keeps today's setup: chrome, first responder, focus and the
+            // macOS file drop destination. Every later window runs the same function on creation.
+            match app.get_webview_window(window_registry::PRIMARY_WINDOW_LABEL) {
+                Some(window) => configure_app_window(&window)?,
+                None => tracing::warn!(
+                    "main window is missing during setup; it gets no window chrome or file drops"
+                ),
+            }
+            if crate::ipc::window::multi_window_enabled() {
+                let restore_app = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    match crate::ipc::window::restore_saved_windows(&restore_app).await {
+                        Ok(restored) if !restored.is_empty() => {
+                            tracing::info!(?restored, "Restored secondary windows");
+                        }
+                        Ok(_) => {}
+                        Err(error) => tracing::warn!(?error, "Could not restore secondary windows"),
+                    }
+                });
+            }
             #[cfg(all(target_os = "macos", feature = "native-terminal"))]
             install_macos_terminal_focus_monitor(app)?;
             #[cfg(all(target_os = "macos", feature = "native-terminal"))]
@@ -1603,6 +1754,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>)
         .manage(in_process_backend)
         .manage(crate::ipc::updater::UpdaterDownloadState::default());
+    let builder = builder.manage(window_registry::WindowRegistry::default());
+    let builder = builder.manage(crate::ipc::window::PendingWindowAdoptions::default());
     let builder = match file_preview_service {
         Some(service) => builder.manage(service),
         None => builder,
@@ -1799,6 +1952,11 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_session_save,
         cmd_session_load,
         cmd_session_clear,
+        crate::ipc::session::cmd_session_discard_window,
+        crate::ipc::window::cmd_window_new,
+        crate::ipc::window::cmd_window_list,
+        crate::ipc::window::cmd_window_move_sessions,
+        crate::ipc::window::cmd_window_take_pending_adoptions,
         cmd_cli_launcher_status,
         cmd_cli_launcher_install,
         cmd_agents_detect,
@@ -2754,6 +2912,9 @@ mod tests {
 /// Window-destroy hook. Closing a window releases only GUI-side resources; it never stops,
 /// unloads or signals the daemon, which owns every PTY (pinned by `quit_path_tests`).
 fn handle_window_destroyed<R: tauri::Runtime>(window: &tauri::Window<R>) {
+    // Sessions are never killed by closing a window (plan 3.6): ownership is released and the
+    // remaining window is told so it can adopt them as background tabs.
+    handle_app_window_destroyed(window);
     // R6: a destroyed window must never leave preview capabilities
     // (retained descriptors, capability URLs) behind.
     if let Some(service) = window
@@ -2775,6 +2936,139 @@ fn handle_window_destroyed<R: tauri::Runtime>(window: &tauri::Window<R>) {
             window.label(),
             error
         );
+    }
+}
+
+/// Event telling the remaining window that a closed window's sessions are now unowned and should
+/// be adopted as background tabs. Payload: [`WindowSessionsOrphanedPayload`].
+#[cfg(feature = "desktop")]
+pub const WINDOW_SESSIONS_ORPHANED_EVENT: &str = "window_sessions_orphaned";
+
+#[cfg(feature = "desktop")]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowSessionsOrphanedPayload {
+    /// Label of the window that closed.
+    pub label: String,
+    /// Backend session ids the closed window owned. They stay alive in the daemon.
+    pub session_ids: Vec<String>,
+}
+
+/// The app window that adopts a closed window's sessions: the focused window, else the primary,
+/// else any other app window, never the closing one.
+#[cfg(feature = "desktop")]
+fn adopting_window<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    closing_label: &str,
+) -> Option<tauri::Window<R>> {
+    let not_closing = |window: &tauri::Window<R>| window.label() != closing_label;
+    window_registry::focused_window(app)
+        .filter(not_closing)
+        .or_else(|| window_registry::primary_window(app).filter(not_closing))
+        .or_else(|| {
+            let mut others: Vec<(String, tauri::Window<R>)> = app
+                .windows()
+                .into_iter()
+                .filter(|(label, _)| {
+                    label != closing_label && window_registry::is_app_window_label(label)
+                })
+                .collect();
+            others.sort_by(|a, b| a.0.cmp(&b.0));
+            others.into_iter().next().map(|(_, window)| window)
+        })
+}
+
+/// Closing an app window never kills its sessions (plan 3.6): ownership is released and the
+/// remaining window is told which sessions it should adopt. With no window left (the last window
+/// closed, i.e. app quit) there is nobody to tell and the daemon keeps the sessions as today.
+#[cfg(feature = "desktop")]
+fn handle_app_window_destroyed<R: tauri::Runtime>(window: &tauri::Window<R>) {
+    let label = window.label();
+    if !window_registry::is_app_window_label(label) {
+        return;
+    }
+    crate::ipc::window::note_window_destroyed(window);
+    let app = window.app_handle();
+    let Some(registry) = app.try_state::<window_registry::WindowRegistry>() else {
+        return;
+    };
+    let session_ids = registry.forget_window(label);
+    if session_ids.is_empty() {
+        return;
+    }
+    let Some(target) = adopting_window(app, label) else {
+        return;
+    };
+    let payload = WindowSessionsOrphanedPayload {
+        label: label.to_string(),
+        session_ids,
+    };
+    if let Err(error) = app.emit_to(target.label(), WINDOW_SESSIONS_ORPHANED_EVENT, payload) {
+        tracing::warn!(%error, from = label, "Could not hand orphaned sessions to a window");
+    }
+}
+
+#[cfg(all(test, feature = "desktop"))]
+mod window_lifecycle_tests {
+    use super::*;
+    use tauri::Listener;
+
+    type MockWindow = tauri::WebviewWindow<tauri::test::MockRuntime>;
+
+    fn two_windows() -> (tauri::App<tauri::test::MockRuntime>, MockWindow, MockWindow) {
+        let app = tauri::test::mock_app();
+        app.manage(window_registry::WindowRegistry::default());
+        let main = tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::default())
+            .build()
+            .expect("main window");
+        let secondary =
+            tauri::WebviewWindowBuilder::new(&app, "ws-test", tauri::WebviewUrl::default())
+                .build()
+                .expect("secondary window");
+        (app, main, secondary)
+    }
+
+    fn record(window: &MockWindow) -> std::sync::mpsc::Receiver<String> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        window.listen(WINDOW_SESSIONS_ORPHANED_EVENT, move |event| {
+            let _ = sender.send(event.payload().to_owned());
+        });
+        receiver
+    }
+
+    #[test]
+    fn closing_a_secondary_window_hands_its_sessions_to_the_primary() {
+        let (app, main, secondary) = two_windows();
+        let registry = app.state::<window_registry::WindowRegistry>();
+        registry.set_owner("s-2", "ws-test");
+        registry.set_owner("s-1", "ws-test");
+        registry.set_owner("s-main", "main");
+        let main_events = record(&main);
+        let secondary_events = record(&secondary);
+
+        handle_window_destroyed(&secondary.as_ref().window());
+
+        let payload: serde_json::Value = serde_json::from_str(
+            &main_events
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("primary window is told to adopt the sessions"),
+        )
+        .expect("json payload");
+        assert_eq!(
+            payload,
+            serde_json::json!({ "label": "ws-test", "sessionIds": ["s-1", "s-2"] })
+        );
+        assert!(secondary_events.try_recv().is_err(), "the closing window is not a target");
+        assert_eq!(registry.owner("s-1"), None);
+        assert_eq!(registry.owner("s-main").as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn closing_a_window_without_sessions_emits_nothing() {
+        let (_app, main, secondary) = two_windows();
+        let main_events = record(&main);
+        handle_window_destroyed(&secondary.as_ref().window());
+        assert!(main_events.try_recv().is_err());
     }
 }
 

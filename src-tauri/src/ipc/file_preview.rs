@@ -48,9 +48,6 @@ use std::time::SystemTime;
 use tauri::Manager;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-/// Desktop window label allowed to hold preview capabilities.
-const ROOT_WINDOW_LABEL: &str = "main";
-
 /// Origins the capability server answers to. Never a wildcard.
 const ALLOWED_ORIGINS: &[&str] = &[
     "tauri://localhost",
@@ -532,10 +529,10 @@ fn nth_line(text: &str, index: usize) -> &str {
     }
 }
 
-/// Only the desktop root window may hold capabilities; child webviews such as
-/// the browser pane (`browser-<uuid>`) are refused.
+/// Only desktop app windows (`main` and `ws-<id>` secondary windows) may hold capabilities;
+/// child webviews such as the browser pane (`browser-<uuid>`) are refused.
 pub fn ensure_trusted_window(label: &str) -> Result<(), IpcError> {
-    if label == ROOT_WINDOW_LABEL {
+    if crate::window_registry::is_app_window_label(label) {
         return Ok(());
     }
     Err(preview_error(

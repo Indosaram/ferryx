@@ -1,9 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default permissions for rorca main app webview",
+  "description": "Default permissions for the rorca app webviews: main and ws-* secondary windows",
   "webviews": [
-    "main"
+    "main",
+    "ws-*"
   ],
   "permissions": [
     "core:default",

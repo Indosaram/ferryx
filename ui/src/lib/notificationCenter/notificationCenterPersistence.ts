@@ -1,4 +1,5 @@
 import { getMigratedItem, NOTIFICATION_HISTORY_STORAGE_KEY } from "../storageKeys";
+import { windowScopedStorageKey } from "../windowIdentity";
 import {
   capNotificationEntries, emptyInboxState, notificationEntryId,
   type InboxState, type NotificationEntry, type NotificationLabels,
@@ -109,11 +110,14 @@ export function createNotificationCenterPersistence(options: NotificationCenterP
     reportError(error);
   }
 
+  // Each window's inbox describes the sessions in its own store; a secondary window persists it
+  // under a namespaced key so two windows never overwrite each other's history.
+  const historyKey = windowScopedStorageKey(NOTIFICATION_HISTORY_STORAGE_KEY);
   let initialState = emptyInboxState();
   if (storage) {
     const target = storage;
     try {
-      initialState = restoreNotificationInbox(getMigratedItem(NOTIFICATION_HISTORY_STORAGE_KEY, {
+      initialState = restoreNotificationInbox(getMigratedItem(historyKey, {
         getItem: (key) => target.getItem(key),
         // getMigratedItem deliberately tolerates failed migration writes; still surface them.
         setItem: (key, value) => {
@@ -133,7 +137,7 @@ export function createNotificationCenterPersistence(options: NotificationCenterP
     timer = undefined;
     if (!pending || !storage) return;
     try {
-      storage.setItem(NOTIFICATION_HISTORY_STORAGE_KEY, JSON.stringify(pending));
+      storage.setItem(historyKey, JSON.stringify(pending));
       pending = undefined;
     } catch (error) {
       // Keep the pending snapshot, allowing explicit flush or a later occurrence to retry.

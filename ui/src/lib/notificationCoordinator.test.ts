@@ -881,3 +881,27 @@ describe("onPermissionUnavailable callback", () => {
   });
 });
 
+
+describe("multi-window notification ownership gate", () => {
+  it("marks unread but sends no banner or sound when this window does not own the session", () => {
+    const gate = vi.fn(() => false);
+    const { instance, marks } = coordinator({ isNotificationLeader: gate });
+
+    instance.handleTerminalBell({ sessionId: "s1", tabId: "t1", worktreePath: "/repo/wt-a", backendSessionId: "b1", ownsSession: false });
+    instance.handleAgentStateChange({ sessionId: "s2", tabId: "t2", previousState: "working", nextState: "done", backendSessionId: "b2", ownsSession: false });
+
+    expect(marks.tabs).toEqual(["t1", "t2"]);
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(soundMock).not.toHaveBeenCalled();
+    expect(gate).toHaveBeenCalledWith(expect.objectContaining({ backendSessionId: "b1", ownsSession: false }));
+  });
+
+  it("notifies once from the owning window", () => {
+    const { instance } = coordinator({ isNotificationLeader: (event) => event.ownsSession === true });
+
+    instance.handleAgentStateChange({ sessionId: "s2", tabId: "t2", previousState: "working", nextState: "done", backendSessionId: "b2", ownsSession: true });
+
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    expect(soundMock).toHaveBeenCalledTimes(1);
+  });
+});

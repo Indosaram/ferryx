@@ -48,6 +48,22 @@ import { getSupervisorSnapshot, startSupervisorFeed, subscribeSupervisorSnapshot
 import { getSetupStatus, setupFinished, setupProjectsFrom } from "./lib/supervisorSetup";
 import { DesktopSupervisorSetupBanner } from "./components/supervisor/DesktopSupervisorSetupBanner";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
+import { currentWindowLabel, isPrimaryWindow, windowScopedStorageKey } from "./lib/windowIdentity";
+import {
+  forwardNotificationTarget,
+  routeNotificationTarget,
+  subscribeForwardedNotificationTargets,
+} from "./lib/notificationForwarding";
+import {
+  appBadgeTotal,
+  forgetWindow,
+  publishWindowBadgeCount,
+  publishWindowSessions,
+  shouldThisWindowOwnBadge,
+  subscribeWindowStateChanges,
+} from "./lib/notificationLeader";
+import { planOrphanAdoption } from "./state/orphanAdoption";
+import { movedEverySession, planTabMove } from "./state/windowMove";
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
 import { setLocalSplitPersistence } from "./lib/localSplitLifecycle";
 import { isMacShortcutPlatform, resolvedShortcuts, useShortcuts } from "./lib/shortcuts";
@@ -134,6 +150,14 @@ import {
   retryTerminalRemoteSession,
   getTerminalRemoteStatus,
   listTerminalSessions,
+  discardWindowSession,
+  listAppWindows,
+  moveSessionsToWindow,
+  onWindowSessionsOrphaned,
+  onWindowSessionsAdopt,
+  openNewWindow,
+  takePendingWindowAdoptions,
+  type WindowSessionsAdoptPayload,
   toIpcError,
   writeTerminal,
   bootTrace,
@@ -419,6 +443,47 @@ export function createDesktopLocalProjectSync() {
 
 const sendDesktopLocalProjects = createDesktopLocalProjectSync();
 
+/** Backend id of a frontend session held in this window's store (mounted or parked workspace). */
+function findBackendSessionId(mounted: WorkspaceState, sessionId: string, workspaceId?: string): string | null {
+  const candidates = workspaceId && workspaceId !== mounted.workspaceId
+    ? [getWorkspaceSnapshot(workspaceId), mounted]
+    : [mounted, ...listWorkspaceSnapshots().map(([, snapshot]) => snapshot)];
+  for (const candidate of candidates) {
+    const backendSessionId = candidate?.sessions[sessionId]?.backendSessionId;
+    if (backendSessionId) return backendSessionId;
+  }
+  return null;
+}
+
+function collectBackendSessionIds(states: readonly WorkspaceState[]): Set<string> {
+  const ids = new Set<string>();
+  for (const candidate of states) {
+    for (const session of Object.values(candidate.sessions)) {
+      if (session.backendSessionId) ids.add(session.backendSessionId);
+    }
+  }
+  return ids;
+}
+
+/**
+ * A secondary window ("ws-<id>") lists the same projects in its sidebar but never inherits the
+ * primary window's tabs: its active project comes from its own session file (window-scoped
+ * load) or its own namespaced selection, and with neither it opens on the workspace picker.
+ * Local registrations are shared with the primary window, which already performed them.
+ */
+export function secondaryWindowBootstrap(
+  stored: ProjectBootstrap,
+  recovered: ProjectBootstrap | null,
+): ProjectBootstrap {
+  const projects = [...stored.projects];
+  for (const project of recovered?.projects ?? []) {
+    if (!projects.some((candidate) => candidate.workspaceId === project.workspaceId)) projects.push(project);
+  }
+  const candidates = [recovered?.activeProjectId, loadWindowActiveProjectId()];
+  const activeProjectId = candidates.find((id) => id && projects.some((project) => project.workspaceId === id)) ?? "";
+  return { projects, activeProjectId };
+}
+
 export function App() {
   useApplyAppearanceSettings();
   const [isNativeRuntime] = useState(() => isTauriRuntime());
@@ -426,13 +491,17 @@ export function App() {
     isNativeRuntime ? null : loadProjectBootstrap(),
   );
 
-  useEffect(() => {
-    if (isNativeRuntime) return startUpdatePolling();
-  }, [isNativeRuntime]);
+  // Once-per-app startup effects run only in the primary window; a secondary window ("ws-<id>")
+  // must not poll for updates or show the Store migration notice a second time.
+  const [isPrimary] = useState(() => isPrimaryWindow());
 
   useEffect(() => {
-    if (isNativeRuntime) void maybeShowWindowsStoreMigrationNotice();
-  }, [isNativeRuntime]);
+    if (isNativeRuntime && isPrimary) return startUpdatePolling();
+  }, [isNativeRuntime, isPrimary]);
+
+  useEffect(() => {
+    if (isNativeRuntime && isPrimary) void maybeShowWindowsStoreMigrationNotice();
+  }, [isNativeRuntime, isPrimary]);
 
   useEffect(() => {
     if (!isNativeRuntime) {
@@ -444,13 +513,16 @@ export function App() {
       .then(async (startup) => {
         void bootTrace("initial.ok");
         const storedBootstrap = loadProjectBootstrap();
+        // loadSession is window-scoped by the backend: a secondary window reads only its own file.
         const savedSession = await loadSession().catch(() => null);
         const recovered = recoverProjectBootstrap(savedSession);
-        const prepared = canonicalizeProjectBootstrap(
-          mergeRecoveredProjectBootstrap(storedBootstrap, recovered, startup),
-          startup,
-        );
-        if (recovered && prepared !== storedBootstrap) {
+        const prepared = isPrimary
+          ? canonicalizeProjectBootstrap(
+              mergeRecoveredProjectBootstrap(storedBootstrap, recovered, startup),
+              startup,
+            )
+          : secondaryWindowBootstrap(storedBootstrap, recovered);
+        if (isPrimary && recovered && prepared !== storedBootstrap) {
           persistProjects(prepared.projects);
           persistActiveProjectId(prepared.activeProjectId);
         }
@@ -479,6 +551,17 @@ export function App() {
           const storedBootstrap = loadProjectBootstrap();
           const savedSession = await loadSession().catch(() => null);
           const recovered = recoverProjectBootstrap(savedSession);
+          if (!isPrimary) {
+            const prepared = secondaryWindowBootstrap(storedBootstrap, recovered);
+            await preloadWorkspaceSnapshots(
+              prepared.projects.map((project) => project.workspaceId),
+              async () => savedSession,
+            ).catch((preloadError) => {
+              console.warn("Workspace session preload fallback skipped:", preloadError);
+            });
+            if (!cancelled) setBootstrap(prepared);
+            return;
+          }
           // In native runtime, if there are no real stored or recovered projects,
           // do NOT resurrect an unregistrable phantom "default" workspace that causes
           // WORKSPACE_NOT_FOUND on spawn; show the genuine empty state instead.
@@ -519,7 +602,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [isNativeRuntime]);
+  }, [isNativeRuntime, isPrimary]);
 
   if (!bootstrap) return <div className="h-screen w-screen bg-background" aria-label="Initializing project" />;
 
@@ -720,6 +803,15 @@ function WorkspaceApp({
   initialActiveProjectId: string;
 }) {
   const [isNativeRuntime] = useState(() => isTauriRuntime());
+  const [isPrimary] = useState(() => isPrimaryWindow());
+  // Bumps when another Ferryx window's focus or badge contribution changes (multi-window).
+  const [windowStateVersion, bumpWindowStateVersion] = useState(0);
+  useEffect(() => subscribeWindowStateChanges(() => bumpWindowStateVersion((version) => version + 1)), []);
+  /** The focused Ferryx window, else the primary window: owns app-global badge and remote selection. */
+  const isAppStateLeader = useCallback(
+    () => shouldThisWindowOwnBadge(isPrimary, getNativeWindowFocused() ?? isWindowForegroundFocused()),
+    [isPrimary],
+  );
   const activeRemoteHost = useSyncExternalStore(
     remoteHostStore.subscribe,
     () => selectActiveHost(remoteHostStore.getState()),
@@ -730,7 +822,8 @@ function WorkspaceApp({
   const [activeProjectId, setActiveProjectId] = useState(initialActiveProjectId);
 
   useEffect(() => {
-    if (!isNativeRuntime) return;
+    // Project membership is app-global daemon state; the primary window owns publishing it.
+    if (!isNativeRuntime || !isPrimary) return;
     const sync = () => {
       void sendDesktopLocalProjects(projects).catch((error) => {
         console.error("Desktop project membership sync failed:", error);
@@ -748,7 +841,7 @@ function WorkspaceApp({
       unlisten?.();
       window.removeEventListener("focus", sync);
     };
-  }, [isNativeRuntime, projects]);
+  }, [isNativeRuntime, isPrimary, projects]);
 
   useEffect(() => {
     startNativeWindowFocusTracking();
@@ -848,6 +941,8 @@ function WorkspaceApp({
     openChangesTab,
     openRemoteDesktopTab,
     adoptBrowserSession,
+    adoptBackendSession,
+    releaseTabsForMove,
     duplicateBrowserTab,
     navigateBrowserTab,
     reloadBrowserTab,
@@ -941,7 +1036,14 @@ function WorkspaceApp({
 
   useEffect(() => wireActivityRecording({
     events: (record) => subscribeActivityNotification((event) => {
-      const decision = coordinatorRef.current!.handleAgentStateChange({ ...event, nextState: event.state });
+      // Activity edges come from this window's own store, so this window owns the session.
+      const backendSessionId = findBackendSessionId(stateRef.current, event.sessionId, event.workspaceId);
+      const decision = coordinatorRef.current!.handleAgentStateChange({
+        ...event,
+        nextState: event.state,
+        backendSessionId: backendSessionId ?? undefined,
+        ownsSession: true,
+      });
       record({ ...event, workspaceId: event.workspaceId ?? stateRef.current.workspaceId }, decision);
     }),
     isObserved: isNotificationObserved,
@@ -999,7 +1101,11 @@ function WorkspaceApp({
       terminalTitle = "";
     }
 
+    // The bell resolved against this window's own store (mounted or parked), so it owns the session.
+    const backendSessionId = findBackendSessionId(stateRef.current, sessionId, target?.workspaceId);
     const decision = coordinatorRef.current!.handleTerminalBell({
+      backendSessionId: backendSessionId ?? undefined,
+      ownsSession: true,
       workspaceId: target?.workspaceId,
       workspaceLabel,
       sessionId,
@@ -2183,7 +2289,8 @@ function WorkspaceApp({
     [attentionRows, state.workspaceId, state.sessions, state.worktrees, parkedActivityVersion],
   );
   useDesktopSidebarPublisher({
-    enabled: isNativeRuntime,
+    // One desktop sidebar model per app (consumed by remote clients): the primary publishes it.
+    enabled: isNativeRuntime && isPrimary,
     projects,
     activeProjectId: activeProject.workspaceId,
     worktrees: state.worktrees,
@@ -2226,6 +2333,11 @@ function WorkspaceApp({
   const [focusedTerminalRetry, setFocusedTerminalRetry] = useState(0);
 
   useEffect(() => {
+    // One active-desktop selection per app: the focused window publishes it, else the primary.
+    if (!isAppStateLeader()) {
+      publishedTerminalPayloadKey.current = null;
+      return;
+    }
     const key = JSON.stringify(focusedTerminalPayload);
     if (publishedTerminalPayloadKey.current === key) return;
     publishedTerminalPayloadKey.current = key;
@@ -2248,16 +2360,30 @@ function WorkspaceApp({
       settled = true;
       clearTimeout(retry);
     };
-  }, [focusedTerminalPayload, focusedTerminalRetry, reportRuntimeError]);
+  }, [focusedTerminalPayload, focusedTerminalRetry, isAppStateLeader, reportRuntimeError, windowStateVersion]);
 
   const unreadBadgeCount = useMemo(
     () => unreadBadgeCountFromStore ?? selectGlobalUnreadBadgeCount(state, activeProject.workspaceId),
     [unreadBadgeCountFromStore, state, activeProject.workspaceId],
   );
 
+  // Every window broadcasts its own unread count; only the badge leader (focused window, else the
+  // primary) writes the app-wide total to the dock, so windows never overwrite each other.
   useEffect(() => {
-    void setBadgeCount(unreadBadgeCount).catch(reportRuntimeError);
-  }, [reportRuntimeError, unreadBadgeCount]);
+    publishWindowBadgeCount(unreadBadgeCount);
+    if (!isAppStateLeader()) return;
+    void setBadgeCount(appBadgeTotal(unreadBadgeCount)).catch(reportRuntimeError);
+  }, [isAppStateLeader, reportRuntimeError, unreadBadgeCount, windowStateVersion]);
+
+  // Announce the backend sessions this window holds so a broadcast event for one of them is
+  // notified only here (see notificationLeader.ts).
+  const ownedBackendSessionKey = useMemo(
+    () => [...collectBackendSessionIds([state, ...listWorkspaceSnapshots().map(([, snapshot]) => snapshot)])].sort().join("\u0000"),
+    [state, parkedActivityVersion],
+  );
+  useEffect(() => {
+    publishWindowSessions(ownedBackendSessionKey ? ownedBackendSessionKey.split("\u0000") : []);
+  }, [ownedBackendSessionKey]);
 
   const toggleSidebar = useCallback(() => {
     setIsSidebarOpen((current) => {
@@ -2531,6 +2657,8 @@ function WorkspaceApp({
   const handleRemoteSelectionRequested = useCallback(
     (payload: RemoteSelectionRequestedPayload) => {
       if (!payload || !payload.workspaceId) return;
+      // Every window receives the request; only the window holding the remote selection acts.
+      if (!isAppStateLeader()) return;
       const targetProject = projectsRef.current.find((p) => p.workspaceId === payload.workspaceId);
       const isCurrentProject = activeProjectRef.current.workspaceId === payload.workspaceId;
       const requestedEntryId = payload.tabId ?? payload.activeTabId ?? null;
@@ -2589,7 +2717,7 @@ function WorkspaceApp({
         });
       }
     },
-    [activateRemoteEntry, dispatchWorkspaceAction, ensureTabForWorktree, handleSelectProject, reportRuntimeError],
+    [activateRemoteEntry, dispatchWorkspaceAction, ensureTabForWorktree, handleSelectProject, isAppStateLeader, reportRuntimeError],
   );
 
   useEffect(() => {
@@ -2702,14 +2830,43 @@ function WorkspaceApp({
 
   const handleNotificationTargetRef = useRef(handleNotificationTarget);
   handleNotificationTargetRef.current = handleNotificationTarget;
+  // This window's store holds the clicked session: same checks as handleNotificationTarget, so a
+  // click is only ever navigated by the window that can actually focus it.
+  const ownsNotificationTarget = useCallback((target: NotificationTarget) => {
+    if (!target?.workspaceId || !target.sessionId) return false;
+    if (!projectsRef.current.some((candidate) => candidate.workspaceId === target.workspaceId)) return false;
+    const live = target.workspaceId === activeProjectRef.current.workspaceId
+      ? stateRef.current
+      : getHmrWorkspaceState(target.workspaceId) ?? getWorkspaceSnapshot(target.workspaceId);
+    return Boolean(live && hasNavigableSession(live, target.sessionId));
+  }, []);
+  // The activation queue is app-global and draining consumes it, so only the primary window
+  // drains (exactly once). It navigates the clicks it owns and forwards the rest to the other
+  // windows, where the owner navigates and raises itself; a secondary window never drains.
   useEffect(
-    () =>
-      subscribeNotificationActivations(
-        (target) => handleNotificationTargetRef.current(target),
+    () => isPrimary
+      ? subscribeNotificationActivations(
+        (target) => routeNotificationTarget({
+          target,
+          ownsTarget: ownsNotificationTarget,
+          navigate: (owned) => handleNotificationTargetRef.current(owned),
+          forward: (foreign) => forwardNotificationTarget(currentWindowLabel(), foreign),
+        }),
         undefined,
         (error) => reportRuntimeErrorRef.current(error),
-      ),
-    [],
+      )
+      : undefined,
+    [isPrimary, ownsNotificationTarget],
+  );
+  useEffect(
+    () => isNativeRuntime && !isPrimary
+      ? subscribeForwardedNotificationTargets(
+        currentWindowLabel(),
+        ownsNotificationTarget,
+        (target) => handleNotificationTargetRef.current(target),
+      )
+      : undefined,
+    [isNativeRuntime, isPrimary, ownsNotificationTarget],
   );
 
   const handleAddTerminalTab = useCallback((shell?: string) => {
@@ -3282,12 +3439,172 @@ function WorkspaceApp({
     setIsCommandPaletteOpen(true);
   }, []);
   const handleCloseCommandPalette = useCallback(() => setIsCommandPaletteOpen(false), []);
+  const handleNewWindow = useCallback(() => {
+    void openNewWindow().catch(reportRuntimeErrorRef.current);
+  }, []);
+
+  // A closed secondary window hands its live backend sessions to this window (the shell lane
+  // emits `window_sessions_orphaned` to the primary/focused window). They are re-attached as
+  // background tabs by backendSessionId; nothing is spawned or killed. The closed window's
+  // session file is discarded only after every live session found a tab here.
+  const adoptBackendSessionRef = useRef(adoptBackendSession);
+  adoptBackendSessionRef.current = adoptBackendSession;
+  useEffect(() => {
+    if (!isNativeRuntime) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    let chain: Promise<void> = Promise.resolve();
+    const adopt = async (fromLabel: string, sessionIds: string[]) => {
+      forgetWindow(fromLabel);
+      const live = await listTerminalSessions();
+      if (disposed) return;
+      const plan = planOrphanAdoption(sessionIds, stateRef.current, live);
+      switchDebug("window.orphans.plan", {
+        fromLabel,
+        adopt: plan.adopt.map((entry) => entry.backend.sessionId),
+        alreadyAttached: plan.alreadyAttached,
+        missing: plan.missing,
+      });
+      let adoptedAll = true;
+      for (const entry of plan.adopt) {
+        if (disposed) return;
+        try {
+          const tabId = await adoptBackendSessionRef.current(entry.worktree, entry.backend);
+          if (tabId === null) adoptedAll = false;
+        } catch (error) {
+          adoptedAll = false;
+          reportRuntimeErrorRef.current(error);
+        }
+      }
+      if (adoptedAll && !disposed) await discardWindowSession(fromLabel);
+    };
+    void onWindowSessionsOrphaned(({ fromLabel, sessionIds }) => {
+      chain = chain
+        .then(() => adopt(fromLabel, sessionIds))
+        .catch((error: unknown) => reportRuntimeErrorRef.current(error));
+    }).then((stop) => {
+      if (disposed) stop(); else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [isNativeRuntime]);
 
   useEffect(() => {
     if (activeRemoteHost) {
       setIsCommandPaletteOpen(false);
     }
   }, [activeRemoteHost]);
+
+  // Sessions another window moved here (`window_sessions_adopt`). The listener is registered
+  // first and the boot-time queue drained once afterwards, so a request that arrived before this
+  // window booted is applied exactly once. Each request waits for its workspace to be mounted,
+  // then re-attaches by backendSessionId as a tab; nothing is spawned or closed.
+  const [pendingAdoptions, setPendingAdoptions] = useState<Array<WindowSessionsAdoptPayload & { attempts: number }>>([]);
+  const adoptionBusyRef = useRef(false);
+  const [adoptionTick, bumpAdoptionTick] = useState(0);
+  useEffect(() => {
+    if (!isNativeRuntime) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const enqueue = (payload: WindowSessionsAdoptPayload) => {
+      if (!disposed) setPendingAdoptions((queue) => [...queue, { ...payload, attempts: 0 }]);
+    };
+    void onWindowSessionsAdopt(enqueue)
+      .then(async (stop) => {
+        if (disposed) {
+          stop();
+          return;
+        }
+        unlisten = stop;
+        for (const payload of await takePendingWindowAdoptions()) enqueue(payload);
+      })
+      .catch((error: unknown) => reportRuntimeErrorRef.current(error));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [isNativeRuntime]);
+  useEffect(() => {
+    const head = pendingAdoptions[0];
+    if (!head || adoptionBusyRef.current) return;
+    if (head.workspaceId && head.workspaceId !== activeProject.workspaceId) {
+      const project = projectsRef.current.find((candidate) => candidate.workspaceId === head.workspaceId);
+      if (project) {
+        handleSelectProject(project);
+        return;
+      }
+      // The source project is unknown here: adopt into the project this window shows.
+      setPendingAdoptions((queue) => [{ ...queue[0]!, workspaceId: undefined }, ...queue.slice(1)]);
+      return;
+    }
+    if (
+      state.workspaceId !== activeProject.workspaceId ||
+      workspaceRestoreStatus === "idle" ||
+      workspaceRestoreStatus === "loading"
+    ) return;
+    adoptionBusyRef.current = true;
+    setPendingAdoptions((queue) => queue.slice(1));
+    void (async () => {
+      const live = await listTerminalSessions();
+      const plan = planOrphanAdoption(head.backendSessionIds, stateRef.current, live, head.attemptGenerations);
+      switchDebug("window.adopt.plan", {
+        adopt: plan.adopt.map((entry) => entry.backend.sessionId),
+        alreadyAttached: plan.alreadyAttached,
+        missing: plan.missing,
+      });
+      const retry: string[] = [];
+      let activateNext = head.activate;
+      for (const entry of plan.adopt) {
+        const tabId = await adoptBackendSessionRef.current(entry.worktree, entry.backend, undefined, { activate: activateNext });
+        if (tabId === null) retry.push(entry.backend.sessionId);
+        else activateNext = false;
+      }
+      if (plan.missing.length > 0) toast.warning("A terminal moved to this window is no longer running.");
+      // The workspace changed while adopting: the backend already made this window the owner, so
+      // try again once it settles rather than leave the session without a tab.
+      if (retry.length > 0 && head.attempts < 3) {
+        setPendingAdoptions((queue) => [
+          ...queue,
+          { ...head, backendSessionIds: retry, workspaceId: activeProjectRef.current.workspaceId, attempts: head.attempts + 1 },
+        ]);
+      } else if (retry.length > 0) {
+        toast.warning("A terminal moved to this window could not be opened.");
+      }
+    })()
+      .catch((error: unknown) => reportRuntimeErrorRef.current(error))
+      .finally(() => {
+        adoptionBusyRef.current = false;
+        bumpAdoptionTick((tick) => tick + 1);
+      });
+  }, [pendingAdoptions, adoptionTick, activeProject.workspaceId, state.workspaceId, workspaceRestoreStatus, handleSelectProject]);
+
+  // "Move to Window": the backend flips ownership and tells the target to adopt; only after it
+  // answers does this window drop the tab. The daemon session is never closed here.
+  const handleMoveTabToWindow = useCallback((tabId: string, targetLabel: string | null) => {
+    const plan = planTabMove(stateRef.current, tabId);
+    if (!plan.ok) {
+      toast.warning(plan.reason);
+      return;
+    }
+    void moveSessionsToWindow({
+      targetLabel,
+      backendSessionIds: plan.backendSessionIds,
+      workspaceId: stateRef.current.workspaceId ?? activeProjectRef.current.workspaceId,
+    })
+      .then((outcome) => {
+        releaseTabsForMove([tabId]);
+        if (!movedEverySession(outcome, plan.backendSessionIds)) {
+          toast.warning("Some terminals in this tab belong to another window and stayed there.");
+        }
+      })
+      .catch((error: unknown) => reportRuntimeErrorRef.current(error));
+  }, [releaseTabsForMove]);
+  const handleListOtherWindows = useCallback(
+    async () => (await listAppWindows()).filter((label) => label !== currentWindowLabel()),
+    [],
+  );
   const handleOpenSettings = useCallback((section?: SectionId, remoteContext?: RemoteContext) => {
     preloadSettingsDialog();
     const validSection =
@@ -3319,7 +3636,7 @@ function WorkspaceApp({
   }, []);
 
   useEffect(() => {
-    if (!isNativeRuntime || activeRemoteHostRef.current) return;
+    if (!isNativeRuntime || !isPrimary || activeRemoteHostRef.current) return;
     let cancelled = false;
     const timer = setTimeout(async () => {
       if (activeRemoteHostRef.current) return;
@@ -3355,7 +3672,7 @@ function WorkspaceApp({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [isNativeRuntime]);
+  }, [isNativeRuntime, isPrimary]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3392,12 +3709,12 @@ function WorkspaceApp({
   }, []);
 
   useEffect(() => {
-    if (!isNativeRuntime) return;
+    if (!isNativeRuntime || !isPrimary) return;
     return startWhatsNewRecorder();
-  }, [isNativeRuntime]);
+  }, [isNativeRuntime, isPrimary]);
 
   useEffect(() => {
-    if (!isNativeRuntime) return;
+    if (!isNativeRuntime || !isPrimary) return;
     let cancelled = false;
     void getCurrentVersion().then((version) => {
       if (cancelled || !version) return;
@@ -3409,7 +3726,7 @@ function WorkspaceApp({
     return () => {
       cancelled = true;
     };
-  }, [isNativeRuntime]);
+  }, [isNativeRuntime, isPrimary]);
 
   const handleToggleSettings = useCallback(() => {
     preloadSettingsDialog();
@@ -3646,7 +3963,8 @@ function WorkspaceApp({
       };
 
       openFilePreviewTab(source, request);
-    }).then((cleanup) => {
+      // Routed to the focused window (emit_to); only that window opens the file.
+    }, { target: currentWindowLabel() }).then((cleanup) => {
       if (disposed) cleanup();
       else unlisten = cleanup;
     }).catch(reportRuntimeError);
@@ -4061,6 +4379,7 @@ function WorkspaceApp({
         "sidebar.left.toggle": toggleSidebar,
         "project.add": handleOpenAddProject,
         "commandPalette.open": handleOpenCommandPalette,
+        "window.new": isNativeRuntime ? handleNewWindow : undefined,
         "settings.toggle": handleToggleSettings,
         "notifications.toggle": handleToggleNotificationCenter,
         "zoom.in": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "in") : handleZoomIn,
@@ -4080,6 +4399,8 @@ function WorkspaceApp({
       handleCycleTab,
       handleOpenAddProject,
       handleOpenCommandPalette,
+      handleNewWindow,
+      isNativeRuntime,
       handleOpenTerminalSearch,
       handleToggleTerminalCopyMode,
       handleSelectTerminalTabByIndex,
@@ -4289,6 +4610,8 @@ function WorkspaceApp({
             onRenameTab={renameTab}
             onToggleTabPin={setTabPinned}
             onResetAgentState={handleResetTabAgentState}
+            onMoveTabToWindow={isNativeRuntime ? handleMoveTabToWindow : undefined}
+            listOtherWindows={isNativeRuntime ? handleListOtherWindows : undefined}
             onAddTab={handleAddTerminalTab}
             onAddBrowserTab={handleAddBrowserTab}
             onOpenSettings={handleOpenSettings}
@@ -4335,6 +4658,7 @@ function WorkspaceApp({
           onSelectWorktree={handleSelectWorktree}
           onSelectTab={handleSelectTerminalTab}
           onShowChanges={activeWorktreeCanShowChanges ? handleShowActiveWorktreeChanges : undefined}
+          onNewWindow={isNativeRuntime ? handleNewWindow : undefined}
           onClose={handleCloseCommandPalette}
         />
       ) : null}
@@ -4716,6 +5040,17 @@ function loadActiveProjectId() {
     return getMigratedItem(ACTIVE_PROJECT_STORAGE_KEY) || DEFAULT_WORKSPACE_ID;
   } catch {
     return DEFAULT_WORKSPACE_ID;
+  }
+}
+
+/** A secondary window's own active project selection (namespaced key); null for the primary. */
+function loadWindowActiveProjectId(): string | null {
+  const key = windowScopedStorageKey(ACTIVE_PROJECT_STORAGE_KEY);
+  if (key === ACTIVE_PROJECT_STORAGE_KEY) return null;
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
   }
 }
 
