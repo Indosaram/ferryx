@@ -363,7 +363,7 @@ fn recommended_index(options: &[String], history: &[String]) -> usize {
         "proceed",
         "continue",
     ];
-    let tokens: Vec<Vec<String>> = options.iter().map(|option| words(option)).collect();
+    let tokens: Vec<Vec<String>> = options.iter().map(|option| tokenize(option)).collect();
     let has =
         |index: usize, list: &[&str]| tokens[index].iter().any(|t| list.contains(&t.as_str()));
     (0..options.len())
@@ -466,7 +466,7 @@ fn is_path_like(token: &str) -> bool {
         || (token.as_bytes().get(1) == Some(&b':') && token.len() > 2)
 }
 
-fn words(text: &str) -> Vec<String> {
+fn tokenize(text: &str) -> Vec<String> {
     text.to_lowercase()
         .split(|c: char| !(c.is_alphanumeric() || c == '_'))
         .filter(|word| !word.is_empty())
@@ -493,7 +493,7 @@ pub fn irreversible_or_external(
 }
 
 fn classify_text(text: &str, worktree: Option<&str>) -> Option<&'static str> {
-    let words = words(text);
+    let words = tokenize(text);
     let any = |list: &[&str]| words.iter().any(|w| list.contains(&w.as_str()));
     let prefixed = |prefixes: &[&str]| {
         words
@@ -542,7 +542,7 @@ fn classify_text(text: &str, worktree: Option<&str>) -> Option<&'static str> {
         return Some("publish");
     }
     // `cargo build --release` builds; it does not cut a release.
-    if words(&text.replace("--release", " "))
+    if tokenize(&text.replace("--release", " "))
         .iter()
         .any(|w| w.starts_with("release"))
     {
@@ -641,7 +641,7 @@ fn remote_script_piped_to_shell(text: &str) -> bool {
     let Some(first) = parts.next() else {
         return false;
     };
-    let fetches = words(first)
+    let fetches = tokenize(first)
         .iter()
         .any(|w| matches!(w.as_str(), "curl" | "wget"));
     fetches
