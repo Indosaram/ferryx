@@ -2185,3 +2185,160 @@ async fn owner_memory_requests_go_to_the_owner_ingest_session_with_typed_refusal
     assert!(matches!(unknown, MemoryRequestError::Fault(_)));
     assert_eq!(harness.peer.of_type("extension_request").len(), 2);
 }
+
+#[derive(Default)]
+struct FakeControl {
+    calls: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl SessionControl for FakeControl {
+    async fn stop(&self, session: &SessionRef) -> crate::error::Result<()> {
+        self.calls.lock().unwrap().push(format!("stop {session}"));
+        Ok(())
+    }
+
+    async fn send(&self, session: &SessionRef, text: &str) -> crate::error::Result<()> {
+        self.calls.lock().unwrap().push(format!("send {session} {text}"));
+        Ok(())
+    }
+
+    async fn answer(
+        &self,
+        session: &SessionRef,
+        prompt_id: &str,
+        screen_revision: Option<&str>,
+        option_index: usize,
+    ) -> crate::error::Result<()> {
+        self.calls.lock().unwrap().push(format!(
+            "answer {session} {prompt_id} {screen_revision:?} {option_index}"
+        ));
+        Ok(())
+    }
+
+    async fn read_tail(&self, session: &SessionRef, lines: usize) -> crate::error::Result<String> {
+        self.calls.lock().unwrap().push(format!("read {session} {lines}"));
+        Ok("tail".to_owned())
+    }
+}
+
+struct FakeFleet(Vec<FleetSession>);
+
+#[async_trait]
+impl FleetSource for FakeFleet {
+    async fn list(&self) -> crate::error::Result<Vec<FleetSession>> {
+        Ok(self.0.clone())
+    }
+}
+
+fn fleet_session(id: &str, question: &str) -> FleetSession {
+    FleetSession {
+        session_ref: SessionRef::new("mac", id),
+        host_id: "mac".into(),
+        host_label: "This Mac".into(),
+        title: "task".into(),
+        cwd: "/work".into(),
+        agent: "claude".into(),
+        state: "blocked".into(),
+        state_source: "provider".into(),
+        state_since_ms: None,
+        screen_changed_at_ms: None,
+        pending_prompt: Some(PendingPrompt {
+            prompt_id: format!("p-{id}"),
+            kind: "approval".into(),
+            question: question.into(),
+            command: None,
+            options: vec!["Allow".into(), "Deny".into()],
+            screen_revision: Some("r1".into()),
+        }),
+        last_assistant_line: None,
+        updated_at_ms: 1,
+        stale: false,
+    }
+}
+
+fn session_tools() -> (Arc<FakeControl>, SessionTools, Vec<FleetSession>) {
+    let fleet = vec![
+        fleet_session("s1", "Run the unit tests?"),
+        fleet_session("s2", "Deploy to production?"),
+    ];
+    let control = Arc::new(FakeControl::default());
+    let tools = SessionTools::new(control.clone(), Arc::new(FakeFleet(fleet.clone())));
+    (control, tools, fleet)
+}
+
+fn session_call(action: &str, payload: Value) -> WorkToolCall {
+    parse_work_call(&json!({"action": action, "payload": payload})).unwrap()
+}
+
+#[tokio::test]
+async fn list_sessions_returns_the_fleet() {
+    let (_, tools, fleet) = session_tools();
+    let reply = tools.execute(session_call("list_sessions", json!({}))).await.unwrap();
+    assert_eq!(reply, json!({ "sessions": fleet }));
+}
+
+#[tokio::test]
+async fn stop_and_send_reach_session_control_with_the_parsed_ref() {
+    let (control, tools, _) = session_tools();
+    tools
+        .execute(session_call("stop_session", json!({"sessionRef": "mac:s1"})))
+        .await
+        .unwrap();
+    tools
+        .execute(session_call(
+            "send_to_session",
+            json!({"sessionRef": "mac:s1", "text": "continue"}),
+        ))
+        .await
+        .unwrap();
+    tools
+        .execute(session_call("read_session", json!({"sessionRef": "mac:s1", "lines": 9999})))
+        .await
+        .unwrap();
+    assert_eq!(
+        *control.calls.lock().unwrap(),
+        vec![
+            "stop mac:s1".to_owned(),
+            "send mac:s1 continue".to_owned(),
+            format!("read mac:s1 {MAX_READ_LINES}"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_supervisor_answer_passes_the_gate_and_an_irreversible_one_is_refused() {
+    let (control, tools, _) = session_tools();
+    let answer = |id: &str| {
+        session_call(
+            "answer_prompt",
+            json!({"sessionRef": format!("mac:{id}"), "promptId": format!("p-{id}"),
+                "screenRevision": "r1", "optionIndex": 0}),
+        )
+    };
+    tools.execute(answer("s1")).await.unwrap();
+    assert_eq!(
+        *control.calls.lock().unwrap(),
+        vec![r#"answer mac:s1 p-s1 Some("r1") 0"#.to_owned()]
+    );
+    let refused = tools.execute(answer("s2")).await.unwrap_err();
+    assert_eq!(refused.code, "SUPERVISOR_ANSWER_REFUSED");
+    assert_eq!(control.calls.lock().unwrap().len(), 1, "nothing was sent");
+    let missing = tools
+        .execute(session_call(
+            "answer_prompt",
+            json!({"sessionRef": "mac:s1", "promptId": "gone", "optionIndex": 0}),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code, "SUPERVISOR_PROMPT_NOT_FOUND");
+}
+
+#[test]
+fn an_invalid_session_ref_is_rejected_when_parsing() {
+    let rejection = parse_work_call(&json!({
+        "action": "stop_session", "payload": {"sessionRef": "nohost"}
+    }))
+    .unwrap_err();
+    assert_eq!(rejection.code, "SUPERVISOR_WORK_INVALID");
+}

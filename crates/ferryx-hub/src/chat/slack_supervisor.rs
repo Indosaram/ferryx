@@ -33,8 +33,8 @@ use super::slack_turn::{Admitted, SlackTurnConfig};
 use crate::goals::contract::RequirementSpec;
 use crate::meta::mhc_profile::ConversationScope;
 use crate::meta::mhc_supervisor::{
-    MhcSupervisor, WorkToolCall, WorkToolHandler, WorkToolRejection, WorkToolRequest,
-    WorkerPreference,
+    MhcSupervisor, SessionTools, WorkToolCall, WorkToolHandler, WorkToolRejection,
+    WorkToolRequest, WorkerPreference,
 };
 use crate::supervisor::admission::{
     self, ActorContext, OperationClass, OwnerChoices, SubmitOutcome, SubmitWork,
@@ -217,11 +217,21 @@ fn update_record(
 /// Slack turn in flight is rejected: there is no authenticated actor to act for.
 pub struct SlackWorkTools {
     pool: SqlitePool,
+    sessions: Option<Arc<SessionTools>>,
 }
 
 impl SlackWorkTools {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            sessions: None,
+        }
+    }
+
+    /// Serves the session tools (list, read, answer, send, stop) too.
+    pub fn with_sessions(mut self, sessions: Arc<SessionTools>) -> Self {
+        self.sessions = Some(sessions);
+        self
     }
 }
 
@@ -324,6 +334,13 @@ impl WorkToolHandler for SlackWorkTools {
                     )),
                 }
             }
+            call => match &self.sessions {
+                Some(sessions) => sessions.execute(call).await,
+                None => Err(WorkToolRejection::new(
+                    "SUPERVISOR_SESSIONS_UNAVAILABLE",
+                    "the session tools are not installed",
+                )),
+            },
         }
     }
 }

@@ -50,6 +50,7 @@ use super::mhc_stdio::{
 };
 use crate::error::HubError;
 use crate::lanes::kibitzer::ModelTurn;
+use crate::supervisor::panel_contract::{FleetSession, PendingPrompt, SessionControl, SessionRef};
 
 /// First relaunch delay after a failed launch or an early exit; doubled per failure up to
 /// [`MAX_BACKOFF`].
@@ -351,6 +352,25 @@ pub enum WorkToolCall {
     Status {
         goal_id: Option<String>,
     },
+    /// Every session of the fleet.
+    ListSessions,
+    ReadSession {
+        session_ref: SessionRef,
+        lines: usize,
+    },
+    AnswerPrompt {
+        session_ref: SessionRef,
+        prompt_id: String,
+        screen_revision: Option<String>,
+        option_index: usize,
+    },
+    SendToSession {
+        session_ref: SessionRef,
+        text: String,
+    },
+    StopSession {
+        session_ref: SessionRef,
+    },
 }
 
 /// A work-tool call with the scope the hub resolved for the calling conversation. Actor,
@@ -416,6 +436,42 @@ struct StatusPayload {
     goal_id: Option<String>,
 }
 
+/// Lines `read_session` returns when the call names none.
+pub const DEFAULT_READ_LINES: usize = 40;
+/// Most lines one `read_session` call may return.
+pub const MAX_READ_LINES: usize = 400;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ReadPayload {
+    session_ref: String,
+    #[serde(default)]
+    lines: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct AnswerPayload {
+    session_ref: String,
+    prompt_id: String,
+    #[serde(default)]
+    screen_revision: Option<String>,
+    option_index: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SendPayload {
+    session_ref: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct StopPayload {
+    session_ref: String,
+}
+
 fn parse_work_call(data: &Value) -> Result<WorkToolCall, WorkToolRejection> {
     let payload = data.get("payload").cloned().unwrap_or(Value::Null);
     let invalid = |error: serde_json::Error| {
@@ -436,10 +492,180 @@ fn parse_work_call(data: &Value) -> Result<WorkToolCall, WorkToolRejection> {
                 goal_id: payload.goal_id,
             })
         }
+        Some("list_sessions") => Ok(WorkToolCall::ListSessions),
+        Some("read_session") => {
+            let payload: ReadPayload = serde_json::from_value(payload).map_err(invalid)?;
+            Ok(WorkToolCall::ReadSession {
+                session_ref: session_ref(&payload.session_ref)?,
+                lines: payload.lines.unwrap_or(DEFAULT_READ_LINES),
+            })
+        }
+        Some("answer_prompt") => {
+            let payload: AnswerPayload = serde_json::from_value(payload).map_err(invalid)?;
+            Ok(WorkToolCall::AnswerPrompt {
+                session_ref: session_ref(&payload.session_ref)?,
+                prompt_id: payload.prompt_id,
+                screen_revision: payload.screen_revision,
+                option_index: payload.option_index,
+            })
+        }
+        Some("send_to_session") => {
+            let payload: SendPayload = serde_json::from_value(payload).map_err(invalid)?;
+            Ok(WorkToolCall::SendToSession {
+                session_ref: session_ref(&payload.session_ref)?,
+                text: payload.text,
+            })
+        }
+        Some("stop_session") => {
+            let payload: StopPayload = serde_json::from_value(payload).map_err(invalid)?;
+            Ok(WorkToolCall::StopSession {
+                session_ref: session_ref(&payload.session_ref)?,
+            })
+        }
         _ => Err(WorkToolRejection::new(
             "SUPERVISOR_WORK_UNKNOWN_ACTION",
             "the work request names no known action",
         )),
+    }
+}
+
+fn session_ref(raw: &str) -> Result<SessionRef, WorkToolRejection> {
+    SessionRef::parse(raw)
+        .map_err(|error| WorkToolRejection::new("SUPERVISOR_WORK_INVALID", &error.to_string()))
+}
+
+/// The fleet the session tools list and look prompts up in.
+#[async_trait]
+pub trait FleetSource: Send + Sync {
+    async fn list(&self) -> Result<Vec<FleetSession>, HubError>;
+}
+
+/// The decision gate for an answer the supervisor itself initiates. Owner taps on a card never
+/// pass through it.
+pub trait AnswerGate: Send + Sync {
+    /// `Err(reason)` refuses to answer `prompt` with option `option_index`.
+    fn allow(&self, prompt: &PendingPrompt, option_index: usize) -> Result<(), String>;
+}
+
+/// Words that mark a prompt as an irreversible or sensitive (D1a) decision.
+const IRREVERSIBLE_WORDS: [&str; 9] = [
+    "deploy",
+    "migrat",
+    "delete",
+    "publish",
+    "credential",
+    "password",
+    "secret",
+    "api key",
+    "token",
+];
+
+/// Refuses every prompt that looks irreversible; the learned decision (todo 5) replaces it.
+pub struct RefuseIrreversible;
+
+impl AnswerGate for RefuseIrreversible {
+    fn allow(&self, prompt: &PendingPrompt, _option_index: usize) -> Result<(), String> {
+        let text = std::iter::once(prompt.question.as_str())
+            .chain(prompt.command.as_deref())
+            .chain(prompt.options.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .to_lowercase();
+        match IRREVERSIBLE_WORDS.iter().find(|word| text.contains(**word)) {
+            Some(word) => Err(format!(
+                "the prompt looks irreversible ({word}); the owner decides"
+            )),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Executes the session work tools over agent control. Constructed with its dependencies like
+/// the other work-tool services; the answer gate defaults to [`RefuseIrreversible`].
+pub struct SessionTools {
+    control: Arc<dyn SessionControl>,
+    fleet: Arc<dyn FleetSource>,
+    gate: Arc<dyn AnswerGate>,
+}
+
+impl SessionTools {
+    pub fn new(control: Arc<dyn SessionControl>, fleet: Arc<dyn FleetSource>) -> Self {
+        Self {
+            control,
+            fleet,
+            gate: Arc::new(RefuseIrreversible),
+        }
+    }
+
+    pub fn with_gate(mut self, gate: Arc<dyn AnswerGate>) -> Self {
+        self.gate = gate;
+        self
+    }
+
+    /// Runs one session call; any other call is rejected as not a session tool.
+    pub async fn execute(&self, call: WorkToolCall) -> Result<Value, WorkToolRejection> {
+        let failed = |error: HubError| {
+            WorkToolRejection::new("SUPERVISOR_SESSION_FAILED", &error.to_string())
+        };
+        match call {
+            WorkToolCall::ListSessions => {
+                let sessions = self.fleet.list().await.map_err(failed)?;
+                Ok(json!({ "sessions": sessions }))
+            }
+            WorkToolCall::ReadSession { session_ref, lines } => {
+                let lines = lines.clamp(1, MAX_READ_LINES);
+                let tail = self
+                    .control
+                    .read_tail(&session_ref, lines)
+                    .await
+                    .map_err(failed)?;
+                Ok(json!({ "sessionRef": session_ref, "tail": tail }))
+            }
+            WorkToolCall::AnswerPrompt {
+                session_ref,
+                prompt_id,
+                screen_revision,
+                option_index,
+            } => {
+                let sessions = self.fleet.list().await.map_err(failed)?;
+                let prompt = sessions
+                    .iter()
+                    .find(|session| session.session_ref == session_ref)
+                    .and_then(|session| session.pending_prompt.as_ref())
+                    .filter(|prompt| prompt.prompt_id == prompt_id)
+                    .ok_or_else(|| {
+                        WorkToolRejection::new(
+                            "SUPERVISOR_PROMPT_NOT_FOUND",
+                            "the session has no such pending prompt",
+                        )
+                    })?;
+                if option_index >= prompt.options.len() {
+                    return Err(WorkToolRejection::new(
+                        "SUPERVISOR_WORK_INVALID",
+                        "optionIndex is not an option of the prompt",
+                    ));
+                }
+                self.gate
+                    .allow(prompt, option_index)
+                    .map_err(|reason| WorkToolRejection::new("SUPERVISOR_ANSWER_REFUSED", &reason))?;
+                self.control
+                    .answer(&session_ref, &prompt_id, screen_revision.as_deref(), option_index)
+                    .await
+                    .map_err(failed)?;
+                Ok(json!({ "ok": true, "sessionRef": session_ref, "optionIndex": option_index }))
+            }
+            WorkToolCall::SendToSession { session_ref, text } => {
+                self.control.send(&session_ref, &text).await.map_err(failed)?;
+                Ok(json!({ "ok": true, "sessionRef": session_ref }))
+            }
+            WorkToolCall::StopSession { session_ref } => {
+                self.control.stop(&session_ref).await.map_err(failed)?;
+                Ok(json!({ "ok": true, "sessionRef": session_ref }))
+            }
+            WorkToolCall::Submit { .. } | WorkToolCall::Status { .. } => Err(
+                WorkToolRejection::new("SUPERVISOR_WORK_INVALID", "not a session tool"),
+            ),
+        }
     }
 }
 
