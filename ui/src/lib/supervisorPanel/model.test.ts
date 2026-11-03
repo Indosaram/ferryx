@@ -215,6 +215,7 @@ describe("supervisor panel view", () => {
       buildPanelView({ ...panelSnapshotFixture, log: [{ ...panelSnapshotFixture.log[0], evidence }] }, options).log.all[0].unverified;
     expect(claim([{ kind: "prompt", id: "p1" }])).toBe(true);
     expect(claim([{ kind: "session", id: "mac:one" }])).toBe(true);
+    expect(claim([{ kind: "answerHistory", id: "hist-1" }])).toBe(true);
     expect(claim([{ kind: "receipt", id: "r1" }])).toBe(false);
     expect(claim([{ kind: "stateTransition", id: "seq-1" }])).toBe(false);
     expect(claim([{ kind: "commit", id: "abc" }])).toBe(false);

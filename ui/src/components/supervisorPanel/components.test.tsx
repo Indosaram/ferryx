@@ -138,7 +138,7 @@ describe('Composer', () => {
     await waitFor(() => expect(onSend).toHaveBeenCalledWith('@roblox stop it', ['win:roblox']));
   });
 
-  it('refuses an ambiguous prefix and keeps the text', async () => {
+  it('shows the reply with an Unverified chip when it carries no delivery evidence', async () => {
     const onSend = vi.fn(async () => ({ ok: true as const, reply: { text: 'I sent it.', unverified: true } }));
     render(<Composer sessions={sessions} onSend={onSend} />);
     type('tell build to go on');

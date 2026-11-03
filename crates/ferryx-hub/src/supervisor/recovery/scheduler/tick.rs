@@ -142,18 +142,10 @@ impl RecoveryScheduler {
             summary,
             basis: "default recovery policy (D2): act first, ask only after the retry budget"
                 .to_owned(),
-            // A resumed or finished row is written only after the scheduler observed the
-            // session leave the fault, which is a state transition. Every other row is a claim
-            // about work in flight and names its sessions without proving delivery (D9).
             evidence: refs
                 .into_iter()
                 .map(|r| EvidenceRef {
-                    kind: if matches!(kind, ActionKind::Resumed | ActionKind::Finished) {
-                        "stateTransition"
-                    } else {
-                        "session"
-                    }
-                    .to_owned(),
+                    kind: "session".to_owned(),
                     id: r.to_string(),
                 })
                 .collect(),

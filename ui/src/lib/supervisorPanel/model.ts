@@ -263,14 +263,13 @@ const CLAIM_KINDS: ReadonlySet<ActionKind> = new Set<ActionKind>([
 
 /**
  * D9: what counts as a delivery event. A ref to a prompt, a session or a goal names what the
- * claim is about, not proof that anything happened; only a delivery receipt, a state-transition
- * sequence, an answer-history entry or a commit does.
+ * claim is about, and an answer-history entry explains why an answer was chosen; neither proves
+ * anything happened. Only a delivery receipt, a state-transition sequence or a commit does.
  */
 export const DELIVERY_EVIDENCE_KINDS: ReadonlySet<string> = new Set([
   "receipt",
   "delivery",
   "stateTransition",
-  "answerHistory",
   "commit",
 ]);
 

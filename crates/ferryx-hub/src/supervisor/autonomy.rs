@@ -478,15 +478,18 @@ impl Autonomy {
                 option_index,
             )
             .await;
-        if let Err(error) = sent {
-            self.escalate(
-                session,
-                prompt,
-                option_index,
-                format!("I could not answer it ({error})."),
-            );
-            return;
-        }
+        let request_id = match sent {
+            Ok(request_id) => request_id,
+            Err(error) => {
+                self.escalate(
+                    session,
+                    prompt,
+                    option_index,
+                    format!("I could not answer it ({error})."),
+                );
+                return;
+            }
+        };
         if let Some(known) = self.tracked().get_mut(&session.session_ref) {
             known.settled = true;
         }
@@ -518,6 +521,7 @@ impl Autonomy {
             format!("Answered \"{label}\" in {}", session.title),
             basis.to_owned(),
             Some(undo),
+            request_id,
         )
         .await;
     }
@@ -550,6 +554,7 @@ impl Autonomy {
         summary: String,
         basis: String,
         undo: Option<UndoHandle>,
+        receipt: Option<String>,
     ) {
         let now = now_ms();
         let entry = ActionEntry {
@@ -559,12 +564,16 @@ impl Autonomy {
             kind: ActionKind::Answered,
             summary,
             basis,
-            evidence: vec![EvidenceRef {
-                // Written only after agent control accepted the answer, so the accepted
-                // answer is the delivery receipt; the prompt id names what it answered.
-                kind: "receipt".to_owned(),
-                id: prompt.prompt_id.clone(),
-            }],
+            // D9: only the request id of the receipt agent control returned proves delivery.
+            // An answer accepted without one, and an owner answer observed in passing, carry no
+            // evidence and stay Unverified.
+            evidence: receipt
+                .into_iter()
+                .map(|id| EvidenceRef {
+                    kind: "receipt".to_owned(),
+                    id,
+                })
+                .collect(),
             undo,
             live: false,
             created_at_ms: now,
@@ -654,6 +663,7 @@ impl Autonomy {
                 "owner",
                 format!("You chose {label}"),
                 basis.to_owned(),
+                None,
                 None,
             )
             .await;

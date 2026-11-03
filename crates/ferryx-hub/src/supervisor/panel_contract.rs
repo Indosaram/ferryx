@@ -324,14 +324,15 @@ pub trait SessionControl: Send + Sync {
     async fn stop(&self, session: &SessionRef) -> Result<()>;
     /// Types `text` into the session and submits it.
     async fn send(&self, session: &SessionRef, text: &str) -> Result<()>;
-    /// Answers a pending prompt; fails when `screen_revision` is stale.
+    /// Answers a pending prompt; fails when `screen_revision` is stale. On success returns the
+    /// request id of the delivery receipt the host accepted it under, when the host returned one.
     async fn answer(
         &self,
         session: &SessionRef,
         prompt_id: &str,
         screen_revision: Option<&str>,
         option_index: usize,
-    ) -> Result<()>;
+    ) -> Result<Option<String>>;
     /// Last `lines` lines of the terminal.
     async fn read_tail(&self, session: &SessionRef, lines: usize) -> Result<String>;
 }

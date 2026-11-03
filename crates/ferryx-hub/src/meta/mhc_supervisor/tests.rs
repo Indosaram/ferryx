@@ -2297,11 +2297,11 @@ impl SessionControl for FakeControl {
         prompt_id: &str,
         screen_revision: Option<&str>,
         option_index: usize,
-    ) -> crate::error::Result<()> {
+    ) -> crate::error::Result<Option<String>> {
         self.calls.lock().unwrap().push(format!(
             "answer {session} {prompt_id} {screen_revision:?} {option_index}"
         ));
-        Ok(())
+        Ok(None)
     }
 
     async fn read_tail(&self, session: &SessionRef, lines: usize) -> crate::error::Result<String> {

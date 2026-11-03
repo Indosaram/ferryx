@@ -263,6 +263,53 @@ mod prompt_changed_event_tests {
         assert_eq!(event.payload["promptId"], "relay-prompt");
     }
 
+    /// The daemon relays an owner-panel `panel.session` frame to its desktop subscribers as
+    /// `supervisor_panel_event`. `DaemonServer::new` subscribes to the panel channel before it
+    /// returns, and the desktop receiver is subscribed before the frame is published.
+    #[tokio::test]
+    async fn a_published_panel_session_reaches_the_desktop_event_stream() {
+        use ferryx_hub::supervisor::panel_contract::{FleetSession, SessionRef};
+        let server = DaemonServer::new();
+        let mut desktop = server.remote_event_tx.subscribe();
+        // The panel channel is process-wide; a unique ref tells this frame from other tests'.
+        let session_ref = SessionRef::new("relay-host", &format!("relay-{}", uuid::Uuid::new_v4()));
+        crate::hub_runtime::publish_panel_session(&FleetSession {
+            session_ref: session_ref.clone(),
+            host_id: "relay-host".into(),
+            host_label: "This computer".into(),
+            title: "relay".into(),
+            cwd: "/work/relay".into(),
+            agent: "claude".into(),
+            state: "idle".into(),
+            state_source: "telemetry".into(),
+            state_since_ms: None,
+            screen_changed_at_ms: None,
+            pending_prompt: None,
+            last_assistant_line: None,
+            updated_at_ms: 1,
+            stale: false,
+            health: None,
+        });
+        let event = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match desktop.recv().await {
+                    Ok(event)
+                        if event.event == SUPERVISOR_PANEL_EVENT
+                            && event.payload["sessionRef"] == session_ref.as_str() =>
+                    {
+                        return event
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => panic!("the desktop stream closed"),
+                }
+            }
+        })
+        .await
+        .expect("panel.session reaches the desktop stream as supervisor_panel_event");
+        assert_eq!(event.payload["type"], "panel.session");
+        assert_eq!(event.payload["session"]["title"], "relay");
+    }
+
     #[test]
     fn a_repaint_under_the_same_prompt_is_not_a_prompt_change() {
         let observation = |prompt: Option<&str>, revision: &str| crate::agent_control::events::AgentObservation {

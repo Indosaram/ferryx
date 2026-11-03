@@ -393,11 +393,11 @@ mod tests {
             prompt_id: &str,
             screen_revision: Option<&str>,
             option_index: usize,
-        ) -> HubResult<()> {
+        ) -> HubResult<Option<String>> {
             self.calls.lock().unwrap().push(format!(
                 "answer {session} {prompt_id} {screen_revision:?} {option_index}"
             ));
-            Ok(())
+            Ok(None)
         }
 
         async fn read_tail(&self, session: &SessionRef, lines: usize) -> HubResult<String> {
