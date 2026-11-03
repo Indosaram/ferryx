@@ -3,6 +3,7 @@
 // lineage, empty aggregates, redaction samples, symlinked production roots).
 import { mkdirSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { relayTunnelArgs, relayTunnelReady, targetRelayUrl } from './f1-acceptance.mjs';
 import {
   aggregateExit, assertNotProduction, EXIT, familyOf, finalExitCode, identityVerdict, interpretDarwinPs, PLATFORM, probeProcess, redact, redactValue,
   settledOk, stampEpochMs,
@@ -160,6 +161,24 @@ export async function unitChecks(check, stateRoot) {
     return { label, code, ok: code === 'PRODUCTION_PATH_REFUSED' };
   });
   check('xdg-and-ferryx-env-roots-refused', extraRoots.every((entry) => entry.ok), extraRoots);
+
+  // F1 relay tunnel: a tunneled target dials its own loopback, the tunnel binds exactly that
+  // loopback port with task-scoped options before -R, and readiness needs OpenSSH's success line
+  // for that same port.
+  const tunneled = { ssh: 'root@203.0.113.7', sshOptions: ['-o', 'UserKnownHostsFile=/abs/kh'], relayTunnel: true };
+  const direct = { ssh: 'box@192.0.2.9' };
+  const args = relayTunnelArgs(tunneled, 41234);
+  const relayTunnel = [
+    ['tunneled-url-is-loopback', targetRelayUrl(tunneled, '100.91.254.71', 41234) === 'http://127.0.0.1:41234'],
+    ['direct-url-uses-relay-host', targetRelayUrl(direct, '192.168.1.5', 41234) === 'http://192.168.1.5:41234'],
+    ['args-forward-same-loopback-port', args.includes('127.0.0.1:41234:127.0.0.1:41234') && args.at(-1) === 'root@203.0.113.7'],
+    ['args-fail-fast-and-no-command', args.includes('ExitOnForwardFailure=yes') && args.includes('-N') && args.includes('BatchMode=yes')],
+    ['args-task-options-before-forward', args.indexOf('UserKnownHostsFile=/abs/kh') < args.indexOf('-R')],
+    ['ready-on-own-port', relayTunnelReady('debug1: remote forward success for: listen 127.0.0.1:41234, connect 127.0.0.1:41234', 41234)],
+    ['not-ready-on-other-port', !relayTunnelReady('debug1: remote forward success for: listen 127.0.0.1:4123, connect 127.0.0.1:4123', 41234)],
+    ['not-ready-on-failure', !relayTunnelReady('Error: remote port forwarding failed for listen port 41234', 41234)],
+  ].map(([label, ok]) => ({ label, ok }));
+  check('f1-relay-tunnel-shape', relayTunnel.every((entry) => entry.ok), { relayTunnel, args });
 
   const selfStamp = (await probeProcess(process.pid)).startStamp ?? null;
   const epoch = stampEpochMs(selfStamp);

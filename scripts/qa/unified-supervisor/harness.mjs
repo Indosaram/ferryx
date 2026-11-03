@@ -338,7 +338,7 @@ function checkRealEngine(value, context) {
 }
 // f1Fleet (f1-acceptance, plan F1): the hub computer's agent root and the two ssh target
 // computers. Every host, path and binary is config; nothing names a personal machine.
-const F1_TARGET_FIELDS = Object.freeze({ required: ['label', 'ssh', 'bun', 'repoDir', 'ferryxCli', 'dataRoot'], optional: ['sshOptions'] });
+const F1_TARGET_FIELDS = Object.freeze({ required: ['label', 'ssh', 'bun', 'repoDir', 'ferryxCli', 'dataRoot'], optional: ['sshOptions', 'relayTunnel'] });
 function checkF1Fleet(value, context, config) {
   if (typeof value !== 'object' || Array.isArray(value)) throw new HarnessError('CONFIG_INVALID', 'f1Fleet must be an object or null');
   const allowed = ['hub', 'targets', 'relayHost', 'sshBin', 'outageDurationMs', 'quotaResetMs'];
@@ -374,6 +374,7 @@ function checkF1Fleet(value, context, config) {
     }
     if (/(^|\/)\.ferryx(\/|$)/.test(target.dataRoot) || target.dataRoot.includes('hub.sqlite')) throw new HarnessError('PRODUCTION_PATH_REFUSED', `f1Fleet.targets[${index}].dataRoot names a production location`);
     if (target.sshOptions !== undefined && (!Array.isArray(target.sshOptions) || target.sshOptions.some((option) => typeof option !== 'string'))) throw new HarnessError('CONFIG_INVALID', `f1Fleet.targets[${index}].sshOptions must be a string array`);
+    if (target.relayTunnel !== undefined && typeof target.relayTunnel !== 'boolean') throw new HarnessError('CONFIG_INVALID', `f1Fleet.targets[${index}].relayTunnel must be true or false`);
   }
   if (new Set(value.targets.map((target) => target.ssh)).size !== 2) throw new HarnessError('CONFIG_INVALID', 'f1Fleet.targets must name two different computers');
   // Overrides exist only to let an operator see a shortened run refuse: the scenario fails a

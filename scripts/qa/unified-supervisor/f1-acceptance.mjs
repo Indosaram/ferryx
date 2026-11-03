@@ -15,6 +15,11 @@
 //   daemon (hub off, relay mode, agent control on), paired to the hub through the relay with a
 //   machine grant (the product's pairedHostPair). targets[0] runs the four outage sessions behind
 //   its proxy; targets[1] runs the 429 session.
+// - Relay reachability: the product dials a plaintext relay only on loopback (or RFC1918 with the
+//   insecure opt-in; validate_relay_url refuses http on a tailnet 100.x address) and pairs only
+//   with an https or loopback-http origin. So the hub pairs through http://127.0.0.1:<port>, and a
+//   target with `relayTunnel` gets a harness-owned `ssh -R 127.0.0.1:<port>:127.0.0.1:<port>`,
+//   opened once the relay port is known, and dials http://127.0.0.1:<port> on its own computer.
 //
 // Product read paths the verdict uses (never pane text, never log text):
 // - GET /api/v1/supervisor/panel and /api/v1/fleet/sessions with the owner's paired machine
@@ -55,6 +60,22 @@ const HUB_WORKSPACE = 'f1-hub';
 const TARGET_WORKSPACE = 'f1-target';
 
 const now = () => Date.now();
+
+// A target's relay URL: loopback through its harness-owned reverse tunnel, else relayHost.
+export const targetRelayUrl = (target, relayHost, port) => `http://${target.relayTunnel === true ? '127.0.0.1' : relayHost}:${port}`;
+
+// The reverse tunnel for one target: the target's loopback <port> forwards to the hub computer's
+// relay on the same port. The task-scoped sshOptions (known_hosts, identity) come before -R.
+export function relayTunnelArgs(target, port) {
+  return ['-T', '-N', '-v', '-o', 'BatchMode=yes', '-o', 'ExitOnForwardFailure=yes', '-o', 'ServerAliveInterval=15', ...(target.sshOptions ?? []),
+    '-R', `127.0.0.1:${port}:127.0.0.1:${port}`, target.ssh];
+}
+
+// OpenSSH's own confirmation (ssh -v) that the remote listener for exactly `port` is bound.
+export function relayTunnelReady(line, port) {
+  const match = /remote forward success for: listen 127\.0\.0\.1:(\d+),/.exec(String(line ?? ''));
+  return match !== null && Number(match[1]) === port;
+}
 
 // One f1-host-agent.mjs child (local or over ssh). RPC replies and pane events arrive as JSON
 // stdout lines in the run journal; every wait is ctx.waitFor on that journal.
@@ -134,10 +155,11 @@ export async function runF1Acceptance(ctx, deps) {
     const hubAgent = await startAgent(ctx, 'agent-hub', process.execPath, [AGENT], ctx.productEnv());
     agents.push(hubAgent);
     // ssh needs the operator's agent socket and known_hosts; it runs nothing but the agent script.
-    const sshEnv = { PATH: process.env.PATH, HOME: process.env.HOME, USER: process.env.USER, SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK };
+    const sshEnv = Object.fromEntries(Object.entries({ PATH: process.env.PATH, HOME: process.env.HOME, USER: process.env.USER, SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK })
+      .filter(([, value]) => value !== undefined));
     for (const [index, target] of fleet.targets.entries()) {
       const sshArgs = ['-T', '-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=15', ...(target.sshOptions ?? []), target.ssh, target.bun, join(target.repoDir, 'scripts', 'qa', 'unified-supervisor', 'f1-host-agent.mjs')];
-      agents.push(await startAgent(ctx, `agent-${index === 0 ? 'outage' : 'quota'}`, fleet.sshBin, sshArgs, Object.fromEntries(Object.entries(sshEnv).filter(([, value]) => value !== undefined))));
+      agents.push(await startAgent(ctx, `agent-${index === 0 ? 'outage' : 'quota'}`, fleet.sshBin, sshArgs, sshEnv));
     }
     const [, outageAgent, quotaAgent] = agents;
     const inits = [];
@@ -163,7 +185,30 @@ export async function runF1Acceptance(ctx, deps) {
       env: ctx.productEnv({ FERRYX_DEPLOYMENT_MODE: 'selfhost', FERRYX_RELAY_MACHINE_TOKENS: machineToken, FERRYX_ACCOUNT_DATA_DIR: join(data, 'relay-account'), RUST_LOG: 'info' }), cwd: data, graceMs: 5_000,
     });
     await ctx.waitFor('relay listening', (e) => e.source === 'relay' && String(e.line ?? '').includes('ferryx-relay listening'), { after: relayCursor, deadlineMs: 30_000 });
-    clause('relay-listening', true, { pid: relay.pid, relayUrl, bind: `0.0.0.0:${relayPort}` });
+    const hubRelayOrigin = `http://127.0.0.1:${relayPort}`;
+    clause('relay-listening', true, { pid: relay.pid, relayUrl, hubRelayOrigin, bind: `0.0.0.0:${relayPort}` });
+
+    // 2b. Reverse tunnels, opened only now that the relay port is known. Each is a recorded spawn
+    //     on this computer (torn down by its own handle, reclaimable by --cleanup); the target's
+    //     port is checked free first and nothing is stopped to free it.
+    const tunnels = [];
+    for (const [index, target] of fleet.targets.entries()) {
+      const agent = agents[index + 1];
+      evidence.hosts[agent.id].relayUrl = targetRelayUrl(target, fleet.relayHost, relayPort);
+      if (target.relayTunnel !== true) continue;
+      const before = await agent.rpc('portFree', { port: relayPort });
+      if (!before.free) throw new HarnessError('PREREQUISITE_MISSING', `${target.label}: 127.0.0.1:${relayPort} is in use there; the relay tunnel cannot bind it and nothing is stopped to free it`);
+      const id = `tunnel-${agent.id.replace(/^agent-/, '')}`;
+      const args = relayTunnelArgs(target, relayPort);
+      const tunnelCursor = ctx.journal.cursor();
+      const handle = await ctx.spawn(id, fleet.sshBin, args, { env: sshEnv, graceMs: 5_000 });
+      const opened = await ctx.waitFor(`${id} forward`, (e) => e.source === id && (e.kind === 'exit' || relayTunnelReady(e.line, relayPort)), { after: tunnelCursor, deadlineMs: 45_000 });
+      if (opened.kind === 'exit') throw new HarnessError('PREREQUISITE_MISSING', `${target.label}: the relay tunnel exited before its forward opened (code ${opened.code}, signal ${opened.signal})`);
+      const after = await agent.rpc('portFree', { port: relayPort });
+      tunnels.push({ label: target.label, handle, pid: handle.pid, port: relayPort, listenerOnTarget: after.free === false });
+      evidence.hosts[agent.id].relayTunnel = { pid: handle.pid, executable: fleet.sshBin, args, port: relayPort };
+    }
+    if (tunnels.length > 0) clause('relay-tunnels-open', tunnels.every((t) => t.listenerOnTarget), { tunnels: tunnels.map(({ label, pid, port, listenerOnTarget }) => ({ label, pid, port, listenerOnTarget })) });
 
     // 3. Hub daemon: owner set-up on a hub-computer fixture repo, hub on, loopback push allowed.
     const hubRepo = await hubAgent.rpc('repo');
@@ -249,15 +294,16 @@ export async function runF1Acceptance(ctx, deps) {
     const targets = [];
     for (const [index, target] of fleet.targets.entries()) {
       const agent = agents[index + 1];
+      const targetUrl = targetRelayUrl(target, fleet.relayHost, relayPort);
       const free = await agent.rpc('portFree', { port: GATEWAY_PORT });
       if (!free.free) throw new HarnessError('PREREQUISITE_MISSING', `${target.label}: port ${GATEWAY_PORT} is in use there; nothing is stopped to free it`);
-      const daemon = await agent.rpc('daemonStart', { ferryxCli: target.ferryxCli, env: { FERRYX_ALLOW_INSECURE_RELAY: '1', FERRYX_MACHINE_TOKEN: machineToken, FERRYX_RELAY_URL: relayUrl } });
+      const daemon = await agent.rpc('daemonStart', { ferryxCli: target.ferryxCli, env: { FERRYX_ALLOW_INSECURE_RELAY: '1', FERRYX_MACHINE_TOKEN: machineToken, FERRYX_RELAY_URL: targetUrl } });
       const call = (request) => agent.rpc('call', { request });
       const control = await call({ type: 'agentControlSettingsSet', enabled: true, excludedDeviceIds: [] });
-      const relayMode = await call({ type: 'remoteConfigure', config: { mode: 'relay', port: GATEWAY_PORT, allowControl: true, relayUrl } });
+      const relayMode = await call({ type: 'remoteConfigure', config: { mode: 'relay', port: GATEWAY_PORT, allowControl: true, relayUrl: targetUrl } });
       await agent.rpc('waitLog', { path: daemon.log, needle: 'relay control channel connected', deadlineMs: 90_000 }, 100_000);
       const pin = await call({ type: 'remoteCreateMachinePairingCode' });
-      const pair = await hubCall(`hub-pair-${target.label}`, { type: 'pairedHostPair', request: { relayOrigin: relayUrl, pin: pin?.code, displayLabel: target.label } }, 90_000);
+      const pair = await hubCall(`hub-pair-${target.label}`, { type: 'pairedHostPair', request: { relayOrigin: hubRelayOrigin, pin: pin?.code, displayLabel: target.label } }, 90_000);
       const repo = await agent.rpc('repo');
       const ws = await call({ type: 'registerWorkspace', workspaceId: TARGET_WORKSPACE, repoRoot: repo.workspaceRoot });
       targets.push({ label: target.label, agent, daemon, hostId: pair?.host?.hostId ?? null, grant: pair?.host?.grantScope ?? null, repo, control, relayMode, ws });
@@ -395,6 +441,8 @@ export async function runF1Acceptance(ctx, deps) {
     clause('approval-exactly-one-push', approvalPushes.length === 1 && pushSink.received.length === 1, { pushes: approvalPushes, windowMs: PUSH_BATCH_WINDOW_MS });
     evidence.pushes = { total: pushSink.received.length, duringRecovery: recoveryPushes.length, afterApproval: approvalPushes.length, received: pushSink.received.map(({ atMs, path, bytes, sha256 }) => ({ atMs, path, bytes, sha256 })) };
     evidence.decisionCards = { duringRecovery: recoveryCardFrames.length, total: cardFrames.length, panelAfterApproval: decisions.length };
+    // A tunnel that dropped mid-run cut its target off the relay: the run does not count.
+    if (tunnels.length > 0) clause('relay-tunnels-held', tunnels.every((t) => t.handle.exitInfo === null), { tunnels: tunnels.map((t) => ({ label: t.label, pid: t.pid, exit: t.handle.exitInfo })) });
   } finally {
     // 9. Teardown by recorded identity: each agent stops the daemons it started; ssh/agent
     //    children are then terminated by the harness through their own handles.

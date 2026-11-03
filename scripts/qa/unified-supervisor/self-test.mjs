@@ -121,6 +121,10 @@ function makeFixture(evidence, nonce) {
     ['config-socket-too-long', write('config.socket-too-long.json', { ...good, dataRoot: POSIX ? join(stateRoot, 'd'.repeat(90)) : join(stateRoot, 'd'.repeat(100), 'd'.repeat(100)) }),
       'CONFIG_INVALID', POSIX ? 'daemon socket' : 'daemon endpoint'],
     ['config-foreign-data-root', write('config.foreign-data-root.json', { ...good, dataRoot: foreignRoot }), 'FOREIGN_STATE_ROOT'],
+    ['config-f1-relay-tunnel-not-boolean', write('config.f1-relay-tunnel.json', { ...good, f1Fleet: {
+      hub: { label: 'hub', agentDataRoot: join(stateRoot, 'f1-agent') }, relayHost: '127.0.0.1', sshBin: '/usr/bin/ssh',
+      targets: ['a', 'b'].map((name) => ({ label: name, ssh: `qa@${name}.invalid`, bun: '/usr/bin/bun', repoDir: '/srv/f1/ferryx', ferryxCli: '/srv/f1/ferryx-cli', dataRoot: '/srv/f1/t', relayTunnel: 'yes' })),
+    } }), 'CONFIG_INVALID', 'relayTunnel'],
   ];
   const uid = process.getuid?.();
   if (POSIX && Number.isInteger(uid)) {

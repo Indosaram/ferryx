@@ -46,7 +46,8 @@
             "properties": {
               "label": { "type": "string", "minLength": 1 },
               "ssh": { "type": "string", "minLength": 1, "description": "ssh destination (host alias or user@host)." },
-              "sshOptions": { "type": "array", "items": { "type": "string" }, "description": "Extra ssh arguments placed before the destination." },
+              "sshOptions": { "type": "array", "items": { "type": "string" }, "description": "Extra ssh arguments placed before the destination, for the agent and the relay tunnel alike (e.g. task-scoped -o UserKnownHostsFile=<abs> -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes)." },
+              "relayTunnel": { "type": "boolean", "description": "When true, the runner opens a harness-owned `ssh -N -R 127.0.0.1:<relayPort>:127.0.0.1:<relayPort>` to this target after the relay port is known, and the target daemon dials http://127.0.0.1:<relayPort>. The product refuses a plaintext relay URL on a non-loopback, non-RFC1918 address (tailnet 100.x included), so a target reached over a tailnet needs this." },
               "bun": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._/-]+$", "description": "Absolute bun path on the target (placed on the remote shell command line)." },
               "repoDir": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._/-]+$", "description": "Absolute checkout of this revision on the target. The whole repository must be clean (git status --porcelain) at the hub's HEAD." },
               "ferryxCli": { "type": "string", "minLength": 1, "description": "Absolute debug ferryx-cli on the target built from the same revision." },
@@ -54,7 +55,7 @@
             }
           }
         },
-        "relayHost": { "type": "string", "minLength": 1, "description": "Address of the hub computer the targets reach the run's relay on (e.g. its tailnet IP). The relay binds 0.0.0.0 on a free port for the run." },
+        "relayHost": { "type": "string", "minLength": 1, "description": "Address of the hub computer the targets without relayTunnel reach the run's relay on (plaintext, so in practice an RFC1918 address). The relay binds 0.0.0.0 on a free port for the run; the hub itself pairs through http://127.0.0.1:<port>." },
         "sshBin": { "type": "string", "minLength": 1, "description": "Absolute ssh client path on the hub computer." },
         "outageDurationMs": { "type": ["integer", "null"], "description": "Default 1200000 (20 min). Any other value runs but fails outage-injected-real-duration." },
         "quotaResetMs": { "type": ["integer", "null"], "description": "Default 180000 (3 min). Any other value runs but fails quota-session-reset-three-minutes." }
