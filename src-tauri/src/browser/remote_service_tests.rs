@@ -848,7 +848,12 @@ fn test_r9_remote_reference_operations_require_snapshot_and_revision() {
     );
 }
 
-#[tokio::test]
+// The capture timeout is the behaviour under test, so the clock is virtual: under `start_paused`
+// timers fire in deadline order, so the producer's 50 ms capture timeout always quarantines the
+// permit before the test's 150 ms wake. On the wall clock a loaded runner could wake the test first,
+// with the permit still held by the in-flight capture (not quarantined), which made
+// `release_quarantine` a no-op and the final permit count 0.
+#[tokio::test(start_paused = true)]
 async fn test_r7_native_capture_permit_retention_across_producer_restart_on_timeout() {
     let (service, _manager, b1, _) = setup_test_environment();
 
