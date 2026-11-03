@@ -215,6 +215,15 @@ impl Fixture {
             }
             eprintln!("A10 cleanup lifecycle drained pid={pid:?} id={id}");
         }
+        // The owner's agent-stamp writer writes into the private root after a batching window; it
+        // must be finished before the root is removed.
+        let state = Arc::clone(&self.state);
+        crate::ipc::run_blocking(move || {
+            state.finish_agent_stamp_writer();
+            Ok(())
+        })
+        .await
+        .unwrap();
         self.tasks.shutdown().await;
         drop(self.owner);
         drop(self.state);
