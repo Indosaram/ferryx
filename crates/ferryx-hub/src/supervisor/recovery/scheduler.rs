@@ -23,6 +23,9 @@ mod tick;
 pub const BUDGET_MS: i64 = 20 * 60_000;
 /// How long a sent resume may take to show output before it counts as no progress, in ms.
 const GRACE_MS: i64 = 30_000;
+/// How long a resume must stay fault-free before it counts as a recovery, in ms. A spinner or
+/// status line right after the send proves nothing: the next 502 usually arrives later.
+const CONFIRM_MS: i64 = 60_000;
 const TAIL_LINES: usize = 40;
 const DEFAULT_BACKOFF_SECS: [i64; 4] = [60, 120, 300, 600];
 const DEFAULT_EVERY_SECS: i64 = 600;
@@ -81,6 +84,8 @@ struct Incident {
     /// later, distinct stall of the same session starts with a fresh budget (H1).
     restarts: u64,
     last_restart_ms: i64,
+    /// Confirmed members that faulted again, with the time they may be retried.
+    hold: HashMap<SessionRef, i64>,
 }
 
 #[derive(Default)]
@@ -154,6 +159,14 @@ fn max_restarts(rules: &[StandingRule]) -> u64 {
     rule_param(rules, RuleKind::StallRestart, "maxRestarts")
         .and_then(|v| v.as_u64())
         .unwrap_or(DEFAULT_MAX_RESTARTS)
+}
+
+fn stall_threshold_ms(rules: &[StandingRule]) -> i64 {
+    rule_param(rules, RuleKind::StallRestart, "thresholdSecs")
+        .and_then(|v| v.as_i64())
+        .filter(|s| *s > 0)
+        .unwrap_or(300)
+        * 1000
 }
 
 fn sessions(n: usize) -> String {

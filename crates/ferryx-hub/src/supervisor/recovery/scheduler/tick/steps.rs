@@ -22,6 +22,14 @@ impl RecoveryScheduler {
             .collect();
         faulted.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         inc.ever.extend(faulted.iter().cloned());
+        // A confirmed member that faults again is no longer confirmed: it leaves `done` and
+        // is retried on the backoff, in this same incident.
+        for r in &faulted {
+            if !st.sent.contains_key(r) && inc.done.remove(r) {
+                inc.attempts += 1;
+                inc.hold.insert(r.clone(), now + backoff_ms(rules, inc.attempts as usize));
+            }
+        }
         // Silent sessions stay unresolved and are retried, never counted as resumed; one that
         // later shows real output is confirmed after all.
         for r in inc.silent.clone() {
@@ -52,7 +60,9 @@ impl RecoveryScheduler {
             .collect();
         pending.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         for r in pending {
-            if now - st.sent[&r] < GRACE_MS {
+            // A fresh fault is judged at once; anything else only after the confirmation
+            // window: a spinner or status line right after the send is not a recovery.
+            if now - st.sent[&r] < CONFIRM_MS && !faulted.contains(&r) {
                 continue;
             }
             // Not readable this pass: judge it when it is.
@@ -84,7 +94,9 @@ impl RecoveryScheduler {
             let summary = format!("Retrying {} after upstream errors", sessions(inc.ever.len()));
             self.row(inc, ActionKind::Retried, summary, true, now).await;
         }
-        if (!inc.succeeded || !inc.silent.is_empty())
+        if (!inc.succeeded
+            || !inc.silent.is_empty()
+            || faulted.iter().any(|r| !inc.done.contains(r)))
             && inc.escalated.is_none()
             && now - inc.started_ms >= BUDGET_MS
         {
@@ -128,6 +140,9 @@ impl RecoveryScheduler {
                     continue;
                 }
                 if inc.silent.contains(r) && inc.next_at_ms > now {
+                    continue;
+                }
+                if inc.hold.get(r).is_some_and(|at| *at > now) {
                     continue;
                 }
                 if let Some(o) = obs.get(r) {
@@ -231,13 +246,21 @@ impl RecoveryScheduler {
             return;
         };
         let title = o.session.title.clone();
+        let (restarts, last) = (inc.restarts, inc.last_restart_ms);
         if !matches!(o.kind, HealthKind::Stalled { .. }) {
-            let summary = format!("Restarted stalled {title}; it is working again");
-            self.row(inc, ActionKind::Resumed, summary, false, now).await;
-            self.finish(inc);
+            // After a restart the incident stays in confirmation: a changed screen alone is
+            // not recovery (the Stop and Send move it themselves). It closes when the turn
+            // settled (provider left Working) or a stall-free window of the stall threshold
+            // passed. A stall meanwhile stays in this incident and escalates once.
+            if restarts == 0 {
+                self.finish(inc);
+            } else if o.session.state != "working" || now - last >= stall_threshold_ms(rules) {
+                let summary = format!("Restarted stalled {title}; it is working again");
+                self.row(inc, ActionKind::Resumed, summary, false, now).await;
+                self.finish(inc);
+            }
             return;
         }
-        let (restarts, last) = (inc.restarts, inc.last_restart_ms);
         if restarts < max_restarts(rules) {
             if self.resume(st, o, true, now).await {
                 inc.restarts = restarts + 1;
@@ -247,12 +270,7 @@ impl RecoveryScheduler {
             }
             return;
         }
-        let threshold = rule_param(rules, RuleKind::StallRestart, "thresholdSecs")
-            .and_then(|v| v.as_i64())
-            .filter(|s| *s > 0)
-            .unwrap_or(300)
-            * 1000;
-        if now - last < threshold {
+        if now - last < stall_threshold_ms(rules) {
             return;
         }
         self.escalate(

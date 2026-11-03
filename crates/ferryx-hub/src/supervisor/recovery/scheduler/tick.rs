@@ -41,6 +41,7 @@ fn new_incident(key: String, scope: String, fault: Fault, o: &Obs, next_at_ms: i
         silent: HashSet::new(),
         restarts: 0,
         last_restart_ms: 0,
+        hold: HashMap::new(),
     }
 }
 
@@ -117,10 +118,13 @@ impl RecoveryScheduler {
         }
         for inc in incidents.iter().filter(|inc| inc.closed) {
             *st.gens.entry(inc.scope.clone()).or_insert(0) += 1;
-            // The handled fault lines are consumed: they never open the next incident.
+            // The handled fault lines are consumed: they never open the next incident. A
+            // member that is faulted right now is never absorbed: its fresh error is news.
             for r in inc.ever.iter().chain([&inc.primary]) {
                 if let Some(o) = obs.get(r) {
-                    st.base.insert(r.clone(), o.tail.clone());
+                    if !faulted(&o.kind) {
+                        st.base.insert(r.clone(), o.tail.clone());
+                    }
                 }
             }
         }

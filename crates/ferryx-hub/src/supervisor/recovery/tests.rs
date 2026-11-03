@@ -85,6 +85,8 @@ struct World {
     up: AtomicBool,
     /// While set, a send produces no output at all.
     mute: AtomicBool,
+    /// While set, a send only produces a spinner/status line (neither an error nor work).
+    spinner: AtomicBool,
     ops: Mutex<Vec<String>>,
     error: Mutex<String>,
 }
@@ -119,6 +121,10 @@ impl SessionControl for World {
             format!("{} ({n})", self.error.lock().unwrap())
         };
         if self.mute.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        if self.spinner.load(Ordering::SeqCst) {
+            self.push(session, &format!("* Thinking... ({n})"));
             return Ok(());
         }
         let mut tails = self.tails.lock().unwrap();
@@ -462,29 +468,117 @@ async fn thirty_seconds_of_silence_after_a_resume_does_not_close_the_outage() {
     assert!(!rows[0].live);
 }
 
+fn provider_working(screen_changed_at: i64) -> FleetSession {
+    session("mac-2", "s1", "claude", "working", "provider", screen_changed_at)
+}
+
 #[tokio::test]
-async fn a_second_stall_after_recovery_gets_a_fresh_restart_budget() {
-    let stalled = session("mac-2", "s1", "claude", "working", "provider", T0 - 10 * MIN);
-    let rig = rig(vec![stalled], "thinking...");
+async fn a_stall_after_the_restart_screen_change_stays_in_one_incident_and_escalates_once() {
+    let rig = rig(vec![provider_working(T0 - 10 * MIN)], "thinking...");
     rig.sched.tick().await;
-    assert_eq!(rig.world.ops().len(), 2, "stop + continue");
-    // Screen moves: the first incident closes.
-    let fresh = |at: i64| {
-        let mut s = session("mac-2", "s1", "claude", "working", "provider", at);
-        s.screen_changed_at_ms = Some(at);
-        s
-    };
-    *rig.fleet.0.lock().unwrap() = vec![fresh(T0 + MIN)];
+    assert_eq!(rig.world.ops().len(), 2, "one Stop and one Send");
+    // The Stop and Send moved the screen to the restart time; it then freezes again.
+    *rig.fleet.0.lock().unwrap() = vec![provider_working(rig.clock.0.load(Ordering::SeqCst))];
+    for _ in 0..40 {
+        rig.step(30_000).await;
+    }
+    assert_eq!(rig.world.ops().len(), 2, "exactly one Stop+Send: {:?}", rig.world.ops());
+    assert_eq!(rig.opened().len(), 1, "{:?}", rig.opened());
+    assert_eq!(rig.rows().len(), 1, "{:?}", rig.rows());
+    assert_eq!(rig.rows()[0].kind, ActionKind::Escalated);
+}
+
+#[tokio::test]
+async fn a_stall_after_confirmed_recovery_gets_a_fresh_restart() {
+    let rig = rig(vec![provider_working(T0 - 10 * MIN)], "thinking...");
+    rig.sched.tick().await;
+    assert_eq!(rig.world.ops().len(), 2);
+    // The turn settles: the provider leaves Working, which confirms the recovery.
+    let mut idle = provider_working(T0);
+    idle.state = "idle".to_owned();
+    *rig.fleet.0.lock().unwrap() = vec![idle];
     rig.step(MIN).await;
-    assert_eq!(rig.rows().len(), 1);
-    assert!(!rig.rows()[0].live);
-    // Much later a distinct stall: acted on again, not escalated for lack of budget.
+    let rows = rig.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, ActionKind::Resumed);
+    assert!(!rows[0].live);
+    // Much later a distinct stall: a fresh incident with a fresh restart, no card.
     rig.step(60 * MIN).await;
-    *rig.fleet.0.lock().unwrap() = vec![fresh(T0 + MIN)];
+    *rig.fleet.0.lock().unwrap() = vec![provider_working(T0)];
     rig.step(MIN).await;
     assert_eq!(rig.world.ops().len(), 4, "{:?}", rig.world.ops());
     assert!(rig.opened().is_empty());
     let rows = rig.rows();
     assert_eq!(rows.len(), 2, "unique incident keys: {rows:?}");
     assert_ne!(rows[0].incident_key, rows[1].incident_key);
+}
+
+#[tokio::test]
+async fn a_spinner_after_the_send_is_not_recovery_while_the_outage_continues() {
+    let rig = rig(four_claude_sessions(), BAD_GATEWAY);
+    rig.sched.tick().await;
+    rig.outbreak(BAD_GATEWAY);
+    rig.world.spinner.store(true, Ordering::SeqCst);
+    rig.sched.tick().await;
+    rig.step(61_000).await;
+    assert_eq!(rig.world.ops().len(), 1, "first probe only: {:?}", rig.world.ops());
+    // The spinner shows right after the send; the 502 arrives on a later pass.
+    rig.step(10_000).await;
+    rig.world.spinner.store(false, Ordering::SeqCst);
+    rig.outbreak(BAD_GATEWAY);
+    for _ in 0..3 {
+        rig.step(30_000).await;
+    }
+    assert_eq!(rig.world.ops().len(), 1, "no sweep while the outage continues");
+    let rows = rig.rows();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].live, "{rows:?}");
+    assert_ne!(rows[0].kind, ActionKind::Resumed);
+    // Retried on the backoff, then recovered in the same incident.
+    rig.world.up.store(true, Ordering::SeqCst);
+    for _ in 0..80 {
+        if rig.rows().iter().any(|row| !row.live) {
+            break;
+        }
+        rig.step(30_000).await;
+    }
+    let rows = rig.rows();
+    assert_eq!(rows.len(), 1, "one incident, one row: {rows:?}");
+    assert_eq!(rows[0].kind, ActionKind::Resumed);
+    assert!(!rows[0].live);
+}
+
+#[tokio::test]
+async fn a_confirmed_member_that_faults_again_keeps_the_incident_open_and_later_recovers() {
+    let rig = rig(four_claude_sessions(), BAD_GATEWAY);
+    rig.sched.tick().await;
+    rig.outbreak(BAD_GATEWAY);
+    rig.world.up.store(true, Ordering::SeqCst);
+    rig.sched.tick().await;
+    // Probe succeeds, then the sweep sends to every member.
+    for _ in 0..4 {
+        rig.step(31_000).await;
+    }
+    let sends = rig.world.ops().len();
+    assert!(sends >= 1);
+    // One confirmed member hits a fresh 502 before the incident closed.
+    let s2 = SessionRef::new("mac-2", "s2");
+    rig.world.push(&s2, BAD_GATEWAY);
+    rig.step(31_000).await;
+    rig.step(31_000).await;
+    let rows = rig.rows();
+    assert_eq!(rows.len(), 1, "same incident, same row: {rows:?}");
+    if rows[0].live {
+        assert_ne!(rows[0].kind, ActionKind::Resumed);
+    }
+    for _ in 0..80 {
+        if rig.rows().iter().any(|row| !row.live) {
+            break;
+        }
+        rig.step(30_000).await;
+    }
+    let rows = rig.rows();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].kind, ActionKind::Resumed);
+    assert!(!rows[0].live);
 }
