@@ -68,7 +68,7 @@ export const panelSnapshotFixture: PanelSnapshot = {
       sessionRef: 'mac:relay',
       prompt: relayPrompt,
       recommendedIndex: 0,
-      reason: 'Adds one nullable column. $RELAY_DB is the dev database on this Mac, so production is not touched.',
+      reason: 'Adds one nullable column. The relay development database on this Mac is used, so production is not touched.',
       createdAtMs: NOW - 2 * MIN,
     },
     {
