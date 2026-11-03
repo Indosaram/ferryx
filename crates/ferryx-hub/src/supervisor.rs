@@ -3682,6 +3682,7 @@ pub async fn attach_legacy_pane(
 mod tests;
 
 pub mod admission;
+pub mod answer_history;
 pub mod answers;
 pub mod changes;
 pub mod completion;
