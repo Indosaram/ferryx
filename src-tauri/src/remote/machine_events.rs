@@ -53,12 +53,6 @@ pub(crate) fn panel_session_frame(
     frame.to_string()
 }
 
-/// Remembers each session's last state and prompt so only a transition makes a frame.
-#[derive(Default)]
-struct PanelTransitions {
-    seen: std::collections::HashMap<String, (crate::agent_control::AgentControlState, Option<String>)>,
-}
-
 /// The event type that tells a subscriber it may have missed panel frames and must re-read
 /// `GET /api/v1/supervisor/panel`. It never carries a prompt body.
 pub(crate) const PANEL_RESYNC_EVENT: &str = "panel.resync";
