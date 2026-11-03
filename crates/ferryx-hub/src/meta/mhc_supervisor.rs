@@ -50,7 +50,7 @@ use super::mhc_stdio::{
 };
 use crate::error::HubError;
 use crate::lanes::kibitzer::ModelTurn;
-use crate::supervisor::contract::{FleetSession, PendingPrompt, SessionControl, SessionRef};
+use crate::supervisor::panel_contract::{FleetSession, PendingPrompt, SessionControl, SessionRef};
 
 /// First relaunch delay after a failed launch or an early exit; doubled per failure up to
 /// [`MAX_BACKOFF`].
