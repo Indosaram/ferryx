@@ -751,18 +751,53 @@ const isChromeBlue = ([r, g, b]) => b > 170 && b - r > 110 && b - g > 60;
 function findRedButton(path, prompt, matches = isDestructiveRed) {
   const image = decodePng(path);
   const y0 = Math.max(0, prompt.y - 24), y1 = Math.min(image.height - 1, prompt.y + 24);
-  let left = Infinity, right = -1, top = Infinity, bottom = -1, count = 0;
-  for (let y = y0; y <= y1; y += 1) {
-    for (let x = Math.round(prompt.right ?? prompt.x); x < image.width; x += 1) {
+  return buttonBlob(image, Math.round(prompt.right ?? prompt.x), image.width - 1, y0, y1, matches, { minWidth: 30, maxWidth: 220, minHeight: 14, maxHeight: 60 });
+}
+/**
+ * The button-sized area of `matches` pixels in the box: matching columns grouped into runs
+ * (gaps up to 3px), each run's box kept when its size fits, and the run with the most matching
+ * pixels wins. Stray pixels elsewhere on the line (run 41658910729 Windows: a 482px-wide box)
+ * or a large area of the same colour (the Windows desktop) are separate runs and drop out.
+ */
+function buttonBlob(image, x0, x1, y0, y1, matches, { minWidth, maxWidth, minHeight, maxHeight }) {
+  const runs = [];
+  let run = null;
+  for (let x = x0; x <= x1; x += 1) {
+    let top = -1, bottom = -1, count = 0;
+    for (let y = y0; y <= y1; y += 1) {
       if (matches(image.rgb(x, y))) {
-        left = Math.min(left, x); right = Math.max(right, x); top = Math.min(top, y); bottom = Math.max(bottom, y);
+        if (top < 0) top = y;
+        bottom = y;
         count += 1;
       }
     }
+    if (!count) continue;
+    if (run && x - run.right <= 3) {
+      run.right = x; run.top = Math.min(run.top, top); run.bottom = Math.max(run.bottom, bottom); run.count += count;
+    } else {
+      run = { left: x, right: x, top, bottom, count };
+      runs.push(run);
+    }
   }
-  const width = right - left + 1, height = bottom - top + 1;
-  if (count < 200 || width < 30 || height < 14) return null;
-  return { x: Math.round((left + right) / 2), y: Math.round((top + bottom) / 2), width, height };
+  const fits = runs
+    .map((entry) => ({ ...entry, width: entry.right - entry.left + 1, height: entry.bottom - entry.top + 1 }))
+    .filter((entry) => entry.count >= 200 && entry.width >= minWidth && entry.width <= maxWidth && entry.height >= minHeight && entry.height <= maxHeight)
+    .sort((a, b) => b.count - a.count);
+  const best = fits[0];
+  if (!best) return null;
+  return { x: Math.round((best.left + best.right) / 2), y: Math.round((best.top + best.bottom) / 2), width: best.width, height: best.height };
+}
+/**
+ * Chrome's uninstall dialog Remove found from the dialog's title ('Remove "uBlock Origin
+ * Lite"?', OCR reads it where it misses the buttons: runs 41658910729 macOS probe-093, Windows
+ * probe-090): the filled blue button in the 40-200px below the title. Windows puts Remove left
+ * of Cancel, macOS and Linux right of it, so only the colour picks it.
+ */
+function findChromeDialogRemove(path, title) {
+  const image = decodePng(path);
+  const x0 = Math.max(0, title.left - 80), x1 = Math.min(image.width - 1, title.left + 420);
+  const y0 = Math.min(image.height - 1, title.top + 40), y1 = Math.min(image.height - 1, title.top + 200);
+  return buttonBlob(image, x0, x1, y0, y1, isChromeBlue, { minWidth: 50, maxWidth: 200, minHeight: 20, maxHeight: 70 });
 }
 /**
  * The controls at the right end of a multi-line row whose first-line label is `label`: column
@@ -893,8 +928,12 @@ function sessions() {
  * the command waits on (wait, snapshot, act postconditions) could not load during spawnSync.
  */
 async function cliAsync(...args) {
+  return cliAsyncWithin(30000, ...args);
+}
+/** `cliAsync` with its own kill timeout (a remove waits on Chrome's dialog, up to 120s). */
+async function cliAsyncWithin(timeoutMs, ...args) {
   const child = Bun.spawn([binary, "browser", ...args], { env, stdout: "pipe", stderr: "pipe" });
-  const timer = setTimeout(() => child.kill(), 30000);
+  const timer = setTimeout(() => child.kill(), timeoutMs);
   const [stdout, stderr, status] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
   clearTimeout(timer);
   return { ok: status === 0, status, stdout: stdout.trim().slice(0, 4000), stderr: stderr.trim().slice(0, 2000) };
@@ -2025,7 +2064,21 @@ function ubolOnDisk() {
       try {
         const settings = JSON.parse(readFileSync(path, "utf8"))?.extensions?.settings ?? {};
         result.prefs_read.push(`${basename(profile)}/${file}`);
-        if (settings[UBOL_ID]) result.prefs = true;
+        if (settings[UBOL_ID]) {
+          result.prefs = true;
+          // What the entry is (a live install, or a leftover such as an uninstall tombstone):
+          // its top-level keys and the fields Chrome uses for state.
+          const entry = settings[UBOL_ID];
+          result.prefs_entry ??= {};
+          result.prefs_entry[`${basename(profile)}/${file}`] = {
+            keys: Object.keys(entry).sort().slice(0, 40),
+            state: entry.state ?? null,
+            location: entry.location ?? null,
+            path: entry.path ?? null,
+            disable_reasons: entry.disable_reasons ?? null,
+            has_manifest: Boolean(entry.manifest),
+          };
+        }
       } catch {}
     }
   }
@@ -2233,6 +2286,10 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
       // "Remove" uninstalls the engine.
       ["click Remove (Ferryx confirmation)", async () => {
         if (!confirmPrompt) return { ok: false, stderr: "no row confirmation open" };
+        // The trash button's tooltip ("Remove uBlock Origin Lite") covers the red button while
+        // the pointer stays on the trash (run 41658910729 Linux probe-072): move onto the prompt.
+        host.mouseMove(confirmPrompt.x, confirmPrompt.y);
+        await sleep(800);
         const path = probeShot();
         const button = findRedButton(path, confirmPrompt);
         if (!button) return { ok: false, probe: basename(path), stderr: "no red Remove button on the confirmation line" };
@@ -2249,7 +2306,7 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
       // the same engine call (the CLI's admitted path), and Chrome's dialog is answered below.
       ["optional CLI fallback (ferryx browser extensions remove)", () => {
         if (confirmed) return { ok: true, skipped: "the Settings row started the removal" };
-        cliRemove = cliAsync("extensions", "remove", UBOL_ID);
+        cliRemove = cliAsyncWithin(150000, "extensions", "remove", UBOL_ID);
         record.removed_via = "cli";
         return { ok: true, started: true };
       }],
@@ -2278,6 +2335,17 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
             if (button && button.x - anchor.right < 160) {
               const at = [button.x, button.y];
               return { ...host.click(...at), at, via: "blue button right of Cancel", button };
+            }
+          }
+          // The dialog's title: a "Remove" with a quoted uBlock right after it on its line.
+          const title = words.find((word) => word.text === "Remove"
+            && words.some((next) => /^["“”']/.test(next.text) && ubolWords([next]).length
+              && Math.abs(next.top - word.top) <= 8 && next.left > word.left && next.left - (word.left + word.width) < 30));
+          if (title) {
+            const button = findChromeDialogRemove(path, title);
+            if (button) {
+              const at = [button.x, button.y];
+              return { ...host.click(...at), at, via: "blue button below the dialog title", button };
             }
           }
           if (!ubolOnDisk().prefs && !ubolWords(words).length) return { ok: true, skipped: "already removed, no Chrome dialog" };
