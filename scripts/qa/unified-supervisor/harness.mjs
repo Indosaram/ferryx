@@ -285,9 +285,9 @@ export function assertIsolatedRoot(path, label, context = {}) {
 // Config.
 
 export const CONFIG_REQUIRED = Object.freeze(['ferryxCli', 'ferryxApp', 'mhcBin', 'dataRoot', 'memoryRoot', 'projectRoot', 'ownerPrincipal']);
-export const CONFIG_OPTIONAL = Object.freeze(['pairedHostId', 'slackChannel', 'ferryxRelay', 'ferryxUiDist', 'realEngine', 'realSlack', '$schema', '$comment']);
+export const CONFIG_OPTIONAL = Object.freeze(['pairedHostId', 'slackChannel', 'ferryxRelay', 'ferryxUiDist', 'realEngine', 'realSlack', 'f1Fleet', '$schema', '$comment']);
 // Optional object fields, validated by their own checks instead of the string rule.
-const OBJECT_FIELDS = new Set(['realEngine', 'realSlack']);
+const OBJECT_FIELDS = new Set(['realEngine', 'realSlack', 'f1Fleet']);
 const REAL_ENGINE_FIELDS = Object.freeze({
   required: ['provider', 'api', 'baseUrl', 'model', 'apiKeyEnv', 'workerCli', 'workerBin', 'workerBaseUrl', 'workerModel'],
   optional: ['workerApiKeyEnv'],
@@ -336,6 +336,52 @@ function checkRealEngine(value, context) {
   try { info = statSync(value.workerBin); } catch { throw new HarnessError('CONFIG_INVALID', `realEngine.workerBin ${value.workerBin} does not exist`); }
   if (!info.isFile()) throw new HarnessError('CONFIG_INVALID', `realEngine.workerBin ${value.workerBin} is not a file`);
 }
+// f1Fleet (f1-acceptance, plan F1): the hub computer's agent root and the two ssh target
+// computers. Every host, path and binary is config; nothing names a personal machine.
+const F1_TARGET_FIELDS = Object.freeze({ required: ['label', 'ssh', 'bun', 'repoDir', 'ferryxCli', 'dataRoot'], optional: ['sshOptions'] });
+function checkF1Fleet(value, context, config) {
+  if (typeof value !== 'object' || Array.isArray(value)) throw new HarnessError('CONFIG_INVALID', 'f1Fleet must be an object or null');
+  const allowed = ['hub', 'targets', 'relayHost', 'sshBin', 'outageDurationMs', 'quotaResetMs'];
+  const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unknown.length > 0) throw new HarnessError('CONFIG_INVALID', `f1Fleet has unknown field(s): ${unknown.join(', ')}`);
+  const absolute = (path, label) => {
+    if (typeof path !== 'string' || !isAbsolute(path) || path.startsWith('~') || path.split(/[\\/]+/).includes('..')) throw new HarnessError('CONFIG_INVALID', `${label} must be an absolute path without ~ or ..`);
+  };
+  if (typeof value.hub !== 'object' || value.hub === null || typeof value.hub.label !== 'string' || value.hub.label.trim() === '') throw new HarnessError('CONFIG_INVALID', 'f1Fleet.hub needs label and agentDataRoot');
+  absolute(value.hub.agentDataRoot, 'f1Fleet.hub.agentDataRoot');
+  assertIsolatedRoot(value.hub.agentDataRoot, 'f1Fleet.hub.agentDataRoot', context);
+  for (const key of ['dataRoot', 'memoryRoot', 'projectRoot']) {
+    const other = config[key];
+    if (typeof other !== 'string') continue;
+    const a = value.hub.agentDataRoot;
+    if (isInside(a, other) || isInside(other, a) || isInside(realish(a), realish(other)) || isInside(realish(other), realish(a))) {
+      throw new HarnessError('CONFIG_INVALID', `f1Fleet.hub.agentDataRoot and ${key} must be disjoint roots`);
+    }
+  }
+  absolute(value.sshBin, 'f1Fleet.sshBin');
+  if (typeof value.relayHost !== 'string' || !/^[A-Za-z0-9.:-]+$/.test(value.relayHost)) throw new HarnessError('CONFIG_INVALID', 'f1Fleet.relayHost must be the hub computer address the targets reach the relay on');
+  if (!Array.isArray(value.targets) || value.targets.length !== 2) throw new HarnessError('CONFIG_INVALID', 'f1Fleet.targets must list exactly two target computers (three computers with the hub)');
+  for (const [index, target] of value.targets.entries()) {
+    const all = [...F1_TARGET_FIELDS.required, ...F1_TARGET_FIELDS.optional];
+    const extra = Object.keys(target ?? {}).filter((key) => !all.includes(key));
+    if (extra.length > 0) throw new HarnessError('CONFIG_INVALID', `f1Fleet.targets[${index}] has unknown field(s): ${extra.join(', ')}`);
+    const missing = F1_TARGET_FIELDS.required.filter((key) => typeof target[key] !== 'string' || target[key].trim() === '');
+    if (missing.length > 0) throw new HarnessError('CONFIG_INVALID', `f1Fleet.targets[${index}] is missing field(s): ${missing.join(', ')}`);
+    for (const key of ['bun', 'repoDir', 'ferryxCli', 'dataRoot']) absolute(target[key], `f1Fleet.targets[${index}].${key}`);
+    // bun and repoDir are placed on the remote ssh command line: shell-inert characters only.
+    for (const key of ['bun', 'repoDir']) {
+      if (!/^[A-Za-z0-9._/-]+$/.test(target[key])) throw new HarnessError('CONFIG_INVALID', `f1Fleet.targets[${index}].${key} may contain only A-Z a-z 0-9 . _ / - (it is passed through the remote shell)`);
+    }
+    if (/(^|\/)\.ferryx(\/|$)/.test(target.dataRoot) || target.dataRoot.includes('hub.sqlite')) throw new HarnessError('PRODUCTION_PATH_REFUSED', `f1Fleet.targets[${index}].dataRoot names a production location`);
+    if (target.sshOptions !== undefined && (!Array.isArray(target.sshOptions) || target.sshOptions.some((option) => typeof option !== 'string'))) throw new HarnessError('CONFIG_INVALID', `f1Fleet.targets[${index}].sshOptions must be a string array`);
+  }
+  if (new Set(value.targets.map((target) => target.ssh)).size !== 2) throw new HarnessError('CONFIG_INVALID', 'f1Fleet.targets must name two different computers');
+  // Overrides exist only to let an operator see a shortened run refuse: the scenario fails a
+  // run whose outage is not the real 20 minutes or whose reset is not the real 3 minutes.
+  for (const key of ['outageDurationMs', 'quotaResetMs']) {
+    if (value[key] !== undefined && value[key] !== null && (!Number.isSafeInteger(value[key]) || value[key] <= 0)) throw new HarnessError('CONFIG_INVALID', `f1Fleet.${key} must be a positive integer`);
+  }
+}
 const BINARY_FIELDS = ['ferryxCli', 'ferryxApp', 'mhcBin'];
 // Binaries only some scenarios need; validated like BINARY_FIELDS when present.
 const OPTIONAL_BINARY_FIELDS = ['ferryxRelay'];
@@ -360,6 +406,7 @@ export function loadConfig(path, context = {}) {
   for (const key of CONFIG_OPTIONAL) {
     if (config[key] === undefined || config[key] === null) continue;
     if (key === 'realSlack') { checkRealSlack(config[key]); continue; }
+    if (key === 'f1Fleet') { checkF1Fleet(config[key], context, config); continue; }
     if (OBJECT_FIELDS.has(key)) { checkRealEngine(config[key], context); continue; }
     if (typeof config[key] !== 'string' || config[key].trim() === '') throw new HarnessError('CONFIG_INVALID', `${key} must be a non-empty string or null`);
   }
