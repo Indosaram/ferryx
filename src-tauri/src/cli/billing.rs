@@ -188,6 +188,32 @@ where
     Ok(token)
 }
 
+/// [`resolve_session_token_with`], falling back to the session saved at login
+/// ([`crate::account::enroll_client::StoredAccountSession`]) when the environment names none.
+/// The environment always wins; the saved session is used only for the origin that issued it.
+pub fn resolve_session_token_or_stored<F>(
+    requested_origin: &str,
+    lookup: F,
+    stored: Option<&crate::account::enroll_client::StoredAccountSession>,
+) -> Result<String, AccountCliError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let env_set = lookup(SESSION_TOKEN_ENV).is_some_and(|value| !value.trim().is_empty());
+    if env_set {
+        return resolve_session_token_with(requested_origin, lookup);
+    }
+    let stored = stored.ok_or_else(|| AccountCliError::local(ACCOUNT_SESSION_REQUIRED, SESSION_HELP))?;
+    let saved = crate::account::origin::normalize_account_origin(&stored.account_origin);
+    let requested = crate::account::origin::normalize_account_origin(requested_origin);
+    match (saved, requested) {
+        (Ok(saved), Ok(requested)) if saved == requested && !stored.session_token.trim().is_empty() => {
+            Ok(stored.session_token.trim().to_string())
+        }
+        _ => Err(AccountCliError::local(ACCOUNT_SESSION_REQUIRED, SESSION_HELP)),
+    }
+}
+
 pub fn parse_entitlement(body: &str) -> Result<BillingEntitlement, AccountCliError> {
     serde_json::from_str::<BillingEntitlement>(body).map_err(|error| {
         AccountCliError::local(

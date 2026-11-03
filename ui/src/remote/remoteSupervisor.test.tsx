@@ -2,11 +2,13 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SUPERVISOR_ACTING_MS } from "../lib/supervisorModel";
 import {
+  adoptRemoteArchivedGoals,
   adoptRemoteAll,
   fetchRemoteDevicePermission,
   fetchSupervisorConversation,
   fetchSupervisorMemory,
   fetchSupervisorSnapshot,
+  moveRemoteSupervisor,
   postSupervisorMemory,
   postSupervisorRequest,
   hasSupervisorCapability,
@@ -14,6 +16,7 @@ import {
   getRemoteSetup,
   runRemoteSetup,
   setRemoteLanePaused,
+  standbyHolderOf,
   useRemoteSupervisor,
   type RemoteSupervisorMachine,
   type SupervisorFetch,
@@ -125,6 +128,56 @@ describe("remote supervisor client", () => {
     expect(result.kind === "ok" ? result.snapshot.lanes[0]?.lastReason : "wrong").toBe("stuck");
   });
 
+  it("parses the lease role, holder and standby notices of the hub", async () => {
+    const hub = {
+      available: true, running: false, error: null, role: "standby", holderMachineId: "studio", holderLabel: "Studio", holderPaired: false,
+      unmappedHosts: ["host-9"], adoptable: [{ goalId: "old-1", title: "Fix it", supervisorId: "s-old", fromMachine: "Laptop" }, { title: "no id" }],
+    };
+    const result = await fetchSupervisorSnapshot(() => Promise.resolve(json(200, snapshotBody({ hub }))));
+    expect(result.kind === "ok" ? result.snapshot.hub : null).toEqual({
+      available: true, running: false, error: null, role: "standby", holderMachineId: "studio", holderLabel: "Studio", holderPaired: false,
+      unmappedHosts: ["host-9"], adoptable: [{ goalId: "old-1", title: "Fix it", supervisorId: "s-old", fromMachine: "Laptop" }],
+    });
+    const older = await fetchSupervisorSnapshot(() => Promise.resolve(json(200, snapshotBody({ hub: { available: true, running: true, role: "boss" } }))));
+    expect(older.kind === "ok" ? older.snapshot.hub.role : "wrong").toBeNull();
+  });
+
+  it("reads the pinned lease status fields of a holder", async () => {
+    const hub = {
+      available: true, running: true, error: null, role: "holder", holderMachineId: "studio", holderLabel: "Studio", holderPaired: true,
+      unmappedHosts: [], adoptable: [], fence: 7, leaseExpiresIn: 42, checkpointId: "cp-9", checkpointAge: 12, observeDropped: 3,
+      promotionBlockReason: "the hub is stopped on this machine, so it does not take over", unreachableHosts: ["Laptop"],
+    };
+    const result = await fetchSupervisorSnapshot(() => Promise.resolve(json(200, snapshotBody({ hub }))));
+    expect(result.kind === "ok" ? result.snapshot.hub : null).toEqual(hub);
+  });
+
+  it("leaves the optional lease fields out when the daemon does not send them", async () => {
+    const hub = { available: true, running: false, role: "standby", holderMachineId: "studio", holderLabel: "Studio", fence: 2, leaseExpiresIn: 30, observeDropped: 0, unreachableHosts: [] };
+    const result = await fetchSupervisorSnapshot(() => Promise.resolve(json(200, snapshotBody({ hub }))));
+    const parsed = result.kind === "ok" ? result.snapshot.hub : null;
+    expect(parsed).not.toBeNull();
+    expect(parsed && "checkpointId" in parsed).toBe(false);
+    expect(parsed && "checkpointAge" in parsed).toBe(false);
+    expect(parsed && "promotionBlockReason" in parsed).toBe(false);
+    expect(parsed?.adoptable).toEqual([]);
+    expect(parsed).toMatchObject({ role: "standby", holderLabel: "Studio", fence: 2, leaseExpiresIn: 30, observeDropped: 0, unreachableHosts: [] });
+  });
+
+  it("reads the machines without lease support and drops empty names", async () => {
+    const hub = { available: true, running: true, role: "holder", machinesWithoutLease: ["Desk", "", 3, "2 unpaired machines"] };
+    const result = await fetchSupervisorSnapshot(() => Promise.resolve(json(200, snapshotBody({ hub }))));
+    expect(result.kind === "ok" ? result.snapshot.hub.machinesWithoutLease : null).toEqual(["Desk", "2 unpaired machines"]);
+    const older = await fetchSupervisorSnapshot(() => Promise.resolve(json(200, snapshotBody({ hub: { available: true, running: true } }))));
+    expect(older.kind === "ok" && "machinesWithoutLease" in older.snapshot.hub).toBe(false);
+  });
+
+  it("reads unreachable hosts sent as pairs or objects", async () => {
+    const hub = { available: true, running: true, role: "holder", unreachableHosts: [["host-1", "timed out"], [null, "refused"], { host: "host-2", label: "Desk" }, 7] };
+    const result = await fetchSupervisorSnapshot(() => Promise.resolve(json(200, snapshotBody({ hub }))));
+    expect(result.kind === "ok" ? result.snapshot.hub.unreachableHosts : null).toEqual(["host-1", "this computer", "Desk"]);
+  });
+
   it.each([
     [403, "FORBIDDEN"],
     [503, "SUPERVISOR_UNAVAILABLE"],
@@ -234,6 +287,36 @@ describe("useRemoteSupervisor", () => {
 });
 
 describe("unified supervisor remote calls", () => {
+  it("moves the supervisor to the machine it is called on", async () => {
+    const fetchLike = vi.fn<SupervisorFetch>(() => Promise.resolve(json(200, { moved: true })));
+    await expect(moveRemoteSupervisor(fetchLike, false)).resolves.toEqual({ kind: "ok", moved: true });
+    expect(fetchLike).toHaveBeenCalledWith("/api/v1/supervisor/move", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force: false }) });
+  });
+
+  it("reads a force-required move's data-loss window from the error details", async () => {
+    const refused = json(409, { error: { code: "SUPERVISOR_FORCE_REQUIRED", message: "holder unreachable", details: { holderLabel: "Studio", checkpointAt: 1_790_000_000 } } });
+    await expect(moveRemoteSupervisor(() => Promise.resolve(refused), false)).resolves.toEqual({
+      kind: "force-required", holderLabel: "Studio", checkpointAt: 1_790_000_000_000, message: "holder unreachable",
+    });
+    const other = json(409, { error: { code: "SUPERVISOR_IDENTITY_MISMATCH", message: "force required for a different hub" } });
+    await expect(moveRemoteSupervisor(() => Promise.resolve(other), true)).resolves.toEqual({
+      kind: "error", code: "SUPERVISOR_IDENTITY_MISMATCH", message: "force required for a different hub", status: 409,
+    });
+  });
+
+  it("names the holder of a SUPERVISOR_STANDBY refusal and nothing else", () => {
+    const standby = json(409, { error: { code: "SUPERVISOR_STANDBY", message: "runs on Studio", details: { holderMachineId: "studio", holderLabel: "Studio" } } });
+    expect(standbyHolderOf(standby)).toEqual({ holderMachineId: "studio", holderLabel: "Studio" });
+    expect(standbyHolderOf(json(409, { error: { code: "REVISION_CONFLICT", message: "SUPERVISOR_STANDBY studio" } }))).toBeNull();
+    expect(standbyHolderOf(json(503, { error: { code: "SUPERVISOR_STANDBY", details: { holderMachineId: "studio" } } }))).toBeNull();
+  });
+
+  it("adopts archived goals on the machine that archived them", async () => {
+    const fetchLike = vi.fn<SupervisorFetch>(() => Promise.resolve(json(200, { adopted: 2 })));
+    await expect(adoptRemoteArchivedGoals(fetchLike, ["a", "b"])).resolves.toEqual({ kind: "ok", adopted: 2 });
+    expect(fetchLike).toHaveBeenCalledWith("/api/v1/supervisor/adopt-archived", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ goalIds: ["a", "b"] }) });
+  });
+
   it("posts an envelope to the request route and returns the receipt", async () => {
     const fetchLike = vi.fn<SupervisorFetch>(() => Promise.resolve(json(200, { goalId: "g", revision: 4, runState: "paused" })));
     const envelope = { requestId: "phone-pause-1", goalId: "g", expectedRevision: 3, action: "pause", payload: {} };

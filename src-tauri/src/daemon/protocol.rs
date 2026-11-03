@@ -665,6 +665,10 @@ pub enum SupervisorReadAction {
         after: Option<i64>,
     },
     Memory,
+    /// Whether this daemon serves the supervisor or stands by for a holder:
+    /// `{standby, holderMachineId, holderLabel}`. Read by `ferryx-cli mcp` before it opens
+    /// the hub database.
+    Role,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -938,6 +942,17 @@ pub enum DaemonRequest {
     SupervisorEngine {
         request: SupervisorEngineAction,
     },
+    /// Move the supervisor to this machine (`ferryx hub move-here`, the desktop move button).
+    /// `force` takes over from an unreachable holder whose last checkpoint this machine lacks.
+    /// `replace_local` (the owner's `--replace-local`) archives and replaces a local
+    /// supervisor with another identity; without it that move is refused.
+    #[serde(rename_all = "camelCase")]
+    SupervisorMoveHere {
+        #[serde(default)]
+        force: bool,
+        #[serde(default)]
+        replace_local: bool,
+    },
     /// One unified supervisor request envelope `{requestId, projectId?, goalId?,
     /// expectedRevision?, action, payload}`, served by the hub's shared request service.
     /// Gated by `supervisorRequestV1`. The actor is server-derived; `cli` only says whether
@@ -1171,11 +1186,20 @@ pub enum DaemonRequest {
     ///
     /// `host_id` absent runs the operation on this daemon (`agentControlV1`). `host_id` set
     /// forwards it to that paired host (`agentControlRemoteV1`). Older peers omit the field.
+    ///
+    /// `supervisor_fence` and `supervisor_account` mark a supervisor request: the executing
+    /// daemon refuses a fence below the highest it has seen for that account
+    /// (`STALE_SUPERVISOR_FENCE`) and raises its maximum on a higher one. Requests without them
+    /// (manual, user, older hubs) are never fenced. Older peers omit both.
     #[serde(rename_all = "camelCase")]
     AgentControl {
         request: crate::agent_control::AgentControlOp,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supervisor_fence: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supervisor_account: Option<String>,
     },
     /// The Settings card: the agent-control switch, excluded devices and the newest audit lines.
     AgentControlSettingsGet,
@@ -1584,6 +1608,10 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     SupervisorEngineOk {
         snapshot: serde_json::Value,
+    },
+    /// Whether `SupervisorMoveHere` moved the supervisor here (false: it already ran here).
+    SupervisorMoveHereOk {
+        moved: bool,
     },
     /// The shared service's receipt for a `SupervisorRequestV1`.
     #[serde(rename = "supervisorRequestV1Ok", rename_all = "camelCase")]

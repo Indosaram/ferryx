@@ -328,6 +328,13 @@ pub struct DeviceInfo {
     pub installation_id: Option<String>,
     #[serde(default)]
     pub attach_public_key: Option<String>,
+    /// Machine id of an enrolled machine of this account that this credential was issued to,
+    /// as the account service vouched in the sealed grant offer (the requester signed the
+    /// grant request with its enrolled machine key). `None` for every phone, web and
+    /// manually paired device. Read only by the same-account machine-to-machine supervisor
+    /// routes (`agent_control_service::http_machine_peer`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_machine_id: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -345,6 +352,8 @@ struct PairingCode {
     approved_token: Option<String>,
     #[serde(default)]
     attach_public_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account_machine_id: Option<String>,
 }
 
 /// Issue time of one bearer token and the token it was rotated to, if any.
@@ -402,6 +411,8 @@ struct PersistedPairingCode {
     approved_token: Option<String>,
     #[serde(default)]
     attach_public_key: Option<String>,
+    #[serde(default)]
+    account_machine_id: Option<String>,
 }
 
 impl From<PersistedPairingCode> for PairingCode {
@@ -424,6 +435,7 @@ impl From<PersistedPairingCode> for PairingCode {
             lifetime: remaining,
             approved_token: persisted.approved_token,
             attach_public_key: persisted.attach_public_key,
+            account_machine_id: persisted.account_machine_id,
         }
     }
 }
@@ -795,6 +807,7 @@ impl AuthManager {
                 lifetime: pairing_code_lifetime(access_scope),
                 approved_token: None,
                 attach_public_key: None,
+                account_machine_id: None,
             },
         );
         window.note_issued(now);
@@ -820,7 +833,7 @@ impl AuthManager {
         token: &str,
         permission: DevicePermission,
     ) {
-        self.issue_pairing_capability(token, permission, DeviceAccessScope::Mirror, None);
+        self.issue_pairing_capability(token, permission, DeviceAccessScope::Mirror, None, None);
     }
 
     pub(crate) fn register_scoped_pairing_capability(
@@ -830,10 +843,12 @@ impl AuthManager {
         access_scope: DeviceAccessScope,
     ) -> Result<(), MachineGrantError> {
         validate_machine_grant(permission, access_scope)?;
-        self.issue_pairing_capability(token, permission, access_scope, None);
+        self.issue_pairing_capability(token, permission, access_scope, None, None);
         Ok(())
     }
 
+    /// Test form of [`Self::register_account_machine_capability`] with no account machine.
+    #[cfg(test)]
     pub(crate) fn register_scoped_pairing_capability_with_attach(
         &self,
         token: &str,
@@ -842,7 +857,23 @@ impl AuthManager {
         attach_public_key: Option<String>,
     ) -> Result<(), MachineGrantError> {
         validate_machine_grant(permission, access_scope)?;
-        self.issue_pairing_capability(token, permission, access_scope, attach_public_key);
+        self.issue_pairing_capability(token, permission, access_scope, attach_public_key, None);
+        Ok(())
+    }
+
+    /// [`Self::register_scoped_pairing_capability`] with an attach key, for an account grant the
+    /// account service vouched was requested by `account_machine_id`, an enrolled machine of
+    /// this account. The device it issues carries that id in [`DeviceInfo::account_machine_id`].
+    pub(crate) fn register_account_machine_capability(
+        &self,
+        token: &str,
+        permission: DevicePermission,
+        access_scope: DeviceAccessScope,
+        attach_public_key: Option<String>,
+        account_machine_id: Option<String>,
+    ) -> Result<(), MachineGrantError> {
+        validate_machine_grant(permission, access_scope)?;
+        self.issue_pairing_capability(token, permission, access_scope, attach_public_key, account_machine_id);
         Ok(())
     }
 
@@ -852,6 +883,7 @@ impl AuthManager {
         permission: DevicePermission,
         access_scope: DeviceAccessScope,
         attach_public_key: Option<String>,
+        account_machine_id: Option<String>,
     ) {
         let _transaction = self.begin_transaction().ok();
         let mut window = self.pairing_window.write();
@@ -867,6 +899,7 @@ impl AuthManager {
                 lifetime: pairing_code_lifetime(access_scope),
                 approved_token: None,
                 attach_public_key,
+                account_machine_id,
             },
         );
         window.note_issued(now);
@@ -1000,6 +1033,7 @@ impl AuthManager {
                     revoked: false,
                     installation_id: effective_installation_id,
                     attach_public_key: pairing.attach_public_key.clone(),
+                    account_machine_id: pairing.account_machine_id.clone(),
                 };
                 self.devices
                     .write()
@@ -1070,6 +1104,7 @@ impl AuthManager {
             revoked: false,
             installation_id: effective_installation_id,
             attach_public_key: pairing.attach_public_key.clone(),
+            account_machine_id: pairing.account_machine_id.clone(),
         };
 
         self.devices.write().insert(device_id.clone(), info.clone());
@@ -1134,6 +1169,7 @@ impl AuthManager {
             revoked: false,
             installation_id: None,
             attach_public_key: pairing.attach_public_key.clone(),
+            account_machine_id: pairing.account_machine_id.clone(),
         };
 
         self.devices.write().insert(device_id.clone(), info.clone());
@@ -1473,6 +1509,18 @@ impl AuthManager {
     #[cfg(test)]
     pub(crate) fn set_last_persisted_at(&self, instant: Instant) {
         *self.last_persisted_at.write() = instant;
+    }
+
+    /// Test-only hook: sets a device's permission without the machine-grant rule, modelling a
+    /// view-only machine device (e.g. persisted by an older build) that pairing cannot issue.
+    #[cfg(test)]
+    pub(crate) fn force_device_permission(&self, device_id: &str, permission: DevicePermission) {
+        // Through a transaction, so the change survives the reload every token check does.
+        let _tx = self.begin_transaction().expect("begin auth transaction");
+        if let Some(device) = self.devices.write().get_mut(device_id) {
+            device.permission = permission;
+        }
+        self.persist_durable().expect("persist forced device permission");
     }
 
     /// Test-only hook: backdates an active pairing PIN's creation time so
@@ -2662,6 +2710,7 @@ mod tests {
                     revoked: true,
                     installation_id: None,
                     attach_public_key: Some("tombstone-key".to_string()),
+                    account_machine_id: None,
                 },
             );
         }

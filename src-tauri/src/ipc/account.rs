@@ -38,6 +38,7 @@ pub async fn cmd_account_enrollment_status() -> Result<AccountEnrollmentStatus, 
 pub async fn cmd_account_enroll_this_machine(
     origin: String,
     enrollment_code: String,
+    session_token: Option<String>,
 ) -> Result<AccountEnrollmentStatus, IpcError> {
     let origin = crate::account::origin::normalize_account_origin(&origin)
         .map_err(|error| IpcError::new(IpcErrorCode::InvalidArgument, error.to_string()))?;
@@ -51,8 +52,14 @@ pub async fn cmd_account_enroll_this_machine(
     // enroll_machine does sync identity-file I/O, so it must not run on a reactor thread.
     let handle = tokio::runtime::Handle::current();
     run_blocking(move || {
-        handle
-            .block_on(enroll_client::enroll_machine(&origin, &code))
+        let record = handle.block_on(enroll_client::enroll_machine(&origin, &code));
+        // The signed-in session lets the daemon pair to the supervisor lease holder by itself.
+        if let (Ok(_), Some(session)) = (&record, session_token.as_deref()) {
+            if let Err(error) = enroll_client::save_account_session(&origin, session) {
+                tracing::warn!(%error, "the account session was not saved");
+            }
+        }
+        record
             .map(|record| Some(record).into())
             .map_err(|error| {
                 IpcError::new(IpcErrorCode::from_code_str(&error.code), error.message)

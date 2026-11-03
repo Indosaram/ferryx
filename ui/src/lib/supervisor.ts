@@ -4,7 +4,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { EMPTY_SNAPSHOT, nextSupervisionExpiry, normalizeSnapshot, type SupervisorSnapshot } from "./supervisorModel";
-import type { SupervisorCallResult, UnifiedSupervisorClient, UnifiedSupervisorView } from "./unifiedSupervisor";
+import { moveRefusal, type SupervisorCallResult, type SupervisorMoveResult, type UnifiedSupervisorClient, type UnifiedSupervisorView } from "./unifiedSupervisor";
 
 export {
   actingSessionIds,
@@ -96,6 +96,46 @@ export async function supervisorGoal(request: SupervisorGoalRequest): Promise<vo
 
 export function supervisorFeedSupported(): boolean {
   return supported;
+}
+
+/** A thrown IPC error as `{code, message, status, details}`; the UI branches on `code` only. */
+function ipcRefusal(error: unknown): { code: string; message: string; status: number | null; details: unknown } {
+  const raw = (error && typeof error === "object" ? error : {}) as { code?: unknown; message?: unknown; details?: unknown };
+  const details = raw.details && typeof raw.details === "object" ? (raw.details as { status?: unknown }) : null;
+  return {
+    code: typeof raw.code === "string" && raw.code ? raw.code : "INTERNAL_ERROR",
+    message: typeof raw.message === "string" ? raw.message : String(error),
+    status: typeof details?.status === "number" ? details.status : null,
+    details: raw.details ?? null,
+  };
+}
+
+/**
+ * Moves the account supervisor to this computer through its daemon (`cmd_supervisor_move_here`,
+ * the same path as `ferryx hub move-here [--force]`), then refetches the snapshot.
+ */
+export async function moveSupervisorHere(force: boolean): Promise<SupervisorMoveResult> {
+  try {
+    const value = await invoke<unknown>("cmd_supervisor_move_here", { force });
+    await refreshSupervisor();
+    const moved = value && typeof value === "object" ? (value as { moved?: unknown }).moved : undefined;
+    return { kind: "ok", moved: moved !== false };
+  } catch (error) {
+    const { code, message, status, details } = ipcRefusal(error);
+    return moveRefusal(code, message, status, details);
+  }
+}
+
+/** Adopts open goals of this computer's archived supervisor into the account supervisor. */
+export async function adoptArchivedGoals(goalIds: readonly string[]): Promise<SupervisorCallResult> {
+  try {
+    const value = await invoke<unknown>("cmd_supervisor_adopt_archived", { goalIds: [...goalIds] });
+    await refreshSupervisor();
+    return { kind: "ok", value: value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {} };
+  } catch (error) {
+    const { code, message, status } = ipcRefusal(error);
+    return { kind: "error", code, message, status };
+  }
 }
 
 /** The last unified supervisor view this desktop saw, or null before the first one. */

@@ -678,6 +678,10 @@ async fn answer_sessions(
 /// Posts `text` when `DISCORD_TOKEN` is set. No token reports that nothing was sent.
 #[cfg(feature = "hub-discord")]
 pub async fn post_if_configured(session: &super::session::SessionKey, text: &str) -> Result<bool> {
+    // Only the lease holder posts; a standby reports nothing sent and the caller keeps it queued.
+    if !crate::holder::is_holder_now() {
+        return Ok(false);
+    }
     let Some(token) = bot_token() else {
         return Ok(false);
     };
@@ -781,6 +785,17 @@ where
     }
 }
 
+/// Aborts its task when dropped: a gateway session's writer and heartbeat end with the session.
+#[cfg(feature = "hub-discord")]
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+#[cfg(feature = "hub-discord")]
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 #[cfg(feature = "hub-discord")]
 async fn run_gateway_session<F, Fut>(token: &str, on_frame: &mut F) -> Result<()>
 where
@@ -819,6 +834,8 @@ where
             }
         }
     });
+    // An aborted session (the hub generation stood down) ends its writer and heartbeat too.
+    let mut owned = vec![AbortOnDrop(writer.abort_handle())];
     let seq = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(-1));
     let mut heartbeat: Option<tokio::task::JoinHandle<()>> = None;
     let mut identified = false;
@@ -865,6 +882,7 @@ where
                     }
                 }
             }));
+            owned.extend(heartbeat.as_ref().map(|task| AbortOnDrop(task.abort_handle())));
             let identify = identify_body(token, gateway_intents(voice_receive_from_env()));
             out_tx
                 .send(identify.to_string())

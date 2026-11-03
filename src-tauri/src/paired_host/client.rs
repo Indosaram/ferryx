@@ -87,11 +87,28 @@ pub enum Operation {
         workspace_id: String,
     },
     /// Agent control on the paired host. Send/Answer/Stop are mutations and are not retried.
+    /// `fence` marks a supervisor's input: it rides the send/answer/stop body and the host
+    /// refuses it when stale (`STALE_SUPERVISOR_FENCE`). A person's control carries none.
     AgentControl {
         op: crate::agent_control::AgentControlOp,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fence: Option<crate::agent_control::fence::SupervisorFence>,
     },
     /// Host and per-session resource sample (`resourceUsageV1`); read-only.
     Resources,
+    /// A new supervisor lease holder raises the host's fence for its account
+    /// (`POST supervisor/fence`, `supervisorFenceV1`).
+    SupervisorFence { account: String, fence: u64 },
+    /// One supervisor request envelope for the machine holding the supervisor lease
+    /// (`POST supervisor/request`), sent by a standby on behalf of its owner's CLI or MCP.
+    SupervisorRequest {
+        envelope: serde_json::Value,
+    },
+    /// A standby's observation of its own panes (keystrokes, a relayed input, a worker
+    /// report) for the holder that supervises them (`POST supervisor/observe`).
+    SupervisorObserve {
+        observation: serde_json::Value,
+    },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -122,6 +139,8 @@ pub enum OperationResult {
     FileRead(m::FileReadResult),
     AgentControl(serde_json::Value),
     Resources(crate::daemon::resource_usage::HostResourceSnapshot),
+    /// The holder's answer to a supervisor request or observation.
+    Supervisor(serde_json::Value),
 }
 /// Desktop projection of [m::Repositories]: a registered row carries the desktop
 /// workspace id (`daemon:<sha256>`) next to the host's own id, so the caller can open
@@ -275,6 +294,14 @@ fn project_remote_error(error: m::MachineError) -> m::MachineError {
         _ => "PAIRED_HOST_REMOTE_ERROR",
     };
     let mut details = serde_json::Map::new();
+    // The agent-control access refusal's fixed marker (no remote prose): a standby keys its
+    // grant repair on it.
+    if code == "FORBIDDEN" && crate::agent_control::policy::is_agent_control_refusal(&error.details) {
+        details.insert(
+            crate::agent_control::policy::REFUSAL_DETAIL.into(),
+            crate::agent_control::policy::AGENT_CONTROL_REFUSAL.into(),
+        );
+    }
     if matches!(
         code,
         "WORKTREE_REMOVED_BRANCH_RETAINED" | "WORKTREE_REMOVED_PRUNE_FAILED"
@@ -366,7 +393,7 @@ struct Route {
 }
 impl Operation {
     pub fn is_mutation(&self) -> bool {
-        if let Self::AgentControl { op } = self {
+        if let Self::AgentControl { op, .. } = self {
             return op.is_input_mutation();
         }
         matches!(
@@ -377,6 +404,8 @@ impl Operation {
                 | Self::DeleteWorktree { .. }
                 | Self::CreateSession { .. }
                 | Self::CloseSession { .. }
+                | Self::SupervisorRequest { .. }
+                | Self::SupervisorObserve { .. }
         )
     }
 
@@ -386,7 +415,7 @@ impl Operation {
     /// pending record there becomes an `OutcomeUnknown` workspace operation on restart.
     pub fn agent_control_mutation_id(&self) -> Option<String> {
         match self {
-            Self::AgentControl { op } if op.is_input_mutation() => op.mutation_request_id(),
+            Self::AgentControl { op, .. } if op.is_input_mutation() => op.mutation_request_id(),
             _ => None,
         }
     }
@@ -411,6 +440,15 @@ impl Operation {
             Self::Resources => {
                 path = "resources";
                 r.capability = Some(crate::remote::resources_api::RESOURCE_USAGE_CAPABILITY);
+            }
+            Self::SupervisorRequest { .. } => {
+                path = "supervisor/request";
+                r.capability = Some(crate::remote::server::supervisor_api::SUPERVISOR_CAPABILITY);
+            }
+            Self::SupervisorObserve { .. } => {
+                path = "supervisor/observe";
+                r.capability =
+                    Some(crate::remote::server::supervisor_api::SUPERVISOR_OBSERVE_CAPABILITY);
             }
             Self::Directories {
                 path: p,
@@ -503,7 +541,11 @@ impl Operation {
                 path = "capabilities";
                 r.capability = Some(crate::remote::dag_api::DAG_STREAM_CAPABILITY);
             }
-            Self::AgentControl { op } => {
+            Self::SupervisorFence { .. } => {
+                path = "supervisor/fence";
+                r.capability = Some(crate::agent_control::fence::SUPERVISOR_FENCE_CAPABILITY);
+            }
+            Self::AgentControl { op, .. } => {
                 path = "agent-control/sessions";
                 r.capability = Some(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
                 match op {
@@ -568,7 +610,7 @@ impl Operation {
             Self::Session { session_id, .. } | Self::CloseSession { session_id, .. } => {
                 r.segments.push(session_id.clone())
             }
-            Self::AgentControl { op } => match op {
+            Self::AgentControl { op, .. } => match op {
                 crate::agent_control::AgentControlOp::Read { session_id }
                 | crate::agent_control::AgentControlOp::Send { session_id, .. }
                 | crate::agent_control::AgentControlOp::Deliver { session_id, .. }
@@ -626,12 +668,26 @@ impl Operation {
                         .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
                 );
             }
-            Self::AgentControl { op } if op.is_input_mutation() => {
+            Self::SupervisorRequest { envelope: body }
+            | Self::SupervisorObserve { observation: body } => {
+                r.method = Method::POST;
+                r.body = Some(
+                    serde_json::to_vec(body).map_err(|_| ClientError::local("INVALID_REQUEST"))?,
+                );
+            }
+            Self::AgentControl { op, fence } if op.is_input_mutation() => {
                 r.method = Method::POST;
                 // The request id stays off `route.request_id` so the workspace journal is not
                 // consulted. Transport loss is relabeled from `agent_control_mutation_id`.
                 r.body = Some(
-                    serde_json::to_vec(&agent_control_body(op))
+                    serde_json::to_vec(&agent_control_body(op, fence.as_ref()))
+                        .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
+                );
+            }
+            Self::SupervisorFence { account, fence } => {
+                r.method = Method::POST;
+                r.body = Some(
+                    serde_json::to_vec(&serde_json::json!({ "account": account, "fence": fence }))
                         .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
                 );
             }
@@ -2082,12 +2138,19 @@ fn map_result(host: &HostView, operation: &Operation, bytes: &[u8]) -> Result<Op
         // is opened separately over a socket.
         Operation::DagStream { .. } => OperationResult::Capabilities(decode(bytes)?),
         Operation::AgentControl { .. } => OperationResult::AgentControl(decode(bytes)?),
+        Operation::SupervisorFence { .. } => OperationResult::AgentControl(decode(bytes)?),
         Operation::Resources => OperationResult::Resources(decode(bytes)?),
+        Operation::SupervisorRequest { .. } | Operation::SupervisorObserve { .. } => {
+            OperationResult::Supervisor(decode(bytes)?)
+        }
     })
 }
 
-fn agent_control_body(op: &crate::agent_control::AgentControlOp) -> serde_json::Value {
-    match op {
+fn agent_control_body(
+    op: &crate::agent_control::AgentControlOp,
+    fence: Option<&crate::agent_control::fence::SupervisorFence>,
+) -> serde_json::Value {
+    let mut body = match op {
         crate::agent_control::AgentControlOp::Send {
             text, request_id, ..
         } => {
@@ -2120,7 +2183,12 @@ fn agent_control_body(op: &crate::agent_control::AgentControlOp) -> serde_json::
             serde_json::json!({ "requestId": request_id })
         }
         _ => serde_json::Value::Null,
+    };
+    if let (Some(fence), Some(fields)) = (fence, body.as_object_mut()) {
+        fields.insert("supervisorFence".into(), serde_json::json!(fence.fence));
+        fields.insert("supervisorAccount".into(), serde_json::json!(fence.account));
     }
+    body
 }
 #[cfg(test)]
 #[path = "client_tests.rs"]
@@ -2128,3 +2196,58 @@ mod tests;
 #[cfg(test)]
 #[path = "probe_tests.rs"]
 mod probe_tests;
+
+/// One supervisor request to the paired host on `machine_id` over its shared end-to-end
+/// encrypted session only: a host without the machine attach key is refused
+/// (`REPAIR_REQUIRED`), never sent through the relay's plaintext proxied route. Returns the
+/// response status, its headers and body.
+pub async fn supervisor_secure_request(
+    service: &PairedHostService,
+    machine_id: &str,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+    limit: usize,
+) -> Result<super::secure_http::HttpResponse> {
+    let hosts = service.list().await?;
+    let host = hosts
+        .into_iter()
+        .find(|host| host.machine_id == machine_id && host.grant_scope == GrantScope::Machine)
+        .ok_or_else(|| ClientError::local("HOST_UNAVAILABLE"))?;
+    let (host, lease) = service.capture_operation(host.host_id.clone(), host.generation).await?;
+    let attach = lease.attach().ok_or_else(|| ClientError::local("REPAIR_REQUIRED"))?;
+    let bearer = lease.token()?.to_owned();
+    let mut headers = vec![
+        ("Authorization", format!("Bearer {bearer}")),
+        ("X-Ferryx-Client-Build", super::secure_http::CLIENT_BUILD.to_owned()),
+    ];
+    if body.is_some() {
+        headers.push(("Content-Type", "application/json".to_owned()));
+    }
+    let relay_origin = crate::remote::relay_client::live_relay_url(&host.relay_origin);
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|_| ClientError::local("INTERNAL_ERROR"))?;
+    let target = super::secure_http::SecureTarget {
+        http: &http,
+        host_id: &host.host_id,
+        generation: lease.generation().0,
+        relay_origin: &relay_origin,
+        machine_id: &host.machine_id,
+        attach,
+        bearer: &bearer,
+        session_kind: crate::remote::relay_server::SessionKind::Http,
+    };
+    let mut cancellation = lease.cancellation();
+    tokio::select! { biased;
+        _ = cancellation.changed() => Err(ClientError::local("PAIRED_HOST_STALE_GENERATION")),
+        result = tokio::time::timeout(
+            Duration::from_secs(120),
+            super::secure_http::shared_request(&target, method, path, &headers, body, limit, method == "GET"),
+        ) => result.map_err(|_| ClientError::local("TIMEOUT"))?,
+    }
+}

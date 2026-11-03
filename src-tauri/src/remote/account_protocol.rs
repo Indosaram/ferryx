@@ -68,6 +68,35 @@ pub struct AccountGrantRequest {
     pub installation_id: String,
     pub grant_scope: AccountGrantScope,
     pub attach_public_key: String,
+    /// Present only when the requester is itself an enrolled machine of this account (a
+    /// standby pairing to the supervisor lease holder). A phone or the web app has no machine
+    /// key and never sends it. The account service verifies it and vouches for the machine in
+    /// the sealed offer ([`AccountGrantOffer::account_machine_id`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_machine: Option<GrantRequesterProof>,
+}
+
+/// An enrolled machine's proof that it is the one asking for a grant: an Ed25519 signature by
+/// its enrolled machine key over
+/// `"{grant_requester_nonce(machine_id, machine_record_id, attach_public_key)}:{timestamp}"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantRequesterProof {
+    pub machine_id: String,
+    pub timestamp: u64,
+    pub signature: String,
+}
+
+/// The nonce a requesting machine signs for a grant on `target_machine_record_id` for the device
+/// key `attach_public_key`. The domain and both ids keep it from being replayed as a lease,
+/// peer-record or other grant signature; the attach key binds it to the requester's own device,
+/// so a captured proof cannot vouch for a device key the requester never saw.
+pub fn grant_requester_nonce(
+    requester_machine_id: &str,
+    target_machine_record_id: &str,
+    attach_public_key: &str,
+) -> String {
+    format!("ferryx-account-grant-requester-v2:{requester_machine_id}:{target_machine_record_id}:{attach_public_key}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +111,14 @@ pub struct AccountGrantOffer {
     pub grant_scope: AccountGrantScope,
     pub expires_at: u64,
     pub device_attach_public_key: String,
+    /// The enrolled machine of this account the grant was issued to, set by the account
+    /// service only after verifying [`AccountGrantRequest::requester_machine`]. A phone cannot
+    /// add it. The seal alone does not authenticate the sender (anyone can seal to the target's
+    /// attach key), so the target honours it only when the account's signature over the
+    /// envelope, forwarded by the relay, verifies against the account key the machine pinned
+    /// ([`crate::account::offer_sink::account_signed`]); otherwise the grant applies without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_machine_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

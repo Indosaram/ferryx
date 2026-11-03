@@ -1189,7 +1189,7 @@ diff --git a/src/report-gate.ts b/src/report-gate.ts
 new file mode 100644
 --- /dev/null
 +++ b/src/report-gate.ts
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,150 @@
 +import { createConnection } from "node:net";
 +
 +export type Report = {
@@ -1269,6 +1269,8 @@ new file mode 100644
 +
 +function reply(value: unknown, op: string): Record<string, unknown> {
 +  const parsed = object(value);
++  if (parsed.status === "standby" || parsed.code === "SUPERVISOR_STANDBY")
++    throw new GateError("unavailable", "Hub supervisor is on standby; retry later");
 +  if (parsed.status === "failed")
 +    throw new GateError("rejected", typeof parsed.error === "string" ? parsed.error : String(parsed.code));
 +  if (parsed.status !== "ok" || parsed.op !== op)
@@ -1431,7 +1433,7 @@ diff --git a/src/report-card.test.ts b/src/report-card.test.ts
 new file mode 100644
 --- /dev/null
 +++ b/src/report-card.test.ts
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,68 @@
 +import { expect, test } from "bun:test";
 +import { mkdtempSync, rmSync } from "node:fs";
 +import { tmpdir } from "node:os";
@@ -1448,6 +1450,11 @@ new file mode 100644
 +  expect(await answer({ delivery: "pending", blocked_by: "m0" }).mutate(7, "m1", change)).toBe("pending");
 +  await expect(answer({ delivery: "pending", progress: "in_flight", blocked_by: "m0" }).mutate(7, "m1", change)).rejects.toBeInstanceOf(GateError);
 +  await expect(answer({ delivery: "sent" }).mutate(7, "m1", change)).rejects.toThrow(/Unknown mutation state/);
++});
++
++test("a supervisor standby refusal is unavailable, so the card intent stays pending for retry", async () => {
++  const standby = new ReportGate(async () => ({ status: "standby", op: "report_mutate", code: "SUPERVISOR_STANDBY", error: "standby", holder: "m2" }));
++  await expect(standby.mutate(7, "m1", change)).rejects.toMatchObject({ code: "unavailable" });
 +});
 +
 +test("an unsettled card edit never blocks the newer desired card and is never called delivered", async () => {

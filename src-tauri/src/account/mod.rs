@@ -9,6 +9,7 @@ pub mod origin;
 pub mod peer_record;
 pub mod service;
 pub mod store;
+pub mod supervisor_lease;
 
 #[cfg(test)]
 mod onboarding_tests;

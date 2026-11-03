@@ -1,2 +1,6 @@
+# sqlx embeds the SHA-384 of each migration's text, so a CRLF checkout (core.autocrlf) would
+# build a binary whose checksums differ from LF builds. storage::migrate reconciles databases
+# migrated by earlier CRLF builds.
+crates/ferryx-hub/migrations/*.sql text eol=lf
 # Agent skills are shipped byte-for-byte (include_str!), so keep them LF on every checkout.
 src-tauri/resources/agent-skills/**/*.md text eol=lf

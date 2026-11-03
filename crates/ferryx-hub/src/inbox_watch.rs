@@ -427,8 +427,34 @@ pub const HEALTHY_RUN: Duration = Duration::from_secs(60);
 pub const STDERR_TAIL_MAX: usize = 2048;
 const GITHUB_PR_QUERY: &str = "query{search(query:\"is:pr author:@me archived:false sort:updated-desc\",type:ISSUE,first:50){nodes{... on PullRequest{url title number updatedAt state repository{nameWithOwner} commits(last:1){nodes{commit{oid statusCheckRollup{state}}}}}}}}";
 
-static GATEWAY_EVENTS: std::sync::OnceLock<tokio::sync::mpsc::Sender<InboxWatcherEvent>> =
-    std::sync::OnceLock::new();
+/// The running collectors' event sender for gateway wakes. Every [`spawn`] replaces it, so a
+/// later hub generation in the same process (a stand-down then re-promotion, a hub stop then
+/// start) gets the wakes; the generation that set it clears it when its collectors end.
+static GATEWAY_EVENTS: std::sync::RwLock<Option<tokio::sync::mpsc::Sender<InboxWatcherEvent>>> =
+    std::sync::RwLock::new(None);
+
+/// Clears [`GATEWAY_EVENTS`] on drop, unless a later generation already replaced it.
+struct GatewayRegistration(tokio::sync::mpsc::Sender<InboxWatcherEvent>);
+
+impl GatewayRegistration {
+    fn install(sender: tokio::sync::mpsc::Sender<InboxWatcherEvent>) -> Self {
+        *GATEWAY_EVENTS
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sender.clone());
+        Self(sender)
+    }
+}
+
+impl Drop for GatewayRegistration {
+    fn drop(&mut self) {
+        let mut slot = GATEWAY_EVENTS
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.as_ref().is_some_and(|current| current.same_channel(&self.0)) {
+            *slot = None;
+        }
+    }
+}
 
 pub fn inbox_enabled() -> bool {
     crate::hub_env::var("OMON_INBOX_ENABLED")
@@ -437,7 +463,11 @@ pub fn inbox_enabled() -> bool {
 }
 
 pub fn notify_gateway() {
-    if let Some(sender) = GATEWAY_EVENTS.get() {
+    let sender = GATEWAY_EVENTS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(sender) = sender {
         let _ = sender.try_send(InboxWatcherEvent::GatewayMessage);
     }
 }
@@ -905,6 +935,9 @@ fn path_escape(value: &str) -> String {
 
 /// Starts the collectors the daemon aborts on `ferryx hub stop`: startup collect,
 /// `imsg watch`, `zele mail watch`, and the Kakao and GitHub timers.
+///
+/// The collectors are children of this future ([`join_owned`]): aborting or dropping it (a
+/// hub stop, a lease stand-down) aborts every one of them and drops the shutdown sender.
 pub async fn spawn(pool: SqlitePool) -> Result<()> {
     if !inbox_enabled() {
         return Ok(());
@@ -917,47 +950,83 @@ pub async fn spawn(pool: SqlitePool) -> Result<()> {
             tracing::warn!(%error, "inbox owner-thread reconciliation failed");
         }
     }
-    let (events, receiver) = watcher_channel();
-    let _ = GATEWAY_EVENTS.set(events.clone());
-    let _ = events.try_send(InboxWatcherEvent::Startup);
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let judge = Judge::from_config(crate::judge::typesafe_from_env());
-    let serve_pool = pool.clone();
     let fetch_pool = pool.clone();
-    let serve_task = tokio::spawn(async move {
-        let _ = serve(serve_pool, receiver, judge, move |kind, cursor| {
+    let imsg_pool = pool.clone();
+    run_collectors(
+        pool,
+        judge,
+        move |kind, cursor| {
             let pool = fetch_pool.clone();
             async move { fetch_kind(&pool, kind, cursor.as_deref()).await }
-        })
-        .await;
+        },
+        move |events| {
+            let pool = imsg_pool.clone();
+            async move { run_imsg_once(&pool, &events).await }
+        },
+        |events| async move { run_mail_once(&events).await },
+    )
+    .await;
+    Ok(())
+}
+
+/// [`spawn`]'s collectors with their sources injected: registers the gateway wake sender,
+/// queues the startup collect, and runs serve (through `fetch`), the source timers and the
+/// imessage and mail watchers (one `imsg_once` / `mail_once` run per supervised attempt) as
+/// children of this future until they all end.
+async fn run_collectors<F, Fut, I, IFut, M, MFut>(
+    pool: SqlitePool,
+    judge: Judge,
+    fetch: F,
+    imsg_once: I,
+    mail_once: M,
+) where
+    F: FnMut(SourceKind, Option<String>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<Option<(Vec<SourceItem>, String)>>> + Send + 'static,
+    I: Fn(tokio::sync::mpsc::Sender<InboxWatcherEvent>) -> IFut + Send + 'static,
+    IFut: std::future::Future<Output = WatcherExit> + Send + 'static,
+    M: Fn(tokio::sync::mpsc::Sender<InboxWatcherEvent>) -> MFut + Send + 'static,
+    MFut: std::future::Future<Output = WatcherExit> + Send + 'static,
+{
+    let (events, receiver) = watcher_channel();
+    let _registration = GatewayRegistration::install(events.clone());
+    let _ = events.try_send(InboxWatcherEvent::Startup);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let serve_pool = pool.clone();
+    let mut children = tokio::task::JoinSet::new();
+    children.spawn(async move {
+        let _ = serve(serve_pool, receiver, judge, fetch).await;
     });
     let timer_events = events.clone();
     let timer_shutdown = shutdown_rx.clone();
-    let timers = tokio::spawn(async move { run_source_timers(timer_events, timer_shutdown).await });
+    children.spawn(async move { run_source_timers(timer_events, timer_shutdown).await });
     let imsg_pool = pool.clone();
     let imsg_events = events.clone();
     let imsg_shutdown = shutdown_rx.clone();
-    let imsg = tokio::spawn(async move {
-        let health_pool = imsg_pool.clone();
-        supervise_command("imessage", &health_pool, imsg_shutdown, move || {
-            let pool = imsg_pool.clone();
-            let events = imsg_events.clone();
-            async move { run_imsg_once(&pool, &events).await }
-        })
-        .await;
+    children.spawn(async move {
+        supervise_command("imessage", &imsg_pool, imsg_shutdown, move || imsg_once(imsg_events.clone()))
+            .await;
     });
-    let mail_pool = pool.clone();
+    let mail_pool = pool;
     let mail_events = events;
-    let mail = tokio::spawn(async move {
-        supervise_command("mail", &mail_pool, shutdown_rx, move || {
-            let events = mail_events.clone();
-            async move { run_mail_once(&events).await }
-        })
-        .await;
+    children.spawn(async move {
+        supervise_command("mail", &mail_pool, shutdown_rx, move || mail_once(mail_events.clone())).await;
     });
-    let _ = shutdown_tx;
-    let _ = tokio::join!(serve_task, timers, imsg, mail);
-    Ok(())
+    // Held until every child ended or this future is dropped.
+    let _shutdown = shutdown_tx;
+    join_owned(children).await;
+}
+
+/// Waits for every task in `children`. The set is owned by this future, so aborting or
+/// dropping the future drops the set, which aborts every child still running.
+pub(crate) async fn join_owned(mut children: tokio::task::JoinSet<()>) {
+    while let Some(ended) = children.join_next().await {
+        if let Err(error) = ended {
+            if error.is_panic() {
+                tracing::warn!(%error, "an inbox collector panicked");
+            }
+        }
+    }
 }
 
 /// How long a watcher process must stay up before its health reads `running`.
@@ -1174,6 +1243,98 @@ async fn tail_text(stderr: Option<tokio::process::ChildStderr>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sends on drop: proves a child task's future was dropped (aborted), not merely idle.
+    struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    /// One hub generation's collectors ([`run_collectors`], the wiring [`spawn`] runs) with
+    /// fake sources: every fetch is reported on `fetched`; each imessage or mail watcher run
+    /// reports its start on `started` and then waits forever, holding a [`DropSignal`].
+    fn generation(
+        pool: SqlitePool,
+        fetched: tokio::sync::mpsc::UnboundedSender<SourceKind>,
+        started: tokio::sync::mpsc::UnboundedSender<(&'static str, tokio::sync::oneshot::Receiver<()>)>,
+    ) -> tokio::task::JoinHandle<()> {
+        type Started = tokio::sync::mpsc::UnboundedSender<(&'static str, tokio::sync::oneshot::Receiver<()>)>;
+        let watcher = |name: &'static str, started: Started| {
+            move |_events: tokio::sync::mpsc::Sender<InboxWatcherEvent>| {
+                let (drop_tx, drop_rx) = tokio::sync::oneshot::channel();
+                let _ = started.send((name, drop_rx));
+                async move {
+                    let _signal = DropSignal(Some(drop_tx));
+                    std::future::pending::<WatcherExit>().await
+                }
+            }
+        };
+        tokio::spawn(run_collectors(
+            pool,
+            Judge::forced("bot_can_handle"),
+            move |kind, _cursor| {
+                let _ = fetched.send(kind);
+                async { Ok(None) }
+            },
+            watcher("imessage", started.clone()),
+            watcher("mail", started),
+        ))
+    }
+
+    /// Waits (bounded) until `fetched` reports `kind`.
+    async fn fetch_of(fetched: &mut tokio::sync::mpsc::UnboundedReceiver<SourceKind>, kind: SourceKind) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while fetched.recv().await.expect("the collectors run") != kind {}
+        })
+        .await
+        .expect("bounded");
+    }
+
+    /// Q5 and F1: aborting a generation's collector task (a stand-down) aborts its imessage
+    /// and mail watchers, and the next generation in the same process gets the gateway wakes.
+    #[tokio::test]
+    async fn a_stood_down_generation_stops_its_watchers_and_the_next_one_gets_gateway_wakes() {
+        let limit = Duration::from_secs(5);
+        let pool = crate::storage::memory().await.unwrap();
+        let mut dropped = Vec::new();
+
+        let (fetched_tx, mut fetched) = tokio::sync::mpsc::unbounded_channel();
+        let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+        let first = generation(pool.clone(), fetched_tx, started_tx);
+        for _ in 0..2 {
+            let (_, drop_rx) = tokio::time::timeout(limit, started.recv()).await.expect("bounded").unwrap();
+            dropped.push(drop_rx);
+        }
+        fetch_of(&mut fetched, SourceKind::Slack).await;
+        notify_gateway();
+        fetch_of(&mut fetched, SourceKind::Slack).await;
+
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        for drop_rx in dropped {
+            tokio::time::timeout(limit, drop_rx).await.expect("bounded").expect("the watcher was aborted");
+        }
+        tokio::time::timeout(limit, async { while fetched.recv().await.is_some() {} })
+            .await
+            .expect("the first generation's serve ended with it");
+
+        let (fetched_tx, mut fetched) = tokio::sync::mpsc::unbounded_channel();
+        let (started_tx, _started) = tokio::sync::mpsc::unbounded_channel();
+        let second = generation(pool, fetched_tx, started_tx);
+        // The startup collect, then a gateway wake that only this generation can receive.
+        fetch_of(&mut fetched, SourceKind::Slack).await;
+        notify_gateway();
+        fetch_of(&mut fetched, SourceKind::Slack).await;
+        second.abort();
+        let _ = second.await;
+        let slot = GATEWAY_EVENTS.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        assert!(slot.is_none(), "an ended generation leaves no gateway sender behind");
+    }
 
     /// Security, billing and account mail lands in Gmail's Updates tab; the watch must
     /// fetch it so the prefilter can pass it to the owner.

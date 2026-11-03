@@ -86,7 +86,7 @@ pub fn open_sqlite_connection(dir: &Path) -> Result<Connection, String> {
     }
 
     schema::configure_connection(&conn)?;
-    schema::init_schema(&mut conn)?;
+    schema::init_schema(&mut conn, is_read_only(dir))?;
 
     // The connection outlives the initialization window, so the lock is released explicitly
     // (an error above drops it on the way out).
@@ -122,6 +122,40 @@ where
         .map_err(|error| E::from(format!("Failed to commit mutate transaction: {error}")))?;
 
     Ok(result)
+}
+
+/// Runs `lease_fn` inside one `BEGIN IMMEDIATE` transaction without loading or saving the
+/// account store: supervisor lease writes are targeted SQL on the lease tables only, so a renew
+/// every few seconds per machine never rewrites the whole store. Refusals returned by
+/// `lease_fn` roll the transaction back. A read-only replica refuses like every other write.
+pub fn lease_transaction<T, E, F>(dir: &Path, lease_fn: F) -> Result<T, E>
+where
+    E: From<String>,
+    F: FnOnce(&rusqlite::Transaction<'_>) -> Result<T, E>,
+{
+    ensure_writable(dir).map_err(E::from)?;
+    let write_lock = store_write_lock(dir);
+    let _writer = write_lock.lock();
+    let mut conn = open_sqlite_connection(dir).map_err(E::from)?;
+    migration::maybe_import_legacy_json(&mut conn, dir).map_err(E::from)?;
+
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| E::from(format!("Failed to begin immediate lease transaction: {error}")))?;
+    let result = lease_fn(&tx)?;
+    tx.commit()
+        .map_err(|error| E::from(format!("Failed to commit lease transaction: {error}")))?;
+    Ok(result)
+}
+
+/// Runs a lease read on a plain connection; works on a read-only replica too.
+pub fn lease_read<T, E, F>(dir: &Path, read_fn: F) -> Result<T, E>
+where
+    E: From<String>,
+    F: FnOnce(&Connection) -> Result<T, E>,
+{
+    let conn = open_sqlite_connection(dir).map_err(E::from)?;
+    read_fn(&conn)
 }
 
 pub fn load_sqlite_store(dir: &Path) -> Result<AccountStore, String> {

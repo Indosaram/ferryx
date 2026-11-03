@@ -17,7 +17,7 @@ use super::types::{
     Decision, GoalError, GoalMode, ProposalState, RequirementStatus, StopReason, TurnOrigin,
 };
 use super::{assess, turns};
-use crate::agent_control::AgentControl;
+use crate::agent_control::{AgentControl, SUPERVISOR_NOT_HOLDER};
 use crate::judge::Judge;
 use crate::lanes::state::{self, LaneStatus, GOAL_CONVERGED_REASON};
 
@@ -217,6 +217,31 @@ async fn dispatch<C: AgentControl + ?Sized>(
         super::SendOutcome::Refused { code } if code == CONTROL_CONFLICT => {
             contract::set_proposal_state(pool, lane_key, ProposalState::Superseded, None).await?;
             Ok(LoopOutcome::new(lane_key))
+        }
+        // This machine does not hold the supervisor lease at this instant (e.g. right after a
+        // sleep/wake). Nothing was typed and the lane is not at fault, so it is not stopped.
+        // A supervised proposal goes back to awaiting approval, so the owner can approve it
+        // again once the role settles; a full-mode proposal is superseded, so the next settled
+        // turn proposes afresh. A `pending` proposal is never left behind: outside a pass it
+        // reads as an interrupted delivery.
+        super::SendOutcome::Refused { code } if code == SUPERVISOR_NOT_HOLDER => {
+            if contract.mode == GoalMode::Supervised {
+                contract::set_proposal_state(
+                    pool,
+                    lane_key,
+                    ProposalState::AwaitingApproval,
+                    Some(&[ProposalState::Pending]),
+                )
+                .await?;
+                Ok(LoopOutcome {
+                    awaiting_approval: true,
+                    ..LoopOutcome::new(lane_key)
+                })
+            } else {
+                contract::set_proposal_state(pool, lane_key, ProposalState::Superseded, None)
+                    .await?;
+                Ok(LoopOutcome::new(lane_key))
+            }
         }
         super::SendOutcome::Refused { code } if code == OBSERVER_UNAVAILABLE => {
             contract::set_proposal_state(
@@ -420,6 +445,10 @@ pub async fn on_turn_settled<C: AgentControl + ?Sized>(
     lane_key: &str,
     worked: bool,
 ) -> Result<Option<LoopOutcome>, GoalError> {
+    // The legacy goal loop settles and judges only on the lease holder.
+    if !crate::holder::is_holder_now() {
+        return Ok(None);
+    }
     let Some(contract) = contract::contract_of(pool, lane_key).await? else {
         return Ok(None);
     };
@@ -942,6 +971,98 @@ mod tests {
             status_of(&pool, LANE).await.unwrap(),
             Some(LaneStatus::Working)
         );
+    }
+
+    #[tokio::test]
+    async fn a_not_holder_refusal_supersedes_the_proposal_and_the_next_turn_proposes_afresh() {
+        let pool = lane_pool(Some(GoalMode::Full)).await;
+        let model = ScriptedModel::new(&[CONTINUE, CONTINUE]);
+        let control = FakeControl::scripted(vec![SendOutcome::Refused {
+            code: SUPERVISOR_NOT_HOLDER.into(),
+        }]);
+        let outcome = on_turn_settled(&pool, &judge(&pool, &model), &control, LANE, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.stop_reason, None);
+        assert!(!outcome.sent);
+        let contract = goal(&pool).await;
+        assert_eq!(contract.proposal.unwrap().state, ProposalState::Superseded);
+        assert_eq!(contract.stop_reason, None);
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Working)
+        );
+        assert_eq!(control.sends().len(), 1);
+
+        // The next settled turn is not read as an interrupted delivery: it proposes afresh.
+        let next = on_turn_settled(&pool, &judge(&pool, &model), &control, LANE, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.stop_reason, None);
+        assert!(next.sent);
+        let contract = goal(&pool).await;
+        assert_eq!(contract.stop_reason, None);
+        assert_eq!(contract.proposal.unwrap().state, ProposalState::Sent);
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Working)
+        );
+        assert_eq!(control.sends().len(), 2);
+        assert_eq!(model.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_not_holder_refusal_on_approve_restores_awaiting_approval_without_stopping() {
+        let pool = lane_pool(Some(GoalMode::Supervised)).await;
+        contract::set_proposal(
+            &pool,
+            LANE,
+            "run the tests",
+            &["g1".to_owned()],
+            ProposalState::AwaitingApproval,
+            Some("hub-goal-goal-a-1"),
+        )
+        .await
+        .unwrap();
+        let model = ScriptedModel::new(&[]);
+        let control = FakeControl::scripted(vec![SendOutcome::Refused {
+            code: SUPERVISOR_NOT_HOLDER.into(),
+        }]);
+        let outcome = approve_proposal(&pool, &control, LANE).await.unwrap();
+        assert_eq!(outcome.stop_reason, None);
+        assert!(outcome.awaiting_approval);
+        assert!(!outcome.sent);
+        let contract = goal(&pool).await;
+        assert_eq!(
+            contract.proposal.unwrap().state,
+            ProposalState::AwaitingApproval
+        );
+        assert_eq!(contract.stop_reason, None);
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Working)
+        );
+
+        // A settled turn leaves the awaiting proposal alone instead of stopping the lane.
+        let settled = on_turn_settled(&pool, &judge(&pool, &model), &control, LANE, true)
+            .await
+            .unwrap();
+        assert_eq!(settled, None);
+        let contract = goal(&pool).await;
+        assert_eq!(contract.stop_reason, None);
+        assert_eq!(
+            contract.proposal.unwrap().state,
+            ProposalState::AwaitingApproval
+        );
+        assert_eq!(model.calls(), 0);
+
+        // Once the role settles the owner approves again and the proposal is sent.
+        let again = approve_proposal(&pool, &control, LANE).await.unwrap();
+        assert!(again.sent);
+        assert_eq!(goal(&pool).await.proposal.unwrap().state, ProposalState::Sent);
+        assert_eq!(control.sends().len(), 2);
     }
 
     #[tokio::test]

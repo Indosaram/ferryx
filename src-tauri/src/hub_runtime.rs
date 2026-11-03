@@ -5,6 +5,8 @@
 //! which uses the shared reference-chat input queue and refuses a pane a person just typed in.
 use std::sync::Arc;
 
+pub(crate) mod holder_link;
+
 use async_trait::async_trait;
 use ferryx_hub::agent_control::{AgentControl, AgentOp, TaskLauncher};
 use ferryx_hub::sessions::watch::Observation;
@@ -120,9 +122,21 @@ impl AgentControl for DaemonBridge {
         let host_id = host_id
             .filter(|host| *host != ferryx_hub::agent_control::LOCAL_HOST_ID && !host.is_empty())
             .map(str::to_owned);
+        // A supervisor input carries this machine's lease fence, asked right before the send;
+        // a machine that is not the lease holder now sends nothing.
+        let (supervisor_fence, supervisor_account) = crate::agent_control::fence::wire(
+            crate::agent_control::fence::stamp_for(&request).map_err(|refusal| {
+                HubError::message(format!("{} {}", refusal.code(), refusal.message()))
+            })?,
+        );
         let response = self
             .client
-            .send_request(DaemonRequest::AgentControl { request, host_id })
+            .send_request(DaemonRequest::AgentControl {
+                request,
+                host_id,
+                supervisor_fence,
+                supervisor_account,
+            })
             .await
             .map_err(|error| HubError::message(error.to_string()))?;
         match response {
@@ -162,6 +176,11 @@ impl AgentControl for DaemonBridge {
             };
             return self.deliver(&send).await.send_outcome(&send);
         };
+        if let Err(refusal) = crate::agent_control::fence::admit_stamped(gateway).await {
+            return ferryx_hub::goals::SendOutcome::Refused {
+                code: refusal.code().to_owned(),
+            };
+        }
         hub_send_outcome(
             crate::agent_control::delivery::send_confirmed(
                 gateway,
@@ -204,6 +223,10 @@ impl AgentControl for DaemonBridge {
             // the first byte: a pause, cancel or correction that landed while the delivery
             // waited for the pane refuses it with a code that proves nothing was typed. It is
             // one-shot: once the first byte is allowed, the ask before Enter always passes.
+            // The lease fence is ratcheted on this machine's daemon before that.
+            if let Err(refusal) = crate::agent_control::fence::admit_stamped(gateway).await {
+                return Delivery::from_error_code(Some(refusal.code()));
+            }
             let fence = crate::agent_control::delivery::supervisor_fence(&send.request_id);
             return match crate::remote::server::agent_control_service::handle_as(
                 gateway,
@@ -217,9 +240,16 @@ impl AgentControl for DaemonBridge {
                 Err(error) => crate::agent_control::delivery::hub_delivery(Err(error)),
             };
         };
+        let (supervisor_fence, supervisor_account) =
+            match crate::agent_control::fence::stamp_for(&op) {
+                Ok(fence) => crate::agent_control::fence::wire(fence),
+                Err(refusal) => return Delivery::from_error_code(Some(refusal.code())),
+            };
         let request = DaemonRequest::AgentControl {
             request: op,
             host_id: Some(host_id.to_owned()),
+            supervisor_fence,
+            supervisor_account,
         };
         match self.client.send_request(request).await {
             Ok(DaemonResponse::AgentControlOk { result }) => {
@@ -431,6 +461,9 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
         Some("env") => return hub_env_cli(&args[3.min(args.len())..]),
         Some("setup") => return setup::hub_setup_cli(&args[3.min(args.len())..]),
         Some("cron") => return hub_cron_cli(&args[3.min(args.len())..]),
+        Some("lease") => return hub_lease_cli(&args[3.min(args.len())..]),
+        Some("move-here") => return hub_move_here_cli(&args[3.min(args.len())..]),
+        Some("adopt-archived") => return hub_adopt_archived_cli(&args[3.min(args.len())..]),
         Some("migrate") => {}
         _ => {
             eprintln!("usage: ferryx hub migrate [--from-omo <db>] [--cwd <dir>] [--imported-from <db>] [--dry-run]");
@@ -441,6 +474,9 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
                 "       ferryx hub env import [--from-plist <omo plist>] | ferryx hub env keys"
             );
             eprintln!("       ferryx hub cron list | ferryx hub cron model <job-id> <provider/model | --clear> | ferryx hub cron approve-rerun <problem-id>");
+            eprintln!("       ferryx hub lease reset-capability");
+            eprintln!("       ferryx hub move-here [--force [--confirm]] [--replace-local]");
+            eprintln!("       ferryx hub adopt-archived [--goal <id> | --all]");
             return 2;
         }
     }
@@ -641,6 +677,107 @@ fn import_omo_env(plist: &std::path::Path) -> Result<Vec<String>, String> {
     Ok(incoming.keys().cloned().collect())
 }
 
+/// `ferryx hub lease reset-capability` forgets that this daemon's relay once served the
+/// supervisor lease, for a deliberate downgrade to a relay without it. Without the reset such a
+/// relay leaves the hub `RELAY_LEASE_UNSUPPORTED` (standby), never holder.
+fn hub_lease_cli(args: &[String]) -> i32 {
+    use crate::daemon::supervisor_lease_client::{lease_file_path, reset_capability_latch};
+    match args.first().map(String::as_str) {
+        Some("reset-capability") if args.len() == 1 => {
+            let Some(path) = lease_file_path() else {
+                eprintln!("cannot resolve the Ferryx data directory");
+                return 1;
+            };
+            match reset_capability_latch(&path) {
+                Ok(()) => {
+                    println!("supervisor lease capability latch cleared ({})", path.display());
+                    0
+                }
+                Err(error) => {
+                    eprintln!("could not clear the lease capability latch: {error}");
+                    1
+                }
+            }
+        }
+        _ => {
+            eprintln!("usage: ferryx hub lease reset-capability");
+            2
+        }
+    }
+}
+
+/// Parses `move-here` flags: `--force` alone is refused; it needs `--confirm` (the person
+/// read what a forced takeover loses). `--replace-local` is the owner's explicit consent to
+/// archive and replace a local supervisor with another identity. Returns
+/// `(force, confirm, replace_local)`; `Err` is the usage exit.
+fn move_here_flags(args: &[String]) -> Result<(bool, bool, bool), String> {
+    let (mut force, mut confirm, mut replace_local) = (false, false, false);
+    for arg in args {
+        match arg.as_str() {
+            "--force" => force = true,
+            "--confirm" => confirm = true,
+            "--replace-local" => replace_local = true,
+            other => return Err(format!("unknown argument {other}")),
+        }
+    }
+    if confirm && !force {
+        return Err("--confirm only confirms --force".to_owned());
+    }
+    Ok((force, confirm, replace_local))
+}
+
+/// `ferryx hub move-here [--force [--confirm]] [--replace-local]`: moves the supervisor to
+/// this machine. A forced takeover is only sent after `--confirm`; without it the daemon is
+/// asked unforced and its `SUPERVISOR_FORCE_REQUIRED` warning (what will be lost) is printed.
+/// A hub holding another supervisor refuses `SUPERVISOR_IDENTITY_MISMATCH` unless
+/// `--replace-local` is given (that local supervisor is then archived first).
+fn hub_move_here_cli(args: &[String]) -> i32 {
+    let (force, confirm, replace_local) = match move_here_flags(args) {
+        Ok(flags) => flags,
+        Err(message) => {
+            eprintln!("{message}");
+            eprintln!("usage: ferryx hub move-here [--force [--confirm]] [--replace-local]");
+            return 2;
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("runtime: {error}");
+            return 1;
+        }
+    };
+    let request = DaemonRequest::SupervisorMoveHere { force: force && confirm, replace_local };
+    match runtime.block_on(DaemonClient::new().send_request(request)) {
+        Ok(DaemonResponse::SupervisorMoveHereOk { moved: true }) => {
+            println!("the supervisor runs on this machine now");
+            0
+        }
+        Ok(DaemonResponse::SupervisorMoveHereOk { moved: false }) => {
+            println!("the supervisor already runs on this machine");
+            0
+        }
+        Ok(DaemonResponse::Error { message, code, .. }) => {
+            eprintln!("{}: {message}", code.as_deref().unwrap_or("ERROR"));
+            if code.as_deref() == Some(crate::supervisor_checkpoint::SUPERVISOR_FORCE_REQUIRED) {
+                eprintln!("run 'ferryx hub move-here --force --confirm' to take over anyway");
+            }
+            if code.as_deref() == Some(ferryx_hub::checkpoint::SUPERVISOR_IDENTITY_MISMATCH) {
+                eprintln!("this machine runs another supervisor; add --replace-local to archive and replace it");
+            }
+            1
+        }
+        Ok(other) => {
+            eprintln!("unexpected daemon response: {other:?}");
+            1
+        }
+        Err(error) => {
+            eprintln!("daemon: {}", error.message);
+            1
+        }
+    }
+}
+
 fn hub_env_cli(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("import") => {
@@ -739,9 +876,17 @@ fn hub_control(op: ferryx_hub::control::ControlOp, check: bool) -> i32 {
             }
         };
         runtime.block_on(async move {
-            match ferryx_hub::control::send_control(&path, op).await {
+            match ferryx_hub::control::send_control(&path, op.clone()).await {
                 Ok(reply) => {
                     println!("{}", reply.trim());
+                    // stdout stays one JSON line for scripts; the standby hint goes beside it.
+                    if let Some(line) = status_hint_line(op, &reply) {
+                        eprintln!("{line}");
+                    }
+                    // Informational only: a warning never changes the exit code.
+                    for warning in ferryx_hub::control::reply_warnings(&reply) {
+                        eprintln!("warning {warning}");
+                    }
                     control_exit_code(&reply, check)
                 }
                 Err(error) => {
@@ -760,6 +905,39 @@ fn hub_control(op: ferryx_hub::control::ControlOp, check: bool) -> i32 {
     }
 }
 
+/// The plain-text `status_hint` line `hub status` prints on standby, naming the holder and this
+/// machine's pairing to it (`supervisor_lease.holderPairing`, e.g. "not paired to holder").
+#[cfg(any(unix, test))]
+fn status_hint_line(op: ferryx_hub::control::ControlOp, reply: &str) -> Option<String> {
+    if op != ferryx_hub::control::ControlOp::Status {
+        return None;
+    }
+    let hint = ferryx_hub::control::reply_status_hint(reply)?;
+    let value = serde_json::from_str::<Value>(reply.trim()).ok();
+    let field = |key: &str| {
+        value.as_ref().and_then(|value| value["supervisor_lease"][key].as_str().map(str::to_owned))
+    };
+    Some(match (field("holderPairing"), field("holderPairingReason")) {
+        (Some(pairing), Some(reason)) => format!("status_hint {hint}; holder pairing: {pairing} ({reason})"),
+        (Some(pairing), None) => format!("status_hint {hint}; holder pairing: {pairing}"),
+        _ => format!("status_hint {hint}"),
+    })
+}
+
+/// The `status` reply with `pairing` (see [`holder_pairing_state`]) next to
+/// `supervisor_lease.holderPaired`, and `holderPairingReason` when the owner has a fix to make
+/// (see [`holder_pairing_reason`]).
+#[cfg(any(unix, test))]
+fn with_holder_pairing(mut report: Value, pairing: &str, reason: Option<&str>) -> Value {
+    if let Some(lease) = report.get_mut("supervisor_lease").and_then(Value::as_object_mut) {
+        lease.insert("holderPairing".into(), json!(pairing));
+        if let Some(reason) = reason {
+            lease.insert("holderPairingReason".into(), json!(reason));
+        }
+    }
+    report
+}
+
 /// Every hub task in this daemon: the generation (Slack, cron, HTTP, watchers) and the control
 /// listener. A handover commit retires it from a synchronous callback.
 static HUB_TASKS: ferryx_hub::lifecycle::TaskRegistry = ferryx_hub::lifecycle::TaskRegistry::new();
@@ -767,8 +945,68 @@ static HUB_TASKS: ferryx_hub::lifecycle::TaskRegistry = ferryx_hub::lifecycle::T
 /// The opened hub and its running generation, for the desktop's Supervisor view.
 type SupervisorView = (Arc<Hub>, Arc<tokio::sync::Mutex<Option<Generation>>>);
 
-/// The opened hub and its running generation, for the desktop's Supervisor view.
-static SUPERVISOR_VIEW: std::sync::OnceLock<SupervisorView> = std::sync::OnceLock::new();
+/// A swappable process-wide value. Under `cfg(test)` each test thread has its own, so tests
+/// drive the product's accessors without sharing state with tests running beside them.
+#[cfg(not(test))]
+type Slot<T> = std::sync::RwLock<Option<T>>;
+#[cfg(test)]
+type Slot<T> = std::thread::LocalKey<std::cell::RefCell<Option<T>>>;
+
+#[cfg(not(test))]
+fn slot_get<T: Clone>(slot: &'static Slot<T>) -> Option<T> {
+    slot.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+#[cfg(not(test))]
+fn slot_set<T>(slot: &'static Slot<T>, value: Option<T>) {
+    *slot.write().unwrap_or_else(|e| e.into_inner()) = value;
+}
+
+#[cfg(test)]
+fn slot_get<T: Clone + 'static>(slot: &'static Slot<T>) -> Option<T> {
+    slot.with(|value| value.borrow().clone())
+}
+
+#[cfg(test)]
+fn slot_set<T: 'static>(slot: &'static Slot<T>, value: Option<T>) {
+    slot.with(|current| *current.borrow_mut() = value);
+}
+
+/// Declares a [`Slot`], empty until set.
+macro_rules! hub_slot {
+    ($(#[$meta:meta])* $name:ident: $ty:ty) => {
+        $(#[$meta])*
+        #[cfg(not(test))]
+        static $name: Slot<$ty> = std::sync::RwLock::new(None);
+        #[cfg(test)]
+        thread_local! {
+            $(#[$meta])*
+            static $name: std::cell::RefCell<Option<$ty>> = const { std::cell::RefCell::new(None) };
+        }
+    };
+}
+
+hub_slot! {
+    /// The opened hub and its running generation, for the desktop's Supervisor view. Swappable:
+    /// a promotion that imports a staged hub database replaces the hub (see [`promote_generation`]).
+    SUPERVISOR_VIEW: SupervisorView
+}
+
+/// The current hub and running slot, `None` until this daemon opened the hub.
+fn supervisor_view() -> Option<SupervisorView> {
+    slot_get(&SUPERVISOR_VIEW)
+}
+
+/// What a start needs besides the running slot, swapped together with [`SUPERVISOR_VIEW`].
+fn supervisor_launch() -> Option<HubLaunch> {
+    slot_get(&SUPERVISOR_LAUNCH)
+}
+
+/// Publishes the hub and launch inputs the view, the phone and control.sock act on.
+fn publish_hub(launch: &HubLaunch, running: &Arc<tokio::sync::Mutex<Option<Generation>>>) {
+    slot_set(&SUPERVISOR_VIEW, Some((Arc::clone(&launch.hub), Arc::clone(running))));
+    slot_set(&SUPERVISOR_LAUNCH, Some(launch.clone()));
+}
 
 /// Supervisor input lines the snapshot carries, newest first.
 const SUPERVISOR_ACTIONS_MAX: usize = 50;
@@ -790,28 +1028,53 @@ pub async fn supervisor_snapshot(state: &RemoteGatewayState) -> Value {
         })
         .take(SUPERVISOR_ACTIONS_MAX)
         .collect();
-    let Some((hub, running)) = SUPERVISOR_VIEW.get() else {
+    let Some((hub, running)) = supervisor_view() else {
         #[cfg(test)]
         let test_hub = state.supervisor_test_hub.read().clone();
         #[cfg(test)]
         if let Some((pool, _)) = test_hub {
-            return json!({ "hub": { "available": true, "running": true, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": unified_snapshot(&pool).await, "setup": setup::snapshot_setup(&pool).await });
+            let lease = live_lease(Some(&pool)).await;
+            return json!({ "hub": snapshot_hub(json!({ "available": true, "running": true, "error": null }), &lease), "lanes": [], "watched": [], "actions": actions, "supervisor": unified_snapshot(&pool).await, "setup": snapshot_setup_unless_standby(&pool).await });
         }
-        return json!({ "hub": { "available": false, "running": false, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": null, "setup": null });
+        let lease = live_lease(None).await;
+        return json!({ "hub": snapshot_hub(json!({ "available": false, "running": false, "error": null }), &lease), "lanes": [], "watched": [], "actions": actions, "supervisor": null, "setup": null });
     };
     // A daemon that handed the hub to its successor no longer drives anything.
     let running = running.lock().await.is_some() && !HUB_TASKS.is_retired();
     let lanes = ferryx_hub::lanes::supervised::supervised_lanes(&hub.pool).await;
     let watched = ferryx_hub::lanes::supervised::watched_local_sessions(&hub.pool).await;
     let error = lanes.as_ref().err().or(watched.as_ref().err()).map(ToString::to_string);
+    let lease = live_lease(Some(&hub.pool)).await;
     json!({
-        "hub": { "available": true, "running": running, "error": error },
+        "hub": snapshot_hub(json!({ "available": true, "running": running, "error": error }), &lease),
         "lanes": lanes.unwrap_or_default(),
         "watched": watched.unwrap_or_default(),
         "actions": actions,
         "supervisor": unified_snapshot(&hub.pool).await,
-        "setup": setup::snapshot_setup(&hub.pool).await,
+        "setup": snapshot_setup_unless_standby(&hub.pool).await,
     })
+}
+
+/// The snapshot's `setup` field. Null on standby: setup runs on the lease holder only.
+async fn snapshot_setup_unless_standby(pool: &ferryx_hub::goals::SqlitePool) -> Value {
+    if standby_refusal().is_some() {
+        return Value::Null;
+    }
+    setup::snapshot_setup(pool).await
+}
+
+/// The snapshot's `hub` object: `base` plus the supervisor lease fields (camelCase), among
+/// them `holderPaired`, and next to it `holderPairing` (`"paired"`, `"not paired to holder"`
+/// or `"no holder"`).
+fn snapshot_hub(mut base: Value, lease: &ferryx_hub::control::LiveLease) -> Value {
+    if let (Some(hub), Ok(Value::Object(fields))) = (base.as_object_mut(), serde_json::to_value(lease)) {
+        hub.extend(fields);
+        hub.insert("holderPairing".into(), json!(holder_pairing_state()));
+        if let Some(reason) = holder_pairing_reason() {
+            hub.insert("holderPairingReason".into(), json!(reason));
+        }
+    }
+    base
 }
 
 /// The hub also relays a person's own words into panes over the owner socket: a Slack approval
@@ -858,10 +1121,54 @@ async fn record_human_keystrokes(
     Ok(ferryx_hub::goals::turns::record_keystroke_turn(pool, session_id).await?.is_some())
 }
 
+/// The live lane whose pane is `session_id` on the paired host `host_id`. A pane id is only
+/// unique on its own machine, so a standby's forwarded note matches the lane the holder bound
+/// under that host, never a lane of the holder's own panes.
+async fn lane_of_host_session(
+    pool: &ferryx_hub::goals::SqlitePool,
+    host_id: &str,
+    session_id: &str,
+) -> Result<Option<String>, HubError> {
+    for lane in ferryx_hub::lanes::supervised::supervised_lanes(pool).await? {
+        if lane.session_id.as_deref() != Some(session_id) {
+            continue;
+        }
+        if ferryx_hub::lanes::state::lane_host(pool, &lane.key).await?.as_deref() == Some(host_id) {
+            return Ok(Some(lane.key));
+        }
+    }
+    Ok(None)
+}
+
+/// [`record_human_keystrokes`] for a standby's pane: the burst and the lane are those of
+/// `session_id` on the paired host `host_id`.
+async fn record_forwarded_keystrokes(
+    pool: &ferryx_hub::goals::SqlitePool,
+    bursts: &KeystrokeBursts,
+    host_id: &str,
+    session_id: &str,
+    now_ms: u64,
+) -> Result<bool, HubError> {
+    if !bursts.admit(&format!("{host_id} {session_id}"), now_ms) {
+        return Ok(false);
+    }
+    let Some(lane_key) = lane_of_host_session(pool, host_id, session_id).await? else {
+        return Ok(false);
+    };
+    ferryx_hub::goals::turns::record_turn(pool, &lane_key, ferryx_hub::goals::TurnOrigin::HumanCorrection, None, None)
+        .await?;
+    Ok(true)
+}
+
 /// A person typed raw keys into `session_id`. When the pane belongs to a lane, the hub records
 /// one human_correction turn per typing burst. The keys themselves are never stored.
 pub(crate) fn note_lane_keystrokes(session_id: &str, now_ms: u64) {
-    let Some((hub, _)) = SUPERVISOR_VIEW.get() else { return };
+    if drop_observation_on_standby("keystrokes", || {
+        json!({ "kind": "keystrokes", "sessionId": session_id, "nowMs": now_ms })
+    }) {
+        return;
+    }
+    let Some((hub, _)) = supervisor_view() else { return };
     let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
     let pool = hub.pool.clone();
     let session_id = session_id.to_owned();
@@ -872,15 +1179,13 @@ pub(crate) fn note_lane_keystrokes(session_id: &str, now_ms: u64) {
     });
 }
 
-/// The turn an accepted agent-control send drove on a lane's pane: a person's relayed words
-/// (chat, lane-thread reply, Slack approval) as human_correction, a `hub-goal-*` supervisor
-/// send as supervisor_proposal. Other request ids record nothing.
-async fn record_control_turn(pool: &ferryx_hub::goals::SqlitePool, op: &AgentControlOp) -> Result<bool, HubError> {
+/// The pane, request id and raw words of a send or answer; `None` for any other op.
+fn control_turn(op: &AgentControlOp) -> Option<(&str, Option<&str>, String)> {
     let (session_id, request_id) = match op {
         AgentControlOp::Send { session_id, request_id, .. } | AgentControlOp::Answer { session_id, request_id, .. } => {
-            (session_id, request_id.as_deref())
+            (session_id.as_str(), request_id.as_deref())
         }
-        _ => return Ok(false),
+        _ => return None,
     };
     // The raw words: `turns::excerpt` redacts secrets before it caps the length. The audit
     // line is already cut, so a secret straddling its cut would slip past redaction.
@@ -892,7 +1197,37 @@ async fn record_control_turn(pool: &ferryx_hub::goals::SqlitePool, op: &AgentCon
         },
         _ => String::new(),
     };
+    Some((session_id, request_id, text))
+}
+
+/// The turn an accepted agent-control send drove on a lane's pane: a person's relayed words
+/// (chat, lane-thread reply, Slack approval) as human_correction, a `hub-goal-*` supervisor
+/// send as supervisor_proposal. Other request ids record nothing.
+async fn record_control_turn(pool: &ferryx_hub::goals::SqlitePool, op: &AgentControlOp) -> Result<bool, HubError> {
+    let Some((session_id, request_id, text)) = control_turn(op) else {
+        return Ok(false);
+    };
     Ok(ferryx_hub::goals::turns::record_send_turn(pool, session_id, request_id, &text).await?.is_some())
+}
+
+/// [`record_control_turn`] for a standby's pane: the lane of `session_id` on the paired host
+/// `host_id`.
+async fn record_forwarded_control_turn(
+    pool: &ferryx_hub::goals::SqlitePool,
+    host_id: &str,
+    op: &AgentControlOp,
+) -> Result<bool, HubError> {
+    let Some((session_id, request_id, text)) = control_turn(op) else {
+        return Ok(false);
+    };
+    let Some(origin) = ferryx_hub::goals::turns::origin_for_request_id(request_id) else {
+        return Ok(false);
+    };
+    let Some(lane_key) = lane_of_host_session(pool, host_id, session_id).await? else {
+        return Ok(false);
+    };
+    ferryx_hub::goals::turns::record_turn(pool, &lane_key, origin, Some(&text), None).await?;
+    Ok(true)
 }
 
 /// Called after an agent-control mutation succeeded. Records the lane turn it drove, if any.
@@ -906,7 +1241,12 @@ pub(crate) fn note_agent_control_input(op: &AgentControlOp) {
     if ferryx_hub::goals::turns::records_own_turn(request_id.as_deref()) {
         return;
     }
-    let Some((hub, _)) = SUPERVISOR_VIEW.get() else { return };
+    if drop_observation_on_standby("agent control input", || {
+        json!({ "kind": "agentControlInput", "op": op })
+    }) {
+        return;
+    }
+    let Some((hub, _)) = supervisor_view() else { return };
     let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
     let pool = hub.pool.clone();
     let op = op.clone();
@@ -922,7 +1262,24 @@ pub(crate) fn note_agent_control_input(op: &AgentControlOp) {
 /// event path ([`ferryx_hub::lanes::dispatch::report_from_worker`]). The reply is one JSON
 /// value: `{ok:true, ...}` or `{ok:false, code, message}`.
 pub async fn supervisor_worker_report((session_id, event_id, body): (String, String, String)) -> Value {
-    let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
+    // On standby the worker's report goes to the holder, which supervises its goal.
+    if let Some(holder) = current_holder() {
+        let observation = json!({ "kind": "workerReport", "sessionId": session_id, "eventId": event_id, "body": body });
+        let hosts = holder_link::DaemonPairedHosts(DaemonClient::new());
+        return match holder_link::LINK
+            .forward(&holder, &hosts, &holder_link::AccountService, holder_observe(observation))
+            .await
+        {
+            Ok(answer) => answer,
+            Err(refusal) => {
+                note_dropped("worker report", &holder);
+                let (holder_machine_id, holder_label) = refusal.holder.clone().unwrap_or_default();
+                json!({"ok": false, "code": refusal.code, "message": refusal.message,
+                    "holderMachineId": holder_machine_id, "holderLabel": holder_label})
+            }
+        };
+    }
+    let Some((hub, _)) = supervisor_view() else {
         return json!({"ok": false, "code": "SUPERVISOR_UNAVAILABLE", "message": "the supervisor hub is not open in this daemon"});
     };
     match ferryx_hub::lanes::dispatch::report_from_worker(
@@ -945,11 +1302,13 @@ pub async fn supervisor_worker_report((session_id, event_id, body): (String, Str
 
 /// True once this daemon opened the hub, so the Supervisor view has lanes to show.
 pub fn supervisor_available() -> bool {
-    SUPERVISOR_VIEW.get().is_some()
+    supervisor_view().is_some()
 }
 
-/// What a start needs besides the running slot: the hub, its config and its bridge.
-static SUPERVISOR_LAUNCH: std::sync::OnceLock<HubLaunch> = std::sync::OnceLock::new();
+hub_slot! {
+    /// What a start needs besides the running slot: the hub, its config and its bridge.
+    SUPERVISOR_LAUNCH: HubLaunch
+}
 
 /// Why the hub was not started.
 #[derive(Debug, thiserror::Error)]
@@ -960,6 +1319,12 @@ pub enum HubStartError {
     HandedOver,
     #[error("hub start was not persisted: {0}")]
     Storage(String),
+    /// Another machine holds the supervisor lease; this daemon stays on standby.
+    #[error("another machine runs the supervisor")]
+    Standby {
+        holder_machine_id: Option<String>,
+        holder_label: Option<String>,
+    },
 }
 
 /// Clears the persisted stop and runs a generation unless one already runs. Returns whether
@@ -968,28 +1333,1646 @@ async fn start_generation(
     running: &tokio::sync::Mutex<Option<Generation>>,
     launch: &HubLaunch,
 ) -> Result<bool, HubStartError> {
+    let lease = lease_gate();
+    gated_start(running, &launch.hub.pool, lease.as_deref(), || open_generation(launch)).await
+}
+
+/// The supervisor lease as the hub start gate sees it. `None` (no lease client) is today's
+/// unleased behaviour: every start runs.
+#[async_trait]
+trait LeaseGate: Send + Sync {
+    /// Holder or Provisional, re-checked against both clocks now.
+    fn allows_hub(&self) -> bool;
+    fn current_role(&self) -> crate::daemon::supervisor_lease_role::Role;
+    /// One non-forced acquire; the role once it settled, `None` when the client ended.
+    async fn try_acquire(&self) -> Option<crate::daemon::supervisor_lease_role::Role>;
+    /// Holder-now check for side effects (chat sends, goal settles); Provisional counts.
+    fn may_act_now(&self) -> bool {
+        self.allows_hub()
+    }
+    /// What is left of the previous holder's lease (+5s) after a takeover; Slack waits it out.
+    fn takeover_wait(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
+    /// Seconds left on the held grant; 0 without an expiring grant.
+    fn lease_expires_in(&self) -> u64 {
+        0
+    }
+    /// How long a standby has known no holder; `None` while it knows one or runs the hub.
+    fn no_holder_for(&self) -> Option<std::time::Duration> {
+        None
+    }
+    /// The relay's newest list of account machines that speak the lease protocol.
+    fn lease_peers(&self) -> Option<crate::daemon::supervisor_lease_client::LeasePeers> {
+        None
+    }
+    /// The grant held right now, carried into a client rebound to a replaced relay.
+    fn live_grant(&self) -> Option<crate::daemon::supervisor_lease_client::LiveGrant> {
+        None
+    }
+    /// Why no relay can arbitrate the lease (code, message), reported as a status problem;
+    /// `None` with a lease client or while the relay client is only being restored.
+    fn unavailable(&self) -> Option<(&'static str, &'static str)> {
+        None
+    }
+}
+
+/// Status code: an enrolled machine whose remote gateway mode is not Relay has no relay to
+/// arbitrate its lease (status problem "lease unavailable: relay mode off").
+const LEASE_RELAY_MODE_OFF: &str = "RELAY_MODE_OFF";
+
+/// The lease of a machine that needs one (enrolled, or capability latched) while no relay
+/// client exists: Standby, or Provisional once [`BOOT_UNREACHABLE_AFTER`] passed and the
+/// persisted provisional rule allows it. Never a holder with fence 0. Replaced by the real
+/// lease client when a relay is published (see `follow_relay`).
+///
+/// [`BOOT_UNREACHABLE_AFTER`]: crate::daemon::supervisor_lease_client::BOOT_UNREACHABLE_AFTER
+struct PendingLease {
+    /// The role the provisional rule gives a boot that cannot reach the relay.
+    unreachable_role: crate::daemon::supervisor_lease_role::Role,
+    provisional: std::sync::atomic::AtomicBool,
+    /// Whether the remote gateway mode is not Relay (read at each status).
+    relay_mode_off: Box<dyn Fn() -> bool + Send + Sync>,
+}
+
+impl PendingLease {
+    fn new(
+        persisted: &crate::daemon::supervisor_lease_role::PersistedLease,
+        relay_mode_off: Box<dyn Fn() -> bool + Send + Sync>,
+    ) -> Self {
+        Self {
+            unreachable_role: crate::daemon::supervisor_lease_role::boot_unreachable_role(persisted),
+            provisional: std::sync::atomic::AtomicBool::new(false),
+            relay_mode_off,
+        }
+    }
+
+    /// The boot wait passed without a relay client: applies the provisional rule. True when
+    /// this machine may now run the hub provisionally.
+    fn relay_unreachable(&self) -> bool {
+        let provisional = self.unreachable_role == crate::daemon::supervisor_lease_role::Role::Provisional;
+        self.provisional.store(provisional, std::sync::atomic::Ordering::SeqCst);
+        provisional
+    }
+}
+
+#[async_trait]
+impl LeaseGate for PendingLease {
+    fn allows_hub(&self) -> bool {
+        self.provisional.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn current_role(&self) -> crate::daemon::supervisor_lease_role::Role {
+        if self.allows_hub() {
+            crate::daemon::supervisor_lease_role::Role::Provisional
+        } else {
+            crate::daemon::supervisor_lease_role::Role::standby_unknown()
+        }
+    }
+
+    /// No relay to ask: the role stays what the provisional rule gave.
+    async fn try_acquire(&self) -> Option<crate::daemon::supervisor_lease_role::Role> {
+        Some(self.current_role())
+    }
+
+    fn unavailable(&self) -> Option<(&'static str, &'static str)> {
+        (self.relay_mode_off)().then_some((LEASE_RELAY_MODE_OFF, "relay mode off"))
+    }
+}
+
+/// What boot reads to decide whether this machine needs the lease: whether it is enrolled in
+/// an account, and its persisted lease state.
+struct BootLeaseFacts {
+    enrolled: bool,
+    persisted: Option<crate::daemon::supervisor_lease_role::PersistedLease>,
+}
+
+/// Reads [`BootLeaseFacts`] from this machine's data directory.
+async fn boot_lease_facts() -> BootLeaseFacts {
+    use crate::daemon::supervisor_lease_client::{lease_file_path, load_persisted};
+    let enrolled = crate::ipc::run_blocking(|| Ok(crate::account::enroll_client::load_enrollment_record().is_some()))
+        .await
+        .unwrap_or(false);
+    let persisted = load_persisted(lease_file_path()).await;
+    BootLeaseFacts { enrolled, persisted }
+}
+
+/// The pending lease a boot without a relay client holds, `None` for an account-less install
+/// that never saw a lease-capable relay (it runs unleased with fence 0, as before).
+fn boot_pending_lease(facts: BootLeaseFacts, remote: Arc<RemoteGatewayState>) -> Option<Arc<PendingLease>> {
+    let BootLeaseFacts { enrolled, persisted } = facts;
+    if !crate::daemon::supervisor_lease_role::boot_requires_lease(enrolled, persisted.as_ref()) {
+        return None;
+    }
+    let relay_mode_off =
+        Box::new(move || remote.config.read().mode != crate::remote::state::RemoteNetworkMode::Relay);
+    Some(Arc::new(PendingLease::new(&persisted.unwrap_or_default(), relay_mode_off)))
+}
+
+/// Waits [`BOOT_UNREACHABLE_AFTER`] for a relay client; without one the pending lease applies
+/// the provisional rule and, when it allows, starts the hub through `wanted`. `follow_relay`
+/// aborts this wait when it binds a relay.
+///
+/// [`BOOT_UNREACHABLE_AFTER`]: crate::daemon::supervisor_lease_client::BOOT_UNREACHABLE_AFTER
+async fn provisional_after_boot_wait(pending: Arc<PendingLease>, wanted: tokio::sync::watch::Sender<bool>) {
+    tokio::time::sleep(crate::daemon::supervisor_lease_client::BOOT_UNREACHABLE_AFTER).await;
+    if pending.relay_unreachable() {
+        tracing::info!("no relay client at boot: hub runs provisionally (last holder, single machine)");
+        wanted.send_replace(true);
+    } else {
+        tracing::info!("no relay client at boot: hub stays on standby until the relay arbitrates the lease");
+    }
+}
+
+#[async_trait]
+impl LeaseGate for crate::daemon::supervisor_lease_client::SupervisorLeaseHandle {
+    fn allows_hub(&self) -> bool {
+        self.state().may_act_now()
+    }
+
+    fn current_role(&self) -> crate::daemon::supervisor_lease_role::Role {
+        self.state().role()
+    }
+
+    async fn try_acquire(&self) -> Option<crate::daemon::supervisor_lease_role::Role> {
+        self.acquire(false).await
+    }
+
+    fn takeover_wait(&self) -> std::time::Duration {
+        self.state().takeover_wait()
+    }
+
+    fn lease_expires_in(&self) -> u64 {
+        self.state().lease_expires_in()
+    }
+
+    fn no_holder_for(&self) -> Option<std::time::Duration> {
+        self.state().no_holder_for()
+    }
+
+    fn lease_peers(&self) -> Option<crate::daemon::supervisor_lease_client::LeasePeers> {
+        self.state().lease_peers()
+    }
+
+    fn live_grant(&self) -> Option<crate::daemon::supervisor_lease_client::LiveGrant> {
+        self.state().live_grant()
+    }
+}
+
+hub_slot! {
+    /// The lease client this daemon runs, installed by [`start`] and rebound by [`follow_relay`].
+    LEASE_GATE: Arc<dyn LeaseGate>
+}
+
+fn lease_gate() -> Option<Arc<dyn LeaseGate>> {
+    slot_get(&LEASE_GATE)
+}
+
+fn set_lease_gate(gate: Option<Arc<dyn LeaseGate>>) {
+    slot_set(&LEASE_GATE, gate);
+}
+
+hub_slot! {
+    /// The running generation's dispatcher fence gate, for the hosts it could not reach.
+    FENCE_GATE: Arc<ferryx_hub::supervisor::fence_gate::FenceGate>
+}
+
+/// The checkpoint fields of the lease status: (checkpoint id, its age in seconds, why a
+/// standby would not take over), from the checkpoint state's promotion `status`.
+fn checkpoint_status_fields(
+    status: crate::supervisor_checkpoint::PromotionStatus,
+) -> (Option<String>, Option<u64>, Option<ferryx_hub::control::PromotionBlock>) {
+    let block = status
+        .block_code
+        .map(|code| ferryx_hub::control::PromotionBlock { code, message: status.block_reason.unwrap_or_default() });
+    (status.checkpoint_id, status.checkpoint_age_secs, block)
+}
+
+/// The status `adoptable` field from this machine's adoptable archived goals
+/// ([`adoptable_goals`]): absent when there are none.
+fn status_adoptable(
+    goals: Vec<ferryx_hub::adoption::AdoptableGoal>,
+) -> Option<Vec<ferryx_hub::control::AdoptableGoal>> {
+    if goals.is_empty() {
+        return None;
+    }
+    Some(
+        goals
+            .into_iter()
+            .map(|goal| ferryx_hub::control::AdoptableGoal {
+                goal_id: goal.goal_id,
+                title: goal.title,
+                supervisor_id: goal.supervisor_id,
+                from_machine: goal.from_machine,
+            })
+            .collect(),
+    )
+}
+
+/// The supervisor lease as `status` and the snapshot report it. `pool` is the open hub
+/// database (for checkpoint hosts it could not map); `None` before the hub opened.
+async fn live_lease(pool: Option<&ferryx_hub::goals::SqlitePool>) -> ferryx_hub::control::LiveLease {
+    let unmapped_hosts = match pool {
+        Some(pool) => ferryx_hub::control::unmapped_hosts(pool).await,
+        None => Vec::new(),
+    };
+    let mut lease = lease_status(lease_gate().as_deref());
+    lease.unmapped_hosts = unmapped_hosts;
+    lease.adoptable = status_adoptable(adoptable_goals().await);
+    let peers = lease_gate().and_then(|gate| gate.lease_peers());
+    if peers.is_some() {
+        let hosts = crate::supervisor_move::paired_host_views().await;
+        lease.machines_without_lease = machines_without_lease(peers.as_ref(), &hosts);
+    }
+    // Only the holder's own term pushes fences; a standby's last gate is a past term.
+    if lease.role == ferryx_hub::control::LeaseRole::Holder {
+        lease.unreachable_hosts = slot_get(&FENCE_GATE)
+            .map(|gate| gate.unreachable_hosts())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(host, reason)| ferryx_hub::control::UnreachableHost { host, reason })
+            .collect();
+    }
+    lease
+}
+
+/// Account machines the relay has not seen speak `supervisorLeaseV1` (they run a daemon that
+/// predates the lease and would run a supervisor of their own). Only when the relay counts
+/// more account machines than lease-capable ones: the paired machine hosts it did not list are
+/// named by label, and any shortfall the paired hosts cannot name is counted. Empty without a
+/// relay answer carrying the list.
+fn machines_without_lease(
+    peers: Option<&crate::daemon::supervisor_lease_client::LeasePeers>,
+    hosts: &[crate::paired_host::inventory::HostView],
+) -> Vec<String> {
+    use crate::paired_host::inventory::GrantScope;
+    let Some(peers) = peers else {
+        return Vec::new();
+    };
+    let total = peers.account_machine_count.map_or(0, |count| count as usize);
+    let missing = total.saturating_sub(peers.capable.len());
+    if missing == 0 {
+        return Vec::new();
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut names: Vec<String> = hosts
+        .iter()
+        .filter(|host| host.grant_scope == GrantScope::Machine)
+        .filter(|host| !peers.capable.contains(&host.machine_id))
+        .filter(|host| seen.insert(host.machine_id.clone()))
+        .map(|host| if host.display_label.is_empty() { host.machine_id.clone() } else { host.display_label.clone() })
+        .collect();
+    let unnamed = missing.saturating_sub(names.len());
+    if unnamed > 0 {
+        names.push(format!("{unnamed} unpaired machine{}", if unnamed == 1 { "" } else { "s" }));
+    }
+    names
+}
+
+/// The lease fields `gate` answers (role, holder, fence, expiry), plus the pairing, drop
+/// counter and checkpoint fields. No lease client: a holder with fence 0 (unleased hub).
+fn lease_status(gate: Option<&dyn LeaseGate>) -> ferryx_hub::control::LiveLease {
+    lease_status_with(gate, crate::supervisor_checkpoint::promotion_status(unix_now()))
+}
+
+/// [`lease_status`] with the checkpoint fields taken from `checkpoints`.
+fn lease_status_with(
+    gate: Option<&dyn LeaseGate>,
+    checkpoints: crate::supervisor_checkpoint::PromotionStatus,
+) -> ferryx_hub::control::LiveLease {
+    use crate::daemon::supervisor_lease_role::Role;
+    use ferryx_hub::control::{LeaseRole, LiveLease};
+    let (checkpoint_id, checkpoint_age, promotion_block_reason) = checkpoint_status_fields(checkpoints);
+    let mut lease = LiveLease {
+        role: LeaseRole::Holder,
+        holder_paired: holder_paired(),
+        checkpoint_id,
+        checkpoint_age,
+        promotion_block_reason,
+        observe_dropped: observe_dropped(),
+        ..LiveLease::default()
+    };
+    let Some(gate) = gate else {
+        return lease;
+    };
+    lease.lease_unavailable = gate
+        .unavailable()
+        .map(|(code, message)| ferryx_hub::control::PromotionBlock { code: code.to_owned(), message: message.to_owned() });
+    match gate.current_role() {
+        Role::Holder { fence } => {
+            lease.fence = fence;
+            lease.lease_expires_in = gate.lease_expires_in();
+        }
+        Role::Provisional => {}
+        Role::Standby { holder_machine_id, holder_label, fence } => {
+            lease.role = LeaseRole::Standby;
+            lease.holder_machine_id = holder_machine_id;
+            lease.holder_label = holder_label;
+            lease.fence = fence.unwrap_or(0);
+            let ttl = std::time::Duration::from_secs(crate::account::supervisor_lease::TTL_SECS);
+            lease.no_holder_past_ttl = gate.no_holder_for().is_some_and(|unknown| unknown > ttl);
+        }
+        Role::Unleased { .. } => lease.role = LeaseRole::Unleased,
+    }
+    lease
+}
+
+/// The lease client's stop signal (the `wanted` watch [`follow_lease`] follows), installed by
+/// [`spawn_lease_client`].
+static LEASE_STOP: std::sync::RwLock<Option<Arc<tokio::sync::watch::Sender<bool>>>> =
+    std::sync::RwLock::new(None);
+
+/// Installs (or clears) the stop signal [`stand_down_now`] sends on.
+pub(crate) fn install_lease_stop(stop: Option<Arc<tokio::sync::watch::Sender<bool>>>) {
+    *LEASE_STOP.write().unwrap_or_else(|e| e.into_inner()) = stop;
+}
+
+/// Stands the hub down through the lease's own path: the same `false` the lease client's
+/// stop sends, so [`follow_lease`] aborts the generation. A no-op without a lease client.
+pub(crate) fn stand_down_now() {
+    let stop = LEASE_STOP.read().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(stop) = stop {
+        tracing::info!("supervisor fence refused; standing the hub down");
+        stop.send_replace(false);
+    }
+}
+
+/// The holder's Slack wait after a takeover, zero without a lease client.
+fn takeover_wait() -> std::time::Duration {
+    lease_gate().map_or(std::time::Duration::ZERO, |lease| lease.takeover_wait())
+}
+
+/// Spawns `future` once the previous holder's lease deadline (+5s) has passed on this
+/// machine's monotonic clock, so the Slack socket and backfill and the Discord gateway of a new
+/// holder never overlap the old holder's. The wait is read from the lease now, at spawn.
+#[cfg(any(feature = "hub-slack", feature = "hub-discord", test))]
+fn spawn_after_takeover<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio::spawn(ferryx_hub::holder::after_takeover(takeover_wait(), future))
+}
+
+/// The Discord gateway's spawn: like Slack's, a new holder connects only after the previous
+/// holder's lease deadline (+5s), so two gateways of one bot never run at once.
+#[cfg(any(feature = "hub-discord", test))]
+fn spawn_discord_gateway<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    spawn_after_takeover(future)
+}
+
+/// Installs the lease as the hub crate's holder predicate (chat sends, goal settles), or
+/// removes it for an unleased hub.
+fn install_holder_gate(lease: Option<Arc<dyn LeaseGate>>) {
+    // Tests: the predicate answers only on the installing thread (as `hub_slot!` scopes the
+    // other hub slots), so a standby installed by one test never gates another's sends.
+    #[cfg(test)]
+    let lease = lease.map(|lease| -> Arc<dyn LeaseGate> {
+        Arc::new(ThreadScopedLease { lease, thread: std::thread::current().id() })
+    });
+    let gate = lease.map(|lease| -> ferryx_hub::holder::HolderGate { Arc::new(move || lease.may_act_now()) });
+    ferryx_hub::holder::install(gate);
+}
+
+/// A lease that answers only on `thread`; every other thread sees a holder.
+#[cfg(test)]
+struct ThreadScopedLease {
+    lease: Arc<dyn LeaseGate>,
+    thread: std::thread::ThreadId,
+}
+
+#[cfg(test)]
+#[async_trait]
+impl LeaseGate for ThreadScopedLease {
+    fn allows_hub(&self) -> bool {
+        std::thread::current().id() != self.thread || self.lease.allows_hub()
+    }
+
+    fn current_role(&self) -> crate::daemon::supervisor_lease_role::Role {
+        self.lease.current_role()
+    }
+
+    async fn try_acquire(&self) -> Option<crate::daemon::supervisor_lease_role::Role> {
+        self.lease.try_acquire().await
+    }
+
+    fn may_act_now(&self) -> bool {
+        std::thread::current().id() != self.thread || self.lease.may_act_now()
+    }
+}
+
+/// The holder a standby names in a refusal; `None` when this daemon may serve (holder,
+/// provisional, or no lease client at all).
+fn standby_holder() -> Option<(Option<String>, Option<String>)> {
+    let lease = lease_gate()?;
+    if lease.may_act_now() {
+        return None;
+    }
+    match standby_error(&lease.current_role()) {
+        HubStartError::Standby { holder_machine_id, holder_label } => Some((holder_machine_id, holder_label)),
+        _ => Some((None, None)),
+    }
+}
+
+/// SUPERVISOR_STANDBY (409) naming the holder, when this daemon is on standby.
+fn standby_refusal() -> Option<ferryx_hub::supervisor::request::RequestFailure> {
+    standby_holder().map(|(id, label)| ferryx_hub::holder::standby_failure(id.as_deref(), label.as_deref()))
+}
+
+/// The control.sock answer to an op only the lease holder may run, when this daemon is on
+/// standby: `{"status":"standby","op":..,"code":"SUPERVISOR_STANDBY","holder":..}`. Report
+/// intake, cutover/rollback and cron rerun approval are holder-only; reads (status, intake,
+/// report_status) and start/stop are not refused here.
+#[cfg(any(unix, test))]
+fn standby_control_refusal(op: &ferryx_hub::control::ControlOp) -> Option<Value> {
+    use ferryx_hub::control::ControlOp;
+    let name = match op {
+        ControlOp::Report(_) => "report",
+        ControlOp::ReportMutate(_) => "report_mutate",
+        ControlOp::ReportAdopt(_) => "report_adopt",
+        ControlOp::Cutover => "cutover",
+        ControlOp::Rollback => "rollback",
+        ControlOp::ApproveRerun(_) => "approve_rerun",
+        _ => return None,
+    };
+    let refusal = standby_refusal()?;
+    let holder = refusal.holder.clone().and_then(|(id, label)| label.or(id));
+    Some(json!({
+        "status": "standby",
+        "op": name,
+        "code": refusal.code,
+        "error": refusal.message,
+        "holder": holder,
+    }))
+}
+
+/// The control.sock answer to `report`, `report_mutate` or `report_adopt`; a standby refuses
+/// them before anything is stored. `None` for any other op.
+#[cfg(any(unix, test))]
+async fn report_control_reply(launch: &HubLaunch, op: &ferryx_hub::control::ControlOp) -> Option<Value> {
+    use ferryx_hub::control::ControlOp;
+    if let Some(refusal) = standby_control_refusal(op) {
+        return Some(refusal);
+    }
+    let pool = &launch.hub.pool;
+    Some(match op {
+        ControlOp::Report(request) => {
+            ferryx_hub::control::report_reply(pool, &launch.hub.owner_session().storage_key(), request).await
+        }
+        ControlOp::ReportMutate(request) => ferryx_hub::report_mutation::reply(pool, request).await,
+        ControlOp::ReportAdopt(request) => ferryx_hub::report_adoption::reply(pool, request).await,
+        _ => return None,
+    })
+}
+
+/// Puts this thread's daemon on standby behind `holder` (machine id, label), or with `None`
+/// back to no lease client (route tests).
+#[cfg(test)]
+pub(crate) fn stand_by_for_test(holder: Option<(&str, &str)>) {
+    use crate::daemon::supervisor_lease_role::Role;
+    struct Standby(String, String);
+    #[async_trait]
+    impl LeaseGate for Standby {
+        fn allows_hub(&self) -> bool {
+            false
+        }
+        fn current_role(&self) -> Role {
+            Role::Standby { holder_machine_id: Some(self.0.clone()), holder_label: Some(self.1.clone()), fence: Some(1) }
+        }
+        async fn try_acquire(&self) -> Option<Role> {
+            Some(self.current_role())
+        }
+    }
+    set_lease_gate(holder.map(|(id, label)| Arc::new(Standby(id.to_owned(), label.to_owned())) as Arc<dyn LeaseGate>));
+}
+
+/// Hook observations a standby could not apply (they belong to the holder's hub).
+static OBSERVE_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many local pane observations this standby dropped instead of writing its own hub DB.
+pub fn observe_dropped() -> u64 {
+    OBSERVE_DROPPED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// True when this daemon is on standby: the observation goes to the paired holder (which
+/// supervises this machine's panes) instead of a hub database nobody reads; an unknown or
+/// unpaired holder drops it with a warning and the `observe_dropped` counter.
+fn drop_observation_on_standby(what: &str, observation: impl FnOnce() -> Value) -> bool {
+    let Some((holder_machine_id, holder_label)) = standby_holder() else {
+        return false;
+    };
+    let holder = holder_link::Holder { machine_id: holder_machine_id, label: holder_label };
+    if holder.machine_id.is_none() && holder.label.is_none() {
+        note_dropped(what, &holder);
+        return true;
+    }
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        note_dropped(what, &holder);
+        return true;
+    };
+    let observation = observation();
+    let what = what.to_owned();
+    runtime.spawn(async move {
+        let hosts = holder_link::DaemonPairedHosts(DaemonClient::new());
+        let sent = holder_link::LINK
+            .forward(&holder, &hosts, &holder_link::AccountService, holder_observe(observation))
+            .await;
+        if let Err(failure) = sent {
+            tracing::debug!(code = %failure.code, "observation not forwarded");
+            note_dropped(&what, &holder);
+        }
+    });
+    true
+}
+
+/// An observation this standby could not hand to the holder: counted and logged.
+fn note_dropped(what: &str, holder: &holder_link::Holder) {
+    OBSERVE_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    tracing::warn!(what, holder = ?holder.label.as_ref().or(holder.machine_id.as_ref()), "standby dropped a supervisor observation");
+}
+
+fn holder_observe(observation: Value) -> crate::paired_host::client::Operation {
+    crate::paired_host::client::Operation::SupervisorObserve { observation }
+}
+
+/// Whether this machine holds a usable agent-control grant on the supervisor holder (the
+/// snapshot's `hub.holderPaired`, read by status).
+pub fn holder_paired() -> bool {
+    holder_link::LINK.holder_paired()
+}
+
+/// `"paired"`, `"not paired to holder"` or `"no holder"`.
+pub fn holder_pairing_state() -> &'static str {
+    holder_link::LINK.pairing_state()
+}
+
+/// Why this machine is not paired to the holder when the owner can fix it: no account session.
+pub fn holder_pairing_reason() -> Option<&'static str> {
+    holder_link::LINK.pairing_reason()
+}
+
+/// The holder, when this daemon is on standby.
+fn current_holder() -> Option<holder_link::Holder> {
+    standby_holder().map(|(machine_id, label)| holder_link::Holder { machine_id, label })
+}
+
+/// The holder applies a standby's observation of its own panes as if local, with `host_id`
+/// the sender machine's paired host key on this holder (the key its remote panes are bound
+/// under): a keystroke burst, a relayed input, or a worker report. `machine_id` is the sending
+/// device's machine; a machine this holder has not paired supervises nothing here.
+pub async fn apply_observation(
+    machine_id: Option<&str>,
+    hosts: &[crate::paired_host::inventory::HostView],
+    observation: Value,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    use ferryx_hub::supervisor::request::RequestFailure;
+    if let Some(refusal) = standby_refusal() {
+        return Err(refusal);
+    }
+    let Some((hub, _)) = supervisor_view() else {
+        return Err(RequestFailure::new("SUPERVISOR_UNAVAILABLE", "the supervisor hub is not open in this daemon"));
+    };
+    let Some(machine_id) = machine_id else {
+        return Err(RequestFailure::new("FORBIDDEN", "the observing device names no machine"));
+    };
+    let Some(host_id) = observer_host(hosts, machine_id) else {
+        return Err(RequestFailure::new(
+            "NOT_FOUND",
+            format!("machine {machine_id} is not a paired host of the supervisor holder"),
+        ));
+    };
+    apply_observation_to(&hub.pool, &host_id, observation).await
+}
+
+/// The paired host key this holder binds `machine_id`'s panes under
+/// (`<origin>/host/<machine>`), when it paired that machine.
+fn observer_host(hosts: &[crate::paired_host::inventory::HostView], machine_id: &str) -> Option<String> {
+    hosts.iter().find(|host| host.machine_id == machine_id).map(|host| host.host_id.clone())
+}
+
+async fn apply_observation_to(
+    pool: &ferryx_hub::goals::SqlitePool,
+    host_id: &str,
+    observation: Value,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    use ferryx_hub::supervisor::request::RequestFailure;
+    let invalid = |what: &str| RequestFailure::new("INVALID_REQUEST", format!("observation: {what}"));
+    let text = |key: &str| observation[key].as_str().map(str::to_owned).ok_or_else(|| invalid(key));
+    let storage = |error: HubError| RequestFailure::new("STORAGE", error.to_string());
+    match observation["kind"].as_str() {
+        Some("keystrokes") => {
+            let now_ms = observation["nowMs"].as_u64().ok_or_else(|| invalid("nowMs"))?;
+            let recorded = record_forwarded_keystrokes(pool, &KEYSTROKE_BURSTS, host_id, &text("sessionId")?, now_ms)
+                .await
+                .map_err(storage)?;
+            Ok(json!({ "ok": true, "recorded": recorded, "hostId": host_id }))
+        }
+        Some("agentControlInput") => {
+            let op: AgentControlOp =
+                serde_json::from_value(observation["op"].clone()).map_err(|_| invalid("op"))?;
+            let recorded = record_forwarded_control_turn(pool, host_id, &op).await.map_err(storage)?;
+            Ok(json!({ "ok": true, "recorded": recorded, "hostId": host_id }))
+        }
+        Some("workerReport") => {
+            match ferryx_hub::lanes::dispatch::report_from_worker(
+                pool,
+                host_id,
+                &text("sessionId")?,
+                &text("eventId")?,
+                &text("body")?,
+            )
+            .await
+            {
+                Ok(report) => {
+                    let mut value = json!(report);
+                    value["ok"] = json!(true);
+                    Ok(value)
+                }
+                Err(error) => Err(RequestFailure::new(error.code(), error.to_string())),
+            }
+        }
+        _ => Err(invalid("kind")),
+    }
+}
+
+fn standby_error(role: &crate::daemon::supervisor_lease_role::Role) -> HubStartError {
+    use crate::daemon::supervisor_lease_role::Role;
+    match role {
+        Role::Standby { holder_machine_id, holder_label, .. } => HubStartError::Standby {
+            holder_machine_id: holder_machine_id.clone(),
+            holder_label: holder_label.clone(),
+        },
+        _ => HubStartError::Standby { holder_machine_id: None, holder_label: None },
+    }
+}
+
+/// The control.sock answer to a start refused on standby: `{"status":"standby","holder":...}`.
+/// `holder` is the holder's label (its machine id when it has none, null when unknown).
+#[cfg(any(unix, test))]
+fn standby_reply(error: &HubStartError) -> Value {
+    let holder = match error {
+        HubStartError::Standby { holder_machine_id, holder_label } => {
+            holder_label.clone().or_else(|| holder_machine_id.clone())
+        }
+        _ => None,
+    };
+    json!({ "status": "standby", "op": "start", "holder": holder })
+}
+
+/// Clears the persisted stop and runs `spawn` into the empty slot, but only on the lease holder:
+/// a standby first asks for the lease (never forced) and is refused with the holder when the
+/// relay says no, before anything is written.
+async fn gated_start<F, Fut>(
+    running: &tokio::sync::Mutex<Option<Generation>>,
+    pool: &ferryx_hub::goals::SqlitePool,
+    lease: Option<&dyn LeaseGate>,
+    spawn: F,
+) -> Result<bool, HubStartError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Generation>,
+{
     if HUB_TASKS.is_retired() {
         return Err(HubStartError::HandedOver);
     }
-    if let Err(error) = ferryx_hub::control::clear_stopped(&launch.hub.pool).await {
+    if let Some(lease) = lease {
+        if !lease.allows_hub() {
+            let role = lease.try_acquire().await.unwrap_or_else(|| lease.current_role());
+            if !lease.allows_hub() {
+                return Err(standby_error(&role));
+            }
+        }
+    }
+    if let Err(error) = ferryx_hub::control::clear_stopped(pool).await {
         tracing::warn!(%error, "hub start did not clear the stopped flag");
         return Err(HubStartError::Storage(error.to_string()));
     }
+    crate::supervisor_checkpoint::shared().set_hub_stopped(false);
     let mut slot = running.lock().await;
     if slot.is_some() {
         return Ok(false);
     }
-    *slot = Some(spawn_generation(launch).await);
+    *slot = Some(spawn().await);
     Ok(true)
+}
+
+/// The side effects of opening a generation, behind a seam tests count.
+#[async_trait]
+trait GenerationEffects: Send + Sync {
+    /// Refreshes the owner-directive projection before anything is delivered.
+    async fn refresh_directives(&self, _launch: &HubLaunch) {}
+    /// Posts the stored chat replies (Slack, Discord).
+    async fn flush_pending(&self, pool: &ferryx_hub::goals::SqlitePool);
+    /// Launches the supervisor pane.
+    async fn launch_pane(&self, launch: &HubLaunch, cwd: &str, command: &[String]);
+    /// Starts the generation's tasks.
+    async fn spawn(&self, launch: &HubLaunch) -> Generation;
+}
+
+/// The daemon's real effects.
+struct DaemonEffects;
+
+#[async_trait]
+impl GenerationEffects for DaemonEffects {
+    async fn refresh_directives(&self, launch: &HubLaunch) {
+        // The owner-directive projection is refreshed when this machine opens a holder
+        // generation (it may call the model), never on a standby's daemon start. It runs
+        // before the boot flush so stored replies are checked against the directives.
+        let judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env())
+            .with_pool(launch.hub.pool.clone());
+        if let Err(error) = ferryx_hub::owner_directives::current(&launch.hub.pool, &judge).await {
+            tracing::warn!(%error, "owner directives were not initialized");
+        }
+    }
+
+    async fn flush_pending(&self, pool: &ferryx_hub::goals::SqlitePool) {
+        if let Err(error) = ferryx_hub::chat::reply::flush_pending(pool).await {
+            tracing::warn!(%error, "stored chat replies were not flushed");
+        }
+    }
+
+    async fn launch_pane(&self, launch: &HubLaunch, cwd: &str, command: &[String]) {
+        if let Err(error) = launch.bridge.launch_pane(cwd, command).await {
+            tracing::warn!(%error, "supervisor pane was not launched");
+        }
+    }
+
+    async fn spawn(&self, launch: &HubLaunch) -> Generation {
+        spawn_generation(launch).await
+    }
+}
+
+/// The side effects of a running hub that must never run on a standby: owner directives are
+/// refreshed, stored chat replies are posted and the supervisor pane is launched, then the
+/// generation's tasks start.
+async fn open_generation(launch: &HubLaunch) -> Generation {
+    launch.effects.refresh_directives(launch).await;
+    launch.effects.flush_pending(&launch.hub.pool).await;
+    if launch.config.supervisor_pane {
+        let preset = ferryx_hub::meta::pane::SupervisorPanePreset::from_parts(
+            launch.config.supervisor_cwd.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
+            Vec::new(),
+        );
+        tracing::info!(title = %preset.title, "supervisor pane preset is armed");
+        if !preset.command.is_empty() {
+            launch.effects.launch_pane(launch, &preset.cwd.to_string_lossy(), &preset.command).await;
+        }
+    }
+    launch.effects.spawn(launch).await
+}
+
+/// The generation a booting hub runs: none while the owner stopped it, none on a standby.
+async fn boot_generation(launch: &HubLaunch, stopped: bool, lease: Option<&dyn LeaseGate>) -> Option<Generation> {
+    let standby = lease.is_some_and(|lease| !lease.allows_hub());
+    if stopped || standby {
+        return None;
+    }
+    Some(open_generation(launch).await)
+}
+
+/// The boot of [`start_opened`]: the boot generation (if any) goes into the running slot,
+/// which is published with the hub for the view, the phone and control.sock.
+async fn boot_hub(
+    launch: &HubLaunch,
+    stopped: bool,
+    lease: Option<&dyn LeaseGate>,
+) -> Arc<tokio::sync::Mutex<Option<Generation>>> {
+    let generation = boot_generation(launch, stopped, lease).await;
+    let running = Arc::new(tokio::sync::Mutex::new(generation));
+    publish_hub(launch, &running);
+    running
+}
+
+/// Lease loss: aborts the running generation and waits for its tasks. Unlike `hub stop` it
+/// never writes hub_stopped, which stays the owner's choice. Returns whether one ran.
+async fn stand_down(running: &tokio::sync::Mutex<Option<Generation>>) -> bool {
+    let Some(generation) = running.lock().await.take() else {
+        return false;
+    };
+    generation.end().await;
+    true
+}
+
+/// Follows the lease client's start/stop decisions: `false` stands the generation down,
+/// `true` (promotion) runs `promote` into the empty slot.
+async fn follow_lease<F, Fut>(
+    mut wanted: tokio::sync::watch::Receiver<bool>,
+    running: Arc<tokio::sync::Mutex<Option<Generation>>>,
+    mut promote: F,
+) where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Option<Generation>> + Send,
+{
+    while wanted.changed().await.is_ok() {
+        let run = *wanted.borrow_and_update();
+        if run {
+            let mut slot = running.lock().await;
+            if slot.is_none() {
+                *slot = promote().await;
+                if slot.is_some() {
+                    tracing::info!("supervisor lease held; hub generation started");
+                }
+            }
+        } else if stand_down(&running).await {
+            tracing::info!("supervisor lease lost; hub generation stopped, hub_stopped unchanged");
+        }
+    }
+}
+
+/// `hub.sqlite.incoming` next to `database`: what a checkpoint import staged.
+fn staged_database(database: &std::path::Path) -> Option<std::path::PathBuf> {
+    database
+        .parent()
+        .map(|dir| dir.join(ferryx_hub::checkpoint_import::INCOMING_DB))
+}
+
+/// Folds the staged database's WAL into its main file and switches it to a rollback journal,
+/// so the one file the staged swap moves into place carries every committed row (a `-wal`
+/// beside `.incoming` would not follow the rename).
+async fn seal_staged_database(incoming: std::path::PathBuf) -> Result<(), HubError> {
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let conn = rusqlite::Connection::open(&incoming).map_err(|error| error.to_string())?;
+        conn.busy_timeout(ferryx_hub::storage::BUSY_TIMEOUT).map_err(|error| error.to_string())?;
+        let busy: i64 = conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        if busy != 0 {
+            return Err("its WAL is still in use".into());
+        }
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        if !mode.eq_ignore_ascii_case("delete") {
+            return Err(format!("journal mode stayed {mode}"));
+        }
+        conn.close().map_err(|(_, error)| error.to_string())
+    })
+    .await
+    .map_err(|error| HubError::message(format!("staged hub database: {error}")))?
+    .map_err(|error| HubError::message(format!("staged hub database was not sealed: {error}")))
+}
+
+/// Seals a database a checkpoint import staged next to `database` and closes `pool`, so the
+/// next hub open swaps it in through the import's own swap (under the open lock; the old file
+/// and its `-wal`/`-shm` are kept as `hub.sqlite.pre-move-<ts>`, a failed swap is rolled back).
+/// Returns whether one was staged. Only called while no generation runs, so nothing else
+/// writes the closed pool.
+async fn close_for_staged_swap(
+    pool: &ferryx_hub::goals::SqlitePool,
+    database: &std::path::Path,
+) -> Result<bool, HubError> {
+    let Some(incoming) = staged_database(database) else {
+        return Ok(false);
+    };
+    if !tokio::fs::try_exists(&incoming).await.unwrap_or(false) {
+        return Ok(false);
+    }
+    seal_staged_database(incoming.clone()).await?;
+    // Resolves once every connection of the old pool is closed, so the swap can rename the file.
+    ferryx_hub::storage::close_fully(pool).await;
+    Ok(true)
+}
+
+/// Promotion (Standby -> Holder): reopens the hub on a staged database first, then runs a
+/// generation when the owner has not stopped the hub (or FERRYX_HUB=on).
+async fn promote_generation() -> Option<Generation> {
+    let (_, running) = supervisor_view()?;
+    let mut launch = supervisor_launch()?;
+    let database = launch
+        .config
+        .database_path
+        .clone()
+        .unwrap_or_else(ferryx_hub::hub::default_database_path);
+    // A takeover granted against a pulled checkpoint stages it first (todo 7's import).
+    if let Some(dir) = database.parent() {
+        crate::supervisor_move::import_pending(dir).await;
+    }
+    match close_for_staged_swap(&launch.hub.pool, &database).await {
+        Ok(false) => {}
+        // Hub::open applies the staged swap before its pool exists.
+        Ok(true) => match Hub::open(launch.config.clone(), launch.bridge.clone()).await {
+            Ok(hub) => {
+                if let Err(error) = ferryx_hub::lanes::kibitzer::ensure_schema(&hub.pool).await {
+                    tracing::warn!(%error, "kibitzer schema was not created");
+                }
+                launch.hub = hub;
+                publish_hub(&launch, &running);
+                tracing::info!(path = %database.display(), "hub reopened on the staged database");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "hub did not reopen on the staged database");
+                return None;
+            }
+        },
+        Err(error) => {
+            tracing::warn!(%error, "staged hub database was not swapped in");
+            return None;
+        }
+    }
+    let forced_on = std::env::var("FERRYX_HUB").ok().as_deref() == Some("on");
+    if !forced_on && ferryx_hub::control::is_stopped(&launch.hub.pool).await.unwrap_or(true) {
+        tracing::info!("supervisor lease held; hub stays stopped until hub start");
+        return None;
+    }
+    Some(open_generation(&launch).await)
+}
+
+/// The lease client's [`crate::daemon::supervisor_lease_client::HubSwitch`]: its start/stop decisions, followed by [`follow_lease`].
+struct HubLeaseSwitch {
+    wanted: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+impl crate::daemon::supervisor_lease_client::HubSwitch for HubLeaseSwitch {
+    fn start_hub(&self) {
+        self.wanted.send_replace(true);
+    }
+
+    fn stop_hub(&self, reason: crate::daemon::supervisor_lease_role::StandDownReason) {
+        tracing::info!(?reason, "supervisor lease stand-down");
+        self.wanted.send_replace(false);
+    }
+}
+
+/// Starts the lease client over `relay`'s control channel; the caller tracks its task.
+async fn spawn_lease_client(
+    relay: crate::remote::relay_client::RelayClient,
+    wanted: tokio::sync::watch::Sender<bool>,
+    handover_manager: Arc<crate::daemon::handover::HandoverManager>,
+    carried: Option<crate::daemon::supervisor_lease_client::LiveGrant>,
+) -> (Arc<dyn LeaseGate>, tokio::task::JoinHandle<()>) {
+    use crate::daemon::supervisor_lease_client::spawn_supervisor_lease_client;
+    let enrollment = crate::ipc::run_blocking(|| Ok(crate::account::enroll_client::load_enrollment_record()))
+        .await
+        .ok()
+        .flatten();
+    let account = enrollment.map(|record| record.account_id);
+    let machine_id = lease_machine_id().await;
+    // A handover successor renews the lease its predecessor handed over at commit (same
+    // machine id and fence) instead of acquiring a new one; a rebind finds it already taken.
+    let own_machine_id = machine_id.clone();
+    let config = lease_client_config(machine_id, account, &handover_manager);
+    // One Arc for the switch and the stop signal: `stand_down_now` sends on the watch the
+    // switch drives (clones of a watch sender share its channel, so `follow_relay`'s too).
+    let wanted = Arc::new(wanted);
+    install_lease_stop(Some(Arc::clone(&wanted)));
+    // A rebind to a replaced relay resumes the grant the replaced client still held.
+    let config = crate::daemon::supervisor_lease_client::LeaseClientConfig { resumed: carried, ..config };
+    let (handle, task) =
+        spawn_supervisor_lease_client(config, Arc::new(relay), Arc::new(HubLeaseSwitch { wanted })).await;
+    // A later handover commit freezes this client and hands its lease to the successor.
+    let handover: Arc<dyn crate::daemon::handover::SupervisorLeaseHandover> = Arc::new(handle.state().clone());
+    handover_manager.set_supervisor_lease(Some(handover));
+    // Supervisor inputs are stamped with this lease's fence, checked right before each send;
+    // a rebound client replaces the previous client's source.
+    let source: Arc<dyn crate::agent_control::fence::SupervisorFenceSource> = Arc::new(handle.state().clone());
+    crate::agent_control::fence::install_source(Some(source));
+    // A move drives this client; a rebound client replaces the previous client's handle.
+    *LEASE_HANDLE.write().unwrap_or_else(|e| e.into_inner()) = Some(handle.clone());
+    let roles = handle.subscribe();
+    let handle_roles = handle.subscribe();
+    let gate: Arc<dyn LeaseGate> = Arc::new(handle);
+    // The hub crate's holder predicate (chat sends, goal settles) follows this client; a
+    // rebound client replaces the previous client's gate.
+    install_holder_gate(Some(Arc::clone(&gate)));
+    let pairing = tokio::spawn(follow_holder_pairing(handle_roles, own_machine_id.clone()));
+    HUB_TASKS.track(&pairing);
+    let archiving = tokio::spawn(archive_on_first_standby(roles, own_machine_id));
+    HUB_TASKS.track(&archiving);
+    (gate, task)
+}
+
+/// The holder another machine is for `role`, as the holder link knows it; `None` when this
+/// machine holds (or may hold) the lease or the holder's machine is unknown.
+fn holder_of_role(role: &crate::daemon::supervisor_lease_role::Role, own_machine_id: &str) -> Option<holder_link::Holder> {
+    match role {
+        crate::daemon::supervisor_lease_role::Role::Standby { holder_machine_id: Some(id), holder_label, .. }
+            if id != own_machine_id =>
+        {
+            Some(holder_link::Holder { machine_id: Some(id.clone()), label: holder_label.clone() })
+        }
+        _ => None,
+    }
+}
+
+/// Keeps the holder link's pairing state on the role: status reads "not paired to holder"
+/// (then "paired" once a pairing attempt succeeds) while a holder is known, "no holder"
+/// otherwise. A newly named holder machine (a first standby, a later B -> C move) is paired to
+/// at once ([`crate::supervisor_move::pair_to_holder`]) instead of on the next periodic pull.
+async fn follow_holder_pairing(
+    roles: tokio::sync::watch::Receiver<crate::daemon::supervisor_lease_role::Role>,
+    own_machine_id: String,
+) {
+    follow_holder_pairing_with(roles, own_machine_id, &holder_link::LINK, crate::supervisor_move::pair_to_holder).await;
+}
+
+/// [`follow_holder_pairing`] on `link`, pairing through `pair` once per newly named holder
+/// machine; a role naming the same holder again does not pair again.
+async fn follow_holder_pairing_with<P, PF>(
+    mut roles: tokio::sync::watch::Receiver<crate::daemon::supervisor_lease_role::Role>,
+    own_machine_id: String,
+    link: &holder_link::HolderLink,
+    mut pair: P,
+) where
+    P: FnMut(holder_link::Holder) -> PF,
+    PF: std::future::Future<Output = ()>,
+{
+    let mut followed: Option<String> = None;
+    loop {
+        let holder = holder_of_role(&roles.borrow_and_update(), &own_machine_id);
+        link.note_holder(holder.as_ref());
+        let named = holder.as_ref().and_then(|holder| holder.machine_id.clone());
+        if named != followed {
+            followed = named;
+            if let Some(holder) = holder {
+                pair(holder).await;
+            }
+        }
+        if roles.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// The hub directory: the directory of the hub database this daemon opens (the open hub's,
+/// else the configured one before it opened).
+fn daemon_hub_dir() -> std::path::PathBuf {
+    let database = match supervisor_launch() {
+        Some(launch) => launch.config.database_path.clone(),
+        None => HubConfig::load().ok().and_then(|config| config.database_path),
+    }
+    .unwrap_or_else(ferryx_hub::hub::default_database_path);
+    database.parent().map(std::path::Path::to_path_buf).unwrap_or_default()
+}
+
+/// First-rollout adoption (plan todo 13): the first time this daemon learns another machine
+/// holds the supervisor lease, it pulls the holder's checkpoint right away
+/// ([`crate::supervisor_move::pull_from_holder`], which also pairs this machine to the
+/// holder), learns the holder's supervisor id from that checkpoint and archives this hub only
+/// when its identity differs ([`archive_for_holder`]). Until a pulled holder checkpoint names
+/// the holder's supervisor id the pull is retried (a stored checkpoint without an identity,
+/// such as a young holder's first one before its supervisor was set up, does not end it),
+/// first after [`FIRST_PUBLISH_RETRY`] (a young holder publishes its first checkpoint within
+/// that), then backing off to [`crate::supervisor_checkpoint::PUBLISH_EVERY`]; the
+/// publisher's periodic pull takes over once the identity is known.
+async fn archive_on_first_standby(
+    roles: tokio::sync::watch::Receiver<crate::daemon::supervisor_lease_role::Role>,
+    own_machine_id: String,
+) {
+    pull_until_holder_checkpoint(
+        roles,
+        own_machine_id,
+        FIRST_PUBLISH_RETRY,
+        crate::supervisor_checkpoint::PUBLISH_EVERY,
+        crate::supervisor_move::pull_from_holder,
+        crate::supervisor_move::known_holder_supervisor_id,
+    )
+    .await;
+}
+
+/// While this machine is standby under another holder, runs `pull` until `known` names the
+/// holder's supervisor id, then returns; a stored checkpoint that names no identity does not
+/// end the loop. Between pulls it waits `first`, doubling up to `cap`, or for a role change; a
+/// newly named holder starts again from `first`. A role that is not standby under another
+/// holder pulls nothing and waits for the next role change. Returns when the role stream ends.
+async fn pull_until_holder_checkpoint<P, PF, K, KF>(
+    mut roles: tokio::sync::watch::Receiver<crate::daemon::supervisor_lease_role::Role>,
+    own_machine_id: String,
+    first: std::time::Duration,
+    cap: std::time::Duration,
+    mut pull: P,
+    mut known: K,
+) where
+    P: FnMut() -> PF,
+    PF: std::future::Future,
+    K: FnMut() -> KF,
+    KF: std::future::Future<Output = Option<String>>,
+{
+    use crate::daemon::supervisor_lease_role::Role;
+    let mut followed: Option<String> = None;
+    let mut wait = first;
+    loop {
+        let holder = match &*roles.borrow_and_update() {
+            Role::Standby { holder_machine_id: Some(holder), .. } if *holder != own_machine_id => Some(holder.clone()),
+            _ => None,
+        };
+        let Some(holder) = holder else {
+            if roles.changed().await.is_err() {
+                return;
+            }
+            continue;
+        };
+        if followed.as_deref() != Some(holder.as_str()) {
+            followed = Some(holder);
+            wait = first;
+        }
+        pull().await;
+        if known().await.is_some() {
+            return;
+        }
+        tokio::select! {
+            changed = roles.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+            () = tokio::time::sleep(wait) => wait = (wait * 2).min(cap),
+        }
+    }
+}
+
+/// Standby for a holder whose supervisor id is `holder_supervisor_id` (read from its
+/// checkpoint): archives this hub once when it holds another supervisor identity, so its open
+/// goals become adoptable into the holder by an owner action. A hub of the holder's own
+/// identity (a former holder that moved away) is left alone.
+pub(crate) async fn archive_for_holder(holder_supervisor_id: &str) {
+    let dir = daemon_hub_dir();
+    match ferryx_hub::adoption::archive_for_holder(&dir, Some(holder_supervisor_id), unix_now() as i64).await {
+        Ok(Some(archive)) => {
+            tracing::info!(archive = %archive.display(), "standby for a holder of another supervisor identity: hub database archived; its open goals are adoptable");
+        }
+        Ok(None) => {}
+        Err(error) => tracing::warn!(%error, "the hub database was not archived on standby"),
+    }
+}
+
+/// The holder's supervisor id: the open hub's own identity while this machine holds the
+/// lease, else the one the holder's last pulled checkpoint names; `None` when not known.
+async fn holder_supervisor_id() -> Option<String> {
+    if lease_handle().is_some_and(|handle| handle.is_holder_now()) {
+        let launch = supervisor_launch()?;
+        return ferryx_hub::supervisor::identities(&launch.hub.pool)
+            .await
+            .ok()?
+            .into_iter()
+            .next()
+            .map(|identity| identity.supervisor_id);
+    }
+    crate::supervisor_move::known_holder_supervisor_id().await
+}
+
+/// Open goals of this machine's archived hub not yet adopted into the holder, for the status
+/// snapshot's `adoptable` field and the standby UI ("Adoptable from <fromMachine>"). Empty
+/// when this hub was never archived; a read failure is logged and reported as empty.
+pub async fn adoptable_goals() -> Vec<ferryx_hub::adoption::AdoptableGoal> {
+    let from = lease_machine_id().await;
+    let holder = holder_supervisor_id().await;
+    match ferryx_hub::adoption::adoptable_goals(&daemon_hub_dir(), &from, holder.as_deref()).await {
+        Ok(goals) => goals,
+        Err(error) => {
+            tracing::warn!(%error, "adoptable archived goals could not be read");
+            Vec::new()
+        }
+    }
+}
+
+/// The phone's Adopt action, served inside the daemon (`POST /api/v1/supervisor/adopt-archived`):
+/// [`adopt_archived`] whose send step never opens a daemon-socket connection. That
+/// connection would come from the daemon itself, which on Windows is only
+/// `TokenAuthenticated` and so may not mutate the supervisor (`supervisor_peer::refusal`).
+/// On standby each goal goes to the holder over the paired channel from the installed
+/// inventory; on the holder it is served by [`supervisor_request`] as the phone `device_id`.
+pub async fn adopt_archived_in_process(
+    state: &RemoteGatewayState,
+    device_id: &str,
+    goal_id: Option<String>,
+) -> Result<Vec<ferryx_hub::adoption::AdoptReport>, ferryx_hub::supervisor::request::RequestFailure> {
+    use ferryx_hub::adoption::AdoptSelection;
+    use ferryx_hub::supervisor::request::RequestFailure;
+    let selection = goal_id.map_or(AdoptSelection::All, AdoptSelection::Goal);
+    let caller = SupervisorCaller::Remote { device_id: device_id.to_owned() };
+    let caller = &caller;
+    ferryx_hub::adoption::adopt_archived(&adopt_hub_dir(state), &selection, move |envelope| {
+        adopt_send(state, caller, envelope)
+    })
+    .await
+    .map_err(|error| RequestFailure::new(error.code(), error.to_string()))
+}
+
+/// The hub directory the phone's Adopt action reads its archive from.
+fn adopt_hub_dir(state: &RemoteGatewayState) -> std::path::PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = state.supervisor_test_hub_dir.read().clone() {
+        return dir;
+    }
+    let _ = state;
+    daemon_hub_dir()
+}
+
+/// One adopted goal's submit in process: to the holder over the paired channel on standby
+/// (a standby whose inventory is not installed yet answers SUPERVISOR_STANDBY), else to this
+/// hub's own request service.
+async fn adopt_send(
+    state: &RemoteGatewayState,
+    caller: &SupervisorCaller,
+    envelope: Value,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    if let Some(holder) = current_holder() {
+        let Some(hosts) = crate::supervisor_move::installed_hosts() else {
+            return Err(ferryx_hub::holder::standby_failure(holder.machine_id.as_deref(), holder.label.as_deref()));
+        };
+        return holder_link::LINK
+            .forward(
+                &holder,
+                &holder_link::ServicePairedHosts(hosts),
+                &holder_link::AccountService,
+                crate::paired_host::client::Operation::SupervisorRequest { envelope },
+            )
+            .await;
+    }
+    supervisor_request(state, caller.clone(), envelope).await
+}
+
+/// The owner's Adopt action (`ferryx hub adopt-archived`, the desktop button): sends the
+/// selected archived goals to the holder through this daemon's `SupervisorRequestV1`
+/// (a standby forwards it to the holder over the paired channel) and records each adopted one
+/// in `adopted-goals.json`. `goal_id` `None` adopts every goal not adopted yet. The phone's
+/// route runs inside the daemon and uses [`adopt_archived_in_process`] instead.
+pub async fn adopt_archived(
+    goal_id: Option<String>,
+) -> Result<Vec<ferryx_hub::adoption::AdoptReport>, ferryx_hub::supervisor::request::RequestFailure> {
+    use ferryx_hub::adoption::AdoptSelection;
+    use ferryx_hub::supervisor::request::RequestFailure;
+    let selection = goal_id.map_or(AdoptSelection::All, AdoptSelection::Goal);
+    ferryx_hub::adoption::adopt_archived(&daemon_hub_dir(), &selection, |envelope| {
+        forward_to_daemon(envelope, false)
+    })
+    .await
+    .map_err(|error| RequestFailure::new(error.code(), error.to_string()))
+}
+
+/// `ferryx hub adopt-archived [--goal <id> | --all]`.
+fn hub_adopt_archived_cli(args: &[String]) -> i32 {
+    let goal_id = match args {
+        [] => None,
+        [flag] if flag == "--all" => None,
+        [flag, goal] if flag == "--goal" => Some(goal.clone()),
+        _ => {
+            eprintln!("usage: ferryx hub adopt-archived [--goal <id> | --all]");
+            return 2;
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("runtime: {error}");
+            return 1;
+        }
+    };
+    runtime.block_on(async move {
+        match adopt_archived(goal_id).await {
+            Ok(reports) => {
+                let failed = reports.iter().any(|report| !report.adopted);
+                println!("{}", json!({ "adopted": reports }));
+                i32::from(failed)
+            }
+            Err(failure) => {
+                eprintln!("{}", failure.to_json());
+                1
+            }
+        }
+    })
+}
+
+/// Bumped each time a relay client is published (the gateway's start, `replace_relay`).
+static RELAY_PUBLISHED: std::sync::LazyLock<tokio::sync::watch::Sender<u64>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::channel(0).0);
+
+/// Called by the gateway right after it published a relay client in `relay_client`.
+pub(crate) fn note_relay_published() {
+    RELAY_PUBLISHED.send_modify(|published| *published += 1);
+}
+
+/// Binds the lease client to every relay client published after the hub started, so the hub
+/// is never unleased once a relay exists: a first relay starts the client, a replaced relay
+/// rebinds it (the previous client is aborted). A client that binds on standby stands the
+/// running generation down through `wanted`.
+async fn follow_relay<C, R, B, Fut>(
+    mut published: tokio::sync::watch::Receiver<u64>,
+    mut relay: R,
+    mut bind: B,
+    mut bound: Option<(Arc<dyn LeaseGate>, tokio::task::JoinHandle<()>)>,
+    wanted: tokio::sync::watch::Sender<bool>,
+) where
+    C: Send,
+    R: FnMut() -> Option<C> + Send + 'static,
+    B: FnMut(C, Option<crate::daemon::supervisor_lease_client::LiveGrant>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = (Arc<dyn LeaseGate>, tokio::task::JoinHandle<()>)> + Send,
+{
+    while published.changed().await.is_ok() {
+        let Some(client) = relay() else { continue };
+        // The grant the replaced client holds now carries into the rebound one, so a relay
+        // replacement never stands the holder's generation down.
+        let carried = bound.as_ref().and_then(|(gate, _)| gate.live_grant());
+        if let Some((_, previous)) = bound.take() {
+            previous.abort();
+        }
+        let (gate, task) = bind(client, carried).await;
+        let standby = !gate.allows_hub();
+        set_lease_gate(Some(Arc::clone(&gate)));
+        bound = Some((gate, task));
+        if standby {
+            wanted.send_replace(false);
+        }
+        tracing::info!(standby, carried = carried.is_some(), "supervisor lease client bound to the published relay");
+    }
+}
+
+/// Production lease client settings. A handover successor renews the lease its predecessor
+/// handed over at commit (same machine id and fence) instead of acquiring a new one.
+fn lease_client_config(
+    machine_id: String,
+    account: Option<String>,
+    handover_manager: &crate::daemon::handover::HandoverManager,
+) -> crate::daemon::supervisor_lease_client::LeaseClientConfig {
+    let mut config = crate::daemon::supervisor_lease_client::LeaseClientConfig::system(machine_id, account);
+    config.handed_over = handover_manager.take_handed_supervisor_lease();
+    config
+}
+
+/// The lease client handle a move drives, installed with the lease gate.
+static LEASE_HANDLE: std::sync::RwLock<Option<crate::daemon::supervisor_lease_client::SupervisorLeaseHandle>> =
+    std::sync::RwLock::new(None);
+
+pub(crate) fn lease_handle() -> Option<crate::daemon::supervisor_lease_client::SupervisorLeaseHandle> {
+    LEASE_HANDLE.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+pub(crate) fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// The hub directory of the open hub (where `hub.sqlite` lives); `None` before it opened.
+pub(crate) fn open_hub_dir() -> Option<std::path::PathBuf> {
+    supervisor_launch().map(|launch| hub_dir(&launch))
+}
+
+fn hub_dir(launch: &HubLaunch) -> std::path::PathBuf {
+    let database = launch.config.database_path.clone().unwrap_or_else(ferryx_hub::hub::default_database_path);
+    database.parent().map(std::path::Path::to_path_buf).unwrap_or_default()
+}
+
+/// Exports the running hub as this holder's newest checkpoint and records it for the next
+/// renew (and the release). Returns its id.
+async fn publish_checkpoint(launch: &HubLaunch) -> Result<String, String> {
+    publish_checkpoint_naming(launch).await.map(|(id, _)| id)
+}
+
+/// [`publish_checkpoint`], also telling whether the published checkpoint's manifest names a
+/// supervisor identity (false while the hub has no `supervisor_identity` row yet).
+async fn publish_checkpoint_naming(launch: &HubLaunch) -> Result<(String, bool), String> {
+    use crate::supervisor_checkpoint as cp;
+    let dir = cp::checkpoint_dir().ok_or("the Ferryx data directory cannot be resolved")?;
+    let machine_id = lease_machine_id().await;
+    let tmp = dir.join(format!(".export-{}.partial", uuid::Uuid::new_v4().simple()));
+    tokio::fs::create_dir_all(&dir).await.map_err(|error| error.to_string())?;
+    let mut request = ferryx_hub::checkpoint::ExportRequest::new(
+        hub_dir(launch),
+        machine_id,
+        tmp.clone(),
+        ferryx_hub::checkpoint_import::default_private_writer(),
+    );
+    request.env_file = ferryx_hub::hub_env::env_file_path();
+    request.memory_root =
+        ferryx_hub::hub_env::home_dir().map(|home| home.join(".omo").join("memory").join("agents"));
+    let exported = ferryx_hub::checkpoint::export(&launch.hub.pool, &request).await;
+    let result = match exported {
+        Ok(exported) => {
+            let store = cp::CheckpointStore::new(dir);
+            let id = exported.checkpoint_id.clone();
+            let named = exported.manifest.supervisor_id.is_some();
+            let saved = tokio::task::spawn_blocking(move || {
+                let bytes = std::fs::read(&exported.path)?;
+                store.save(&exported.checkpoint_id, &bytes, unix_now(), false)
+            })
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|saved| saved.map_err(|error| error.to_string()));
+            saved.map(|entry| {
+                cp::shared().publish(entry);
+                (id, named)
+            })
+        }
+        Err(error) => Err(error.to_string()),
+    };
+    let _ = tokio::fs::remove_file(&tmp).await;
+    result
+}
+
+/// This machine's lease id: the machine id the relay authenticates its control socket by and
+/// records as `holder_machine_id` / `reserved_for` (the account's `machines.machine_id`, the
+/// one paired hosts know it by), not the enrollment's `machine_record_id`, which the relay
+/// never sees. `local` without an enrollment.
+pub(crate) async fn lease_machine_id() -> String {
+    crate::ipc::run_blocking(|| {
+        if crate::account::enroll_client::load_enrollment_record().is_none() {
+            return Ok(None);
+        }
+        Ok(crate::remote::auth::canonical_identity_dir()
+            .ok()
+            .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir).ok())
+            .map(|identity| identity.machine_id))
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| "local".to_owned())
+}
+
+/// The holder side of a move (`POST /api/v1/supervisor/release-to`): quiesces the generation,
+/// publishes the final checkpoint and releases the lease reserved for `target`. Only a
+/// `Released` ack from the relay hands the supervisor away; a failed export or a refused /
+/// unanswered release restarts the generation, and the lease client keeps holding (role,
+/// renewals and auto-acquire untouched). Returns the final checkpoint id.
+pub async fn release_supervisor_to(target: &str) -> Result<Option<String>, crate::supervisor_checkpoint::MoveError> {
+    use crate::supervisor_checkpoint::MoveError;
+    let (Some(handle), Some(launch), Some((_, running))) = (lease_handle(), supervisor_launch(), supervisor_view()) else {
+        return Err(MoveError::new(503, "SUPERVISOR_UNAVAILABLE", "the supervisor hub is not open in this daemon"));
+    };
+    if !handle.is_holder_now() {
+        return Err(MoveError::new(409, crate::supervisor_checkpoint::SUPERVISOR_STANDBY, "this machine does not run the supervisor"));
+    }
+    let (handle, launch) = (&handle, &launch);
+    let id = release_generation_to(
+        &running,
+        move || publish_checkpoint(launch),
+        move || handle.release_to(target),
+        move || async move {
+            // Restore only while the lease still lets this machine run the hub. Only the tasks
+            // restart: stored replies were flushed and the pane launched when it first ran.
+            if handle.state().may_act_now() {
+                Some(launch.effects.spawn(launch).await)
+            } else {
+                None
+            }
+        },
+    )
+    .await?;
+    tracing::info!(target_machine = target, checkpoint = %id, "supervisor released to another machine");
+    Ok(Some(id))
+}
+
+/// The order of a move's release: the generation is stood down so the final checkpoint holds
+/// every write, the checkpoint is published, then the lease is released. A failed export or a
+/// release the relay did not acknowledge as `Released` restarts the generation (`restart`, when
+/// one ran) and returns the error, so the holder keeps running the supervisor.
+async fn release_generation_to<P, PF, R, RF, S, SF>(
+    running: &tokio::sync::Mutex<Option<Generation>>,
+    publish: P,
+    release: R,
+    restart: S,
+) -> Result<String, crate::supervisor_checkpoint::MoveError>
+where
+    P: FnOnce() -> PF,
+    PF: std::future::Future<Output = Result<String, String>>,
+    R: FnOnce() -> RF,
+    RF: std::future::Future<Output = bool>,
+    S: FnOnce() -> SF,
+    SF: std::future::Future<Output = Option<Generation>>,
+{
+    use crate::supervisor_checkpoint::MoveError;
+    let was_running = stand_down(running).await;
+    let error = match publish().await {
+        Ok(id) => {
+            if release().await {
+                return Ok(id);
+            }
+            MoveError::new(503, "SUPERVISOR_UNAVAILABLE", "the relay did not release the supervisor lease")
+        }
+        Err(error) => MoveError::new(500, "CHECKPOINT_EXPORT_FAILED", error),
+    };
+    if was_running {
+        let mut slot = running.lock().await;
+        if slot.is_none() {
+            *slot = restart().await;
+        }
+        if slot.is_some() {
+            tracing::info!(code = %error.code, "supervisor move failed; hub generation restarted");
+        }
+    }
+    Err(error)
+}
+
+/// How soon a hold whose first checkpoint naming its supervisor identity is not published yet
+/// first tries again.
+const FIRST_PUBLISH_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long a hold waits before its next first-publish attempt after `failed` attempts that
+/// published no checkpoint naming a supervisor identity: [`FIRST_PUBLISH_RETRY`], doubling
+/// with each further such attempt, up to `cap`.
+fn first_publish_retry(failed: u32, cap: std::time::Duration) -> std::time::Duration {
+    let factor = 1u32.checked_shl(failed.saturating_sub(1)).unwrap_or(u32::MAX);
+    FIRST_PUBLISH_RETRY.saturating_mul(factor).min(cap)
+}
+
+/// Publishes a checkpoint of the running hub for the current hold. The hold's first publish is
+/// done (`pending` false) once a published checkpoint names a supervisor identity; until then
+/// `failed` counts the attempts that did not.
+async fn publish_for_hold(launch: &HubLaunch, pending: &mut bool, failed: &mut u32) {
+    match publish_checkpoint_naming(launch).await {
+        Ok((_, true)) => {
+            *pending = false;
+            *failed = 0;
+        }
+        Ok((id, false)) => {
+            if *pending {
+                *failed = failed.saturating_add(1);
+                tracing::info!(checkpoint = %id, "supervisor checkpoint names no supervisor identity yet; publishing again");
+            }
+        }
+        Err(error) => {
+            if *pending {
+                *failed = failed.saturating_add(1);
+            }
+            tracing::warn!(%error, "supervisor checkpoint was not published");
+        }
+    }
+}
+
+/// Whether a hub generation runs now. Waits out a promotion holding the slot (it imports a
+/// pulled checkpoint first), so a first export never races that import.
+async fn generation_running() -> bool {
+    match supervisor_view() {
+        Some((_, running)) => running.lock().await.is_some(),
+        None => false,
+    }
+}
+
+/// Every [`crate::supervisor_checkpoint::PUBLISH_EVERY`] while this machine holds the lease:
+/// a fresh checkpoint for the standbys, reported on the next renew. A leased hold also
+/// publishes as soon as it starts, so a young holder's lease row carries a checkpoint, and
+/// again ([`first_publish_retry`]) until one names its supervisor identity, so a standby can
+/// learn it without waiting out the publish interval.
+fn spawn_checkpoint_publisher() -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticks = tokio::time::interval(crate::supervisor_checkpoint::PUBLISH_EVERY);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticks.tick().await;
+        // True until the current leased hold published a checkpoint naming its identity.
+        let mut hold_unpublished = true;
+        // Publish attempts of this hold that named no identity (or failed) while it was true.
+        let mut unnamed_publishes = 0u32;
+        loop {
+            let handle = lease_handle();
+            // Subscribed before the role is read, so a grant from here on wakes the loop.
+            let mut roles = handle.as_ref().map(|handle| handle.subscribe());
+            let leased_holder =
+                handle.as_ref().is_some_and(|handle| handle.current_fence() > 0 && handle.is_holder_now());
+            if !leased_holder {
+                hold_unpublished = true;
+                unnamed_publishes = 0;
+            } else if hold_unpublished && generation_running().await {
+                if let Some(launch) = supervisor_launch() {
+                    publish_for_hold(&launch, &mut hold_unpublished, &mut unnamed_publishes).await;
+                }
+            }
+            let role_changed = async {
+                let alive = match roles.as_mut() {
+                    Some(roles) => roles.changed().await.is_ok(),
+                    None => false,
+                };
+                if !alive {
+                    // No client, or it ended (a rebind replaces it): look again shortly.
+                    tokio::time::sleep(FIRST_PUBLISH_RETRY).await;
+                }
+            };
+            // Until this hold's first checkpoint naming its identity is out, the loop also
+            // looks again soon (a promotion still importing, a supervisor not set up yet), and
+            // a tick only wakes it: the publish at the loop top is the one export per wake.
+            let first_pending = leased_holder && hold_unpublished;
+            let first_retry = first_publish_retry(unnamed_publishes, crate::supervisor_checkpoint::PUBLISH_EVERY);
+            tokio::select! {
+                _ = ticks.tick() => {
+                    if first_pending {
+                        continue;
+                    }
+                }
+                () = role_changed => continue,
+                () = tokio::time::sleep(first_retry), if first_pending => continue,
+            }
+            let holder = lease_handle().is_some_and(|handle| handle.is_holder_now());
+            let Some(launch) = supervisor_launch() else { continue };
+            if holder {
+                publish_for_hold(&launch, &mut hold_unpublished, &mut unnamed_publishes).await;
+            } else {
+                crate::supervisor_move::pull_from_holder().await;
+            }
+        }
+    })
 }
 
 /// A person starts the stopped hub from another surface. `by` names who, as for a lane pause.
 /// Like `ferryx hub start`, it never restarts the daemon, so live PTY sessions stay up.
 pub async fn start_supervisor(state: &RemoteGatewayState, by: &str) -> Result<bool, HubStartError> {
-    let (Some((_, running)), Some(launch)) = (SUPERVISOR_VIEW.get(), SUPERVISOR_LAUNCH.get()) else {
+    let (Some((_, running)), Some(launch)) = (supervisor_view(), supervisor_launch()) else {
         return Err(HubStartError::Unavailable);
     };
-    let started = start_generation(running, launch).await?;
+    let started = start_generation(&running, &launch).await?;
     tracing::info!(by, started, "supervisor hub start requested");
     crate::remote::server::agent_control_service::publish_supervisor_changed(
         state,
@@ -1047,6 +3030,10 @@ pub async fn set_lane_paused_gated(
 ) -> Result<bool, LanePauseError> {
     use ferryx_hub::lanes::state::LaneStatus;
     use ferryx_hub::supervisor::request::{self, RequestContext, RequestFailure};
+    // Every lane, supervisor-owned or legacy, is paused on the holder.
+    if let Some(refusal) = standby_refusal() {
+        return Err(LanePauseError::Supervisor(refusal));
+    }
     if let Ok((pool, owner, control)) = supervisor_service(state).await {
         let owned = ferryx_hub::supervisor::supervisor_owns_lane(&pool, lane_key)
             .await
@@ -1089,7 +3076,7 @@ pub async fn set_lane_paused_gated(
             }
         }
     }
-    let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
+    let Some((hub, _)) = supervisor_view() else {
         return Err(LanePauseError::Unavailable);
     };
     let status = ferryx_hub::lanes::state::status_of(&hub.pool, lane_key)
@@ -1285,8 +3272,8 @@ pub async fn supervisor_engine(
     state: &RemoteGatewayState,
     action: crate::daemon::protocol::SupervisorEngineAction,
 ) -> Result<Value, SupervisorEngineError> {
-    let pool = SUPERVISOR_VIEW.get().map(|(hub, _)| hub.pool.clone());
-    let control = SUPERVISOR_VIEW.get().map(|(hub, _)| Arc::clone(&hub.control));
+    let pool = supervisor_view().map(|(hub, _)| hub.pool.clone());
+    let control = supervisor_view().map(|(hub, _)| Arc::clone(&hub.control));
     let hub_open = pool.is_some();
     // engine_view refuses first (MHC_NOT_RUNNING) when no engine is installed, so the identity
     // rows are read only for a view that is returned.
@@ -1325,6 +3312,12 @@ async fn supervisor_service(
     ferryx_hub::supervisor::request::RequestFailure,
 > {
     use ferryx_hub::supervisor::request::RequestFailure;
+    // A standby never serves supervisor state: requests, conversation, memory and pause go
+    // to the holder, named in the refusal (409 SUPERVISOR_STANDBY). Checked first, so the
+    // routes' test hub below answers the same refusal on standby.
+    if let Some(refusal) = standby_refusal() {
+        return Err(refusal);
+    }
     #[cfg(test)]
     let test_hub = state.supervisor_test_hub.read().clone();
     #[cfg(test)]
@@ -1332,7 +3325,7 @@ async fn supervisor_service(
         return Ok((pool, Some(owner), None));
     }
     let _ = state;
-    let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
+    let Some((hub, _)) = supervisor_view() else {
         return Err(RequestFailure::new(
             "SUPERVISOR_UNAVAILABLE",
             "the supervisor hub is not open in this daemon",
@@ -1354,6 +3347,19 @@ pub async fn supervisor_request(
     use ferryx_hub::supervisor::request::{self, RequestContext, RequestFailure};
     // A malformed envelope is refused before the hub is even consulted.
     request::parse_envelope(envelope.clone())?;
+    // On standby the owner's CLI/MCP request runs on the holder over the paired channel; a
+    // phone is answered 409 with the holder instead, so it switches to it.
+    if let (Some(holder), false) = (current_holder(), matches!(caller, SupervisorCaller::Remote { .. })) {
+        let hosts = holder_link::DaemonPairedHosts(DaemonClient::new());
+        return holder_link::LINK
+            .forward(
+                &holder,
+                &hosts,
+                &holder_link::AccountService,
+                crate::paired_host::client::Operation::SupervisorRequest { envelope },
+            )
+            .await;
+    }
     let (pool, owner, control) = supervisor_service(state).await?;
     let owner = owner.ok_or_else(|| {
         RequestFailure::new(
@@ -1448,7 +3454,97 @@ pub async fn supervisor_read(
             supervisor_conversation(state, SupervisorCaller::Desktop, &project_id, after.unwrap_or(0)).await
         }
         SupervisorReadAction::Memory => supervisor_memory(state, SupervisorCaller::Desktop).await,
+        SupervisorReadAction::Role => Ok(supervisor_role()),
     }
+}
+
+/// This daemon's supervisor role for a local reader: `standby` with the holder, or serving.
+fn supervisor_role() -> Value {
+    match standby_holder() {
+        Some((holder_machine_id, holder_label)) => json!({
+            "standby": true,
+            "holderMachineId": holder_machine_id,
+            "holderLabel": holder_label,
+        }),
+        None => json!({ "standby": false, "holderMachineId": null, "holderLabel": null }),
+    }
+}
+
+/// How often `ferryx-cli mcp` re-reads the daemon's supervisor role after startup. The hub
+/// crate's MCP server has no per-call hook, so the role is followed on this interval: a
+/// takeover elsewhere refuses this process's supervisor reads within one interval.
+const MCP_ROLE_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The daemon's `role` answer, `None` when the daemon cannot be asked (absent, older, or slow).
+async fn ask_daemon_role() -> Option<Value> {
+    use crate::daemon::protocol::SupervisorReadAction;
+    let request = DaemonRequest::SupervisorReadV1 { request: SupervisorReadAction::Role };
+    let exchange = crate::cli::supervisor_goal::exchange_once(SUPERVISOR_READ_CAPABILITY, request, false);
+    let answer = tokio::time::timeout(std::time::Duration::from_secs(15), exchange).await.ok()?;
+    match answer {
+        Ok(DaemonResponse::SupervisorReadV1Ok { value }) => Some(value),
+        _ => None,
+    }
+}
+
+/// Whether this machine runs a supervisor lease client: its persisted lease state exists.
+fn mcp_lease_configured() -> bool {
+    crate::daemon::supervisor_lease_client::lease_file_path()
+        .and_then(|path| crate::daemon::supervisor_lease_client::read_persisted(&path))
+        .is_some()
+}
+
+/// The refusal `ferryx-cli mcp` answers supervisor state with, from the daemon's `answer`.
+/// Fails closed: with a lease client configured, a daemon that cannot answer may be a
+/// standby, so supervisor state is refused (SUPERVISOR_UNAVAILABLE). Without one (an
+/// unleased hub, or an install from before the lease) an unanswered role serves as before.
+fn mcp_refusal(
+    answer: Option<&Value>,
+    lease_configured: bool,
+) -> Option<ferryx_hub::supervisor::request::RequestFailure> {
+    match answer {
+        Some(role) => mcp_role_refusal(role),
+        None if lease_configured => Some(ferryx_hub::supervisor::request::RequestFailure::new(
+            "SUPERVISOR_UNAVAILABLE",
+            "the daemon did not report whether this machine holds the supervisor lease",
+        )),
+        None => None,
+    }
+}
+
+/// Re-reads the role every [`MCP_ROLE_RECHECK`] and hands the refusal to `set` (the hub
+/// crate's standby state in production). A process that started on standby has no hub
+/// database open, so once this machine serves it refuses until restarted instead of
+/// answering from its empty store. Never returns.
+async fn follow_mcp_role<A, Fut, S>(started_on_standby: bool, lease_configured: bool, mut ask: A, set: S)
+where
+    A: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<Value>>,
+    S: Fn(Option<ferryx_hub::supervisor::request::RequestFailure>),
+{
+    let mut ticks = tokio::time::interval(MCP_ROLE_RECHECK);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticks.tick().await;
+    loop {
+        ticks.tick().await;
+        let answer = ask().await;
+        let mut refusal = mcp_refusal(answer.as_ref(), lease_configured);
+        if started_on_standby && refusal.is_none() {
+            refusal = Some(ferryx_hub::supervisor::request::RequestFailure::new(
+                "SUPERVISOR_UNAVAILABLE",
+                "ferryx-cli mcp started without the hub database; restart it to serve supervisor state",
+            ));
+        }
+        set(refusal);
+    }
+}
+
+/// The refusal a `role` answer means for the MCP process.
+fn mcp_role_refusal(role: &Value) -> Option<ferryx_hub::supervisor::request::RequestFailure> {
+    if role["standby"].as_bool() != Some(true) {
+        return None;
+    }
+    Some(ferryx_hub::holder::standby_failure(role["holderMachineId"].as_str(), role["holderLabel"].as_str()))
 }
 
 /// The unified supervisor's part of the snapshot: identity, engine health and every goal's
@@ -1538,7 +3634,7 @@ pub async fn supervisor_goal(
     state: &RemoteGatewayState,
     action: crate::daemon::protocol::SupervisorGoalAction,
 ) -> Result<Value, SupervisorGoalError> {
-    let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
+    let Some((hub, _)) = supervisor_view() else {
         return Err(SupervisorGoalError::Unavailable);
     };
     let mutates = action.mutates();
@@ -1602,7 +3698,7 @@ pub async fn supervisor_dispatch(
     state: &RemoteGatewayState,
     action: crate::daemon::protocol::SupervisorDispatchAction,
 ) -> Result<Value, SupervisorDispatchError> {
-    let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
+    let Some((hub, _)) = supervisor_view() else {
         return Err(SupervisorDispatchError::Unavailable);
     };
     let result = apply_dispatch_action(&hub.pool, action).await?;
@@ -1790,6 +3886,8 @@ async fn apply_goal_action(
 /// or a second scheduler. `hub_stopped` is left as it is: the successor reads it to decide
 /// whether to open the hub.
 pub fn retire_for_handover() {
+    // The lease client is aborted with the other hub tasks, without a release: the handover
+    // (plan todo 9) freezes the lease and hands it to the successor on commit.
     if let Some(aborted) = HUB_TASKS.retire() {
         tracing::info!(aborted, "hub stopped at handover commit; the successor owns Slack, cron, :9119 and control.sock");
     }
@@ -1816,26 +3914,8 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
         gateway: Some(Arc::clone(server.remote_state())),
     });
     let hub = Hub::open(config.clone(), bridge.clone()).await.map_err(|error| error.to_string())?;
-    let directive_judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env())
-        .with_pool(hub.pool.clone());
-    ferryx_hub::owner_directives::current(&hub.pool, &directive_judge)
-        .await
-        .map_err(|error| format!("owner directives initialization failed: {error}"))?;
-    if let Err(error) = ferryx_hub::chat::reply::flush_pending(&hub.pool).await {
-        tracing::warn!(%error, "stored chat replies were not flushed");
-    }
-    if config.supervisor_pane {
-        let preset = ferryx_hub::meta::pane::SupervisorPanePreset::from_parts(
-            config.supervisor_cwd.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
-            Vec::new(),
-        );
-        tracing::info!(title = %preset.title, "supervisor pane preset is armed");
-        if !preset.command.is_empty() {
-            if let Err(error) = bridge.launch_pane(&preset.cwd.to_string_lossy(), &preset.command).await {
-                tracing::warn!(%error, "supervisor pane was not launched");
-            }
-        }
-    }
+    // Stored replies, the supervisor pane and the owner-directive refresh are side effects of
+    // a running hub: they happen in `open_generation`, on the lease holder only.
     if let Err(error) = ferryx_hub::lanes::kibitzer::ensure_schema(&hub.pool).await {
         tracing::warn!(%error, "kibitzer schema was not created");
     }
@@ -1843,8 +3923,19 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     let forced_on = std::env::var("FERRYX_HUB").ok().as_deref() == Some("on");
     let persisted_stop = ferryx_hub::control::is_stopped(&hub.pool).await.unwrap_or(true);
     let stopped = !forced_on && persisted_stop;
+    // Only machines whose owner has not stopped the hub take part in auto-promotion.
+    crate::supervisor_checkpoint::shared().set_hub_stopped(persisted_stop);
+    if let Some(dir) = crate::supervisor_checkpoint::checkpoint_dir() {
+        let store = crate::supervisor_checkpoint::CheckpointStore::new(dir);
+        let newest = tokio::task::spawn_blocking(move || store.newest()).await.ok().flatten();
+        crate::supervisor_checkpoint::shared().set_local(newest);
+    }
     // This daemon owns the hub from here; a later handover commit ends it again.
     server.handover_manager.on_commit(retire_for_handover);
+    // A move reaches the holder over the paired encrypted channel; the publisher checkpoints
+    // while this machine holds the lease and pulls the holder's checkpoint while it stands by.
+    crate::supervisor_move::install_hosts(server.paired_hosts().clone());
+    HUB_TASKS.track(&spawn_checkpoint_publisher());
     // A predecessor from before 2026.1022.7 keeps its hub through the drain. Stop it over
     // control.sock; its stop persists hub_stopped=1, so the value read above is put back.
     #[cfg(unix)]
@@ -1857,31 +3948,133 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
             tracing::warn!(%error, "hub_stopped was not restored after stopping the previous hub");
         }
     }
-    let launch = HubLaunch {
-        server,
-        config,
-        hub,
-        bridge,
-        #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
-        profiles,
-        #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
-        meta_session_id,
+    let remote = Arc::clone(server.remote_state());
+    let handover = Arc::clone(&server.handover_manager);
+    let facts = boot_lease_facts().await;
+    let followers = start_booted(
+        HubLaunch {
+            server,
+            config,
+            hub,
+            bridge,
+            #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
+            profiles,
+            #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
+            meta_session_id,
+            effects: Arc::new(DaemonEffects),
+        },
+        stopped,
+        facts,
+        // Subscribed before the relay is read, so a relay published from here on binds the client.
+        RELAY_PUBLISHED.subscribe(),
+        move || remote.relay_client.read().clone(),
+        move |relay: crate::remote::relay_client::RelayClient, wanted, carried| {
+            let handover_manager = Arc::clone(&handover);
+            async move {
+                let (gate, task) = spawn_lease_client(relay, wanted, handover_manager, carried).await;
+                HUB_TASKS.track(&task);
+                (gate, task)
+            }
+        },
+        serve_control,
+    )
+    .await;
+    for task in &followers {
+        HUB_TASKS.track(task);
+    }
+    Ok(())
+}
+
+/// [`start_opened`] with the pending lease `facts` call for: an enrolled (or
+/// capability-latched) machine never opens a generation unleased while the relay client is
+/// still being restored, nor when its gateway mode is not Relay.
+async fn start_booted<C, R, B, Fut, S>(
+    launch: HubLaunch,
+    stopped: bool,
+    facts: BootLeaseFacts,
+    relay_published: tokio::sync::watch::Receiver<u64>,
+    relay: R,
+    bind: B,
+    serve: S,
+) -> [tokio::task::JoinHandle<()>; 2]
+where
+    C: Send + 'static,
+    R: FnMut() -> Option<C> + Send + 'static,
+    B: FnMut(C, tokio::sync::watch::Sender<bool>, Option<crate::daemon::supervisor_lease_client::LiveGrant>) -> Fut
+        + Send
+        + 'static,
+    Fut: std::future::Future<Output = (Arc<dyn LeaseGate>, tokio::task::JoinHandle<()>)> + Send + 'static,
+    S: FnOnce(Arc<tokio::sync::Mutex<Option<Generation>>>, HubLaunch) + Send,
+{
+    let pending = boot_pending_lease(facts, Arc::clone(launch.server.remote_state()));
+    start_opened(launch, stopped, relay_published, relay, bind, pending, serve).await
+}
+
+/// The rest of [`start`] once the hub is open: the supervisor lease decides which of the
+/// owner's machines runs the hub, so the lease client over `relay()` binds (through `bind`)
+/// and is installed before the boot generation, which runs only on the holder. Without a
+/// relay client an account-less install runs unleased until one is published (see
+/// `follow_relay`); a machine that needs the lease (`pending`: enrolled or capability latched)
+/// holds standby, or provisional per the boot rule, until then. `serve` answers control.sock
+/// for the running slot. Returns the lease and relay followers.
+async fn start_opened<C, R, B, Fut, S>(
+    launch: HubLaunch,
+    stopped: bool,
+    relay_published: tokio::sync::watch::Receiver<u64>,
+    mut relay: R,
+    mut bind: B,
+    pending: Option<Arc<PendingLease>>,
+    serve: S,
+) -> [tokio::task::JoinHandle<()>; 2]
+where
+    C: Send + 'static,
+    R: FnMut() -> Option<C> + Send + 'static,
+    B: FnMut(C, tokio::sync::watch::Sender<bool>, Option<crate::daemon::supervisor_lease_client::LiveGrant>) -> Fut
+        + Send
+        + 'static,
+    Fut: std::future::Future<Output = (Arc<dyn LeaseGate>, tokio::task::JoinHandle<()>)> + Send + 'static,
+    S: FnOnce(Arc<tokio::sync::Mutex<Option<Generation>>>, HubLaunch) + Send,
+{
+    let (wanted, lease_decisions) = tokio::sync::watch::channel(false);
+    let bound = match (relay(), pending) {
+        (Some(client), _) => Some(bind(client, wanted.clone(), None).await),
+        (None, Some(pending)) => {
+            // Enrolled or capability-latched: never a generation unleased. Standby (or
+            // Provisional once the boot wait passed, per the provisional rule) until a relay
+            // client is published; `follow_relay` then aborts the wait and binds the client.
+            let gate: Arc<dyn LeaseGate> = pending.clone();
+            install_holder_gate(Some(Arc::clone(&gate)));
+            let wait = tokio::spawn(provisional_after_boot_wait(pending, wanted.clone()));
+            Some((gate, wait))
+        }
+        (None, None) => {
+            // Account-less install: unleased (fence 0) until a relay is published.
+            install_holder_gate(None);
+            None
+        }
     };
-    let generation = if stopped {
-        None
-    } else {
-        Some(spawn_generation(&launch).await)
-    };
-    let running = Arc::new(tokio::sync::Mutex::new(generation));
-    let _ = SUPERVISOR_VIEW.set((Arc::clone(&launch.hub), Arc::clone(&running)));
-    let _ = SUPERVISOR_LAUNCH.set(launch.clone());
-    serve_control(running, launch);
-    if stopped {
+    let lease = bound.as_ref().map(|(gate, _)| Arc::clone(gate));
+    set_lease_gate(lease.clone());
+    let standby = lease.as_ref().is_some_and(|lease| !lease.allows_hub());
+    let running = boot_hub(&launch, stopped, lease.as_deref()).await;
+    let follower = tokio::spawn(follow_lease(lease_decisions, Arc::clone(&running), promote_generation));
+    let bind_wanted = wanted.clone();
+    let relays = tokio::spawn(follow_relay(
+        relay_published,
+        relay,
+        move |client: C, carried| bind(client, bind_wanted.clone(), carried),
+        bound,
+        wanted,
+    ));
+    serve(running, launch);
+    if standby {
+        tracing::info!("ferryx hub is on standby: another machine holds the supervisor lease");
+    } else if stopped {
         tracing::info!("ferryx hub stayed stopped until hub start (or FERRYX_HUB=on)");
     } else {
         tracing::info!("ferryx hub is up");
     }
-    Ok(())
+    [follower, relays]
 }
 
 #[derive(Clone)]
@@ -1894,6 +4087,8 @@ struct HubLaunch {
     profiles: ferryx_hub::chat::router::ProfileRouter,
     #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
     meta_session_id: String,
+    /// Stored replies, the supervisor pane and the generation's tasks.
+    effects: Arc<dyn GenerationEffects>,
 }
 
 /// Whether the hub HTTP listener is bound, for `hub status`. The guard clears it when the
@@ -1916,7 +4111,7 @@ impl Drop for HttpBound {
 }
 
 #[cfg(unix)]
-fn live_hub(running: bool, config: &HubConfig) -> ferryx_hub::control::LiveHub {
+fn live_hub(running: bool, config: &HubConfig, lease: ferryx_hub::control::LiveLease) -> ferryx_hub::control::LiveHub {
     ferryx_hub::control::LiveHub {
         running,
         http_addr: config.tracker_addr.clone().unwrap_or_else(|| "127.0.0.1:9119".into()),
@@ -1934,6 +4129,7 @@ fn live_hub(running: bool, config: &HubConfig) -> ferryx_hub::control::LiveHub {
         #[cfg(not(feature = "hub-discord"))]
         discord_configured: false,
         version: env!("CARGO_PKG_VERSION").to_owned(),
+        lease: Some(lease),
     }
 }
 
@@ -1944,7 +4140,7 @@ struct Generation {
 impl Generation {
     /// Aborts the generation's tasks and waits for them to end, so a following start
     /// reconciles only after the predecessor dispatcher stopped. On every platform: a setup
-    /// restart ends the generation before it starts the next one.
+    /// restart, a lease stand-down and `hub stop` end the generation before the next starts.
     async fn end(self) {
         for task in &self.tasks {
             task.abort();
@@ -1964,13 +4160,20 @@ fn spawn_supervisor_dispatcher(
     launch: &HubLaunch,
     idle: Arc<ferryx_hub::supervisor::receipts::IdleLedger>,
 ) -> tokio::task::JoinHandle<()> {
+    // Each generation is one holder term: its fence reaches every daemon before a dispatch.
+    let fence_gate = crate::agent_control::fence::dispatcher_fence_gate(
+        launch.bridge.client.clone(),
+        launch.bridge.gateway.clone(),
+    );
+    slot_set(&FENCE_GATE, Some(Arc::clone(&fence_gate)));
     let dispatcher = ferryx_hub::supervisor::dispatcher::Dispatcher::new(
         launch.hub.pool.clone(),
         launch.bridge.clone(),
         launch.bridge.clone(),
         ferryx_hub::agent_control::LOCAL_HOST_ID,
     )
-    .with_idle_ledger(idle);
+    .with_idle_ledger(idle)
+    .with_fence_gate(fence_gate);
     tokio::spawn(dispatcher.run(ferryx_hub::supervisor::dispatcher::dispatch_wake()))
 }
 
@@ -2195,7 +4398,8 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         // reconcile every few minutes. It reads with the bot token; Socket Mode is untouched.
         if let Some(config) = ferryx_hub::chat::slack_turn::installed() {
             if ferryx_hub::chat::slack::app_token().is_some() {
-                tasks.push(tokio::spawn(ferryx_hub::chat::slack_backfill::run_forever(
+                // After a takeover the backfill waits out the old holder's lease like the socket.
+                tasks.push(spawn_after_takeover(ferryx_hub::chat::slack_backfill::run_forever(
                     config,
                     launch.hub.pool.clone(),
                 )));
@@ -2238,6 +4442,8 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
             ferryx_hub::chat::slack_supervisor::SlackWorkTools::new(launch.hub.pool.clone()),
         ));
         tasks.push(tokio::spawn(runtime.clone().supervise()));
+        // Automatic cutover and owner memory seeding run as this generation's task: only on
+        // the lease holder, and a stand-down ends them with the generation.
         tasks.push(tokio::spawn(setup::auto_setup(
             runtime.clone(),
             launch.hub.pool.clone(),
@@ -2293,7 +4499,9 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         let slack_profiles = launch.profiles.clone();
         let slack_meta = launch.meta_session_id.clone();
         let slack_pool = launch.hub.pool.clone();
-        tasks.push(tokio::spawn(async move {
+        // Two sockets never overlap: a new holder opens Slack only after the previous holder's
+        // lease deadline (+5s) passed on this machine's monotonic clock.
+        tasks.push(spawn_after_takeover(async move {
             let owner_for_frames = owner.clone();
             if let Err(error) = ferryx_hub::chat::slack::connect_socket_mode(move |text| {
                 let bridge = slack_bridge.clone();
@@ -2323,7 +4531,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         let discord_profiles = launch.profiles.clone();
         let discord_meta = launch.meta_session_id.clone();
         let discord_pool = launch.hub.pool.clone();
-        tasks.push(tokio::spawn(async move {
+        tasks.push(spawn_discord_gateway(async move {
             if let Err(error) = ferryx_hub::chat::discord::connect_gateway(move |frame| {
                 let bridge = discord_bridge.clone();
                 let profiles = discord_profiles.clone();
@@ -2558,7 +4766,8 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                     }
                 };
                 let running = Arc::clone(&running);
-                let launch = launch.clone();
+                // A promotion may have reopened the hub on an imported database since bind.
+                let launch = supervisor_launch().unwrap_or_else(|| launch.clone());
                 tokio::spawn(async move {
                     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
                     let mut reader = tokio::io::BufReader::new(stream);
@@ -2566,12 +4775,32 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                     if reader.read_line(&mut line).await.is_err() {
                         return;
                     }
-                    let reply = match ferryx_hub::control::parse_control(&line) {
+                    let parsed = ferryx_hub::control::parse_control(&line);
+                    // Holder-only ops are refused on a standby before anything runs.
+                    if let Some(refusal) = parsed.as_ref().ok().and_then(standby_control_refusal) {
+                        let mut stream = reader.into_inner();
+                        let _ = stream.write_all(format!("{refusal}\n").as_bytes()).await;
+                        return;
+                    }
+                    let reply = match parsed {
                         Ok(ferryx_hub::control::ControlOp::Stop) => {
                             let persisted = ferryx_hub::control::mark_stopped(&launch.hub.pool).await;
+                            if persisted.is_ok() {
+                                crate::supervisor_checkpoint::shared().set_hub_stopped(true);
+                            }
                             let previous = running.lock().await.take();
                             if let Some(generation) = previous {
                                 generation.end().await;
+                            }
+                            // A holder's clean stop hands the supervisor on: the final
+                            // checkpoint first (the release records it), then the lease.
+                            let holder = lease_handle().filter(|handle| handle.current_fence() != 0 && handle.is_holder_now());
+                            if let (Ok(()), Some(handle)) = (&persisted, holder) {
+                                crate::supervisor_checkpoint::publish_then_release(
+                                    || publish_checkpoint(&launch),
+                                    || async move { handle.release().await.is_some_and(|role| !role.runs_hub()) },
+                                )
+                                .await;
                             }
                             match persisted {
                                 Ok(()) => "{\"status\":\"ok\",\"op\":\"stop\"}\n",
@@ -2588,6 +4817,11 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                             Ok(_) => "{\"status\":\"ok\",\"op\":\"start\"}\n",
                             Err(HubStartError::HandedOver) => {
                                 "{\"status\":\"failed\",\"error\":\"this daemon handed the hub over to its successor\"}\n"
+                            }
+                            Err(error @ HubStartError::Standby { .. }) => {
+                                let mut stream = reader.into_inner();
+                                let _ = stream.write_all(format!("{}\n", standby_reply(&error)).as_bytes()).await;
+                                return;
                             }
                             Err(_) => "{\"status\":\"failed\",\"error\":\"hub start was not persisted\"}\n",
                         },
@@ -2627,11 +4861,13 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                         }
                         Ok(ferryx_hub::control::ControlOp::Status) => {
                             let running_now = running.lock().await.is_some();
+                            let lease = live_lease(Some(&launch.hub.pool)).await;
                             let report = ferryx_hub::control::status_report(
                                 &launch.hub.pool,
-                                &live_hub(running_now, &launch.config),
+                                &live_hub(running_now, &launch.config, lease),
                             )
                             .await;
+                            let report = with_holder_pairing(report, holder_pairing_state(), holder_pairing_reason());
                             let mut stream = reader.into_inner();
                             let _ = stream.write_all(format!("{report}\n").as_bytes()).await;
                             return;
@@ -2648,24 +4884,10 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                             let _ = stream.write_all(format!("{reply}\n").as_bytes()).await;
                             return;
                         }
-                        Ok(ferryx_hub::control::ControlOp::ReportAdopt(request)) => {
-                            let reply = ferryx_hub::report_adoption::reply(&launch.hub.pool, &request).await;
-                            let mut stream = reader.into_inner();
-                            let _ = stream.write_all(format!("{reply}\n").as_bytes()).await;
-                            return;
-                        }
-                        Ok(ferryx_hub::control::ControlOp::ReportMutate(request)) => {
-                            let reply = ferryx_hub::report_mutation::reply(&launch.hub.pool, &request).await;
-                            let mut stream = reader.into_inner();
-                            let _ = stream.write_all(format!("{reply}\n").as_bytes()).await;
-                            return;
-                        }
-                        Ok(ferryx_hub::control::ControlOp::Report(request)) => {
-                            let reply = ferryx_hub::control::report_reply(
-                                &launch.hub.pool,
-                                &launch.hub.owner_session().storage_key(),
-                                &request,
-                            ).await;
+                        Ok(op @ (ferryx_hub::control::ControlOp::ReportAdopt(_)
+                        | ferryx_hub::control::ControlOp::ReportMutate(_)
+                        | ferryx_hub::control::ControlOp::Report(_))) => {
+                            let reply = report_control_reply(&launch, &op).await.unwrap_or(Value::Null);
                             let mut stream = reader.into_inner();
                             let _ = stream.write_all(format!("{reply}\n").as_bytes()).await;
                             return;
@@ -2820,12 +5042,24 @@ impl ferryx_hub::mcp::OwnerRoute for DaemonOwnerRoute {
         &self,
         envelope: Value,
     ) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+        forward_to_daemon(envelope, true).await
+    }
+}
+
+/// Sends one supervisor request envelope to this machine's daemon (`SupervisorRequestV1` as
+/// the owner's CLI, `mcp` when `ferryx-cli mcp` forwards it), under the daemon's pane peer
+/// check. On standby the daemon forwards it to the holder.
+async fn forward_to_daemon(
+    envelope: Value,
+    mcp: bool,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    {
         use crate::daemon::protocol::{DaemonRequest, DaemonResponse};
         use ferryx_hub::supervisor::request::RequestFailure;
         let request = DaemonRequest::SupervisorRequestV1 {
             envelope,
             cli: true,
-            mcp: true,
+            mcp,
         };
         let exchange = crate::cli::supervisor_goal::exchange_once(
             SUPERVISOR_REQUEST_CAPABILITY,
@@ -2879,7 +5113,22 @@ pub fn run_mcp() -> i32 {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let pool = match ferryx_hub::storage::connect(&path).await {
+        // On standby the hub database is not this machine's to serve: supervisor reads and
+        // writes are refused with the holder, and the file is never opened (an empty
+        // in-memory store backs the agent tools only). The role is re-read while serving.
+        // The lease file read is blocking: off the runtime thread; a failed read fails closed.
+        let lease_configured = tokio::task::spawn_blocking(mcp_lease_configured).await.unwrap_or(true);
+        let standby = mcp_refusal(ask_daemon_role().await.as_ref(), lease_configured);
+        let started_on_standby = standby.is_some();
+        let opened = if standby.is_some() {
+            ferryx_hub::storage::memory().await
+        } else {
+            // A plain open: only the daemon's hub open swaps in a staged checkpoint import.
+            // This process runs beside the daemon, whose pool may hold the database.
+            open_mcp_pool(&path).await
+        };
+        ferryx_hub::holder::set_standby(standby);
+        let pool = match opened {
             Ok(pool) => pool,
             Err(error) => {
                 eprintln!("ferryx mcp: {error}");
@@ -2894,17 +5143,290 @@ pub fn run_mcp() -> i32 {
             tracker_token: config.tracker_owner_token.unwrap_or_default(),
             owner_route: Some(Arc::new(DaemonOwnerRoute)),
         });
-        if let Err(error) = ferryx_hub::mcp::serve(context).await {
-            eprintln!("ferryx mcp: {error}");
-            return 1;
+        let follower =
+            follow_mcp_role(started_on_standby, lease_configured, ask_daemon_role, ferryx_hub::holder::set_standby);
+        tokio::select! {
+            served = ferryx_hub::mcp::serve(context) => match served {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("ferryx mcp: {error}");
+                    1
+                }
+            },
+            () = follower => 0,
         }
-        0
     })
+}
+
+/// The `ferryx-cli mcp` database open: a plain open that leaves a staged checkpoint import
+/// (`hub.sqlite.incoming`) for the daemon's hub open to swap in.
+async fn open_mcp_pool(path: &std::path::Path) -> Result<ferryx_hub::goals::SqlitePool, HubError> {
+    ferryx_hub::storage::connect(path).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn standby_under(holder: &str) -> crate::daemon::supervisor_lease_role::Role {
+        crate::daemon::supervisor_lease_role::Role::Standby {
+            holder_machine_id: Some(holder.to_owned()),
+            holder_label: None,
+            fence: Some(1),
+        }
+    }
+
+    /// A holder move (B -> C) pairs this standby to the new holder at once, not on the next
+    /// 300 s pull; a role naming the same holder again does not pair again.
+    #[tokio::test(start_paused = true)]
+    async fn a_newly_named_holder_is_paired_at_once_and_an_unchanged_one_is_not_repaired() {
+        use holder_link::tests::{FakeAccount, FakeHosts};
+        let limit = std::time::Duration::from_secs(1);
+        let link = Arc::new(holder_link::HolderLink::new());
+        let hosts = Arc::new(FakeHosts::default());
+        let account = Arc::new(FakeAccount { session: true, grants: parking_lot::Mutex::new(Vec::new()) });
+        let (paired_tx, mut paired) = tokio::sync::mpsc::unbounded_channel();
+        let (roles_tx, roles) = tokio::sync::watch::channel(standby_under("mach-b"));
+        let follower = {
+            let (link, hosts, account) = (Arc::clone(&link), Arc::clone(&hosts), Arc::clone(&account));
+            tokio::spawn(async move {
+                let pairing_link = Arc::clone(&link);
+                follow_holder_pairing_with(roles, "mach-a".into(), &link, move |holder| {
+                    let (link, hosts, account) = (Arc::clone(&pairing_link), Arc::clone(&hosts), Arc::clone(&account));
+                    let paired_tx = paired_tx.clone();
+                    async move {
+                        let host = link.holder_host(&holder, hosts.as_ref(), account.as_ref()).await;
+                        let _ = paired_tx.send((holder.machine_id, host.is_some()));
+                    }
+                })
+                .await;
+            })
+        };
+
+        let first = tokio::time::timeout(limit, paired.recv()).await.expect("paired at once").unwrap();
+        assert_eq!(first, (Some("mach-b".to_owned()), true));
+
+        // The same holder under a renewed fence: no second pairing, even well past the backoff.
+        roles_tx.send_replace(crate::daemon::supervisor_lease_role::Role::Standby {
+            holder_machine_id: Some("mach-b".into()),
+            holder_label: None,
+            fence: Some(2),
+        });
+        tokio::time::sleep(holder_link::PAIRING_RETRY * 2).await;
+        assert!(paired.try_recv().is_err(), "an unchanged holder was paired again");
+
+        let moved = tokio::time::Instant::now();
+        roles_tx.send_replace(standby_under("mach-c"));
+        let second = tokio::time::timeout(limit, paired.recv()).await.expect("paired without the 300 s pull").unwrap();
+        assert_eq!(second, (Some("mach-c".to_owned()), true));
+        assert!(moved.elapsed() < limit);
+        assert_eq!(*account.grants.lock(), vec!["mach-b".to_owned(), "mach-c".to_owned()]);
+        assert_eq!(link.pairing_state(), "paired");
+
+        drop(roles_tx);
+        tokio::time::timeout(limit, follower).await.expect("ends with the role stream").unwrap();
+    }
+
+    /// Pull outcomes a test scripts: the instant of every pull, answered from `stored`.
+    fn scripted_pulls(
+        stored: impl Fn(usize) -> bool + Send + 'static,
+    ) -> (impl FnMut() -> std::future::Ready<bool>, tokio::sync::mpsc::UnboundedReceiver<tokio::time::Instant>) {
+        let (pulled_tx, pulled) = tokio::sync::mpsc::unbounded_channel();
+        let mut count = 0;
+        let pull = move || {
+            let _ = pulled_tx.send(tokio::time::Instant::now());
+            count += 1;
+            std::future::ready(stored(count))
+        };
+        (pull, pulled)
+    }
+
+    fn drained(pulled: &mut tokio::sync::mpsc::UnboundedReceiver<tokio::time::Instant>) -> Vec<tokio::time::Instant> {
+        std::iter::from_fn(|| pulled.try_recv().ok()).collect()
+    }
+
+    /// Q6: a standby whose holder has no checkpoint yet pulls again soon (the old code pulled
+    /// once) and stops as soon as the holder's supervisor identity is known.
+    #[tokio::test(start_paused = true)]
+    async fn the_first_standby_pull_retries_until_the_holder_identity_is_known() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (_roles_tx, roles) = tokio::sync::watch::channel(standby_under("mach-b"));
+        let pulls = Arc::new(AtomicUsize::new(0));
+        let (pulled, known_after) = (Arc::clone(&pulls), Arc::clone(&pulls));
+        let started = tokio::time::Instant::now();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            pull_until_holder_checkpoint(
+                roles,
+                "mach-a".into(),
+                FIRST_PUBLISH_RETRY,
+                crate::supervisor_checkpoint::PUBLISH_EVERY,
+                move || {
+                    pulled.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(false)
+                },
+                move || {
+                    let known = (known_after.load(Ordering::SeqCst) >= 3).then(|| "sv-holder".to_owned());
+                    async move { known }
+                },
+            ),
+        )
+        .await
+        .expect("the loop returns once the identity is known");
+
+        assert_eq!(pulls.load(Ordering::SeqCst), 3, "pulled until the identity was known, then stopped");
+        assert_eq!(started.elapsed(), FIRST_PUBLISH_RETRY * 3, "after 5 s, then 10 s");
+    }
+
+    /// Run m: a stored holder checkpoint that names no identity (a young holder's first one,
+    /// published before its supervisor was set up) does not end the retry; it ends once the
+    /// holder's identity is known.
+    #[tokio::test(start_paused = true)]
+    async fn the_first_standby_pull_keeps_pulling_past_a_checkpoint_without_identity() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (_roles_tx, roles) = tokio::sync::watch::channel(standby_under("mach-b"));
+        let pulls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&pulls);
+        let (pull, mut pulled) = scripted_pulls(move |count| {
+            counted.store(count, Ordering::SeqCst);
+            true
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            pull_until_holder_checkpoint(
+                roles,
+                "mach-a".into(),
+                FIRST_PUBLISH_RETRY,
+                crate::supervisor_checkpoint::PUBLISH_EVERY,
+                pull,
+                move || {
+                    let known = (pulls.load(Ordering::SeqCst) >= 4).then(|| "sv-holder".to_owned());
+                    async move { known }
+                },
+            ),
+        )
+        .await
+        .expect("the loop returns once the identity is known");
+        assert_eq!(drained(&mut pulled).len(), 4, "stored checkpoints without identity kept it pulling");
+    }
+
+    /// Run m: a hold whose checkpoints name no supervisor identity yet publishes again after
+    /// 5 s, then backs off to the publish interval instead of exporting every 5 s forever.
+    #[test]
+    fn the_first_publish_retry_backs_off_to_the_publish_interval() {
+        let every = crate::supervisor_checkpoint::PUBLISH_EVERY;
+        let retries: Vec<_> = (0..8).map(|failed| first_publish_retry(failed, every)).collect();
+        let secs: Vec<u64> = retries.iter().map(std::time::Duration::as_secs).collect();
+        assert_eq!(secs[..6], [5, 5, 10, 20, 40, 80]);
+        assert!(retries.iter().all(|retry| *retry <= every), "{retries:?}");
+        assert_eq!(first_publish_retry(40, every), every);
+        assert_eq!(first_publish_retry(u32::MAX, every), every);
+    }
+
+    /// F2: a holder that never publishes (or whose pulls keep failing) is pulled with a backoff
+    /// capped at the publish interval, not every 5 s: 17 pulls in an hour instead of 720.
+    #[tokio::test(start_paused = true)]
+    async fn the_first_standby_pull_backs_off_to_the_publish_interval() {
+        let every = crate::supervisor_checkpoint::PUBLISH_EVERY;
+        let (_roles_tx, roles) = tokio::sync::watch::channel(standby_under("mach-b"));
+        let (pull, mut pulled) = scripted_pulls(|_| false);
+        let retry = tokio::spawn(pull_until_holder_checkpoint(
+            roles,
+            "mach-a".into(),
+            FIRST_PUBLISH_RETRY,
+            every,
+            pull,
+            || async { None::<String> },
+        ));
+        // Paused clock: the runtime jumps straight through the loop's timers.
+        tokio::time::sleep(std::time::Duration::from_secs(60 * 60)).await;
+        retry.abort();
+
+        let pulls = drained(&mut pulled);
+        assert!(pulls.len() <= 17, "{} pulls in an hour", pulls.len());
+        let gaps: Vec<_> = pulls.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        assert_eq!(gaps.first(), Some(&FIRST_PUBLISH_RETRY));
+        assert!(gaps.iter().all(|gap| *gap <= every), "{gaps:?}");
+        assert_eq!(gaps.last(), Some(&every), "capped at the publish interval: {gaps:?}");
+    }
+
+    /// Q6: the retry pauses while this machine is not standby under another holder and pulls
+    /// again when it is (the old code pulled once and returned for good).
+    #[tokio::test(start_paused = true)]
+    async fn the_first_standby_pull_pauses_off_standby_and_resumes_under_a_new_holder() {
+        let limit = std::time::Duration::from_secs(60);
+        let (roles_tx, roles) = tokio::sync::watch::channel(standby_under("mach-b"));
+        let (pull, mut pulled) = scripted_pulls(|_| false);
+        let retry = tokio::spawn(pull_until_holder_checkpoint(
+            roles,
+            "mach-a".into(),
+            FIRST_PUBLISH_RETRY,
+            crate::supervisor_checkpoint::PUBLISH_EVERY,
+            pull,
+            || async { None::<String> },
+        ));
+        for _ in 0..2 {
+            tokio::time::timeout(limit, pulled.recv()).await.expect("pulled again soon").unwrap();
+        }
+
+        roles_tx.send_replace(crate::daemon::supervisor_lease_role::Role::Holder { fence: 2 });
+        tokio::time::sleep(crate::supervisor_checkpoint::PUBLISH_EVERY * 2).await;
+        assert!(pulled.try_recv().is_err(), "no pull while this machine holds the lease");
+
+        roles_tx.send_replace(standby_under("mach-c"));
+        tokio::time::timeout(limit, pulled.recv()).await.expect("pulled under the new holder").unwrap();
+        tokio::time::timeout(limit, pulled.recv()).await.expect("on the short retry again").unwrap();
+
+        drop(roles_tx);
+        tokio::time::timeout(crate::supervisor_checkpoint::PUBLISH_EVERY, retry)
+            .await
+            .expect("the loop ends with the role stream")
+            .unwrap();
+    }
+
+    /// Plan todo 9 wiring: the lease a committed predecessor recorded reaches the successor's
+    /// lease client config exactly once; a later client (a hub restart) acquires normally.
+    #[test]
+    fn the_lease_client_config_carries_the_lease_handed_over_at_commit() {
+        use crate::daemon::handover::HandoverManager;
+        use crate::daemon::handover_transaction::{HandoverState, HandoverTransaction, SupervisorLeaseTransfer};
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("legacy.sock");
+        let identity = legacy.to_string_lossy().into_owned();
+        let lease = SupervisorLeaseTransfer { machine_id: "rec-a".into(), fence: 7, deadline_unix_ms: 1_800_000_105_000 };
+        let mut record = HandoverTransaction::new_simple(&identity, &identity, 1, 0, 0, 0, &identity);
+        record.state = HandoverState::Retired;
+        record.supervisor_lease = Some(lease.clone());
+        std::fs::write(legacy.with_extension("transaction"), serde_json::to_vec(&record).unwrap()).unwrap();
+
+        let successor = HandoverManager::new(root.path().join("successor.sock"));
+        successor.adopt_recorded_supervisor_lease(&legacy);
+        let config = lease_client_config("rec-a".to_owned(), Some("acct".to_owned()), &successor);
+        assert_eq!(config.handed_over, Some(lease));
+        assert_eq!((config.machine_id.as_str(), config.account.as_deref()), ("rec-a", Some("acct")));
+        let again = lease_client_config("rec-a".to_owned(), Some("acct".to_owned()), &successor);
+        assert_eq!(again.handed_over, None, "handed over once");
+    }
+
+    /// `ferryx-cli mcp` runs beside the daemon, whose pool may hold the database: its open
+    /// never swaps a staged import in.
+    #[tokio::test]
+    async fn the_mcp_open_leaves_a_staged_import_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("hub.sqlite");
+        ferryx_hub::storage::connect(&live).await.unwrap().close().await;
+        let incoming = dir.path().join(ferryx_hub::checkpoint_import::INCOMING_DB);
+        std::fs::write(&incoming, b"staged import").unwrap();
+        let pool = open_mcp_pool(&live).await.unwrap();
+        pool.close().await;
+        assert_eq!(std::fs::read(&incoming).unwrap(), b"staged import", "still staged");
+        let swapped = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry.file_name().to_string_lossy().contains(".pre-move-"));
+        assert!(!swapped, "the live database was not moved aside");
+    }
 
     #[test]
     fn each_hub_pane_launch_gets_its_own_spawn_request_id() {
@@ -3166,6 +5688,355 @@ mod tests {
         assert!(excerpt.chars().count() <= 240);
     }
 
+    /// The holder applies a standby's forwarded keystroke note to its own hub DB, attributed to
+    /// the sender machine; an unknown kind writes nothing.
+    #[tokio::test]
+    async fn a_forwarded_keystroke_note_lands_in_the_holders_hub_db_with_the_sender_host() {
+        let pool = lane_pool().await;
+        ferryx_hub::lanes::state::set_host(&pool, "ledger", "mach-a").await.unwrap();
+        let applied = apply_observation_to(
+            &pool,
+            "mach-a",
+            json!({"kind": "keystrokes", "sessionId": "pane-1", "nowMs": 9_000_000_u64}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(applied, json!({"ok": true, "recorded": true, "hostId": "mach-a"}));
+        assert_eq!(turn_rows(&pool).await, vec![("human_correction".to_owned(), None)]);
+        let refused = apply_observation_to(&pool, "mach-a", json!({"kind": "other"})).await.unwrap_err();
+        assert_eq!(refused.code, "INVALID_REQUEST");
+        assert_eq!(turn_rows(&pool).await.len(), 1);
+    }
+
+    fn paired_host(machine_id: &str) -> crate::paired_host::inventory::HostView {
+        use crate::paired_host::inventory::{host_key, AuthStatus, GrantScope};
+        crate::paired_host::inventory::HostView {
+            host_id: host_key("https://relay.test", machine_id).unwrap(),
+            relay_origin: "https://relay.test".into(),
+            machine_id: machine_id.into(),
+            display_label: "Laptop A".into(),
+            grant_scope: GrantScope::Machine,
+            generation: crate::scoped_contracts::Epoch(1),
+            auth_status: AuthStatus::Paired,
+            online: true,
+            ssh_host_id: None,
+            device_id: None,
+            unavailable_reason: None,
+        }
+    }
+
+    /// Paired machine hosts the relay did not list are named by label, and a shortfall the
+    /// paired hosts cannot name is counted; an older relay (no list) names nobody.
+    #[test]
+    fn machines_without_lease_names_paired_hosts_the_relay_did_not_list() {
+        use crate::daemon::supervisor_lease_client::LeasePeers;
+        let mut desk = paired_host("mach-c");
+        desk.display_label = "Desk".into();
+        let hosts = [paired_host("mach-a"), desk];
+        let peers = |capable: &[&str], count| LeasePeers {
+            capable: capable.iter().map(|id| (*id).to_owned()).collect(),
+            account_machine_count: Some(count),
+        };
+
+        assert!(machines_without_lease(None, &hosts).is_empty(), "an older relay names nobody");
+        assert!(machines_without_lease(Some(&peers(&["me", "mach-a", "mach-c"], 3)), &hosts).is_empty());
+        assert_eq!(machines_without_lease(Some(&peers(&["me", "mach-a"], 3)), &hosts), ["Desk"]);
+        assert_eq!(
+            machines_without_lease(Some(&peers(&["me"], 4)), &hosts),
+            ["Laptop A", "Desk", "1 unpaired machine"]
+        );
+        assert_eq!(machines_without_lease(Some(&peers(&["me"], 3)), &[]), ["2 unpaired machines"]);
+    }
+
+    /// A forwarding standby is the holder's paired host `<origin>/host/<machine>`, the key the
+    /// holder bound its panes under, never its bare machine id; an unpaired machine maps to none.
+    #[test]
+    fn a_forwarding_standby_maps_to_the_holders_paired_host_key() {
+        let hosts = [paired_host("mach-a"), paired_host("mach-c")];
+        assert_eq!(observer_host(&hosts, "mach-a").as_deref(), Some("https://relay.test/host/mach-a"));
+        assert_eq!(observer_host(&hosts, "mach-z"), None);
+    }
+
+    /// The observe entry point the HTTP route calls attributes an observation to the calling
+    /// device's machine, mapped to the paired host key this holder bound its panes under: never
+    /// the holder's own (`local`) lane with the same pane id, never the bare machine id. A
+    /// device naming no machine, or a machine this holder has not paired, writes nothing.
+    #[tokio::test]
+    async fn an_observation_is_attributed_to_the_calling_devices_paired_host() {
+        set_lease_gate(None);
+        let pool = lane_pool().await;
+        let hosts = [paired_host("mach-a"), paired_host("mach-c")];
+        let host_a = observer_host(&hosts, "mach-a").unwrap();
+        ferryx_hub::lanes::state::insert_lane(&pool, "remote-ledger", "Remote", "lead", "/tmp", "file marker")
+            .await
+            .unwrap();
+        ferryx_hub::lanes::state::set_pane(&pool, "remote-ledger", "pane-1").await.unwrap();
+        ferryx_hub::lanes::state::set_host(&pool, "remote-ledger", &host_a).await.unwrap();
+        let effects = CountingEffects::new();
+        let (launch, _) = test_launch(pool.clone(), HubConfig::default(), &effects);
+        publish_hub(&launch, &Arc::new(tokio::sync::Mutex::new(None)));
+        let op = AgentControlOp::Send {
+            session_id: "pane-1".into(),
+            text: "please also fix the docs".into(),
+            request_id: Some("lane-ledger-owner-msg9".into()),
+        };
+        let observation = json!({"kind": "agentControlInput", "op": op});
+        let remote_rows = || {
+            let pool = pool.clone();
+            async move { ferryx_hub::goals::turns::turns_of(&pool, "remote-ledger").await.unwrap().len() }
+        };
+
+        let applied = apply_observation(Some("mach-a"), &hosts, observation.clone()).await.unwrap();
+        assert_eq!(applied["hostId"], host_a.as_str(), "attributed to the caller's paired host");
+        assert_eq!(applied["recorded"], true);
+        assert_eq!(remote_rows().await, 1, "the caller's lane got the turn");
+        assert!(turn_rows(&pool).await.is_empty(), "the holder's own pane-1 lane did not");
+
+        let anonymous = apply_observation(None, &hosts, observation.clone()).await.unwrap_err();
+        assert_eq!(anonymous.code, "FORBIDDEN");
+        let unpaired = apply_observation(Some("mach-z"), &hosts, observation).await.unwrap_err();
+        assert_eq!(unpaired.code, "NOT_FOUND");
+        assert_eq!(remote_rows().await, 1);
+        assert!(turn_rows(&pool).await.is_empty());
+        slot_set(&SUPERVISOR_VIEW, None);
+        slot_set(&SUPERVISOR_LAUNCH, None);
+    }
+
+    /// Pane ids are only unique per machine: a standby's keystrokes and relayed input land on
+    /// the lane bound to that pane on the standby's paired host, never on the holder's own lane
+    /// with the same pane id, and a pane of another host records nothing.
+    #[tokio::test]
+    async fn forwarded_keystrokes_and_input_match_the_lane_of_the_senders_host() {
+        let pool = lane_pool().await;
+        let host_a = observer_host(&[paired_host("mach-a")], "mach-a").unwrap();
+        ferryx_hub::lanes::state::insert_lane(&pool, "remote-ledger", "Remote", "lead", "/tmp", "file marker")
+            .await
+            .unwrap();
+        ferryx_hub::lanes::state::set_pane(&pool, "remote-ledger", "pane-1").await.unwrap();
+        ferryx_hub::lanes::state::set_host(&pool, "remote-ledger", &host_a).await.unwrap();
+        let remote_rows = || {
+            let pool = pool.clone();
+            async move { ferryx_hub::goals::turns::turns_of(&pool, "remote-ledger").await.unwrap().len() }
+        };
+
+        let applied = apply_observation_to(
+            &pool,
+            &host_a,
+            json!({"kind": "keystrokes", "sessionId": "pane-1", "nowMs": 7_000_000_u64}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(applied["recorded"], true);
+        assert_eq!(remote_rows().await, 1, "the sender's lane got the note");
+        assert!(turn_rows(&pool).await.is_empty(), "the holder's own pane-1 lane did not");
+
+        let op = AgentControlOp::Send {
+            session_id: "pane-1".into(),
+            text: "please also fix the docs".into(),
+            request_id: Some("lane-ledger-owner-msg9".into()),
+        };
+        let applied = apply_observation_to(&pool, &host_a, json!({"kind": "agentControlInput", "op": op}))
+            .await
+            .unwrap();
+        assert_eq!(applied["recorded"], true);
+        assert_eq!(remote_rows().await, 2);
+        assert!(turn_rows(&pool).await.is_empty());
+
+        let elsewhere = observer_host(&[paired_host("mach-c")], "mach-c").unwrap();
+        let applied = apply_observation_to(
+            &pool,
+            &elsewhere,
+            json!({"kind": "keystrokes", "sessionId": "pane-1", "nowMs": 7_000_000_u64}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(applied["recorded"], false, "pane-1 of another host is no lane here");
+        assert_eq!(remote_rows().await, 2);
+        assert!(turn_rows(&pool).await.is_empty());
+    }
+
+    /// A forwarded worker report matches the goal bound under the sender's paired host key.
+    #[tokio::test]
+    async fn a_forwarded_worker_report_matches_the_binding_under_the_senders_host_key() {
+        use ferryx_hub::supervisor as sv;
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let host_a = observer_host(&[paired_host("mach-a")], "mach-a").unwrap();
+        let owner = "desktop:qa-owner";
+        let (identity, project, _) =
+            sv::provision_owner(&pool, owner, "qa", "github.com/example/qa", &host_a, "/qa/repo/.git")
+                .await
+                .unwrap();
+        let request = sv::AdmitRequest {
+            supervisor_id: identity.supervisor_id.clone(),
+            owner_principal: owner.into(),
+            source_adapter: sv::ChannelProvider::Desktop,
+            source_message_id: "qa-remote-1".into(),
+            body: "Create result.txt containing READY.".into(),
+            project_id: project.project_id.clone(),
+            channel_binding_id: None,
+            target: sv::ExecutionTarget { kind: sv::ExecutionKind::Pty, host_id: host_a.clone() },
+            title: "Write result.txt".into(),
+            cwd: "/qa/repo".into(),
+            instruction: "Create result.txt containing READY.".into(),
+            requirements: vec![ferryx_hub::goals::contract::RequirementSpec {
+                id: "r1".into(),
+                text: "result.txt contains READY".into(),
+                verifier: "verify.sh exits 0".into(),
+            }],
+            mode: ferryx_hub::goals::GoalMode::Full,
+            turn_limit: sv::DEFAULT_TURN_LIMIT,
+            operation_grant: Vec::new(),
+        };
+        let goal_id = sv::admit_request(&pool, &request).await.unwrap().receipt.goal_id;
+        sv::attach_session(&pool, &goal_id, 1, "pane-remote").await.unwrap();
+        let report = json!({"kind": "workerReport", "sessionId": "pane-remote", "eventId": "r-1", "body": "progress"});
+
+        let applied = apply_observation_to(&pool, &host_a, report.clone()).await.unwrap();
+        assert_eq!(applied["ok"], true);
+        assert_eq!(applied["goalId"], goal_id.as_str());
+        let bare_machine = apply_observation_to(&pool, "mach-a", report).await.unwrap_err();
+        assert_eq!(bare_machine.code, "NOT_FOUND", "the bare machine id binds nothing");
+    }
+
+    /// `hub status` names the pairing next to `holderPaired`, and the stderr hint carries it.
+    #[tokio::test]
+    async fn hub_status_reports_the_holder_pairing_state() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let live = ferryx_hub::control::LiveHub {
+            lease: Some(lease_status(Some(&FakeLease::new(false, false) as &dyn LeaseGate))),
+            ..Default::default()
+        };
+        let report = with_holder_pairing(ferryx_hub::control::status_report(&pool, &live).await, "not paired to holder", None);
+        assert_eq!(report["supervisor_lease"]["holderPairing"], "not paired to holder");
+        assert!(report["supervisor_lease"].get("holderPairingReason").is_none());
+        assert!(report["supervisor_lease"]["holderPaired"].is_boolean());
+        assert!(report["supervisor_lease"]["observeDropped"].is_u64());
+        let hint = status_hint_line(ferryx_hub::control::ControlOp::Status, &report.to_string()).unwrap();
+        assert!(hint.ends_with("holder pairing: not paired to holder"), "{hint}");
+
+        let report = with_holder_pairing(
+            ferryx_hub::control::status_report(&pool, &live).await,
+            "not paired to holder",
+            Some(holder_link::NEEDS_LOGIN_REASON),
+        );
+        assert_eq!(report["supervisor_lease"]["holderPairingReason"], holder_link::NEEDS_LOGIN_REASON);
+        let hint = status_hint_line(ferryx_hub::control::ControlOp::Status, &report.to_string()).unwrap();
+        assert!(hint.contains("ferryx account login"), "{hint}");
+    }
+
+    /// The production Slack and Discord spawns wait out the lease's takeover wait before their
+    /// task runs.
+    #[tokio::test(start_paused = true)]
+    async fn the_slack_spawn_waits_out_the_takeover_before_connecting() {
+        struct Takeover;
+        #[async_trait]
+        impl LeaseGate for Takeover {
+            fn allows_hub(&self) -> bool {
+                true
+            }
+            fn current_role(&self) -> Role {
+                Role::Holder { fence: 8 }
+            }
+            async fn try_acquire(&self) -> Option<Role> {
+                Some(self.current_role())
+            }
+            fn takeover_wait(&self) -> std::time::Duration {
+                std::time::Duration::from_secs(95)
+            }
+        }
+        set_lease_gate(Some(Arc::new(Takeover) as Arc<dyn LeaseGate>));
+        let started = tokio::time::Instant::now();
+        let slack = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let discord = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (slack_flag, discord_flag) = (Arc::clone(&slack), Arc::clone(&discord));
+        let slack_task = spawn_after_takeover(async move {
+            slack_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::Instant::now()
+        });
+        let discord_task = spawn_discord_gateway(async move {
+            discord_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::Instant::now()
+        });
+        set_lease_gate(None);
+        tokio::time::sleep(std::time::Duration::from_secs(94)).await;
+        assert!(!slack.load(std::sync::atomic::Ordering::SeqCst), "slack connected before the old deadline");
+        assert!(!discord.load(std::sync::atomic::Ordering::SeqCst), "discord connected before the old deadline");
+        for (name, task) in [("slack", slack_task), ("discord", discord_task)] {
+            let at = task.await.unwrap();
+            assert!(at - started >= std::time::Duration::from_secs(95), "{name} connected after {:?}", at - started);
+        }
+    }
+
+    /// `ferryx-cli mcp` fails closed: with a lease client configured, an unanswered role
+    /// refuses supervisor state; without one it serves as before.
+    #[test]
+    fn the_mcp_role_fails_closed_when_a_leased_daemon_cannot_answer() {
+        let refused = mcp_refusal(None, true).expect("a leased machine refuses");
+        assert_eq!(refused.code, "SUPERVISOR_UNAVAILABLE");
+        assert!(mcp_refusal(None, false).is_none(), "an unleased hub serves as before");
+        let standby = json!({"standby": true, "holderMachineId": "mach-b", "holderLabel": "Laptop B"});
+        assert_eq!(mcp_refusal(Some(&standby), true).unwrap().code, ferryx_hub::holder::SUPERVISOR_STANDBY);
+        assert!(mcp_refusal(Some(&json!({"standby": false})), true).is_none());
+    }
+
+    /// The role `ferryx-cli mcp` asks the daemon for reports a standby with its holder, so the
+    /// MCP process refuses supervisor writes there; a daemon without a lease client serves.
+    #[test]
+    fn a_standby_daemon_reports_its_role_so_mcp_refuses_writes() {
+        stand_by_for_test(Some(("mach-b", "Laptop B")));
+        let standby = supervisor_role();
+        stand_by_for_test(None);
+        let serving = supervisor_role();
+
+        assert_eq!(standby["standby"], json!(true), "{standby}");
+        assert_eq!(standby["holderMachineId"], json!("mach-b"));
+        let refused = mcp_refusal(Some(&standby), true).expect("a standby refuses MCP supervisor writes");
+        assert_eq!(refused.code, ferryx_hub::holder::SUPERVISOR_STANDBY);
+        assert_eq!(refused.holder, Some((Some("mach-b".to_owned()), Some("Laptop B".to_owned()))));
+        assert_eq!(serving["standby"], json!(false), "{serving}");
+        assert!(mcp_refusal(Some(&serving), true).is_none(), "a serving daemon lets MCP write");
+    }
+
+    /// The role is re-read while `ferryx-cli mcp` serves: a takeover elsewhere refuses with
+    /// the new holder on the next check, and a process that started on standby never serves
+    /// its empty store.
+    #[tokio::test(start_paused = true)]
+    async fn the_mcp_role_is_rechecked_while_serving() {
+        type Seen = Arc<std::sync::Mutex<Vec<Option<String>>>>;
+        let follow = |started_on_standby: bool, answers: Vec<Option<Value>>| {
+            let seen: Seen = Arc::default();
+            let record = Arc::clone(&seen);
+            let answers = Arc::new(std::sync::Mutex::new(answers.into_iter()));
+            let task = tokio::spawn(follow_mcp_role(
+                started_on_standby,
+                true,
+                move || {
+                    let next = answers.lock().unwrap().next().flatten();
+                    async move { next }
+                },
+                move |refusal: Option<ferryx_hub::supervisor::request::RequestFailure>| {
+                    record.lock().unwrap().push(refusal.map(|refusal| refusal.code));
+                },
+            ));
+            (seen, task)
+        };
+        let serving = json!({"standby": false});
+        let standby = json!({"standby": true, "holderMachineId": "mach-b", "holderLabel": "Laptop B"});
+
+        let (seen, task) = follow(false, vec![Some(serving.clone()), Some(standby.clone()), None]);
+        tokio::time::sleep(MCP_ROLE_RECHECK * 3 + std::time::Duration::from_millis(1)).await;
+        task.abort();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![None, Some("SUPERVISOR_STANDBY".to_owned()), Some("SUPERVISOR_UNAVAILABLE".to_owned())]
+        );
+
+        let (seen, task) = follow(true, vec![Some(serving)]);
+        tokio::time::sleep(MCP_ROLE_RECHECK + std::time::Duration::from_millis(1)).await;
+        task.abort();
+        assert_eq!(*seen.lock().unwrap(), vec![Some("SUPERVISOR_UNAVAILABLE".to_owned())]);
+    }
+
     #[tokio::test]
     async fn a_supervisor_goal_send_records_a_supervisor_proposal() {
         let pool = lane_pool().await;
@@ -3229,5 +6100,1207 @@ mod tests {
             assert!(refused.to_string().starts_with("MHC_NOT_RUNNING:"), "{refused}");
         }
         assert_eq!(SupervisorEngineError::Unavailable.code(), "SUPERVISOR_UNAVAILABLE");
+    }
+
+    use crate::daemon::supervisor_lease_role::Role;
+
+    /// A lease client stub: whether the hub may run now, and what an acquire turns it into.
+    struct FakeLease {
+        allows: std::sync::atomic::AtomicBool,
+        acquire_grants: bool,
+        acquires: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FakeLease {
+        fn new(allows: bool, acquire_grants: bool) -> Self {
+            Self {
+                allows: std::sync::atomic::AtomicBool::new(allows),
+                acquire_grants,
+                acquires: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    fn held_by_b() -> Role {
+        Role::Standby {
+            holder_machine_id: Some("mach-b".into()),
+            holder_label: Some("Laptop B".into()),
+            fence: Some(7),
+        }
+    }
+
+    #[async_trait]
+    impl LeaseGate for FakeLease {
+        fn allows_hub(&self) -> bool {
+            self.allows.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn current_role(&self) -> Role {
+            if self.allows_hub() { Role::Holder { fence: 7 } } else { held_by_b() }
+        }
+
+        async fn try_acquire(&self) -> Option<Role> {
+            self.acquires.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.acquire_grants {
+                self.allows.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Some(self.current_role())
+        }
+    }
+
+    /// One generation task that never ends on its own; the receiver errors once it is aborted.
+    fn pending_generation() -> (Generation, tokio::sync::oneshot::Receiver<()>) {
+        let (alive, ended) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _alive = alive;
+            std::future::pending::<()>().await;
+        });
+        (Generation { tasks: vec![task] }, ended)
+    }
+
+    /// Stands in for `open_generation` (stored replies, supervisor pane, then the tasks):
+    /// counts how often a start reached it.
+    async fn counting_spawn(calls: &std::sync::atomic::AtomicUsize) -> Generation {
+        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Generation { tasks: Vec::new() }
+    }
+
+    #[tokio::test]
+    async fn a_start_on_standby_is_refused_with_the_holder_and_spawns_nothing() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::control::mark_stopped(&pool).await.unwrap();
+        let running = tokio::sync::Mutex::new(None);
+        let lease = FakeLease::new(false, false);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+
+        let refused = gated_start(&running, &pool, Some(&lease as &dyn LeaseGate), || counting_spawn(&calls)).await.unwrap_err();
+
+        assert!(
+            matches!(&refused, HubStartError::Standby { holder_machine_id, holder_label }
+                if holder_machine_id.as_deref() == Some("mach-b") && holder_label.as_deref() == Some("Laptop B")),
+            "{refused:?}"
+        );
+        assert_eq!(lease.acquires.load(std::sync::atomic::Ordering::SeqCst), 1, "asked for the lease once, unforced");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "no replies flushed, no pane, no tasks");
+        assert!(running.lock().await.is_none());
+        assert_eq!(HUB_TASKS.live(), 0);
+        assert!(ferryx_hub::control::is_stopped(&pool).await.unwrap(), "a refused start writes nothing");
+        assert_eq!(
+            standby_reply(&refused),
+            json!({"status": "standby", "op": "start", "holder": "Laptop B"})
+        );
+        assert!(!ferryx_hub::control::reply_ok(&standby_reply(&refused).to_string()), "the CLI exits non-zero");
+    }
+
+    /// `ferryx-cli mcp` reads the daemon's role before it opens the hub database: a standby
+    /// answer becomes SUPERVISOR_STANDBY naming the holder; a serving or older daemon none.
+    #[test]
+    fn the_mcp_role_answer_on_standby_refuses_with_the_holder() {
+        let refused = mcp_role_refusal(&json!({"standby": true, "holderMachineId": "mach-b", "holderLabel": "Laptop B"}))
+            .expect("standby refuses");
+        assert_eq!(refused.code, ferryx_hub::holder::SUPERVISOR_STANDBY);
+        assert_eq!(refused.holder, Some((Some("mach-b".into()), Some("Laptop B".into()))));
+        assert!(mcp_role_refusal(&json!({"standby": false})).is_none());
+        assert!(mcp_role_refusal(&json!({})).is_none(), "an older daemon serves as before");
+    }
+
+    /// The lease is re-read at use: one installed predicate flips every gate.
+    #[tokio::test]
+    async fn the_installed_holder_gate_follows_the_lease_now() {
+        let lease = Arc::new(FakeLease::new(false, false));
+        let gate: Arc<dyn LeaseGate> = lease.clone();
+        let predicate: ferryx_hub::holder::HolderGate = Arc::new(move || gate.may_act_now());
+        let flag = Arc::clone(&lease);
+        ferryx_hub::holder::scope(predicate, async move {
+            assert!(!ferryx_hub::holder::is_holder_now());
+            flag.allows.store(true, std::sync::atomic::Ordering::SeqCst);
+            assert!(ferryx_hub::holder::is_holder_now());
+        })
+        .await;
+    }
+
+    /// A standby that has known no holder for `unknown_for`.
+    struct NoHolder {
+        unknown_for: std::time::Duration,
+    }
+
+    #[async_trait]
+    impl LeaseGate for NoHolder {
+        fn allows_hub(&self) -> bool {
+            false
+        }
+
+        fn current_role(&self) -> Role {
+            Role::standby_unknown()
+        }
+
+        async fn try_acquire(&self) -> Option<Role> {
+            Some(Role::standby_unknown())
+        }
+
+        fn no_holder_for(&self) -> Option<std::time::Duration> {
+            Some(self.unknown_for)
+        }
+    }
+
+    #[test]
+    fn the_lease_status_reports_the_holder_and_the_standby_role() {
+        let holder = lease_status(Some(&FakeLease::new(true, false) as &dyn LeaseGate));
+        let wire = serde_json::to_value(&holder).unwrap();
+        assert_eq!(wire["role"], "holder");
+        assert_eq!(wire["fence"], 7);
+        assert_eq!(wire["leaseExpiresIn"], 0, "the fake holds no expiring grant");
+        assert!(wire["holderMachineId"].is_null());
+
+        let standby = lease_status(Some(&FakeLease::new(false, false) as &dyn LeaseGate));
+        let wire = serde_json::to_value(&standby).unwrap();
+        assert_eq!(wire["role"], "standby");
+        assert_eq!(wire["holderMachineId"], "mach-b");
+        assert_eq!(wire["holderLabel"], "Laptop B");
+        assert_eq!(wire["fence"], 7);
+        assert!(wire["holderPaired"].is_boolean());
+        assert!(wire["observeDropped"].is_u64());
+        assert!(!standby.no_holder_past_ttl);
+        for absent in ["checkpointId", "checkpointAge", "promotionBlockReason", "adoptable"] {
+            assert!(wire.get(absent).is_none(), "{absent} in {wire}");
+        }
+
+        let unleased = lease_status(None);
+        assert_eq!(unleased.role, ferryx_hub::control::LeaseRole::Holder, "no lease client runs the hub");
+        assert_eq!(unleased.fence, 0);
+    }
+
+    /// The status `adoptable` field carries the archived goals the owner can adopt, pinned
+    /// to its wire fields, and is absent when there are none.
+    #[test]
+    fn the_lease_status_reports_the_adoptable_archived_goals() {
+        let none = ferryx_hub::control::LiveLease { adoptable: status_adoptable(Vec::new()), ..Default::default() };
+        let wire = serde_json::to_value(&none).unwrap();
+        assert!(wire.get("adoptable").is_none(), "{wire}");
+
+        let goal = ferryx_hub::adoption::AdoptableGoal {
+            goal_id: "goal-1".into(),
+            title: "Ship it".into(),
+            from_machine: "mach-a".into(),
+            supervisor_id: "sup-1".into(),
+            project_name: "ferryx".into(),
+            run_state: "running".into(),
+        };
+        let some = ferryx_hub::control::LiveLease { adoptable: status_adoptable(vec![goal]), ..Default::default() };
+        let wire = serde_json::to_value(&some).unwrap();
+        assert_eq!(
+            wire["adoptable"],
+            json!([{"goalId": "goal-1", "title": "Ship it", "supervisorId": "sup-1", "fromMachine": "mach-a"}])
+        );
+    }
+
+    /// A standby with a recorded checkpoint reports its id, its age and why it does not
+    /// take over, in the status and snapshot wire shape.
+    #[test]
+    fn a_standby_status_reports_its_checkpoint_and_the_promotion_block() {
+        use crate::supervisor_checkpoint::{CheckpointState, LeaseRefusal, StoredCheckpoint};
+        let have = "a".repeat(64);
+        let expected = "b".repeat(64);
+        let checkpoints = CheckpointState::default();
+        checkpoints.set_local(Some(StoredCheckpoint { id: have.clone(), at: 1_000, pulled: true }));
+        checkpoints.note_refusal(Some(LeaseRefusal {
+            code: crate::daemon::supervisor_lease_role::LEASE_CHECKPOINT_MISMATCH.to_owned(),
+            expected_checkpoint: Some(expected.clone()),
+            holder_machine_id: None,
+            holder_label: None,
+        }));
+        let standby = FakeLease::new(false, false);
+
+        let stale = lease_status_with(Some(&standby as &dyn LeaseGate), checkpoints.status(1_090));
+        let wire = serde_json::to_value(&stale).unwrap();
+        assert_eq!(wire["role"], "standby");
+        assert_eq!(wire["checkpointId"], have.as_str());
+        assert_eq!(wire["checkpointAge"], 90);
+        assert_eq!(wire["promotionBlockReason"]["code"], "CHECKPOINT_STALE");
+        let message = wire["promotionBlockReason"]["message"].as_str().unwrap();
+        assert!(message.contains(&expected), "{message}");
+        assert_eq!(wire["promotionBlockReason"].as_object().unwrap().len(), 2, "{wire}");
+
+        checkpoints.set_hub_stopped(true);
+        let stopped = lease_status_with(Some(&standby as &dyn LeaseGate), checkpoints.status(1_090));
+        let wire = serde_json::to_value(&stopped).unwrap();
+        assert_eq!(wire["promotionBlockReason"]["code"], "HUB_STOPPED");
+        assert_eq!(wire["checkpointId"], have.as_str());
+
+        let nothing = lease_status_with(Some(&standby as &dyn LeaseGate), CheckpointState::default().status(1_090));
+        let wire = serde_json::to_value(&nothing).unwrap();
+        for absent in ["checkpointId", "checkpointAge", "promotionBlockReason"] {
+            assert!(wire.get(absent).is_none(), "{absent} in {wire}");
+        }
+    }
+
+    /// A standby is healthy; one that has known no holder for longer than the TTL is not.
+    #[tokio::test]
+    async fn a_standby_status_is_healthy_until_no_holder_is_known_past_the_ttl() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let ttl = std::time::Duration::from_secs(crate::account::supervisor_lease::TTL_SECS);
+        let live = |lease: ferryx_hub::control::LiveLease| ferryx_hub::control::LiveHub {
+            lease: Some(lease),
+            ..Default::default()
+        };
+
+        let known = ferryx_hub::control::status_report(
+            &pool,
+            &live(lease_status(Some(&FakeLease::new(false, false) as &dyn LeaseGate))),
+        )
+        .await;
+        assert_eq!(known["healthy"], true, "{known}");
+        assert_eq!(known["supervisor_lease"]["role"], "standby");
+        let hint = status_hint_line(ferryx_hub::control::ControlOp::Status, &known.to_string()).unwrap();
+        assert!(hint.starts_with("status_hint ") && hint.contains("Laptop B"), "{hint}");
+        assert!(status_hint_line(ferryx_hub::control::ControlOp::Start, &known.to_string()).is_none());
+
+        let at_ttl = lease_status(Some(&NoHolder { unknown_for: ttl } as &dyn LeaseGate));
+        assert!(!at_ttl.no_holder_past_ttl);
+        let past = ferryx_hub::control::status_report(
+            &pool,
+            &live(lease_status(Some(&NoHolder { unknown_for: ttl + std::time::Duration::from_secs(1) } as &dyn LeaseGate))),
+        )
+        .await;
+        assert_eq!(past["healthy"], false);
+        assert_eq!(past["problems"], json!(["no supervisor holds the lease"]));
+    }
+
+    /// The snapshot the desktop IPC and the phone API both serve carries the lease fields.
+    #[tokio::test]
+    async fn the_supervisor_snapshot_hub_reports_the_lease_role() {
+        let server = DaemonServer::new();
+        set_lease_gate(Some(Arc::new(FakeLease::new(false, false)) as Arc<dyn LeaseGate>));
+        let standby = supervisor_snapshot(server.remote_state()).await;
+        let hub = &standby["hub"];
+        assert_eq!(hub["available"], false);
+        assert_eq!(hub["role"], "standby");
+        assert_eq!(hub["holderMachineId"], "mach-b");
+        assert_eq!(hub["holderLabel"], "Laptop B");
+        assert!(hub["holderPaired"].is_boolean());
+        assert_eq!(hub["unmappedHosts"], json!([]));
+        assert_eq!(hub["unreachableHosts"], json!([]));
+        assert!(hub["observeDropped"].is_u64());
+        assert!(hub["holderPairing"].is_string(), "the pairing state sits next to holderPaired");
+
+        set_lease_gate(Some(Arc::new(FakeLease::new(true, false)) as Arc<dyn LeaseGate>));
+        let holder = supervisor_snapshot(server.remote_state()).await;
+        assert_eq!(holder["hub"]["role"], "holder");
+        assert_eq!(holder["hub"]["fence"], 7);
+        assert!(holder["hub"]["holderMachineId"].is_null());
+        assert!(holder["hub"]["leaseExpiresIn"].is_u64());
+        set_lease_gate(None);
+    }
+
+    #[tokio::test]
+    async fn a_standby_start_that_wins_the_lease_runs_the_generation() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::control::mark_stopped(&pool).await.unwrap();
+        let running = tokio::sync::Mutex::new(None);
+        let lease = FakeLease::new(false, true);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+
+        let started = gated_start(&running, &pool, Some(&lease as &dyn LeaseGate), || counting_spawn(&calls)).await.unwrap();
+
+        assert!(started);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(running.lock().await.is_some());
+        assert!(!ferryx_hub::control::is_stopped(&pool).await.unwrap(), "start clears the owner's stop");
+    }
+
+    #[tokio::test]
+    async fn an_unleased_daemon_starts_as_before() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let running = tokio::sync::Mutex::new(None);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        assert!(gated_start(&running, &pool, None, || counting_spawn(&calls)).await.unwrap());
+        assert!(!gated_start(&running, &pool, None, || counting_spawn(&calls)).await.unwrap(), "already running");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// A move whose export fails or whose release the relay does not acknowledge restarts the
+    /// generation it stood down and reports the error; a released move leaves the slot empty.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_move_release_restarts_the_generation_and_a_released_one_does_not() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for (export_ok, released, code) in [
+            (false, true, Some("CHECKPOINT_EXPORT_FAILED")),
+            (true, false, Some("SUPERVISOR_UNAVAILABLE")),
+            (true, true, None),
+        ] {
+            let (generation, ended) = pending_generation();
+            let running = tokio::sync::Mutex::new(Some(generation));
+            let releases = AtomicUsize::new(0);
+            let restarts = AtomicUsize::new(0);
+            let result = release_generation_to(
+                &running,
+                || async move { if export_ok { Ok("c".repeat(64)) } else { Err("disk full".to_owned()) } },
+                || {
+                    releases.fetch_add(1, Ordering::SeqCst);
+                    async move { released }
+                },
+                || {
+                    restarts.fetch_add(1, Ordering::SeqCst);
+                    async { Some(Generation { tasks: Vec::new() }) }
+                },
+            )
+            .await;
+
+            assert!(ended.await.is_err(), "the generation was quiesced before the export");
+            assert_eq!(result.as_ref().err().map(|error| error.code.as_str()), code);
+            // No release is attempted without a published checkpoint.
+            assert_eq!(releases.load(Ordering::SeqCst), usize::from(export_ok));
+            let failed = code.is_some();
+            assert_eq!(restarts.load(Ordering::SeqCst), usize::from(failed));
+            assert_eq!(running.lock().await.is_some(), failed, "export_ok={export_ok} released={released}");
+        }
+    }
+
+    /// A failed move with no generation running (owner stopped the hub) starts none.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_move_starts_no_generation_that_was_not_running() {
+        let running = tokio::sync::Mutex::new(None);
+        let result = release_generation_to(
+            &running,
+            || async { Ok("c".repeat(64)) },
+            || async { false },
+            || async { Some(Generation { tasks: Vec::new() }) },
+        )
+        .await;
+        assert_eq!(result.err().map(|error| error.code), Some("SUPERVISOR_UNAVAILABLE".to_owned()));
+        assert!(running.lock().await.is_none());
+    }
+
+    /// Not cfg(unix): the stand-down must stop the hub on Windows too.
+    #[tokio::test]
+    async fn losing_the_lease_aborts_the_generation_and_regaining_runs_it_again() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::control::clear_stopped(&pool).await.unwrap();
+        let (generation, ended) = pending_generation();
+        let running = Arc::new(tokio::sync::Mutex::new(Some(generation)));
+        let (wanted, decisions) = tokio::sync::watch::channel(true);
+        let (promoted_tx, mut promoted) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let follower = tokio::spawn(follow_lease(decisions, Arc::clone(&running), move || {
+            let promoted_tx = promoted_tx.clone();
+            async move {
+                let _ = promoted_tx.send(());
+                Some(Generation { tasks: Vec::new() })
+            }
+        }));
+        let limit = std::time::Duration::from_secs(10);
+
+        wanted.send_replace(false);
+        assert!(tokio::time::timeout(limit, ended).await.expect("bounded").is_err(), "the task was aborted");
+        // The stand-down takes the generation out of the slot before it aborts the tasks.
+        assert!(running.lock().await.is_none());
+        assert!(!ferryx_hub::control::is_stopped(&pool).await.unwrap(), "lease loss leaves hub_stopped as it was");
+
+        wanted.send_replace(true);
+        tokio::time::timeout(limit, promoted.recv()).await.expect("bounded").expect("promoted");
+        // The follower assigns the slot under the lock it held while promoting.
+        assert!(running.lock().await.is_some(), "regaining the lease runs a generation again");
+        follower.abort();
+    }
+
+    #[tokio::test]
+    async fn a_staged_database_replaces_the_hub_database_on_promotion() {
+        a_staged_database_case().await;
+    }
+
+    #[test]
+    fn move_here_force_needs_the_explicit_confirm() {
+        let args = |list: &[&str]| list.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        assert_eq!(move_here_flags(&args(&[])), Ok((false, false, false)));
+        assert_eq!(move_here_flags(&args(&["--force"])), Ok((true, false, false)), "force alone is not sent forced");
+        assert_eq!(move_here_flags(&args(&["--force", "--confirm"])), Ok((true, true, false)));
+        assert_eq!(
+            move_here_flags(&args(&["--force", "--confirm", "--replace-local"])),
+            Ok((true, true, true)),
+            "replacing the local supervisor is its own explicit flag"
+        );
+        assert!(move_here_flags(&args(&["--confirm"])).is_err());
+        assert!(move_here_flags(&args(&["--yes"])).is_err());
+    }
+
+    async fn a_staged_database_case() {
+        use ferryx_hub::supervisor as sv;
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("hub.sqlite");
+        let local = ferryx_hub::storage::connect(&database).await.unwrap();
+        assert!(sv::identities(&local).await.unwrap().is_empty());
+        let incoming = staged_database(&database).unwrap();
+        let imported = ferryx_hub::storage::connect(&incoming).await.unwrap();
+        sv::provision_owner(&imported, "slack:T1:U-owner", "ferryx", "github.com/example/ferryx", "host-b", "/repo/.git")
+            .await
+            .unwrap();
+        ferryx_hub::storage::close_fully(&imported).await;
+
+        assert!(close_for_staged_swap(&local, &database).await.unwrap());
+        assert!(local.is_closed(), "the old pool is closed before the swap");
+        assert!(!dir.path().join("hub.sqlite.incoming-wal").exists(), "the staged WAL was folded in");
+        // The promotion reopens through the import's swap, as Hub::open does.
+        let reopened = ferryx_hub::checkpoint_import::open_with_staged_swap(&database, 1_800_000_000)
+            .await
+            .unwrap();
+        assert!(!incoming.exists());
+        assert_eq!(sv::identities(&reopened).await.unwrap().len(), 1, "the imported supervisor is there");
+        let backup = dir.path().join("hub.sqlite.pre-move-1800000000");
+        assert!(backup.exists(), "the replaced database is kept as a pre-move backup");
+        let kept = ferryx_hub::storage::connect(&backup).await.unwrap();
+        assert!(sv::identities(&kept).await.unwrap().is_empty(), "the backup is the old database");
+        kept.close().await;
+        assert!(!close_for_staged_swap(&reopened, &database).await.unwrap(), "nothing staged: nothing swapped");
+        assert!(!reopened.is_closed());
+    }
+
+    /// Counts what opening a generation did: stored replies flushed, panes launched,
+    /// generations spawned (with the pool each one ran on).
+    struct CountingEffects {
+        flushes: std::sync::atomic::AtomicUsize,
+        panes: std::sync::atomic::AtomicUsize,
+        spawned: tokio::sync::watch::Sender<usize>,
+        pools: std::sync::Mutex<Vec<ferryx_hub::goals::SqlitePool>>,
+    }
+
+    impl CountingEffects {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                flushes: std::sync::atomic::AtomicUsize::new(0),
+                panes: std::sync::atomic::AtomicUsize::new(0),
+                spawned: tokio::sync::watch::channel(0).0,
+                pools: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn counts(&self) -> (usize, usize, usize) {
+            (
+                self.flushes.load(std::sync::atomic::Ordering::SeqCst),
+                self.panes.load(std::sync::atomic::Ordering::SeqCst),
+                *self.spawned.borrow(),
+            )
+        }
+    }
+
+    #[async_trait]
+    impl GenerationEffects for CountingEffects {
+        async fn flush_pending(&self, _pool: &ferryx_hub::goals::SqlitePool) {
+            self.flushes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        async fn launch_pane(&self, _launch: &HubLaunch, _cwd: &str, _command: &[String]) {
+            self.panes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        async fn spawn(&self, launch: &HubLaunch) -> Generation {
+            self.pools.lock().unwrap().push(launch.hub.pool.clone());
+            self.spawned.send_modify(|spawned| *spawned += 1);
+            Generation { tasks: Vec::new() }
+        }
+    }
+
+    /// A launch over `pool` whose effects are counted and whose agent control records sends.
+    fn test_launch(
+        pool: ferryx_hub::goals::SqlitePool,
+        config: HubConfig,
+        effects: &Arc<CountingEffects>,
+    ) -> (HubLaunch, Arc<ferryx_hub::agent_control::RecordingControl>) {
+        let control = Arc::new(ferryx_hub::agent_control::RecordingControl::default());
+        let hub = Hub::with_policy(
+            pool,
+            control.clone(),
+            config.clone(),
+            ferryx_hub::sessions::watch::NotifyPolicy::default(),
+        );
+        let launch = HubLaunch {
+            server: Arc::new(DaemonServer::new()),
+            config,
+            hub,
+            bridge: Arc::new(DaemonBridge { client: DaemonClient::new(), gateway: None }),
+            #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
+            profiles: ferryx_hub::chat::router::ProfileRouter::new(Vec::new()),
+            #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
+            meta_session_id: "meta".into(),
+            effects: effects.clone(),
+        };
+        (launch, control)
+    }
+
+    /// A config that arms the supervisor pane, so a start that got past the gate would launch it.
+    fn pane_config() -> HubConfig {
+        HubConfig {
+            supervisor_pane: true,
+            supervisor_cwd: Some(std::env::temp_dir()),
+            ..HubConfig::default()
+        }
+    }
+
+    /// Boot (what `start` runs once the hub is open) on a standby: no stored reply is posted,
+    /// no pane is launched, no generation runs, nothing is sent; the hub is still published.
+    #[tokio::test]
+    async fn a_standby_boot_flushes_nothing_launches_no_pane_and_runs_no_generation() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::control::clear_stopped(&pool).await.unwrap();
+        let effects = CountingEffects::new();
+        let (launch, control) = test_launch(pool, pane_config(), &effects);
+        let lease = FakeLease::new(false, false);
+
+        let running = boot_hub(&launch, false, Some(&lease as &dyn LeaseGate)).await;
+
+        assert!(running.lock().await.is_none(), "a standby boots without a generation");
+        assert_eq!(effects.counts(), (0, 0, 0), "no flush, no pane, no generation");
+        assert!(control.ops().is_empty(), "nothing was sent");
+        let (_, published) = supervisor_view().expect("the hub is published for the view");
+        assert!(Arc::ptr_eq(&published, &running));
+
+        // The same boot on the holder (pane off, so no launcher is installed) runs the effects.
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let (launch, _) = test_launch(pool, HubConfig::default(), &effects);
+        let holder = FakeLease::new(true, false);
+        let running = boot_hub(&launch, false, Some(&holder as &dyn LeaseGate)).await;
+        assert!(running.lock().await.is_some());
+        assert_eq!(effects.counts(), (1, 0, 1));
+    }
+
+    /// [`start_opened`] with a relay whose lease client answers `holder`: the gate it bound and
+    /// the running slot control.sock was served with.
+    async fn start_opened_with(launch: HubLaunch, holder: bool) -> (Arc<dyn LeaseGate>, SupervisorView) {
+        set_lease_gate(None);
+        let (_published, published) = tokio::sync::watch::channel(0u64);
+        let bound = Arc::new(std::sync::Mutex::new(Vec::<Arc<dyn LeaseGate>>::new()));
+        let served = Arc::new(std::sync::Mutex::new(None::<Arc<tokio::sync::Mutex<Option<Generation>>>>));
+        let binds = Arc::clone(&bound);
+        let serves = Arc::clone(&served);
+        let followers = start_opened(
+            launch,
+            false,
+            published,
+            move || Some(holder),
+            move |holder: bool, _wanted: tokio::sync::watch::Sender<bool>, _carried| {
+                let gate: Arc<dyn LeaseGate> = Arc::new(FakeLease::new(holder, false));
+                binds.lock().unwrap().push(Arc::clone(&gate));
+                let (generation, _ended) = pending_generation();
+                let task = generation.tasks.into_iter().next().unwrap();
+                async move { (gate, task) }
+            },
+            None,
+            move |running, _launch| *serves.lock().unwrap() = Some(running),
+        )
+        .await;
+        for task in followers {
+            task.abort();
+        }
+        let gate = bound.lock().unwrap().pop().expect("the relay's lease client was bound");
+        let running = served.lock().unwrap().take().expect("control.sock was served");
+        let (hub, published) = supervisor_view().expect("the hub is published for the view");
+        assert!(Arc::ptr_eq(&published, &running), "control.sock serves the published slot");
+        (gate, (hub, running))
+    }
+
+    /// `start` once the hub is open, on a standby: the lease client bound to the relay is the
+    /// installed gate and the one the boot asks, so no stored reply is posted, no pane is
+    /// launched, no generation runs and nothing is sent; control.sock serves the published slot.
+    #[tokio::test]
+    async fn a_standby_start_flushes_nothing_launches_no_pane_and_runs_no_generation() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::control::clear_stopped(&pool).await.unwrap();
+        let effects = CountingEffects::new();
+        let (launch, control) = test_launch(pool, pane_config(), &effects);
+
+        let (gate, (_, running)) = start_opened_with(launch, false).await;
+
+        assert!(lease_gate().is_some_and(|installed| Arc::ptr_eq(&installed, &gate)), "the bound gate is installed");
+        assert!(running.lock().await.is_none(), "a standby starts without a generation");
+        assert_eq!(effects.counts(), (0, 0, 0), "no flush, no pane, no generation");
+        assert!(control.ops().is_empty(), "nothing was sent");
+        set_lease_gate(None);
+    }
+
+    /// control.sock `report` on a standby is refused with SUPERVISOR_STANDBY naming the holder
+    /// and stores nothing: the same report on a serving daemon is then queued as new, not
+    /// answered as a duplicate.
+    #[tokio::test]
+    async fn a_standby_refuses_a_control_report_and_stores_nothing() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let effects = CountingEffects::new();
+        let (launch, _) = test_launch(pool, HubConfig::default(), &effects);
+        let line = json!({"op":"report", "source":"autopilot", "topic":"card:42",
+            "salience":"action", "body":"check the new posting", "state":"eligible"});
+        let op = ferryx_hub::control::parse_control(&line.to_string()).unwrap();
+
+        stand_by_for_test(Some(("mach-b", "Laptop B")));
+        let refused = report_control_reply(&launch, &op).await.unwrap();
+        stand_by_for_test(None);
+
+        assert_eq!(refused["status"], "standby", "{refused}");
+        assert_eq!(refused["op"], "report");
+        assert_eq!(refused["code"], ferryx_hub::holder::SUPERVISOR_STANDBY);
+        assert_eq!(refused["holder"], "Laptop B");
+        assert!(refused["outbox_id"].is_null(), "{refused}");
+
+        let served = report_control_reply(&launch, &op).await.unwrap();
+        assert_eq!(served["status"], "ok", "{served}");
+        assert_eq!(served["decision"], "sent", "the standby stored nothing to dedupe against: {served}");
+        assert!(served["outbox_id"].as_i64().is_some(), "{served}");
+    }
+
+    /// cutover, rollback and approve_rerun are holder-only on control.sock; the intake read
+    /// and a serving daemon are not refused.
+    #[test]
+    fn a_standby_refuses_control_cutover_rollback_and_approve_rerun() {
+        use ferryx_hub::control::ControlOp;
+        stand_by_for_test(Some(("mach-b", "Laptop B")));
+        let refused: Vec<_> = [ControlOp::Cutover, ControlOp::Rollback, ControlOp::ApproveRerun(7)]
+            .iter()
+            .map(|op| standby_control_refusal(op).expect("a standby refuses a holder-only op"))
+            .collect();
+        let intake = standby_control_refusal(&ControlOp::Intake);
+        stand_by_for_test(None);
+
+        for (reply, op) in refused.iter().zip(["cutover", "rollback", "approve_rerun"]) {
+            assert_eq!(reply["op"], op);
+            assert_eq!(reply["code"], ferryx_hub::holder::SUPERVISOR_STANDBY);
+            assert_eq!(reply["holder"], "Laptop B");
+        }
+        assert!(intake.is_none(), "intake is a read and stays served");
+        assert!(standby_control_refusal(&ControlOp::Cutover).is_none(), "a serving daemon runs cutover");
+    }
+
+    /// A chat transport that counts what reached it.
+    #[derive(Default)]
+    struct CountingChat(std::sync::atomic::AtomicUsize);
+
+    #[async_trait]
+    impl ferryx_hub::chat::router::Outbound for CountingChat {
+        async fn send(&self, _session: &ferryx_hub::chat::session::SessionKey, _text: &str) -> ferryx_hub::error::Result<()> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// Effects whose flush is the daemon's real one ([`DaemonEffects`]), counted.
+    #[derive(Default)]
+    struct FlushingEffects(std::sync::atomic::AtomicUsize);
+
+    #[async_trait]
+    impl GenerationEffects for FlushingEffects {
+        async fn flush_pending(&self, pool: &ferryx_hub::goals::SqlitePool) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            DaemonEffects.flush_pending(pool).await;
+        }
+
+        async fn launch_pane(&self, _launch: &HubLaunch, _cwd: &str, _command: &[String]) {}
+
+        async fn spawn(&self, _launch: &HubLaunch) -> Generation {
+            Generation { tasks: Vec::new() }
+        }
+    }
+
+    /// A standby lease for the thread that created it only. The holder gate it backs is
+    /// process-wide, so tests running beside this one on other threads still see a holder.
+    struct StandbyOnThisThread(std::thread::ThreadId);
+
+    #[async_trait]
+    impl LeaseGate for StandbyOnThisThread {
+        fn allows_hub(&self) -> bool {
+            std::thread::current().id() != self.0
+        }
+
+        fn current_role(&self) -> Role {
+            if self.allows_hub() { Role::Holder { fence: 7 } } else { held_by_b() }
+        }
+
+        async fn try_acquire(&self) -> Option<Role> {
+            Some(self.current_role())
+        }
+    }
+
+    /// A standby start with the holder gate installed the way `spawn_lease_client` binds it:
+    /// a stored chat reply is neither flushed by the boot nor delivered by a flush under the
+    /// installed gate; it stays queued for the holder.
+    #[tokio::test]
+    async fn a_standby_start_leaves_a_stored_chat_reply_undelivered() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::control::clear_stopped(&pool).await.unwrap();
+        let session = ferryx_hub::chat::session::SessionKey::new("slack", None::<String>, "C1", None::<String>, "U1");
+        let standby: ferryx_hub::holder::HolderGate = Arc::new(|| false);
+        ferryx_hub::holder::scope(standby, ferryx_hub::chat::reply::chat_reply(&pool, &session, "queued", None))
+            .await
+            .unwrap();
+        assert_eq!(ferryx_hub::chat::reply::pending(&pool).await.unwrap().len(), 1, "seeded");
+        let counting = CountingEffects::new();
+        let (mut launch, control) = test_launch(pool.clone(), pane_config(), &counting);
+        let effects = Arc::new(FlushingEffects::default());
+        launch.effects = effects.clone();
+        let transport = Arc::new(CountingChat::default());
+        set_lease_gate(None);
+        let (_published, published) = tokio::sync::watch::channel(0u64);
+
+        let work = async {
+            let followers = start_opened(
+                launch,
+                false,
+                published,
+                move || Some(()),
+                move |(), _wanted: tokio::sync::watch::Sender<bool>, _carried| {
+                    let gate: Arc<dyn LeaseGate> = Arc::new(StandbyOnThisThread(std::thread::current().id()));
+                    // As `spawn_lease_client`: the bound client is the hub crate's holder gate.
+                    install_holder_gate(Some(Arc::clone(&gate)));
+                    let (generation, _ended) = pending_generation();
+                    let task = generation.tasks.into_iter().next().unwrap();
+                    async move { (gate, task) }
+                },
+                None,
+                |_running, _launch| {},
+            )
+            .await;
+            for task in followers {
+                task.abort();
+            }
+            // Even a flush that ran now would ask the installed gate and post nothing.
+            DaemonEffects.flush_pending(&pool).await;
+        };
+        ferryx_hub::chat::reply::with_transport(transport.clone(), work).await;
+
+        assert_eq!(effects.0.load(std::sync::atomic::Ordering::SeqCst), 0, "the standby boot flushed nothing");
+        assert_eq!(transport.0.load(std::sync::atomic::Ordering::SeqCst), 0, "nothing reached the chat transport");
+        assert_eq!(ferryx_hub::chat::reply::pending(&pool).await.unwrap().len(), 1, "the reply stays queued");
+        assert!(control.ops().is_empty(), "nothing was sent");
+        install_holder_gate(None);
+        set_lease_gate(None);
+    }
+
+    /// The same start on the lease holder runs the boot generation through the effects.
+    #[tokio::test]
+    async fn a_holder_start_runs_the_generation() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::control::clear_stopped(&pool).await.unwrap();
+        let effects = CountingEffects::new();
+        let (launch, _) = test_launch(pool, HubConfig::default(), &effects);
+
+        let (gate, (_, running)) = start_opened_with(launch, true).await;
+
+        assert!(lease_gate().is_some_and(|installed| Arc::ptr_eq(&installed, &gate) && installed.allows_hub()));
+        assert!(running.lock().await.is_some(), "the holder starts a generation");
+        assert_eq!(effects.counts(), (1, 0, 1));
+        set_lease_gate(None);
+    }
+
+    /// The control.sock / CLI / phone start path asks the installed lease, not a test-only one.
+    #[tokio::test]
+    async fn the_control_socket_start_is_refused_on_standby() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::control::mark_stopped(&pool).await.unwrap();
+        let effects = CountingEffects::new();
+        let (launch, control) = test_launch(pool.clone(), HubConfig::default(), &effects);
+        let lease = Arc::new(FakeLease::new(false, false));
+        set_lease_gate(Some(lease.clone() as Arc<dyn LeaseGate>));
+        let running = tokio::sync::Mutex::new(None);
+
+        let refused = start_generation(&running, &launch).await.unwrap_err();
+
+        assert!(
+            matches!(&refused, HubStartError::Standby { holder_label, .. } if holder_label.as_deref() == Some("Laptop B")),
+            "{refused:?}"
+        );
+        assert_eq!(lease.acquires.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(effects.counts(), (0, 0, 0));
+        assert!(control.ops().is_empty());
+        assert!(running.lock().await.is_none());
+        assert!(ferryx_hub::control::is_stopped(&pool).await.unwrap(), "a refused start writes nothing");
+        set_lease_gate(None);
+    }
+
+    /// Lease loss on the published hub: the generation the view shows is aborted and the pool
+    /// the view and the next generation use keeps hub_stopped=0; regaining runs one again.
+    #[tokio::test]
+    async fn a_stand_down_leaves_the_published_hub_unstopped_and_regaining_starts_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let config = HubConfig { database_path: Some(dir.path().join("hub.sqlite")), ..HubConfig::default() };
+        let effects = CountingEffects::new();
+        let (launch, _) = test_launch(pool, config, &effects);
+        let (generation, ended) = pending_generation();
+        publish_hub(&launch, &Arc::new(tokio::sync::Mutex::new(Some(generation))));
+        let (hub, running) = supervisor_view().unwrap();
+        ferryx_hub::control::clear_stopped(&hub.pool).await.unwrap();
+        let (wanted, decisions) = tokio::sync::watch::channel(true);
+        let follower = tokio::spawn(follow_lease(decisions, Arc::clone(&running), promote_generation));
+        let limit = std::time::Duration::from_secs(10);
+
+        wanted.send_replace(false);
+        assert!(tokio::time::timeout(limit, ended).await.expect("bounded").is_err(), "the task was aborted");
+        assert!(running.lock().await.is_none());
+        let (hub, _) = supervisor_view().unwrap();
+        assert!(!ferryx_hub::control::is_stopped(&hub.pool).await.unwrap(), "the view's pool is not stopped");
+        let launch = supervisor_launch().unwrap();
+        assert!(!ferryx_hub::control::is_stopped(&launch.hub.pool).await.unwrap(), "the next generation's pool is not stopped");
+        assert_eq!(effects.counts(), (0, 0, 0));
+
+        let mut spawned = effects.spawned.subscribe();
+        wanted.send_replace(true);
+        tokio::time::timeout(limit, spawned.wait_for(|spawned| *spawned == 1))
+            .await
+            .expect("bounded")
+            .expect("spawned");
+        assert!(running.lock().await.is_some(), "regaining the lease runs a generation again");
+        follower.abort();
+    }
+
+    /// Promotion with a staged database: the hub reopens on it before the first generation,
+    /// which sees a goal that exists only in the imported database.
+    #[tokio::test]
+    async fn a_promotion_reopens_the_hub_on_the_staged_database_before_the_first_generation() {
+        use ferryx_hub::goals::contract::RequirementSpec;
+        use ferryx_hub::goals::GoalMode;
+        use ferryx_hub::supervisor::{self as sv, AdmitRequest, ChannelProvider, ExecutionKind, ExecutionTarget};
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("hub.sqlite");
+        let local = ferryx_hub::storage::connect(&database).await.unwrap();
+        let imported = ferryx_hub::storage::connect(&staged_database(&database).unwrap()).await.unwrap();
+        let owner = "slack:T1:U-owner";
+        let (identity, project, _) =
+            sv::provision_owner(&imported, owner, "ferryx", "github.com/example/ferryx", "host-b", "/repo/.git")
+                .await
+                .unwrap();
+        let request = AdmitRequest {
+            supervisor_id: identity.supervisor_id,
+            owner_principal: owner.into(),
+            source_adapter: ChannelProvider::Desktop,
+            source_message_id: "d-1".into(),
+            body: "Create result.txt containing READY.".into(),
+            project_id: project.project_id,
+            channel_binding_id: None,
+            target: ExecutionTarget { kind: ExecutionKind::Pty, host_id: "host-b".into() },
+            title: "Write result.txt".into(),
+            cwd: "/repo".into(),
+            instruction: "Create result.txt containing READY.".into(),
+            requirements: vec![RequirementSpec {
+                id: "r1".into(),
+                text: "result.txt contains READY".into(),
+                verifier: "test -f result.txt".into(),
+            }],
+            mode: GoalMode::Full,
+            turn_limit: 5,
+            operation_grant: sv::admission::OperationClass::BASELINE.to_vec(),
+        };
+        let goal_id = sv::admit_request(&imported, &request).await.unwrap().receipt.goal_id;
+        ferryx_hub::control::clear_stopped(&imported).await.unwrap();
+        ferryx_hub::storage::close_fully(&imported).await;
+        assert!(sv::goal_of(&local, &goal_id).await.unwrap().is_none(), "the goal is only in the import");
+        let config = HubConfig { database_path: Some(database.clone()), ..HubConfig::default() };
+        let effects = CountingEffects::new();
+        let (launch, _) = test_launch(local.clone(), config, &effects);
+        let running = Arc::new(tokio::sync::Mutex::new(None));
+        publish_hub(&launch, &running);
+
+        let generation = promote_generation().await;
+
+        assert!(generation.is_some(), "the imported hub is not stopped, so a generation runs");
+        assert!(local.is_closed(), "the standby's pool was closed for the swap");
+        let first = effects.pools.lock().unwrap().first().cloned().expect("one generation");
+        assert!(sv::goal_of(&first, &goal_id).await.unwrap().is_some(), "the first generation sees the imported goal");
+        let (hub, view_running) = supervisor_view().unwrap();
+        assert!(Arc::ptr_eq(&view_running, &running), "the running slot is kept");
+        assert!(sv::goal_of(&hub.pool, &goal_id).await.unwrap().is_some(), "the view shows the imported hub");
+        assert!(std::fs::read_dir(dir.path())
+            .unwrap()
+            .any(|entry| entry.unwrap().file_name().to_string_lossy().starts_with("hub.sqlite.pre-move-")));
+        hub.pool.close().await;
+    }
+
+    /// A relay published after the hub started binds the lease client (a standby stands the
+    /// generation down); a replaced relay rebinds it and the previous client ends. Runs on the
+    /// current-thread test runtime: `follow_relay` finishes each bind before the test resumes.
+    #[tokio::test]
+    async fn a_relay_published_later_binds_and_a_replaced_relay_rebinds_the_lease_client() {
+        set_lease_gate(None);
+        let (published_tx, published) = tokio::sync::watch::channel(0u64);
+        let relay = Arc::new(std::sync::Mutex::new(None::<bool>));
+        let (bound_tx, mut bound) = tokio::sync::mpsc::unbounded_channel::<bool>();
+        let (ended_tx, mut ended) = tokio::sync::mpsc::unbounded_channel::<tokio::sync::oneshot::Receiver<()>>();
+        let (wanted, mut decisions) = tokio::sync::watch::channel(true);
+        let current = Arc::clone(&relay);
+        let follower = tokio::spawn(follow_relay(
+            published,
+            move || *current.lock().unwrap(),
+            move |holder: bool, _carried| {
+                let (task, alive) = {
+                    let (generation, alive) = pending_generation();
+                    (generation.tasks.into_iter().next().unwrap(), alive)
+                };
+                let _ = ended_tx.send(alive);
+                let _ = bound_tx.send(holder);
+                let gate: Arc<dyn LeaseGate> = Arc::new(FakeLease::new(holder, false));
+                async move { (gate, task) }
+            },
+            None,
+            wanted,
+        ));
+        let limit = std::time::Duration::from_secs(10);
+        assert!(lease_gate().is_none(), "account-less, no relay yet: unleased");
+
+        *relay.lock().unwrap() = Some(false);
+        published_tx.send_modify(|n| *n += 1);
+        assert!(!tokio::time::timeout(limit, bound.recv()).await.expect("bounded").unwrap());
+        tokio::time::timeout(limit, decisions.changed()).await.expect("bounded").unwrap();
+        assert!(!*decisions.borrow_and_update(), "bound on standby: the generation stands down");
+        assert!(lease_gate().is_some_and(|gate| !gate.allows_hub()), "the hub is leased now");
+        let first = ended.recv().await.unwrap();
+
+        *relay.lock().unwrap() = Some(true);
+        published_tx.send_modify(|n| *n += 1);
+        assert!(tokio::time::timeout(limit, bound.recv()).await.expect("bounded").unwrap());
+        assert!(tokio::time::timeout(limit, first).await.expect("bounded").is_err(), "the previous client ended");
+        assert!(lease_gate().is_some_and(|gate| gate.allows_hub()), "rebound to the new relay");
+        follower.abort();
+        set_lease_gate(None);
+    }
+
+    /// A persisted lease snapshot with the capability latched.
+    fn latched_lease(
+        last_role: crate::daemon::supervisor_lease_role::LastRole,
+        machines: u32,
+    ) -> crate::daemon::supervisor_lease_role::PersistedLease {
+        crate::daemon::supervisor_lease_role::PersistedLease {
+            last_role,
+            last_fence: 5,
+            account_machine_count: Some(machines),
+            holder_machine_id: None,
+            lease_capable: true,
+        }
+    }
+
+    /// An enrolled, capability-latched standby boots before its relay client is published: no
+    /// generation opens (no flush, no pane, no Slack), not after the boot wait either, and a
+    /// relay published after start whose client binds on standby keeps it that way.
+    #[tokio::test]
+    async fn a_latched_standby_never_opens_a_generation_before_or_after_its_relay_is_published() {
+        use crate::daemon::supervisor_lease_role::LastRole;
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::control::clear_stopped(&pool).await.unwrap();
+        let effects = CountingEffects::new();
+        let (launch, control) = test_launch(pool, pane_config(), &effects);
+        set_lease_gate(None);
+        // No database work happens past this point on a standby, so paused time is safe.
+        tokio::time::pause();
+        let (published_tx, published) = tokio::sync::watch::channel(0u64);
+        let relay = Arc::new(std::sync::Mutex::new(None::<bool>));
+        let current = Arc::clone(&relay);
+        let (bound_tx, mut bound) = tokio::sync::mpsc::unbounded_channel::<bool>();
+        let served = Arc::new(std::sync::Mutex::new(None::<Arc<tokio::sync::Mutex<Option<Generation>>>>));
+        let serves = Arc::clone(&served);
+        let pending = Arc::new(PendingLease::new(&latched_lease(LastRole::Standby, 2), Box::new(|| false)));
+
+        let followers = start_opened(
+            launch,
+            false,
+            published,
+            move || *current.lock().unwrap(),
+            move |holder: bool, _wanted: tokio::sync::watch::Sender<bool>, _carried| {
+                let _ = bound_tx.send(holder);
+                let gate: Arc<dyn LeaseGate> = Arc::new(FakeLease::new(holder, false));
+                let (generation, _ended) = pending_generation();
+                let task = generation.tasks.into_iter().next().unwrap();
+                async move { (gate, task) }
+            },
+            Some(pending),
+            move |running, _launch| *serves.lock().unwrap() = Some(running),
+        )
+        .await;
+        let running = served.lock().unwrap().take().expect("control.sock was served");
+
+        assert!(lease_gate().is_some_and(|gate| !gate.allows_hub()), "standby, not unleased");
+        assert!(running.lock().await.is_none());
+        tokio::time::sleep(crate::daemon::supervisor_lease_client::BOOT_UNREACHABLE_AFTER * 2).await;
+        assert!(running.lock().await.is_none(), "the boot wait keeps a multi-machine standby off");
+
+        *relay.lock().unwrap() = Some(false);
+        published_tx.send_modify(|n| *n += 1);
+        let limit = std::time::Duration::from_secs(10);
+        assert!(!tokio::time::timeout(limit, bound.recv()).await.expect("bounded").unwrap());
+        tokio::time::sleep(limit).await;
+
+        assert!(lease_gate().is_some_and(|gate| !gate.allows_hub()), "the bound standby client is installed");
+        assert!(running.lock().await.is_none(), "no generation ever opened");
+        assert_eq!(effects.counts(), (0, 0, 0), "no flush, no pane, no generation");
+        assert!(control.ops().is_empty(), "nothing was sent");
+        for task in followers {
+            task.abort();
+        }
+        install_holder_gate(None);
+        set_lease_gate(None);
+    }
+
+    /// `start`'s boot path for an enrolled machine whose relay client is not published yet:
+    /// the boot facts make it hold a pending (standby) lease, so no generation opens before a
+    /// relay grants the lease. Without the pending lease it would boot unleased and run one.
+    #[tokio::test]
+    async fn an_enrolled_boot_without_a_relay_client_opens_no_generation_before_a_lease() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::control::clear_stopped(&pool).await.unwrap();
+        let effects = CountingEffects::new();
+        let (launch, control) = test_launch(pool, pane_config(), &effects);
+        set_lease_gate(None);
+        let (_published, published) = tokio::sync::watch::channel(0u64);
+        let served = Arc::new(std::sync::Mutex::new(None::<Arc<tokio::sync::Mutex<Option<Generation>>>>));
+        let serves = Arc::clone(&served);
+        let binds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let bound = Arc::clone(&binds);
+
+        let followers = start_booted(
+            launch,
+            false,
+            BootLeaseFacts { enrolled: true, persisted: None },
+            published,
+            || None::<bool>,
+            move |holder: bool, _wanted: tokio::sync::watch::Sender<bool>, _carried| {
+                bound.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let gate: Arc<dyn LeaseGate> = Arc::new(FakeLease::new(holder, false));
+                let (generation, _ended) = pending_generation();
+                let task = generation.tasks.into_iter().next().unwrap();
+                async move { (gate, task) }
+            },
+            move |running, _launch| *serves.lock().unwrap() = Some(running),
+        )
+        .await;
+        for task in followers {
+            task.abort();
+        }
+        let running = served.lock().unwrap().take().expect("control.sock was served");
+
+        assert_eq!(binds.load(std::sync::atomic::Ordering::SeqCst), 0, "no relay client to bind");
+        assert!(lease_gate().is_some_and(|gate| !gate.allows_hub()), "a pending standby lease, not unleased");
+        assert!(running.lock().await.is_none(), "no generation before a lease");
+        assert_eq!(effects.counts(), (0, 0, 0), "no flush, no pane, no generation");
+        assert!(control.ops().is_empty(), "nothing was sent");
+        install_holder_gate(None);
+        set_lease_gate(None);
+    }
+
+    /// An account-less install (not enrolled, no persisted lease) still boots unleased.
+    #[tokio::test]
+    async fn only_an_enrolled_or_latched_boot_holds_a_pending_lease() {
+        let remote = Arc::clone(DaemonServer::new().remote_state());
+        let facts = |enrolled, persisted| BootLeaseFacts { enrolled, persisted };
+        assert!(boot_pending_lease(facts(false, None), Arc::clone(&remote)).is_none());
+        assert!(boot_pending_lease(facts(true, None), Arc::clone(&remote)).is_some());
+        let latched = latched_lease(crate::daemon::supervisor_lease_role::LastRole::Standby, 2);
+        assert!(boot_pending_lease(facts(false, Some(latched)), remote).is_some());
+    }
+
+    /// The boot wait applies the provisional rule: only a last holder of a single-machine
+    /// account starts the hub without a relay client; it starts nothing before the wait.
+    #[tokio::test(start_paused = true)]
+    async fn the_boot_wait_runs_the_hub_provisionally_only_for_a_last_single_machine_holder() {
+        use crate::daemon::supervisor_lease_role::{LastRole, Role};
+        for (persisted, provisional) in [
+            (latched_lease(LastRole::Holder, 1), true),
+            (latched_lease(LastRole::Holder, 2), false),
+            (latched_lease(LastRole::Standby, 1), false),
+            (crate::daemon::supervisor_lease_role::PersistedLease::default(), false),
+        ] {
+            let pending = Arc::new(PendingLease::new(&persisted, Box::new(|| false)));
+            assert!(!pending.allows_hub(), "standby before the wait");
+            let (wanted, decisions) = tokio::sync::watch::channel(false);
+            let wait = tokio::spawn(provisional_after_boot_wait(Arc::clone(&pending), wanted));
+            tokio::time::sleep(crate::daemon::supervisor_lease_client::BOOT_UNREACHABLE_AFTER - std::time::Duration::from_secs(1)).await;
+            assert!(!*decisions.borrow(), "nothing starts before the boot wait");
+            wait.await.unwrap();
+            assert_eq!(*decisions.borrow(), provisional, "{persisted:?}");
+            assert_eq!(pending.allows_hub(), provisional);
+            let role = if provisional { Role::Provisional } else { Role::standby_unknown() };
+            assert_eq!(pending.current_role(), role);
+        }
+    }
+
+    /// An enrolled machine whose gateway mode is not Relay has no lease client: it reports
+    /// standby with the RELAY_MODE_OFF reason, never an unleased holder.
+    #[test]
+    fn an_enrolled_machine_without_relay_mode_reports_why_the_lease_is_unavailable() {
+        let off = PendingLease::new(&Default::default(), Box::new(|| true));
+        let status = lease_status_with(
+            Some(&off as &dyn LeaseGate),
+            crate::supervisor_checkpoint::CheckpointState::default().status(0),
+        );
+        let wire = serde_json::to_value(&status).unwrap();
+        assert_eq!(wire["role"], "standby");
+        assert_eq!(wire["leaseUnavailable"]["code"], LEASE_RELAY_MODE_OFF);
+        assert_eq!(wire["leaseUnavailable"]["message"], "relay mode off");
+
+        let restoring = PendingLease::new(&Default::default(), Box::new(|| false));
+        let status = lease_status_with(
+            Some(&restoring as &dyn LeaseGate),
+            crate::supervisor_checkpoint::CheckpointState::default().status(0),
+        );
+        assert!(status.lease_unavailable.is_none(), "relay mode on: the client is being restored");
+        assert_eq!(status.role, ferryx_hub::control::LeaseRole::Standby);
+    }
+
+    /// A holder gate that reports a live grant.
+    struct Granted(crate::daemon::supervisor_lease_client::LiveGrant);
+
+    #[async_trait]
+    impl LeaseGate for Granted {
+        fn allows_hub(&self) -> bool {
+            true
+        }
+
+        fn current_role(&self) -> Role {
+            Role::Holder { fence: self.0.fence }
+        }
+
+        async fn try_acquire(&self) -> Option<Role> {
+            Some(self.current_role())
+        }
+
+        fn live_grant(&self) -> Option<crate::daemon::supervisor_lease_client::LiveGrant> {
+            Some(self.0)
+        }
+    }
+
+    /// A replaced relay rebinds the lease client with the live grant of the replaced one, and
+    /// the holder's generation is not stood down by the replacement.
+    #[tokio::test]
+    async fn a_rebind_carries_the_live_grant_and_keeps_the_holder_running() {
+        set_lease_gate(None);
+        let grant = crate::daemon::supervisor_lease_client::LiveGrant {
+            fence: 7,
+            deadline: std::time::SystemTime::now() + std::time::Duration::from_secs(60),
+        };
+        let (published_tx, published) = tokio::sync::watch::channel(0u64);
+        let (carried_tx, mut carried) =
+            tokio::sync::mpsc::unbounded_channel::<Option<crate::daemon::supervisor_lease_client::LiveGrant>>();
+        let (wanted, decisions) = tokio::sync::watch::channel(true);
+        let first: Arc<dyn LeaseGate> = Arc::new(Granted(grant));
+        let (generation, first_alive) = pending_generation();
+        let first_task = generation.tasks.into_iter().next().unwrap();
+        let follower = tokio::spawn(follow_relay(
+            published,
+            || Some(()),
+            move |(), resumed| {
+                let _ = carried_tx.send(resumed);
+                // As the real client: holder on the carried grant from the start.
+                let gate: Arc<dyn LeaseGate> = match resumed {
+                    Some(grant) => Arc::new(Granted(grant)),
+                    None => Arc::new(FakeLease::new(false, false)),
+                };
+                let (generation, _alive) = pending_generation();
+                let task = generation.tasks.into_iter().next().unwrap();
+                async move { (gate, task) }
+            },
+            Some((first, first_task)),
+            wanted,
+        ));
+        let limit = std::time::Duration::from_secs(10);
+
+        published_tx.send_modify(|n| *n += 1);
+        let resumed = tokio::time::timeout(limit, carried.recv()).await.expect("bounded").unwrap();
+
+        assert_eq!(resumed, Some(grant), "the replaced client's grant was carried");
+        assert!(tokio::time::timeout(limit, first_alive).await.expect("bounded").is_err(), "the previous client ended");
+        assert!(lease_gate().is_some_and(|gate| gate.allows_hub() && gate.live_grant() == Some(grant)));
+        assert!(*decisions.borrow(), "the holder generation was not stood down");
+        follower.abort();
+        set_lease_gate(None);
     }
 }

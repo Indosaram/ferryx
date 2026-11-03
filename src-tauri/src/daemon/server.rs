@@ -4262,6 +4262,11 @@ impl DaemonServer {
         &self.remote_state
     }
 
+    /// This daemon's paired-host inventory (a supervisor move reaches the holder through it).
+    pub(crate) fn paired_hosts(&self) -> &crate::paired_host::service::PairedHostService {
+        &self.paired_hosts
+    }
+
     pub fn session_service(&self) -> &Arc<DaemonSessionService> {
         &self.session_service
     }
@@ -6193,6 +6198,18 @@ impl DaemonServer {
         if handover_from.is_none() {
             self.restore_remote_sessions_at(self.remote_sessions_path.clone())
                 .await?;
+        } else if let Some(legacy) = handover_from.clone() {
+            // The committed predecessor wrote its supervisor lease into the decision record;
+            // the lease client started with the hub renews it (plan todo 9).
+            let manager = Arc::clone(&self.handover_manager);
+            if let Err(error) = crate::ipc::run_blocking(move || {
+                manager.adopt_recorded_supervisor_lease(&legacy);
+                Ok(())
+            })
+            .await
+            {
+                tracing::warn!(%error, "Could not read the supervisor lease handed over at commit");
+            }
         }
 
         // Both platform listeners share this call site: unix binds the socket path, every other
@@ -7831,6 +7848,24 @@ impl DaemonServer {
                         },
                     }
                 }
+                Ok(DaemonRequest::SupervisorMoveHere { force, replace_local }) => {
+                    match crate::supervisor_move::move_supervisor_here(
+                        self.remote_state(),
+                        &self.paired_hosts,
+                        force,
+                        replace_local,
+                        "desktop",
+                    )
+                    .await
+                    {
+                        Ok(moved) => DaemonResponse::SupervisorMoveHereOk { moved },
+                        Err(error) => DaemonResponse::Error {
+                            message: error.message,
+                            code: Some(error.code),
+                            details: Some(serde_json::Value::Object(*error.details)),
+                        },
+                    }
+                }
                 Ok(DaemonRequest::SupervisorRequestV1 { envelope, cli, mcp }) => {
                     let caller = if mcp {
                         crate::hub_runtime::SupervisorCaller::Mcp
@@ -7864,7 +7899,11 @@ impl DaemonServer {
                         Err(error) => DaemonResponse::Error {
                             message: error.to_string(),
                             code: Some(error.code().into()),
-                            details: None,
+                            // A standby names the holder, as every SUPERVISOR_STANDBY refusal does.
+                            details: match &error {
+                                crate::hub_runtime::SetupError::Standby(failure) => Some(failure.to_json()),
+                                _ => None,
+                            },
                         },
                     }
                 }
@@ -8450,12 +8489,11 @@ impl DaemonServer {
                         Err(message) => daemon_error(message),
                     }
                 }
-                Ok(DaemonRequest::AgentControl { request, host_id }) => {
-                    match host_id {
-                        None => match crate::remote::server::agent_control_service::handle(&self.remote_state, request).await {
-                            Ok(result) => DaemonResponse::AgentControlOk { result },
-                            Err(error) => crate::remote::server::agent_control_service::error_response(error),
-                        },
+                Ok(DaemonRequest::AgentControl { request, host_id, supervisor_fence, supervisor_account }) => {
+                    match crate::agent_control::fence::SupervisorFence::from_wire(supervisor_fence, supervisor_account) {
+                    Err(refusal) => crate::remote::server::agent_control_service::fence_response(&refusal),
+                    Ok(fence) => match host_id {
+                        None => crate::remote::server::agent_control_service::handle_fenced(&self.remote_state, request, fence).await,
                         // One execute, on the caller's request id. A lost answer stays outcome-unknown
                         // and is not issued again.
                         Some(host_id) => {
@@ -8464,9 +8502,11 @@ impl DaemonServer {
                                 &self.paired_hosts,
                                 host_id,
                                 request,
+                                fence,
                             )
                             .await
                         }
+                    },
                     }
                 }
                 Err(e) => daemon_error(format!("Malformed request: {e}"),),

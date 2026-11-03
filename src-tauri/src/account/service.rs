@@ -24,6 +24,7 @@ use crate::remote::account_grants::{submission_signing_input, GrantSubmission};
 use crate::remote::account_protocol::{
     AccountEnrollChallenge, AccountEnrollRequest, AccountEnrollResponse, AccountGrantOffer,
     AccountGrantOfferEnvelope, AccountGrantRequest, AccountGrantResponse, AccountGrantScope,
+    grant_requester_nonce,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use ed25519_dalek::{Signer, SigningKey};
@@ -610,6 +611,11 @@ pub struct DevicePollResponse {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enrollment_code: Option<String>,
+    /// An account session for the approving user, minted with the enrollment code so a
+    /// headless machine can later ask for grants on its sibling machines (supervisor failover)
+    /// without a user-exported `FERRYX_ACCOUNT_SESSION_TOKEN`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -703,6 +709,7 @@ pub async fn device_poll(
         return Ok(Json(DevicePollResponse {
             status: "authorization_pending".into(),
             enrollment_code: None,
+            session_token: None,
         }));
     }
     state.mutate(|store| {
@@ -723,15 +730,26 @@ pub async fn device_poll(
         }
         if let Some(ref enrollment_code) = record.enrollment_code {
             let code = enrollment_code.clone();
+            let email = record.email.clone();
             store.device_auths.remove(&code_hash);
+            let session_token = store.user_by_email(&email).map(|user| user.user_id.clone()).map(|user_id| {
+                let bearer_token = random_token();
+                store.sessions.insert(
+                    token_hash(&bearer_token),
+                    SessionRecord { user_id, expires_at: now + SESSION_TTL.as_secs() },
+                );
+                bearer_token
+            });
             Ok(Json(DevicePollResponse {
                 status: "approved".into(),
                 enrollment_code: Some(code),
+                session_token,
             }))
         } else {
             Ok(Json(DevicePollResponse {
                 status: "authorization_pending".into(),
                 enrollment_code: None,
+                session_token: None,
             }))
         }
     })
@@ -1171,6 +1189,36 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+/// The requester machine an account grant may vouch for: `None` without a proof; the proof's
+/// machine id when it names an enrolled machine of `user_id` whose key signed
+/// [`grant_requester_nonce`] for the request's own attach key within the clock window and whose
+/// machine id is the request's installation id. Any other proof is refused 401 so a forged one never degrades silently.
+fn requester_machine_id(
+    store: &AccountStore,
+    user_id: &str,
+    target_machine_record_id: &str,
+    request: &AccountGrantRequest,
+    now: u64,
+) -> Result<Option<String>, ApiError> {
+    let Some(proof) = request.requester_machine.as_ref() else {
+        return Ok(None);
+    };
+    let refused = || ApiError::unauthorized("GRANT_REQUESTER_INVALID", "the requesting machine could not be verified");
+    if proof.machine_id != request.installation_id || proof.timestamp.abs_diff(now) > PEER_RECORD_CLOCK_SKEW_SECS {
+        return Err(refused());
+    }
+    let requester = store
+        .machines
+        .values()
+        .find(|machine| machine.machine_id == proof.machine_id && machine.owner_user_id == user_id)
+        .ok_or_else(refused)?;
+    let nonce = grant_requester_nonce(&requester.machine_id, target_machine_record_id, &request.attach_public_key);
+    if !crate::remote::auth::verify_machine_signature(&requester.public_key, &nonce, proof.timestamp, &proof.signature) {
+        return Err(refused());
+    }
+    Ok(Some(requester.machine_id.clone()))
 }
 
 /// `GET /api/account/v1/machines/{machine_id}/peer-record`
@@ -1615,6 +1663,13 @@ pub async fn issue_grant(
                     grant_scope: request_clone.grant_scope,
                     expires_at: grant.expires_at,
                     device_attach_public_key: request_clone.attach_public_key.clone(),
+                    account_machine_id: requester_machine_id(
+                        store,
+                        &user.user_id,
+                        &machine.machine_record_id,
+                        &request_clone,
+                        now,
+                    )?,
                 };
                 Ok(Ok((grant, pairing_token, machine, offer)))
             })?;
@@ -2033,6 +2088,12 @@ mod tests {
             .0;
         assert_eq!(approved.status, "approved");
         assert!(approved.enrollment_code.is_some());
+        let session = approved.session_token.expect("an approved poll carries an account session");
+        let user = state
+            .read(|store| Ok(store.user_for_session(&session, now_secs()).cloned()))
+            .unwrap()
+            .expect("the minted session resolves to the approving user");
+        assert_eq!(user.email, "headless@test.local");
     }
 
     #[tokio::test]
@@ -2443,6 +2504,7 @@ mod tests {
             installation_id: "inst-test".into(),
             grant_scope: AccountGrantScope::Machine,
             attach_public_key: device_attach_key,
+            requester_machine: None,
         })
         .unwrap();
 
@@ -2557,6 +2619,7 @@ mod tests {
             installation_id: "inst-test".into(),
             grant_scope: AccountGrantScope::Machine,
             attach_public_key: device_attach_key.clone(),
+            requester_machine: None,
         })
         .unwrap();
 
@@ -2600,6 +2663,7 @@ mod tests {
             installation_id: "inst-test-2".into(),
             grant_scope: AccountGrantScope::Machine,
             attach_public_key: device_attach_key.clone(),
+            requester_machine: None,
         })
         .unwrap();
 
@@ -2657,6 +2721,7 @@ mod tests {
             installation_id: "inst-test-3".into(),
             grant_scope: AccountGrantScope::Machine,
             attach_public_key: device_attach_key.clone(),
+            requester_machine: None,
         })
         .unwrap();
 
@@ -2708,6 +2773,7 @@ mod tests {
             installation_id: "inst-test-4".into(),
             grant_scope: AccountGrantScope::Machine,
             attach_public_key: device_attach_key.clone(),
+            requester_machine: None,
         })
         .unwrap();
 
@@ -2761,6 +2827,7 @@ mod tests {
             installation_id: "inst-test-5".into(),
             grant_scope: AccountGrantScope::Machine,
             attach_public_key: device_attach_key,
+            requester_machine: None,
         })
         .unwrap();
 
@@ -2807,6 +2874,7 @@ mod tests {
             installation_id: "inst-offline".into(),
             grant_scope: AccountGrantScope::Machine,
             attach_public_key: STANDARD.encode([3u8; 32]),
+            requester_machine: None,
         })
         .unwrap();
         let mut headers = HeaderMap::new();
@@ -3505,6 +3573,7 @@ mod tests {
             installation_id: "inst-1".into(),
             grant_scope: AccountGrantScope::Machine,
             attach_public_key: device_id.public_key.clone(),
+            requester_machine: None,
         };
 
         let err = issue_grant(
@@ -3995,5 +4064,107 @@ mod tests {
 
         // enrolled_machine_by_id returns None (swallows error for non-critical callers)
         assert!(enrolled_machine_by_id(&state, "m-1").is_none());
+    }
+
+    /// The grant vouches for its requester only when an enrolled machine of the same owner
+    /// signed the requester nonce: a valid proof yields the machine id, no proof yields none
+    /// (a phone or the web app), and a forged or foreign proof is refused outright.
+    #[test]
+    fn a_grant_vouches_for_the_requester_machine_only_with_its_enrolled_key_signature() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(tmp.path().join("mail")));
+        let state = Arc::new(AccountState::new(tmp.path(), "https://account.test", mailer));
+        let (_session, holder) = setup_test_user_and_machine(&state, "https://relay.test");
+        let key = SigningKey::from_bytes(&[42u8; 32]);
+        let standby = crate::remote::auth::MachineIdentity {
+            machine_id: "mach-standby".into(),
+            display_name: "Standby".into(),
+            public_key: STANDARD.encode(key.verifying_key().to_bytes()),
+            private_key: STANDARD.encode(key.to_bytes()),
+        };
+        let now = now_secs();
+        state
+            .mutate(|store| {
+                store.machines.insert(
+                    "rec-standby".into(),
+                    MachineRecord {
+                        machine_record_id: "rec-standby".into(),
+                        owner_user_id: holder.owner_user_id.clone(),
+                        machine_id: standby.machine_id.clone(),
+                        display_name: "Standby".into(),
+                        public_key: standby.public_key.clone(),
+                        attach_public_key: STANDARD.encode([5u8; 32]),
+                        relay_origin: "https://relay.test".into(),
+                        platform: "linux".into(),
+                        enrollment_epoch: 1,
+                        enrolled_at: now,
+                        last_seen_at: now,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+        let request = |proof: Option<crate::remote::account_protocol::GrantRequesterProof>| AccountGrantRequest {
+            machine_record_id: holder.machine_record_id.clone(),
+            enrollment_epoch: "1".into(),
+            device_label: "Standby".into(),
+            installation_id: "mach-standby".into(),
+            grant_scope: AccountGrantScope::Machine,
+            attach_public_key: STANDARD.encode([6u8; 32]),
+            requester_machine: proof,
+        };
+        let vouch = |request: &AccountGrantRequest| {
+            state.read(|store| requester_machine_id(store, &holder.owner_user_id, &holder.machine_record_id, request, now))
+        };
+
+        let attach = STANDARD.encode([6u8; 32]);
+        let sign = |target: &str, attach: &str, at: u64| {
+            crate::hub_runtime::holder_link::requester_proof(&standby, target, attach, at).unwrap()
+        };
+        let proof = sign(&holder.machine_record_id, &attach, now);
+        assert_eq!(vouch(&request(Some(proof.clone()))).unwrap().as_deref(), Some("mach-standby"));
+        assert_eq!(vouch(&request(None)).unwrap(), None, "a phone or web request names no machine");
+
+        let mut forged = proof.clone();
+        forged.signature = STANDARD.encode([0u8; 64]);
+        assert_eq!(vouch(&request(Some(forged))).unwrap_err().code, "GRANT_REQUESTER_INVALID");
+        let other_target = sign("rec-other", &attach, now);
+        assert_eq!(vouch(&request(Some(other_target))).unwrap_err().code, "GRANT_REQUESTER_INVALID");
+        let mut wrong_installation = request(Some(proof.clone()));
+        wrong_installation.installation_id = "phone-install".into();
+        assert_eq!(vouch(&wrong_installation).unwrap_err().code, "GRANT_REQUESTER_INVALID");
+
+        // F2 MINOR-1: a captured proof replayed with another device key is refused.
+        let mut replayed = request(Some(proof));
+        replayed.attach_public_key = STANDARD.encode([8u8; 32]);
+        assert_eq!(vouch(&replayed).unwrap_err().code, "GRANT_REQUESTER_INVALID");
+
+        // F2 MINOR-4: a proof signed outside the clock window is refused, on either side.
+        let skew = PEER_RECORD_CLOCK_SKEW_SECS;
+        let edge = sign(&holder.machine_record_id, &attach, now - skew);
+        assert!(vouch(&request(Some(edge))).unwrap().is_some(), "the window's edge is accepted");
+        let stale = sign(&holder.machine_record_id, &attach, now - skew - 1);
+        assert_eq!(vouch(&request(Some(stale))).unwrap_err().code, "GRANT_REQUESTER_INVALID");
+        let future = sign(&holder.machine_record_id, &attach, now + skew + 1);
+        assert_eq!(vouch(&request(Some(future))).unwrap_err().code, "GRANT_REQUESTER_INVALID");
+
+        // F2 MINOR-4: the same machine key enrolled under another owner vouches for nothing.
+        // The store enforces machines.owner_user_id -> users, so the other owner must exist.
+        state
+            .mutate(|store| {
+                store.users.insert(
+                    "someone-else".into(),
+                    UserRecord {
+                        user_id: "someone-else".into(),
+                        email: "someone-else@example.com".into(),
+                        created_at: now,
+                    },
+                );
+                store.machines.get_mut("rec-standby").unwrap().owner_user_id = "someone-else".into();
+                Ok(())
+            })
+            .unwrap();
+        let foreign = sign(&holder.machine_record_id, &attach, now);
+        assert_eq!(vouch(&request(Some(foreign))).unwrap_err().code, "GRANT_REQUESTER_INVALID");
     }
 }

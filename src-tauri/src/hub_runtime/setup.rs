@@ -13,7 +13,7 @@ use ferryx_hub::supervisor::SupervisorError;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::{start_generation, Generation, HubStartError, HUB_TASKS, SUPERVISOR_LAUNCH, SUPERVISOR_VIEW};
+use super::{start_generation, supervisor_launch, supervisor_view, Generation, HubStartError, HUB_TASKS};
 use crate::remote::state::RemoteGatewayState;
 
 /// One project the owner asked setup to map: a display name and a local checkout path.
@@ -46,6 +46,9 @@ pub enum SetupError {
     EnvFile(String),
     #[error("the Slack owner {0} is configured but its Slack team could not be resolved yet; run setup again once Slack answers")]
     SlackTeamUnresolved(String),
+    /// Another machine holds the supervisor lease: setup runs on the holder only.
+    #[error("{}", .0.message)]
+    Standby(ferryx_hub::supervisor::request::RequestFailure),
     #[error("{0}")]
     Supervisor(#[from] SupervisorError),
 }
@@ -60,6 +63,7 @@ impl SetupError {
             Self::HandedOver => "INVALID_STATE",
             Self::EnvFile(_) => "STORAGE",
             Self::SlackTeamUnresolved(_) => SLACK_TEAM_UNRESOLVED,
+            Self::Standby(_) => ferryx_hub::holder::SUPERVISOR_STANDBY,
             Self::Supervisor(error) => error.code(),
         }
     }
@@ -71,6 +75,9 @@ impl From<HubStartError> for SetupError {
             HubStartError::Unavailable => Self::Unavailable,
             HubStartError::HandedOver => Self::HandedOver,
             HubStartError::Storage(message) => Self::EnvFile(message),
+            HubStartError::Standby { holder_machine_id, holder_label } => Self::Standby(
+                ferryx_hub::holder::standby_failure(holder_machine_id.as_deref(), holder_label.as_deref()),
+            ),
         }
     }
 }
@@ -83,13 +90,18 @@ pub(crate) struct SlackOwner {
 }
 
 /// The hub pool, and whether it is this daemon's live hub (whose generation setup may restart).
+/// A standby is refused (SUPERVISOR_STANDBY naming the holder): its local hub is not the
+/// supervisor, so setup, cutover, adoption and memory seeding happen on the holder only.
 pub(super) fn hub_pool(state: &RemoteGatewayState) -> Result<(ferryx_hub::goals::SqlitePool, bool), SetupError> {
+    if let Some(refusal) = super::standby_refusal() {
+        return Err(SetupError::Standby(refusal));
+    }
     #[cfg(test)]
     if let Some((pool, _)) = state.supervisor_test_hub.read().clone() {
         return Ok((pool, false));
     }
     let _ = state;
-    let (hub, _) = SUPERVISOR_VIEW.get().ok_or(SetupError::Unavailable)?;
+    let (hub, _) = supervisor_view().ok_or(SetupError::Unavailable)?;
     Ok((hub.pool.clone(), true))
 }
 
@@ -186,9 +198,7 @@ async fn slack_auth_team() -> Option<String> {
 
 /// The Slack team this hub has seen (stored Slack sessions), else Slack's own auth.test.
 async fn slack_owner(pool: &ferryx_hub::goals::SqlitePool) -> SlackOwner {
-    let user = SUPERVISOR_LAUNCH
-        .get()
-        .and_then(|launch| launch.config.owner_slack_id.clone());
+    let user = supervisor_launch().and_then(|launch| launch.config.owner_slack_id.clone());
     let Some(user) = user else {
         return SlackOwner::default();
     };
@@ -202,13 +212,13 @@ async fn slack_owner(pool: &ferryx_hub::goals::SqlitePool) -> SlackOwner {
 /// Restarts this daemon's hub generation when one runs (see [`restart_if_running`]). Returns
 /// whether it restarted. Never restarts the daemon or touches a PTY.
 async fn restart_generation() -> Result<bool, SetupError> {
-    let (Some((_, running)), Some(launch)) = (SUPERVISOR_VIEW.get(), SUPERVISOR_LAUNCH.get()) else {
+    let (Some((_, running)), Some(launch)) = (supervisor_view(), supervisor_launch()) else {
         return Err(SetupError::Unavailable);
     };
     if HUB_TASKS.is_retired() {
         return Err(SetupError::HandedOver);
     }
-    restart_if_running(running, || start_generation(running, launch)).await
+    restart_if_running(&running, || start_generation(&running, &launch)).await
 }
 
 /// Ends the running generation and starts a fresh one with start, as control stop then start
@@ -540,12 +550,20 @@ pub async fn supervisor_setup_run(
     }
     if let (Some(engine), true) = (installed, answer["seedDue"] == true) {
         // The engine was already Ready, so its generation's task saw no new Ready: seed here,
-        // off the request path (once; a finished import makes this a no-op).
-        let state = std::sync::Arc::clone(state);
-        let pool = pool.clone();
-        super::HUB_TASKS.track(&tokio::spawn(async move {
-            seed_if_wanted(&engine, &pool, &state, super::home_dir()).await;
-        }));
+        // off the request path (once; a finished import makes this a no-op). It joins the
+        // running generation's tasks, so a lease stand-down or `hub stop` ends it; with no
+        // generation running there is no engine to seed and nothing is spawned.
+        if let Some((_, running)) = supervisor_view() {
+            if let Some(generation) = running.lock().await.as_mut() {
+                let state = std::sync::Arc::clone(state);
+                let pool = pool.clone();
+                let task = tokio::spawn(async move {
+                    seed_if_wanted(&engine, &pool, &state, super::home_dir()).await;
+                });
+                HUB_TASKS.track(&task);
+                generation.tasks.push(task);
+            }
+        }
     }
     crate::remote::server::agent_control_service::publish_supervisor_changed(state, json!({ "setup": "run" }));
     Ok(answer)

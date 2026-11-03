@@ -4250,8 +4250,10 @@ async fn get_capabilities(
             capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
+            capabilities.push(crate::agent_control::fence::SUPERVISOR_FENCE_CAPABILITY);
             if crate::hub_runtime::supervisor_available() {
                 capabilities.push(supervisor_api::SUPERVISOR_CAPABILITY);
+                capabilities.push(supervisor_api::SUPERVISOR_OBSERVE_CAPABILITY);
             }
             capabilities
         } else { vec![] },
@@ -8057,6 +8059,33 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route("/api/v1/supervisor", get(supervisor_api::http_snapshot))
         .route("/api/v1/supervisor/start", post(supervisor_api::http_start))
         .route(
+            "/api/v1/supervisor/move",
+            post(supervisor_api::http_move).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+            )),
+        )
+        .route(
+            "/api/v1/supervisor/release-to",
+            post(supervisor_api::http_release_to).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+            )),
+        )
+        .route("/api/v1/supervisor/checkpoint", get(supervisor_api::http_checkpoint))
+        .route(
+            "/api/v1/supervisor/adopt-archived",
+            post(supervisor_api::http_adopt_archived).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+            )),
+        )
+        .route(
+            "/api/v1/supervisor/fence",
+            post(agent_control_service::http_supervisor_fence).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+                ),
+            ),
+        )
+        .route(
             "/api/v1/supervisor/setup",
             get(supervisor_api::http_setup_status)
                 .post(supervisor_api::http_setup_run)
@@ -8084,6 +8113,12 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route(
             "/api/v1/supervisor/pause",
             post(supervisor_api::http_pause).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+            )),
+        )
+        .route(
+            "/api/v1/supervisor/observe",
+            post(supervisor_api::http_observe).layer(axum::extract::DefaultBodyLimit::max(
                 crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
             )),
         )
@@ -8339,6 +8374,7 @@ impl RemoteServerHandle {
         });
         *state.relay_client.write() = Some(client.clone());
         self.published_pairing = Some((state, epoch));
+        crate::hub_runtime::note_relay_published();
         self.relay_task = Some(tokio::spawn(async move { client.run().await }));
         prev_task
     }
@@ -8661,6 +8697,8 @@ pub async fn start_remote_server_with_resolver_and_insecure_opt_in(
             });
             published_pairing = Some((Arc::clone(&state), epoch));
             *state.relay_client.write() = Some(client.clone());
+            // The hub's lease client binds to this relay (it may have started without one).
+            crate::hub_runtime::note_relay_published();
             // run invokes connect_control and keeps servicing reverse tunnels/reconnects.
             tokio::spawn(async move { client.run().await })
         });
@@ -9928,6 +9966,7 @@ mod tests {
                 audience: None,
                 nonce: "startup-challenge".into(),
                 timestamp: 1234,
+                capabilities: Vec::new(),
             };
             socket
                 .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -12560,6 +12599,7 @@ mod tests {
                 audience: None,
                 nonce: "mock-test-challenge".into(),
                 timestamp: now_secs,
+                capabilities: Vec::new(),
             };
             socket
                 .send(tokio_tungstenite::tungstenite::Message::Text(
