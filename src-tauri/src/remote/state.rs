@@ -861,6 +861,9 @@ pub struct RemoteGatewayState {
     #[cfg(feature = "remote-desktop")]
     pub remote_desktop: Arc<crate::remote::remote_desktop::RemoteDesktopHost>,
     pub browser_service_epoch: AtomicU64,
+    /// The daemon's paired-host service, set once by the daemon. The HTTP gateway forwards a
+    /// paired computer's stop or decision answer through it in-process, as the calling device.
+    paired_hosts: RwLock<Option<crate::paired_host::service::PairedHostService>>,
     snapshot_cache: RwLock<Option<WorkspaceCacheEntry>>,
     snapshot_lock: tokio::sync::Mutex<()>,
     #[cfg(test)]
@@ -1170,6 +1173,7 @@ impl RemoteGatewayState {
             )),
             admission_controller: Arc::new(AdmissionController::new()),
             browser_service_epoch: AtomicU64::new(1),
+            paired_hosts: RwLock::new(None),
             snapshot_cache: RwLock::new(None),
             snapshot_lock: tokio::sync::Mutex::new(()),
             #[cfg(test)]
@@ -1179,6 +1183,14 @@ impl RemoteGatewayState {
             #[cfg(test)]
             snapshot_post_build_hook: Arc::new(RwLock::new(None)),
         }
+    }
+
+    pub(crate) fn set_paired_hosts(&self, hosts: crate::paired_host::service::PairedHostService) {
+        *self.paired_hosts.write() = Some(hosts);
+    }
+
+    pub(crate) fn paired_hosts(&self) -> Option<crate::paired_host::service::PairedHostService> {
+        self.paired_hosts.read().clone()
     }
 
     #[cfg(test)]

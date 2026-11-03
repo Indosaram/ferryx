@@ -2667,7 +2667,15 @@ async fn host_http_handler(
     peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     request: Request<Body>,
 ) -> Result<Response, StatusCode> {
-    if !allowed_http_route(request.method(), &path) {
+    // The route is validated as the raw, undecoded request path (the bytes that are forwarded):
+    // axum's wildcard is already percent-decoded, so an encoded `<hostUrl>:<id>` session ref
+    // would arrive as extra and empty segments.
+    let raw_route = request
+        .uri()
+        .path()
+        .strip_prefix(&format!("/host/{machine}/api/v1/"))
+        .unwrap_or_default();
+    if !allowed_http_route(request.method(), raw_route) {
         return Err(StatusCode::FORBIDDEN);
     }
     // A refused query answers with the frozen machine envelope every other refusal on this
@@ -2958,12 +2966,30 @@ async fn browser_identify_http_handler(
 
 pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
     let parts: Vec<_> = path.split('/').collect();
-    if parts.iter().any(|part| {
+    // Only the session ref of a direct stop or a decision tap may carry %XX escapes: a paired
+    // computer's host id is a URL, so its ref travels as one percent-encoded segment.
+    let ref_position = match (method.as_str(), parts.as_slice()) {
+        ("POST", ["sessions", _, "stop"]) => Some(1),
+        ("POST", ["supervisor", "decisions", _, "answer"]) => Some(2),
+        _ => None,
+    };
+    if parts.iter().enumerate().any(|(index, part)| {
         part.is_empty()
             || matches!(*part, "." | "..")
-            || !part
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.' | b'~'))
+            || if Some(index) == ref_position {
+                !encoded_session_ref_is_admissible(part)
+            } else {
+                // The route is split raw, then each segment is decoded and held to the old
+                // character rule, so `daemon-session%3Aabc` is `daemon-session:abc` as it was
+                // when the wildcard arrived decoded, while `%2F`, `%20`, controls, malformed
+                // escapes and encoded dot segments stay refused.
+                !decoded_segment(part).is_some_and(|decoded| {
+                    !matches!(decoded.as_slice(), b"." | b"..")
+                        && decoded.iter().all(|b| {
+                            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.' | b'~')
+                        })
+                })
+            }
     }) {
         return false;
     }
@@ -3021,6 +3047,55 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("GET" | "POST", ["supervisor", "memory"])
             | ("GET", ["attach"])
     )
+}
+
+/// One raw path segment with its `%XX` escapes decoded. `None` for a malformed escape.
+fn decoded_segment(segment: &str) -> Option<Vec<u8>> {
+    let mut decoded = Vec::with_capacity(segment.len());
+    let mut bytes = segment.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            let digit = |b: Option<u8>| b.and_then(|b| (b as char).to_digit(16));
+            let (Some(hi), Some(lo)) = (digit(bytes.next()), digit(bytes.next())) else {
+                return None;
+            };
+            decoded.push((hi * 16 + lo) as u8);
+        } else {
+            decoded.push(byte);
+        }
+    }
+    Some(decoded)
+}
+
+/// One raw path segment holding a session ref: plain route characters or valid `%XX` escapes,
+/// decoding to non-empty UTF-8 without control characters, and never to a dot segment. An
+/// escaped `/` stays inside the segment; it is never a separator.
+fn encoded_session_ref_is_admissible(segment: &str) -> bool {
+    let mut decoded = Vec::with_capacity(segment.len());
+    let mut bytes = segment.bytes();
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b'%' => {
+                let digit = |b: Option<u8>| b.and_then(|b| (b as char).to_digit(16));
+                let (Some(hi), Some(lo)) = (digit(bytes.next()), digit(bytes.next())) else {
+                    return false;
+                };
+                decoded.push((hi * 16 + lo) as u8);
+            }
+            b if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.' | b'~') => {
+                decoded.push(b)
+            }
+            _ => return false,
+        }
+    }
+    match String::from_utf8(decoded) {
+        Ok(decoded) => {
+            !decoded.is_empty()
+                && !matches!(decoded.as_str(), "." | "..")
+                && !decoded.chars().any(char::is_control)
+        }
+        Err(_) => false,
+    }
 }
 
 /// How large a forwarded body one reference-chat route may carry.
@@ -5661,6 +5736,120 @@ mod tests {
         assert_eq!(body["error"]["retryable"], false);
         assert_eq!(body["requestId"], "agent-req-1");
         state.unregister_control_channel("agent-host", generation);
+        server.abort();
+    }
+
+    #[test]
+    fn an_encoded_colon_in_an_id_segment_is_admitted_and_other_escapes_are_not() {
+        assert!(allowed_http_route(&Method::GET, "agent-history/daemon-session%3Aabc"));
+        assert!(allowed_http_route(
+            &Method::POST,
+            "reference-chat/daemon-session%3Aabc/acknowledge-outcome"
+        ));
+        for route in [
+            "agent-history/a%2Fb",
+            "agent-history/%2e%2e",
+            "agent-history/%2E",
+            "agent-history/a%20b",
+            "agent-history/a%0Ab",
+            "agent-history/a%zz",
+            "agent-history/a%",
+        ] {
+            assert!(!allowed_http_route(&Method::GET, route), "{route}");
+        }
+    }
+
+    #[test]
+    fn an_encoded_paired_session_ref_is_admitted_only_on_the_stop_and_answer_routes() {
+        let encoded = "https%3A%2F%2Frelay.example%2Fhost%2Fm%3As1";
+        let stop = format!("sessions/{encoded}/stop");
+        let tap = format!("supervisor/decisions/{encoded}/answer");
+        for route in [&stop, &tap] {
+            assert!(allowed_http_route(&Method::POST, route), "POST {route}");
+            assert!(!allowed_http_route(&Method::GET, route), "GET {route} stays refused");
+            assert!(!allowed_http_route(&Method::DELETE, route), "DELETE {route} stays refused");
+        }
+        // The escaped slashes stay inside one segment, so the route is still a mutation.
+        assert!(agent_control_mutation(&Method::POST, &format!("/api/v1/{stop}")));
+        assert!(agent_control_mutation(&Method::POST, &format!("/api/v1/{tap}")));
+        assert!(!agent_control_mutation(&Method::GET, &format!("/api/v1/{stop}")));
+        // Escapes are admitted nowhere else, and a bad escape or an encoded dot segment never is.
+        for route in [
+            format!("agent-control/sessions/{encoded}/stop"),
+            format!("sessions/{encoded}"),
+            format!("sessions/{encoded}/stop/extra"),
+            format!("workspace/{encoded}"),
+            "sessions/%2e%2e/stop".to_owned(),
+            "sessions/%2E/stop".to_owned(),
+            "sessions/%2e%2E/stop".to_owned(),
+            "sessions/%/stop".to_owned(),
+            "sessions/%zz/stop".to_owned(),
+            "sessions/%0a/stop".to_owned(),
+            "sessions/%ff/stop".to_owned(),
+            "sessions//stop".to_owned(),
+            "supervisor/decisions/%2e%2e/answer".to_owned(),
+        ] {
+            assert!(!allowed_http_route(&Method::POST, &route), "{route}");
+        }
+        // An unescaped slash in the ref is the old decoded shape: more segments, refused.
+        assert!(!allowed_http_route(
+            &Method::POST,
+            "sessions/https://relay.example/host/m:s1/stop"
+        ));
+    }
+
+    /// Production-shaped: the request goes through the real relay router, so the encoded ref is
+    /// validated from the raw URI path and forwarded to the host byte for byte.
+    #[tokio::test]
+    async fn a_paired_session_ref_stop_traverses_the_relay_as_one_encoded_segment() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (generation, mut notices, _grants) = state.register_control_channel("m".into());
+        state.register_device_token("m", "paired-device-token");
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let base = base.replace("ws://", "http://");
+        let tunnel = base.replace("http://", "ws://");
+        let encoded = "https%3A%2F%2Frelay.example%2Fhost%2Fm%3As1";
+        let url = format!("{base}/host/m/api/v1/sessions/{encoded}/stop");
+
+        // Refused before anything is forwarded: wrong method, and an encoded `..`.
+        let get = client.get(&url).send().await.unwrap();
+        assert_eq!(get.status(), StatusCode::FORBIDDEN);
+        let dots = client
+            .post(format!("{base}/host/m/api/v1/sessions/%2e%2e/stop"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(dots.status(), StatusCode::FORBIDDEN);
+
+        let post = client
+            .post(&url)
+            .bearer_auth("paired-device-token")
+            .header("content-type", "application/json")
+            .body("{}")
+            .send();
+        let peer = async {
+            let notice = notices.recv().await.unwrap();
+            let (mut data, _) = tokio_tungstenite::connect_async(format!(
+                "{tunnel}/tunnel/data/{}",
+                notice.session_id
+            ))
+            .await
+            .unwrap();
+            let request = data.next().await.unwrap().unwrap().into_data();
+            let head = String::from_utf8_lossy(&request).into_owned();
+            assert!(
+                head.starts_with(&format!("POST /api/v1/sessions/{encoded}/stop HTTP/1.1")),
+                "forwarded raw, not decoded: {head}"
+            );
+            data.close(None).await.unwrap();
+        };
+        let (response, ()) = timeout(Duration::from_secs(10), async { tokio::join!(post, peer) })
+            .await
+            .unwrap();
+        // The host's reply was lost after delivery: outcome-unknown, so it was a mutation.
+        assert_eq!(response.unwrap().status(), StatusCode::CONFLICT);
+        state.unregister_control_channel("m", generation);
         server.abort();
     }
 

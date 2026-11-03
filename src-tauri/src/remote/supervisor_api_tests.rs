@@ -702,13 +702,24 @@ async fn a_stop_routes_by_session_ref_and_stays_on_this_computer() {
     assert_eq!(audit[0].code, "NOT_FOUND");
     let audited = gateway.state().agent_control_audit.recent().len();
 
-    // Another computer's ref never reaches a local pane: refused before agent control runs.
+    // Another computer's ref never reaches a local pane: it goes to the daemon's paired-host
+    // forwarding path. This daemon has no paired host named "otherhost", which that path reports.
     let (status, _, body) = gateway
         .post_to("/api/v1/sessions/otherhost:no-such-pane/stop", &token, "")
         .await;
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["error"]["code"], "NOT_FOUND");
-    assert_eq!(gateway.state().agent_control_audit.recent().len(), audited, "nothing was attempted locally");
+    assert!(
+        body["error"]["message"].as_str().unwrap_or_default().contains("no paired host is named otherhost"),
+        "the forward reached the daemon's paired-host path: {body}"
+    );
+    let audit = gateway.state().agent_control_audit.recent();
+    let forwarded: Vec<_> = audit.iter().skip(audited).collect();
+    assert_eq!(forwarded.len(), 1, "exactly one audit line for the forward: {audit:?}");
+    assert!(
+        forwarded[0].op == "stop" && forwarded[0].session_id.as_deref() == Some("no-such-pane") && forwarded[0].device_id != "owner",
+        "the forward is audited under the calling device: {audit:?}"
+    );
 
     // A handle with no host is malformed.
     let (status, _, body) = gateway.post_to("/api/v1/sessions/nohost/stop", &token, "").await;
@@ -731,6 +742,29 @@ async fn a_decision_tap_needs_its_exact_body_and_is_audited_as_an_answer() {
     assert_eq!(status, 404, "{body}");
     let audit = gateway.state().agent_control_audit.latest(1);
     assert_eq!((audit[0].op.as_str(), audit[0].code.as_str()), ("answer", "NOT_FOUND"));
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn a_decision_tap_for_another_computer_is_forwarded_and_audited_per_device() {
+    let gateway = Gateway::start().await;
+    let token = gateway.authorized_machine_token();
+
+    let path = "/api/v1/supervisor/decisions/otherhost:pane-9/answer";
+    let (status, _, body) = gateway.post_to(path, &token, TAP).await;
+    assert_eq!(status, 404, "{body}");
+    assert!(
+        body["error"]["message"].as_str().unwrap_or_default().contains("no paired host is named otherhost"),
+        "the tap reached the daemon's paired-host forwarding path: {body}"
+    );
+    let audit = gateway.state().agent_control_audit.latest(1);
+    assert_eq!((audit[0].op.as_str(), audit[0].code.as_str()), ("answer", "NOT_FOUND"));
+    assert_ne!(audit[0].device_id, "owner");
+
+    // Authorization is checked before the forward: a device taken off the allowlist forwards nothing.
+    gateway.state().agent_control_policy.restrict_to(["another-device"]);
+    let (status, _, body) = gateway.post_to(path, &token, TAP).await;
+    assert_eq!(status, 403, "{body}");
     gateway.stop().await;
 }
 
