@@ -224,3 +224,62 @@ async fn a_machine_scope_events_socket_receives_the_prompt_changed_frame() {
         .unwrap();
     fixture.stop().await;
 }
+
+/// The next frame of `kind` on the socket, skipping other event types.
+async fn next_frame_of<S>(socket: &mut S, kind: &str) -> Value
+where
+    S: futures_util::Stream<
+            Item = Result<
+                tokio_tungstenite::tungstenite::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        > + Unpin,
+{
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let message = socket.next().await.unwrap().unwrap();
+            let Ok(text) = message.to_text() else {
+                continue;
+            };
+            let Ok(event) = serde_json::from_str::<Value>(text) else {
+                continue;
+            };
+            if event["type"] == kind {
+                return event;
+            }
+        }
+    })
+    .await
+    .expect("a frame of the wanted type")
+}
+
+#[tokio::test]
+async fn a_non_owner_machine_socket_gets_the_panel_transition_without_a_prompt_body() {
+    // Agent control is off by default, so this Control device is not an owner subscriber.
+    let (fixture, token) = fixture(DeviceAccessScope::Machine).await;
+    let state = fixture.owner.remote_state().clone();
+    assert!(!state.agent_control_policy.enabled());
+    let mut socket = fixture.events_socket(&token).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let message = socket.next().await.unwrap().unwrap();
+            let event: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+            if event["type"] == "inventoryInvalidated" {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the machine socket opens with an inventory boundary");
+
+    state.agent_events.publish(draft("machine-session", "p1"));
+    let frame = next_frame_of(&mut socket, "panel.session").await;
+    assert_eq!(frame["state"], "blocked");
+    assert_eq!(frame["promptId"], "p1");
+    assert!(frame["sessionRef"].as_str().unwrap().ends_with(":machine-session"));
+    assert!(frame.get("session").is_none(), "{frame}");
+    assert!(frame.get("question").is_none() && frame.get("body").is_none(), "{frame}");
+
+    drop(socket);
+    fixture.stop().await;
+}

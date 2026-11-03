@@ -626,6 +626,10 @@ pub enum SupervisorReadAction {
         after: Option<i64>,
     },
     Memory,
+    /// The panel snapshot (`PanelSnapshot`): sessions, handling, log, rules, decisions.
+    Panel,
+    /// This computer's sessions as the fleet read maps them (`FleetSession[]`).
+    Fleet,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

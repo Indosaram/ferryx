@@ -1426,7 +1426,7 @@ pub const SUPERVISOR_READ_CAPABILITY: &str = "supervisorReadV1";
 /// The desktop's read of the unified supervisor besides the snapshot: the same conversation
 /// page and memory view the remote `GET /api/v1/supervisor/{conversation,memory}` routes serve.
 pub async fn supervisor_read(
-    state: &RemoteGatewayState,
+    state: &Arc<RemoteGatewayState>,
     request: crate::daemon::protocol::SupervisorReadAction,
 ) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
     use crate::daemon::protocol::SupervisorReadAction;
@@ -1435,7 +1435,121 @@ pub async fn supervisor_read(
             supervisor_conversation(state, SupervisorCaller::Desktop, &project_id, after.unwrap_or(0)).await
         }
         SupervisorReadAction::Memory => supervisor_memory(state, SupervisorCaller::Desktop).await,
+        SupervisorReadAction::Panel => Ok(json!(supervisor_panel(state).await)),
+        SupervisorReadAction::Fleet => Ok(json!({ "sessions": local_fleet_sessions(state).await })),
     }
+}
+
+/// The label the panel shows for this computer.
+const LOCAL_FLEET_LABEL: &str = "This computer";
+
+/// The panel's log window: action entries updated in the last day.
+const PANEL_LOG_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
+
+fn unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// This computer's sessions in the fleet shape (`GET /api/v1/fleet/sessions`).
+///
+/// The gateway has no path to the hub's paired-host fleet, so this is the local machine only,
+/// mapped exactly as the hub's `fleet::merge_sessions` maps one machine of many. A failed local
+/// list is a stale, empty machine rather than an error.
+pub async fn local_fleet_sessions(state: &Arc<RemoteGatewayState>) -> Vec<ferryx_hub::supervisor::panel_contract::FleetSession> {
+    let host_id = crate::remote::reference_chat::files::reference_host_id();
+    let entry = match crate::remote::server::agent_control_service::handle(state, AgentControlOp::List).await {
+        Ok(result) => ferryx_hub::fleet::InventoryEntry {
+            host_id: host_id.clone(),
+            sessions: result
+                .get("sessions")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            error: None,
+            stale: false,
+        },
+        Err(error) => ferryx_hub::fleet::InventoryEntry {
+            host_id: host_id.clone(),
+            sessions: Vec::new(),
+            error: Some(error.message),
+            stale: true,
+        },
+    };
+    let labels = std::collections::HashMap::from([(host_id, LOCAL_FLEET_LABEL.to_string())]);
+    ferryx_hub::fleet::merge_sessions(&labels, &[entry], unix_ms())
+}
+
+/// One local session in the fleet shape, read now, with its pending prompt and last assistant
+/// line. Only owner-scoped event frames carry it.
+pub async fn local_fleet_session(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+) -> Option<ferryx_hub::supervisor::panel_contract::FleetSession> {
+    let read = crate::remote::server::agent_control_service::handle(
+        state,
+        AgentControlOp::Read { session_id: session_id.to_string() },
+    )
+    .await
+    .ok()?;
+    let entry = read.get("session")?.clone();
+    let host_id = crate::remote::reference_chat::files::reference_host_id();
+    let one = ferryx_hub::fleet::InventoryEntry {
+        host_id: host_id.clone(),
+        sessions: vec![entry],
+        error: None,
+        stale: false,
+    };
+    let labels = std::collections::HashMap::from([(host_id, LOCAL_FLEET_LABEL.to_string())]);
+    ferryx_hub::fleet::merge_sessions(&labels, &[one], unix_ms()).pop()
+}
+
+/// What the panel reads besides the fleet. Each store is installed by the worker that owns it;
+/// until then its section is empty.
+static PANEL_SOURCES: parking_lot::RwLock<ferryx_hub::fleet::PanelSources> =
+    parking_lot::RwLock::new(ferryx_hub::fleet::PanelSources { log: None, rules: None, escalations: None });
+
+/// The supervisor pause flag the panel reports. The pause route sets it.
+static PANEL_PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Installs the stores the panel reads (replaces the previous ones).
+pub fn install_panel_sources(sources: ferryx_hub::fleet::PanelSources) {
+    *PANEL_SOURCES.write() = sources;
+}
+
+/// Sets the supervisor pause flag the panel reports.
+pub fn set_panel_paused(paused: bool) {
+    PANEL_PAUSED.store(paused, std::sync::atomic::Ordering::Release);
+}
+
+/// Whether the hub is open and its generation running in this daemon.
+async fn hub_running(state: &RemoteGatewayState) -> bool {
+    let Some((_, running)) = SUPERVISOR_VIEW.get() else {
+        #[cfg(test)]
+        return state.supervisor_test_hub.read().is_some();
+        #[cfg(not(test))]
+        {
+            let _ = state;
+            return false;
+        }
+    };
+    running.lock().await.is_some() && !HUB_TASKS.is_retired()
+}
+
+/// Everything the Supervisor panel renders, in one snapshot. With no hub running it asks for
+/// setup (`setupRequired`); the fleet still lists this computer's sessions.
+pub async fn supervisor_panel(state: &Arc<RemoteGatewayState>) -> ferryx_hub::supervisor::panel_contract::PanelSnapshot {
+    let sessions = local_fleet_sessions(state).await;
+    let sources = PANEL_SOURCES.read().clone();
+    ferryx_hub::fleet::assemble_panel(
+        &sources,
+        sessions,
+        PANEL_PAUSED.load(std::sync::atomic::Ordering::Acquire),
+        hub_running(state).await,
+        unix_ms() - PANEL_LOG_WINDOW_MS,
+    )
+    .await
 }
 
 /// The unified supervisor's part of the snapshot: identity, engine health and every goal's

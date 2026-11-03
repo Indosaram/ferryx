@@ -156,6 +156,13 @@ async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Ob
         .as_ref()
         .filter(|seen| seen.screen_revision == screen_revision)
         .and_then(|seen| seen.screen_changed_at_ms);
+    let last_assistant_line = match &agent {
+        Some(agent) => {
+            let identity = reference_chat_identity(state, &target, Some(agent)).await;
+            last_assistant_line(state, session_id, identity).await
+        }
+        None => None,
+    };
     let entry = serde_json::json!({
         "sessionId": session_id,
         "running": details.running,
@@ -173,8 +180,64 @@ async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Ob
         "screenRevision": screen_revision,
         "screenChangedAt": screen_changed_at,
         "screenReadable": readable,
+        "lastAssistantLine": last_assistant_line,
     });
     Ok(Observed { entry, screen })
+}
+
+/// The longest `lastAssistantLine` a list or read entry carries.
+const LAST_ASSISTANT_LINE_MAX_CHARS: usize = 200;
+
+/// How many newest turn boundaries are read to find the last assistant message.
+const LAST_ASSISTANT_LINE_TURNS: usize = 4;
+
+/// The last line of the session's newest assistant text, from the same history reader the phone
+/// chat uses. `None` when the store is unavailable, remote, scrollback-only or holds no
+/// assistant text yet; a missing line never fails a list or read.
+async fn last_assistant_line(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+    identity: reference_history::ReferenceHistoryIdentity,
+) -> Option<String> {
+    if reference_chat_session_is_remote(state, session_id).await {
+        return None;
+    }
+    let home = reference_chat_history_home(state)?;
+    let siblings = reference_chat_siblings(state, session_id).await;
+    let stream = reference_chat_resolve_history(
+        home,
+        identity.clone(),
+        siblings,
+        reference_history::resolve_reference_history_stream,
+    )
+    .await
+    .ok()?;
+    let page = reference_history::read_reference_history_page(&stream, &identity, LAST_ASSISTANT_LINE_TURNS, None)
+        .await
+        .ok()?;
+    if !page.is_native() {
+        return None;
+    }
+    last_assistant_line_of(&page.turns)
+}
+
+/// The last non-empty line of the newest assistant text part, cut to
+/// [`LAST_ASSISTANT_LINE_MAX_CHARS`] characters.
+fn last_assistant_line_of(turns: &[reference_types::ReferenceTurn]) -> Option<String> {
+    turns
+        .iter()
+        .rev()
+        .filter(|turn| turn.role == reference_types::ReferenceTurnRole::Assistant)
+        .flat_map(|turn| turn.parts.iter().rev())
+        .find_map(|part| match part {
+            reference_types::ReferencePart::Text { text, .. } => text
+                .lines()
+                .rev()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(|line| line.chars().take(LAST_ASSISTANT_LINE_MAX_CHARS).collect::<String>()),
+            _ => None,
+        })
 }
 
 async fn live(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<(), ScopeError> {
@@ -1197,6 +1260,49 @@ mod tests {
         stamp_remote_receipt_host(&mut listed, "https://relay.example/host/other");
         assert!(listed.get("receipt").is_none());
         assert_eq!(listed["sessions"][0]["sessionId"], "pane-1");
+    }
+
+    fn turn(role: reference_types::ReferenceTurnRole, parts: Vec<reference_types::ReferencePart>) -> reference_types::ReferenceTurn {
+        reference_types::ReferenceTurn {
+            role,
+            started_at: None,
+            ended_at: None,
+            source: None,
+            parts,
+            abandoned: None,
+        }
+    }
+
+    fn text(text: &str) -> reference_types::ReferencePart {
+        reference_types::ReferencePart::Text { text: text.to_string(), phase: None }
+    }
+
+    #[test]
+    fn the_last_assistant_line_is_the_newest_assistant_text_cut_to_the_cap() {
+        use reference_types::ReferenceTurnRole::{Assistant, User};
+        assert_eq!(last_assistant_line_of(&[]), None);
+        let turns = vec![
+            turn(Assistant, vec![text("older answer")]),
+            turn(Assistant, vec![text("First line\n\nSecond line  \n\n")]),
+            turn(User, vec![text("a later user message")]),
+        ];
+        assert_eq!(last_assistant_line_of(&turns).as_deref(), Some("Second line"));
+        let long = vec![turn(Assistant, vec![text(&"x".repeat(500))])];
+        assert_eq!(last_assistant_line_of(&long).map(|line| line.chars().count()), Some(LAST_ASSISTANT_LINE_MAX_CHARS));
+        let no_text = vec![turn(Assistant, vec![reference_types::ReferencePart::Thinking { text: "hmm".into() }])];
+        assert_eq!(last_assistant_line_of(&no_text), None);
+    }
+
+    #[tokio::test]
+    async fn a_list_entry_carries_the_last_assistant_line_key_null_when_unavailable() {
+        let session_id = "agent-control-last-line";
+        let (_backend, state) = pane(session_id, CLAUDE_APPROVAL);
+        let listed = handle(&state, AgentControlOp::List).await.expect("list");
+        let entry = &listed["sessions"][0];
+        assert!(entry.get("lastAssistantLine").is_some(), "{listed}");
+        assert!(entry["lastAssistantLine"].is_null(), "a pane with no transcript has no line: {listed}");
+        let read = handle(&state, AgentControlOp::Read { session_id: session_id.to_string() }).await.expect("read");
+        assert!(read["session"].get("lastAssistantLine").is_some(), "{read}");
     }
 
     const CLAUDE_APPROVAL: &str = include_str!("reference_chat/fixtures/claude/prompt/approval-command.screen");
