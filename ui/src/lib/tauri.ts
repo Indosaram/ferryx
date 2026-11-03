@@ -585,6 +585,17 @@ export async function setSupervisorPanelPaused(paused: boolean): Promise<void> {
   await invokeCommand<unknown>("cmd_supervisor_pause", { paused });
 }
 
+/** One page of the supervisor's app transcript after `cursor` (a message id; 0 is the start). */
+export async function readSupervisorTranscriptPage(cursor: number): Promise<unknown> {
+  if (!isTauri()) throw toIpcError(new Error("The supervisor is reachable only in the desktop app"));
+  return invokeCommand<unknown>("cmd_supervisor_read", { request: { view: "transcript", cursor } });
+}
+
+/** Saves the exported transcript into the Downloads folder; resolves to the saved path. */
+export async function saveSupervisorTranscriptFile(fileName: string, text: string): Promise<string> {
+  return invokeCommand<string>("cmd_supervisor_transcript_export", { fileName, text });
+}
+
 /** Stops one session straight through agent control, not via the engine. */
 export async function stopSupervisedSession(sessionRef: string): Promise<void> {
   if (!isTauri()) throw toIpcError(new Error("The supervisor is reachable only in the desktop app"));

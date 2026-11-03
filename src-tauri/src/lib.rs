@@ -1980,6 +1980,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::supervisor::cmd_supervisor_request,
         ipc::supervisor::cmd_supervisor_read,
         ipc::supervisor::cmd_supervisor_converse,
+        ipc::supervisor::cmd_supervisor_transcript_export,
         ipc::supervisor::cmd_supervisor_panel,
         ipc::supervisor::cmd_supervisor_setup_status,
         ipc::supervisor::cmd_supervisor_setup_run,

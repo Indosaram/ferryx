@@ -12,6 +12,7 @@ import { Composer } from "../../components/supervisorPanel/Composer";
 import { PanelSurface } from "../../components/supervisorPanel/PanelSurface";
 import { cn } from "../../lib/cn";
 import type { PanelActions } from "../../lib/supervisorPanel/actions";
+import type { TranscriptSource } from "../../lib/supervisorPanel/useTranscript";
 import type { MentionOption } from "../../components/supervisorPanel/types";
 import { PhoneHomeHeader } from "../home/PhoneHomeHeader";
 import { PullToRefreshIndicator } from "../home/PullToRefreshIndicator";
@@ -22,6 +23,7 @@ export type PhoneSupervisorHomeProps = {
   readonly state: PanelState;
   readonly now: number;
   readonly actions: PanelActions;
+  readonly transcript?: TranscriptSource;
   readonly onRefresh: () => Promise<unknown> | void;
   /** "+": go where a session is started. Absent: no button. */
   readonly onStartSession?: () => void;
@@ -83,6 +85,7 @@ export function PhoneSupervisorHome(props: PhoneSupervisorHomeProps) {
                 nowMs={now}
                 computerLabel={props.computerLabel}
                 hideComposer
+                transcript={props.transcript}
                 onComposerText={(text) => setSeed((current) => ({ text, nonce: (current?.nonce ?? 0) + 1 }))}
               />
             ) : (

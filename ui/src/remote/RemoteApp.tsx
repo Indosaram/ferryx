@@ -3125,6 +3125,7 @@ export const RemoteHostConnection: React.FC<{
       state={panelState}
       now={phoneSupervisor.now}
       computerLabel={panelComputerLabel}
+      transcript={phonePanel.transcript}
       actions={{ ...phonePanel.actions, turnOn: panelTurnOn, openSession: (ref) => openPanelSessionRef.current(ref) }}
     />
   );
@@ -5361,6 +5362,7 @@ export const RemoteHostConnection: React.FC<{
             state: panelState,
             now: phoneSupervisor.now,
             actions: { ...phonePanel.actions, turnOn: panelTurnOn, openSession: openPanelSession },
+            transcript: phonePanel.transcript,
             onStartSession: () => phoneNav.selectTab("worktrees"),
             computerLabel: panelComputerLabel,
             onRefresh: () =>

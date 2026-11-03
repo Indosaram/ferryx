@@ -21,6 +21,8 @@ import { RulesLine } from './RulesLine';
 import { HandlingRow, SessionRow } from './Rows';
 import { SetupCard } from './SetupCard';
 import { StatusLine } from './StatusLine';
+import { TranscriptSection } from './TranscriptSection';
+import type { TranscriptSource } from '../../lib/supervisorPanel/useTranscript';
 import type { ActionLogLine, GlyphState, MentionOption } from './types';
 
 export type PanelSurfaceProps = {
@@ -41,6 +43,8 @@ export type PanelSurfaceProps = {
    */
   hideComposer?: boolean;
   onComposerText?: (text: string) => void;
+  /** The stored owner/supervisor conversation; omitted, the panel shows no conversation. */
+  transcript?: Pick<TranscriptSource, 'messages' | 'exportFile'>;
 };
 
 const SESSION_GLYPH: Record<SessionGlyph, GlyphState> = {
@@ -144,7 +148,7 @@ function SetupSection({ actions, touch, computerLabel }: Pick<PanelSurfaceProps,
  * and the phone renders it with `touch`. All content comes from `buildPanelView`; all writes go
  * through `actions`, and a refused write shows its message where the user acted.
  */
-export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, computerLabel, hideComposer, onComposerText }: PanelSurfaceProps) {
+export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, computerLabel, hideComposer, onComposerText, transcript }: PanelSurfaceProps) {
   const view = useMemo(() => buildPanelView(snapshot, { nowMs, health }), [snapshot, nowMs, health]);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pausing, setPausing] = useState(false);
@@ -260,6 +264,9 @@ export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, c
           entries={view.log.all.map(logLine)}
           onUndo={(id) => void report(actions.undo(id))}
         />
+      ) : null}
+      {transcript && transcript.messages.length > 0 ? (
+        <TranscriptSection touch={touch} messages={transcript.messages} onExport={transcript.exportFile} />
       ) : null}
       <RulesLine
         touch={touch}

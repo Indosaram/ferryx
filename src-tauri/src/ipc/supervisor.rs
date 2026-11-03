@@ -154,6 +154,46 @@ fn converse_from(response: DaemonResponse) -> Result<serde_json::Value, IpcError
     }
 }
 
+/// Saves transcript text as a new file in `<home>/Downloads` and returns its path. The desktop
+/// webview has no download handler, so the panel's "Export transcript" lands here. The name is a
+/// plain file name (no path parts) and an existing file is never overwritten.
+fn write_download(downloads: &std::path::Path, file_name: &str, text: &str) -> Result<std::path::PathBuf, IpcError> {
+    use std::io::Write;
+    let plain = !file_name.is_empty()
+        && file_name.len() <= 128
+        && file_name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && !file_name.starts_with('.');
+    if !plain {
+        return Err(IpcError::new(IpcErrorCode::InvalidRequest, "the export file name must be a plain file name"));
+    }
+    let io = |error: std::io::Error| IpcError::new(IpcErrorCode::IoError, format!("the transcript was not saved: {error}"));
+    std::fs::create_dir_all(downloads).map_err(io)?;
+    let (stem, extension) = file_name.rsplit_once('.').map_or((file_name, String::new()), |(s, e)| (s, format!(".{e}")));
+    for attempt in 0..100 {
+        let name = if attempt == 0 { file_name.to_owned() } else { format!("{stem} ({attempt}){extension}") };
+        let path = downloads.join(name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(text.as_bytes()).map_err(io)?;
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(io(error)),
+        }
+    }
+    Err(IpcError::new(IpcErrorCode::IoError, "the transcript was not saved: too many files with that name"))
+}
+
+/// The panel's "Export transcript" on the desktop: the transcript text the panel read from the
+/// app transcript is saved to the Downloads folder; the reply is the saved path.
+#[tauri::command]
+pub async fn cmd_supervisor_transcript_export(file_name: String, text: String) -> Result<String, IpcError> {
+    let home = ferryx_hub::hub_env::home()
+        .ok_or_else(|| IpcError::new(IpcErrorCode::IoError, "the transcript was not saved: this account has no home folder"))?;
+    let path = write_download(&home.join("Downloads"), &file_name, &text)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// One owner message from the panel composer: the supervisor answers on the `app` channel and
 /// both are stored in the app transcript. Returns `{owner, reply, replayed}`.
 #[tauri::command]
@@ -665,5 +705,20 @@ mod tests {
         assert_eq!(error.details.unwrap()["status"], 503);
         let old = DaemonResponse::Error { message: "unknown variant".into(), code: None, details: None };
         assert_eq!(converse_from(old).unwrap_err().code, IpcErrorCode::DaemonUpgradeRequired);
+    }
+
+    #[test]
+    fn an_export_is_a_new_plain_named_file_that_never_overwrites() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let downloads = dir.path().join("Downloads");
+        let first = write_download(&downloads, "supervisor-transcript-1.txt", "Owner prompt\nSupervisor reply\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "Owner prompt\nSupervisor reply\n");
+        let second = write_download(&downloads, "supervisor-transcript-1.txt", "later").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "Owner prompt\nSupervisor reply\n");
+        for bad in ["", "../escape.txt", "a/b.txt", ".hidden", "a b.txt"] {
+            let refused = write_download(&downloads, bad, "x").unwrap_err();
+            assert_eq!(refused.code, IpcErrorCode::InvalidRequest, "{bad:?}");
+        }
     }
 }

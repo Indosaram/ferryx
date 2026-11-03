@@ -2,12 +2,14 @@
 // frames from that host's `/api/v1/events` (through the supervisor frame bus). It subscribes
 // before it fetches and never polls; a subscribe or lag boundary refetches once. Actions are
 // direct hub routes (answer, pause, converse); each refetches on success so the card leaves.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { PanelActionResult, PanelActions } from "../../lib/supervisorPanel/actions";
 import type { PanelSnapshot } from "../../lib/supervisorPanel/contract";
+import { parseTranscriptPage, type TranscriptPageLoader } from "../../lib/supervisorPanel/transcript";
+import { useTranscript, type TranscriptSource } from "../../lib/supervisorPanel/useTranscript";
 import type { SupervisorFrameBus } from "../home/machineSupervisorSources";
-import type { SupervisorFetch } from "../remoteSupervisor";
+import { isSupervisorChangedFrame, type SupervisorFetch } from "../remoteSupervisor";
 import { applyPanelEvent, parsePanelFrame } from "./panelModel";
 
 export type { PanelActionResult };
@@ -80,12 +82,25 @@ async function post(fetchLike: SupervisorFetch, path: string, body?: unknown): P
   }
 }
 
+/** One transcript page from `GET /api/v1/supervisor/transcript?cursor=`, the same page the desktop reads. */
+export function transcriptLoaderFor(fetchLike: SupervisorFetch): TranscriptPageLoader {
+  return async (cursor) => {
+    const res = await fetchLike(`/api/v1/supervisor/transcript?cursor=${cursor}`);
+    if (res.status < 200 || res.status >= 300) throw new Error(`transcript read failed (${res.status})`);
+    const page = parseTranscriptPage(decode(res.body));
+    if (!page) throw new Error("the transcript reply was not a transcript page");
+    return page;
+  };
+}
+
 export type PhonePanel = {
   readonly state: PanelState;
   /** Refetches; the promise settles when the new snapshot is in (pull-to-refresh holds on it). */
   readonly refresh: () => Promise<void>;
   /** The panel's writes, as direct hub routes; `openSession` is filled in by the caller. */
   readonly actions: Omit<PanelActions, "openSession">;
+  /** The stored conversation: prompts, Replies and reports, with its export. */
+  readonly transcript: TranscriptSource;
 };
 
 export function usePhonePanel(input: {
@@ -100,6 +115,9 @@ export function usePhonePanel(input: {
   const fetchRef = useRef(fetchLike);
   fetchRef.current = fetchLike;
   const seqRef = useRef(0);
+  const loadTranscript = useMemo(() => (fetchLike ? transcriptLoaderFor(fetchLike) : null), [fetchLike]);
+  const transcript = useTranscript(loadTranscript, state);
+  const refreshTranscript = transcript.refresh;
 
   const refresh = useCallback(async () => {
     const current = fetchRef.current;
@@ -118,6 +136,7 @@ export function usePhonePanel(input: {
       return;
     }
     const unsubscribe = bus.subscribe(hostId, (frame) => {
+      if (isSupervisorChangedFrame(frame)) void refreshTranscript();
       if (isResyncFrame(frame)) {
         void refresh();
         return;
@@ -130,7 +149,7 @@ export function usePhonePanel(input: {
     void refresh();
     return unsubscribe;
     // The fetch identity changes with the tunnel; a replaced tunnel resubscribes and refetches.
-  }, [enabled, hostId, fetchLike, bus, refresh]);
+  }, [enabled, hostId, fetchLike, bus, refresh, refreshTranscript]);
 
   const act = useCallback(
     async (path: string, body?: unknown): Promise<PanelActionResult> => {
@@ -159,5 +178,5 @@ export function usePhonePanel(input: {
     undo: (actionId) => act(`/api/v1/supervisor/actions/${actionId}/undo`),
     turnOn: () => act("/api/v1/supervisor/start"),
   };
-  return { state, refresh, actions };
+  return { state, refresh, actions, transcript };
 }

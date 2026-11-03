@@ -4879,6 +4879,11 @@ impl DaemonServer {
                 if let Err(error) = write_half.write_all(reply.as_bytes()).await {
                     tracing::debug!(%error, "supervisor report client left before its reply");
                 }
+                // A stored report is a new transcript row: every Supervisor view reads again.
+                crate::remote::server::agent_control_service::publish_supervisor_changed(
+                    &self.remote_state,
+                    serde_json::json!({ "supervisorReport": true }),
+                );
             } else if let Some(response) = herdr_response_line(&line) {
                 // Answer before ingesting: the herdr client gives up after 500 ms, and admission
                 // may wait on a blocking journal read.

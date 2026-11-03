@@ -939,6 +939,20 @@ pub async fn supervisor_worker_report((session_id, event_id, body): (String, Str
         Ok(report) => {
             let mut value = json!(report);
             value["ok"] = json!(true);
+            // The owner reads the report in the app transcript: one supervisor row per report,
+            // keyed by its wake event so a replayed report never stores a second copy.
+            let stored = ferryx_hub::supervisor::transcript::append(
+                &hub.pool,
+                ferryx_hub::supervisor::transcript::Role::Supervisor,
+                &body,
+                &[],
+                &format!("report:{}", report.wake_event_id),
+                ferryx_hub::supervisor::transcript::now_ms(),
+            )
+            .await;
+            if let Err(failure) = stored {
+                tracing::warn!(%failure, "a worker report was not stored in the app transcript");
+            }
             value
         }
         Err(error) => json!({"ok": false, "code": error.code(), "message": error.to_string()}),
