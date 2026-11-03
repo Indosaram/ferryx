@@ -33,14 +33,18 @@ pub struct SupervisorSettings {
     pub owner_home: Option<String>,
 }
 
+/// `value` trimmed, or `None` when it is absent or blank.
+fn non_blank(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
 /// The owner's home directory: `omo_home` when set, else `<home>/.omo`. Blank values count as
 /// unset; `None` when neither names a directory.
 pub fn owner_home(omo_home: Option<&str>, home: Option<&str>) -> Option<String> {
-    let present = |value: Option<&str>| value.map(str::trim).filter(|value| !value.is_empty());
-    if let Some(dir) = present(omo_home) {
+    if let Some(dir) = non_blank(omo_home) {
         return Some(dir.to_owned());
     }
-    present(home).map(|home| Path::new(home).join(".omo").to_string_lossy().into_owned())
+    non_blank(home).map(|home| Path::new(home).join(".omo").to_string_lossy().into_owned())
 }
 
 /// [`owner_home`] from this process: `OMO_HOME`, else `HOME` (or `USERPROFILE` on Windows).
