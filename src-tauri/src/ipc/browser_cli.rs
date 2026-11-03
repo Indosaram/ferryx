@@ -1900,6 +1900,16 @@ pub fn start_browser_cli_server<R: tauri::Runtime>(
     start_browser_cli_server_at_path(app, manager, &browser_cli_socket_path())
 }
 
+/// Test seam: serves the browser CLI endpoint at `path` (a socket on Unix, a port file elsewhere).
+#[cfg(all(test, feature = "desktop"))]
+pub(crate) fn start_browser_cli_server_for_test<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: Arc<BrowserManager>,
+    path: &Path,
+) -> Result<BrowserCliServerStart, BrowserError> {
+    start_browser_cli_server_at_path(app, manager, path)
+}
+
 #[cfg(not(unix))]
 fn start_browser_cli_server_at_path<R: tauri::Runtime>(
     app: AppHandle<R>,
@@ -3208,6 +3218,25 @@ pub async fn send_browser_cli_request(
 ) -> Result<BrowserCliResponse, BrowserError> {
     let auth = cli_controller_auth().await?;
     send_browser_cli_request_at_path_as(request, &browser_cli_socket_path(), auth).await
+}
+
+/// Sends one request as the given controller (the pipe and MCP adapters pick their
+/// credential once per request).
+pub async fn send_browser_cli_request_as(
+    request: BrowserCliRequest,
+    auth: Option<ControllerAuth>,
+) -> Result<BrowserCliResponse, BrowserError> {
+    send_browser_cli_request_at_path_as(request, &browser_cli_socket_path(), auth).await
+}
+
+/// Test seam: sends one request as `auth` to the endpoint at `path`.
+#[cfg(test)]
+pub(crate) async fn send_browser_cli_request_for_test(
+    request: BrowserCliRequest,
+    path: &Path,
+    auth: Option<ControllerAuth>,
+) -> Result<BrowserCliResponse, BrowserError> {
+    send_browser_cli_request_at_path_as(request, path, auth).await
 }
 
 #[cfg(test)]

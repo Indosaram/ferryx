@@ -50,9 +50,10 @@ copied). Files ported later under the grant use `owner-granted-copy`.
 | `maho-import` (whole crate) | `crates/ferryx-browser-import` | One row per file: 46 verbatim, 33 adapted. Two example probes and `tests/safari_fda_paths.rs` are `not-imported`. `src/sqlite_snapshot.rs` is Ferryx-only |
 
 The agent rows that pointed at `browser/agent/mcp.rs`, `pipe.rs` and `ownership.rs` were
-corrected: those files were never created. The MCP client/server and pipe sources are now
-`not-imported` (Ferryx has no browser MCP or pipe adapter yet), and the task-space ownership
-policy points at `browser/agent/authority.rs` (tab leases and desktop reclaim).
+corrected when those files did not exist yet. The MCP client/server and pipe sources are now
+`behavior-reference` rows for `browser/agent/pipe.rs` and `browser/agent/mcp.rs`
+(`ferryx browser pipe` and `ferryx browser mcp`), and the task-space ownership policy points at
+`browser/agent/authority.rs` (tab leases and desktop reclaim).
 
 ## Imported behavior
 

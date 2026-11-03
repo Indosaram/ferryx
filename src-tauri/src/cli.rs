@@ -388,6 +388,9 @@ where
     if args.get(2).is_some_and(|arg| arg == "controllers") {
         return Err(BROWSER_CONTROLLERS_ROUTE.into());
     }
+    if args.get(2).is_some_and(|arg| arg == "pipe" || arg == "mcp") {
+        return Err(BROWSER_ADAPTER_ROUTE.into());
+    }
     match args.get(2).map(String::as_str) {
         Some("list") => Ok(BrowserCliCommand::List),
         Some("open") => {
@@ -4022,6 +4025,51 @@ pub fn run_browser_controllers_cli(
     Ok(())
 }
 
+/// `ferryx browser pipe|mcp` is parsed by [`parse_browser_adapter_cli`].
+const BROWSER_ADAPTER_ROUTE: &str = "`browser pipe` and `browser mcp` are handled by parse_browser_adapter_cli";
+
+/// Stdio adapter selected by `ferryx browser pipe|mcp`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserAdapter {
+    Pipe,
+    Mcp,
+}
+
+/// Parses `ferryx browser pipe|mcp [--controller <uuid>]`; `None` for any other command line.
+pub fn parse_browser_adapter_cli<I, T>(args: I) -> Option<Result<(BrowserAdapter, Option<String>), String>>
+where
+    I: IntoIterator<Item = T>,
+    T: AsRef<str>,
+{
+    let mut args = args.into_iter().map(|arg| arg.as_ref().to_string()).collect::<Vec<_>>();
+    if args.get(1).is_none_or(|arg| arg != "browser") {
+        return None;
+    }
+    let (adapter, name) = match args.get(2).map(String::as_str) {
+        Some("pipe") => (BrowserAdapter::Pipe, "pipe"),
+        Some("mcp") => (BrowserAdapter::Mcp, "mcp"),
+        _ => return None,
+    };
+    Some(crate::browser::agent::client::take_controller_option(&mut args).and_then(|controller| {
+        if args.len() > 3 {
+            return Err(format!("`ferryx browser {name}` takes no arguments besides --controller <uuid>"));
+        }
+        Ok((adapter, controller))
+    }))
+}
+
+/// Runs the stdio adapter; stdout belongs to the protocol, so nothing is printed here.
+pub fn run_browser_adapter_cli((adapter, controller): (BrowserAdapter, Option<String>)) -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    match adapter {
+        BrowserAdapter::Pipe => runtime.block_on(crate::browser::agent::pipe::run_stdio(controller)),
+        BrowserAdapter::Mcp => runtime.block_on(crate::browser::agent::mcp::run_stdio(controller)),
+    }
+}
+
 /// Runtime for one request to the running app. The request waits under `tokio::time::timeout`,
 /// so the runtime needs timers as well as IO.
 fn browser_cli_runtime() -> Result<tokio::runtime::Runtime, String> {
@@ -4409,6 +4457,42 @@ pub fn run_daemon_headless(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn adapter_args(extra: &[&str]) -> Vec<String> {
+        ["ferryx", "browser"].iter().chain(extra.iter()).map(|arg| arg.to_string()).collect()
+    }
+
+    #[test]
+    fn browser_adapter_cli_parses_pipe_and_mcp() {
+        assert_eq!(
+            parse_browser_adapter_cli(adapter_args(&["pipe"])),
+            Some(Ok((BrowserAdapter::Pipe, None)))
+        );
+        let id = "123e4567-e89b-12d3-a456-426614174000";
+        assert_eq!(
+            parse_browser_adapter_cli(adapter_args(&["mcp", "--controller", id])),
+            Some(Ok((BrowserAdapter::Mcp, Some(id.to_string()))))
+        );
+    }
+
+    #[test]
+    fn browser_adapter_cli_refuses_extra_arguments() {
+        let parsed = parse_browser_adapter_cli(adapter_args(&["pipe", "extra"]));
+        assert!(matches!(parsed, Some(Err(_))));
+    }
+
+    #[test]
+    fn browser_adapter_cli_ignores_other_commands() {
+        assert!(parse_browser_adapter_cli(adapter_args(&["list"])).is_none());
+        assert!(parse_browser_adapter_cli(adapter_args(&["controllers"])).is_none());
+        assert!(parse_browser_adapter_cli(["ferryx", "open"]).is_none());
+    }
+
+    #[test]
+    fn parse_browser_cli_routes_adapters_elsewhere() {
+        let error = parse_browser_cli(adapter_args(&["pipe"])).expect_err("pipe is not a request command");
+        assert_eq!(error, BROWSER_ADAPTER_ROUTE);
+    }
 
     #[test]
     fn browser_cli_runtime_has_timers_for_the_response_timeout() {
