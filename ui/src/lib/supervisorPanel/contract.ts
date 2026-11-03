@@ -1,5 +1,5 @@
 // Frozen shared contract for the autonomous supervisor panel. Mirrors
-// crates/ferryx-hub/src/supervisor/contract.rs (wire shape, camelCase).
+// crates/ferryx-hub/src/supervisor/panel_contract.rs (wire shape, camelCase).
 // Routes, commands and events: docs/plans/SUPERVISOR_PANEL_CONTRACT.md.
 
 /** `<hostId>:<backendSessionId>` */

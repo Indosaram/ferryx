@@ -1,7 +1,7 @@
 # Supervisor panel contract (frozen)
 
 Plan: `docs/plans/SUPERVISOR_AUTONOMY_PANEL_PLAN_2026-11-02.md`. Types and signatures only; no behaviour.
-Code: hub `crates/ferryx-hub/src/supervisor/contract.rs` (serde camelCase), UI `ui/src/lib/supervisorPanel/contract.ts` (+ `fixtures.ts`). Change both files together; do not fork a type.
+Code: hub `crates/ferryx-hub/src/supervisor/panel_contract.rs` (serde camelCase), UI `ui/src/lib/supervisorPanel/contract.ts` (+ `fixtures.ts`). Change both files together; do not fork a type.
 
 ## Types
 
@@ -26,7 +26,7 @@ Default rules (`default_rules()`, seconds): `upstreamRetry {backoffSecs:[60,120,
 
 `resume_text(agent)`: `claude` / `claude-code` / `codex` -> `"continue"`; others `None` (escalate).
 
-Hub traits (all in `contract.rs`, `async_trait`): `ActionLog` (`upsert_incident`, `list_today`, `mark_undone`), `RuleStore` (`list`, `upsert`), `HealthClassifier` (`classify(&FleetSession, tail, rules, now_ms) -> HealthKind`, sync), `SessionControl` (`stop`, `send`, `answer`, `read_tail`). Errors: `crate::error::HubError`.
+Hub traits (all in `panel_contract.rs`, `async_trait`): `ActionLog` (`upsert_incident`, `list_today`, `mark_undone`), `RuleStore` (`list`, `upsert`), `HealthClassifier` (`classify(&FleetSession, tail, rules, now_ms) -> HealthKind`, sync), `SessionControl` (`stop`, `send`, `answer`, `read_tail`). Errors: `crate::error::HubError`.
 
 ## Daemon fields (no code in this task)
 
