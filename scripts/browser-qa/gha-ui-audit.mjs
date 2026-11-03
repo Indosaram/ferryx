@@ -771,9 +771,12 @@ function findRowIcons(path, label) {
   if (start >= 0) runs.push([start, last]);
   // A trailing run wider than any control is the window edge or the screen outside it.
   while (runs.length && runs.at(-1)[1] - runs.at(-1)[0] > 100) runs.pop();
-  if (!runs.length) return null;
-  const cluster = [runs.at(-1)];
-  for (let index = runs.length - 2; index >= 0 && cluster[0][0] - runs[index][1] <= 120; index -= 1) cluster.unshift(runs[index]);
+  // The switch is the rightmost run 26-48px wide (a scrollbar or window edge can follow it); the
+  // controls left of it are the narrow icon runs before it (pin, trash), up to 60px apart.
+  const switchIndex = runs.findLastIndex(([a, b]) => b - a + 1 >= 26 && b - a + 1 <= 48);
+  if (switchIndex < 0) return null;
+  const cluster = [runs[switchIndex]];
+  for (let index = switchIndex - 1; index >= 0 && cluster[0][0] - runs[index][1] <= 60 && runs[index][1] - runs[index][0] < 26; index -= 1) cluster.unshift(runs[index]);
   return cluster.map(([a, b]) => ({ x: Math.round((a + b) / 2), width: b - a + 1 }));
 }
 function findWord(words, text, { nth = 0, minX = 0, maxX = Infinity, pick = "first", match = null } = {}) {
@@ -1675,6 +1678,17 @@ if (engineZip) {
     "Settings > Browser > Chromium Engine: click 'Download', wait for the install",
     [
       focus,
+      // The Import steps can leave Settings closed (on Windows run 41635903718 the wheel did not
+      // scroll, the import dialog never opened and its Escape closed Settings): reopen it here.
+      ["Settings > Browser on screen", async () => {
+        const words = ocr(probeShot()) ?? [];
+        if (findWord(words, "", { match: (word) => /^(Appearance|Keyboard)$/.test(word.text) })) return { ok: true, already_open: true };
+        const opened = await openSettings();
+        if (!opened.ok) return opened;
+        await sleep(500);
+        return { ...(await clickNav("Browser")), reopened: true };
+      }],
+      1500,
       // The Import step left the pane scrolled to the bottom; Chromium Engine sits above Extensions.
       ["scroll up to the Chromium Engine group", () => scrollSettingsTo("Chromium Engine", { direction: -1 })],
       // Rightmost: the group also has a "Download size" row label on the left.
@@ -2203,16 +2217,19 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
       }],
       ["click Remove in Chrome's dialog", async () => {
         if (!confirmed) return { ok: false, stderr: "Ferryx confirmation not clicked" };
-        // Chrome's uninstall dialog: title 'Remove "uBlock Origin Lite"?' and a Remove button
-        // below it; the bottom-most "Remove" is the button.
+        // Chrome's uninstall dialog: 'Remove "uBlock Origin Lite"?' over Cancel and Remove, with
+        // Remove right of Cancel on one line. Ferryx's own rows have Remove buttons too (the
+        // engine's, the confirmation's Remove left of its Cancel), so only that pair counts.
         const deadline = Date.now() + 30000;
         do {
           await sleep(1500);
           const words = ocr(probeShot()) ?? [];
-          const hits = words.filter((word) => word.text === "Remove").sort((a, b) => b.top - a.top);
-          if (hits.length) {
-            const at = [hits[0].left + Math.round(hits[0].width / 2), hits[0].top + Math.round(hits[0].height / 2)];
-            return { ...host.click(...at), at, candidates: hits.length };
+          const cancels = words.filter((word) => word.text === "Cancel");
+          const hit = words.find((word) => word.text === "Remove"
+            && cancels.some((cancel) => Math.abs(cancel.top - word.top) <= 12 && word.left > cancel.left && word.left - (cancel.left + cancel.width) < 120));
+          if (hit) {
+            const at = [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)];
+            return { ...host.click(...at), at };
           }
           if (!ubolOnDisk().prefs && !ubolWords(words).length) return { ok: true, skipped: "already removed, no Chrome dialog" };
         } while (Date.now() < deadline);
