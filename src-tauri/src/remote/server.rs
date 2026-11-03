@@ -1875,12 +1875,13 @@ async fn ws_events_handler(
         ))?;
         let receiver = services.workspaces.machine_events.subscribe();
         // The owner's own devices (agent control admits them) also get prompt bodies on the
-        // `panel.session` frames; every other machine device gets state only.
-        let owner = state.agent_control_policy.permits(&device.id);
+        // `panel.session` frames; every other machine device gets state only. The socket asks the
+        // policy again for every frame, so a later change takes effect at once.
+        let device_id = device.id.clone();
         return Ok(ws.on_upgrade(move |socket| async move {
             let _ = while_device_authorized(
                 &mut revocation,
-                super::machine_events::serve(socket, state, receiver, owner),
+                super::machine_events::serve(socket, state, receiver, device_id),
             )
             .await;
         }));
@@ -2312,7 +2313,8 @@ where
         state.agent.clone(),
         state.provider_session.clone(),
         state.detail.clone(),
-    );
+    )
+    .with_report_marks(state);
     let json_str = serde_json::to_string(&msg).map_err(|_| ())?;
     // Guard against oversized metadata without dropping the PTY terminal connection:
     // If the full message (e.g. carrying an unusually long detail question or path)
@@ -2333,7 +2335,8 @@ where
                 state.state.clone(),
                 state.agent.clone(),
                 bounded_provider,
-            );
+            )
+            .with_report_marks(state);
             let compact_json = serde_json::to_string(&compact_msg).map_err(|_| ())?;
             match machine_control(Message::Text(compact_json.into())) {
                 Ok(control) => {
@@ -2781,6 +2784,15 @@ async fn handle_machine_terminal_socket(
             {
                 return;
             }
+            // A paired client reads untagged error frames as failures of the stream,
+            // so the rejection of a fire-and-forget acknowledgement names its operation.
+            let acknowledgement = matches!(
+                &message,
+                Message::Text(text) if matches!(
+                    serde_json::from_str::<MachineTerminalControl>(text),
+                    Ok(MachineTerminalControl::AcknowledgeAgentOutcome { .. })
+                )
+            );
             let operation = async {
                 match message {
                     Message::Binary(bytes) if bytes.len() <= 64 * 1024 => {
@@ -2796,6 +2808,13 @@ async fn handle_machine_terminal_socket(
                     }
                     Message::Text(text) if text.len() <= 16 * 1024 => {
                         match serde_json::from_str::<MachineTerminalControl>(&text) {
+                            Ok(MachineTerminalControl::AcknowledgeAgentOutcome {
+                                generation: supplied,
+                            }) if supplied.0 == generation => {
+                                state.session_backend
+                                    .acknowledge_agent_outcome(&target.session_id).await
+                                    .map_err(|error| error.to_string())
+                            }
                             Ok(MachineTerminalControl::Resize {
                                 generation: supplied,
                                 cols,
@@ -2893,9 +2912,11 @@ async fn handle_machine_terminal_socket(
             })
             .await;
             if let Err(code) = result {
-                let Ok(control) = machine_control(machine_control_message(
-                    serde_json::json!({"type":"error","code":code}),
-                )) else {
+                let mut frame = serde_json::json!({"type":"error","code":code});
+                if acknowledgement {
+                    frame["op"] = serde_json::Value::from("acknowledgeAgentOutcome");
+                }
+                let Ok(control) = machine_control(machine_control_message(frame)) else {
                     return;
                 };
                 if controls.try_send(control).is_err() {
@@ -3086,11 +3107,22 @@ async fn handle_terminal_socket(
                             if !matches!(
                                 ctrl,
                                 ClientControlMessage::Scroll { .. } | ClientControlMessage::Ping
+                                    | ClientControlMessage::AcknowledgeAgentOutcome
                             ) {
                                 continue;
                             }
                         }
                         match ctrl {
+                            ClientControlMessage::AcknowledgeAgentOutcome => {
+                                if !can_control {
+                                    continue;
+                                }
+                                if let Err(error) = session_backend
+                                    .acknowledge_agent_outcome(&session_id_clone).await
+                                {
+                                    tracing::warn!(session_id = session_id_clone, %error, "outcome acknowledgement failed");
+                                }
+                            }
                             ClientControlMessage::RemoteWrite { .. }
                             | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
@@ -3615,11 +3647,22 @@ async fn handle_terminal_grid_socket(
                             if !matches!(
                                 ctrl,
                                 ClientControlMessage::Scroll { .. } | ClientControlMessage::Ping
+                                    | ClientControlMessage::AcknowledgeAgentOutcome
                             ) {
                                 continue;
                             }
                         }
                         match ctrl {
+                            ClientControlMessage::AcknowledgeAgentOutcome => {
+                                if !can_control {
+                                    continue;
+                                }
+                                if let Err(error) = session_backend
+                                    .acknowledge_agent_outcome(&session_id_clone).await
+                                {
+                                    tracing::warn!(session_id = session_id_clone, %error, "outcome acknowledgement failed");
+                                }
+                            }
                             ClientControlMessage::RemoteWrite { .. }
                             | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
@@ -3825,9 +3868,6 @@ pub(crate) async fn serve_static_or_index(uri: axum::http::Uri) -> Response {
     if uri.path().starts_with("/api/") {
         return machine_error(StatusCode::NOT_FOUND, "NOT_FOUND");
     }
-    let Some(path) = static_relative_path(uri.path()) else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
     // Discovery uses synchronous filesystem metadata, so keep it off the reactor.
     let dist_dir = match crate::ipc::run_blocking(|| Ok(resolve_dist_dir())).await {
         Ok(path) => path,
@@ -3835,6 +3875,14 @@ pub(crate) async fn serve_static_or_index(uri: axum::http::Uri) -> Response {
             tracing::warn!(%error, "remote asset root discovery failed");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
+    };
+    serve_static_from(dist_dir, uri).await
+}
+
+/// Serves `uri` from the asset root `dist_dir`, falling back to its index.html.
+pub(crate) async fn serve_static_from(dist_dir: PathBuf, uri: axum::http::Uri) -> Response {
+    let Some(path) = static_relative_path(uri.path()) else {
+        return StatusCode::BAD_REQUEST.into_response();
     };
     let Ok(root) = tokio::fs::canonicalize(dist_dir).await else {
         return Html(EMBEDDED_FALLBACK_HTML).into_response();
@@ -7023,6 +7071,113 @@ async fn reference_chat_screen(
     }
 }
 
+async fn reference_chat_acknowledge_outcome(
+    State(state): State<Arc<RemoteGatewayState>>,
+    AxumPath(session_id): AxumPath<String>,
+    query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let query = match reference_chat_read_query(query) {
+        Ok(query) => query,
+        Err(response) => return *response,
+    };
+    let read = match reference_chat_read_context(&state, &headers, &session_id, &query, false).await {
+        Ok(read) => read,
+        Err(response) => return response.into(),
+    };
+    if read.device.permission != DevicePermission::Control {
+        return reference_chat_error(
+            ScopeErrorCode::Forbidden,
+            "a view-only device cannot acknowledge an agent outcome",
+        );
+    }
+    if let Err(response) = authenticate_machine_request(&state, &headers) {
+        return *response;
+    }
+    match state.session_backend.acknowledge_agent_outcome(&session_id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => {
+            let (status, code) = acknowledge_outcome_failure_status(&error);
+            machine_error_with_details(status, code, &error.to_string(), serde_json::Map::new())
+        }
+    }
+}
+
+/// Not found only when the backend no longer knows the session; an owner that
+/// cannot be reached or did not answer in time is an upstream failure.
+fn acknowledge_outcome_failure_status(
+    error: &crate::remote::backend::OutcomeAckError,
+) -> (StatusCode, &'static str) {
+    use crate::remote::backend::OutcomeAckError;
+    match error {
+        OutcomeAckError::Uncertain(_) => (StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"),
+        OutcomeAckError::UnknownSession => (StatusCode::NOT_FOUND, "NOT_FOUND"),
+        OutcomeAckError::Unsupported | OutcomeAckError::NoMirror => {
+            (StatusCode::UNPROCESSABLE_ENTITY, "UNSUPPORTED")
+        }
+        OutcomeAckError::Unreachable(_) | OutcomeAckError::Rejected(_) => {
+            (StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE")
+        }
+    }
+}
+
+#[cfg(test)]
+mod acknowledge_outcome_status_tests {
+    use super::*;
+    use crate::remote::backend::OutcomeAckError;
+
+    #[test]
+    fn acknowledgement_failures_map_to_accurate_statuses() {
+        for (error, status, code) in [
+            (OutcomeAckError::UnknownSession, StatusCode::NOT_FOUND, "NOT_FOUND"),
+            (OutcomeAckError::from_daemon_code(Some("SESSION_NOT_FOUND"), "Session 's' not found".into()), StatusCode::NOT_FOUND, "NOT_FOUND"),
+            (OutcomeAckError::paired("PAIRED_NOT_SENT".into()), StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE"),
+            (OutcomeAckError::paired("PAIRED_PROXY_UNAVAILABLE".into()), StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE"),
+            (OutcomeAckError::paired("HOST_UNAVAILABLE".into()), StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE"),
+            (OutcomeAckError::paired("PAIRED_UNCERTAIN_SEND".into()), StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"),
+            (OutcomeAckError::paired("TIMEOUT".into()), StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"),
+            (OutcomeAckError::Unsupported, StatusCode::UNPROCESSABLE_ENTITY, "UNSUPPORTED"),
+            (OutcomeAckError::NoMirror, StatusCode::UNPROCESSABLE_ENTITY, "UNSUPPORTED"),
+            // Classification follows the structured kind, never the message text.
+            (OutcomeAckError::Unreachable("SSH workspace path not found".into()), StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE"),
+            (OutcomeAckError::from_daemon_code(None, "Session 's' not found".into()), StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE"),
+            (OutcomeAckError::from_daemon_code(Some("OUTCOME_ACK_NO_MIRROR"), "x".into()), StatusCode::UNPROCESSABLE_ENTITY, "UNSUPPORTED"),
+            (OutcomeAckError::from_daemon_code(Some("OUTCOME_ACK_UNCERTAIN"), "TIMEOUT".into()), StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"),
+        ] {
+            assert_eq!(acknowledge_outcome_failure_status(&error), (status, code), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn daemon_codes_round_trip_every_failure_kind() {
+        for error in [
+            OutcomeAckError::UnknownSession,
+            OutcomeAckError::NoMirror,
+            OutcomeAckError::Unsupported,
+            OutcomeAckError::Unreachable("HOST_UNAVAILABLE".into()),
+            OutcomeAckError::Uncertain("TIMEOUT".into()),
+        ] {
+            let message = match &error {
+                OutcomeAckError::Unreachable(detail) | OutcomeAckError::Uncertain(detail) => detail.clone(),
+                _ => error.to_string(),
+            };
+            assert_eq!(OutcomeAckError::from_daemon_code(Some(error.code()), message), error);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_vanished_or_unmirrored_session_is_classified_by_the_hub() {
+        let service = crate::terminal::TerminalService::default();
+        let hub = service.output_hub();
+        hub.register_session("plain");
+        let unmirrored = RemoteSessionBackend::acknowledge_agent_outcome(&service, "plain").await;
+        assert_eq!(unmirrored, Err(OutcomeAckError::NoMirror));
+        let vanished = RemoteSessionBackend::acknowledge_agent_outcome(&service, "gone").await;
+        assert_eq!(vanished, Err(OutcomeAckError::UnknownSession));
+        assert_eq!(acknowledge_outcome_failure_status(&vanished.unwrap_err()).0, StatusCode::NOT_FOUND);
+    }
+}
+
 /// GET /api/v1/reference-chat/{sessionId}/prompt
 ///
 /// The card is detected in the pane's own session record and remembered, so the answer route can
@@ -7893,6 +8048,10 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             get(reference_chat_screen),
         )
         .route(
+            "/api/v1/reference-chat/{sessionId}/acknowledge-outcome",
+            post(reference_chat_acknowledge_outcome),
+        )
+        .route(
             "/api/v1/reference-chat/{sessionId}/prompt",
             get(reference_chat_prompt),
         )
@@ -7955,6 +8114,13 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route("/api/v1/fleet/sessions", get(supervisor_api::http_fleet_sessions))
         .route("/api/v1/supervisor/start", post(supervisor_api::http_start))
         .route(
+            "/api/v1/supervisor/setup",
+            get(supervisor_api::http_setup_status)
+                .post(supervisor_api::http_setup_run)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route("/api/v1/supervisor/adopt-all", post(supervisor_api::http_adopt_all))
+        .route(
             "/api/v1/supervisor/request",
             post(supervisor_api::http_request).layer(axum::extract::DefaultBodyLimit::max(
                 crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
@@ -7963,6 +8129,16 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route(
             "/api/v1/supervisor/conversation",
             get(supervisor_api::http_conversation),
+        )
+        .route(
+            "/api/v1/supervisor/converse",
+            post(supervisor_api::http_converse).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+            )),
+        )
+        .route(
+            "/api/v1/supervisor/transcript",
+            get(supervisor_api::http_transcript),
         )
         .route(
             "/api/v1/supervisor/memory",
@@ -7977,6 +8153,30 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             post(supervisor_api::http_pause).layer(axum::extract::DefaultBodyLimit::max(
                 crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
             )),
+        )
+        // T9 direct controls. The stop shares the `{sessionId}` parameter name with
+        // `/api/v1/sessions/{sessionId}` (the router refuses two names at one position); the
+        // handler reads the segment as a `<hostId>:<backendSessionId>` handle. Neither route goes
+        // through the hub or the engine.
+        .route(
+            "/api/v1/sessions/{sessionId}/stop",
+            post(agent_control_service::http_session_ref_stop).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+                ),
+            ),
+        )
+        .route(
+            "/api/v1/supervisor/decisions/{sessionRef}/answer",
+            post(agent_control_service::http_decision_answer).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+                ),
+            ),
+        )
+        .route(
+            "/api/v1/supervisor/actions/{id}/undo",
+            post(supervisor_api::http_action_undo),
         )
         .route(
             "/api/v1/workspace/projects",
@@ -8068,6 +8268,13 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             super::filesystem::BrowseLimits::default(),
         )))
         .with_state(Arc::clone(&state));
+
+    // Remote desktop pairing and stream routes; they run the same bearer check and then require
+    // a Machine grant with Control.
+    #[cfg(feature = "remote-desktop")]
+    {
+        router = router.merge(super::remote_desktop::router(Arc::clone(&state)));
+    }
 
     if cfg!(not(test)) {
         let auth = Arc::clone(&state.auth_manager);
@@ -8450,7 +8657,10 @@ pub async fn start_remote_server_with_resolver_and_insecure_opt_in(
                 // Use the actual bound loopback port when the caller requested
                 // an OS-assigned port (0), so the external listener matches it.
                 let extra_router = create_remote_router(Arc::clone(&state));
-                match bind_and_serve(extra_addr, Arc::clone(&state), extra_router, false).await {
+                let extra_bind_addr = external_listener_bind_addr(extra_addr);
+                match bind_and_serve(extra_bind_addr, Arc::clone(&state), extra_router, false)
+                    .await
+                {
                     Ok((_extra_local_addr, extra_shutdown_tx)) => {
                         extra_shutdown_txs.push(extra_shutdown_tx);
                     }
@@ -8578,6 +8788,49 @@ pub async fn start_remote_server_strict_with_resolver(
 #[cfg(test)]
 pub(crate) static DIRECT_GATE_TEST_MUTEX: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
+
+/// The socket the external (non-loopback) listener binds for a classified interface address.
+#[cfg(not(test))]
+fn external_listener_bind_addr(address: SocketAddr) -> SocketAddr {
+    address
+}
+
+#[cfg(test)]
+thread_local! {
+    static EXTERNAL_LISTENER_ON_LOOPBACK: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Test seam: while the returned guard lives, the external listener started on this thread binds
+/// an ephemeral loopback port instead of the resolved interface address. Gate classification
+/// still runs on the resolved address, so overlay tests can use a fixed CGNAT address without
+/// the host owning it.
+#[cfg(test)]
+pub(crate) struct ExternalListenerOnLoopback(());
+
+#[cfg(test)]
+impl ExternalListenerOnLoopback {
+    pub(crate) fn enable() -> Self {
+        EXTERNAL_LISTENER_ON_LOOPBACK.with(|redirect| redirect.set(true));
+        Self(())
+    }
+}
+
+#[cfg(test)]
+impl Drop for ExternalListenerOnLoopback {
+    fn drop(&mut self) {
+        EXTERNAL_LISTENER_ON_LOOPBACK.with(|redirect| redirect.set(false));
+    }
+}
+
+#[cfg(test)]
+fn external_listener_bind_addr(address: SocketAddr) -> SocketAddr {
+    if EXTERNAL_LISTENER_ON_LOOPBACK.with(std::cell::Cell::get) {
+        (std::net::Ipv4Addr::LOCALHOST, 0).into()
+    } else {
+        address
+    }
+}
 
 #[cfg(test)]
 #[path = "p19_insecure_direct_tests.rs"]
@@ -10504,9 +10757,13 @@ mod tests {
         let registry = WorkspaceRegistry::new();
         registry.register("workspace-fail", &repo).unwrap();
 
-        // Corrupt git repo so manager.list_worktrees() fails
+        // Corrupt the repo so manager.list_worktrees() fails. The `.git` entry must stay
+        // present: removing it makes the manager re-probe Git backing and treat the root as a
+        // plain folder, which legitimately lists empty. A dangling gitdir pointer keeps the
+        // root Git-backed while `git worktree list` fails.
         let git_dir = repo.join(".git");
         std::fs::remove_dir_all(&git_dir).unwrap();
+        std::fs::write(&git_dir, "gitdir: /nonexistent/ferryx-corrupt-gitdir\n").unwrap();
 
         let pty = Arc::new(crate::terminal::PtyManager::new());
         let hub = Arc::new(TerminalOutputHub::default());

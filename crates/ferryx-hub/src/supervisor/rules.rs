@@ -1,4 +1,4 @@
-//! Persisted standing rules (`supervisor_rules`, migration 0028).
+//! Persisted standing rules (`supervisor_rules`, migration 0046).
 //!
 //! [`SqliteRuleStore::open`] seeds [`default_rules`] once, when the table is empty, so the D2
 //! defaults are in effect with no instruction and survive a restart.

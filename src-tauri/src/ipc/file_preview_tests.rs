@@ -385,8 +385,9 @@ fn caret_target_is_one_based_and_clamped_to_unicode_scalars() {
 }
 
 #[test]
-fn only_the_desktop_root_window_may_hold_capabilities() {
+fn only_desktop_app_windows_may_hold_capabilities() {
     assert!(ensure_trusted_window("main").is_ok());
+    assert!(ensure_trusted_window("ws-test").is_ok());
     for untrusted in ["browser-6f1c", "preview-child", "", "MAIN"] {
         let error = ensure_trusted_window(untrusted).expect_err("untrusted webview refused");
         assert_eq!(reason_of(&error), "PermissionDenied");
@@ -1552,7 +1553,7 @@ async fn late_open_completion_does_not_revoke_newer_preview() {
     // R3: simulate out-of-order open completion by taking epoch 1, then
     // opening and registering doc 2 (epoch 2), then attempting to register doc 1
     // with stale epoch 1.
-    let epoch1 = service.begin_main_open(ROOT_WINDOW_LABEL);
+    let epoch1 = service.begin_main_open(crate::window_registry::PRIMARY_WINDOW_LABEL);
     assert_eq!(epoch1, 1);
 
     // Document 2 opens and finishes at epoch 2
@@ -1565,14 +1566,14 @@ async fn late_open_completion_does_not_revoke_newer_preview() {
     // Attempt to register doc 1 with stale epoch 1
     let opened1 = open_blocking_path(&dir.path().join("first.txt"), None, None).unwrap();
     let err = service
-        .register_main(ROOT_WINDOW_LABEL, opened1, epoch1)
+        .register_main(crate::window_registry::PRIMARY_WINDOW_LABEL, opened1, epoch1)
         .unwrap_err();
     assert_eq!(err.code, IpcErrorCode::InvalidArgument);
 
     // Doc 2's handle is STILL valid and not revoked by stale doc 1
     let reg = service.registry.lock();
     assert_eq!(
-        reg.windows.get(ROOT_WINDOW_LABEL).unwrap().main.as_deref(),
+        reg.windows.get(crate::window_registry::PRIMARY_WINDOW_LABEL).unwrap().main.as_deref(),
         Some(doc2.handle.as_str())
     );
     assert!(reg.handles.contains_key(&doc2.handle));

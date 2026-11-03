@@ -10,6 +10,7 @@ import {
   loadNotificationSettings,
 } from './notificationSettings';
 import type { DispatchNotificationArgs, NotificationPermissionStatus } from './types';
+import { shouldThisWindowNotifyFor } from './notificationLeader';
 
 export function isWindowForegroundFocused(): boolean {
   return (
@@ -27,6 +28,12 @@ export interface NotificationDecision {
 
 export interface NotificationCoordinatorOptions {
   isWindowFocused?: () => boolean;
+  /**
+   * Multi-window ownership gate for OS notifications and sounds (see notificationLeader.ts): the
+   * window whose store holds the session notifies; the primary window also notifies for a session
+   * no window claims. Unread marks are window-local and are not gated.
+   */
+  isNotificationLeader?: (event: SessionOwnershipParams) => boolean;
   getSettings?: () => NotificationSettings;
   onMarkTabUnread?: (tabId: string, workspaceId?: string) => void;
   onMarkWorktreeUnread?: (path: string, workspaceId?: string) => void;
@@ -36,7 +43,15 @@ export interface NotificationCoordinatorOptions {
   onPermissionUnavailable?: () => void;
 }
 
-export interface TerminalBellEventParams {
+/** Multi-window ownership of the event's session, resolved by the caller against its store. */
+export interface SessionOwnershipParams {
+  /** Backend (daemon) session id from the native event payload. */
+  backendSessionId?: string;
+  /** Whether this window's workspace store holds a session with that backendSessionId. */
+  ownsSession?: boolean;
+}
+
+export interface TerminalBellEventParams extends SessionOwnershipParams {
   workspaceId?: string;
   workspaceLabel?: string;
   sessionId?: string;
@@ -48,7 +63,7 @@ export interface TerminalBellEventParams {
   settings?: NotificationSettings;
 }
 
-export interface AgentStateChangeEventParams {
+export interface AgentStateChangeEventParams extends SessionOwnershipParams {
   workspaceId?: string;
   workspaceLabel?: string;
   notificationSuppressed?: boolean;
@@ -207,6 +222,12 @@ export class NotificationCoordinator {
     return this.options.isWindowFocused ? this.options.isWindowFocused() : isWindowForegroundFocused();
   }
 
+  private isLeader(event: SessionOwnershipParams): boolean {
+    if (this.options.isNotificationLeader) return this.options.isNotificationLeader(event);
+    // Callers that predate multi-window only ever pass events their own store resolved.
+    return shouldThisWindowNotifyFor(event.backendSessionId, event.ownsSession ?? true);
+  }
+
   private resolveSettings(override?: NotificationSettings): NotificationSettings {
     if (override) return override;
     if (this.options.getSettings) return this.options.getSettings();
@@ -243,7 +264,7 @@ export class NotificationCoordinator {
         this.options.onMarkWorktreeUnread(wtPath, params.workspaceId);
       }
 
-      if (settings.enabled && settings.terminalBell) {
+      if (settings.enabled && settings.terminalBell && this.isLeader(params)) {
         Promise.resolve(
           playNotificationSound({
             soundId: settings.customSoundId ?? 'system',
@@ -339,7 +360,7 @@ export class NotificationCoordinator {
         }
       }
 
-      if (!bellSuppressed && settings.enabled && settings.agentTaskComplete) {
+      if (!bellSuppressed && settings.enabled && settings.agentTaskComplete && this.isLeader(params)) {
         Promise.resolve(
           playNotificationSound({
             soundId: settings.customSoundId ?? 'system',

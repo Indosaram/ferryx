@@ -50,6 +50,7 @@ use super::mhc_stdio::{
 };
 use crate::error::HubError;
 use crate::lanes::kibitzer::ModelTurn;
+use crate::supervisor::panel_contract::{FleetSession, PendingPrompt, SessionControl, SessionRef};
 
 /// First relaunch delay after a failed launch or an early exit; doubled per failure up to
 /// [`MAX_BACKOFF`].
@@ -351,6 +352,25 @@ pub enum WorkToolCall {
     Status {
         goal_id: Option<String>,
     },
+    /// Every session of the fleet.
+    ListSessions,
+    ReadSession {
+        session_ref: SessionRef,
+        lines: usize,
+    },
+    AnswerPrompt {
+        session_ref: SessionRef,
+        prompt_id: String,
+        screen_revision: Option<String>,
+        option_index: usize,
+    },
+    SendToSession {
+        session_ref: SessionRef,
+        text: String,
+    },
+    StopSession {
+        session_ref: SessionRef,
+    },
 }
 
 /// A work-tool call with the scope the hub resolved for the calling conversation. Actor,
@@ -416,7 +436,43 @@ struct StatusPayload {
     goal_id: Option<String>,
 }
 
-fn parse_work_call(data: &Value) -> Result<WorkToolCall, WorkToolRejection> {
+/// Lines `read_session` returns when the call names none.
+pub const DEFAULT_READ_LINES: usize = 40;
+/// Most lines one `read_session` call may return.
+pub const MAX_READ_LINES: usize = 400;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ReadPayload {
+    session_ref: String,
+    #[serde(default)]
+    lines: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct AnswerPayload {
+    session_ref: String,
+    prompt_id: String,
+    #[serde(default)]
+    screen_revision: Option<String>,
+    option_index: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SendPayload {
+    session_ref: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct StopPayload {
+    session_ref: String,
+}
+
+pub(crate) fn parse_work_call(data: &Value) -> Result<WorkToolCall, WorkToolRejection> {
     let payload = data.get("payload").cloned().unwrap_or(Value::Null);
     let invalid = |error: serde_json::Error| {
         WorkToolRejection::new("SUPERVISOR_WORK_INVALID", &error.to_string())
@@ -436,10 +492,174 @@ fn parse_work_call(data: &Value) -> Result<WorkToolCall, WorkToolRejection> {
                 goal_id: payload.goal_id,
             })
         }
+        Some("list_sessions") => Ok(WorkToolCall::ListSessions),
+        Some("read_session") => {
+            let payload: ReadPayload = serde_json::from_value(payload).map_err(invalid)?;
+            Ok(WorkToolCall::ReadSession {
+                session_ref: session_ref(&payload.session_ref)?,
+                lines: payload.lines.unwrap_or(DEFAULT_READ_LINES),
+            })
+        }
+        Some("answer_prompt") => {
+            let payload: AnswerPayload = serde_json::from_value(payload).map_err(invalid)?;
+            Ok(WorkToolCall::AnswerPrompt {
+                session_ref: session_ref(&payload.session_ref)?,
+                prompt_id: payload.prompt_id,
+                screen_revision: payload.screen_revision,
+                option_index: payload.option_index,
+            })
+        }
+        Some("send_to_session") => {
+            let payload: SendPayload = serde_json::from_value(payload).map_err(invalid)?;
+            Ok(WorkToolCall::SendToSession {
+                session_ref: session_ref(&payload.session_ref)?,
+                text: payload.text,
+            })
+        }
+        Some("stop_session") => {
+            let payload: StopPayload = serde_json::from_value(payload).map_err(invalid)?;
+            Ok(WorkToolCall::StopSession {
+                session_ref: session_ref(&payload.session_ref)?,
+            })
+        }
         _ => Err(WorkToolRejection::new(
             "SUPERVISOR_WORK_UNKNOWN_ACTION",
             "the work request names no known action",
         )),
+    }
+}
+
+fn session_ref(raw: &str) -> Result<SessionRef, WorkToolRejection> {
+    SessionRef::parse(raw)
+        .map_err(|error| WorkToolRejection::new("SUPERVISOR_WORK_INVALID", &error.to_string()))
+}
+
+/// The fleet the session tools list and look prompts up in.
+#[async_trait]
+pub trait FleetSource: Send + Sync {
+    async fn list(&self) -> Result<Vec<FleetSession>, HubError>;
+}
+
+/// The decision gate for an answer the supervisor itself initiates. Owner taps on a card never
+/// pass through it.
+#[async_trait]
+pub trait AnswerGate: Send + Sync {
+    /// `Err(reason)` refuses to answer `prompt` of `session` with option `option_index`.
+    async fn allow(
+        &self,
+        session: &FleetSession,
+        prompt: &PendingPrompt,
+        option_index: usize,
+    ) -> Result<(), String>;
+}
+
+/// The default gate: with no decision installed the supervisor answers nothing by itself.
+/// Production installs [`crate::supervisor::autonomy::DecisionGate`].
+pub struct RefuseUnlearned;
+
+#[async_trait]
+impl AnswerGate for RefuseUnlearned {
+    async fn allow(
+        &self,
+        _session: &FleetSession,
+        _prompt: &PendingPrompt,
+        _option_index: usize,
+    ) -> Result<(), String> {
+        Err("no answer decision is installed; the owner decides".to_owned())
+    }
+}
+
+/// Executes the session work tools over agent control. Constructed with its dependencies like
+/// the other work-tool services; the answer gate defaults to [`RefuseUnlearned`].
+pub struct SessionTools {
+    control: Arc<dyn SessionControl>,
+    fleet: Arc<dyn FleetSource>,
+    gate: Arc<dyn AnswerGate>,
+}
+
+impl SessionTools {
+    pub fn new(control: Arc<dyn SessionControl>, fleet: Arc<dyn FleetSource>) -> Self {
+        Self {
+            control,
+            fleet,
+            gate: Arc::new(RefuseUnlearned),
+        }
+    }
+
+    pub fn with_gate(mut self, gate: Arc<dyn AnswerGate>) -> Self {
+        self.gate = gate;
+        self
+    }
+
+    /// Runs one session call; any other call is rejected as not a session tool.
+    pub async fn execute(&self, call: WorkToolCall) -> Result<Value, WorkToolRejection> {
+        let failed = |error: HubError| {
+            WorkToolRejection::new("SUPERVISOR_SESSION_FAILED", &error.to_string())
+        };
+        match call {
+            WorkToolCall::ListSessions => {
+                let sessions = self.fleet.list().await.map_err(failed)?;
+                Ok(json!({ "sessions": sessions }))
+            }
+            WorkToolCall::ReadSession { session_ref, lines } => {
+                let lines = lines.clamp(1, MAX_READ_LINES);
+                let tail = self
+                    .control
+                    .read_tail(&session_ref, lines)
+                    .await
+                    .map_err(failed)?;
+                Ok(json!({ "sessionRef": session_ref, "tail": tail }))
+            }
+            WorkToolCall::AnswerPrompt {
+                session_ref,
+                prompt_id,
+                screen_revision,
+                option_index,
+            } => {
+                let sessions = self.fleet.list().await.map_err(failed)?;
+                let not_found = || {
+                    WorkToolRejection::new(
+                        "SUPERVISOR_PROMPT_NOT_FOUND",
+                        "the session has no such pending prompt",
+                    )
+                };
+                let session = sessions
+                    .iter()
+                    .find(|session| session.session_ref == session_ref)
+                    .ok_or_else(not_found)?;
+                let prompt = session
+                    .pending_prompt
+                    .as_ref()
+                    .filter(|prompt| prompt.prompt_id == prompt_id)
+                    .ok_or_else(not_found)?;
+                if option_index >= prompt.options.len() {
+                    return Err(WorkToolRejection::new(
+                        "SUPERVISOR_WORK_INVALID",
+                        "optionIndex is not an option of the prompt",
+                    ));
+                }
+                self.gate
+                    .allow(session, prompt, option_index)
+                    .await
+                    .map_err(|reason| WorkToolRejection::new("SUPERVISOR_ANSWER_REFUSED", &reason))?;
+                self.control
+                    .answer(&session_ref, &prompt_id, screen_revision.as_deref(), option_index)
+                    .await
+                    .map_err(failed)?;
+                Ok(json!({ "ok": true, "sessionRef": session_ref, "optionIndex": option_index }))
+            }
+            WorkToolCall::SendToSession { session_ref, text } => {
+                self.control.send(&session_ref, &text).await.map_err(failed)?;
+                Ok(json!({ "ok": true, "sessionRef": session_ref }))
+            }
+            WorkToolCall::StopSession { session_ref } => {
+                self.control.stop(&session_ref).await.map_err(failed)?;
+                Ok(json!({ "ok": true, "sessionRef": session_ref }))
+            }
+            WorkToolCall::Submit { .. } | WorkToolCall::Status { .. } => Err(
+                WorkToolRejection::new("SUPERVISOR_WORK_INVALID", "not a session tool"),
+            ),
+        }
     }
 }
 
@@ -1010,7 +1230,7 @@ impl Inner {
         state.backoff = MIN_BACKOFF;
         if let Some(engine) = state.current.take() {
             engine.terminate(SHUTDOWN_GRACE).await;
-            self.note_exit(&engine);
+            self.note_exit(&engine, None);
         }
         // Still under the engine lock: a successor launch cannot be overwritten as stopped.
         self.health.send_modify(|health| {
@@ -1040,7 +1260,7 @@ impl Inner {
         if self.is_stopped() {
             if let Some(engine) = state.current.take() {
                 engine.terminate(SHUTDOWN_GRACE).await;
-                self.note_exit(&engine);
+                self.note_exit(&engine, None);
             }
             return Err(SupervisorFault::not_running(
                 "the supervisor engine stopped with the hub",
@@ -1212,7 +1432,10 @@ impl Inner {
         }
     }
 
-    fn note_exit(&self, engine: &Engine) {
+    /// Marks the engine exited in health. `fault` is set when the exit counts as a failed
+    /// launch ([`Self::record_exit`]), so a reader of health alone (the Slack gate) sees that
+    /// the next use waits out the backoff instead of relaunching.
+    fn note_exit(&self, engine: &Engine, fault: Option<SupervisorFault>) {
         let reason = engine
             .client
             .gone_reason()
@@ -1226,6 +1449,7 @@ impl Inner {
                 health.state = HealthState::Exited;
                 health.pid = None;
                 health.detail = Some(redact(&reason));
+                health.fault = fault;
             }
         });
     }
@@ -1245,11 +1469,12 @@ impl Inner {
 
     /// Notes an engine that exited on its own. One that exited within [`STABLE_UPTIME`] of its
     /// launch counts as a failed launch: the next launch waits out the backoff, which doubles.
-    /// One that ran longer resets the backoff.
+    /// Its fault is kept in health until a launch succeeds. One that ran longer resets the
+    /// backoff and leaves health without a fault, so its next use relaunches it.
     fn record_exit(&self, state: &mut EngineState, engine: &Engine) {
-        self.note_exit(engine);
         let uptime = engine.launched_at.elapsed();
         if uptime >= STABLE_UPTIME {
+            self.note_exit(engine, None);
             state.backoff = MIN_BACKOFF;
             return;
         }
@@ -1262,6 +1487,7 @@ impl Inner {
             uptime.as_secs()
         ));
         tracing::warn!(%fault, backoff_secs = state.backoff.as_secs(), "mhc supervisor engine exited early; the relaunch backs off");
+        self.note_exit(engine, Some(fault.clone()));
         state.last_fault = Some(fault);
         state.retry_at = Some(tokio::time::Instant::now() + state.backoff);
         state.backoff = (state.backoff * 2).min(MAX_BACKOFF);
@@ -2134,7 +2360,8 @@ impl MhcSupervisor {
 
     /// Keeps the engine supervised: launches it, watches the owned process, retries failed
     /// launches with a 5s..300s backoff. A turn in flight when the engine exits is never resent;
-    /// after an exit the engine relaunches on its next use.
+    /// after an exit the engine relaunches on its next use, and after an early exit
+    /// ([`STABLE_UPTIME`]) also once its backoff ends.
     ///
     /// Calling it re-enables a stopped runtime at once (before the future is polled), so the
     /// new hub generation's first decision does not race it. Dropping the future (the hub
@@ -2157,10 +2384,13 @@ impl MhcSupervisor {
                         let generation = engine.generation;
                         self.inner.engine_gone(&engine).await;
                         drop(engine);
+                        // An early exit leaves its fault in health: the loop then relaunches
+                        // once the backoff ends, since health alone keeps Slack turns off it.
                         let changed = health
                             .wait_for(|current| {
                                 current.generation != generation
                                     || current.state == HealthState::Degraded
+                                    || current.fault.is_some()
                             })
                             .await;
                         if changed.is_err() {
@@ -2310,14 +2540,33 @@ pub async fn installed_engine_snapshot() -> Result<Value, SupervisorFault> {
 /// engine installed in this process, the decision reads only sources every hub process shares
 /// (see [`configured_in`]), never one process's environment, so the MCP server and CLI agree
 /// with the daemon and report [`SupervisorFault::NotRunning`] instead of using the omo model.
-pub fn configured_model() -> Option<Arc<dyn ModelTurn>> {
-    // Tests never read the developer's hub env file or data directory.
-    let configured = installed().is_some()
-        || (!cfg!(test)
+/// The shared sources are files, so they are read on the blocking pool, never on a runtime
+/// worker.
+pub async fn configured_model() -> Option<Arc<dyn ModelTurn>> {
+    // Tests never read the developer's hub env file or data directory. The file is read fresh,
+    // so an engine turned on after this process started is seen without a restart.
+    configured_model_with(|| {
+        !cfg!(test)
             && configured_in(
-                crate::hub_env::file_env(),
+                &crate::hub_env::read_file_env(),
                 super::supervisor::state_dir_from_home().as_deref(),
-            ));
+            )
+    })
+    .await
+}
+
+/// [`configured_model`] with the blocking shared-source read given (tests pass their own).
+/// A read that cannot finish (its task panicked or was cancelled) counts as not configured.
+pub(crate) async fn configured_model_with(
+    shared: impl FnOnce() -> bool + Send + 'static,
+) -> Option<Arc<dyn ModelTurn>> {
+    if installed().is_some() {
+        return model_when(true);
+    }
+    let configured = tokio::task::spawn_blocking(shared).await.unwrap_or_else(|error| {
+        tracing::warn!(%error, "the hub env file was not read; the supervisor engine counts as not configured");
+        false
+    });
     model_when(configured)
 }
 

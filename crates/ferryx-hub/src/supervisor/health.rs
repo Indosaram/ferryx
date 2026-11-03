@@ -156,6 +156,16 @@ fn reset_at_ms(lines: &[String], quota_line: &str, now_ms: i64) -> Option<i64> {
         .find_map(|line| parse_reset(line, now_ms))
 }
 
+/// Reset instant named anywhere in the last [`TAIL_LINES`] lines of `text` (newest line
+/// first), or `None`. The same readings as the classifier's quota path.
+pub fn reset_at_from_text(text: &str, now_ms: i64) -> Option<i64> {
+    text.lines()
+        .rev()
+        .take(TAIL_LINES)
+        .map(str::to_ascii_lowercase)
+        .find_map(|line| parse_reset(&line, now_ms))
+}
+
 fn parse_reset(line: &str, now_ms: i64) -> Option<i64> {
     static RETRY_AFTER: OnceLock<Regex> = OnceLock::new();
     static RELATIVE: OnceLock<Regex> = OnceLock::new();
@@ -319,6 +329,20 @@ mod tests {
                 "{tail}"
             );
         }
+    }
+
+    #[test]
+    fn reset_at_from_text_reads_the_newest_reset_line() {
+        assert_eq!(
+            reset_at_from_text("Quota hit. Try again in 3 minutes\n", NOW),
+            Some(NOW + 180_000)
+        );
+        assert_eq!(
+            reset_at_from_text("retry-after: 120\nTry again in 1 hour", NOW),
+            Some(NOW + 3_600_000)
+        );
+        assert_eq!(reset_at_from_text("quota exceeded\nno time given", NOW), None);
+        assert_eq!(reset_at_from_text("", NOW), None);
     }
 
     #[test]

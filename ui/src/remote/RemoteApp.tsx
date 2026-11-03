@@ -1517,6 +1517,8 @@ export const RemoteHostConnection: React.FC<{
   const lateSelectionRef = useRef<RemoteContextOption | null>(null);
   const workspaceRefreshVersionRef = useRef(0);
   const confirmationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Aborted on unmount so a selection request that never answers does not outlive the page.
+  const selectionAbortRef = useRef(new AbortController());
 
 
   const [initialAccountTarget, setInitialAccountTarget] = useState<{
@@ -1565,7 +1567,11 @@ export const RemoteHostConnection: React.FC<{
   // active tunnel, and a relay-paired host with attach info gets its own encrypted transport.
   // remoteFetch/remoteOpenSocket route every request for the registered base through it.
   const relayE2EMode = activeTunnelConnection ? "e2e" : relayE2EState(activeHost, transport.url);
-  const e2eHost = !activeTunnelConnection && relayE2EMode === "e2e" ? activeHost : null;
+  // A plaintext fallback keeps the encrypted transport registered: re-registering it (new token)
+  // retries encryption, and remoteFetch routes around it while the fallback holds.
+  const e2eHost = !activeTunnelConnection && (relayE2EMode === "e2e" || relayE2EMode === "plaintext-fallback")
+    ? activeHost
+    : null;
   const e2eRelayOrigin = e2eHost?.relayOrigin ?? null;
   const e2eMachineId = e2eHost?.machineId ?? null;
   const e2eEnrollmentEpoch = e2eHost?.enrollmentEpoch ?? null;
@@ -1708,6 +1714,7 @@ export const RemoteHostConnection: React.FC<{
   );
   const {
     applyParsedInventoryEvent,
+    acknowledgeOutcome,
     noteSessionActivity,
     noteSessionsPayload,
   } = accountDiscovery;
@@ -2052,10 +2059,15 @@ export const RemoteHostConnection: React.FC<{
     void fetchBrowserSessionsRef.current();
   }, [token, browserContextWorkspace, browserContextWorktree, transportBaseUrl]);
 
-  useEffect(() => () => {
-    workspaceRefreshVersionRef.current += 1;
-    pendingSelectionRef.current = null;
-    if (confirmationTimeoutRef.current !== null) clearTimeout(confirmationTimeoutRef.current);
+  useEffect(() => {
+    const selectionAbort = new AbortController();
+    selectionAbortRef.current = selectionAbort;
+    return () => {
+      workspaceRefreshVersionRef.current += 1;
+      pendingSelectionRef.current = null;
+      selectionAbort.abort();
+      if (confirmationTimeoutRef.current !== null) clearTimeout(confirmationTimeoutRef.current);
+    };
   }, []);
 
   const loadWorkspace = useCallback(async (): Promise<RemoteWorkspaceModel | null> => {
@@ -2856,6 +2868,7 @@ export const RemoteHostConnection: React.FC<{
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
             body: JSON.stringify(selectPayload),
+            signal: selectionAbortRef.current.signal,
           },
         );
         ok = response.ok;
@@ -3523,8 +3536,44 @@ export const RemoteHostConnection: React.FC<{
       machineId,
       daemonEpoch: frame.daemonEpoch,
       agentType: frame.agent,
+      outcome: frame.outcome ?? null,
+      kind: frame.kind ?? null,
     });
   }, [activeTunnelMachineId, noteSessionActivity]);
+
+  useEffect(() => {
+    if (activeTunnelMachineId && effectiveSessionId) acknowledgeOutcome(activeTunnelMachineId, effectiveSessionId);
+  }, [acknowledgeOutcome, activeTunnelMachineId, effectiveSessionId]);
+
+  const acknowledgeChatOutcome = useCallback(async (target: ReferenceTargetRef, signal: AbortSignal) => {
+    if (!token || signal.aborted) return;
+    const sessionId = target.target.backendSessionId;
+    const query = referenceChatReadQuery(target, "");
+    const path = `/api/v1/reference-chat/${encodeURIComponent(sessionId)}/acknowledge-outcome?${query}`;
+    const init = {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      signal,
+    };
+    const request = activeTunnelConnection
+      ? activeTunnelConnection.transport.fetchLike(path, init)
+      : remoteFetch(transportBaseUrl, path, init);
+    await request.then((response) => {
+      if (response.status < 200 || response.status >= 300) {
+        throw new Error(`Outcome acknowledgement failed: ${response.status}`);
+      }
+    }).catch((error: unknown) => {
+      if (!signal.aborted) console.warn("Could not acknowledge the agent outcome", { sessionId, error });
+    });
+  }, [activeTunnelConnection, token, transportBaseUrl]);
+
+  useEffect(() => {
+    const target = chatTargetRef.current;
+    if (viewMode !== "chat" || !target) return;
+    const controller = new AbortController();
+    void acknowledgeChatOutcome(target, controller.signal);
+    return () => controller.abort();
+  }, [acknowledgeChatOutcome, chatTargetKey, viewMode]);
 
   useEffect(() => {
     // The identity belongs to the host that answered it: a new token or transport has none yet.
@@ -4004,7 +4053,7 @@ export const RemoteHostConnection: React.FC<{
           return;
         }
         const body: unknown = await response.json();
-        if (pushedDuringRead) return;
+        if (cancelled || pushedDuringRead) return;
         const prompt = parseChatPrompt(body);
         const promptId = prompt?.id ?? null;
         const revision = prompt === null ? null : parseChatScreenRevision(body);
@@ -4027,6 +4076,9 @@ export const RemoteHostConnection: React.FC<{
           const next = prev.filter((warning) => warning !== CHAT_HELD_WARNING);
           return next.length === prev.length ? prev : next;
         });
+        // This existing read is the visible chat's observation of the live pane. A new
+        // outcome may arrive without a prompt-change push or a view transition.
+        await acknowledgeChatOutcome(target, controller.signal);
       } catch {
         /* a transient prompt read keeps the card the user is looking at */
       } finally {
@@ -4061,7 +4113,7 @@ export const RemoteHostConnection: React.FC<{
       clearInterval(timer);
       chatPromptPushRef.current = null;
     };
-  }, [chatAgentIsNative, chatAgentType, chatPromptRefresh, chatTargetKey, effectiveSessionId, token, transportBaseUrl, viewMode]);
+  }, [acknowledgeChatOutcome, chatAgentIsNative, chatAgentType, chatPromptRefresh, chatTargetKey, effectiveSessionId, token, transportBaseUrl, viewMode]);
 
   /** One older page, on an explicit request only: nothing fetches backwards on its own. */
   const loadChatOlderPage = useCallback(async () => {
@@ -5264,7 +5316,7 @@ export const RemoteHostConnection: React.FC<{
           }
         : null;
   const phoneWorktrees = (
-    <WorktreesHome onOpenAccount={() => setAccountSheetOpen(true)}>
+    <WorktreesHome onOpenAccount={() => setAccountSheetOpen(true)} contextTitle={model.context.workspaceId ? contextName(model.context) : null}>
       <RemoteWorkspaceMirror
         inline
         model={effectiveModel}
@@ -5504,7 +5556,9 @@ export const RemoteHostConnection: React.FC<{
           <p>
             {relayRepairConfirming
               ? "Signing in again removes this phone's current pairing. You'll pick your computer again after you sign in."
-              : "This phone's connection to your computer isn't fully encrypted. Sign in to your account to secure it."}
+              : relayRepairError
+                ? "Your relay requires encryption, and this phone can't connect until it's secured. Sign in to your Ferryx account to secure it."
+                : "This phone's connection to your computer isn't fully encrypted. Sign in to your account to secure it."}
           </p>
           <div className="mt-2 flex flex-wrap gap-2">
             <button

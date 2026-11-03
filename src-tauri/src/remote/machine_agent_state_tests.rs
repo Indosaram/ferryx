@@ -145,6 +145,15 @@ impl Fixture {
                 Err(err) => panic!("fixture session close failed for {session_id}: {err:?}"),
             }
         }
+        // The host's agent-stamp writer writes into `host/` after a batching window; it must be
+        // finished before the caller removes the directory.
+        let host_state = Arc::clone(&self.host_state);
+        crate::ipc::run_blocking(move || {
+            host_state.finish_agent_stamp_writer();
+            Ok(())
+        })
+        .await
+        .unwrap();
         self.tasks.shutdown().await;
     }
 }
@@ -229,6 +238,8 @@ async fn machine_terminal_websocket_publishes_authoritative_agent_state_and_igno
             }),
             detail: Some("analyzing codebase".into()),
             origin: AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         };
         host_session_service.publish_agent_state_for_test(initial_agent_state);
 
@@ -245,6 +256,8 @@ async fn machine_terminal_websocket_publishes_authoritative_agent_state_and_igno
             }),
             detail: None,
             origin: AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         });
 
         let descriptor = Descriptor {
@@ -304,6 +317,8 @@ async fn machine_terminal_websocket_publishes_authoritative_agent_state_and_igno
             }),
             detail: None,
             origin: AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         });
 
         let rotated_agent_state = AgentState {
@@ -318,6 +333,8 @@ async fn machine_terminal_websocket_publishes_authoritative_agent_state_and_igno
             }),
             detail: Some("blocked on user confirmation".into()),
             origin: AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         };
         host_session_service.publish_agent_state_for_test(rotated_agent_state);
 

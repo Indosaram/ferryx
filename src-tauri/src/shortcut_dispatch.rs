@@ -1,16 +1,17 @@
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 
-/// Returns whether the native shortcut was delivered and may be consumed.
+/// Returns whether the native shortcut was delivered and may be consumed. The shortcut goes to
+/// the focused app window only, so a second window never acts on a chord typed in another.
 pub(crate) fn dispatch<R: tauri::Runtime, S: serde::Serialize + Clone>(
     app: &tauri::AppHandle<R>,
     event: &str,
     payload: S,
 ) -> bool {
-    let Some(window) = app.get_window("main") else {
+    let Some(window) = crate::window_registry::focused_window(app) else {
         tracing::warn!(event, "Shortcut target window is unavailable");
         return false;
     };
-    match window.emit(event, payload) {
+    match app.emit_to(window.label(), event, payload) {
         Ok(()) => true,
         Err(error) => {
             tracing::warn!(event, ?error, "Shortcut dispatch failed");
@@ -22,7 +23,7 @@ pub(crate) fn dispatch<R: tauri::Runtime, S: serde::Serialize + Clone>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tauri::Listener;
+    use tauri::{Listener, Manager};
 
     #[test]
     fn shortcuts_reach_listeners_with_browser_children() {
@@ -59,7 +60,8 @@ mod tests {
                 "menu_open_settings",
             ] {
                 let (sender, receiver) = std::sync::mpsc::channel();
-                let listener = app.listen(event, move |received| {
+                // Shortcuts are emitted to the target window, so listen where the UI listens.
+                let listener = main.listen(event, move |received| {
                     sender
                         .send(received.payload().to_owned())
                         .expect("receive shortcut");
@@ -75,7 +77,7 @@ mod tests {
                     "3"
                 );
                 assert!(receiver.try_recv().is_err(), "duplicate event");
-                app.unlisten(listener);
+                main.unlisten(listener);
             }
         }
     }
@@ -84,5 +86,35 @@ mod tests {
     fn missing_window_does_not_consume_shortcut() {
         let app = tauri::test::mock_app();
         assert!(!dispatch(app.handle(), "menu_next_tab", ()));
+    }
+
+    #[test]
+    fn shortcuts_reach_only_the_focused_window() {
+        let app = tauri::test::mock_app();
+        app.manage(crate::window_registry::WindowRegistry::default());
+        let main = tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::default())
+            .build()
+            .expect("main window");
+        let secondary =
+            tauri::WebviewWindowBuilder::new(&app, "ws-test", tauri::WebviewUrl::default())
+                .build()
+                .expect("secondary window");
+        let record = |window: &tauri::WebviewWindow<tauri::test::MockRuntime>| {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            window.listen("menu_close_tab", move |event| {
+                let _ = sender.send(event.payload().to_owned());
+            });
+            receiver
+        };
+        let main_events = record(&main);
+        let secondary_events = record(&secondary);
+
+        app.state::<crate::window_registry::WindowRegistry>()
+            .note_focused("ws-test");
+        assert!(dispatch(app.handle(), "menu_close_tab", ()));
+        secondary_events
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("focused window receives the shortcut");
+        assert!(main_events.try_recv().is_err(), "unfocused window must not act");
     }
 }

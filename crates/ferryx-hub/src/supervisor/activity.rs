@@ -1,4 +1,4 @@
-//! Persisted supervisor action log (`supervisor_actions`, migration 0028).
+//! Persisted supervisor action log (`supervisor_actions`, migration 0046).
 //!
 //! One row per incident: [`ActionLog::upsert_incident`] inserts the first event of an
 //! `incident_key` and updates the same row in place afterwards.

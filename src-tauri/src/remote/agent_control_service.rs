@@ -99,7 +99,22 @@ struct Observed {
     screen: Option<reference_types::ReferenceScreenSnapshot>,
 }
 
+/// One session's status without its last assistant line. Every mutation path (send, answer,
+/// prompt reads) uses this: it never opens the history store.
 async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Observed, ScopeError> {
+    observe_entry(state, session_id, false).await
+}
+
+/// One session's status with `lastAssistantLine`, for the List and Read ops only.
+async fn observe_with_line(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Observed, ScopeError> {
+    observe_entry(state, session_id, true).await
+}
+
+async fn observe_entry(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+    with_last_line: bool,
+) -> Result<Observed, ScopeError> {
     let details = state
         .session_backend
         .describe_session(session_id)
@@ -149,7 +164,9 @@ async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Ob
     }
     // The bus's timestamps belong to its own latest reading; they only describe this entry's
     // state and screen while that reading still matches them.
-    let seen = state.agent_events.latest(session_id);
+    // `stamps` is the latest reading, or the persisted stamps of a previous run before this
+    // run's first reading, so a restarted daemon still reports the real times.
+    let seen = state.agent_events.stamps(session_id);
     let state_since = seen.as_ref().filter(|seen| seen.state == status.state).and_then(|seen| seen.state_since_ms);
     let screen_revision = screen.as_ref().map(|snapshot| snapshot.revision.clone());
     let screen_changed_at = seen
@@ -157,13 +174,13 @@ async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Ob
         .filter(|seen| seen.screen_revision == screen_revision)
         .and_then(|seen| seen.screen_changed_at_ms);
     let last_assistant_line = match &agent {
-        Some(agent) => {
+        Some(agent) if with_last_line => {
             let identity = reference_chat_identity(state, &target, Some(agent)).await;
             last_assistant_line(state, session_id, identity).await
         }
-        None => None,
+        _ => None,
     };
-    let entry = serde_json::json!({
+    let mut entry = serde_json::json!({
         "sessionId": session_id,
         "running": details.running,
         "cols": details.cols,
@@ -180,9 +197,19 @@ async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Ob
         "screenRevision": screen_revision,
         "screenChangedAt": screen_changed_at,
         "screenReadable": readable,
-        "lastAssistantLine": last_assistant_line,
+        // When this entry was read, so a hub that caches a list can show how old it is.
+        "observedAt": observed_at_ms(),
     });
+    if with_last_line {
+        entry["lastAssistantLine"] = serde_json::json!(last_assistant_line);
+    }
     Ok(Observed { entry, screen })
+}
+
+fn observed_at_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
 }
 
 /// The longest `lastAssistantLine` a list or read entry carries.
@@ -336,9 +363,15 @@ pub(crate) async fn handle_as(
     actor: &str,
     authorize: Option<Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>>,
 ) -> Result<serde_json::Value, ScopeError> {
+    // An answer the owner types (a card tap, the phone, Slack, the terminal helper) joins the
+    // answer history once it went through; the supervisor's own answers never do.
+    let owner_answer = crate::hub_runtime::panel_autonomy::owner_answer_of(&op);
     let result = dispatch(state, op.clone(), authorize).await;
     if result.is_ok() && op.is_input_mutation() {
         crate::hub_runtime::note_agent_control_input(&op);
+    }
+    if let (Ok(_), Some(answer)) = (&result, owner_answer) {
+        tokio::spawn(answer.recorded());
     }
     record_audit(
         state,
@@ -395,7 +428,7 @@ async fn dispatch(
             let ids = state.session_backend.list_sessions().await;
             let entries: Vec<serde_json::Value> = stream::iter(ids)
                 .map(|id| async move {
-                    match observe(state, &id).await {
+                    match observe_with_line(state, &id).await {
                         Ok(observed) => observed.entry,
                         // A session that vanished between the list and its read is reported, not dropped.
                         Err(error) => serde_json::json!({
@@ -415,7 +448,7 @@ async fn dispatch(
         }
         AgentControlOp::Read { session_id } => {
             live(state, &session_id).await?;
-            let observed = observe(state, &session_id).await?;
+            let observed = observe_with_line(state, &session_id).await?;
             let mut entry = observed.entry;
             entry["screen"] = match observed.screen {
                 Some(snapshot) => serde_json::json!({
@@ -753,6 +786,8 @@ pub(crate) async fn prompt_answer(
     answer: crate::daemon::protocol::AgentPromptAnswerInput,
     registry_id: Option<String>,
 ) -> Result<crate::scoped_contracts::DeliveryReceipt, ScopeError> {
+    let owner_answer =
+        crate::hub_runtime::panel_autonomy::owner_prompt_answer_of(&session_id, &prompt_id, answer.key.as_deref());
     let answer = reference_answer(answer)?;
     live(state, &session_id).await?;
     let Some(agent) = prompt_agent(state, &session_id, registry_id).await? else {
@@ -794,7 +829,12 @@ pub(crate) async fn prompt_answer(
         runtime.answers.answer(&request, &step, &screen, &writer, &clock).await
     });
     match transaction.await {
-        Ok(reference_input::ReferenceInputOutcome::Accepted { receipt }) => Ok(receipt),
+        Ok(reference_input::ReferenceInputOutcome::Accepted { receipt }) => {
+            if let Some(answer) = owner_answer {
+                tokio::spawn(answer.recorded());
+            }
+            Ok(receipt)
+        }
         Ok(reference_input::ReferenceInputOutcome::NotTyped { error }) => Err(error),
         Ok(reference_input::ReferenceInputOutcome::OutcomeUnknown { message, .. }) => {
             Err(reference_chat_scope(ScopeErrorCode::OperationOutcomeUnknown, message))
@@ -1192,14 +1232,25 @@ pub(crate) async fn http_stop(
         Ok(device) => device,
         Err(response) => return response,
     };
+    stop_session(&state, &headers, &device, session_id, body).await
+}
+
+/// The agent-control `Stop` for one pane, as one authorized device.
+async fn stop_session(
+    state: &Arc<RemoteGatewayState>,
+    headers: &HeaderMap,
+    device: &DeviceInfo,
+    session_id: String,
+    body: Result<Json<StopBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
     let body = match body {
         Ok(Json(body)) => body,
         Err(_) => StopBody::default(),
     };
-    let authorize = http_reauthorize(&state, &headers);
+    let authorize = http_reauthorize(state, headers);
     control_finish(
         handle_as(
-            &state,
+            state,
             AgentControlOp::Stop {
                 session_id,
                 request_id: body.request_id,
@@ -1208,6 +1259,102 @@ pub(crate) async fn http_stop(
             Some(authorize),
         )
         .await,
+    )
+}
+
+/// The backend session id of a `<hostId>:<backendSessionId>` handle this daemon owns.
+///
+/// A handle names a pane on one computer. This gateway controls only its own panes, so a handle
+/// for another computer is refused (`NOT_FOUND`) instead of being typed into a local pane that
+/// happens to share the backend id. `local_host_id` is this machine's configured id; the literal
+/// `local` always names this machine.
+pub(crate) fn local_backend_session(
+    session_ref: &str,
+    local_host_id: &str,
+) -> Result<String, ScopeError> {
+    let parsed = ferryx_hub::supervisor::panel_contract::SessionRef::parse(session_ref)
+        .map_err(|error| reference_chat_scope(ScopeErrorCode::InvalidRequest, error.to_string()))?;
+    let host = parsed.host_id();
+    if host != ferryx_hub::agent_control::LOCAL_HOST_ID && host != local_host_id {
+        return Err(reference_chat_scope(
+            ScopeErrorCode::NotFound,
+            "that session is on another computer; control it through that computer",
+        ));
+    }
+    Ok(parsed.backend_session_id().to_owned())
+}
+
+/// `POST /api/v1/sessions/{sessionRef}/stop`: the provider's interrupt key, straight to agent
+/// control. The hub and the engine are not on this path, so it works while either is down.
+pub(crate) async fn http_session_ref_stop(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    AxumPath(session_ref): AxumPath<String>,
+    body: Result<Json<StopBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let device = match http_device(&state, &headers, true) {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+    let session_id = match local_backend_session(&session_ref, &reference_files::reference_host_id()) {
+        Ok(session_id) => session_id,
+        Err(error) => return reference_chat_refusal(&error),
+    };
+    stop_session(&state, &headers, &device, session_id, body).await
+}
+
+/// `POST /api/v1/supervisor/decisions/{sessionRef}/answer` body: the owner's tap on one option.
+/// `screenRevision` is the stale guard; the screen is re-read before any key is typed.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct DecisionAnswerBody {
+    prompt_id: String,
+    screen_revision: String,
+    option_index: u32,
+    #[serde(default)]
+    request_id: Option<String>,
+}
+
+/// The agent-control answer an owner's decision tap becomes: exactly one option, no gate.
+pub(crate) fn decision_answer_op(session_id: String, body: DecisionAnswerBody) -> AgentControlOp {
+    AgentControlOp::Answer {
+        session_id,
+        prompt_id: body.prompt_id,
+        screen_revision: body.screen_revision,
+        answer: reference_types::ReferencePromptAnswer {
+            option_index: Some(body.option_index),
+            ..Default::default()
+        },
+        request_id: body.request_id,
+    }
+}
+
+pub(crate) async fn http_decision_answer(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    AxumPath(session_ref): AxumPath<String>,
+    body: Result<Json<DecisionAnswerBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let device = match http_device(&state, &headers, true) {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => {
+            return reference_chat_error(
+                ScopeErrorCode::InvalidRequest,
+                "the body must be {promptId, screenRevision, optionIndex}",
+            )
+        }
+    };
+    let session_id = match local_backend_session(&session_ref, &reference_files::reference_host_id()) {
+        Ok(session_id) => session_id,
+        Err(error) => return reference_chat_refusal(&error),
+    };
+    let authorize = http_reauthorize(&state, &headers);
+    control_finish(
+        handle_as(&state, decision_answer_op(session_id, body), &device.id, Some(authorize)).await,
     )
 }
 
@@ -1235,6 +1382,104 @@ mod tests {
         assert!(!single.multi_select);
         assert!(prompt_view(&single, "rev".into()).is_some());
     }
+    #[test]
+    fn a_session_ref_names_a_pane_on_this_computer_only() {
+        assert_eq!(local_backend_session("local:pane-1", "studio").unwrap(), "pane-1");
+        assert_eq!(
+            local_backend_session("studio:pane-1", "studio").unwrap(),
+            "pane-1",
+            "this machine's configured host id names it too"
+        );
+        let other = local_backend_session("omarchy:pane-1", "studio").unwrap_err();
+        assert_eq!(
+            other.code,
+            ScopeErrorCode::NotFound,
+            "another computer's pane is never typed into locally"
+        );
+        for bad in ["nohost", ":pane-1", "studio:", ""] {
+            assert_eq!(
+                local_backend_session(bad, "studio").unwrap_err().code,
+                ScopeErrorCode::InvalidRequest,
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_decision_tap_is_exactly_one_option_with_the_stale_guard() {
+        let body: DecisionAnswerBody = serde_json::from_value(serde_json::json!({
+            "promptId": "p1", "screenRevision": "rev-3", "optionIndex": 1
+        }))
+        .unwrap();
+        let AgentControlOp::Answer { session_id, prompt_id, screen_revision, answer, request_id } =
+            decision_answer_op("pane-1".into(), body)
+        else {
+            panic!("a decision tap is an answer");
+        };
+        assert_eq!((session_id.as_str(), prompt_id.as_str(), screen_revision.as_str()), ("pane-1", "p1", "rev-3"));
+        assert_eq!(answer.option_index, Some(1));
+        assert!(answer.is_single_choice());
+        assert_eq!(request_id, None);
+        for bad in [
+            serde_json::json!({"promptId": "p", "optionIndex": 0}),
+            serde_json::json!({"promptId": "p", "screenRevision": "r"}),
+            serde_json::json!({"promptId": "p", "screenRevision": "r", "optionIndex": 0, "customText": "x"}),
+        ] {
+            assert!(serde_json::from_value::<DecisionAnswerBody>(bad.clone()).is_err(), "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stop_by_session_ref_interrupts_the_pane_with_no_hub_open() {
+        let session_id = "agent-control-stop-by-ref";
+        let (backend, state) = pane(session_id, CLAUDE_APPROVAL);
+        // No hub is open in this test, so a stop that needed one could not succeed.
+        assert!(!crate::hub_runtime::supervisor_available());
+        let backend_id = local_backend_session(&format!("local:{session_id}"), "local").unwrap();
+
+        let result = handle_as(
+            &state,
+            AgentControlOp::Stop { session_id: backend_id, request_id: None },
+            "device-1",
+            None,
+        )
+        .await
+        .expect("the stop is accepted");
+
+        assert_eq!(result["receipt"]["stage"], "accepted", "{result}");
+        assert_eq!(backend.writes.lock().expect("writes").clone(), vec![b"\x1b".to_vec()]);
+        assert!(backend.signals.lock().expect("signals").is_empty(), "stop never signals the process");
+        let audit = state.agent_control_audit.latest(1);
+        assert_eq!((audit[0].op.as_str(), audit[0].device_id.as_str(), audit[0].code.as_str()), ("stop", "device-1", "OK"));
+    }
+
+    #[tokio::test]
+    async fn a_decision_tap_on_a_stale_screen_is_a_typed_conflict_and_types_nothing() {
+        let session_id = "agent-control-decision-stale";
+        let (backend, state) = pane(session_id, CLAUDE_APPROVAL);
+        let (prompt_id, revision) = pending_prompt(&state, session_id).await;
+        let tap = |revision: &str| {
+            let body = DecisionAnswerBody {
+                prompt_id: prompt_id.clone(),
+                screen_revision: revision.to_string(),
+                option_index: 0,
+                request_id: None,
+            };
+            decision_answer_op(session_id.to_string(), body)
+        };
+
+        let stale = handle_as(&state, tap("not-the-current-revision"), "device-1", None)
+            .await
+            .expect_err("a stale revision is refused");
+        assert_eq!(stale.code, ScopeErrorCode::RequestConflict, "{}", stale.message);
+        assert!(backend.writes.lock().expect("writes").is_empty(), "nothing typed on a stale tap");
+        assert_eq!(state.agent_control_audit.latest(1)[0].code, "REQUEST_CONFLICT");
+
+        handle_as(&state, tap(&revision), "device-1", None).await.expect("the current revision is typed");
+        assert!(!backend.writes.lock().expect("writes").is_empty());
+        assert_eq!(state.agent_control_audit.latest(1)[0].op, "answer");
+    }
+
     #[test]
     fn a_remote_receipt_carries_the_paired_host_id_and_other_results_do_not() {
         let mut receipt = serde_json::json!({
@@ -1303,6 +1548,19 @@ mod tests {
         assert!(entry["lastAssistantLine"].is_null(), "a pane with no transcript has no line: {listed}");
         let read = handle(&state, AgentControlOp::Read { session_id: session_id.to_string() }).await.expect("read");
         assert!(read["session"].get("lastAssistantLine").is_some(), "{read}");
+    }
+
+    #[tokio::test]
+    async fn a_mutation_path_observation_never_reads_the_history_store() {
+        let session_id = "agent-control-no-line-on-mutation";
+        let (_backend, state) = pane(session_id, CLAUDE_APPROVAL);
+        let plain = observe(&state, session_id).await.expect("observe");
+        assert!(plain.entry.get("lastAssistantLine").is_none(), "{}", plain.entry);
+        let with_line = observe_with_line(&state, session_id).await.expect("observe with line");
+        assert!(with_line.entry.get("lastAssistantLine").is_some(), "{}", with_line.entry);
+        for entry in [&plain.entry, &with_line.entry] {
+            assert!(entry["observedAt"].as_i64().is_some_and(|at| at > 0), "{entry}");
+        }
     }
 
     const CLAUDE_APPROVAL: &str = include_str!("reference_chat/fixtures/claude/prompt/approval-command.screen");

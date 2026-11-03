@@ -128,6 +128,11 @@ jobs:
       - name: Build remote helper (debug, required by ssh bridge suites)
         run: cargo build --manifest-path remote-helper/Cargo.toml
 
+      # The default remote-desktop feature links the pinned LGPL FFmpeg SDK that
+      # .cargo/config.toml points FFMPEG_DIR at.
+      - name: Fetch FFmpeg SDK (remote-desktop)
+        run: bun scripts/fetch-ffmpeg.mjs --target aarch64-apple-darwin
+
       # ---- Lint gates ----
       - name: Verify release workflow policy
         run: bun scripts/release-workflow-policy.mjs
@@ -144,32 +149,15 @@ jobs:
       - name: Test native terminal thread policy gate
         run: bun test scripts/native-terminal-thread-policy.test.mjs
 
+      # Multi-window invariant: production code never looks up the desktop window by the
+      # literal "main" label; window_registry.rs resolves the caller, owner or focused window.
+      - name: Verify multi-window policy
+        run: bun scripts/multi-window-policy.mjs
+
+      - name: Test multi-window policy gate
+        run: bun test scripts/multi-window-policy.test.mjs
+
       # ---- Unit and integration suites ----
-      # The P19 overlay gate suites bind a CGNAT overlay address, so the VM needs one that is
-      # actually local. It must sit on a NON-loopback interface: the resolver enumerates
-      # interfaces with IFF_UP and without IFF_LOOPBACK, so an lo0 alias is invisible to it.
-      # Report the outcome here, so a missing capability shows up in this log instead of being
-      # inferred from a test panic.
-      - name: Provision overlay address for host-dependent suites
-        shell: bash
-        run: |
-          OVERLAY_ADDRESS=100.64.1.2
-          sudo -n true && echo "PROVISION sudo=available" || echo "PROVISION sudo=unavailable"
-          ls -l /usr/sbin/sshd || echo "PROVISION sshd=missing"
-          if ! ifconfig -a | grep -q "$OVERLAY_ADDRESS"; then
-            for interface in $(ifconfig -l); do
-              case "$interface" in lo*) continue ;; esac
-              ifconfig "$interface" | grep -q 'inet ' || continue
-              # macOS rejects a point-to-point alias without a netmask, so try the explicit
-              # host-mask form first and fall back to the bare form.
-              if sudo -n ifconfig "$interface" alias "$OVERLAY_ADDRESS" netmask 255.255.255.255 up 2>/dev/null \
-                || sudo -n ifconfig "$interface" alias "$OVERLAY_ADDRESS" up 2>/dev/null; then
-                echo "PROVISION overlay_interface=$interface"
-                break
-              fi
-            done
-          fi
-          ifconfig -a | grep "$OVERLAY_ADDRESS" && echo "PROVISION overlay_alias=present" || echo "PROVISION overlay_alias=missing"
       - name: Test CI process supervision
         run: python3 -m unittest discover -s scripts -p 'ci_*_test.py'
 
@@ -337,7 +325,29 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf \
-            libasound2-dev
+            libasound2-dev \
+            clang \
+            libclang-dev \
+            libpipewire-0.3-dev \
+            libspa-0.2-dev \
+            libdbus-1-dev \
+            libva-dev \
+            libdrm-dev \
+            libgbm-dev \
+            libegl-dev \
+            libgl-dev \
+            libxcb1-dev \
+            libxcb-shm0-dev \
+            libxcb-randr0-dev \
+            libxcb-xfixes0-dev \
+            libx11-dev \
+            libxext-dev \
+            libxrandr-dev \
+            libxfixes-dev \
+            libxtst-dev \
+            libxi-dev \
+            libevdev-dev \
+            libudev-dev
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -382,6 +392,12 @@ jobs:
 
       - name: Build Frontend UI (required for Tauri asset embed)
         run: bun run --cwd ui build
+
+      # The default remote-desktop feature links the pinned LGPL FFmpeg SDK. Kept out of the cargo
+      # steps so they stay on the default shell (Windows: pwsh with Strawberry Perl, which the
+      # vendored OpenSSL build needs; Git Bash's perl lacks its modules).
+      - name: Fetch FFmpeg SDK (remote-desktop)
+        run: bun scripts/fetch-ffmpeg.mjs --target ${{ matrix.target }}
 
       - name: Cargo Check
         run: cargo check --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
@@ -448,24 +464,10 @@ jobs:
         if: matrix.os_name == 'linux'
         run: cargo build --manifest-path remote-helper/Cargo.toml
 
-      # The P19 overlay gate suites need a CGNAT address on a non-loopback interface, as in the
-      # precheck job. On Linux add it to the default-route interface as a /32.
-      - name: Provision overlay address for host-dependent suites
-        if: matrix.os_name == 'linux'
-        shell: bash
-        run: |
-          OVERLAY_ADDRESS=100.64.1.2
-          interface=$(ip -o -4 route show default | awk '{print $5; exit}')
-          sudo -n ip addr add "$OVERLAY_ADDRESS/32" dev "$interface"
-          ip -o -4 addr show | grep "$OVERLAY_ADDRESS" && echo "PROVISION overlay_alias=present on $interface"
-
       # Suites that cannot run on a hosted runner, each skipped with the reason it was measured
-      # to fail. They stay verified on real hosts: the renderer contract suite on GPU hardware,
-      # the gateway suites on a tailnet, the PTY saturation suites on a real kernel buffer.
+      # to fail. They stay verified on real hosts: the gateway suites on a tailnet, the PTY
+      # saturation suites on a real kernel buffer.
       # `--lib` is what pulls them in, so the exclusion has to be spelled out here.
-      #   native_terminal::renderer::      builds a real WGPU device and CoreText/locale fonts;
-      #                                    llvmpipe plus a font-less image fails ink-density and
-      #                                    rasterization assertions.
       #   remote::tests::test_remote_server_health_and_lifecycle and
       #   remote::tests::test_headless_handover_workspace_state_...  require an active Tailscale
       #                                    IPv4 interface ("no active Tailscale IPv4 interface found").
@@ -485,7 +487,7 @@ jobs:
       #                                    through /bin/sh; dash on Linux prints those escapes
       #                                    literally, so the probe never produces invalid UTF-8.
       #                                    The suite is a host-shell contract, not a product one.
-      - name: Cargo Test (renderer contract excluded)
+      - name: Cargo Test (host-dependent suites excluded)
         if: matrix.os_name == 'linux'
         run: |
           cargo test --manifest-path src-tauri/Cargo.toml \
@@ -510,7 +512,6 @@ jobs:
             --test updater_endpoint_contract \
             --test worktree_safety \
             -- --test-threads=1 \
-            --skip native_terminal::renderer:: \
             --skip remote::tests::test_remote_server_health_and_lifecycle \
             --skip remote::tests::test_headless_handover_workspace_state_selects_live_session_without_desktop_selection \
             --skip daemon::client::tests::test_client_workspace_registration_and_remote_apis \

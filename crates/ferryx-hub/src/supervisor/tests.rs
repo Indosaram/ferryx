@@ -11,6 +11,7 @@
 //! `recovery` crashes the hub at every effect boundary and restarts it (todo 12).
 //! `memory` covers native owner memory: teach, forget, correct, provenance and learning (todo 15).
 //! `cutover` covers reversible legacy adoption and cutover (todo 16).
+//! `transcript` covers the app conversation transcript (todo 7).
 mod admission;
 mod bound_session;
 mod completion;
@@ -21,4 +22,5 @@ mod recovery;
 mod request;
 mod schema;
 mod setup;
+mod transcript;
 mod wakes;

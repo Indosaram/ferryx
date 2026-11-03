@@ -178,7 +178,8 @@ pub enum AgentStateSource {
 pub struct ProviderReport {
     pub agent: Option<String>,
     pub state: String,
-    /// The frame came from the agent itself, not from a daemon release or a manual reset.
+    /// The frame came from the program itself (its extension or an OSC 7501 report), not from a
+    /// daemon release or a manual reset.
     pub self_reported: bool,
     pub detail: Option<String>,
 }
@@ -758,6 +759,16 @@ mod tests {
         assert_eq!(status, DerivedStatus { tier: AgentTier::Native, state: AgentControlState::Working, source: AgentStateSource::Provider });
         let waiting = derive_status(Some(&report("waiting", true)), None, false);
         assert_eq!(waiting.state, AgentControlState::Blocked);
+    }
+
+    #[test]
+    fn a_protocol_report_wins_over_the_screen() {
+        use crate::daemon::protocol::AgentStateOrigin;
+        let protocol = report("working", AgentStateOrigin::Protocol.is_provider_report());
+        let status = derive_status(Some(&protocol), Some(AgentActivity::Idle), false);
+        assert_eq!(status, DerivedStatus { tier: AgentTier::Native, state: AgentControlState::Working, source: AgentStateSource::Provider });
+        let released = report("working", AgentStateOrigin::ProcessReleased.is_provider_report());
+        assert_eq!(derive_status(Some(&released), Some(AgentActivity::Idle), false).source, AgentStateSource::Screen);
     }
 
     #[test]

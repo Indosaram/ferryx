@@ -2,6 +2,9 @@
 //! may be answered without the owner. They never widen the source rule.
 use serde::Deserialize;
 
+use crate::supervisor::answer_history::irreversible_or_external;
+use crate::supervisor::panel_contract::{AnswerDecision, PendingPrompt};
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Reading {
@@ -50,6 +53,43 @@ pub fn auto_answer(reading: &Reading, _suggested: &str) -> AutoDecision {
     AutoDecision::EscalateOwner
 }
 
+/// Turns the supervisor's answer decision ([`crate::supervisor::answer_history::decide`]) into
+/// what the hub does with the prompt. An irreversible or external step (plan D1a) and an
+/// unreadable screen are never answered, whatever `decision` says. A permission or approval
+/// prompt (plan D3 lists approvals) is answered only when it names the command it approves and
+/// the reading is not screen-tier: without a command "Do you want to proceed?" says nothing
+/// about what is approved, and a screen reading may have the command wrong.
+pub fn auto_answer_decided(
+    reading: &Reading,
+    prompt: &PendingPrompt,
+    worktree: Option<&str>,
+    decision: &AnswerDecision,
+) -> AutoDecision {
+    if !reading.screen_readable {
+        return AutoDecision::Hold;
+    }
+    if irreversible_or_external(prompt, worktree).is_some() {
+        return AutoDecision::EscalateOwner;
+    }
+    let approval = |kind: &str| matches!(kind, "permission" | "approval");
+    if reading.kind.as_deref().is_some_and(approval) || approval(&prompt.kind) {
+        let names_command = prompt
+            .command
+            .as_deref()
+            .is_some_and(|command| !command.trim().is_empty());
+        if !names_command || reading.state_source == "screen" {
+            return AutoDecision::EscalateOwner;
+        }
+    }
+    match decision {
+        AnswerDecision::Answer { option_index, .. } => match prompt.options.get(*option_index) {
+            Some(text) => AutoDecision::Answer { text: text.clone() },
+            None => AutoDecision::EscalateOwner,
+        },
+        AnswerDecision::Escalate { .. } => AutoDecision::EscalateOwner,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,7 +103,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_answer_never_answers_for_the_owner() {
+    fn auto_answer_never_answers_d1a_items_for_the_owner() {
         assert_eq!(
             auto_answer(&reading("provider", Some("approval"), true), "yes"),
             AutoDecision::EscalateOwner
@@ -95,5 +135,130 @@ mod tests {
             auto_answer(&reading("screen", Some("plan"), true), "ok"),
             AutoDecision::EscalateOwner
         );
+    }
+
+    #[test]
+    fn decided_answer_is_typed_only_for_routine_questions() {
+        let prompt = |question: &str, command: Option<&str>| PendingPrompt {
+            prompt_id: "p1".into(),
+            kind: "question".into(),
+            question: question.into(),
+            command: command.map(str::to_owned),
+            options: vec!["Allow".into(), "Deny".into()],
+            screen_revision: None,
+        };
+        let answer = AnswerDecision::Answer {
+            option_index: 0,
+            basis: "You chose Allow the last 3 times".into(),
+        };
+        let question = reading("provider", Some("question"), true);
+        assert_eq!(
+            auto_answer_decided(&question, &prompt("Use tabs?", None), None, &answer),
+            AutoDecision::Answer {
+                text: "Allow".into()
+            }
+        );
+        // D1a items are never auto-answered, even when the decision says Answer.
+        for (text, command) in [
+            (
+                "Run the migration?",
+                Some("sqlx migrate run --database-url postgres://prod/app"),
+            ),
+            ("Deploy to production?", None),
+            ("Run it?", Some("git push --force origin main")),
+            ("Run it?", Some("rm -rf /var/lib/app")),
+            ("Paste the API token?", None),
+        ] {
+            assert_eq!(
+                auto_answer_decided(&question, &prompt(text, command), None, &answer),
+                AutoDecision::EscalateOwner,
+                "{text} {command:?}"
+            );
+        }
+        assert_eq!(
+            auto_answer_decided(
+                &reading("provider", Some("permission"), true),
+                &prompt("Use tabs?", None),
+                None,
+                &answer
+            ),
+            AutoDecision::EscalateOwner
+        );
+        assert_eq!(
+            auto_answer_decided(
+                &reading("provider", Some("question"), false),
+                &prompt("Use tabs?", None),
+                None,
+                &answer
+            ),
+            AutoDecision::Hold
+        );
+    }
+
+    #[test]
+    fn learned_approval_is_answered_only_with_a_command_and_never_for_d1a() {
+        let approval = |command: Option<&str>| PendingPrompt {
+            prompt_id: "p1".into(),
+            kind: "approval".into(),
+            question: "Do you want to proceed?".into(),
+            command: command.map(str::to_owned),
+            options: vec!["Yes".into(), "No".into()],
+            screen_revision: None,
+        };
+        let answer = AnswerDecision::Answer {
+            option_index: 0,
+            basis: "You chose Yes the last 3 times".into(),
+        };
+        let provider = reading("provider", Some("approval"), true);
+        assert_eq!(
+            auto_answer_decided(
+                &provider,
+                &approval(Some("cargo test -p ferryx-hub")),
+                None,
+                &answer
+            ),
+            AutoDecision::Answer { text: "Yes".into() }
+        );
+        // The same kind through the prompt alone (permission) is also answerable.
+        let permission = PendingPrompt {
+            kind: "permission".into(),
+            ..approval(Some("cargo test"))
+        };
+        assert_eq!(
+            auto_answer_decided(&reading("provider", None, true), &permission, None, &answer),
+            AutoDecision::Answer { text: "Yes".into() }
+        );
+        // No command: nothing says what is approved.
+        for command in [None, Some("  ")] {
+            assert_eq!(
+                auto_answer_decided(&provider, &approval(command), None, &answer),
+                AutoDecision::EscalateOwner,
+                "{command:?}"
+            );
+        }
+        // Screen-tier approvals stay with the owner.
+        assert_eq!(
+            auto_answer_decided(
+                &reading("screen", Some("approval"), true),
+                &approval(Some("cargo test")),
+                None,
+                &answer
+            ),
+            AutoDecision::EscalateOwner
+        );
+        // D1a still wins for an approval with a command.
+        for command in [
+            "git reset --hard HEAD~3",
+            "git push origin --delete main",
+            "alembic upgrade head",
+            "kubectl delete pod web",
+            "terraform apply -auto-approve",
+        ] {
+            assert_eq!(
+                auto_answer_decided(&provider, &approval(Some(command)), None, &answer),
+                AutoDecision::EscalateOwner,
+                "{command}"
+            );
+        }
     }
 }

@@ -198,7 +198,7 @@ impl TerminalOutputHub {
                         history,
                         history_segments: Vec::new(),
                         gap,
-                        history_incomplete: hub.history_incomplete,
+                        history_incomplete: hub.history_incomplete(),
                     },
                     _charge: permit,
                 },

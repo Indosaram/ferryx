@@ -113,29 +113,6 @@ pub fn is_tailscale_cgnat_address(addr: &std::net::Ipv4Addr) -> bool {
     octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000
 }
 
-/// Test-only: the first CGNAT (`100.64.0.0/10`) address bound on this machine, or `None`.
-///
-/// Gate tests must bind an overlay address, and proof is injected separately through
-/// [`set_test_overlay_proof_override`], so this deliberately does not require overlay proof -
-/// which [`SystemInterfaceResolver::tailscale_address`] would demand and a CI VM cannot supply.
-/// Loopback aliases count: any local interface carrying the address makes it bindable, even
-/// though [`enumerate_ipv4_interface_addresses`] excludes loopback for the resolver's purposes.
-#[cfg(all(test, unix))]
-pub fn test_local_cgnat_address() -> Option<std::net::Ipv4Addr> {
-    enumerate_ipv4_addresses(true)
-        .ok()?
-        .into_iter()
-        .find(is_tailscale_cgnat_address)
-}
-
-#[cfg(all(test, not(unix)))]
-pub fn test_local_cgnat_address() -> Option<std::net::Ipv4Addr> {
-    enumerate_ipv4_interface_addresses()
-        .ok()?
-        .into_iter()
-        .find(is_tailscale_cgnat_address)
-}
-
 #[cfg(test)]
 type TestOverlayFn = Box<dyn Fn(&std::net::Ipv4Addr) -> Option<bool> + Send + Sync>;
 #[cfg(test)]
@@ -880,6 +857,9 @@ pub struct RemoteGatewayState {
     pub(crate) host_lease_wired: std::sync::atomic::AtomicBool,
     pub browser_backend: parking_lot::RwLock<Arc<dyn RemoteBrowserBackend>>,
     pub admission_controller: Arc<AdmissionController>,
+    /// The daemon-owned remote desktop host behind `/api/v1/remote-desktop/*`.
+    #[cfg(feature = "remote-desktop")]
+    pub remote_desktop: Arc<crate::remote::remote_desktop::RemoteDesktopHost>,
     pub browser_service_epoch: AtomicU64,
     snapshot_cache: RwLock<Option<WorkspaceCacheEntry>>,
     snapshot_lock: tokio::sync::Mutex<()>,
@@ -893,6 +873,19 @@ pub struct RemoteGatewayState {
     /// daemon's opened hub instead.
     #[cfg(test)]
     pub(crate) supervisor_test_hub: RwLock<Option<(ferryx_hub::goals::SqlitePool, String)>>,
+    /// Test-only app conversation standing in for the installed mhc engine.
+    #[cfg(test)]
+    pub(crate) supervisor_test_engine:
+        RwLock<Option<Arc<dyn ferryx_hub::supervisor::transcript::AppConversation>>>,
+    /// Test-only standing-rule store standing in for the installed one.
+    #[cfg(test)]
+    pub(crate) supervisor_test_rules:
+        RwLock<Option<Arc<dyn ferryx_hub::supervisor::panel_contract::RuleStore>>>,
+    /// The app-transcript requests running now, one flight per request id.
+    pub(crate) supervisor_flights: ferryx_hub::supervisor::transcript::Flights,
+    /// The agent-stamp writer thread, kept so a test fixture can end it before its directory goes.
+    #[cfg(test)]
+    agent_stamp_writer: parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl RemoteGatewayState {
@@ -904,11 +897,30 @@ impl RemoteGatewayState {
         let workspaces = Arc::clone(&sessions.workspace_service);
         self.workspace_registry = workspaces.registry.clone();
         self.session_backend = sessions.clone();
+        let stamp_writer = install_agent_stamp_persistence(&self.agent_events, &workspaces);
+        #[cfg(test)]
+        {
+            *self.agent_stamp_writer.lock() = stamp_writer;
+        }
+        #[cfg(not(test))]
+        drop(stamp_writer);
         self.machine_services = Some(Arc::new(crate::daemon::MachineServices {
             sessions,
             workspaces,
         }));
         self
+    }
+
+    /// Ends the agent-stamp writer after it has written everything queued, and waits for it. The
+    /// writer batches for `AGENT_STAMP_WRITE_WINDOW` and writes into the machine journal's
+    /// directory, so a test that removes that directory calls this first. Publishes after it are
+    /// not persisted.
+    #[cfg(test)]
+    pub(crate) fn finish_agent_stamp_writer(&self) {
+        self.agent_events.clear_stamp_sink();
+        if let Some(writer) = self.agent_stamp_writer.lock().take() {
+            let _ = writer.join();
+        }
     }
 
     pub fn new(
@@ -1061,6 +1073,22 @@ impl RemoteGatewayState {
                 }
             }));
         }
+        #[cfg(feature = "remote-desktop")]
+        let remote_desktop = Arc::new(crate::remote::remote_desktop::RemoteDesktopHost::new(
+            // Explicit stores (fixtures, isolated daemons) keep RD state beside their auth store.
+            identity_dir
+                .as_ref()
+                .map(|dir| dir.join("remote-desktop"))
+                .or_else(crate::remote::remote_desktop::default_dir),
+        ));
+        #[cfg(feature = "remote-desktop")]
+        {
+            // A revoked device's remote desktop key must stop authenticating with its token.
+            let remote_desktop = Arc::clone(&remote_desktop);
+            auth_manager.on_device_revoked(Arc::new(move |device_id: &str| {
+                remote_desktop.revoke_device(device_id);
+            }));
+        }
         Self {
             config: RwLock::new(config),
             identity_dir,
@@ -1074,6 +1102,13 @@ impl RemoteGatewayState {
             agent_history_home: RwLock::new(None),
             #[cfg(test)]
             supervisor_test_hub: RwLock::new(None),
+            #[cfg(test)]
+            supervisor_test_engine: RwLock::new(None),
+            #[cfg(test)]
+            supervisor_test_rules: RwLock::new(None),
+            supervisor_flights: Default::default(),
+            #[cfg(test)]
+            agent_stamp_writer: parking_lot::Mutex::new(None),
             auth_manager,
             terminal_service,
             daemon_epoch: AtomicU64::new(0),
@@ -1105,6 +1140,8 @@ impl RemoteGatewayState {
             desktop_event_sink: RwLock::new(None),
             relay_pairing: RwLock::new(None),
             relay_client: RwLock::new(None),
+            #[cfg(feature = "remote-desktop")]
+            remote_desktop,
             socket_tickets: parking_lot::Mutex::new(std::collections::HashMap::new()),
             host_lease: Arc::new(crate::remote::direct_lease::HostLeaseState::new()),
             host_lease_required: std::sync::atomic::AtomicBool::new(false),
@@ -1726,6 +1763,80 @@ impl RemoteGatewayState {
         );
         Ok(self.agent_control_settings())
     }
+
+    /// One-step owner enablement: turn agent control on and admit only this owner's own paired
+    /// devices (machine scope with Control permission). Any other device, including one paired
+    /// later, stays refused. Saved like [`Self::set_agent_control`]; blocking file I/O.
+    pub fn enable_agent_control_for_owner(
+        &self,
+    ) -> std::io::Result<crate::agent_control::policy::AgentControlSettings> {
+        use crate::remote::auth::{DeviceAccessScope, DevicePermission};
+        let owner_devices: Vec<String> = self
+            .auth_manager
+            .list_devices()
+            .into_iter()
+            .filter(|device| {
+                device.access_scope == DeviceAccessScope::Machine
+                    && device.permission == DevicePermission::Control
+            })
+            .map(|device| device.id)
+            .collect();
+        let next = self
+            .agent_control_policy
+            .snapshot()
+            .enabled_for_owner_devices(&owner_devices);
+        if let Some(path) = self.agent_control_path.as_deref() {
+            write_private_json(path, &next)?;
+        }
+        self.agent_control_policy.apply(&next);
+        tracing::info!(
+            devices = owner_devices.len(),
+            "agent control enabled for the owner's devices"
+        );
+        Ok(self.agent_control_settings())
+    }
+}
+
+/// How long the stamp writer gathers changes before one journal write.
+const AGENT_STAMP_WRITE_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Keeps each session's state and screen times in the machine journal's own session record, so a
+/// restarted daemon continues them instead of restarting them. Seeds the bus from the journal
+/// now, then writes every change from one thread: the bus's sink only queues, so a publisher never
+/// waits on the journal. The thread holds the workspace service, not the gateway state, and ends
+/// (after a last write) when the bus, and with it the sink, is dropped.
+fn install_agent_stamp_persistence(
+    bus: &Arc<crate::agent_control::events::AgentEventBus>,
+    workspaces: &Arc<crate::daemon::workspace_service::DaemonWorkspaceService>,
+) -> Option<std::thread::JoinHandle<()>> {
+    match workspaces.journal.agent_stamps() {
+        Ok(stamps) => bus.seed_stamps(stamps),
+        Err(error) => tracing::warn!(%error, "agent stamps were not loaded from the machine journal"),
+    }
+    let (queue, updates) = std::sync::mpsc::channel();
+    let sink_queue = std::sync::Mutex::new(queue);
+    bus.set_stamp_sink(Arc::new(move |session_id, stamps| {
+        if let Ok(queue) = sink_queue.lock() {
+            let _ = queue.send((session_id.to_string(), stamps.clone()));
+        }
+    }));
+    let workspaces = Arc::clone(workspaces);
+    let spawned = std::thread::Builder::new().name("agent-stamps".into()).spawn(move || {
+        while let Some((batch, closed)) =
+            crate::agent_control::events::next_stamp_batch(&updates, AGENT_STAMP_WRITE_WINDOW)
+        {
+            if let Err(error) = workspaces.journal.record_agent_stamps(&batch) {
+                tracing::warn!(%error, "agent stamps were not written to the machine journal");
+            }
+            if closed {
+                break;
+            }
+        }
+    });
+    if let Err(error) = &spawned {
+        tracing::warn!(%error, "the agent stamp writer did not start");
+    }
+    spawned.ok()
 }
 
 /// The `/api/v1/sessions` visibility rule applied to pushes: a Machine-scope Control device

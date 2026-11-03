@@ -825,6 +825,19 @@ fn dispatch_status() -> DaemonRequest {
     .expect("dispatch status")
 }
 
+/// Automatic setup as `ferryx hub setup` and the desktop send it.
+fn setup_request(action: crate::daemon::protocol::SupervisorSetupAction) -> DaemonRequest {
+    DaemonRequest::SupervisorSetup { request: action }
+}
+
+fn setup_run() -> DaemonRequest {
+    setup_request(crate::daemon::protocol::SupervisorSetupAction::Run { import_memory: true, projects: Vec::new() })
+}
+
+fn setup_adopt_all() -> DaemonRequest {
+    setup_request(crate::daemon::protocol::SupervisorSetupAction::AdoptAll)
+}
+
 /// A peer under a worker pane is refused FORBIDDEN for every supervisor mutation, before the
 /// hub is consulted; the same peer may still read the snapshot.
 #[cfg(unix)]
@@ -840,7 +853,7 @@ async fn a_supervisor_mutation_from_inside_a_worker_pane_is_forbidden() {
         cli: true,
         mcp: false,
     };
-    for request in [pause_request(), teach, dispatch_submit(), mcp_submit()] {
+    for request in [pause_request(), teach, dispatch_submit(), mcp_submit(), setup_run(), setup_adopt_all()] {
         match unix_exchange(&server, request.clone()).await {
             DaemonResponse::Error { code, message, .. } => {
                 assert_eq!(code.as_deref(), Some("FORBIDDEN"), "{request:?}: {message}");
@@ -848,6 +861,31 @@ async fn a_supervisor_mutation_from_inside_a_worker_pane_is_forbidden() {
             }
             other => panic!("{request:?} answered {other:?}"),
         }
+    }
+    // T9: a worker must not pause or resume the supervisor, turn it on, widen agent control or
+    // undo its log. Each is refused before the hub or the policy is touched.
+    for request in [
+        DaemonRequest::SupervisorGlobalPause { paused: false },
+        DaemonRequest::SupervisorSettings { enabled: Some(true) },
+        DaemonRequest::SupervisorActionUndo { id: 1 },
+        DaemonRequest::AgentControlEnableOwner,
+    ] {
+        match unix_exchange(&server, request.clone()).await {
+            DaemonResponse::Error { code, message, .. } => {
+                assert_eq!(code.as_deref(), Some("FORBIDDEN"), "{request:?}: {message}");
+            }
+            other => panic!("{request:?} answered {other:?}"),
+        }
+    }
+    assert!(
+        !server.remote_state().agent_control_policy.enabled(),
+        "a refused enablement left agent control off"
+    );
+    // Reading the settings changes nothing, so it is never FORBIDDEN from a pane.
+    if let DaemonResponse::Error { code, .. } =
+        unix_exchange(&server, DaemonRequest::SupervisorSettings { enabled: None }).await
+    {
+        assert_ne!(code.as_deref(), Some("FORBIDDEN"), "settings read from a pane");
     }
     assert!(matches!(
         unix_exchange(&server, DaemonRequest::SupervisorSnapshot).await,
@@ -860,6 +898,12 @@ async fn a_supervisor_mutation_from_inside_a_worker_pane_is_forbidden() {
             Some("FORBIDDEN"),
             "dispatch status from a pane"
         );
+    }
+    // Reading the setup status is not an owner decision either.
+    if let DaemonResponse::Error { code, .. } =
+        unix_exchange(&server, setup_request(crate::daemon::protocol::SupervisorSetupAction::Status)).await
+    {
+        assert_ne!(code.as_deref(), Some("FORBIDDEN"), "setup status from a pane");
     }
     // Compatibility: the owner's own shell in a pane keeps the pre-existing lane-goal and
     // legacy lane-pause requests; with no hub here they answer as before, never FORBIDDEN.
@@ -925,7 +969,7 @@ async fn a_supervisor_mutation_from_outside_the_panes_reaches_the_service() {
 #[tokio::test]
 async fn a_supervisor_mutation_from_an_unidentified_peer_is_forbidden() {
     let server = Arc::new(DaemonServer::new());
-    for request in [pause_request(), dispatch_submit(), mcp_submit()] {
+    for request in [pause_request(), dispatch_submit(), mcp_submit(), setup_run(), setup_adopt_all()] {
         match data_exchange(&server, request.clone()).await {
             DaemonResponse::Error { code, .. } => {
                 assert_eq!(code.as_deref(), Some("FORBIDDEN"), "{request:?}")

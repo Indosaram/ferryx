@@ -77,7 +77,7 @@ The repository provides two dedicated server binaries defined in `src-tauri/Carg
 ### Prerequisites
 
 - Rust stable (at least 1.82), Zig 0.17.0, and initialized repository submodules for the pinned Ghostty build
-- The Linux system packages required by Tauri v2, including GTK 3 and WebKitGTK 4.1, plus `pkg-config` and a C compiler; the relay shares the Tauri crate's dependencies
+- `pkg-config` and a C compiler. Building with `--no-default-features` leaves out the desktop GUI and remote desktop stacks, so GTK, WebKitGTK and FFmpeg are not needed
 
 ### Compilation
 
@@ -85,10 +85,10 @@ Build the release binaries from the project root:
 
 ```bash
 # Build the unified relay binary
-cargo build --manifest-path src-tauri/Cargo.toml --release --bin ferryx-relay
+cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features --bin ferryx-relay
 
 # Build the headless client CLI if needed (from the same checkout)
-cargo build --manifest-path src-tauri/Cargo.toml --release --bin ferryx-cli
+cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features --bin ferryx-cli
 ```
 
 The compiled binaries will be located at:

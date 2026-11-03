@@ -68,6 +68,9 @@ async fn reset_scenario(succeeds: bool) {
         detail: None,
         is_snapshot,
         origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+        state_source: None,
+        outcome: None,
+        kind: None,
     };
     messages_tx
         .send(report("working", false))

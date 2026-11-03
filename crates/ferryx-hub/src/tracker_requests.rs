@@ -20,17 +20,16 @@ fn now_utc() -> String {
 }
 
 const REQUESTERS_ENV: &str = "TRACKER_REQUESTERS";
-const DEFAULT_REQUESTERS: &str = "여신님";
 const META_PREFIX: &str = "request_item:";
 const LABEL_COLOR: &str = "#f27ec2";
 
 static SYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Requester names from `TRACKER_REQUESTERS` (comma separated); each matches inbox authors
-/// containing it.
+/// containing it. Unset means no requesters: nothing is mirrored.
 fn requesters() -> Vec<String> {
     crate::hub_env::var(REQUESTERS_ENV)
-        .unwrap_or_else(|_| DEFAULT_REQUESTERS.to_string())
+        .unwrap_or_default()
         .split(',')
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
@@ -53,28 +52,22 @@ fn title_for(snippet: &str) -> String {
         title.push('…');
     }
     if title.is_empty() {
-        title = "(빈 메시지)".to_string();
+        title = crate::locale::text("(빈 메시지)", "(empty message)");
     }
     title
 }
 
-/// Calendar date in KST (the owner's zone) of an RFC 3339 timestamp.
-fn kst_date(timestamp: &str) -> Option<String> {
+/// The owner-local calendar date of an RFC 3339 timestamp.
+fn owner_date(timestamp: &str) -> Option<String> {
     let parsed = chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
-    let kst = chrono::FixedOffset::east_opt(9 * 3600)?;
-    Some(parsed.with_timezone(&kst).format("%Y-%m-%d").to_string())
+    Some(crate::locale::current().local_date(parsed.with_timezone(&chrono::Utc)).to_string())
 }
 
-fn kst_time(timestamp: &str) -> String {
+/// An RFC 3339 timestamp as owner-local time with the zone, e.g. `2026-10-21 19:00 KST`.
+fn owner_time(timestamp: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(timestamp)
-        .ok()
-        .zip(chrono::FixedOffset::east_opt(9 * 3600))
-        .map(|(t, kst)| {
-            t.with_timezone(&kst)
-                .format("%Y-%m-%d %H:%M KST")
-                .to_string()
-        })
-        .unwrap_or_else(|| timestamp.to_string())
+        .map(|t| crate::locale::current().format(t.with_timezone(&chrono::Utc), "%Y-%m-%d %H:%M"))
+        .unwrap_or_else(|_| timestamp.to_string())
 }
 
 async fn ensure_label(pool: &SqlitePool, name: &str) -> Result<String> {
@@ -95,9 +88,11 @@ async fn ensure_label(pool: &SqlitePool, name: &str) -> Result<String> {
     .bind(&id)
     .bind(name)
     .bind(LABEL_COLOR)
-    .bind(format!(
-        "{name}이(가) 요청한 에이전트 작업 (인박스에서 자동 수집)"
-    ))
+    .bind(if crate::locale::current().is_korean() {
+        format!("{name}이(가) 요청한 에이전트 작업 (인박스에서 자동 수집)")
+    } else {
+        format!("Agent work requested by {name} (collected from the inbox)")
+    })
     .bind(now_utc())
     .execute(pool)
     .await?;
@@ -132,8 +127,16 @@ async fn ensure_view(pool: &SqlitePool, name: &str, label_id: &str, me: &str) ->
          VALUES (?, ?, ?, 'layers', ?, ?, NULL, ?, ?, 1, ?, ?)",
     )
     .bind(&id)
-    .bind(format!("{name} 요청"))
-    .bind(format!("{name}이(가) 지시한 작업"))
+    .bind(if crate::locale::current().is_korean() {
+        format!("{name} 요청")
+    } else {
+        format!("Requests from {name}")
+    })
+    .bind(if crate::locale::current().is_korean() {
+        format!("{name}이(가) 지시한 작업")
+    } else {
+        format!("Work {name} asked for")
+    })
     .bind(LABEL_COLOR)
     .bind(me)
     .bind(&filters)
@@ -152,6 +155,10 @@ async fn ensure_view(pool: &SqlitePool, name: &str, label_id: &str, me: &str) ->
 
 /// Mirrors request-like inbox items from every configured requester into labelled Omon issues.
 pub async fn sync(pool: &SqlitePool) -> Result<()> {
+    sync_requesters(pool, &requesters()).await
+}
+
+async fn sync_requesters(pool: &SqlitePool, names: &[String]) -> Result<()> {
     let _guard = SYNC_LOCK.lock().await;
     let team: Option<(String, String)> =
         sqlx::query_as("SELECT id, key FROM tracker_teams WHERE key = 'OMO'")
@@ -167,8 +174,8 @@ pub async fn sync(pool: &SqlitePool) -> Result<()> {
     let Some(me) = me else {
         return Ok(());
     };
-    for name in requesters() {
-        sync_requester(pool, &name, &team_id, &team_key, &me).await?;
+    for name in names {
+        sync_requester(pool, name, &team_id, &team_key, &me).await?;
     }
     Ok(())
 }
@@ -273,15 +280,14 @@ async fn sync_requester(
         let due_at: Option<String> = row.get("due_at");
         let proposed: Option<String> = row.get("proposed_action");
 
-        let mut description = format!(
-            "> {}\n\n- 요청자: {} ({source})\n- 받은 시각: {}\n- 인박스 분류: {class} / {status}\n- 분류 사유: {reason}\n",
-            snippet.trim().replace('\n', "\n> "),
+        let mut description = request_description(
+            &snippet,
             author.as_deref().unwrap_or(name),
-            kst_time(&received_at),
+            &source,
+            &received_at,
+            (&class, &status, &reason),
+            proposed.as_deref(),
         );
-        if let Some(action) = proposed.as_deref().filter(|a| !a.trim().is_empty()) {
-            description.push_str(&format!("- 제안된 처리: {action}\n"));
-        }
         description.push_str(&format!("- inbox item: `{item_id}`\n"));
 
         let created_at = chrono::DateTime::parse_from_rfc3339(&received_at)
@@ -291,7 +297,7 @@ async fn sync_requester(
             })
             .unwrap_or_else(|_| now_utc());
         let (completed_at, canceled_at) = lifecycle(&state_type, &now_utc());
-        let due_date = due_at.as_deref().and_then(kst_date);
+        let due_date = due_at.as_deref().and_then(owner_date);
         let issue_id = Uuid::new_v4().to_string();
 
         let mut tx = pool.begin_write().await?;
@@ -354,9 +360,45 @@ async fn sync_requester(
     Ok(())
 }
 
+/// The issue body: the quoted request, then who sent it, when (owner-local time), and how the
+/// inbox classified it, in the owner's language.
+fn request_description(
+    snippet: &str,
+    requester: &str,
+    source: &str,
+    received_at: &str,
+    (class, status, reason): (&str, &str, &str),
+    proposed: Option<&str>,
+) -> String {
+    let quote = snippet.trim().replace('\n', "\n> ");
+    let received = owner_time(received_at);
+    let korean = crate::locale::current().is_korean();
+    let mut description = if korean {
+        format!(
+            "> {quote}\n\n- 요청자: {requester} ({source})\n- 받은 시각: {received}\n- 인박스 분류: {class} / {status}\n- 분류 사유: {reason}\n"
+        )
+    } else {
+        format!(
+            "> {quote}\n\n- Requester: {requester} ({source})\n- Received: {received}\n- Inbox class: {class} / {status}\n- Reason: {reason}\n"
+        )
+    };
+    if let Some(action) = proposed.filter(|a| !a.trim().is_empty()) {
+        description.push_str(&if korean {
+            format!("- 제안된 처리: {action}\n")
+        } else {
+            format!("- Proposed action: {action}\n")
+        });
+    }
+    description
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn goddess() -> Vec<String> {
+        vec!["여신님".to_owned()]
+    }
 
     async fn seeded() -> SqlitePool {
         let pool = crate::storage::memory().await.unwrap();
@@ -420,8 +462,8 @@ mod tests {
         insert_item(pool, "e", "여신님😍", "쿠팡 회수 해줘요", "fyi", "open").await;
         insert_item(pool, "d", "다른사람", "이거 만들어줘", "bot", "open").await;
 
-        sync(pool).await.unwrap();
-        sync(pool).await.unwrap();
+        sync_requesters(pool, &goddess()).await.unwrap();
+        sync_requesters(pool, &goddess()).await.unwrap();
         assert_eq!(
             labelled(pool).await,
             vec![
@@ -446,7 +488,7 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
-        sync(pool).await.unwrap();
+        sync_requesters(pool, &goddess()).await.unwrap();
         assert_eq!(labelled(pool).await[0].1, "Done");
 
         // A deleted issue stays deleted.
@@ -454,14 +496,57 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
-        sync(pool).await.unwrap();
+        sync_requesters(pool, &goddess()).await.unwrap();
         assert_eq!(labelled(pool).await.len(), 1);
     }
 
+    #[test]
+    fn request_bodies_use_the_owner_zone_and_language() {
+        let korean = request_description(
+            "체크표\n만들어줘",
+            "여신님",
+            "kakao",
+            "2026-10-21T10:00:00+00:00",
+            ("bot", "open", "r"),
+            Some("만들기"),
+        );
+        assert!(korean.contains("> 체크표\n> 만들어줘"), "{korean}");
+        assert!(korean.contains("- 받은 시각: 2026-10-21 19:00 KST"), "{korean}");
+        assert!(korean.contains("- 제안된 처리: 만들기"), "{korean}");
+        assert_eq!(owner_date("2026-10-21T16:00:00+00:00").as_deref(), Some("2026-10-22"));
+        crate::locale::with(crate::locale::OwnerLocale::english_utc(), || {
+            let english = request_description(
+                "make a checklist",
+                "Alice",
+                "mail",
+                "2026-10-21T10:00:00+00:00",
+                ("bot", "open", "r"),
+                Some("draft it"),
+            );
+            assert!(english.contains("- Requester: Alice (mail)"), "{english}");
+            assert!(english.contains("- Received: 2026-10-21 10:00 UTC"), "{english}");
+            assert!(english.contains("- Proposed action: draft it"), "{english}");
+            assert!(!english.chars().any(crate::locale::is_hangul), "{english}");
+            assert_eq!(owner_date("2026-10-21T16:00:00+00:00").as_deref(), Some("2026-10-21"));
+            assert_eq!(title_for("  "), "(empty message)");
+        });
+    }
+
     #[tokio::test]
-    async fn the_tracker_api_runs_the_sync_like_omos_prepare() {
+    async fn no_requester_is_built_in() {
         let pool = seeded().await;
         insert_item(&pool, "a", "여신님", "체크표 만들어줘", "bot", "open").await;
+        sync_requesters(&pool, &[]).await.unwrap();
+        assert!(labelled(&pool).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mirrored_requests_appear_in_the_tracker_api() {
+        let pool = seeded().await;
+        insert_item(&pool, "a", "여신님", "체크표 만들어줘", "bot", "open").await;
+        // No requester is built in, so the requester is passed explicitly rather than through
+        // TRACKER_REQUESTERS, which parallel tests would observe.
+        sync_requesters(&pool, &goddess()).await.unwrap();
         let items = crate::tracker_linear::issue_values_for_test(&pool).await;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["title"], "체크표 만들어줘");

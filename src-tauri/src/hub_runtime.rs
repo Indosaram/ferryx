@@ -18,6 +18,16 @@ use crate::daemon::server::DaemonServer;
 use crate::remote::state::RemoteGatewayState;
 use crate::remote::reference_chat::types::{ReferencePart, ReferencePromptAnswer, ReferenceTurn};
 
+mod setup;
+mod seed;
+pub use setup::{
+    supervisor_adopt_all, supervisor_setup, supervisor_setup_run, supervisor_setup_status, SetupError, SetupProject,
+    SetupRunRequest, SLACK_TEAM_UNRESOLVED,
+};
+
+/// Capability a daemon advertises once it serves `DaemonRequest::SupervisorSetup`.
+pub const SUPERVISOR_SETUP_CAPABILITY: &str = "supervisorSetupV1";
+
 /// Maps a hub operation onto the daemon's agent-control request.
 /// The request id is the one the caller supplied. A lost answer is not given a new id.
 pub fn to_agent_control_op(op: &AgentOp) -> Result<AgentControlOp, String> {
@@ -85,6 +95,8 @@ fn lines_of(turns: &[ReferenceTurn]) -> Vec<String> {
         .filter(|text| !text.trim().is_empty())
         .collect()
 }
+
+pub(crate) mod panel_autonomy;
 
 struct DaemonBridge {
     client: DaemonClient,
@@ -226,7 +238,7 @@ impl AgentControl for DaemonBridge {
 }
 
 /// A git remote URL in a form two checkouts of one repository share.
-fn remote_key(url: &str) -> String {
+pub(crate) fn remote_key(url: &str) -> String {
     let url = url.trim().trim_end_matches('/');
     url.strip_suffix(".git").unwrap_or(url).to_ascii_lowercase()
 }
@@ -419,12 +431,14 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
             };
         }
         Some("env") => return hub_env_cli(&args[3.min(args.len())..]),
+        Some("setup") => return setup::hub_setup_cli(&args[3.min(args.len())..]),
         Some("cron") => return hub_cron_cli(&args[3.min(args.len())..]),
         Some("migrate") => {}
         _ => {
             eprintln!("usage: ferryx hub migrate [--from-omo <db>] [--cwd <dir>] [--imported-from <db>] [--dry-run]");
             eprintln!("       ferryx hub stop | start | status [--check]");
             eprintln!("       ferryx hub cutover | rollback | intake");
+            eprintln!("       {}", setup::HUB_SETUP_USAGE);
             eprintln!(
                 "       ferryx hub env import [--from-plist <omo plist>] | ferryx hub env keys"
             );
@@ -783,9 +797,9 @@ pub async fn supervisor_snapshot(state: &RemoteGatewayState) -> Value {
         let test_hub = state.supervisor_test_hub.read().clone();
         #[cfg(test)]
         if let Some((pool, _)) = test_hub {
-            return json!({ "hub": { "available": true, "running": true, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": unified_snapshot(&pool).await });
+            return json!({ "hub": { "available": true, "running": true, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": unified_snapshot(&pool).await, "setup": setup::snapshot_setup(&pool).await });
         }
-        return json!({ "hub": { "available": false, "running": false, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": null });
+        return json!({ "hub": { "available": false, "running": false, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": null, "setup": null });
     };
     // A daemon that handed the hub to its successor no longer drives anything.
     let running = running.lock().await.is_some() && !HUB_TASKS.is_retired();
@@ -798,6 +812,7 @@ pub async fn supervisor_snapshot(state: &RemoteGatewayState) -> Value {
         "watched": watched.unwrap_or_default(),
         "actions": actions,
         "supervisor": unified_snapshot(&hub.pool).await,
+        "setup": setup::snapshot_setup(&hub.pool).await,
     })
 }
 
@@ -1106,6 +1121,129 @@ pub async fn set_lane_paused_gated(
     Ok(changed)
 }
 
+/// Capability a daemon advertises once it serves the direct supervisor controls: the global
+/// pause, the enablement settings and the action undo (`SupervisorGlobalPause`,
+/// `SupervisorSettings`, `SupervisorActionUndo`, `AgentControlEnableOwner`).
+pub const SUPERVISOR_CONTROL_CAPABILITY: &str = "supervisorControlV1";
+
+/// Why a direct supervisor control did not run.
+#[derive(Debug, thiserror::Error)]
+pub enum SupervisorControlError {
+    #[error("the supervisor hub is not open in this daemon")]
+    Unavailable,
+    /// Enabling is bound to the owner's home, and neither `OMO_HOME` nor a home directory is set.
+    #[error("no owner home directory: set OMO_HOME or HOME")]
+    NoOwnerHome,
+    #[error("{0}")]
+    Storage(String),
+    #[error("{0}")]
+    Undo(ferryx_hub::supervisor::undo::UndoError),
+}
+
+impl SupervisorControlError {
+    /// The stable wire code a refusal carries.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Unavailable => "SUPERVISOR_UNAVAILABLE",
+            Self::NoOwnerHome => "INVALID_REQUEST",
+            Self::Storage(_) => "INTERNAL",
+            Self::Undo(error) => error.code(),
+        }
+    }
+}
+
+/// The pool the direct controls read and write: the hub's, or the test hub's.
+async fn control_pool(
+    state: &RemoteGatewayState,
+) -> Result<ferryx_hub::goals::SqlitePool, SupervisorControlError> {
+    supervisor_service(state)
+        .await
+        .map(|(pool, _, _)| pool)
+        .map_err(|_| SupervisorControlError::Unavailable)
+}
+
+fn control_storage(error: impl std::fmt::Display) -> SupervisorControlError {
+    SupervisorControlError::Storage(error.to_string())
+}
+
+/// The owner pauses (`true`) or resumes (`false`) every supervisor action at once. This is the
+/// hub-wide flag ([`ferryx_hub::control::set_paused`]), not one lane's pause. It never goes
+/// through the engine and never touches a PTY. Returns whether the flag changed.
+pub async fn set_supervisor_paused(
+    state: &RemoteGatewayState,
+    paused: bool,
+    by: &str,
+) -> Result<bool, SupervisorControlError> {
+    let pool = control_pool(state).await?;
+    let was = ferryx_hub::control::is_paused(&pool).await.map_err(control_storage)?;
+    ferryx_hub::control::set_paused(&pool, paused).await.map_err(control_storage)?;
+    tracing::info!(by, paused, "supervisor pause changed");
+    crate::remote::server::agent_control_service::publish_supervisor_changed(
+        state,
+        json!({ "paused": paused, "by": by }),
+    );
+    Ok(was != paused)
+}
+
+/// The persisted supervisor settings as the owner sees them. `enabled` is the effective answer:
+/// the owner turned it on AND this daemon resolves the same owner home (`OMO_HOME`, else
+/// `<home>/.omo`). `requested` is the stored switch alone. `removeAll` defaults off.
+/// With `enabled` set, the switch is saved first (stamping the current owner home).
+pub async fn supervisor_settings(
+    state: &RemoteGatewayState,
+    enabled: Option<bool>,
+) -> Result<Value, SupervisorControlError> {
+    use ferryx_hub::supervisor::settings;
+    let pool = control_pool(state).await?;
+    let home = settings::current_owner_home();
+    if let Some(enabled) = enabled {
+        let home = home.as_deref().ok_or(SupervisorControlError::NoOwnerHome)?;
+        settings::set_enabled(&pool, enabled, home).await.map_err(control_storage)?;
+        crate::remote::server::agent_control_service::publish_supervisor_changed(
+            state,
+            json!({ "enabled": enabled }),
+        );
+    }
+    let saved = settings::load(&pool).await.map_err(control_storage)?;
+    let effective = settings::is_enabled(&pool, home.as_deref()).await.map_err(control_storage)?;
+    Ok(json!({
+        "enabled": effective,
+        "requested": saved.enabled,
+        "removeAll": saved.remove_all,
+        "ownerHome": saved.owner_home,
+        "currentOwnerHome": home,
+    }))
+}
+
+/// The panel's Undo on one action-log line: runs the entry's undo handle through the T2 action
+/// log and rule store. A handle nobody can reverse is `UNSUPPORTED`; a spent or missing one is
+/// `NOT_FOUND`.
+pub async fn undo_supervisor_action(
+    state: &RemoteGatewayState,
+    id: i64,
+) -> Result<(), SupervisorControlError> {
+    use ferryx_hub::supervisor::undo::{ActionUndo, LoggedUndo};
+    use ferryx_hub::supervisor::{activity::SqliteActionLog, rules::SqliteRuleStore};
+    let pool = control_pool(state).await?;
+    let now_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as i64)
+    };
+    let rules = SqliteRuleStore::open(pool.clone(), now_ms()).await.map_err(control_storage)?;
+    let undo = LoggedUndo::new(
+        Arc::new(SqliteActionLog::new(pool)),
+        Arc::new(rules),
+        Arc::new(now_ms),
+    );
+    undo.undo(id).await.map_err(SupervisorControlError::Undo)?;
+    crate::remote::server::agent_control_service::publish_supervisor_changed(
+        state,
+        json!({ "actionId": id }),
+    );
+    Ok(())
+}
+
 /// Capability a daemon advertises once it serves `DaemonRequest::SupervisorGoal`.
 pub const SUPERVISOR_GOAL_CAPABILITY: &str = "supervisorGoalV1";
 
@@ -1395,6 +1533,126 @@ pub async fn supervisor_conversation(
     request::conversation(&pool, &context, project_id, after).await
 }
 
+/// Capability a daemon advertises once it serves `DaemonRequest::SupervisorConverseV1`.
+pub const SUPERVISOR_CONVERSE_CAPABILITY: &str = "supervisorConverseV1";
+
+/// The installed mhc engine as one app request's conversation: the turn registers the owner's
+/// message with `app_work::converse`, so the work tools the turn calls (submit and the session
+/// tools) act for the installation's owner and only while this turn is live.
+struct AppTurnEngine {
+    supervisor: ferryx_hub::meta::mhc_supervisor::MhcSupervisor,
+    request_id: String,
+    owner_text: String,
+}
+
+#[async_trait]
+impl ferryx_hub::supervisor::transcript::AppConversation for AppTurnEngine {
+    async fn converse(
+        &self,
+        scope: &ferryx_hub::meta::mhc_profile::ConversationScope,
+        message: &str,
+    ) -> Result<String, ferryx_hub::meta::mhc_fault::SupervisorFault> {
+        debug_assert_eq!(scope, &ferryx_hub::supervisor::app_work::app_scope());
+        ferryx_hub::supervisor::app_work::converse(&self.supervisor, &self.request_id, &self.owner_text, message).await
+    }
+}
+
+/// The supervisor conversation the app channel talks to for one request: the installed mhc
+/// engine, through the turn-token helper.
+fn app_conversation(
+    state: &RemoteGatewayState,
+    input: &ferryx_hub::supervisor::transcript::ConverseInput,
+) -> Option<Arc<dyn ferryx_hub::supervisor::transcript::AppConversation>> {
+    #[cfg(test)]
+    if let Some(engine) = state.supervisor_test_engine.read().clone() {
+        return Some(engine);
+    }
+    let _ = state;
+    ferryx_hub::meta::mhc_supervisor::installed().map(|supervisor| {
+        Arc::new(AppTurnEngine {
+            supervisor,
+            request_id: input.request_id.clone(),
+            owner_text: input.text.trim().to_owned(),
+        }) as Arc<dyn ferryx_hub::supervisor::transcript::AppConversation>
+    })
+}
+
+/// The persisted standing rules, once the daemon's hub open path installs them.
+static RULE_STORE: std::sync::OnceLock<Arc<dyn ferryx_hub::supervisor::panel_contract::RuleStore>> =
+    std::sync::OnceLock::new();
+
+/// Installs the standing-rule store `supervisor_converse` writes rule changes to. Nothing in
+/// this branch calls it: `SqliteRuleStore` lives in the task 4 branch, so until the integration
+/// owner installs it a rule change is refused, never faked.
+pub fn install_rule_store(store: Arc<dyn ferryx_hub::supervisor::panel_contract::RuleStore>) {
+    let _ = RULE_STORE.set(store);
+}
+
+fn rule_store(
+    state: &RemoteGatewayState,
+) -> Option<Arc<dyn ferryx_hub::supervisor::panel_contract::RuleStore>> {
+    #[cfg(test)]
+    if let Some(store) = state.supervisor_test_rules.read().clone() {
+        return Some(store);
+    }
+    let _ = state;
+    RULE_STORE.get().cloned()
+}
+
+/// One owner message from the panel composer and the supervisor's reply, both stored in the app
+/// transcript. Without the engine nothing is stored and the answer is `MHC_NOT_RUNNING`.
+/// The reply tells the Supervisor views to refetch, and so does every row stored while the turn
+/// runs: the owner's message is announced at once, not after the whole turn.
+pub async fn supervisor_converse(
+    state: &RemoteGatewayState,
+    caller: SupervisorCaller,
+    input: ferryx_hub::supervisor::transcript::ConverseInput,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    use ferryx_hub::supervisor::request::RequestFailure;
+    use ferryx_hub::supervisor::transcript;
+    let (pool, owner, _) = supervisor_service(state).await?;
+    if owner.is_none() {
+        return Err(RequestFailure::new(
+            "UNAUTHORIZED",
+            "this installation has no single supervisor owner",
+        ));
+    }
+    let Some(engine) = app_conversation(state, &input) else {
+        return Err(RequestFailure::new(
+            "MHC_NOT_RUNNING",
+            "no mhc supervisor engine is installed in this daemon; nothing was stored",
+        ));
+    };
+    let rules = rule_store(state);
+    let announce = || {
+        let mut payload = json!({ "supervisorConverse": input.request_id });
+        if let SupervisorCaller::Remote { device_id } = &caller {
+            if let Some(fields) = payload.as_object_mut() {
+                fields.insert("by".into(), json!(format!("remote:{device_id}")));
+            }
+        }
+        crate::remote::server::agent_control_service::publish_supervisor_changed(state, payload);
+    };
+    let ctx = transcript::Converse {
+        pool: &pool,
+        engine: engine.as_ref(),
+        rules: rules.as_deref(),
+        flights: &state.supervisor_flights,
+        now: &transcript::now_ms,
+        changed: &announce,
+    };
+    transcript::converse(&ctx, &input).await
+}
+
+/// One page of the app transcript after `cursor` (a message id; 0 starts from the beginning).
+pub async fn supervisor_transcript(
+    state: &RemoteGatewayState,
+    cursor: i64,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    let (pool, _, _) = supervisor_service(state).await?;
+    ferryx_hub::supervisor::transcript::page(&pool, cursor, ferryx_hub::supervisor::transcript::PAGE_LIMIT).await
+}
+
 /// The owner's native memory receipts with their provenance, read from the installed mhc
 /// engine. A closed hub is SUPERVISOR_UNAVAILABLE; a daemon without the engine is
 /// MEMORY_UNAVAILABLE, never an empty success.
@@ -1435,8 +1693,9 @@ pub async fn supervisor_read(
             supervisor_conversation(state, SupervisorCaller::Desktop, &project_id, after.unwrap_or(0)).await
         }
         SupervisorReadAction::Memory => supervisor_memory(state, SupervisorCaller::Desktop).await,
+        SupervisorReadAction::Transcript { cursor } => supervisor_transcript(state, cursor.unwrap_or(0)).await,
         SupervisorReadAction::Panel => Ok(json!(supervisor_panel(state).await)),
-        SupervisorReadAction::Fleet => Ok(json!({ "sessions": local_fleet_sessions(state).await })),
+        SupervisorReadAction::Fleet => Ok(json!({ "sessions": panel_autonomy::fleet_sessions(state).await })),
     }
 }
 
@@ -1454,9 +1713,9 @@ fn unix_ms() -> i64 {
 
 /// This computer's sessions in the fleet shape (`GET /api/v1/fleet/sessions`).
 ///
-/// The gateway has no path to the hub's paired-host fleet, so this is the local machine only,
-/// mapped exactly as the hub's `fleet::merge_sessions` maps one machine of many. A failed local
-/// list is a stale, empty machine rather than an error.
+/// This computer only, mapped exactly as the hub's `fleet::merge_sessions` maps one machine of
+/// many. A failed local list is a stale, empty machine rather than an error. Readers of the
+/// whole fleet use [`panel_autonomy::fleet_sessions`], which adds the paired hosts.
 pub async fn local_fleet_sessions(state: &Arc<RemoteGatewayState>) -> Vec<ferryx_hub::supervisor::panel_contract::FleetSession> {
     let host_id = crate::remote::reference_chat::files::reference_host_id();
     let entry = match crate::remote::server::agent_control_service::handle(state, AgentControlOp::List).await {
@@ -1581,12 +1840,18 @@ async fn hub_running(state: &RemoteGatewayState) -> bool {
 /// Everything the Supervisor panel renders, in one snapshot. With no hub running it asks for
 /// setup (`setupRequired`); the fleet still lists this computer's sessions.
 pub async fn supervisor_panel(state: &Arc<RemoteGatewayState>) -> ferryx_hub::supervisor::panel_contract::PanelSnapshot {
-    let sessions = local_fleet_sessions(state).await;
+    let sessions = panel_autonomy::fleet_sessions(state).await;
     let sources = PANEL_SOURCES.read().clone();
+    // The pause the owner set is the hub's persisted flag; the in-process one only covers a
+    // daemon whose hub is not open.
+    let paused = match supervisor_service(state).await {
+        Ok((pool, _, _)) => ferryx_hub::control::is_paused(&pool).await.unwrap_or(false),
+        Err(_) => PANEL_PAUSED.load(std::sync::atomic::Ordering::Acquire),
+    };
     ferryx_hub::fleet::assemble_panel(
         &sources,
         sessions,
-        PANEL_PAUSED.load(std::sync::atomic::Ordering::Acquire),
+        paused,
         hub_running(state).await,
         unix_ms() - PANEL_LOG_WINDOW_MS,
     )
@@ -1958,6 +2223,11 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
         gateway: Some(Arc::clone(server.remote_state())),
     });
     let hub = Hub::open(config.clone(), bridge.clone()).await.map_err(|error| error.to_string())?;
+    let directive_judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env())
+        .with_pool(hub.pool.clone());
+    ferryx_hub::owner_directives::current(&hub.pool, &directive_judge)
+        .await
+        .map_err(|error| format!("owner directives initialization failed: {error}"))?;
     if let Err(error) = ferryx_hub::chat::reply::flush_pending(&hub.pool).await {
         tracing::warn!(%error, "stored chat replies were not flushed");
     }
@@ -2004,6 +2274,9 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
         #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
         meta_session_id,
     };
+    // Autonomy first: the panel sources, the rule store and the engine's session tools exist
+    // before any generation (or the engine) can use them.
+    panel_autonomy::install(&launch).await;
     let generation = if stopped {
         None
     } else {
@@ -2075,8 +2348,21 @@ fn live_hub(running: bool, config: &HubConfig) -> ferryx_hub::control::LiveHub {
 }
 
 struct Generation {
-    #[cfg(unix)]
     tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Generation {
+    /// Aborts the generation's tasks and waits for them to end, so a following start
+    /// reconciles only after the predecessor dispatcher stopped. On every platform: a setup
+    /// restart ends the generation before it starts the next one.
+    async fn end(self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+        for task in self.tasks {
+            let _ = task.await;
+        }
+    }
 }
 
 /// The supervisor's dispatcher for this hub generation. It drains committed ready intents at
@@ -2167,6 +2453,24 @@ fn spawn_supervisor_wakes(launch: &HubLaunch) -> tokio::task::JoinHandle<()> {
     tokio::spawn(scheduler.run(ferryx_hub::supervisor::wakes::wake_signal()))
 }
 
+/// The supervisor's recovery scheduler for this hub generation: it watches the fleet for
+/// upstream errors, quota stops and stalls, and retries goal lanes whose model hit a quota.
+/// Without an installed autonomy service there is nothing to run. The scheduler reads the
+/// owner's persisted pause itself, through the decision gate, on every tick.
+fn spawn_supervisor_recovery(launch: &HubLaunch) -> tokio::task::JoinHandle<()> {
+    let scheduler = panel_autonomy::recovery();
+    let quota = panel_autonomy::quota_recovery();
+    let pool = launch.hub.pool.clone();
+    let bridge = launch.bridge.clone();
+    tokio::spawn(async move {
+        let (Some(scheduler), Some(quota)) = (scheduler, quota) else {
+            return;
+        };
+        scheduler.set_loop_retry(Arc::new(panel_autonomy::GoalRetry::new(pool, bridge, quota)));
+        scheduler.run(std::time::Duration::from_secs(15)).await;
+    })
+}
+
 /// Forwards the store's goal-change announcements ([`ferryx_hub::supervisor::changes`]) to the
 /// desktop and phone Supervisor views as `supervisor_changed {goalId}`, so a goal the
 /// dispatcher, a worker receipt or the wake scheduler moved is refetched without an owner
@@ -2245,6 +2549,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
                             observation.session_id.clone(),
                         );
                     }
+                    panel_autonomy::observed(watch_server.remote_state(), &observation);
                     let run = state_run(&mut runs, &observation);
                     if let Err(error) = on_agent_event(&watch_hub, watch_bridge.as_ref(), &mut agents, omo_polled, run, observation).await {
                         tracing::debug!(%error, "hub observer event was not applied");
@@ -2267,6 +2572,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     tasks.push(spawn_supervisor_dispatcher(launch, idle));
     tasks.push(spawn_supervisor_change_forwarder(launch));
     tasks.push(spawn_supervisor_wakes(launch));
+    tasks.push(spawn_supervisor_recovery(launch));
     let addr = launch.config.tracker_addr.clone().unwrap_or_else(|| "127.0.0.1:9119".into());
     let router = ferryx_hub::http::router(launch.hub.pool.clone(), ferryx_hub::http::web_root());
     tasks.push(tokio::spawn(async move {
@@ -2288,16 +2594,27 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         )
     {
         let owner = launch.config.owner_slack_id.clone();
-        let binary = ferryx_hub::meta::supervisor::mhc_bin();
-        let config = ferryx_hub::chat::slack_turn::SlackTurnConfig::from_env(&binary, owner.as_deref());
-        tracing::info!(
-            binary = %binary,
-            workspace = config.omo.workspace.is_some(),
-            idle_secs = config.omo.idle_timeout.as_secs(),
-            total_secs = config.omo.total_timeout.as_secs(),
-            "slack turn path is armed (mhc RPC)"
-        );
-        ferryx_hub::chat::slack_turn::install(config);
+        // mhc_bin and from_env read the hub env file, and from_env creates the Slack workspace
+        // root: off the async runtime threads.
+        let armed = tokio::task::spawn_blocking(move || {
+            let binary = ferryx_hub::meta::supervisor::mhc_bin();
+            let config = ferryx_hub::chat::slack_turn::SlackTurnConfig::from_env(&binary, owner.as_deref());
+            (binary, config)
+        })
+        .await;
+        match armed {
+            Ok((binary, config)) => {
+                tracing::info!(
+                    binary = %binary,
+                    workspace = config.omo.workspace.is_some(),
+                    idle_secs = config.omo.idle_timeout.as_secs(),
+                    total_secs = config.omo.total_timeout.as_secs(),
+                    "slack turn path is armed (mhc RPC)"
+                );
+                ferryx_hub::chat::slack_turn::install(config);
+            }
+            Err(error) => tracing::warn!(%error, "the slack turn config was not read; slack turns stay off"),
+        }
         // omo's startup sweep: claims a restart left pending are never re-run.
         match ferryx_hub::chat::report_claims::recover_stale(&launch.hub.pool).await {
             Ok(0) => {}
@@ -2321,7 +2638,15 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     // each generation supervises it (launch, owned-exit watch, 5s..300s relaunch backoff).
     // Aborting the generation's tasks (hub stop, handover retirement) closes the engine's stdin
     // and kills it after a short grace; the next generation's supervise call re-enables it.
-    let mhc_supervisor = ferryx_hub::meta::mhc_profile::MhcProfileConfig::from_env().map(|config| {
+    // from_env reads the hub env file: off the async runtime threads.
+    let mhc_config = match tokio::task::spawn_blocking(ferryx_hub::meta::mhc_profile::MhcProfileConfig::from_env).await {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(%error, "the mhc supervisor engine config was not read");
+            None
+        }
+    };
+    let mhc_supervisor = mhc_config.map(|config| {
         ferryx_hub::meta::mhc_supervisor::install_with(|| {
             let data_dir = ferryx_hub::meta::supervisor::state_dir_from_home()
                 .unwrap_or_else(|| std::path::PathBuf::from(".ferryx/hub"));
@@ -2336,13 +2661,30 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         // Every engine call (decision, convergence, conversation, ingest) is recorded with its
         // cause and usage in this hub's `supervisor_model_calls`.
         runtime.set_usage_sink(launch.hub.pool.clone()).await;
-        // Slack owner conversations call the typed work tools; admission acts only for the
-        // authenticated Slack turn in flight for the calling scope.
+        // The app conversation calls the typed work tools as the installation's owner
+        // (`AppWorkTools`, independent of Slack); Slack owner conversations go to the Slack
+        // handler, which acts only for the authenticated Slack turn in flight.
+        let sessions = panel_autonomy::session_tools();
+        let mut work_tools = ferryx_hub::supervisor::app_work::AppWorkTools::new(launch.hub.pool.clone());
+        if let Some(sessions) = &sessions {
+            work_tools = work_tools.with_sessions(sessions.clone());
+        }
         #[cfg(feature = "hub-slack")]
-        runtime.set_work_handler(std::sync::Arc::new(
-            ferryx_hub::chat::slack_supervisor::SlackWorkTools::new(launch.hub.pool.clone()),
-        ));
+        {
+            let mut slack = ferryx_hub::chat::slack_supervisor::SlackWorkTools::new(launch.hub.pool.clone());
+            if let Some(sessions) = sessions {
+                slack = slack.with_sessions(sessions);
+            }
+            work_tools = work_tools.with_fallback(std::sync::Arc::new(slack));
+        }
+        runtime.set_work_handler(std::sync::Arc::new(work_tools));
         tasks.push(tokio::spawn(runtime.clone().supervise()));
+        tasks.push(tokio::spawn(setup::auto_setup(
+            runtime.clone(),
+            launch.hub.pool.clone(),
+            Arc::clone(launch.server.remote_state()),
+            home_dir(),
+        )));
     }
     #[cfg(unix)]
     {
@@ -2458,6 +2800,8 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     }
     // omo-gateway's lead is the owner's Slack DM session, not a lane name: action-loop items,
     // owner alerts and cron problems queued for "meta" were never delivered.
+    // There is no built-in owner: without one (HubConfig::load logged the config error) the
+    // owner DM cannot be found or opened, so the lead is OMON_LANE_DEFAULT_LEAD or the fallback.
     let lead_fallback = launch
         .config
         .meta_session_id
@@ -2468,7 +2812,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         .owner_slack_id
         .clone()
         .filter(|owner| !owner.trim().is_empty())
-        .unwrap_or_else(|| ferryx_hub::config::DEFAULT_SLACK_OWNER_ID.to_owned());
+        .unwrap_or_default();
     if ferryx_hub::autonomy::action_loop_enabled() {
         let action_pool = launch.hub.pool.clone();
         let (owner, fallback) = (lead_owner.clone(), lead_fallback.clone());
@@ -2568,10 +2912,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     for task in &tasks {
         HUB_TASKS.track(task);
     }
-    Generation {
-        #[cfg(unix)]
-        tasks,
-    }
+    Generation { tasks }
 }
 
 async fn post_cron_delivery(item: &ferryx_hub::schedule::DueDelivery) -> Option<String> {
@@ -2630,7 +2971,7 @@ async fn post_discord_delivery(channel: &str, text: &str) -> ferryx_hub::Result<
 }
 
 fn home_dir() -> std::path::PathBuf {
-    std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("."))
+    ferryx_hub::hub_env::home().unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
 fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: HubLaunch) {
@@ -2669,15 +3010,9 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                     let reply = match ferryx_hub::control::parse_control(&line) {
                         Ok(ferryx_hub::control::ControlOp::Stop) => {
                             let persisted = ferryx_hub::control::mark_stopped(&launch.hub.pool).await;
-                            if let Some(generation) = running.lock().await.take() {
-                                for task in &generation.tasks {
-                                    task.abort();
-                                }
-                                // Wait for the aborted tasks to end, so a later `hub start`
-                                // reconciles only after the predecessor dispatcher stopped.
-                                for task in generation.tasks {
-                                    let _ = task.await;
-                                }
+                            let previous = running.lock().await.take();
+                            if let Some(generation) = previous {
+                                generation.end().await;
                             }
                             match persisted {
                                 Ok(()) => "{\"status\":\"ok\",\"op\":\"stop\"}\n",
@@ -2748,6 +3083,34 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                             let _ = stream.write_all(reply.as_bytes()).await;
                             return;
                         }
+                        Ok(ferryx_hub::control::ControlOp::ReportStatus(id)) => {
+                            let reply = ferryx_hub::control::report_status_reply(&launch.hub.pool, id).await;
+                            let mut stream = reader.into_inner();
+                            let _ = stream.write_all(format!("{reply}\n").as_bytes()).await;
+                            return;
+                        }
+                        Ok(ferryx_hub::control::ControlOp::ReportAdopt(request)) => {
+                            let reply = ferryx_hub::report_adoption::reply(&launch.hub.pool, &request).await;
+                            let mut stream = reader.into_inner();
+                            let _ = stream.write_all(format!("{reply}\n").as_bytes()).await;
+                            return;
+                        }
+                        Ok(ferryx_hub::control::ControlOp::ReportMutate(request)) => {
+                            let reply = ferryx_hub::report_mutation::reply(&launch.hub.pool, &request).await;
+                            let mut stream = reader.into_inner();
+                            let _ = stream.write_all(format!("{reply}\n").as_bytes()).await;
+                            return;
+                        }
+                        Ok(ferryx_hub::control::ControlOp::Report(request)) => {
+                            let reply = ferryx_hub::control::report_reply(
+                                &launch.hub.pool,
+                                &launch.hub.owner_session().storage_key(),
+                                &request,
+                            ).await;
+                            let mut stream = reader.into_inner();
+                            let _ = stream.write_all(format!("{reply}\n").as_bytes()).await;
+                            return;
+                        }
                         Err(_) => "{\"status\":\"failed\",\"error\":\"expected stop, start, status, approve_rerun, cutover, rollback, or intake\"}\n",
                     };
                     let mut stream = reader.into_inner();
@@ -2777,7 +3140,17 @@ fn settle_goal_turn(server: Arc<DaemonServer>, hub: Arc<Hub>, bridge: Arc<Daemon
             }
         };
         let judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env());
-        match ferryx_hub::goals::r#loop::on_turn_settled(&hub.pool, &judge, bridge.as_ref(), &lane_key, true).await {
+        let quota = panel_autonomy::quota_recovery();
+        match ferryx_hub::goals::r#loop::on_turn_settled_with(
+            &hub.pool,
+            &judge,
+            bridge.as_ref(),
+            &lane_key,
+            true,
+            quota.as_deref(),
+        )
+        .await
+        {
             Ok(Some(outcome)) => server.remote_state().emit_desktop_event(
                 crate::remote::server::agent_control_service::SUPERVISOR_CHANGED_EVENT,
                 json!({

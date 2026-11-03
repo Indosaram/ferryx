@@ -41,6 +41,7 @@ import {
 import { openTerminalToken } from "../lib/linkRouting";
 import { loadFileLinkEditor } from "../lib/fileLinkSettings";
 import {
+  acknowledgeAgentOutcome,
   attachTerminal,
   isStructuredIpcError,
   onNativeTerminalCopyOrInterrupt,
@@ -51,6 +52,7 @@ import {
   setNativeTerminalScrollbarOverlay,
   setNativeTerminalAttentionFrame,
 } from "../lib/tauri";
+import { currentWindowLabel } from "../lib/windowIdentity";
 import { decodeBase64 } from "../lib/terminalOutput";
 import { useNativeTerminalVisibilityState } from "../lib/nativeTerminalVisibility";
 import { classifyNativeTerminalAttachError } from "../lib/nativeTerminalAttachPolicy";
@@ -861,7 +863,8 @@ export function NativeTerminalPane({
       emitNativeTerminalPresentation(tuple);
       emitNativeObservationRef.current("presentation", { presented: true, producerComponent: "native-frontend-presentation" });
       presentNativeTerminalLifecycle(targetSessionId, tuple.bindingKey);
-    }).then((stop) => {
+      // Owner-routed (emit_to): listen on this window only, see listenToThisWindow in tauri.ts.
+    }, { target: currentWindowLabel() }).then((stop) => {
       if (disposed) stop();
       else unlisten = stop;
     }).catch((error: unknown) => {
@@ -1354,6 +1357,16 @@ export function NativeTerminalPane({
       }
     }
   }, [active, sendFocus, targetSessionId, visible]);
+
+  // A focused pane has been read: the daemon drops the program's done/error outcome. The local
+  // mark is cleared by the store marking the completion seen on the same focus.
+  const activityOutcome = activity?.outcome;
+  useEffect(() => {
+    if (!active || !visible || !targetSessionId || !isTauri()) return;
+    acknowledgeAgentOutcome(targetSessionId).catch((error: unknown) => {
+      console.warn("Could not acknowledge the agent outcome", { sessionId: targetSessionId, error });
+    });
+  }, [active, activityOutcome, targetSessionId, visible]);
 
   const measureGeometry = useCallback((): GeometryState | null => {
     const element = viewportRef.current;
@@ -2922,6 +2935,7 @@ export function NativeTerminalPane({
             });
             insertPathsIfInsidePane(paths ?? [], position.x, position.y);
           },
+          { target: currentWindowLabel() },
         );
 
         if (disposed) unlistenNative();
@@ -3658,7 +3672,7 @@ export function NativeTerminalPane({
           streamRecoveryPending = false;
         }
       })();
-    }).then((unlisten) => {
+    }, { target: currentWindowLabel() }).then((unlisten) => {
       if (!isSubscribed) { unlisten(); return; }
       unlistenStreamEnded = unlisten;
     }).catch((error: unknown) => {

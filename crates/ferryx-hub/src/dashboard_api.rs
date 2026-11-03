@@ -1735,7 +1735,7 @@ mod tests {
                 .unwrap();
         assert_eq!(delivery, "[]", "delivery follows the new payload");
 
-        assert_eq!(updated["model"], crate::model_policy::background_model());
+        assert_eq!(updated["model"], json!(crate::model_policy::background_model()));
         assert!(updated["model_override"].is_null());
         let (status, chosen) = call(
             &app,
@@ -1796,7 +1796,7 @@ mod tests {
         )
         .await;
         assert!(cleared["model_override"].is_null());
-        assert_eq!(cleared["model"], crate::model_policy::background_model());
+        assert_eq!(cleared["model"], json!(crate::model_policy::background_model()));
 
         let (_, paused) = call(&app, "POST", "/api/cron/jobs/daily/pause", None, &[]).await;
         assert_eq!(paused["enabled"], false);

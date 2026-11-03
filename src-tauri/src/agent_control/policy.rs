@@ -50,6 +50,23 @@ pub struct PersistedAgentControl {
     pub restricted_device_ids: Option<Vec<String>>,
 }
 
+impl PersistedAgentControl {
+    /// The one-step owner enablement: agent control on, and only `owner_device_ids` (the
+    /// owner's own paired machine Control devices) allowed. Every other device, including one
+    /// paired later, stays refused until the owner enables again. Devices the owner excluded
+    /// by hand stay excluded.
+    pub fn enabled_for_owner_devices(&self, owner_device_ids: &[String]) -> Self {
+        let mut allowed: Vec<String> = owner_device_ids.to_vec();
+        allowed.sort();
+        allowed.dedup();
+        Self {
+            enabled: true,
+            excluded_device_ids: self.excluded_device_ids.clone(),
+            restricted_device_ids: Some(allowed),
+        }
+    }
+}
+
 /// The Settings card's view: the switch, the excluded devices and the newest audit records.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -468,6 +485,33 @@ mod tests {
             clamp_wait_timeout(0).unwrap_err().code,
             ScopeErrorCode::InvalidRequest
         );
+    }
+
+    #[test]
+    fn owner_enablement_admits_only_the_owner_devices_and_keeps_hand_exclusions() {
+        let policy = AgentControlPolicy::default();
+        let before = PersistedAgentControl {
+            enabled: false,
+            excluded_device_ids: vec!["owner-tablet".into()],
+            restricted_device_ids: None,
+        };
+        let next = before.enabled_for_owner_devices(&[
+            "owner-phone".into(),
+            "owner-tablet".into(),
+            "owner-phone".into(),
+        ]);
+        assert!(next.enabled);
+        assert_eq!(
+            next.restricted_device_ids,
+            Some(vec!["owner-phone".to_string(), "owner-tablet".to_string()])
+        );
+        policy.apply(&next);
+        assert!(policy.permits("owner-phone"));
+        assert!(!policy.permits("owner-tablet"), "a hand exclusion survives enablement");
+        assert!(!policy.permits("someone-else"), "a non-owner device stays refused");
+        let none = before.enabled_for_owner_devices(&[]);
+        policy.apply(&none);
+        assert!(!policy.permits("owner-phone"), "no owner device means nobody is admitted");
     }
 
     #[test]

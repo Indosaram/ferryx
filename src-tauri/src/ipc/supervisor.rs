@@ -3,7 +3,12 @@
 
 use super::error::{IpcError, IpcErrorCode};
 use crate::daemon::client::DaemonClient;
-use crate::daemon::protocol::{DaemonRequest, DaemonResponse, SupervisorGoalAction, SupervisorReadAction};
+use crate::daemon::protocol::{
+    DaemonRequest, DaemonResponse, SupervisorDispatchAction, SupervisorGoalAction, SupervisorReadAction,
+    SupervisorSetupAction,
+};
+use crate::agent_control::AgentControlOp;
+use crate::remote::reference_chat::types::ReferencePromptAnswer;
 use std::sync::Arc;
 
 /// A daemon that knows these requests types every failure, so an untyped error is an older daemon.
@@ -135,6 +140,56 @@ pub async fn cmd_supervisor_read(
     read_from(daemon_client.send_request(DaemonRequest::SupervisorReadV1 { request }).await?)
 }
 
+fn converse_from(response: DaemonResponse) -> Result<serde_json::Value, IpcError> {
+    match response {
+        DaemonResponse::SupervisorConverseV1Ok { value } => Ok(value),
+        DaemonResponse::Error { message, code, details } => {
+            let mut error = failure(message, code);
+            if details.is_some() {
+                error.details = details;
+            }
+            Err(error)
+        }
+        _ => Err(IpcError::internal("Unexpected daemon supervisor converse response")),
+    }
+}
+
+/// One owner message from the panel composer: the supervisor answers on the `app` channel and
+/// both are stored in the app transcript. Returns `{owner, reply, replayed}`.
+#[tauri::command]
+pub async fn cmd_supervisor_converse(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+    text: String,
+    mentions: Vec<String>,
+    request_id: String,
+) -> Result<serde_json::Value, IpcError> {
+    converse_from(
+        daemon_client
+            .send_request(DaemonRequest::SupervisorConverseV1 { text, mentions, request_id })
+            .await?,
+    )
+}
+
+fn setup_from(response: DaemonResponse) -> Result<serde_json::Value, IpcError> {
+    match response {
+        DaemonResponse::SupervisorSetupOk { value } => Ok(value),
+        DaemonResponse::Error { message, code, .. } => Err(failure(message, code)),
+        _ => Err(IpcError::internal("Unexpected daemon supervisor setup response")),
+    }
+}
+
+/// The shared supervisor SetupStatus.
+#[tauri::command]
+pub async fn cmd_supervisor_setup_status(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+) -> Result<serde_json::Value, IpcError> {
+    setup_from(
+        daemon_client
+            .send_request(DaemonRequest::SupervisorSetup { request: SupervisorSetupAction::Status })
+            .await?,
+    )
+}
+
 /// The Supervisor panel snapshot (`PanelSnapshot`, camelCase): sessions, handling, log, rules,
 /// decisions, the pause flag and `setupRequired` when no hub runs.
 #[tauri::command]
@@ -148,9 +203,369 @@ pub async fn cmd_supervisor_panel(
     )
 }
 
+/// Runs automatic supervisor setup in the daemon-hosted hub; returns the fresh SetupStatus.
+#[tauri::command]
+pub async fn cmd_supervisor_setup_run(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+    import_memory: bool,
+    projects: Vec<crate::hub_runtime::SetupProject>,
+) -> Result<serde_json::Value, IpcError> {
+    setup_from(
+        daemon_client
+            .send_request(DaemonRequest::SupervisorSetup {
+                request: SupervisorSetupAction::Run { import_memory, projects },
+            })
+            .await?,
+    )
+}
+
+/// Adopts every adoptable legacy lane as the owner: {adopted: [lane], refused: [{lane, code, message}]}.
+#[tauri::command]
+pub async fn cmd_supervisor_adopt_all(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+) -> Result<serde_json::Value, IpcError> {
+    setup_from(
+        daemon_client
+            .send_request(DaemonRequest::SupervisorSetup { request: SupervisorSetupAction::AdoptAll })
+            .await?,
+    )
+}
+
+
+/// A `<hostId>:<backendSessionId>` handle split for agent control: the host is `None` (this
+/// daemon) when it names this machine, else the paired host that owns the pane.
+fn agent_target(session_ref: &str, local_host_id: &str) -> Result<(Option<String>, String), IpcError> {
+    let parsed = ferryx_hub::supervisor::panel_contract::SessionRef::parse(session_ref)
+        .map_err(|error| IpcError::new(IpcErrorCode::InvalidArgument, error.to_string()))?;
+    let host = parsed.host_id();
+    let host_id = (host != ferryx_hub::agent_control::LOCAL_HOST_ID && host != local_host_id)
+        .then(|| host.to_owned());
+    Ok((host_id, parsed.backend_session_id().to_owned()))
+}
+
+/// The agent-control request that stops one session: the provider's interrupt key, straight to
+/// the daemon. No hub and no engine are on this path, so it works when either is down.
+fn stop_request(session_ref: &str, local_host_id: &str, request_id: String) -> Result<DaemonRequest, IpcError> {
+    let (host_id, session_id) = agent_target(session_ref, local_host_id)?;
+    Ok(DaemonRequest::AgentControl {
+        request: AgentControlOp::Stop { session_id, request_id: Some(request_id) },
+        host_id,
+    })
+}
+
+/// The agent-control request for an owner's tap on a decision card. The screen revision is the
+/// stale guard: an answer for a screen that moved on types nothing.
+fn answer_request(
+    session_ref: &str,
+    local_host_id: &str,
+    prompt_id: String,
+    screen_revision: String,
+    option_index: u32,
+    request_id: String,
+) -> Result<DaemonRequest, IpcError> {
+    let (host_id, session_id) = agent_target(session_ref, local_host_id)?;
+    Ok(DaemonRequest::AgentControl {
+        request: AgentControlOp::Answer {
+            session_id,
+            prompt_id,
+            screen_revision,
+            answer: ReferencePromptAnswer { option_index: Some(option_index), ..Default::default() },
+            request_id: Some(request_id),
+        },
+        host_id,
+    })
+}
+
+fn control_result(response: DaemonResponse) -> Result<serde_json::Value, IpcError> {
+    match response {
+        DaemonResponse::AgentControlOk { result } | DaemonResponse::SupervisorControlOk { result } => Ok(result),
+        DaemonResponse::Error { message, code, details } => {
+            let mut error = failure(message, code);
+            if details.is_some() {
+                error.details = details;
+            }
+            Err(error)
+        }
+        _ => Err(IpcError::internal("Unexpected daemon supervisor control response")),
+    }
+}
+
+fn local_host_id() -> String {
+    crate::remote::reference_chat::files::reference_host_id()
+}
+
+/// Stop one session. Straight to agent control (the provider's interrupt key), never through
+/// the hub or the engine.
+#[tauri::command]
+pub async fn cmd_session_stop(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+    session_ref: String,
+) -> Result<serde_json::Value, IpcError> {
+    let request = stop_request(&session_ref, &local_host_id(), uuid::Uuid::new_v4().to_string())?;
+    control_result(daemon_client.send_request(request).await?)
+}
+
+/// The owner taps an option on a decision card. No answer gate: it is the owner's own tap.
+#[tauri::command]
+pub async fn cmd_supervisor_answer(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+    session_ref: String,
+    prompt_id: String,
+    screen_revision: String,
+    option_index: u32,
+) -> Result<serde_json::Value, IpcError> {
+    let request = answer_request(
+        &session_ref,
+        &local_host_id(),
+        prompt_id,
+        screen_revision,
+        option_index,
+        uuid::Uuid::new_v4().to_string(),
+    )?;
+    control_result(daemon_client.send_request(request).await?)
+}
+
+/// Pause (`true`) or resume (`false`) every supervisor action at once.
+#[tauri::command]
+pub async fn cmd_supervisor_pause(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+    paused: bool,
+) -> Result<serde_json::Value, IpcError> {
+    control_result(daemon_client.send_request(DaemonRequest::SupervisorGlobalPause { paused }).await?)
+}
+
+/// The persisted supervisor settings; with `enabled` set, the owner turns the supervisor on or
+/// off first. The reply's `enabled` is true only for the owner home that turned it on.
+#[tauri::command]
+pub async fn cmd_supervisor_settings(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+    enabled: Option<bool>,
+) -> Result<serde_json::Value, IpcError> {
+    control_result(daemon_client.send_request(DaemonRequest::SupervisorSettings { enabled }).await?)
+}
+
+/// Undo one action-log entry through its undo handle.
+#[tauri::command]
+pub async fn cmd_supervisor_action_undo(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+    id: i64,
+) -> Result<serde_json::Value, IpcError> {
+    control_result(daemon_client.send_request(DaemonRequest::SupervisorActionUndo { id }).await?)
+}
+
+/// "Start a session": submit owner work to an explicit project. A request without a project
+/// is refused here, before the daemon is asked: the panel never guesses one.
+fn dispatch_request(
+    project_id: &str,
+    title: String,
+    instruction: String,
+    requirements: Vec<ferryx_hub::goals::contract::RequirementSpec>,
+    host_id: Option<String>,
+    session_id: Option<String>,
+    message_id: String,
+) -> Result<DaemonRequest, IpcError> {
+    let invalid = |message: &str| IpcError::new(IpcErrorCode::InvalidArgument, message);
+    if project_id.trim().is_empty() {
+        return Err(invalid("a dispatch needs an explicit project"));
+    }
+    if title.trim().is_empty() || instruction.trim().is_empty() {
+        return Err(invalid("a dispatch needs a title and an instruction"));
+    }
+    if requirements.is_empty() {
+        return Err(invalid("a dispatch needs at least one requirement"));
+    }
+    if session_id.is_some() && host_id.is_none() {
+        return Err(invalid("binding a session needs its host"));
+    }
+    let work = ferryx_hub::supervisor::admission::SubmitWork {
+        project_id: Some(project_id.trim().to_owned()),
+        host_id: host_id.clone(),
+        kind: None,
+        title,
+        instruction: instruction.clone(),
+        requirements,
+        cwd: None,
+        operations: Vec::new(),
+        turn_limit: None,
+    };
+    Ok(DaemonRequest::SupervisorDispatch {
+        request: SupervisorDispatchAction::Submit {
+            message_id,
+            body: instruction,
+            host_id,
+            session_id,
+            work: Box::new(work),
+        },
+    })
+}
+
+/// Start work in a project from the panel's "+" or composer. Admitted as the owner through the
+/// existing dispatch path; the work narrows to what the owner chose, never widens.
+#[tauri::command]
+pub async fn cmd_supervisor_dispatch(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+    project_id: String,
+    title: String,
+    instruction: String,
+    requirements: Vec<ferryx_hub::goals::contract::RequirementSpec>,
+    host_id: Option<String>,
+    session_id: Option<String>,
+) -> Result<serde_json::Value, IpcError> {
+    let request = dispatch_request(
+        &project_id,
+        title,
+        instruction,
+        requirements,
+        host_id,
+        session_id,
+        uuid::Uuid::new_v4().to_string(),
+    )?;
+    match daemon_client.send_request(request).await? {
+        DaemonResponse::SupervisorDispatchOk { result } => Ok(result),
+        DaemonResponse::Error { message, code, details } => {
+            let mut error = failure(message, code);
+            if details.is_some() {
+                error.details = details;
+            }
+            Err(error)
+        }
+        _ => Err(IpcError::internal("Unexpected daemon supervisor dispatch response")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_setup_answer_is_its_value_and_an_untyped_error_is_an_older_daemon() {
+        let value = serde_json::json!({"nextAction": "map_projects"});
+        assert_eq!(setup_from(DaemonResponse::SupervisorSetupOk { value: value.clone() }).unwrap(), value);
+        let older = setup_from(DaemonResponse::Error { message: "unknown".into(), code: None, details: None }).unwrap_err();
+        assert_eq!(older.code, IpcErrorCode::DaemonUpgradeRequired);
+    }
+
+    #[test]
+    fn a_local_session_ref_stops_on_this_daemon_and_a_paired_one_forwards_to_its_host() {
+        let local = stop_request("local:pane-1", "local", "r1".into()).unwrap();
+        assert!(matches!(
+            local,
+            DaemonRequest::AgentControl { host_id: None, request: AgentControlOp::Stop { ref session_id, request_id: Some(ref id) } }
+                if session_id == "pane-1" && id == "r1"
+        ));
+        // A host id that is this machine's own configured id is local too.
+        let own = stop_request("studio:pane-1", "studio", "r1".into()).unwrap();
+        assert!(matches!(own, DaemonRequest::AgentControl { host_id: None, .. }));
+        let remote = stop_request("omarchy:pane:7", "studio", "r2".into()).unwrap();
+        assert!(matches!(
+            remote,
+            DaemonRequest::AgentControl { host_id: Some(ref host), request: AgentControlOp::Stop { ref session_id, .. } }
+                if host == "omarchy" && session_id == "pane:7"
+        ));
+    }
+
+    #[test]
+    fn a_malformed_session_ref_is_refused_before_the_daemon_is_asked() {
+        for bad in ["nohost", ":pane", "host:", ""] {
+            assert_eq!(
+                stop_request(bad, "local", "r".into()).unwrap_err().code,
+                IpcErrorCode::InvalidArgument,
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_owner_tap_carries_the_stale_guard_and_the_chosen_option_only() {
+        let request = answer_request("local:pane-1", "local", "p1".into(), "rev-9".into(), 2, "r".into()).unwrap();
+        let DaemonRequest::AgentControl { request: AgentControlOp::Answer { prompt_id, screen_revision, answer, session_id, .. }, host_id } =
+            request
+        else {
+            panic!("an answer is an agent-control answer");
+        };
+        assert_eq!((prompt_id.as_str(), screen_revision.as_str(), session_id.as_str()), ("p1", "rev-9", "pane-1"));
+        assert_eq!(host_id, None);
+        assert_eq!(answer.option_index, Some(2));
+        assert!(answer.is_single_choice(), "exactly one answer shape");
+    }
+
+    fn requirement() -> ferryx_hub::goals::contract::RequirementSpec {
+        ferryx_hub::goals::contract::RequirementSpec {
+            id: "r1".into(),
+            text: "result.txt contains READY".into(),
+            verifier: "verify.sh exits 0".into(),
+        }
+    }
+
+    #[test]
+    fn a_dispatch_names_its_project_and_is_refused_without_one() {
+        let request = dispatch_request(
+            " proj-1 ",
+            "Fix relay".into(),
+            "Fix the reconnect".into(),
+            vec![requirement()],
+            Some("omarchy".into()),
+            None,
+            "m1".into(),
+        )
+        .unwrap();
+        let DaemonRequest::SupervisorDispatch { request: SupervisorDispatchAction::Submit { message_id, host_id, session_id, work, .. } } =
+            request
+        else {
+            panic!("a dispatch is a submit");
+        };
+        assert_eq!(message_id, "m1");
+        assert_eq!(host_id.as_deref(), Some("omarchy"));
+        assert_eq!(session_id, None);
+        assert_eq!(work.project_id.as_deref(), Some("proj-1"), "the explicit project, trimmed");
+        assert!(work.operations.is_empty(), "a dispatch asks for no extra operations");
+
+        let refused = |project: &str| {
+            dispatch_request(project, "t".into(), "i".into(), vec![requirement()], None, None, "m".into())
+                .unwrap_err()
+                .code
+        };
+        assert_eq!(refused(""), IpcErrorCode::InvalidArgument);
+        assert_eq!(refused("   "), IpcErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn a_dispatch_needs_a_title_an_instruction_a_requirement_and_a_host_for_a_bound_session() {
+        let build = |title: &str, instruction: &str, requirements: Vec<_>, host: Option<&str>, session: Option<&str>| {
+            dispatch_request(
+                "p",
+                title.into(),
+                instruction.into(),
+                requirements,
+                host.map(str::to_owned),
+                session.map(str::to_owned),
+                "m".into(),
+            )
+        };
+        assert!(build("", "i", vec![requirement()], None, None).is_err());
+        assert!(build("t", " ", vec![requirement()], None, None).is_err());
+        assert!(build("t", "i", Vec::new(), None, None).is_err());
+        assert!(build("t", "i", vec![requirement()], None, Some("pane-1")).is_err());
+        assert!(build("t", "i", vec![requirement()], Some("h"), Some("pane-1")).is_ok());
+    }
+
+    #[test]
+    fn control_replies_carry_their_result_and_a_refusal_keeps_its_code_and_details() {
+        let ok = DaemonResponse::SupervisorControlOk { result: serde_json::json!({"paused": true}) };
+        assert_eq!(control_result(ok).unwrap()["paused"], true);
+        let agent = DaemonResponse::AgentControlOk { result: serde_json::json!({"receipt": {"stage": "accepted"}}) };
+        assert_eq!(control_result(agent).unwrap()["receipt"]["stage"], "accepted");
+        let stale = DaemonResponse::Error {
+            message: "the screen moved on".into(),
+            code: Some("REQUEST_CONFLICT".into()),
+            details: Some(serde_json::json!({"status": 409})),
+        };
+        let error = control_result(stale).unwrap_err();
+        assert_eq!(error.code, IpcErrorCode::RequestConflict);
+        assert_eq!(error.details.unwrap()["status"], 409);
+        let old = DaemonResponse::Error { message: "unknown variant".into(), code: None, details: None };
+        assert_eq!(control_result(old).unwrap_err().code, IpcErrorCode::DaemonUpgradeRequired);
+    }
 
     #[test]
     fn an_untyped_error_means_the_daemon_is_older() {
@@ -234,5 +649,21 @@ mod tests {
         let request: SupervisorReadAction =
             serde_json::from_value(serde_json::json!({"view": "conversation", "projectId": "p", "after": 2})).unwrap();
         assert_eq!(request, SupervisorReadAction::Conversation { project_id: "p".into(), after: Some(2) });
+    }
+
+    #[test]
+    fn a_converse_reply_carries_the_rows_and_a_refusal_keeps_its_code() {
+        let ok = DaemonResponse::SupervisorConverseV1Ok { value: serde_json::json!({"replayed": false}) };
+        assert_eq!(converse_from(ok).unwrap()["replayed"], false);
+        let refused = DaemonResponse::Error {
+            message: "no mhc supervisor engine is installed in this daemon".into(),
+            code: Some("MHC_NOT_RUNNING".into()),
+            details: Some(serde_json::json!({"code": "MHC_NOT_RUNNING", "status": 503})),
+        };
+        let error = converse_from(refused).unwrap_err();
+        assert_eq!(error.code, IpcErrorCode::Custom("MHC_NOT_RUNNING".into()));
+        assert_eq!(error.details.unwrap()["status"], 503);
+        let old = DaemonResponse::Error { message: "unknown variant".into(), code: None, details: None };
+        assert_eq!(converse_from(old).unwrap_err().code, IpcErrorCode::DaemonUpgradeRequired);
     }
 }

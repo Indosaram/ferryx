@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
-use tauri::{Emitter, Manager, PhysicalSize, Runtime, Window};
+use tauri::{Manager, PhysicalSize, Runtime, Window};
+
+use crate::window_registry::{emit_to_session_owner, record_owner, window_for_session};
 
 use super::composition::{
     CellMetrics, LogicalBounds, PhysicalBounds, PlatformCompositorDescriptor,
@@ -143,6 +145,15 @@ pub struct NativeTerminalAgentStatePayload {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_snapshot: bool,
+    /// `protocol` when the pane program reported this state over OSC 7501.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_source: Option<crate::daemon::protocol::AgentStateWireSource>,
+    /// How the turn behind an `idle` ended, when the producer said so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<crate::daemon::protocol::AgentOutcome>,
+    /// What a `blocked` session needs from the user, when the producer said so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<crate::daemon::protocol::AgentBlockedKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2136,7 +2147,9 @@ fn dispatch_owned_render_inner<R: Runtime>(
                                 if let Some(presentation_receipt) =
                                     pane_liveness_presentation_receipt(frame_attach_tuple.clone(), true)
                                 {
-                                    if let Err(error) = completion_window_for_closure.emit(
+                                    if let Err(error) = emit_to_session_owner(
+                                        completion_window_for_closure.app_handle(),
+                                        &completion_session_id,
                                         crate::ipc::native_terminal::NATIVE_TERMINAL_PRESENTATION_RECEIPT_EVENT,
                                         presentation_receipt.clone(),
                                     ) {
@@ -2219,8 +2232,11 @@ fn dispatch_owned_render_inner<R: Runtime>(
                             && slot.publish_presentation(frame_generation, frame_epoch, frame_attach_tuple.as_ref(), receipt)
                         {
                             if let Some(receipt) = pane_liveness_presentation_receipt(frame_attach_tuple, true) {
-                                if let Err(error) = surface_window.emit(
-                                    crate::ipc::native_terminal::NATIVE_TERMINAL_PRESENTATION_RECEIPT_EVENT, receipt,
+                                if let Err(error) = emit_to_session_owner(
+                                    surface_window.app_handle(),
+                                    &session_id,
+                                    crate::ipc::native_terminal::NATIVE_TERMINAL_PRESENTATION_RECEIPT_EVENT,
+                                    receipt,
                                 ) {
                                     tracing::debug!(%error, "Failed to emit injected presentation receipt");
                                 }
@@ -2502,6 +2518,7 @@ pub fn dispatch_main_thread_receipt<R: Runtime>(
 ) -> tauri::Result<()> {
     #[cfg(test)]
     if let Some(dispatch) = window.try_state::<tests::RenderDispatch>() {
+        dispatch.dispatch_windows.lock().push(window.label().to_string());
         dispatch.submit_receipt(Box::new(task));
         return Ok(());
     }
@@ -2514,6 +2531,7 @@ fn dispatch_render_on_main_thread<R: Runtime>(
 ) -> tauri::Result<()> {
     #[cfg(test)]
     if let Some(dispatch) = window.try_state::<tests::RenderDispatch>() {
+        dispatch.dispatch_windows.lock().push(window.label().to_string());
         dispatch.submit(Box::new(task));
         return Ok(());
     }
@@ -2636,6 +2654,9 @@ fn take_native_terminal_events(
                             provider_session: None,
                             detail: None,
                             is_snapshot: false,
+                            state_source: None,
+                            outcome: None,
+                            kind: None,
                         },
                     ));
                 }
@@ -3474,14 +3495,30 @@ fn emit_native_terminal_event<R: Runtime>(
 ) {
     if let Some(app) = app {
         let result = match &event {
-            NativeTerminalEvent::Title(payload) => app.emit(NATIVE_TERMINAL_TITLE_EVENT, payload),
-            NativeTerminalEvent::Bell(payload) => app.emit(NATIVE_TERMINAL_BELL_EVENT, payload),
-            NativeTerminalEvent::AgentState(payload) => {
-                app.emit(NATIVE_TERMINAL_AGENT_STATE_EVENT, payload)
-            }
-            NativeTerminalEvent::Scrollbar(payload) => {
-                app.emit(NATIVE_TERMINAL_SCROLLBAR_EVENT, payload)
-            }
+            NativeTerminalEvent::Title(payload) => emit_to_session_owner(
+                app,
+                &payload.session_id,
+                NATIVE_TERMINAL_TITLE_EVENT,
+                payload,
+            ),
+            NativeTerminalEvent::Bell(payload) => emit_to_session_owner(
+                app,
+                &payload.session_id,
+                NATIVE_TERMINAL_BELL_EVENT,
+                payload,
+            ),
+            NativeTerminalEvent::AgentState(payload) => emit_to_session_owner(
+                app,
+                &payload.session_id,
+                NATIVE_TERMINAL_AGENT_STATE_EVENT,
+                payload,
+            ),
+            NativeTerminalEvent::Scrollbar(payload) => emit_to_session_owner(
+                app,
+                &payload.session_id,
+                NATIVE_TERMINAL_SCROLLBAR_EVENT,
+                payload,
+            ),
         };
         if let Err(error) = result {
             tracing::debug!(%error, "Failed to emit native terminal event");
@@ -3518,6 +3555,9 @@ impl NativeTerminalSurfaceHostState {
                 provider_session: None,
                 detail: None,
                 is_snapshot: false,
+                state_source: None,
+                outcome: None,
+                kind: None,
             };
             emit_native_terminal_event(
                 app,
@@ -3613,16 +3653,26 @@ impl NativeTerminalSurfaceHostState {
     /// Uses half-open bounds `left <= x < right` and `top <= y < bottom` so split
     /// boundaries deterministically map to exactly one pane.
     pub fn session_at_logical_point(&self, lx: f64, ly: f64) -> Option<String> {
+        self.session_at_logical_point_matching(lx, ly, |_| true)
+    }
+
+    /// The first attached session under the logical point that `accept` admits, e.g. only the
+    /// sessions owned by the clicked window. `accept` runs with no session lock held.
+    pub fn session_at_logical_point_matching(
+        &self,
+        lx: f64,
+        ly: f64,
+        accept: impl Fn(&str) -> bool,
+    ) -> Option<String> {
         self.session_handles().into_iter().find_map(|(id, session)| {
-            let session = session.lock();
-            if session.surface_attached {
-                if let Some(bounds) = session.logical_bounds {
-                    if bounds.contains(lx, ly) {
-                        return Some(id);
-                    }
-                }
-            }
-            None
+            let under_point = {
+                let session = session.lock();
+                session.surface_attached
+                    && session
+                        .logical_bounds
+                        .is_some_and(|bounds| bounds.contains(lx, ly))
+            };
+            (under_point && accept(&id)).then_some(id)
         })
     }
 
@@ -4587,7 +4637,9 @@ impl NativeTerminalSurfaceHostState {
         let pump_task = tokio::spawn(async move {
             let schedule_render = || {
                 if render_coordinator.schedule_render() {
-                    if let Some(window) = app_handle.as_ref().and_then(|app| app.get_window("main"))
+                    if let Some(window) = app_handle
+                        .as_ref()
+                        .and_then(|app| window_for_session(app, &session_id_owned))
                     {
                         dispatch_scheduled_render(
                             window,
@@ -4740,7 +4792,7 @@ impl NativeTerminalSurfaceHostState {
                         .is_some();
                         if owned_stream_ended {
                             if let Some(app) = app_handle.as_ref() {
-                                if let Err(error) = app.emit("native_terminal_stream_ended", NativeTerminalFocusPayload {
+                                if let Err(error) = emit_to_session_owner(app, &session_id_owned, "native_terminal_stream_ended", NativeTerminalFocusPayload {
                                     session_id: session_id_owned.clone(),
                                 }) {
                                     tracing::warn!(session_id = %session_id_owned, %error, "Failed to notify terminal stream disconnect");
@@ -5087,8 +5139,12 @@ impl NativeTerminalSurfaceHostState {
                         detail,
                         is_snapshot,
                         origin,
+                        state_source,
+                        outcome,
+                        kind,
                         ..
                     } => {
+                        let origin = crate::daemon::protocol::AgentStateOrigin::from_wire(origin, state_source);
                         let reported = match state.as_ref() {
                             "working" => Some(crate::agent_detect::AgentActivity::Working),
                             "blocked" => Some(crate::agent_detect::AgentActivity::Blocked),
@@ -5159,6 +5215,9 @@ impl NativeTerminalSurfaceHostState {
                                             provider_session: provider_session.clone(),
                                             detail: detail.as_ref().map(|value| value.to_string()),
                                             is_snapshot,
+                                            state_source: origin.wire_source(),
+                                            outcome,
+                                            kind,
                                         },
                                     ),
                                 );
@@ -5179,7 +5238,9 @@ impl NativeTerminalSurfaceHostState {
                             sess.terminal.set_remote_generation(Some(generation));
                         });
                         if let Some(app) = app_handle.as_ref() {
-                            if let Err(error) = app.emit(
+                            if let Err(error) = emit_to_session_owner(
+                                app,
+                                &session_id_owned,
                                 "terminal_remote_status",
                                 serde_json::json!({
                                     "sessionId": session_id_owned,
@@ -5207,7 +5268,7 @@ impl NativeTerminalSurfaceHostState {
                         .is_some();
                         if owned_stream_ended {
                             if let Some(app) = app_handle.as_ref() {
-                                if let Err(error) = app.emit("native_terminal_stream_ended", NativeTerminalFocusPayload {
+                                if let Err(error) = emit_to_session_owner(app, &session_id_owned, "native_terminal_stream_ended", NativeTerminalFocusPayload {
                                     session_id: session_id_owned.clone(),
                                 }) {
                                     tracing::warn!(session_id = %session_id_owned, %error, "Failed to notify terminal stream disconnect");
@@ -5314,7 +5375,7 @@ impl NativeTerminalSurfaceHostState {
                                             "Exhausted busy retries (2s) delivering VT response to remote session; remote control stalled"
                                         );
                                         if let Some(app) = app_handle_for_writer.as_ref() {
-                                            let _ = app.emit("terminal_remote_status", serde_json::json!({
+                                            let _ = emit_to_session_owner(app, &id, "terminal_remote_status", serde_json::json!({
                                                 "sessionId": id,
                                                 "state": "disconnected",
                                                 "generation": target_gen,
@@ -6207,9 +6268,15 @@ impl NativeTerminalSurfaceHostState {
         }
         let host = match hosts.entry(session_id.clone()) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::hash_map::Entry::Vacant(entry) => entry.insert(
-                NativeTerminalSurfaceHost::new(window, request.bounds.scale_factor)?,
-            ),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let host = entry.insert(NativeTerminalSurfaceHost::new(
+                    window,
+                    request.bounds.scale_factor,
+                )?);
+                // The window that creates a session's surface owns the session.
+                record_owner(window.app_handle(), &session_id, window.label());
+                host
+            }
         };
         request.bounds = host
             .active_presentation_geometry()
@@ -7628,6 +7695,8 @@ mod tests {
         owner_thread: std::thread::ThreadId,
         require_deferred: std::sync::atomic::AtomicBool,
         pub submissions: Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
+        /// Label of the window each main-thread render was dispatched on.
+        pub dispatch_windows: Mutex<Vec<String>>,
     }
 
     impl RenderDispatch {
@@ -7731,6 +7800,7 @@ mod tests {
                     owner_thread: std::thread::current().id(),
                     require_deferred: std::sync::atomic::AtomicBool::new(true),
                     submissions: Mutex::new(Vec::new()),
+                    dispatch_windows: Mutex::new(Vec::new()),
                 })
                 .build(tauri::test::mock_context(tauri::test::noop_assets()))
                 .unwrap();
@@ -8026,7 +8096,7 @@ mod tests {
 
         let app_handle = harness._app.handle().clone();
         let mut command = Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
-            app_handle.clone(),
+            harness.window.clone(),
             app_handle.state::<NativeTerminalSurfaceHostState>(),
             harness.request.session_id.clone(),
             crate::ipc::native_terminal::NativeTerminalLogicalRect {
@@ -8230,7 +8300,7 @@ mod tests {
         // When: the frontend updates an attached terminal's bounds.
         let app_handle = harness._app.handle().clone();
         let mut command = Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
-            app_handle.clone(),
+            harness.window.clone(),
             app_handle.state::<NativeTerminalSurfaceHostState>(),
             harness.request.session_id.clone(),
             crate::ipc::native_terminal::NativeTerminalLogicalRect {
@@ -8266,6 +8336,233 @@ mod tests {
             *harness.events.lock(),
             vec![FrameEvent::Acquire, FrameEvent::Presented]
         );
+    }
+
+    /// Adds a managed window registry and a second app window `ws-test` to the harness app.
+    fn add_secondary_owner_window(harness: &DirectRenderHarness) -> Window<tauri::test::MockRuntime> {
+        harness
+            ._app
+            .manage(crate::window_registry::WindowRegistry::default());
+        let secondary = tauri::WebviewWindowBuilder::new(
+            &harness._app,
+            "ws-test",
+            tauri::WebviewUrl::default(),
+        )
+        .build()
+        .unwrap();
+        // Only dispatches after this point belong to the test.
+        harness
+            .window
+            .state::<RenderDispatch>()
+            .dispatch_windows
+            .lock()
+            .clear();
+        secondary.as_ref().window()
+    }
+
+    #[tokio::test]
+    async fn output_for_a_session_owned_by_a_secondary_window_renders_on_that_window() {
+        let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame]);
+        harness
+            .window
+            .state::<RenderDispatch>()
+            .require_deferred
+            .store(false, Ordering::SeqCst);
+        let _secondary = add_secondary_owner_window(&harness);
+        harness
+            ._app
+            .state::<crate::window_registry::WindowRegistry>()
+            .set_owner(&harness.request.session_id, "ws-test");
+
+        harness
+            ._output
+            .send(DaemonStreamMessage::Output {
+                session_id: harness.request.session_id.clone().into(),
+                sequence: 2,
+                data: b"owned by ws-test\r\n".to_vec().into(),
+                metrics_read_unix_micros: None,
+            })
+            .await
+            .unwrap();
+        harness.execute_dispatched().await;
+
+        let dispatched = harness
+            .window
+            .state::<RenderDispatch>()
+            .dispatch_windows
+            .lock()
+            .clone();
+        assert!(!dispatched.is_empty(), "output must schedule a render");
+        assert!(
+            dispatched.iter().all(|label| label == "ws-test"),
+            "renders for a ws-test session must run on ws-test, got {dispatched:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_events_for_a_secondary_window_session_reach_only_that_window() {
+        use tauri::Listener;
+        let harness = DirectRenderHarness::new(vec![]);
+        let secondary = add_secondary_owner_window(&harness);
+        harness
+            ._app
+            .state::<crate::window_registry::WindowRegistry>()
+            .set_owner(&harness.request.session_id, "ws-test");
+        let (main_sender, mut main_received) = tokio::sync::mpsc::unbounded_channel();
+        let (ws_sender, mut ws_received) = tokio::sync::mpsc::unbounded_channel();
+        let main_listener = harness.window.listen(NATIVE_TERMINAL_AGENT_STATE_EVENT, move |event| {
+            let _ = main_sender.send(event.payload().to_string());
+        });
+        let ws_listener = secondary.listen(NATIVE_TERMINAL_AGENT_STATE_EVENT, move |event| {
+            let _ = ws_sender.send(event.payload().to_string());
+        });
+
+        let message = serde_json::from_value(serde_json::json!({
+            "type": "agentState",
+            "sessionId": harness.request.session_id,
+            "state": "working",
+            "agent": "omo",
+            "isSnapshot": false,
+        }))
+        .unwrap();
+        harness._output.send(message).await.unwrap();
+        let payload = tokio::time::timeout(std::time::Duration::from_secs(3), ws_received.recv())
+            .await
+            .expect("the owner window must receive its session's agent state")
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["sessionId"], harness.request.session_id);
+        assert!(
+            main_received.try_recv().is_err(),
+            "main must not receive a ws-test session's agent state"
+        );
+        harness.window.unlisten(main_listener);
+        secondary.unlisten(ws_listener);
+    }
+
+    #[tokio::test]
+    async fn input_receipt_for_a_secondary_window_session_dispatches_on_that_window() {
+        let mut harness = DirectRenderHarness::new(vec![]);
+        let _secondary = add_secondary_owner_window(&harness);
+        harness
+            ._app
+            .state::<crate::window_registry::WindowRegistry>()
+            .set_owner(&harness.request.session_id, "ws-test");
+        let app_handle = harness._app.handle().clone();
+        let state = harness.state.clone();
+        let session_id = harness.request.session_id.clone();
+        let receipt = tokio::spawn(async move {
+            crate::ipc::native_terminal::dispatch_native_terminal_receipt(
+                &app_handle,
+                &state,
+                &session_id,
+            )
+            .await
+        });
+        let task = tokio::time::timeout(std::time::Duration::from_secs(5), harness.dispatched.recv())
+            .await
+            .expect("the receipt must be dispatched to a window main thread")
+            .expect("dispatch channel open");
+        task();
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(5), receipt)
+            .await
+            .expect("the receipt must resolve once its main-thread task ran")
+            .unwrap();
+        assert!(receipt.is_ok(), "receipt for an attached session: {receipt:?}");
+        let dispatched = harness
+            .window
+            .state::<RenderDispatch>()
+            .dispatch_windows
+            .lock()
+            .clone();
+        assert_eq!(dispatched, vec!["ws-test".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn bounds_ipc_from_a_secondary_window_renders_on_that_window() {
+        let mut harness =
+            DirectRenderHarness::with_deferred_direct_frames(vec![SimulatedAcquisition::Frame]);
+        harness._app.manage(harness.state.clone());
+        harness
+            .window
+            .state::<RenderDispatch>()
+            .require_deferred
+            .store(false, Ordering::SeqCst);
+        let secondary = add_secondary_owner_window(&harness);
+        let bounds = harness.request.bounds;
+
+        let app_handle = harness._app.handle().clone();
+        let command = crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
+            secondary.clone(),
+            app_handle.state::<NativeTerminalSurfaceHostState>(),
+            harness.request.session_id.clone(),
+            crate::ipc::native_terminal::NativeTerminalLogicalRect {
+                x: bounds.x,
+                y: bounds.y,
+                width: bounds.width,
+                height: bounds.height,
+            },
+            bounds.scale_factor,
+            None,
+            None,
+        );
+        let mut command = Box::pin(command);
+        assert!(futures_util::poll!(command.as_mut()).is_pending());
+        harness.execute_dispatched().await;
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(5), command)
+            .await
+            .expect("bounds IPC from ws-test must resolve on its presentation")
+            .expect("bounds IPC from ws-test must succeed");
+        assert!(receipt.presented);
+
+        let dispatched = harness
+            .window
+            .state::<RenderDispatch>()
+            .dispatch_windows
+            .lock()
+            .clone();
+        assert!(!dispatched.is_empty(), "the deferred frame must be dispatched");
+        assert!(
+            dispatched.iter().all(|label| label == "ws-test"),
+            "bounds IPC from ws-test must render on ws-test, got {dispatched:?}"
+        );
+    }
+
+    #[test]
+    fn hit_testing_skips_sessions_the_filter_rejects() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let bounds = LogicalBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            scale_factor: 1.0,
+        };
+        for session_id in ["hit-a", "hit-b"] {
+            state
+                .prepare_session_layout(
+                    NativeTerminalBoundsRequest {
+                        session_id: session_id.into(),
+                        bounds,
+                    },
+                    font_manager::derived_cell_metrics(),
+                )
+                .unwrap();
+            let session = state.test_session(session_id);
+            let mut session = session.lock();
+            session.surface_attached = true;
+            session.logical_bounds = Some(bounds);
+        }
+        assert_eq!(
+            state.session_at_logical_point_matching(10.0, 10.0, |id| id == "hit-b"),
+            Some("hit-b".to_string())
+        );
+        assert_eq!(
+            state.session_at_logical_point_matching(10.0, 10.0, |_| false),
+            None
+        );
+        assert_eq!(state.session_at_logical_point_matching(500.0, 10.0, |_| true), None);
+        state.teardown();
     }
 
     #[tokio::test]
@@ -8343,7 +8640,7 @@ mod tests {
         let bounds = harness.request.bounds;
         let app_handle = harness._app.handle().clone();
         let mut command = Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
-            app_handle.clone(),
+            harness.window.clone(),
             app_handle.state::<NativeTerminalSurfaceHostState>(),
             harness.request.session_id.clone(),
             crate::ipc::native_terminal::NativeTerminalLogicalRect {
@@ -8425,7 +8722,7 @@ mod tests {
             let app_handle = harness._app.handle().clone();
             let mut old_command =
                 Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
-                    app_handle.clone(),
+                    harness.window.clone(),
                     app_handle.state::<NativeTerminalSurfaceHostState>(),
                     harness.request.session_id.clone(),
                     crate::ipc::native_terminal::NativeTerminalLogicalRect {
@@ -8441,7 +8738,7 @@ mod tests {
             assert!(futures_util::poll!(old_command.as_mut()).is_pending());
             let mut latest_command =
                 Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
-                    app_handle.clone(),
+                    harness.window.clone(),
                     app_handle.state::<NativeTerminalSurfaceHostState>(),
                     harness.request.session_id.clone(),
                     crate::ipc::native_terminal::NativeTerminalLogicalRect {
@@ -8557,7 +8854,7 @@ mod tests {
             let app_handle = harness._app.handle().clone();
             let mut command =
                 Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
-                    app_handle.clone(),
+                    harness.window.clone(),
                     app_handle.state::<NativeTerminalSurfaceHostState>(),
                     harness.request.session_id.clone(),
                     crate::ipc::native_terminal::NativeTerminalLogicalRect {
@@ -8617,7 +8914,7 @@ mod tests {
             .unwrap();
         let narrowed_width = harness.request.bounds.width / 2.0;
         let command = crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
-            harness._app.handle().clone(),
+            harness.window.clone(),
             harness._app.state::<NativeTerminalSurfaceHostState>(),
             harness.request.session_id.clone(),
             crate::ipc::native_terminal::NativeTerminalLogicalRect {
@@ -9584,6 +9881,7 @@ mod tests {
                 owner_thread: std::thread::current().id(),
                 require_deferred: std::sync::atomic::AtomicBool::new(false),
                 submissions: Mutex::new(Vec::new()),
+                dispatch_windows: Mutex::new(Vec::new()),
             })
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
@@ -9694,6 +9992,7 @@ mod tests {
                 owner_thread: std::thread::current().id(),
                 require_deferred: std::sync::atomic::AtomicBool::new(false),
                 submissions: Mutex::new(Vec::new()),
+                dispatch_windows: Mutex::new(Vec::new()),
             })
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
@@ -9894,6 +10193,7 @@ mod tests {
                 owner_thread: std::thread::current().id(),
                 require_deferred: std::sync::atomic::AtomicBool::new(false),
                 submissions: Mutex::new(Vec::new()),
+                dispatch_windows: Mutex::new(Vec::new()),
             })
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
@@ -10554,6 +10854,9 @@ mod tests {
             detail: None,
             is_snapshot: false,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            state_source: None,
+            outcome: None,
+            kind: None,
         })
         .await
         .expect("send agent state report");
@@ -10645,6 +10948,9 @@ mod tests {
                 detail: None,
                 is_snapshot: false,
                 origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+                state_source: None,
+                outcome: None,
+                kind: None,
             })
             .await
             .expect("send agent state report");
@@ -10746,6 +11052,9 @@ mod tests {
                 detail: None,
                 is_snapshot: false,
                 origin,
+                state_source: None,
+                outcome: None,
+                kind: None,
             })
             .await
             .expect("send agent state report");
@@ -10800,6 +11109,9 @@ mod tests {
             detail: None,
             is_snapshot: false,
             origin: crate::daemon::protocol::AgentStateOrigin::ProcessObserved,
+            state_source: None,
+            outcome: None,
+            kind: None,
         })
         .await
         .expect("send process sighting");
@@ -10880,6 +11192,9 @@ mod tests {
             }),
             is_snapshot: false,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            state_source: None,
+            outcome: None,
+            kind: None,
         };
 
         // The agent stays "working" across `/new`, so an activity-only change test swallows the

@@ -1,0 +1,25 @@
+[package]
+name = "ferryx-rd-mobile"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ferryx-rd-proto = { path = "../ferryx-rd-proto" }
+ferryx-rd-net = { path = "../ferryx-rd-net" }
+ferryx-rd-app = { path = "../ferryx-rd-app", default-features = false }
+ferryx-rd-decode = { path = "../ferryx-rd-decode", default-features = false }
+ferryx-rd-render = { path = "../ferryx-rd-render" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
+core-foundation = { version = "0.10", default-features = false }
+
+[lib]
+name = "ferryx_rd_mobile"
+crate-type = ["lib", "cdylib", "staticlib"]

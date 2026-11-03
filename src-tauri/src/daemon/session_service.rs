@@ -744,7 +744,7 @@ impl DaemonSessionService {
         Some(crate::agent_control::ProviderReport {
             agent: current.agent,
             state: current.state,
-            self_reported: current.origin.is_self_reported(),
+            self_reported: current.origin.is_provider_report(),
             detail: current.detail,
         })
     }
@@ -2810,6 +2810,7 @@ impl DaemonSessionService {
                             pid: None,
                         },
                         exit: None,
+                        agent_stamps: None,
                     }
                 });
                 // Store idempotency entry and session metadata before releasing the request lock.

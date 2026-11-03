@@ -7,7 +7,6 @@ use sqlx::SqlitePool;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::agent_control::{AgentControl, AgentOp, TaskLauncher};
-use crate::chat::reply::chat_reply;
 use crate::chat::session::SessionKey;
 use crate::cron::{self, CronJob, CronTarget};
 use crate::error::Result;
@@ -240,11 +239,12 @@ pub(crate) fn tool_list() -> Vec<Value> {
         ),
         (
             "chat.reply",
-            "Post a reply to a chat channel. The text is yours; it is never copied from a screen.",
+            "Submit a report through the owner reporting gate. Admission is not a delivery receipt. Use a stable topic and factual state for repeated reports.",
             schema(
                 json!({"platform": {"type": "string", "enum": ["slack", "discord"]}, "channelId": {"type": "string"},
-                "userId": {"type": "string"}, "text": {"type": "string"}}),
-                &["channelId", "text"],
+                "userId": {"type": "string"}, "text": {"type": "string"},
+                "topic": {"type": "string"}, "state": {"type": "string"}}),
+                &["channelId", "text", "topic", "state"],
             ),
         ),
     ];
@@ -662,10 +662,31 @@ async fn call_tool(
             let user = args.get("userId").and_then(Value::as_str).unwrap_or("");
             let text = required(args, "text")?;
             let session = SessionKey::new(platform, None::<String>, channel, None::<String>, user);
-            let id = chat_reply(&context.pool, &session, &text, None)
-                .await
-                .map_err(|error| error.to_string())?;
-            Ok(json!({"id": id, "sessionKey": session.storage_key()}))
+            let key = session.storage_key();
+            let topic = required(args, "topic")?;
+            let state = required(args, "state")?;
+            if [&topic, &state, &text].iter().any(|value| value.trim().is_empty()) {
+                return Err("report topic, state and text must not be empty".into());
+            }
+            let report = crate::control::ReportRequest {
+                source: "mcp_reply".into(), topic,
+                salience: crate::report_gate::Salience::Result,
+                state,
+                body: text.clone(), quote: None, sender: None, origin: None,
+                thread: None, blocks: None, blocked_reason: None, incident: None,
+            };
+            let admitted = crate::control::report_reply(&context.pool, &key, &report).await;
+            if admitted["status"] != "ok" {
+                return Err(admitted["error"].as_str().unwrap_or("report admission failed").to_owned());
+            }
+            if let Some(id) = admitted["outbox_id"].as_i64() {
+                if let Some(posted) = crate::chat::reply::deliver_stored_posted(&context.pool, id, &key, &text)
+                    .await.map_err(|error| error.to_string())? {
+                    crate::report_feedback::posted_from_outbox(&context.pool, id, &posted)
+                        .await.map_err(|error| error.to_string())?;
+                }
+            }
+            Ok(json!({"id": admitted["outbox_id"], "decision": admitted["decision"], "sessionKey": key}))
         }
         other => Err(format!("unknown tool {other}")),
     }
@@ -788,6 +809,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_reply_cannot_bypass_report_policy() {
+        let context = McpContext {
+            control: Arc::new(RecordingControl::default()),
+            launcher: Arc::new(FixedLauncher::new("pane")),
+            pool: crate::storage::memory().await.unwrap(),
+            meta_session_id: "meta".into(), tracker_token: "t".into(), owner_route: None,
+        };
+        let args = json!({"channelId":"C1", "text":"요청한 문서가 승인됐습니다.",
+            "topic":"document:alpha", "state":"approved"});
+        let mut missing = args.clone();
+        missing.as_object_mut().unwrap().remove("topic");
+        assert!(call_tool(&context, "chat.reply", &missing).await.is_err());
+        let first = call_tool(&context, "chat.reply", &args).await.unwrap();
+        assert_eq!(first["decision"], "sent");
+        let id = first["id"].as_i64().unwrap();
+        let part_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM report_delivery_parts WHERE outbox_id = ?")
+            .bind(id).fetch_one(&context.pool).await.unwrap();
+        assert_eq!(part_count, 1);
+        let duplicate = call_tool(&context, "chat.reply", &args).await.unwrap();
+        assert_eq!(duplicate["decision"], "duplicate");
+        assert_eq!(duplicate["id"], id);
+        let mut internal = args.clone();
+        internal["text"] = json!("[ERROR] private transport trace");
+        internal["state"] = json!("trace");
+        assert_eq!(call_tool(&context, "chat.reply", &internal).await.unwrap()["decision"], "internal");
+        let scope = crate::report_rules::scope_from_alert("mcp_reply", None, None, Some("document:alpha"));
+        crate::report_rules::record(&context.pool, &scope, crate::report_rules::Effect::Mute, "stop", None)
+            .await.unwrap();
+        let mut changed = args;
+        changed["state"] = json!("published");
+        changed["text"] = json!("문서가 게시됐습니다.");
+        let muted = call_tool(&context, "chat.reply", &changed).await.unwrap();
+        assert_eq!(muted["decision"], "muted");
+        assert!(muted["id"].is_null());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_outbox")
+            .fetch_one(&context.pool).await.unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
     async fn tools_call_agents_list_and_chat_reply() {
         let control = Arc::new(RecordingControl::default());
         *control.result.lock().unwrap() = json!({"sessions": []});
@@ -810,7 +871,7 @@ mod tests {
             .contains("sessions"));
         let reply = dispatch(
             &context,
-            &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"chat.reply","arguments":{"channelId":"C1","text":"ok"}}}),
+            &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"chat.reply","arguments":{"channelId":"C1","text":"ok","topic":"task:result","state":"completed"}}}),
         )
         .await;
         assert!(reply.get("error").is_none(), "{reply}");

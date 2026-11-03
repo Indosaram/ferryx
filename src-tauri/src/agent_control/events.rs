@@ -178,7 +178,60 @@ struct Log {
     evicted_through: u64,
     retained: VecDeque<AgentObservation>,
     latest: HashMap<String, AgentObservation>,
+    /// Stamps a previous daemon run persisted, until this run's first reading of the session
+    /// replaces them. Never part of `latest`, `snapshot` or a replay: a seed is not a reading.
+    seeds: HashMap<String, SessionStamps>,
     capacity: usize,
+}
+
+/// What a session's state and screen timestamps depend on: the state and screen revision they
+/// were measured against, so a later reading can tell whether each one changed. This is what
+/// the journal keeps per session across a daemon restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStamps {
+    pub state: AgentControlState,
+    pub screen_revision: Option<String>,
+    pub state_since_ms: Option<i64>,
+    pub screen_changed_at_ms: Option<i64>,
+}
+
+impl SessionStamps {
+    fn of(observation: &AgentObservation) -> Self {
+        Self {
+            state: observation.state,
+            screen_revision: observation.screen_revision.clone(),
+            state_since_ms: observation.state_since_ms,
+            screen_changed_at_ms: observation.screen_changed_at_ms,
+        }
+    }
+}
+
+/// Receives a session's stamps whenever a reading changes them.
+pub type StampSink = Arc<dyn Fn(&str, &SessionStamps) + Send + Sync>;
+
+/// Waits for one stamp update, then keeps collecting for `window`, keeping only the newest per
+/// session. Returns `None` once the channel is closed with nothing left. A busy session moves its
+/// screen revision many times a second; the journal is rewritten and synced per batch, not per
+/// reading. The `bool` is true when the channel closed, so the caller writes this batch and stops.
+pub fn next_stamp_batch(
+    updates: &std::sync::mpsc::Receiver<(String, SessionStamps)>,
+    window: Duration,
+) -> Option<(std::collections::BTreeMap<String, SessionStamps>, bool)> {
+    let mut batch = std::collections::BTreeMap::new();
+    let (id, stamps) = updates.recv().ok()?;
+    batch.insert(id, stamps);
+    let deadline = std::time::Instant::now() + window;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match updates.recv_timeout(left) {
+            Ok((id, stamps)) => {
+                batch.insert(id, stamps);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Some((batch, false)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Some((batch, true)),
+        }
+    }
 }
 
 /// Which inputs reached each pane, in arrival order. A delivery reads it to tell whether a turn
@@ -214,6 +267,7 @@ struct LastMark {
 /// machine stream is attached.
 pub struct AgentEventBus {
     log: Mutex<Log>,
+    stamp_sink: Mutex<Option<StampSink>>,
     tx: broadcast::Sender<AgentObservation>,
     machine_events: Mutex<Option<Arc<crate::remote::machine_events::MachineEvents>>>,
     local_sequence: Mutex<u64>,
@@ -234,21 +288,27 @@ fn system_now_ms() -> i64 {
 
 /// The (state since, screen changed at) pair for `draft` against the session's previous
 /// reading: an unchanged state or screen revision keeps its time, a changed one takes `now`.
-fn stamps(
-    latest: &HashMap<String, AgentObservation>,
-    draft: &ObservationDraft,
-    now: i64,
-) -> (Option<i64>, Option<i64>) {
-    let previous = latest.get(&draft.session_id);
-    let state_since = match previous {
+/// With no reading yet in this run, the stamps a previous run persisted stand in for it, so a
+/// restart does not move either time.
+fn stamps(log: &Log, draft: &ObservationDraft, now: i64) -> (Option<i64>, Option<i64>) {
+    let previous = effective_stamps(log, &draft.session_id);
+    let state_since = match &previous {
         Some(seen) if seen.state == draft.state => seen.state_since_ms,
         _ => Some(now),
     };
-    let screen_changed_at = match previous {
+    let screen_changed_at = match &previous {
         Some(seen) if seen.screen_revision == draft.screen_revision => seen.screen_changed_at_ms,
         _ => Some(now),
     };
     (state_since, screen_changed_at)
+}
+
+/// The session's newest stamps: its latest reading in this run, else a persisted seed.
+fn effective_stamps(log: &Log, session_id: &str) -> Option<SessionStamps> {
+    log.latest
+        .get(session_id)
+        .map(SessionStamps::of)
+        .or_else(|| log.seeds.get(session_id).cloned())
 }
 
 impl AgentEventBus {
@@ -265,8 +325,10 @@ impl AgentEventBus {
                 evicted_through: 0,
                 retained: VecDeque::new(),
                 latest: HashMap::new(),
+                seeds: HashMap::new(),
                 capacity,
             }),
+            stamp_sink: Mutex::new(None),
             tx,
             machine_events: Mutex::new(None),
             local_sequence: Mutex::new(0),
@@ -296,6 +358,37 @@ impl AgentEventBus {
 
     pub fn latest(&self, session_id: &str) -> Option<AgentObservation> {
         self.log.lock().latest.get(session_id).cloned()
+    }
+
+    /// Loads the stamps a previous run persisted. Call before the observers start: a seed only
+    /// stands in for a session's first reading of this run, and a session with no seed (and no
+    /// reading) has no stamps.
+    pub fn seed_stamps(&self, seeds: impl IntoIterator<Item = (String, SessionStamps)>) {
+        let mut log = self.log.lock();
+        for (session_id, stamps) in seeds {
+            if !log.latest.contains_key(&session_id) {
+                log.seeds.insert(session_id, stamps);
+            }
+        }
+    }
+
+    /// Installs the receiver of stamp changes (the journal writer). It runs on the publishing
+    /// thread, outside the bus lock, and must not block.
+    pub fn set_stamp_sink(&self, sink: StampSink) {
+        *self.stamp_sink.lock() = Some(sink);
+    }
+
+    /// Drops the installed stamp sink, which closes the writer's queue so the writer drains what
+    /// it holds and ends. A test fixture calls it to retire the writer before its directory goes.
+    #[cfg(test)]
+    pub(crate) fn clear_stamp_sink(&self) {
+        *self.stamp_sink.lock() = None;
+    }
+
+    /// The session's newest stamps: its latest reading, else its persisted seed. An entry listed
+    /// before the observer's first reading of this run still shows the real times.
+    pub fn stamps(&self, session_id: &str) -> Option<SessionStamps> {
+        effective_stamps(&self.log.lock(), session_id)
     }
 
     pub fn revision(&self) -> u64 {
@@ -406,9 +499,11 @@ impl AgentEventBus {
     /// Log a reading under a sequence `allocate_sequence` already issued and wake waiters.
     fn record(&self, sequence: u64, draft: ObservationDraft, now: i64) -> AgentObservation {
         let observation;
+        let changed_stamps;
         {
             let mut log = self.log.lock();
-            let (state_since_ms, screen_changed_at_ms) = stamps(&log.latest, &draft, now);
+            let (state_since_ms, screen_changed_at_ms) = stamps(&log, &draft, now);
+            let previous = effective_stamps(&log, &draft.session_id);
             observation = AgentObservation {
                 sequence,
                 session_id: draft.session_id,
@@ -422,6 +517,9 @@ impl AgentEventBus {
                 screen_changed_at_ms,
             };
             log.revision = log.revision.max(sequence);
+            let current = SessionStamps::of(&observation);
+            changed_stamps = (previous.as_ref() != Some(&current)).then_some(current);
+            log.seeds.remove(&observation.session_id);
             log.latest
                 .insert(observation.session_id.clone(), observation.clone());
             log.retained.push_back(observation.clone());
@@ -432,12 +530,18 @@ impl AgentEventBus {
             }
         }
         let _ = self.tx.send(observation.clone());
+        if let Some(changed) = changed_stamps {
+            let sink = self.stamp_sink.lock().clone();
+            if let Some(sink) = sink {
+                sink(&observation.session_id, &changed);
+            }
+        }
         observation
     }
 
     fn allocate_sequence(&self, draft: &ObservationDraft, now: i64) -> u64 {
         if let Some(events) = self.machine_events.lock().clone() {
-            let (state_since_ms, screen_changed_at_ms) = stamps(&self.log.lock().latest, draft, now);
+            let (state_since_ms, screen_changed_at_ms) = stamps(&self.log.lock(), draft, now);
             return events.publish_sequenced(
                 AGENT_CONTROL_EVENT,
                 draft.workspace_id.as_deref(),
@@ -982,5 +1086,117 @@ mod tests {
         assert!(!bus.input_observed("pane", earlier.sequence, horizon), "still from before");
         assert!(bus.input_observed("pane", later.sequence, horizon));
         assert!(bus.input_observed("other-pane", 0, horizon), "per pane");
+    }
+
+    fn seed(state: AgentControlState, revision: &str, since: i64, changed: i64) -> SessionStamps {
+        SessionStamps {
+            state,
+            screen_revision: Some(revision.into()),
+            state_since_ms: Some(since),
+            screen_changed_at_ms: Some(changed),
+        }
+    }
+
+    #[test]
+    fn a_fresh_bus_keeps_seeded_stamps_when_state_and_revision_are_unchanged() {
+        let (bus, clock) = clocked_bus();
+        bus.seed_stamps([("s".to_string(), seed(AgentControlState::Working, "rev", 100, 200))]);
+        // The restart happened at 1_000 (the bus clock), long after both seeded times.
+        clock.store(9_000, std::sync::atomic::Ordering::SeqCst);
+        let first = bus.publish(draft("s", AgentControlState::Working));
+        assert_eq!(first.state_since_ms, Some(100));
+        assert_eq!(first.screen_changed_at_ms, Some(200), "downtime is not hidden by a reset");
+        assert_eq!(first.slim()["screenChangedAt"], 200);
+    }
+
+    #[test]
+    fn a_seed_stands_in_before_the_first_reading_and_is_not_a_reading() {
+        let (bus, _clock) = clocked_bus();
+        bus.seed_stamps([("s".to_string(), seed(AgentControlState::Idle, "rev", 100, 200))]);
+        assert_eq!(bus.stamps("s"), Some(seed(AgentControlState::Idle, "rev", 100, 200)));
+        assert!(bus.latest("s").is_none() && bus.snapshot().is_empty(), "a seed is not an observation");
+        assert_eq!(bus.revision(), 0);
+        assert_eq!(bus.stamps("unknown-session"), None, "a session nobody persisted stays None");
+    }
+
+    #[test]
+    fn a_changed_state_after_restart_moves_only_state_since() {
+        let (bus, clock) = clocked_bus();
+        bus.seed_stamps([("s".to_string(), seed(AgentControlState::Working, "rev", 100, 200))]);
+        clock.store(5_000, std::sync::atomic::Ordering::SeqCst);
+        let idle = bus.publish(draft("s", AgentControlState::Idle));
+        assert_eq!(idle.state_since_ms, Some(5_000));
+        assert_eq!(idle.screen_changed_at_ms, Some(200));
+    }
+
+    #[test]
+    fn a_changed_revision_after_restart_moves_only_screen_changed_at() {
+        let (bus, clock) = clocked_bus();
+        bus.seed_stamps([("s".to_string(), seed(AgentControlState::Working, "old", 100, 200))]);
+        clock.store(6_000, std::sync::atomic::Ordering::SeqCst);
+        let next = bus.publish(revised("s", AgentControlState::Working, "new"));
+        assert_eq!(next.state_since_ms, Some(100));
+        assert_eq!(next.screen_changed_at_ms, Some(6_000));
+    }
+
+    #[test]
+    fn an_unseeded_session_after_restart_starts_at_the_observation_time() {
+        let (bus, _clock) = clocked_bus();
+        bus.seed_stamps([("other".to_string(), seed(AgentControlState::Working, "rev", 100, 200))]);
+        let first = bus.publish(draft("s", AgentControlState::Working));
+        assert_eq!(first.state_since_ms, Some(1_000));
+        assert_eq!(first.screen_changed_at_ms, Some(1_000));
+    }
+
+    #[test]
+    fn a_seed_never_overrides_a_reading_this_run_already_made() {
+        let (bus, _clock) = clocked_bus();
+        bus.publish(draft("s", AgentControlState::Working));
+        bus.seed_stamps([("s".to_string(), seed(AgentControlState::Working, "rev", 1, 2))]);
+        assert_eq!(bus.stamps("s").and_then(|seen| seen.state_since_ms), Some(1_000));
+    }
+
+    #[test]
+    fn the_sink_hears_only_changed_stamps_with_the_state_and_revision_they_measure() {
+        let (bus, clock) = clocked_bus();
+        let heard = Arc::new(Mutex::new(Vec::<(String, SessionStamps)>::new()));
+        let sink_heard = Arc::clone(&heard);
+        bus.set_stamp_sink(Arc::new(move |id, stamps| sink_heard.lock().push((id.to_string(), stamps.clone()))));
+        bus.publish(revised("s", AgentControlState::Working, "r1"));
+        // Same state, revision and stamps: only the prompt moved, nothing to persist.
+        let mut prompt_only = revised("s", AgentControlState::Working, "r1");
+        prompt_only.prompt_id = Some("p".into());
+        bus.publish(prompt_only);
+        clock.store(4_000, std::sync::atomic::Ordering::SeqCst);
+        bus.publish(revised("s", AgentControlState::Working, "r2"));
+        let heard = heard.lock();
+        assert_eq!(heard.len(), 2, "{heard:?}");
+        assert_eq!(heard[0].1, seed(AgentControlState::Working, "r1", 1_000, 1_000));
+        assert_eq!(heard[1].1, seed(AgentControlState::Working, "r2", 1_000, 4_000));
+    }
+
+    #[test]
+    fn an_unchanged_seeded_session_does_not_rewrite_its_stamps_on_the_first_reading() {
+        let (bus, _clock) = clocked_bus();
+        let heard = Arc::new(Mutex::new(0usize));
+        let sink_heard = Arc::clone(&heard);
+        bus.set_stamp_sink(Arc::new(move |_, _| *sink_heard.lock() += 1));
+        bus.seed_stamps([("s".to_string(), seed(AgentControlState::Working, "rev", 100, 200))]);
+        bus.publish(draft("s", AgentControlState::Working));
+        assert_eq!(*heard.lock(), 0);
+    }
+
+    #[test]
+    fn the_stamp_batcher_keeps_the_newest_per_session_and_reports_a_closed_queue() {
+        let (queue, updates) = std::sync::mpsc::channel();
+        queue.send(("a".to_string(), seed(AgentControlState::Working, "r1", 1, 1))).unwrap();
+        queue.send(("a".to_string(), seed(AgentControlState::Working, "r2", 1, 2))).unwrap();
+        queue.send(("b".to_string(), seed(AgentControlState::Idle, "r1", 3, 3))).unwrap();
+        drop(queue);
+        let (batch, closed) = next_stamp_batch(&updates, Duration::from_secs(5)).expect("a batch");
+        assert!(closed, "a disconnected queue ends the writer without waiting out the window");
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch["a"].screen_revision.as_deref(), Some("r2"));
+        assert!(next_stamp_batch(&updates, Duration::from_secs(5)).is_none());
     }
 }

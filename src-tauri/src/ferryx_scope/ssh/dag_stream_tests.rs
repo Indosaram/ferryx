@@ -47,7 +47,14 @@ fn runs_dir(project: &Path) -> std::path::PathBuf {
 }
 
 fn write_checkpoint(dir: &Path, name: &str, body: &Value) {
-    std::fs::write(dir.join(name), serde_json::to_vec(body).expect("encode")).expect("write");
+    // Publish atomically: the watcher ignores non-`.json` names, and the rename means it only
+    // ever sees the complete old or complete new checkpoint, never a truncated one.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let bytes = serde_json::to_vec(body).expect("encode");
+    let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let staged = dir.join(format!("{name}.{}.{unique}.tmp", std::process::id()));
+    std::fs::write(&staged, bytes).expect("write");
+    std::fs::rename(&staged, dir.join(name)).expect("publish");
 }
 
 fn canonical_checkpoint(run_id: &str, status: &str) -> Value {

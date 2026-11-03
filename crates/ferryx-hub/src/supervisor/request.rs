@@ -220,6 +220,11 @@ pub enum Action {
     Teach,
     Forget,
     Depend,
+    LessonsList,
+    LessonRetire,
+    LessonPin,
+    ReportRulesList,
+    ReportRuleClose,
 }
 
 impl Action {
@@ -237,6 +242,11 @@ impl Action {
             "teach" => Self::Teach,
             "forget" => Self::Forget,
             "depend" => Self::Depend,
+            "lessons_list" => Self::LessonsList,
+            "lesson_retire" => Self::LessonRetire,
+            "lesson_pin" => Self::LessonPin,
+            "report_rules_list" => Self::ReportRulesList,
+            "report_rule_close" => Self::ReportRuleClose,
             _ => return None,
         })
     }
@@ -244,7 +254,17 @@ impl Action {
     /// Goal control and memory: the owner's own decisions, never a worker's. Adapters that
     /// can be reached from inside a Ferryx pane route these through the daemon's peer check.
     pub fn needs_owner_authority(self) -> bool {
-        self.targets_goal() || matches!(self, Self::Teach | Self::Forget)
+        self.targets_goal()
+            || matches!(
+                self,
+                Self::Teach
+                    | Self::Forget
+                    | Self::LessonsList
+                    | Self::LessonRetire
+                    | Self::LessonPin
+                    | Self::ReportRulesList
+                    | Self::ReportRuleClose
+            )
     }
 
     /// Actions that name one existing goal.
@@ -330,6 +350,18 @@ struct DependPayload {
     child_goal_id: Option<String>,
     #[serde(default)]
     event_key: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct LessonPayload {
+    lesson_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ReportRulePayload {
+    rule_id: String,
 }
 
 fn payload<T: for<'de> Deserialize<'de>>(value: &Value) -> Result<T, RequestFailure> {
@@ -428,7 +460,154 @@ pub async fn handle(
             learn(pool, context, &envelope, action, &mut answer);
             Ok(answer)
         }
+        Action::LessonsList => {
+            let _: EmptyPayload = payload(&envelope.payload)?;
+            let project_id = envelope
+                .project_id
+                .as_deref()
+                .ok_or_else(|| RequestFailure::invalid("lessons_list needs projectId"))?;
+            owned_project(pool, context, project_id).await?;
+            let lessons = super::lessons::list(pool, project_id).await?;
+            Ok(json!({"projectId": project_id, "lessons": lessons}))
+        }
+        Action::LessonRetire | Action::LessonPin => {
+            let target: LessonPayload = payload(&envelope.payload)?;
+            require_text("lessonId", &target.lesson_id)?;
+            if envelope.project_id.is_some() {
+                return Err(RequestFailure::invalid(
+                    "a lesson action names a lesson, not a project",
+                ));
+            }
+            let lesson = super::lessons::get(pool, &target.lesson_id)
+                .await?
+                .ok_or_else(|| {
+                    RequestFailure::new(
+                        "NOT_FOUND",
+                        format!("lesson {} not found", target.lesson_id),
+                    )
+                })?;
+            owned_project(pool, context, &lesson.project).await?;
+            let changed = if action == Action::LessonRetire {
+                super::lessons::retire(pool, &lesson.id).await?
+            } else {
+                super::lessons::pin(pool, &lesson.id).await?
+            };
+            let lesson = super::lessons::get(pool, &lesson.id).await?;
+            Ok(json!({"changed": changed, "lesson": lesson}))
+        }
+        Action::ReportRulesList => {
+            let _: EmptyPayload = payload(&envelope.payload)?;
+            refuse_project(&envelope)?;
+            owner_identity(pool, context).await?;
+            report_rules_active(pool).await
+        }
+        Action::ReportRuleClose => {
+            let target: ReportRulePayload = payload(&envelope.payload)?;
+            require_text("ruleId", &target.rule_id)?;
+            refuse_project(&envelope)?;
+            owner_identity(pool, context).await?;
+            report_rule_close(pool, &target.rule_id).await
+        }
     }
+}
+
+/// Owner report rules are owner-wide, never a project's.
+fn refuse_project(envelope: &Envelope) -> Result<(), RequestFailure> {
+    if envelope.project_id.is_some() {
+        return Err(RequestFailure::invalid(format!(
+            "{} does not take projectId",
+            envelope.action
+        )));
+    }
+    Ok(())
+}
+
+/// The caller's project: 404 when unknown, 403 when another owner's.
+async fn owned_project(
+    pool: &SqlitePool,
+    context: &RequestContext,
+    project_id: &str,
+) -> Result<(), RequestFailure> {
+    let identity = owner_identity(pool, context).await?;
+    let owner: Option<String> =
+        sqlx::query_scalar("SELECT supervisor_id FROM supervisor_projects WHERE project_id = ?")
+            .bind(project_id)
+            .fetch_optional(pool)
+            .await?;
+    match owner {
+        None => Err(RequestFailure::new(
+            "NOT_FOUND",
+            format!("project {project_id} not found"),
+        )),
+        Some(owner) if owner != identity.supervisor_id => Err(RequestFailure::new(
+            "FORBIDDEN",
+            format!("project {project_id} belongs to another owner"),
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
+/// One `owner_report_rules` row as the request service reports it.
+type ReportRuleRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    Option<String>,
+    String,
+);
+
+/// The active owner report rules (not closed), newest first.
+async fn report_rules_active(pool: &SqlitePool) -> Result<Value, RequestFailure> {
+    let rows: Vec<ReportRuleRow> = sqlx::query_as(
+        "SELECT id, source, sender_key, topic_key, pattern, effect, owner_words,
+                origin_alert_ref, created_at
+         FROM owner_report_rules WHERE closed_at IS NULL ORDER BY created_at DESC, id",
+    )
+    .fetch_all(pool)
+    .await?;
+    let rules: Vec<Value> = rows
+        .into_iter()
+        .map(
+            |(id, source, sender_key, topic_key, pattern, effect, words, alert, at)| {
+                json!({"id": id, "source": source, "senderKey": sender_key,
+                    "topicKey": topic_key, "pattern": pattern, "effect": effect,
+                    "ownerWords": words, "originAlertRef": alert, "createdAt": at})
+            },
+        )
+        .collect();
+    Ok(json!({"rules": rules}))
+}
+
+/// Closes one owner report rule (`closed_at`); the row is kept. `closed` is false when the
+/// rule already was closed; an unknown rule is 404.
+async fn report_rule_close(pool: &SqlitePool, rule_id: &str) -> Result<Value, RequestFailure> {
+    let closed = sqlx::query(
+        "UPDATE owner_report_rules SET closed_at = ? WHERE id = ? AND closed_at IS NULL",
+    )
+    .bind(crate::storage::now_rfc3339())
+    .bind(rule_id)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        > 0;
+    if !closed {
+        let known: Option<String> =
+            sqlx::query_scalar("SELECT id FROM owner_report_rules WHERE id = ?")
+                .bind(rule_id)
+                .fetch_optional(pool)
+                .await?;
+        if known.is_none() {
+            return Err(RequestFailure::new(
+                "NOT_FOUND",
+                format!("report rule {rule_id} not found"),
+            ));
+        }
+    }
+    Ok(json!({"ruleId": rule_id, "closed": closed}))
 }
 
 /// The owner-authored text of an accepted request, when it is one the owner writes in words:
@@ -1637,4 +1816,168 @@ pub async fn conversation(
         })
         .collect();
     Ok(json!({"projectId": project_id, "messages": messages, "next": next}))
+}
+
+#[cfg(test)]
+mod lesson_and_rule_operations {
+    use super::*;
+    use crate::supervisor::lessons::{self, LessonDomain, LessonDraft};
+    use crate::supervisor::{create_project, ensure_identity};
+
+    const OWNER: &str = "slack:T1:U-owner";
+
+    async fn setup() -> (SqlitePool, String) {
+        let pool = crate::storage::memory().await.unwrap();
+        let identity = ensure_identity(&pool, OWNER).await.unwrap();
+        let project = create_project(&pool, &identity.supervisor_id, "ferryx", "github.com/x/f")
+            .await
+            .unwrap();
+        (pool, project.project_id)
+    }
+
+    fn context(principal: &str) -> RequestContext {
+        RequestContext {
+            principal: principal.into(),
+            adapter: ChannelProvider::Desktop,
+            channel_binding_id: None,
+            control: None,
+            memory: None,
+        }
+    }
+
+    async fn lesson(pool: &SqlitePool, project: &str) -> String {
+        let draft = LessonDraft {
+            domain: LessonDomain::Goal,
+            project,
+            rule: "run the focused test first",
+            rationale: "earlier goal",
+            keywords: "",
+            evidence_ref: "goal:1",
+        };
+        lessons::record(pool, draft, |_| true).await.unwrap().unwrap().id
+    }
+
+    async fn rule(pool: &SqlitePool, id: &str) {
+        sqlx::query(
+            "INSERT INTO owner_report_rules(id, source, effect, owner_words, created_at)
+             VALUES (?, 'cron', 'mute', 'stop telling me', '2026-10-30T00:00:00Z')",
+        )
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn envelope(action: &str, project: Option<&str>, payload: Value) -> Value {
+        json!({"requestId": format!("r-{action}"), "projectId": project, "action": action,
+            "payload": payload})
+    }
+
+    #[tokio::test]
+    async fn lessons_list_returns_the_project_lessons() {
+        let (pool, project) = setup().await;
+        let id = lesson(&pool, &project).await;
+        lesson(&pool, "another-project").await;
+        let answer = handle(&pool, &context(OWNER), envelope("lessons_list", Some(&project), json!({})))
+            .await
+            .unwrap();
+        let listed = answer["lessons"].as_array().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["id"], id.as_str());
+        let missing = handle(&pool, &context(OWNER), envelope("lessons_list", None, json!({})))
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code, "INVALID_REQUEST");
+        let stranger = handle(
+            &pool,
+            &context("slack:T1:U-stranger"),
+            envelope("lessons_list", Some(&project), json!({})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(stranger.code, "UNAUTHORIZED");
+    }
+
+    #[tokio::test]
+    async fn lesson_retire_retires_an_owned_lesson() {
+        let (pool, project) = setup().await;
+        let id = lesson(&pool, &project).await;
+        let answer = handle(&pool, &context(OWNER), envelope("lesson_retire", None, json!({"lessonId": id})))
+            .await
+            .unwrap();
+        assert_eq!(answer["changed"], true);
+        assert_eq!(answer["lesson"]["state"], "retired");
+        let unknown = handle(
+            &pool,
+            &context(OWNER),
+            envelope("lesson_retire", None, json!({"lessonId": "nope"})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unknown.code, "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn lesson_pin_pins_an_owned_lesson() {
+        let (pool, project) = setup().await;
+        let id = lesson(&pool, &project).await;
+        let answer = handle(&pool, &context(OWNER), envelope("lesson_pin", None, json!({"lessonId": id})))
+            .await
+            .unwrap();
+        assert_eq!(answer["changed"], true);
+        assert_eq!(answer["lesson"]["pinned"], true);
+        let foreign = lesson(&pool, "unknown-project").await;
+        let refused = handle(
+            &pool,
+            &context(OWNER),
+            envelope("lesson_pin", None, json!({"lessonId": foreign})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.code, "NOT_FOUND");
+        assert!(!lessons::get(&pool, &foreign).await.unwrap().unwrap().pinned);
+    }
+
+    #[tokio::test]
+    async fn report_rules_list_returns_active_rules_only() {
+        let (pool, _) = setup().await;
+        rule(&pool, "rule-open").await;
+        rule(&pool, "rule-closed").await;
+        sqlx::query("UPDATE owner_report_rules SET closed_at = '2026-10-30T01:00:00Z' WHERE id = 'rule-closed'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let answer = handle(&pool, &context(OWNER), envelope("report_rules_list", None, json!({})))
+            .await
+            .unwrap();
+        let rules = answer["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0]["id"], "rule-open");
+        assert_eq!(rules[0]["effect"], "mute");
+    }
+
+    #[tokio::test]
+    async fn report_rule_close_sets_closed_at_once() {
+        let (pool, _) = setup().await;
+        rule(&pool, "rule-1").await;
+        let close = || envelope("report_rule_close", None, json!({"ruleId": "rule-1"}));
+        let first = handle(&pool, &context(OWNER), close()).await.unwrap();
+        assert_eq!(first["closed"], true);
+        let again = handle(&pool, &context(OWNER), close()).await.unwrap();
+        assert_eq!(again["closed"], false);
+        let closed_at: Option<String> =
+            sqlx::query_scalar("SELECT closed_at FROM owner_report_rules WHERE id = 'rule-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(closed_at.is_some());
+        let unknown = handle(
+            &pool,
+            &context(OWNER),
+            envelope("report_rule_close", None, json!({"ruleId": "nope"})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unknown.code, "NOT_FOUND");
+    }
 }

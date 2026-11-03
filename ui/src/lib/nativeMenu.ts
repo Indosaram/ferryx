@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { currentWindowLabel } from "./windowIdentity";
 
 export type NativeMenuPoint = { x: number; y: number };
 
@@ -66,6 +67,7 @@ export async function openNativePopupMenu(
 
   signal?.addEventListener("abort", cleanup, { once: true });
   try {
+    // The backend routes the menu action to the window that opened the menu (emit_to).
     const unlisten = await listen<{ id: string }>(MENU_ACTION_EVENT, (event) => {
       if (cleanedUp) return;
       const id = actionIds.get(event.payload.id);
@@ -73,7 +75,7 @@ export async function openNativePopupMenu(
       // Revoke ownership before user code can throw, reopen, or dispatch again.
       cleanup();
       onAction(id);
-    });
+    }, { target: currentWindowLabel() });
 
     if (cleanedUp) {
       unlisten();
