@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -104,6 +104,10 @@ pub struct AgentObservation {
     pub prompt_id: Option<String>,
     pub kind: Option<String>,
     pub screen_revision: Option<String>,
+    /// Epoch ms when the session entered `state`; unchanged while later readings keep it.
+    pub state_since_ms: Option<i64>,
+    /// Epoch ms when `screen_revision` last changed.
+    pub screen_changed_at_ms: Option<i64>,
 }
 
 impl AgentObservation {
@@ -118,6 +122,8 @@ impl AgentObservation {
             "promptId": self.prompt_id,
             "kind": self.kind,
             "screenRevision": self.screen_revision,
+            "stateSince": self.state_since_ms,
+            "screenChangedAt": self.screen_changed_at_ms,
         })
     }
 
@@ -215,10 +221,42 @@ pub struct AgentEventBus {
     /// This bus's observer epoch. Sequences restart with the daemon, so a sequence is only
     /// comparable with others of the same epoch; run ids and wait replies carry it.
     instance: String,
+    /// Epoch ms clock for the state and screen timestamps; tests inject a fixed one.
+    now_ms: Box<dyn Fn() -> i64 + Send + Sync>,
+}
+
+fn system_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// The (state since, screen changed at) pair for `draft` against the session's previous
+/// reading: an unchanged state or screen revision keeps its time, a changed one takes `now`.
+fn stamps(
+    latest: &HashMap<String, AgentObservation>,
+    draft: &ObservationDraft,
+    now: i64,
+) -> (Option<i64>, Option<i64>) {
+    let previous = latest.get(&draft.session_id);
+    let state_since = match previous {
+        Some(seen) if seen.state == draft.state => seen.state_since_ms,
+        _ => Some(now),
+    };
+    let screen_changed_at = match previous {
+        Some(seen) if seen.screen_revision == draft.screen_revision => seen.screen_changed_at_ms,
+        _ => Some(now),
+    };
+    (state_since, screen_changed_at)
 }
 
 impl AgentEventBus {
     pub fn new(capacity: usize) -> Self {
+        Self::with_clock(capacity, Box::new(system_now_ms))
+    }
+
+    fn with_clock(capacity: usize, now_ms: Box<dyn Fn() -> i64 + Send + Sync>) -> Self {
         let capacity = capacity.max(1);
         let (tx, _) = broadcast::channel(capacity);
         Self {
@@ -234,6 +272,7 @@ impl AgentEventBus {
             local_sequence: Mutex::new(0),
             inputs: Mutex::new(InputLedger::default()),
             instance: uuid::Uuid::new_v4().simple().to_string(),
+            now_ms,
         }
     }
 
@@ -359,24 +398,29 @@ impl AgentEventBus {
 
     /// Record one changed reading and wake waiters. Unchanged readings are the caller's to drop.
     pub fn publish(&self, draft: ObservationDraft) -> AgentObservation {
-        let sequence = self.allocate_sequence(&draft);
-        self.record(sequence, draft)
+        let now = (self.now_ms)();
+        let sequence = self.allocate_sequence(&draft, now);
+        self.record(sequence, draft, now)
     }
 
     /// Log a reading under a sequence `allocate_sequence` already issued and wake waiters.
-    fn record(&self, sequence: u64, draft: ObservationDraft) -> AgentObservation {
-        let observation = AgentObservation {
-            sequence,
-            session_id: draft.session_id,
-            state: draft.state,
-            state_source: draft.state_source,
-            tier: draft.tier,
-            prompt_id: draft.prompt_id,
-            kind: draft.kind,
-            screen_revision: draft.screen_revision,
-        };
+    fn record(&self, sequence: u64, draft: ObservationDraft, now: i64) -> AgentObservation {
+        let observation;
         {
             let mut log = self.log.lock();
+            let (state_since_ms, screen_changed_at_ms) = stamps(&log.latest, &draft, now);
+            observation = AgentObservation {
+                sequence,
+                session_id: draft.session_id,
+                state: draft.state,
+                state_source: draft.state_source,
+                tier: draft.tier,
+                prompt_id: draft.prompt_id,
+                kind: draft.kind,
+                screen_revision: draft.screen_revision,
+                state_since_ms,
+                screen_changed_at_ms,
+            };
             log.revision = log.revision.max(sequence);
             log.latest
                 .insert(observation.session_id.clone(), observation.clone());
@@ -391,8 +435,9 @@ impl AgentEventBus {
         observation
     }
 
-    fn allocate_sequence(&self, draft: &ObservationDraft) -> u64 {
+    fn allocate_sequence(&self, draft: &ObservationDraft, now: i64) -> u64 {
         if let Some(events) = self.machine_events.lock().clone() {
+            let (state_since_ms, screen_changed_at_ms) = stamps(&self.log.lock().latest, draft, now);
             return events.publish_sequenced(
                 AGENT_CONTROL_EVENT,
                 draft.workspace_id.as_deref(),
@@ -406,6 +451,8 @@ impl AgentEventBus {
                     prompt_id: draft.prompt_id.clone(),
                     kind: draft.kind.clone(),
                     screen_revision: draft.screen_revision.clone(),
+                    state_since_ms,
+                    screen_changed_at_ms,
                 }
                 .slim(),
             );
@@ -676,6 +723,8 @@ mod tests {
             prompt_id: Some("p".into()),
             kind: None,
             screen_revision: Some("rev".into()),
+            state_since_ms: None,
+            screen_changed_at_ms: None,
         };
         filter.remember_exposure("s0", true);
         for index in 0..=PROMPT_FILTER_SESSIONS {
@@ -758,7 +807,7 @@ mod tests {
         let bus = AgentEventBus::new(8);
         let logged = bus.publish(draft("s", AgentControlState::Idle));
         // A reading took its sequence but `publish` has not logged it yet.
-        let in_flight = bus.allocate_sequence(&draft("s", AgentControlState::Working));
+        let in_flight = bus.allocate_sequence(&draft("s", AgentControlState::Working), 0);
         // The domain also moved ahead of the log for other machine events.
         *bus.local_sequence.lock() = in_flight + 2;
         let head = bus.head();
@@ -766,7 +815,7 @@ mod tests {
         assert!(head > bus.revision());
         assert!(in_flight <= head);
 
-        bus.record(in_flight, draft("s", AgentControlState::Working));
+        bus.record(in_flight, draft("s", AgentControlState::Working), 0);
         match bus.replay(head) {
             AgentReplay::Events { events, .. } => {
                 assert!(events.is_empty(), "a reading at or before head is not newer: {events:?}")
@@ -785,6 +834,58 @@ mod tests {
         assert!(hit.is_none(), "the in-flight reading must not satisfy a wait from head");
     }
 
+    fn clocked_bus() -> (AgentEventBus, Arc<std::sync::atomic::AtomicI64>) {
+        let clock = Arc::new(std::sync::atomic::AtomicI64::new(1_000));
+        let reader = Arc::clone(&clock);
+        let bus = AgentEventBus::with_clock(
+            8,
+            Box::new(move || reader.load(std::sync::atomic::Ordering::SeqCst)),
+        );
+        (bus, clock)
+    }
+
+    fn revised(session: &str, state: AgentControlState, revision: &str) -> ObservationDraft {
+        let mut reading = draft(session, state);
+        reading.screen_revision = Some(revision.into());
+        reading
+    }
+
+    #[test]
+    fn an_unchanged_revision_keeps_screen_changed_at() {
+        let (bus, clock) = clocked_bus();
+        let first = bus.publish(draft("s", AgentControlState::Working));
+        assert_eq!(first.screen_changed_at_ms, Some(1_000));
+        clock.store(5_000, std::sync::atomic::Ordering::SeqCst);
+        let mut again = draft("s", AgentControlState::Working);
+        again.prompt_id = Some("p".into());
+        let second = bus.publish(again);
+        assert_eq!(second.screen_changed_at_ms, Some(1_000));
+        assert_eq!(second.state_since_ms, Some(1_000));
+        assert_eq!(second.slim()["screenChangedAt"], 1_000);
+    }
+
+    #[test]
+    fn a_state_change_resets_state_since() {
+        let (bus, clock) = clocked_bus();
+        bus.publish(draft("s", AgentControlState::Working));
+        clock.store(5_000, std::sync::atomic::Ordering::SeqCst);
+        let idle = bus.publish(draft("s", AgentControlState::Idle));
+        assert_eq!(idle.state_since_ms, Some(5_000));
+        assert_eq!(idle.screen_changed_at_ms, Some(1_000));
+        assert_eq!(idle.slim()["stateSince"], 5_000);
+        assert_eq!(bus.latest("s").and_then(|seen| seen.state_since_ms), Some(5_000));
+    }
+
+    #[test]
+    fn a_revision_change_in_the_same_state_moves_only_screen_changed_at() {
+        let (bus, clock) = clocked_bus();
+        bus.publish(revised("s", AgentControlState::Working, "r1"));
+        clock.store(7_000, std::sync::atomic::Ordering::SeqCst);
+        let next = bus.publish(revised("s", AgentControlState::Working, "r2"));
+        assert_eq!(next.state_since_ms, Some(1_000));
+        assert_eq!(next.screen_changed_at_ms, Some(7_000));
+    }
+
     #[test]
     fn the_slim_payload_has_no_prompt_body() {
         let observation = AgentObservation {
@@ -796,8 +897,12 @@ mod tests {
             prompt_id: Some("p".into()),
             kind: Some("approval".into()),
             screen_revision: Some("rev".into()),
+            state_since_ms: Some(1_000),
+            screen_changed_at_ms: Some(2_000),
         };
         let slim = observation.slim();
+        assert_eq!(slim["stateSince"], 1_000);
+        assert_eq!(slim["screenChangedAt"], 2_000);
         assert_eq!(slim["sessionId"], "s");
         assert_eq!(slim["promptId"], "p");
         assert_eq!(slim["kind"], "approval");
