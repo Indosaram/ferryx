@@ -98,6 +98,17 @@ describe("BrowserPermissionPrompts", () => {
   });
 
   it("shows the structured error code when the decision fails", async () => {
+    ipc.invoke.mockImplementation(async (command: string) => {
+      if (command === "cmd_browser_permission_pending") return [];
+      throw { code: "INTERNAL_ERROR", message: "gone" };
+    });
+    render(<BrowserPermissionPrompts browserId="b1" />);
+    await subscribed("browser_permission_prompt");
+    fire("browser_permission_prompt", cameraPrompt);
+    fireEvent.click(await screen.findByRole("button", { name: "Allow" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("INTERNAL_ERROR");
+  });
+
   it("stays in flow without hiding its own pane's native page view", async () => {
     render(
       <>
@@ -113,17 +124,6 @@ describe("BrowserPermissionPrompts", () => {
     // Flush the visibility hook's MutationObserver callback before reading the probe.
     await act(async () => {});
     expect(screen.getByTestId("native-surface-probe")).toHaveTextContent("true");
-  });
-
-    ipc.invoke.mockImplementation(async (command: string) => {
-      if (command === "cmd_browser_permission_pending") return [];
-      throw { code: "INTERNAL_ERROR", message: "gone" };
-    });
-    render(<BrowserPermissionPrompts browserId="b1" />);
-    await subscribed("browser_permission_prompt");
-    fire("browser_permission_prompt", cameraPrompt);
-    fireEvent.click(await screen.findByRole("button", { name: "Allow" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("INTERNAL_ERROR");
   });
 });
 
