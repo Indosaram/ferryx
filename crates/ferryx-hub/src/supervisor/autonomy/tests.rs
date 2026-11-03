@@ -386,3 +386,45 @@ async fn an_owner_tap_is_not_gated_the_owner_may_answer_any_prompt() {
     assert_eq!(fixture.frames.count("action You chose npm"), 1);
     assert!(fixture.control.calls().is_empty(), "the owner's tap went to the pane, not through the supervisor");
 }
+
+fn recovery_escalation(session_ref: &SessionRef) -> Escalation {
+    Escalation {
+        session_ref: session_ref.clone(),
+        prompt: PendingPrompt {
+            prompt_id: "recovery:stall".to_owned(),
+            kind: "recovery".to_owned(),
+            question: "The session is still stalled after a restart. What now?".to_owned(),
+            command: None,
+            options: vec!["Restart it again".to_owned(), "Leave it".to_owned()],
+            screen_revision: None,
+        },
+        recommended_index: 0,
+        reason: "restarted once, stalled again".to_owned(),
+        created_at_ms: 5,
+    }
+}
+
+#[tokio::test]
+async fn a_recovery_escalation_survives_clear_and_is_withdrawn_only_by_recovery() {
+    let fixture = fixture().await;
+    let session_ref = SessionRef::new("mac", "s1");
+    RecoveryEscalations::open(&*fixture.autonomy, recovery_escalation(&session_ref));
+
+    let open = fixture.autonomy.escalation_source().pending().await.unwrap();
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].reason, "restarted once, stalled again");
+    assert_eq!(fixture.frames.count("decision mac:s1 open"), 1);
+
+    // A prompt observation clearing its own card never withdraws the recovery escalation.
+    fixture.autonomy.clear(&session_ref);
+    fixture.autonomy.observe(&session(None)).await;
+    let still_open = fixture.autonomy.escalation_source().pending().await.unwrap();
+    assert_eq!(still_open.len(), 1);
+    assert_eq!(fixture.frames.count("decision mac:s1 resolved"), 0);
+
+    // Recovery withdraws it once the session is healthy; a second resolve publishes nothing.
+    RecoveryEscalations::resolve(&*fixture.autonomy, &session_ref);
+    RecoveryEscalations::resolve(&*fixture.autonomy, &session_ref);
+    assert!(fixture.autonomy.escalation_source().pending().await.unwrap().is_empty());
+    assert_eq!(fixture.frames.count("decision mac:s1 resolved"), 1);
+}

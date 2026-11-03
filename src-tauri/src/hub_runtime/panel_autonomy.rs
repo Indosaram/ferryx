@@ -6,11 +6,16 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ferryx_hub::goals::loop_driver::{on_turn_settled_with, QuotaRecovery};
 use ferryx_hub::supervisor::adapters::{HostDirectory, PairedHost, RemoteFleetSource, SupervisorAgentControl};
 use ferryx_hub::supervisor::autonomy::{Autonomy, PanelPublisher};
+use ferryx_hub::supervisor::health::SessionHealthClassifier;
 use ferryx_hub::supervisor::session_control::AgentSessionControl;
 use ferryx_hub::supervisor::panel_contract::{
     ActionEntry, Escalation, FleetSession, SessionControl, SessionRef, StandingRule,
+};
+use ferryx_hub::supervisor::recovery::{
+    Clock, LoopRetry, PauseGate, RecoveryDeps, RecoveryEscalations, RecoveryScheduler, SystemClock,
 };
 
 use super::HubLaunch;
@@ -32,6 +37,100 @@ pub fn session_tools() -> Option<Arc<ferryx_hub::meta::mhc_supervisor::SessionTo
 /// The installed autonomy service, if the hub is open in this daemon.
 pub fn installed() -> Option<Arc<Autonomy>> {
     AUTONOMY.get().cloned()
+}
+
+/// The one recovery scheduler of this daemon, installed with the autonomy service.
+static RECOVERY: std::sync::OnceLock<Arc<RecoveryScheduler>> = std::sync::OnceLock::new();
+
+/// The installed recovery scheduler, if the hub is open in this daemon.
+pub fn recovery() -> Option<Arc<RecoveryScheduler>> {
+    RECOVERY.get().cloned()
+}
+
+/// Builds the recovery scheduler over the autonomy service's own stores, pause gate and
+/// escalation registry. `control`, `fleet` and `clock` are the seams: production passes the
+/// supervisor-marked session control, the full fleet and the system clock.
+pub fn build_recovery(
+    autonomy: &Arc<Autonomy>,
+    control: Arc<dyn SessionControl>,
+    fleet: Arc<dyn ferryx_hub::meta::mhc_supervisor::FleetSource>,
+    clock: Arc<dyn Clock>,
+) -> Arc<RecoveryScheduler> {
+    let pause: Arc<dyn PauseGate> = autonomy.gate();
+    let service: Arc<Autonomy> = Arc::clone(autonomy);
+    let escalations: Arc<dyn RecoveryEscalations> = service;
+    Arc::new(RecoveryScheduler::new(RecoveryDeps {
+        fleet,
+        control,
+        rules: autonomy.rule_store(),
+        log: autonomy.action_log(),
+        classifier: Arc::new(SessionHealthClassifier),
+        clock,
+        pause,
+        escalations,
+    }))
+}
+
+/// Hands a goal lane's quota fault (the supervisor's own model is out of quota) to recovery,
+/// which schedules the retry instead of the loop stopping the lane.
+struct GoalQuota {
+    scheduler: Arc<RecoveryScheduler>,
+}
+
+#[async_trait]
+impl QuotaRecovery for GoalQuota {
+    async fn quota_fault(&self, lane_key: &str, session_id: &str, detail: &str) -> bool {
+        let session_ref = SessionRef::new(
+            &crate::remote::reference_chat::files::reference_host_id(),
+            session_id,
+        );
+        self.scheduler
+            .report_goal_quota(lane_key, Some(session_ref), detail)
+            .await;
+        true
+    }
+}
+
+/// The goal loop's quota recovery, when the recovery scheduler is installed.
+pub fn quota_recovery() -> Option<Arc<dyn QuotaRecovery>> {
+    let scheduler = recovery()?;
+    let quota: Arc<dyn QuotaRecovery> = Arc::new(GoalQuota { scheduler });
+    Some(quota)
+}
+
+/// Re-runs the goal loop for a lane whose quota fault recovery waited out.
+pub(super) struct GoalRetry {
+    pool: sqlx::SqlitePool,
+    bridge: Arc<super::DaemonBridge>,
+    quota: Arc<dyn QuotaRecovery>,
+}
+
+impl GoalRetry {
+    pub(super) fn new(
+        pool: sqlx::SqlitePool,
+        bridge: Arc<super::DaemonBridge>,
+        quota: Arc<dyn QuotaRecovery>,
+    ) -> Self {
+        Self { pool, bridge, quota }
+    }
+}
+
+#[async_trait]
+impl LoopRetry for GoalRetry {
+    async fn retry(&self, lane_key: &str) -> ferryx_hub::error::Result<()> {
+        let judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env());
+        on_turn_settled_with(
+            &self.pool,
+            &judge,
+            self.bridge.as_ref(),
+            lane_key,
+            true,
+            Some(self.quota.as_ref()),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| ferryx_hub::error::HubError::message(error.to_string()))
+    }
 }
 
 /// Publishes through the daemon's owner event channel (`panel.decision|action|rules`).
@@ -128,7 +227,7 @@ pub(super) async fn install(launch: &HubLaunch) {
     let control: Arc<dyn ferryx_hub::agent_control::AgentControl> =
         Arc::new(SupervisorAgentControl::new(bridge, local_host_ids(), pool.clone()));
     let session_control: Arc<dyn SessionControl> = Arc::new(AgentSessionControl::new(control.clone()));
-    let autonomy = match Autonomy::open(pool.clone(), session_control, Arc::new(OwnerChannel)).await {
+    let autonomy = match Autonomy::open(pool.clone(), session_control.clone(), Arc::new(OwnerChannel)).await {
         Ok(autonomy) => autonomy,
         Err(error) => {
             tracing::warn!(%error, "supervisor autonomy was not opened; the panel stays empty");
@@ -150,6 +249,13 @@ pub(super) async fn install(launch: &HubLaunch) {
     });
     super::install_rule_store(autonomy.rule_store());
     super::set_panel_paused(ferryx_hub::control::is_paused(&pool).await.unwrap_or(false));
+    let scheduler = build_recovery(
+        &autonomy,
+        session_control,
+        Arc::new(FullFleet { state: Arc::clone(&state) }),
+        Arc::new(SystemClock),
+    );
+    let _ = RECOVERY.set(scheduler);
     let tools = Arc::new(
         ferryx_hub::meta::mhc_supervisor::SessionTools::new(
             Arc::new(AgentSessionControl::new(control)),
@@ -383,5 +489,158 @@ mod tests {
         assert_eq!(snapshot.rules.len(), 4);
         assert_eq!(snapshot.sessions.len(), 1);
         assert!(!snapshot.setup_required);
+    }
+
+    /// Epoch ms the fake clock starts at.
+    const START_MS: i64 = 1_800_000_000_000;
+
+    /// A clock only the test moves.
+    struct FakeClock {
+        now_ms: std::sync::atomic::AtomicI64,
+    }
+
+    impl FakeClock {
+        fn new(now_ms: i64) -> Self {
+            Self { now_ms: std::sync::atomic::AtomicI64::new(now_ms) }
+        }
+
+        fn advance(&self, by_ms: i64) {
+            self.now_ms.fetch_add(by_ms, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl Clock for FakeClock {
+        fn now_ms(&self) -> i64 {
+            self.now_ms.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// Records what recovery does to a session and serves a proxy error as its terminal tail.
+    #[derive(Default)]
+    struct ScriptedControl {
+        stops: std::sync::Mutex<Vec<String>>,
+        sends: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl ScriptedControl {
+        fn stops(&self) -> Vec<String> {
+            self.stops.lock().unwrap().clone()
+        }
+
+        fn sends(&self) -> Vec<(String, String)> {
+            self.sends.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl SessionControl for ScriptedControl {
+        async fn stop(&self, session: &SessionRef) -> ferryx_hub::error::Result<()> {
+            self.stops.lock().unwrap().push(session.as_str().to_owned());
+            Ok(())
+        }
+        async fn send(&self, session: &SessionRef, text: &str) -> ferryx_hub::error::Result<()> {
+            self.sends.lock().unwrap().push((session.as_str().to_owned(), text.to_owned()));
+            Ok(())
+        }
+        async fn answer(&self, _: &SessionRef, _: &str, _: Option<&str>, _: usize) -> ferryx_hub::error::Result<()> {
+            Ok(())
+        }
+        async fn read_tail(&self, _: &SessionRef, _: usize) -> ferryx_hub::error::Result<String> {
+            Ok("working on the relay\nAPI Error: 502 Bad Gateway\n".to_owned())
+        }
+    }
+
+    /// A fleet that never changes.
+    struct FixedFleet {
+        sessions: Vec<FleetSession>,
+    }
+
+    #[async_trait]
+    impl ferryx_hub::meta::mhc_supervisor::FleetSource for FixedFleet {
+        async fn list(&self) -> ferryx_hub::error::Result<Vec<FleetSession>> {
+            Ok(self.sessions.clone())
+        }
+    }
+
+    /// A Claude Code session on another computer that is working through a proxy outage.
+    fn outage_session() -> FleetSession {
+        FleetSession {
+            session_ref: SessionRef::new("mac-2", "s9"),
+            host_id: "mac-2".into(),
+            host_label: "Mac 2".into(),
+            title: "relay".into(),
+            cwd: "/nonexistent/recovery-test".into(),
+            agent: "claude".into(),
+            state: "working".into(),
+            state_source: "screen".into(),
+            state_since_ms: Some(START_MS),
+            screen_changed_at_ms: Some(START_MS),
+            pending_prompt: None,
+            last_assistant_line: None,
+            updated_at_ms: START_MS,
+            stale: false,
+        }
+    }
+
+    struct RecoveryFixture {
+        autonomy: Arc<Autonomy>,
+        scheduler: Arc<RecoveryScheduler>,
+        control: Arc<ScriptedControl>,
+        clock: Arc<FakeClock>,
+    }
+
+    /// The real scheduler over real autonomy stores (in-memory database), with a scripted
+    /// session control, a fixed fleet and a fake clock.
+    async fn recovery_fixture() -> RecoveryFixture {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let autonomy = Autonomy::open(pool, Arc::new(NoControl), Arc::new(Silent)).await.unwrap();
+        let control = Arc::new(ScriptedControl::default());
+        let clock = Arc::new(FakeClock::new(START_MS));
+        let scheduler = build_recovery(
+            &autonomy,
+            control.clone(),
+            Arc::new(FixedFleet { sessions: vec![outage_session()] }),
+            clock.clone(),
+        );
+        RecoveryFixture { autonomy, scheduler, control, clock }
+    }
+
+    /// The real scheduler built by the daemon's wiring: a proxy outage on another computer's
+    /// session is retried once after the first backoff, with one live log row for the incident.
+    #[tokio::test]
+    async fn the_built_scheduler_resumes_a_cross_host_session_after_the_first_backoff() {
+        let fixture = recovery_fixture().await;
+
+        fixture.scheduler.tick().await;
+        assert!(fixture.control.sends().is_empty(), "nothing is retried before the first backoff");
+
+        // The default `upstreamRetry` backoff starts at 60 s.
+        fixture.clock.advance(61_000);
+        fixture.scheduler.tick().await;
+
+        assert_eq!(
+            fixture.control.sends(),
+            vec![("mac-2:s9".to_owned(), "continue".to_owned())]
+        );
+        assert!(fixture.control.stops().is_empty());
+        let rows = fixture.autonomy.action_log().list_today(0).await.unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].live, "{rows:?}");
+    }
+
+    /// A goal loop's quota fault is taken over by recovery: the report is accepted and the
+    /// deferral shows as one live row.
+    #[tokio::test]
+    async fn a_goal_quota_fault_is_taken_over_and_logged_as_a_live_recovery_row() {
+        let fixture = recovery_fixture().await;
+        let quota = GoalQuota { scheduler: Arc::clone(&fixture.scheduler) };
+
+        assert!(quota.quota_fault("lane-1", "s5", "429 usage limit reached").await);
+
+        let rows = fixture.autonomy.action_log().list_today(0).await.unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].incident_key, "recovery:goalquota:lane-1");
+        assert!(rows[0].live, "{rows:?}");
+        assert!(fixture.control.sends().is_empty());
     }
 }
