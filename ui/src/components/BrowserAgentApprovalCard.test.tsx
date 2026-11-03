@@ -3,6 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BrowserAgentApprovalCard } from "./BrowserAgentApprovalCard";
 import type { BrowserAgentApproval, BrowserAgentOverview } from "../lib/browserAgent";
+import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
+
+function NativeSurfaceProbe() {
+  return <span data-testid="native-surface-probe">{String(useNativeTerminalVisibility())}</span>;
+}
 
 const agent = vi.hoisted(() => ({
   getBrowserAgentOverview: vi.fn(),
@@ -121,5 +126,18 @@ describe("BrowserAgentApprovalCard", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("BROWSER_APPROVAL_NOT_FOUND");
     expect(screen.getByTestId("browser-agent-approval")).toBeInTheDocument();
+  });
+
+  it("makes native page views yield while a request is pending so they cannot paint over the card", async () => {
+    backend([grant]);
+    render(
+      <>
+        <NativeSurfaceProbe />
+        <BrowserAgentApprovalCard />
+      </>,
+    );
+    expect(screen.getByTestId("native-surface-probe")).toHaveTextContent("true");
+    await screen.findByTestId("browser-agent-approval");
+    await vi.waitFor(() => expect(screen.getByTestId("native-surface-probe")).toHaveTextContent("false"));
   });
 });

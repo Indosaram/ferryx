@@ -376,6 +376,14 @@ export function extractBrowserErrorCode(err: unknown): string {
   return "UNKNOWN_ERROR";
 }
 
+/** Whether a failed download IPC call left a registry record, i.e. its failure is on the
+ * downloads shelf. The host sets `details.downloadRegistered` from the registry itself. */
+export function browserDownloadErrorRegistered(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const details = (err as Record<string, unknown>).details;
+  return !!details && typeof details === "object" && (details as Record<string, unknown>).downloadRegistered === true;
+}
+
 export async function setBrowserBounds(
   browserId: string,
   bounds: LogicalRect,

@@ -3104,24 +3104,51 @@ pub async fn browser_download_with_session<R: tauri::Runtime>(
     manager: &BrowserManager,
     request: BrowserDownloadRequest,
 ) -> Result<crate::browser::download::DownloadRecord, IpcError> {
-    let cookie_header = download_cookie_header(app, manager, &request).await?;
+    // The id is chosen here so a failure can be checked against the registry afterwards.
+    let download_id = uuid::Uuid::new_v4().to_string();
+    let cookie_header = download_cookie_header(app, manager, &request)
+        .await
+        .map_err(|error| with_download_registration(error, &download_id))?;
+    download_with_registration_signal(&request, cookie_header.as_deref(), &download_id).await
+}
 
-    let download_id = crate::browser::download::download_url_with_cookies(
+/// Runs one registry download under `download_id`; every error says whether a record exists.
+async fn download_with_registration_signal(
+    request: &BrowserDownloadRequest,
+    cookie_header: Option<&str>,
+    download_id: &str,
+) -> Result<crate::browser::download::DownloadRecord, IpcError> {
+    crate::browser::download::download_url_with_cookies(
         &request.url,
         std::path::Path::new(&request.file_path),
-        cookie_header.as_deref(),
-        None,
+        cookie_header,
+        Some(download_id),
         request.browser_id.as_deref(),
     )
-    .await?;
+    .await
+    .map_err(|error| with_download_registration(error.into(), download_id))?;
 
-    let record = crate::browser::download::get_download(&download_id).ok_or_else(|| {
-        IpcError::new(
-            IpcErrorCode::BrowserDownloadFailed,
-            "Download registered but missing from registry",
+    crate::browser::download::get_download(download_id).ok_or_else(|| {
+        with_download_registration(
+            IpcError::new(
+                IpcErrorCode::BrowserDownloadFailed,
+                "Download registered but missing from registry",
+            ),
+            download_id,
         )
-    })?;
-    Ok(record)
+    })
+}
+
+/// Tells the UI whether the failed download left a registry record (shown on the downloads
+/// shelf) or failed before one existed (so the offer row must keep it with Retry). Read from
+/// the registry itself, so the answer stays true whichever step failed.
+fn with_download_registration(error: IpcError, download_id: &str) -> IpcError {
+    let details = if crate::browser::download::get_download(download_id).is_some() {
+        serde_json::json!({ "downloadRegistered": true, "downloadId": download_id })
+    } else {
+        serde_json::json!({ "downloadRegistered": false })
+    };
+    error.with_details(details)
 }
 
 #[tauri::command]
@@ -4903,6 +4930,68 @@ mod tests {
     #[test]
     fn test_browser_dump_state_script_contains_no_document_cookie() {
         assert!(!BROWSER_DUMP_STATE_SCRIPT.contains("document.cookie"));
+    }
+
+    #[tokio::test]
+    async fn download_refused_before_registration_reports_no_record() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let request = BrowserDownloadRequest {
+            url: "http://127.0.0.1:9/file.bin".into(),
+            // No file name: the target is refused before the registry takes the download.
+            file_path: String::new(),
+            browser_id: None,
+            cookies: Some("a=b".into()),
+        };
+        let error = download_with_registration_signal(&request, request.cookies.as_deref(), &id)
+            .await
+            .expect_err("a destination without a file name must fail");
+        assert_eq!(error.code, IpcErrorCode::BrowserDownloadFailed);
+        assert_eq!(
+            error.message,
+            "Browser download failed: download destination must name a file"
+        );
+        assert_eq!(
+            error.details,
+            Some(serde_json::json!({ "downloadRegistered": false }))
+        );
+        assert!(crate::browser::download::get_download(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn download_failing_after_registration_reports_its_record() {
+        // A local server that answers HTTP 500: the failure comes after the registry took the
+        // download, and is the same on every machine (no freed-port race).
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind stub");
+        let port = listener.local_addr().expect("stub addr").port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf).await;
+            socket
+                .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("write 500");
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = uuid::Uuid::new_v4().to_string();
+        let request = BrowserDownloadRequest {
+            url: format!("http://127.0.0.1:{port}/file.bin"),
+            file_path: dir.path().join("file.bin").to_string_lossy().into_owned(),
+            browser_id: None,
+            cookies: Some("a=b".into()),
+        };
+        let error = download_with_registration_signal(&request, request.cookies.as_deref(), &id)
+            .await
+            .expect_err("an HTTP 500 must fail");
+        server.await.expect("stub server");
+        assert_eq!(error.code, IpcErrorCode::BrowserDownloadFailed);
+        assert_eq!(
+            error.details,
+            Some(serde_json::json!({ "downloadRegistered": true, "downloadId": id }))
+        );
+        let record = crate::browser::download::get_download(&id).expect("failed record kept");
+        assert_eq!(record.status, crate::browser::download::DownloadStatus::Failed);
     }
 
     #[test]

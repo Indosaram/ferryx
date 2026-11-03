@@ -119,6 +119,12 @@ function restoredStack(persisted: PersistedBrowserNavigation): TabStack {
   };
 }
 
+/** Stacks are browsing history, so they reach disk only when history is remembered too. */
+function persistsNavigation(storage: Storage): boolean {
+  const settings = loadBrowserSettings(storage);
+  return settings.restoreTabsOnLaunch && settings.rememberBrowsingHistory;
+}
+
 /**
  * Per-tab back/forward stack kept by Ferryx for both engines. Neither the system webview nor the
  * Chromium engine can import history, so after a restart the stack (persisted under
@@ -148,7 +154,7 @@ export class BrowserTabNavigationStore {
     if (this.stacks) return this.stacks;
     const stacks = new Map<string, TabStack>();
     const storage = this.storage();
-    if (storage && loadBrowserSettings(storage).restoreTabsOnLaunch) {
+    if (storage && persistsNavigation(storage)) {
       let raw: string | null = null;
       try {
         raw = storage.getItem(BROWSER_TAB_NAVIGATION_STORAGE_KEY);
@@ -169,7 +175,7 @@ export class BrowserTabNavigationStore {
     if (storage) {
       try {
         const stacks = this.load();
-        if (stacks.size === 0 || !loadBrowserSettings(storage).restoreTabsOnLaunch) {
+        if (stacks.size === 0 || !persistsNavigation(storage)) {
           storage.removeItem(BROWSER_TAB_NAVIGATION_STORAGE_KEY);
         } else {
           storage.setItem(BROWSER_TAB_NAVIGATION_STORAGE_KEY, serializeBrowserTabNavigation(Object.fromEntries(stacks)));

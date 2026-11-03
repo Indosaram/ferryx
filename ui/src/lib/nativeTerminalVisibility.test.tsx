@@ -190,6 +190,41 @@ describe("useNativeTerminalVisibility", () => {
   });
 
   it("does not yield surface (returns true) when dialog opts out on itself", async () => {
+  it("yields surface (returns false) when an alertdialog mounts", async () => {
+    const { result } = renderHook(() => useNativeTerminalVisibility());
+    expect(result.current).toBe(true);
+
+    const alert = document.createElement("div");
+    alert.setAttribute("role", "alertdialog");
+    await act(async () => {
+      document.body.appendChild(alert);
+    });
+    expect(result.current).toBe(false);
+
+    await act(async () => {
+      document.body.removeChild(alert);
+    });
+    expect(result.current).toBe(true);
+  });
+
+  it("does not yield surface when an in-flow alertdialog opts out", async () => {
+    const { result } = renderHook(() => useNativeTerminalVisibility());
+
+    const alert = document.createElement("div");
+    alert.setAttribute("role", "alertdialog");
+    alert.setAttribute("data-native-terminal-yield", "off");
+    await act(async () => {
+      document.body.appendChild(alert);
+    });
+    expect(result.current).toBe(true);
+
+    // The opt-out is what keeps it from yielding: dropping it makes the same element yield.
+    await act(async () => {
+      alert.removeAttribute("data-native-terminal-yield");
+    });
+    expect(result.current).toBe(false);
+  });
+
     const { result } = renderHook(() => useNativeTerminalVisibility());
     expect(result.current).toBe(true);
 
