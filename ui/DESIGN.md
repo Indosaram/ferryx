@@ -520,3 +520,54 @@ worktrees}`, `mobile-home-inbox-count`, `mobile-home-resume`, `supervisor-home`,
 (`data-state`), `supervisor-take-over`, `supervisor-resume`, `mobile-session-back`.
 
 No new tokens: every colour is an existing `chat-*`, `status-*` or `accent` token.
+
+## 14. Supervisor panel
+
+Applies to `ui/src/components/supervisorPanel/` (desktop left panel, phone home). Same components on
+both surfaces: the desktop scale is the default, `touch` switches to the phone rules of §6 (44px
+targets, `text-sm` / `text-xs` rem sizes, 16px composer text). Only shared semantic tokens appear
+(`bg-card`, `bg-secondary`, `bg-muted`, `text-foreground`, `text-muted-foreground`, `border-border`,
+`border-input`, `bg-primary`, `status-*`, `destructive`); inside `.remote-app-root` these already
+follow the chat palette. No new tokens.
+
+### State glyphs (D12)
+Shape carries the state, colour only repeats it; every glyph is `role="img"` with the state word as
+its `aria-label` and sits at `size-4` (`size-5` is not used; the hit area grows, not the glyph).
+| State | Word | Shape | Token |
+|---|---|---|---|
+| needs | Needs you | filled triangle with an exclamation cut-out | `text-status-warning` |
+| working | Working | open ring with a gap (static, no spinner) | `text-status-working` |
+| done | Finished | filled disc with a check cut-out | `text-status-success` |
+| failed | Failed | filled disc with a cross cut-out | `text-destructive` |
+| idle | Idle | small filled dot | `text-status-idle` |
+Cut-outs use `stroke-background`. Unknown state renders idle with the detail "Status unknown".
+
+### Decision card
+- Surface `rounded-xl border border-border bg-card p-3`, `gap-2` between parts. The border is the
+  plain `border-border`: urgency is carried by the needs glyph in the header row, never by a tinted
+  or amber border (§6 "no accent outline on a rounded card").
+- Header row (one button, opens the terminal): needs glyph, session name `font-medium`, `· computer`,
+  trailing underlined "Terminal" in `text-muted-foreground`.
+- Question `font-medium` (`text-[15px]` desktop, `text-base` phone). Command: one `font-mono`
+  line on `bg-muted rounded-md px-2 py-1.5`, `truncate`, full text in `title`; omitted when null.
+- **Recommendation line**: the S mark, then the reason in `text-muted-foreground`. The S mark is a
+  `size-5 rounded-md bg-primary text-primary-foreground text-xs font-semibold` tile with no gradient
+  and no glow; it is decorative (`aria-hidden`) and the line is prefixed by a `sr-only` "Recommended:".
+- Buttons: the recommended option is first and the only primary (`bg-primary text-primary-foreground`);
+  the rest are `bg-secondary border border-input`. `min-h-8` desktop, `min-h-11 flex-1` phone, `gap-2`.
+- A card without a recommended option and reason is never rendered.
+
+### Rows, log and the rest
+- Session and handling rows: glyph, title (`font-medium truncate`), one `text-muted-foreground`
+  detail line, computer name at the end. A handling row has a sibling Stop button (never nested in the
+  row button), `aria-label="Stop <title>"`, `min-h-11 min-w-11` on phone.
+- Action log: two lines by default, "All N" / "Less" toggle; a line is one sentence, a muted time, a
+  "Why" disclosure (`aria-expanded`, basis in words) and "Undo" when reversible. Unverified claims
+  carry a grey "Unverified" chip (`bg-muted text-muted-foreground`), never a colour.
+- Rules line: `text-muted-foreground` sentence on a `border-t border-border` rule with a trailing
+  "Change" link-button.
+- Composer: `border border-input bg-card rounded-xl` box, borderless textarea ("Tell the
+  supervisor anything"), `size-8` (`size-11` phone) Send in `bg-primary`. `@` opens a
+  `role="listbox"` of sessions (`bg-popover border border-border rounded-lg`) with "title · computer".
+- Setup card: one `rounded-xl border border-border bg-card p-4` with a heading, one sentence and a
+  single primary "Turn on" button; shown instead of every other section.
