@@ -129,6 +129,10 @@ pub struct FleetSession {
     pub last_assistant_line: Option<String>,
     pub updated_at_ms: i64,
     pub stale: bool,
+    /// What daemon telemetry alone says about the session's health. Only `failed` is produced
+    /// today: the agent process left the pane in the middle of a turn. Absent from older peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<HealthKind>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -332,14 +336,15 @@ pub trait SessionControl: Send + Sync {
     async fn stop(&self, session: &SessionRef) -> Result<()>;
     /// Types `text` into the session and submits it.
     async fn send(&self, session: &SessionRef, text: &str) -> Result<()>;
-    /// Answers a pending prompt; fails when `screen_revision` is stale.
+    /// Answers a pending prompt; fails when `screen_revision` is stale. On success returns the
+    /// request id of the delivery receipt the host accepted it under, when the host returned one.
     async fn answer(
         &self,
         session: &SessionRef,
         prompt_id: &str,
         screen_revision: Option<&str>,
         option_index: usize,
-    ) -> Result<()>;
+    ) -> Result<Option<String>>;
     /// Last `lines` lines of the terminal.
     async fn read_tail(&self, session: &SessionRef, lines: usize) -> Result<String>;
 }
@@ -398,6 +403,7 @@ mod tests {
             last_assistant_line: None,
             updated_at_ms: 2_000,
             stale: false,
+            health: None,
         }
     }
 

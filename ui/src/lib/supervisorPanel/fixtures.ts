@@ -109,7 +109,7 @@ export const panelSnapshotFixture: PanelSnapshot = {
       kind: 'answered',
       summary: 'Answered Release notes: v2026.1102.1',
       basis: 'You picked the stable tag the last 4 times',
-      evidence: [{ kind: 'prompt', id: 'prompt-notes-1' }, { kind: 'answerHistory', id: 'hist-12' }],
+      evidence: [{ kind: 'receipt', id: 'sup-answer-notes-1' }, { kind: 'answerHistory', id: 'hist-12' }],
       undo: { kind: 'reopenPrompt', payload: { promptId: 'prompt-notes-1' } },
       live: false,
       createdAtMs: NOW - 13 * MIN,

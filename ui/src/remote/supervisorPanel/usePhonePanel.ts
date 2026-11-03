@@ -4,7 +4,7 @@
 // direct hub routes (answer, pause, converse); each refetches on success so the card leaves.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { PanelActionResult, PanelActions } from "../../lib/supervisorPanel/actions";
+import { parseConverseReply, type PanelActionResult, type PanelActions } from "../../lib/supervisorPanel/actions";
 import type { PanelSnapshot } from "../../lib/supervisorPanel/contract";
 import { parseTranscriptPage, type TranscriptPageLoader } from "../../lib/supervisorPanel/transcript";
 import { useTranscript, type TranscriptSource } from "../../lib/supervisorPanel/useTranscript";
@@ -66,7 +66,10 @@ function jsonPost(body: unknown) {
 async function post(fetchLike: SupervisorFetch, path: string, body?: unknown): Promise<PanelActionResult> {
   try {
     const res = await fetchLike(path, jsonPost(body));
-    if (res.status >= 200 && res.status < 300) return { ok: true };
+    if (res.status >= 200 && res.status < 300) {
+      const reply = parseConverseReply(decode(res.body));
+      return reply ? { ok: true, reply } : { ok: true };
+    }
     return {
       ok: false,
       stale: res.status === 409,

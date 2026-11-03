@@ -305,6 +305,15 @@ struct Tracked {
     settled: bool,
 }
 
+/// What one answered-prompt action-log row says, apart from the session and prompt it is about.
+struct LogLine {
+    summary: String,
+    basis: String,
+    undo: Option<UndoHandle>,
+    /// Request id of the delivery receipt agent control returned, when there was one.
+    receipt: Option<String>,
+}
+
 /// The newest prompt the supervisor answered on its own in a session: what Undo restores.
 /// Dropped once a different prompt or screen revision shows up in that session.
 struct AutonomousAnswer {
@@ -478,15 +487,18 @@ impl Autonomy {
                 option_index,
             )
             .await;
-        if let Err(error) = sent {
-            self.escalate(
-                session,
-                prompt,
-                option_index,
-                format!("I could not answer it ({error})."),
-            );
-            return;
-        }
+        let request_id = match sent {
+            Ok(request_id) => request_id,
+            Err(error) => {
+                self.escalate(
+                    session,
+                    prompt,
+                    option_index,
+                    format!("I could not answer it ({error})."),
+                );
+                return;
+            }
+        };
         if let Some(known) = self.tracked().get_mut(&session.session_ref) {
             known.settled = true;
         }
@@ -515,9 +527,12 @@ impl Autonomy {
             session,
             prompt,
             "answer",
-            format!("Answered \"{label}\" in {}", session.title),
-            basis.to_owned(),
-            Some(undo),
+            LogLine {
+                summary: format!("Answered \"{label}\" in {}", session.title),
+                basis: basis.to_owned(),
+                undo: Some(undo),
+                receipt: request_id,
+            },
         )
         .await;
     }
@@ -547,10 +562,9 @@ impl Autonomy {
         session: &FleetSession,
         prompt: &PendingPrompt,
         who: &str,
-        summary: String,
-        basis: String,
-        undo: Option<UndoHandle>,
+        line: LogLine,
     ) {
+        let LogLine { summary, basis, undo, receipt } = line;
         let now = now_ms();
         let entry = ActionEntry {
             id: 0,
@@ -559,10 +573,16 @@ impl Autonomy {
             kind: ActionKind::Answered,
             summary,
             basis,
-            evidence: vec![EvidenceRef {
-                kind: "prompt".to_owned(),
-                id: prompt.prompt_id.clone(),
-            }],
+            // D9: only the request id of the receipt agent control returned proves delivery.
+            // An answer accepted without one, and an owner answer observed in passing, carry no
+            // evidence and stay Unverified.
+            evidence: receipt
+                .into_iter()
+                .map(|id| EvidenceRef {
+                    kind: "receipt".to_owned(),
+                    id,
+                })
+                .collect(),
             undo,
             live: false,
             created_at_ms: now,
@@ -659,9 +679,12 @@ impl Autonomy {
                 &session,
                 &prompt,
                 "owner",
-                format!("You chose {label}"),
-                basis.to_owned(),
-                None,
+                LogLine {
+                    summary: format!("You chose {label}"),
+                    basis: basis.to_owned(),
+                    undo: None,
+                    receipt: None,
+                },
             )
             .await;
         }

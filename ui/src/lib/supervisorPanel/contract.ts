@@ -48,6 +48,8 @@ export interface FleetSession {
   lastAssistantLine: string | null;
   updatedAtMs: number;
   stale: boolean;
+  /** Telemetry-derived health; only `failed` is produced (agent died mid-turn). Absent otherwise. */
+  health?: HealthKind;
 }
 
 export type ActionKind =

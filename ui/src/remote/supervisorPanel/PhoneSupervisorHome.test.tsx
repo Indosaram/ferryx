@@ -202,6 +202,17 @@ describe("PhoneSupervisorHome", () => {
     expect(screen.getByTestId("supervisor-composer-error")).toHaveTextContent("not reachable");
   });
 
+  it("shows the supervisor's reply with an Unverified chip when it carries no delivery evidence", async () => {
+    const actions = actionsMock({ converse: vi.fn(async () => ({ ok: true, reply: { text: "I restarted the build.", evidence: [] } }) as const) });
+    renderHome({ actions });
+    const input = screen.getByRole("combobox", { name: "Tell the supervisor anything" });
+    fireEvent.change(input, { target: { value: "restart the build" } });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Send" })));
+    const reply = await screen.findByTestId("supervisor-reply");
+    expect(reply).toHaveTextContent("I restarted the build.");
+    expect(within(reply).getByText("Unverified")).toBeInTheDocument();
+  });
+
   it("pins the composer to the safe area and keeps it out of the scroller", () => {
     renderHome();
     const pinned = screen.getByTestId("phone-panel-composer");

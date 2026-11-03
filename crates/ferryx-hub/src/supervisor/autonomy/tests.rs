@@ -13,6 +13,8 @@ use serde_json::json;
 struct Control {
     calls: Mutex<Vec<String>>,
     fail: Mutex<bool>,
+    /// Accepts answers without a delivery receipt, like a host that returns none.
+    no_receipt: Mutex<bool>,
 }
 
 impl Control {
@@ -39,7 +41,7 @@ impl SessionControl for Control {
         prompt_id: &str,
         _screen_revision: Option<&str>,
         option_index: usize,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         if *self.fail.lock().unwrap() {
             return Err(crate::error::HubError::message("the pane moved"));
         }
@@ -47,7 +49,10 @@ impl SessionControl for Control {
             .lock()
             .unwrap()
             .push(format!("answer {session} {prompt_id} {option_index}"));
-        Ok(())
+        if *self.no_receipt.lock().unwrap() {
+            return Ok(None);
+        }
+        Ok(Some(format!("req-{prompt_id}")))
     }
 
     async fn read_tail(&self, _session: &SessionRef, _lines: usize) -> Result<String> {
@@ -134,6 +139,7 @@ fn session(prompt: Option<PendingPrompt>) -> FleetSession {
         last_assistant_line: None,
         updated_at_ms: 1,
         stale: false,
+        health: None,
     }
 }
 
@@ -192,11 +198,34 @@ async fn three_owner_answers_teach_it_and_the_fourth_is_answered_with_a_log_line
         .expect("the autonomous answer is logged");
     assert_eq!(answered.kind, ActionKind::Answered);
     assert!(answered.basis.contains("pnpm"), "{}", answered.basis);
+    // The evidence is the request id agent control accepted the answer under, not the prompt id.
+    assert_eq!(
+        answered.evidence,
+        vec![EvidenceRef { kind: "receipt".to_owned(), id: "req-p4".to_owned() }]
+    );
     assert_eq!(fixture.frames.count("action Answered"), 1);
 
     // The supervisor's own answer is never learned as the owner's.
     fixture.autonomy.owner_answered("s1", "p4", 1).await;
     assert_eq!(history.recent_labels(&probe, "/nonexistent/ferryx-autonomy-test", "claude").await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn an_answer_accepted_without_a_receipt_is_logged_with_no_evidence() {
+    let fixture = fixture().await;
+    teach(&fixture, 1, 3).await;
+    *fixture.control.no_receipt.lock().unwrap() = true;
+    let fourth = question("p4", "Which package manager should I use?", None);
+    fixture.autonomy.observe(&session(Some(fourth))).await;
+
+    assert_eq!(fixture.control.calls(), vec!["answer mac:s1 p4 1".to_owned()]);
+    let log = fixture.autonomy.action_log().list_today(0).await.unwrap();
+    let answered = log
+        .iter()
+        .find(|entry| entry.summary.starts_with("Answered"))
+        .expect("the autonomous answer is logged");
+    // No receipt came back, so nothing stands in for one: the panel shows it as Unverified.
+    assert!(answered.evidence.is_empty(), "{:?}", answered.evidence);
 }
 
 #[tokio::test]

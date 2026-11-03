@@ -420,8 +420,8 @@ pub(crate) mod tests {
         async fn send(&self, _: &SessionRef, _: &str) -> ferryx_hub::error::Result<()> {
             Ok(())
         }
-        async fn answer(&self, _: &SessionRef, _: &str, _: Option<&str>, _: usize) -> ferryx_hub::error::Result<()> {
-            Ok(())
+        async fn answer(&self, _: &SessionRef, _: &str, _: Option<&str>, _: usize) -> ferryx_hub::error::Result<Option<String>> {
+            Ok(None)
         }
         async fn read_tail(&self, _: &SessionRef, _: usize) -> ferryx_hub::error::Result<String> {
             Ok(String::new())
@@ -451,6 +451,7 @@ pub(crate) mod tests {
             last_assistant_line: None,
             updated_at_ms: 1,
             stale: false,
+            health: None,
         }
     }
 
@@ -690,8 +691,8 @@ pub(crate) mod tests {
             self.sends.lock().unwrap().push((session.as_str().to_owned(), text.to_owned()));
             Ok(())
         }
-        async fn answer(&self, _: &SessionRef, _: &str, _: Option<&str>, _: usize) -> ferryx_hub::error::Result<()> {
-            Ok(())
+        async fn answer(&self, _: &SessionRef, _: &str, _: Option<&str>, _: usize) -> ferryx_hub::error::Result<Option<String>> {
+            Ok(None)
         }
         async fn read_tail(&self, _: &SessionRef, _: usize) -> ferryx_hub::error::Result<String> {
             Ok(format!("working on the relay\n{}", self.fresh.lock().unwrap()))
@@ -727,6 +728,7 @@ pub(crate) mod tests {
             last_assistant_line: None,
             updated_at_ms: START_MS,
             stale: false,
+            health: None,
         }
     }
 

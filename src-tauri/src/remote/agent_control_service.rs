@@ -203,6 +203,9 @@ async fn observe_entry(
     if with_last_line {
         entry["lastAssistantLine"] = serde_json::json!(last_assistant_line);
     }
+    if state.machine_services.as_ref().is_some_and(|services| services.sessions.agent_control_failed(session_id)) {
+        entry["health"] = serde_json::json!({ "type": "failed", "reason": "the agent exited in the middle of a turn" });
+    }
     Ok(Observed { entry, screen })
 }
 

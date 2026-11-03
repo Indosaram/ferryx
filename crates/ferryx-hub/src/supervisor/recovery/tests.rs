@@ -148,8 +148,8 @@ impl SessionControl for World {
         tail.push_str(&format!("{line}\n"));
         Ok(())
     }
-    async fn answer(&self, _: &SessionRef, _: &str, _: Option<&str>, _: usize) -> Result<()> {
-        Ok(())
+    async fn answer(&self, _: &SessionRef, _: &str, _: Option<&str>, _: usize) -> Result<Option<String>> {
+        Ok(None)
     }
     async fn read_tail(&self, session: &SessionRef, _lines: usize) -> Result<String> {
         if self.unreadable.lock().unwrap().contains(session) {
@@ -218,6 +218,7 @@ fn session(host: &str, id: &str, agent: &str, state: &str, source: &str, changed
         last_assistant_line: None,
         updated_at_ms: changed,
         stale: false,
+        health: None,
     }
 }
 
@@ -337,6 +338,11 @@ async fn a_twenty_minute_outage_resumes_all_four_sessions_with_one_row_and_no_ca
     assert_eq!(rows[0].kind, ActionKind::Resumed);
     assert!(!rows[0].live);
     assert_eq!(rows[0].evidence.len(), 4);
+    assert!(
+        rows[0].evidence.iter().all(|e| e.kind == "session"),
+        "a session ref is not relabelled as a delivery event: {:?}",
+        rows[0].evidence
+    );
     assert!(rig.opened().is_empty(), "no card, no push");
 }
 

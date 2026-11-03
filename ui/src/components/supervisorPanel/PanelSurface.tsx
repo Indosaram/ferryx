@@ -23,6 +23,7 @@ import { SetupCard } from './SetupCard';
 import { StatusLine } from './StatusLine';
 import { TranscriptSection } from './TranscriptSection';
 import type { TranscriptSource } from '../../lib/supervisorPanel/useTranscript';
+import { toComposerResult } from './composerResult';
 import type { ActionLogLine, GlyphState, MentionOption } from './types';
 
 export type PanelSurfaceProps = {
@@ -282,7 +283,7 @@ export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, c
           touch={touch}
           sessions={mentions}
           seed={seed}
-          onSend={(text, refs) => actions.converse(text, refs)}
+          onSend={async (text, refs) => toComposerResult(await actions.converse(text, refs))}
         />
       )}
     </div>

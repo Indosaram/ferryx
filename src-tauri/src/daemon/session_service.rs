@@ -738,6 +738,15 @@ impl DaemonSessionService {
         }
     }
 
+    /// Whether telemetry says the agent died mid-turn: the daemon released the pane after the
+    /// agent's own last report still said `working`. Cleared when a new agent owns the pane.
+    pub fn agent_control_failed(&self, session_id: &str) -> bool {
+        self.agent_states.current(session_id).is_some_and(|state| {
+            state.origin == crate::daemon::protocol::AgentStateOrigin::ProcessReleased
+                && state.outcome == Some(crate::daemon::protocol::AgentOutcome::Error)
+        })
+    }
+
     /// The agent extension's last report for this PTY, for the agent-control surface.
     pub fn agent_control_report(&self, session_id: &str) -> Option<crate::agent_control::ProviderReport> {
         let current = self.agent_states.current(session_id)?;

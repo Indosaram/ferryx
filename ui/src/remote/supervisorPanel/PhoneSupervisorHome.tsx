@@ -9,6 +9,7 @@ import { ChevronRight, Plus } from "lucide-react";
 import { useRef, useState, type ReactNode } from "react";
 
 import { Composer } from "../../components/supervisorPanel/Composer";
+import { toComposerResult } from "../../components/supervisorPanel/composerResult";
 import { PanelSurface } from "../../components/supervisorPanel/PanelSurface";
 import { cn } from "../../lib/cn";
 import type { PanelActions } from "../../lib/supervisorPanel/actions";
@@ -110,7 +111,7 @@ export function PhoneSupervisorHome(props: PhoneSupervisorHomeProps) {
       ) : null}
       {snapshot && !snapshot.setupRequired ? (
         <div data-testid="phone-panel-composer" className="shrink-0 border-t border-chat-border bg-chat-header px-3 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
-          <Composer touch sessions={mentions} seed={seed} onSend={(text, refs) => actions.converse(text, refs)} />
+          <Composer touch sessions={mentions} seed={seed} onSend={async (text, refs) => toComposerResult(await actions.converse(text, refs))} />
         </div>
       ) : null}
     </div>

@@ -20,6 +20,7 @@ export function Composer({ sessions, touch, onSend, seed }: ComposerProps) {
   const [dismissed, setDismissed] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reply, setReply] = useState<{ text: string; unverified: boolean } | null>(null);
 
   useEffect(() => {
     if (!seed) return;
@@ -76,6 +77,7 @@ export function Composer({ sessions, touch, onSend, seed }: ComposerProps) {
     }
     setText('');
     setCaret(0);
+    setReply(result?.ok ? (result.reply ?? null) : null);
   };
 
   const onChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
@@ -184,6 +186,14 @@ export function Composer({ sessions, touch, onSend, seed }: ComposerProps) {
       {error ? (
         <p role="alert" data-testid="supervisor-composer-error" className={cn('mt-1 px-1 text-status-warning', touch ? 'text-sm' : 'text-xs')}>
           {error}
+        </p>
+      ) : null}
+      {reply ? (
+        <p data-testid="supervisor-reply" className={cn('mt-2 px-1 leading-snug text-foreground', touch ? 'text-sm' : 'text-xs')}>
+          {reply.text}
+          {reply.unverified ? (
+            <span className="ml-1.5 rounded-sm bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">Unverified</span>
+          ) : null}
         </p>
       ) : null}
     </div>

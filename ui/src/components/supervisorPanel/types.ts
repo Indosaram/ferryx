@@ -105,7 +105,9 @@ export interface MentionOption {
   computer: string;
 }
 
-export type ComposerSendResult = { ok: true } | { ok: false; message: string };
+export type ComposerSendResult =
+  | { ok: true; reply?: { text: string; unverified: boolean } }
+  | { ok: false; message: string };
 
 export interface ComposerProps extends TouchProps {
   sessions: MentionOption[];

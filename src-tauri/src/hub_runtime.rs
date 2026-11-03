@@ -1828,6 +1828,16 @@ pub fn publish_panel_decision(
     }));
 }
 
+/// One session's fresh fleet entry (`panel.session`), for a change that does not move its state
+/// word, such as the agent dying while its screen still shows work.
+pub fn publish_panel_session(session: &ferryx_hub::supervisor::panel_contract::FleetSession) {
+    let _ = PANEL_EVENTS.send(json!({
+        "type": "panel.session",
+        "sessionRef": session.session_ref,
+        "session": session,
+    }));
+}
+
 /// An action-log entry was created or updated in place.
 pub fn publish_panel_action(action: &ferryx_hub::supervisor::panel_contract::ActionEntry) {
     let _ = PANEL_EVENTS.send(json!({ "type": PANEL_ACTION_EVENT, "action": action }));

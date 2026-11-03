@@ -63,13 +63,14 @@ impl SessionControl for AgentSessionControl {
         prompt_id: &str,
         screen_revision: Option<&str>,
         option_index: usize,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let Some(revision) = screen_revision.filter(|revision| !revision.trim().is_empty()) else {
             return Err(HubError::message(format!(
                 "{MISSING_SCREEN_REVISION}: the answer names no screen revision, so it cannot be checked against the live prompt; read the session again"
             )));
         };
-        self.control
+        let accepted = self
+            .control
             .execute(
                 Some(session.host_id()),
                 AgentOp::Answer {
@@ -80,8 +81,13 @@ impl SessionControl for AgentSessionControl {
                     request_id: Uuid::new_v4().to_string(),
                 },
             )
-            .await
-            .map(|_| ())
+            .await?;
+        // Only the delivery receipt the host returned names an accepted request; a result
+        // without one yields `None` rather than an id made up here.
+        Ok(accepted
+            .pointer("/receipt/requestId")
+            .and_then(Value::as_str)
+            .map(str::to_owned))
     }
 
     async fn read_tail(&self, session: &SessionRef, lines: usize) -> Result<String> {
@@ -135,10 +141,11 @@ mod tests {
     async fn an_answer_with_its_revision_sends_one_answer_op_to_the_session_host() {
         let recording = Arc::new(RecordingControl::default());
         let control = AgentSessionControl::new(recording.clone());
-        control
-            .answer(&session(), "p1", Some("r7"), 2)
-            .await
-            .unwrap();
+        // The default recorded result carries no receipt: no accepted request id is reported.
+        assert_eq!(
+            control.answer(&session(), "p1", Some("r7"), 2).await.unwrap(),
+            None
+        );
         let ops = recording.ops();
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].0.as_deref(), Some("mac"));
@@ -157,6 +164,18 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn an_accepted_answer_returns_the_request_id_of_its_receipt() {
+        let recording = Arc::new(RecordingControl::default());
+        *recording.result.lock().unwrap() =
+            json!({"receipt": {"requestId": "sup-req-9", "stage": "accepted"}});
+        let control = AgentSessionControl::new(recording.clone());
+        assert_eq!(
+            control.answer(&session(), "p1", Some("r7"), 0).await.unwrap(),
+            Some("sup-req-9".to_owned())
+        );
     }
 
     #[tokio::test]
@@ -222,6 +241,7 @@ mod tests {
                 last_assistant_line: None,
                 updated_at_ms: 1,
                 stale: false,
+                health: None,
             }])
         }
     }

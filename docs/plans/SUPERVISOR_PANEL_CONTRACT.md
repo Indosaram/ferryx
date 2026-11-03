@@ -13,7 +13,7 @@ Code: hub `crates/ferryx-hub/src/supervisor/panel_contract.rs` (serde camelCase)
 | `PendingPrompt` | `{promptId, kind: question\|permission\|approval, question, command?, options[], screenRevision?}` |
 | `FleetSession` | `{sessionRef, hostId, hostLabel, title, cwd, agent, state: working\|blocked\|idle\|unknown, stateSource, stateSinceMs?, screenChangedAtMs?, pendingPrompt?, lastAssistantLine?, updatedAtMs, stale}` |
 | `ActionKind` | answered, retried, resumed, cancelled, stopped, ruleChanged, finished, escalated |
-| `EvidenceRef` / `UndoHandle` | `{kind, id}` / `{kind, payload}` |
+| `EvidenceRef` / `UndoHandle` | `{kind, id}` / `{kind, payload}`; only `receipt`, `delivery`, `stateTransition` and `commit` are delivery events (D9); `prompt`, `session`, `goal` and `answerHistory` name a subject or a reason and leave a claim Unverified |
 | `ActionEntry` | `{id, incidentKey, sessionRef?, kind, summary, basis, evidence[], undo?, live, createdAtMs, updatedAtMs}`; one row per `incidentKey`, updated in place |
 | `Escalation` | `{sessionRef, prompt, recommendedIndex, reason, createdAtMs}`; recommendation mandatory |
 | `AnswerDecision` | `{type:"answer", optionIndex, basis}` / `{type:"escalate", recommendedIndex, reason}` |
@@ -26,7 +26,7 @@ Default rules (`default_rules()`, seconds): `upstreamRetry {backoffSecs:[60,120,
 
 `resume_text(agent)`: `claude` / `claude-code` / `codex` -> `"continue"`; others `None` (escalate).
 
-Hub traits (all in `panel_contract.rs`, `async_trait`): `ActionLog` (`upsert_incident`, `list_today`, `mark_undone`), `RuleStore` (`list`, `upsert`), `HealthClassifier` (`classify(&FleetSession, tail, rules, now_ms) -> HealthKind`, sync), `SessionControl` (`stop`, `send`, `answer`, `read_tail`). Errors: `crate::error::HubError`.
+Hub traits (all in `panel_contract.rs`, `async_trait`): `ActionLog` (`upsert_incident`, `list_today`, `mark_undone`), `RuleStore` (`list`, `upsert`), `HealthClassifier` (`classify(&FleetSession, tail, rules, now_ms) -> HealthKind`, sync), `SessionControl` (`stop`, `send`, `answer`, `read_tail`; `answer` returns `Option<String>`, the `requestId` of the delivery receipt the host accepted it under, which an `answered` row stores as its only `receipt` evidence; no receipt, no evidence). Errors: `crate::error::HubError`.
 
 ## Daemon fields (no code in this task)
 

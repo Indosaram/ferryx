@@ -9,8 +9,8 @@ use tokio::sync::Mutex;
 use crate::agent_control::{AgentControl, AgentOp};
 use crate::error::{HubError, Result};
 use crate::supervisor::panel_contract::{
-    ActionEntry, ActionLog, Escalation, FleetSession, PanelSnapshot, PendingPrompt, RuleStore,
-    SessionRef, StandingRule,
+    ActionEntry, ActionLog, Escalation, FleetSession, HealthKind, PanelSnapshot, PendingPrompt,
+    RuleStore, SessionRef, StandingRule,
 };
 
 /// One host in a fleet list. A failure is an entry, not an error for the whole list.
@@ -209,6 +209,10 @@ fn fleet_session(
         // daemon that omits it falls back to the merge time.
         updated_at_ms: millis("observedAt").unwrap_or(now_ms),
         stale,
+        health: value
+            .get("health")
+            .and_then(|health| serde_json::from_value::<HealthKind>(health.clone()).ok())
+            .filter(|health| matches!(health, HealthKind::Failed { .. })),
     })
 }
 
