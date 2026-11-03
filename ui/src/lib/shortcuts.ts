@@ -411,7 +411,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
   },
   {
     id: "notifications.toggle",
-    title: "Toggle notification center",
+    title: "Show supervisor",
     group: "Global",
     binding: { key: "n", mod: true, shift: true },
     aliases: [{ key: "i", mod: true, shift: true }],

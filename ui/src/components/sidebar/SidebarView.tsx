@@ -1,10 +1,7 @@
-import { CheckCheck, PanelLeftClose, Plus } from "lucide-react";
+import { PanelLeftClose, Plus } from "lucide-react";
 import { Fragment, type ReactNode } from "react";
 
 import { cn } from "../../lib/cn";
-import { AttentionInbox } from "../../features/ferryx/attention/AttentionInbox";
-import type { AttentionPrompts } from "../../features/ferryx/attention/attentionPrompts";
-import type { AttentionRow } from "../../features/ferryx/attention/attentionModel";
 import { IconButton } from "../ui/IconButton";
 import { SectionHeader } from "../ui/SectionHeader";
 import { SIDEBAR_EMPTY_TEXT } from "./sidebarLabels";
@@ -36,18 +33,6 @@ export type SidebarReorder = {
   readonly rows: (project: SidebarProjectNode, rows: readonly SidebarWorktreeNode[], children: ReactNode) => ReactNode;
 };
 
-export type SidebarInbox = {
-  readonly rows: readonly AttentionRow[];
-  readonly onOpen: (row: AttentionRow) => void;
-  /** Absent when this surface may not dismiss (the remote showing a desktop's published rows). */
-  readonly onDismiss?: (row: AttentionRow) => void;
-  readonly onDismissAll?: () => void;
-  /** Present where a needs-you row may answer its pane's prompt inline (the desktop). */
-  readonly prompts?: AttentionPrompts;
-  /** Working panes the Inbox lists only once the daemon reads a prompt on them (needs `prompts`). */
-  readonly candidates?: readonly AttentionRow[];
-};
-
 export type SidebarViewProps = {
   readonly model: SidebarModel;
   readonly live: SidebarLive;
@@ -56,18 +41,14 @@ export type SidebarViewProps = {
   readonly density?: SidebarDensity;
   readonly actions: SidebarViewActions;
   readonly filter: { readonly query: string; readonly onChange: (query: string) => void };
-  /** Active tab; the tabs render only when an inbox is offered. */
+  /** Active tab; the tabs render only when the Supervisor panel is offered. */
   readonly view?: SidebarViewId;
-  readonly inbox?: SidebarInbox;
-  /**
-   * The Supervisor tab's content; the tab shows when this is set and advanced features are on.
-   * `always` shows it regardless (the autonomy panel is the sidebar, not an advanced feature).
-   */
-  readonly supervisor?: { readonly typing: boolean; readonly content: ReactNode; readonly always?: boolean };
+  /** The Supervisor panel; the Supervisor tab shows whenever this is set. */
+  readonly supervisor?: { readonly content: ReactNode };
   /** Leading titlebar content (desktop traffic-light pad). */
   readonly titlebarLeading?: ReactNode;
   readonly titlebarProps?: Readonly<Record<string, string | boolean | undefined>>;
-  readonly shortcuts?: { readonly hideSidebar?: string; readonly addProject?: string; readonly settings?: string; readonly inbox?: string };
+  readonly shortcuts?: { readonly hideSidebar?: string; readonly addProject?: string; readonly settings?: string };
   /** Container-supplied header extras (menus, slot activation, add worktree). */
   readonly projectChrome?: (
     project: SidebarProjectNode,
@@ -78,7 +59,7 @@ export type SidebarViewProps = {
   readonly reorder?: SidebarReorder;
 };
 
-/** The sidebar body both apps render: titlebar actions, view tabs, filter, project tree, footer. */
+/** The sidebar body both apps render: titlebar actions, view tabs, panel, filter, project tree, footer. */
 export function SidebarView({
   model,
   live,
@@ -87,7 +68,6 @@ export function SidebarView({
   actions,
   filter,
   view = "worktrees",
-  inbox,
   supervisor,
   titlebarLeading,
   titlebarProps,
@@ -97,12 +77,11 @@ export function SidebarView({
   reorder,
 }: SidebarViewProps) {
   const touch = density === "touch";
-  const showSupervisor = Boolean(supervisor) && (Boolean(supervisor?.always) || model.advancedFeatures);
-  const activeView: SidebarViewId = view === "supervisor" && !showSupervisor ? "worktrees" : view;
+  const activeView: SidebarViewId = view === "supervisor" && !supervisor ? "worktrees" : view;
   const worktreesHidden = activeView !== "worktrees";
   const collapsed = new Set(model.collapsedGroupIds);
   const entries = filterSidebarModel(model, filter.query);
-  const showTitlebar = Boolean(titlebarLeading || actions.hideSidebar || actions.addProject || inbox);
+  const showTitlebar = Boolean(titlebarLeading || actions.hideSidebar || actions.addProject);
 
   const sections = entries.map(({ group: project, rows, forceExpanded }) => {
     const expanded = forceExpanded || !collapsed.has(project.groupId);
@@ -171,31 +150,12 @@ export function SidebarView({
               <Plus className="size-3.5" />
             </IconButton>
           ) : null}
-          {inbox ? (
-            <div className="ml-auto flex items-center gap-0.5">
-              {activeView === "inbox" && inbox.onDismissAll ? (
-                <IconButton label="Mark all read" className="no-drag" size="sm" disabled={inbox.rows.length === 0} onClick={inbox.onDismissAll}>
-                  <CheckCheck className="size-3.5" />
-                </IconButton>
-              ) : null}
-            </div>
-          ) : null}
         </div>
       ) : null}
 
-      {inbox && actions.onViewChange ? (
-        <SidebarViewTabs
-          view={activeView}
-          onViewChange={actions.onViewChange}
-          inboxCount={inbox.rows.length}
-          supervisor={showSupervisor && supervisor ? { typing: supervisor.typing } : null}
-          inboxShortcut={shortcuts.inbox}
-        />
-      ) : null}
+      {supervisor && actions.onViewChange ? <SidebarViewTabs view={activeView} onViewChange={actions.onViewChange} /> : null}
 
       {activeView === "supervisor" && supervisor ? supervisor.content : null}
-
-      {activeView === "inbox" && inbox ? <AttentionInbox rows={inbox.rows} onOpen={inbox.onOpen} {...(inbox.onDismiss ? { onDismiss: inbox.onDismiss } : {})} {...(inbox.prompts ? { prompts: inbox.prompts } : {})} {...(inbox.candidates ? { candidates: inbox.candidates } : {})} /> : null}
 
       <div
         data-testid="worktree-region"

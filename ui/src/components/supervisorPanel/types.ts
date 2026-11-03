@@ -50,6 +50,19 @@ export interface SessionRowProps extends TouchProps {
   state: GlyphState;
   selected?: boolean;
   onOpen: () => void;
+  /**
+   * A legacy supervisor goal is a property of its session (D14): shown under the row, with
+   * pause/resume as the row menu's one item. Absent for a session without one.
+   */
+  goal?: SessionGoalProps;
+}
+
+export interface SessionGoalProps {
+  text: string;
+  paused: boolean;
+  onTogglePaused: () => void;
+  /** The pause call is in flight. */
+  pending?: boolean;
 }
 
 export interface ActionLogLine {

@@ -2785,9 +2785,9 @@ describe("Remote UI Components", () => {
         );
       });
 
-      // Verify the phone home's Worktrees (workspace context) tab is present and magic link override is released
+      // Verify the phone home's panel (with its start-a-session button) is present and magic link override is released
       expect(
-        await screen.findByTestId("mobile-home-tab-worktrees")
+        await screen.findByTestId("phone-panel-start-session")
       ).not.toBeNull();
 
       // 6. User switches to saved host: must now issue workspace state request to saved origin

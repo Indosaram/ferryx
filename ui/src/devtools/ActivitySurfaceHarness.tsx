@@ -1,11 +1,9 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { selectActivityNotificationTargets, type ActivityNotificationEvent, selectGlobalUnreadBadgeCount, selectTabActivitySummaries, selectWorktreeActivitySummaries, workspaceReducer, type WorkspaceAction, type WorkspaceState } from "../state/workspaceStore";
 import { TabBar } from "../components/TabBar";
 import { WorktreeList } from "../components/WorktreeList";
 import type { Worktree } from "../lib/types";
-import { AttentionInbox } from "../features/ferryx/attention/AttentionInbox";
-import { buildAttentionRows, liveActivityLookup } from "../features/ferryx/attention/attentionModel";
 import { NotificationCoordinator } from "../lib/notificationCoordinator";
 import { isNotificationTargetObserved, wireActivityRecording, type RecordingListener } from "../lib/notificationCenter/activityRecording";
 import { notificationCenterStore } from "../lib/notificationCenter/notificationCenterStore";
@@ -152,8 +150,6 @@ export function ActivitySurfaceHarness() {
 
   const tabActivity = useMemo(() => selectTabActivitySummaries(state), [state]);
   const worktreeActivity = useMemo(() => selectWorktreeActivitySummaries(state), [state]);
-  const inbox = useSyncExternalStore(notificationCenterStore.subscribe, notificationCenterStore.getSnapshot);
-  const attentionRows = useMemo(() => buildAttentionRows(inbox.entries, liveActivityLookup(state, [])), [inbox, state]);
 
   const scenarios: Array<{ id: string; label: string; run: () => void }> = [
     {
@@ -319,19 +315,6 @@ export function ActivitySurfaceHarness() {
           activityByWorktreePath={worktreeActivity}
           onSelect={() => undefined}
           onDelete={() => undefined}
-        />
-      </div>
-
-      <div data-testid="harness-notifications" className="mt-4 flex h-80 w-[300px] flex-col border border-border bg-worktree-sidebar text-worktree-sidebar-foreground">
-        <AttentionInbox
-          rows={attentionRows}
-          onOpen={(row) => {
-            const tab = stateRef.current.layout.tabs.find((candidate) => "sessionId" in candidate && candidate.sessionId === row.sessionId);
-            if (!tab) return;
-            dispatch({ type: "ACTIVATE_TAB", tabId: tab.id } as WorkspaceAction);
-            notificationCenterStore.markEntriesRead([{ id: row.id, expectedRevision: row.revision }]);
-          }}
-          onDismiss={(row) => notificationCenterStore.markEntriesRead([{ id: row.id, expectedRevision: row.revision }])}
         />
       </div>
 

@@ -150,17 +150,6 @@ if (parity) {
   remoteHostStore.setState((state) => ({ ...state, hosts: sidebarParityFixture.pairedHosts, nativeStatus: "ready", machineFeaturesEnabled: true }));
   updateListingFailures(() => sidebarParityFixture.listingFailures);
 }
-const attention = {
-  rows: [1, 2, 3].map((n) => ({
-    id: `qa-row-${n}`, revision: 1, workspaceId: LOCAL_ID, sessionId: `qa-sess-${n}`, state: "needs-you" as const,
-    who: "omo", location: `ferryx / row ${n}`, text: "Needs input", at: 0,
-  })),
-  onOpen: () => markFixture("fixtureAttentionOpen")(),
-  onDismiss: () => markFixture("fixtureAttentionDismiss")(),
-  onDismissAll: () => markFixture("fixtureAttentionDismissAll")(),
-  inboxOpen: params.get("inbox") === "1",
-  onInboxOpenChange: () => markFixture("fixtureInboxToggle")(),
-};
 const root = document.getElementById("root");
 if (root && parity) {
   const fixture = sidebarParityFixture;
@@ -180,7 +169,6 @@ if (root && parity) {
         onSelectWorktree={markFixture("fixtureSelectedWorktree")}
         onCreateWorktree={markFixture("fixtureCreateWorktree")}
         onOpenSettings={() => markFixture("fixtureOpenSettings")()}
-        attention={{ ...attention, rows: [...sidebarParityFixture.desktopAttention] }}
       />
     </div>,
   );
@@ -207,7 +195,6 @@ if (root && parity) {
         onSelectWorktree={markFixture("fixtureSelectedWorktree")}
         onCreateWorktree={markFixture("fixtureCreateWorktree")}
         onOpenSettings={() => markFixture("fixtureOpenSettings")()}
-        attention={attention}
       />
     </div>,
   );

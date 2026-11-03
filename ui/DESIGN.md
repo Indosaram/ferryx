@@ -190,7 +190,7 @@ The settings redesign originated from the audit documented in `ui/docs/settings-
 The sidebar presents **one nested tree**, not two disjoint lists:
 
 ```
-[ Worktrees | Inbox 3 ]                  <- SegmentedControl
+[ Supervisor | Worktrees ]               <- SegmentedControl (Supervisor panel is the default)
 [ Filter worktrees      ]                <- Input
 Projects 4                               <- SectionHeader, count = project groups
 +- v ferryx                    [+] [...] <- project row; + and ... on hover only
@@ -229,8 +229,8 @@ Rules:
 8. **Project name click selects and expands; it never collapses.** Only the chevron collapses.
 9. **Project hover actions are exactly `+` and `...`** (`IconButton` sm). `...` opens the native
    project menu (Past conversations, Remove Project); no DOM dropdown in the sidebar.
-10. **Anatomy, top to bottom**: `SegmentedControl` Worktrees / Inbox (Inbox carries the attention
-    count), a filter `Input` ("Filter worktrees", Escape clears, not persisted), `SectionHeader`
+10. **Anatomy, top to bottom**: `SegmentedControl` Supervisor / Worktrees (the Supervisor panel
+    opens by default; there is no Inbox view), a filter `Input` ("Filter worktrees", Escape clears, not persisted), `SectionHeader`
     "Projects N", the tree, and a footer reading `<n> running · <m> needs input` in
     `text-[10px] text-muted-foreground`. Each footer part is omitted at zero; both zero = empty footer.
     A non-empty filter forces projects with a matching worktree expanded.
@@ -469,34 +469,21 @@ Applies to the remote web client below 768px when signed in to an account
 
 ### Navigation
 
-- Three home destinations behind a bottom tab bar: Supervisor (default after sign-in),
-  Inbox, Worktrees. `MobileHomeTabBar`: `role="tablist"`, 56px (`h-14`) plus `.pb-safe`,
-  icon above a one-word text label, roving tabindex with Arrow keys. Inbox shows a count
-  badge on `bg-status-warning` when sessions wait; the count is also in the tab's
-  accessible name.
-- Opening a session from any destination shows the Session screen (the existing
-  `MobileTopBar` plus chat/terminal body). The tab bar is hidden there so the composer and
-  keyboard keep the full height. `MobileTopBar` gains a back control (`mobile-session-back`).
-- `usePhoneNavigation` *replaces* the history entry on a tab switch and *pushes* one only on
-  entering a session or opening an overlay (§6 History). `popstate` closes the topmost overlay,
-  then returns from a session to the destination it came from; back from a home tab leaves the
-  app instead of replaying earlier tab taps.
+- The Supervisor panel is the home (§14); there is no tab bar, no Inbox and no lanes list. "+" on
+  the panel opens the Worktrees screen (the drawer's inventory inline, with New terminal and New
+  worktree) where a session is started; "Back to the supervisor" returns. With no hub running the
+  panel body is the single setup card ("Turn on the supervisor on <computer>").
+- Opening a session from the panel or the Worktrees screen shows the Session screen (the existing
+  `MobileTopBar` plus chat/terminal body). `MobileTopBar` carries a back control
+  (`mobile-session-back`).
+- `usePhoneNavigation` *replaces* the history entry when "+" or Back switches home screens and
+  *pushes* one only on entering a session or opening an overlay (§6 History). `popstate` closes
+  the topmost overlay, then returns from a session to the home screen it came from.
 
 ### Surfaces
 
-- Supervisor: header card (`bg-chat-surface-raised`) with a sentence-case status whose unit
-  matches the list below it (for example "Watching 3 lanes"), never a bare enum such as
-  `off` or `watching 4`, and one sentence. Then one section per machine, with a state note when it is loading, offline,
-  not connected, unsupported ("Update Ferryx on this computer to see its supervisor") or
-  has the hub stopped. Lane cards show the name (cwd leaf · title), one status slot (paused
-  > typing > needs you > hub status), Goal, "Stopped: <reason>", and a 44px Pause/Resume
-  button. A typing lane uses `bg-chat-surface-raised` plus a text label and icon (never
-  `bg-accent`, which is a desktop token with no light-theme value on the chat palette). Then a
-  "Recent" list of the last 3 actions with "Show all"; each row names its computer, opens its
-  session, and shows humanised text (no op names, refusal codes or session-id prefixes).
-- Inbox: needs-you sessions from every machine. Waiting and supervisor-held come first,
-  then finished; each row states why in text ("Waiting for your answer", "Supervisor paused
-  this lane", "Finished"). The dot colour only repeats that text.
+- Panel: see §14. A legacy supervisor goal is a property of its session row (a "Supervisor: <goal>"
+  line); pause/resume is the row menu's item.
 - Worktrees: the drawer's inventory rendered inline (`RemoteWorkspaceMirror inline`) with
   New terminal and New worktree, plus an Account button. Sign out lives only in the Account
   sheet (one place, confirmed, out of the thumb zone); the sheet holds the email, Sign out and
@@ -510,11 +497,8 @@ Applies to the remote web client below 768px when signed in to an account
 
 ### Test ids
 
-`mobile-home` (`data-destination`), `mobile-home-tabs`, `mobile-home-tab-{supervisor,inbox,
-worktrees}`, `mobile-home-inbox-count`, `mobile-home-resume`, `supervisor-home`,
-`supervisor-home-headline`, `supervisor-machine-<machineId>`, `supervisor-lane-card`
-(`data-lane-key`, `data-machine-id`), `supervisor-lane-pause`, `supervisor-recent-action`,
-`inbox-home`, `inbox-row` (`data-machine-id`, `data-session-id`), `worktrees-home`,
+`mobile-home` (`data-home`: `panel` or `panel-start`), `phone-supervisor-home`,
+`phone-panel-start-session`, `phone-panel-start-back`, `mobile-home-resume`,
 `remote-worktrees-inline`, `account-open`, `account-delete-open`, `account-delete-email`,
 `account-delete-confirm`, `account-delete-error` (`data-code`), `supervisor-session-strip`
 (`data-state`), `supervisor-take-over`, `supervisor-resume`, `mobile-session-back`.

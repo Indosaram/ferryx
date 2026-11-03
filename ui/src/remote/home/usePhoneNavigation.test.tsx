@@ -23,15 +23,15 @@ describe("usePhoneNavigation", () => {
   it("replaces the entry on a tab switch and pushes one per opened session", () => {
     const { result } = renderHook(() => usePhoneNavigation(true));
     const start = window.history.length;
-    act(() => result.current.selectTab("inbox"));
     act(() => result.current.selectTab("worktrees"));
-    act(() => result.current.selectTab("inbox"));
+    act(() => result.current.selectTab("supervisor"));
+    act(() => result.current.selectTab("worktrees"));
     expect(window.history.length).toBe(start);
-    expect(window.history.state?.[PHONE_HISTORY_KEY]).toEqual({ kind: "home", destination: "inbox" });
+    expect(window.history.state?.[PHONE_HISTORY_KEY]).toEqual({ kind: "home", destination: "worktrees" });
     act(() => result.current.openSession());
     expect(window.history.length).toBe(start + 1);
-    expect(result.current.screen).toEqual({ kind: "session", from: "inbox" });
-    expect(result.current.destination).toBe("inbox");
+    expect(result.current.screen).toEqual({ kind: "session", from: "worktrees" });
+    expect(result.current.destination).toBe("worktrees");
   });
 
   it("returns to the destination the session came from when the platform back fires", () => {
@@ -45,35 +45,35 @@ describe("usePhoneNavigation", () => {
 
   it("treats an entry it did not write as the home of the open session", () => {
     const { result } = renderHook(() => usePhoneNavigation(true));
-    act(() => result.current.selectTab("inbox"));
+    act(() => result.current.selectTab("worktrees"));
     act(() => result.current.openSession());
     popTo(null);
-    expect(result.current.screen).toEqual({ kind: "home", destination: "inbox" });
+    expect(result.current.screen).toEqual({ kind: "home", destination: "worktrees" });
   });
 
   it("neither reads nor writes history while disabled", () => {
     window.history.replaceState({ other: 1 }, "");
     const start = window.history.length;
     const { result } = renderHook(() => usePhoneNavigation(false));
-    act(() => result.current.selectTab("inbox"));
+    act(() => result.current.selectTab("worktrees"));
     act(() => result.current.openSession());
     expect(window.history.length).toBe(start);
     expect(window.history.state).toEqual({ other: 1 });
     popTo({ [PHONE_HISTORY_KEY]: { kind: "home", destination: "worktrees" } });
-    expect(result.current.screen).toEqual({ kind: "session", from: "inbox" });
+    expect(result.current.screen).toEqual({ kind: "session", from: "worktrees" });
   });
 
   it("keeps the tab across a layout flip and drops only the pushed session", () => {
     const { result, rerender } = renderHook(({ on }) => usePhoneNavigation(on), { initialProps: { on: true } });
-    act(() => result.current.selectTab("inbox"));
+    act(() => result.current.selectTab("worktrees"));
     act(() => result.current.openSession());
     rerender({ on: false });
-    expect(result.current.screen).toEqual({ kind: "home", destination: "inbox" });
+    expect(result.current.screen).toEqual({ kind: "home", destination: "worktrees" });
   });
 
   it("resets to the Supervisor default on reset (sign-out)", () => {
     const { result } = renderHook(() => usePhoneNavigation(true));
-    act(() => result.current.selectTab("inbox"));
+    act(() => result.current.selectTab("worktrees"));
     act(() => result.current.reset());
     expect(result.current.screen).toEqual({ kind: "home", destination: "supervisor" });
     expect(window.history.state?.[PHONE_HISTORY_KEY]).toEqual({ kind: "home", destination: "supervisor" });

@@ -15,6 +15,7 @@ function actionsMock(overrides: Partial<PanelActions> = {}): PanelActions {
   return {
     answer: vi.fn(async () => ({ ok: true }) as const),
     setPaused: vi.fn(async () => ({ ok: true }) as const),
+    setLanePaused: vi.fn(async () => ({ ok: true }) as const),
     converse: vi.fn(async () => ({ ok: true }) as const),
     stop: vi.fn(async () => ({ ok: true }) as const),
     undo: vi.fn(async () => ({ ok: true }) as const),

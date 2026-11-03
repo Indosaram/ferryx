@@ -230,6 +230,48 @@ describe('PanelSurface', () => {
     expect(document.querySelectorAll('[data-testid="session-row"] [data-glyph="done"]')).toHaveLength(0);
   });
 
+  it('carries a legacy goal on its session row, with pause and resume as the row menu item', async () => {
+    const setLanePaused = vi.fn(async () => ({ ok: true }) as const);
+    const actions = { ...(inert as object), setLanePaused } as never;
+    const goal = { laneKey: 'ledger', text: 'Get tests green', paused: false };
+    const { rerender } = render(
+      <PanelSurface snapshot={panelSnapshotFixture} actions={actions} nowMs={NOW} goals={new Map([['mac:wtlist', goal]])} />,
+    );
+    // One goal, one session row: no lanes list, no goal card.
+    expect(screen.getAllByTestId('session-goal')).toHaveLength(1);
+    expect(screen.getByTestId('session-goal')).toHaveTextContent('Get tests green');
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for Worktree list refresh' }));
+    expect(screen.getAllByRole('menuitem')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Pause supervisor' }));
+    await waitFor(() => expect(setLanePaused).toHaveBeenCalledWith('ledger', true));
+    rerender(
+      <PanelSurface snapshot={panelSnapshotFixture} actions={actions} nowMs={NOW} goals={new Map([['mac:wtlist', { ...goal, paused: true }]])} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for Worktree list refresh' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Resume supervisor' }));
+    await waitFor(() => expect(setLanePaused).toHaveBeenLastCalledWith('ledger', false));
+  });
+
+  it('shows a refused lane pause where the owner acted', async () => {
+    const setLanePaused = vi.fn(async () => ({ ok: false, stale: false, message: 'Hub is offline' }) as const);
+    const actions = { ...(inert as object), setLanePaused } as never;
+    render(
+      <PanelSurface snapshot={panelSnapshotFixture} actions={actions} nowMs={NOW} goals={new Map([['mac:wtlist', { laneKey: 'ledger', text: 'g', paused: false }]])} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for Worktree list refresh' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Pause supervisor' }));
+    expect(await screen.findByTestId('supervisor-panel-error')).toHaveTextContent('Hub is offline');
+  });
+
+  it('replaces sections 2-6 with the setup card when no hub is running', () => {
+    const noHub = { ...panelSnapshotFixture, setupRequired: true };
+    render(<PanelSurface snapshot={noHub} actions={inert} nowMs={NOW} computerLabel="maho-win" />);
+    expect(screen.getByRole('heading', { name: 'Turn on the supervisor on maho-win' })).toBeInTheDocument();
+    for (const section of ['Needs you', 'Handling', 'Sessions']) expect(screen.queryByRole('region', { name: section })).toBeNull();
+    expect(screen.queryByTestId('session-row')).toBeNull();
+    expect(screen.queryByTestId('decision-card')).toBeNull();
+  });
+
   it('marks Unverified only on claim kinds without evidence', () => {
     const base = panelSnapshotFixture.log[0];
     const snapshot = {

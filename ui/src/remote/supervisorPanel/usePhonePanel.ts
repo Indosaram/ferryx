@@ -152,6 +152,7 @@ export function usePhonePanel(input: {
         optionIndex,
       }),
     setPaused: (paused) => act("/api/v1/supervisor/pause", { paused }),
+    setLanePaused: (laneKey, paused) => act("/api/v1/supervisor/pause", { laneKey, paused }),
     converse: (text, mentions) =>
       act("/api/v1/supervisor/converse", { text, mentions: [...mentions], requestId: globalThis.crypto.randomUUID() }),
     stop: (sessionRef) => act(`/api/v1/sessions/${encodeURIComponent(sessionRef)}/stop`),

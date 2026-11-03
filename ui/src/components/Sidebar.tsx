@@ -42,15 +42,11 @@ import {
   SIDEBAR_WORKTREE_ORDER_STORAGE_KEY,
 } from "../lib/storageKeys";
 import type { RegisteredProject } from "../lib/tauri";
-import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
-import type { AttentionPrompts } from "../features/ferryx/attention/attentionPrompts";
 import type { ActiveAgent, DirtyState, Worktree } from "../lib/types";
-import { useAdvancedFeatures } from "../lib/advancedFeatures";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
 import { pruneWorktreeOrder, readSidebarDragData, worktreeOrdersEqual, type SidebarDragData } from "./sidebar-dnd/sidebarDragData";
 import { projectSortableId, SortableProjectSection } from "./sidebar-dnd/SortableProjectSection";
 import { SupervisorPanelHost } from "./supervisorPanel/SupervisorPanelHost";
-import { SupervisorPanel, useSupervisorTyping } from "./supervisor/SupervisorPanel";
 import { isStandaloneRemoteGroup, projectDisplayLabel, projectHostLabel } from "./sidebar/sidebarLabels";
 import { sidebarLiveState, type SidebarProjectNode, type SidebarRowLive, type SidebarWorktreeNode } from "./sidebar/sidebarModel";
 import { applyWorktreeOrder, emptyProjectGroupIds, groupWorktreesByProject, initialCollapsedProjects, seedCollapsedProjects } from "./sidebar/sidebarRows";
@@ -104,23 +100,11 @@ type SidebarProps = {
   onOpenResources?: () => void;
   onToggle?: () => void;
   onHide?: () => void;
-  /** Focuses the terminal tab of a Supervisor panel row; the panel shows only when this is set. */
+  /**
+   * Focuses the terminal tab of a Supervisor panel row. The panel is the sidebar's default view
+   * whenever this is set (App always sets it); a host without a focus target has no panel.
+   */
   onFocusSupervisorSession?: (sessionRef: string) => void;
-  /** Present when the sidebar offers the attention inbox as a sub view behind its header icon. */
-  attention?: SidebarAttention;
-};
-
-export type SidebarAttention = {
-  rows: readonly AttentionRow[];
-  onOpen: (row: AttentionRow) => void;
-  onDismiss: (row: AttentionRow) => void;
-  onDismissAll: () => void;
-  /** Lets a needs-you row answer its pane's prompt inline. */
-  prompts?: AttentionPrompts;
-  /** Working panes the Inbox lists only once the daemon reads a prompt on them. */
-  candidates?: readonly AttentionRow[];
-  inboxOpen: boolean;
-  onInboxOpenChange: (open: boolean) => void;
 };
 
 /**
@@ -156,18 +140,13 @@ export function Sidebar({
   onToggle,
   onHide,
   onFocusSupervisorSession,
-  attention,
 }: SidebarProps) {
-  const inboxOpen = attention?.inboxOpen ?? false;
-  // The autonomy panel is the sidebar's Supervisor view: it opens by default, replaces the
-  // earlier lanes view (never both), and is not behind advanced features.
-  const panelMode = onFocusSupervisorSession !== undefined && attention !== undefined;
+  // The autonomy panel is the sidebar's Supervisor view: it opens by default and is not behind
+  // advanced features. The project tree is the other view; there is no Inbox view.
+  const panelMode = onFocusSupervisorSession !== undefined;
   const widthRange = panelMode ? SUPERVISOR_SIDEBAR_RANGE : DEFAULT_SIDEBAR_RANGE;
-  const [supervisorOpenState, setSupervisorOpen] = useState(panelMode);
-  const advancedFeatures = useAdvancedFeatures();
-  const supervisorOpen = supervisorOpenState && !inboxOpen && (advancedFeatures || panelMode);
-  const supervisorTyping = useSupervisorTyping();
-  const sidebarView: SidebarViewId = supervisorOpen ? "supervisor" : inboxOpen ? "inbox" : "worktrees";
+  const [chosenView, setChosenView] = useState<SidebarViewId>(panelMode ? "supervisor" : "worktrees");
+  const sidebarView: SidebarViewId = panelMode ? chosenView : "worktrees";
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [resizing, setResizing] = useState(false);
   const [width, setWidth] = useState(() => loadSidebarWidth(widthRange));
@@ -514,30 +493,17 @@ export function Sidebar({
             hideSidebar: hide ?? noop,
             openSettings: () => onOpenSettings?.(),
             openResources: onOpenResources ?? noop,
-            onViewChange: attention
-              ? (view) => {
-                  setSupervisorOpen(view === "supervisor");
-                  if ((view === "inbox") !== inboxOpen) attention.onInboxOpenChange(view === "inbox");
-                }
-              : undefined,
+            onViewChange: panelMode ? setChosenView : undefined,
           }}
           filter={{ query: filterQuery, onChange: setFilterQuery }}
           view={sidebarView}
-          inbox={attention}
-          supervisor={
-            attention
-              ? panelMode && onFocusSupervisorSession
-                ? { typing: supervisorTyping, always: true, content: <SupervisorPanelHost onFocusSession={onFocusSupervisorSession} /> }
-                : { typing: supervisorTyping, content: <SupervisorPanel /> }
-              : undefined
-          }
+          supervisor={onFocusSupervisorSession ? { content: <SupervisorPanelHost onFocusSession={onFocusSupervisorSession} /> } : undefined}
           titlebarLeading={isMac ? <div data-testid="titlebar-traffic-light-pad" className="w-[72px] shrink-0" aria-hidden="true" /> : null}
           titlebarProps={{ "data-testid": "sidebar-drag-region", "data-tauri-drag-region": true }}
           shortcuts={{
             hideSidebar: hide ? "sidebar.left.toggle" : undefined,
             addProject: "project.add",
             settings: onOpenSettings ? "settings.toggle" : undefined,
-            inbox: "notifications.toggle",
           }}
           projectChrome={projectChrome}
           renderRow={renderRow}

@@ -1,14 +1,15 @@
-// Phone navigation for the supervisor-first home: three home destinations behind a bottom tab
-// bar, and a Session screen pushed on top. A tab switch replaces the history entry (as platform
-// tab bars do); a Session screen and every overlay push one, so the back gesture closes the
-// topmost overlay first, then returns from the session, then leaves.
+// Phone navigation for the supervisor-first home: the Supervisor panel (home), the Worktrees
+// screen "+" opens to start a session, and a Session screen pushed on top. There is no tab bar.
+// Moving between the two home screens replaces the history entry; a Session screen and every
+// overlay push one, so the back gesture closes the topmost overlay first, then returns from the
+// session, then leaves.
 // Entering and leaving the Session screen runs through runPhoneTransition (a push/pop slide
-// where the browser supports view transitions); tab switches and resets stay instant.
+// where the browser supports view transitions); home switches and resets stay instant.
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { runPhoneTransition } from "./phoneTransition";
 
-export type PhoneDestination = "supervisor" | "inbox" | "worktrees";
+export type PhoneDestination = "supervisor" | "worktrees";
 
 export type PhoneScreen =
   | { readonly kind: "home"; readonly destination: PhoneDestination }
@@ -20,7 +21,7 @@ export const PHONE_HISTORY_KEY = "ferryxPhone";
 const HOME_DEFAULT: PhoneScreen = { kind: "home", destination: "supervisor" };
 
 function isDestination(value: unknown): value is PhoneDestination {
-  return value === "supervisor" || value === "inbox" || value === "worktrees";
+  return value === "supervisor" || value === "worktrees";
 }
 
 function sameScreen(a: PhoneScreen, b: PhoneScreen): boolean {
@@ -48,7 +49,7 @@ function writeHistory(screen: PhoneScreen, mode: "push" | "replace"): void {
 
 export type PhoneNavigation = {
   readonly screen: PhoneScreen;
-  /** The destination the tab bar shows as selected (the one a Session screen returns to). */
+  /** The home screen on show (the one a Session screen returns to). */
   readonly destination: PhoneDestination;
   readonly selectTab: (destination: PhoneDestination) => void;
   readonly openSession: () => void;

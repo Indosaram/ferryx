@@ -14,6 +14,7 @@ const ok = () => Promise.resolve({ ok: true } as const);
 const inertActions: PanelActions = {
   answer: ok,
   setPaused: ok,
+  setLanePaused: ok,
   converse: ok,
   stop: ok,
   undo: ok,

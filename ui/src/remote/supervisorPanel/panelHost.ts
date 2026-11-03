@@ -46,3 +46,45 @@ export function panelSessionTarget(
   const sessionId = sessionRef.slice(split + 1);
   return sessionId ? { machineId: pinned.machineId, sessionId } : null;
 }
+
+import type { SupervisorMachineView } from "../home/phoneHomeModel";
+import { emptyPanelSnapshot } from "../../lib/supervisorPanel/emptySnapshot";
+import type { PanelState } from "./usePhonePanel";
+
+export const NO_HUB_HOST_MESSAGE = "No computer is ready to run the supervisor. Open Ferryx on the computer you want, then try again.";
+export const SEVERAL_HUB_HOSTS_MESSAGE = "More than one computer could run the supervisor. Turn it on from the computer you want to use.";
+
+/**
+ * Where "Turn on" goes. A pinned host already runs the supervisor. Otherwise the one reachable
+ * machine whose hub is not running; none or several is named, never guessed.
+ */
+export type SetupHost =
+  | { readonly kind: "host"; readonly machineId: string; readonly label: string }
+  | { readonly kind: "none" }
+  | { readonly kind: "several" };
+
+export function pickSetupHost(
+  pinnedId: string | null,
+  machines: readonly SupervisorMachineView[],
+): SetupHost {
+  if (pinnedId !== null) {
+    const pinned = machines.find((machine) => machine.machineId === pinnedId);
+    return { kind: "host", machineId: pinnedId, label: pinned?.label ?? "your computer" };
+  }
+  const candidates = machines.filter((machine) => machine.state === "ok" && machine.snapshot !== null && !machine.snapshot.hub.running);
+  if (candidates.length === 1) return { kind: "host", machineId: candidates[0].machineId, label: candidates[0].label };
+  return candidates.length === 0 ? { kind: "none" } : { kind: "several" };
+}
+
+/**
+ * What the panel body shows. A pinned host shows its own state. No pinned host means no hub is
+ * running anywhere reachable: the setup card (an empty snapshot with `setupRequired`), once
+ * discovery has settled. Never the previous home, never a blank panel.
+ */
+export function effectivePanelState(pinnedId: string | null, hostState: PanelState, discovering: boolean): PanelState {
+  if (pinnedId !== null) {
+    // A host without the panel route reads as setup: there is no panel to show yet.
+    return hostState.kind === "unsupported" ? { kind: "ready", snapshot: emptyPanelSnapshot() } : hostState;
+  }
+  return discovering ? { kind: "loading" } : { kind: "ready", snapshot: emptyPanelSnapshot() };
+}

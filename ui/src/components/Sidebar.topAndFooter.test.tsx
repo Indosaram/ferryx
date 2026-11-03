@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ActivitySummary } from "../lib/activity";
 import type { Worktree } from "../lib/types";
-import { SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, Sidebar, type SidebarAttention } from "./Sidebar";
+import { SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, Sidebar } from "./Sidebar";
 
 function worktreeAt(slug: string): Worktree {
   return {
@@ -40,21 +40,6 @@ function summary(overrides: Partial<ActivitySummary>): ActivitySummary {
   };
 }
 
-function attentionProps(overrides: Partial<SidebarAttention> = {}): SidebarAttention {
-  return {
-    rows: [{
-      id: "row-1", revision: 1, workspaceId: "ferryx", sessionId: "sess-1", state: "needs-you",
-      who: "omo", location: "ferryx / main", text: "Ship it now?", at: Date.now(),
-    }],
-    onOpen: vi.fn(),
-    onDismiss: vi.fn(),
-    onDismissAll: vi.fn(),
-    inboxOpen: false,
-    onInboxOpenChange: vi.fn(),
-    ...overrides,
-  };
-}
-
 function props(overrides: Record<string, unknown> = {}) {
   return {
     projects,
@@ -71,37 +56,30 @@ function props(overrides: Record<string, unknown> = {}) {
 beforeEach(() => localStorage.clear());
 afterEach(cleanup);
 
-describe("Sidebar top: inbox segment", () => {
-  it("toggles the worktree region and aria-selected through the Inbox tab", () => {
-    const attention = attentionProps();
-    const view = render(<Sidebar {...props({ attention })} />);
+describe("Sidebar top: view segment", () => {
+  it("offers only Supervisor and Worktrees, the panel first, and toggles the tree through them", async () => {
+    render(<Sidebar {...props({ onFocusSupervisorSession: vi.fn() })} />);
 
     // Role/name queries stay scoped to the small tablist and titlebar subtrees: whole-document
     // accessible-name scans over the dnd-kit tree are what made this test slow.
     const tablist = () => screen.getByRole("tablist");
     const titlebar = () => screen.getByTestId("sidebar-drag-region");
     expect(tablist()).toHaveAttribute("aria-label", "Sidebar view");
-    const worktreesTab = within(tablist()).getByRole("tab", { name: "Worktrees" });
-    const inboxTab = within(tablist()).getByRole("tab", { name: "Inbox (1)" });
-    expect(worktreesTab).toHaveAttribute("aria-selected", "true");
-    expect(inboxTab).toHaveAttribute("aria-selected", "false");
-    expect(inboxTab).toHaveAttribute("data-shortcut", "notifications.toggle");
-    expect(within(inboxTab).getByTestId("sidebar-attention-badge")).toHaveTextContent("1");
-    expect(screen.getByTestId("worktree-region")).not.toHaveAttribute("hidden");
-    expect(within(titlebar()).queryByRole("button", { name: "Mark all read" })).toBeNull();
-
-    fireEvent.click(inboxTab);
-    expect(attention.onInboxOpenChange).toHaveBeenCalledWith(true);
-
-    view.rerender(<Sidebar {...props({ attention: { ...attention, inboxOpen: true } })} />);
-    expect(within(tablist()).getByRole("tab", { name: "Inbox (1)" })).toHaveAttribute("aria-selected", "true");
+    expect(within(tablist()).getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Supervisor", "Worktrees"]);
+    expect(within(tablist()).getByRole("tab", { name: "Supervisor" })).toHaveAttribute("aria-selected", "true");
     expect(within(tablist()).getByRole("tab", { name: "Worktrees" })).toHaveAttribute("aria-selected", "false");
     expect(screen.getByTestId("worktree-region")).toHaveAttribute("hidden");
-    expect(within(titlebar()).getByRole("button", { name: "Mark all read" })).toBeInTheDocument();
+    expect(await screen.findByTestId("supervisor-panel")).toBeInTheDocument();
+    expect(within(titlebar()).queryByRole("button", { name: "Mark all read" })).toBeNull();
 
-    // Arrow-key roving moves selection back to Worktrees.
-    fireEvent.keyDown(within(tablist()).getByRole("tab", { name: "Inbox (1)" }), { key: "ArrowLeft" });
-    expect(attention.onInboxOpenChange).toHaveBeenLastCalledWith(false);
+    fireEvent.click(within(tablist()).getByRole("tab", { name: "Worktrees" }));
+    expect(within(tablist()).getByRole("tab", { name: "Worktrees" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("worktree-region")).not.toHaveAttribute("hidden");
+    expect(screen.queryByTestId("supervisor-panel")).toBeNull();
+
+    // Arrow-key roving moves selection back to the panel.
+    fireEvent.keyDown(within(tablist()).getByRole("tab", { name: "Worktrees" }), { key: "ArrowLeft" });
+    expect(within(tablist()).getByRole("tab", { name: "Supervisor" })).toHaveAttribute("aria-selected", "true");
   });
 });
 
