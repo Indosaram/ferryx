@@ -9,7 +9,7 @@ Ferryx browser tabs run on one of two engines. The system webview is the default
 | What it is | The OS webview, driven through wry | CEF 156.2.0 (Chrome style, via cef-rs), a separate process |
 | macOS | WKWebView | Engine app in a frameless window placed over the pane |
 | Windows | WebView2 | Engine as a child window of the Ferryx window |
-| Linux | WebKitGTK | Not available yet |
+| Linux | WebKitGTK | Engine window reparented into the Ferryx X11 window (X11 or XWayland); native Wayland falls back to the system webview |
 | Ships with Ferryx | Yes | No, downloaded on demand |
 | Process model | Inside the Ferryx process | One engine process per browser profile, shared by all tabs of that profile |
 
@@ -36,6 +36,7 @@ Once the engine is installed, new tabs use it. Tabs that are already open keep t
 | --- | --- | --- |
 | macOS | about 150 MB zip | about 332 MB |
 | Windows | not recorded | about 459 MB, 240 files |
+| Linux | not recorded | not recorded |
 
 ### Update model
 
@@ -75,21 +76,29 @@ Limits of the re-fetch: it is a second request, so a one-time URL or a POST-only
 
 "Yes" means it was checked by hand or by a gate in the 2026-11-01 plan status. "Not verified" means the sources don't say. "Not available" means the engine doesn't exist on that OS yet.
 
-| Capability | macOS webview | macOS Chromium | Windows webview | Windows Chromium | Linux webview | Linux Chromium |
+| Capability | macOS webview | macOS Chromium | Windows webview | Windows Chromium | Linux webview | Linux Chromium (X11 / XWayland) |
 | --- | --- | --- | --- | --- | --- | --- |
-| Page rendering | Yes | Yes | Yes | Yes | Yes | Not available |
-| Chrome Web Store extensions and popups | No | Yes | No | Yes | No | Not available |
-| Extension management | No | Yes, via chrome://extensions | No | Yes, via chrome://extensions | No | Not available |
-| Shared logins and cookies across tabs of a profile | Not verified | Yes, one engine per profile | Not verified | Yes, one engine per profile | Not verified | Not available |
-| Cookie persistence across restart | Not verified | Yes, checked by killing the engine | Not verified | Yes, checked by killing the engine | Not verified | Not available |
-| Popups, target=_blank, window.open as Ferryx tabs | Not verified | Yes | Not verified | Yes | Not verified | Not available |
-| DevTools | Not verified | Not verified | Not verified | Not verified | Not verified | Not available |
-| Named profiles | No, macOS WebKit rejects them | Yes, `browser-cef/<profile>` | Yes | Yes, `browser-cef/<profile>` | Yes | Not available |
-| Sandbox | Not verified | Not verified, engine is ad-hoc signed and needs a separately signed app | Not verified | Yes, after the AppContainer read grant | Not verified | Not available |
+| Page rendering | Yes | Yes | Yes | Yes | Yes | Yes, in CI under Xvfb and XWayland |
+| Chrome Web Store extensions and popups | No | Yes | No | Yes | No | Not verified |
+| Extension management | No | Yes, Settings > Browser > Extensions | No | Yes, Settings > Browser > Extensions | No | Yes, Settings > Browser > Extensions |
+| Shared logins and cookies across tabs of a profile | Not verified | Yes, one engine per profile | Not verified | Yes, one engine per profile | Not verified | One engine per profile, not verified by hand |
+| Cookie persistence across restart | Not verified | Yes, checked by killing the engine | Not verified | Yes, checked by killing the engine | Not verified | Not verified |
+| Popups, target=_blank, window.open as Ferryx tabs | Not verified | Yes | Not verified | Yes | Not verified | Not verified |
+| DevTools | Not verified | Not verified | Not verified | Not verified | Not verified | Not verified |
+| Named profiles | No, macOS WebKit rejects them | Yes, `browser-cef/<profile>` | Yes | Yes, `browser-cef/<profile>` | Yes | Yes, `browser-cef/<profile>` |
+| Sandbox | Not verified | Not verified, engine is ad-hoc signed and needs a separately signed app | Not verified | Yes, after the AppContainer read grant | Not verified | Namespace sandbox where user namespaces are allowed, otherwise off (see Linux) |
 
 ### Linux
 
-The Linux Chromium engine isn't available. `platform_key()` returns `None` on Linux, so the status is `Unsupported`. There is also no window placement (X11 child or wl_subsurface) and no packaging. Linux uses WebKitGTK only.
+The Chromium engine runs on Linux. `platform_key()` in `src-tauri/src/browser/engine_install.rs` returns `linux-x86_64` or `linux-aarch64`, so Linux installs the same way as the other OSes from Settings > Browser > Chromium Engine. `scripts/browser-engine/release-engine.mjs` bundles `engine-linux-<arch>.zip` with `ferryx_engine` at its root.
+
+Placement (`src-tauri/src/browser/cef_engine/linux.rs`): the engine reparents each tab's window into the Ferryx toplevel X window and places it in pixels, as on Windows. That needs an X window id, so it works on X11 and on XWayland (Ferryx started with `GDK_BACKEND=x11`).
+
+Native Wayland fallback: a native Wayland Ferryx window has no X window id (`parent_xid` returns `None`), and another client's surface can't be placed inside it. In that session an installed engine reports `Installed` with `inactive: "wayland-session"` (`WAYLAND_REASON`), Settings says Chromium tabs need an X11 window and to start Ferryx with `GDK_BACKEND=x11`, and every browser tab uses WebKitGTK. A tab that asked for Chromium shows the fallback notice in the pane.
+
+Sandbox (`crates/ferryx-browser-engine/src/engine/linux_sandbox.rs`): the engine lives in the user's data dir, where `chrome-sandbox` can never be setuid root, so the setuid sandbox isn't shipped. Chromium's namespace sandbox is used when unprivileged user namespaces are allowed. Where the kernel or its policy denies them (for example Ubuntu's AppArmor restriction), the engine runs without the sandbox and says so on stderr. Not yet checked on a real GPU desktop.
+
+The `.deb` declares `libxtst6`, which the engine needs for input.
 
 ### macOS signing
 
@@ -98,8 +107,8 @@ The macOS engine is ad-hoc signed today. A Developer ID signed engine app, with 
 ## Extensions
 
 - Chrome Web Store installs work in Chromium tabs. The Chrome-style toolbar extension menu is drawn inside the pane.
-- The extension list in Settings > Browser reads the profile's installed extensions from the profile directory on disk.
-- Enable, disable, remove and options open Chrome's own `chrome://extensions` page as a Ferryx Chromium tab. CEF 156 has no `CefExtension` API (it was removed upstream with the Alloy runtime), so the Chrome-style page is the supported surface.
+- Settings > Browser > Extensions lists the profile's extensions and enables, disables, pins and removes them. Remove asks for confirmation in Ferryx first. Details and options open as a Ferryx Chromium tab.
+- These changes go through the engine. CEF 156 has no `CefExtension` API (it was removed upstream with the Alloy runtime), so the engine keeps one hidden browser on Chrome's `chrome://extensions` WebUI and runs each command there (`crates/ferryx-browser-engine/src/engine/extensions.rs`). Chromium shows its own uninstall confirmation on top while a removal runs.
 - System-webview tabs can't run Chrome extensions. They show an "Install engine" prompt that leads to Settings > Browser > Chromium Engine.
 - Measured on macOS: uBlock Origin Lite installed from the Web Store in one tab appears in another tab's Extensions menu, and it survives an engine restart. On Windows, uBlock Origin Lite and a VPN extension popup worked.
 
@@ -113,8 +122,6 @@ The macOS engine is ad-hoc signed today. A Developer ID signed engine app, with 
 Enabling H.264 and AAC needs a custom CEF build with `proprietary_codecs=true` and `ffmpeg_branding=Chrome`. That build comes with codec licensing questions that need an owner decision before anyone builds it.
 
 Widevine playback needs the host app to be VMP-signed. That is Google Widevine VMP signing, for example through castLabs EVS, and it needs Google approval. Ferryx has no such signing, so the Chromium engine does not play DRM video.
-
-The description text of the Chromium Engine row in Settings currently says tabs "play protected video". That's wrong while this limit stands, and the string in `ui/src/components/settings/BrowserEngineGroup.tsx` should be reworded.
 
 ## Google sign-in
 
@@ -147,17 +154,16 @@ engine is their in-app path. Cancelling any handoff leaves the original tab as i
 | Situation | Result |
 | --- | --- |
 | Engine not installed | New tabs use the system webview |
-| Platform without an engine (Linux) | Tabs use the system webview, status is `Unsupported` |
+| Platform without an engine build (any OS/arch `platform_key()` doesn't name) | Tabs use the system webview, status is `Unsupported` |
+| Linux on a native Wayland session | Tabs use WebKitGTK, status is `Installed` with `inactive: "wayland-session"` |
 | Engine process exits or refuses a command | Ferryx closes that profile's Chromium tabs |
 | Engine window closed inside the engine | Ferryx reaps the engine and closes the Ferryx tab |
 
 ## Known gaps
 
-- Linux engine: window placement and packaging.
+- Linux on native Wayland: no in-pane Chromium (see Linux).
 - Developer ID signing of the downloaded macOS engine.
-- The release manifest asset. The plan notes the manifest pointed at a local test server until the asset is published.
-- Permission prompts (camera, microphone, screen, notifications, location).
-- Agent automation over the Chromium engine.
+- The release manifest asset: `MANIFEST_URL` points at the `browser-engine-156.2.0-ferryx.1` GitHub release, which isn't published yet.
 
 ## Source
 
