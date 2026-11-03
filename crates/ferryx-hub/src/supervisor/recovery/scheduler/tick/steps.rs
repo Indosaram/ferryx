@@ -168,9 +168,15 @@ impl RecoveryScheduler {
                 && inc.silent.is_empty()
                 && faulted.iter().all(|r| inc.done.contains(r))
             {
-                // Only sessions still in the fleet were resumed: a vanished one is not.
+                // Only sessions still in the fleet were resumed: a vanished one is not. A
+                // member that is still here and healthy recovered on its own.
                 let resumed = inc.done.iter().filter(|r| st.present.contains(*r)).count();
-                if resumed == 0 {
+                let here = inc.ever.iter().filter(|r| st.present.contains(*r)).count();
+                if resumed == 0 && here > 0 {
+                    let summary =
+                        format!("{} recovered from upstream errors on their own", sessions(here));
+                    self.row(inc, ActionKind::Finished, summary, false, now).await;
+                } else if resumed == 0 {
                     let summary = format!(
                         "{} ended before they could be resumed",
                         sessions(inc.ever.len())
@@ -300,7 +306,10 @@ impl RecoveryScheduler {
                     self.row(inc, ActionKind::Finished, summary, false, now).await;
                 }
                 self.finish(inc);
-            } else if o.session.state != "working" || moved_on {
+            } else if o.session.state != "working"
+                || moved_on
+                || o.session.pending_prompt.is_some()
+            {
                 let summary = format!("Restarted stalled {title}; it is working again");
                 self.row(inc, ActionKind::Resumed, summary, false, now).await;
                 self.finish(inc);

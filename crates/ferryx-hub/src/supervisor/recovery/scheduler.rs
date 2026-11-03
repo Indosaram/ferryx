@@ -257,12 +257,13 @@ fn goal_attempts(rules: &[StandingRule]) -> u32 {
 /// built-in text. `None` for an unknown agent: a rule never makes recovery guess.
 fn resume_text_for(rules: &[StandingRule], agent: &str) -> Option<String> {
     let builtin = resume_for(agent).ok()?;
-    [RuleKind::UpstreamRetry, RuleKind::StallRestart, RuleKind::QuotaResume]
+    let text = [RuleKind::UpstreamRetry, RuleKind::StallRestart, RuleKind::QuotaResume]
         .into_iter()
         .find_map(|kind| rule_param(rules, kind, "resumeText").and_then(|v| v.as_str()))
         .map(str::trim)
         .filter(|text| !text.is_empty())
-        .map_or_else(|| builtin.to_owned(), str::to_owned)
+        .map_or_else(|| builtin.to_owned(), str::to_owned);
+    Some(text)
 }
 
 /// Whole minutes of `ms` (at least one), for owner-facing text.

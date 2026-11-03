@@ -9,6 +9,7 @@ enum GoalRow {
     Waiting { at_ms: i64, attempts: u32 },
     Resumed,
     NothingToResume,
+    Stopped { reason: String },
     GaveUp { attempts: u32 },
 }
 
@@ -92,7 +93,7 @@ impl RecoveryScheduler {
                 let requeued = std::mem::take(&mut wait.requeued);
                 let (started_ms, session) = (wait.started_ms, wait.session.clone());
                 let finished = match &outcome {
-                    Ok(done) if !requeued => Some(*done),
+                    Ok(done) if !requeued => Some(done.clone()),
                     _ => None,
                 };
                 let row = match finished {
@@ -101,6 +102,7 @@ impl RecoveryScheduler {
                         match done {
                             RetryOutcome::Resumed => GoalRow::Resumed,
                             RetryOutcome::NothingToResume => GoalRow::NothingToResume,
+                            RetryOutcome::Stopped(reason) => GoalRow::Stopped { reason },
                         }
                     }
                     None => {
@@ -119,6 +121,14 @@ impl RecoveryScheduler {
                 };
                 (row, started_ms, session)
             };
+            if let GoalRow::GaveUp { attempts } = &row {
+                let detail = format!(
+                    "recovery gave up after {attempts} retries of a usage-limited goal pass"
+                );
+                if let Err(error) = retry.give_up(&lane, &detail).await {
+                    tracing::warn!(%error, lane = %lane, "an exhausted goal lane was not stopped");
+                }
+            }
             self.goal_row(&lane, session.as_ref(), started_ms, now, row).await;
         }
     }
@@ -157,7 +167,12 @@ impl RecoveryScheduler {
             ),
             GoalRow::GaveUp { attempts } => (
                 ActionKind::Escalated,
-                format!("Gave up retrying goal {lane_key} after {attempts} attempts; it needs the owner"),
+                format!("Gave up retrying goal {lane_key} after {attempts} attempts; the lane is blocked for the owner"),
+                false,
+            ),
+            GoalRow::Stopped { reason } => (
+                ActionKind::Finished,
+                format!("Goal {lane_key} was not resumed: the loop stopped it ({reason})"),
                 false,
             ),
         };

@@ -738,6 +738,25 @@ async fn a_decision_tap_needs_its_exact_body_and_is_audited_as_an_answer() {
 async fn the_global_pause_without_a_hub_is_unavailable_and_a_malformed_body_is_invalid() {
     let gateway = Gateway::start().await;
     let token = gateway.authorized_machine_token();
+    let card = crate::hub_runtime::panel_autonomy::tests::take_recovery_card().await;
+    // A card on another computer's session, answered over the real router: the scheduler
+    // carries out "leave it" (no pane is typed into), a second tap finds nothing open.
+    let path = "/api/v1/supervisor/decisions/mac-2:card1/answer";
+    let tap = serde_json::json!({"promptId": card, "screenRevision": card, "optionIndex": 1}).to_string();
+    let (status, _, body) = gateway.post_to(path, &token, &tap).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["recovery"], "answered");
+    let audit = gateway.state().agent_control_audit.latest(1);
+    assert_eq!((audit[0].op.as_str(), audit[0].code.as_str()), ("answer", "OK"));
+    let (status, _, body) = gateway.post_to(path, &token, &tap).await;
+    assert_eq!(status, 404, "the card was consumed by the first tap: {body}");
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn the_global_pause_without_a_hub_is_unavailable_and_a_malformed_body_is_invalid() {
+    let gateway = Gateway::start().await;
+    let token = gateway.authorized_machine_token();
 
     let (status, _, body) = gateway.post_to("/api/v1/supervisor/pause", &token, GLOBAL_PAUSE).await;
     assert_eq!(status, 503, "{body}");

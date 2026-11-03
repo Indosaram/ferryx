@@ -1368,6 +1368,26 @@ pub(crate) async fn http_decision_answer(
             )
         }
     };
+    // A recovery card belongs to the scheduler, whichever computer its session is on, so it
+    // is answered before the session ref is required to be local.
+    if body.prompt_id.starts_with(ferryx_hub::supervisor::recovery::CARD_PREFIX) {
+        let op = decision_answer_op(session_ref.clone(), body);
+        let result = recovery_card_answer(&op).await.unwrap_or_else(|| {
+            Err(reference_chat_scope(ScopeErrorCode::NotFound, "that recovery card is no longer open"))
+        });
+        record_audit(
+            &state,
+            AuditRecord::for_op(
+                &device.id,
+                &op,
+                match &result {
+                    Ok(_) => "OK".to_string(),
+                    Err(error) => reference_chat_wire_code(error.code).to_string(),
+                },
+            ),
+        );
+        return control_finish(result);
+    }
     let session_id = match local_backend_session(&session_ref, &reference_files::reference_host_id()) {
         Ok(session_id) => session_id,
         Err(error) => return reference_chat_refusal(&error),

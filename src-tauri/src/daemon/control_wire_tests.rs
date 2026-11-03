@@ -793,6 +793,37 @@ async fn unix_exchange(server: &Arc<DaemonServer>, request: DaemonRequest) -> Da
 }
 
 fn pause_request() -> DaemonRequest {
+/// A recovery card answered over the owner socket for a session on another computer
+/// (`host_id: Some`): the scheduler answers it here, nothing is forwarded to the host.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_recovery_card_tap_for_a_paired_host_session_is_answered_locally() {
+    let server = Arc::new(DaemonServer::new());
+    let card = crate::hub_runtime::panel_autonomy::tests::take_recovery_card().await;
+    let request = DaemonRequest::AgentControl {
+        request: crate::agent_control::AgentControlOp::Answer {
+            session_id: "card2".into(),
+            prompt_id: card.clone(),
+            screen_revision: card.clone(),
+            answer: crate::remote::reference_chat::types::ReferencePromptAnswer {
+                option_index: Some(1),
+                ..Default::default()
+            },
+            request_id: None,
+        },
+        host_id: Some("mac-2".into()),
+    };
+    match unix_exchange(&server, request.clone()).await {
+        DaemonResponse::AgentControlOk { result } => assert_eq!(result["recovery"], "answered"),
+        other => panic!("answered {other:?}"),
+    }
+    match unix_exchange(&server, request).await {
+        DaemonResponse::Error { code, .. } => assert_eq!(code.as_deref(), Some("NOT_FOUND")),
+        other => panic!("a consumed card answered {other:?}"),
+    }
+}
+
+fn pause_request() -> DaemonRequest {
     DaemonRequest::SupervisorRequestV1 {
         envelope: serde_json::json!({"requestId": "peer-1", "goalId": "g", "expectedRevision": 1,
             "action": "pause", "payload": {}}),

@@ -179,6 +179,7 @@ impl LoopRetry for Retry {
 /// A goal retry that answers from a script: errors, then `Resumed` or `NothingToResume`.
 struct ScriptedRetry {
     calls: Mutex<Vec<String>>,
+    gave_up: Mutex<Vec<(String, String)>>,
     script: Mutex<Vec<Result<RetryOutcome>>>,
 }
 #[async_trait]
@@ -194,6 +195,10 @@ impl LoopRetry for ScriptedRetry {
         } else {
             script.remove(0)
         }
+    }
+    async fn give_up(&self, lane_key: &str, detail: &str) -> Result<()> {
+        self.gave_up.lock().unwrap().push((lane_key.to_owned(), detail.to_owned()));
+        Ok(())
     }
 }
 
@@ -728,6 +733,7 @@ async fn a_goal_retry_with_nothing_to_resume_is_not_reported_as_resumed() {
     let rig = rig(Vec::new(), "");
     let retry = Arc::new(ScriptedRetry {
         calls: Mutex::new(Vec::new()),
+        gave_up: Mutex::new(Vec::new()),
         script: Mutex::new(vec![Ok(RetryOutcome::NothingToResume)]),
     });
     rig.sched.set_loop_retry(retry.clone());
@@ -747,7 +753,11 @@ async fn goal_retries_are_bounded_by_the_rule() {
         RuleKind::QuotaResume,
         serde_json::json!({ "fallbackSecs": 600, "maxGoalAttempts": 2 }),
     );
-    let retry = Arc::new(ScriptedRetry { calls: Mutex::new(Vec::new()), script: Mutex::new(Vec::new()) });
+    let retry = Arc::new(ScriptedRetry {
+        calls: Mutex::new(Vec::new()),
+        gave_up: Mutex::new(Vec::new()),
+        script: Mutex::new(Vec::new()),
+    });
     rig.sched.set_loop_retry(retry.clone());
     rig.sched.report_goal_quota("lane-b", None, "Try again in 1 minutes").await;
     for _ in 0..6 {
@@ -758,6 +768,121 @@ async fn goal_retries_are_bounded_by_the_rule() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].kind, ActionKind::Escalated);
     assert!(!rows[0].live);
+    // The lane is handed back to the loop's stop path, not left Working.
+    let gave_up = retry.gave_up.lock().unwrap().clone();
+    assert_eq!(gave_up.len(), 1, "{gave_up:?}");
+    assert_eq!(gave_up[0].0, "lane-b");
+    assert!(gave_up[0].1.contains("2 retries"), "{gave_up:?}");
+}
+
+#[tokio::test]
+async fn a_goal_pass_the_loop_stopped_is_not_reported_as_resumed() {
+    let rig = rig(Vec::new(), "");
+    let retry = Arc::new(ScriptedRetry {
+        calls: Mutex::new(Vec::new()),
+        gave_up: Mutex::new(Vec::new()),
+        script: Mutex::new(vec![Ok(RetryOutcome::Stopped("supervisor_degraded".to_owned()))]),
+    });
+    rig.sched.set_loop_retry(retry.clone());
+    rig.sched.report_goal_quota("lane-s", None, "Try again in 1 minutes").await;
+    rig.step(2 * MIN).await;
+    let rows = rig.rows();
+    assert_eq!(rows.len(), 1);
+    assert!(!rows[0].live);
+    assert_eq!(rows[0].kind, ActionKind::Finished);
+    assert!(rows[0].summary.contains("supervisor_degraded"), "{rows:?}");
+    assert!(retry.gave_up.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn members_that_recover_on_their_own_are_not_reported_as_ended() {
+    let rig = rig(four_claude_sessions(), BAD_GATEWAY);
+    rig.sched.tick().await;
+    rig.outbreak(BAD_GATEWAY);
+    rig.sched.tick().await;
+    // Before the first backoff elapses the errors scroll away: every session shows healthy
+    // output only and stays in the fleet.
+    for r in rig.refs.clone() {
+        rig.world.tails.lock().unwrap().insert(r, "carrying on with the task\n".to_owned());
+    }
+    rig.step(30_000).await;
+    rig.step(30_000).await;
+    assert!(rig.world.ops().is_empty(), "nothing was sent: {:?}", rig.world.ops());
+    let rows = rig.rows();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(!rows[0].live, "{rows:?}");
+    assert_eq!(rows[0].kind, ActionKind::Finished);
+    assert!(rows[0].summary.contains("on their own"), "{rows:?}");
+    assert!(!rows[0].summary.contains("ended"), "{rows:?}");
+}
+
+#[tokio::test]
+async fn an_ordinary_prompt_after_the_probe_send_is_progress_and_sweeps_the_rest() {
+    let rig = rig(four_claude_sessions(), BAD_GATEWAY);
+    rig.sched.tick().await;
+    rig.outbreak(BAD_GATEWAY);
+    rig.sched.tick().await;
+    rig.step(61_000).await;
+    let s1 = SessionRef::new("mac-2", "s1");
+    assert_eq!(rig.world.sends_to(&s1), 1, "probe sent: {:?}", rig.world.ops());
+    // The probe resumed and now asks an ordinary permission question.
+    rig.world.push(&s1, "Do you want to proceed? 1. Yes 2. No");
+    {
+        let mut fleet = rig.fleet.0.lock().unwrap();
+        let s = fleet.iter_mut().find(|s| s.session_ref == s1).unwrap();
+        s.pending_prompt = Some(crate::supervisor::panel_contract::PendingPrompt {
+            prompt_id: "p-ask".to_owned(),
+            kind: "permission".to_owned(),
+            question: "Do you want to proceed?".to_owned(),
+            command: None,
+            options: vec!["Yes".to_owned(), "No".to_owned()],
+            screen_revision: Some("rev-1".to_owned()),
+        });
+    }
+    rig.world.up.store(true, Ordering::SeqCst);
+    for _ in 0..4 {
+        rig.step(30_000).await;
+    }
+    for n in 2..=4 {
+        let r = SessionRef::new("mac-2", &format!("s{n}"));
+        assert!(rig.world.sends_to(&r) >= 1, "{r} was swept: {:?}", rig.world.ops());
+    }
+    assert!(rig.opened().is_empty(), "no false unreachable card");
+    for _ in 0..8 {
+        if rig.rows().iter().any(|row| !row.live) {
+            break;
+        }
+        rig.step(30_000).await;
+    }
+    let rows = rig.rows();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(!rows[0].live, "{rows:?}");
+    assert_eq!(rows[0].kind, ActionKind::Resumed);
+}
+
+#[tokio::test]
+async fn a_restarted_stall_that_asks_a_prompt_closes_instead_of_escalating() {
+    let rig = rig(vec![provider_working(T0 - 10 * MIN)], "thinking...");
+    rig.sched.tick().await;
+    assert_eq!(rig.world.ops().len(), 2);
+    let mut asking = provider_working(T0 - 10 * MIN);
+    asking.pending_prompt = Some(crate::supervisor::panel_contract::PendingPrompt {
+        prompt_id: "p-ask".to_owned(),
+        kind: "permission".to_owned(),
+        question: "Run the tests?".to_owned(),
+        command: None,
+        options: vec!["Yes".to_owned(), "No".to_owned()],
+        screen_revision: Some("rev-1".to_owned()),
+    });
+    *rig.fleet.0.lock().unwrap() = vec![asking];
+    for _ in 0..30 {
+        rig.step(30_000).await;
+    }
+    assert!(rig.opened().is_empty(), "{:?}", rig.opened());
+    assert_eq!(rig.world.ops().len(), 2, "no second restart");
+    let rows = rig.rows();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].kind, ActionKind::Resumed);
 }
 
 #[tokio::test]

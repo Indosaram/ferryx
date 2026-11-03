@@ -68,6 +68,13 @@ fn is_echo(line: &str, text: &str) -> bool {
 }
 
 impl State {
+    /// `true` while an open stall incident has restarted `r` and is still confirming it.
+    pub(super) fn restarted(&self, r: &SessionRef) -> bool {
+        self.incidents
+            .iter()
+            .any(|i| i.fault == Fault::Stall && i.primary == *r && i.restarts > 0 && !i.closed)
+    }
+
     /// `true` once a session has been out of the fleet for at least `grace_ms`: a one-pass
     /// blip of the fleet listing is not a vanish (L2). A session in the fleet is never gone,
     /// even when this pass could not observe it.
@@ -105,7 +112,27 @@ impl RecoveryScheduler {
         st.present = fleet.iter().map(|s| s.session_ref.clone()).collect();
         let mut obs: HashMap<SessionRef, Obs> = HashMap::new();
         for session in fleet {
-            if session.stale || session.pending_prompt.is_some() {
+            if session.stale {
+                continue;
+            }
+            // A session showing a real prompt is excluded from fault detection (its card is
+            // the owner's decision), but one with an outstanding resume, or a restarted stall
+            // primary, has plainly started a new turn: that is progress for judging sends.
+            if session.pending_prompt.is_some() {
+                if st.sent.contains_key(&session.session_ref)
+                    || st.restarted(&session.session_ref)
+                {
+                    let tail = self
+                        .deps
+                        .control
+                        .read_tail(&session.session_ref, TAIL_LINES)
+                        .await
+                        .unwrap_or_default();
+                    obs.insert(
+                        session.session_ref.clone(),
+                        Obs { session, tail, kind: HealthKind::Healthy, progress: true },
+                    );
+                }
                 continue;
             }
             let Ok(tail) = self
@@ -317,7 +344,9 @@ impl RecoveryScheduler {
                 question,
                 command: None,
                 options: options.iter().map(|o| (*o).to_owned()).collect(),
-                screen_revision: None,
+                // Owner surfaces (HTTP, desktop) require a revision string on an answer; a
+                // recovery card has no screen, so its id stands in and is never compared.
+                screen_revision: Some(format!("{CARD_PREFIX}{}", inc.key)),
             },
             recommended_index: 0,
             reason,

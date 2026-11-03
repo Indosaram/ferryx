@@ -58,6 +58,16 @@ async fn quota_taken(
     }
 }
 
+/// Blocks the lane as degraded: recovery's bounded retries ran out, so the loop's own stop
+/// path holds it for the owner instead of leaving it Working unwatched.
+pub async fn stop_degraded(
+    pool: &SqlitePool,
+    lane_key: &str,
+    detail: &str,
+) -> Result<LoopOutcome, GoalError> {
+    stop(pool, lane_key, StopReason::SupervisorDegraded, Some(detail)).await
+}
+
 /// What one loop pass changed, for the `supervisor_changed` payload `{laneKey, stopReason}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1141,6 +1151,27 @@ mod tests {
                 self.fault.clone(),
             ))
         }
+    }
+
+    #[tokio::test]
+    async fn a_typed_supervisor_fault_stops_the_lane_as_degraded_not_judge_unavailable() {
+    #[tokio::test]
+    async fn recovery_giving_up_blocks_the_lane_as_degraded_with_its_detail() {
+        let pool = lane_pool(Some(GoalMode::Full)).await;
+        let outcome = stop_degraded(&pool, LANE, "recovery gave up after 5 retries")
+            .await
+            .unwrap();
+        assert_eq!(outcome.stop_reason, Some(StopReason::SupervisorDegraded));
+        let contract = goal(&pool).await;
+        assert_eq!(contract.stop_reason, Some(StopReason::SupervisorDegraded));
+        assert_eq!(
+            contract.stop_detail.as_deref(),
+            Some("recovery gave up after 5 retries")
+        );
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Blocked)
+        );
     }
 
     #[tokio::test]
