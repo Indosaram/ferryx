@@ -3,8 +3,8 @@ use serde_json::Value;
 use sqlx::SqlitePool;
 
 use super::commands::{
-    help_text, parse_command, session_key, HuddleAction, SessionsCommand, SlackCommand,
-    SlashInvocation,
+    help_text, parse_command, session_key, HuddleAction, ListAction, SessionsCommand,
+    SlackCommand, SlashInvocation,
 };
 use super::session::SessionKey;
 use crate::agent_control::{AgentControl, AgentOp};
@@ -168,6 +168,18 @@ pub async fn execute(env: &SlashEnv<'_>, invocation: &SlashInvocation) -> Result
             }
             sessions(env, command).await
         }
+        SlackCommand::Rules(action) => {
+            if invocation.user_id != env.owner_id {
+                return Ok(SlashReply::private(OWNER_ONLY));
+            }
+            rules(env, action).await
+        }
+        SlackCommand::Lessons(action) => {
+            if invocation.user_id != env.owner_id {
+                return Ok(SlashReply::private(OWNER_ONLY));
+            }
+            lessons(env, action).await
+        }
         SlackCommand::Huddle(action) => {
             if !env.huddle_enabled {
                 return Ok(SlashReply::private(HUDDLE_OFF));
@@ -186,8 +198,10 @@ pub async fn execute(env: &SlashEnv<'_>, invocation: &SlashInvocation) -> Result
 }
 
 #[cfg_attr(not(feature = "hub-slack"), allow(dead_code))]
-const THREAD_ONLY: &str =
-    "이 명령은 대화 스레드 안에서 실행해 주세요. 채널 최상위에서는 새 채널 세션을 만들지 않습니다.";
+const THREAD_ONLY: (&str, &str) = (
+    "이 명령은 대화 스레드 안에서 실행해 주세요. 채널 최상위에서는 새 채널 세션을 만들지 않습니다.",
+    "Run this command inside a conversation thread. A channel's top level does not start a new channel session.",
+);
 
 /// Which session a stop or steer means. Inside a thread or DM it is that session. At a
 /// channel's top level Slack sends no thread, so it is the one thread with a live turn there.
@@ -204,11 +218,15 @@ fn live_turn_target(
     }
     let mut candidates = super::turns::active_in_channel(&invocation.channel_id);
     match candidates.len() {
-        0 => Err("이 채널에 진행 중인 대화가 없습니다."),
+        0 => Err(crate::locale::current().pick(
+            "이 채널에 진행 중인 대화가 없습니다.",
+            "No conversation is running in this channel.",
+        )),
         1 => Ok(candidates.pop()),
-        _ => Err(
+        _ => Err(crate::locale::current().pick(
             "진행 중인 대화가 여러 개입니다. 멈추거나 거절할 대화의 스레드 안에서 실행해 주세요.",
-        ),
+            "Several conversations are running. Run this inside the thread of the one to stop or decline.",
+        )),
     }
 }
 
@@ -276,7 +294,7 @@ async fn steer(
         let target = match live_turn_target(invocation, key) {
             Ok(Some(target)) => target,
             Ok(None) if invocation.is_dm() || invocation.thread_ts.is_some() => key.storage_key(),
-            _ => return Ok(SlashReply::private(THREAD_ONLY)),
+            _ => return Ok(SlashReply::private(crate::locale::text(THREAD_ONLY.0, THREAD_ONLY.1))),
         };
         if let Some((thread_id, turn_id)) = super::turns::ids(&target) {
             let omo = config.omo.clone();
@@ -557,6 +575,151 @@ async fn status(env: &SlashEnv<'_>) -> Result<SlashReply> {
         "Active sessions: {sessions}\nMemory entries: {memories}\nUptime: {}s\nLedger entries: {ledger}",
         uptime_secs()
     )))
+}
+
+/// `/omo-rules`: the owner's active report rules, newest first, numbered; `close <n>` closes one.
+async fn rules(env: &SlashEnv<'_>, action: ListAction) -> Result<SlashReply> {
+    let active = crate::report_rules::active_rules(env.pool).await?;
+    match action {
+        ListAction::List => {
+            if active.is_empty() {
+                return Ok(SlashReply::private(crate::locale::text(
+                    "지금 적용 중인 보고 규칙이 없습니다. 기본값은 모두 보내는 것입니다.",
+                    "No report rules are active. By default everything is sent.",
+                )));
+            }
+            let lines: Vec<String> = active
+                .iter()
+                .enumerate()
+                .map(|(index, rule)| {
+                    format!(
+                        "{}. {} → {}",
+                        index + 1,
+                        crate::report_rules::describe_ko(rule),
+                        effect_ko(rule.effect)
+                    )
+                })
+                .collect();
+            let (count, lines) = (active.len(), lines.join("\n"));
+            Ok(SlashReply::private(if crate::locale::current().is_korean() {
+                format!("*보고 규칙* ({count}개)\n{lines}\n규칙을 끄려면 `/omo-rules close <번호>`")
+            } else {
+                format!("*Report rules* ({count})\n{lines}\nTo turn one off: `/omo-rules close <number>`")
+            }))
+        }
+        ListAction::Close(number) => {
+            let Some(rule) = active.get(number - 1) else {
+                return Ok(SlashReply::private(if crate::locale::current().is_korean() {
+                    format!("{number}번 규칙이 없습니다. `/omo-rules`로 목록을 확인해 주세요.")
+                } else {
+                    format!("There is no rule {number}. See the list with `/omo-rules`.")
+                }));
+            };
+            if !crate::report_rules::close(env.pool, &rule.id).await? {
+                return Ok(SlashReply::private(crate::locale::text("이미 닫힌 규칙입니다.", "That rule is already closed.")));
+            }
+            let rule = crate::report_rules::describe_ko(rule);
+            Ok(SlashReply::private(if crate::locale::current().is_korean() {
+                format!("규칙을 껐습니다: {rule}. 이 종류의 알림은 다시 기본값대로 보냅니다.")
+            } else {
+                format!("Rule turned off: {rule}. Alerts of this kind are sent by default again.")
+            }))
+        }
+        ListAction::Retire(_) | ListAction::Pin(_) => {
+            Ok(SlashReply::private("Usage: `/omo-rules [list | close <number>]`"))
+        }
+    }
+}
+
+fn effect_ko(effect: crate::report_rules::Effect) -> &'static str {
+    let locale = crate::locale::current();
+    match effect {
+        crate::report_rules::Effect::Mute => locale.pick("보내지 않음", "not sent"),
+        crate::report_rules::Effect::Digest => locale.pick("하루 요약에만", "daily digest only"),
+        crate::report_rules::Effect::Send => locale.pick("바로 보냄", "sent right away"),
+    }
+}
+
+/// `/omo-lessons`: the report lessons that are not retired, newest first, numbered;
+/// `retire <n>` and `pin <n>` act on one. Lesson text is never edited here.
+async fn lessons(env: &SlashEnv<'_>, action: ListAction) -> Result<SlashReply> {
+    use crate::supervisor::lessons::{self, LessonState};
+    let live: Vec<lessons::Lesson> =
+        lessons::list(env.pool, crate::report_feedback::LESSON_PROJECT)
+            .await?
+            .into_iter()
+            .filter(|lesson| lesson.state != LessonState::Retired)
+            .collect();
+    let pick = |number: usize| live.get(number - 1);
+    let missing = |number: usize| {
+        SlashReply::private(if crate::locale::current().is_korean() {
+            format!("{number}번 교훈이 없습니다. `/omo-lessons`로 목록을 확인해 주세요.")
+        } else {
+            format!("There is no lesson {number}. See the list with `/omo-lessons`.")
+        })
+    };
+    match action {
+        ListAction::List => {
+            if live.is_empty() {
+                return Ok(SlashReply::private(crate::locale::text(
+                    "보고에 대해 배운 교훈이 아직 없습니다.",
+                    "No report lessons have been learned yet.",
+                )));
+            }
+            let locale = crate::locale::current();
+            let (helped, hurt) = (locale.pick("도움", "helped"), locale.pick("방해", "hurt"));
+            let lines: Vec<String> = live
+                .iter()
+                .enumerate()
+                .map(|(index, lesson)| {
+                    format!(
+                        "{}. {}{} ({}, {helped} {} / {hurt} {})",
+                        index + 1,
+                        if lesson.pinned { "📌 " } else { "" },
+                        lesson.rule,
+                        lesson.state.as_str(),
+                        lesson.helped,
+                        lesson.hurt
+                    )
+                })
+                .collect();
+            let (count, lines) = (live.len(), lines.join("\n"));
+            Ok(SlashReply::private(if locale.is_korean() {
+                format!("*보고 교훈* ({count}개)\n{lines}\n`/omo-lessons retire <번호>` 또는 `/omo-lessons pin <번호>`")
+            } else {
+                format!("*Report lessons* ({count})\n{lines}\n`/omo-lessons retire <number>` or `/omo-lessons pin <number>`")
+            }))
+        }
+        ListAction::Retire(number) => {
+            let Some(lesson) = pick(number) else {
+                return Ok(missing(number));
+            };
+            let done = lessons::retire(env.pool, &lesson.id).await?;
+            let korean = crate::locale::current().is_korean();
+            Ok(SlashReply::private(match (done, korean) {
+                (true, true) => format!("교훈을 내렸습니다: {}", lesson.rule),
+                (true, false) => format!("Lesson retired: {}", lesson.rule),
+                (false, true) => "이미 내려간 교훈입니다.".to_owned(),
+                (false, false) => "That lesson is already retired.".to_owned(),
+            }))
+        }
+        ListAction::Pin(number) => {
+            let Some(lesson) = pick(number) else {
+                return Ok(missing(number));
+            };
+            let done = lessons::pin(env.pool, &lesson.id).await?;
+            let korean = crate::locale::current().is_korean();
+            Ok(SlashReply::private(match (done, korean) {
+                (true, true) => format!("교훈을 고정했습니다: {}", lesson.rule),
+                (true, false) => format!("Lesson pinned: {}", lesson.rule),
+                (false, true) => "이미 고정된 교훈입니다.".to_owned(),
+                (false, false) => "That lesson is already pinned.".to_owned(),
+            }))
+        }
+        ListAction::Close(_) => Ok(SlashReply::private(
+            "Usage: `/omo-lessons [list | retire <number> | pin <number>]`",
+        )),
+    }
 }
 
 async fn cron(env: &SlashEnv<'_>, action: &str) -> Result<SlashReply> {
@@ -1253,6 +1416,13 @@ mod tests {
             "two live threads are ambiguous"
         );
         drop((guard, other));
+        crate::locale::with(crate::locale::OwnerLocale::english_utc(), || {
+            assert_eq!(
+                live_turn_target(&top, &key),
+                Err("No conversation is running in this channel.")
+            );
+            assert_eq!(effect_ko(crate::report_rules::Effect::Mute), "not sent");
+        });
         let in_thread = SlashInvocation {
             channel_id: "C-live".into(),
             thread_ts: Some("1.1".into()),
@@ -1262,5 +1432,83 @@ mod tests {
             live_turn_target(&in_thread, &session_key(&in_thread, "B1")),
             Ok(None)
         );
+    }
+
+    #[tokio::test]
+    async fn rules_and_lessons_list_and_act_by_number_for_the_owner_only() {
+        use crate::report_rules::{Effect, Scope};
+        use crate::supervisor::lessons::{self, LessonDomain, LessonDraft};
+        let pool = crate::storage::memory().await.unwrap();
+        let control = RecordingControl::default();
+        let env = SlashEnv {
+            pool: &pool,
+            owner_id: "UOWNER",
+            bot_user_id: "B1",
+            control: &control,
+            meta_session_id: "meta",
+            huddle_enabled: false,
+            model: None,
+        };
+        let empty = execute(&env, &invocation("/omo-rules", "")).await.unwrap();
+        assert!(empty.text.contains("기본값은 모두 보내는"));
+
+        let scope = Scope {
+            source: "mail".into(),
+            sender_key: Some("gitlab.com".into()),
+            topic_key: None,
+            pattern: None,
+        };
+        let rule = crate::report_rules::record(&pool, &scope, Effect::Mute, "이거 그만 보내", None)
+            .await
+            .unwrap();
+        let listed = execute(&env, &invocation("/omo-rules", "list")).await.unwrap();
+        assert!(listed.ephemeral);
+        assert!(listed.text.contains("1. gitlab.com의 메일 알림 → 보내지 않음"), "{}", listed.text);
+
+        let stranger = SlashInvocation {
+            user_id: "USOMEONE".into(),
+            ..invocation("/omo-rules", "close 1")
+        };
+        let refused = execute(&env, &stranger).await.unwrap();
+        assert_ne!(refused.text, "");
+        assert_eq!(crate::report_rules::active_rules(&pool).await.unwrap().len(), 1);
+
+        let missing = execute(&env, &invocation("/omo-rules", "close 2")).await.unwrap();
+        assert!(missing.text.contains("2번 규칙이 없습니다"));
+        let closed = execute(&env, &invocation("/omo-rules", "close 1")).await.unwrap();
+        assert!(closed.text.contains("규칙을 껐습니다"), "{}", closed.text);
+        assert!(crate::report_rules::active_rules(&pool).await.unwrap().is_empty());
+        let closed_row: Option<String> =
+            sqlx::query_scalar("SELECT closed_at FROM owner_report_rules WHERE id = ?")
+                .bind(&rule.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(closed_row.is_some(), "the row is closed, never deleted");
+
+        let lesson = lessons::record(
+            &pool,
+            LessonDraft {
+                domain: LessonDomain::Report,
+                project: crate::report_feedback::LESSON_PROJECT,
+                rule: "GitHub CI 실패 메일은 사장님 DM에 보내지 않는다",
+                rationale: "owner objected",
+                keywords: "ci",
+                evidence_ref: "report:ci",
+            },
+            |_| true,
+        )
+        .await
+        .unwrap()
+        .expect("lesson stored");
+        let listed = execute(&env, &invocation("/omo-lessons", "")).await.unwrap();
+        assert!(listed.text.contains("1. GitHub CI 실패 메일"), "{}", listed.text);
+        let pinned = execute(&env, &invocation("/omo-lessons", "pin 1")).await.unwrap();
+        assert!(pinned.text.contains("고정했습니다"));
+        assert!(lessons::get(&pool, &lesson.id).await.unwrap().unwrap().pinned);
+        let retired = execute(&env, &invocation("/omo-lessons", "retire 1")).await.unwrap();
+        assert!(retired.text.contains("내렸습니다"));
+        let after = execute(&env, &invocation("/omo-lessons", "list")).await.unwrap();
+        assert!(after.text.contains("아직 없습니다"), "{}", after.text);
     }
 }

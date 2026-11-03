@@ -143,6 +143,15 @@ pub struct NativeTerminalAgentStatePayload {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_snapshot: bool,
+    /// `protocol` when the pane program reported this state over OSC 7501.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_source: Option<crate::daemon::protocol::AgentStateWireSource>,
+    /// How the turn behind an `idle` ended, when the producer said so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<crate::daemon::protocol::AgentOutcome>,
+    /// What a `blocked` session needs from the user, when the producer said so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<crate::daemon::protocol::AgentBlockedKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2636,6 +2645,9 @@ fn take_native_terminal_events(
                             provider_session: None,
                             detail: None,
                             is_snapshot: false,
+                            state_source: None,
+                            outcome: None,
+                            kind: None,
                         },
                     ));
                 }
@@ -3518,6 +3530,9 @@ impl NativeTerminalSurfaceHostState {
                 provider_session: None,
                 detail: None,
                 is_snapshot: false,
+                state_source: None,
+                outcome: None,
+                kind: None,
             };
             emit_native_terminal_event(
                 app,
@@ -5087,8 +5102,12 @@ impl NativeTerminalSurfaceHostState {
                         detail,
                         is_snapshot,
                         origin,
+                        state_source,
+                        outcome,
+                        kind,
                         ..
                     } => {
+                        let origin = crate::daemon::protocol::AgentStateOrigin::from_wire(origin, state_source);
                         let reported = match state.as_ref() {
                             "working" => Some(crate::agent_detect::AgentActivity::Working),
                             "blocked" => Some(crate::agent_detect::AgentActivity::Blocked),
@@ -5159,6 +5178,9 @@ impl NativeTerminalSurfaceHostState {
                                             provider_session: provider_session.clone(),
                                             detail: detail.as_ref().map(|value| value.to_string()),
                                             is_snapshot,
+                                            state_source: origin.wire_source(),
+                                            outcome,
+                                            kind,
                                         },
                                     ),
                                 );
@@ -10554,6 +10576,9 @@ mod tests {
             detail: None,
             is_snapshot: false,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            state_source: None,
+            outcome: None,
+            kind: None,
         })
         .await
         .expect("send agent state report");
@@ -10645,6 +10670,9 @@ mod tests {
                 detail: None,
                 is_snapshot: false,
                 origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+                state_source: None,
+                outcome: None,
+                kind: None,
             })
             .await
             .expect("send agent state report");
@@ -10746,6 +10774,9 @@ mod tests {
                 detail: None,
                 is_snapshot: false,
                 origin,
+                state_source: None,
+                outcome: None,
+                kind: None,
             })
             .await
             .expect("send agent state report");
@@ -10800,6 +10831,9 @@ mod tests {
             detail: None,
             is_snapshot: false,
             origin: crate::daemon::protocol::AgentStateOrigin::ProcessObserved,
+            state_source: None,
+            outcome: None,
+            kind: None,
         })
         .await
         .expect("send process sighting");
@@ -10880,6 +10914,9 @@ mod tests {
             }),
             is_snapshot: false,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            state_source: None,
+            outcome: None,
+            kind: None,
         };
 
         // The agent stays "working" across `/new`, so an activity-only change test swallows the

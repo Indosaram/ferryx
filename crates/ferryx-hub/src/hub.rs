@@ -25,6 +25,8 @@ pub struct Hub {
     latest: std::sync::Mutex<HashMap<String, Observation>>,
     /// Earliest armed wake per target. One timer per target, never a poll.
     wakes: std::sync::Mutex<HashMap<String, DateTime<Utc>>>,
+    #[cfg(test)]
+    timer_applied: tokio::sync::Notify,
 }
 
 impl Hub {
@@ -74,6 +76,8 @@ impl Hub {
             config,
             latest: std::sync::Mutex::new(HashMap::new()),
             wakes: std::sync::Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            timer_applied: tokio::sync::Notify::new(),
         })
     }
 
@@ -120,7 +124,13 @@ impl Hub {
             .lock()
             .expect("hub latest lock")
             .insert(observation.target.clone(), observation.clone());
-        let outcome = self.apply(observation, Utc::now()).await?;
+        let outcome = match self.apply(observation, Utc::now()).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.arm(observation.target.clone(), Utc::now() + chrono::Duration::seconds(30));
+                return Err(error);
+            }
+        };
         if let Some(at) = outcome.next_wake {
             self.arm(observation.target.clone(), at);
         }
@@ -130,6 +140,13 @@ impl Hub {
     async fn apply(&self, observation: &Observation, now: DateTime<Utc>) -> Result<ObserveOutcome> {
         let outcome = self.watcher.on_observation(observation, now).await?;
         for notice in &outcome.due {
+            if owner_post(self.watcher.mode(), &notice.kind) {
+                let session = if owner_actionable(&notice.kind) { self.owner_session() } else { self.home_session() };
+                self.post_notice(&session, notice).await?;
+            }
+            if matches!(notice.kind.as_str(), "completion" | "failure") {
+                self.reply_to_origin(observation, &notice.text).await?;
+            }
             if self.watcher.deliver(notice, now).await? {
                 let level = if matches!(
                     notice.kind.as_str(),
@@ -142,57 +159,65 @@ impl Hub {
                 if let Err(error) = crate::http::record_log(&self.pool, level, &notice.text).await {
                     tracing::warn!(%error, key = %notice.dedupe_key, "notice was not written to the activity log");
                 }
-                if owner_post(self.watcher.mode(), &notice.kind) {
-                    let session = if owner_actionable(&notice.kind) {
-                        self.owner_session()
-                    } else {
-                        self.home_session()
-                    };
-                    if let Err(error) = crate::chat::reply::chat_reply_card(
-                        &self.pool,
-                        &session,
-                        &notice.text,
-                        notice.approval.as_ref(),
-                    )
-                    .await
-                    {
-                        tracing::warn!(%error, key = %notice.dedupe_key, "owner notice is stored but was not posted");
-                    }
-                }
-                if matches!(notice.kind.as_str(), "completion" | "failure") {
-                    self.reply_to_origin(observation, &notice.text).await;
-                }
+
             }
         }
         Ok(outcome)
     }
 
+    async fn post_notice(&self, session: &SessionKey, notice: &crate::sessions::watch::Notice) -> Result<()> {
+        use crate::storage::WriteTx;
+        let report = notice_report(notice);
+        let text = format!("{}\n{}", report.body, notice.text);
+        let mut tx = self.pool.begin_write().await?;
+        let blocks = notice.approval.as_ref()
+            .and_then(|card| crate::chat::slack::approval_blocks(&text, card));
+        let (_, id) = match blocks.as_ref().and_then(serde_json::Value::as_array) {
+            Some(blocks) => crate::report_gate::queue_card_in(
+                &mut tx, &session.storage_key(), &report, false, &text, blocks,
+            ).await?,
+            None => crate::report_gate::queue_delivery_in(
+                &mut tx, &session.storage_key(), &report, false, &text, None,
+            ).await?,
+        };
+        tx.commit().await?;
+        if let Some(id) = id {
+            crate::owner_alert::post_queued(&self.pool, id, &session.storage_key(), &text).await?;
+        }
+        Ok(())
+    }
+
     /// Final result of a task the owner started from Slack or Discord, in that thread.
     /// Actionable mode does this instead of posting the home-channel turn-complete.
-    async fn reply_to_origin(&self, observation: &Observation, notice_text: &str) {
-        let origin = match crate::chat::router::take_chat_origin(
-            &self.pool,
-            &observation.session_id,
-        )
-        .await
-        {
-            Ok(origin) => origin,
-            Err(error) => {
-                tracing::warn!(%error, session = %observation.session_id, "chat origin was not read");
-                return;
-            }
-        };
-        let Some(origin) = origin else {
-            return;
-        };
+    async fn reply_to_origin(&self, observation: &Observation, notice_text: &str) -> Result<()> {
+        use crate::storage::WriteTx;
         let text = if observation.last_assistant.trim().is_empty() {
             notice_text
         } else {
             observation.last_assistant.as_str()
         };
-        if let Err(error) = crate::chat::reply::chat_reply(&self.pool, &origin, text, None).await {
-            tracing::warn!(%error, session = %observation.session_id, "origin result was not posted");
-        }
+        let posted: Result<()> = async {
+            let mut tx = self.pool.begin_write().await?;
+            let key = format!("chat_origin:{}", observation.session_id);
+            let origin: Option<String> = sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = ?")
+                .bind(&key).fetch_optional(&mut *tx).await?;
+            let Some(origin) = origin else { return Ok(()); };
+            let report = crate::report_gate::Report::new(
+                uuid::Uuid::new_v4().to_string(), "session-result",
+                format!("session-result:{}:{origin}", observation.target),
+                crate::report_gate::Salience::Result, text,
+            ).with_state(&format!("{}:{}", observation.message_count, observation.failed));
+            let (_, id) = crate::report_gate::queue_delivery_in(
+                &mut tx, &origin, &report, false, text, None,
+            ).await?;
+            sqlx::query("DELETE FROM hub_meta WHERE key = ?").bind(key).execute(&mut *tx).await?;
+            tx.commit().await?;
+            if let Some(id) = id {
+                crate::owner_alert::post_queued(&self.pool, id, &origin, text).await?;
+            }
+            Ok(())
+        }.await;
+        posted
     }
 
     fn arm(self: &Arc<Self>, target: String, at: DateTime<Utc>) {
@@ -227,10 +252,14 @@ impl Hub {
                     .cloned();
                 let Some(observation) = latest else { return };
                 let next = match hub.apply(&observation, Utc::now()).await {
-                    Ok(outcome) => outcome.next_wake,
+                    Ok(outcome) => {
+                        #[cfg(test)]
+                        hub.timer_applied.notify_one();
+                        outcome.next_wake
+                    }
                     Err(error) => {
                         tracing::warn!(%error, %target, "held notice was not applied");
-                        return;
+                        Some(Utc::now() + chrono::Duration::seconds(30))
                     }
                 };
                 let Some(next) = next else { return };
@@ -245,6 +274,34 @@ impl Hub {
             }
         });
     }
+}
+
+/// A watcher notice keeps its external prompt as a quote, separate from bot narration.
+pub fn notice_report(notice: &crate::sessions::watch::Notice) -> crate::report_gate::Report {
+    use crate::report_gate::{Report, Salience};
+    let locale = crate::locale::current();
+    let (salience, body) = match notice.kind.as_str() {
+        "question" | "blocked" | "approval" => (
+            Salience::Decision,
+            locale.pick("진행을 위해 확인이 필요합니다.", "Your confirmation is needed to continue."),
+        ),
+        "failure" | "error" | "crash" | "failed" | "remediation" => (
+            Salience::Action,
+            locale.pick(
+                "작업에 문제가 발생했습니다. 확인이 필요합니다.",
+                "A task ran into a problem and needs your attention.",
+            ),
+        ),
+        "completion" => (
+            Salience::Result,
+            locale.pick("요청한 작업 결과입니다.", "Here is the result of the task you asked for."),
+        ),
+        _ => (Salience::Internal, locale.pick("내부 작업 상태입니다.", "Internal task status.")),
+    };
+    Report::new(&notice.dedupe_key, "session-watch",
+        format!("session-watch:{}:{}", notice.target, notice.kind), salience, body)
+        .with_state(&notice.dedupe_key).with_quote(notice.text.clone())
+        .with_origin(notice.target.clone())
 }
 
 pub fn default_database_path() -> PathBuf {
@@ -299,6 +356,7 @@ mod tests {
             config,
             latest: std::sync::Mutex::new(HashMap::new()),
             wakes: std::sync::Mutex::new(HashMap::new()),
+            timer_applied: tokio::sync::Notify::new(),
         })
     }
 
@@ -330,7 +388,7 @@ mod tests {
             streaming,
             blocking_question: false,
             question: None,
-            last_assistant: "shipped the patch".into(),
+            last_assistant: "패치 적용을 완료했습니다.".into(),
             watched: true,
             machine_failed: false,
             failed,
@@ -411,15 +469,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_owner_rule_mutes_a_watcher_question_before_queueing() {
+        let pool = crate::storage::memory().await.unwrap();
+        let scope = crate::report_rules::scope_from_alert(
+            "session-watch", None, None, Some("session-watch:local:pane:question"),
+        );
+        crate::report_rules::record(&pool, &scope, crate::report_rules::Effect::Mute,
+            "owner-feedback", None).await.unwrap();
+        let hub = hub_with(pool.clone(), std::time::Duration::ZERO, home_config());
+        hub.ingest(&blocked(Some("Proceed?"))).await.unwrap();
+        assert!(crate::chat::reply::pending(&pool).await.unwrap().is_empty());
+        let decision: String = sqlx::query_scalar("SELECT decision FROM report_suppressions WHERE source = 'session-watch'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(decision, "muted");
+    }
+
+    #[tokio::test]
     async fn a_held_notice_is_sent_by_its_timer_without_another_observation() {
         let pool = crate::storage::memory().await.unwrap();
         let hub = hub(pool.clone(), std::time::Duration::from_millis(200));
+        let applied = hub.timer_applied.notified();
         let outcome = hub.ingest(&blocked(Some("Proceed?"))).await.unwrap();
         assert!(outcome.due.is_empty(), "not due before the delay");
         assert!(outcome.next_wake.is_some());
         assert!(notices(&pool).await.is_empty());
 
-        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), applied).await.unwrap();
         let sent = notices(&pool).await;
         assert_eq!(sent.len(), 1, "{sent:?}");
         assert_eq!(sent[0].1, "question");
@@ -443,6 +518,13 @@ mod tests {
         let outbox = crate::chat::reply::pending(&pool).await.unwrap();
         assert_eq!(outbox.len(), 1, "the card is the only notice: {outbox:?}");
         assert!(outbox[0].2.contains("Proceed?"));
+        let blocks: String = sqlx::query_scalar("SELECT blocks_json FROM chat_outbox WHERE id = ?")
+            .bind(outbox[0].0).fetch_one(&pool).await.unwrap();
+        let blocks: serde_json::Value = serde_json::from_str(&blocks).unwrap();
+        assert_eq!(blocks[1]["elements"][0]["value"], "ferryx:approval:pane:same-prompt:rev-1:0:once");
+        let reports: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM report_delivery_parts WHERE outbox_id = ?")
+            .bind(outbox[0].0).fetch_one(&pool).await.unwrap();
+        assert_eq!(reports, 1);
         assert!(
             !outbox[0].2.contains("needs the owner"),
             "the plain escalation line is not also queued: {}",
@@ -454,12 +536,13 @@ mod tests {
     async fn a_question_that_went_away_is_not_sent_when_the_timer_fires() {
         let pool = crate::storage::memory().await.unwrap();
         let hub = hub(pool.clone(), std::time::Duration::from_millis(200));
+        let applied = hub.timer_applied.notified();
         hub.ingest(&blocked(Some("Proceed?"))).await.unwrap();
         let mut answered = blocked(None);
         answered.blocking_question = false;
         hub.ingest(&answered).await.unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), applied).await.unwrap();
         assert!(notices(&pool).await.is_empty());
     }
 
@@ -483,7 +566,7 @@ mod tests {
             .await
             .unwrap();
         assert!(logged.contains("turn complete"), "{logged}");
-        assert!(logged.contains("shipped the patch"), "{logged}");
+        assert!(logged.contains("패치 적용을 완료했습니다."), "{logged}");
         let stored = notices(&pool).await;
         assert_eq!(stored.len(), 1, "{stored:?}");
         assert_eq!(stored[0].1, "completion");
@@ -512,6 +595,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_origin_survives_a_failed_result_enqueue() {
+        let pool = crate::storage::memory().await.unwrap();
+        let origin = SessionKey::new("slack", None::<String>, "CORIGIN", Some("123.456"), "UOWNER");
+        sqlx::query("INSERT INTO hub_meta(key, value) VALUES('chat_origin:pane', ?)")
+            .bind(origin.storage_key()).execute(&pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER refuse_result BEFORE INSERT ON chat_outbox BEGIN SELECT RAISE(ABORT, 'disk failure'); END")
+            .execute(&pool).await.unwrap();
+        let hub = hub_with(pool.clone(), std::time::Duration::ZERO, home_config());
+        hub.ingest(&turn(true, false)).await.unwrap();
+        assert!(hub.ingest(&turn(false, false)).await.is_err());
+        assert!(hub.wakes.lock().unwrap().contains_key("local:pane"));
+        assert!(notices(&pool).await.is_empty());
+        let kept: String = sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = 'chat_origin:pane'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(kept, origin.storage_key());
+        let topics: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM report_topics")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(topics, 0);
+        sqlx::query("DROP TRIGGER refuse_result").execute(&pool).await.unwrap();
+        let applied = hub.timer_applied.notified();
+        hub.arm("local:pane".into(), Utc::now());
+        tokio::time::timeout(std::time::Duration::from_secs(5), applied).await.unwrap();
+        let queued = crate::chat::reply::pending(&pool).await.unwrap();
+        assert_eq!(queued.iter().filter(|(_, key, _)| *key == origin.storage_key()).count(), 1);
+        assert_eq!(notices(&pool).await.len(), 1);
+        hub.ingest(&turn(false, false)).await.unwrap();
+        assert_eq!(crate::chat::reply::pending(&pool).await.unwrap().len(), queued.len());
+    }
+
+    #[tokio::test]
     async fn an_explicit_request_result_is_replied_to_its_origin() {
         let pool = crate::storage::memory().await.unwrap();
         let origin = SessionKey::new(
@@ -537,7 +650,7 @@ mod tests {
         let session = SessionKey::from_storage_key(&queued[0].0).unwrap();
         assert_eq!(session.channel_id, "CORIGIN");
         assert_eq!(session.thread_id.as_deref(), Some("123.456"));
-        assert_eq!(queued[0].1, "shipped the patch");
+        assert_eq!(queued[0].1, "패치 적용을 완료했습니다.");
         let left: Option<String> =
             sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = 'chat_origin:pane'")
                 .fetch_optional(&pool)
@@ -573,6 +686,28 @@ mod tests {
         assert!(queued[0].1.contains("turn complete"));
         let back = SessionKey::from_storage_key(&queued[1].0).unwrap();
         assert_eq!(back.channel_id, "CORIGIN");
-        assert_eq!(queued[1].1, "shipped the patch");
+        assert_eq!(queued[1].1, "패치 적용을 완료했습니다.");
+    }
+
+    #[test]
+    fn notice_bodies_are_in_the_owner_language() {
+        let notice = |kind: &str| crate::sessions::watch::Notice {
+            dedupe_key: format!("k-{kind}"),
+            target: "local:pane".into(),
+            kind: kind.into(),
+            text: "pane text".into(),
+            approval: None,
+        };
+        assert_eq!(notice_report(&notice("question")).body, "진행을 위해 확인이 필요합니다.");
+        crate::locale::with(crate::locale::OwnerLocale::english_utc(), || {
+            assert_eq!(
+                notice_report(&notice("question")).body,
+                "Your confirmation is needed to continue."
+            );
+            for kind in ["failure", "completion", "working"] {
+                let body = notice_report(&notice(kind)).body;
+                assert!(!body.chars().any(crate::locale::is_hangul), "{kind}: {body}");
+            }
+        });
     }
 }

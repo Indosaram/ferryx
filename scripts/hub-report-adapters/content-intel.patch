@@ -1,0 +1,3509 @@
+diff --git a/lib/ferryx-report-gate.ts b/lib/ferryx-report-gate.ts
+new file mode 100644
+index 0000000..f8c9057
+--- /dev/null
++++ b/lib/ferryx-report-gate.ts
+@@ -0,0 +1,169 @@
++/**
++ * Client for the Ferryx hub control socket `report` / `report_status` operations
++ * (crates/ferryx-hub/src/control.rs). The hub owns owner-facing Slack delivery; a producer
++ * learns it only from a real receipt, never from admission.
++ */
++import { createConnection } from "node:net";
++import { homedir } from "node:os";
++import { join } from "node:path";
++
++export type Report = {
++  readonly source: string;
++  readonly topic: string;
++  readonly salience: "action" | "decision" | "result" | "fyi" | "internal";
++  readonly body: string;
++  readonly state: string;
++  readonly quote?: string;
++  readonly sender?: string;
++  readonly origin?: string;
++  readonly thread?: string;
++  readonly blocks?: readonly Record<string, unknown>[];
++  readonly blocked_reason?: string;
++};
++
++export type Delivery =
++  | { readonly kind: "pending"; readonly outboxId: number }
++  | { readonly kind: "delivered"; readonly outboxId: number; readonly ref: string }
++  | { readonly kind: "suppressed"; readonly reason: string };
++
++/** `in_flight`/`recovering`: the hub still settles this identity; `uncertain` and card-only `superseded` are final. */
++export type MutationState = "delivered" | "suppressed" | "pending" | "uncertain" | "superseded" | "in_flight" | "recovering";
++
++export class GateError extends Error {
++  constructor(
++    readonly code: "unavailable" | "protocol" | "rejected",
++    message: string,
++  ) {
++    super(message);
++    this.name = "GateError";
++  }
++}
++
++export type Transport = (request: Readonly<Record<string, unknown>>) => Promise<unknown>;
++
++export function socketTransport(path: string): Transport {
++  return (request) =>
++    new Promise((resolve, reject) => {
++      const socket = createConnection(path);
++      let buffer = "";
++      let settled = false;
++      const fail = (error: GateError) => {
++        if (settled) return;
++        settled = true;
++        socket.destroy();
++        reject(error);
++      };
++      socket.setEncoding("utf8");
++      socket.setTimeout(20_000, () => fail(new GateError("unavailable", "Hub reply timed out")));
++      socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
++      socket.on("data", (chunk) => {
++        buffer += chunk;
++        if (buffer.length > 1_048_576) {
++          fail(new GateError("protocol", "Hub reply exceeds 1 MiB"));
++          return;
++        }
++        const end = buffer.indexOf("\n");
++        if (end < 0 || settled) return;
++        try {
++          const reply: unknown = JSON.parse(buffer.slice(0, end));
++          settled = true;
++          socket.destroy();
++          resolve(reply);
++        } catch (error) {
++          fail(new GateError("protocol", error instanceof Error ? error.message : "Invalid JSON"));
++        }
++      });
++      socket.once("error", (error) => fail(new GateError("unavailable", error.message)));
++      socket.once("close", () => fail(new GateError("unavailable", "Hub closed before its reply")));
++    });
++}
++
++function reply(value: unknown, op: string): Readonly<Record<string, unknown>> {
++  if (typeof value !== "object" || value === null || Array.isArray(value))
++    throw new GateError("protocol", "Expected a hub reply object");
++  const parsed = value as Readonly<Record<string, unknown>>;
++  if (parsed["status"] === "failed") {
++    const error = parsed["error"];
++    throw new GateError("rejected", typeof error === "string" ? error : String(parsed["code"]));
++  }
++  if (parsed["status"] !== "ok" || parsed["op"] !== op)
++    throw new GateError("protocol", "Unexpected hub reply operation or status");
++  return parsed;
++}
++
++function positiveId(value: unknown): number {
++  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0)
++    throw new GateError("protocol", "Missing positive outbox ID");
++  return value;
++}
++
++export class ReportGate {
++  constructor(private readonly transport: Transport) {}
++
++  async mutate(outboxId: number, mutationId: string, change: Record<string, unknown>): Promise<MutationState> {
++    const value = reply(await this.transport({ op: "report_mutate", outbox_id: positiveId(outboxId), mutation_id: mutationId, change }), "report_mutate");
++    if (value["outbox_id"] !== outboxId || value["mutation_id"] !== mutationId) throw new GateError("protocol", "Mutation identity mismatch");
++    const delivery = value["delivery"];
++    if (delivery !== "delivered" && delivery !== "suppressed" && delivery !== "pending" && delivery !== "uncertain" && delivery !== "superseded") throw new GateError("protocol", "Unknown mutation state");
++    const progress = value["progress"];
++    if (delivery !== "pending" || progress === undefined) return delivery;
++    // The hub is still settling this identity itself: ask again with it, never give it up.
++    if ((progress === "in_flight" || progress === "recovering") && value["blocked_by"] === mutationId) return progress;
++    throw new GateError("protocol", "Unknown mutation progress");
++  }
++
++  async status(outboxId: number): Promise<Delivery> {
++    const id = positiveId(outboxId);
++    const value = reply(
++      await this.transport({ op: "report_status", outbox_id: id }),
++      "report_status",
++    );
++    if (value["outbox_id"] !== id)
++      throw new GateError("protocol", "Receipt belongs to another outbox row");
++    switch (value["delivery"]) {
++      case "pending":
++        return { kind: "pending", outboxId: id };
++      case "cancelled":
++        return { kind: "suppressed", reason: "cancelled" };
++      case "delivered": {
++        const channel = value["channel"];
++        const ts = value["ts"];
++        if (typeof channel !== "string" || !channel.trim() || typeof ts !== "string" || !ts.trim())
++          throw new GateError("protocol", "Delivered report has no Slack receipt");
++        return { kind: "delivered", outboxId: id, ref: `${channel}:${ts}` };
++      }
++      default:
++        throw new GateError("protocol", "Unknown delivery state");
++    }
++  }
++
++  async submit(report: Report): Promise<Delivery> {
++    const value = reply(await this.transport({ op: "report", ...report }), "report");
++    const decision = value["decision"];
++    switch (decision) {
++      case "sent":
++        return this.status(positiveId(value["outbox_id"]));
++      // A duplicate recovers the original row; a deferred card (digest with blocks) keeps its
++      // own pending row. Only a null outbox_id means nothing will be posted for this request.
++      case "duplicate":
++      case "digest":
++        return value["outbox_id"] === null
++          ? { kind: "suppressed", reason: decision }
++          : this.status(positiveId(value["outbox_id"]));
++      case "muted":
++      case "internal":
++      case "empty":
++      case "stale":
++        return { kind: "suppressed", reason: decision };
++      default:
++        throw new GateError("protocol", "Unknown gate decision");
++    }
++  }
++}
++
++/** The hub control socket (`FERRYX_HUB_CONTROL_SOCKET`, else `~/.ferryx/hub/control.sock`). */
++export function defaultReportGate(env: Readonly<Record<string, string | undefined>> = process.env): ReportGate {
++  const path =
++    env["FERRYX_HUB_CONTROL_SOCKET"]?.trim() || join(homedir(), ".ferryx", "hub", "control.sock");
++  return new ReportGate(socketTransport(path));
++}
+diff --git a/lib/report-outbox.ts b/lib/report-outbox.ts
+new file mode 100644
+index 0000000..0d1dc1a
+--- /dev/null
++++ b/lib/report-outbox.ts
+@@ -0,0 +1,294 @@
++/**
++ * Durable producer side of owner reporting. Every owner-facing message is written here before
++ * any network call, then admitted to the Ferryx hub. Only a real hub receipt (channel:ts) marks a
++ * row delivered; muted/cancelled/internal decisions are an explicit terminal `suppressed` state.
++ * Rows survive restarts: the next run resumes from the stored hub outbox ID. There is no time
++ * window; the row key is the report's source, topic and state.
++ */
++import type { Database } from "bun:sqlite";
++import { createHash } from "node:crypto";
++import { existsSync } from "node:fs";
++import { type Delivery, GateError, type Report, type ReportGate } from "./ferryx-report-gate";
++
++export type Attachment = { readonly name: string; readonly path: string };
++
++/** Thrown by an uploader when the file was certainly not shared, so retrying cannot duplicate it. */
++export class AttachmentNotShared extends Error {
++  constructor(message: string) {
++    super(message);
++    this.name = "AttachmentNotShared";
++  }
++}
++
++/** Thrown by an uploader when the hub's own receipt says the share outcome is unknown. */
++export class AttachmentUncertain extends Error {
++  constructor(message: string) {
++    super(message);
++    this.name = "AttachmentUncertain";
++  }
++}
++
++/**
++ * Thrown by an uploader when the hub is still settling this exact identity (its upload is in
++ * flight). The claim is kept, so the next run asks the hub again with the same identity.
++ */
++export class AttachmentInFlight extends Error {
++  constructor(message: string) {
++    super(message);
++    this.name = "AttachmentInFlight";
++  }
++}
++
++/** Shares one file into the delivered parent message's thread. */
++export type Uploader = (channel: string, threadTs: string, file: Attachment, parent?: { outboxId: number; mutationId: string }) => Promise<void>;
++
++export type OutboxState = "pending" | "delivered" | "suppressed" | "failed";
++
++export type OutboxRow = {
++  readonly id: string;
++  readonly source: string;
++  readonly state: OutboxState;
++  readonly outboxId: number | null;
++  readonly ref: string | null;
++  readonly reason: string | null;
++  readonly meta: Readonly<Record<string, unknown>>;
++  readonly attachments: readonly Attachment[];
++  readonly attachmentsDone: number;
++  readonly uncertain: readonly string[];
++  readonly completed: boolean;
++};
++
++type RawRow = {
++  id: string;
++  source: string;
++  request: string;
++  meta: string;
++  state: OutboxState;
++  outbox_id: number | null;
++  ref: string | null;
++  reason: string | null;
++  attachments: string;
++  attachments_started: number;
++  attachments_done: number;
++  uncertain: string;
++  completed_at: string | null;
++};
++
++export function reportKey(report: Pick<Report, "source" | "topic" | "state">): string {
++  return createHash("sha256")
++    .update(JSON.stringify([report.source, report.topic, report.state]))
++    .digest("hex");
++}
++
++export class ReportOutbox {
++  constructor(
++    private readonly db: Database,
++    private readonly gate: ReportGate,
++  ) {
++    db.exec(`CREATE TABLE IF NOT EXISTS report_outbox (
++      id TEXT PRIMARY KEY,
++      source TEXT NOT NULL,
++      request TEXT NOT NULL,
++      meta TEXT NOT NULL DEFAULT '{}',
++      state TEXT NOT NULL DEFAULT 'pending',
++      outbox_id INTEGER,
++      ref TEXT,
++      reason TEXT,
++      attachments TEXT NOT NULL DEFAULT '[]',
++      attachments_started INTEGER NOT NULL DEFAULT 0,
++      attachments_done INTEGER NOT NULL DEFAULT 0,
++      uncertain TEXT NOT NULL DEFAULT '[]',
++      completed_at TEXT,
++      created_at TEXT NOT NULL)`);
++  }
++
++  /** Persists the delivery intent. Re-enqueueing the same source/topic/state is a no-op. */
++  enqueue(
++    report: Report,
++    meta: Readonly<Record<string, unknown>> = {},
++    attachments: readonly Attachment[] = [],
++  ): string {
++    const id = reportKey(report);
++    this.db
++      .query(
++        `INSERT OR IGNORE INTO report_outbox(id, source, request, meta, attachments, created_at)
++         VALUES(?, ?, ?, ?, ?, ?)`,
++      )
++      .run(
++        id,
++        report.source,
++        JSON.stringify(report),
++        JSON.stringify(meta),
++        JSON.stringify(attachments),
++        new Date().toISOString(),
++      );
++    return id;
++  }
++
++  exists(id: string): boolean {
++    return (
++      this.db.query<{ id: string }, [string]>("SELECT id FROM report_outbox WHERE id = ?").get(id) !==
++      null
++    );
++  }
++
++  /** Rows of `source` that still need a hub answer, producer completion or attachments. */
++  open(source: string): readonly string[] {
++    return this.db
++      .query<{ id: string }, [string]>(
++        `SELECT id FROM report_outbox WHERE source = ?
++           AND (state = 'pending' OR (state = 'delivered' AND (completed_at IS NULL
++             OR attachments_done < json_array_length(attachments))))
++         ORDER BY rowid`,
++      )
++      .all(source)
++      .map((row) => row.id);
++  }
++
++  get(id: string): OutboxRow {
++    const raw = this.db
++      .query<RawRow, [string]>("SELECT * FROM report_outbox WHERE id = ?")
++      .get(id);
++    if (raw === null) throw new GateError("protocol", `Unknown local report ${id}`);
++    return {
++      attachments: JSON.parse(raw.attachments) as Attachment[],
++      attachmentsDone: raw.attachments_done,
++      completed: raw.completed_at !== null,
++      id: raw.id,
++      meta: JSON.parse(raw.meta) as Record<string, unknown>,
++      outboxId: raw.outbox_id,
++      reason: raw.reason,
++      ref: raw.ref,
++      source: raw.source,
++      state: raw.state,
++      uncertain: JSON.parse(raw.uncertain) as string[],
++    };
++  }
++
++  /**
++   * Advances one row as far as the hub allows. An unavailable hub leaves the row pending for
++   * the next run; a rejected or malformed exchange marks it `failed` and rethrows.
++   */
++  async drive(id: string): Promise<OutboxRow> {
++    const row = this.get(id);
++    if (row.state !== "pending") return row;
++    let delivery: Delivery;
++    try {
++      delivery =
++        row.outboxId === null
++          ? await this.gate.submit(this.request(id))
++          : await this.gate.status(row.outboxId);
++    } catch (error) {
++      if (error instanceof GateError && error.code === "unavailable") return row;
++      const reason =
++        error instanceof GateError ? `${error.code}: ${error.message}` : String(error);
++      this.db
++        .query("UPDATE report_outbox SET state = 'failed', reason = ? WHERE id = ?")
++        .run(reason, id);
++      throw error;
++    }
++    this.record(id, delivery);
++    return this.get(id);
++  }
++
++  /** Marks the producer's own post-delivery bookkeeping finished. */
++  complete(id: string): void {
++    this.db
++      .query("UPDATE report_outbox SET completed_at = ? WHERE id = ? AND state = 'delivered'")
++      .run(new Date().toISOString(), id);
++  }
++
++  private request(id: string): Report {
++    const raw = this.db
++      .query<{ request: string }, [string]>("SELECT request FROM report_outbox WHERE id = ?")
++      .get(id);
++    return JSON.parse(raw?.request ?? "null") as Report;
++  }
++
++  private record(id: string, delivery: Delivery): void {
++    switch (delivery.kind) {
++      case "pending":
++        this.db
++          .query("UPDATE report_outbox SET outbox_id = ? WHERE id = ?")
++          .run(delivery.outboxId, id);
++        return;
++      case "delivered":
++        this.db
++          .query(
++            "UPDATE report_outbox SET state = 'delivered', outbox_id = ?, ref = ? WHERE id = ?",
++          )
++          .run(delivery.outboxId, delivery.ref, id);
++        return;
++      case "suppressed":
++        this.db
++          .query("UPDATE report_outbox SET state = 'suppressed', reason = ? WHERE id = ?")
++          .run(delivery.reason, id);
++        return;
++    }
++  }
++
++  /**
++   * Shares attachments into the delivered parent's thread, at most once each. The claim is
++   * persisted before the upload. A claim without a confirmation (crash or lost reply) is replayed
++   * with the same mutation identity, so the hub's receipt decides: it answers an identity it
++   * already holds without posting again. Only the hub's final `uncertain` answer records an
++   * attachment as uncertain; the producer never infers it. While the hub reports the identity in
++   * flight, the claim stays open and later attachments wait. Never runs before a real receipt.
++   */
++  async shareAttachments(id: string, upload: Uploader): Promise<OutboxRow> {
++    const row = this.get(id);
++    if (row.state !== "delivered" || row.ref === null) return row;
++    const split = row.ref.indexOf(":");
++    const channel = row.ref.slice(0, split);
++    const threadTs = row.ref.slice(split + 1);
++    const claimed = this.db
++      .query<{ attachments_started: number }, [string]>(
++        "SELECT attachments_started FROM report_outbox WHERE id = ?",
++      )
++      .get(row.id);
++    const started = claimed?.attachments_started ?? row.attachmentsDone;
++    for (let index = row.attachmentsDone; index < row.attachments.length; index += 1) {
++      const file = row.attachments[index];
++      if (file === undefined) break;
++      // A replayed claim goes to the hub even without the file: the hub may already hold it.
++      if (index >= started && !existsSync(file.path)) {
++        // Retrying cannot bring a deleted preview back; record it instead of blocking the row.
++        this.markUncertain(row.id, index, `${file.name} (missing)`);
++        continue;
++      }
++      this.db
++        .query("UPDATE report_outbox SET attachments_started = ? WHERE id = ?")
++        .run(index + 1, row.id);
++      try {
++        if (row.outboxId === null) throw new AttachmentNotShared("Missing parent outbox id");
++        await upload(channel, threadTs, file, { outboxId: row.outboxId, mutationId: `${row.id}:attachment:${index}` });
++      } catch (error) {
++        if (error instanceof AttachmentUncertain) {
++          this.markUncertain(row.id, index, file.name);
++          continue;
++        }
++        // Keep the claim: the next run re-queries the hub with this identity, in order.
++        if (error instanceof AttachmentInFlight) break;
++        if (error instanceof AttachmentNotShared) {
++          this.db
++            .query("UPDATE report_outbox SET attachments_started = ? WHERE id = ?")
++            .run(index, row.id);
++        }
++        throw error;
++      }
++      this.db
++        .query("UPDATE report_outbox SET attachments_done = ? WHERE id = ?")
++        .run(index + 1, row.id);
++    }
++    return this.get(id);
++  }
++
++  private markUncertain(id: string, index: number, name: string): void {
++    const uncertain = [...this.get(id).uncertain, name];
++    this.db
++      .query(
++        "UPDATE report_outbox SET attachments_done = ?, attachments_started = ?, uncertain = ? WHERE id = ?",
++      )
++      .run(index + 1, index + 1, JSON.stringify(uncertain), id);
++  }
++}
+diff --git a/scripts/maho-build-in-public.ts b/scripts/maho-build-in-public.ts
+index 3d2dfca..2c410d8 100644
+--- a/scripts/maho-build-in-public.ts
++++ b/scripts/maho-build-in-public.ts
+@@ -3,20 +3,24 @@
+  * Maho build-in-public loop for the owner's own accounts (X @indo_yoon, Threads @indo_yoon).
+  *
+  *   draft                       cron entry: turn new maho-browser commits into one X post and one
+- *                               Threads post, then send them to Slack with buttons.
++ *                               Threads post, then report them to the owner through the Ferryx hub
++ *                               as a Slack card with buttons.
+  *   preview|publish-x|publish-threads|pass <draft-id> <token>
+  *                               Slack button actions (run by the omon gateway, namespace maho-bip).
+  *
+  * Commits are the only factual evidence. Nothing is posted without the owner's Slack click, and a
+  * click only publishes the exact text whose hash the button carries.
+  */
++import { Database } from "bun:sqlite";
+ import { createHash } from "node:crypto";
+ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { getProject } from "../lib/config";
++import { defaultReportGate, type Report } from "../lib/ferryx-report-gate";
+ import { DefaultMahoTransport, type MahoTransport } from "../lib/maho-publication-browser";
+ import { OUTPUT_DIR } from "../lib/paths";
++import { type OutboxRow, ReportOutbox } from "../lib/report-outbox";
+ import {
+ 	formatThreadsPostFromCopy,
+ 	type LinebreakChecker,
+@@ -26,12 +30,12 @@ import {
+ 	THREADS_CHAR_LIMIT,
+ 	X_TWEET_CHAR_LIMIT,
+ } from "../lib/social-post-generation";
+-import { slackTarget } from "./publish-ready-digest";
+ 
+ export const NAMESPACE = "maho-bip";
+ export const SITE_URL = "https://mahobrowser.com";
+ const BIP_DIR = join(OUTPUT_DIR, "build-in-public", "maho");
+ const STATE_PATH = join(BIP_DIR, "state.json");
++const OUTBOX_PATH = join(BIP_DIR, "report-outbox.sqlite");
+ const REPO =
+ 	process.env["MAHO_BIP_REPO"] ?? join(process.env["HOME"] ?? "", "code/project/maho-browser");
+ const GITHUB_REPO = "https://github.com/Project-Maho/maho-browser";
+@@ -104,9 +108,15 @@ function git(args: readonly string[]): string {
+ 	return result.stdout.toString();
+ }
+ 
+-function readState(): { readonly last_sha?: string } {
+-	if (!existsSync(STATE_PATH)) return {};
+-	return JSON.parse(readFileSync(STATE_PATH, "utf8")) as { last_sha?: string };
++type State = {
++	readonly last_sha?: string;
++	readonly last_draft?: string;
++	readonly slack_ts?: string;
++};
++
++function readState(path: string = STATE_PATH): State {
++	if (!existsSync(path)) return {};
++	return JSON.parse(readFileSync(path, "utf8")) as State;
+ }
+ 
+ function newCommits(): { readonly head: string; readonly commits: readonly Commit[] } {
+@@ -363,27 +373,87 @@ export function slackBlocks(draft: Draft): unknown[] {
+ 	];
+ }
+ 
+-async function postSlack(draft: Draft): Promise<string> {
+-	const target = slackTarget();
+-	if (!target) throw new Error("SLACK_BOT_TOKEN(_FILE) and SLACK_NOTIFY_CHANNEL_ID are required");
+-	const response = await fetch("https://slack.com/api/chat.postMessage", {
+-		body: JSON.stringify({
+-			blocks: slackBlocks(draft),
+-			channel: target.channel,
+-			text: `Maho build-in-public 초안 ${draft.id}`,
+-			unfurl_links: false,
+-			unfurl_media: false,
+-		}),
+-		headers: {
+-			Authorization: `Bearer ${target.token}`,
+-			"Content-Type": "application/json; charset=utf-8",
+-		},
+-		method: "POST",
+-	});
+-	const json = (await response.json()) as { ok?: boolean; ts?: string; error?: string };
+-	if (!json.ok) throw new Error(`Slack chat.postMessage: ${json.error ?? response.status}`);
+-	return json.ts ?? "";
++/** The draft card as an owner decision report; its state is the hash the buttons carry. */
++export function draftReport(draft: Draft): Report {
++	return {
++		blocks: slackBlocks(draft) as Record<string, unknown>[],
++		body: `Maho build-in-public 초안 ${draft.id}`,
++		salience: "decision",
++		source: NAMESPACE,
++		state: `draft:${draft.token}`,
++		topic: `${NAMESPACE}:draft:${draft.id}`,
++	};
++}
++
++export function describeDelivery(row: OutboxRow): string {
++	switch (row.state) {
++		case "delivered":
++			return `허브가 슬랙에 전달했습니다 (${row.ref})`;
++		case "pending":
++			return row.outboxId === null
++				? "허브 연결 대기 (다음 실행에서 재시도)"
++				: `허브 전달 대기 (outbox ${row.outboxId})`;
++		case "suppressed":
++			return `허브가 보내지 않기로 했습니다 (${row.reason})`;
++		case "failed":
++			return `허브 요청 실패 (${row.reason})`;
++	}
++}
++
++/** Advances one draft report; only a real receipt records `slack_ts`. */
++export async function settleDraft(
++	outbox: ReportOutbox,
++	id: string,
++	statePath: string = STATE_PATH,
++): Promise<OutboxRow> {
++	const row = await outbox.drive(id);
++	if (row.state !== "delivered" || row.completed) return row;
++	const state = readState(statePath);
++	if (state.last_draft === row.meta["draft_id"])
++		writeFileSync(statePath, JSON.stringify({ ...state, slack_ts: row.ref }, null, 2));
++	outbox.complete(id);
++	return row;
++}
++
++/** Retries drafts an earlier run left with the hub. One failing row does not block the rest. */
++export async function resumeDrafts(
++	outbox: ReportOutbox,
++	statePath: string = STATE_PATH,
++): Promise<readonly string[]> {
++	const failures: string[] = [];
++	for (const id of outbox.open(NAMESPACE)) {
++		try {
++			const row = await settleDraft(outbox, id, statePath);
++			console.log(`이전 초안 ${String(row.meta["draft_id"])}: ${describeDelivery(row)}`);
++		} catch (error) {
++			failures.push(error instanceof Error ? error.message : String(error));
++		}
++	}
++	return failures;
++}
++
++/**
++ * Persists the delivery intent and consumes the commits before any network call, so a retry
++ * resumes this exact draft instead of writing a second one from the same commits.
++ */
++export async function sendDraft(
++	outbox: ReportOutbox,
++	draft: Draft,
++	head: string,
++	statePath: string = STATE_PATH,
++): Promise<OutboxRow> {
++	const id = outbox.enqueue(draftReport(draft), { draft_id: draft.id });
++	writeFileSync(statePath, JSON.stringify({ last_draft: draft.id, last_sha: head }, null, 2));
++	return settleDraft(outbox, id, statePath);
++}
++
++function openOutbox(): ReportOutbox {
++	mkdirSync(BIP_DIR, { recursive: true });
++	return new ReportOutbox(new Database(OUTBOX_PATH, { create: true }), defaultReportGate());
+ }
+ 
+ async function runDraft(generate: Generator = defaultGenerator()): Promise<number> {
++	const outbox = openOutbox();
++	for (const failure of await resumeDrafts(outbox))
++		console.log(`⚠️ 이전 초안 재시도 실패: ${failure}`);
+ 	const { head, commits } = newCommits();
+@@ -409,12 +479,8 @@ async function runDraft(generate: Generator = defaultGenerator()): Promise<numbe
+ 	const dir = join(BIP_DIR, draft.id);
+ 	mkdirSync(dir, { recursive: true });
+ 	writeFileSync(join(dir, "draft.json"), JSON.stringify(draft, null, 2));
+-	const ts = await postSlack(draft);
+-	writeFileSync(
+-		STATE_PATH,
+-		JSON.stringify({ last_draft: draft.id, last_sha: head, slack_ts: ts }, null, 2),
+-	);
+-	console.log(`초안 ${draft.id} 슬랙 발송 완료 (커밋 ${commits.length}개)`);
++	const row = await sendDraft(outbox, draft, head);
++	console.log(`초안 ${draft.id} (커밋 ${commits.length}개): ${describeDelivery(row)}`);
+ 	return 0;
+ }
+ 
+diff --git a/scripts/publish-ready-digest.ts b/scripts/publish-ready-digest.ts
+index 197e857..dca9aca 100644
+--- a/scripts/publish-ready-digest.ts
++++ b/scripts/publish-ready-digest.ts
+@@ -2,6 +2,7 @@
+ import type { Database } from "bun:sqlite";
+ import {
+   closeSync,
++  copyFileSync,
+   existsSync,
+   mkdirSync,
+   mkdtempSync,
+@@ -16,6 +17,7 @@ import { tmpdir } from "node:os";
+-import { basename, dirname, join } from "node:path";
++import { basename, dirname, join, sep } from "node:path";
+ import { initSchema } from "../lib/db";
+ import { readAiCaption } from "../lib/distribution";
++import { defaultReportGate, GateError, type Report } from "../lib/ferryx-report-gate";
+ import { OUTPUT_DIR } from "../lib/paths";
+ import {
+   isAssetScoreEligible,
+@@ -23,9 +25,21 @@ import {
+   resolveTopicAssetScore,
+ } from "../lib/publication-approval";
+ import { createPublicationDraft } from "../lib/publication-drafts";
++import {
++  type Attachment,
++  AttachmentInFlight,
++  AttachmentNotShared,
++  AttachmentUncertain,
++  type OutboxRow,
++  ReportOutbox,
++  reportKey,
++  type Uploader,
++} from "../lib/report-outbox";
+ 
+ const PENDING_PATH = join(OUTPUT_DIR, "publish-ready-pending.json");
+ const DIGEST_LOG_PATH = join(OUTPUT_DIR, "publish-ready-digest.log");
++const OUTBOX_FILES_DIR = join(OUTPUT_DIR, "publish-ready-outbox");
++export const REPORT_SOURCE = "content-intel-publish-ready";
+ 
+ const VISUAL_ASSET_TYPES = ["card_news_images", "short_video"] as const;
+ const TEXT_ASSET_TYPES = ["threads_post", "x_thread"] as const;
+@@ -546,18 +560,8 @@
+-type SlackTarget = { readonly token: string; readonly channel: string };
+-
+-export function slackTarget(env: Record<string, string | undefined> = process.env): SlackTarget | null {
+-  const token = env["SLACK_BOT_TOKEN"]?.trim() || readSecret(env["SLACK_BOT_TOKEN_FILE"]);
+-  const channel = env["SLACK_NOTIFY_CHANNEL_ID"]?.trim();
+-  return token && channel ? { channel, token } : null;
+-}
+-
+-function readSecret(path: string | undefined): string | undefined {
+-  if (!path) return undefined;
+-  try {
+-    return readFileSync(path, "utf8").trim() || undefined;
+-  } catch {
+-    return undefined;
+-  }
+-}
++type SlackTarget = { readonly channel: string };
++
++export function slackTarget(env: Record<string, string | undefined> = process.env): SlackTarget | null {
++  const channel = env["SLACK_NOTIFY_CHANNEL_ID"]?.trim();
++  return channel ? { channel } : null;
++}
+ 
+ export function slackBlocks(text: string, components: readonly unknown[]): unknown[] {
+@@ -584,55 +586,133 @@
+-async function slackCall(target: SlackTarget, method: string, body: unknown, fetchFn: typeof fetch): Promise<Record<string, unknown>> {
+-  const response = await fetchFn(`https://slack.com/api/${method}`, {
+-    body: JSON.stringify(body),
+-    headers: { Authorization: `Bearer ${target.token}`, "Content-Type": "application/json; charset=utf-8" },
+-    method: "POST",
+-  });
+-  const json = (await response.json()) as Record<string, unknown>;
+-  if (json["ok"] !== true) throw new Error(`Slack ${method} error: ${String(json["error"] ?? response.status)}`);
+-  return json;
+-}
+-
+-async function uploadToSlack(
+-  target: SlackTarget,
+-  threadTs: string,
+-  file: { readonly name: string; readonly path: string },
+-  fetchFn: typeof fetch,
+-): Promise<void> {
+-  const bytes = readFileSync(file.path);
+-  const form = new URLSearchParams({ filename: file.name, length: String(bytes.length) });
+-  const ticket = await fetchFn("https://slack.com/api/files.getUploadURLExternal", {
+-    body: form,
+-    headers: { Authorization: `Bearer ${target.token}` },
+-    method: "POST",
+-  });
+-  const info = (await ticket.json()) as { ok?: boolean; upload_url?: string; file_id?: string; error?: string };
+-  if (!info.ok || !info.upload_url || !info.file_id) throw new Error(`Slack upload URL error: ${info.error ?? ticket.status}`);
+-  const put = await fetchFn(info.upload_url, { body: bytes, method: "POST" });
+-  if (!put.ok) throw new Error(`Slack upload error HTTP ${put.status}`);
+-  await slackCall(
+-    target,
+-    "files.completeUploadExternal",
+-    { channel_id: target.channel, files: [{ id: info.file_id, title: file.name }], thread_ts: threadTs },
+-    fetchFn,
+-  );
++/** Shares attachments through the hub; producers never read a Slack token. */
++export function slackUploader(gate = defaultReportGate()): Uploader {
++  return async (_channel, _threadTs, file, parent) => {
++    if (!parent) throw new AttachmentNotShared("Missing parent report identity");
++    const result = await gate.mutate(parent.outboxId, parent.mutationId, { kind: "attachment", path: file.path, name: file.name, title: file.name });
++    if (result === "pending") throw new AttachmentNotShared("Hub attachment pending");
++    // The hub still settles this identity: keep the claim and ask again with it next run.
++    if (result === "in_flight" || result === "recovering") throw new AttachmentInFlight("Hub attachment still in flight");
++    if (result === "uncertain") throw new AttachmentUncertain("Hub attachment outcome uncertain");
++    // Only card updates are superseded; for an attachment it is a broken receipt, never an upload.
++    if (result === "superseded") throw new GateError("protocol", "Hub answered superseded for an attachment");
++  };
+ }
+ 
+-async function postToSlack(
+-  target: SlackTarget,
++export type CardMeta = { readonly kind: "card"; readonly topic_id: number; readonly title: string };
++
++/** The recommendation card as an owner report: the exact Slack blocks and buttons, keyed by snapshot. */
++export function recommendationReport(
++  ready: Pick<DigestRow, "id">,
+   content: string,
+   components: readonly unknown[],
+-  files: readonly { readonly name: string; readonly path: string }[],
+-  fetchFn: typeof fetch = fetch,
+-): Promise<{ readonly id: string }> {
+-  const posted = await slackCall(
+-    target,
+-    "chat.postMessage",
+-    { blocks: slackBlocks(content, components), channel: target.channel, text: toSlackText(content), unfurl_links: false },
+-    fetchFn,
+-  );
+-  const ts = String(posted["ts"]);
+-  for (const file of files) await uploadToSlack(target, ts, file, fetchFn);
+-  return { id: ts };
++  snapshot: ReviewedSnapshot,
++  previewedAssetIds: readonly number[],
++): Report {
++  return {
++    blocks: slackBlocks(content, components) as Record<string, unknown>[],
++    body: toSlackText(content),
++    salience: "decision",
++    source: REPORT_SOURCE,
++    state: `snapshot:${snapshot.id}:${snapshot.payload_sha256}:${snapshot.draft_revision}:assets:${previewedAssetIds.join("-")}`,
++    topic: `publish-ready:topic:${ready.id}`,
++  };
++}
++
++export function failureReport(message: string): Report {
++  return {
++    body: "⚠️ *콘텐츠 추천 발행 오류*",
++    quote: message,
++    salience: "action",
++    source: REPORT_SOURCE,
++    state: message,
++    topic: "publish-ready:error",
++  };
++}
++
++/** Preview files made in the run's temp dir (a shrunk reel) are copied where a retry can find them. */
++export function durableAttachments(
++  files: readonly Attachment[],
++  tempDir: string,
++  dir: string,
++): readonly Attachment[] {
++  return files.map((file) => {
++    if (!file.path.startsWith(`${tempDir}${sep}`)) return file;
++    mkdirSync(dir, { recursive: true });
++    const path = join(dir, file.name);
++    copyFileSync(file.path, path);
++    return { name: file.name, path };
++  });
++}
++
++export type CardPaths = { readonly pending: string; readonly log: string };
++
++/** Producer bookkeeping that only a delivered receipt may trigger. */
++export function recordDeliveredCard(row: OutboxRow, paths: CardPaths = { log: DIGEST_LOG_PATH, pending: PENDING_PATH }): void {
++  const meta = row.meta as Partial<CardMeta>;
++  if (meta.kind !== "card" || typeof meta.topic_id !== "number") return;
++  const now = new Date().toISOString();
++  const pendingData: PendingPayload = {
++    pending: { digest_sent_at: now, title: String(meta.title ?? ""), topic_id: meta.topic_id },
++  };
++  writeJsonAtomically(paths.pending, pendingData);
++  mkdirSync(dirname(paths.log), { recursive: true });
++  const logFd = openSync(paths.log, "a");
++  try {
++    writeSync(logFd, `${now} | topic #${meta.topic_id} | msg ${row.ref} | ${String(meta.title ?? "")}\n`);
++  } finally {
++    closeSync(logFd);
++  }
++}
++
++/**
++ * Moves one report as far as the hub allows: admission or receipt lookup, then (only on a real
++ * receipt) the producer bookkeeping, then the thread attachments.
++ */
++export async function settleReport(
++  outbox: ReportOutbox,
++  id: string,
++  upload: Uploader,
++  paths?: CardPaths,
++): Promise<OutboxRow> {
++  const row = await outbox.drive(id);
++  if (row.state !== "delivered") return row;
++  if (!row.completed) {
++    recordDeliveredCard(row, paths);
++    outbox.complete(id);
++  }
++  const shared = await outbox.shareAttachments(id, upload);
++  if (shared.uncertain.length > 0)
++    console.error(`첨부 전송 여부를 확인할 수 없어 재전송하지 않았습니다: ${shared.uncertain.join(", ")}`);
++  return shared;
++}
++
++/** Retries every report an earlier run left open. One failing row does not block the rest. */
++export async function resumeReports(
++  outbox: ReportOutbox,
++  upload: Uploader,
++  paths?: CardPaths,
++): Promise<readonly string[]> {
++  const failures: string[] = [];
++  for (const id of outbox.open(REPORT_SOURCE)) {
++    try {
++      await settleReport(outbox, id, upload, paths);
++    } catch (error) {
++      failures.push(errorMessage(error));
++    }
++  }
++  return failures;
++}
++
++export function describeDelivery(row: OutboxRow): string {
++  switch (row.state) {
++    case "delivered":
++      return `허브가 전달했습니다 (${row.ref})`;
++    case "pending":
++      return row.outboxId === null ? "허브 연결 대기 (다음 실행에서 재시도)" : `허브 전달 대기 (outbox ${row.outboxId})`;
++    case "suppressed":
++      return `허브가 보내지 않기로 했습니다 (${row.reason})`;
++    case "failed":
++      return `허브 요청 실패 (${row.reason})`;
++  }
+ }
+ 
+ function writeJsonAtomically(path: string, data: unknown): void {
+@@ -645,12 +779,19 @@ function writeJsonAtomically(path: string, data: unknown): void {
+   }
+ }
+ 
+-async function reportFailure(message: string, fetchFn: typeof fetch = fetch): Promise<void> {
+-  const slack = slackTarget();
+-  if (slack) {
++async function reportFailure(
++  message: string,
++  outbox: ReportOutbox | null,
++  fetchFn: typeof fetch = fetch,
++): Promise<void> {
++  if (outbox) {
+     try {
+-      await slackCall(slack, "chat.postMessage", { channel: slack.channel, text: `⚠️ *콘텐츠 추천 발행 오류*\n${message}` }, fetchFn);
+-    } catch {}
++      const row = await outbox.drive(outbox.enqueue(failureReport(message)));
++      console.error(`오류 보고: ${describeDelivery(row)}`);
++      if (row.state === "delivered") outbox.complete(row.id);
++    } catch (error) {
++      console.error(`오류 보고 실패: ${errorMessage(error)}`);
++    }
+     return;
+   }
+   const token = process.env["DISCORD_BOT_TOKEN"]?.trim();
+@@ -672,8 +813,15 @@ export async function main(): Promise<number> {
+   const db = initSchema();
+   const projects = ["noveling", "creative-tech"];
+   const tempDir = mkdtempSync(join(tmpdir(), "publish-ready-digest-"));
++  // Slack goes through the Ferryx hub; the token is used only to thread preview files.
++  const slack = slackTarget();
++  const outbox = slack ? new ReportOutbox(db, defaultReportGate()) : null;
+ 
+   try {
++    if (slack && outbox) {
++      const failures = await resumeReports(outbox, slackUploader());
++      for (const failure of failures) console.error(`이전 추천 재시도 실패: ${failure}`);
++    }
+     const ready = selectTopReady(db, projects);
+     if (ready === null) {
+       console.log("추천 가능한 토픽이 없습니다. (상태: review, 렌더 완료 에셋 보유)");
+@@ -688,7 +836,6 @@ export async function main(): Promise<number> {
+     const message = renderRecommendation(ready, count, omitted);
+     const previewedAssetIds = [...assets.cardIds, ...assets.videoIds];
+     const reviewedSnapshot = ensureReviewSnapshot(db, ready, assets, tempDir);
+-    const slack = slackTarget();
+     const components = buttonComponents(
+       ready.id,
+       previewedAssetIds,
+@@ -700,9 +847,19 @@ export async function main(): Promise<number> {
+       slack ? "slack" : "discord",
+     );
+ 
+-    const sent = slack
+-      ? await postToSlack(slack, message, components, files)
+-      : await postToDiscord(message, components, files);
++    if (slack && outbox) {
++      const report = recommendationReport(ready, message, components, reviewedSnapshot, previewedAssetIds);
++      const key = reportKey(report);
++      if (!outbox.exists(key)) {
++        const meta: CardMeta = { kind: "card", title: ready.title, topic_id: ready.id };
++        outbox.enqueue(report, meta, durableAttachments(files, tempDir, join(OUTBOX_FILES_DIR, key)));
++      }
++      const row = await settleReport(outbox, key, slackUploader());
++      console.log(`추천 #${ready.id} (${ready.title}): ${describeDelivery(row)}`);
++      return 0;
++    }
++
++    const sent = await postToDiscord(message, components, files);
+ 
+     const pendingData: PendingPayload = {
+       pending: {
+@@ -727,7 +884,7 @@ export async function main(): Promise<number> {
+   } catch (error) {
+     const msg = errorMessage(error);
+     console.error(`추천 발송 실패: ${msg}`);
+-    await reportFailure(msg);
++    await reportFailure(msg, outbox);
+     return 1;
+   } finally {
+     db.close();
+diff --git a/tests/helpers/fake-hub.ts b/tests/helpers/fake-hub.ts
+new file mode 100644
+index 0000000..e182d62
+--- /dev/null
++++ b/tests/helpers/fake-hub.ts
+@@ -0,0 +1,50 @@
++import { GateError, type Transport } from "../../lib/ferryx-report-gate";
++
++/**
++ * In-process stand-in for the Ferryx hub control socket. It follows control.rs: `report`
++ * answers a decision and outbox_id, `report_status` answers the row's delivery receipt.
++ */
++export class FakeHub {
++  readonly requests: Record<string, unknown>[] = [];
++  readonly rows = new Map<number, { delivery: "pending" | "delivered" | "cancelled"; ts?: string }>();
++  decision: "sent" | "digest" | "muted" | "duplicate" | "internal" = "sent";
++  down = false;
++  private next = 1;
++
++  readonly transport: Transport = async (request) => {
++    if (this.down) throw new GateError("unavailable", "connect ENOENT");
++    this.requests.push({ ...request });
++    if (request["op"] === "report_status") {
++      const id = Number(request["outbox_id"]);
++      const row = this.rows.get(id);
++      if (!row) return { status: "failed", op: "report_status", code: "not_found", outbox_id: id };
++      return {
++        status: "ok",
++        op: "report_status",
++        outbox_id: id,
++        delivery: row.delivery,
++        channel: row.ts ? "D1" : null,
++        ts: row.ts ?? null,
++      };
++    }
++    if (this.decision === "sent" || this.decision === "digest") {
++      const id = this.next++;
++      this.rows.set(id, { delivery: "pending" });
++      return { status: "ok", op: "report", decision: this.decision, outbox_id: id };
++    }
++    return { status: "ok", op: "report", decision: this.decision, outbox_id: null };
++  };
++
++  /** The hub's outbox worker posting row `id` to Slack. */
++  deliver(id: number, ts: string): void {
++    this.rows.set(id, { delivery: "delivered", ts });
++  }
++
++  cancel(id: number): void {
++    this.rows.set(id, { delivery: "cancelled" });
++  }
++
++  reports(): Record<string, unknown>[] {
++    return this.requests.filter((request) => request["op"] === "report");
++  }
++}
+diff --git a/tests/unit/maho-build-in-public.test.ts b/tests/unit/maho-build-in-public.test.ts
+index ba0b578..cd0c7ed 100644
+--- a/tests/unit/maho-build-in-public.test.ts
++++ b/tests/unit/maho-build-in-public.test.ts
+@@ -1,9 +1,13 @@
++import { Database } from "bun:sqlite";
+ import { describe, expect, test } from "bun:test";
+-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
++import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
++import { ReportGate } from "../../lib/ferryx-report-gate";
++import { ReportOutbox } from "../../lib/report-outbox";
+ import {
+   composeUrl,
+   copyViolations,
+   type Draft,
++  draftReport,
+   draftToken,
+@@ -11,11 +15,14 @@
+   isUserFacing,
+   loadDraft,
+   NAMESPACE,
+   parseGitLog,
++  resumeDrafts,
++  sendDraft,
+   SITE_URL,
+   slackBlocks,
+   writeCopy,
+ } from "../../scripts/maho-build-in-public";
++import { FakeHub } from "../helpers/fake-hub";
+ 
+ const commit = (subject: string) => ({ body: "", sha: "a".repeat(40), subject });
+ const passChecker = () => ({ output: "", violations: 0 });
+@@ -158,4 +165,53 @@ describe("slack draft and button binding", () => {
+     expect(x.searchParams.get("text")).toBe(text);
+     expect(threads.searchParams.get("text")).toBe(text);
+   });
++
++  test("the draft card goes to the hub with its buttons; only a receipt records slack_ts", async () => {
++    const root = mkdtempSync(join(tmpdir(), "maho-bip-gate-"));
++    const statePath = join(root, "state.json");
++    const hub = new FakeHub();
++    const db = new Database(":memory:");
++    try {
++      hub.down = true;
++      const outbox = new ReportOutbox(db, new ReportGate(hub.transport));
++      expect((await sendDraft(outbox, draft, "head1", statePath)).state).toBe("pending");
++      expect(JSON.parse(readFileSync(statePath, "utf8"))).toEqual({
++        last_draft: draft.id,
++        last_sha: "head1",
++      });
++
++      hub.down = false;
++      const restarted = new ReportOutbox(db, new ReportGate(hub.transport));
++      await resumeDrafts(restarted, statePath);
++      expect(hub.reports()).toEqual([{ op: "report", ...draftReport(draft) }]);
++      expect(hub.reports()[0]?.["blocks"]).toEqual(slackBlocks(draft));
++      expect(JSON.parse(readFileSync(statePath, "utf8")).slack_ts).toBeUndefined();
++
++      hub.deliver(1, "100.2");
++      await resumeDrafts(restarted, statePath);
++      expect(JSON.parse(readFileSync(statePath, "utf8")).slack_ts).toBe("D1:100.2");
++      expect(restarted.open(NAMESPACE)).toEqual([]);
++      expect(hub.reports()).toHaveLength(1);
++    } finally {
++      rmSync(root, { force: true, recursive: true });
++    }
++  });
++
++  test("a muted draft is terminal and records no slack_ts", async () => {
++    const root = mkdtempSync(join(tmpdir(), "maho-bip-gate-"));
++    const statePath = join(root, "state.json");
++    const hub = new FakeHub();
++    hub.decision = "muted";
++    try {
++      const outbox = new ReportOutbox(new Database(":memory:"), new ReportGate(hub.transport));
++      expect(await sendDraft(outbox, draft, "head1", statePath)).toMatchObject({
++        reason: "muted",
++        state: "suppressed",
++      });
++      expect(JSON.parse(readFileSync(statePath, "utf8")).slack_ts).toBeUndefined();
++      expect(outbox.open(NAMESPACE)).toEqual([]);
++    } finally {
++      rmSync(root, { force: true, recursive: true });
++    }
++  });
+ });
+diff --git a/tests/unit/publish-ready-report-gate.test.ts b/tests/unit/publish-ready-report-gate.test.ts
+new file mode 100644
+index 0000000..f14e4c3
+--- /dev/null
++++ b/tests/unit/publish-ready-report-gate.test.ts
+@@ -0,0 +1,170 @@
++import { Database } from "bun:sqlite";
++import { afterEach, describe, expect, test } from "bun:test";
++import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { GateError, ReportGate } from "../../lib/ferryx-report-gate";
++import { AttachmentInFlight, AttachmentUncertain, ReportOutbox, type Uploader } from "../../lib/report-outbox";
++import {
++  buttonComponents,
++  type CardMeta,
++  durableAttachments,
++  failureReport,
++  REPORT_SOURCE,
++  recommendationReport,
++  resumeReports,
++  settleReport,
++  slackBlocks,
++  slackUploader,
++} from "../../scripts/publish-ready-digest";
++import { FakeHub } from "../helpers/fake-hub";
++
++const dirs: string[] = [];
++function tempDir(): string {
++  const dir = mkdtempSync(join(tmpdir(), "publish-ready-gate-"));
++  dirs.push(dir);
++  return dir;
++}
++
++afterEach(() => {
++  for (const dir of dirs.splice(0)) rmSync(dir, { force: true, recursive: true });
++});
++
++const snapshot = { draft_revision: 2, id: 9, payload_sha256: "a".repeat(64) };
++const components = buttonComponents(
++  7,
++  [11, 12],
++  { draftRevision: snapshot.draft_revision, id: snapshot.id, payloadSha256: snapshot.payload_sha256 },
++  "slack",
++);
++const meta: CardMeta = { kind: "card", title: "새 카드", topic_id: 7 };
++
++function setup() {
++  const dir = tempDir();
++  const hub = new FakeHub();
++  const db = new Database(":memory:");
++  const outbox = new ReportOutbox(db, new ReportGate(hub.transport));
++  const paths = { log: join(dir, "digest.log"), pending: join(dir, "pending.json") };
++  const uploads: string[] = [];
++  const upload: Uploader = async (channel, ts, file) => {
++    uploads.push(`${channel}:${ts}:${file.name}`);
++  };
++  return { db, dir, hub, outbox, paths, upload, uploads };
++}
++
++describe("publish-ready card through the Ferryx hub", () => {
++  test("the report carries the exact Slack blocks and buttons", () => {
++    const report = recommendationReport({ id: 7 }, "**제목**", components, snapshot, [11, 12]);
++    expect(report.blocks).toEqual(slackBlocks("**제목**", components) as Record<string, unknown>[]);
++    const actions = report.blocks?.[1] as { elements: { value?: string }[] };
++    expect(actions.elements[0]?.value).toBe(
++      `omon:btn:content-intel:publish:7-11-12:9.${"a".repeat(64)}.2`,
++    );
++    expect(report).toMatchObject({
++      salience: "decision",
++      source: REPORT_SOURCE,
++      state: `snapshot:9:${"a".repeat(64)}:2:assets:11-12`,
++      topic: "publish-ready:topic:7",
++    });
++  });
++
++  test("a pending digest card writes no pending file until the hub delivers it", async () => {
++    const { dir, hub, outbox, paths, upload, uploads } = setup();
++    hub.decision = "digest";
++    const report = recommendationReport({ id: 7 }, "본문", components, snapshot, [11, 12]);
++    const files = [{ name: "card-01.png", path: join(dir, "od-card-01.png") }];
++    writeFileSync(join(dir, "od-card-01.png"), "png");
++    const id = outbox.enqueue(report, meta, files);
++
++    expect(await settleReport(outbox, id, upload, paths)).toMatchObject({ outboxId: 1, state: "pending" });
++    expect(existsSync(paths.pending)).toBe(false);
++    expect(uploads).toEqual([]);
++
++    hub.deliver(1, "100.2");
++    expect(await resumeReports(outbox, upload, paths)).toEqual([]);
++    expect(JSON.parse(readFileSync(paths.pending, "utf8")).pending).toMatchObject({ title: "새 카드", topic_id: 7 });
++    expect(readFileSync(paths.log, "utf8")).toContain("msg D1:100.2");
++    expect(uploads).toEqual(["D1:100.2:card-01.png"]);
++
++    await resumeReports(outbox, upload, paths);
++    expect(uploads).toHaveLength(1);
++    expect(hub.reports()).toHaveLength(1);
++    expect(readFileSync(paths.log, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
++  });
++
++  test("a muted card is terminal and never becomes the pending recommendation", async () => {
++    const { hub, outbox, paths, upload, uploads } = setup();
++    hub.decision = "muted";
++    const id = outbox.enqueue(recommendationReport({ id: 7 }, "본문", components, snapshot, [11]), meta, [
++      { name: "card-01.png", path: "/r/1.png" },
++    ]);
++    expect(await settleReport(outbox, id, upload, paths)).toMatchObject({ reason: "muted", state: "suppressed" });
++    expect(existsSync(paths.pending)).toBe(false);
++    expect(uploads).toEqual([]);
++    expect(outbox.open(REPORT_SOURCE)).toEqual([]);
++  });
++
++  test("errors are reported as an action report keyed by their message", () => {
++    expect(failureReport("DB locked")).toMatchObject({
++      quote: "DB locked",
++      salience: "action",
++      source: REPORT_SOURCE,
++      state: "DB locked",
++      topic: "publish-ready:error",
++    });
++  });
++
++  test("temp-dir previews are copied to a durable path for retries", () => {
++    const temp = tempDir();
++    const durable = join(tempDir(), "outbox");
++    writeFileSync(join(temp, "shrunk.mp4"), "video");
++    const files = durableAttachments(
++      [
++        { name: "reel.mp4", path: join(temp, "shrunk.mp4") },
++        { name: "card-01.png", path: "/render/od-card-01.png" },
++      ],
++      temp,
++      durable,
++    );
++    expect(files).toEqual([
++      { name: "reel.mp4", path: join(durable, "reel.mp4") },
++      { name: "card-01.png", path: "/render/od-card-01.png" },
++    ]);
++    expect(readFileSync(join(durable, "reel.mp4"), "utf8")).toBe("video");
++  });
++
++  test("slack uploader sends only the hub parent identity and attachment", async () => {
++    const calls: Record<string, unknown>[] = [];
++    const gate = new ReportGate(async (request) => {
++      calls.push(request);
++      return { status: "ok", op: "report_mutate", outbox_id: 7, mutation_id: "file:1", delivery: "delivered" };
++    });
++    await slackUploader(gate)("D1", "100.2", { name: "card.png", path: "/render/card.png" }, { outboxId: 7, mutationId: "file:1" });
++    expect(calls).toEqual([{ op: "report_mutate", outbox_id: 7, mutation_id: "file:1",
++      change: { kind: "attachment", path: "/render/card.png", name: "card.png", title: "card.png" } }]);
++  });
++
++  test("a hub uncertain answer is an uncertain attachment, not a retryable failure", async () => {
++    const gate = new ReportGate(async () => (
++      { status: "ok", op: "report_mutate", outbox_id: 7, mutation_id: "file:1", delivery: "uncertain" }));
++    await expect(
++      slackUploader(gate)("D1", "100.2", { name: "card.png", path: "/render/card.png" }, { outboxId: 7, mutationId: "file:1" }),
++    ).rejects.toBeInstanceOf(AttachmentUncertain);
++  });
++
++  test("a hub in-flight answer keeps the attachment claim open instead of marking it uncertain", async () => {
++    const gate = new ReportGate(async () => ({ status: "ok", op: "report_mutate", outbox_id: 7, mutation_id: "file:1",
++      delivery: "pending", progress: "in_flight", blocked_by: "file:1" }));
++    await expect(
++      slackUploader(gate)("D1", "100.2", { name: "card.png", path: "/render/card.png" }, { outboxId: 7, mutationId: "file:1" }),
++    ).rejects.toBeInstanceOf(AttachmentInFlight);
++  });
++
++  test("a hub superseded answer for an attachment is a protocol error, never an upload", async () => {
++    const gate = new ReportGate(async () => (
++      { status: "ok", op: "report_mutate", outbox_id: 7, mutation_id: "file:1", delivery: "superseded" }));
++    await expect(
++      slackUploader(gate)("D1", "100.2", { name: "card.png", path: "/render/card.png" }, { outboxId: 7, mutationId: "file:1" }),
++    ).rejects.toBeInstanceOf(GateError);
++  });
++});
+diff --git a/tests/unit/report-outbox.test.ts b/tests/unit/report-outbox.test.ts
+new file mode 100644
+index 0000000..344607a
+--- /dev/null
++++ b/tests/unit/report-outbox.test.ts
+@@ -0,0 +1,229 @@
++import { Database } from "bun:sqlite";
++import { describe, expect, test } from "bun:test";
++import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { GateError, type Report, ReportGate } from "../../lib/ferryx-report-gate";
++import { AttachmentInFlight, AttachmentNotShared, AttachmentUncertain, ReportOutbox, type Uploader } from "../../lib/report-outbox";
++import { FakeHub } from "../helpers/fake-hub";
++
++const card: Report = {
++  blocks: [
++    {
++      elements: [{ action_id: "omon:btn:content-intel:publish:1", type: "button", value: "v" }],
++      type: "actions",
++    },
++  ],
++  body: "발행할까요?",
++  salience: "decision",
++  source: "test",
++  state: "snapshot:1",
++  topic: "publish-ready:topic:1",
++};
++
++function setup(): { db: Database; hub: FakeHub; outbox: ReportOutbox } {
++  const db = new Database(":memory:");
++  const hub = new FakeHub();
++  return { db, hub, outbox: new ReportOutbox(db, new ReportGate(hub.transport)) };
++}
++
++describe("report gate client", () => {
++  test("sends the card blocks unchanged and reads a real receipt", async () => {
++    const hub = new FakeHub();
++    const gate = new ReportGate(hub.transport);
++    expect(await gate.submit(card)).toEqual({ kind: "pending", outboxId: 1 });
++    expect(hub.requests[0]).toEqual({ op: "report", ...card });
++    hub.deliver(1, "100.2");
++    expect(await gate.status(1)).toEqual({ kind: "delivered", outboxId: 1, ref: "D1:100.2" });
++  });
++
++  test("a deferred digest card is pending, a null-ID decision is terminal", async () => {
++    const hub = new FakeHub();
++    const gate = new ReportGate(hub.transport);
++    hub.decision = "digest";
++    expect(await gate.submit(card)).toEqual({ kind: "pending", outboxId: 1 });
++    hub.decision = "muted";
++    expect(await gate.submit(card)).toEqual({ kind: "suppressed", reason: "muted" });
++  });
++
++  test("a hub in-flight answer for the same identity is retryable progress, not uncertain", async () => {
++    const answer = (extra: Record<string, unknown>) => new ReportGate(async () => ({
++      status: "ok", op: "report_mutate", outbox_id: 7, mutation_id: "file:1", delivery: "pending", ...extra }));
++    const change = { kind: "attachment", path: "/r/card.png", name: "card.png", title: "card.png" };
++    expect(await answer({ progress: "in_flight", blocked_by: "file:1" }).mutate(7, "file:1", change)).toBe("in_flight");
++    expect(await answer({ progress: "recovering", blocked_by: "file:1" }).mutate(7, "file:1", change)).toBe("recovering");
++    expect(await answer({ delivery: "superseded" }).mutate(7, "file:1", change)).toBe("superseded");
++    expect(await answer({ blocked_by: "file:0" }).mutate(7, "file:1", change)).toBe("pending");
++    await expect(answer({ progress: "in_flight", blocked_by: "file:0" }).mutate(7, "file:1", change)).rejects.toThrow(/progress/);
++  });
++
++  test("a delivered status without channel and ts is a protocol error", async () => {
++    const gate = new ReportGate(async () => ({
++      status: "ok",
++      op: "report_status",
++      outbox_id: 3,
++      delivery: "delivered",
++    }));
++    await expect(gate.status(3)).rejects.toThrow(/no Slack receipt/);
++  });
++});
++
++describe("report outbox", () => {
++  test("persists intent before the network and resumes after a restart", async () => {
++    const { db, hub, outbox } = setup();
++    hub.down = true;
++    const id = outbox.enqueue(card);
++    expect((await outbox.drive(id)).state).toBe("pending");
++    expect(outbox.open("test")).toEqual([id]);
++
++    hub.down = false;
++    const restarted = new ReportOutbox(db, new ReportGate(hub.transport));
++    expect(restarted.enqueue(card)).toBe(id);
++    expect(await restarted.drive(id)).toMatchObject({ outboxId: 1, ref: null, state: "pending" });
++    hub.deliver(1, "100.2");
++    expect(await restarted.drive(id)).toMatchObject({ ref: "D1:100.2", state: "delivered" });
++    expect(hub.reports()).toHaveLength(1);
++  });
++
++  test("muted and cancelled outcomes are explicit terminal states", async () => {
++    const { hub, outbox } = setup();
++    hub.decision = "muted";
++    const muted = outbox.enqueue(card);
++    expect(await outbox.drive(muted)).toMatchObject({ reason: "muted", state: "suppressed" });
++
++    hub.decision = "sent";
++    const cancelled = outbox.enqueue({ ...card, state: "snapshot:2" });
++    await outbox.drive(cancelled);
++    hub.cancel(1);
++    expect(await outbox.drive(cancelled)).toMatchObject({ reason: "cancelled", state: "suppressed" });
++    expect(outbox.open("test")).toEqual([]);
++  });
++
++  test("a rejected request is marked failed and leaves other rows retryable", async () => {
++    const db = new Database(":memory:");
++    const outbox = new ReportOutbox(
++      db,
++      new ReportGate(async () => ({ status: "failed", op: "report", error: "invalid report" })),
++    );
++    const id = outbox.enqueue(card);
++    await expect(outbox.drive(id)).rejects.toBeInstanceOf(GateError);
++    expect(outbox.get(id)).toMatchObject({ reason: "rejected: invalid report", state: "failed" });
++    expect(outbox.open("test")).toEqual([]);
++  });
++
++  test("attachments wait for the receipt and a lost reply replays only its own claim", async () => {
++    const { hub, outbox } = setup();
++    const dir = mkdtempSync(join(tmpdir(), "report-outbox-"));
++    const files = ["reel.mp4", "card-01.png", "card-02.png", "card-03.png"].map((name) => ({
++      name,
++      path: join(dir, name),
++    }));
++    for (const file of files.slice(0, 3)) writeFileSync(file.path, file.name);
++    const uploads: string[] = [];
++    let failNext: Error | null = null;
++    const upload: Uploader = async (channel, threadTs, file) => {
++      if (failNext) {
++        const error = failNext;
++        failNext = null;
++        throw error;
++      }
++      uploads.push(`${channel}:${threadTs}:${file.name}`);
++    };
++    const id = outbox.enqueue(card, {}, files);
++    await outbox.drive(id);
++    expect((await outbox.shareAttachments(id, upload)).attachmentsDone).toBe(0);
++    expect(uploads).toEqual([]);
++
++    hub.deliver(1, "100.2");
++    await outbox.drive(id);
++    failNext = new AttachmentNotShared("upload URL error");
++    await expect(outbox.shareAttachments(id, upload)).rejects.toThrow("upload URL error");
++    expect(outbox.get(id).attachmentsDone).toBe(0);
++
++    failNext = new Error("socket hang up");
++    await expect(outbox.shareAttachments(id, upload)).rejects.toThrow("socket hang up");
++    expect(outbox.open("test")).toEqual([id]);
++
++    const done = await outbox.shareAttachments(id, upload);
++    expect(done).toMatchObject({
++      attachmentsDone: 4,
++      uncertain: ["card-03.png (missing)"],
++    });
++    expect(uploads).toEqual(["D1:100.2:reel.mp4", "D1:100.2:card-01.png", "D1:100.2:card-02.png"]);
++    await outbox.shareAttachments(id, upload);
++    expect(uploads).toHaveLength(3);
++    expect(outbox.open("test")).toEqual([id]);
++    outbox.complete(id);
++    expect(outbox.open("test")).toEqual([]);
++    rmSync(dir, { force: true, recursive: true });
++  });
++
++  test("a restart replays an unconfirmed attachment under its identity and trusts the hub receipt", async () => {
++    const { db, hub, outbox } = setup();
++    const dir = mkdtempSync(join(tmpdir(), "report-outbox-"));
++    const files = ["reel.mp4", "card-01.png", "card-02.png"].map((name) => ({ name, path: join(dir, name) }));
++    for (const file of files) writeFileSync(file.path, file.name);
++    // The hub's report_mutate: a known identity answers its recorded outcome and posts nothing.
++    const recorded = new Map<string, "delivered" | "uncertain">();
++    const identities: string[] = [];
++    const posted: string[] = [];
++    let loseReply = true;
++    const upload: Uploader = async (_channel, _threadTs, file, parent) => {
++      const identity = parent?.mutationId ?? "";
++      identities.push(identity);
++      if (!recorded.has(identity)) {
++        const outcome = file.name === "card-02.png" ? "uncertain" : "delivered";
++        recorded.set(identity, outcome);
++        if (outcome === "delivered") posted.push(file.name);
++      }
++      if (loseReply) {
++        loseReply = false;
++        throw new Error("socket hang up");
++      }
++      if (recorded.get(identity) === "uncertain") throw new AttachmentUncertain("Hub attachment outcome uncertain");
++    };
++    const id = outbox.enqueue(card, {}, files);
++    await outbox.drive(id);
++    hub.deliver(1, "100.2");
++    await outbox.drive(id);
++    await expect(outbox.shareAttachments(id, upload)).rejects.toThrow("socket hang up");
++    expect(outbox.get(id)).toMatchObject({ attachmentsDone: 0, uncertain: [] });
++    rmSync(files[0]?.path ?? "", { force: true });
++
++    const restarted = new ReportOutbox(db, new ReportGate(hub.transport));
++    expect(await restarted.shareAttachments(id, upload)).toMatchObject({
++      attachmentsDone: 3,
++      uncertain: ["card-02.png"],
++    });
++    expect(identities).toEqual([0, 0, 1, 2].map((index) => `${id}:attachment:${index}`));
++    expect(posted).toEqual(["reel.mp4", "card-01.png"]);
++    rmSync(dir, { force: true, recursive: true });
++  });
++
++  test("an in-flight attachment keeps its claim and is re-queried, in order, after a restart", async () => {
++    const { db, hub, outbox } = setup();
++    const dir = mkdtempSync(join(tmpdir(), "report-outbox-"));
++    const files = ["reel.mp4", "card-01.png"].map((name) => ({ name, path: join(dir, name) }));
++    for (const file of files) writeFileSync(file.path, file.name);
++    const identities: string[] = [];
++    let inFlight = true;
++    const upload: Uploader = async (_channel, _threadTs, _file, parent) => {
++      identities.push(parent?.mutationId ?? "");
++      if (inFlight) throw new AttachmentInFlight("Hub attachment still in flight");
++    };
++    const id = outbox.enqueue(card, {}, files);
++    await outbox.drive(id);
++    hub.deliver(1, "100.2");
++    await outbox.drive(id);
++    expect(await outbox.shareAttachments(id, upload)).toMatchObject({ attachmentsDone: 0, uncertain: [] });
++    expect(outbox.open("test")).toEqual([id]);
++    // The source file may vanish meanwhile: the open claim still asks the hub, never marks it missing.
++    rmSync(files[0]?.path ?? "", { force: true });
++
++    inFlight = false;
++    const restarted = new ReportOutbox(db, new ReportGate(hub.transport));
++    expect(await restarted.shareAttachments(id, upload)).toMatchObject({ attachmentsDone: 2, uncertain: [] });
++    expect(identities).toEqual([0, 0, 1].map((index) => `${id}:attachment:${index}`));
++    rmSync(dir, { force: true, recursive: true });
++  });
++});
+diff --git a/scripts/x-growth-daily.ts b/scripts/x-growth-daily.ts
+--- a/scripts/x-growth-daily.ts
++++ b/scripts/x-growth-daily.ts
+@@ -1,983 +1,975 @@
+-#!/usr/bin/env bun
+-/**
+- * Daily X growth loop for @indo_yoon, scheduled from the Ferryx hub.
+- *
+- *   draft                         daily cron: write one insight post from the YC 6,320 fact bank and
+- *                                 send it to Slack with buttons. Posts are only published on click.
+- *   tick                          cron every 20 min: on a random daily plan (0-2 slots, random times),
+- *                                 write one reply to a popular startup post in a random style, gate it
+- *                                 with Jev, publish it, then report to Slack with a delete button.
+- *   publish|preview|pass|delete <item-id> <token>
+- *                                 Slack button actions (namespace x-growth).
+- *
+- * Posts need the owner's click. Replies are auto-published only when Jev scores them at or above
+- * JEV_THRESHOLD. Every number in any copy must exist in the fact bank.
+- */
+-import { createHash } from "node:crypto";
+-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+-import { tmpdir } from "node:os";
+-import { join } from "node:path";
+-import { OUTPUT_DIR } from "../lib/paths";
+-import { slackTarget } from "./publish-ready-digest";
+-
+-export const NAMESPACE = "x-growth";
+-export const OWNER = "indo_yoon";
+-export const X_LIMIT = 280;
+-const DIR = join(OUTPUT_DIR, "x-growth", "daily");
+-const HISTORY_PATH = join(DIR, "history.json");
+-const FACTS_PATH = join(OUTPUT_DIR, "x-growth", "yc-2027-report.md");
+-const MAX_ATTEMPTS = 3;
+-const MAX_REPLIES = 3;
+-const PLAN_PATH = join(DIR, "reply-plan.json");
+-export const JEV_BANDS = {
+-  post: { auto: 0.25, ask: 0.1 },
+-  reply: { auto: 0.5, ask: 0.15 },
+-} as const;
+-export type Verdict = "auto" | "ask" | "drop";
+-
+-export function verdict(kind: "post" | "reply", score: number): Verdict {
+-  const band = JEV_BANDS[kind];
+-  return score >= band.auto ? "auto" : score >= band.ask ? "ask" : "drop";
+-}
+-const AUTHOR_COOLDOWN_MS = 7 * 24 * 3600 * 1000;
+-const STALE_SLOT_MS = 3 * 3600 * 1000;
+-const MAX_JITTER_MS = 12 * 60 * 1000;
+-const AUTO_SEARCHES = [
+-  '(yc OR "y combinator") lang:en -filter:replies',
+-  "(startup OR founders) (robotics OR hardware OR defense) lang:en -filter:replies",
+-  '("startup idea" OR "what to build") lang:en -filter:replies',
+-  '(founder OR founders) (solo OR "small team") lang:en -filter:replies',
+-  "(seed OR preseed) (ai OR startup) lang:en -filter:replies",
+-];
+-const MIN_FAVES = [100, 200, 300];
+-const REPLY_STYLES = [
+-  "one short sentence under 90 characters: a sharp observation tied to their point, at most one number",
+-  "two short lines: one number from the fact bank, then what it implies for their point",
+-  "a mild contrarian take on their point backed by one fact, under 180 characters",
+-  "agree and extend: add the one data point their readers would not know, under 160 characters",
+-  "a plain observation with no numbers at all, grounded in a trend from the fact bank, under 140 characters",
+-];
+-const PUBLISHED_POSTS = [
+-  "i ran every yc company through the same filter. all 6,320, back to 2005. share building robots, drones, chips, energy or defense: 2015: 7.5% 2023: 2.6% 2026: 17.1%",
+-  "yc went physical. startups building robots, drones, chips, energy or defense: 2023: 2.6% of the batch 2026: 17.1%. defense + drone: 0 → 21. voice ai and sales tools: roughly halved.",
+-];
+-
+-export type Candidate = {
+-  readonly id: string;
+-  readonly author: string;
+-  readonly text: string;
+-  readonly likes: number;
+-};
+-
+-export type Item = {
+-  readonly id: string;
+-  readonly kind: "post" | "reply";
+-  readonly text: string;
+-  readonly token: string;
+-  readonly reply_to?: Candidate;
+-};
+-
+-type History = {
+-  posts: string[];
+-  replied: string[];
+-  authors: Record<string, string>;
+-  published: Record<string, { at: string; by: string; url?: string }>;
+-  passed: Record<string, { at: string; by: string }>;
+-};
+-
+-export function parseCandidates(html: string): Candidate[] {
+-  const out: Candidate[] = [];
+-  for (const article of html.split('data-testid="tweet"').slice(1)) {
+-    const status = article.match(/href="\/([A-Za-z0-9_]+)\/status\/(\d+)"/);
+-    if (!status) continue;
+-    const [, author = "", id = ""] = status;
+-    if (author.toLowerCase() === OWNER) continue;
+-    const start = article.indexOf('data-testid="tweetText"');
+-    if (start < 0) continue;
+-    const rest = article.slice(start);
+-    const end = rest.indexOf("data-testid=", 25);
+-    const text = (end > 0 ? rest.slice(0, end) : rest.slice(0, 4000))
+-      .replace(/^data-testid="tweetText"[^>]*>/, "")
+-      .replace(/<img[^>]*alt="([^"]*)"[^>]*>/g, "$1")
+-      .replace(/<[^>]+>/g, "")
+-      .replace(/&quot;/g, '"')
+-      .replace(/&#39;/g, "'")
+-      .replace(/&amp;/g, "&")
+-      .replace(/\\n/g, "\n")
+-      .replace(/<[^>]*$/, "")
+-      .trim();
+-    const likesRaw = article.match(/(\d[\d,.]*[KM]?) [Ll]ikes?/)?.[1] ?? "0";
+-    if (text.length < 20) continue;
+-    out.push({ author, id, likes: parseCount(likesRaw), text: text.slice(0, 600) });
+-  }
+-  return out;
+-}
+-
+-export function parseCount(raw: string): number {
+-  const n = Number.parseFloat(raw.replace(/,/g, ""));
+-  if (Number.isNaN(n)) return 0;
+-  if (raw.endsWith("K")) return Math.round(n * 1000);
+-  if (raw.endsWith("M")) return Math.round(n * 1_000_000);
+-  return Math.round(n);
+-}
+-
+-export function ungroundedNumbers(text: string, facts: string): string[] {
+-  const numbers = text.match(/\d[\d,.]*\d%?|\d%?/g) ?? [];
+-  const plain = facts.replace(/\*/g, "");
+-  return numbers.filter((n) => !plain.includes(n.replace(/[.,]$/, "")));
+-}
+-
+-export function copyProblems(text: string, facts: string): string[] {
+-  const problems: string[] = [];
+-  const length = [...text].length;
+-  if (length > X_LIMIT) problems.push(`${length} chars (max ${X_LIMIT})`);
+-  if (/#[\p{L}\d_]+/u.test(text)) problems.push("contains a hashtag");
+-  if (/!/.test(text)) problems.push("contains an exclamation mark");
+-  if (/[\u3131-\uD79D]/.test(text)) problems.push("X copy must be English only");
+-  if (/https?:\/\//.test(text)) problems.push("no links in the copy");
+-  const bad = ungroundedNumbers(text, facts);
+-  if (bad.length > 0) problems.push(`numbers not in the fact bank: ${bad.join(", ")}`);
+-  return problems;
+-}
+-
+-export function buildPrompt(
+-  facts: string,
+-  recentPosts: readonly string[],
+-  candidates: readonly Candidate[],
+-  feedback: readonly string[] = [],
+-): string {
+-  return [
+-    "You ghostwrite X posts for @indo_yoon, a solo developer who analyzed all 6,320 YC companies.",
+-    "Voice: lowercase, plain, direct, like a builder thinking out loud. No hype words, no emoji, no hashtags, no exclamation marks, no closing questions that beg for engagement.",
+-    "",
+-    "FACT BANK (the ONLY source of facts and numbers; copy numbers exactly as written here):",
+-    facts,
+-    "",
+-    "ALREADY POSTED (do not repeat these angles or numbers as the lead):",
+-    ...recentPosts.map((p) => `- ${p.replace(/\n/g, " ")}`),
+-    "",
+-    "TASK 1: Write ONE new English post (<= 260 chars). Lead with a non-obvious claim someone could save or argue with, then 1-3 short lines of evidence from the fact bank. Pick a different shift, gap or idea than the already-posted ones.",
+-    "",
+-    ...(candidates.length === 0
+-      ? []
+-      : [
+-          "",
+-          "TASK 2: Below are today's popular posts. Choose up to 3 where a short reply backed by the fact bank genuinely adds something the author's readers would want. Skip anything off-topic, political, or where the data does not fit. Each reply is English, <= 220 chars, adds one concrete data point or contrarian angle, and never says 'great post', never asks for a follow, never links.",
+-          ...candidates.map(
+-            (c) => `- id=${c.id} @${c.author} (${c.likes} likes): ${c.text.replace(/\n/g, " ")}`,
+-          ),
+-        ]),
+-    ...(feedback.length > 0
+-      ? ["", "PREVIOUS ATTEMPT WAS REJECTED. Fix these:", ...feedback.map((f) => `- ${f}`)]
+-      : []),
+-    "",
+-    "Return ONLY minified JSON:",
+-    '{"post":"...","replies":[{"tweet_id":"...","text":"..."}]}',
+-  ].join("\n");
+-}
+-
+-export type Generator = (prompt: string) => string;
+-
+-// The Ferryx Hub picks one model for every cron job (FERRYX_CRON_MODEL, provider/id).
+-export function cronModel(specific?: string): string {
+-  return (
+-    process.env["FERRYX_CRON_MODEL"]?.trim() ||
+-    (specific ? process.env[specific]?.trim() : "") ||
+-    "mahoquot/gpt-6-luna"
+-  );
+-}
+-
+-// Bare completion through omo: no tools, no agent context; the prompt arrives on stdin.
+-function omoComplete(
+-  model: string,
+-  prompt: string,
+-): { exitCode: number; stdout: string; stderr: string } {
+-  const result = Bun.spawnSync(
+-    [
+-      process.env["OMO_BIN"] ?? "/Users/indo/.bun/bin/omo",
+-      "-p",
+-      "--no-session",
+-      "--model",
+-      model,
+-      "--no-tools",
+-      "--no-extensions",
+-      "--no-skills",
+-      "--no-context-files",
+-      "--system-prompt",
+-      "Follow the instructions exactly. Output only what is asked.",
+-      "-",
+-    ],
+-    { cwd: tmpdir(), stdin: new TextEncoder().encode(prompt), stdout: "pipe", stderr: "pipe" },
+-  );
+-  return {
+-    exitCode: result.exitCode,
+-    stderr: result.stderr.toString(),
+-    stdout: result.stdout.toString(),
+-  };
+-}
+-
+-function omoGenerator(): Generator {
+-  return (prompt) => {
+-    const result = omoComplete(cronModel("X_GROWTH_MODEL"), prompt);
+-    if (result.exitCode !== 0) throw new Error(`omo failed: ${result.stderr || result.stdout}`);
+-    return result.stdout;
+-  };
+-}
+-
+-function parseJson(raw: string): {
+-  post?: string;
+-  replies?: { tweet_id?: string; text?: string }[];
+-} {
+-  const start = raw.indexOf("{");
+-  const end = raw.lastIndexOf("}");
+-  if (start < 0 || end < start) throw new Error("generator returned no JSON");
+-  return JSON.parse(raw.slice(start, end + 1));
+-}
+-
+-export function writeItems(
+-  draftId: string,
+-  facts: string,
+-  recentPosts: readonly string[],
+-  candidates: readonly Candidate[],
+-  generate: Generator,
+-): Item[] {
+-  let feedback: string[] = [];
+-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+-    try {
+-      const out = parseJson(generate(buildPrompt(facts, recentPosts, candidates, feedback)));
+-      const problems: string[] = [];
+-      const post = (out.post ?? "").trim();
+-      for (const p of copyProblems(post, facts)) problems.push(`post: ${p}`);
+-      const replies: Item[] = [];
+-      for (const r of (out.replies ?? []).slice(0, MAX_REPLIES)) {
+-        const target = candidates.find((c) => c.id === r.tweet_id);
+-        const text = (r.text ?? "").trim();
+-        if (!target) {
+-          problems.push(`reply targets unknown tweet_id ${r.tweet_id}`);
+-          continue;
+-        }
+-        const rp = copyProblems(text, facts);
+-        if (rp.length > 0) {
+-          problems.push(...rp.map((p) => `reply to ${target.id}: ${p}`));
+-          continue;
+-        }
+-        replies.push({
+-          id: `${draftId}-r${replies.length + 1}`,
+-          kind: "reply",
+-          reply_to: target,
+-          text,
+-          token: itemToken(text, target.id),
+-        });
+-      }
+-      if (problems.length === 0)
+-        return [
+-          { id: `${draftId}-p`, kind: "post", text: post, token: itemToken(post) },
+-          ...replies,
+-        ];
+-      feedback = problems;
+-    } catch (error) {
+-      feedback = [error instanceof Error ? error.message : String(error)];
+-    }
+-  }
+-  throw new Error(
+-    `copy failed quality gates after ${MAX_ATTEMPTS} attempts: ${feedback.join("; ")}`,
+-  );
+-}
+-
+-export function itemToken(text: string, replyTo = ""): string {
+-  return createHash("sha256").update(`${replyTo}\n\x00\n${text}`).digest("hex");
+-}
+-
+-export function composeUrl(item: Item): string {
+-  const reply = item.reply_to ? `&in_reply_to=${item.reply_to.id}` : "";
+-  return `https://x.com/intent/post?text=${encodeURIComponent(item.text)}${reply}`;
+-}
+-
+-function kstStamp(date: Date): string {
+-  const kst = new Date(date.getTime() + 9 * 3600 * 1000);
+-  return kst.toISOString().slice(0, 16).replace(/[-:]/g, "").replace("T", "-");
+-}
+-
+-export function slackBlocks(draftId: string, items: readonly Item[]): unknown[] {
+-  const quote = (text: string) =>
+-    text
+-      .split("\n")
+-      .map((line) => `>${line}`)
+-      .join("\n");
+-  const buttons = (item: Item) => ({
+-    type: "actions",
+-    elements: [
+-      ["publish", item.kind === "post" ? "X 발행" : "답글 발행", "primary"],
+-      ["preview", "작성창 미리보기", undefined],
+-      ["pass", "패스", "danger"],
+-    ].map(([action, label, style]) => ({
+-      type: "button",
+-      text: { type: "plain_text", text: label, emoji: true },
+-      action_id: `${action}:${item.id}`,
+-      value: `omon:btn:${NAMESPACE}:${action}:${item.id}:${item.token}`,
+-      ...(style ? { style } : {}),
+-    })),
+-  });
+-  const blocks: unknown[] = [
+-    { type: "header", text: { type: "plain_text", text: `📈 X 성장 초안 · ${draftId}` } },
+-  ];
+-  for (const item of items) {
+-    const head =
+-      item.kind === "post"
+-        ? `*새 글 · @${OWNER}* (${[...item.text].length}자)`
+-        : `*답글 → <https://x.com/${item.reply_to?.author}/status/${item.reply_to?.id}|@${item.reply_to?.author}> (${item.reply_to?.likes} likes)*\n${quote((item.reply_to?.text ?? "").slice(0, 280))}\n*내 답글* (${[...item.text].length}자)`;
+-    blocks.push({ type: "divider" });
+-    blocks.push({
+-      type: "section",
+-      text: { type: "mrkdwn", text: `${head}\n${quote(item.text)}` },
+-    });
+-    blocks.push(buttons(item));
+-  }
+-  blocks.push({
+-    type: "context",
+-    elements: [
+-      {
+-        type: "mrkdwn",
+-        text: "버튼을 누르기 전에는 아무것도 게시되지 않습니다. 숫자는 모두 YC 6,320 리포트에 있는 값만 씁니다.",
+-      },
+-    ],
+-  });
+-  return blocks;
+-}
+-
+-function readHistory(): History {
+-  const empty: History = { authors: {}, passed: {}, posts: [], published: {}, replied: [] };
+-  return existsSync(HISTORY_PATH)
+-    ? { ...empty, ...(JSON.parse(readFileSync(HISTORY_PATH, "utf8")) as Partial<History>) }
+-    : empty;
+-}
+-
+-function saveHistory(history: History) {
+-  mkdirSync(DIR, { recursive: true });
+-  writeFileSync(HISTORY_PATH, JSON.stringify(history, null, 2));
+-}
+-
+-type ToolResult = Record<string, unknown>;
+-
+-function tool(id: string, args: Record<string, unknown>): ToolResult {
+-  const r = Bun.spawnSync(["maho", "--json", "tool", "run", id, "--args", JSON.stringify(args)], {
+-    timeout: 60_000,
+-  });
+-  const raw = r.stdout.toString();
+-  try {
+-    const parsed = JSON.parse(raw) as ToolResult;
+-    if (parsed["ok"] === false) throw new Error(JSON.stringify(parsed["error"]));
+-    return (parsed["result"] ?? {}) as ToolResult;
+-  } catch (error) {
+-    const detail = (raw + r.stderr.toString()).trim().slice(0, 300);
+-    throw new Error(`maho ${id} failed (exit ${r.exitCode}): ${detail || String(error)}`);
+-  }
+-}
+-
+-function tryTool(id: string, args: Record<string, unknown>): ToolResult | null {
+-  try {
+-    return tool(id, args);
+-  } catch {
+-    return null;
+-  }
+-}
+-
+-// Maho aborts every tools/call at 15s, so poll the fast query_selector under our own deadline.
+-function waitFor(tabId: number, selector: string, timeoutMs: number): boolean {
+-  const deadline = Date.now() + timeoutMs;
+-  for (;;) {
+-    const res = tryTool("page.query_selector", { selector, tab_id: tabId });
+-    if (Number(res?.["match_count"] ?? 0) > 0) return true;
+-    if (Date.now() >= deadline) return false;
+-    Bun.sleepSync(500);
+-  }
+-}
+-
+-function openTab(url: string): number {
+-  Bun.spawnSync(["open", "-g", "-a", "Maho"]);
+-  return Number((tool("tab.new", { url })["tab"] as { id: number }).id);
+-}
+-
+-function searchCandidates(queries: readonly string[], replied: ReadonlySet<string>): Candidate[] {
+-  const since = new Date(Date.now() - 36 * 3600 * 1000).toISOString().slice(0, 10);
+-  const seen = new Map<string, Candidate>();
+-  for (const query of queries) {
+-    const q = encodeURIComponent(`${query} since:${since}`);
+-    const tabId = openTab(`https://x.com/search?q=${q}&src=typed_query&f=top`);
+-    try {
+-      if (!waitFor(tabId, "article[data-testid='tweet']", 40_000)) continue;
+-      Bun.sleepSync(2000);
+-      const res = tryTool("page.content", { tab_id: tabId });
+-      const raw = String(res?.["text"] ?? "").replace(/\\"/g, '"');
+-      for (const c of parseCandidates(raw)) if (!replied.has(c.id)) seen.set(c.id, c);
+-    } finally {
+-      tryTool("tab.close", { tab_id: tabId });
+-    }
+-  }
+-  return [...seen.values()].sort((a, b) => b.likes - a.likes).slice(0, 12);
+-}
+-
+-async function postSlack(draftId: string, items: readonly Item[]): Promise<string> {
+-  const target = slackTarget();
+-  if (!target) throw new Error("SLACK_BOT_TOKEN(_FILE) and SLACK_NOTIFY_CHANNEL_ID are required");
+-  const response = await fetch("https://slack.com/api/chat.postMessage", {
+-    body: JSON.stringify({
+-      blocks: slackBlocks(draftId, items),
+-      channel: target.channel,
+-      text: `X 성장 초안 ${draftId}`,
+-      unfurl_links: false,
+-      unfurl_media: false,
+-    }),
+-    headers: {
+-      Authorization: `Bearer ${target.token}`,
+-      "Content-Type": "application/json; charset=utf-8",
+-    },
+-    method: "POST",
+-  });
+-  const json = (await response.json()) as { ok?: boolean; ts?: string; error?: string };
+-  if (!json.ok) throw new Error(`Slack chat.postMessage: ${json.error ?? response.status}`);
+-  return json.ts ?? "";
+-}
+-
+-async function runDraft(generate: Generator = omoGenerator()): Promise<number> {
+-  const facts = readFileSync(FACTS_PATH, "utf8");
+-  const history = readHistory();
+-  const draftId = kstStamp(new Date());
+-  const recent = [...PUBLISHED_POSTS, ...history.posts.slice(-10)];
+-  const items = writeItems(draftId, facts, recent, [], generate);
+-  const dir = join(DIR, draftId);
+-  mkdirSync(dir, { recursive: true });
+-  writeFileSync(join(dir, "draft.json"), JSON.stringify({ items }, null, 2));
+-  const ts = await postSlack(draftId, items);
+-  console.log(`X 성장 초안 ${draftId} 슬랙 발송 (글 1개, ts=${ts})`);
+-  return 0;
+-}
+-
+-export function loadItem(itemId: string, token: string, root: string = DIR): Item {
+-  const match = itemId.match(/^(\d{8}-\d{4})-(p|r\d|a)$/);
+-  if (!match) throw new Error(`잘못된 항목 id: ${itemId}`);
+-  const path = join(root, match[1] ?? "", "draft.json");
+-  if (!existsSync(path)) throw new Error(`초안 ${match[1]}을(를) 찾을 수 없습니다.`);
+-  const { items } = JSON.parse(readFileSync(path, "utf8")) as { items: Item[] };
+-  const item = items.find((i) => i.id === itemId);
+-  if (!item) throw new Error(`항목 ${itemId}이(가) 초안에 없습니다.`);
+-  if (item.token !== token || itemToken(item.text, item.reply_to?.id ?? "") !== token)
+-    throw new Error(`항목 ${itemId}의 내용이 슬랙에 보낸 것과 다릅니다. 발행하지 않았습니다.`);
+-  return item;
+-}
+-
+-function authorized(): string {
+-  const clicker = process.env["OMON_BUTTON_USER_ID"]?.trim();
+-  const owner = process.env["SLACK_APPROVAL_USER_ID"]?.trim();
+-  if (!clicker || !owner || clicker !== owner) throw new Error("승인된 사용자의 클릭이 아닙니다.");
+-  return `slack:${clicker}`;
+-}
+-
+-function findOwnReplyId(item: Item): string | undefined {
+-  if (!item.reply_to) return undefined;
+-  const tabId = openTab(`https://x.com/${item.reply_to.author}/status/${item.reply_to.id}`);
+-  try {
+-    if (!waitFor(tabId, "article[data-testid='tweet']", 30_000)) return undefined;
+-    Bun.sleepSync(3000);
+-    const html = String(tryTool("page.content", { tab_id: tabId })?.["text"] ?? "").replace(
+-      /\\"/g,
+-      '"',
+-    );
+-    return html.match(new RegExp(`href="/${OWNER}/status/(\\d+)"`, "i"))?.[1];
+-  } finally {
+-    tryTool("tab.close", { tab_id: tabId });
+-  }
+-}
+-
+-function publish(item: Item, by: string): string {
+-  const history = readHistory();
+-  const done = history.published[item.id];
+-  if (done) return `이미 발행된 항목입니다 (${done.at}).`;
+-  const tabId = openTab(composeUrl(item));
+-  if (!waitFor(tabId, "[data-testid='tweetTextarea_0']", 20_000))
+-    throw new Error(`X 작성창이 뜨지 않았습니다 (로그인 확인 필요). Maho 탭 ${tabId}`);
+-  Bun.sleepSync(1500);
+-  // Record intent before the irreversible click so a retry never double-posts.
+-  history.published[item.id] = { at: new Date().toISOString(), by };
+-  if (item.kind === "post") history.posts.push(item.text);
+-  if (item.reply_to) history.replied.push(item.reply_to.id);
+-  saveHistory(history);
+-  tool("input.locator_click", { locator: { css: "[data-testid='tweetButton']" }, tab_id: tabId });
+-  const closed = (() => {
+-    const deadline = Date.now() + 15_000;
+-    while (Date.now() < deadline) {
+-      const res = tryTool("page.query_selector", {
+-        selector: "[role='dialog'] [data-testid='tweetTextarea_0']",
+-        tab_id: tabId,
+-      });
+-      if (res && Number(res["match_count"] ?? 0) === 0) return true;
+-      Bun.sleepSync(1000);
+-    }
+-    return false;
+-  })();
+-  if (!closed)
+-    throw new Error(
+-      `게시 버튼은 눌렀지만 작성창이 닫히지 않았습니다. Maho 탭 ${tabId}를 확인해 주세요. 중복 방지를 위해 이 항목은 잠갔습니다.`,
+-    );
+-  tryTool("tab.close", { tab_id: tabId });
+-  const replyId = item.reply_to ? findOwnReplyId(item) : undefined;
+-  if (replyId) {
+-    const after = readHistory();
+-    after.published[item.id] = {
+-      at: history.published[item.id]?.at ?? "",
+-      by,
+-      url: tweetUrl(replyId),
+-    };
+-    saveHistory(after);
+-  }
+-  const where = item.reply_to ? `@${item.reply_to.author} 글에 답글` : "새 글";
+-  return `✅ @${OWNER} ${where} 게시 완료 — ${item.id}. ${replyId ? tweetUrl(replyId) : `https://x.com/${OWNER}`}`;
+-}
+-
+-function tweetUrl(id: string): string {
+-  return `https://x.com/${OWNER}/status/${id}`;
+-}
+-
+-function deleteTweet(item: Item): string {
+-  const url = readHistory().published[item.id]?.url;
+-  if (!url)
+-    throw new Error(`${item.id}의 게시물 주소를 몰라 삭제하지 못했습니다. X에서 직접 지워 주세요.`);
+-  const tabId = openTab(url);
+-  try {
+-    if (!waitFor(tabId, "article[tabindex='-1'] [data-testid='caret']", 30_000))
+-      throw new Error(`게시물 메뉴를 찾지 못했습니다: ${url}`);
+-    tool("input.locator_click", {
+-      locator: { css: "article[tabindex='-1'] [data-testid='caret']" },
+-      tab_id: tabId,
+-    });
+-    if (!waitFor(tabId, "[role='menuitem']", 10_000))
+-      throw new Error("게시물 메뉴가 열리지 않았습니다.");
+-    tool("input.locator_click", { locator: { name: "Delete", role: "menuitem" }, tab_id: tabId });
+-    if (!waitFor(tabId, "[data-testid='confirmationSheetConfirm']", 10_000))
+-      throw new Error("삭제 확인 창이 뜨지 않았습니다.");
+-    tool("input.locator_click", {
+-      locator: { css: "[data-testid='confirmationSheetConfirm']" },
+-      tab_id: tabId,
+-    });
+-    Bun.sleepSync(3000);
+-  } finally {
+-    tryTool("tab.close", { tab_id: tabId });
+-  }
+-  const history = readHistory();
+-  history.published[item.id] = {
+-    ...(history.published[item.id] ?? { at: "", by: "" }),
+-    url: `deleted:${url}`,
+-  };
+-  saveHistory(history);
+-  return `🗑 삭제했습니다: ${url}`;
+-}
+-
+-export type ReplyPlan = {
+-  date: string;
+-  slots: {
+-    at: string;
+-    kind: "post" | "reply";
+-    status: "planned" | "running" | "done" | "skipped";
+-    note?: string;
+-  }[];
+-};
+-
+-export function kstDate(date: Date): string {
+-  return new Date(date.getTime() + 9 * 3600 * 1000).toISOString().slice(0, 10);
+-}
+-
+-export function makePlan(day: string, random: () => number = Math.random): ReplyPlan {
+-  const roll = random();
+-  const count = roll < 0.2 ? 0 : roll < 0.65 ? 1 : 2;
+-  const startMin = 9 * 60;
+-  const endMin = 23 * 60 + 30;
+-  const minutes: number[] = [];
+-  for (let guard = 0; minutes.length < count && guard < 50; guard += 1) {
+-    const m = startMin + Math.floor(random() * (endMin - startMin));
+-    if (minutes.every((x) => Math.abs(x - m) >= 90)) minutes.push(m);
+-  }
+-  const base = Date.parse(`${day}T00:00:00+09:00`);
+-  const slots: ReplyPlan["slots"] = minutes.map((m) => ({
+-    at: new Date(base + m * 60_000).toISOString(),
+-    kind: "reply" as const,
+-    status: "planned" as const,
+-  }));
+-  if (random() < 0.85) {
+-    const m = 9 * 60 + Math.floor(random() * (21 * 60 - 9 * 60));
+-    slots.push({ at: new Date(base + m * 60_000).toISOString(), kind: "post", status: "planned" });
+-  }
+-  return { date: day, slots: slots.sort((a, b) => Date.parse(a.at) - Date.parse(b.at)) };
+-}
+-
+-export function dueSlot(plan: ReplyPlan, now: Date): { index: number; stale: boolean } | null {
+-  const index = plan.slots.findIndex(
+-    (slot) => slot.status === "planned" && Date.parse(slot.at) <= now.getTime(),
+-  );
+-  if (index < 0) return null;
+-  const at = Date.parse(plan.slots[index]?.at ?? "");
+-  return { index, stale: now.getTime() - at > STALE_SLOT_MS };
+-}
+-
+-function readPlan(): ReplyPlan | null {
+-  return existsSync(PLAN_PATH) ? (JSON.parse(readFileSync(PLAN_PATH, "utf8")) as ReplyPlan) : null;
+-}
+-
+-function savePlan(plan: ReplyPlan) {
+-  mkdirSync(DIR, { recursive: true });
+-  writeFileSync(PLAN_PATH, JSON.stringify(plan, null, 2));
+-}
+-
+-export function eligible(
+-  candidates: readonly Candidate[],
+-  history: Pick<History, "replied" | "authors">,
+-  now: Date,
+-): Candidate[] {
+-  return candidates.filter((c) => {
+-    if (history.replied.includes(c.id)) return false;
+-    const last = history.authors[c.author.toLowerCase()];
+-    return !last || now.getTime() - Date.parse(last) >= AUTHOR_COOLDOWN_MS;
+-  });
+-}
+-
+-export function buildReplyPrompt(
+-  facts: string,
+-  candidates: readonly Candidate[],
+-  style: string,
+-): string {
+-  return [
+-    "You write one X reply for @indo_yoon, a solo developer who analyzed all 6,320 YC companies.",
+-    "Voice: lowercase, plain, like a builder talking to a peer. No emoji, hashtags, exclamation marks, links, 'great post', or asking for follows.",
+-    "",
+-    "FACT BANK (the only source of facts and numbers; copy numbers exactly):",
+-    facts,
+-    "",
+-    `STYLE FOR THIS REPLY: ${style}`,
+-    "",
+-    'Candidate posts. Pick the ONE where a reply from this fact bank genuinely adds something. If none fit, or a post is personal, tragic, political or a giveaway, return {"skip":true}.',
+-    ...candidates.map(
+-      (c) => `- id=${c.id} @${c.author} (${c.likes} likes): ${c.text.replace(/\n/g, " ")}`,
+-    ),
+-    "",
+-    'Return ONLY minified JSON: {"tweet_id":"...","text":"..."} or {"skip":true}',
+-  ].join("\n");
+-}
+-
+-export type Judge = (original: Candidate | undefined, text: string) => number;
+-
+-export const JEV_POST_INSTRUCTIONS =
+-  "You are a strict gate for an automated X post on a solo developer's account (he analyzed all 6,320 YC companies). Answer yes only if ALL hold: it makes one clear, non-obvious point a founder or investor would find worth saving; the evidence lines support that point; it reads like a thoughtful human builder, not a bot, ad or engagement bait; it is complete and not confusing on its own.";
+-
+-export const JEV_INSTRUCTIONS =
+-  "You are a strict gate for an automated X reply from a solo developer who analyzed all 6,320 YC companies. Answer yes only if ALL hold: the reply directly engages with the original post's actual point; the data it cites is relevant to that point; it reads like a thoughtful human, not a bot or self-promotion; it is respectful and appropriate for the tone of the original (not a sensitive, personal, political or tragic post); it does not ask for follows or likes.";
+-
+-const jevJudge: Judge = (original, text) => {
+-  const file = join(tmpdir(), `x-growth-jev-${process.pid}.txt`);
+-  writeFileSync(
+-    file,
+-    original
+-      ? `ORIGINAL POST by @${original.author}:\n${original.text}\n\nPROPOSED REPLY:\n${text}`
+-      : `PROPOSED X POST:\n${text}`,
+-  );
+-  const r = Bun.spawnSync(
+-    [
+-      "typesafe-judge",
+-      "noul",
+-      "-q",
+-      "--file",
+-      file,
+-      "--instructions",
+-      original ? JEV_INSTRUCTIONS : JEV_POST_INSTRUCTIONS,
+-    ],
+-    {
+-      cwd: join(import.meta.dir, ".."),
+-      timeout: 60_000,
+-    },
+-  );
+-  const score = Number.parseFloat(r.stdout.toString().trim());
+-  if (Number.isNaN(score))
+-    throw new Error(`Jev 판정 실패: ${(r.stdout.toString() + r.stderr.toString()).slice(0, 200)}`);
+-  return score;
+-};
+-
+-export type Review = {
+-  ai_score: number;
+-  verdict: "human" | "ai" | "unsure";
+-  tells: string[];
+-  rewrite: string;
+-};
+-export type Reviewer = (text: string, original: Candidate | undefined) => Review;
+-export const MAX_HUMAN_AI_SCORE = 3;
+-const MAX_REWRITES = 2;
+-
+-export function buildReviewPrompt(text: string, original: Candidate | undefined): string {
+-  return [
+-    `You are an expert editor who spots AI-written social media text. Review this X ${original ? "reply" : "post"} from a solo developer.`,
+-    ...(original
+-      ? [`ORIGINAL POST by @${original.author}: ${original.text.replace(/\n/g, " ")}`]
+-      : []),
+-    "TEXT:",
+-    text,
+-    "",
+-    'Look for AI tells: tidy "X, which Y" clauses, parenthetical stat qualifiers, "so ... would be ..." inference lines, balanced setup-payoff structure, "not X, it\'s Y", em dashes, colon lists, hedge-then-precision, generic summary closers, words like landscape, crucial, notably, worth noting, the real, perfectly grammatical lowercase that still reads like a press line, and anything a real founder typing fast on a phone would not write.',
+-    "Score 0 = clearly a human typed it, 10 = obviously generated.",
+-    "The rewrite must keep only facts and numbers already in TEXT, add none, stay under 200 characters, use no hashtags, links, emoji, exclamation marks, slang like lol, or em dashes, and still make sense to the original author.",
+-    'Return ONLY JSON: {"ai_score":0-10,"verdict":"human"|"ai"|"unsure","tells":["..."],"rewrite":"..."}',
+-  ].join("\n");
+-}
+-
+-const omoReviewer: Reviewer = (text, original) => {
+-  const result = omoComplete(
+-    cronModel("X_GROWTH_REVIEW_MODEL"),
+-    buildReviewPrompt(text, original),
+-  );
+-  if (result.exitCode !== 0)
+-    throw new Error(`AI 티 리뷰 실패: ${result.stderr.slice(0, 200)}`);
+-  const raw = result.stdout;
+-  const json = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1)) as Partial<Review>;
+-  const score = Number(json.ai_score);
+-  if (Number.isNaN(score)) throw new Error(`AI 티 리뷰 응답을 읽지 못함: ${raw.slice(0, 200)}`);
+-  return {
+-    ai_score: score,
+-    rewrite: String(json.rewrite ?? "").trim(),
+-    tells: (json.tells ?? []).map(String),
+-    verdict: json.verdict === "human" || json.verdict === "ai" ? json.verdict : "unsure",
+-  };
+-};
+-
+-export type Humanized = { text: string; review: Review; rounds: number } | { failed: string };
+-
+-export function humanize(
+-  text: string,
+-  original: Candidate | undefined,
+-  facts: string,
+-  review: Reviewer,
+-): Humanized {
+-  let current = text;
+-  for (let round = 0; round <= MAX_REWRITES; round += 1) {
+-    const result = review(current, original);
+-    if (result.ai_score <= MAX_HUMAN_AI_SCORE && result.verdict !== "ai")
+-      return { review: result, rounds: round, text: current };
+-    if (round === MAX_REWRITES || !result.rewrite)
+-      return { failed: `AI 티 ${result.ai_score}/10 (${result.tells.slice(0, 2).join("; ")})` };
+-    const problems = copyProblems(result.rewrite, facts);
+-    if (problems.length > 0)
+-      return { failed: `리라이트가 품질 게이트 탈락: ${problems.join("; ")}` };
+-    current = result.rewrite;
+-  }
+-  return { failed: "리라이트 반복 초과" };
+-}
+-
+-export type Decision = "auto" | "ask" | "drop";
+-
+-export function decide(kind: "post" | "reply", jev: number, review: Review): Decision {
+-  const v = verdict(kind, jev);
+-  if (v === "drop") return "drop";
+-  if (v === "auto" && review.verdict === "human") return "auto";
+-  return "ask";
+-}
+-
+-async function slackPost(text: string, blocks: unknown[]): Promise<void> {
+-  const target = slackTarget();
+-  if (!target) throw new Error("SLACK_BOT_TOKEN(_FILE) and SLACK_NOTIFY_CHANNEL_ID are required");
+-  const response = await fetch("https://slack.com/api/chat.postMessage", {
+-    body: JSON.stringify({
+-      blocks,
+-      channel: target.channel,
+-      text,
+-      unfurl_links: false,
+-      unfurl_media: false,
+-    }),
+-    headers: {
+-      Authorization: `Bearer ${target.token}`,
+-      "Content-Type": "application/json; charset=utf-8",
+-    },
+-    method: "POST",
+-  });
+-  const json = (await response.json()) as { ok?: boolean; error?: string };
+-  if (!json.ok) throw new Error(`Slack chat.postMessage: ${json.error ?? response.status}`);
+-}
+-
+-function pick<T>(items: readonly T[], random: () => number = Math.random): T {
+-  return items[Math.floor(random() * items.length)] as T;
+-}
+-
+-export function askBlocks(item: Item, jev: number, review: Review): unknown[] {
+-  return [
+-    {
+-      type: "section",
+-      text: {
+-        type: "mrkdwn",
+-        text: `🤔 *판단 보류: 직접 결정해 주세요* (Jev ${jev.toFixed(2)}, AI 티 ${review.ai_score}/10 ${review.verdict})${review.tells.length > 0 ? `\n남은 지적: ${review.tells.slice(0, 2).join("; ")}` : ""}`,
+-      },
+-    },
+-    ...(slackBlocks(item.id.replace(/-[a-z]\d*$/, ""), [item]) as unknown[]).slice(1),
+-  ];
+-}
+-
+-async function autoItem(
+-  kind: "post" | "reply",
+-  generate: Generator,
+-  judge: Judge,
+-  review: Reviewer,
+-): Promise<string> {
+-  const facts = readFileSync(FACTS_PATH, "utf8");
+-  const history = readHistory();
+-  const now = new Date();
+-  const style = pick(REPLY_STYLES);
+-  let target: Candidate | undefined;
+-  let draft: string;
+-  let query = "";
+-  if (kind === "reply") {
+-    query = `${pick(AUTO_SEARCHES)} min_faves:${pick(MIN_FAVES)}`;
+-    const pool = eligible(searchCandidates([query], new Set(history.replied)), history, now)
+-      .sort(() => Math.random() - 0.5)
+-      .slice(0, 6);
+-    if (pool.length === 0) return `후보 없음 (${query})`;
+-    const raw = parseJson(generate(buildReplyPrompt(facts, pool, style))) as {
+-      tweet_id?: string;
+-      text?: string;
+-      skip?: boolean;
+-    };
+-    if (raw.skip) return `생성기가 맞는 글이 없다고 판단 (${query})`;
+-    target = pool.find((c) => c.id === raw.tweet_id);
+-    if (!target) return `생성기가 후보 밖의 글을 골랐음: ${raw.tweet_id}`;
+-    draft = (raw.text ?? "").trim();
+-  } else {
+-    const recent = [...PUBLISHED_POSTS, ...history.posts.slice(-10)];
+-    const items = writeItems(kstStamp(now), facts, recent, [], generate);
+-    draft = items[0]?.text ?? "";
+-  }
+-  const problems = copyProblems(draft, facts);
+-  if (problems.length > 0) return `품질 게이트 탈락: ${problems.join("; ")}`;
+-  const human = humanize(draft, target, facts, review);
+-  if ("failed" in human) return `AI 티 리뷰 탈락으로 버림: ${human.failed}`;
+-  const jev = judge(target, human.text);
+-  const decision = decide(kind, jev, human.review);
+-  const draftId = kstStamp(now);
+-  const item: Item = {
+-    id: `${draftId}-${kind === "post" ? "p" : "a"}`,
+-    kind,
+-    ...(target ? { reply_to: target } : {}),
+-    text: human.text,
+-    token: itemToken(human.text, target?.id ?? ""),
+-  };
+-  const dir = join(DIR, draftId);
+-  mkdirSync(dir, { recursive: true });
+-  writeFileSync(
+-    join(dir, "draft.json"),
+-    JSON.stringify(
+-      {
+-        decision,
+-        first_draft: draft,
+-        items: [item],
+-        jev,
+-        query,
+-        review: human.review,
+-        rounds: human.rounds,
+-        style,
+-      },
+-      null,
+-      2,
+-    ),
+-  );
+-  const summary = `Jev ${jev.toFixed(2)}, AI 티 ${human.review.ai_score}/10, 리라이트 ${human.rounds}회`;
+-  if (decision === "drop") return `게시 안 함 (${summary})`;
+-  if (decision === "ask") {
+-    await slackPost(
+-      `판단 보류: ${kind === "post" ? "새 글" : `@${target?.author} 답글`}`,
+-      askBlocks(item, jev, human.review),
+-    );
+-    return `판단 보류로 Slack에 문의 (${summary})`;
+-  }
+-  if (target) {
+-    const before = readHistory();
+-    before.authors[target.author.toLowerCase()] = now.toISOString();
+-    saveHistory(before);
+-  }
+-  return `${publish(item, "auto:jev+review")} (${summary})`;
+-}
+-
+-async function runTick(
+-  generate: Generator = omoGenerator(),
+-  judge: Judge = jevJudge,
+-  review: Reviewer = omoReviewer,
+-): Promise<number> {
+-  const now = new Date();
+-  let plan = readPlan();
+-  if (!plan || plan.date !== kstDate(now)) {
+-    plan = makePlan(kstDate(now));
+-    savePlan(plan);
+-    console.log(`오늘 계획: ${plan.slots.map((s) => `${s.kind}@${s.at}`).join(", ") || "없음"}`);
+-  }
+-  const due = dueSlot(plan, now);
+-  if (!due) {
+-    console.log("지금 예정된 답글 없음");
+-    return 0;
+-  }
+-  const slot = plan.slots[due.index];
+-  if (!slot) return 0;
+-  if (due.stale) {
+-    slot.status = "skipped";
+-    slot.note = "예정 시각을 3시간 넘겨 건너뜀";
+-    savePlan(plan);
+-    console.log(slot.note);
+-    return 0;
+-  }
+-  slot.status = "running";
+-  savePlan(plan);
+-  Bun.sleepSync(Math.floor(Math.random() * MAX_JITTER_MS));
+-  try {
+-    slot.note = await autoItem(slot.kind ?? "reply", generate, judge, review);
+-    slot.status = "done";
+-  } catch (error) {
+-    slot.note = error instanceof Error ? error.message : String(error);
+-    slot.status = "done";
+-    savePlan(plan);
+-    throw error;
+-  }
+-  savePlan(plan);
+-  console.log(slot.note);
+-  return 0;
+-}
+-
+-async function runAction(action: string, itemId: string, token: string): Promise<number> {
+-  const by = authorized();
+-  const item = loadItem(itemId, token);
+-  if (action === "pass") {
+-    const history = readHistory();
+-    history.passed[item.id] = { at: new Date().toISOString(), by };
+-    if (item.reply_to) history.replied.push(item.reply_to.id);
+-    saveHistory(history);
+-    console.log(`${item.id}을(를) 패스했습니다.`);
+-    return 0;
+-  }
+-  if (action === "preview") {
+-    const tabId = openTab(composeUrl(item));
+-    console.log(`🔍 Maho 탭 ${tabId}에 작성창을 열었습니다. 게시는 하지 않았습니다.`);
+-    return 0;
+-  }
+-  if (action === "publish") {
+-    console.log(publish(item, by));
+-    return 0;
+-  }
+-  if (action === "delete") {
+-    console.log(deleteTweet(item));
+-    return 0;
+-  }
+-  throw new Error(`알 수 없는 동작: ${action}`);
+-}
+-
+-if (import.meta.main) {
+-  const [action = "", id = "", token = ""] = process.argv.slice(2);
+-  try {
+-    process.exitCode =
+-      action === "draft"
+-        ? await runDraft()
+-        : action === "tick"
+-          ? await runTick()
+-          : await runAction(action, id, token);
+-  } catch (error) {
+-    console.error(`⚠️ ${error instanceof Error ? error.message : String(error)}`);
+-    process.exitCode = 1;
+-  }
+-}
++#!/usr/bin/env bun
++/**
++ * Daily X growth loop for @indo_yoon, scheduled from the Ferryx hub.
++ *
++ *   draft                         daily cron: write one insight post from the YC 6,320 fact bank and
++ *                                 send it to Slack with buttons. Posts are only published on click.
++ *   tick                          cron every 20 min: on a random daily plan (0-2 slots, random times),
++ *                                 write one reply to a popular startup post in a random style, gate it
++ *                                 with Jev, publish it, then report to Slack with a delete button.
++ *   publish|preview|pass|delete <item-id> <token>
++ *                                 Slack button actions (namespace x-growth).
++ *
++ * Posts need the owner's click. Replies are auto-published only when Jev scores them at or above
++ * JEV_THRESHOLD. Every number in any copy must exist in the fact bank.
++ */
++import { createHash } from "node:crypto";
++import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { OUTPUT_DIR } from "../lib/paths";
++import { openDb } from "../lib/db";
++import { defaultReportGate, type Report } from "../lib/ferryx-report-gate";
++import { ReportOutbox } from "../lib/report-outbox";
++
++export const NAMESPACE = "x-growth";
++export const OWNER = "indo_yoon";
++export const X_LIMIT = 280;
++const DIR = join(OUTPUT_DIR, "x-growth", "daily");
++const HISTORY_PATH = join(DIR, "history.json");
++const FACTS_PATH = join(OUTPUT_DIR, "x-growth", "yc-2027-report.md");
++const MAX_ATTEMPTS = 3;
++const MAX_REPLIES = 3;
++const PLAN_PATH = join(DIR, "reply-plan.json");
++export const JEV_BANDS = {
++  post: { auto: 0.25, ask: 0.1 },
++  reply: { auto: 0.5, ask: 0.15 },
++} as const;
++export type Verdict = "auto" | "ask" | "drop";
++
++export function verdict(kind: "post" | "reply", score: number): Verdict {
++  const band = JEV_BANDS[kind];
++  return score >= band.auto ? "auto" : score >= band.ask ? "ask" : "drop";
++}
++const AUTHOR_COOLDOWN_MS = 7 * 24 * 3600 * 1000;
++const STALE_SLOT_MS = 3 * 3600 * 1000;
++const MAX_JITTER_MS = 12 * 60 * 1000;
++const AUTO_SEARCHES = [
++  '(yc OR "y combinator") lang:en -filter:replies',
++  "(startup OR founders) (robotics OR hardware OR defense) lang:en -filter:replies",
++  '("startup idea" OR "what to build") lang:en -filter:replies',
++  '(founder OR founders) (solo OR "small team") lang:en -filter:replies',
++  "(seed OR preseed) (ai OR startup) lang:en -filter:replies",
++];
++const MIN_FAVES = [100, 200, 300];
++const REPLY_STYLES = [
++  "one short sentence under 90 characters: a sharp observation tied to their point, at most one number",
++  "two short lines: one number from the fact bank, then what it implies for their point",
++  "a mild contrarian take on their point backed by one fact, under 180 characters",
++  "agree and extend: add the one data point their readers would not know, under 160 characters",
++  "a plain observation with no numbers at all, grounded in a trend from the fact bank, under 140 characters",
++];
++const PUBLISHED_POSTS = [
++  "i ran every yc company through the same filter. all 6,320, back to 2005. share building robots, drones, chips, energy or defense: 2015: 7.5% 2023: 2.6% 2026: 17.1%",
++  "yc went physical. startups building robots, drones, chips, energy or defense: 2023: 2.6% of the batch 2026: 17.1%. defense + drone: 0 → 21. voice ai and sales tools: roughly halved.",
++];
++
++export type Candidate = {
++  readonly id: string;
++  readonly author: string;
++  readonly text: string;
++  readonly likes: number;
++};
++
++export type Item = {
++  readonly id: string;
++  readonly kind: "post" | "reply";
++  readonly text: string;
++  readonly token: string;
++  readonly reply_to?: Candidate;
++};
++
++type History = {
++  posts: string[];
++  replied: string[];
++  authors: Record<string, string>;
++  published: Record<string, { at: string; by: string; url?: string }>;
++  passed: Record<string, { at: string; by: string }>;
++};
++
++export function parseCandidates(html: string): Candidate[] {
++  const out: Candidate[] = [];
++  for (const article of html.split('data-testid="tweet"').slice(1)) {
++    const status = article.match(/href="\/([A-Za-z0-9_]+)\/status\/(\d+)"/);
++    if (!status) continue;
++    const [, author = "", id = ""] = status;
++    if (author.toLowerCase() === OWNER) continue;
++    const start = article.indexOf('data-testid="tweetText"');
++    if (start < 0) continue;
++    const rest = article.slice(start);
++    const end = rest.indexOf("data-testid=", 25);
++    const text = (end > 0 ? rest.slice(0, end) : rest.slice(0, 4000))
++      .replace(/^data-testid="tweetText"[^>]*>/, "")
++      .replace(/<img[^>]*alt="([^"]*)"[^>]*>/g, "$1")
++      .replace(/<[^>]+>/g, "")
++      .replace(/&quot;/g, '"')
++      .replace(/&#39;/g, "'")
++      .replace(/&amp;/g, "&")
++      .replace(/\\n/g, "\n")
++      .replace(/<[^>]*$/, "")
++      .trim();
++    const likesRaw = article.match(/(\d[\d,.]*[KM]?) [Ll]ikes?/)?.[1] ?? "0";
++    if (text.length < 20) continue;
++    out.push({ author, id, likes: parseCount(likesRaw), text: text.slice(0, 600) });
++  }
++  return out;
++}
++
++export function parseCount(raw: string): number {
++  const n = Number.parseFloat(raw.replace(/,/g, ""));
++  if (Number.isNaN(n)) return 0;
++  if (raw.endsWith("K")) return Math.round(n * 1000);
++  if (raw.endsWith("M")) return Math.round(n * 1_000_000);
++  return Math.round(n);
++}
++
++export function ungroundedNumbers(text: string, facts: string): string[] {
++  const numbers = text.match(/\d[\d,.]*\d%?|\d%?/g) ?? [];
++  const plain = facts.replace(/\*/g, "");
++  return numbers.filter((n) => !plain.includes(n.replace(/[.,]$/, "")));
++}
++
++export function copyProblems(text: string, facts: string): string[] {
++  const problems: string[] = [];
++  const length = [...text].length;
++  if (length > X_LIMIT) problems.push(`${length} chars (max ${X_LIMIT})`);
++  if (/#[\p{L}\d_]+/u.test(text)) problems.push("contains a hashtag");
++  if (/!/.test(text)) problems.push("contains an exclamation mark");
++  if (/[\u3131-\uD79D]/.test(text)) problems.push("X copy must be English only");
++  if (/https?:\/\//.test(text)) problems.push("no links in the copy");
++  const bad = ungroundedNumbers(text, facts);
++  if (bad.length > 0) problems.push(`numbers not in the fact bank: ${bad.join(", ")}`);
++  return problems;
++}
++
++export function buildPrompt(
++  facts: string,
++  recentPosts: readonly string[],
++  candidates: readonly Candidate[],
++  feedback: readonly string[] = [],
++): string {
++  return [
++    "You ghostwrite X posts for @indo_yoon, a solo developer who analyzed all 6,320 YC companies.",
++    "Voice: lowercase, plain, direct, like a builder thinking out loud. No hype words, no emoji, no hashtags, no exclamation marks, no closing questions that beg for engagement.",
++    "",
++    "FACT BANK (the ONLY source of facts and numbers; copy numbers exactly as written here):",
++    facts,
++    "",
++    "ALREADY POSTED (do not repeat these angles or numbers as the lead):",
++    ...recentPosts.map((p) => `- ${p.replace(/\n/g, " ")}`),
++    "",
++    "TASK 1: Write ONE new English post (<= 260 chars). Lead with a non-obvious claim someone could save or argue with, then 1-3 short lines of evidence from the fact bank. Pick a different shift, gap or idea than the already-posted ones.",
++    "",
++    ...(candidates.length === 0
++      ? []
++      : [
++          "",
++          "TASK 2: Below are today's popular posts. Choose up to 3 where a short reply backed by the fact bank genuinely adds something the author's readers would want. Skip anything off-topic, political, or where the data does not fit. Each reply is English, <= 220 chars, adds one concrete data point or contrarian angle, and never says 'great post', never asks for a follow, never links.",
++          ...candidates.map(
++            (c) => `- id=${c.id} @${c.author} (${c.likes} likes): ${c.text.replace(/\n/g, " ")}`,
++          ),
++        ]),
++    ...(feedback.length > 0
++      ? ["", "PREVIOUS ATTEMPT WAS REJECTED. Fix these:", ...feedback.map((f) => `- ${f}`)]
++      : []),
++    "",
++    "Return ONLY minified JSON:",
++    '{"post":"...","replies":[{"tweet_id":"...","text":"..."}]}',
++  ].join("\n");
++}
++
++export type Generator = (prompt: string) => string;
++
++// The Ferryx Hub picks one model for every cron job (FERRYX_CRON_MODEL, provider/id).
++export function cronModel(specific?: string): string {
++  return (
++    process.env["FERRYX_CRON_MODEL"]?.trim() ||
++    (specific ? process.env[specific]?.trim() : "") ||
++    "mahoquot/gpt-6-luna"
++  );
++}
++
++// Bare completion through omo: no tools, no agent context; the prompt arrives on stdin.
++function omoComplete(
++  model: string,
++  prompt: string,
++): { exitCode: number; stdout: string; stderr: string } {
++  const result = Bun.spawnSync(
++    [
++      process.env["OMO_BIN"] ?? "/Users/indo/.bun/bin/omo",
++      "-p",
++      "--no-session",
++      "--model",
++      model,
++      "--no-tools",
++      "--no-extensions",
++      "--no-skills",
++      "--no-context-files",
++      "--system-prompt",
++      "Follow the instructions exactly. Output only what is asked.",
++      "-",
++    ],
++    { cwd: tmpdir(), stdin: new TextEncoder().encode(prompt), stdout: "pipe", stderr: "pipe" },
++  );
++  return {
++    exitCode: result.exitCode,
++    stderr: result.stderr.toString(),
++    stdout: result.stdout.toString(),
++  };
++}
++
++function omoGenerator(): Generator {
++  return (prompt) => {
++    const result = omoComplete(cronModel("X_GROWTH_MODEL"), prompt);
++    if (result.exitCode !== 0) throw new Error(`omo failed: ${result.stderr || result.stdout}`);
++    return result.stdout;
++  };
++}
++
++function parseJson(raw: string): {
++  post?: string;
++  replies?: { tweet_id?: string; text?: string }[];
++} {
++  const start = raw.indexOf("{");
++  const end = raw.lastIndexOf("}");
++  if (start < 0 || end < start) throw new Error("generator returned no JSON");
++  return JSON.parse(raw.slice(start, end + 1));
++}
++
++export function writeItems(
++  draftId: string,
++  facts: string,
++  recentPosts: readonly string[],
++  candidates: readonly Candidate[],
++  generate: Generator,
++): Item[] {
++  let feedback: string[] = [];
++  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
++    try {
++      const out = parseJson(generate(buildPrompt(facts, recentPosts, candidates, feedback)));
++      const problems: string[] = [];
++      const post = (out.post ?? "").trim();
++      for (const p of copyProblems(post, facts)) problems.push(`post: ${p}`);
++      const replies: Item[] = [];
++      for (const r of (out.replies ?? []).slice(0, MAX_REPLIES)) {
++        const target = candidates.find((c) => c.id === r.tweet_id);
++        const text = (r.text ?? "").trim();
++        if (!target) {
++          problems.push(`reply targets unknown tweet_id ${r.tweet_id}`);
++          continue;
++        }
++        const rp = copyProblems(text, facts);
++        if (rp.length > 0) {
++          problems.push(...rp.map((p) => `reply to ${target.id}: ${p}`));
++          continue;
++        }
++        replies.push({
++          id: `${draftId}-r${replies.length + 1}`,
++          kind: "reply",
++          reply_to: target,
++          text,
++          token: itemToken(text, target.id),
++        });
++      }
++      if (problems.length === 0)
++        return [
++          { id: `${draftId}-p`, kind: "post", text: post, token: itemToken(post) },
++          ...replies,
++        ];
++      feedback = problems;
++    } catch (error) {
++      feedback = [error instanceof Error ? error.message : String(error)];
++    }
++  }
++  throw new Error(
++    `copy failed quality gates after ${MAX_ATTEMPTS} attempts: ${feedback.join("; ")}`,
++  );
++}
++
++export function itemToken(text: string, replyTo = ""): string {
++  return createHash("sha256").update(`${replyTo}\n\x00\n${text}`).digest("hex");
++}
++
++export function composeUrl(item: Item): string {
++  const reply = item.reply_to ? `&in_reply_to=${item.reply_to.id}` : "";
++  return `https://x.com/intent/post?text=${encodeURIComponent(item.text)}${reply}`;
++}
++
++function kstStamp(date: Date): string {
++  const kst = new Date(date.getTime() + 9 * 3600 * 1000);
++  return kst.toISOString().slice(0, 16).replace(/[-:]/g, "").replace("T", "-");
++}
++
++export function slackBlocks(draftId: string, items: readonly Item[]): unknown[] {
++  const quote = (text: string) =>
++    text
++      .split("\n")
++      .map((line) => `>${line}`)
++      .join("\n");
++  const buttons = (item: Item) => ({
++    type: "actions",
++    elements: [
++      ["publish", item.kind === "post" ? "X 발행" : "답글 발행", "primary"],
++      ["preview", "작성창 미리보기", undefined],
++      ["pass", "패스", "danger"],
++    ].map(([action, label, style]) => ({
++      type: "button",
++      text: { type: "plain_text", text: label, emoji: true },
++      action_id: `${action}:${item.id}`,
++      value: `omon:btn:${NAMESPACE}:${action}:${item.id}:${item.token}`,
++      ...(style ? { style } : {}),
++    })),
++  });
++  const blocks: unknown[] = [
++    { type: "header", text: { type: "plain_text", text: `📈 X 성장 초안 · ${draftId}` } },
++  ];
++  for (const item of items) {
++    const head =
++      item.kind === "post"
++        ? `*새 글 · @${OWNER}* (${[...item.text].length}자)`
++        : `*답글 → <https://x.com/${item.reply_to?.author}/status/${item.reply_to?.id}|@${item.reply_to?.author}> (${item.reply_to?.likes} likes)*\n${quote((item.reply_to?.text ?? "").slice(0, 280))}\n*내 답글* (${[...item.text].length}자)`;
++    blocks.push({ type: "divider" });
++    blocks.push({
++      type: "section",
++      text: { type: "mrkdwn", text: `${head}\n${quote(item.text)}` },
++    });
++    blocks.push(buttons(item));
++  }
++  blocks.push({
++    type: "context",
++    elements: [
++      {
++        type: "mrkdwn",
++        text: "버튼을 누르기 전에는 아무것도 게시되지 않습니다. 숫자는 모두 YC 6,320 리포트에 있는 값만 씁니다.",
++      },
++    ],
++  });
++  return blocks;
++}
++
++function readHistory(): History {
++  const empty: History = { authors: {}, passed: {}, posts: [], published: {}, replied: [] };
++  return existsSync(HISTORY_PATH)
++    ? { ...empty, ...(JSON.parse(readFileSync(HISTORY_PATH, "utf8")) as Partial<History>) }
++    : empty;
++}
++
++function saveHistory(history: History) {
++  mkdirSync(DIR, { recursive: true });
++  writeFileSync(HISTORY_PATH, JSON.stringify(history, null, 2));
++}
++
++type ToolResult = Record<string, unknown>;
++
++function tool(id: string, args: Record<string, unknown>): ToolResult {
++  const r = Bun.spawnSync(["maho", "--json", "tool", "run", id, "--args", JSON.stringify(args)], {
++    timeout: 60_000,
++  });
++  const raw = r.stdout.toString();
++  try {
++    const parsed = JSON.parse(raw) as ToolResult;
++    if (parsed["ok"] === false) throw new Error(JSON.stringify(parsed["error"]));
++    return (parsed["result"] ?? {}) as ToolResult;
++  } catch (error) {
++    const detail = (raw + r.stderr.toString()).trim().slice(0, 300);
++    throw new Error(`maho ${id} failed (exit ${r.exitCode}): ${detail || String(error)}`);
++  }
++}
++
++function tryTool(id: string, args: Record<string, unknown>): ToolResult | null {
++  try {
++    return tool(id, args);
++  } catch {
++    return null;
++  }
++}
++
++// Maho aborts every tools/call at 15s, so poll the fast query_selector under our own deadline.
++function waitFor(tabId: number, selector: string, timeoutMs: number): boolean {
++  const deadline = Date.now() + timeoutMs;
++  for (;;) {
++    const res = tryTool("page.query_selector", { selector, tab_id: tabId });
++    if (Number(res?.["match_count"] ?? 0) > 0) return true;
++    if (Date.now() >= deadline) return false;
++    Bun.sleepSync(500);
++  }
++}
++
++function openTab(url: string): number {
++  Bun.spawnSync(["open", "-g", "-a", "Maho"]);
++  return Number((tool("tab.new", { url })["tab"] as { id: number }).id);
++}
++
++function searchCandidates(queries: readonly string[], replied: ReadonlySet<string>): Candidate[] {
++  const since = new Date(Date.now() - 36 * 3600 * 1000).toISOString().slice(0, 10);
++  const seen = new Map<string, Candidate>();
++  for (const query of queries) {
++    const q = encodeURIComponent(`${query} since:${since}`);
++    const tabId = openTab(`https://x.com/search?q=${q}&src=typed_query&f=top`);
++    try {
++      if (!waitFor(tabId, "article[data-testid='tweet']", 40_000)) continue;
++      Bun.sleepSync(2000);
++      const res = tryTool("page.content", { tab_id: tabId });
++      const raw = String(res?.["text"] ?? "").replace(/\\"/g, '"');
++      for (const c of parseCandidates(raw)) if (!replied.has(c.id)) seen.set(c.id, c);
++    } finally {
++      tryTool("tab.close", { tab_id: tabId });
++    }
++  }
++  return [...seen.values()].sort((a, b) => b.likes - a.likes).slice(0, 12);
++}
++
++async function ownerReport(report?: Report): Promise<string> {
++  const db = openDb();
++  try {
++    const outbox = new ReportOutbox(db, defaultReportGate());
++    for (const id of outbox.open("x-growth")) {
++      const row = await outbox.drive(id);
++      if (row.state === "delivered") outbox.complete(id);
++    }
++    if (!report) return "";
++    const row = await outbox.drive(outbox.enqueue(report));
++    if (row.state === "delivered") {
++      outbox.complete(row.id);
++      return "허브 전달 완료 (" + row.ref + ")";
++    }
++    return "허브 " + row.state + " (" + (row.reason ?? row.outboxId ?? row.id) + ")";
++  } finally {
++    db.close();
++  }
++}
++
++async function postSlack(draftId: string, items: readonly Item[]): Promise<string> {
++  return ownerReport({ source: "x-growth", topic: "draft", state: JSON.stringify(items),
++    salience: "decision", body: "X 성장 초안 " + draftId,
++    blocks: slackBlocks(draftId, items) as Record<string, unknown>[] });
++}
++
++async function runDraft(generate: Generator = omoGenerator()): Promise<number> {
++  const facts = readFileSync(FACTS_PATH, "utf8");
++  const history = readHistory();
++  const draftId = kstStamp(new Date());
++  const recent = [...PUBLISHED_POSTS, ...history.posts.slice(-10)];
++  const items = writeItems(draftId, facts, recent, [], generate);
++  const dir = join(DIR, draftId);
++  mkdirSync(dir, { recursive: true });
++  writeFileSync(join(dir, "draft.json"), JSON.stringify({ items }, null, 2));
++  const ts = await postSlack(draftId, items);
++  console.log(`X 성장 초안 ${draftId}: ${ts}`);
++  return 0;
++}
++
++export function loadItem(itemId: string, token: string, root: string = DIR): Item {
++  const match = itemId.match(/^(\d{8}-\d{4})-(p|r\d|a)$/);
++  if (!match) throw new Error(`잘못된 항목 id: ${itemId}`);
++  const path = join(root, match[1] ?? "", "draft.json");
++  if (!existsSync(path)) throw new Error(`초안 ${match[1]}을(를) 찾을 수 없습니다.`);
++  const { items } = JSON.parse(readFileSync(path, "utf8")) as { items: Item[] };
++  const item = items.find((i) => i.id === itemId);
++  if (!item) throw new Error(`항목 ${itemId}이(가) 초안에 없습니다.`);
++  if (item.token !== token || itemToken(item.text, item.reply_to?.id ?? "") !== token)
++    throw new Error(`항목 ${itemId}의 내용이 슬랙에 보낸 것과 다릅니다. 발행하지 않았습니다.`);
++  return item;
++}
++
++function authorized(): string {
++  const clicker = process.env["OMON_BUTTON_USER_ID"]?.trim();
++  const owner = process.env["SLACK_APPROVAL_USER_ID"]?.trim();
++  if (!clicker || !owner || clicker !== owner) throw new Error("승인된 사용자의 클릭이 아닙니다.");
++  return `slack:${clicker}`;
++}
++
++function findOwnReplyId(item: Item): string | undefined {
++  if (!item.reply_to) return undefined;
++  const tabId = openTab(`https://x.com/${item.reply_to.author}/status/${item.reply_to.id}`);
++  try {
++    if (!waitFor(tabId, "article[data-testid='tweet']", 30_000)) return undefined;
++    Bun.sleepSync(3000);
++    const html = String(tryTool("page.content", { tab_id: tabId })?.["text"] ?? "").replace(
++      /\\"/g,
++      '"',
++    );
++    return html.match(new RegExp(`href="/${OWNER}/status/(\\d+)"`, "i"))?.[1];
++  } finally {
++    tryTool("tab.close", { tab_id: tabId });
++  }
++}
++
++function publish(item: Item, by: string): string {
++  const history = readHistory();
++  const done = history.published[item.id];
++  if (done) return `이미 발행된 항목입니다 (${done.at}).`;
++  const tabId = openTab(composeUrl(item));
++  if (!waitFor(tabId, "[data-testid='tweetTextarea_0']", 20_000))
++    throw new Error(`X 작성창이 뜨지 않았습니다 (로그인 확인 필요). Maho 탭 ${tabId}`);
++  Bun.sleepSync(1500);
++  // Record intent before the irreversible click so a retry never double-posts.
++  history.published[item.id] = { at: new Date().toISOString(), by };
++  if (item.kind === "post") history.posts.push(item.text);
++  if (item.reply_to) history.replied.push(item.reply_to.id);
++  saveHistory(history);
++  tool("input.locator_click", { locator: { css: "[data-testid='tweetButton']" }, tab_id: tabId });
++  const closed = (() => {
++    const deadline = Date.now() + 15_000;
++    while (Date.now() < deadline) {
++      const res = tryTool("page.query_selector", {
++        selector: "[role='dialog'] [data-testid='tweetTextarea_0']",
++        tab_id: tabId,
++      });
++      if (res && Number(res["match_count"] ?? 0) === 0) return true;
++      Bun.sleepSync(1000);
++    }
++    return false;
++  })();
++  if (!closed)
++    throw new Error(
++      `게시 버튼은 눌렀지만 작성창이 닫히지 않았습니다. Maho 탭 ${tabId}를 확인해 주세요. 중복 방지를 위해 이 항목은 잠갔습니다.`,
++    );
++  tryTool("tab.close", { tab_id: tabId });
++  const replyId = item.reply_to ? findOwnReplyId(item) : undefined;
++  if (replyId) {
++    const after = readHistory();
++    after.published[item.id] = {
++      at: history.published[item.id]?.at ?? "",
++      by,
++      url: tweetUrl(replyId),
++    };
++    saveHistory(after);
++  }
++  const where = item.reply_to ? `@${item.reply_to.author} 글에 답글` : "새 글";
++  return `✅ @${OWNER} ${where} 게시 완료 — ${item.id}. ${replyId ? tweetUrl(replyId) : `https://x.com/${OWNER}`}`;
++}
++
++function tweetUrl(id: string): string {
++  return `https://x.com/${OWNER}/status/${id}`;
++}
++
++function deleteTweet(item: Item): string {
++  const url = readHistory().published[item.id]?.url;
++  if (!url)
++    throw new Error(`${item.id}의 게시물 주소를 몰라 삭제하지 못했습니다. X에서 직접 지워 주세요.`);
++  const tabId = openTab(url);
++  try {
++    if (!waitFor(tabId, "article[tabindex='-1'] [data-testid='caret']", 30_000))
++      throw new Error(`게시물 메뉴를 찾지 못했습니다: ${url}`);
++    tool("input.locator_click", {
++      locator: { css: "article[tabindex='-1'] [data-testid='caret']" },
++      tab_id: tabId,
++    });
++    if (!waitFor(tabId, "[role='menuitem']", 10_000))
++      throw new Error("게시물 메뉴가 열리지 않았습니다.");
++    tool("input.locator_click", { locator: { name: "Delete", role: "menuitem" }, tab_id: tabId });
++    if (!waitFor(tabId, "[data-testid='confirmationSheetConfirm']", 10_000))
++      throw new Error("삭제 확인 창이 뜨지 않았습니다.");
++    tool("input.locator_click", {
++      locator: { css: "[data-testid='confirmationSheetConfirm']" },
++      tab_id: tabId,
++    });
++    Bun.sleepSync(3000);
++  } finally {
++    tryTool("tab.close", { tab_id: tabId });
++  }
++  const history = readHistory();
++  history.published[item.id] = {
++    ...(history.published[item.id] ?? { at: "", by: "" }),
++    url: `deleted:${url}`,
++  };
++  saveHistory(history);
++  return `🗑 삭제했습니다: ${url}`;
++}
++
++export type ReplyPlan = {
++  date: string;
++  slots: {
++    at: string;
++    kind: "post" | "reply";
++    status: "planned" | "running" | "done" | "skipped";
++    note?: string;
++  }[];
++};
++
++export function kstDate(date: Date): string {
++  return new Date(date.getTime() + 9 * 3600 * 1000).toISOString().slice(0, 10);
++}
++
++export function makePlan(day: string, random: () => number = Math.random): ReplyPlan {
++  const roll = random();
++  const count = roll < 0.2 ? 0 : roll < 0.65 ? 1 : 2;
++  const startMin = 9 * 60;
++  const endMin = 23 * 60 + 30;
++  const minutes: number[] = [];
++  for (let guard = 0; minutes.length < count && guard < 50; guard += 1) {
++    const m = startMin + Math.floor(random() * (endMin - startMin));
++    if (minutes.every((x) => Math.abs(x - m) >= 90)) minutes.push(m);
++  }
++  const base = Date.parse(`${day}T00:00:00+09:00`);
++  const slots: ReplyPlan["slots"] = minutes.map((m) => ({
++    at: new Date(base + m * 60_000).toISOString(),
++    kind: "reply" as const,
++    status: "planned" as const,
++  }));
++  if (random() < 0.85) {
++    const m = 9 * 60 + Math.floor(random() * (21 * 60 - 9 * 60));
++    slots.push({ at: new Date(base + m * 60_000).toISOString(), kind: "post", status: "planned" });
++  }
++  return { date: day, slots: slots.sort((a, b) => Date.parse(a.at) - Date.parse(b.at)) };
++}
++
++export function dueSlot(plan: ReplyPlan, now: Date): { index: number; stale: boolean } | null {
++  const index = plan.slots.findIndex(
++    (slot) => slot.status === "planned" && Date.parse(slot.at) <= now.getTime(),
++  );
++  if (index < 0) return null;
++  const at = Date.parse(plan.slots[index]?.at ?? "");
++  return { index, stale: now.getTime() - at > STALE_SLOT_MS };
++}
++
++function readPlan(): ReplyPlan | null {
++  return existsSync(PLAN_PATH) ? (JSON.parse(readFileSync(PLAN_PATH, "utf8")) as ReplyPlan) : null;
++}
++
++function savePlan(plan: ReplyPlan) {
++  mkdirSync(DIR, { recursive: true });
++  writeFileSync(PLAN_PATH, JSON.stringify(plan, null, 2));
++}
++
++export function eligible(
++  candidates: readonly Candidate[],
++  history: Pick<History, "replied" | "authors">,
++  now: Date,
++): Candidate[] {
++  return candidates.filter((c) => {
++    if (history.replied.includes(c.id)) return false;
++    const last = history.authors[c.author.toLowerCase()];
++    return !last || now.getTime() - Date.parse(last) >= AUTHOR_COOLDOWN_MS;
++  });
++}
++
++export function buildReplyPrompt(
++  facts: string,
++  candidates: readonly Candidate[],
++  style: string,
++): string {
++  return [
++    "You write one X reply for @indo_yoon, a solo developer who analyzed all 6,320 YC companies.",
++    "Voice: lowercase, plain, like a builder talking to a peer. No emoji, hashtags, exclamation marks, links, 'great post', or asking for follows.",
++    "",
++    "FACT BANK (the only source of facts and numbers; copy numbers exactly):",
++    facts,
++    "",
++    `STYLE FOR THIS REPLY: ${style}`,
++    "",
++    'Candidate posts. Pick the ONE where a reply from this fact bank genuinely adds something. If none fit, or a post is personal, tragic, political or a giveaway, return {"skip":true}.',
++    ...candidates.map(
++      (c) => `- id=${c.id} @${c.author} (${c.likes} likes): ${c.text.replace(/\n/g, " ")}`,
++    ),
++    "",
++    'Return ONLY minified JSON: {"tweet_id":"...","text":"..."} or {"skip":true}',
++  ].join("\n");
++}
++
++export type Judge = (original: Candidate | undefined, text: string) => number;
++
++export const JEV_POST_INSTRUCTIONS =
++  "You are a strict gate for an automated X post on a solo developer's account (he analyzed all 6,320 YC companies). Answer yes only if ALL hold: it makes one clear, non-obvious point a founder or investor would find worth saving; the evidence lines support that point; it reads like a thoughtful human builder, not a bot, ad or engagement bait; it is complete and not confusing on its own.";
++
++export const JEV_INSTRUCTIONS =
++  "You are a strict gate for an automated X reply from a solo developer who analyzed all 6,320 YC companies. Answer yes only if ALL hold: the reply directly engages with the original post's actual point; the data it cites is relevant to that point; it reads like a thoughtful human, not a bot or self-promotion; it is respectful and appropriate for the tone of the original (not a sensitive, personal, political or tragic post); it does not ask for follows or likes.";
++
++const jevJudge: Judge = (original, text) => {
++  const file = join(tmpdir(), `x-growth-jev-${process.pid}.txt`);
++  writeFileSync(
++    file,
++    original
++      ? `ORIGINAL POST by @${original.author}:\n${original.text}\n\nPROPOSED REPLY:\n${text}`
++      : `PROPOSED X POST:\n${text}`,
++  );
++  const r = Bun.spawnSync(
++    [
++      "typesafe-judge",
++      "noul",
++      "-q",
++      "--file",
++      file,
++      "--instructions",
++      original ? JEV_INSTRUCTIONS : JEV_POST_INSTRUCTIONS,
++    ],
++    {
++      cwd: join(import.meta.dir, ".."),
++      timeout: 60_000,
++    },
++  );
++  const score = Number.parseFloat(r.stdout.toString().trim());
++  if (Number.isNaN(score))
++    throw new Error(`Jev 판정 실패: ${(r.stdout.toString() + r.stderr.toString()).slice(0, 200)}`);
++  return score;
++};
++
++export type Review = {
++  ai_score: number;
++  verdict: "human" | "ai" | "unsure";
++  tells: string[];
++  rewrite: string;
++};
++export type Reviewer = (text: string, original: Candidate | undefined) => Review;
++export const MAX_HUMAN_AI_SCORE = 3;
++const MAX_REWRITES = 2;
++
++export function buildReviewPrompt(text: string, original: Candidate | undefined): string {
++  return [
++    `You are an expert editor who spots AI-written social media text. Review this X ${original ? "reply" : "post"} from a solo developer.`,
++    ...(original
++      ? [`ORIGINAL POST by @${original.author}: ${original.text.replace(/\n/g, " ")}`]
++      : []),
++    "TEXT:",
++    text,
++    "",
++    'Look for AI tells: tidy "X, which Y" clauses, parenthetical stat qualifiers, "so ... would be ..." inference lines, balanced setup-payoff structure, "not X, it\'s Y", em dashes, colon lists, hedge-then-precision, generic summary closers, words like landscape, crucial, notably, worth noting, the real, perfectly grammatical lowercase that still reads like a press line, and anything a real founder typing fast on a phone would not write.',
++    "Score 0 = clearly a human typed it, 10 = obviously generated.",
++    "The rewrite must keep only facts and numbers already in TEXT, add none, stay under 200 characters, use no hashtags, links, emoji, exclamation marks, slang like lol, or em dashes, and still make sense to the original author.",
++    'Return ONLY JSON: {"ai_score":0-10,"verdict":"human"|"ai"|"unsure","tells":["..."],"rewrite":"..."}',
++  ].join("\n");
++}
++
++const omoReviewer: Reviewer = (text, original) => {
++  const result = omoComplete(
++    cronModel("X_GROWTH_REVIEW_MODEL"),
++    buildReviewPrompt(text, original),
++  );
++  if (result.exitCode !== 0)
++    throw new Error(`AI 티 리뷰 실패: ${result.stderr.slice(0, 200)}`);
++  const raw = result.stdout;
++  const json = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1)) as Partial<Review>;
++  const score = Number(json.ai_score);
++  if (Number.isNaN(score)) throw new Error(`AI 티 리뷰 응답을 읽지 못함: ${raw.slice(0, 200)}`);
++  return {
++    ai_score: score,
++    rewrite: String(json.rewrite ?? "").trim(),
++    tells: (json.tells ?? []).map(String),
++    verdict: json.verdict === "human" || json.verdict === "ai" ? json.verdict : "unsure",
++  };
++};
++
++export type Humanized = { text: string; review: Review; rounds: number } | { failed: string };
++
++export function humanize(
++  text: string,
++  original: Candidate | undefined,
++  facts: string,
++  review: Reviewer,
++): Humanized {
++  let current = text;
++  for (let round = 0; round <= MAX_REWRITES; round += 1) {
++    const result = review(current, original);
++    if (result.ai_score <= MAX_HUMAN_AI_SCORE && result.verdict !== "ai")
++      return { review: result, rounds: round, text: current };
++    if (round === MAX_REWRITES || !result.rewrite)
++      return { failed: `AI 티 ${result.ai_score}/10 (${result.tells.slice(0, 2).join("; ")})` };
++    const problems = copyProblems(result.rewrite, facts);
++    if (problems.length > 0)
++      return { failed: `리라이트가 품질 게이트 탈락: ${problems.join("; ")}` };
++    current = result.rewrite;
++  }
++  return { failed: "리라이트 반복 초과" };
++}
++
++export type Decision = "auto" | "ask" | "drop";
++
++export function decide(kind: "post" | "reply", jev: number, review: Review): Decision {
++  const v = verdict(kind, jev);
++  if (v === "drop") return "drop";
++  if (v === "auto" && review.verdict === "human") return "auto";
++  return "ask";
++}
++
++async function slackPost(text: string, blocks: unknown[], item: Item): Promise<string> {
++  return ownerReport({ source: "x-growth", topic: "review:" + item.id, state: JSON.stringify(item),
++    salience: "decision", body: text, blocks: blocks as Record<string, unknown>[] });
++}
++
++function pick<T>(items: readonly T[], random: () => number = Math.random): T {
++  return items[Math.floor(random() * items.length)] as T;
++}
++
++export function askBlocks(item: Item, jev: number, review: Review): unknown[] {
++  return [
++    {
++      type: "section",
++      text: {
++        type: "mrkdwn",
++        text: `🤔 *판단 보류: 직접 결정해 주세요* (Jev ${jev.toFixed(2)}, AI 티 ${review.ai_score}/10 ${review.verdict})${review.tells.length > 0 ? `\n남은 지적: ${review.tells.slice(0, 2).join("; ")}` : ""}`,
++      },
++    },
++    ...(slackBlocks(item.id.replace(/-[a-z]\d*$/, ""), [item]) as unknown[]).slice(1),
++  ];
++}
++
++async function autoItem(
++  kind: "post" | "reply",
++  generate: Generator,
++  judge: Judge,
++  review: Reviewer,
++): Promise<string> {
++  const facts = readFileSync(FACTS_PATH, "utf8");
++  const history = readHistory();
++  const now = new Date();
++  const style = pick(REPLY_STYLES);
++  let target: Candidate | undefined;
++  let draft: string;
++  let query = "";
++  if (kind === "reply") {
++    query = `${pick(AUTO_SEARCHES)} min_faves:${pick(MIN_FAVES)}`;
++    const pool = eligible(searchCandidates([query], new Set(history.replied)), history, now)
++      .sort(() => Math.random() - 0.5)
++      .slice(0, 6);
++    if (pool.length === 0) return `후보 없음 (${query})`;
++    const raw = parseJson(generate(buildReplyPrompt(facts, pool, style))) as {
++      tweet_id?: string;
++      text?: string;
++      skip?: boolean;
++    };
++    if (raw.skip) return `생성기가 맞는 글이 없다고 판단 (${query})`;
++    target = pool.find((c) => c.id === raw.tweet_id);
++    if (!target) return `생성기가 후보 밖의 글을 골랐음: ${raw.tweet_id}`;
++    draft = (raw.text ?? "").trim();
++  } else {
++    const recent = [...PUBLISHED_POSTS, ...history.posts.slice(-10)];
++    const items = writeItems(kstStamp(now), facts, recent, [], generate);
++    draft = items[0]?.text ?? "";
++  }
++  const problems = copyProblems(draft, facts);
++  if (problems.length > 0) return `품질 게이트 탈락: ${problems.join("; ")}`;
++  const human = humanize(draft, target, facts, review);
++  if ("failed" in human) return `AI 티 리뷰 탈락으로 버림: ${human.failed}`;
++  const jev = judge(target, human.text);
++  const decision = decide(kind, jev, human.review);
++  const draftId = kstStamp(now);
++  const item: Item = {
++    id: `${draftId}-${kind === "post" ? "p" : "a"}`,
++    kind,
++    ...(target ? { reply_to: target } : {}),
++    text: human.text,
++    token: itemToken(human.text, target?.id ?? ""),
++  };
++  const dir = join(DIR, draftId);
++  mkdirSync(dir, { recursive: true });
++  writeFileSync(
++    join(dir, "draft.json"),
++    JSON.stringify(
++      {
++        decision,
++        first_draft: draft,
++        items: [item],
++        jev,
++        query,
++        review: human.review,
++        rounds: human.rounds,
++        style,
++      },
++      null,
++      2,
++    ),
++  );
++  const summary = `Jev ${jev.toFixed(2)}, AI 티 ${human.review.ai_score}/10, 리라이트 ${human.rounds}회`;
++  if (decision === "drop") return `게시 안 함 (${summary})`;
++  if (decision === "ask") {
++    const delivery = await slackPost(
++      `판단 보류: ${kind === "post" ? "새 글" : `@${target?.author} 답글`}`,
++      askBlocks(item, jev, human.review),
++      item,
++    );
++    return `판단 보류: ${delivery} (${summary})`;
++  }
++  if (target) {
++    const before = readHistory();
++    before.authors[target.author.toLowerCase()] = now.toISOString();
++    saveHistory(before);
++  }
++  return `${publish(item, "auto:jev+review")} (${summary})`;
++}
++
++async function runTick(
++  generate: Generator = omoGenerator(),
++  judge: Judge = jevJudge,
++  review: Reviewer = omoReviewer,
++): Promise<number> {
++  const now = new Date();
++  let plan = readPlan();
++  if (!plan || plan.date !== kstDate(now)) {
++    plan = makePlan(kstDate(now));
++    savePlan(plan);
++    console.log(`오늘 계획: ${plan.slots.map((s) => `${s.kind}@${s.at}`).join(", ") || "없음"}`);
++  }
++  const due = dueSlot(plan, now);
++  if (!due) {
++    console.log("지금 예정된 답글 없음");
++    return 0;
++  }
++  const slot = plan.slots[due.index];
++  if (!slot) return 0;
++  if (due.stale) {
++    slot.status = "skipped";
++    slot.note = "예정 시각을 3시간 넘겨 건너뜀";
++    savePlan(plan);
++    console.log(slot.note);
++    return 0;
++  }
++  slot.status = "running";
++  savePlan(plan);
++  Bun.sleepSync(Math.floor(Math.random() * MAX_JITTER_MS));
++  try {
++    slot.note = await autoItem(slot.kind ?? "reply", generate, judge, review);
++    slot.status = "done";
++  } catch (error) {
++    slot.note = error instanceof Error ? error.message : String(error);
++    slot.status = "done";
++    savePlan(plan);
++    throw error;
++  }
++  savePlan(plan);
++  console.log(slot.note);
++  return 0;
++}
++
++async function runAction(action: string, itemId: string, token: string): Promise<number> {
++  const by = authorized();
++  const item = loadItem(itemId, token);
++  if (action === "pass") {
++    const history = readHistory();
++    history.passed[item.id] = { at: new Date().toISOString(), by };
++    if (item.reply_to) history.replied.push(item.reply_to.id);
++    saveHistory(history);
++    console.log(`${item.id}을(를) 패스했습니다.`);
++    return 0;
++  }
++  if (action === "preview") {
++    const tabId = openTab(composeUrl(item));
++    console.log(`🔍 Maho 탭 ${tabId}에 작성창을 열었습니다. 게시는 하지 않았습니다.`);
++    return 0;
++  }
++  if (action === "publish") {
++    console.log(publish(item, by));
++    return 0;
++  }
++  if (action === "delete") {
++    console.log(deleteTweet(item));
++    return 0;
++  }
++  throw new Error(`알 수 없는 동작: ${action}`);
++}
++
++if (import.meta.main) {
++  const [action = "", id = "", token = ""] = process.argv.slice(2);
++  try {
++    await ownerReport();
++    process.exitCode =
++      action === "draft"
++        ? await runDraft()
++        : action === "tick"
++          ? await runTick()
++          : await runAction(action, id, token);
++  } catch (error) {
++    console.error(`⚠️ ${error instanceof Error ? error.message : String(error)}`);
++    process.exitCode = 1;
++  }
++}

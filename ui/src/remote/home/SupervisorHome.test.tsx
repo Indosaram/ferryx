@@ -6,6 +6,7 @@ import { fixtureAction, fixtureLane, fixtureMachine, fixtureSnapshot } from "./p
 import { SupervisorHome, type SupervisorHomeProps } from "./SupervisorHome";
 import { unifiedHosts } from "./usePhoneSupervisor";
 import { normalizeUnified } from "../../lib/unifiedSupervisor";
+import { normalizeSetupStatus, type SetupActions } from "../../lib/supervisorSetupModel";
 
 const NOW = 5_000_000;
 
@@ -172,6 +173,37 @@ describe("SupervisorHome", () => {
       machines: [fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "k", lastReason: "tests failed twice" })] }) })],
     });
     expect(screen.getByTestId("supervisor-lane-reason")).toHaveTextContent("Stopped: tests failed twice");
+  });
+
+  describe("setup", () => {
+    const needsSetup = () =>
+      fixtureMachine({
+        machineId: "m1",
+        label: "Studio Mac",
+        snapshot: { ...fixtureSnapshot({ lanes: [fixtureLane({ key: "k" })] }), setup: normalizeSetupStatus({ nextAction: "create_owner" })! },
+      });
+
+    it("headlines unfinished setup with the machine name", () => {
+      renderHome({ machines: [needsSetup()] });
+      expect(screen.getByTestId("supervisor-home")).toHaveAttribute("data-headline", "needs_setup");
+      expect(screen.getByTestId("supervisor-home-headline")).toHaveTextContent("Supervisor setup isn't finished on Studio Mac");
+    });
+
+    it("gives a Control device a Finish setup button that runs setup on that machine", async () => {
+      const run = vi.fn<SetupActions["run"]>(async () => ({ kind: "ok", status: normalizeSetupStatus({ nextAction: "wait_engine" })! }));
+      const setupActions = vi.fn((): SetupActions => ({ run, adopt: vi.fn() }));
+      renderHome({ machines: [needsSetup()], setupActions });
+      expect(setupActions).toHaveBeenCalledWith("m1");
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Finish setup" })));
+      expect(run).toHaveBeenCalledWith({ importMemory: false, projects: [] });
+    });
+
+    it("shows a view-only device the text only", () => {
+      renderHome({ machines: [needsSetup()], setupActions: () => null });
+      expect(screen.getByTestId("supervisor-setup-banner")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Finish setup" })).toBeNull();
+      expect(screen.getByTestId("supervisor-setup-view-only")).toBeInTheDocument();
+    });
   });
 });
 

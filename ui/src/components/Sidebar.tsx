@@ -50,6 +50,7 @@ import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
 import { pruneWorktreeOrder, readSidebarDragData, worktreeOrdersEqual, type SidebarDragData } from "./sidebar-dnd/sidebarDragData";
 import { projectSortableId, SortableProjectSection } from "./sidebar-dnd/SortableProjectSection";
 import { SupervisorPanel, useSupervisorTyping } from "./supervisor/SupervisorPanel";
+import { setupProjectsFrom } from "../lib/supervisorSetupModel";
 import { isStandaloneRemoteGroup, projectDisplayLabel, projectHostLabel } from "./sidebar/sidebarLabels";
 import { sidebarLiveState, type SidebarProjectNode, type SidebarRowLive, type SidebarWorktreeNode } from "./sidebar/sidebarModel";
 import { applyWorktreeOrder, emptyProjectGroupIds, groupWorktreesByProject, initialCollapsedProjects, seedCollapsedProjects } from "./sidebar/sidebarRows";
@@ -177,6 +178,7 @@ export function Sidebar({
   );
 
   const projectGroups = useMemo(() => groupProjects(projects), [projects]);
+  const setupProjects = useMemo(() => setupProjectsFrom(projects), [projects]);
   const emptyGroupIds = useMemo(
     () => emptyProjectGroupIds(projectGroups, emptyWorkspaceIds),
     [emptyWorkspaceIds, projectGroups],
@@ -516,7 +518,7 @@ export function Sidebar({
           filter={{ query: filterQuery, onChange: setFilterQuery }}
           view={sidebarView}
           inbox={attention}
-          supervisor={attention ? { typing: supervisorTyping, content: <SupervisorPanel /> } : undefined}
+          supervisor={attention ? { typing: supervisorTyping, content: <SupervisorPanel projects={setupProjects} /> } : undefined}
           titlebarLeading={isMac ? <div data-testid="titlebar-traffic-light-pad" className="w-[72px] shrink-0" aria-hidden="true" /> : null}
           titlebarProps={{ "data-testid": "sidebar-drag-region", "data-tauri-drag-region": true }}
           shortcuts={{

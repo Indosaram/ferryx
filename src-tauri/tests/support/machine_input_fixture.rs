@@ -263,25 +263,68 @@ impl Held {
         let fd = pty.raw_master_fd().unwrap();
         let bytes = [b'x'; 65536];
         let mut accepted = 0u64;
-        let mut chunk_size = bytes.len();
+        // Linux queues master writes in the pty's flip buffer and a kernel worker later moves
+        // them into the slave's line discipline. A WouldBlock seen before that worker ran is not
+        // final: the move frees flip-buffer room and LATE would then be accepted outright. The
+        // queue is full for good only once the line discipline itself is full, so wait for that
+        // exact state (observed through the slave's FIONREAD) and fill again.
+        #[cfg(target_os = "linux")]
+        let slave = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+                .open(pty.slave_tty_name().expect("pty slave path"))
+                .expect("open pty slave")
+        };
+        let settle_deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            // SAFETY: FFI buffer bounds: bytes is live for the call, fd is owned
-            // by pty retained above, and write only reads chunk_size bytes.
-            let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), chunk_size) };
-            if n < 0 {
-                let err = std::io::Error::last_os_error();
-                assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
-                if chunk_size > 1 {
-                    // Binary step down so the buffer is full down to a single byte:
-                    // EAGAIN on a 64k write does not prove 4-byte LATE cannot fit.
-                    chunk_size = (chunk_size / 2).max(1);
-                    continue;
-                } else {
-                    break;
+            // Sampled before the fill: if the line discipline is already full, nothing can
+            // move out of the flip buffer afterwards, so the fill's WouldBlock is final.
+            #[cfg(target_os = "linux")]
+            let discipline_full = {
+                use std::os::fd::AsRawFd;
+                let mut queued: libc::c_int = 0;
+                // SAFETY: `slave` is an open tty fd; FIONREAD writes one c_int.
+                assert_eq!(
+                    unsafe { libc::ioctl(slave.as_raw_fd(), libc::FIONREAD, &mut queued) },
+                    0
+                );
+                // A raw-mode n_tty read buffer holds N_TTY_BUF_SIZE - 1 bytes at most.
+                queued >= 4095
+            };
+            // Other kernels hand master writes to the line discipline synchronously.
+            #[cfg(not(target_os = "linux"))]
+            let discipline_full = true;
+            let mut chunk_size = bytes.len();
+            loop {
+                // SAFETY: FFI buffer bounds: bytes is live for the call, fd is owned
+                // by pty retained above, and write only reads chunk_size bytes.
+                let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), chunk_size) };
+                if n < 0 {
+                    let err = std::io::Error::last_os_error();
+                    assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+                    if chunk_size > 1 {
+                        // Binary step down so the buffer is full down to a single byte:
+                        // EAGAIN on a 64k write does not prove 4-byte LATE cannot fit.
+                        chunk_size = (chunk_size / 2).max(1);
+                        continue;
+                    } else {
+                        break;
+                    }
                 }
+                accepted += u64::try_from(n).unwrap();
+                assert!(accepted < 4 * 1024 * 1024);
             }
-            accepted += u64::try_from(n).unwrap();
-            assert!(accepted < 4 * 1024 * 1024);
+            if discipline_full {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < settle_deadline,
+                "pty line discipline never filled; accepted={accepted}"
+            );
+            tokio::task::yield_now().await;
         }
         eprintln!("A10 kernel WouldBlock original_pid={pid} accepted={accepted}");
         Self {

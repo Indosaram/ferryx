@@ -45,6 +45,8 @@ import { notificationCenterStore } from "./lib/notificationCenter/notificationCe
 import { syncSupervisorNotifications, type SupervisorPaneResolver } from "./lib/notificationCenter/supervisorRecording";
 import { notificationEntryId } from "./lib/notificationCenter/types";
 import { getSupervisorSnapshot, startSupervisorFeed, subscribeSupervisorSnapshot } from "./lib/supervisor";
+import { getSetupStatus, setupFinished, setupProjectsFrom } from "./lib/supervisorSetup";
+import { DesktopSupervisorSetupBanner } from "./components/supervisor/DesktopSupervisorSetupBanner";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
 import { setLocalSplitPersistence } from "./lib/localSplitLifecycle";
@@ -75,6 +77,7 @@ import { showNotificationPermissionHint } from "./lib/notificationPermissionHint
 import { getCurrentVersion } from "./lib/updater";
 import { GettingStartedChecklist } from "./components/onboarding/GettingStartedChecklist";
 import { DaemonConnectionBanner } from "./components/DaemonConnectionBanner";
+import { RemoteDesktopConsentDialog } from "./components/settings/remote/RemoteDesktopHostSection";
 import { InsecureTransportBanner } from "./components/InsecureTransportBanner";
 import type { SectionId } from "./components/settings/types";
 import type { MachineProjectTarget, RemoteContext } from "./lib/machineNavigation";
@@ -843,6 +846,7 @@ function WorkspaceApp({
     createBrowserTab,
     openFilePreviewTab,
     openChangesTab,
+    openRemoteDesktopTab,
     adoptBrowserSession,
     duplicateBrowserTab,
     navigateBrowserTab,
@@ -2838,6 +2842,8 @@ function WorkspaceApp({
   const onboardingTryProject =
     onboardingAddedProject ??
     (activeProject !== DEFAULT_PROJECT && (activeProject.target?.kind ?? "local") === "local" ? activeProject : null);
+  // Local projects supervisor setup maps (onboarding step and setup banner).
+  const setupProjects = useMemo(() => setupProjectsFrom(projects), [projects]);
 
   const handleWorktreeCreated = useCallback(
     async (owner: RegisteredProject, worktree: Worktree, launch?: WorktreeAgentLaunch) => {
@@ -3217,6 +3223,13 @@ function WorkspaceApp({
     setAddProjectTarget(undefined);
     setIsAddProjectOpen(true);
   }, []);
+  const handleOpenRemoteDesktop = useCallback((hostId: string, label: string) => {
+    if (activeRemoteHostRef.current) return;
+    setIsSettingsOpen(false);
+    setSettingsInitialSection(undefined);
+    setSettingsRemoteContext(undefined);
+    openRemoteDesktopTab(hostId, label);
+  }, [openRemoteDesktopTab]);
   // Settings > Remote hands one machine to Add Project; the dialog routes pairedDaemon to its form.
   const handleOpenMachineProject = useCallback((target: MachineProjectTarget) => {
     if (activeRemoteHostRef.current) return;
@@ -3310,11 +3323,12 @@ function WorkspaceApp({
     let cancelled = false;
     const timer = setTimeout(async () => {
       if (activeRemoteHostRef.current) return;
-      const [permissions, cli, enrollment, devices] = await Promise.all([
+      const [permissions, cli, enrollment, devices, setup] = await Promise.all([
         getSystemPermissionsStatus().catch(() => null),
         getCliLauncherStatus().catch(() => null),
         getAccountEnrollmentStatus().catch(() => null),
         listRemoteDevices().catch(() => null),
+        getSetupStatus(),
       ]);
       if (cancelled) return;
       if (permissions) {
@@ -3327,6 +3341,7 @@ function WorkspaceApp({
         projectCount: projectsRef.current.length,
         accountLinked: enrollment?.enrolled === true,
         pairedDeviceCount: devices ? devices.filter((device) => !device.revoked).length : null,
+        supervisorReady: setup.kind === "ok" ? setupFinished(setup.status) : null,
       };
       const state = loadOnboardingState();
       if (shouldAutoOpenOnboarding(state, ctx)) {
@@ -3345,11 +3360,12 @@ function WorkspaceApp({
   useEffect(() => {
     let cancelled = false;
     const handleOpenOnboarding = async () => {
-      const [permissions, cli, enrollment, devices] = await Promise.all([
+      const [permissions, cli, enrollment, devices, setup] = await Promise.all([
         getSystemPermissionsStatus().catch(() => null),
         getCliLauncherStatus().catch(() => null),
         getAccountEnrollmentStatus().catch(() => null),
         listRemoteDevices().catch(() => null),
+        getSetupStatus(),
       ]);
       if (cancelled) return;
       if (permissions) {
@@ -3362,6 +3378,7 @@ function WorkspaceApp({
         projectCount: projectsRef.current.length,
         accountLinked: enrollment?.enrolled === true,
         pairedDeviceCount: devices ? devices.filter((device) => !device.revoked).length : null,
+        supervisorReady: setup.kind === "ok" ? setupFinished(setup.status) : null,
       };
       setOnboardingDoneSteps(satisfiedOnboardingSteps(loadOnboardingState(), ctx));
       setOnboardingInitialStepIndex(0);
@@ -4213,6 +4230,7 @@ function WorkspaceApp({
             }}
           />
         ) : null}
+        {!activeRemoteHost ? <DesktopSupervisorSetupBanner projects={setupProjects} className="mx-3 mt-2" /> : null}
         {activeRemoteHost ? (
           <div className="flex-1 flex flex-col min-h-0 bg-background overflow-hidden">
             <RemoteHostConnection
@@ -4331,6 +4349,7 @@ function WorkspaceApp({
         >
           <SettingsDialog open initialSection={settingsInitialSection} onClose={handleCloseSettings}
             onOpenSshProject={handleOpenSshProject} onOpenMachineProject={handleOpenMachineProject}
+            onOpenRemoteDesktop={handleOpenRemoteDesktop}
             remoteContext={settingsRemoteContext} />
         </Suspense>
       ) : null}
@@ -4339,6 +4358,7 @@ function WorkspaceApp({
           <SystemResourcesDialog onClose={() => setIsResourcesOpen(false)} />
         </Suspense>
       ) : null}
+      <RemoteDesktopConsentDialog />
       {!activeRemoteHost && onboardingSteps && onboardingSteps.length > 0 ? (
         <Suspense fallback={null}>
           <WelcomeWizard
@@ -4362,6 +4382,7 @@ function WorkspaceApp({
               setOnboardingSteps(null);
             }}
             tryProject={onboardingTryProject}
+            supervisorProjects={setupProjects}
             defaultAgentId={agentSettings.defaultAgentId}
             onTryWorktreeCreated={(worktree, launch) =>
               onboardingTryProject ? handleWorktreeCreated(onboardingTryProject, worktree, launch) : undefined}

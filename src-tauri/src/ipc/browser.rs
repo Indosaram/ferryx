@@ -1340,11 +1340,21 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
         }
     }
 
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    let cef_engine_dir = if opener.is_none() {
+        engine_data_dir(app)
+            .ok()
+            .and_then(|data| crate::browser::cef_engine::engine_dir(&data))
+    } else {
+        None
+    };
+    // The Chromium engine keeps a named profile in its own directory; WebKit cannot.
     #[cfg(target_os = "macos")]
-    if request
-        .profile
-        .as_ref()
-        .is_some_and(BrowserProfileId::is_named)
+    if cef_engine_dir.is_none()
+        && request
+            .profile
+            .as_ref()
+            .is_some_and(BrowserProfileId::is_named)
     {
         return Err(BrowserError::UnsupportedProfile(
             "named persistent browser profiles are unavailable on macOS WebKit".into(),
@@ -1376,6 +1386,11 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
         }
         _ => None,
     };
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if let Some(engine_dir) = cef_engine_dir {
+        return create_cef_browser_session(app, manager, state, engine_dir).await;
+    }
 
     if let Some(main_window) = app.get_window("main") {
         let label = state.webview_label.clone();
@@ -1803,6 +1818,193 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
     }
     // Report the bridge kind the platform install recorded.
     Ok(manager.get_state(&state.browser_id).unwrap_or(state))
+}
+
+/// Publishes a session state change without a webview in scope (CEF tabs have none).
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn emit_session_state<R: tauri::Runtime>(app: &AppHandle<R>, state: &BrowserState) {
+    let _ = app.emit(
+        BROWSER_STATE_CHANGED_EVENT,
+        BrowserStateChangedPayload::from(state),
+    );
+}
+
+/// Opens the tab in its profile's Chromium engine, whose browser window sits over the pane.
+/// The engine reports the page's address, title and loading state as events.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+async fn create_cef_browser_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &Arc<BrowserManager>,
+    state: BrowserState,
+    engine_dir: std::path::PathBuf,
+) -> Result<BrowserState, IpcError> {
+    use crate::browser::cef_engine;
+    let browser_id = state.browser_id.clone();
+    let fail = |message: String| -> IpcError {
+        discard_failed_session(manager, &browser_id);
+        BrowserError::CreateFailed(message).into()
+    };
+    // The engine draws its own toolbar, so the pane hides the Ferryx one for this tab.
+    let state = match manager.set_engine(&browser_id, crate::browser::BrowserEngine::Chromium) {
+        Ok(state) => state,
+        Err(error) => return Err(fail(error.to_string())),
+    };
+    let Some(main_window) = app.get_window("main") else {
+        return Err(fail("main window unavailable".into()));
+    };
+    #[cfg(target_os = "windows")]
+    let parent = match main_window.hwnd() {
+        Ok(hwnd) => hwnd.0 as isize,
+        Err(error) => return Err(fail(format!("main window handle: {error}"))),
+    };
+    #[cfg(target_os = "macos")]
+    let Some(parent) = cef_engine::window_number(&main_window) else {
+        return Err(fail("main window number unavailable".into()));
+    };
+    let bounds = manager
+        .get_bounds(&browser_id)
+        .ok()
+        .flatten()
+        .unwrap_or(LogicalRect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        });
+    let rect = cef_pane_rect(&main_window, &bounds);
+    // One engine per profile shares cookies, logins and extensions across that profile's tabs;
+    // a private tab's engine keeps its data in memory.
+    let profile = state.profile_id.as_str().to_string();
+    let cache_dir = if state.profile_id.is_private() {
+        None
+    } else {
+        match engine_data_dir(app) {
+            Ok(root) => Some(root.join("browser-cef").join(&profile)),
+            Err(error) => return Err(fail(error.message)),
+        }
+    };
+    let sink = cef_event_sink(app.clone(), Arc::clone(manager));
+    let open_id = browser_id.clone();
+    let url = state.url.clone();
+    let visible = state.visible;
+    if let Err(error) = crate::ipc::run_blocking(move || {
+        let launch = cef_engine::EngineLaunch {
+            engine_dir: &engine_dir,
+            cache_dir: cache_dir.as_deref(),
+            parent,
+        };
+        cef_engine::open(&launch, &profile, sink, &open_id, rect, &url, visible).map_err(IpcError::from)
+    })
+    .await
+    {
+        discard_failed_session(manager, &browser_id);
+        return Err(error);
+    }
+    emit_session_state(app, &state);
+    Ok(state)
+}
+
+/// Applies a Chromium engine's events: page state to the tab, a closed browser to a closed tab,
+/// and a window the engine opened on its own (a new tab, a sign-in popup) to a new tab.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn cef_event_sink<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: Arc<BrowserManager>,
+) -> crate::browser::cef_engine::EventSink {
+    use crate::browser::cef_engine::{self, Event};
+    Arc::new(move |profile: &str, event: Event| {
+        let (browser_id, update) = match event {
+            Event::Created { tab, .. } => {
+                cef_engine::repaint(&tab);
+                return;
+            }
+            Event::Address { tab, url } => {
+                let update = manager.update_navigation_state(&tab, Some(url), None, None, None, None, None);
+                (tab, update)
+            }
+            Event::Title { tab, title } => {
+                let update = manager.update_navigation_state(&tab, None, Some(title), None, None, None, None);
+                (tab, update)
+            }
+            Event::Loading { tab, loading, can_go_back, can_go_forward } => {
+                let update = manager.update_navigation_state(
+                    &tab,
+                    None,
+                    None,
+                    Some(loading),
+                    Some(can_go_back),
+                    Some(can_go_forward),
+                    None,
+                );
+                (tab, update)
+            }
+            Event::Closed { tab } => {
+                let _ = app.emit(
+                    crate::browser::guest::BROWSER_CLOSE_REQUESTED_EVENT,
+                    crate::browser::model::BrowserCloseRequestedPayload { browser_id: tab },
+                );
+                return;
+            }
+            Event::Popup { popup, url, .. } => {
+                adopt_cef_popup(&app, &manager, profile, popup, url);
+                return;
+            }
+        };
+        if let Ok(state) = update {
+            emit_session_state(&app, &state);
+            // The engine paints a page's first frame after it reports the change.
+            cef_engine::repaint(&browser_id);
+        }
+    })
+}
+
+/// Gives a window the engine opened on its own a Ferryx tab of the same profile.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn adopt_cef_popup<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &BrowserManager,
+    profile: &str,
+    popup: u32,
+    url: String,
+) {
+    let request = CreateBrowserRequest {
+        browser_id: None,
+        workspace_id: None,
+        worktree_path: None,
+        // The page is already loading in the engine; the address event brings the real URL.
+        url: if url.starts_with("http") { url } else { "about:blank".to_string() },
+        profile: BrowserProfileId::from_id(profile),
+        zoom_factor: None,
+        bounds: None,
+        visible: Some(false),
+    };
+    let state = match manager.register_session(request) {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::warn!(%error, %profile, popup, "could not give an engine window a tab");
+            return;
+        }
+    };
+    record_session_created(&state.browser_id);
+    let state = match manager.set_engine(&state.browser_id, crate::browser::BrowserEngine::Chromium) {
+        Ok(state) => state,
+        Err(error) => {
+            discard_failed_session(manager, &state.browser_id);
+            tracing::warn!(%error, "could not give an engine window a tab");
+            return;
+        }
+    };
+    if !crate::browser::cef_engine::adopt(profile, &state.browser_id, popup) {
+        discard_failed_session(manager, &state.browser_id);
+        return;
+    }
+    let _ = app.emit(
+        crate::browser::guest::BROWSER_SESSION_CREATED_EVENT,
+        crate::browser::model::BrowserSessionCreatedPayload {
+            browser: state,
+            workspace_id: None,
+        },
+    );
 }
 
 /// The host receiver the platform bridge calls with `(browser_id, raw envelope, attestation)`.
@@ -2255,6 +2457,13 @@ pub async fn navigate_browser_session_with_context<R: tauri::Runtime>(
     // and the session must not be left with a bumped generation and `loading = true`.
     // The URL policy is checked first so a refused URL reports its policy error.
     crate::browser::security::validate_url_with_context(url, context)?;
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if crate::browser::cef_engine::is_cef_tab(browser_id) {
+        let valid_url = manager.update_url_with_context(browser_id, url, context)?;
+        emit_session_state(app, &manager.get_state(browser_id)?);
+        crate::browser::cef_engine::navigate(browser_id, &valid_url)?;
+        return Ok(());
+    }
     let label = manager.get_webview_label(browser_id)?;
     let webview = app
         .get_webview(&label)
@@ -2292,7 +2501,13 @@ pub async fn cmd_browser_navigate<R: tauri::Runtime>(
     url: String,
 ) -> Result<(), IpcError> {
     let state = manager.get_state(&browser_id)?;
-    if app.get_webview(&state.webview_label).is_none() {
+    // A Chromium-engine tab has no Tauri webview; its engine process takes the navigation.
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    let has_view = crate::browser::cef_engine::is_cef_tab(&browser_id)
+        || app.get_webview(&state.webview_label).is_some();
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let has_view = app.get_webview(&state.webview_label).is_some();
+    if !has_view {
         return Err(BrowserError::WebviewNotFound(state.webview_label).into());
     }
     navigate_browser_session(&app, manager.inner(), &browser_id, &url).await
@@ -2386,6 +2601,10 @@ pub async fn cmd_browser_go_back<R: tauri::Runtime>(
     manager: State<'_, Arc<BrowserManager>>,
     browser_id: String,
 ) -> Result<(), IpcError> {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if crate::browser::cef_engine::is_cef_tab(&browser_id) {
+        return Ok(crate::browser::cef_engine::history(&browser_id, false)?);
+    }
     history_navigation(&app, manager.inner(), &browser_id, false)
 }
 
@@ -2395,6 +2614,10 @@ pub async fn cmd_browser_go_forward<R: tauri::Runtime>(
     manager: State<'_, Arc<BrowserManager>>,
     browser_id: String,
 ) -> Result<(), IpcError> {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if crate::browser::cef_engine::is_cef_tab(&browser_id) {
+        return Ok(crate::browser::cef_engine::history(&browser_id, true)?);
+    }
     history_navigation(&app, manager.inner(), &browser_id, true)
 }
 
@@ -2556,6 +2779,14 @@ pub async fn cmd_browser_reload<R: tauri::Runtime>(
     browser_id: String,
     ignore_cache: Option<bool>,
 ) -> Result<(), IpcError> {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if crate::browser::cef_engine::is_cef_tab(&browser_id) {
+        let state = manager.begin_reload(&browser_id)?;
+        emit_session_state(&app, &state);
+        return Ok(
+            crate::browser::cef_engine::reload(&browser_id, ignore_cache.unwrap_or(false))?,
+        );
+    }
     let state = manager.begin_reload(&browser_id)?;
     let webview = app
         .get_webview(&state.webview_label)
@@ -2595,6 +2826,13 @@ pub async fn cmd_browser_set_bounds<R: tauri::Runtime>(
     bounds: LogicalRect,
 ) -> Result<(), IpcError> {
     manager.set_bounds(&browser_id, bounds.clone())?;
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if crate::browser::cef_engine::is_cef_tab(&browser_id) {
+        if let Some(main_window) = app.get_window("main") {
+            crate::browser::cef_engine::set_bounds(&browser_id, cef_pane_rect(&main_window, &bounds));
+        }
+        return Ok(());
+    }
     let state = manager.get_state(&browser_id)?;
     let webview = app
         .get_webview(&state.webview_label)
@@ -2639,6 +2877,10 @@ pub fn set_browser_session_visible<R: tauri::Runtime>(
     visible: bool,
 ) -> Result<(), IpcError> {
     manager.set_visible(browser_id, visible)?;
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if crate::browser::cef_engine::set_visible(browser_id, visible) {
+        return Ok(());
+    }
     let state = manager.get_state(browser_id)?;
     let webview = app
         .get_webview(&state.webview_label)
@@ -3438,6 +3680,11 @@ pub async fn close_browser_session<R: tauri::Runtime>(
         .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
     crate::browser::bridge::forget_webview(app, &session.webview_label);
     CREATED_SESSION_IDS.lock().retain(|id| id != browser_id);
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if crate::browser::cef_engine::close(browser_id) {
+        crate::browser::popup::forget_opener(browser_id);
+        return Ok(());
+    }
     // As an opener, this tab's pending closes and popup links can never be consumed again.
     crate::browser::popup::forget_opener(browser_id);
     // The link is removed before any await so a failed notification cannot leave it behind.
@@ -3493,6 +3740,134 @@ pub async fn cmd_browser_list(
     manager: State<'_, Arc<BrowserManager>>,
 ) -> Result<Vec<BrowserSessionSummary>, IpcError> {
     Ok(manager.list_sessions())
+}
+
+/// Where the engine and its per-tab caches live: the app data dir, or `FERRYX_DATA_DIR` when an
+/// isolated (QA or test) instance set it, so such a run never touches the real install.
+fn engine_data_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<std::path::PathBuf, IpcError> {
+    if let Some(dir) = std::env::var_os("FERRYX_DATA_DIR").filter(|dir| !dir.is_empty()) {
+        return Ok(std::path::PathBuf::from(dir));
+    }
+    app.path()
+        .app_data_dir()
+        .map_err(|error| IpcError::new(crate::ipc::error::IpcErrorCode::IoError, error.to_string()))
+}
+
+fn engine_install_error(error: crate::browser::engine_install::InstallError) -> IpcError {
+    use crate::browser::engine_install::InstallError;
+    let code = match error {
+        InstallError::Unsupported(_) => crate::ipc::error::IpcErrorCode::UnsupportedCapability,
+        InstallError::Io(_) => crate::ipc::error::IpcErrorCode::IoError,
+        _ => crate::ipc::error::IpcErrorCode::InternalError,
+    };
+    IpcError::new(code, error.to_string())
+}
+
+/// Whether the Chromium engine is installed. New tabs use it once it is.
+#[tauri::command]
+pub async fn cmd_browser_engine_status<R: tauri::Runtime>(
+    app: AppHandle<R>,
+) -> Result<crate::browser::engine_install::EngineStatus, IpcError> {
+    let data_dir = engine_data_dir(&app)?;
+    crate::ipc::run_blocking(move || {
+        Ok(crate::browser::engine_install::status(&data_dir, ENGINE_EXECUTABLE))
+    })
+    .await
+}
+
+/// Downloads, verifies and installs the Chromium engine for this platform.
+#[tauri::command]
+pub async fn cmd_browser_engine_install<R: tauri::Runtime>(
+    app: AppHandle<R>,
+) -> Result<crate::browser::engine_install::EngineStatus, IpcError> {
+    use crate::browser::engine_install;
+    let data_dir = engine_data_dir(&app)?;
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("Ferryx/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| IpcError::internal(error.to_string()))?;
+    let bytes = engine_install::fetch(&client).await.map_err(engine_install_error)?;
+    crate::ipc::run_blocking(move || {
+        let dir = engine_install::unpack(&bytes, &data_dir, ENGINE_EXECUTABLE)
+            .map_err(engine_install_error)?;
+        #[cfg(target_os = "windows")]
+        crate::browser::cef_engine::grant_sandbox_read(&dir).map_err(IpcError::from)?;
+        #[cfg(not(target_os = "windows"))]
+        let _ = dir;
+        Ok(engine_install::status(&data_dir, ENGINE_EXECUTABLE))
+    })
+    .await
+}
+
+/// Removes the installed engine; open Chromium tabs keep running until closed.
+#[tauri::command]
+pub async fn cmd_browser_engine_remove<R: tauri::Runtime>(
+    app: AppHandle<R>,
+) -> Result<crate::browser::engine_install::EngineStatus, IpcError> {
+    use crate::browser::engine_install;
+    let data_dir = engine_data_dir(&app)?;
+    crate::ipc::run_blocking(move || {
+        let dir = engine_install::install_dir(&data_dir);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).map_err(|error| {
+                IpcError::new(crate::ipc::error::IpcErrorCode::IoError, error.to_string())
+            })?;
+        }
+        Ok(engine_install::status(&data_dir, ENGINE_EXECUTABLE))
+    })
+    .await
+}
+
+/// The engine's executable name, also on platforms without a Chromium backend yet.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+const ENGINE_EXECUTABLE: &str = crate::browser::cef_engine::ENGINE_EXE;
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+const ENGINE_EXECUTABLE: &str = "ferryx_engine";
+
+/// Where a pane's engine window goes, in the units the platform module places it in: pixels
+/// inside the main window on Windows, screen points (top-left origin) on macOS, where the
+/// engine window is a separate window over the main one.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn cef_pane_rect<R: tauri::Runtime>(
+    main_window: &tauri::Window<R>,
+    bounds: &LogicalRect,
+) -> crate::browser::cef_engine::PhysicalRect {
+    let scale = main_window.scale_factor().unwrap_or(1.0);
+    #[cfg(target_os = "windows")]
+    {
+        crate::browser::cef_engine::to_physical(bounds, scale)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let origin = main_window
+            .inner_position()
+            .map(|position| position.to_logical::<f64>(scale))
+            .unwrap_or_default();
+        crate::browser::cef_engine::to_physical(
+            &LogicalRect {
+                x: origin.x + bounds.x,
+                y: origin.y + bounds.y,
+                width: bounds.width,
+                height: bounds.height,
+            },
+            1.0,
+        )
+    }
+}
+
+/// Moves every engine window back over its pane after the main window moved, resized or came
+/// to the front. Only macOS needs it: there the engine windows are separate windows, while on
+/// Windows they are children that move with the main window.
+#[cfg(target_os = "macos")]
+pub(crate) fn follow_main_window<R: tauri::Runtime>(
+    window: &tauri::Window<R>,
+    manager: &BrowserManager,
+) {
+    for browser_id in crate::browser::cef_engine::tab_ids() {
+        if let Ok(Some(bounds)) = manager.get_bounds(&browser_id) {
+            crate::browser::cef_engine::set_bounds(&browser_id, cef_pane_rect(window, &bounds));
+        }
+    }
 }
 
 #[cfg(any(target_os = "windows", test))]

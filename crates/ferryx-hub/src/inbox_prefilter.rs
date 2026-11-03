@@ -1,6 +1,6 @@
 //! omo-gateway's inbox prefilter (`src/inbox/prefilter.rs`): noise that never reaches triage.
 //! Rules are read from `~/.ferryx/hub/inbox-filters.json` (never written here); a missing file
-//! uses omo's defaults. Drops are counted per KST day in `inbox_filter_stats` like omo.
+//! uses omo's defaults. Drops are counted per owner-local day in `inbox_filter_stats` like omo.
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -10,7 +10,7 @@ use sqlx::SqlitePool;
 
 use crate::inbox_sources::SourceItem;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct PrefilterRules {
     pub owner_kakao_name: String,
@@ -18,17 +18,6 @@ pub struct PrefilterRules {
     pub owner_kakao_authors: Vec<String>,
     pub kakao_keywords: Vec<String>,
     pub excluded_kakao_rooms: HashSet<String>,
-}
-
-impl Default for PrefilterRules {
-    fn default() -> Self {
-        Self {
-            owner_kakao_name: String::new(),
-            owner_kakao_authors: vec!["윤인도".to_owned()],
-            kakao_keywords: Vec::new(),
-            excluded_kakao_rooms: ["18491246151592761".to_owned()].into_iter().collect(),
-        }
-    }
 }
 
 pub fn rules_path() -> Option<PathBuf> {
@@ -306,7 +295,7 @@ fn is_account_critical(text: &str) -> bool {
     )
 }
 
-/// omo's `record_drop`, per KST day. The table is omo's; it is created when missing.
+/// omo's `record_drop`, per owner-local day. The table is omo's; it is created when missing.
 pub async fn record_drops(pool: &SqlitePool, drops: &[(&'static str, &'static str)]) {
     if drops.is_empty() {
         return;
@@ -322,10 +311,7 @@ pub async fn record_drops(pool: &SqlitePool, drops: &[(&'static str, &'static st
     )
     .execute(pool)
     .await;
-    let day = Utc::now()
-        .with_timezone(&chrono_tz::Asia::Seoul)
-        .date_naive()
-        .to_string();
+    let day = drop_day(Utc::now());
     for (source, rule) in drops {
         if let Err(error) = sqlx::query(
             "INSERT INTO inbox_filter_stats(day, source, rule, count) VALUES(?, ?, ?, 1)
@@ -341,6 +327,11 @@ pub async fn record_drops(pool: &SqlitePool, drops: &[(&'static str, &'static st
             return;
         }
     }
+}
+
+/// The `inbox_filter_stats.day` of a drop at `at`: the owner's calendar date.
+fn drop_day(at: chrono::DateTime<Utc>) -> String {
+    crate::locale::current().local_date(at).to_string()
 }
 
 #[cfg(test)]
@@ -364,7 +355,11 @@ mod tests {
 
     #[test]
     fn kakao_noise_rooms_and_the_owner_are_dropped_like_omo() {
-        let rules = PrefilterRules::default();
+        let rules = PrefilterRules {
+            owner_kakao_authors: vec!["윤인도".to_owned()],
+            excluded_kakao_rooms: ["18491246151592761".to_owned()].into_iter().collect(),
+            ..Default::default()
+        };
         let mut open_chat = item("kakao", "someone", "공지");
         open_chat.room_type = Some("OM".into());
         assert_eq!(
@@ -505,13 +500,39 @@ mod tests {
         let rules = PrefilterRules::load(Some(&path));
         assert_eq!(rules.kakao_keywords, vec!["x".to_owned()]);
         assert!(rules.excluded_kakao_rooms.contains("1"));
-        assert_eq!(rules.owner_kakao_authors, vec!["윤인도".to_owned()]);
+        assert!(
+            rules.owner_kakao_authors.is_empty(),
+            "no owner name is built in; the rules file names the owner"
+        );
         let missing = PrefilterRules::load(Some(&dir.join("missing.json")));
-        assert!(missing.excluded_kakao_rooms.contains("18491246151592761"));
+        assert!(missing.excluded_kakao_rooms.is_empty() && missing.owner_kakao_authors.is_empty());
         assert!(
             !dir.join("missing.json").exists(),
             "the rules file is never written"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn drops_are_counted_on_the_owners_day() {
+        let pool = crate::storage::memory().await.unwrap();
+        let before = Utc::now().date_naive().to_string();
+        crate::locale::scope(crate::locale::OwnerLocale::english_utc(), async {
+            record_drops(&pool, &[("mail", "mail_otp")]).await;
+        })
+        .await;
+        let after = Utc::now().date_naive().to_string();
+        let day: String = sqlx::query_scalar("SELECT day FROM inbox_filter_stats")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        // The UTC owner's day, also when the call straddled midnight.
+        assert!(day == before || day == after, "{day}");
+        let evening = chrono::DateTime::parse_from_rfc3339("2026-10-31T16:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(drop_day(evening), "2026-11-01", "a Seoul owner's day");
+        let utc = crate::locale::with(crate::locale::OwnerLocale::english_utc(), || drop_day(evening));
+        assert_eq!(utc, "2026-10-31");
     }
 }

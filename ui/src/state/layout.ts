@@ -3,6 +3,7 @@ import {
   createChangesPaneContent,
   createDagPaneContent,
   createFilePaneContent,
+  createRemoteDesktopPaneContent,
   createTerminalPaneContent,
   isTerminalTab,
   type BrowserPaneState,
@@ -168,7 +169,7 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
           tabs,
           activeTabId: action.activate === false ? state.activeTabId : action.tab.id,
           returnTabIdByTabId:
-            !exists && action.activate !== false && (action.tab.kind === "file" || action.tab.kind === "browser" || action.tab.kind === "changes") && state.activeTabId
+            !exists && action.activate !== false && (action.tab.kind === "file" || action.tab.kind === "browser" || action.tab.kind === "changes" || action.tab.kind === "remoteDesktop") && state.activeTabId
               ? { ...state.returnTabIdByTabId, [action.tab.id]: state.activeTabId }
               : state.returnTabIdByTabId,
           layoutsByTabId,
@@ -487,6 +488,7 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
         sourceTab.kind === "browser" ||
         sourceTab.kind === "file" ||
         sourceTab.kind === "changes" ||
+        sourceTab.kind === "remoteDesktop" ||
         !sourceLayout ||
         !sourceGroup ||
         state.tabs.some((tab) => tab.id === action.newTab.id)
@@ -786,6 +788,10 @@ export function toPaneContent(raw: unknown, fallbackSessionId = ""): PaneContent
         });
       }
     }
+    if (item.kind === "remoteDesktop") {
+      const hostId = (item as { hostId?: unknown }).hostId;
+      if (typeof hostId === "string" && hostId) return createRemoteDesktopPaneContent(hostId);
+    }
     if (item.kind === "dag") {
       const dagState: DagPaneState = (item as { dag?: DagPaneState }).dag
         ? { runId: (item as { dag?: DagPaneState }).dag?.runId ?? (item as { runId?: string | null }).runId ?? null }
@@ -824,6 +830,9 @@ export function defaultContentForTab(tab: WorkspaceTab, sessionIdOverride?: stri
   }
   if (tab.kind === "changes") {
     return createChangesPaneContent({ workspaceId: tab.workspaceId, worktreePath: tab.worktreePath, worktree: tab.worktree });
+  }
+  if (tab.kind === "remoteDesktop") {
+    return createRemoteDesktopPaneContent(tab.hostId);
   }
   return createTerminalPaneContent(sessionIdOverride ?? tab.sessionId);
 }

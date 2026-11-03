@@ -288,7 +288,7 @@ pub fn classify_windows_clipboard(
             name == "png" || name.starts_with("image/") || name == "jfif"
         });
     if let Some(text) = text {
-        if !text.is_empty() && !(has_image_data && is_image_locator_text(&text)) {
+        if !(text.is_empty() || has_image_data && is_image_locator_text(&text)) {
             return NativeTerminalClipboardContent::Text { text };
         }
     }
@@ -344,7 +344,7 @@ pub fn classify_clipboard_content(
 ) -> NativeTerminalClipboardContent {
     let has_image = types.iter().any(|t| is_image_pasteboard_type(t));
     if let Some(text) = text {
-        if !text.is_empty() && !(has_image && is_image_locator_text(&text)) {
+        if !(text.is_empty() || has_image && is_image_locator_text(&text)) {
             return NativeTerminalClipboardContent::Text { text };
         }
     }
@@ -464,7 +464,7 @@ pub fn classify_linux_clipboard(
         return NativeTerminalClipboardContent::Image;
     }
     if let Some(text) = text {
-        if !text.is_empty() && !(has_image && is_image_locator_text(&text)) {
+        if !(text.is_empty() || has_image && is_image_locator_text(&text)) {
             return NativeTerminalClipboardContent::Text { text };
         }
     }

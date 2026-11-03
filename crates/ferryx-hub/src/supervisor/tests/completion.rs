@@ -428,7 +428,7 @@ async fn a_worker_rewritten_verifier_never_completes_the_goal() {
     std::fs::write(repo.0.join("verify.sh"), "exit 0\n").unwrap();
     git(&repo.0, &["commit", "-q", "-am", "make the check pass"]);
     git(&repo.0, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
-    let rewritten = std::process::Command::new("sh")
+    let rewritten = crate::child_env::std_command("sh")
         .arg("verify.sh")
         .current_dir(&repo.0)
         .status()
@@ -623,7 +623,20 @@ async fn a_verifier_failure_runs_a_correction_without_the_owner_and_stops_at_the
     assert!(dispatch.drain().await.is_empty());
     assert_eq!(sends(&control).len(), 2);
     assert_eq!(turns_used(&pool, &lane).await, 1);
-    assert_eq!(model.prompts().len(), 2, "one assessment per settled run");
+    // One assessment per settled run; the unconverged goal is then reflected on once (through
+    // typesafe-judge or the model, whichever this machine has).
+    let assessments = model
+        .prompts()
+        .iter()
+        .filter(|prompt| !prompt.contains("lesson_reflect"))
+        .count();
+    assert_eq!(assessments, 2, "one assessment per settled run");
+    let reflections: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM judge_calls WHERE purpose = 'lesson_reflect'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(reflections >= 1, "the unconverged goal is reflected on");
 }
 
 /// A corrective instruction that names a withheld operation is held for the owner.

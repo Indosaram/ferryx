@@ -12,7 +12,7 @@ import {
 import { resolveAgentLogo } from "../lib/agentIcon";
 import { agentDisplayNameForType, classifyTerminalTitleActivity, formatTabLabelFromTitle, isBareAgentTitle, normalizeTerminalTitle, parseAgentTitle } from "../lib/agentTitle";
 import { workspaceName } from "../lib/branchFilter";
-import { closeBrowser, createBrowser, createPopupBrowser, navigateBrowser, reloadBrowser, type BrowserReloadOptions, type BrowserSessionCreatedPayload } from "../lib/browserTauri";
+import { browserTabIdForBrowserId, closeBrowser, createBrowser, createPopupBrowser, navigateBrowser, onBrowserStateChanged, reloadBrowser, type BrowserReloadOptions, type BrowserSessionCreatedPayload } from "../lib/browserTauri";
 import { closeTerminal, describeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalFocus, onNativeTerminalTitle, spawnTerminal, toIpcError, waitForTerminalExit, type SpawnTerminalRequest } from "../lib/tauri";
 import * as tauriIpc from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
@@ -44,6 +44,8 @@ import {
 import { createBrowserPaneContent, isManagedBranchPrefix, isTerminalTab, worktreeIdentity } from "../lib/types";
 import type {
   AgentProviderSession,
+  AgentBlockedKind,
+  AgentOutcome,
   ActiveAgent,
   BrowserState,
   BrowserTab,
@@ -56,6 +58,7 @@ import type {
   TerminalLifecyclePayload,
   ChangesTab,
   FileTab,
+  RemoteDesktopTab,
   SessionRecoveryState,
   TerminalSession,
   TerminalTab,
@@ -841,6 +844,8 @@ export type WorkspaceAction =
       providerSession?: AgentProviderSession | null;
       detail?: string | null;
       isSnapshot?: boolean;
+      outcome?: AgentOutcome | null;
+      kind?: AgentBlockedKind | null;
       observed?: boolean;
     }
   | { type: "RESET_AGENT_STATE"; sessionId: string }
@@ -1186,6 +1191,8 @@ export function useWorkspaceStore({
           providerSession: payload.providerSession,
           detail: payload.detail,
           isSnapshot: payload.isSnapshot,
+          outcome: payload.outcome,
+          kind: payload.kind,
         }));
         return;
       }
@@ -1199,6 +1206,8 @@ export function useWorkspaceStore({
         providerSession: payload.providerSession,
         detail: payload.detail,
         isSnapshot: payload.isSnapshot,
+        outcome: payload.outcome,
+        kind: payload.kind,
       });
       if (
         !stateRef.current.sessions[resolved.sessionId]?.workspaceId.startsWith("daemon:")
@@ -2055,6 +2064,12 @@ export function useWorkspaceStore({
         return;
       }
 
+      // The pane disconnects its viewer session on unmount; no backend PTY to dispose.
+      if (closingTab.kind === "remoteDesktop") {
+        dispatch({ type: "CLOSE_TAB", tabId });
+        return;
+      }
+
       // A browser can live as pane content inside a terminal-kind tab (e.g. after a
       // browser tab was dragged into this tab's split); collect its ids so the native
       // child webviews are torn down with the tab instead of leaking.
@@ -2321,6 +2336,7 @@ export function useWorkspaceStore({
         loading: browserState.loading,
         canGoBack: browserState.canGoBack,
         canGoForward: browserState.canGoForward,
+        engine: browserState.engine,
         zoomFactor: browserState.zoomFactor,
         loadError: browserState.loadError ?? null,
         profileId: browserState.profileId,
@@ -2434,6 +2450,24 @@ export function useWorkspaceStore({
     [dispatch],
   );
 
+  /** Opens (or focuses) the remote desktop viewer of a paired host in the active layout. */
+  const openRemoteDesktopTab = useCallback(
+    (hostId: string, label: string): string => {
+      const existing = stateRef.current.layout.tabs.find(
+        (tab) => tab.kind === "remoteDesktop" && tab.hostId === hostId,
+      );
+      if (existing) {
+        dispatch({ type: "ACTIVATE_TAB", tabId: existing.id });
+        return existing.id;
+      }
+      const tabId = createId("tab");
+      const tab: RemoteDesktopTab = { kind: "remoteDesktop", id: tabId, label, hostId, sessionId: "" };
+      dispatch({ type: "ADD_TAB_WITH_SESSION", tab });
+      return tabId;
+    },
+    [dispatch],
+  );
+
   const adoptBrowserSession = useCallback(
     (
       browserState: BrowserState | BrowserSessionCreatedPayload["browser"],
@@ -2479,6 +2513,7 @@ export function useWorkspaceStore({
         loading: browserState.loading,
         canGoBack: browserState.canGoBack,
         canGoForward: browserState.canGoForward,
+        engine: browserState.engine,
         zoomFactor: browserState.zoomFactor,
         loadError: browserState.loadError ?? null,
         profileId: browserState.profileId,
@@ -2530,6 +2565,50 @@ export function useWorkspaceStore({
     },
     [dispatch],
   );
+
+  // The tab bar and persisted layout read the tab record, which nothing else updates when the
+  // page changes on its own (a link, or a Chromium tab's own address bar). Keep url, title and
+  // engine current, and let the label follow the page title until the user renames the tab.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onBrowserStateChanged((payload) => {
+      const current = stateRef.current;
+      const tabs = [
+        ...current.layout.tabs,
+        ...Object.values(current.worktreeLayouts ?? {}).flatMap((layout) => layout.tabs),
+      ];
+      const tabId = browserTabIdForBrowserId(tabs, payload.browserId);
+      const tab = tabs.find((candidate) => candidate.id === tabId);
+      if (!tabId || tab?.kind !== "browser") return;
+      const title = payload.title?.trim() || null;
+      const labelFollowsTitle = tab.label === "Browser" || tab.label === (tab.title ?? "");
+      const updates: Partial<BrowserTab> = {
+        url: payload.url || tab.url,
+        title,
+        ...(payload.engine ? { engine: payload.engine } : {}),
+        ...(title && labelFollowsTitle ? { label: title } : {}),
+      };
+      if (
+        updates.url === tab.url &&
+        updates.title === (tab.title ?? null) &&
+        (updates.engine ?? tab.engine) === tab.engine &&
+        (updates.label ?? tab.label) === tab.label
+      ) {
+        return;
+      }
+      dispatch({ type: "UPDATE_BROWSER_TAB", tabId, browserId: payload.browserId, updates });
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    }).catch((error: unknown) => {
+      switchDebug("browser.state-listener.error", { error: String(error) });
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [dispatch]);
 
   const openWorkspacePortInBrowser = useCallback(
     async (port: number) => {
@@ -2587,6 +2666,7 @@ export function useWorkspaceStore({
     createBrowserTab,
     openFilePreviewTab,
     openChangesTab,
+    openRemoteDesktopTab,
     adoptBrowserSession,
     duplicateBrowserTab,
     navigateBrowserTab: navigateBrowserTabAction,
@@ -4215,6 +4295,8 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         source: "screen",
         agentSource,
         ...(action.detail ? { detail: action.detail } : {}),
+        ...(mappedState === "done" && action.outcome ? { outcome: action.outcome } : {}),
+        ...(mappedState === "waiting" && action.kind ? { kind: action.kind } : {}),
         ...(action.isSnapshot && mappedState !== "working"
           ? { seen: true, notificationSuppressed: true }
           : {}),
@@ -4563,7 +4645,9 @@ function applySessionActivity(
     previous.source === activity.source &&
     previous.agentSource === activity.agentSource &&
     previous.seen === activity.seen &&
-    previous.notificationSuppressed === activity.notificationSuppressed
+    previous.notificationSuppressed === activity.notificationSuppressed &&
+    previous.outcome === activity.outcome &&
+    previous.kind === activity.kind
   ) {
     return state;
   }

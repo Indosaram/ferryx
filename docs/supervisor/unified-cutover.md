@@ -33,9 +33,96 @@ dispatched. No wake is delivered. Owner work sent to the supervisor is refused w
 Non-supervisor cron jobs (`scheduled_jobs`) keep their payload, schedule and backend through
 every step below. Neither cutover nor rollback reads or writes them.
 
+## Automatic setup
+
+One owner action sets the supervisor up. It runs from the desktop Supervisor setup step
+(onboarding or the setup banner), from a paired phone (`POST /api/v1/supervisor/setup`,
+machine Control devices only), or from the CLI:
+
+```bash
+# What is still missing, and the next step.
+ferryx hub setup --status --json
+
+# Set up, seed owner memory, and map one checkout on this host.
+ferryx hub setup --import-memory --project ~/code/myrepo
+```
+
+The CLI is refused inside a Ferryx pane (`FERRYX_SESSION_ID` is set). When a running daemon
+advertises `supervisorSetupV1`, the CLI goes through it. Without one, the CLI writes the hub
+database and env file itself, and the engine starts with the next hub generation.
+
+A run does these steps in order. Each one is idempotent, so a second run changes nothing.
+
+1. It writes `FERRYX_HUB_MHC_SUPERVISOR=1` to the hub env file (`~/.ferryx/hub/env`, or
+   `FERRYX_HUB_ENV_FILE`) unless the engine is already on.
+2. It records the owner's choices in `hub_meta`: automatic cutover on, and memory import on
+   only with `--import-memory` (`importMemory` on the other surfaces).
+3. If the running hub generation has no engine, it restarts the generation in-process, as
+   `ferryx hub stop` then `ferryx hub start` do, without leaving the stopped flag set. The
+   daemon is never restarted, so live PTY sessions stay up. A daemon that handed the hub to its
+   successor refuses with `INVALID_STATE`.
+4. It creates the one owner identity if none exists. The owner is `slack:<team>:<user>` when
+   the hub knows the Slack owner (`owner_slack_id`) and the Slack team (from a stored Slack
+   conversation, else Slack `auth.test`). Otherwise it is `local:<OS account>`.
+5. It maps each requested project path on this host (`local`) the way
+   `ferryx-cli supervisor setup` does. The git common dir is resolved to its canonical path.
+   The repository identity is the normalized `origin` URL, else `local:<git common dir>`.
+   A path that is not a checkout root or git common dir is refused on its own
+   (`NOT_A_GIT_DIR` in `projectResults`), and the other paths still map.
+6. It answers with the setup status below, plus `projectResults` and `restarted`.
+
+After setup, each hub generation with the engine watches the engine's health. It does not
+poll. On every transition to Ready it runs the automatic cutover. That cutover does nothing
+unless automatic cutover is on, an owner exists, and there is legacy work to cut over. It
+never runs after an explicit `ferryx hub rollback`, because the owner decided.
+
+After the first Ready, the generation seeds owner memory once, if memory import is on and no
+import has finished yet. It reads two sources:
+
+- the owner's typed turns from the most recent Claude (`~/.claude/projects`), Codex
+  (`~/.codex/sessions`) and omo (`~/.omo/agent/sessions`) sessions: 20 sessions, the latest
+  10 turns of each;
+- the owner's global instruction files `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`,
+  `~/.config/opencode/AGENTS.md` and `~/.omo/agent/AGENTS.md`: up to 64 KiB each, one
+  paragraph per turn.
+
+Sessions the hub drove, tagged wrappers and anything that looks like a credential are skipped.
+A rerun ingests nothing new. Agent-written memory, such as `~/.omo/memory`, is never read.
+The log records counts only, never text.
+
+When the engine is missing or not ready, nothing is cut over. `nextAction` names the unmet
+engine step, and `engineFault` carries the `MHC_*` code. The Preflight steps below fix it.
+
+The setup status is camelCase JSON:
+
+| field | meaning |
+| --- | --- |
+| `engineEnabled`, `engineInstalled`, `engineState` | the env flag, an engine in the running generation, and its state |
+| `engineFault`, `missingCapabilities` | `{code, message}` or null, and required capabilities the engine lacks |
+| `restartRequired` | the flag is on but the running generation has no engine |
+| `owner`, `projects` | `{supervisorId, ownerPrincipal}` or null, and the owner's mapped project count |
+| `intake` | `{unifiedOpen, legacy, origin, legacyHistory}` |
+| `autoCutover`, `memoryImport` | the owner's choices; `memoryImport` is `{enabled, sessions, turns, lastAt}` |
+| `adoptable` | legacy lanes that can be adopted |
+| `nextAction` | the first unmet step: `enable_engine`, `restart_required`, `wait_engine`, `fix_engine`, `create_owner`, `map_projects`, `cutover`, `import_memory`, `adopt` or `none` |
+
+The same status is in the Supervisor snapshot's `setup` field. It is also served by
+`GET /api/v1/supervisor/setup` (any machine device except a mirror) and by the daemon request
+`supervisorSetup {action: "status"}`.
+
+Old lanes can be adopted in one action: the desktop's adopt-all, the phone's
+`POST /api/v1/supervisor/adopt-all` (Control devices), or `supervisorSetup {action: "adoptAll"}`.
+It adopts every adoptable legacy lane as the owner, through the same adopt request as
+"Adopting old work" below. A lane is adoptable when it is queued or blocked, is not a supervisor
+goal, and was not adopted before. The answer is
+`{"adopted": [lane], "refused": [{"lane", "code", "message"}]}`. One refusal does not stop the
+others.
+
 ## Preflight
 
-Run each command on the designated supervisor host. Every one only reads.
+The manual runbook below is for an operator who wants to drive each step. Automatic setup
+performs the same steps. Run each command on the designated supervisor host. Every one only
+reads.
 
 ```bash
 # 1. The hub is up and healthy, and you can see which intake is open now.

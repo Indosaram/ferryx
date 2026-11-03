@@ -69,6 +69,7 @@ ferryx/
   - The picked host is claimed in `/tmp/ferryx-build-host-locks/<host>`, and other sessions skip it while the claim holds: a lease of `FERRYX_BUILD_CLAIM_TTL` seconds (default 7200), or, with `FERRYX_BUILD_OWNER_PID=<pid>`, for as long as that pid is alive. Run `scripts/pick-build-host.sh --release <host>` as soon as the build ends, pass or fail.
   - Exit code 3 means no idle host: wait and retry, or ask the user before using paid XenoCI. Never start a second build on a host the picker reported as busy or claimed.
 - **Binary Stream Framing**: 20-byte fixed header; stream pumps coalesce bursts (`10ms` interval or `32KB` max).
+- **Remote Desktop Is Default**: `remote-desktop` (`crates/ferryx-rd`) is in `src-tauri` default features and links LGPL FFmpeg 9 via `FFMPEG_DIR` (`.cargo/config.toml` → `src-tauri/resources/ffmpeg/sdk`, filled by `bun scripts/fetch-ffmpeg.mjs` from the sha256-pinned `pin.json` `sdk` prerelease). Headless bins (`ferryx-cli`, `ferryx-relay`, `ferryx-account`) always build with `--no-default-features`. Never ship GPL/nonfree/OpenH264 FFmpeg; release hosts build FFmpeg from source via `scripts/build-ffmpeg-lgpl.sh`.
 
 ## ANTI-PATTERNS (THIS PROJECT)
 - NEVER execute synchronous disk I/O or git commands on async Tokio runtime threads; use `run_blocking`.
@@ -107,6 +108,7 @@ bun run --cwd ui test
 
 # Backend Desktop Dev / Build / Test
 cd src-tauri && cargo tauri dev
+bun scripts/fetch-ffmpeg.mjs   # once per clone: LGPL FFmpeg 9 SDK for the default remote-desktop feature
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml --lib
 
