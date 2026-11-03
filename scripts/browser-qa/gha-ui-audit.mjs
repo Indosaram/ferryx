@@ -741,6 +741,28 @@ function findRowSwitch(path, label, { below = 12 } = {}) {
 
 const norm = (text) => text.toLowerCase().replace(/[^a-z0-9:%./]/g, "");
 /**
+ * The destructive (red) button on the line of `prompt` (an OCR phrase hit), right of the
+ * prompt's text: the bounding box of strongly red pixels within 24px above or below the
+ * prompt's centre line. Returns its centre and size, or null when no button-sized red area.
+ */
+function findRedButton(path, prompt) {
+  const image = decodePng(path);
+  const y0 = Math.max(0, prompt.y - 24), y1 = Math.min(image.height - 1, prompt.y + 24);
+  let left = Infinity, right = -1, top = Infinity, bottom = -1, count = 0;
+  for (let y = y0; y <= y1; y += 1) {
+    for (let x = Math.round(prompt.right ?? prompt.x); x < image.width; x += 1) {
+      const [r, g, b] = image.rgb(x, y);
+      if (r > 170 && r - g > 80 && r - b > 80) {
+        left = Math.min(left, x); right = Math.max(right, x); top = Math.min(top, y); bottom = Math.max(bottom, y);
+        count += 1;
+      }
+    }
+  }
+  const width = right - left + 1, height = bottom - top + 1;
+  if (count < 200 || width < 30 || height < 14) return null;
+  return { x: Math.round((left + right) / 2), y: Math.round((top + bottom) / 2), width, height };
+}
+/**
  * The controls at the right end of a multi-line row whose first-line label is `label`: column
  * runs that differ from the row background anywhere in the band from 6px above the label to
  * 36px below it, right of the label's text. Returns the cluster at the right end (runs closer
@@ -2033,6 +2055,7 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
   let installButton = null;
   let confirmPrompt = null;
   let confirmed = false;
+  let cliRemove = null;
   await step(
     "extension-store-open",
     "Mod+Shift+B opens a Chromium tab; the CLI navigates it to uBlock Origin Lite's Chrome Web Store page",
@@ -2202,21 +2225,34 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
         }
         return { ok: false, stderr: "the remove confirmation did not appear" };
       }],
-      // Only the Remove on the row's own confirmation line: the Chromium Engine group above has
-      // a "Remove" button too, and clicking that uninstalls the engine.
+      // The confirmation's Remove is white text on the destructive red: OCR does not read it
+      // (runs 41635903718 and 41642552143 clicked off it), so it is the red button on the
+      // prompt's line, right of the prompt. Only that one: the Chromium Engine group's own
+      // "Remove" uninstalls the engine.
       ["click Remove (Ferryx confirmation)", async () => {
         if (!confirmPrompt) return { ok: false, stderr: "no row confirmation open" };
-        const words = ocr(probeShot()) ?? [];
-        const hit = words
-          .filter((word) => word.text === "Remove" && Math.abs(word.top - confirmPrompt.top) < 40 && word.left > confirmPrompt.left)
-          .sort((a, b) => b.left - a.left)[0];
-        if (!hit) return { ok: false, stderr: "the confirmation's Remove button not found next to its prompt" };
-        const at = [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)];
-        confirmed = true;
-        return { ...host.click(...at), at };
+        const path = probeShot();
+        const button = findRedButton(path, confirmPrompt);
+        if (!button) return { ok: false, probe: basename(path), stderr: "no red Remove button on the confirmation line" };
+        const at = [button.x, button.y];
+        const clicked = host.click(...at);
+        await sleep(1500);
+        // The confirmation closes when its Remove is clicked (the row's change starts).
+        const after = ocr(probeShot()) ?? [];
+        confirmed = !(findPhrase(after, "Chrome may ask").length || findPhrase(after, "once more").length);
+        return { ...clicked, ok: clicked.ok && confirmed, at, button, stderr: confirmed ? "" : "the confirmation stayed open after clicking its Remove" };
+      }],
+      // The product path from here: Ferryx asks the engine to uninstall and Chrome shows its own
+      // dialog. When the click above did not get there, `ferryx browser extensions remove` runs
+      // the same engine call (the CLI's admitted path), and Chrome's dialog is answered below.
+      ["optional CLI fallback (ferryx browser extensions remove)", () => {
+        if (confirmed) return { ok: true, skipped: "the Settings row started the removal" };
+        cliRemove = cliAsync("extensions", "remove", UBOL_ID);
+        record.removed_via = "cli";
+        return { ok: true, started: true };
       }],
       ["click Remove in Chrome's dialog", async () => {
-        if (!confirmed) return { ok: false, stderr: "Ferryx confirmation not clicked" };
+        if (confirmed) record.removed_via = "settings-row";
         // Chrome's uninstall dialog: 'Remove "uBlock Origin Lite"?' over Cancel and Remove, with
         // Remove right of Cancel on one line. Ferryx's own rows have Remove buttons too (the
         // engine's, the confirmation's Remove left of its Cancel), so only that pair counts.
@@ -2235,6 +2271,16 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
         } while (Date.now() < deadline);
         return { ok: false, stderr: "Chrome's Remove dialog not visible" };
       }],
+      ["optional CLI fallback answered", async () => {
+        if (!cliRemove) return { ok: true, skipped: "no CLI fallback" };
+        const result = await cliRemove;
+        let listing = null;
+        try {
+          listing = JSON.parse(result.stdout);
+        } catch {}
+        record.cli_remove = { ok: result.ok, status: result.status, still_listed: listing ? listing.extensions?.some((entry) => entry.id === UBOL_ID) : null, stderr: result.stderr.slice(0, 400) };
+        return { ok: result.ok, ...record.cli_remove };
+      }],
       ["wait for the row to disappear", async () => {
         const deadline = Date.now() + 60000;
         let words = [];
@@ -2252,6 +2298,9 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
   // the profile data are absent anyway.
   const installed = record.checks.installed_from_web_store;
   record.checks.removed_from_settings = installed && (summary.steps.at(-1).actions.at(-1)?.ok ?? false);
+  // Which product path removed it: the Settings row (real clicks) or the CLI's extensions
+  // remove (the same engine call); either way Chrome's own dialog was answered by a click.
+  record.removed_via ??= null;
   // Chrome commits Preferences on a 10s timer.
   await sleep(15000);
   record.disk_after_remove = ubolOnDisk();

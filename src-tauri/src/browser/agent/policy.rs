@@ -294,6 +294,14 @@ pub fn classify_cli(request: &BrowserCliRequest) -> Result<Classification, Autho
             Classification::new(ToolId::Highlight, browser(browser_id))
         }
         R::RemoteAttach { .. } => Classification::new(ToolId::RemoteAttach, Target::Global),
+        R::Extensions { action, .. } => {
+            let tool = match action.as_str() {
+                "list" => ToolId::ExtensionsRead,
+                "remove" => ToolId::ExtensionsWrite,
+                _ => return Err(unknown("extensions", action)),
+            };
+            Classification::new(tool, Target::Global)
+        }
     };
     Ok(classification)
 }
@@ -590,6 +598,8 @@ pub fn authorize(
                 | ToolId::StateExport
                 | ToolId::StateImport
                 | ToolId::DownloadStart
+                | ToolId::ExtensionsRead
+                | ToolId::ExtensionsWrite
                 | ToolId::OpenFile
                 | ToolId::OpenInboundUrl => {
                     return Err(forbidden(
@@ -951,6 +961,22 @@ mod tests {
                     protocol_version: Some(1),
                 },
                 ToolId::RemoteAttach,
+            ),
+            (
+                BrowserCliRequest::Extensions {
+                    action: "list".into(),
+                    extension_id: None,
+                    profile: None,
+                },
+                ToolId::ExtensionsRead,
+            ),
+            (
+                BrowserCliRequest::Extensions {
+                    action: "remove".into(),
+                    extension_id: Some("ddkjiahejlhfcafbddmgiahcphecmpfh".into()),
+                    profile: None,
+                },
+                ToolId::ExtensionsWrite,
             ),
         ]
     }

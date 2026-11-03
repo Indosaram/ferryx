@@ -246,7 +246,27 @@ pub async fn cmd_browser_extensions_remove<R: tauri::Runtime>(
     profile: Option<String>,
     extension_id: String,
 ) -> Result<ExtensionsListing, IpcError> {
-    change_extension(app, manager.inner(), profile, ExtensionCall::Remove { extension: extension_id }).await
+    remove_extension(app, manager.inner(), profile, extension_id).await
+}
+
+/// The profile's extensions, as Settings > Browser > Extensions lists them (`ferryx browser
+/// extensions list`).
+pub async fn list_extensions<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    profile: Option<String>,
+) -> Result<ExtensionsListing, IpcError> {
+    cmd_browser_extensions_list(app, profile).await
+}
+
+/// The Settings row's remove, also reached by `ferryx browser extensions remove`: the same
+/// engine call, so Chrome still asks in its own dialog.
+pub async fn remove_extension<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: &Arc<BrowserManager>,
+    profile: Option<String>,
+    extension_id: String,
+) -> Result<ExtensionsListing, IpcError> {
+    change_extension(app, manager, profile, ExtensionCall::Remove { extension: extension_id }).await
 }
 
 /// Pins or unpins an extension's toolbar button in the profile's engine.

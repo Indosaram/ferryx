@@ -117,6 +117,17 @@ jobs:
         if: matrix.os_name == 'windows'
         run: choco install tesseract -y --no-progress || echo "tesseract unavailable; the audit records OCR as unavailable"
 
+      # The runner's desktop is 1024x768, narrower than the 1280px audit window: the store's
+      # 'Add to Chrome' and Chrome's install dialog land off screen. Widen the display first.
+      - name: Set display resolution 1920x1080 (Windows)
+        if: matrix.os_name == 'windows'
+        shell: pwsh
+        run: |
+          try { Set-DisplayResolution -Width 1920 -Height 1080 -Force -ErrorAction Stop } catch { Write-Host "Set-DisplayResolution failed: $_" }
+          Add-Type -AssemblyName System.Windows.Forms
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          Write-Host "primary screen now $($b.Width)x$($b.Height)"
+
       - name: Use Strawberry Perl for vendored OpenSSL (Windows)
         if: matrix.os_name == 'windows'
         shell: bash
