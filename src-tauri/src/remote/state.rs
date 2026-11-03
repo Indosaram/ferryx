@@ -895,6 +895,12 @@ pub struct RemoteGatewayState {
     #[cfg(test)]
     pub(crate) supervisor_test_engine:
         RwLock<Option<Arc<dyn ferryx_hub::supervisor::transcript::AppConversation>>>,
+    /// Test-only standing-rule store standing in for the installed one.
+    #[cfg(test)]
+    pub(crate) supervisor_test_rules:
+        RwLock<Option<Arc<dyn ferryx_hub::supervisor::panel_contract::RuleStore>>>,
+    /// The app-transcript requests running now, one flight per request id.
+    pub(crate) supervisor_flights: ferryx_hub::supervisor::transcript::Flights,
 }
 
 impl RemoteGatewayState {
@@ -1078,6 +1084,9 @@ impl RemoteGatewayState {
             supervisor_test_hub: RwLock::new(None),
             #[cfg(test)]
             supervisor_test_engine: RwLock::new(None),
+            #[cfg(test)]
+            supervisor_test_rules: RwLock::new(None),
+            supervisor_flights: Default::default(),
             auth_manager,
             terminal_service,
             daemon_epoch: AtomicU64::new(0),

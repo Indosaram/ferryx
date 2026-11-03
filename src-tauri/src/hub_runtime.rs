@@ -1412,9 +1412,32 @@ fn app_conversation(
     })
 }
 
+/// The persisted standing rules, once the daemon's hub open path installs them.
+static RULE_STORE: std::sync::OnceLock<Arc<dyn ferryx_hub::supervisor::panel_contract::RuleStore>> =
+    std::sync::OnceLock::new();
+
+/// Installs the standing-rule store `supervisor_converse` writes rule changes to. Nothing in
+/// this branch calls it: `SqliteRuleStore` lives in the task 4 branch, so until the integration
+/// owner installs it a rule change is refused, never faked.
+pub fn install_rule_store(store: Arc<dyn ferryx_hub::supervisor::panel_contract::RuleStore>) {
+    let _ = RULE_STORE.set(store);
+}
+
+fn rule_store(
+    state: &RemoteGatewayState,
+) -> Option<Arc<dyn ferryx_hub::supervisor::panel_contract::RuleStore>> {
+    #[cfg(test)]
+    if let Some(store) = state.supervisor_test_rules.read().clone() {
+        return Some(store);
+    }
+    let _ = state;
+    RULE_STORE.get().cloned()
+}
+
 /// One owner message from the panel composer and the supervisor's reply, both stored in the app
 /// transcript. Without the engine nothing is stored and the answer is `MHC_NOT_RUNNING`.
-/// The reply tells the Supervisor views to refetch.
+/// The reply tells the Supervisor views to refetch, and so does every row stored while the turn
+/// runs: the owner's message is announced at once, not after the whole turn.
 pub async fn supervisor_converse(
     state: &RemoteGatewayState,
     caller: SupervisorCaller,
@@ -1435,15 +1458,25 @@ pub async fn supervisor_converse(
             "no mhc supervisor engine is installed in this daemon; nothing was stored",
         ));
     };
-    let answer = transcript::converse(&pool, engine.as_ref(), &input, &transcript::now_ms).await?;
-    let mut payload = json!({ "supervisorConverse": input.request_id });
-    if let SupervisorCaller::Remote { device_id } = &caller {
-        if let Some(fields) = payload.as_object_mut() {
-            fields.insert("by".into(), json!(format!("remote:{device_id}")));
+    let rules = rule_store(state);
+    let announce = || {
+        let mut payload = json!({ "supervisorConverse": input.request_id });
+        if let SupervisorCaller::Remote { device_id } = &caller {
+            if let Some(fields) = payload.as_object_mut() {
+                fields.insert("by".into(), json!(format!("remote:{device_id}")));
+            }
         }
-    }
-    crate::remote::server::agent_control_service::publish_supervisor_changed(state, payload);
-    Ok(answer)
+        crate::remote::server::agent_control_service::publish_supervisor_changed(state, payload);
+    };
+    let ctx = transcript::Converse {
+        pool: &pool,
+        engine: engine.as_ref(),
+        rules: rules.as_deref(),
+        flights: &state.supervisor_flights,
+        now: &transcript::now_ms,
+        changed: &announce,
+    };
+    transcript::converse(&ctx, &input).await
 }
 
 /// One page of the app transcript after `cursor` (a message id; 0 starts from the beginning).
