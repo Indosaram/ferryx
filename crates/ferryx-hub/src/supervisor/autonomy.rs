@@ -305,6 +305,15 @@ struct Tracked {
     settled: bool,
 }
 
+/// What one answered-prompt action-log row says, apart from the session and prompt it is about.
+struct LogLine {
+    summary: String,
+    basis: String,
+    undo: Option<UndoHandle>,
+    /// Request id of the delivery receipt agent control returned, when there was one.
+    receipt: Option<String>,
+}
+
 /// The newest prompt the supervisor answered on its own in a session: what Undo restores.
 /// Dropped once a different prompt or screen revision shows up in that session.
 struct AutonomousAnswer {
@@ -518,10 +527,12 @@ impl Autonomy {
             session,
             prompt,
             "answer",
-            format!("Answered \"{label}\" in {}", session.title),
-            basis.to_owned(),
-            Some(undo),
-            request_id,
+            LogLine {
+                summary: format!("Answered \"{label}\" in {}", session.title),
+                basis: basis.to_owned(),
+                undo: Some(undo),
+                receipt: request_id,
+            },
         )
         .await;
     }
@@ -551,11 +562,9 @@ impl Autonomy {
         session: &FleetSession,
         prompt: &PendingPrompt,
         who: &str,
-        summary: String,
-        basis: String,
-        undo: Option<UndoHandle>,
-        receipt: Option<String>,
+        line: LogLine,
     ) {
+        let LogLine { summary, basis, undo, receipt } = line;
         let now = now_ms();
         let entry = ActionEntry {
             id: 0,
@@ -661,10 +670,12 @@ impl Autonomy {
                 &session,
                 &prompt,
                 "owner",
-                format!("You chose {label}"),
-                basis.to_owned(),
-                None,
-                None,
+                LogLine {
+                    summary: format!("You chose {label}"),
+                    basis: basis.to_owned(),
+                    undo: None,
+                    receipt: None,
+                },
             )
             .await;
         }
