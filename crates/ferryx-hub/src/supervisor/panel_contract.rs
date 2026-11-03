@@ -19,6 +19,18 @@ use crate::error::{HubError, Result};
 pub struct SessionRef(String);
 
 impl SessionRef {
+    /// Where the host id ends. A local host id has no `:`, so the first one splits. A paired
+    /// computer's id is its URL (`https://relay:443/host/<machine>`, the machine part
+    /// percent-encoded so it has no `:`), so its ref splits at the first `:` after `/host/`.
+    fn split_at(raw: &str) -> Option<usize> {
+        let first = raw.find(':')?;
+        if raw[first..].starts_with("://") {
+            let marker = raw[first + 3..].find("/host/")? + first + 3 + "/host/".len();
+            return raw[marker..].find(':').map(|colon| marker + colon);
+        }
+        Some(first)
+    }
+
     /// Builds a ref from its two parts.
     pub fn new(host_id: &str, backend_session_id: &str) -> Self {
         Self(format!("{host_id}:{backend_session_id}"))
@@ -26,7 +38,7 @@ impl SessionRef {
 
     /// Parses `<hostId>:<backendSessionId>`; both parts must be non-empty.
     pub fn parse(raw: &str) -> Result<Self> {
-        match raw.split_once(':') {
+        match Self::split_at(raw).map(|at| (&raw[..at], &raw[at + 1..])) {
             Some((host, backend)) if !host.is_empty() && !backend.is_empty() => {
                 Ok(Self(raw.to_string()))
             }
@@ -39,11 +51,11 @@ impl SessionRef {
     }
 
     pub fn host_id(&self) -> &str {
-        self.0.split_once(':').map_or("", |(host, _)| host)
+        Self::split_at(&self.0).map_or("", |at| &self.0[..at])
     }
 
     pub fn backend_session_id(&self) -> &str {
-        self.0.split_once(':').map_or("", |(_, backend)| backend)
+        Self::split_at(&self.0).map_or("", |at| &self.0[at + 1..])
     }
 }
 
@@ -350,6 +362,17 @@ mod tests {
         assert!(SessionRef::parse("nohost").is_err());
         assert!(SessionRef::parse(":x").is_err());
         assert!(SessionRef::parse("x:").is_err());
+    }
+
+    #[test]
+    fn a_paired_computers_url_host_id_is_one_host_id() {
+        let host = "http://127.0.0.1:8443/host/a%3Ab";
+        let made = SessionRef::new(host, "abc:123");
+        let parsed = SessionRef::parse(made.as_str()).unwrap();
+        assert_eq!(parsed.host_id(), host);
+        assert_eq!(parsed.backend_session_id(), "abc:123");
+        assert!(SessionRef::parse("https://relay.example/host/m:").is_err());
+        assert!(SessionRef::parse("https://relay.example/no-host-segment:s").is_err());
     }
 
     fn fleet_session() -> FleetSession {

@@ -596,9 +596,13 @@ async fn gateway_stop_for_a_paired_session_ref_is_forwarded_and_audited_once_und
         let response = reqwest::Client::builder()
             .no_proxy()
             .build()?
+            // A paired computer's id is a URL, so its ref is one percent-encoded path segment.
             .post(format!(
-                "http://{addr}/api/v1/sessions/{}:{}/stop",
-                host_view.host_id, session.target.session_id
+                "http://{addr}/api/v1/sessions/{}/stop",
+                url::form_urlencoded::byte_serialize(
+                    format!("{}:{}", host_view.host_id, session.target.session_id).as_bytes()
+                )
+                .collect::<String>()
             ))
             .bearer_auth(&token)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
