@@ -67,6 +67,46 @@ export function markNotRun(lane, scenarioIds, reason) {
 }
 
 /**
+ * Ends one run-spawned process by its exact identity through the agent that spawned it, the
+ * way native-configured-adapters' host does: probe; if live, subscribe to its exit FIRST, then
+ * `terminate {pid, executable, processStart}`, then await that exit. The entry proves the
+ * outcome (killed / already-exited); any error is recorded as reported-not-killed, which the
+ * validator fails.
+ */
+export async function stopExact(agent, { resource, receipt, deadlineMs = 60_000 }) {
+  const { pid, executable, processStart } = receipt ?? {};
+  if (!pid || !executable || !processStart) return { resource, pid, action: 'reported-not-killed', error: 'receipt lacks pid, executable or processStart' };
+  try {
+    const signal = AbortSignal.timeout(deadlineMs);
+    const live = await agent.call('probe', { pid }, signal);
+    if (live.exited) return { resource, pid, processStart, action: 'already-exited' };
+    const exited = agent.call('exit', { pid, processStart }, signal);
+    const terminated = await agent.call('terminate', { pid, executable, processStart }, signal);
+    await exited;
+    return { resource, pid, processStart, action: terminated?.exited ? 'already-exited' : 'killed' };
+  } catch (error) {
+    return { resource, pid, processStart, action: 'reported-not-killed', error: String(error?.message ?? error) };
+  }
+}
+
+/** One-at-a-time section: `run(fn)` waits for every earlier section to settle first. */
+export function mutex() {
+  let tail = Promise.resolve();
+  return (fn) => {
+    const result = tail.then(fn);
+    tail = result.catch(() => {});
+    return result;
+  };
+}
+
+/** A promise plus its resolver, for one lane to hold until another records a fact. */
+export function latch() {
+  let open;
+  const promise = new Promise((resolveLatch) => { open = resolveLatch; });
+  return { promise, open };
+}
+
+/**
  * Bounded wait for a product state: each try is a fresh read of the real surface or daemon.
  * The gap only paces the reads of a remote surface that offers no change subscription (a
  * MahoRD frame, a WDA source, a daemon read over SSH); the deadline decides failure.

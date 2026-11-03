@@ -9,12 +9,14 @@
 // clicks land on points located by OCR of the real frame, and every assertion that names
 // on-screen text is checked against tesseract output of that frame.
 //
-// Unavailable host = LaneBlocked HOST_UNAVAILABLE (SSH probe or MahoRD connect failed), never a
-// skip. Cleanup removes only the profile and children this run created.
+// Unavailable host = LaneBlocked HOST_UNAVAILABLE (the SSH identity probe failed) or
+// MAHORD_UNAVAILABLE (MahoRD connect failed), never a skip. Anything after a reachable host
+// answered (wrong revision or stamp, relay, daemon, GUI, product) is a lane failure. Cleanup
+// ends the GUI and daemon by exact pid identity, then removes only the profile this run made.
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { connectNativeMahord, rpcProcess } from '../fixtures/native-configured-adapters.mjs';
-import { LaneBlocked, StepFailed, markNotRun, runStep, until } from './steps.mjs';
+import { LaneBlocked, StepFailed, markNotRun, runStep, stopExact, until } from './steps.mjs';
 import { scenariosForLane } from './contract.mjs';
 
 const quote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
@@ -64,11 +66,10 @@ function locate(read, phrase, { below = -1 } = {}) {
 
 export async function runDesktopLane(lane, { host, run, shared, signal }) {
   const ids = scenariosForLane(lane.name);
-  const cleanups = [];
-  let agent; let helper; let mahord; let setup;
+  let agent; let helper; let mahord; let setup; let daemon; let gui;
   const ssh = (script, onEvent) => rpcProcess(run.sshExecutable ?? 'ssh', ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', host.sshDestination, remoteNode(host, script)], { signal, onEvent });
   try {
-    // 0. Host reachability: an unavailable host is a blocked lane with its exact cause.
+    // 0. Host reachability: only an unanswered identity probe makes the host unavailable.
     try {
       helper = ssh(host.hostHelper);
       const who = await helper.call('identity', {});
@@ -79,24 +80,25 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     }
     try {
       mahord = await connectNativeMahord({ executable: run.mahordExecutable, address: host.mahordAddress, pairingId: host.pairingId, nudgeMs: host.mahordNudgeMs, signal });
-      cleanups.push(() => mahord.close());
     } catch (error) {
-      throw new LaneBlocked('HOST_UNAVAILABLE', `MahoRD ${host.mahordAddress} (${host.hostId}): ${error.message}`);
+      throw new LaneBlocked('MAHORD_UNAVAILABLE', `MahoRD ${host.mahordAddress} (${host.hostId}): ${error.message}`);
     }
     lane.write('identity', 'identity.json', { machine: lane.receipt.machine, candidate: lane.receipt.candidate });
-    if (lane.receipt.candidate.headRevision !== run.revision) throw new LaneBlocked('REVISION_MISMATCH', `${host.hostId} checkout is at ${lane.receipt.candidate.headRevision}, run revision ${run.revision}`);
+    if (lane.receipt.candidate.headRevision !== run.revision) throw new StepFailed('REVISION_MISMATCH', `${host.hostId} checkout is at ${lane.receipt.candidate.headRevision}, run revision ${run.revision}`);
 
-    // 1. Isolated profile + candidate daemon through the existing native agent.
+    // 1. Isolated profile + candidate daemon through the existing native agent. The build
+    // stamp the agent checked against the manifest must be this revision plus its patch hash.
     agent = ssh(host.remoteAgent);
     setup = await agent.call('prepare', { worktreeRoot: host.worktreeRoot, worktree: host.worktree, runId: run.runId, operationId: `f3-${run.runId}`,
       binary: host.binary, uiDist: host.uiDist, manifest: host.buildManifest });
-    cleanups.push(() => agent.call('remove-profile', { profile: setup.profile }, AbortSignal.timeout(60_000)).then((r) => lane.receipt.cleanup.push({ resource: 'profile', path: setup.profile, action: 'removed', detail: r })));
-    cleanups.push(() => helper.call('cleanup', {}).then((receipts) => lane.receipt.cleanup.push(...receipts)));
+    lane.receipt.candidate.stamp = setup.candidate;
+    lane.receipt.candidate.binarySha256 = setup.binarySha256;
+    lane.receipt.candidate.uiSha256 = setup.uiSha256;
+    if (typeof setup.candidate !== 'string' || !setup.candidate.startsWith(`${run.revision}+`)) throw new StepFailed('CANDIDATE_STAMP', `${host.hostId} candidate stamp ${setup.candidate} is not ${run.revision}+<patch>`);
     const wrappers = await helper.call('write-wrappers', { profile: setup.profile });
-    const env = { ...setup.env, FERRYX_RELAY_URL: shared.relayOrigin, FERRYX_ALLOW_INSECURE_RELAY: '1', FERRYX_MACHINE_TOKEN: shared.machineToken(host.hostId), FERRYX_ACCOUNT_ORIGIN: shared.relayOrigin };
+    const env = { ...setup.env, FERRYX_RELAY_URL: shared.relayOrigin, FERRYX_MACHINE_TOKEN: shared.machineToken(host.hostId), FERRYX_ACCOUNT_ORIGIN: shared.relayOrigin };
     setup.env = env;
-    const daemon = await agent.call('spawn-daemon', { setup, runId: run.runId, operationId: `f3-${run.runId}`, hostId: host.hostId, timeoutMs: 120_000 });
-    lane.receipt.cleanup.push({ resource: 'daemon', pid: daemon.pid, action: 'reported-not-killed', detail: 'terminated by remove-profile of the owning agent' });
+    daemon = await agent.call('spawn-daemon', { setup, runId: run.runId, operationId: `f3-${run.runId}`, hostId: host.hostId, timeoutMs: 120_000 });
     lane.write('gui-receipt', 'daemon-launch.json', daemon);
     const call = async (label, frames, deadlineMs) => {
       const replies = await helper.call('daemon', { profile: setup.profile, frames, deadlineMs });
@@ -110,15 +112,17 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     await call('relay', [{ type: 'remoteConfigure', config: { mode: 'relay', port: 43821, allowControl: true, relayUrl: shared.relayOrigin } }]);
 
     // 2. GUI through MahoRD only (the same launcher path native-configured-adapters uses).
-    const gui = await launchGui({ agent, mahord, setup, host, run, lane });
-    lane.receipt.cleanup.push({ resource: 'gui', pid: gui.pid, action: 'reported-not-killed', detail: 'terminated by remove-profile of the owning agent' });
+    gui = await launchGui({ agent, mahord, setup, host, run, lane });
+    // A frame: real MahoRD pixels plus their OCR. Attached to a step only when `step` is given,
+    // so a polled frame attaches exactly the frame its assertion read (see `keep`).
     const frame = async (name, step) => {
       const bytes = await mahord.screenshot(signal);
-      const shot = step ? step.artifact('screenshot', `${name}.png`, bytes) : lane.write('screenshot', `frames/${name}.png`, bytes);
+      const shot = step ? step.artifact('screenshot', `${name}.png`, bytes) : lane.write('screenshot', `frames/${name}-${Date.now()}.png`, bytes);
       const read = await ocr(run.tesseract, join(run.evidenceDir, shot.path));
       if (step) step.artifact('ocr', `${name}.ocr.tsv`, read.tsv);
-      return { shot, read };
+      return { shot, read, bytes };
     };
+    const keep = (step, name, seen) => { step.artifact('screenshot', `${name}.png`, seen.bytes); step.artifact('ocr', `${name}.ocr.tsv`, seen.read.tsv); return seen; };
     const panel = async (step, name) => {
       const reply = await call(`panel-${name}`, [{ type: 'supervisorReadV1', request: { view: 'panel' } }]);
       if (step) step.artifact('panel-read', `${name}.panel.json`, reply);
@@ -138,12 +142,12 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const card = await shared.decisionCard();
       const view = await until('decision card in this desktop panel', () => panel(null), (v) => (v?.decisions ?? []).some((d) => d.sessionRef === card.sessionRef), { deadlineMs: 120_000 });
       step.artifact('panel-read', 'decision.panel.json', view);
-      const shown = await until('decision card text on screen', () => frame('decision'), ({ read }) => read.text.includes(card.commandFragment), { deadlineMs: 60_000 });
+      const shown = keep(step, 'decision', await until('decision card text on screen', () => frame('decision'), ({ read }) => read.text.includes(card.commandFragment), { deadlineMs: 60_000 }));
       const decision = view.decisions.find((d) => d.sessionRef === card.sessionRef);
       shared.record('F3-D1', lane.name, { sessionRef: decision.sessionRef, promptId: decision.promptId, question: decision.question, command: decision.command });
       step.assert('card-is-the-fleet-decision', decision.promptId === card.promptId, { decision, card });
       step.assert('card-command-on-screen', shown.read.text.includes(card.commandFragment), { fragment: card.commandFragment });
-      step.assert('recommended-option-on-screen', /yes/i.test(shown.read.text) && /no/i.test(shown.read.text), { text: shown.read.text.slice(0, 2000) });
+      step.assert('recommended-option-on-screen', /\bYes\b/.test(shown.read.text) && /\bNo\b/.test(shown.read.text), { text: shown.read.text.slice(0, 2000) });
       await frame('decision-final', step);
     });
 
@@ -163,7 +167,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const rows = await until('prompt and reply in the transcript', () => transcript(null), (page) => pairOf(page, prompt) !== null, { deadlineMs: 180_000 });
       step.artifact('transcript-read', 'transcript.json', rows);
       const pair = pairOf(rows, prompt);
-      const after = await until('prompt and reply on screen', () => frame('after-prompt'), ({ read: r }) => r.text.includes(token) && r.text.includes(firstWords(pair.reply.text)), { deadlineMs: 60_000 });
+      const after = keep(step, 'after-prompt', await until('prompt and reply on screen', () => frame('after-prompt'), ({ read: r }) => r.text.includes(token) && r.text.includes(firstWords(pair.reply.text)), { deadlineMs: 60_000 }));
       shared.record('F3-D2', lane.name, { owner: pair.owner.text, reply: pair.reply.text });
       step.assert('prompt-row-stored', pair.owner.text === prompt, pair);
       step.assert('reply-row-stored', pair.reply.text.length > 0, pair);
@@ -181,8 +185,9 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const button = locate(read, host.exportLabel ?? 'Export transcript');
       if (!button) throw new StepFailed('PRODUCT_GAP_EXPORT_CONTROL', `no "${host.exportLabel ?? 'Export transcript'}" control on the supervisor panel`);
       await mahord.click({ x: button.x, y: button.y }, signal);
-      const files = await until('a new file in Downloads', () => helper.call('list-files', { profile: setup.profile, dir: downloads }), (list) => list.some((f) => f.file && !before.has(f.name) && f.bytes > 0 && !/\.(crdownload|part|download)$/.test(f.name)), { deadlineMs: 60_000 });
-      const fresh = files.find((f) => f.file && !before.has(f.name) && f.bytes > 0);
+      const done = (f) => f.file && !before.has(f.name) && f.bytes > 0 && !/\.(crdownload|part|partial|download|tmp)$/i.test(f.name);
+      const files = await until('a finished new file in Downloads', () => helper.call('list-files', { profile: setup.profile, dir: downloads }), (list) => list.filter(done).length === 1, { deadlineMs: 60_000 });
+      const fresh = files.find(done);
       const file = await helper.call('read-b64', { profile: setup.profile, path: fresh.path });
       const bytes = Buffer.from(file.base64, 'base64');
       step.artifact('export-file', `export/${fresh.name}`, bytes);
@@ -195,22 +200,26 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     });
 
     // F3-D4: the session's long report (sent by the fixture agent through the product's
-    // supervisorReport path) opens in Viewer, its first and last lines readable there.
+    // supervisorReport path) opens in Viewer: before the click its end is not on screen; after
+    // it the full heading and the configured Viewer-only marker are, then the end line.
     await runStep(lane, 'F3-D4', async (step) => {
       const token = `${lane.name.slice(0, 3)}${run.runId.replace(/[^a-z0-9]/g, '').slice(-8)}`;
+      const heading = `F3 long report ${token}`;
+      const end = `End of report ${token}`;
       await shared.sendLongReport(token);
-      const rows = await until('the long report in the transcript', () => transcript(null), (page) => JSON.stringify(page ?? {}).includes(`F3 long report ${token}`), { deadlineMs: 120_000 });
+      const rows = await until('the long report in the transcript', () => transcript(null), (page) => JSON.stringify(page ?? {}).includes(heading), { deadlineMs: 120_000 });
       step.artifact('transcript-read', 'report.transcript.json', rows);
       const { read } = await frame('before-viewer', step);
+      step.assert('report-not-open-before-viewer', !read.text.includes(end) && !read.text.includes(host.viewerMarker), { text: read.text.slice(0, 1500) });
       const open = locate(read, host.viewerLabel ?? 'Open in Viewer');
       if (!open) throw new StepFailed('PRODUCT_GAP_VIEWER_CONTROL', `no "${host.viewerLabel ?? 'Open in Viewer'}" control next to the report`);
       await mahord.click({ x: open.x, y: open.y }, signal);
-      const head = await until('report heading in Viewer', () => frame('viewer-head'), ({ read: r }) => r.text.includes(token) && /viewer/i.test(r.text), { deadlineMs: 60_000 });
-      step.artifact('screenshot', 'viewer-head.png', await mahord.screenshot(signal));
+      const head = keep(step, 'viewer-head', await until('report heading in Viewer', () => frame('viewer-head'), ({ read: r }) => r.text.includes(heading) && r.text.includes(host.viewerMarker), { deadlineMs: 60_000 }));
+      step.assert('viewer-shows-report-heading', head.read.text.includes(heading), { heading, text: head.read.text.slice(0, 1500) });
+      step.assert('viewer-marker-shown', head.read.text.includes(host.viewerMarker), { marker: host.viewerMarker });
       await mahord.hotkey(host.platform === 'darwin' ? ['Meta', 'ArrowDown'] : ['Control', 'End'], signal);
-      const tail = await until('report end in Viewer', () => frame('viewer-tail', step), ({ read: r }) => r.text.includes(`End of report ${token}`), { deadlineMs: 60_000 });
-      step.assert('viewer-shows-report-heading', head.read.text.includes(`F3 long report ${token}`) || head.read.text.includes(token), { text: head.read.text.slice(0, 1500) });
-      step.assert('viewer-shows-report-end', tail.read.text.includes(`End of report ${token}`), { text: tail.read.text.slice(0, 1500) });
+      const tail = keep(step, 'viewer-tail', await until('report end in Viewer', () => frame('viewer-tail'), ({ read: r }) => r.text.includes(end), { deadlineMs: 60_000 }));
+      step.assert('viewer-shows-report-end', tail.read.text.includes(end), { end, text: tail.read.text.slice(0, 1500) });
     });
   } catch (error) {
     if (error instanceof LaneBlocked) lane.receipt.blocked = { code: error.code, detail: error.detail, at: new Date().toISOString() };
@@ -218,11 +227,29 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     if (mahord) await mahord.screenshot(AbortSignal.timeout(10_000)).then((bytes) => lane.write('screenshot', 'frames/failure.png', bytes)).catch(() => {});
   } finally {
     markNotRun(lane, ids, lane.receipt.blocked ? `${lane.receipt.blocked.code}` : 'lane stopped before this step');
-    for (const step of cleanups.reverse()) {
-      try { await step(); } catch (error) { lane.receipt.cleanup.push({ resource: 'cleanup-step', action: 'reported-not-killed', error: String(error.message ?? error) }); }
-    }
-    agent?.close(); helper?.close();
+    shared.desktopDone(lane.name);
+    // The session host's resources stay up until every lane that reads them has settled.
+    await shared.cleanupGate(lane.name);
+    await cleanupLane({ lane, agent, helper, mahord, setup, gui, daemon });
   }
+}
+
+/** GUI, then daemon by exact identity; helper children; then the profile; each outcome recorded. */
+async function cleanupLane({ lane, agent, helper, mahord, setup, gui, daemon }) {
+  const record = (entry) => lane.receipt.cleanup.push(entry);
+  const attempt = async (resource, body) => {
+    try { await body(); } catch (error) { record({ resource, action: 'reported-not-killed', error: String(error?.message ?? error) }); }
+  };
+  if (agent && gui) record(await stopExact(agent, { resource: 'gui', receipt: gui }));
+  if (agent && daemon) record(await stopExact(agent, { resource: 'daemon', receipt: daemon }));
+  if (helper && setup) await attempt('helper-children', async () => { for (const entry of await helper.call('cleanup', {})) record(entry); });
+  const alive = lane.receipt.cleanup.some((entry) => ['gui', 'daemon'].includes(entry.resource) && !['killed', 'already-exited'].includes(entry.action));
+  if (agent && setup) {
+    if (alive) record({ resource: 'profile', path: setup.profile, action: 'reported-not-killed', error: 'profile kept: a run-spawned process is not proven gone' });
+    else await attempt('profile', async () => record({ resource: 'profile', path: setup.profile, action: 'removed', detail: await agent.call('remove-profile', { profile: setup.profile }, AbortSignal.timeout(60_000)) }));
+  }
+  await attempt('mahord', async () => mahord?.close());
+  agent?.close(); helper?.close();
 }
 
 async function launchGui({ agent, mahord, setup, host, run, lane }) {

@@ -155,10 +155,10 @@ async function awaitExit({ key, deadlineMs = 120_000 }) {
 async function cleanup() {
   const receipts = [];
   for (const entry of owned.values()) {
-    if (entry.exit) { receipts.push({ key: entry.key, pid: entry.pid, action: 'already-exited', exit: entry.exit }); continue; }
+    if (entry.exit) { receipts.push({ resource: entry.key, key: entry.key, pid: entry.pid, action: 'already-exited', exit: entry.exit }); continue; }
     entry.child.kill();
     const exit = await Promise.race([entry.exited, new Promise((r) => setTimeout(() => r(null), 10_000))]);
-    receipts.push({ key: entry.key, pid: entry.pid, action: exit ? 'killed' : 'reported-not-killed', exit });
+    receipts.push({ resource: entry.key, key: entry.key, pid: entry.pid, action: exit ? 'killed' : 'reported-not-killed', exit });
   }
   return receipts;
 }
@@ -178,17 +178,14 @@ function listFiles({ profile, dir }) {
   });
 }
 
-async function httpGet({ url }) {
-  const parsed = new URL(url);
-  if (!['127.0.0.1', 'localhost'].includes(parsed.hostname)) throw fail('URL_REFUSED', 'only loopback URLs of this run');
-  const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
-  return { status: response.status, body: (await response.text()).slice(0, 20_000) };
-}
-
 /** Removes a directory this helper itself created (the run-owned relay root), after cleanup. */
 function removeOwnedDir({ profile }) {
   const target = resolve(profile);
-  if (!ownedDirs.has(target)) return { resource: 'dir', path: target, action: 'reported-not-killed', reason: 'not created by this helper' };
+  if (!ownedDirs.has(target)) {
+    return existsSync(target)
+      ? { resource: 'dir', path: target, action: 'reported-not-killed', reason: 'exists but was not created by this helper' }
+      : { resource: 'dir', path: target, action: 'absent' };
+  }
   if ([...owned.values()].some((entry) => !entry.exit)) throw fail('DIR_BUSY', `${target} still has a live child`);
   rmSync(target, { recursive: true, force: false });
   ownedDirs.delete(target);
@@ -197,7 +194,7 @@ function removeOwnedDir({ profile }) {
 
 const METHODS = {
   identity, daemon, 'write-wrappers': writeWrappers, 'spawn-owned': spawnOwned, 'await-exit': awaitExit,
-  cleanup, 'read-b64': readB64, 'list-files': listFiles, 'http-get': httpGet, 'remove-owned-dir': removeOwnedDir,
+  cleanup, 'read-b64': readB64, 'list-files': listFiles, 'remove-owned-dir': removeOwnedDir,
 };
 
 if (process.argv.includes('--rpc')) {
