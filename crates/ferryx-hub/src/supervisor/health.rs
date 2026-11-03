@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use super::contract::{FleetSession, HealthClassifier, HealthKind, RuleKind, StandingRule};
+use super::panel_contract::{FleetSession, HealthClassifier, HealthKind, RuleKind, StandingRule};
 
 /// How many trailing lines of the terminal tail are inspected.
 const TAIL_LINES: usize = 40;
@@ -211,7 +211,7 @@ fn parse_reset(line: &str, now_ms: i64) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::contract::{default_rules, SessionRef};
+    use super::super::panel_contract::{default_rules, SessionRef};
     use super::*;
 
     /// 2023-11-14 22:13:20 UTC.
