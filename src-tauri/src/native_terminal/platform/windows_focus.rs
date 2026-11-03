@@ -4,12 +4,17 @@
 //! hit-test prevents standard window activation. This low-level mouse hook detects
 //! left mouse button up events over native terminal surfaces, restores keyboard focus
 //! to the hosting WebView2 child window, and emits `native_terminal_focus` to the frontend.
+//!
+//! One process-wide hook serves every app window. Each registered top-level window keeps its own
+//! state keyed by its root HWND; a click resolves the top-level window under the pointer and only
+//! that window's terminal surfaces are hit-tested and notified.
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Mutex;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use tauri::{Emitter, Manager, Runtime};
+use tauri::{Emitter, Manager, Runtime, Window};
 
 use crate::native_terminal::surface_host::{
     NativeTerminalSurfaceHostState, NATIVE_TERMINAL_FOCUS_EVENT,
@@ -23,6 +28,7 @@ const WH_MOUSE_LL: i32 = 14;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
 const HC_ACTION: i32 = 0;
+const GA_ROOT: u32 = 2;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -65,6 +71,8 @@ unsafe extern "system" {
         lparam: isize,
     ) -> i32;
     fn GetClassNameW(hwnd: Hwnd, lp_class_name: *mut u16, n_max_count: i32) -> i32;
+    fn WindowFromPoint(point: Point) -> Hwnd;
+    fn GetAncestor(hwnd: Hwnd, ga_flags: u32) -> Hwnd;
 }
 
 #[link(name = "kernel32")]
@@ -141,13 +149,15 @@ fn best_effort_focus_webview(root_hwnd: Hwnd) {
     }
 }
 
+/// Per top-level window state for the shared hook.
 struct MonitorState {
-    root_hwnd: isize,
-    surface_host: NativeTerminalSurfaceHostState,
+    /// Sessions hit at a logical point of this window, limited to the sessions it owns.
+    hit_test: Box<dyn Fn(f64, f64) -> Option<String> + Send + Sync + 'static>,
     emit_focus: Box<dyn Fn(String) + Send + Sync + 'static>,
 }
 
-static MONITOR_STATE: Mutex<Option<MonitorState>> = Mutex::new(None);
+/// Registered windows keyed by root HWND (as `isize`).
+static MONITOR_STATES: Mutex<Option<HashMap<isize, MonitorState>>> = Mutex::new(None);
 static HOOK_HANDLE: Mutex<Option<isize>> = Mutex::new(None);
 static FOCUS_GATE: crate::native_terminal::focus_gesture::PressReleaseFocusGate =
     crate::native_terminal::focus_gesture::PressReleaseFocusGate::new();
@@ -156,23 +166,35 @@ unsafe extern "system" fn mouse_ll_hook_proc(n_code: i32, wparam: usize, lparam:
     let is_press = wparam == WM_LBUTTONDOWN as usize;
     if n_code >= HC_ACTION && (is_press || wparam == WM_LBUTTONUP as usize) && lparam != 0 {
         let hook_struct = &*(lparam as *const MsllHookStruct);
-        let mut pt = hook_struct.pt;
+        let screen_pt = hook_struct.pt;
 
-        if let Ok(guard) = MONITOR_STATE.lock() {
-            if let Some(state) = guard.as_ref() {
-                let root_hwnd = state.root_hwnd as Hwnd;
-                if ScreenToClient(root_hwnd, &mut pt) != 0 {
-                    let dpi = GetDpiForWindow(root_hwnd);
-                    let dpi_scale = if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 };
-                    let logical_x = pt.x as f64 / dpi_scale;
-                    let logical_y = pt.y as f64 / dpi_scale;
-
-                    let hit = state
-                        .surface_host
-                        .session_at_logical_point(logical_x, logical_y);
-                    if is_press {
-                        FOCUS_GATE.press(hit);
-                    } else if let Some(session_id) = FOCUS_GATE.release(hit) {
+        if let Ok(guard) = MONITOR_STATES.lock() {
+            if let Some(states) = guard.as_ref() {
+                let under_pointer = WindowFromPoint(screen_pt);
+                let root_hwnd = if under_pointer.is_null() {
+                    std::ptr::null_mut()
+                } else {
+                    GetAncestor(under_pointer, GA_ROOT)
+                };
+                let mut hit = None;
+                let mut clicked = None;
+                if let Some(state) = states.get(&(root_hwnd as isize)) {
+                    let mut pt = screen_pt;
+                    if ScreenToClient(root_hwnd, &mut pt) != 0 {
+                        let dpi = GetDpiForWindow(root_hwnd);
+                        let dpi_scale = if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 };
+                        let logical_x = pt.x as f64 / dpi_scale;
+                        let logical_y = pt.y as f64 / dpi_scale;
+                        hit = (state.hit_test)(logical_x, logical_y);
+                        clicked = Some(state);
+                    }
+                }
+                // A press outside every registered window still resets the gate, so a drag that
+                // starts elsewhere never focuses the pane it is released over.
+                if is_press {
+                    FOCUS_GATE.press(hit);
+                } else if let Some(session_id) = FOCUS_GATE.release(hit) {
+                    if let Some(state) = clicked {
                         best_effort_focus_webview(root_hwnd);
                         (state.emit_focus)(session_id);
                     }
@@ -184,66 +206,113 @@ unsafe extern "system" fn mouse_ll_hook_proc(n_code: i32, wparam: usize, lparam:
     CallNextHookEx(std::ptr::null_mut(), n_code, wparam, lparam)
 }
 
-/// Installs a low-level mouse hook on Windows to restore keyboard focus to WebView2
-/// when clicking inside an active native terminal child surface.
-pub fn install_windows_terminal_focus_monitor<R: Runtime>(
-    app: &tauri::App<R>,
-) -> tauri::Result<()> {
-    let Some(window) = app.get_window("main") else {
-        tracing::debug!("install_windows_terminal_focus_monitor: main window not found");
-        return Ok(());
-    };
-
+fn root_hwnd_of<R: Runtime>(window: &Window<R>) -> Option<isize> {
     let window_handle = match window.window_handle() {
         Ok(h) => h,
         Err(e) => {
             tracing::debug!(
-                "install_windows_terminal_focus_monitor: failed to get window handle: {e}"
+                label = window.label(),
+                "windows terminal focus: failed to get window handle: {e}"
             );
-            return Ok(());
+            return None;
         }
     };
-
-    let root_hwnd = match window_handle.as_raw() {
-        RawWindowHandle::Win32(handle) => handle.hwnd.get() as Hwnd,
+    match window_handle.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
         _ => {
-            tracing::debug!("install_windows_terminal_focus_monitor: expected Win32 window handle");
-            return Ok(());
+            tracing::debug!(
+                label = window.label(),
+                "windows terminal focus: expected Win32 window handle"
+            );
+            None
         }
-    };
+    }
+}
 
+fn ensure_hook_installed() {
+    let Ok(mut guard) = HOOK_HANDLE.lock() else {
+        return;
+    };
+    if guard.is_some() {
+        return;
+    }
+    // SAFETY: Installing WH_MOUSE_LL hook on the current process module image.
+    let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
+    let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_ll_hook_proc), instance, 0) };
+    if hook.is_null() {
+        tracing::warn!("windows terminal focus: SetWindowsHookExW failed");
+    } else {
+        *guard = Some(hook as isize);
+    }
+}
+
+/// Registers one top-level app window with the shared low-level mouse hook, installing the hook on
+/// first use. Clicks inside this window hit-test only the sessions it owns and emit
+/// `native_terminal_focus` to this window. Returns the root HWND to pass to
+/// [`unregister_windows_terminal_focus_window`] when the window closes, or `None` when the window
+/// has no Win32 handle.
+pub fn register_windows_terminal_focus_window<R: Runtime>(
+    window: &Window<R>,
+    surface_host: NativeTerminalSurfaceHostState,
+) -> Option<isize> {
+    let root_hwnd = root_hwnd_of(window)?;
+    let label = window.label().to_string();
+
+    let hit_app = window.app_handle().clone();
+    let hit_label = label.clone();
+    let hit_test = Box::new(move |logical_x: f64, logical_y: f64| {
+        surface_host.session_at_logical_point_matching(logical_x, logical_y, |session_id| {
+            crate::window_registry::window_for_session(&hit_app, session_id)
+                .is_some_and(|owner| owner.label() == hit_label)
+        })
+    });
+
+    let emit_app = window.app_handle().clone();
+    let emit_focus = Box::new(move |session_id: String| {
+        if let Some(window) = emit_app.get_window(&label) {
+            let _ = window.emit(NATIVE_TERMINAL_FOCUS_EVENT, session_id);
+        } else {
+            let _ = emit_app.emit(NATIVE_TERMINAL_FOCUS_EVENT, session_id);
+        }
+    });
+
+    if let Ok(mut guard) = MONITOR_STATES.lock() {
+        guard.get_or_insert_with(HashMap::new).insert(
+            root_hwnd,
+            MonitorState {
+                hit_test,
+                emit_focus,
+            },
+        );
+    }
+    ensure_hook_installed();
+    Some(root_hwnd)
+}
+
+/// Removes a window registered with [`register_windows_terminal_focus_window`]. The shared hook
+/// stays installed for the remaining windows.
+pub fn unregister_windows_terminal_focus_window(root_hwnd: isize) {
+    if let Ok(mut guard) = MONITOR_STATES.lock() {
+        if let Some(states) = guard.as_mut() {
+            states.remove(&root_hwnd);
+        }
+    }
+}
+
+/// Installs a low-level mouse hook on Windows to restore keyboard focus to WebView2
+/// when clicking inside an active native terminal child surface of the `main` window.
+pub fn install_windows_terminal_focus_monitor<R: Runtime>(
+    app: &tauri::App<R>,
+) -> tauri::Result<()> {
+    let Some(window) = app.get_window(crate::window_registry::PRIMARY_WINDOW_LABEL) else {
+        tracing::debug!("install_windows_terminal_focus_monitor: main window not found");
+        return Ok(());
+    };
     let surface_host = app
         .state::<NativeTerminalSurfaceHostState>()
         .inner()
         .clone();
-
-    let app_handle = app.handle().clone();
-    let emit_focus = Box::new(move |session_id: String| {
-        if let Some(window) = app_handle.get_window("main") {
-            let _ = window.emit(NATIVE_TERMINAL_FOCUS_EVENT, session_id);
-        } else {
-            let _ = app_handle.emit(NATIVE_TERMINAL_FOCUS_EVENT, session_id);
-        }
-    });
-
-    if let Ok(mut guard) = MONITOR_STATE.lock() {
-        *guard = Some(MonitorState {
-            root_hwnd: root_hwnd as isize,
-            surface_host,
-            emit_focus,
-        });
-    }
-
-    // SAFETY: Installing WH_MOUSE_LL hook on the current process module image.
-    let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
-    let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_ll_hook_proc), instance, 0) };
-
-    if hook.is_null() {
-        tracing::warn!("install_windows_terminal_focus_monitor: SetWindowsHookExW failed");
-    } else if let Ok(mut guard) = HOOK_HANDLE.lock() {
-        *guard = Some(hook as isize);
-    }
-
+    register_windows_terminal_focus_window(&window, surface_host);
     Ok(())
 }
 
@@ -256,7 +325,7 @@ pub fn uninstall_windows_terminal_focus_monitor() {
             }
         }
     }
-    if let Ok(mut guard) = MONITOR_STATE.lock() {
+    if let Ok(mut guard) = MONITOR_STATES.lock() {
         *guard = None;
     }
 }

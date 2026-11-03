@@ -411,10 +411,9 @@ pub async fn read_clipboard_image_for_app<R: tauri::Runtime>(
 ) -> Result<Option<ClipboardImage>, crate::ipc::IpcError> {
     #[cfg(target_os = "macos")]
     {
-        use tauri::Manager;
-        let window = app
-            .get_window("main")
-            .ok_or_else(|| crate::ipc::IpcError::internal("Main Ferryx window is unavailable"))?;
+        // Any app window only serves as the main-thread hop; the paste comes from the focused one.
+        let window = crate::window_registry::focused_window(app)
+            .ok_or_else(|| crate::ipc::IpcError::internal("No Ferryx window is available"))?;
         let (sender, receiver) = tokio::sync::oneshot::channel();
         window
             .run_on_main_thread(move || {

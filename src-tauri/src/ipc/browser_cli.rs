@@ -2942,7 +2942,13 @@ async fn execute_request<R: tauri::Runtime>(
                 col,
             };
 
-            if let Err(error) = app.emit(CLI_OPEN_FILE_EVENT, payload) {
+            // The file opens in the window the user works in; other windows must not open it too.
+            let target = crate::window_registry::focused_window(app);
+            let delivered = match target.as_ref() {
+                Some(window) => app.emit_to(window.label(), CLI_OPEN_FILE_EVENT, payload),
+                None => app.emit(CLI_OPEN_FILE_EVENT, payload),
+            };
+            if let Err(error) = delivered {
                 return BrowserCliResponse::Error {
                     code: ipc_error_code_string(IpcErrorCode::BrowserHostUnavailable),
                     details: None,
@@ -2950,7 +2956,7 @@ async fn execute_request<R: tauri::Runtime>(
                 };
             }
 
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = target {
                 let _ = window.show();
                 let _ = window.set_focus();
             }

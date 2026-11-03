@@ -41,8 +41,10 @@ export function moveTabIntoPaneSplit(
   const sourceTab = state.tabs.find((tab) => tab.id === sourceTabId);
   const targetTab = state.tabs.find((tab) => tab.id === targetTabId);
   if (!sourceTab || !targetTab) return state;
-  // A Changes tab hosts only its panel; a split there would hide terminals the tab close never disposes.
+  // A Changes or remote desktop tab hosts only its panel; a split there would hide terminals the
+  // tab close never disposes.
   if (targetTab.kind === "changes" || sourceTab.kind === "changes") return state;
+  if (targetTab.kind === "remoteDesktop" || sourceTab.kind === "remoteDesktop") return state;
 
   let sourceLayout = state.layoutsByTabId[sourceTabId];
   if (!sourceLayout && sourceTab.kind === "browser") {

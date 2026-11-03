@@ -54,8 +54,25 @@ fn cli_build_command(
     let profile = profile_dir.file_name().expect("profile directory has a name");
     let profile = if profile == "debug" { std::ffi::OsStr::new("dev") } else { profile };
     let mut command = std::process::Command::new(cargo);
+    // `cargo test` gives this process its package environment (CARGO_MANIFEST_DIR,
+    // CARGO_PKG_*, OUT_DIR, ...). Build scripts such as ring's track those variables with
+    // rerun-if-env-changed, so a nested cargo that inherits them sees them "changed"
+    // and rebuilds ring and everything above it, and the next ordinary cargo run in the
+    // same target dir rebuilds it all again. Cargo sets them per package itself.
+    for (key, _) in std::env::vars_os() {
+        if key.to_str().is_some_and(is_cargo_package_env) {
+            command.env_remove(key);
+        }
+    }
     command
-        .args(["build", "--bin", "ferryx-cli", "--manifest-path"])
+        // A plain `cargo build --bin` resolves features without dev-dependencies, so tokio
+        // loses the `test-util` feature the test build has. That is a different tokio, and
+        // every crate above it, ferryx_lib included, compiles a second time here; the next
+        // test or example build in the same target dir then rebuilds its own units again.
+        // Naming an example as well (one `cargo test` already compiles) resolves features
+        // the way the test build does, so the CLI reuses the units the tests were built from.
+        .args(["build", "--bin", "ferryx-cli", "--example", CLI_FEATURE_PEER_EXAMPLE])
+        .arg("--manifest-path")
         .arg(manifest_dir.join("Cargo.toml"))
         .arg("--target-dir")
         .arg(target_dir)
@@ -71,6 +88,27 @@ fn cli_build_command(
     (command, binary)
 }
 
+/// A small example with no required features, built next to the CLI so feature
+/// resolution includes dev-dependencies (see `cli_build_command`).
+const CLI_FEATURE_PEER_EXAMPLE: &str = "remote_grid_frame_dump";
+
+/// Variables cargo sets for the package it builds or runs, never for cargo itself.
+fn is_cargo_package_env(key: &str) -> bool {
+    key.starts_with("CARGO_PKG_")
+        || matches!(
+            key,
+            "CARGO_MANIFEST_DIR"
+                | "CARGO_MANIFEST_PATH"
+                | "CARGO_MANIFEST_LINKS"
+                | "CARGO_CRATE_NAME"
+                | "CARGO_BIN_NAME"
+                | "CARGO_PRIMARY_PACKAGE"
+                | "CARGO_TARGET_TMPDIR"
+                | "CARGO_RUSTC_CURRENT_DIR"
+                | "OUT_DIR"
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,12 +119,13 @@ mod tests {
             std::ffi::OsStr::new("cargo"), Path::new(exe), Path::new("checkout/src-tauri"), triple,
         );
         let mut expected = vec![
-            "build", "--bin", "ferryx-cli", "--manifest-path", "checkout/src-tauri/Cargo.toml",
+            "build", "--bin", "ferryx-cli", "--example", "remote_grid_frame_dump",
+            "--manifest-path", "checkout/src-tauri/Cargo.toml",
             "--target-dir", expected_root, "--profile", expected_profile,
         ];
         if explicit { expected.extend(["--target", triple]); }
         let mut expected: Vec<std::ffi::OsString> = expected.into_iter().map(Into::into).collect();
-        expected[4] = Path::new("checkout/src-tauri").join("Cargo.toml").into_os_string();
+        expected[6] = Path::new("checkout/src-tauri").join("Cargo.toml").into_os_string();
         assert_eq!(command.get_args().collect::<Vec<_>>(),
             expected.iter().map(std::ffi::OsString::as_os_str).collect::<Vec<_>>());
         assert_eq!(binary, Path::new(exe).parent().unwrap().parent().unwrap()
@@ -97,6 +136,27 @@ mod tests {
     #[test]
     fn native_debug_reuses_the_existing_target_root() {
         assert_layout("target/debug/deps/tests", "target", "dev", false);
+    }
+
+    #[test]
+    fn nested_cargo_drops_the_inherited_package_environment() {
+        // This test binary runs under cargo test, so the package variables are set.
+        assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+        let (command, _) = cli_build_command(
+            std::ffi::OsStr::new("cargo"),
+            Path::new("target/debug/deps/tests"),
+            Path::new("checkout/src-tauri"),
+            "aarch64-apple-darwin",
+        );
+        let removed: Vec<_> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+        for key in ["CARGO_MANIFEST_DIR", "CARGO_PKG_NAME", "CARGO_PKG_VERSION", "OUT_DIR"] {
+            assert!(removed.iter().any(|k| k == key), "{key} must not reach the nested cargo");
+        }
+        assert!(removed.iter().all(|k| is_cargo_package_env(k) || k == "CARGO_BUILD_TARGET"));
     }
 
     #[test]

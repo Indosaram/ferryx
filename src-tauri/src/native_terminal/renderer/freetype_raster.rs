@@ -98,7 +98,15 @@ unsafe extern "C" {
         index: c_int,
         value: *mut *mut u8,
     ) -> c_int;
+    fn FcPatternGetInteger(
+        pattern: *mut c_void,
+        object: *const c_char,
+        index: c_int,
+        value: *mut c_int,
+    ) -> c_int;
     fn FcPatternDestroy(pattern: *mut c_void);
+    #[cfg(test)]
+    fn FcConfigAppFontAddDir(config: *mut c_void, dir: *const u8) -> c_int;
 }
 
 struct Library(*mut c_void);
@@ -133,9 +141,26 @@ fn fontconfig() -> Option<&'static FontConfig> {
             // SAFETY: FcInitLoadConfigAndFonts returns a config owned by this cache, which keeps
             // it alive for the process lifetime instead of leaking one per lookup.
             let handle = unsafe { FcInitLoadConfigAndFonts() };
+            #[cfg(test)]
+            if !handle.is_null() {
+                register_fixture_fonts(handle);
+            }
             (!handle.is_null()).then_some(FontConfig(handle))
         })
         .as_ref()
+}
+
+/// Test builds add `tests/fixtures/fonts` (a Noto Sans KR variable-font Hangul subset and a
+/// MesloLGS NF subset) to the application font set, so rasterization tests resolve the same
+/// faces on every Linux host instead of depending on which fonts happen to be installed.
+#[cfg(test)]
+fn register_fixture_fonts(config: *mut c_void) {
+    let dir = CString::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/fonts"))
+        .expect("fixture font directory has no interior NUL");
+    // SAFETY: `config` is the live handle FcInitLoadConfigAndFonts just returned, and
+    // fontconfig copies the directory string before returning.
+    let added = unsafe { FcConfigAppFontAddDir(config, dir.as_ptr() as *const u8) };
+    assert_ne!(added, 0, "fontconfig rejected the fixture font directory {dir:?}");
 }
 
 /// Splits a comma-separated font stack into family names, trimming whitespace and surrounding
@@ -156,16 +181,33 @@ fn font_candidates(stack: &str) -> Vec<String> {
     candidates
 }
 
+/// A font file plus the face fontconfig selected inside it.
+///
+/// `index` is fontconfig's `FC_INDEX`: the face within a collection in the low 16 bits and the
+/// 1-based named instance of a variable font in the high 16 bits, which is the `face_index`
+/// encoding `FT_New_Face` accepts. Opening index 0 instead would render a variable font's
+/// default instance (Thin for Noto Sans KR) whatever weight was matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedFace {
+    path: String,
+    index: c_long,
+}
+
 /// Resolves the first family in `stack` fontconfig can match for `ch`, falling back to
 /// `monospace` so a configured family that is not installed still renders.
-fn resolve_stack_font_path(stack: &str, ch: char, bold: bool, italic: bool) -> Option<String> {
+fn resolve_stack_font_path(
+    stack: &str,
+    ch: char,
+    bold: bool,
+    italic: bool,
+) -> Option<ResolvedFace> {
     font_candidates(stack)
         .iter()
         .map(String::as_str)
         .find_map(|family| resolve_font_path(family, ch, bold, italic))
 }
 
-fn resolve_font_path(family: &str, ch: char, bold: bool, italic: bool) -> Option<String> {
+fn resolve_font_path(family: &str, ch: char, bold: bool, italic: bool) -> Option<ResolvedFace> {
     let weight = if bold { "bold" } else { "regular" };
     let slant = if italic { "italic" } else { "roman" };
     let query = format!(
@@ -174,6 +216,7 @@ fn resolve_font_path(family: &str, ch: char, bold: bool, italic: bool) -> Option
     );
     let name = CString::new(query).ok()?;
     let file_key = CString::new("file").ok()?;
+    let index_key = CString::new("index").ok()?;
     let config = fontconfig()?;
     // SAFETY: every fontconfig pattern created here is destroyed before returning, the config is
     // the process-lifetime cache above, and the borrowed file string is copied out while its
@@ -202,8 +245,15 @@ fn resolve_font_path(family: &str, ch: char, bold: bool, italic: bool) -> Option
         } else {
             None
         };
+        let mut index: c_int = 0;
+        if FcPatternGetInteger(matched, index_key.as_ptr(), 0, &mut index) != 0 {
+            index = 0;
+        }
         FcPatternDestroy(matched);
-        path
+        path.map(|path| ResolvedFace {
+            path,
+            index: c_long::from(index),
+        })
     }
 }
 
@@ -225,10 +275,10 @@ pub fn rasterize_to_alpha_buffer(
     let Some(library) = library() else {
         return false;
     };
-    let Some(path) = resolve_stack_font_path(family, ch, bold, italic) else {
+    let Some(resolved) = resolve_stack_font_path(family, ch, bold, italic) else {
         return false;
     };
-    let Ok(path) = CString::new(path) else {
+    let Ok(path) = CString::new(resolved.path) else {
         return false;
     };
     let Ok(guard) = library.lock() else {
@@ -240,7 +290,7 @@ pub fn rasterize_to_alpha_buffer(
     // only read for the rows/width FreeType reports.
     unsafe {
         let mut face: *mut FtFaceRec = ptr::null_mut();
-        if FT_New_Face(guard.0, path.as_ptr(), 0, &mut face) != 0 || face.is_null() {
+        if FT_New_Face(guard.0, path.as_ptr(), resolved.index, &mut face) != 0 || face.is_null() {
             return false;
         }
         FT_Set_Pixel_Sizes(face, 0, pixel_size);

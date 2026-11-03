@@ -1,0 +1,75 @@
+[package]
+name = "ferryx-rd-app"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["ffmpeg"]
+ffmpeg = ["ferryx-rd-decode/ffmpeg"]
+# Legacy shared-secret maho relay fallback. Ferryx carries remote desktop over its own
+# end-to-end tunnel, so its build leaves this off.
+maho-relay = ["dep:tokio-tungstenite", "dep:futures-util"]
+# MCP stdio server and HTTP agent automation server used by the headless CLI.
+agent = []
+# The headless `ferryx-rd-client` binary and everything only it needs.
+cli = ["agent", "maho-relay", "dep:clap", "dep:tracing-subscriber"]
+
+[dependencies]
+ferryx-rd-proto = { path = "../ferryx-rd-proto" }
+ferryx-rd-net = { path = "../ferryx-rd-net" }
+ferryx-rd-decode = { path = "../ferryx-rd-decode", default-features = false }
+ferryx-rd-render = { path = "../ferryx-rd-render" }
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+rand.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+rustix.workspace = true
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+clap = { version = "4", features = ["derive"], optional = true }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"], optional = true }
+futures-util = { version = "0.3", optional = true }
+
+[[bin]]
+name = "ferryx-rd-client"
+path = "src/bin/ferryx_rd_client.rs"
+required-features = ["cli"]
+
+# These spawn the real `ferryx-rd-client` executable, so they build only with it.
+[[test]]
+name = "cli_clipboard"
+required-features = ["cli"]
+
+[[test]]
+name = "cli_mcp_contract"
+required-features = ["cli"]
+
+[[test]]
+name = "cli_receiver_telemetry"
+required-features = ["cli"]
+
+[[test]]
+name = "relay_bootstrap"
+required-features = ["maho-relay"]
+
+[[test]]
+name = "agent_control_e2e"
+required-features = ["agent"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.1", default-features = false, features = ["NSPasteboard"] }
+objc2-foundation = { version = "0.3.1", default-features = false, features = ["NSArray", "NSString"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_IO", "Win32_System_Threading"] }

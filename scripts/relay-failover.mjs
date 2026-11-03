@@ -191,7 +191,7 @@ export function deployStandbyPlan(config) {
     publicHostname: config.publicHostname,
     blockedOn: config.standby.ssh ? null : "STANDBY_HOST_MISSING: the owner has not provided the standby's SSH host",
     steps: [
-      local("build-relay", "release-profile relay binary (todo 33)", "cd src-tauri && cargo build --release --bin ferryx-relay"),
+      local("build-relay", "release-profile relay binary (todo 33)", "cd src-tauri && cargo build --release --no-default-features --bin ferryx-relay"),
       run(ph, "primary-secrets-present", "primary has the object-store credentials", "sudo test -s /etc/ferryx/litestream.env"),
       litestreamInstall("primary-install-litestream", ph, config.litestream.version),
       file(ph, "primary-litestream-config", "/etc/litestream.yml", litestreamYml(config, p)),

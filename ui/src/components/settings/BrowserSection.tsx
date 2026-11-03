@@ -43,6 +43,7 @@ import {
   SelectValue,
 } from "../ui/select";
 import { Switch } from "../ui/switch";
+import { BrowserEngineGroup } from "./BrowserEngineGroup";
 import { SettingRow, SettingsGroup, SettingsHeading } from "./primitives";
 
 export function BrowserSection() {
@@ -339,6 +340,8 @@ export function BrowserSection() {
           </SettingRow>
         </div>
       </SettingsGroup>
+
+      <BrowserEngineGroup />
 
       <SettingsGroup title="Link Routing">
         <div className="border-b border-border">

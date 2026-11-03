@@ -207,6 +207,19 @@ pub fn build_child_path(
         std::env::split_paths(list).for_each(&mut push);
     }
     fallback_dirs(home).into_iter().for_each(&mut push);
+    #[cfg(windows)]
+    {
+        // Git for Windows exposes git through cmd/, but its POSIX tools live in
+        // usr/bin/. Cron scripts and verifiers share this child PATH.
+        let git_tools: Vec<PathBuf> = entries.iter().filter_map(|dir| {
+            if !dir.join("git.exe").is_file() { return None; }
+            let tools = dir.parent()?.join("usr/bin");
+            tools.join("sh.exe").is_file().then_some(tools)
+        }).collect();
+        for dir in git_tools {
+            if !entries.contains(&dir) { entries.push(dir); }
+        }
+    }
     std::env::join_paths(entries).unwrap_or_default()
 }
 
@@ -263,6 +276,32 @@ fn parse_marked_path(text: &str) -> Option<OsString> {
         .map(str::trim)
         .filter(|path| !path.is_empty())
         .map(OsString::from)
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn git_installation_tools_are_appended_without_overriding_explicit_path() {
+        let root = std::env::temp_dir().join(format!("hub-git-path-{}", uuid::Uuid::new_v4()));
+        let cmd = root.join("cmd");
+        let tools = root.join("usr/bin");
+        std::fs::create_dir_all(&cmd).unwrap();
+        std::fs::create_dir_all(&tools).unwrap();
+        std::fs::write(cmd.join("git.exe"), b"").unwrap();
+        std::fs::write(tools.join("sh.exe"), b"").unwrap();
+        let path = build_child_path(Some(cmd.as_os_str()), None, None, None);
+        let dirs: Vec<_> = std::env::split_paths(&path).collect();
+        assert_eq!(dirs.first(), Some(&cmd));
+        assert_eq!(dirs.last(), Some(&tools));
+        let explicit = std::env::join_paths([&tools, &cmd]).unwrap();
+        let path = build_child_path(Some(&explicit), None, None, None);
+        let dirs: Vec<_> = std::env::split_paths(&path).collect();
+        assert_eq!(dirs.first(), Some(&tools));
+        assert_eq!(dirs.iter().filter(|dir| **dir == tools).count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(all(test, unix))]

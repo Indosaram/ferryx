@@ -38,6 +38,7 @@ export type SettingsDialogProps = {
   remoteContext?: RemoteContext;
   onOpenMachineProject?: (target: MachineProjectTarget, context: RemoteContext) => void;
   onOpenSshProject?: (hostId: string) => void;
+  onOpenRemoteDesktop?: (hostId: string, label: string) => void;
   accountOrigin?: string;
 };
 
@@ -89,7 +90,7 @@ function resolvePlanAuth(accountOrigin?: string): PlanAuth {
   return { origin, token: getStoredAccountSessionToken(origin) };
 }
 
-function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenMachineProject, remoteContext, accountOrigin }: SettingsDialogBodyProps) {
+function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenMachineProject, onOpenRemoteDesktop, remoteContext, accountOrigin }: SettingsDialogBodyProps) {
   const { settings, localSettings, nativePreferences, updateSettings, refreshNativePreferences } = useTerminalSettings();
   const [planAuth, setPlanAuth] = useState<PlanAuth>(() => resolvePlanAuth(accountOrigin));
   const [planUnavailable, setPlanUnavailable] = useState(false);
@@ -260,6 +261,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
               legacySsh={initialSection === "ssh"}
               onOpenProject={onOpenMachineProject}
               onOpenSshProject={onOpenSshProject}
+              onOpenRemoteDesktop={onOpenRemoteDesktop}
               accountOrigin={accountOrigin}
               onAccountSessionChange={handleAccountSessionChange}
             />

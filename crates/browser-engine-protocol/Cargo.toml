@@ -1,0 +1,13 @@
+[package]
+name = "ferryx-browser-engine-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "Line protocol between Ferryx and its Chromium engine process"
+license = "MIT"
+publish = false
+
+[lib]
+name = "ferryx_browser_engine_protocol"
+path = "src/lib.rs"
+
+[workspace]

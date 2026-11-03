@@ -2,7 +2,7 @@ import type { HostEndpoint } from "../state/remoteHostStore";
 import type { AttachKeyPair } from "./accountAttach";
 import type { OpenTunnelParams } from "./accountSession";
 import type { FetchLikeInit, TunnelResponse, TunnelTransport, TunnelWebSocket } from "./attachTunnel";
-import { remoteApiUrl, remoteSocketUrl, SocketTicketError } from "./remoteClient";
+import { fetchWithDeadline, remoteApiUrl, remoteSocketUrl, SocketTicketError } from "./remoteClient";
 
 /** Typed code for a relay host this client cannot encrypt to (no attach key, e.g. paired by PIN). */
 export const REPAIR_REQUIRED = "REPAIR_REQUIRED";
@@ -33,6 +33,11 @@ export class RelayE2EError extends Error {
 }
 
 export const CLIENT_BUILD_HEADER = "X-Ferryx-Client-Build";
+/**
+ * Response header a relay that understands `?e2e=1` sends on every `/attach/session` answer.
+ * With it present, a 4xx is a real refusal (typed RelayE2EError), never "unsupported".
+ */
+export const RELAY_E2E_AWARE_HEADER = "x-ferryx-relay-e2e";
 
 /**
  * The relay does not know the device-token `?e2e=1` allocation yet (400, 404, 405, or any 401 -
@@ -73,6 +78,8 @@ function registryKey(baseUrl: string): string {
 export function registerRelayE2E(baseUrl: string, transport: RelayE2ETransport): () => void {
   const key = registryKey(baseUrl);
   registry.set(key, transport);
+  // A fresh registration (new token, new connection) gets a fresh chance at encryption.
+  plaintextFallback.delete(key);
   return () => {
     if (registry.get(key) === transport) registry.delete(key);
   };
@@ -139,7 +146,12 @@ async function bodyBytes(body: BodyInit | null | undefined): Promise<Uint8Array 
 
 function tunnelResponse(raw: TunnelResponse): Response {
   const nullBody = raw.status === 204 || raw.status === 205 || raw.status === 304;
-  return new Response(nullBody ? null : raw.body.slice(), { status: raw.status, headers: raw.headers });
+  if (nullBody) return new Response(null, { status: raw.status, headers: raw.headers });
+  // The tunnel hands over a fresh, exclusively owned body: wrap it as a view instead of copying
+  // (up to 16 MiB). Only a SharedArrayBuffer-backed body, which BodyInit rejects, is copied.
+  const { buffer, byteOffset, byteLength } = raw.body;
+  const body = buffer instanceof ArrayBuffer ? new Uint8Array(buffer, byteOffset, byteLength) : raw.body.slice();
+  return new Response(body, { status: raw.status, headers: raw.headers });
 }
 
 function errorCode(data: unknown): string | null {
@@ -185,7 +197,7 @@ export async function remoteFetch(baseUrl: string, path: string, init: RequestIn
     }
   }
   const url = remoteApiUrl(baseUrl, path);
-  const response = await fetch(url, isRelayHostUrl(url) ? { ...init, headers: withClientBuild(init.headers) } : init);
+  const response = await fetchWithDeadline(url, isRelayHostUrl(url) ? { ...init, headers: withClientBuild(init.headers) } : init);
   await throwIfE2ERequired(response);
   return response;
 }
@@ -265,6 +277,10 @@ export interface RelayE2EConnection extends RelayE2ETransport {
 }
 
 const E2E_ALLOCATION_TIMEOUT_MS = 15_000;
+/** Backoff for a failed allocation the relay will keep failing (machine offline, rate limited). */
+export const E2E_ALLOCATION_BACKOFF_INITIAL_MS = 2_000;
+export const E2E_ALLOCATION_BACKOFF_MAX_MS = 30_000;
+const BACKOFF_CODES = new Set(["MACHINE_OFFLINE", "RATE_LIMITED"]);
 
 /** `POST {relay}/api/v1/attach/session?e2e=1`; failures are typed and bounded by a deadline. */
 export async function allocateE2ESession(
@@ -275,39 +291,56 @@ export async function allocateE2ESession(
 ): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), E2E_ALLOCATION_TIMEOUT_MS);
+  const timedOut = () =>
+    new RelayE2EError("RELAY_TIMEOUT", `Encrypted session allocation timed out after ${E2E_ALLOCATION_TIMEOUT_MS}ms`);
   let response: Response;
-  try {
-    response = await fetchImpl(`${relayOrigin.replace(/\/+$/, "")}/api/v1/attach/session?e2e=1`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${bearer}`,
-        "Content-Type": "application/json",
-        [CLIENT_BUILD_HEADER]: clientBuild(),
-      },
-      body: JSON.stringify({ machineId }),
-      signal: controller.signal,
-    });
-  } catch (error) {
-    if (controller.signal.aborted) {
-      throw new RelayE2EError("REQUEST_TIMEOUT", `Encrypted session allocation timed out after ${E2E_ALLOCATION_TIMEOUT_MS}ms`);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timer);
-  }
   let data: unknown = null;
   try {
-    data = await response.json();
-  } catch {
-    data = null;
+    try {
+      response = await fetchImpl(`${relayOrigin.replace(/\/+$/, "")}/api/v1/attach/session?e2e=1`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${bearer}`,
+          "Content-Type": "application/json",
+          [CLIENT_BUILD_HEADER]: clientBuild(),
+        },
+        body: JSON.stringify({ machineId }),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (controller.signal.aborted) throw timedOut();
+      // fetch rejects with a TypeError when the relay itself cannot be reached (DNS, TLS, CORS).
+      if (error instanceof TypeError) {
+        throw new RelayE2EError("RELAY_UNREACHABLE", `Encrypted session allocation could not reach the relay: ${error.message}`);
+      }
+      throw error;
+    }
+    // The deadline covers the body too: a stalled body is a timeout, not a hang.
+    try {
+      data = await response.json();
+    } catch {
+      if (controller.signal.aborted) throw timedOut();
+      data = null;
+    }
+  } finally {
+    clearTimeout(timer);
   }
   if (!response.ok) {
     const code = errorCode(data);
     if (code === E2E_REQUIRED || response.status === 426) throw new RelayRepairRequiredError();
-    // An old relay that does not know `?e2e=1` falls back to plaintext: 400, 404, 405, or any 401
+    // A relay that understands `?e2e=1` says so in a header; its 401 is an auth denial
+    // (sign out / repair), never a reason to downgrade.
+    const e2eAware = response.headers?.get(RELAY_E2E_AWARE_HEADER) === "1";
+    if (e2eAware && response.status === 401) {
+      throw new RelayE2EError("UNAUTHORIZED", "Encrypted session allocation was refused (401)", 401);
+    }
+    // Only an old relay without that header falls back to plaintext: 400, 404, 405, or any 401
     // (an old account relay answers a device token with 401 {"code":"UNAUTHORIZED"}). 426/E2E_REQUIRED,
     // 409, 402 and other statuses stay typed errors.
-    if (response.status === 400 || response.status === 401 || response.status === 404 || response.status === 405) {
+    if (
+      !e2eAware
+      && (response.status === 400 || response.status === 401 || response.status === 404 || response.status === 405)
+    ) {
       throw new RelayE2EUnsupportedError(response.status);
     }
     throw new RelayE2EError(
@@ -340,14 +373,38 @@ export function openRelayE2ETransport(params: OpenRelayE2ETransportParams): Rela
   let http: OpenedTunnel | null = null;
   let opening: Promise<OpenedTunnel> | null = null;
   const sockets = new Set<{ socket: TunnelWebSocket; tunnel: OpenedTunnel }>();
+  // Negative cache: while the relay says the machine is offline or we are rate limited, every
+  // poll gets the cached rejection instead of another POST (which would only earn a 429).
+  let allocationBackoffMs = 0;
+  let allocationBlockedUntil = 0;
+  let allocationFailure: unknown = null;
 
   const assertOpen = () => {
     if (closed) throw new RelayE2EError("CONNECTION_CLOSED", "Encrypted relay connection has been closed");
   };
 
+  const allocate = async (): Promise<string> => {
+    if (allocationFailure !== null && Date.now() < allocationBlockedUntil) throw allocationFailure;
+    try {
+      const sessionId = await allocateE2ESession(params.relayOrigin, params.bearer, params.machineId, fetchImpl);
+      allocationBackoffMs = 0;
+      allocationFailure = null;
+      return sessionId;
+    } catch (error) {
+      if (error instanceof RelayE2EError && BACKOFF_CODES.has(error.code)) {
+        allocationBackoffMs = allocationBackoffMs === 0
+          ? E2E_ALLOCATION_BACKOFF_INITIAL_MS
+          : Math.min(allocationBackoffMs * 2, E2E_ALLOCATION_BACKOFF_MAX_MS);
+        allocationBlockedUntil = Date.now() + allocationBackoffMs;
+        allocationFailure = error;
+      }
+      throw error;
+    }
+  };
+
   const openSession = async (): Promise<OpenedTunnel> => {
     const localKeyPair = await attachKey;
-    const sessionId = await allocateE2ESession(params.relayOrigin, params.bearer, params.machineId, fetchImpl);
+    const sessionId = await allocate();
     assertOpen();
     return openTunnelImpl({
       relayOrigin: params.relayOrigin,
@@ -399,6 +456,15 @@ export function openRelayE2ETransport(params: OpenRelayE2ETransportParams): Rela
         tunnel.close();
         throw error;
       }
+      // close() ran during the upgrade: it no longer tracks this socket, so release it here.
+      if (closed) {
+        try {
+          socket.close();
+        } finally {
+          tunnel.close();
+        }
+        assertOpen();
+      }
       for (const entry of sockets) if (entry.socket.readyState === 3) sockets.delete(entry);
       sockets.add({ socket, tunnel });
       return socket;
@@ -426,12 +492,13 @@ export function openRelayE2ETransport(params: OpenRelayE2ETransportParams): Rela
 
 /**
  * How traffic to `host` travels: "direct" when not through its relay, "e2e" when the relay only
- * carries ciphertext, REPAIR_REQUIRED for a relay host this client holds no attach info for.
+ * carries ciphertext, "plaintext-fallback" when an old relay forced this page session back to
+ * the plaintext path, REPAIR_REQUIRED for a relay host this client holds no attach info for.
  */
 export function relayE2EState(
   host: HostEndpoint | null,
   transportUrl: string,
-): "direct" | "e2e" | typeof REPAIR_REQUIRED {
+): "direct" | "e2e" | "plaintext-fallback" | typeof REPAIR_REQUIRED {
   if (!host?.relayOrigin || !host.machineId) return "direct";
   let origin: string;
   try {
@@ -440,5 +507,7 @@ export function relayE2EState(
     return "direct";
   }
   if (origin !== host.relayOrigin) return "direct";
-  return host.attachPublicKey && host.enrollmentEpoch ? "e2e" : REPAIR_REQUIRED;
+  if (!host.attachPublicKey || !host.enrollmentEpoch) return REPAIR_REQUIRED;
+  const base = registryKey(`${host.relayOrigin}/host/${encodeURIComponent(host.machineId)}`);
+  return plaintextFallback.has(base) ? "plaintext-fallback" : "e2e";
 }

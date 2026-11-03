@@ -920,6 +920,49 @@ async fn an_engine_exit_mid_turn_is_never_retransmitted_and_an_early_exit_backs_
     assert_eq!(supervisor.health().generation, 2);
 }
 
+/// Health alone tells the Slack gate (`chat::slack_supervisor::engine_ready`) whether an
+/// exited engine may take a turn, since it lets an exit without a fault through: an early
+/// exit keeps its fault there until the backoff ends and the supervising loop relaunches the
+/// engine, while an exit after STABLE_UPTIME has no fault, so its next use relaunches it.
+#[tokio::test(start_paused = true)]
+async fn an_early_exit_keeps_slack_turns_off_the_engine_until_the_backoff_relaunch() {
+    let harness = Harness::new("early-exit-gate", all_capabilities());
+    let supervisor = harness.supervisor();
+    let mut health = supervisor.subscribe_health();
+    let generation = tokio::spawn(supervisor.clone().supervise());
+    assert_eq!(supervisor.decide("first").await.unwrap(), "answer:first");
+
+    harness.peer.disconnect();
+    let early = tokio::time::timeout(WAIT, health.wait_for(|health| health.state == HealthState::Exited))
+        .await
+        .expect("the early exit is observed")
+        .unwrap()
+        .clone();
+    assert_eq!(early.fault.as_ref().map(SupervisorFault::code), Some("MHC_ENGINE_EXITED"));
+    assert!(retry_in(&supervisor).await > Duration::ZERO, "the exit is inside its backoff");
+
+    let relaunched = tokio::time::timeout(
+        WAIT,
+        health.wait_for(|health| health.state == HealthState::Ready && health.generation == 2),
+    )
+    .await
+    .expect("the supervising loop relaunches the engine once the backoff ends")
+    .unwrap()
+    .clone();
+    assert_eq!(relaunched.fault, None);
+    assert_eq!(harness.launcher.launches.load(Ordering::SeqCst), 2);
+
+    tokio::time::advance(STABLE_UPTIME).await;
+    harness.peer.disconnect();
+    let stable = tokio::time::timeout(WAIT, health.wait_for(|health| health.state == HealthState::Exited))
+        .await
+        .expect("the stable exit is observed")
+        .unwrap()
+        .clone();
+    assert_eq!(stable.fault, None, "the next use relaunches a stable engine");
+    generation.abort();
+}
+
 #[derive(Default)]
 struct RecordingWork {
     calls: Mutex<Vec<WorkToolRequest>>,
@@ -1325,7 +1368,7 @@ async fn a_process_without_the_engine_reports_not_running_instead_of_another_mod
     assert!(installed().is_none());
     let fault = installed_engine_snapshot().await.unwrap_err();
     assert_eq!(fault.code(), "MHC_NOT_RUNNING");
-    assert!(configured_model().is_none());
+    assert!(configured_model().await.is_none());
     let fault = InstalledModel
         .complete_typed("question", TurnContext::Retained)
         .await
@@ -1345,6 +1388,23 @@ async fn a_process_without_the_engine_reports_not_running_instead_of_another_mod
         ),
         "{judged:?}"
     );
+}
+
+/// The judge's model decision reads the hub env file on the blocking pool, never on the
+/// runtime thread, even on a single-threaded runtime; a read that cannot finish counts as
+/// not configured. No engine is installed in tests.
+#[tokio::test(flavor = "current_thread")]
+async fn the_configured_model_reads_the_shared_sources_off_the_runtime() {
+    let runtime_thread = std::thread::current().id();
+    let model = configured_model_with(move || {
+        assert_ne!(std::thread::current().id(), runtime_thread, "read on the runtime thread");
+        true
+    })
+    .await
+    .expect("a configured hub has the engine model");
+    assert!(model.is_supervisor_engine());
+    assert!(configured_model_with(|| false).await.is_none());
+    assert!(configured_model_with(|| panic!("the hub env file read failed")).await.is_none());
 }
 
 #[tokio::test]
@@ -1779,6 +1839,28 @@ fn a_process_disable_wins_over_the_shared_enable_and_a_process_enable_is_ignored
     }
     assert!(MhcProfileConfig::from_env_in(&none, Some("1")).is_none());
     assert!(MhcProfileConfig::from_env_in(&none, None).is_none());
+}
+
+#[test]
+fn the_engine_binary_defaults_to_the_bundled_mhc_and_the_shared_file_overrides_it() {
+    let on = BTreeMap::from([("FERRYX_HUB_MHC_SUPERVISOR".to_owned(), "1".to_owned())]);
+    // Unless the developer's environment names one, the default is what the hub resolves for
+    // per-turn mhc children: the bundled mhc next to this executable, else bare `mhc`.
+    if std::env::var_os("FERRYX_HUB_MHC_BIN").is_none() {
+        let config = MhcProfileConfig::from_env_in(&on, None).unwrap();
+        assert_eq!(
+            config.binary,
+            crate::meta::supervisor::resolve_mhc_bin(None, std::env::current_exe().ok().as_deref())
+        );
+        let named = BTreeMap::from([
+            ("FERRYX_HUB_MHC_SUPERVISOR".to_owned(), "1".to_owned()),
+            ("FERRYX_HUB_MHC_BIN".to_owned(), " /opt/mhc/bin/mhc ".to_owned()),
+            ("FERRYX_HUB_MHC_THINKING".to_owned(), "high".to_owned()),
+        ]);
+        let config = MhcProfileConfig::from_env_in(&named, None).unwrap();
+        assert_eq!(config.binary, "/opt/mhc/bin/mhc");
+        assert_eq!(config.thinking_level.as_deref(), Some("high"));
+    }
 }
 
 #[test]

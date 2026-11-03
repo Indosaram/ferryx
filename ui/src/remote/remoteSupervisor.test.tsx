@@ -2,6 +2,8 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SUPERVISOR_ACTING_MS } from "../lib/supervisorModel";
 import {
+  adoptRemoteAll,
+  fetchRemoteDevicePermission,
   fetchSupervisorConversation,
   fetchSupervisorMemory,
   fetchSupervisorSnapshot,
@@ -9,6 +11,8 @@ import {
   postSupervisorRequest,
   hasSupervisorCapability,
   isSupervisorChangedFrame,
+  getRemoteSetup,
+  runRemoteSetup,
   setRemoteLanePaused,
   useRemoteSupervisor,
   type RemoteSupervisorMachine,
@@ -54,6 +58,50 @@ afterEach(() => {
 });
 
 describe("remote supervisor client", () => {
+  it("maps a view device's 403 on setup to FORBIDDEN, keeping the machine's own code", async () => {
+    const bare: SupervisorFetch = () => Promise.resolve({ status: 403, body: "" });
+    await expect(runRemoteSetup(bare, { importMemory: true, projects: [] })).resolves.toMatchObject({ kind: "error", code: "FORBIDDEN" });
+    await expect(adoptRemoteAll(bare)).resolves.toMatchObject({ kind: "error", code: "FORBIDDEN" });
+    const typed: SupervisorFetch = () => Promise.resolve(json(403, { error: { code: "DEVICE_VIEW_ONLY", message: "view devices cannot change setup" } }));
+    await expect(runRemoteSetup(typed, { importMemory: false, projects: [] })).resolves.toEqual({
+      kind: "error",
+      code: "DEVICE_VIEW_ONLY",
+      message: "view devices cannot change setup",
+    });
+  });
+
+  it("posts setup with its options and parses the SetupStatus", async () => {
+    const fetchLike = vi.fn<SupervisorFetch>(() => Promise.resolve(json(200, { nextAction: "wait_engine", engineState: "starting" })));
+    const result = await runRemoteSetup(fetchLike, { importMemory: true, projects: [{ name: "ferryx", path: "/code/ferryx" }] });
+    expect(fetchLike).toHaveBeenCalledWith("/api/v1/supervisor/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ importMemory: true, projects: [{ name: "ferryx", path: "/code/ferryx" }] }),
+    });
+    expect(result).toMatchObject({ kind: "ok", status: { nextAction: "wait_engine", engineState: "starting" } });
+  });
+
+  it("reads setup and adopt-all through their routes", async () => {
+    const get = vi.fn<SupervisorFetch>(() => Promise.resolve(json(200, { nextAction: "none" })));
+    await expect(getRemoteSetup(get)).resolves.toMatchObject({ kind: "ok", status: { nextAction: "none" } });
+    expect(get).toHaveBeenCalledWith("/api/v1/supervisor/setup");
+    const adopt = vi.fn<SupervisorFetch>(() => Promise.resolve(json(200, { adopted: ["a"], refused: [] })));
+    await expect(adoptRemoteAll(adopt)).resolves.toEqual({ kind: "ok", adopted: ["a"], refused: [] });
+    expect(adopt).toHaveBeenCalledWith("/api/v1/supervisor/adopt-all", { method: "POST" });
+  });
+
+  it("reports an offline machine and an older machine without the route", async () => {
+    await expect(getRemoteSetup(() => Promise.reject(new Error("tunnel closed")))).resolves.toMatchObject({ kind: "error", code: "OFFLINE" });
+    await expect(getRemoteSetup(() => Promise.resolve(json(404, {})))).resolves.toMatchObject({ kind: "error", code: "NOT_FOUND" });
+  });
+
+  it("reads this device's permission from the capabilities document", async () => {
+    await expect(fetchRemoteDevicePermission(() => Promise.resolve(json(200, { permission: "control" })))).resolves.toBe("control");
+    await expect(fetchRemoteDevicePermission(() => Promise.resolve(json(200, { permission: "view" })))).resolves.toBe("view");
+    await expect(fetchRemoteDevicePermission(() => Promise.resolve(json(200, {})))).resolves.toBeNull();
+    await expect(fetchRemoteDevicePermission(() => Promise.reject(new Error("x")))).resolves.toBeNull();
+  });
+
   it("reads supervisorV1 from the capabilities document or list", () => {
     expect(hasSupervisorCapability({ capabilities: ["terminalCreateV1", "supervisorV1"] })).toBe(true);
     expect(hasSupervisorCapability(["supervisorV1"])).toBe(true);

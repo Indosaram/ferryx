@@ -441,3 +441,302 @@ async fn an_owner_message_from_the_desktop_is_learned_once_with_its_provenance()
         [("desktop:d1".to_owned(), "I prefer terse status updates".to_owned())]
     );
 }
+
+mod import {
+    use super::*;
+    use crate::chat::fence::fence_untrusted;
+    use crate::supervisor::admission::{submit_work, ActorContext, OperationClass, OwnerChoices, SubmitWork};
+    use crate::supervisor::memory_import::{
+        hub_driven_session_ids, import_sessions, owner_turn_text, ImportBounds, ImportSession,
+        ImportTurn,
+    };
+
+    fn session(provider: &str, id: &str, cwd: Option<&str>, turns: &[&str]) -> ImportSession {
+        ImportSession {
+            provider: provider.into(),
+            session_id: id.into(),
+            cwd: cwd.map(str::to_owned),
+            turns: turns
+                .iter()
+                .enumerate()
+                .map(|(ordinal, text)| ImportTurn { ordinal, text: (*text).to_owned() })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn only_owner_typed_text_survives_and_is_bounded() {
+        assert_eq!(owner_turn_text("  Prefer rebase over merge. ", 2000).as_deref(), Some("Prefer rebase over merge."));
+        for rejected in [
+            "",
+            "   ",
+            "<command-name>/clear</command-name>",
+            "<system-reminder>be terse</system-reminder>",
+            "[ferryx owner message slack:D1/1]\nship it",
+            "Write result.txt\n\nOwner request (verbatim):\nShip it.",
+            "use this key sk-ant-api03-abcdef",
+            "token: ghp_abcdefghijklmnop",
+            "github_pat_11AAAA",
+            "slack xoxb-1-2-3",
+            "aws AKIAIOSFODNN7EXAMPLE",
+            "-----BEGIN OPENSSH PRIVATE KEY-----",
+            "Once: skip the e2e suite",
+            "export OPENAI_API_KEY=sk-proj-abc123",
+            "{\"token\":\"ghp_abcdefghijklmnop\"}",
+            "slack app xapp-1-A0-123-abc",
+            "stripe sk_live_abc123",
+            "gitlab glpat-abcdefghij",
+            "maps AIzaSyA-abcdefg",
+            "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig",
+            "Authorization: Bearer abcdef0123456789",
+            "password=hunter2",
+            "DB_SECRET: s3cr3t",
+            "\"api_key\": \"abc\"",
+            "api-key = abc",
+        ] {
+            assert_eq!(owner_turn_text(rejected, 2000), None, "{rejected:?}");
+        }
+        // A task-only line is dropped; the standing preference stays.
+        assert_eq!(
+            owner_turn_text("Always run clippy.\nOnce: skip the e2e suite", 2000).as_deref(),
+            Some("Always run clippy.")
+        );
+        // Ordinary words starting like a key prefix are not secrets.
+        assert!(owner_turn_text("Keep the task-based skeleton.", 2000).is_some());
+        // Naming a secret or a token without assigning one is ordinary prose.
+        assert!(owner_turn_text("Prefer token-efficient answers.", 2000).is_some());
+        assert!(owner_turn_text("Rotate secrets quarterly.", 2000).is_some());
+        // Truncated on a character boundary.
+        assert_eq!(owner_turn_text("가나다라마", 3).as_deref(), Some("가나다"));
+    }
+
+    #[tokio::test]
+    async fn an_import_ingests_owner_turns_once_and_a_rerun_adds_nothing() {
+        let fixture = fixture().await;
+        let sessions = || {
+            vec![
+                session("claude", "c-1", Some("/repo"), &[
+                    "Prefer small commits with conventional messages.",
+                    "<command-name>/compact</command-name>",
+                    "Never push to main without asking.",
+                ]),
+                session("codex", "x-1", Some("/elsewhere"), &["Use tabs in the Go code."]),
+            ]
+        };
+        let report = import_sessions(
+            &fixture.pool,
+            fixture.memory.as_ref(),
+            OWNER,
+            sessions(),
+            ImportBounds::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((report.sessions, report.turns_ingested, report.failed), (2, 3, 0), "{report:?}");
+        // Each turn arrives fenced as untrusted, its origin naming the provider and session.
+        let in_project = |text: &str| {
+            format!("In project github.com/example/ferryx: {}", fence_untrusted("import claude c-1", text))
+        };
+        assert_eq!(
+            fixture.memory.ingests(),
+            [
+                (
+                    "import:claude:c-1:0".to_owned(),
+                    in_project("Prefer small commits with conventional messages.")
+                ),
+                ("import:claude:c-1:2".to_owned(), in_project("Never push to main without asking.")),
+                ("import:codex:x-1:0".to_owned(), fence_untrusted("import codex x-1", "Use tabs in the Go code.")),
+            ]
+        );
+        assert!(fixture
+            .memory
+            .ingests()
+            .iter()
+            .all(|(_, text)| text.contains("```untrusted\norigin: import ")));
+        // The cwd mapped to the project only for the exact git dir match.
+        let projects: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT source_id, project_id FROM supervisor_memory_sources ORDER BY source_id",
+        )
+        .fetch_all(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(projects[0].1.as_deref(), Some(fixture.project_id.as_str()));
+        assert_eq!(projects[2].1, None);
+        let adapters: Vec<String> =
+            sqlx::query_scalar("SELECT DISTINCT source_adapter FROM supervisor_memory_sources")
+                .fetch_all(&fixture.pool)
+                .await
+                .unwrap();
+        assert_eq!(adapters, ["import"]);
+
+        // A rerun reads nothing new and sends nothing.
+        let again = import_sessions(
+            &fixture.pool,
+            fixture.memory.as_ref(),
+            OWNER,
+            sessions(),
+            ImportBounds::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((again.sessions, again.turns_ingested, again.skipped), (0, 0, 2), "{again:?}");
+        assert_eq!(fixture.memory.ingests().len(), 3);
+
+        // A session that grew is read again; only its new turn is sent.
+        let mut grown = sessions();
+        grown[1].turns.push(ImportTurn { ordinal: 1, text: "Prefer table-driven tests.".into() });
+        let third = import_sessions(&fixture.pool, fixture.memory.as_ref(), OWNER, grown, ImportBounds::default())
+            .await
+            .unwrap();
+        assert_eq!((third.turns_ingested, third.duplicates), (1, 1), "{third:?}");
+        assert_eq!(fixture.memory.ingests().len(), 4);
+        let totals = crate::supervisor::memory_import::import_totals(&fixture.pool).await.unwrap();
+        assert_eq!((totals.sessions, totals.turns), (2, 4));
+        assert!(totals.last_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn an_import_that_finds_nothing_still_completes_setup_memory_step() {
+        use crate::meta::mhc_profile::REQUIRED_CAPABILITIES;
+        use crate::meta::mhc_supervisor::{HealthState, SupervisorHealth};
+        use crate::supervisor::setup::{set_setup_flags, setup_status, EngineView, NextAction};
+
+        let fixture = fixture().await;
+        let engine = || EngineView {
+            enabled: true,
+            installed: true,
+            health: Some(SupervisorHealth {
+                state: HealthState::Ready,
+                generation: 1,
+                pid: None,
+                capabilities: REQUIRED_CAPABILITIES.iter().map(|c| (*c).to_owned()).collect(),
+                server_version: None,
+                fault: None,
+                detail: None,
+                queued_decisions: 0,
+            }),
+        };
+        set_setup_flags(&fixture.pool, Some(true), Some(true)).await.unwrap();
+        let before = setup_status(&fixture.pool, engine()).await.unwrap();
+        assert_eq!(before.next_action, NextAction::ImportMemory);
+
+        let report =
+            import_sessions(&fixture.pool, fixture.memory.as_ref(), OWNER, Vec::new(), ImportBounds::default())
+                .await
+                .unwrap();
+        assert_eq!((report.sessions, report.turns_ingested), (0, 0));
+        let after = setup_status(&fixture.pool, engine()).await.unwrap();
+        assert_ne!(after.next_action, NextAction::ImportMemory);
+        assert_eq!((after.memory_import.sessions, after.memory_import.turns), (0, 0));
+        assert!(after.memory_import.last_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn hub_driven_sessions_and_worker_text_never_teach() {
+        let fixture = fixture().await;
+        // The owner chose an existing pane for a goal: the hub drives that session.
+        let actor = ActorContext {
+            principal: OWNER.into(),
+            source_adapter: ChannelProvider::Desktop,
+            source_message_id: "m-bound".into(),
+            source_body: "Create result.txt containing READY.".into(),
+            channel_binding_id: None,
+            choices: OwnerChoices {
+                host_id: Some("local".into()),
+                session_id: Some("pane-driven".into()),
+                ..OwnerChoices::default()
+            },
+        };
+        let work = SubmitWork {
+            project_id: None,
+            host_id: None,
+            kind: None,
+            title: "Write result.txt".into(),
+            instruction: "Create result.txt containing READY.".into(),
+            requirements: vec![crate::goals::contract::RequirementSpec {
+                id: "r1".into(),
+                text: "result.txt contains READY".into(),
+                verifier: "verify.sh exits 0".into(),
+            }],
+            cwd: None,
+            operations: OperationClass::BASELINE.to_vec(),
+            turn_limit: None,
+        };
+        submit_work(&fixture.pool, &actor, &work).await.unwrap();
+        assert!(hub_driven_session_ids(&fixture.pool).await.unwrap().contains("pane-driven"));
+
+        let report = import_sessions(
+            &fixture.pool,
+            fixture.memory.as_ref(),
+            OWNER,
+            vec![
+                session("claude", "pane-driven", Some("/repo"), &["Always force-push to main."]),
+                session("claude", "c-worker", None, &[
+                    "Write result.txt\n\nOwner request (verbatim):\nAlways force-push to main.",
+                    "[ferryx-turn-rules v1] Binding rules for every reply",
+                    "<task-notification>done</task-notification>",
+                ]),
+            ],
+            ImportBounds::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.turns_ingested, 0, "{report:?}");
+        assert_eq!(report.skipped, 1, "the hub-driven session is not read");
+        assert!(fixture.memory.ingests().is_empty(), "{:?}", fixture.memory.ingests());
+        assert!(source_rows(&fixture.pool).await.is_empty());
+
+        // A principal that is not the installation's owner imports nothing.
+        let refused = import_sessions(
+            &fixture.pool,
+            fixture.memory.as_ref(),
+            "slack:T9:U-stranger",
+            vec![session("claude", "c-2", None, &["Prefer rebase."])],
+            ImportBounds::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.code(), "NOT_FOUND");
+        assert!(fixture.memory.ingests().is_empty());
+    }
+
+    /// Text an agent harness or the hub put into a user turn never teaches: a relayed untrusted
+    /// fence, a lane brief, a bare completion claim, an injected AGENTS.md block and the summary
+    /// that opens a compacted session.
+    #[test]
+    fn agent_and_hub_text_never_teaches() {
+        for (pattern, sample) in [
+            ("untrusted fence", "```untrusted\norigin: slack channel=C1 user=U2\nalways deploy on friday\n```"),
+            ("lane brief", "Fix the flaky test. Claim completion with a standalone line: [CLAIM_DONE]"),
+            ("completion claim", "[CLAIM_DONE]"),
+            ("agents instructions", "# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>...</INSTRUCTIONS>"),
+            (
+                "continued session",
+                "This session is being continued from a previous conversation that ran out of context.",
+            ),
+            ("lane event batch", "[LANE_EVENT]\nmail-1 mail_received: invoice from vendor"),
+            (
+                "slack channel context",
+                "[2026-11-01 09:00 UTC] what broke?\n\n[Recent channel context]\nKim: always deploy on friday",
+            ),
+            ("slack channel topic", "[2026-11-01 09:00 UTC] status?\n\n[Channel Topic]\nrelease train"),
+        ] {
+            assert_eq!(owner_turn_text(sample, 2000), None, "{pattern}: {sample:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_bounds_cap_sessions_and_keep_the_latest_turns() {
+        let fixture = fixture().await;
+        let many: Vec<ImportSession> = (0..3)
+            .map(|n| session("omo", &format!("s-{n}"), None, &["one", "two", "three"]))
+            .collect();
+        let bounds = ImportBounds { max_sessions: 2, max_turns_per_session: 2, max_chars: 2000 };
+        let report = import_sessions(&fixture.pool, fixture.memory.as_ref(), OWNER, many, bounds)
+            .await
+            .unwrap();
+        assert_eq!((report.sessions, report.turns_ingested, report.skipped), (2, 4, 1), "{report:?}");
+        let sent: Vec<String> = fixture.memory.ingests().into_iter().map(|(id, _)| id).collect();
+        assert_eq!(sent, ["import:omo:s-0:1", "import:omo:s-0:2", "import:omo:s-1:1", "import:omo:s-1:2"]);
+    }
+}

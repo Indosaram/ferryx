@@ -433,6 +433,54 @@ async fn a_mirror_device_cannot_mutate_the_supervisor() {
 }
 
 #[tokio::test]
+async fn setup_routes_read_for_any_machine_device_and_mutate_only_for_admitted_control() {
+    let gateway = Gateway::start().await;
+    let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    // A closed hub: every setup route is SUPERVISOR_UNAVAILABLE and nothing is written.
+    let (status, _, body) = gateway.get("/api/v1/supervisor/setup", &token).await;
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body["error"]["code"], SUPERVISOR_UNAVAILABLE_CODE);
+    for path in ["/api/v1/supervisor/setup", "/api/v1/supervisor/adopt-all"] {
+        let (status, _, body) = gateway.post_to(path, &token, r#"{"importMemory":false,"projects":[]}"#).await;
+        assert_eq!(status, 503, "{path}: {body}");
+        assert_eq!(body["error"]["code"], SUPERVISOR_UNAVAILABLE_CODE);
+    }
+
+    populate(&gateway).await;
+    let (status, cache, body) = gateway.get("/api/v1/supervisor/setup", &token).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(cache.as_deref(), Some("no-store"));
+    assert!(body["nextAction"].is_string(), "{body}");
+    assert_eq!(body["owner"]["ownerPrincipal"], OWNER);
+    assert_eq!(body["projects"], 1);
+    let (_, _, snapshot) = gateway.get("/api/v1/supervisor", &token).await;
+    assert_eq!(snapshot["setup"]["owner"], body["owner"], "{snapshot}");
+
+    // A device the agent-control policy does not admit may not run setup or adopt.
+    gateway.state().agent_control_policy.restrict_to(["another-device"]);
+    for path in ["/api/v1/supervisor/setup", "/api/v1/supervisor/adopt-all"] {
+        let (status, _, body) = gateway.post_to(path, &token, r#"{"importMemory":true,"projects":[]}"#).await;
+        assert_eq!(status, 403, "{path}: {body}");
+        assert_eq!(body["error"]["code"], "FORBIDDEN");
+    }
+    let mirror = gateway.token(DevicePermission::Control, DeviceAccessScope::Mirror);
+    let (status, _, _) = gateway.get("/api/v1/supervisor/setup", &mirror).await;
+    assert_eq!(status, 403);
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn adopt_all_adopts_nothing_when_no_legacy_lane_is_adoptable() {
+    let gateway = Gateway::start().await;
+    let token = gateway.authorized_machine_token();
+    populate(&gateway).await;
+    let (status, _, body) = gateway.post_to("/api/v1/supervisor/adopt-all", &token, "").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, serde_json::json!({"adopted": [], "refused": []}));
+    gateway.stop().await;
+}
+
+#[tokio::test]
 async fn memory_without_an_engine_and_a_closed_hub_are_503() {
     let gateway = Gateway::start().await;
     let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);

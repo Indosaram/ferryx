@@ -236,10 +236,20 @@ unmeasured performance claims:
 - [Rust](https://www.rust-lang.org/) stable (at least 1.89)
 - [Zig](https://ziglang.org/download/) 0.17.0 (required for the pinned Ghostty build)
 - [Tauri CLI v2](https://v2.tauri.app/start/prerequisites/)
+- On Windows, LLVM (`libclang`, for the FFmpeg bindings; set `LIBCLANG_PATH` if it is not found)
 
 On Linux, install the GTK 3, WebKitGTK 4.1, and other system libraries required by
-[Tauri](https://v2.tauri.app/start/prerequisites/) before compiling the desktop app. The
-headless CLI builds without them:
+[Tauri](https://v2.tauri.app/start/prerequisites/) before compiling the desktop app, plus the
+headers the built-in remote desktop links (Debian/Ubuntu package names):
+
+```bash
+sudo apt-get install clang libclang-dev libpipewire-0.3-dev libspa-0.2-dev libdbus-1-dev \
+  libva-dev libdrm-dev libgbm-dev libegl-dev libgl-dev libxcb1-dev libxcb-shm0-dev \
+  libxcb-randr0-dev libxcb-xfixes0-dev libx11-dev libxext-dev libxrandr-dev libxfixes-dev \
+  libxtst-dev libxi-dev libevdev-dev libudev-dev
+```
+
+The headless CLI and relay build without any of them:
 `cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features --bin ferryx-cli`.
 
 ### Clone and install
@@ -271,6 +281,24 @@ The command is idempotent: it skips a download that is already present and verif
 both macOS slices. Release builds run it automatically: `cargo tauri build` calls it from
 `beforeBuildCommand`. A dev build works without it. The hub then uses `FERRYX_HUB_MHC_BIN`
 when set, else an mhc bundled next to the running executable, else `mhc` from your PATH.
+
+### Fetch FFmpeg (remote desktop)
+
+Remote desktop is part of every desktop build and links FFmpeg 9. You do not install FFmpeg
+yourself: one command downloads the pinned LGPL FFmpeg 9 SDK (headers and shared libraries, no
+GPL, nonfree or OpenH264 code) for your machine from a prerelease of this repository, checks its
+sha256 and build receipt, and places it in the gitignored `src-tauri/resources/ffmpeg/sdk/`:
+
+```bash
+bun scripts/fetch-ffmpeg.mjs
+```
+
+`.cargo/config.toml` points `FFMPEG_DIR` there, so `cargo build`, `cargo test` and
+`cargo tauri dev` link it, and dev binaries load it from there at run time. `cargo tauri dev`
+and `cargo tauri build` run the fetch automatically; run it yourself before a plain `cargo`
+command in a fresh clone. Prebuilt SDKs exist for Linux x86_64, macOS (arm64 and x86_64) and
+Windows x64. On other targets, or to use your own FFmpeg 9 build, set `FFMPEG_DIR` to its prefix
+(`include/` and `lib/`); `scripts/build-ffmpeg-lgpl.sh` builds one from the pinned source.
 
 ### Run the desktop app
 

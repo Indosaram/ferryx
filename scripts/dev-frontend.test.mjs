@@ -31,6 +31,7 @@ test(
       env: {
         ...process.env,
         FERRYX_DEV_FRONTEND_NO_BUILD: "1",
+        FERRYX_DEV_FETCH_FFMPEG: "0",
         FERRYX_DEV_CACHE_DIR: tempCacheDir,
       },
       stdout: "pipe",

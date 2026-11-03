@@ -1599,6 +1599,25 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
   });
 
+  it("acknowledges on focus without a cached outcome and again when an outcome arrives", async () => {
+    const session = createSession("term-session-ack", "daemon-pty-ack");
+    const plain: TerminalActivity = { isAgent: true, state: "done", title: "omo" };
+    const { rerender } = await renderNative(<NativeTerminalPane sessionId="term-session-ack" session={session} activity={plain} active={false} />);
+    expect(tauriCoreMocks.invoke.mock.calls.some(([cmd]) => cmd === "cmd_agent_acknowledge_outcome")).toBe(false);
+
+    await act(async () => {
+      rerender(<NativeTerminalPane sessionId="term-session-ack" session={session} activity={plain} active />);
+    });
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_agent_acknowledge_outcome", { sessionId: "daemon-pty-ack" });
+    const acknowledgements = () => tauriCoreMocks.invoke.mock.calls.filter(([cmd]) => cmd === "cmd_agent_acknowledge_outcome").length;
+    const onFocus = acknowledgements();
+
+    await act(async () => {
+      rerender(<NativeTerminalPane sessionId="term-session-ack" session={session} activity={{ ...plain, outcome: "error" }} active />);
+    });
+    expect(acknowledgements()).toBe(onFocus + 1);
+  });
+
   it("positions the IME input sink at the native cursor receipt", async () => {
     tauriCoreMocks.invoke.mockResolvedValue({
       cols: 80,

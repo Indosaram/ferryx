@@ -54,6 +54,7 @@ import {
 import { BrowserPane } from "./BrowserPane";
 import { FilePreviewPane } from "./FilePreviewPane";
 import { ChangesPanel } from "./ChangesPanel";
+import { RemoteDesktopPane } from "./RemoteDesktopPane";
 import { DagGraphView } from "./dag/DagGraphView";
 import { TabBar } from "./TabBar";
 import { NativeTerminalVisibilityProvider } from "../lib/nativeTerminalVisibility";
@@ -205,6 +206,9 @@ type TerminalSplitViewProps = {
   onToggleTabPin?: (tabId: string, pinned: boolean) => void;
   onAddTab?: (shell?: string) => void;
   onAddBrowserTab?: (url?: string, profileId?: string) => void;
+  /** Multi-window: omit to hide the "Move to Window" tab menu entries. */
+  onMoveTabToWindow?: (tabId: string, targetLabel: string | null) => void;
+  listOtherWindows?: () => Promise<string[]>;
   onDuplicateBrowserTab?: (tabId: string, profileId?: string) => void;
   onAddMarkdown?: () => void;
   onAddMobileEmulator?: () => void;
@@ -263,6 +267,8 @@ export function TerminalSplitView({
   onRenameTab,
   onToggleTabPin,
   onAddTab = () => undefined,
+  onMoveTabToWindow,
+  listOtherWindows,
   onAddBrowserTab = () => undefined,
   onDuplicateBrowserTab = () => undefined,
   onAddMarkdown,
@@ -505,6 +511,8 @@ export function TerminalSplitView({
     onRenameTab,
     onToggleTabPin,
     onAddTab,
+    onMoveTabToWindow,
+    listOtherWindows,
     onAddBrowserTab,
     onDuplicateBrowserTab,
     onAddMarkdown,
@@ -692,6 +700,8 @@ type TabGroupViewProps = {
   onRenameTab?: (tabId: string, label: string) => void;
   onToggleTabPin?: (tabId: string, pinned: boolean) => void;
   onAddTab: (shell?: string) => void;
+  onMoveTabToWindow?: (tabId: string, targetLabel: string | null) => void;
+  listOtherWindows?: () => Promise<string[]>;
   onAddBrowserTab: (url?: string, profileId?: string) => void;
   onDuplicateBrowserTab: (tabId: string, profileId?: string) => void;
   onAddMarkdown?: () => void;
@@ -754,6 +764,8 @@ function TabGroupView({
   onToggleTabPin,
   onResetAgentState,
   onAddTab,
+  onMoveTabToWindow,
+  listOtherWindows,
   onAddBrowserTab,
   onAddMarkdown,
   onDuplicateBrowserTab,
@@ -849,6 +861,8 @@ function TabGroupView({
         onCloseToLeft={onCloseTabsToLeft}
         onRenameTab={onRenameTab}
         onTogglePin={onToggleTabPin}
+        onMoveTabToWindow={onMoveTabToWindow}
+        listOtherWindows={listOtherWindows}
         onResetAgentState={onResetAgentState}
         sessionIdForLifecycle={(tab) => focusedPaneSessionId(layout, tab)}
         onSplitRight={(tabId) => splitTerminalTab(tabId, "horizontal")}
@@ -1478,6 +1492,15 @@ const PaneLeafView = React.memo(function PaneLeafView({
                   worktree={content.worktree}
                   worktreePath={content.worktreePath}
                   active={tabVisible}
+                />
+              );
+            case "remoteDesktop":
+              return (
+                <RemoteDesktopPane
+                  hostId={content.hostId}
+                  label={tab.label}
+                  visible={tabVisible}
+                  occluded={showsDropFeedback}
                 />
               );
             case "dag": {
