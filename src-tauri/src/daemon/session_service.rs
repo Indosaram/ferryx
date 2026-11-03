@@ -2810,6 +2810,7 @@ impl DaemonSessionService {
                             pid: None,
                         },
                         exit: None,
+                        agent_stamps: None,
                     }
                 });
                 // Store idempotency entry and session metadata before releasing the request lock.

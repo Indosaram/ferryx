@@ -902,6 +902,7 @@ impl RemoteGatewayState {
         let workspaces = Arc::clone(&sessions.workspace_service);
         self.workspace_registry = workspaces.registry.clone();
         self.session_backend = sessions.clone();
+        install_agent_stamp_persistence(&self.agent_events, &workspaces);
         self.machine_services = Some(Arc::new(crate::daemon::MachineServices {
             sessions,
             workspaces,
@@ -1622,6 +1623,47 @@ impl RemoteGatewayState {
 
 /// Concurrent push dispatches in flight before new alerts are dropped.
 const PUSH_DISPATCH_SLOTS: usize = 16;
+
+/// How long the stamp writer gathers changes before one journal write.
+const AGENT_STAMP_WRITE_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Keeps each session's state and screen times in the machine journal's own session record, so a
+/// restarted daemon continues them instead of restarting them. Seeds the bus from the journal
+/// now, then writes every change from one thread: the bus's sink only queues, so a publisher never
+/// waits on the journal. The thread holds the workspace service, not the gateway state, and ends
+/// (after a last write) when the bus, and with it the sink, is dropped.
+fn install_agent_stamp_persistence(
+    bus: &Arc<crate::agent_control::events::AgentEventBus>,
+    workspaces: &Arc<crate::daemon::workspace_service::DaemonWorkspaceService>,
+) {
+    match workspaces.journal.agent_stamps() {
+        Ok(stamps) => bus.seed_stamps(stamps),
+        Err(error) => tracing::warn!(%error, "agent stamps were not loaded from the machine journal"),
+    }
+    let (queue, updates) = std::sync::mpsc::channel();
+    let sink_queue = std::sync::Mutex::new(queue);
+    bus.set_stamp_sink(Arc::new(move |session_id, stamps| {
+        if let Ok(queue) = sink_queue.lock() {
+            let _ = queue.send((session_id.to_string(), stamps.clone()));
+        }
+    }));
+    let workspaces = Arc::clone(workspaces);
+    let spawned = std::thread::Builder::new().name("agent-stamps".into()).spawn(move || {
+        while let Some((batch, closed)) =
+            crate::agent_control::events::next_stamp_batch(&updates, AGENT_STAMP_WRITE_WINDOW)
+        {
+            if let Err(error) = workspaces.journal.record_agent_stamps(&batch) {
+                tracing::warn!(%error, "agent stamps were not written to the machine journal");
+            }
+            if closed {
+                break;
+            }
+        }
+    });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "the agent stamp writer did not start");
+    }
+}
 
 /// The `/api/v1/sessions` visibility rule applied to pushes: a Machine-scope Control device
 /// sees machine-owned sessions; a Mirror device sees mirrored (desktop) sessions only.

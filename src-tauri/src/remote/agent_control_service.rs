@@ -164,7 +164,9 @@ async fn observe_entry(
     }
     // The bus's timestamps belong to its own latest reading; they only describe this entry's
     // state and screen while that reading still matches them.
-    let seen = state.agent_events.latest(session_id);
+    // `stamps` is the latest reading, or the persisted stamps of a previous run before this
+    // run's first reading, so a restarted daemon still reports the real times.
+    let seen = state.agent_events.stamps(session_id);
     let state_since = seen.as_ref().filter(|seen| seen.state == status.state).and_then(|seen| seen.state_since_ms);
     let screen_revision = screen.as_ref().map(|snapshot| snapshot.revision.clone());
     let screen_changed_at = seen
