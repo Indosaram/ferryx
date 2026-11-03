@@ -3681,6 +3681,7 @@ pub async fn attach_legacy_pane(
 #[cfg(test)]
 mod tests;
 
+pub mod activity;
 pub mod admission;
 pub mod answers;
 pub mod changes;
@@ -3692,4 +3693,5 @@ pub mod dispatcher;
 pub mod memory;
 pub mod receipts;
 pub mod request;
+pub mod rules;
 pub mod wakes;
