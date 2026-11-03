@@ -66,6 +66,7 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
+          use-cache: false
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -82,6 +83,7 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
           shared-key: macos-15-tests-no-debuginfo-v1
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Report disk space before compilation
         run: df -h . "$RUNNER_TEMP"
@@ -309,6 +311,7 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
+          use-cache: false
 
       - name: Install Linux system dependencies
         if: matrix.os_name == 'linux'
@@ -363,6 +366,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: './src-tauri -> target'
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Fixture suites commit through git. Hosted runners ship no global identity, so
       # `git commit` inside a fixture repository fails before the assertion under test runs.
