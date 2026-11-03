@@ -209,6 +209,64 @@ pub(crate) async fn http_conversation(
     }
 }
 
+/// `POST /api/v1/supervisor/converse {text, mentions, requestId}`: one owner message answered
+/// by the supervisor on the `app` channel; both rows land in the app transcript. Only a machine
+/// Control device the agent-control policy admits may send it; any other device is 403.
+pub(crate) async fn http_converse(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    body: Result<
+        Json<ferryx_hub::supervisor::transcript::ConverseInput>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    let device = match agent_control_service::http_device(&state, &headers, true) {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+    let Ok(Json(input)) = body else {
+        return reference_chat_error(
+            ScopeErrorCode::InvalidRequest,
+            "the body must be {text, mentions, requestId}",
+        );
+    };
+    let caller = crate::hub_runtime::SupervisorCaller::Remote {
+        device_id: device.id.clone(),
+    };
+    match crate::hub_runtime::supervisor_converse(&state, caller, input).await {
+        Ok(answer) => no_store(answer),
+        Err(failure) => service_refusal(&failure),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TranscriptQuery {
+    #[serde(default)]
+    cursor: Option<i64>,
+}
+
+/// `GET /api/v1/supervisor/transcript?cursor=`: one page of the app transcript, oldest first.
+pub(crate) async fn http_transcript(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    query: Result<
+        axum::extract::Query<TranscriptQuery>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> Response {
+    if let Err(response) = agent_control_service::http_device(&state, &headers, false) {
+        return response;
+    }
+    let Ok(axum::extract::Query(query)) = query else {
+        return reference_chat_error(ScopeErrorCode::InvalidRequest, "the query must be [cursor]");
+    };
+    match crate::hub_runtime::supervisor_transcript(&state, query.cursor.unwrap_or(0)).await {
+        Ok(page) => no_store(page),
+        Err(failure) => service_refusal(&failure),
+    }
+}
+
 /// `GET /api/v1/supervisor/memory`: the owner's native memory receipts with their provenance.
 /// Without the engine in this daemon it is 503 `MEMORY_UNAVAILABLE`, never an empty success.
 pub(crate) async fn http_memory(

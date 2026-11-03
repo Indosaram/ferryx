@@ -135,6 +135,36 @@ pub async fn cmd_supervisor_read(
     read_from(daemon_client.send_request(DaemonRequest::SupervisorReadV1 { request }).await?)
 }
 
+fn converse_from(response: DaemonResponse) -> Result<serde_json::Value, IpcError> {
+    match response {
+        DaemonResponse::SupervisorConverseV1Ok { value } => Ok(value),
+        DaemonResponse::Error { message, code, details } => {
+            let mut error = failure(message, code);
+            if details.is_some() {
+                error.details = details;
+            }
+            Err(error)
+        }
+        _ => Err(IpcError::internal("Unexpected daemon supervisor converse response")),
+    }
+}
+
+/// One owner message from the panel composer: the supervisor answers on the `app` channel and
+/// both are stored in the app transcript. Returns `{owner, reply, replayed}`.
+#[tauri::command]
+pub async fn cmd_supervisor_converse(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+    text: String,
+    mentions: Vec<String>,
+    request_id: String,
+) -> Result<serde_json::Value, IpcError> {
+    converse_from(
+        daemon_client
+            .send_request(DaemonRequest::SupervisorConverseV1 { text, mentions, request_id })
+            .await?,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +251,21 @@ mod tests {
         let request: SupervisorReadAction =
             serde_json::from_value(serde_json::json!({"view": "conversation", "projectId": "p", "after": 2})).unwrap();
         assert_eq!(request, SupervisorReadAction::Conversation { project_id: "p".into(), after: Some(2) });
+    }
+
+    #[test]
+    fn a_converse_reply_carries_the_rows_and_a_refusal_keeps_its_code() {
+        let ok = DaemonResponse::SupervisorConverseV1Ok { value: serde_json::json!({"replayed": false}) };
+        assert_eq!(converse_from(ok).unwrap()["replayed"], false);
+        let refused = DaemonResponse::Error {
+            message: "no mhc supervisor engine is installed in this daemon".into(),
+            code: Some("MHC_NOT_RUNNING".into()),
+            details: Some(serde_json::json!({"code": "MHC_NOT_RUNNING", "status": 503})),
+        };
+        let error = converse_from(refused).unwrap_err();
+        assert_eq!(error.code, IpcErrorCode::Custom("MHC_NOT_RUNNING".into()));
+        assert_eq!(error.details.unwrap()["status"], 503);
+        let old = DaemonResponse::Error { message: "unknown variant".into(), code: None, details: None };
+        assert_eq!(converse_from(old).unwrap_err().code, IpcErrorCode::DaemonUpgradeRequired);
     }
 }

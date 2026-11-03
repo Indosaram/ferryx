@@ -782,6 +782,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::SupervisorEngine { .. } => "supervisorEngine",
         DaemonRequest::SupervisorRequestV1 { .. } => "supervisorRequestV1",
         DaemonRequest::SupervisorReadV1 { .. } => "supervisorReadV1",
+        DaemonRequest::SupervisorConverseV1 { .. } => "supervisorConverseV1",
     }
 }
 
@@ -980,7 +981,9 @@ fn request_timeout(request: &DaemonRequest) -> std::time::Duration {
     match request {
         DaemonRequest::SupervisorGoal { request } if request.mutates() => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
         // A cancel stops the worker's pane before it answers.
-        DaemonRequest::SupervisorRequestV1 { .. } => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
+        DaemonRequest::SupervisorRequestV1 { .. } | DaemonRequest::SupervisorConverseV1 { .. } => {
+            SUPERVISOR_GOAL_REQUEST_TIMEOUT
+        }
         _ => DEFAULT_REQUEST_TIMEOUT,
     }
 }

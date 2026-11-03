@@ -7909,6 +7909,16 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             get(supervisor_api::http_conversation),
         )
         .route(
+            "/api/v1/supervisor/converse",
+            post(supervisor_api::http_converse).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+            )),
+        )
+        .route(
+            "/api/v1/supervisor/transcript",
+            get(supervisor_api::http_transcript),
+        )
+        .route(
             "/api/v1/supervisor/memory",
             get(supervisor_api::http_memory)
                 .post(supervisor_api::http_memory_post)
