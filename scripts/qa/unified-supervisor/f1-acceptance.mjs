@@ -1,0 +1,390 @@
+// Scenario `f1-acceptance` (docs/plans/SUPERVISOR_AUTONOMY_PANEL_PLAN_2026-11-02.md, final
+// verification F1): autonomy with no owner input on a fixture fleet of three computers, then one
+// irreversible approval that must reach the owner.
+//
+// Opt-in: it runs only when the config carries `f1Fleet` (see config.schema.json). Without it the
+// scenario refuses with PREREQUISITE_MISSING (never PASS) and --all leaves it out.
+//
+// Topology (every address, port, path and binary comes from config; nothing names a machine):
+// - Hub computer (where this runner runs): the isolated hub daemon (ctx.startDaemon, hub on,
+//   gateway in localNetwork mode on the product's fixed gateway port), the loopback relay
+//   (config.ferryxRelay on a free port, reachable as f1Fleet.relayHost by the targets), a
+//   loopback mock Web Push service, and an f1-host-agent.mjs child that owns this computer's
+//   fixture provider proxy and pane logs. Its panes: the stalled session, later the approval.
+// - targets[0], targets[1]: f1-host-agent.mjs over `ssh -T`, each starting one isolated target
+//   daemon (hub off, relay mode, agent control on), paired to the hub through the relay with a
+//   machine grant (the product's pairedHostPair). targets[0] runs the four outage sessions behind
+//   its proxy; targets[1] runs the 429 session.
+//
+// Product read paths the verdict uses (never pane text, never log text):
+// - GET /api/v1/supervisor/panel and /api/v1/fleet/sessions with the owner's paired machine
+//   Control device token (the phone/desktop panel read path).
+// - The owner event socket /api/v1/events (panel.decision / panel.action frames), raw.
+// - The hub database supervisor_actions rows, opened read-only.
+// - Push: the owner device subscribes a loopback endpoint (FERRYX_PUSH_ALLOW_LOOPBACK_ENDPOINT,
+//   honoured by debug builds only) through POST /api/v1/push/subscribe; every POST the daemon's
+//   real push sender makes to it is one push.
+//
+// Timing: the 20 minute outage and the 3 minute 429 reset are real wall-clock time (the behavior
+// under test). Every other wait is event driven (journal events, directory watches, sockets)
+// with a bounded deadline. The one fixed window is the product's decision-push batch window
+// (push_policy DECISION_BATCH_WINDOW, 30 s) after the approval push, observed to prove that no
+// second push follows; it is the behavior under test for "exactly one push".
+import { createHash, randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { HarnessError, isInside, POSIX } from './harness.mjs';
+
+export const F1_REQUIRED_ASSERTIONS = Object.freeze([
+  'fleet-agents-ready', 'fleet-same-revision', 'relay-listening', 'hub-open', 'owner-device-paired', 'owner-push-subscribed',
+  'owner-event-socket-open', 'targets-paired-by-machine-grant', 'three-computers', 'outage-injected-real-duration',
+  'four-outage-sessions-on-one-computer', 'quota-session-reset-three-minutes', 'stall-session-provider-working',
+  'all-recovery-sessions-finished', 'outage-sessions-recovered-after-outage', 'quota-resumed-at-reset',
+  'stall-cancelled-and-resumed', 'one-log-row-per-incident', 'recovery-rows-closed', 'zero-cards-during-recovery',
+  'zero-pushes-during-recovery', 'approval-one-card-with-recommendation', 'approval-not-answered-by-supervisor',
+  'approval-exactly-one-push', 'fleet-teardown-clean',
+]);
+
+const AGENT = join(dirname(fileURLToPath(import.meta.url)), 'f1-host-agent.mjs');
+const REAL_OUTAGE_MS = 20 * 60_000;
+const REAL_QUOTA_RESET_MS = 3 * 60_000;
+const GATEWAY_PORT = 43821;
+const PUSH_BATCH_WINDOW_MS = 30_000;
+const HUB_WORKSPACE = 'f1-hub';
+const TARGET_WORKSPACE = 'f1-target';
+
+const now = () => Date.now();
+
+// One f1-host-agent.mjs child (local or over ssh). RPC replies and pane events arrive as JSON
+// stdout lines in the run journal; every wait is ctx.waitFor on that journal.
+async function startAgent(ctx, id, executable, args, env) {
+  const handle = await ctx.spawn(id, executable, args, { stdin: 'pipe', graceMs: 20_000, env });
+  handle.child.stdin.on('error', () => { /* the exit event decides */ });
+  let seq = 0;
+  const ready = await ctx.waitFor(`${id} ready`, (e) => e.source === id && e.json?.event === 'agent-ready', { deadlineMs: 120_000 });
+  const rpc = async (op, payload = {}, deadlineMs = 120_000) => {
+    seq += 1;
+    const callId = seq;
+    const cursor = ctx.journal.cursor();
+    ctx.evidence.appendJsonl('f1/rpc.jsonl', { agent: id, id: callId, op, payload, at: new Date().toISOString() });
+    handle.child.stdin.write(`${JSON.stringify({ id: callId, op, ...payload })}\n`);
+    const reply = await ctx.waitFor(`${id} ${op}`, (e) => e.source === id && e.json?.id === callId, { after: cursor, deadlineMs });
+    ctx.evidence.appendJsonl('f1/rpc.jsonl', { agent: id, id: callId, op, reply: reply.json, at: new Date().toISOString() });
+    if (!reply.json.ok) throw new HarnessError(reply.json.error?.code ?? 'AGENT_ERROR', `${id} ${op}: ${reply.json.error?.message}`);
+    return reply.json.result;
+  };
+  return { id, handle, rpc, hostname: ready.json.hostname, agentPid: ready.json.pid };
+}
+
+const paneEvents = (ctx, agentId) => ctx.journal.events.filter((e) => e.source === agentId && e.json?.event === 'pane').map((e) => e.json.record);
+
+function waitPane(ctx, agentId, label, predicate, deadlineMs) {
+  return ctx.waitFor(label, (e) => e.source === agentId && e.json?.event === 'pane' && predicate(e.json.record), { deadlineMs });
+}
+
+// Loopback Web Push endpoint: counts what the daemon's real push sender posts.
+function startPushSink(ctx) {
+  const received = [];
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    async fetch(request) {
+      const body = new Uint8Array(await request.arrayBuffer());
+      const entry = { atMs: now(), method: request.method, path: new URL(request.url).pathname, bytes: body.length,
+        sha256: createHash('sha256').update(body).digest('hex'), headers: Object.fromEntries(request.headers) };
+      received.push(entry);
+      ctx.evidence.appendJsonl('f1/push-received.jsonl', entry);
+      ctx.journal.push({ source: 'push-sink', kind: 'push', index: received.length, atMs: entry.atMs });
+      return new Response(null, { status: 201 });
+    },
+  });
+  return { url: `http://127.0.0.1:${server.port}/push/f1-${ctx.runId}`, received, stop: () => server.stop(true) };
+}
+
+async function pushKeys() {
+  const pair = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const raw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
+  return { p256dh: Buffer.from(raw).toString('base64url'), auth: Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString('base64url') };
+}
+
+export async function runF1Acceptance(ctx, deps) {
+  const { config } = ctx;
+  const fleet = config.f1Fleet;
+  if (!fleet) throw new HarnessError('PREREQUISITE_MISSING', 'f1-acceptance needs config.f1Fleet (hub agent root, two ssh target computers, relayHost); it is opt-in');
+  if (!POSIX) throw new HarnessError('SCENARIO_PLATFORM_UNSUPPORTED', 'f1-acceptance runs POSIX fixture panes; run the hub computer on Linux or macOS');
+  if (typeof config.ferryxRelay !== 'string') throw new HarnessError('CONFIG_INVALID', 'f1-acceptance needs ferryxRelay on the hub computer');
+  if (!(await deps.portIsFree(GATEWAY_PORT))) throw new HarnessError('PREREQUISITE_MISSING', `127.0.0.1:${GATEWAY_PORT} is in use on the hub computer; the hub gateway binds that fixed port and nothing is stopped to free it`);
+  const outageMs = fleet.outageDurationMs ?? REAL_OUTAGE_MS;
+  const quotaResetMs = fleet.quotaResetMs ?? REAL_QUOTA_RESET_MS;
+  const data = realpathSync(ctx.paths.data);
+  const dbPath = join(data, 'hub', 'hub.sqlite');
+  if (!isInside(dbPath, data)) throw new HarnessError('PRODUCTION_PATH_REFUSED', `${dbPath} is outside the run root`);
+  const hubSocket = join(data, 'runtime', 'daemon.sock');
+  const hubLog = join(data, 'data', 'logs', 'daemon.log');
+  const evidence = { schema: 'f1-acceptance/1', runId: ctx.runId, startedAtMs: now(), config: { outageMs, quotaResetMs, relayHost: fleet.relayHost }, hosts: {}, scenarios: {}, panel: [], frames: [], clauses: [] };
+  const clause = (name, ok, detail) => { evidence.clauses.push({ clause: name, pass: ok === true, atMs: now(), detail }); return ctx.assert(name, ok === true, detail); };
+  const writeEvidence = () => ctx.evidence.writeJson('f1/f1-evidence.json', { ...evidence, finishedAtMs: now() });
+  const agents = [];
+  const pushSink = startPushSink(ctx);
+  let socket = null;
+  try {
+    // 1. Fleet agents: the hub computer's own, then each target over ssh.
+    const localRev = (await ctx.run('git-rev', deps.onPath('git') ?? '/usr/bin/git', ['-C', dirname(AGENT), 'rev-parse', 'HEAD'], { deadlineMs: 10_000 })).stdout.trim();
+    const hubAgent = await startAgent(ctx, 'agent-hub', process.execPath, [AGENT], ctx.productEnv());
+    agents.push(hubAgent);
+    // ssh needs the operator's agent socket and known_hosts; it runs nothing but the agent script.
+    const sshEnv = { PATH: process.env.PATH, HOME: process.env.HOME, USER: process.env.USER, SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK };
+    for (const [index, target] of fleet.targets.entries()) {
+      const sshArgs = ['-T', '-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=15', ...(target.sshOptions ?? []), target.ssh, target.bun, join(target.repoDir, 'scripts', 'qa', 'unified-supervisor', 'f1-host-agent.mjs')];
+      agents.push(await startAgent(ctx, `agent-${index === 0 ? 'outage' : 'quota'}`, fleet.sshBin, sshArgs, Object.fromEntries(Object.entries(sshEnv).filter(([, value]) => value !== undefined))));
+    }
+    const [, outageAgent, quotaAgent] = agents;
+    const inits = [];
+    inits.push(await hubAgent.rpc('init', { runId: ctx.runId, dataRoot: fleet.hub.agentDataRoot, bun: process.execPath }));
+    for (const [index, target] of fleet.targets.entries()) inits.push(await agents[index + 1].rpc('init', { runId: ctx.runId, dataRoot: target.dataRoot, bun: target.bun }));
+    const revs = [];
+    for (const agent of agents) revs.push(await agent.rpc('rev'));
+    clause('fleet-agents-ready', inits.every((init) => typeof init.runRoot === 'string'), { inits });
+    clause('fleet-same-revision', revs.every((rev) => rev.head === localRev && !rev.dirty), { localRev, revs });
+    for (const [index, agent] of agents.entries()) {
+      evidence.hosts[agent.id] = { role: ['hub', 'outage', 'quota'][index], label: index === 0 ? fleet.hub.label : fleet.targets[index - 1].label, hostname: inits[index].hostname, agentPid: inits[index].agentPid, runRoot: inits[index].runRoot, clockAtInitMs: inits[index].nowMs };
+    }
+    const proxies = [];
+    for (const agent of agents) proxies.push((await agent.rpc('proxyStart', { quotaResetMs })).url);
+
+    // 2. Relay on the hub computer (recorded pid), reachable by the targets as relayHost.
+    const relayPort = await deps.freeLoopbackPort();
+    const relayUrl = `http://${fleet.relayHost}:${relayPort}`;
+    const machineToken = `f1-${ctx.runId}-${randomUUID()}`;
+    const relayCursor = ctx.journal.cursor();
+    const relay = await ctx.spawn('relay', config.ferryxRelay, ['--port', String(relayPort)], {
+      env: ctx.productEnv({ FERRYX_DEPLOYMENT_MODE: 'selfhost', FERRYX_RELAY_MACHINE_TOKENS: machineToken, FERRYX_ACCOUNT_DATA_DIR: join(data, 'relay-account'), RUST_LOG: 'info' }), cwd: data, graceMs: 5_000,
+    });
+    await ctx.waitFor('relay listening', (e) => e.source === 'relay' && String(e.line ?? '').includes('ferryx-relay listening'), { after: relayCursor, deadlineMs: 30_000 });
+    clause('relay-listening', true, { pid: relay.pid, relayUrl, bind: `0.0.0.0:${relayPort}` });
+
+    // 3. Hub daemon: owner set-up on a hub-computer fixture repo, hub on, loopback push allowed.
+    const hubRepo = await hubAgent.rpc('repo');
+    const hubEnv = ctx.productEnv({
+      SHELL: inits[0].shell, FERRYX_ALLOW_INSECURE_RELAY: '1', FERRYX_PUSH_ALLOW_LOOPBACK_ENDPOINT: '1',
+      FERRYX_HUB_TRACKER_ADDR: `127.0.0.1:${await deps.freeLoopbackPort()}`,
+    });
+    const setup = await ctx.cli(['supervisor', 'setup', '--owner', config.ownerPrincipal, '--project', 'f1', '--repo-identity', 'qa:f1', '--host', 'local', '--git-common-dir', realpathSync(hubRepo.gitCommonDir), '--json'], { label: 'supervisor-setup', env: hubEnv });
+    if (setup.code !== 0) throw new HarnessError('SETUP_FAILED', `supervisor setup failed: ${JSON.stringify(setup.json)} ${setup.stderr}`);
+    await ctx.startDaemon({ env: hubEnv, deadlineMs: 60_000 });
+    mkdirSync(dirname(hubLog), { recursive: true });
+    await deps.waitForChange(ctx, 'hub is up', dirname(hubLog), () => ({ done: existsSync(hubLog) && readFileSync(hubLog, 'utf8').includes('ferryx hub is up') }), 120_000);
+    clause('hub-open', true, { hubLog });
+    const hubCall = (label, request, deadlineMs) => hubAgent.rpc('call', { socket: hubSocket, request, deadlineMs }, (deadlineMs ?? 60_000) + 10_000)
+      .then((reply) => { ctx.evidence.appendJsonl('f1/hub-socket.jsonl', { label, request, reply, at: new Date().toISOString() }); return reply; });
+    const registered = await hubCall('hub-register-workspace', { type: 'registerWorkspace', workspaceId: HUB_WORKSPACE, repoRoot: realpathSync(hubRepo.workspaceRoot) });
+
+    // 4. The owner's paired device: panel reads, the event socket and the push subscription.
+    const configured = await hubCall('hub-remote-configure', { type: 'remoteConfigure', config: { mode: 'localNetwork', port: 0, allowControl: true } });
+    const status = await hubCall('hub-remote-status', { type: 'remoteGetStatus' });
+    const bound = status?.status?.boundAddress ?? null;
+    if (configured?.type !== 'remoteConfigureOk' || !bound) throw new HarnessError('GATEWAY_UNAVAILABLE', `hub gateway did not start: ${JSON.stringify({ configured, status })}`);
+    const base = `http://${bound}`;
+    const http = async (label, method, path, { token, body } = {}) => {
+      const headers = { accept: 'application/json' };
+      if (token) headers.authorization = `Bearer ${token}`;
+      if (body !== undefined) headers['content-type'] = 'application/json';
+      const response = await fetch(`${base}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: ctx.signal });
+      const text = await response.text();
+      let json = null;
+      try { json = JSON.parse(text); } catch { /* raw */ }
+      const entry = { label, method, path, request: body ?? null, status: response.status, body: json ?? text, atMs: now() };
+      ctx.evidence.appendJsonl('f1/http.jsonl', entry);
+      return entry;
+    };
+    const code = await hubCall('owner-pairing-code', { type: 'remoteCreateMachinePairingCode' });
+    const paired = await http('owner-pair', 'POST', '/api/v1/pair/exchange', { body: { code: code?.code, deviceName: 'f1-owner-phone', installationId: `f1-owner-${ctx.runId}` } });
+    const owner = { token: paired.body?.token ?? null, id: paired.body?.device?.id ?? null };
+    const policy = await hubCall('hub-agent-control-on', { type: 'agentControlSettingsSet', enabled: true, excludedDeviceIds: [] });
+    clause('owner-device-paired', paired.status === 200 && Boolean(owner.token) && policy?.type === 'agentControlSettingsOk', { status: paired.status, device: paired.body?.device ?? null, policy });
+    if (!owner.token) throw new HarnessError('PAIRING_FAILED', 'owner device pairing failed');
+    const subscribed = await http('owner-push-subscribe', 'POST', '/api/v1/push/subscribe', { token: owner.token, body: { endpoint: pushSink.url, keys: await pushKeys(), phoneNeedsInput: true, phoneFinishedMode: 'off' } });
+    clause('owner-push-subscribed', subscribed.status === 204, { status: subscribed.status, body: subscribed.body, endpoint: pushSink.url, note: 'a 400 here means the hub binary is not a debug build (loopback endpoints are refused in release)' });
+    const ticket = await http('owner-socket-ticket', 'POST', '/api/v1/socket-ticket', { token: owner.token, body: { target: '/api/v1/events' } });
+    socket = new WebSocket(`ws://${bound}/api/v1/events?ticket=${encodeURIComponent(ticket.body?.ticket ?? '')}`);
+    socket.addEventListener('message', (message) => {
+      let frame = null;
+      try { frame = JSON.parse(String(message.data)); } catch { return; }
+      if (!String(frame?.type ?? '').startsWith('panel.')) return;
+      const entry = { atMs: now(), frame };
+      evidence.frames.push(entry);
+      ctx.evidence.appendJsonl('f1/owner-frames.jsonl', entry);
+      ctx.journal.push({ source: 'owner-socket', kind: 'frame', type: frame.type, sessionRef: frame.sessionRef ?? frame.action?.sessionRef ?? null, decision: frame.type === 'panel.decision' ? frame.decision !== null : null });
+    });
+    const opened = await new Promise((resolveOpen) => {
+      socket.addEventListener('open', () => resolveOpen(true), { once: true });
+      socket.addEventListener('error', () => resolveOpen(false), { once: true });
+      setTimeout(() => resolveOpen(false), 30_000);
+    });
+    clause('owner-event-socket-open', opened && ticket.status === 200, { ticketStatus: ticket.status });
+    const panel = async (label) => {
+      const read = await http(`panel-${label}`, 'GET', '/api/v1/supervisor/panel', { token: owner.token });
+      const fleetRead = await http(`fleet-${label}`, 'GET', '/api/v1/fleet/sessions', { token: owner.token });
+      const snapshot = { label, atMs: now(), status: read.status, decisions: read.body?.decisions ?? null, handling: read.body?.handling ?? null, log: read.body?.log ?? null, paused: read.body?.paused ?? null, fleet: fleetRead.body?.sessions ?? null };
+      evidence.panel.push(snapshot);
+      return snapshot;
+    };
+
+    // 5. Targets: isolated daemons in relay mode, paired to the hub with a machine grant.
+    const targets = [];
+    for (const [index, target] of fleet.targets.entries()) {
+      const agent = agents[index + 1];
+      const free = await agent.rpc('portFree', { port: GATEWAY_PORT });
+      if (!free.free) throw new HarnessError('PREREQUISITE_MISSING', `${target.label}: port ${GATEWAY_PORT} is in use there; nothing is stopped to free it`);
+      const daemon = await agent.rpc('daemonStart', { ferryxCli: target.ferryxCli, env: { FERRYX_ALLOW_INSECURE_RELAY: '1', FERRYX_MACHINE_TOKEN: machineToken, FERRYX_RELAY_URL: relayUrl } });
+      const call = (request) => agent.rpc('call', { request });
+      const control = await call({ type: 'agentControlSettingsSet', enabled: true, excludedDeviceIds: [] });
+      const relayMode = await call({ type: 'remoteConfigure', config: { mode: 'relay', port: GATEWAY_PORT, allowControl: true, relayUrl } });
+      await agent.rpc('waitLog', { path: daemon.log, needle: 'relay control channel connected', deadlineMs: 90_000 }, 100_000);
+      const pin = await call({ type: 'remoteCreateMachinePairingCode' });
+      const pair = await hubCall(`hub-pair-${target.label}`, { type: 'pairedHostPair', request: { relayOrigin: relayUrl, pin: pin?.code, displayLabel: target.label } }, 90_000);
+      const repo = await agent.rpc('repo');
+      const ws = await call({ type: 'registerWorkspace', workspaceId: TARGET_WORKSPACE, repoRoot: repo.workspaceRoot });
+      targets.push({ label: target.label, agent, daemon, hostId: pair?.host?.hostId ?? null, grant: pair?.host?.grantScope ?? null, repo, control, relayMode, ws });
+      evidence.hosts[agent.id].daemon = { pid: daemon.pid, executable: daemon.executable, args: daemon.args, socket: daemon.socket };
+      evidence.hosts[agent.id].hostId = pair?.host?.hostId ?? null;
+    }
+    clause('targets-paired-by-machine-grant', targets.every((t) => t.hostId && t.grant === 'machine' && t.control?.type === 'agentControlSettingsOk' && t.relayMode?.type === 'remoteConfigureOk' && t.ws?.type === 'registerWorkspaceOk') && registered?.type === 'registerWorkspaceOk',
+      { targets: targets.map(({ label, hostId, grant, control, relayMode, ws }) => ({ label, hostId, grant, control: control?.type, relayMode: relayMode?.type, ws: ws?.type })), hubWorkspace: registered?.type });
+
+    // 6. Inject the faults. The outage clock starts on targets[0] before its sessions exist, so
+    //    each session's first turn already fails; the 429 session's reset starts at its first turn.
+    const [outageTarget, quotaTarget] = targets;
+    const outage = await outageAgent.rpc('outage', { durationMs: outageMs });
+    const outageSessions = [];
+    for (let n = 1; n <= 4; n += 1) {
+      outageSessions.push(await outageAgent.rpc('spawnPane', { workspaceId: TARGET_WORKSPACE, cwd: outageTarget.repo.repo, role: 'outage', label: `outage-${n}`, proxyUrl: proxies[1] }));
+    }
+    const quotaSession = await quotaAgent.rpc('spawnPane', { workspaceId: TARGET_WORKSPACE, cwd: quotaTarget.repo.repo, role: 'quota', label: 'quota-1', proxyUrl: proxies[2] });
+    const stallSession = await hubAgent.rpc('spawnPane', { socket: hubSocket, workspaceId: HUB_WORKSPACE, cwd: hubRepo.repo, role: 'stall', label: 'stall-1', proxyUrl: proxies[0] });
+    const stallWorking = await waitPane(ctx, hubAgent.id, 'stall pane reported working', (r) => r.label === 'stall-1' && r.kind === 'reported' && r.state === 'working', 60_000).then(() => true, () => false);
+    const fleetAfterFaults = await panel('after-faults');
+    const stallEntry = fleetAfterFaults.fleet?.find?.((s) => s.sessionRef?.endsWith?.(`:${stallSession.sessionId}`)) ?? null;
+    // The hub computer's own host id, as the hub's fleet read names it.
+    const hubHostId = stallEntry?.hostId ?? null;
+    const ref = (hostId, session) => `${hostId}:${session.sessionId}`;
+    evidence.scenarios.outage = { host: outageTarget.label, hostId: outageTarget.hostId, injectedAtMs: outage.startedAtMs, endsAtMs: outage.untilMs, durationMs: outageMs, sessions: outageSessions.map((s) => ({ label: s.label, sessionRef: ref(outageTarget.hostId, s), spawnedAtMs: s.spawnedAtMs })) };
+    evidence.scenarios.quota = { host: quotaTarget.label, hostId: quotaTarget.hostId, resetMs: quotaResetMs, session: { label: quotaSession.label, sessionRef: ref(quotaTarget.hostId, quotaSession), spawnedAtMs: quotaSession.spawnedAtMs } };
+    evidence.scenarios.stall = { host: fleet.hub.label, hostId: hubHostId, session: { label: stallSession.label, sessionRef: hubHostId ? ref(hubHostId, stallSession) : null, sessionId: stallSession.sessionId, spawnedAtMs: stallSession.spawnedAtMs } };
+    clause('outage-injected-real-duration', outageMs === REAL_OUTAGE_MS, { outageMs, required: REAL_OUTAGE_MS, injectedAtMs: outage.startedAtMs });
+    clause('quota-session-reset-three-minutes', quotaResetMs === REAL_QUOTA_RESET_MS, { quotaResetMs, required: REAL_QUOTA_RESET_MS });
+    clause('three-computers', new Set(inits.map((init) => init.hostname)).size === 3 && new Set([hubHostId, ...targets.map((t) => t.hostId)]).size === 3,
+      { hostnames: inits.map((init) => init.hostname), hostIds: [hubHostId, ...targets.map((t) => t.hostId)] });
+    clause('four-outage-sessions-on-one-computer', outageSessions.length === 4 && new Set(outageSessions.map((s) => s.sessionId)).size === 4, { sessions: evidence.scenarios.outage.sessions });
+    clause('stall-session-provider-working', stallWorking && stallEntry?.state === 'working' && stallEntry?.stateSource === 'provider', { stallEntry });
+
+    // 7. Recovery runs with no owner input. Wait (bounded) for every session's own completion.
+    const recoveryDeadline = outageMs + 20 * 60_000;
+    const doneOf = (agentId, label) => waitPane(ctx, agentId, `${label} done`, (r) => r.label === label && r.kind === 'done', recoveryDeadline).then((e) => e.json.record.atMs, () => null);
+    const doneAt = await Promise.all([
+      ...outageSessions.map((s) => doneOf(outageAgent.id, s.label)), doneOf(quotaAgent.id, 'quota-1'), doneOf(hubAgent.id, 'stall-1'),
+    ]);
+    clause('all-recovery-sessions-finished', doneAt.every((at) => Number.isFinite(at)), { doneAt });
+
+    // The incident rows close in place once the scheduler judges the resumed sessions healthy.
+    const hub = await deps.openHubReader(dbPath);
+    const rows = () => hub.all('SELECT id, incident_key, session_ref, kind, summary, basis, evidence_json, live, created_at, updated_at FROM supervisor_actions ORDER BY id');
+    const recoveryRows = () => rows().filter((row) => row.incident_key.startsWith('recovery:'));
+    await deps.waitForChange(ctx, 'recovery rows closed', dirname(dbPath), () => {
+      const current = recoveryRows();
+      return { done: current.length >= 3 && current.every((row) => row.live === 0), current };
+    }, 5 * 60_000).catch(() => null);
+    const afterRecovery = await panel('after-recovery');
+    const recoveryEndMs = now();
+
+    // Recovery actions, per session, from what each pane received and returned.
+    const actionsOf = (agentId, label) => paneEvents(ctx, agentId).filter((r) => r.label === label && ['input', 'turn', 'done', 'reported'].includes(r.kind))
+      .map(({ atMs, kind, text, escape, status, attempt, state }) => ({ atMs, kind, text, escape, status, attempt, state }));
+    for (const s of evidence.scenarios.outage.sessions) s.recoveryActions = actionsOf(outageAgent.id, s.label);
+    evidence.scenarios.quota.session.recoveryActions = actionsOf(quotaAgent.id, 'quota-1');
+    evidence.scenarios.stall.session.recoveryActions = actionsOf(hubAgent.id, 'stall-1');
+    const outageProxy = await outageAgent.rpc('proxyLog');
+    const quotaProxy = await quotaAgent.rpc('proxyLog');
+    evidence.scenarios.outage.proxy = outageProxy;
+    evidence.scenarios.quota.proxy = quotaProxy;
+
+    const outageOk = evidence.scenarios.outage.sessions.every((s) => {
+      const turns = s.recoveryActions.filter((a) => a.kind === 'turn');
+      const resumed = s.recoveryActions.some((a) => a.kind === 'input' && a.text === 'continue');
+      return turns.some((t) => t.status === 502) && turns.at(-1)?.status === 200 && turns.at(-1).atMs >= outage.untilMs && resumed;
+    });
+    clause('outage-sessions-recovered-after-outage', outageOk, { outageEndsAtMs: outage.untilMs, sessions: evidence.scenarios.outage.sessions.map((s) => ({ sessionRef: s.sessionRef, turns: s.recoveryActions.filter((a) => a.kind === 'turn') })) });
+    const quotaUntil = quotaProxy.quotaUntil['quota-1'];
+    const quotaTurns = evidence.scenarios.quota.session.recoveryActions.filter((a) => a.kind === 'turn');
+    clause('quota-resumed-at-reset', quotaTurns[0]?.status === 429 && quotaTurns.at(-1)?.status === 200 && quotaTurns.at(-1).atMs >= quotaUntil
+      && quotaTurns.filter((t) => t.status === 429).length === 1, { quotaUntil, turns: quotaTurns });
+    const stallInputs = evidence.scenarios.stall.session.recoveryActions.filter((a) => a.kind === 'input');
+    const stallStart = evidence.scenarios.stall.session.spawnedAtMs;
+    clause('stall-cancelled-and-resumed', stallInputs.some((a) => a.escape) && stallInputs.some((a) => a.text === 'continue') && stallInputs[0]?.atMs - stallStart >= 5 * 60_000,
+      { inputs: stallInputs, spawnedAtMs: stallStart, note: 'Stop types Escape (provider interrupt), then Send types the resume text; the stall threshold is 5 min of an unchanged screen' });
+
+    const finalRows = recoveryRows();
+    evidence.actionRows = rows();
+    const scopes = finalRows.map((row) => row.incident_key.replace(/:g\d+$/, ''));
+    const expectedScopes = [`recovery:upstream:${outageTarget.hostId}`, `recovery:quota:${evidence.scenarios.quota.session.sessionRef}`, `recovery:stall:${evidence.scenarios.stall.session.sessionRef}`].sort();
+    const panelLogKeys = (afterRecovery.log ?? []).map((entry) => entry.incidentKey).filter((key) => key?.startsWith('recovery:'));
+    clause('one-log-row-per-incident', finalRows.length === 3 && JSON.stringify([...scopes].sort()) === JSON.stringify(expectedScopes)
+      && new Set(finalRows.map((row) => row.incident_key)).size === 3 && rows().length === 3 && panelLogKeys.length === 3
+      && new Set(panelLogKeys).size === 3 && panelLogKeys.every((key) => finalRows.some((row) => row.incident_key === key)),
+    { rows: finalRows.map(({ id, incident_key, session_ref, kind, summary, live, created_at, updated_at, evidence_json }) => ({ id, incident_key, session_ref, kind, summary, live, created_at, updated_at, evidence: evidence_json })), expectedScopes, panelLogKeys, allRows: rows().length });
+    clause('recovery-rows-closed', finalRows.length === 3 && finalRows.every((row) => row.live === 0) && (afterRecovery.handling ?? []).length === 0, { live: finalRows.map((row) => ({ key: row.incident_key, live: row.live })), handling: afterRecovery.handling });
+    const recoveryCardFrames = evidence.frames.filter((f) => f.frame.type === 'panel.decision' && f.frame.decision !== null);
+    const panelDecisionCounts = evidence.panel.map((p) => ({ label: p.label, decisions: p.decisions?.length ?? null }));
+    clause('zero-cards-during-recovery', recoveryCardFrames.length === 0 && panelDecisionCounts.every((p) => p.decisions === 0), { cardFrames: recoveryCardFrames, panelDecisionCounts });
+    const recoveryPushes = pushSink.received.filter((p) => p.atMs <= recoveryEndMs);
+    clause('zero-pushes-during-recovery', recoveryPushes.length === 0, { pushes: recoveryPushes });
+
+    // 8. The irreversible step: a non-local `sqlx migrate run` approval on a hub-computer pane the
+    //    owner's device created through the machine session API (so the push may name it).
+    const cardCursor = ctx.journal.cursor();
+    const pushCursor = pushSink.received.length;
+    await hubAgent.rpc('setMode', { role: 'approval', label: 'approval-1', proxyUrl: proxies[0] });
+    const created = await http('approval-session-create', 'POST', '/api/v1/sessions', { token: owner.token, body: {
+      requestId: randomUUID(), workspaceId: HUB_WORKSPACE, worktree: null, cols: 120, rows: 40, inheritFromSessionId: null, cwdRelative: 'f1-project', startup: { kind: 'shell' },
+    } });
+    const approvalDrawn = await waitPane(ctx, hubAgent.id, 'approval drawn', (r) => r.label === 'approval-1' && r.kind === 'approval-drawn', 60_000).catch(() => null);
+    const approvalSessionId = approvalDrawn?.json?.record?.sessionId ?? null;
+    const approvalRef = hubHostId && approvalSessionId ? `${hubHostId}:${approvalSessionId}` : null;
+    const card = await ctx.waitFor('approval card frame', (e) => e.source === 'owner-socket' && e.type === 'panel.decision' && e.decision === true, { after: cardCursor, deadlineMs: 120_000 }).catch(() => null);
+    const firstPush = await ctx.waitFor('approval push', (e) => e.source === 'push-sink' && e.index === pushCursor + 1, { after: cardCursor, deadlineMs: PUSH_BATCH_WINDOW_MS + 90_000 }).catch(() => null);
+    // The batch window, observed in full after the first push: a second push would land in it.
+    await new Promise((resolveWindow) => setTimeout(resolveWindow, PUSH_BATCH_WINDOW_MS + 15_000));
+    const afterApproval = await panel('after-approval');
+    const decisions = afterApproval.decisions ?? [];
+    const only = decisions[0] ?? null;
+    const cardFrames = evidence.frames.filter((f) => f.frame.type === 'panel.decision' && f.frame.decision !== null);
+    evidence.scenarios.approval = { host: fleet.hub.label, sessionRef: approvalRef, createStatus: created.status, createdAtMs: created.atMs, cardFrameAtMs: card?.at ?? null, firstPushAtMs: firstPush?.atMs ?? null, decisions, cardFrames: cardFrames.length };
+    clause('approval-one-card-with-recommendation', decisions.length === 1 && only?.sessionRef === approvalRef && Number.isInteger(only?.recommendedIndex)
+      && only.recommendedIndex >= 0 && only.recommendedIndex < (only.prompt?.options?.length ?? 0) && String(only?.reason ?? '').trim() !== ''
+      && /sqlx migrate run/.test(`${only?.prompt?.command ?? ''} ${only?.prompt?.question ?? ''}`) && cardFrames.length === 1 && cardFrames[0].frame.sessionRef === approvalRef,
+    { createStatus: created.status, approvalRef, decisions, cardFrames });
+    const approvalInputs = paneEvents(ctx, hubAgent.id).filter((r) => r.label === 'approval-1' && r.kind === 'input');
+    const answeredRows = rows().filter((row) => row.session_ref === approvalRef && row.kind === 'answered');
+    clause('approval-not-answered-by-supervisor', approvalInputs.length === 0 && answeredRows.length === 0, { approvalInputs, answeredRows });
+    const approvalPushes = pushSink.received.slice(pushCursor);
+    clause('approval-exactly-one-push', approvalPushes.length === 1 && pushSink.received.length === 1, { pushes: approvalPushes, windowMs: PUSH_BATCH_WINDOW_MS });
+    evidence.pushes = { total: pushSink.received.length, duringRecovery: recoveryPushes.length, afterApproval: approvalPushes.length, received: pushSink.received.map(({ atMs, path, bytes, sha256 }) => ({ atMs, path, bytes, sha256 })) };
+    evidence.decisionCards = { duringRecovery: recoveryCardFrames.length, total: cardFrames.length, panelAfterApproval: decisions.length };
+  } finally {
+    // 9. Teardown by recorded identity: each agent stops the daemons it started; ssh/agent
+    //    children are then terminated by the harness through their own handles.
+    const receipts = [];
+    try { socket?.close(); } catch { /* closed */ }
+    for (const agent of [...agents].reverse()) {
+      try { receipts.push({ agent: agent.id, ...(await agent.rpc('shutdown', {}, 60_000)) }); } catch (error) { receipts.push({ agent: agent.id, error: String(error?.message ?? error) }); }
+    }
+    pushSink.stop();
+    evidence.teardown = receipts;
+    if (!ctx.signal.aborted && agents.length > 0) {
+      const clean = receipts.every((r) => !r.error && (r.daemons ?? []).every((d) => d.exited) && (r.panes ?? []).every((p) => !p.aliveAtTeardown || p.signalled));
+      try { clause('fleet-teardown-clean', clean, { receipts }); } catch { /* recorded late; the run fails */ }
+    }
+    writeEvidence();
+  }
+}

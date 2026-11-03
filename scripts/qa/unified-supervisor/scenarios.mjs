@@ -23,6 +23,7 @@ import { LEGACY_REQUIRED_ASSERTIONS } from './legacy.mjs';
 import { CORRECTION_REQUIRED_ASSERTIONS } from './correction.mjs';
 import { REAL_AUTONOMY_REQUIRED_ASSERTIONS } from './real-autonomy.mjs';
 import { CHANNELS_REQUIRED_ASSERTIONS } from './channels.mjs';
+import { F1_REQUIRED_ASSERTIONS } from './f1-acceptance.mjs';
 
 export const SLEEPER = fileURLToPath(new URL('./fixture-sleeper.mjs', import.meta.url));
 export const WORKER = fileURLToPath(new URL('./fixture-worker.mjs', import.meta.url));
@@ -2578,6 +2579,10 @@ const realAutonomyDeps = Object.freeze({
 });
 const loadRealAutonomy = async () => import('./real-autonomy.mjs');
 
+// The F1 acceptance scenario (plan F1, f1-acceptance.mjs) reuses these helpers.
+const f1Deps = Object.freeze({ onPath, freeLoopbackPort, portIsFree, openHubReader, waitForChange });
+const loadF1 = async () => import('./f1-acceptance.mjs');
+
 // The channels scenario (todo 17, channels.mjs) reuses these helpers.
 const channelsDeps = Object.freeze({
   onPath,
@@ -2655,6 +2660,21 @@ export const SCENARIOS = Object.freeze({
       { clause: 'remote-run', reason: 'the worker runs on this host only', coveredBy: 'remote-delivery' },
     ],
     run: (ctx) => loadRealAutonomy().then((module) => module.runRealAutonomy(ctx, realAutonomyDeps)),
+  }),
+  'f1-acceptance': Object.freeze({
+    implemented: true,
+    task: 'F1',
+    // Opt-in: needs config.f1Fleet (three computers); --all skips it without that, and a direct
+    // run refuses with PREREQUISITE_MISSING. Real 20 min outage + 3 min reset: about 45 min.
+    optIn: 'f1Fleet',
+    summary: 'Three computers, four sessions in a real 20 minute proxy outage, a 429 with a 3 minute reset and a provider-Working session that stops drawing: all finish with no owner input, one panel log row per incident, zero decision cards and zero pushes; then a non-local sqlx migrate run approval yields exactly one recommended card and exactly one push',
+    deadlineMs: 75 * 60_000,
+    requiredAssertions: F1_REQUIRED_ASSERTIONS,
+    notCovered: [
+      { clause: 'real-provider-and-agent-binary', reason: 'sessions are fixture panes reporting as claude through the agent-state socket and calling a per-computer fixture proxy; the supervisor, recovery, panel, event socket, push sender, relay and pairing are the real product', coveredBy: 'real-autonomy (real Claude Code worker, one host)' },
+      { clause: 'push-delivery-to-a-real-push-service', reason: 'the owner subscription is a loopback endpoint (debug builds only); every encrypted POST the product push sender makes is counted', coveredBy: null },
+    ],
+    run: (ctx) => loadF1().then((module) => module.runF1Acceptance(ctx, f1Deps)),
   }),
   correction: Object.freeze({
     implemented: true,
