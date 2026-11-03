@@ -222,6 +222,7 @@ mod tests {
                 last_assistant_line: None,
                 updated_at_ms: 1,
                 stale: false,
+                health: None,
             }])
         }
     }

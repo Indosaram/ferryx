@@ -163,7 +163,22 @@ fn prompt_moved(
     true
 }
 
+/// Tells the owner panel that `session_id`'s agent died mid-turn, from the release telemetry
+/// alone: the fresh fleet entry (which carries `health: failed`) goes out as `panel.session`.
+fn publish_failed_session(server: &Arc<DaemonServer>, session_id: &str) {
+    let state = Arc::clone(&server.remote_state);
+    let session_id = session_id.to_string();
+    tokio::spawn(async move {
+        if let Some(session) = crate::hub_runtime::local_fleet_session(&state, &session_id).await {
+            crate::hub_runtime::publish_panel_session(&session);
+        }
+    });
+}
+
 const PROMPT_MOVED_SESSIONS: usize = 256;
+
+/// The desktop event name the UI's `onSupervisorPanelEvent` listens for.
+const SUPERVISOR_PANEL_EVENT: &str = "supervisor_panel_event";
 
 /// The desktop event for one `agentPromptChanged` frame. A frame that is not a JSON object is
 /// logged and skipped: relaying it as a null payload would tell no row anything.
@@ -4092,6 +4107,24 @@ impl DaemonServer {
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let mut observations = remote_state.agent_events.subscribe();
             let prompt_tx = remote_event_tx.clone();
+            // The owner panel channel also reaches the desktop UI, which listens for
+            // `supervisor_panel_event` (see `onSupervisorPanelEvent`).
+            let mut panel_frames = crate::hub_runtime::subscribe_panel_events();
+            let panel_tx = remote_event_tx.clone();
+            runtime.spawn(async move {
+                loop {
+                    match panel_frames.recv().await {
+                        Ok(payload) => {
+                            let _ = panel_tx.send(DaemonRemoteEvent {
+                                event: SUPERVISOR_PANEL_EVENT.to_string(),
+                                payload,
+                            });
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
             runtime.spawn(async move {
                 let mut filter = crate::agent_control::events::PromptChangeFilter::default();
                 let mut shown = std::collections::HashMap::<String, Option<String>>::new();
@@ -5226,6 +5259,9 @@ impl DaemonServer {
                                         match edge {
                                         Some(crate::terminal::foreground::AgentProcessEdge::Released) => {
                                             server.agent_states.release_foreground(&id);
+                                            if server.session_service.agent_control_failed(&id) {
+                                                publish_failed_session(&server, &id);
+                                            }
                                             server.session_service.release_provider_claim(&id);
                                             server.program_exited(&id, through);
                                         }
@@ -9903,6 +9939,126 @@ mod remote_ssh_tests;
 #[cfg(all(test, unix))]
 mod protocol_release_tests {
     use super::*;
+
+    /// F4: an agent killed mid-turn shows `health: failed` from telemetry alone. A real PTY runs
+    /// an agent-named program that reports `working` and is SIGKILLed; the observer sees the
+    /// shell take the foreground back and the owner panel channel (subscribed BEFORE the kill)
+    /// carries a `panel.session` frame with the failed health. No supervisor text is involved.
+    #[tokio::test]
+    async fn a_killed_agent_publishes_a_failed_panel_session_from_telemetry_alone() {
+        let (directory, script) = crate::ipc::run_blocking(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let script = directory.path().join("omo");
+            std::fs::write(&script, "printf 'AGENT_PID=%s;PIDEND' $$\nread answer\n").unwrap();
+            Ok((directory, script))
+        })
+        .await
+        .unwrap();
+        let server = Arc::new(DaemonServer::new());
+        let mut command = portable_pty::CommandBuilder::new("/bin/bash");
+        command.args(["--noprofile", "--norc", "-i"]);
+        let (id, _lifecycle) = server
+            .terminal_service
+            .spawn_resolved_with_id(
+                uuid::Uuid::new_v4().to_string(),
+                command,
+                80,
+                24,
+                crate::terminal::pty::ResolvedSpawnContext {
+                    root: directory.path().to_owned(),
+                    cwd: directory.path().to_owned(),
+                    managed_workspace_id: None,
+                },
+            )
+            .unwrap();
+        let (_history, output) = server.terminal_service.output_hub().observe_for_test(&id).unwrap();
+        let collect_until = |marker: &'static str| {
+            let mut output = output.resubscribe();
+            async move {
+                let mut text = String::new();
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        match output.recv().await {
+                            Ok(chunk) => text.push_str(&String::from_utf8_lossy(&chunk)),
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Closed) => panic!("PTY closed before {marker}"),
+                        }
+                        if text.contains(marker) {
+                            return text;
+                        }
+                    }
+                })
+                .await
+                .expect("pane marker")
+            }
+        };
+        // Each wait subscribes when it is created, before the input that produces its marker.
+        let shell_ready = collect_until("SHELL_READY>");
+        server
+            .terminal_service
+            .write_input(&id, b"stty -echo; PS1='SHELL_''READY>'\n")
+            .unwrap();
+        shell_ready.await;
+        let agent_ready = collect_until("PIDEND");
+        server
+            .terminal_service
+            .write_input(&id, format!("/bin/sh '{}'\n", script.display()).as_bytes())
+            .unwrap();
+        let text = agent_ready.await;
+        let start = text.find("AGENT_PID=").unwrap() + "AGENT_PID=".len();
+        let pid: i32 = text[start..].split(';').next().unwrap().trim().parse().unwrap();
+        server.agent_states.publish_canonical(crate::daemon::agent_state::AgentState {
+            session_id: id.clone(),
+            state: "working".into(),
+            agent: Some("omo".into()),
+            provider_session: None,
+            detail: None,
+            origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
+        });
+        // Subscribe to the owner channel before the kill.
+        let mut frames = crate::hub_runtime::subscribe_panel_events();
+        // The second full process listing proves the first one was classified, so the observer
+        // has seen the agent own the foreground before it is killed.
+        let (listed_tx, mut listed_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        server.spawn_foreground_observer_with(Arc::new(move || {
+            let _ = listed_tx.send(());
+            crate::terminal::foreground::capture_process_snapshot()
+        }));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            listed_rx.recv().await.unwrap();
+            listed_rx.recv().await.unwrap();
+        })
+        .await
+        .expect("the observer lists processes twice");
+        // SAFETY: the pid is the pane's own agent process, read from its output.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+        let wanted = format!("{}:{id}", crate::remote::reference_chat::files::reference_host_id());
+        let frame = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match frames.recv().await {
+                    Ok(frame)
+                        if frame["type"] == "panel.session"
+                            && frame["sessionRef"] == wanted.as_str()
+                            && frame["session"]["health"]["type"] == "failed" =>
+                    {
+                        return frame;
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => panic!("panel channel closed"),
+                }
+            }
+        })
+        .await
+        .expect("a failed panel.session frame within 5s of the kill");
+        assert_eq!(frame["session"]["health"]["type"], "failed");
+
+        server.terminal_service.write_input(&id, b"exit\n").unwrap();
+        server.terminal_service.close_session(&id).await.unwrap();
+        drop(directory);
+        drop(output);
+    }
 
     /// Collects the pane's output until `marker` appears; a protocol handshake, not a delay.
     async fn output_until(output: &mut broadcast::Receiver<Vec<u8>>, marker: &str) {

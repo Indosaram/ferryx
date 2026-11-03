@@ -341,6 +341,9 @@ const GLYPH_RANK: Record<SessionGlyph, number> = { needsYou: 0, failed: 1, worki
 
 /** A failed health report counts only while the session has not changed state since it. */
 function hasFailed(session: FleetSession, health: SessionHealth | undefined): boolean {
+  // Telemetry on the session itself: the daemon says the agent died mid-turn and no newer state
+  // has replaced the report since (a new turn clears it on the daemon).
+  if (!session.stale && session.health?.type === "failed" && session.state !== "working") return true;
   return (
     !session.stale &&
     health?.kind.type === "failed" &&

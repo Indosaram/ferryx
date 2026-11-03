@@ -245,6 +245,7 @@ mod tests {
             last_assistant_line: None,
             updated_at_ms: NOW,
             stale: false,
+            health: None,
         }
     }
 

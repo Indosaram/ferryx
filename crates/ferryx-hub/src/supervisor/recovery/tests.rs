@@ -158,6 +158,7 @@ fn session(host: &str, id: &str, agent: &str, state: &str, source: &str, changed
         last_assistant_line: None,
         updated_at_ms: changed,
         stale: false,
+        health: None,
     }
 }
 

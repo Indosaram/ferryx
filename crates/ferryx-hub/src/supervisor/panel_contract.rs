@@ -117,6 +117,10 @@ pub struct FleetSession {
     pub last_assistant_line: Option<String>,
     pub updated_at_ms: i64,
     pub stale: bool,
+    /// What daemon telemetry alone says about the session's health. Only `failed` is produced
+    /// today: the agent process left the pane in the middle of a turn. Absent from older peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<HealthKind>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -375,6 +379,7 @@ mod tests {
             last_assistant_line: None,
             updated_at_ms: 2_000,
             stale: false,
+            health: None,
         }
     }
 
