@@ -147,6 +147,15 @@ async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Ob
             }
         }
     }
+    // The bus's timestamps belong to its own latest reading; they only describe this entry's
+    // state and screen while that reading still matches them.
+    let seen = state.agent_events.latest(session_id);
+    let state_since = seen.as_ref().filter(|seen| seen.state == status.state).and_then(|seen| seen.state_since_ms);
+    let screen_revision = screen.as_ref().map(|snapshot| snapshot.revision.clone());
+    let screen_changed_at = seen
+        .as_ref()
+        .filter(|seen| seen.screen_revision == screen_revision)
+        .and_then(|seen| seen.screen_changed_at_ms);
     let entry = serde_json::json!({
         "sessionId": session_id,
         "running": details.running,
@@ -158,9 +167,11 @@ async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Ob
         "tier": status.tier,
         "state": status.state,
         "stateSource": status.source,
+        "stateSince": state_since,
         "detail": provider.and_then(|report| report.detail),
         "pending": pending,
-        "screenRevision": screen.as_ref().map(|snapshot| snapshot.revision.clone()),
+        "screenRevision": screen_revision,
+        "screenChangedAt": screen_changed_at,
         "screenReadable": readable,
     });
     Ok(Observed { entry, screen })
