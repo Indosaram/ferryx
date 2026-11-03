@@ -40,6 +40,31 @@ pub(crate) async fn http_snapshot(
         .into_response()
 }
 
+/// `GET /api/v1/supervisor/panel`: the whole panel in one snapshot. Owner only: it carries
+/// prompt bodies, so only a machine Control device agent control admits may read it.
+pub(crate) async fn http_panel(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = agent_control_service::http_device(&state, &headers, true) {
+        return response;
+    }
+    no_store(serde_json::json!(crate::hub_runtime::supervisor_panel(&state).await))
+}
+
+/// `GET /api/v1/fleet/sessions`: `{sessions}` in the fleet shape. Owner only. This gateway has
+/// no path to the hub's paired-host fleet, so the list is this computer's sessions mapped the
+/// same way the hub maps each machine.
+pub(crate) async fn http_fleet_sessions(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = agent_control_service::http_device(&state, &headers, true) {
+        return response;
+    }
+    no_store(serde_json::json!({ "sessions": crate::hub_runtime::local_fleet_sessions(&state).await }))
+}
+
 pub(crate) async fn http_pause(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,

@@ -27,6 +27,55 @@ mod machine_event_snapshot_race_tests;
 #[path = "machine_event_prompt_push_tests.rs"]
 mod machine_event_prompt_push_tests;
 
+/// The event type of one session's state transition for the Supervisor panel.
+pub(crate) const PANEL_SESSION_EVENT: &str = "panel.session";
+
+/// The `panel.session` frame for one agent observation.
+///
+/// Every machine socket gets the slim form: ids and state, never a prompt body. `session` (the
+/// fleet entry with its pending prompt and last assistant line) is passed only for an owner
+/// subscriber, which is what puts the question text on the wire for the owner alone.
+pub(crate) fn panel_session_frame(
+    host_id: &str,
+    observation: &crate::agent_control::events::AgentObservation,
+    session: Option<&ferryx_hub::supervisor::panel_contract::FleetSession>,
+) -> String {
+    let mut frame = observation.slim();
+    frame["type"] = json!(PANEL_SESSION_EVENT);
+    frame["sequence"] = json!(observation.sequence);
+    frame["sessionRef"] = json!(ferryx_hub::supervisor::panel_contract::SessionRef::new(
+        host_id,
+        &observation.session_id
+    ));
+    if let Some(session) = session {
+        frame["session"] = serde_json::to_value(session).unwrap_or(Value::Null);
+    }
+    frame.to_string()
+}
+
+/// Remembers each session's last state and prompt so only a transition makes a frame.
+#[derive(Default)]
+struct PanelTransitions {
+    seen: std::collections::HashMap<String, (crate::agent_control::AgentControlState, Option<String>)>,
+}
+
+/// Sessions remembered at once; past it the memory restarts and one spare frame per session is sent.
+const PANEL_TRANSITIONS_MAX: usize = 1024;
+
+impl PanelTransitions {
+    fn moved(&mut self, observation: &crate::agent_control::events::AgentObservation) -> bool {
+        let reading = (observation.state, observation.prompt_id.clone());
+        if self.seen.get(&observation.session_id) == Some(&reading) {
+            return false;
+        }
+        if self.seen.len() >= PANEL_TRANSITIONS_MAX && !self.seen.contains_key(&observation.session_id) {
+            self.seen.clear();
+        }
+        self.seen.insert(observation.session_id.clone(), reading);
+        true
+    }
+}
+
 impl Default for MachineEvents {
     fn default() -> Self {
         Self::new(64)
@@ -131,6 +180,7 @@ pub(crate) async fn serve(
     mut socket: axum::extract::ws::WebSocket,
     state: Arc<super::state::RemoteGatewayState>,
     mut receiver: broadcast::Receiver<Value>,
+    owner: bool,
 ) {
     use axum::extract::ws::Message;
     use futures_util::StreamExt;
@@ -161,6 +211,11 @@ pub(crate) async fn serve(
     let mut agent_rx = state.agent_events.subscribe();
     let mut agent_open = true;
     let mut prompts = crate::agent_control::events::PromptChangeFilter::default();
+    let mut panel = PanelTransitions::default();
+    // Decision, action and rule frames go to owner subscribers only.
+    let mut panel_rx = crate::hub_runtime::subscribe_panel_events();
+    let mut panel_open = owner;
+    let host_id = super::reference_chat::files::reference_host_id();
     loop {
         // The cursor is read BEFORE inventory construction. Any overlapping commit
         // is therefore replayed, never discarded as already in this boundary.
@@ -354,12 +409,37 @@ pub(crate) async fn serve(
                 _ = watch.changed() => { reason = "filesystem"; break; },
                 observation = agent_rx.recv(), if agent_open => match observation {
                     Ok(observation) => {
-                        let Some(frame) = prompts.frame(&observation) else { continue };
-                        if !matches!(tokio::time::timeout(std::time::Duration::from_secs(10), socket.send(Message::Text(frame.into()))).await, Ok(Ok(()))) { return; }
+                        if let Some(frame) = prompts.frame(&observation) {
+                            if !matches!(tokio::time::timeout(std::time::Duration::from_secs(10), socket.send(Message::Text(frame.into()))).await, Ok(Ok(()))) { return; }
+                        }
+                        if panel.moved(&observation) {
+                            // The prompt body travels only to an owner subscriber.
+                            let session = if owner {
+                                tokio::time::timeout(
+                                    std::time::Duration::from_secs(5),
+                                    crate::hub_runtime::local_fleet_session(&state, &observation.session_id),
+                                )
+                                .await
+                                .ok()
+                                .flatten()
+                            } else {
+                                None
+                            };
+                            let frame = panel_session_frame(&host_id, &observation, session.as_ref());
+                            if !matches!(tokio::time::timeout(std::time::Duration::from_secs(10), socket.send(Message::Text(frame.into()))).await, Ok(Ok(()))) { return; }
+                        }
                     },
                     // A lagged reader only loses pushes; the client's prompt poll still converges.
                     Err(broadcast::error::RecvError::Lagged(_)) => {},
                     Err(broadcast::error::RecvError::Closed) => agent_open = false,
+                },
+                frame = panel_rx.recv(), if panel_open => match frame {
+                    Ok(frame) => {
+                        if !matches!(tokio::time::timeout(std::time::Duration::from_secs(10), socket.send(Message::Text(frame.to_string().into()))).await, Ok(Ok(()))) { return; }
+                    },
+                    // A lagged owner re-reads the panel snapshot; only the pushes are lost.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {},
+                    Err(broadcast::error::RecvError::Closed) => panel_open = false,
                 },
                 event = receiver.recv() => match event {
                     Ok(event) => {
@@ -373,5 +453,90 @@ pub(crate) async fn serve(
             }
         }
         watcher = Some(watch);
+    }
+}
+
+#[cfg(test)]
+mod panel_frame_tests {
+    use super::*;
+    use crate::agent_control::{
+        events::AgentObservation, AgentControlState, AgentStateSource, AgentTier,
+    };
+    use ferryx_hub::supervisor::panel_contract::{FleetSession, PendingPrompt, SessionRef};
+
+    fn observation() -> AgentObservation {
+        AgentObservation {
+            sequence: 7,
+            session_id: "s1".into(),
+            state: AgentControlState::Blocked,
+            state_source: AgentStateSource::Screen,
+            tier: AgentTier::Screen,
+            prompt_id: Some("p1".into()),
+            kind: Some("approval".into()),
+            screen_revision: Some("r1".into()),
+            state_since_ms: None,
+            screen_changed_at_ms: None,
+        }
+    }
+
+    fn session() -> FleetSession {
+        FleetSession {
+            session_ref: SessionRef::new("mac", "s1"),
+            host_id: "mac".into(),
+            host_label: "This computer".into(),
+            title: "ferryx".into(),
+            cwd: "/work/ferryx".into(),
+            agent: "claude".into(),
+            state: "blocked".into(),
+            state_source: "screen".into(),
+            state_since_ms: None,
+            screen_changed_at_ms: None,
+            pending_prompt: Some(PendingPrompt {
+                prompt_id: "p1".into(),
+                kind: "approval".into(),
+                question: "Run the migration?".into(),
+                command: None,
+                options: vec!["Allow".into(), "Deny".into()],
+                screen_revision: Some("r1".into()),
+            }),
+            last_assistant_line: None,
+            updated_at_ms: 1,
+            stale: false,
+        }
+    }
+
+    #[test]
+    fn a_non_owner_panel_frame_names_the_transition_and_carries_no_prompt_body() {
+        let frame: Value = serde_json::from_str(&panel_session_frame("mac", &observation(), None)).unwrap();
+        assert_eq!(frame["type"], PANEL_SESSION_EVENT);
+        assert_eq!(frame["sessionRef"], "mac:s1");
+        assert_eq!(frame["state"], "blocked");
+        assert_eq!(frame["promptId"], "p1");
+        assert!(frame.get("session").is_none());
+        assert!(!frame.to_string().contains("Run the migration?"));
+    }
+
+    #[test]
+    fn an_owner_panel_frame_carries_the_fleet_session_with_its_question() {
+        let session = session();
+        let frame: Value =
+            serde_json::from_str(&panel_session_frame("mac", &observation(), Some(&session))).unwrap();
+        assert_eq!(frame["type"], PANEL_SESSION_EVENT);
+        assert_eq!(frame["session"]["pendingPrompt"]["question"], "Run the migration?");
+        assert_eq!(frame["session"]["sessionRef"], "mac:s1");
+    }
+
+    #[test]
+    fn only_a_state_or_prompt_change_is_a_transition() {
+        let mut transitions = PanelTransitions::default();
+        let first = observation();
+        assert!(transitions.moved(&first));
+        let mut revision_only = first.clone();
+        revision_only.screen_revision = Some("r2".into());
+        assert!(!transitions.moved(&revision_only), "a screen change alone is not a transition");
+        let mut working = first.clone();
+        working.state = AgentControlState::Working;
+        working.prompt_id = None;
+        assert!(transitions.moved(&working));
     }
 }
