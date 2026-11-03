@@ -365,6 +365,9 @@ pub(crate) async fn handle_as(
 ) -> Result<serde_json::Value, ScopeError> {
     // An answer the owner types (a card tap, the phone, Slack, the terminal helper) joins the
     // answer history once it went through; the supervisor's own answers never do.
+    if let Some(handled) = recovery_card_answer(&op).await {
+        return handled;
+    }
     let owner_answer = crate::hub_runtime::panel_autonomy::owner_answer_of(&op);
     let result = dispatch(state, op.clone(), authorize).await;
     if result.is_ok() && op.is_input_mutation() {
@@ -385,6 +388,23 @@ pub(crate) async fn handle_as(
         ),
     );
     result
+}
+
+/// An owner's tap on a recovery card, answered by the recovery scheduler instead of the pane.
+/// `None` for every other op (including answers to real pane prompts).
+pub(crate) async fn recovery_card_answer(op: &AgentControlOp) -> Option<Result<serde_json::Value, ScopeError>> {
+    let AgentControlOp::Answer { prompt_id, answer, .. } = op else {
+        return None;
+    };
+    let result = crate::hub_runtime::panel_autonomy::answer_recovery_card(prompt_id, answer.option_index).await?;
+    Some(result.map(|()| serde_json::json!({ "recovery": "answered" })).map_err(|error| {
+        let code = match &error {
+            ferryx_hub::supervisor::recovery::CardError::NotOpen => ScopeErrorCode::NotFound,
+            ferryx_hub::supervisor::recovery::CardError::BadOption => ScopeErrorCode::InvalidRequest,
+            ferryx_hub::supervisor::recovery::CardError::Failed(_) => ScopeErrorCode::ControlConflict,
+        };
+        reference_chat_scope(code, error.to_string())
+    }))
 }
 
 /// Desktop event the Supervisor view refetches on: a supervisor typed, or was refused.

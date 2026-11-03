@@ -28,7 +28,7 @@ mod tests;
 pub const GOAL_QUOTA_PREFIX: &str = "recovery:goalquota:";
 
 mod scheduler;
-pub use scheduler::{resume_for, RecoveryScheduler, Refusal, BUDGET_MS};
+pub use scheduler::{resume_for, CardError, RecoveryScheduler, Refusal, BUDGET_MS, CARD_PREFIX};
 
 /// Wall clock in epoch milliseconds.
 pub trait Clock: Send + Sync {
@@ -71,6 +71,22 @@ pub trait RecoveryEscalations: Send + Sync {
 #[async_trait]
 pub trait LoopRetry: Send + Sync {
     async fn retry(&self, lane_key: &str) -> Result<()>;
+
+    /// Like [`Self::retry`], but says whether a lane was actually resumed. The default treats
+    /// every successful retry as a resume; an implementation that can tell a lane with no
+    /// goal to run apart overrides it, so recovery never claims a resume that did not happen.
+    async fn retry_outcome(&self, lane_key: &str) -> Result<RetryOutcome> {
+        self.retry(lane_key).await.map(|()| RetryOutcome::Resumed)
+    }
+}
+
+/// What a goal-lane retry did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryOutcome {
+    /// The lane's goal loop ran again.
+    Resumed,
+    /// The lane has no goal to run (no contract, or the loop is off): nothing was resumed.
+    NothingToResume,
 }
 
 /// Everything the recovery scheduler works with.

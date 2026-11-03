@@ -8522,6 +8522,16 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::AgentControl { request, host_id }) => {
+                    // A recovery card is answered by this daemon's scheduler wherever its
+                    // session lives: it is not a prompt in any pane.
+                    if let Some(handled) =
+                        crate::remote::server::agent_control_service::recovery_card_answer(&request).await
+                    {
+                        match handled {
+                            Ok(result) => DaemonResponse::AgentControlOk { result },
+                            Err(error) => crate::remote::server::agent_control_service::error_response(error),
+                        }
+                    } else {
                     match host_id {
                         None => match crate::remote::server::agent_control_service::handle(&self.remote_state, request).await {
                             Ok(result) => DaemonResponse::AgentControlOk { result },
@@ -8538,6 +8548,7 @@ impl DaemonServer {
                             )
                             .await
                         }
+                    }
                     }
                 }
                 Err(e) => daemon_error(format!("Malformed request: {e}"),),

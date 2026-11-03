@@ -15,7 +15,8 @@ use ferryx_hub::supervisor::panel_contract::{
     ActionEntry, Escalation, FleetSession, SessionControl, SessionRef, StandingRule,
 };
 use ferryx_hub::supervisor::recovery::{
-    Clock, LoopRetry, PauseGate, RecoveryDeps, RecoveryEscalations, RecoveryScheduler, SystemClock,
+    CardError, Clock, LoopRetry, PauseGate, RecoveryDeps, RecoveryEscalations, RecoveryScheduler,
+    RetryOutcome, SystemClock, CARD_PREFIX,
 };
 
 use super::HubLaunch;
@@ -71,6 +72,22 @@ pub fn build_recovery(
     }))
 }
 
+/// An owner's tap on a recovery card (`recovery:<incident>`), carried out by the recovery
+/// scheduler. `None` when `prompt_id` is not a recovery card, so the caller answers it as an
+/// ordinary pane prompt. A recovery card has no pane prompt behind it: nothing is typed.
+pub async fn answer_recovery_card(prompt_id: &str, option_index: Option<u32>) -> Option<Result<(), CardError>> {
+    if !prompt_id.starts_with(CARD_PREFIX) {
+        return None;
+    }
+    let Some(scheduler) = recovery() else {
+        return Some(Err(CardError::NotOpen));
+    };
+    let Some(option) = option_index.and_then(|index| usize::try_from(index).ok()) else {
+        return Some(Err(CardError::BadOption));
+    };
+    Some(scheduler.answer_card(prompt_id, option).await)
+}
+
 /// Hands a goal lane's quota fault (the supervisor's own model is out of quota) to recovery,
 /// which schedules the retry instead of the loop stopping the lane.
 struct GoalQuota {
@@ -118,8 +135,13 @@ impl GoalRetry {
 #[async_trait]
 impl LoopRetry for GoalRetry {
     async fn retry(&self, lane_key: &str) -> ferryx_hub::error::Result<()> {
+        self.retry_outcome(lane_key).await.map(|_| ())
+    }
+
+    /// `Ok(None)` from the goal loop means the lane has no goal to run: nothing was resumed.
+    async fn retry_outcome(&self, lane_key: &str) -> ferryx_hub::error::Result<RetryOutcome> {
         let judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env());
-        on_turn_settled_with(
+        let outcome = on_turn_settled_with(
             &self.pool,
             &judge,
             self.bridge.as_ref(),
@@ -128,8 +150,11 @@ impl LoopRetry for GoalRetry {
             Some(self.quota.as_ref()),
         )
         .await
-        .map(|_| ())
-        .map_err(|error| ferryx_hub::error::HubError::message(error.to_string()))
+        .map_err(|error| ferryx_hub::error::HubError::message(error.to_string()))?;
+        Ok(match outcome {
+            Some(_) => RetryOutcome::Resumed,
+            None => RetryOutcome::NothingToResume,
+        })
     }
 }
 
