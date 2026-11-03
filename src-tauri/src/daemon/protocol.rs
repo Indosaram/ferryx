@@ -1076,6 +1076,12 @@ pub enum DaemonRequest {
     RemoteSetWindowFocused {
         focused: bool,
     },
+    /// Mutes or unmutes phone push for one session; the panel still lists it.
+    #[serde(rename_all = "camelCase")]
+    SessionMute {
+        session_ref: String,
+        muted: bool,
+    },
     /// Turns this connection into a one-way stream of desktop-directed remote
     /// events. Without it the gateway (which lives in the daemon) has no way to
     /// reach the GUI, so remote-issued selections are silently dropped.
@@ -1554,6 +1560,7 @@ pub enum DaemonResponse {
     },
     RemoteSetActiveSelectionOk,
     RemoteSetWindowFocusedOk,
+    SessionMuteOk,
     #[serde(rename_all = "camelCase")]
     RemoteGetActiveSelectionOk {
         selection: Option<RemoteActiveDesktopSelection>,

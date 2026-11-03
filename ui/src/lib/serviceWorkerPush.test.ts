@@ -89,4 +89,34 @@ describe("service worker push handling", () => {
     await sw.dispatch("notificationclick", { notification: { close: vi.fn(), data: { sessionId: "a b" } } });
     expect(sw.openWindow).toHaveBeenCalledWith("https://phone.example.test/#session=a%20b");
   });
+
+  it("opens the decision card from the push deep link", async () => {
+    const sw = loadServiceWorker([]);
+    const url = "/?panel=decision&session=mac%3As1";
+    await sw.dispatch("push", {
+      data: pushData({ agent_id: "mac:s1", state: "decision", title: "Decision needed", body: "Claude Code", url }),
+    });
+    expect(sw.showNotification).toHaveBeenCalledWith("Decision needed", expect.objectContaining({
+      tag: "mac:s1",
+      data: { sessionId: "mac:s1", state: "decision", url },
+    }));
+
+    await sw.dispatch("notificationclick", { notification: { close: vi.fn(), data: { sessionId: "mac:s1", state: "decision", url } } });
+    expect(sw.openWindow).toHaveBeenCalledWith("https://phone.example.test" + url);
+
+    const postMessage = vi.fn();
+    const open = loadServiceWorker([{ url: "https://phone.example.test/", focus: vi.fn(async () => undefined), postMessage }]);
+    await open.dispatch("notificationclick", { notification: { close: vi.fn(), data: { sessionId: "mac:s1", state: "decision", url } } });
+    expect(postMessage).toHaveBeenCalledWith({ type: "ferryx:open-url", url });
+  });
+
+  it("ignores a deep link that leaves the origin", async () => {
+    const sw = loadServiceWorker([]);
+    await sw.dispatch("push", {
+      data: pushData({ agent_id: "a", state: "decision", title: "t", body: "b", url: "//evil.example/x" }),
+    });
+    expect(sw.showNotification).toHaveBeenCalledWith("t", expect.objectContaining({
+      data: { sessionId: "a", state: "decision", url: "/#session=a" },
+    }));
+  });
 });

@@ -829,9 +829,8 @@ pub struct RemoteGatewayState {
     /// Last desktop window-focus report from the GUI and when it arrived. Selection is not
     /// focus: this is the native window's own focus, and a stale report counts as unfocused.
     desktop_window_focus: RwLock<Option<(bool, std::time::Instant)>>,
-    push_dispatch_started: std::sync::atomic::AtomicBool,
-    /// Bounds concurrent push dispatches so a slow push service never stalls the event loop.
-    push_dispatch_slots: Arc<tokio::sync::Semaphore>,
+    /// New-card dedupe and the 30 s batch window for decision pushes.
+    pub(crate) decision_gate: crate::remote::push::DecisionGate,
     #[cfg(test)]
     pub(crate) machine_owned_override: MachineOwnedOverride,
     pub workspace_registry: WorkspaceRegistry,
@@ -1086,8 +1085,7 @@ impl RemoteGatewayState {
             agent_control_audit,
             push,
             desktop_window_focus: RwLock::new(None),
-            push_dispatch_started: std::sync::atomic::AtomicBool::new(false),
-            push_dispatch_slots: Arc::new(tokio::sync::Semaphore::new(PUSH_DISPATCH_SLOTS)),
+            decision_gate: crate::remote::push::DecisionGate::default(),
             #[cfg(test)]
             machine_owned_override: RwLock::new(None),
             active_selection: RwLock::new(None),
@@ -1397,79 +1395,144 @@ impl RemoteGatewayState {
         )
     }
 
-    /// Starts the task that turns agent transitions into phone pushes. Idempotent per state.
-    pub fn start_push_dispatch(self: &Arc<Self>) {
-        if self.push_dispatch_started.load(Ordering::Acquire) {
-            return;
-        }
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            tracing::warn!("phone push dispatch not started: no async runtime");
-            return;
-        };
-        if self.push_dispatch_started.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let mut events = self.agent_events.subscribe();
-        let state = Arc::downgrade(self);
-        runtime.spawn(async move {
-            let mut turns = crate::remote::push::TurnTracker::default();
-            loop {
-                let observation = match events.recv().await {
-                    Ok(observation) => observation,
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        tracing::warn!(skipped, "push dispatch lagged behind agent events");
-                        continue;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => return,
-                };
-                let Some(state) = state.upgrade() else { return };
-                let Some(kind) = turns.observe(
-                    &observation.session_id,
-                    observation.state,
-                    std::time::Instant::now(),
-                ) else {
-                    continue;
-                };
-                // Sending runs on its own task: a slow push service must not delay the next
-                // observation. Past the bound the alert is dropped and logged, not queued.
-                let Ok(slot) = Arc::clone(&state.push_dispatch_slots).try_acquire_owned() else {
-                    tracing::warn!("phone push dropped: too many sends in flight");
-                    continue;
-                };
-                let session_id = observation.session_id.clone();
-                tokio::spawn(async move {
-                    let _slot = slot;
-                    state.dispatch_push(&session_id, kind).await;
-                });
-            }
-        });
-    }
-
-    /// Sends `kind` for `session_id` to every subscription that wants it and whose device may
-    /// see the session, unless the desktop window is focused. Returns how many sends were made.
-    pub async fn dispatch_push(&self, session_id: &str, kind: crate::remote::push::PushKind) -> usize {
-        if self.desktop_window_focus_suppresses_push() {
+    /// Feeds one owner-channel panel frame to phone push. Only a `panel.decision` frame that
+    /// carries a new escalation can push; every other frame (retries and recovery are
+    /// `panel.action`, finished sessions are `panel.session`) is ignored, and a resolved
+    /// decision (`decision: null`) re-arms its session. Returns how many sends were made now.
+    pub async fn handle_panel_frame(self: &Arc<Self>, frame: &serde_json::Value) -> usize {
+        use ferryx_hub::supervisor::panel_contract::Escalation;
+        if frame.get("type").and_then(|kind| kind.as_str()) != Some("panel.decision") {
             return 0;
         }
-        let machine_owned = self.session_is_machine_owned(session_id);
-        let targets: Vec<_> = self
-            .push
-            .store
-            .list_subscriptions()
-            .into_iter()
-            .filter(|sub| kind.wanted_by(sub))
-            .filter(|sub| {
-                self.auth_manager
-                    .live_device(&sub.device_id)
-                    .is_some_and(|device| device_sees_session(&device, machine_owned))
+        let Some(session_ref) = frame.get("sessionRef").and_then(|value| value.as_str()) else {
+            return 0;
+        };
+        let decision = frame.get("decision").filter(|value| !value.is_null());
+        let Some(decision) = decision else {
+            self.decision_gate.resolved(session_ref);
+            return 0;
+        };
+        let Ok(escalation) = serde_json::from_value::<Escalation>(decision.clone()) else {
+            tracing::warn!("ignoring a malformed panel.decision frame");
+            return 0;
+        };
+        self.push_decision(session_ref, &escalation.prompt.prompt_id, std::time::Instant::now())
+            .await
+    }
+
+    /// The decision push policy: not muted, a card this session has not announced, no focused
+    /// desktop; then at most one push per batch window, later cards held for the flush.
+    pub(crate) async fn push_decision(
+        self: &Arc<Self>,
+        session_ref: &str,
+        prompt_id: &str,
+        now: std::time::Instant,
+    ) -> usize {
+        use crate::remote::push::WindowVerdict;
+        if self.push.store.is_session_muted(session_ref)
+            || !self.decision_gate.is_new_card(session_ref, prompt_id)
+            || self.desktop_window_focus_suppresses_push()
+        {
+            return 0;
+        }
+        match self.decision_gate.window(session_ref, now) {
+            WindowVerdict::Send => self.dispatch_decision_push(&[session_ref.to_string()]).await,
+            WindowVerdict::Held { flush_in } => {
+                if let Some(wait) = flush_in {
+                    let state = Arc::downgrade(self);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(wait).await;
+                        if let Some(state) = state.upgrade() {
+                            state.flush_decision_batch(std::time::Instant::now()).await;
+                        }
+                    });
+                }
+                0
+            }
+        }
+    }
+
+    /// Sends the cards held by the batch window as one push. Cards muted or shown on a focused
+    /// desktop in the meantime are dropped.
+    pub(crate) async fn flush_decision_batch(&self, now: std::time::Instant) -> usize {
+        let mut held = self.decision_gate.take_held(now);
+        held.retain(|session_ref| !self.push.store.is_session_muted(session_ref));
+        if held.is_empty() || self.desktop_window_focus_suppresses_push() {
+            return 0;
+        }
+        self.dispatch_decision_push(&held).await
+    }
+
+    /// Mutes or unmutes phone push for one session. The session stays in the panel.
+    pub async fn set_session_push_muted(
+        self: &Arc<Self>,
+        session_ref: &str,
+        muted: bool,
+    ) -> Result<(), crate::ipc::IpcError> {
+        ferryx_hub::supervisor::panel_contract::SessionRef::parse(session_ref).map_err(|error| {
+            crate::ipc::IpcError::new(crate::ipc::IpcErrorCode::InvalidRequest, error.to_string())
+        })?;
+        let state = Arc::clone(self);
+        let session_ref = session_ref.to_string();
+        crate::ipc::run_blocking(move || {
+            state
+                .push
+                .store
+                .set_session_muted(&session_ref, muted)
+                .map(|_| ())
+                .map_err(crate::ipc::IpcError::internal)
+        })
+        .await
+    }
+
+    /// Sends the decision push for `session_refs` to every subscription that wants it, each
+    /// seeing only the sessions its device may see. Returns how many sends were made.
+    pub(crate) async fn dispatch_decision_push(&self, session_refs: &[String]) -> usize {
+        use ferryx_hub::supervisor::panel_contract::SessionRef;
+        let visible: Vec<(&String, bool)> = session_refs
+            .iter()
+            .map(|session_ref| {
+                let backend = SessionRef::parse(session_ref)
+                    .map(|parsed| parsed.backend_session_id().to_string())
+                    .unwrap_or_else(|_| session_ref.clone());
+                (session_ref, self.session_is_machine_owned(&backend))
             })
             .collect();
+        let mut targets = Vec::new();
+        for sub in self.push.store.list_subscriptions() {
+            if !crate::remote::push::PushKind::Decision.wanted_by(&sub) {
+                continue;
+            }
+            let Some(device) = self.auth_manager.live_device(&sub.device_id) else {
+                continue;
+            };
+            let refs: Vec<String> = visible
+                .iter()
+                .filter(|(_, machine_owned)| device_sees_session(&device, *machine_owned))
+                .map(|(session_ref, _)| (*session_ref).clone())
+                .collect();
+            if !refs.is_empty() {
+                targets.push((sub, refs));
+            }
+        }
         if targets.is_empty() {
             return 0;
         }
-        let (agent, worktree) = self.push_labels(session_id).await;
-        let notification = kind.notification(session_id, &agent, worktree.as_deref());
-        let sends = targets.iter().map(|sub| self.push.send(sub, &notification));
+        let mut sends = Vec::new();
+        for (sub, refs) in &targets {
+            let (agent, worktree) = match refs.as_slice() {
+                [only] => {
+                    let backend = SessionRef::parse(only)
+                        .map(|parsed| parsed.backend_session_id().to_string())
+                        .unwrap_or_else(|_| only.clone());
+                    self.push_labels(&backend).await
+                }
+                _ => (String::new(), None),
+            };
+            let notification =
+                crate::remote::push::decision_notification(refs, &agent, worktree.as_deref());
+            sends.push(async move { self.push.send(sub, &notification).await });
+        }
         let outcomes = futures_util::future::join_all(sends).await;
         for outcome in &outcomes {
             if let crate::remote::push::SendOutcome::Failed(error) = outcome {
@@ -1619,9 +1682,6 @@ impl RemoteGatewayState {
         Ok(self.agent_control_settings())
     }
 }
-
-/// Concurrent push dispatches in flight before new alerts are dropped.
-const PUSH_DISPATCH_SLOTS: usize = 16;
 
 /// The `/api/v1/sessions` visibility rule applied to pushes: a Machine-scope Control device
 /// sees machine-owned sessions; a Mirror device sees mirrored (desktop) sessions only.
