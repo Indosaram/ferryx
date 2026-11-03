@@ -1513,6 +1513,47 @@ static PANEL_SOURCES: parking_lot::RwLock<ferryx_hub::fleet::PanelSources> =
 /// The supervisor pause flag the panel reports. The pause route sets it.
 static PANEL_PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Event types of the owner panel channel besides `panel.session` (see
+/// `docs/plans/SUPERVISOR_PANEL_CONTRACT.md`).
+pub const PANEL_DECISION_EVENT: &str = "panel.decision";
+pub const PANEL_ACTION_EVENT: &str = "panel.action";
+pub const PANEL_RULES_EVENT: &str = "panel.rules";
+
+/// Owner-scoped panel frames on their way to owner event sockets. The supervisor workers that
+/// own decisions, the action log and rules call the `publish_panel_*` functions below; the
+/// machine events socket forwards each frame to owner subscribers only, so a prompt body never
+/// reaches any other device. A frame with no subscriber is dropped: a client re-reads
+/// `GET /api/v1/supervisor/panel` when it connects.
+static PANEL_EVENTS: std::sync::LazyLock<tokio::sync::broadcast::Sender<Value>> =
+    std::sync::LazyLock::new(|| tokio::sync::broadcast::channel(256).0);
+
+/// A receiver of the owner panel frames published from now on.
+pub fn subscribe_panel_events() -> tokio::sync::broadcast::Receiver<Value> {
+    PANEL_EVENTS.subscribe()
+}
+
+/// An escalation appeared (`Some`) or was resolved (`None`) for `session_ref`.
+pub fn publish_panel_decision(
+    session_ref: &ferryx_hub::supervisor::panel_contract::SessionRef,
+    decision: Option<&ferryx_hub::supervisor::panel_contract::Escalation>,
+) {
+    let _ = PANEL_EVENTS.send(json!({
+        "type": PANEL_DECISION_EVENT,
+        "sessionRef": session_ref,
+        "decision": decision,
+    }));
+}
+
+/// An action-log entry was created or updated in place.
+pub fn publish_panel_action(action: &ferryx_hub::supervisor::panel_contract::ActionEntry) {
+    let _ = PANEL_EVENTS.send(json!({ "type": PANEL_ACTION_EVENT, "action": action }));
+}
+
+/// The standing rules list changed; `rules` is the whole new list.
+pub fn publish_panel_rules(rules: &[ferryx_hub::supervisor::panel_contract::StandingRule]) {
+    let _ = PANEL_EVENTS.send(json!({ "type": PANEL_RULES_EVENT, "rules": rules }));
+}
+
 /// Installs the stores the panel reads (replaces the previous ones).
 pub fn install_panel_sources(sources: ferryx_hub::fleet::PanelSources) {
     *PANEL_SOURCES.write() = sources;

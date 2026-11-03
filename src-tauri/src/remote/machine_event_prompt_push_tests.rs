@@ -283,3 +283,144 @@ async fn a_non_owner_machine_socket_gets_the_panel_transition_without_a_prompt_b
     drop(socket);
     fixture.stop().await;
 }
+
+/// Waits for the machine socket's first inventory boundary, when it is in its event loop.
+async fn wait_for_boundary<S>(socket: &mut S)
+where
+    S: futures_util::Stream<
+            Item = Result<
+                tokio_tungstenite::tungstenite::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        > + Unpin,
+{
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let message = socket.next().await.unwrap().unwrap();
+            let event: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+            if event["type"] == "inventoryInvalidated" {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the machine socket opens with an inventory boundary");
+}
+
+/// The panel channel is process-wide, so the tests that publish on it run one at a time.
+static PANEL_CHANNEL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn escalation() -> ferryx_hub::supervisor::panel_contract::Escalation {
+    use ferryx_hub::supervisor::panel_contract::{Escalation, PendingPrompt, SessionRef};
+    Escalation {
+        session_ref: SessionRef::new("mac", "s1"),
+        prompt: PendingPrompt {
+            prompt_id: "p1".into(),
+            kind: "approval".into(),
+            question: "Run the migration?".into(),
+            command: Some("sqlx migrate run".into()),
+            options: vec!["Allow".into(), "Deny".into()],
+            screen_revision: Some("r1".into()),
+        },
+        recommended_index: 1,
+        reason: "Not a local database".into(),
+        created_at_ms: 1,
+    }
+}
+
+#[tokio::test]
+async fn an_owner_socket_gets_decision_action_and_rules_frames_within_two_seconds() {
+    use ferryx_hub::supervisor::panel_contract::{ActionEntry, ActionKind, SessionRef};
+    let _channel = PANEL_CHANNEL.lock().await;
+    let (fixture, token) = fixture(DeviceAccessScope::Machine).await;
+    let state = fixture.owner.remote_state().clone();
+    state.agent_control_policy.set_enabled(true);
+    let mut socket = fixture.events_socket(&token).await;
+    wait_for_boundary(&mut socket).await;
+
+    let decision = escalation();
+    crate::hub_runtime::publish_panel_decision(&decision.session_ref, Some(&decision));
+    let frame = tokio::time::timeout(Duration::from_secs(2), next_frame_of(&mut socket, "panel.decision"))
+        .await
+        .expect("the decision frame arrives within two seconds");
+    assert_eq!(frame["sessionRef"], "mac:s1");
+    assert_eq!(frame["decision"]["prompt"]["question"], "Run the migration?");
+    assert_eq!(frame["decision"]["recommendedIndex"], 1);
+
+    crate::hub_runtime::publish_panel_decision(&SessionRef::new("mac", "s1"), None);
+    let resolved = next_frame_of(&mut socket, "panel.decision").await;
+    assert!(resolved["decision"].is_null(), "{resolved}");
+
+    let action = ActionEntry {
+        id: 3,
+        incident_key: "proxy-502".into(),
+        session_ref: None,
+        kind: ActionKind::Retried,
+        summary: "Retried".into(),
+        basis: "default rule".into(),
+        evidence: Vec::new(),
+        undo: None,
+        live: true,
+        created_at_ms: 1,
+        updated_at_ms: 2,
+    };
+    crate::hub_runtime::publish_panel_action(&action);
+    let frame = next_frame_of(&mut socket, "panel.action").await;
+    assert_eq!(frame["action"]["incidentKey"], "proxy-502");
+
+    crate::hub_runtime::publish_panel_rules(&ferryx_hub::supervisor::panel_contract::default_rules());
+    let frame = next_frame_of(&mut socket, "panel.rules").await;
+    assert_eq!(frame["rules"].as_array().unwrap().len(), 4);
+
+    drop(socket);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn a_non_owner_socket_never_gets_a_decision_frame_with_its_question() {
+    let _channel = PANEL_CHANNEL.lock().await;
+    let (fixture, owner_token) = fixture(DeviceAccessScope::Machine).await;
+    let state = fixture.owner.remote_state().clone();
+    let other_token = {
+        let auth = &state.auth_manager;
+        let pin = auth
+            .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+            .unwrap();
+        auth.exchange_pairing_code(&pin, "other-device").unwrap().0
+    };
+    let other_id = state.auth_manager.validate_token(&other_token).unwrap().id;
+    // Agent control admits the first device only; the second is a machine device it excludes.
+    state.agent_control_policy.set_enabled(true);
+    state.agent_control_policy.restrict_to([state.auth_manager.validate_token(&owner_token).unwrap().id]);
+    assert!(!state.agent_control_policy.permits(&other_id));
+    let mut owner = fixture.events_socket(&owner_token).await;
+    let mut other = fixture.events_socket(&other_token).await;
+    wait_for_boundary(&mut owner).await;
+    wait_for_boundary(&mut other).await;
+
+    let decision = escalation();
+    crate::hub_runtime::publish_panel_decision(&decision.session_ref, Some(&decision));
+    // The owner socket proves the frame was on the channel before anything below is published.
+    next_frame_of(&mut owner, "panel.decision").await;
+    state.agent_events.publish(draft("machine-session", "p1"));
+    let mut seen = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let message = other.next().await.unwrap().unwrap();
+            let Ok(text) = message.to_text() else { continue };
+            let Ok(event) = serde_json::from_str::<Value>(text) else { continue };
+            assert!(!text.contains("Run the migration?"), "{text}");
+            let kind = event["type"].as_str().unwrap_or_default().to_owned();
+            seen.push(kind.clone());
+            if kind == "panel.session" {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the non-owner socket still gets the slim panel.session frame");
+    assert!(!seen.iter().any(|kind| kind == "panel.decision"), "{seen:?}");
+
+    drop((owner, other));
+    fixture.stop().await;
+}

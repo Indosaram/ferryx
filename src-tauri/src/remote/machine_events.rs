@@ -212,6 +212,9 @@ pub(crate) async fn serve(
     let mut agent_open = true;
     let mut prompts = crate::agent_control::events::PromptChangeFilter::default();
     let mut panel = PanelTransitions::default();
+    // Decision, action and rule frames go to owner subscribers only.
+    let mut panel_rx = crate::hub_runtime::subscribe_panel_events();
+    let mut panel_open = owner;
     let host_id = super::reference_chat::files::reference_host_id();
     loop {
         // The cursor is read BEFORE inventory construction. Any overlapping commit
@@ -429,6 +432,14 @@ pub(crate) async fn serve(
                     // A lagged reader only loses pushes; the client's prompt poll still converges.
                     Err(broadcast::error::RecvError::Lagged(_)) => {},
                     Err(broadcast::error::RecvError::Closed) => agent_open = false,
+                },
+                frame = panel_rx.recv(), if panel_open => match frame {
+                    Ok(frame) => {
+                        if !matches!(tokio::time::timeout(std::time::Duration::from_secs(10), socket.send(Message::Text(frame.to_string().into()))).await, Ok(Ok(()))) { return; }
+                    },
+                    // A lagged owner re-reads the panel snapshot; only the pushes are lost.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {},
+                    Err(broadcast::error::RecvError::Closed) => panel_open = false,
                 },
                 event = receiver.recv() => match event {
                     Ok(event) => {
