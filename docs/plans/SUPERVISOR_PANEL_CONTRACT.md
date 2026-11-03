@@ -70,8 +70,8 @@ All of these skip the hub engine. Auth is the existing agent-control gate: machi
 
 | Route | Body -> response |
 |---|---|
-| `POST /api/v1/sessions/{sessionRef}/stop` | optional `{requestId}`; the provider interrupt key via agent control. A ref for another computer is 404, a malformed ref 400. |
-| `POST /api/v1/supervisor/decisions/{sessionRef}/answer` | `{promptId, screenRevision, optionIndex[, requestId]}`; an owner tap, no answer gate; stale revision is 409 `REQUEST_CONFLICT` and nothing is typed. |
+| `POST /api/v1/sessions/{sessionRef}/stop` | optional `{requestId}`; the provider interrupt key via agent control. A ref for a paired computer is forwarded once through the daemon's agent-control path to that computer (same device authorization, per-device audit; a lost answer is 409 `OPERATION_OUTCOME_UNKNOWN` and is not resent; an unknown paired host is 404); a malformed ref 400. |
+| `POST /api/v1/supervisor/decisions/{sessionRef}/answer` | `{promptId, screenRevision, optionIndex[, requestId]}`; an owner tap, no answer gate; stale revision is 409 `REQUEST_CONFLICT` and nothing is typed. A ref for a paired computer is forwarded exactly like the stop route, and the tap joins this computer's answer history under that computer's session refs only. |
 | `POST /api/v1/supervisor/pause` | `{paused}` pauses every supervisor action (hub flag `supervisor_paused`); `{laneKey, paused}` keeps pausing one lane. Same path, one handler. |
 | `POST /api/v1/supervisor/actions/{id}/undo` | runs the entry's undo handle; `restoreRule` is supported, other kinds 422 `UNSUPPORTED`, a spent or missing handle 404. |
 

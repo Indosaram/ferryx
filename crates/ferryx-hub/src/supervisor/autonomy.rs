@@ -546,10 +546,19 @@ impl Autonomy {
     /// The owner's answer to a tracked, unsettled prompt, without settling it. Taken before the
     /// answer is typed, so the pane's next observation cannot clear the prompt first; the caller
     /// records it with [`Self::record_owner_answer`] once the answer went through.
-    pub fn peek_owner_answer(&self, backend_session_id: &str, prompt_id: &str) -> Option<OwnerAnswer> {
+    ///
+    /// `host_matches` says which computers the answer was typed on: backend and prompt ids are
+    /// only unique per computer, so a pane on one host never claims another host's prompt.
+    pub fn peek_owner_answer(
+        &self,
+        host_matches: impl Fn(&str) -> bool,
+        backend_session_id: &str,
+        prompt_id: &str,
+    ) -> Option<OwnerAnswer> {
         let tracked = self.tracked();
         let (session_ref, known) = tracked.iter().find(|(session_ref, known)| {
-            session_ref.backend_session_id() == backend_session_id
+            host_matches(session_ref.host_id())
+                && session_ref.backend_session_id() == backend_session_id
                 && known.prompt.prompt_id == prompt_id
         })?;
         (!known.settled).then(|| OwnerAnswer {

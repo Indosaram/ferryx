@@ -859,6 +859,10 @@ pub struct RemoteGatewayState {
     #[cfg(feature = "remote-desktop")]
     pub remote_desktop: Arc<crate::remote::remote_desktop::RemoteDesktopHost>,
     pub browser_service_epoch: AtomicU64,
+    /// The daemon's own owner socket, used to forward a stop or decision answer for a paired
+    /// computer's session through the daemon's existing `AgentControl { host_id: Some(..) }` path.
+    /// Never starts a daemon; tests install their own.
+    agent_control_loopback: parking_lot::Mutex<Option<Arc<crate::daemon::client::DaemonClient>>>,
     snapshot_cache: RwLock<Option<WorkspaceCacheEntry>>,
     snapshot_lock: tokio::sync::Mutex<()>,
     #[cfg(test)]
@@ -1167,6 +1171,7 @@ impl RemoteGatewayState {
             )),
             admission_controller: Arc::new(AdmissionController::new()),
             browser_service_epoch: AtomicU64::new(1),
+            agent_control_loopback: parking_lot::Mutex::new(None),
             snapshot_cache: RwLock::new(None),
             snapshot_lock: tokio::sync::Mutex::new(()),
             #[cfg(test)]
@@ -1176,6 +1181,21 @@ impl RemoteGatewayState {
             #[cfg(test)]
             snapshot_post_build_hook: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// The loopback client agent-control forwards to paired computers go through.
+    pub(crate) fn agent_control_loopback(&self) -> Arc<crate::daemon::client::DaemonClient> {
+        Arc::clone(self.agent_control_loopback.lock().get_or_insert_with(|| {
+            Arc::new(crate::daemon::client::DaemonClient::existing_only(std::time::Duration::from_secs(2)))
+        }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_agent_control_loopback_for_test(
+        &self,
+        client: Arc<crate::daemon::client::DaemonClient>,
+    ) {
+        *self.agent_control_loopback.lock() = Some(client);
     }
 
     #[cfg(test)]

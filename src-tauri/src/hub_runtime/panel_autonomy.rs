@@ -297,13 +297,23 @@ impl PendingOwnerAnswer {
     }
 }
 
-/// The owner answer behind an agent-control `Answer` op, when it is the owner's (not a
-/// supervisor request id) and names a tracked prompt.
+/// The owner answer behind an agent-control `Answer` op typed on this computer, when it is the
+/// owner's (not a supervisor request id) and names a tracked prompt.
 pub fn owner_answer_of(op: &AgentControlOp) -> Option<PendingOwnerAnswer> {
-    owner_answer_with(&installed()?, op)
+    owner_answer_with(&installed()?, None, op)
 }
 
-fn owner_answer_with(autonomy: &Arc<Autonomy>, op: &AgentControlOp) -> Option<PendingOwnerAnswer> {
+/// The same for an answer forwarded to the paired computer `host_id`: the prompt is looked up
+/// under that computer's session refs only, never a local pane with the same ids.
+pub fn forwarded_owner_answer_of(host_id: &str, op: &AgentControlOp) -> Option<PendingOwnerAnswer> {
+    owner_answer_with(&installed()?, Some(host_id), op)
+}
+
+fn owner_answer_with(
+    autonomy: &Arc<Autonomy>,
+    host_id: Option<&str>,
+    op: &AgentControlOp,
+) -> Option<PendingOwnerAnswer> {
     let AgentControlOp::Answer { session_id, prompt_id, answer, request_id, .. } = op else {
         return None;
     };
@@ -311,8 +321,16 @@ fn owner_answer_with(autonomy: &Arc<Autonomy>, op: &AgentControlOp) -> Option<Pe
         return None;
     }
     let option_index = usize::try_from(answer.option_index?).ok()?;
-    let claimed = autonomy.peek_owner_answer(session_id, prompt_id)?;
+    let claimed = autonomy.peek_owner_answer(|host| host_is(host_id, host), session_id, prompt_id)?;
     Some(PendingOwnerAnswer { autonomy: Arc::clone(autonomy), answer: claimed, option_index })
+}
+
+/// Whether a session ref's host is the computer an answer was typed on: `None` is this one.
+fn host_is(typed_on: Option<&str>, ref_host: &str) -> bool {
+    match typed_on {
+        Some(host) => ref_host == host,
+        None => local_host_ids().iter().any(|local| local == ref_host),
+    }
 }
 
 /// The same for the desktop prompt-answer path (`AgentPromptAnswer`).
@@ -323,7 +341,7 @@ pub fn owner_prompt_answer_of(
 ) -> Option<PendingOwnerAnswer> {
     let option_index = key?.trim().parse::<usize>().ok()?;
     let autonomy = installed()?;
-    let claimed = autonomy.peek_owner_answer(session_id, prompt_id)?;
+    let claimed = autonomy.peek_owner_answer(|host| host_is(None, host), session_id, prompt_id)?;
     Some(PendingOwnerAnswer { autonomy, answer: claimed, option_index })
 }
 
@@ -443,10 +461,10 @@ mod tests {
 
         // A supervisor-marked answer is not the owner's.
         let supervisor = answer_op("p1", Some("sup-tool-abc"));
-        assert!(owner_answer_with(&autonomy, &supervisor).is_none());
+        assert!(owner_answer_with(&autonomy, None, &supervisor).is_none());
         // The owner's, through the same op, is claimed and recorded once it went through.
         let owner = answer_op("p1", Some("phone-1"));
-        let claimed = owner_answer_with(&autonomy, &owner).expect("a tracked, unsettled prompt");
+        let claimed = owner_answer_with(&autonomy, None, &owner).expect("a tracked, unsettled prompt");
         claimed.recorded().await;
         // The log line is published before the card resolves.
         let action = next_of(&mut frames, super::super::PANEL_ACTION_EVENT).await;
@@ -455,13 +473,34 @@ mod tests {
         assert!(resolved["decision"].is_null(), "{resolved}");
         assert!(autonomy.escalation_source().pending().await.unwrap().is_empty());
         // The same answer reported twice is learned once.
-        assert!(owner_answer_with(&autonomy, &owner).is_none());
+        assert!(owner_answer_with(&autonomy, None, &owner).is_none());
 
         let rules = autonomy.rule_store();
         let first = rules.list().await.unwrap().remove(0);
         rules.upsert(first).await.unwrap();
         let rule_frame = next_of(&mut frames, super::super::PANEL_RULES_EVENT).await;
         assert_eq!(rule_frame["rules"].as_array().unwrap().len(), 4);
+    }
+
+    /// Backend and prompt ids are only unique per computer. An answer forwarded to a paired
+    /// computer is learned from that computer's prompt, and a local answer never claims it.
+    #[tokio::test]
+    async fn a_forwarded_owner_answer_claims_only_the_paired_hosts_prompt() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let autonomy = Autonomy::open(pool, Arc::new(NoControl), Arc::new(Silent)).await.unwrap();
+        let mut remote = blocked("p1");
+        remote.session_ref = SessionRef::new("omarchy", "s1");
+        remote.host_id = "omarchy".into();
+        autonomy.observe(&remote).await;
+        let owner = answer_op("p1", Some("phone-1"));
+
+        assert!(owner_answer_with(&autonomy, None, &owner).is_none(), "a local answer is not omarchy's");
+        assert!(owner_answer_with(&autonomy, Some("other"), &owner).is_none());
+        let claimed = owner_answer_with(&autonomy, Some("omarchy"), &owner).expect("omarchy's tracked prompt");
+        claimed.recorded().await;
+        assert!(owner_answer_with(&autonomy, Some("omarchy"), &owner).is_none(), "learned once");
+        let supervisor = answer_op("p1", Some("sup-tool-abc"));
+        assert!(owner_answer_with(&autonomy, Some("omarchy"), &supervisor).is_none());
     }
 
     /// The owner channel is process-wide, so the test that watches it is the only one that
