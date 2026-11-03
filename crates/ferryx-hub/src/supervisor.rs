@@ -3683,6 +3683,7 @@ mod tests;
 
 pub mod admission;
 pub mod answers;
+pub mod app_work;
 pub mod changes;
 pub mod completion;
 pub mod panel_contract;
@@ -3692,4 +3693,5 @@ pub mod dispatcher;
 pub mod memory;
 pub mod receipts;
 pub mod request;
+pub mod session_control;
 pub mod wakes;

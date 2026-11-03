@@ -2181,12 +2181,15 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         // Every engine call (decision, convergence, conversation, ingest) is recorded with its
         // cause and usage in this hub's `supervisor_model_calls`.
         runtime.set_usage_sink(launch.hub.pool.clone()).await;
-        // Slack owner conversations call the typed work tools; admission acts only for the
-        // authenticated Slack turn in flight for the calling scope.
+        // The app conversation calls the typed work tools as the installation's owner
+        // (`AppWorkTools`, independent of Slack); Slack owner conversations go to the Slack
+        // handler, which acts only for the authenticated Slack turn in flight.
+        let work_tools = ferryx_hub::supervisor::app_work::AppWorkTools::new(launch.hub.pool.clone());
         #[cfg(feature = "hub-slack")]
-        runtime.set_work_handler(std::sync::Arc::new(
+        let work_tools = work_tools.with_fallback(std::sync::Arc::new(
             ferryx_hub::chat::slack_supervisor::SlackWorkTools::new(launch.hub.pool.clone()),
         ));
+        runtime.set_work_handler(std::sync::Arc::new(work_tools));
         tasks.push(tokio::spawn(runtime.clone().supervise()));
     }
     #[cfg(unix)]

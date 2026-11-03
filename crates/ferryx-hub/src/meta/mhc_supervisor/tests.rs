@@ -302,6 +302,12 @@ impl Peer {
                     self.emit(json!({"type": "model_changed", "sessionId": handle,
                         "model": {"provider": "other", "id": "other-model"}, "thinkingLevel": "high", "source": "fallback"}));
                     self.assistant(&handle, "answered by another model");
+                } else if message.contains("APP_SESSIONS") {
+                    let durable = self.handles.lock().unwrap()[&handle].clone();
+                    self.emit(json!({"type": "extension_event", "sessionId": handle,
+                        "name": "supervisor.work_request", "data": {
+                            "requestId": "sess-1", "sessionId": durable, "action": "list_sessions",
+                            "payload": {}}}));
                 } else if message.contains("WORK") {
                     let durable = if message.contains("WORK_FORGED") {
                         "not-a-session".to_owned()
@@ -2341,4 +2347,66 @@ fn an_invalid_session_ref_is_rejected_when_parsing() {
     }))
     .unwrap_err();
     assert_eq!(rejection.code, "SUPERVISOR_WORK_INVALID");
+}
+
+#[tokio::test]
+async fn an_app_turn_reaches_submit_and_the_session_tools_through_the_engine() {
+    use crate::supervisor::app_work::{self, AppWorkTools};
+    use crate::supervisor::{bind_project_host, create_project, ensure_identity};
+    let pool = crate::storage::memory().await.unwrap();
+    let identity = ensure_identity(&pool, "desktop:owner").await.unwrap();
+    let project = create_project(&pool, &identity.supervisor_id, "ferryx", "github.com/example/ferryx")
+        .await
+        .unwrap();
+    bind_project_host(&pool, &project.project_id, "host-a", "/home/owner/code/ferryx/.git")
+        .await
+        .unwrap();
+    let (_, sessions, fleet) = session_tools();
+    let harness = Harness::new("app-work", all_capabilities());
+    let supervisor = harness.supervisor();
+    supervisor.set_work_handler(Arc::new(
+        AppWorkTools::new(pool.clone()).with_sessions(Arc::new(sessions)),
+    ));
+
+    // The engine's submit call reaches admission for the installation owner: no Slack turn is
+    // registered, and the app scope still gets its goal.
+    let work = "Create result.txt containing READY. Run the verifier.";
+    let reply: Value = serde_json::from_str(
+        &app_work::converse(&supervisor, "app-req-1", work, "WORK please")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reply["ok"], true, "{reply}");
+    let owner: String = sqlx::query_scalar("SELECT owner_principal FROM supervisor_goals")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(owner, "desktop:owner");
+
+    // A session tool call of the same conversation reaches the session service.
+    let listed: Value = serde_json::from_str(
+        &app_work::converse(&supervisor, "app-req-2", "list them", "APP_SESSIONS")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(listed["ok"], true, "{listed}");
+    assert_eq!(listed["result"], json!({ "sessions": fleet }));
+
+    // The same engine call outside a registered app turn (an untracked converse) cannot submit.
+    let untracked: Value = serde_json::from_str(
+        &supervisor
+            .converse_in_turn(&app_work::app_scope(), None, "WORK again")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(untracked["ok"], false, "{untracked}");
+    assert_eq!(untracked["error"]["code"], "SUPERVISOR_WORK_SCOPE");
+    let goals: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_goals")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(goals, 1);
 }
