@@ -19,7 +19,6 @@ use objc2_authentication_services::{
     ASWebAuthenticationSessionErrorCode, ASWebAuthenticationSessionErrorDomain,
 };
 use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSProcessInfo, NSString, NSURL};
-use tauri::Manager;
 use tokio::sync::oneshot;
 
 use super::{callback_supported, AuthCallback, AuthSessionOutcome};
