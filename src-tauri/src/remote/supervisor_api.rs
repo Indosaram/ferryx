@@ -116,7 +116,9 @@ fn control_refusal(error: &crate::hub_runtime::SupervisorControlError) -> Respon
         Refused::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
         Refused::Undo(UndoError::NotSupported) => StatusCode::UNPROCESSABLE_ENTITY,
         Refused::Undo(UndoError::Nothing(_)) => StatusCode::NOT_FOUND,
+        Refused::Undo(UndoError::Stale(_)) => StatusCode::CONFLICT,
         Refused::Undo(UndoError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
+        Refused::Undo(UndoError::Failed(_)) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     machine_error_with_details(status, error.code(), &error.to_string(), serde_json::Map::new())
 }

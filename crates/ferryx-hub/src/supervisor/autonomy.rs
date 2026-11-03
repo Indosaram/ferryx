@@ -24,10 +24,11 @@ use super::answer_history::{
 };
 use super::panel_contract::{
     ActionEntry, ActionKind, ActionLog, AnswerDecision, Escalation, EvidenceRef, FleetSession,
-    PendingPrompt, RuleStore, SessionControl, SessionRef, StandingRule,
+    PendingPrompt, RuleStore, SessionControl, SessionRef, StandingRule, UndoHandle,
 };
 use super::recovery::RecoveryEscalations;
 use super::rules::SqliteRuleStore;
+use super::undo::{ActionUndo, UndoError};
 use crate::error::Result;
 use crate::fleet::EscalationSource;
 use crate::meta::mhc_supervisor::AnswerGate;
@@ -36,6 +37,9 @@ use crate::meta::mhc_supervisor::AnswerGate;
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
+
+/// Undo-handle kind of an autonomous answer: the undo restores the decision card.
+pub const RESTORE_DECISION: &str = "restoreDecision";
 
 /// Where the panel's owner-scoped frames go. The daemon implements it over its owner event
 /// channel; every real mutation below calls it exactly once.
@@ -140,6 +144,10 @@ impl EscalationRegistry {
 
     fn remove_recovery(&self, session_ref: &SessionRef) -> Option<Escalation> {
         self.recovery_guard().remove(session_ref)
+    }
+
+    fn contains(&self, session_ref: &SessionRef) -> bool {
+        self.guard().contains_key(session_ref)
     }
 }
 
@@ -297,6 +305,16 @@ struct Tracked {
     settled: bool,
 }
 
+/// The newest prompt the supervisor answered on its own in a session: what Undo restores.
+/// Dropped once a different prompt or screen revision shows up in that session.
+struct AutonomousAnswer {
+    session: FleetSession,
+    prompt: PendingPrompt,
+    repo: String,
+    option_index: usize,
+    basis: String,
+}
+
 /// The production autonomy service. Build it with [`Autonomy::open`].
 pub struct Autonomy {
     history: AnswerHistory,
@@ -308,6 +326,7 @@ pub struct Autonomy {
     publisher: Arc<dyn PanelPublisher>,
     repos: Arc<RepoResolver>,
     tracked: Mutex<HashMap<SessionRef, Tracked>>,
+    answered: Mutex<HashMap<SessionRef, AutonomousAnswer>>,
 }
 
 impl Autonomy {
@@ -337,6 +356,7 @@ impl Autonomy {
             publisher,
             repos,
             tracked: Mutex::new(HashMap::new()),
+            answered: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -363,6 +383,10 @@ impl Autonomy {
         self.tracked.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn answered(&self) -> std::sync::MutexGuard<'_, HashMap<SessionRef, AutonomousAnswer>> {
+        self.answered.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// The session has no pending prompt any more (answered, in the terminal or elsewhere, or
     /// gone): its card disappears.
     pub fn clear(&self, session_ref: &SessionRef) {
@@ -383,6 +407,13 @@ impl Autonomy {
             return;
         }
         let repo = self.repos.key(&session.cwd).await;
+        // A different prompt or screen revision supersedes the last autonomous answer: its
+        // Undo may not resurrect a card over it.
+        self.answered().retain(|key, answered| {
+            *key != session.session_ref
+                || (answered.prompt.prompt_id == prompt.prompt_id
+                    && answered.prompt.screen_revision == prompt.screen_revision)
+        });
         let replaced = {
             let mut tracked = self.tracked();
             match tracked.get(&session.session_ref) {
@@ -459,13 +490,34 @@ impl Autonomy {
         if let Some(known) = self.tracked().get_mut(&session.session_ref) {
             known.settled = true;
         }
+        let repo = self.repos.key(&session.cwd).await;
+        self.answered().insert(
+            session.session_ref.clone(),
+            AutonomousAnswer {
+                session: session.clone(),
+                prompt: prompt.clone(),
+                repo,
+                option_index,
+                basis: basis.to_owned(),
+            },
+        );
         let label = prompt.options.get(option_index).cloned().unwrap_or_default();
+        let undo = UndoHandle {
+            kind: RESTORE_DECISION.to_owned(),
+            payload: serde_json::json!({
+                "sessionRef": session.session_ref.as_str(),
+                "promptId": prompt.prompt_id,
+                "screenRevision": prompt.screen_revision,
+                "optionIndex": option_index,
+            }),
+        };
         self.write_log(
             session,
             prompt,
             "answer",
             format!("Answered \"{label}\" in {}", session.title),
             basis.to_owned(),
+            Some(undo),
         )
         .await;
     }
@@ -497,6 +549,7 @@ impl Autonomy {
         who: &str,
         summary: String,
         basis: String,
+        undo: Option<UndoHandle>,
     ) {
         let now = now_ms();
         let entry = ActionEntry {
@@ -510,7 +563,7 @@ impl Autonomy {
                 kind: "prompt".to_owned(),
                 id: prompt.prompt_id.clone(),
             }],
-            undo: None,
+            undo,
             live: false,
             created_at_ms: now,
             updated_at_ms: now,
@@ -599,6 +652,7 @@ impl Autonomy {
                 "owner",
                 format!("You chose {label}"),
                 basis.to_owned(),
+                None,
             )
             .await;
         }
@@ -636,6 +690,67 @@ pub struct OwnerAnswer {
     session: FleetSession,
     prompt: PendingPrompt,
     repo: String,
+}
+
+/// Undo of an autonomous answer: the item is pending again as a decision card recommending the
+/// option that was sent, with the basis as its reason. Nothing is typed into the pane and
+/// nothing is learned. Refusals are typed: no handle (never answerable, or already undone) is
+/// `Nothing`; a newer prompt or screen revision, an open card, or a restart that lost the
+/// prompt is `Stale`, and the handle stays.
+#[async_trait]
+impl ActionUndo for Autonomy {
+    async fn undo(&self, id: i64) -> std::result::Result<(), UndoError> {
+        let entry = self
+            .log
+            .list_today(0)
+            .await
+            .map_err(|error| UndoError::Failed(error.to_string()))?
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .ok_or(UndoError::Nothing(id))?;
+        let handle = entry.undo.ok_or(UndoError::Nothing(id))?;
+        if handle.kind != RESTORE_DECISION {
+            return Err(UndoError::NotSupported);
+        }
+        let session_ref = entry.session_ref.ok_or(UndoError::Nothing(id))?;
+        let prompt_id = handle.payload.get("promptId").and_then(|v| v.as_str());
+        let revision = handle.payload.get("screenRevision").and_then(|v| v.as_str());
+        let record = {
+            let mut answered = self.answered();
+            let current = answered.get(&session_ref).is_some_and(|known| {
+                Some(known.prompt.prompt_id.as_str()) == prompt_id
+                    && known.prompt.screen_revision.as_deref() == revision
+            });
+            let superseded = self.tracked().get(&session_ref).is_some_and(|known| {
+                Some(known.prompt.prompt_id.as_str()) != prompt_id
+                    || known.prompt.screen_revision.as_deref() != revision
+            });
+            if !current || superseded || self.escalations.contains(&session_ref) {
+                return Err(UndoError::Stale(id));
+            }
+            answered.remove(&session_ref).ok_or(UndoError::Stale(id))?
+        };
+        if let Err(error) = self.log.mark_undone(id, now_ms()).await {
+            self.answered().insert(session_ref, record);
+            return Err(UndoError::Failed(error.to_string()));
+        }
+        self.tracked().insert(
+            session_ref,
+            Tracked {
+                session: record.session.clone(),
+                prompt: record.prompt.clone(),
+                repo: record.repo,
+                settled: false,
+            },
+        );
+        self.escalate(
+            &record.session,
+            &record.prompt,
+            record.option_index,
+            format!("You undid my answer. Basis: {}", record.basis),
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]

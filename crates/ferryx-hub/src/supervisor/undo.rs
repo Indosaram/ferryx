@@ -30,6 +30,13 @@ pub enum UndoError {
     /// The stores failed; nothing was marked undone.
     #[error("undo failed: {0}")]
     Storage(String),
+    /// The screen moved on (a newer prompt or revision, or a card is already open): nothing
+    /// changed and the undo handle stays.
+    #[error("action {0} can no longer be undone: the screen moved on")]
+    Stale(i64),
+    /// The undo could not be stored; nothing was restored.
+    #[error("undoing the action failed: {0}")]
+    Failed(String),
 }
 
 impl UndoError {
@@ -39,6 +46,8 @@ impl UndoError {
             Self::NotSupported => "UNSUPPORTED",
             Self::Nothing(_) => "NOT_FOUND",
             Self::Storage(_) => "INTERNAL",
+            Self::Stale(_) => "STALE",
+            Self::Failed(_) => "FAILED",
         }
     }
 }

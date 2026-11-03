@@ -369,6 +369,111 @@ async fn the_gate_uses_the_irreversible_classifier_not_a_word_list() {
     assert!(!reason.contains("irreversible"), "{reason}");
 }
 
+const POOL_CWD: &str = "/nonexistent/ferryx-autonomy-test";
+
+/// Teaches three owner answers, lets the supervisor answer `p4` on its own, and returns the
+/// answered action entry.
+async fn autonomous_answer(fixture: &Fixture) -> ActionEntry {
+    teach(fixture, 1, 3).await;
+    let fourth = question("p4", "Which package manager should I use?", None);
+    fixture.autonomy.observe(&session(Some(fourth))).await;
+    assert_eq!(fixture.control.calls(), vec!["answer mac:s1 p4 1".to_owned()]);
+    fixture
+        .autonomy
+        .action_log()
+        .list_today(0)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.summary.starts_with("Answered"))
+        .expect("the autonomous answer is logged")
+}
+
+#[tokio::test]
+async fn undoing_an_autonomous_answer_restores_the_decision_card_without_a_second_send() {
+    let fixture = fixture().await;
+    let answered = autonomous_answer(&fixture).await;
+    let handle = answered.undo.clone().expect("an autonomous answer carries an undo handle");
+    assert_eq!(handle.kind, RESTORE_DECISION);
+    assert!(fixture.autonomy.escalation_source().pending().await.unwrap().is_empty());
+
+    // Baselines after the autonomous answer: teaching opened one card per owner answer.
+    let calls_before = fixture.control.calls();
+    let opened_before = fixture.frames.count("decision mac:s1 open");
+
+    fixture.autonomy.undo(answered.id).await.unwrap();
+
+    let open = fixture.autonomy.escalation_source().pending().await.unwrap();
+    assert_eq!(open.len(), 1, "the item is pending again");
+    assert_eq!(open[0].prompt.prompt_id, "p4");
+    assert_eq!(open[0].prompt.screen_revision.as_deref(), Some("rev-p4"));
+    assert_eq!(open[0].recommended_index, 1);
+    assert!(open[0].reason.contains("You chose pnpm the last 3 times"), "{}", open[0].reason);
+    assert_eq!(fixture.frames.count("decision mac:s1 open"), opened_before + 1);
+    assert_eq!(fixture.control.calls(), calls_before, "undo never answers by itself");
+
+    let entry = fixture
+        .autonomy
+        .action_log()
+        .list_today(0)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.id == answered.id)
+        .unwrap();
+    assert_eq!(entry.undo, None, "the entry is marked undone");
+
+    // Neither the autonomous answer nor its undo became an owner precedent.
+    let history = AnswerHistory::new(fixture.pool.clone());
+    let probe = question("x", "Which package manager should I use?", None);
+    assert_eq!(history.recent_labels(&probe, POOL_CWD, "claude").await.unwrap().len(), 3);
+
+    // Repeating the undo is a typed refusal and changes nothing.
+    assert_eq!(fixture.autonomy.undo(answered.id).await, Err(UndoError::Nothing(answered.id)));
+    assert_eq!(fixture.autonomy.escalation_source().pending().await.unwrap().len(), 1);
+    assert_eq!(fixture.frames.count("decision mac:s1 open"), opened_before + 1);
+    assert_eq!(fixture.control.calls(), calls_before);
+}
+
+#[tokio::test]
+async fn a_newer_screen_revision_stops_undo_from_resurrecting_the_card() {
+    let fixture = fixture().await;
+    let answered = autonomous_answer(&fixture).await;
+
+    // The pane moved on: a new prompt, escalated because this one is unlike the precedents.
+    let newer = question("p5", "Rename the helper module?", None);
+    fixture.autonomy.observe(&session(Some(newer))).await;
+    let before = fixture.autonomy.escalation_source().pending().await.unwrap();
+    assert_eq!(before.len(), 1);
+
+    let refused = fixture.autonomy.undo(answered.id).await.unwrap_err();
+    assert_eq!(refused, UndoError::Stale(answered.id));
+    assert_eq!(refused.code(), "STALE");
+    let after = fixture.autonomy.escalation_source().pending().await.unwrap();
+    assert_eq!(after, before, "the newer card is untouched");
+    assert_eq!(after[0].prompt.prompt_id, "p5");
+    let entry = fixture
+        .autonomy
+        .action_log()
+        .list_today(0)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.id == answered.id)
+        .unwrap();
+    assert!(entry.undo.is_some(), "a refused undo keeps its handle");
+    assert_eq!(fixture.control.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn undo_of_an_unknown_or_handleless_action_is_not_found() {
+    let fixture = fixture().await;
+    teach(&fixture, 1, 1).await;
+    assert_eq!(fixture.autonomy.undo(9_999).await, Err(UndoError::Nothing(9_999)));
+    let owner_line = fixture.autonomy.action_log().list_today(0).await.unwrap().remove(0);
+    assert_eq!(fixture.autonomy.undo(owner_line.id).await, Err(UndoError::Nothing(owner_line.id)));
+}
+
 #[tokio::test]
 async fn an_owner_tap_is_not_gated_the_owner_may_answer_any_prompt() {
     let fixture = fixture().await;
