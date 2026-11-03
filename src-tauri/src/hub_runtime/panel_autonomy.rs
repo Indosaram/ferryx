@@ -15,7 +15,8 @@ use ferryx_hub::supervisor::panel_contract::{
     ActionEntry, Escalation, FleetSession, SessionControl, SessionRef, StandingRule,
 };
 use ferryx_hub::supervisor::recovery::{
-    Clock, LoopRetry, PauseGate, RecoveryDeps, RecoveryEscalations, RecoveryScheduler, SystemClock,
+    CardError, Clock, LoopRetry, PauseGate, RecoveryDeps, RecoveryEscalations, RecoveryScheduler,
+    RetryOutcome, SystemClock, CARD_PREFIX,
 };
 
 use super::HubLaunch;
@@ -71,6 +72,22 @@ pub fn build_recovery(
     }))
 }
 
+/// An owner's tap on a recovery card (`recovery:<incident>`), carried out by the recovery
+/// scheduler. `None` when `prompt_id` is not a recovery card, so the caller answers it as an
+/// ordinary pane prompt. A recovery card has no pane prompt behind it: nothing is typed.
+pub async fn answer_recovery_card(prompt_id: &str, option_index: Option<u32>) -> Option<Result<(), CardError>> {
+    if !prompt_id.starts_with(CARD_PREFIX) {
+        return None;
+    }
+    let Some(scheduler) = recovery() else {
+        return Some(Err(CardError::NotOpen));
+    };
+    let Some(option) = option_index.and_then(|index| usize::try_from(index).ok()) else {
+        return Some(Err(CardError::BadOption));
+    };
+    Some(scheduler.answer_card(prompt_id, option).await)
+}
+
 /// Hands a goal lane's quota fault (the supervisor's own model is out of quota) to recovery,
 /// which schedules the retry instead of the loop stopping the lane.
 struct GoalQuota {
@@ -118,8 +135,13 @@ impl GoalRetry {
 #[async_trait]
 impl LoopRetry for GoalRetry {
     async fn retry(&self, lane_key: &str) -> ferryx_hub::error::Result<()> {
+        self.retry_outcome(lane_key).await.map(|_| ())
+    }
+
+    /// `Ok(None)` from the goal loop means the lane has no goal to run: nothing was resumed.
+    async fn retry_outcome(&self, lane_key: &str) -> ferryx_hub::error::Result<RetryOutcome> {
         let judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env());
-        on_turn_settled_with(
+        let outcome = on_turn_settled_with(
             &self.pool,
             &judge,
             self.bridge.as_ref(),
@@ -128,8 +150,29 @@ impl LoopRetry for GoalRetry {
             Some(self.quota.as_ref()),
         )
         .await
-        .map(|_| ())
-        .map_err(|error| ferryx_hub::error::HubError::message(error.to_string()))
+        .map_err(|error| ferryx_hub::error::HubError::message(error.to_string()))?;
+        Ok(retry_outcome_of(outcome.as_ref()))
+    }
+
+    /// The lane's bounded retries ran out: the loop's own stop path blocks it as degraded.
+    async fn give_up(&self, lane_key: &str, detail: &str) -> ferryx_hub::error::Result<()> {
+        ferryx_hub::goals::loop_driver::stop_degraded(&self.pool, lane_key, detail)
+            .await
+            .map(|_| ())
+            .map_err(|error| ferryx_hub::error::HubError::message(error.to_string()))
+    }
+}
+
+/// What a goal-loop pass means for recovery: only a pass that left the lane running is a
+/// resume. `None` is a lane with no goal; a pass that stopped the lane (degraded supervisor,
+/// unavailable judge, any stop rule) resumed nothing.
+fn retry_outcome_of(outcome: Option<&ferryx_hub::goals::loop_driver::LoopOutcome>) -> RetryOutcome {
+    match outcome {
+        None => RetryOutcome::NothingToResume,
+        Some(outcome) => match outcome.stop_reason {
+            Some(reason) => RetryOutcome::Stopped(reason.to_string()),
+            None => RetryOutcome::Resumed,
+        },
     }
 }
 
@@ -362,7 +405,7 @@ pub fn observed(state: &Arc<RemoteGatewayState>, observation: &crate::agent_cont
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::remote::reference_chat::types::ReferencePromptAnswer;
     use ferryx_hub::supervisor::panel_contract::PendingPrompt;
@@ -533,6 +576,66 @@ mod tests {
     /// Epoch ms the fake clock starts at.
     const START_MS: i64 = 1_800_000_000_000;
 
+    static CARD_INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+    static CARDS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    /// An open recovery card (its prompt id) of the process-wide installed scheduler: four
+    /// sessions on another computer stalled, were restarted once and stalled again, so each
+    /// has a card. Every call hands out a card no other test holds.
+    pub(crate) async fn take_recovery_card() -> String {
+        CARD_INIT
+            .get_or_init(|| async {
+                let pool = ferryx_hub::storage::memory().await.unwrap();
+                let autonomy = Autonomy::open(pool, Arc::new(NoControl), Arc::new(Silent)).await.unwrap();
+                let stalled = |n: u32| {
+                    let mut s = outage_session();
+                    s.session_ref = SessionRef::new("mac-2", &format!("card{n}"));
+                    s.state_source = "provider".into();
+                    s.state_since_ms = Some(START_MS - 600_000);
+                    s.screen_changed_at_ms = Some(START_MS - 600_000);
+                    s
+                };
+                let clock = Arc::new(FakeClock::new(START_MS));
+                let scheduler = build_recovery(
+                    &autonomy,
+                    Arc::new(ScriptedControl::default()),
+                    Arc::new(FixedFleet { sessions: (1..=4).map(stalled).collect() }),
+                    clock.clone(),
+                );
+                scheduler.tick().await;
+                clock.advance(400_000);
+                scheduler.tick().await;
+                let cards = autonomy.escalation_source().pending().await.unwrap();
+                assert_eq!(cards.len(), 4, "{cards:?}");
+                *CARDS.lock().unwrap() = cards.into_iter().map(|c| c.prompt.prompt_id).collect();
+                RECOVERY.set(scheduler).ok().expect("one installed scheduler per test process");
+            })
+            .await;
+        CARDS.lock().unwrap().pop().expect("a recovery card per test")
+    }
+
+    /// Only a pass that left the lane running is a resume; a stop of any kind is not.
+    #[test]
+    fn a_goal_pass_that_stopped_the_lane_is_not_a_resume() {
+        use ferryx_hub::goals::loop_driver::LoopOutcome;
+        use ferryx_hub::goals::StopReason;
+        let outcome = |stop_reason| LoopOutcome {
+            lane_key: "lane".to_owned(),
+            stop_reason,
+            awaiting_approval: false,
+            sent: false,
+        };
+        assert_eq!(retry_outcome_of(None), RetryOutcome::NothingToResume);
+        assert_eq!(retry_outcome_of(Some(&outcome(None))), RetryOutcome::Resumed);
+        for reason in [StopReason::SupervisorDegraded, StopReason::JudgeUnavailable] {
+            assert_eq!(
+                retry_outcome_of(Some(&outcome(Some(reason)))),
+                RetryOutcome::Stopped(reason.to_string()),
+                "{reason}"
+            );
+        }
+    }
+
     /// A clock only the test moves.
     struct FakeClock {
         now_ms: std::sync::atomic::AtomicI64,
@@ -554,14 +657,20 @@ mod tests {
         }
     }
 
-    /// Records what recovery does to a session and serves a proxy error as its terminal tail.
+    /// Records what recovery does to a session and serves its terminal tail; `outage` makes a
+    /// proxy error appear after recovery has already seen the session.
     #[derive(Default)]
     struct ScriptedControl {
         stops: std::sync::Mutex<Vec<String>>,
         sends: std::sync::Mutex<Vec<(String, String)>>,
+        fresh: std::sync::Mutex<String>,
     }
 
     impl ScriptedControl {
+        fn outage(&self) {
+            self.fresh.lock().unwrap().push_str("API Error: 502 Bad Gateway\n");
+        }
+
         fn stops(&self) -> Vec<String> {
             self.stops.lock().unwrap().clone()
         }
@@ -585,7 +694,7 @@ mod tests {
             Ok(())
         }
         async fn read_tail(&self, _: &SessionRef, _: usize) -> ferryx_hub::error::Result<String> {
-            Ok("working on the relay\nAPI Error: 502 Bad Gateway\n".to_owned())
+            Ok(format!("working on the relay\n{}", self.fresh.lock().unwrap()))
         }
     }
 
@@ -629,7 +738,8 @@ mod tests {
     }
 
     /// The real scheduler over real autonomy stores (in-memory database), with a scripted
-    /// session control, a fixed fleet and a fake clock.
+    /// session control, a fixed fleet and a fake clock. Recovery has seen the session once
+    /// (its baseline pass) before the proxy outage starts: old scrollback is never news.
     async fn recovery_fixture() -> RecoveryFixture {
         let pool = ferryx_hub::storage::memory().await.unwrap();
         let autonomy = Autonomy::open(pool, Arc::new(NoControl), Arc::new(Silent)).await.unwrap();
@@ -641,6 +751,8 @@ mod tests {
             Arc::new(FixedFleet { sessions: vec![outage_session()] }),
             clock.clone(),
         );
+        scheduler.tick().await;
+        control.outage();
         RecoveryFixture { autonomy, scheduler, control, clock }
     }
 
