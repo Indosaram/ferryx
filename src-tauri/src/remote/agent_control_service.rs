@@ -900,7 +900,7 @@ async fn forward_once(
     let known = hosts.list().await.map_err(|error| ForwardFailure {
         // Nothing was sent yet, so this never claims the op may have been applied.
         code: "INVENTORY_INCOMPLETE".into(),
-        message: "the paired-host inventory could not be read".into(),
+        message: format!("the paired-host inventory could not be read: {error}"),
     })?;
     let Some(host) = known.into_iter().find(|host| host.host_id == host_id) else {
         return Err(ForwardFailure {
