@@ -213,7 +213,8 @@ describe("RemoteApp phone home", () => {
 
   it("opens the Worktrees screen from + and returns to the panel", async () => {
     render(<RemoteApp />);
-    act(() => fireEvent.click(await screen.findByTestId("phone-panel-start-session")));
+    const plus = await screen.findByTestId("phone-panel-start-session");
+    act(() => fireEvent.click(plus));
     const start = await screen.findByTestId("mobile-home");
     expect(start).toHaveAttribute("data-destination", "worktrees");
     act(() => fireEvent.click(screen.getByTestId("phone-panel-start-back")));

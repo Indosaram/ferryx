@@ -15,6 +15,8 @@ export async function openWorkspacePicker(options: { timeout?: number } = {}): P
     },
     options.timeout === undefined ? undefined : { timeout: options.timeout },
   );
+  // The Worktrees screen the panel's "+" opens is already the picker when it is showing.
+  if (trigger.getAttribute("data-testid") === "remote-worktrees-inline") return trigger;
   const onHome = trigger.getAttribute("data-testid") === "phone-panel-start-session";
   if (onHome || (trigger.getAttribute("aria-expanded") !== null && trigger.getAttribute("aria-expanded") !== "true")) {
     act(() => {

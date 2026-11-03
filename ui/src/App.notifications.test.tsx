@@ -864,9 +864,12 @@ describe("App notification coordinator wiring", () => {
       return { workspaceId, sessionId, revision: inbox.getSnapshot().entries[0].revision };
     };
     // A Supervisor panel row names its session `<hostId>:<backendSessionId>`; the desktop focuses
-    // the open pane behind it through the same path a notification uses.
+    // the open pane behind it through the same path a notification uses. A session no open pane
+    // runs has a backend id nothing resolves, so its row can lead nowhere. The panel row carries
+    // no occurrence revision, so a click acknowledges the entry as it stands when the pane opens.
+    const openBackendIds: Record<string, string> = { "default/sess-1": "backend-sess-1", "other/sess-remote": "backend-other" };
     const backendOf = (workspaceId: string, sessionId: string) =>
-      workspaceId === "other" ? "backend-other" : `backend-${sessionId}`;
+      openBackendIds[`${workspaceId}/${sessionId}`] ?? `backend-gone-${workspaceId}-${sessionId}`;
     const clickRow = async (clicked: ReturnType<typeof seedUnread>) => {
       await act(async () => { sidebarProps.onFocusSupervisorSession!(`mac:${backendOf(clicked.workspaceId, clicked.sessionId)}`); });
     };
@@ -930,19 +933,20 @@ describe("App notification coordinator wiring", () => {
       await act(async () => { render(<App />); });
       await clickRow(clicked);
       expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-1" });
-      expect(acknowledge).toHaveBeenCalledWith([{ id: notificationEntryId("default", "sess-1"), expectedRevision: clicked.revision }]);
+      expect(acknowledge).toHaveBeenCalledWith([{ id: notificationEntryId("default", "sess-1") }]);
       expect(dispatchWorkspaceAction.mock.invocationCallOrder.at(-1)).toBeLessThan(acknowledge.mock.invocationCallOrder[0]);
       expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
+      expect(paneFlashSessions()).toEqual(["sess-1"]);
     });
 
-    it("does not acknowledge a newer occurrence when a stale revision is clicked", async () => {
+    it("acknowledges the occurrence the pane shows when a newer one arrived before the click", async () => {
       const clicked = seedUnread();
       await act(async () => { render(<App />); });
       inbox.recordActivity({ workspaceId: "default", sessionId: "sess-1", labels: {}, subject: "agent",
         previousState: "done", state: "waiting", occurredAt: 200, observed: false });
       await clickRow(clicked);
       expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-1" });
-      expect(inbox.getSnapshot().entries[0]).toMatchObject({ revision: 2, read: { unread: true } });
+      expect(inbox.getSnapshot().entries[0]).toMatchObject({ revision: 2, read: { seen: true } });
     });
 
     it.each([ ["ghost", "sess-1"], ["default", "closed"], ["other", "closed"] ])(
@@ -957,6 +961,7 @@ describe("App notification coordinator wiring", () => {
         expect(dispatchWorkspaceAction).not.toHaveBeenCalled();
         expect(acknowledge).not.toHaveBeenCalled();
         expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
+        expect(paneFlashSessions()).toEqual([]);
       },
     );
 
@@ -969,7 +974,7 @@ describe("App notification coordinator wiring", () => {
       await clickRow(clicked);
       expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("other");
       expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-remote" });
-      expect(acknowledge).toHaveBeenCalledWith([{ id: notificationEntryId("other", "sess-remote"), expectedRevision: clicked.revision }]);
+      expect(acknowledge).toHaveBeenCalledWith([{ id: notificationEntryId("other", "sess-remote") }]);
       expect(dispatchWorkspaceAction.mock.invocationCallOrder.at(-1)).toBeLessThan(acknowledge.mock.invocationCallOrder[0]);
       expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
     });
@@ -994,13 +999,14 @@ describe("App notification coordinator wiring", () => {
       dispatchWorkspaceAction.mockClear();
       await clickRow(clicked);
       expect(changed).toBe(true);
-      expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
       if (change === "closed target") {
+        expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
         expect(dispatchWorkspaceAction).not.toHaveBeenCalled();
         expect(acknowledge).not.toHaveBeenCalled();
       } else {
         expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-remote" });
-        expect(acknowledge).toHaveBeenCalledWith([{ id: notificationEntryId("other", "sess-remote"), expectedRevision: clicked.revision }]);
+        expect(acknowledge).toHaveBeenCalledWith([{ id: notificationEntryId("other", "sess-remote") }]);
+        expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
         expect(inbox.getSnapshot().entries[0].revision).toBe(2);
       }
     });
