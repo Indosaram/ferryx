@@ -72,6 +72,29 @@ pub async fn clear_stopped(pool: &sqlx::SqlitePool) -> Result<()> {
     Ok(())
 }
 
+/// The owner pauses (`true`) or resumes (`false`) every supervisor action at once. The flag
+/// is the hub's, not a lane's: recovery and answers read it ([`is_paused`]) before they act,
+/// and it survives a restart. It never stops the hub or touches a PTY.
+pub async fn set_paused(pool: &sqlx::SqlitePool, paused: bool) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO hub_meta(key, value) VALUES('supervisor_paused', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(if paused { "1" } else { "0" })
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Whether the owner paused every supervisor action. A hub that never set it is not paused.
+pub async fn is_paused(pool: &sqlx::SqlitePool) -> Result<bool> {
+    let value: Option<String> =
+        sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = 'supervisor_paused'")
+            .fetch_optional(pool)
+            .await?;
+    Ok(value.as_deref() == Some("1"))
+}
+
 pub async fn is_stopped(pool: &sqlx::SqlitePool) -> Result<bool> {
     let value: Option<String> =
         sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = 'hub_stopped'")
@@ -431,5 +454,15 @@ mod tests {
         server.await.unwrap();
         assert!(reply.contains("Stop"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_pause_flag_defaults_off_and_persists_each_change() {
+        let pool = crate::storage::memory().await.expect("hub db");
+        assert!(!is_paused(&pool).await.unwrap(), "a fresh hub is not paused");
+        set_paused(&pool, true).await.unwrap();
+        assert!(is_paused(&pool).await.unwrap());
+        set_paused(&pool, false).await.unwrap();
+        assert!(!is_paused(&pool).await.unwrap());
     }
 }
