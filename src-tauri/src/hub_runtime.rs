@@ -1121,6 +1121,129 @@ pub async fn set_lane_paused_gated(
     Ok(changed)
 }
 
+/// Capability a daemon advertises once it serves the direct supervisor controls: the global
+/// pause, the enablement settings and the action undo (`SupervisorGlobalPause`,
+/// `SupervisorSettings`, `SupervisorActionUndo`, `AgentControlEnableOwner`).
+pub const SUPERVISOR_CONTROL_CAPABILITY: &str = "supervisorControlV1";
+
+/// Why a direct supervisor control did not run.
+#[derive(Debug, thiserror::Error)]
+pub enum SupervisorControlError {
+    #[error("the supervisor hub is not open in this daemon")]
+    Unavailable,
+    /// Enabling is bound to the owner's home, and neither `OMO_HOME` nor a home directory is set.
+    #[error("no owner home directory: set OMO_HOME or HOME")]
+    NoOwnerHome,
+    #[error("{0}")]
+    Storage(String),
+    #[error("{0}")]
+    Undo(ferryx_hub::supervisor::undo::UndoError),
+}
+
+impl SupervisorControlError {
+    /// The stable wire code a refusal carries.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Unavailable => "SUPERVISOR_UNAVAILABLE",
+            Self::NoOwnerHome => "INVALID_REQUEST",
+            Self::Storage(_) => "INTERNAL",
+            Self::Undo(error) => error.code(),
+        }
+    }
+}
+
+/// The pool the direct controls read and write: the hub's, or the test hub's.
+async fn control_pool(
+    state: &RemoteGatewayState,
+) -> Result<ferryx_hub::goals::SqlitePool, SupervisorControlError> {
+    supervisor_service(state)
+        .await
+        .map(|(pool, _, _)| pool)
+        .map_err(|_| SupervisorControlError::Unavailable)
+}
+
+fn control_storage(error: impl std::fmt::Display) -> SupervisorControlError {
+    SupervisorControlError::Storage(error.to_string())
+}
+
+/// The owner pauses (`true`) or resumes (`false`) every supervisor action at once. This is the
+/// hub-wide flag ([`ferryx_hub::control::set_paused`]), not one lane's pause. It never goes
+/// through the engine and never touches a PTY. Returns whether the flag changed.
+pub async fn set_supervisor_paused(
+    state: &RemoteGatewayState,
+    paused: bool,
+    by: &str,
+) -> Result<bool, SupervisorControlError> {
+    let pool = control_pool(state).await?;
+    let was = ferryx_hub::control::is_paused(&pool).await.map_err(control_storage)?;
+    ferryx_hub::control::set_paused(&pool, paused).await.map_err(control_storage)?;
+    tracing::info!(by, paused, "supervisor pause changed");
+    crate::remote::server::agent_control_service::publish_supervisor_changed(
+        state,
+        json!({ "paused": paused, "by": by }),
+    );
+    Ok(was != paused)
+}
+
+/// The persisted supervisor settings as the owner sees them. `enabled` is the effective answer:
+/// the owner turned it on AND this daemon resolves the same owner home (`OMO_HOME`, else
+/// `<home>/.omo`). `requested` is the stored switch alone. `removeAll` defaults off.
+/// With `enabled` set, the switch is saved first (stamping the current owner home).
+pub async fn supervisor_settings(
+    state: &RemoteGatewayState,
+    enabled: Option<bool>,
+) -> Result<Value, SupervisorControlError> {
+    use ferryx_hub::supervisor::settings;
+    let pool = control_pool(state).await?;
+    let home = settings::current_owner_home();
+    if let Some(enabled) = enabled {
+        let home = home.as_deref().ok_or(SupervisorControlError::NoOwnerHome)?;
+        settings::set_enabled(&pool, enabled, home).await.map_err(control_storage)?;
+        crate::remote::server::agent_control_service::publish_supervisor_changed(
+            state,
+            json!({ "enabled": enabled }),
+        );
+    }
+    let saved = settings::load(&pool).await.map_err(control_storage)?;
+    let effective = settings::is_enabled(&pool, home.as_deref()).await.map_err(control_storage)?;
+    Ok(json!({
+        "enabled": effective,
+        "requested": saved.enabled,
+        "removeAll": saved.remove_all,
+        "ownerHome": saved.owner_home,
+        "currentOwnerHome": home,
+    }))
+}
+
+/// The panel's Undo on one action-log line: runs the entry's undo handle through the T2 action
+/// log and rule store. A handle nobody can reverse is `UNSUPPORTED`; a spent or missing one is
+/// `NOT_FOUND`.
+pub async fn undo_supervisor_action(
+    state: &RemoteGatewayState,
+    id: i64,
+) -> Result<(), SupervisorControlError> {
+    use ferryx_hub::supervisor::undo::{ActionUndo, LoggedUndo};
+    use ferryx_hub::supervisor::{activity::SqliteActionLog, rules::SqliteRuleStore};
+    let pool = control_pool(state).await?;
+    let now_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as i64)
+    };
+    let rules = SqliteRuleStore::open(pool.clone(), now_ms()).await.map_err(control_storage)?;
+    let undo = LoggedUndo::new(
+        Arc::new(SqliteActionLog::new(pool)),
+        Arc::new(rules),
+        Arc::new(now_ms),
+    );
+    undo.undo(id).await.map_err(SupervisorControlError::Undo)?;
+    crate::remote::server::agent_control_service::publish_supervisor_changed(
+        state,
+        json!({ "actionId": id }),
+    );
+    Ok(())
+}
+
 /// Capability a daemon advertises once it serves `DaemonRequest::SupervisorGoal`.
 pub const SUPERVISOR_GOAL_CAPABILITY: &str = "supervisorGoalV1";
 

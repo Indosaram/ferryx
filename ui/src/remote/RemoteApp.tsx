@@ -5368,7 +5368,7 @@ export const RemoteHostConnection: React.FC<{
       ?.focus({ preventScroll: true });
   };
   const phoneWorktrees = (
-    <WorktreesHome onOpenAccount={() => setAccountSheetOpen(true)}>
+    <WorktreesHome onOpenAccount={() => setAccountSheetOpen(true)} contextTitle={model.context.workspaceId ? contextName(model.context) : null}>
       <RemoteWorkspaceMirror
         inline
         model={effectiveModel}
@@ -5447,7 +5447,7 @@ export const RemoteHostConnection: React.FC<{
           }}
           resume={
             token && model.context.workspaceId
-              ? { title: mobileTitle, subtitle: contextName(model.context), onOpen: phoneNav.openSession }
+              ? { title: mobileTitle, subtitle: contextName(model.context), context: contextName(model.context), onOpen: phoneNav.openSession }
               : offlineLastTarget
                 ? {
                     title: offlineLastTarget.worktreeLabel ?? offlineLastTarget.worktreeSlug ?? "Your last worktree",

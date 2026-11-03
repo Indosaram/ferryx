@@ -589,6 +589,39 @@ async fn a_view_only_device_cannot_converse_and_nothing_is_stored() {
     gateway.stop().await;
 }
 
+// ---------------------------------------------------------------------------------------------
+// T9 direct controls: the session stop, the decision tap, the global pause and the undo, over the
+// real router. Auth runs before routing and before the hub, so every refusal class is 403 with
+// nothing typed and nothing changed.
+
+const SESSION_STOP: &str = "/api/v1/sessions/local:no-such-pane/stop";
+const DECISION_ANSWER: &str = "/api/v1/supervisor/decisions/local:no-such-pane/answer";
+const ACTION_UNDO: &str = "/api/v1/supervisor/actions/1/undo";
+const TAP: &str = r#"{"promptId":"p","screenRevision":"r","optionIndex":0}"#;
+const GLOBAL_PAUSE: &str = r#"{"paused":true}"#;
+
+#[tokio::test]
+async fn every_direct_control_route_refuses_a_mirror_device_and_one_outside_the_allowlist() {
+    let gateway = Gateway::start().await;
+    let mirror = gateway.token(DevicePermission::Control, DeviceAccessScope::Mirror);
+    let outsider = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    gateway.state().agent_control_policy.restrict_to(["another-device"]);
+
+    for token in [&mirror, &outsider] {
+        for (path, body) in [
+            (SESSION_STOP, ""),
+            (DECISION_ANSWER, TAP),
+            (ACTION_UNDO, ""),
+            ("/api/v1/supervisor/pause", GLOBAL_PAUSE),
+        ] {
+            let (status, _, answer) = gateway.post_to(path, token, body).await;
+            assert_eq!(status, 403, "{path} -> {answer}");
+            assert_eq!(answer["error"]["code"], "FORBIDDEN", "{path}");
+        }
+    }
+    gateway.stop().await;
+}
+
 #[tokio::test]
 async fn an_owner_device_converses_and_both_messages_are_stored_once() {
     let gateway = Gateway::start().await;
@@ -625,6 +658,132 @@ async fn an_owner_device_converses_and_both_messages_are_stored_once() {
 }
 
 #[tokio::test]
+async fn with_agent_control_off_the_direct_controls_are_forbidden_before_their_body_is_read() {
+    let gateway = Gateway::start().await;
+    let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    gateway.state().agent_control_policy.set_enabled(false);
+
+    for (path, body) in [
+        (SESSION_STOP, "not json"),
+        (DECISION_ANSWER, "not json"),
+        (ACTION_UNDO, ""),
+        ("/api/v1/supervisor/pause", "not json"),
+    ] {
+        let (status, _, answer) = gateway.post_to(path, &token, body).await;
+        assert_eq!(status, 403, "{path} -> {answer}");
+    }
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn a_missing_token_is_unauthorized_on_the_direct_controls() {
+    let gateway = Gateway::start().await;
+    for path in [SESSION_STOP, DECISION_ANSWER, ACTION_UNDO] {
+        let (status, _, answer) = gateway
+            .send(client().post(format!("http://{}{path}", gateway.addr)))
+            .await;
+        assert_eq!(status, 401, "{path} -> {answer}");
+        assert_eq!(answer["error"]["code"], "UNAUTHORIZED", "{path}");
+    }
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn a_stop_routes_by_session_ref_and_stays_on_this_computer() {
+    let gateway = Gateway::start().await;
+    let token = gateway.authorized_machine_token();
+
+    // This computer, no such pane: the route reached agent control (typed NOT_FOUND), no hub needed.
+    let (status, _, body) = gateway.post_to(SESSION_STOP, &token, "").await;
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["error"]["code"], "NOT_FOUND");
+    let audit = gateway.state().agent_control_audit.latest(1);
+    assert_eq!(audit[0].op, "stop", "the stop went through agent control and was audited");
+    assert_eq!(audit[0].code, "NOT_FOUND");
+    let audited = gateway.state().agent_control_audit.recent().len();
+
+    // Another computer's ref never reaches a local pane: refused before agent control runs.
+    let (status, _, body) = gateway
+        .post_to("/api/v1/sessions/otherhost:no-such-pane/stop", &token, "")
+        .await;
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["error"]["code"], "NOT_FOUND");
+    assert_eq!(gateway.state().agent_control_audit.recent().len(), audited, "nothing was attempted locally");
+
+    // A handle with no host is malformed.
+    let (status, _, body) = gateway.post_to("/api/v1/sessions/nohost/stop", &token, "").await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"]["code"], "INVALID_REQUEST");
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn a_decision_tap_needs_its_exact_body_and_is_audited_as_an_answer() {
+    let gateway = Gateway::start().await;
+    let token = gateway.authorized_machine_token();
+
+    for body in [r#"{"promptId":"p"}"#, r#"{"promptId":"p","screenRevision":"r","optionIndex":"0"}"#, "not json"] {
+        let (status, _, answer) = gateway.post_to(DECISION_ANSWER, &token, body).await;
+        assert_eq!(status, 400, "{body} -> {answer}");
+        assert_eq!(answer["error"]["code"], "INVALID_REQUEST", "{body}");
+    }
+    let (status, _, body) = gateway.post_to(DECISION_ANSWER, &token, TAP).await;
+    assert_eq!(status, 404, "{body}");
+    let audit = gateway.state().agent_control_audit.latest(1);
+    assert_eq!((audit[0].op.as_str(), audit[0].code.as_str()), ("answer", "NOT_FOUND"));
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn the_global_pause_without_a_hub_is_unavailable_and_a_malformed_body_is_invalid() {
+    let gateway = Gateway::start().await;
+    let token = gateway.authorized_machine_token();
+
+    let (status, _, body) = gateway.post_to("/api/v1/supervisor/pause", &token, GLOBAL_PAUSE).await;
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body["error"]["code"], SUPERVISOR_UNAVAILABLE_CODE);
+    for body in [r#"{}"#, r#"{"paused":"yes"}"#, r#"{"paused":true,"extra":1}"#] {
+        let (status, _, answer) = gateway.post_to("/api/v1/supervisor/pause", &token, body).await;
+        assert_eq!(status, 400, "{body} -> {answer}");
+    }
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn the_same_pause_path_pauses_the_whole_supervisor_or_one_lane_by_body_shape() {
+    let gateway = Gateway::start().await;
+    let (pool, goal_id, _) = populate(&gateway).await;
+    let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    assert!(!ferryx_hub::control::is_paused(&pool).await.unwrap());
+
+    let (status, cache, body) = gateway.post_to("/api/v1/supervisor/pause", &token, GLOBAL_PAUSE).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(cache.as_deref(), Some("no-store"));
+    assert_eq!((body["paused"].as_bool(), body["changed"].as_bool()), (Some(true), Some(true)));
+    assert!(body.get("laneKey").is_none(), "the global form names no lane");
+    assert!(ferryx_hub::control::is_paused(&pool).await.unwrap(), "the flag the hub reads is set");
+    assert_eq!(goal_row(&pool, &goal_id).await, ("ready".into(), 1), "no lane or goal was touched");
+
+    let (_, _, again) = gateway.post_to("/api/v1/supervisor/pause", &token, GLOBAL_PAUSE).await;
+    assert_eq!(again["changed"], false, "pausing twice changes nothing");
+    let (status, _, body) = gateway
+        .post_to("/api/v1/supervisor/pause", &token, r#"{"paused":false}"#)
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(!ferryx_hub::control::is_paused(&pool).await.unwrap(), "resume clears the flag");
+
+    // The lane form on the same path still pauses that one goal and leaves the global flag alone.
+    let lane_key = ferryx_hub::supervisor::goal_of(&pool, &goal_id).await.unwrap().unwrap().lane_key;
+    let lane = serde_json::json!({"laneKey": lane_key, "paused": true}).to_string();
+    let (status, _, body) = gateway.post_to("/api/v1/supervisor/pause", &token, &lane).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["laneKey"], lane_key.as_str());
+    assert_eq!(goal_row(&pool, &goal_id).await, ("paused".into(), 2));
+    assert!(!ferryx_hub::control::is_paused(&pool).await.unwrap(), "a lane pause is not the global pause");
+    gateway.stop().await;
+}
+
+#[tokio::test]
 async fn a_malformed_converse_body_is_400_and_a_closed_hub_is_503() {
     let gateway = Gateway::start().await;
     let token = gateway.authorized_machine_token();
@@ -638,5 +797,53 @@ async fn a_malformed_converse_body_is_400_and_a_closed_hub_is_503() {
         .await;
     assert_eq!(status, 503, "{answer}");
     assert_eq!(answer["error"]["code"], SUPERVISOR_UNAVAILABLE_CODE);
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn an_action_undo_restores_a_rule_once_then_has_nothing_left() {
+    use ferryx_hub::supervisor::activity::SqliteActionLog;
+    use ferryx_hub::supervisor::panel_contract::{ActionEntry, ActionKind, ActionLog, RuleStore, UndoHandle};
+    use ferryx_hub::supervisor::rules::SqliteRuleStore;
+    let gateway = Gateway::start().await;
+    let (pool, _, _) = populate(&gateway).await;
+    let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    let rules = SqliteRuleStore::open(pool.clone(), 1).await.unwrap();
+    let before = rules.list().await.unwrap()[0].clone();
+    let mut changed = before.clone();
+    changed.params = serde_json::json!({"backoffSecs": [300], "thenEverySecs": 300});
+    rules.upsert(changed).await.unwrap();
+    let stored = SqliteActionLog::new(pool.clone())
+        .upsert_incident(ActionEntry {
+            id: 0,
+            incident_key: "rule-1".into(),
+            session_ref: None,
+            kind: ActionKind::RuleChanged,
+            summary: "Changed the retry interval".into(),
+            basis: "you asked".into(),
+            evidence: Vec::new(),
+            undo: Some(UndoHandle {
+                kind: "restoreRule".into(),
+                payload: serde_json::json!({ "rule": before.clone() }),
+            }),
+            live: false,
+            created_at_ms: 10,
+            updated_at_ms: 10,
+        })
+        .await
+        .unwrap();
+
+    let path = format!("/api/v1/supervisor/actions/{}/undo", stored.id);
+    let (status, _, body) = gateway.post_to(&path, &token, "").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["undone"], stored.id);
+    let restored = rules.list().await.unwrap().into_iter().find(|rule| rule.id == before.id).unwrap();
+    assert_eq!(restored.params, before.params, "the previous rule is back");
+
+    let (status, _, body) = gateway.post_to(&path, &token, "").await;
+    assert_eq!(status, 404, "a spent handle has nothing left: {body}");
+    assert_eq!(body["error"]["code"], "NOT_FOUND");
+    let (status, _, body) = gateway.post_to("/api/v1/supervisor/actions/x/undo", &token, "").await;
+    assert_eq!(status, 400, "{body}");
     gateway.stop().await;
 }

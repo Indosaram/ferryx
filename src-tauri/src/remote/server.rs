@@ -8103,6 +8103,30 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
                 crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
             )),
         )
+        // T9 direct controls. The stop shares the `{sessionId}` parameter name with
+        // `/api/v1/sessions/{sessionId}` (the router refuses two names at one position); the
+        // handler reads the segment as a `<hostId>:<backendSessionId>` handle. Neither route goes
+        // through the hub or the engine.
+        .route(
+            "/api/v1/sessions/{sessionId}/stop",
+            post(agent_control_service::http_session_ref_stop).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+                ),
+            ),
+        )
+        .route(
+            "/api/v1/supervisor/decisions/{sessionRef}/answer",
+            post(agent_control_service::http_decision_answer).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+                ),
+            ),
+        )
+        .route(
+            "/api/v1/supervisor/actions/{id}/undo",
+            post(supervisor_api::http_action_undo),
+        )
         .route(
             "/api/v1/workspace/projects",
             get(super::workspace_api::list_scoped)

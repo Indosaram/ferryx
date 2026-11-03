@@ -43,7 +43,7 @@ function makeTunnel(): FakeTunnel {
     isClosed: false,
     fetchLike: vi.fn(),
     openWebSocket: vi.fn(),
-    close: vi.fn(() => {
+    close: vi.fn<() => void>(() => {
       tunnel.isClosed = true;
     }),
   };

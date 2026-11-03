@@ -677,6 +677,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
                 request: crate::daemon::protocol::SupervisorSetupAction::Status
             }
             | DaemonRequest::AgentControlSettingsGet
+            | DaemonRequest::SupervisorSettings { enabled: None }
     )
 }
 
@@ -803,6 +804,10 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::AgentControl { .. } => "agentControl",
         DaemonRequest::AgentControlSettingsGet => "agentControlSettingsGet",
         DaemonRequest::AgentControlSettingsSet { .. } => "agentControlSettingsSet",
+        DaemonRequest::AgentControlEnableOwner => "agentControlEnableOwner",
+        DaemonRequest::SupervisorGlobalPause { .. } => "supervisorGlobalPause",
+        DaemonRequest::SupervisorSettings { .. } => "supervisorSettings",
+        DaemonRequest::SupervisorActionUndo { .. } => "supervisorActionUndo",
         DaemonRequest::GetAgentIntegration => "getAgentIntegration",
         DaemonRequest::SetAgentIntegration { .. } => "setAgentIntegration",
         DaemonRequest::SupervisorDispatch { .. } => "supervisorDispatch",

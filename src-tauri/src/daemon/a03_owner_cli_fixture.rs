@@ -261,6 +261,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push(crate::hub_runtime::SUPERVISOR_SETUP_CAPABILITY);
             capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_ENGINE_CAPABILITY);
+            capabilities.push(crate::hub_runtime::SUPERVISOR_CONTROL_CAPABILITY);
             capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY);
             capabilities.push(crate::daemon::protocol::AGENT_LAUNCH_CAPABILITY);
             #[cfg(feature = "remote-desktop")]

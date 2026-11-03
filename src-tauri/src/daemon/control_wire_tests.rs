@@ -862,6 +862,31 @@ async fn a_supervisor_mutation_from_inside_a_worker_pane_is_forbidden() {
             other => panic!("{request:?} answered {other:?}"),
         }
     }
+    // T9: a worker must not pause or resume the supervisor, turn it on, widen agent control or
+    // undo its log. Each is refused before the hub or the policy is touched.
+    for request in [
+        DaemonRequest::SupervisorGlobalPause { paused: false },
+        DaemonRequest::SupervisorSettings { enabled: Some(true) },
+        DaemonRequest::SupervisorActionUndo { id: 1 },
+        DaemonRequest::AgentControlEnableOwner,
+    ] {
+        match unix_exchange(&server, request.clone()).await {
+            DaemonResponse::Error { code, message, .. } => {
+                assert_eq!(code.as_deref(), Some("FORBIDDEN"), "{request:?}: {message}");
+            }
+            other => panic!("{request:?} answered {other:?}"),
+        }
+    }
+    assert!(
+        !server.remote_state().agent_control_policy.enabled(),
+        "a refused enablement left agent control off"
+    );
+    // Reading the settings changes nothing, so it is never FORBIDDEN from a pane.
+    if let DaemonResponse::Error { code, .. } =
+        unix_exchange(&server, DaemonRequest::SupervisorSettings { enabled: None }).await
+    {
+        assert_ne!(code.as_deref(), Some("FORBIDDEN"), "settings read from a pane");
+    }
     assert!(matches!(
         unix_exchange(&server, DaemonRequest::SupervisorSnapshot).await,
         DaemonResponse::SupervisorSnapshotOk { .. }

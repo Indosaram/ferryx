@@ -3728,6 +3728,7 @@ pub mod receipts;
 pub mod request;
 pub mod rules;
 pub mod session_control;
+pub mod settings;
 pub mod setup;
 pub mod transcript;
 pub mod undo;
