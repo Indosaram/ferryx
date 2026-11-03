@@ -6,6 +6,8 @@ import { desktopPanelActions } from '../../lib/supervisorPanel/desktopActions';
 import { emptyPanelSnapshot } from '../../lib/supervisorPanel/emptySnapshot';
 import { applyPanelEvent } from '../../lib/supervisorPanel/model';
 import { legacyGoalsBySession } from '../../lib/supervisorPanel/legacyGoals';
+import { loadDesktopTranscriptPage, type TranscriptPageLoader } from '../../lib/supervisorPanel/transcript';
+import { useTranscript } from '../../lib/supervisorPanel/useTranscript';
 import { useSupervisor } from '../../lib/supervisor';
 import { getSupervisorPanel, onSupervisorPanelEvent } from '../../lib/tauri';
 import { PanelSurface } from './PanelSurface';
@@ -18,6 +20,7 @@ export type SupervisorPanelHostProps = {
   /** Replaces the Tauri-backed writes (tests). `onChanged` is the host's reload. */
   actionsFor?: (input: { openSession: (sessionRef: SessionRef) => void; onChanged: () => void }) => PanelActions;
   now?: () => number;
+  loadTranscript?: TranscriptPageLoader;
 };
 
 /**
@@ -31,6 +34,7 @@ export function SupervisorPanelHost({
   subscribe = onSupervisorPanelEvent,
   actionsFor = desktopPanelActions,
   now = Date.now,
+  loadTranscript = loadDesktopTranscriptPage,
 }: SupervisorPanelHostProps) {
   const [snapshot, setSnapshot] = useState<PanelSnapshot | null>(null);
   const [tick, setTick] = useState(() => now());
@@ -102,13 +106,18 @@ export function SupervisorPanelHost({
     [snapshot, hub.lanes],
   );
 
+  // The stored conversation is read again whenever the panel or the hub snapshot changed: a sent
+  // prompt, its Reply and a worker report all end in one of those.
+  const transcriptVersion = useMemo(() => ({ snapshot, hub }), [snapshot, hub]);
+  const transcript = useTranscript(loadTranscript, transcriptVersion);
+
   return (
     <div
       data-testid="supervisor-panel"
       className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 pt-1 text-xs scrollbar-sleek"
     >
       {snapshot ? (
-        <PanelSurface snapshot={snapshot} actions={actions} nowMs={tick} goals={goals} computerLabel="this computer" />
+        <PanelSurface snapshot={snapshot} actions={actions} nowMs={tick} goals={goals} computerLabel="this computer" transcript={transcript} />
       ) : (
         <p className="text-muted-foreground">Loading supervisor…</p>
       )}

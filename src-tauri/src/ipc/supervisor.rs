@@ -154,6 +154,69 @@ fn converse_from(response: DaemonResponse) -> Result<serde_json::Value, IpcError
     }
 }
 
+/// Saves transcript text as a new file in the user's Downloads folder and returns its path. The
+/// desktop webview has no download handler, so the panel's "Export transcript" lands here. The
+/// name is a plain file name (no path parts), an existing file is never overwritten, and a write
+/// that fails leaves no partial file behind.
+fn write_download(
+    downloads: &std::path::Path,
+    file_name: &str,
+    text: &str,
+) -> Result<std::path::PathBuf, IpcError> {
+    write_download_with(downloads, file_name, text, |file, bytes| {
+        use std::io::Write;
+        file.write_all(bytes)
+    })
+}
+
+fn write_download_with(
+    downloads: &std::path::Path,
+    file_name: &str,
+    text: &str,
+    write: impl Fn(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> Result<std::path::PathBuf, IpcError> {
+    let plain = !file_name.is_empty()
+        && file_name.len() <= 128
+        && file_name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && !file_name.starts_with('.');
+    if !plain {
+        return Err(IpcError::new(IpcErrorCode::InvalidRequest, "the export file name must be a plain file name"));
+    }
+    let io = |error: std::io::Error| IpcError::new(IpcErrorCode::IoError, format!("the transcript was not saved: {error}"));
+    std::fs::create_dir_all(downloads).map_err(io)?;
+    let (stem, extension) = file_name.rsplit_once('.').map_or((file_name, String::new()), |(s, e)| (s, format!(".{e}")));
+    for attempt in 0..100 {
+        let name = if attempt == 0 { file_name.to_owned() } else { format!("{stem} ({attempt}){extension}") };
+        let path = downloads.join(name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                if let Err(error) = write(&mut file, text.as_bytes()) {
+                    drop(file);
+                    let _ = std::fs::remove_file(&path);
+                    return Err(io(error));
+                }
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(io(error)),
+        }
+    }
+    Err(IpcError::new(IpcErrorCode::IoError, "the transcript was not saved: too many files with that name"))
+}
+
+/// The panel's "Export transcript" on the desktop: the transcript text the panel read from the
+/// app transcript is saved to the Downloads folder; the reply is the saved path.
+#[tauri::command]
+pub async fn cmd_supervisor_transcript_export(file_name: String, text: String) -> Result<String, IpcError> {
+    // The platform's Downloads folder (Known Folder redirection on Windows, XDG on Linux); a
+    // home-relative `Downloads` only when the platform names none.
+    let downloads = dirs::download_dir()
+        .or_else(|| ferryx_hub::hub_env::home().map(|home| home.join("Downloads")))
+        .ok_or_else(|| IpcError::new(IpcErrorCode::IoError, "the transcript was not saved: this account has no Downloads folder"))?;
+    let path = write_download(&downloads, &file_name, &text)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// One owner message from the panel composer: the supervisor answers on the `app` channel and
 /// both are stored in the app transcript. Returns `{owner, reply, replayed}`.
 #[tauri::command]
@@ -665,5 +728,36 @@ mod tests {
         assert_eq!(error.details.unwrap()["status"], 503);
         let old = DaemonResponse::Error { message: "unknown variant".into(), code: None, details: None };
         assert_eq!(converse_from(old).unwrap_err().code, IpcErrorCode::DaemonUpgradeRequired);
+    }
+
+    #[test]
+    fn an_export_is_a_new_plain_named_file_that_never_overwrites() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let downloads = dir.path().join("Downloads");
+        let first = write_download(&downloads, "supervisor-transcript-1.txt", "Owner prompt\nSupervisor reply\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "Owner prompt\nSupervisor reply\n");
+        let second = write_download(&downloads, "supervisor-transcript-1.txt", "later").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "Owner prompt\nSupervisor reply\n");
+        for bad in ["", "../escape.txt", "a/b.txt", ".hidden", "a b.txt"] {
+            let refused = write_download(&downloads, bad, "x").unwrap_err();
+            assert_eq!(refused.code, IpcErrorCode::InvalidRequest, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_failed_write_removes_the_partial_file_and_a_retry_can_reuse_the_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let failing = write_download_with(dir.path(), "t.txt", "text", |file, _| {
+            use std::io::Write;
+            file.write_all(b"par")?;
+            Err(std::io::Error::other("disk full"))
+        })
+        .unwrap_err();
+        assert_eq!(failing.code, IpcErrorCode::IoError);
+        assert!(failing.message.contains("disk full"));
+        assert!(!dir.path().join("t.txt").exists(), "no partial file is left");
+        let again = write_download(dir.path(), "t.txt", "text").unwrap();
+        assert_eq!(again, dir.path().join("t.txt"));
     }
 }

@@ -171,4 +171,25 @@ describe("SupervisorPanelHost", () => {
     act(() => handlers[0]({ type: "panel.action", action: live }));
     expect(screen.queryAllByTestId("handling-row")).toHaveLength(0);
   });
+
+  it("shows the stored prompt and Reply rows from the transcript read, beside the cards and composer", async () => {
+    const pages = [
+      {
+        messages: [
+          { id: 1, role: "owner" as const, text: "Retry every 5 min", evidence: [], requestId: "q1", createdAtMs: 1 },
+          { id: 2, role: "supervisor" as const, text: "Done: retrying every 5 min.", evidence: [], requestId: "reply:q1", createdAtMs: 2 },
+        ],
+        nextCursor: 2,
+        hasMore: false,
+      },
+    ];
+    const loadTranscript = vi.fn(async (cursor: number) => (cursor === 0 ? pages[0] : { messages: [], nextCursor: cursor, hasMore: false }));
+    renderHost(panelSnapshotFixture, {}, { loadTranscript });
+    expect(await screen.findByText("Retry every 5 min")).toBeInTheDocument();
+    expect(screen.getByText("Done: retrying every 5 min.")).toBeInTheDocument();
+    expect(loadTranscript).toHaveBeenCalledWith(0);
+    expect(screen.getAllByTestId("decision-card")).toHaveLength(2);
+    expect(screen.getByRole("combobox", { name: "Tell the supervisor anything" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export transcript" })).toBeInTheDocument();
+  });
 });

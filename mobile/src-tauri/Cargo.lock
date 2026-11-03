@@ -960,6 +960,10 @@ dependencies = [
 name = "ferryx-mobile"
 version = "1.0.0"
 dependencies = [
+ "block2",
+ "objc2",
+ "objc2-foundation",
+ "objc2-ui-kit",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",

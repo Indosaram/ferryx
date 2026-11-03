@@ -17,8 +17,8 @@ use crate::meta::mhc_profile::ConversationScope;
 use crate::supervisor::panel_contract::{EvidenceRef, RuleKind, RuleScope, RuleStore, StandingRule};
 use crate::supervisor::request::RequestFailure;
 use crate::supervisor::transcript::{
-    append, app_scope, by_request, converse, page, AppConversation, Converse, ConverseInput,
-    Flights, Role,
+    append, app_scope, by_request, converse, page, store_report, AppConversation, Converse,
+    ConverseInput, Flights, Role, REPORT_PREFIX,
 };
 
 struct FakeEngine {
@@ -269,12 +269,51 @@ async fn mentions_reach_the_turn_and_bad_input_is_refused_before_any_write() {
 
     let mut bad_ref = input("hi", "req-2");
     bad_ref.mentions = vec!["no-colon".into()];
-    for bad in [bad_ref, input("   ", "req-3"), input("hi", ""), input("hi", "reply:x"), input("hi", "failed:x")] {
+    let report_id = format!("{REPORT_PREFIX}lane_event:1");
+    for bad in [
+        bad_ref,
+        input("   ", "req-3"),
+        input("hi", ""),
+        input("hi", "reply:x"),
+        input("hi", "failed:x"),
+        input("hi", &report_id),
+    ] {
         let failure = converse_at(&pool, &engine, &bad, 1).await.unwrap_err();
         assert_eq!(failure.code, "INVALID_REQUEST");
     }
     assert_eq!(page(&pool, 0, 10).await.unwrap()["messages"].as_array().unwrap().len(), 2);
     assert_eq!(engine.turns().len(), 1);
+}
+
+#[tokio::test]
+async fn a_worker_report_is_one_supervisor_row_and_a_replay_stores_nothing_more() {
+    let pool = crate::storage::memory().await.unwrap();
+    let (first, inserted) = store_report(&pool, "lane_event:7", "# Report\n\nEnd of report", 10).await.unwrap();
+    assert!(inserted);
+    assert_eq!(first.role, Role::Supervisor);
+    assert_eq!(first.request_id, "report:lane_event:7");
+    assert!(first.evidence.is_empty());
+
+    let (again, inserted) = store_report(&pool, "lane_event:7", "a different body", 99).await.unwrap();
+    assert!(!inserted, "a replay is not stored again");
+    assert_eq!(again.id, first.id);
+    assert_eq!(again.text, "# Report\n\nEnd of report");
+
+    let (other, inserted) = store_report(&pool, "lane_event:8", "next report", 11).await.unwrap();
+    assert!(inserted);
+    assert_ne!(other.id, first.id);
+    assert_eq!(page(&pool, 0, 10).await.unwrap()["messages"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn an_owner_cannot_take_a_report_row_before_the_report_arrives() {
+    let pool = crate::storage::memory().await.unwrap();
+    let engine = FakeEngine::replying("ok");
+    let squat = input("squatting", "report:lane_event:7");
+    assert_eq!(converse_at(&pool, &engine, &squat, 1).await.unwrap_err().code, "INVALID_REQUEST");
+    let (stored, inserted) = store_report(&pool, "lane_event:7", "the real report", 2).await.unwrap();
+    assert!(inserted, "the report row was never suppressed");
+    assert_eq!(stored.text, "the real report");
 }
 
 #[tokio::test]

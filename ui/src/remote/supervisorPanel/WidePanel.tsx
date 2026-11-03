@@ -4,6 +4,7 @@
 // and never blank.
 import { PanelSurface } from "../../components/supervisorPanel/PanelSurface";
 import type { PanelActions } from "../../lib/supervisorPanel/actions";
+import type { TranscriptSource } from "../../lib/supervisorPanel/useTranscript";
 import type { PanelState } from "./usePhonePanel";
 
 export type WidePanelProps = {
@@ -12,11 +13,12 @@ export type WidePanelProps = {
   readonly actions: PanelActions;
   /** The computer the setup card names. */
   readonly computerLabel?: string;
+  readonly transcript?: TranscriptSource;
 };
 
-export function WidePanel({ state, now, actions, computerLabel }: WidePanelProps) {
+export function WidePanel({ state, now, actions, computerLabel, transcript }: WidePanelProps) {
   if (state.kind === "ready") {
-    return <PanelSurface snapshot={state.snapshot} actions={actions} nowMs={now} computerLabel={computerLabel} />;
+    return <PanelSurface snapshot={state.snapshot} actions={actions} nowMs={now} computerLabel={computerLabel} transcript={transcript} />;
   }
   return (
     <p data-testid="wide-panel-status" role={state.kind === "error" ? "alert" : "status"} className="text-muted-foreground">

@@ -38,6 +38,9 @@ pub const APP_CHANNEL: &str = "app";
 const REPLY_PREFIX: &str = "reply:";
 /// Prefix of the request id the failure marker of a dropped request is stored under.
 const FAILED_PREFIX: &str = "failed:";
+/// Prefix of the request id a worker report is stored under (`report:<wake event id>`). Owner
+/// request ids may not start with it, so a client can never occupy a report's row.
+pub const REPORT_PREFIX: &str = "report:";
 /// Text of the failure marker.
 const ABANDONED_TEXT: &str = "This request did not finish: the connection was dropped before the supervisor answered. Send it again to retry.";
 /// Shortest retry interval a rule change may set, in seconds.
@@ -223,6 +226,17 @@ fn reply_request_id(request_id: &str) -> String {
 
 fn failed_request_id(request_id: &str) -> String {
     format!("{FAILED_PREFIX}{request_id}")
+}
+
+/// Stores a worker report as one supervisor row keyed by its wake event id. A replay of the same
+/// report returns the stored row and `false`; nothing is written twice.
+pub async fn store_report(
+    pool: &SqlitePool,
+    wake_event_id: &str,
+    body: &str,
+    now_ms: i64,
+) -> Result<(TranscriptMessage, bool), RequestFailure> {
+    append(pool, Role::Supervisor, body, &[], &format!("{REPORT_PREFIX}{wake_event_id}"), now_ms).await
 }
 
 fn invalid(message: impl Into<String>) -> RequestFailure {
@@ -519,9 +533,10 @@ pub async fn converse(ctx: &Converse<'_>, input: &ConverseInput) -> Outcome {
         || request_id.chars().any(char::is_control)
         || request_id.starts_with(REPLY_PREFIX)
         || request_id.starts_with(FAILED_PREFIX)
+        || request_id.starts_with(REPORT_PREFIX)
     {
         return Err(invalid(format!(
-            "requestId must be 1-{MAX_REQUEST_ID_CHARS} printable characters and not start with {REPLY_PREFIX} or {FAILED_PREFIX}"
+            "requestId must be 1-{MAX_REQUEST_ID_CHARS} printable characters and not start with {REPLY_PREFIX}, {FAILED_PREFIX} or {REPORT_PREFIX}"
         )));
     }
     let text = input.text.trim();

@@ -4876,11 +4876,14 @@ impl DaemonServer {
         while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
             if let Some(report) = supervisor_report_line(&line) {
                 // A worker's ordinary report for its own supervisor goal: one JSON reply line.
-                let mut reply = crate::hub_runtime::supervisor_worker_report(report).await.to_string();
+                let outcome = crate::hub_runtime::supervisor_worker_report(report).await;
+                let mut reply = outcome.to_string();
                 reply.push('\n');
                 if let Err(error) = write_half.write_all(reply.as_bytes()).await {
                     tracing::debug!(%error, "supervisor report client left before its reply");
                 }
+                // A stored report is a new transcript row: every Supervisor view reads again.
+                crate::hub_runtime::announce_worker_report(&self.remote_state, &outcome);
             } else if let Some(response) = herdr_response_line(&line) {
                 // Answer before ingesting: the herdr client gives up after 500 ms, and admission
                 // may wait on a blocking journal read.
