@@ -7,7 +7,7 @@ Code: hub `crates/ferryx-hub/src/supervisor/panel_contract.rs` (serde camelCase)
 
 | Type | Shape |
 |---|---|
-| `SessionRef` | string `<hostId>:<backendSessionId>`; Rust newtype with `new`, `parse`, `as_str`, `Display` |
+| `SessionRef` | string `<hostId>:<backendSessionId>`; Rust newtype with `new`, `parse`, `as_str`, `Display`. A paired computer's host id is its URL (`https://relay/host/<machine>`), so the ref splits at the first `:` after `/host/`. In a request path the whole ref is ONE percent-encoded segment (`sessions/https%3A%2F%2Frelay%2Fhost%2Fm%3As1/stop`); the relay validates and forwards the raw path, and `%2F` is never a separator. |
 | `HealthKind` | `{type:"healthy"}` / `upstreamError{status?}` / `quota{resetAtMs?}` / `stalled{sinceMs}` / `failed{reason}` |
 | `SessionHealth` | `{sessionRef, kind, observedAtMs}` |
 | `PendingPrompt` | `{promptId, kind: question\|permission\|approval, question, command?, options[], screenRevision?}` |
