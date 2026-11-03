@@ -116,7 +116,7 @@ impl ferryx_hub::meta::mhc_supervisor::FleetSource for FullFleet {
 
 /// Opens the stores, installs the panel sources, the rule store, the pause flag and builds the
 /// engine's session tools. Called once per daemon, when the hub opens; a second call keeps the first.
-pub async fn install(launch: &HubLaunch) {
+pub(super) async fn install(launch: &HubLaunch) {
     if AUTONOMY.get().is_some() {
         return;
     }
