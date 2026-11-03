@@ -616,9 +616,17 @@ async fn gateway_stop_for_a_paired_session_ref_is_forwarded_and_audited_once_und
         assert_eq!(audit.len(), 1, "exactly one gateway-side audit line: {audit:?}");
         assert_eq!((audit[0].op.as_str(), audit[0].device_id.as_str(), audit[0].code.as_str()), ("stop", device.id.as_str(), "OK"));
         assert!(audit[0].request_id.is_some(), "a request id was minted before the forward");
-        assert!(
-            fixture.host_state.agent_control_audit.recent().iter().any(|record| record.op == "stop"),
-            "the paired host executed the stop"
+        let host_stops: Vec<_> = fixture
+            .host_state
+            .agent_control_audit
+            .recent()
+            .into_iter()
+            .filter(|record| record.op == "stop")
+            .collect();
+        assert_eq!(host_stops.len(), 1, "the paired host executed exactly one stop: {host_stops:?}");
+        assert_eq!(
+            host_stops[0].request_id, audit[0].request_id,
+            "the id minted at the gateway is the id the host executed"
         );
         Ok::<_, anyhow::Error>(())
     }

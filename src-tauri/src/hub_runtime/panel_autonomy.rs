@@ -309,7 +309,7 @@ pub fn forwarded_owner_answer_of(host_id: &str, op: &AgentControlOp) -> Option<P
     owner_answer_with(&installed()?, Some(host_id), op)
 }
 
-fn owner_answer_with(
+pub(crate) fn owner_answer_with(
     autonomy: &Arc<Autonomy>,
     host_id: Option<&str>,
     op: &AgentControlOp,

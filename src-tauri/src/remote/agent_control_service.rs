@@ -898,7 +898,8 @@ async fn forward_once(
     // it as a missing capability instead of an untyped refusal.
     let delivery = matches!(op, AgentControlOp::Deliver { .. });
     let known = hosts.list().await.map_err(|error| ForwardFailure {
-        code: forward_code(&error.code),
+        // Nothing was sent yet, so this never claims the op may have been applied.
+        code: "INVENTORY_INCOMPLETE".into(),
         message: "the paired-host inventory could not be read".into(),
     })?;
     let Some(host) = known.into_iter().find(|host| host.host_id == host_id) else {
@@ -1295,6 +1296,20 @@ async fn forward_as(
         _ => {}
     }
     let owner_answer = crate::hub_runtime::panel_autonomy::forwarded_owner_answer_of(&host_id, &op);
+    forward_with(state, host_id, op, actor, authorize, owner_answer).await
+}
+
+/// The forward itself, with the owner answer to record already claimed (so it can be tested
+/// against an autonomy service of its own instead of the process-wide one). The answer is
+/// recorded only when the paired host accepted the op.
+async fn forward_with(
+    state: &Arc<RemoteGatewayState>,
+    host_id: String,
+    op: AgentControlOp,
+    actor: &str,
+    authorize: Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>,
+    owner_answer: Option<crate::hub_runtime::panel_autonomy::PendingOwnerAnswer>,
+) -> Result<serde_json::Value, ScopeError> {
     let result = match authorize() {
         Err(error) => Err(error),
         Ok(()) => match state.paired_hosts() {
@@ -1345,6 +1360,9 @@ fn forward_scope_code(code: &str) -> ScopeErrorCode {
         | "MACHINE_ACCESS_REQUIRED"
         | "REPAIR_REQUIRED"
         | "HOST_UNAVAILABLE"
+        | "PERMISSION_DENIED"
+        | "RATE_LIMITED"
+        | "MACHINE_SERVICE_UNAVAILABLE"
         | "PAIRED_HOST_STALE_GENERATION"
         | "PAIRED_HOST_WRONG_MACHINE"
         | "PAIRED_HOST_REDIRECT_REJECTED" => ScopeErrorCode::InventoryIncomplete,
@@ -1523,7 +1541,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_forward_is_re_authorized_audited_once_under_the_device_and_mints_nothing_when_refused() {
+    async fn a_forward_is_re_authorized_audited_once_under_the_device_and_mints_an_id_even_when_refused() {
         let (_backend, state) = pane("agent-control-forward-auth", CLAUDE_APPROVAL);
         let refuse: Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync> =
             Arc::new(|| Err(reference_chat_scope(ScopeErrorCode::Unauthorized, "the caller's device is no longer authorized")));
@@ -1545,6 +1563,261 @@ mod tests {
         let line = audit.last().unwrap();
         assert_eq!((line.device_id.as_str(), line.op.as_str(), line.code.as_str()), ("device-1", "stop", "UNAUTHORIZED"));
         assert!(line.request_id.is_some(), "a stop with no request id gets one before it is forwarded");
+    }
+
+    /// A fake paired host that advertises agent control and serves `extra`, paired through the
+    /// real service. The relay and the host are one axum server on loopback.
+    async fn fake_paired_host(
+        extra: axum::Router,
+    ) -> (
+        tempfile::TempDir,
+        crate::paired_host::service::PairedHostService,
+        crate::paired_host::inventory::HostView,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use axum::routing::{get, post};
+        let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap())).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let router = axum::Router::new()
+            .route(
+                "/api/v1/pair/exchange",
+                post(|| async {
+                    axum::Json(serde_json::json!({"token":"fixture-secret","machineId":"a","device":{"id":"d","name":"d","permission":"control","accessScope":"machine","createdAt":1,"lastSeenAt":1}}))
+                }),
+            )
+            .route(
+                "/host/a/api/v1/capabilities",
+                get(|| async {
+                    axum::Json(serde_json::json!({"apiVersion":1,"machineId":"a","daemonEpoch":"1","platform":"linux","accessScope":"machine","permission":"control","capabilities":["directoryBrowseV1","machineWorkspaceV1","agentControlRemoteV1"],"limits":{"directoryEntries":1000,"terminalSessions":64}}))
+                }),
+            )
+            .merge(extra);
+        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let service = crate::paired_host::service::PairedHostService::open_test_loopback(root.path().join("data"));
+        let host = service
+            .pair(crate::paired_host::service::PairRequest {
+                relay_origin: origin,
+                pin: crate::paired_host::service::Secret("fixture".into()),
+                display_label: "fixture".into(),
+            })
+            .await
+            .unwrap();
+        (root, service, host, task)
+    }
+
+    async fn close_fake_host(root: tempfile::TempDir, task: tokio::task::JoinHandle<()>) {
+        task.abort();
+        let _ = task.await;
+        crate::ipc::run_blocking(move || {
+            root.close().unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    fn allow() -> Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync> {
+        Arc::new(|| Ok(()))
+    }
+
+    /// The paired host received the stop, then its reply was unreadable. The forward is not
+    /// sent again, is outcome-unknown (409), and is audited once under the device.
+    #[tokio::test]
+    async fn a_stop_whose_reply_is_lost_after_delivery_is_outcome_unknown_and_never_resent() {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&hits);
+        let host = axum::Router::new().route(
+            "/host/a/api/v1/agent-control/sessions/s-1/stop",
+            axum::routing::post(move || {
+                let counted = Arc::clone(&counted);
+                async move {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    (axum::http::StatusCode::OK, "not json")
+                }
+            }),
+        );
+        let (root, service, view, task) = fake_paired_host(host).await;
+        let (_backend, state) = pane("agent-control-lost-reply", CLAUDE_APPROVAL);
+        state.set_paired_hosts(service);
+
+        let error = forward_as(
+            &state,
+            view.host_id.clone(),
+            AgentControlOp::Stop { session_id: "s-1".into(), request_id: None },
+            "device-1",
+            allow(),
+        )
+        .await
+        .expect_err("an unreadable reply after delivery is not a success");
+
+        assert_eq!(error.code, ScopeErrorCode::OperationOutcomeUnknown, "{}", error.message);
+        assert_eq!(reference_chat_status(error.code), StatusCode::CONFLICT);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1, "the host saw exactly one stop");
+        let audit = state.agent_control_audit.recent();
+        assert_eq!(audit.len(), 1, "{audit:?}");
+        assert_eq!(
+            (audit[0].device_id.as_str(), audit[0].op.as_str(), audit[0].code.as_str()),
+            ("device-1", "stop", crate::remote::reference_chat::types::REFERENCE_OUTCOME_UNKNOWN_CODE)
+        );
+        close_fake_host(root, task).await;
+    }
+
+    struct SilentControl;
+
+    #[async_trait::async_trait]
+    impl ferryx_hub::supervisor::panel_contract::SessionControl for SilentControl {
+        async fn stop(&self, _: &ferryx_hub::supervisor::panel_contract::SessionRef) -> ferryx_hub::error::Result<()> {
+            Ok(())
+        }
+        async fn send(&self, _: &ferryx_hub::supervisor::panel_contract::SessionRef, _: &str) -> ferryx_hub::error::Result<()> {
+            Ok(())
+        }
+        async fn answer(
+            &self,
+            _: &ferryx_hub::supervisor::panel_contract::SessionRef,
+            _: &str,
+            _: Option<&str>,
+            _: usize,
+        ) -> ferryx_hub::error::Result<()> {
+            Ok(())
+        }
+        async fn read_tail(&self, _: &ferryx_hub::supervisor::panel_contract::SessionRef, _: usize) -> ferryx_hub::error::Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    /// Sends the summary of every action-log write to the test, in order.
+    struct ActionTap(tokio::sync::mpsc::UnboundedSender<String>);
+
+    impl ferryx_hub::supervisor::autonomy::PanelPublisher for ActionTap {
+        fn decision(&self, _: &ferryx_hub::supervisor::panel_contract::SessionRef, _: Option<&ferryx_hub::supervisor::panel_contract::Escalation>) {}
+        fn action(&self, action: &ferryx_hub::supervisor::panel_contract::ActionEntry) {
+            let _ = self.0.send(action.summary.clone());
+        }
+        fn rules(&self, _: &[ferryx_hub::supervisor::panel_contract::StandingRule]) {}
+    }
+
+    fn omarchy_blocked() -> ferryx_hub::supervisor::panel_contract::FleetSession {
+        use ferryx_hub::supervisor::panel_contract::{FleetSession, PendingPrompt, SessionRef};
+        FleetSession {
+            session_ref: SessionRef::new("omarchy", "s-1"),
+            host_id: "omarchy".into(),
+            host_label: "omarchy".into(),
+            title: "ferryx".into(),
+            cwd: "/nonexistent/forward-answer-test".into(),
+            agent: "claude".into(),
+            state: "blocked".into(),
+            state_source: "screen".into(),
+            state_since_ms: None,
+            screen_changed_at_ms: None,
+            pending_prompt: Some(PendingPrompt {
+                prompt_id: "p1".into(),
+                kind: "question".into(),
+                question: "Which package manager should I use?".into(),
+                command: None,
+                options: vec!["npm".into(), "pnpm".into()],
+                screen_revision: Some("rev-1".into()),
+            }),
+            last_assistant_line: None,
+            updated_at_ms: 1,
+            stale: false,
+        }
+    }
+
+    fn forwarded_tap() -> AgentControlOp {
+        AgentControlOp::Answer {
+            session_id: "s-1".into(),
+            prompt_id: "p1".into(),
+            screen_revision: "rev-1".into(),
+            answer: ReferencePromptAnswer { option_index: Some(1), ..Default::default() },
+            request_id: Some("tap-1".into()),
+        }
+    }
+
+    /// A forwarded owner tap joins the answer history exactly when the paired host accepted it:
+    /// recorded once on success, left unsettled on a stale screen and on a lost reply.
+    #[tokio::test]
+    async fn a_forwarded_owner_tap_is_recorded_only_when_the_paired_host_accepted_it() {
+        use axum::routing::post;
+        let answers = axum::Router::new().route(
+            "/host/a/api/v1/agent-control/sessions/s-1/answer",
+            post(|| async {
+                axum::Json(serde_json::json!({"receipt": {"stage": "accepted", "target": {"hostId": "local", "backendSessionId": "s-1"}}}))
+            }),
+        );
+        let conflict = axum::Router::new().route(
+            "/host/a/api/v1/agent-control/sessions/s-2/answer",
+            post(|| async {
+                (
+                    axum::http::StatusCode::CONFLICT,
+                    axum::Json(serde_json::json!({"error": {"code": "REQUEST_CONFLICT", "message": "stale", "retryable": false, "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4", "details": {}}})),
+                )
+            }),
+        );
+        let lost = axum::Router::new().route(
+            "/host/a/api/v1/agent-control/sessions/s-3/answer",
+            post(|| async { (axum::http::StatusCode::OK, "not json") }),
+        );
+        let (root, service, view, task) = fake_paired_host(answers.merge(conflict).merge(lost)).await;
+        let (_backend, state) = pane("agent-control-forward-history", CLAUDE_APPROVAL);
+        state.set_paired_hosts(service);
+
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let (tap, mut actions) = tokio::sync::mpsc::unbounded_channel();
+        let autonomy = ferryx_hub::supervisor::autonomy::Autonomy::open(pool, Arc::new(SilentControl), Arc::new(ActionTap(tap)))
+            .await
+            .unwrap();
+        let claim = |op: &AgentControlOp| crate::hub_runtime::panel_autonomy::owner_answer_with(&autonomy, Some(&view.host_id), op);
+        // The prompt is tracked under the paired host's own session ref.
+        let track = |session: &str| {
+            let mut tracked = omarchy_blocked();
+            tracked.session_ref = ferryx_hub::supervisor::panel_contract::SessionRef::new(&view.host_id, session);
+            tracked.host_id = view.host_id.clone();
+            tracked
+        };
+        autonomy.observe(&track("s-1")).await;
+
+        let op = forwarded_tap();
+        let pending = claim(&op).expect("the paired host's prompt is tracked");
+        let accepted = forward_with(&state, view.host_id.clone(), op.clone(), "device-1", allow(), Some(pending))
+            .await
+            .expect("the paired host accepted the tap");
+        assert_eq!(accepted["receipt"]["stage"], "accepted", "{accepted}");
+        let mut seen = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(summary) = actions.recv().await {
+                seen.push(summary);
+                if seen.iter().any(|summary| summary == "You chose pnpm") {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the owner's choice was recorded");
+        assert_eq!(seen.iter().filter(|summary| *summary == "You chose pnpm").count(), 1, "{seen:?}");
+        assert!(claim(&op).is_none(), "the prompt is settled: learned once");
+        assert_eq!(state.agent_control_audit.recent().len(), 1);
+
+        // A tap the host refuses as stale, and one whose reply is lost, record nothing and leave
+        // the prompt claimable. Each prompt gets its own session id on the fixture host.
+        for (session, expected) in [("s-2", ScopeErrorCode::RequestConflict), ("s-3", ScopeErrorCode::OperationOutcomeUnknown)] {
+            autonomy.observe(&track(session)).await;
+            let mut refused = forwarded_tap();
+            if let AgentControlOp::Answer { session_id, .. } = &mut refused {
+                *session_id = session.into();
+            }
+            let pending = claim(&refused).expect("tracked and unsettled");
+            let error = forward_with(&state, view.host_id.clone(), refused.clone(), "device-1", allow(), Some(pending))
+                .await
+                .expect_err("not accepted");
+            assert_eq!(error.code, expected, "{session}: {}", error.message);
+            assert!(claim(&refused).is_some(), "{session}: nothing was recorded, the prompt is still open");
+        }
+        while let Ok(summary) = actions.try_recv() {
+            assert_ne!(summary, "You chose pnpm", "a refused or lost tap recorded an owner choice");
+        }
+        close_fake_host(root, task).await;
     }
 
     #[tokio::test]
