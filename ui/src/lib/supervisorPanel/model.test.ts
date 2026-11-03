@@ -234,6 +234,13 @@ describe("supervisor panel view", () => {
       "No standing rules.",
     );
   });
+
+  it("shows a fixed retry interval the owner set in plain language", () => {
+    const rules = panelSnapshotFixture.rules.map((rule) =>
+      rule.kind === "upstreamRetry" ? { ...rule, params: { backoffSecs: [300], thenEverySecs: 300 } } : rule,
+    );
+    expect(buildPanelView({ ...panelSnapshotFixture, rules }, options).rulesLine).toMatch(/^Retries upstream errors every 5 min, /);
+  });
 });
 
 function actionEntry(overrides: Partial<ActionEntry>): ActionEntry {

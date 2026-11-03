@@ -10,6 +10,9 @@
 //             the runner decides when its card (and its push) appears.
 //   upstream  draws a provider 502 retry screen and reports `working`, so the recovery
 //             scheduler lists it under Handling with Stop.
+//   focus     draws one idle line naming its title and reports `idle`, so the panel lists it
+//             as a plain session row; every key it receives is recorded, which proves the row
+//             click focused this pane's terminal (F3-D6).
 //
 // Every received byte and every state report goes to <logDir>/agent-<title>.jsonl, which the
 // runner copies as evidence; this file never decides PASS. Ctrl-C (the Stop path) is recorded
@@ -17,14 +20,14 @@
 // (a `supervisorReport` line on the agent-state socket, as fixture-worker.mjs does) whose body
 // carries <token> in its heading and in its last line, so the Viewer check can prove the whole
 // report was opened.
-//   argv: <logDir> <decision|held|upstream> <title>
+//   argv: <logDir> <decision|held|upstream|focus> <title>
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
 
 const [logDir, mode, title] = process.argv.slice(2);
-if (!logDir || !['decision', 'held', 'upstream'].includes(mode) || !/^[a-z0-9]+$/.test(title ?? '')) {
-  process.stderr.write('usage: fixture-agent.mjs <logDir> <decision|held|upstream> <title [a-z0-9]+>\n');
+if (!logDir || !['decision', 'held', 'upstream', 'focus'].includes(mode) || !/^[a-z0-9]+$/.test(title ?? '')) {
+  process.stderr.write('usage: fixture-agent.mjs <logDir> <decision|held|upstream|focus> <title [a-z0-9]+>\n');
   process.exit(5);
 }
 mkdirSync(logDir, { recursive: true });
@@ -76,13 +79,20 @@ function drawUpstream() {
   report('working');
 }
 
+function drawFocus() {
+  process.stdout.write('\x1b[2J\x1b[H');
+  process.stdout.write(`\r\n● ${title} is idle. Waiting for input.\r\n`);
+  record({ kind: 'focus-drawn' });
+  report('idle');
+}
+
 function classify(bytes) {
   if (bytes.includes(0x03)) return 'stop';
   const text = bytes.toString('utf8');
   const report = /F3-REPORT:([a-z0-9]+)/.exec(text);
   if (report) return `report:${report[1]}`;
   if (!drawn) return text.includes('F3-DRAW') ? 'draw' : 'input';
-  if (mode === 'upstream') return 'input';
+  if (mode === 'upstream' || mode === 'focus') return 'input';
   // The option the keys select: a digit, or Enter after N down-arrows from option 1; Esc alone
   // cancels. Option 1 is Yes, option 4 is No.
   const digit = /^([1-4])/.exec(text);
@@ -100,6 +110,8 @@ process.stdin.on('data', (chunk) => {
   if (kind === 'stop') { record({ kind: 'stopped' }); process.exit(130); }
   if (kind === 'draw') { drawn = true; drawDecision(); return; }
   if (kind.startsWith('report:')) { sendReport(kind.slice('report:'.length)); return; }
+  // The focus pane echoes printable input, so the typed token is visible in its terminal.
+  if (mode === 'focus') { process.stdout.write(chunk.toString('utf8').replace(/[^\x20-\x7e]/g, '')); return; }
   if (kind === 'approve' || kind === 'reject' || kind.startsWith('option')) {
     process.stdout.write(`\r\nAnswered ${kind} for migration ${nonce}.\r\n`);
     record({ kind: 'answered', answer: kind, nonce });
@@ -111,3 +123,4 @@ process.stdin.on('end', () => { record({ kind: 'input-closed' }); process.exit(0
 record({ kind: 'ready', sessionId: process.env.FERRYX_SESSION_ID ?? null, cwd: process.cwd() });
 if (mode === 'decision') drawDecision();
 else if (mode === 'upstream') drawUpstream();
+else if (mode === 'focus') drawFocus();

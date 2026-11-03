@@ -14,10 +14,12 @@
 // answered (wrong revision or stamp, relay, daemon, GUI, product) is a lane failure. Cleanup
 // ends the GUI and daemon by exact pid identity, then removes only the profile this run made.
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { connectNativeMahord, rpcProcess } from '../fixtures/native-configured-adapters.mjs';
 import { LaneBlocked, StepFailed, markNotRun, runStep, stopExact, until } from './steps.mjs';
 import { scenariosForLane } from './contract.mjs';
+import { acceptedReply, configureGateway, decisionsNamingNonce, gatewayPortFor, globalRetryRule, namesNonce, rowFocusVerdict, rulesLineText, typedInto, uniqueSession } from './seams.mjs';
 
 const quote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
 const psq = (value) => `'${String(value).replaceAll("'", "''")}'`;
@@ -96,20 +98,26 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     lane.receipt.candidate.uiSha256 = setup.uiSha256;
     if (typeof setup.candidate !== 'string' || !setup.candidate.startsWith(`${run.revision}+`)) throw new StepFailed('CANDIDATE_STAMP', `${host.hostId} candidate stamp ${setup.candidate} is not ${run.revision}+<patch>`);
     const wrappers = await helper.call('write-wrappers', { profile: setup.profile });
-    const env = { ...setup.env, FERRYX_RELAY_URL: shared.relayOrigin, FERRYX_MACHINE_TOKEN: shared.machineToken(host.hostId), FERRYX_ACCOUNT_ORIGIN: shared.relayOrigin };
+    // The isolated daemon's gateway gets a run-owned free port: production on this host may
+    // already own 43821, and a refused bind must stop the lane, never be stepped over.
+    const gatewayPort = gatewayPortFor(host.hostId, await helper.call('free-port', {}));
+    const env = { ...setup.env, FERRYX_RELAY_URL: shared.relayOrigin, FERRYX_MACHINE_TOKEN: shared.machineToken(host.hostId), FERRYX_ACCOUNT_ORIGIN: shared.relayOrigin,
+      FERRYX_QA_GATEWAY_PORT: String(gatewayPort) };
     setup.env = env;
     daemon = await agent.call('spawn-daemon', { setup, runId: run.runId, operationId: `f3-${run.runId}`, hostId: host.hostId, timeoutMs: 120_000 });
     lane.write('gui-receipt', 'daemon-launch.json', daemon);
-    const call = async (label, frames, deadlineMs) => {
+    const exchange = async (label, frames, deadlineMs) => {
       const replies = await helper.call('daemon', { profile: setup.profile, frames, deadlineMs });
       lane.write('daemon-io', `daemon/${Date.now()}-${label}.json`, { label, frames, replies });
-      return replies.at(-1);
+      return replies;
     };
+    // Every daemon call is checked: a structured error reply stops the step or the lane.
+    const call = async (label, frames, deadlineMs) => acceptedReply(label, await exchange(label, frames, deadlineMs));
     const enrolled = await shared.enroll({ host, helper, profile: setup.profile, env, cli: host.cli });
     lane.write('account', 'enroll.json', enrolled);
-    await call('register', [{ type: 'registerWorkspace', workspaceId: 'f3', repoRoot: setup.worktree }]);
-    await call('agent-control', [{ type: 'agentControlSettingsSet', enabled: true, excludedDeviceIds: [] }]);
-    await call('relay', [{ type: 'remoteConfigure', config: { mode: 'relay', port: 43821, allowControl: true, relayUrl: shared.relayOrigin } }]);
+    acceptedReply('register', await exchange('register', [{ type: 'registerWorkspace', workspaceId: 'f3', repoRoot: setup.worktree }]), 'registerWorkspaceOk');
+    acceptedReply('agent-control', await exchange('agent-control', [{ type: 'agentControlSettingsSet', enabled: true, excludedDeviceIds: [] }]), 'agentControlSettingsOk');
+    lane.write('relay', 'gateway.json', await configureGateway({ call: exchange, port: gatewayPort, relayOrigin: shared.relayOrigin }));
 
     // 2. GUI through MahoRD only (the same launcher path native-configured-adapters uses).
     gui = await launchGui({ agent, mahord, setup, host, run, lane });
@@ -220,6 +228,98 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       await mahord.hotkey(host.platform === 'darwin' ? ['Meta', 'ArrowDown'] : ['Control', 'End'], signal);
       const tail = keep(step, 'viewer-tail', await until('report end in Viewer', () => frame('viewer-tail'), ({ read: r }) => r.text.includes(end) && r.text.includes(host.viewerMarker), { deadlineMs: 60_000 }));
       step.assert('viewer-shows-report-end', tail.read.text.includes(end) && tail.read.text.includes(host.viewerMarker), { end, marker: host.viewerMarker, text: tail.read.text.slice(0, 1500) });
+    });
+
+    // F3-D6: one session row, clicked through MahoRD, focuses that session's terminal. Two of
+    // this desktop's own instrumented panes (unique titles on this computer), spawned by this
+    // desktop's daemon: `away` and `focus`. Focus is first put on `away` through its row and
+    // proven there by a probe that fully arrives in the away pane's log (keys go to one focused
+    // target, in order), so the focus pane cannot already hold focus. Then the focus row is
+    // clicked and a token typed after it must arrive in the focus pane and show on screen.
+    await runStep(lane, 'F3-D6', async (step) => {
+      const panes = {};
+      for (const key of ['away', 'focus']) {
+        const pane = wrappers.wrappers[key];
+        const spawned = await call(`spawn-${key}`, [{ type: 'spawn', clientRequestId: randomUUID(), workspaceId: 'f3', worktree: null, cwd: pane.cwd, cols: 100, rows: 24, shell: pane.shell }]);
+        if (spawned.type !== 'spawnOk') throw new StepFailed('FIXTURE_PANES', `spawn ${key}: ${JSON.stringify(spawned)}`);
+        panes[key] = { title: pane.title, sessionId: spawned.sessionId };
+      }
+      const log = async (key, after = 0) => {
+        const file = await helper.call('read-b64', { profile: setup.profile, path: join(wrappers.logs, `agent-${panes[key].title}.jsonl`) });
+        return Buffer.from(file.base64, 'base64').toString('utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line)).slice(after);
+      };
+      const both = (v) => ['away', 'focus'].every((key) => uniqueSession(v, panes[key].title) !== null);
+      const view = await until('the away and focus rows in the panel', () => panel(null), both, { deadlineMs: 120_000 });
+      step.artifact('panel-read', 'focus.panel.json', view);
+      step.assert('row-in-panel', ['away', 'focus'].every((key) => uniqueSession(view, panes[key].title)?.sessionRef?.endsWith(`:${panes[key].sessionId}`) === true),
+        { away: uniqueSession(view, panes.away.title), focus: uniqueSession(view, panes.focus.title), panes });
+      const suffix = run.runId.replace(/[^a-z0-9]/g, '').slice(-6);
+      const probe = `f3probe${suffix}`;
+      const token = `f3token${suffix}`;
+      const clickRow = async (key, name) => {
+        const { read } = await frame(name, step);
+        const row = locate(read, panes[key].title);
+        if (!row) throw new StepFailed('ROW_NOT_ON_SCREEN', `no session row "${panes[key].title}" on screen`);
+        await mahord.click({ x: row.x, y: row.y }, signal);
+      };
+      // Focus on `away`, proven by the probe arriving there in full before the focus row is clicked.
+      const awayMark = (await log('away')).length;
+      await clickRow('away', 'before-away-click');
+      await mahord.type(probe, signal);
+      const awayEntries = await until('the probe in the away pane', () => log('away', awayMark), (list) => typedInto(list, probe), { deadlineMs: 30_000 });
+      step.artifact('fixture-log', 'away.agent.jsonl', (await log('away')).map((e) => JSON.stringify(e)).join('\n'));
+      const focusBefore = await log('focus');
+      const elsewhere = rowFocusVerdict({ away: awayEntries, focus: focusBefore, probe, token }).focusWasElsewhere;
+      step.assert('keys-in-away-pane-before-click', elsewhere, { probe });
+      if (!elsewhere) throw new StepFailed('FOCUS_NOT_ELSEWHERE', `the probe did not land in ${panes.away.title} alone`);
+      // Every probe key was taken by `away`, so these entries were logged before the focus click.
+      const focusMark = focusBefore.length;
+      await clickRow('focus', 'before-row-click');
+      await mahord.type(token, signal);
+      const entries = await until('typed token in the focus pane', () => log('focus', focusMark), (list) => typedInto(list, token), { deadlineMs: 30_000 });
+      step.artifact('fixture-log', 'focus.agent.jsonl', (await log('focus')).map((e) => JSON.stringify(e)).join('\n'));
+      const verdict = rowFocusVerdict({ away: await log('away', awayMark), focus: await log('focus'), probe, token });
+      step.assert('row-click-focused-terminal', typedInto(entries, token) && verdict.focusWasElsewhere && verdict.clickFocusedTerminal, { token, probe, verdict });
+      const shown = keep(step, 'after-row-click', await until('typed token on screen', () => frame('after-row-click'), ({ read: r }) => r.text.includes(token), { deadlineMs: 30_000 }));
+      step.assert('typed-token-on-screen', shown.read.text.includes(token), { token, text: shown.read.text.slice(0, 1500) });
+    });
+
+    // F3-D7: "retry every 5 min", typed into this desktop's composer through MahoRD, becomes the
+    // standing retry rule (300 s) and the rules line on screen changes. The line is read from
+    // OCR before and after; the daemon's panel read proves the stored rule.
+    await runStep(lane, 'F3-D7', async (step) => {
+      const instruction = 'retry every 5 min';
+      const beforeView = await panel(step, 'rules-before');
+      const { read: beforeRead } = await frame('rules-before', step);
+      const beforeLine = rulesLineText(beforeRead.text);
+      step.assert('rules-line-before', beforeLine !== null && !/every 5 min/.test(beforeLine), { line: beforeLine, rule: globalRetryRule(beforeView) });
+      const box = locate(beforeRead, 'Tell the supervisor');
+      if (!box) throw new StepFailed('COMPOSER_NOT_FOUND', 'the composer placeholder is not on screen');
+      await mahord.click({ x: box.x, y: box.y }, signal);
+      await mahord.type(instruction, signal);
+      await mahord.key('Enter', signal);
+      const stored = await until('the 300 s retry rule', () => panel(null), (v) => globalRetryRule(v)?.params?.thenEverySecs === 300, { deadlineMs: 120_000 });
+      step.artifact('panel-read', 'rules-after.panel.json', stored);
+      step.artifact('transcript-read', 'rules.transcript.json', await transcript(null));
+      step.assert('rule-stored-every-300s', globalRetryRule(stored)?.params?.thenEverySecs === 300, { rule: globalRetryRule(stored) });
+      const after = keep(step, 'rules-after', await until('the changed rules line on screen', () => frame('rules-after'), ({ read: r }) => /every 5 min/.test(rulesLineText(r.text) ?? ''), { deadlineMs: 60_000 }));
+      const afterLine = rulesLineText(after.read.text);
+      step.assert('rules-line-changed-on-screen', afterLine !== beforeLine && /every 5 min/.test(afterLine ?? ''), { before: beforeLine, after: afterLine });
+    });
+
+    // F3-D5: each decision the phone answered (F3-P1, F3-P2; their nonces recorded by the iPhone
+    // lane) is gone from this desktop's panel read and from its screen. Waits for the phone.
+    await runStep(lane, 'F3-D5', async (step) => {
+      await shared.phoneAnswersDone;
+      const answers = shared.phoneAnswers;
+      step.assert('phone-answered-card', answers.length > 0 && answers.every((a) => Number.isInteger(a.nonce)), { answers });
+      const gone = (v) => answers.every((a) => decisionsNamingNonce(v, shared.decisionTitle, a.nonce).length === 0);
+      const view = await until('the answered cards gone from the panel', () => panel(null), gone, { deadlineMs: 60_000 });
+      step.artifact('panel-read', 'answered.panel.json', view);
+      step.assert('answered-card-gone-from-panel', gone(view), { answers, decisions: view.decisions });
+      const offScreen = ({ read: r }) => answers.every((a) => !namesNonce(r.text, shared.decisionTitle, a.nonce));
+      const shown = keep(step, 'answered', await until('the answered cards gone from screen', () => frame('answered'), offScreen, { deadlineMs: 60_000 }));
+      step.assert('answered-card-gone-from-screen', offScreen(shown), { answers, text: shown.read.text.slice(0, 1500) });
     });
   } catch (error) {
     if (error instanceof LaneBlocked) lane.receipt.blocked = { code: error.code, detail: error.detail, at: new Date().toISOString() };

@@ -13,7 +13,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { createConnection } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import { hostname, platform, release } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -105,14 +105,26 @@ function writeWrappers({ profile }) {
   mkdirSync(bin, { recursive: true });
   mkdirSync(logs, { recursive: true });
   const wrappers = {};
-  for (const [mode, title] of [['decision', 'f3decision'], ['held', 'f3push'], ['upstream', 'f3upstream']]) {
-    const file = join(bin, `f3-${mode}${WIN ? '.cmd' : ''}`);
+  // `focus` and `away` are per desktop (F3-D6): two instrumented panes whose titles name the
+  // host, so each desktop's rows are unique; both run the fixture's `focus` mode.
+  const host = WIN ? 'win' : 'mac';
+  for (const [key, mode, title] of [['decision', 'decision', 'f3decision'], ['held', 'held', 'f3push'], ['upstream', 'upstream', 'f3upstream'],
+    ['focus', 'focus', `f3focus${host}`], ['away', 'focus', `f3away${host}`]]) {
+    const file = join(bin, `f3-${key}${WIN ? '.cmd' : ''}`);
     const body = WIN
       ? `@echo off\r\n"${process.execPath}" "${agent}" "${logs}" ${mode} ${title}\r\nexit /b %ERRORLEVEL%\r\n`
       : `#!/bin/sh\nexec '${process.execPath}' '${agent}' '${logs}' ${mode} ${title}\n`;
     writeFileSync(file, body, { mode: 0o755 });
     if (!WIN) chmodSync(file, 0o755);
-    wrappers[mode] = { shell: file, title };
+    wrappers[key] = { shell: file, title };
+  }
+  // The panel titles a session by the last segment of its cwd (fleet.rs), so each of these panes
+  // runs in its own directory inside the profile (and so inside the registered worktree, removed
+  // with the profile): one row on this computer carries its title.
+  for (const key of ['focus', 'away']) {
+    const cwd = join(profile, 'panes', wrappers[key].title);
+    mkdirSync(cwd, { recursive: true });
+    wrappers[key].cwd = resolve(cwd);
   }
   return { wrappers, logs };
 }
@@ -192,9 +204,25 @@ function removeOwnedDir({ profile }) {
   return { resource: 'dir', path: target, action: 'removed' };
 }
 
+/**
+ * A free loopback-and-wildcard TCP port for this run's gateway, found by binding port 0 and
+ * releasing it; never the production gateway port 43821 and never a listener someone else owns.
+ * The daemon binds it right after, and the lane proves the bind from the daemon's own status.
+ */
+function freePort() {
+  return new Promise((resolvePort, reject) => {
+    const server = createServer();
+    server.once('error', (error) => reject(fail('PORT_UNAVAILABLE', error.message)));
+    server.listen({ port: 0, host: '0.0.0.0', exclusive: true }, () => {
+      const { port } = server.address();
+      server.close(() => (port === 43821 ? freePort().then(resolvePort, reject) : resolvePort({ port })));
+    });
+  });
+}
+
 const METHODS = {
   identity, daemon, 'write-wrappers': writeWrappers, 'spawn-owned': spawnOwned, 'await-exit': awaitExit,
-  cleanup, 'read-b64': readB64, 'list-files': listFiles, 'remove-owned-dir': removeOwnedDir,
+  cleanup, 'read-b64': readB64, 'list-files': listFiles, 'remove-owned-dir': removeOwnedDir, 'free-port': freePort,
 };
 
 if (process.argv.includes('--rpc')) {

@@ -29,6 +29,7 @@ New files:
 | `iphone-lane.mjs` | The iPhone lane (Safari and the Home Screen web app through WDA) |
 | `host-helper.mjs` | Per-host JSONL RPC: identity, daemon protocol, fixture wrappers, run-owned children, profile file reads |
 | `fixture-agent.mjs` | Fixture pane that stands in for a Claude session: decision, held decision (for push), or upstream 502 |
+| `seams.mjs` | Pure checks: daemon replies, the run-owned gateway port, the iPhone web-context page channel, row, rules-line and answered-card checks (self-tests in `seams.test.mjs`) |
 | `config.example.json` | Every field the run needs |
 
 ## Topology
@@ -65,6 +66,8 @@ Ordering:
    - The name must resolve from the iPhone, maho-mac and the control host.
 2. **MahoRD.** MahoRD must be paired with both hosts (pairing ids go in the config), and each host's desktop session must be unlocked.
 3. **iPhone.** WebDriverAgent must be running against the device and reachable at `iphone.driverEndpoint`. The device must be unlocked and trusted. If the device or driver is absent or unacknowledged, the lane is BLOCKED.
+   - `driverEndpoint` must be an Appium XCUITest server, not raw WebDriverAgent. Raw WDA has no `execute/sync` route, so page reads go through Safari's `WEBVIEW_*` context instead. Safari > Advanced > Web Inspector must be on.
+   - Without a web context, the lane is BLOCKED with `WEB_CONTEXT_UNSUPPORTED` or `WEB_CONTEXT_ABSENT`.
 4. **Push permission.** This is the owner's action and is never automated.
    - Once per origin: in Safari, do Share > Add to Home Screen.
    - During each run, when the lane logs "F3-P4 waiting": open that web app, sign in, then Settings > Phone alerts > on > Allow. The run's daemon profile is new, so its push store starts empty.
@@ -114,6 +117,14 @@ The gesture area is a fixed band of the visual viewport, the same in code and he
 | F3-P4 | iphone | `user-on-another-card`, `banner-absent-before-release`, `push-banner-shown`, `push-opened-new-card`, `opened-card-in-gesture-area` (fails if WDA reports no window size) | screenshot, accessibility-source, push-subscription, panel-read |
 | F3-D3 | macos, windows | `export-holds-prompt`, `export-holds-reply` (bytes of the new file in the profile's `Downloads`); cross `both-desktops-pass` | screenshot, export-file, transcript-read |
 | F3-D4 | macos, windows | `report-not-open-before-viewer` (neither `End of report <token>` nor `viewerMarker` on the pre-click frame), `viewer-shows-report-heading` (full `F3 long report <token>`), `viewer-marker-shown` (the configured Viewer-only text), `viewer-shows-report-end`. The report is the fixture's 40 sections, sent on the product's `supervisorReport` path. Cross `both-desktops-pass` | screenshot, ocr, transcript-read |
+| F3-D5 | macos, windows | `phone-answered-card` (the nonces the fixture pane answered in P1 and P2), `answered-card-gone-from-panel`, `answered-card-gone-from-screen`. Cross `both-desktops-pass` | screenshot, ocr, panel-read |
+| F3-D6 | macos, windows | `row-in-panel` (this desktop's own `f3away<host>` and `f3focus<host>` panes), `keys-in-away-pane-before-click` (after a click on the away row, a probe arrives in full in the away pane), `row-click-focused-terminal` (keys typed after the MahoRD focus-row click reach the focus pane; the probe never did), `typed-token-on-screen`. Cross `both-desktops-pass` | screenshot, ocr, panel-read, fixture-log |
+| F3-D7 | macos, windows | `rules-line-before`, `rule-stored-every-300s` (the panel read's global `upstreamRetry` rule), `rules-line-changed-on-screen` ("every 5 min" in the OCR'd rules line). Cross `both-desktops-pass` | screenshot, ocr, panel-read, transcript-read |
+
+Isolation:
+- Each desktop daemon's gateway binds a run-owned free port (`FERRYX_QA_GATEWAY_PORT`, honored only by a `local-split-qa` build with a QA run id). It is never the production 43821.
+- The lane proves the bind from the daemon's own `remoteGetStatus`. A refused `remoteConfigure` or any other daemon error reply stops the lane.
+- A `FERRYX_QA_ISOLATED` desktop saves the transcript export into the profile's `home/Downloads`, never the real user's Downloads folder (Windows resolves that folder through the Known Folder API, which ignores `USERPROFILE`).
 
 
 ## Evidence schema

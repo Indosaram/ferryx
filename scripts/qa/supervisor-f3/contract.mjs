@@ -47,6 +47,15 @@ export const SCENARIOS = Object.freeze([
   { id: 'F3-D4', clause: 'the long report opens in Viewer', lanes: ['macos', 'windows'],
     artifacts: ['screenshot', 'ocr', 'transcript-read'],
     assertions: ['report-not-open-before-viewer', 'viewer-shows-report-heading', 'viewer-marker-shown', 'viewer-shows-report-end'], cross: ['both-desktops-pass'] },
+  { id: 'F3-D5', clause: 'a decision answered from the phone leaves the panel on both desktops', lanes: ['macos', 'windows'],
+    artifacts: ['screenshot', 'ocr', 'panel-read'],
+    assertions: ['phone-answered-card', 'answered-card-gone-from-panel', 'answered-card-gone-from-screen'], cross: ['both-desktops-pass'] },
+  { id: 'F3-D6', clause: 'clicking a session row on the desktop focuses that session\'s terminal', lanes: ['macos', 'windows'],
+    artifacts: ['screenshot', 'ocr', 'panel-read', 'fixture-log'],
+    assertions: ['row-in-panel', 'keys-in-away-pane-before-click', 'row-click-focused-terminal', 'typed-token-on-screen'], cross: ['both-desktops-pass'] },
+  { id: 'F3-D7', clause: 'telling the supervisor "retry every 5 min" changes the rules line', lanes: ['macos', 'windows'],
+    artifacts: ['screenshot', 'ocr', 'panel-read', 'transcript-read'],
+    assertions: ['rules-line-before', 'rule-stored-every-300s', 'rules-line-changed-on-screen'], cross: ['both-desktops-pass'] },
 ]);
 
 export const scenarioById = (id) => SCENARIOS.find((scenario) => scenario.id === id) ?? null;

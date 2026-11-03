@@ -8278,11 +8278,12 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
 
     if cfg!(not(test)) {
         let auth = Arc::clone(&state.auth_manager);
+        // The gateway this router belongs to: the port its loopback listener binds
+        // (`config.port`, set before the router is built), so a QA daemon on its own port never
+        // forwards attaches to a production gateway on the same host.
+        let gateway_port = state.config.read().port;
         let deps = Arc::new(crate::remote::attach_router::AttachRouterDeps {
-            gateway_addr: format!(
-                "127.0.0.1:{}",
-                crate::remote::state::REMOTE_GATEWAY_PORT
-            ),
+            gateway_addr: format!("127.0.0.1:{gateway_port}"),
             authorize: Arc::new(move |key| auth.authorizes_attach_key_bytes(key)),
         });
         router = router.merge(crate::remote::attach_router::attach_router(deps));

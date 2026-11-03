@@ -321,8 +321,15 @@ function stallThresholdMs(rules: StandingRule[]): number {
 
 export function formatRulesLine(rules: StandingRule[]): string {
   const parts: string[] = [];
-  if (latestGlobalRule(rules, "upstreamRetry")) {
-    parts.push("retries upstream errors on a backoff");
+  const retry = latestGlobalRule(rules, "upstreamRetry");
+  if (retry) {
+    // A plain-language rule change ("retry every 5 min") stores one fixed interval; show it, so
+    // the owner sees the line change. The default rule keeps its backoff wording.
+    const backoff = retry.params.backoffSecs;
+    const every = retry.params.thenEverySecs;
+    const fixed =
+      typeof every === "number" && every > 0 && Array.isArray(backoff) && backoff.every((secs) => secs === every);
+    parts.push(fixed ? `retries upstream errors every ${formatMinutes(every * 1000)}` : "retries upstream errors on a backoff");
   }
   const stall = latestGlobalRule(rules, "stallRestart");
   if (stall) {

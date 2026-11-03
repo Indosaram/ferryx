@@ -66,7 +66,7 @@ function crossChecks(shared, lanes) {
   cross.push({ scenarioId: 'F3-D1', id: 'same-card-both-desktops', ok: Boolean(d1.macos && d1.windows) && JSON.stringify(d1.macos) === JSON.stringify(d1.windows), observed: d1 });
   const d2 = shared.observed['F3-D2'] ?? {};
   cross.push({ scenarioId: 'F3-D2', id: 'same-prompt-and-reply-both-desktops', ok: Boolean(d2.macos && d2.windows) && d2.macos.owner === d2.windows.owner && d2.macos.reply === d2.windows.reply, observed: d2 });
-  for (const id of ['F3-D3', 'F3-D4']) {
+  for (const id of ['F3-D3', 'F3-D4', 'F3-D5', 'F3-D6', 'F3-D7']) {
     const status = (name) => lanes[name].receipt.steps.find((s) => s.scenarioId === id)?.status;
     cross.push({ scenarioId: id, id: 'both-desktops-pass', ok: status('macos') === 'pass' && status('windows') === 'pass', observed: { macos: status('macos'), windows: status('windows') } });
   }
@@ -100,6 +100,8 @@ async function runLanes({ config, run, lanes, shared, signal }) {
   } finally {
     // macOS never started: it cannot record D1/D2, so it must not hold the phone.
     if (others.length === 0) shared.desktopDone('macos');
+    // The phone never started: no desktop F3-D5 may wait for its answers.
+    if (others.length === 0) shared.phoneAnswersSettled();
     await Promise.allSettled(others);
     shared.releaseCleanup();
     await windowsDone;

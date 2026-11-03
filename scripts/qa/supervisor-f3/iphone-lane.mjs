@@ -1,7 +1,12 @@
-// iPhone lane of the F3 acceptance run: Safari on the owner's real iPhone, driven through the
-// provisioned WebDriverAgent by the existing producer's seam (herdr-reference-device.mjs
+// iPhone lane of the F3 acceptance run: Safari on the owner's real iPhone, driven through an
+// Appium XCUITest session by the existing producer's seam (herdr-reference-device.mjs
 // bindIosDevice: driver status, session and device provenance are read, never invented). Every
 // action is a real touch from the accessibility tree or the page rect; page state is only READ.
+//
+// Page reads need a page-script route, which raw WebDriverAgent does not have (no
+// `execute/sync`). They go through Safari's WEBVIEW context of the Appium session
+// (seams.webPageChannel); touches, source and screenshots run in NATIVE_APP. A driver without a
+// web context blocks the lane (WEB_CONTEXT_UNSUPPORTED), never a fabricated read.
 //
 // Push (F3-P4) needs Web Push permission for the served origin, which iOS grants only to a Home
 // Screen web app the owner allowed. The lane checks the gateway's own subscription list for a
@@ -11,6 +16,7 @@ import { join } from 'node:path';
 import { bindIosDevice } from '../herdr-reference-device.mjs';
 import { LaneBlocked, StepFailed, markNotRun, runStep, until } from './steps.mjs';
 import { scenariosForLane } from './contract.mjs';
+import { pageToScreen, webPageChannel, webViewFrame } from './seams.mjs';
 
 // Read-only page probe: the decision cards, their buttons and rects, the Stop buttons and the
 // visual viewport. The gesture area is that viewport minus a fixed 44 pt top (status bar) and
@@ -24,8 +30,11 @@ const PANEL_EXPR = `(() => {
   }));
   const stops = [...document.querySelectorAll('[data-testid="handling-row"] button[aria-label^="Stop "]')].map((b) => ({ label: b.getAttribute('aria-label'), rect: rect(b) }));
   return { url: location.href, home: !!document.querySelector('[data-testid="phone-supervisor-home"]'), cards, stops,
-    viewport: { w: innerWidth, h: innerHeight, vvTop: vv ? vv.offsetTop : 0, vvH: vv ? vv.height : innerHeight }, at: Date.now() };
+    viewport: { w: innerWidth, h: innerHeight, vvTop: vv ? vv.offsetTop : 0, vvLeft: vv ? vv.offsetLeft : 0, vvH: vv ? vv.height : innerHeight, scale: vv ? vv.scale : 1 }, at: Date.now() };
 })()`;
+const RECT_EXPR = (selector) => `(() => { const el = document.querySelector('${selector}'); if (!el) return null;
+  const r = el.getBoundingClientRect(); const vv = window.visualViewport;
+  return { rect: { x: r.x, y: r.y, w: r.width, h: r.height }, viewport: { vvTop: vv ? vv.offsetTop : 0, vvLeft: vv ? vv.offsetLeft : 0, scale: vv ? vv.scale : 1 } }; })()`;
 const TOP_PT = 44;
 const BOTTOM_PT = 34;
 const MIN_TARGET_PT = 44;
@@ -41,7 +50,9 @@ export async function runIphoneLane(lane, { device, run, shared }) {
   let ios;
   try {
     try {
-      ios = await bindIosDevice({ serial: device.serial, driverEndpoint: device.driverEndpoint, model: device.model, osVersion: device.osVersion, evidenceDir: join(lane.dir, 'wda') });
+      // Appium lists Safari's pages as WEBVIEW contexts of a native session only on request.
+      ios = await bindIosDevice({ serial: device.serial, driverEndpoint: device.driverEndpoint, model: device.model, osVersion: device.osVersion, evidenceDir: join(lane.dir, 'wda'),
+        capabilities: { 'appium:includeSafariInWebviews': true, 'appium:webviewConnectTimeout': 10_000 } });
     } catch (error) {
       // bindIosDevice deletes a WDA session the probe opened before rethrowing; keep that proof.
       lane.receipt.cleanup.push(...(error.cleanup ?? []).map((r) => ({ ...r, action: r.action === 'deleted' ? 'session-deleted' : r.action })));
@@ -54,37 +65,58 @@ export async function runIphoneLane(lane, { device, run, shared }) {
     lane.write('identity', 'identity.json', { machine: lane.receipt.machine, candidate: lane.receipt.candidate });
 
     await ios.wda.navigate(shared.phoneUrl);
-    const read = async () => ios.page.evaluate(PANEL_EXPR);
+    // The page channel: Safari's web context of the Appium session. A driver without one (raw
+    // WebDriverAgent) blocks the lane here, before any step could read a page.
+    const page = webPageChannel({ request: (method, suffix, body) => ios.wda.request(method, suffix, body), sessionPath: (suffix) => ios.wda.sessionPath(suffix) });
+    try {
+      lane.write('identity', 'web-context.json', { context: await page.open() });
+    } catch (error) {
+      throw new LaneBlocked(error.code ?? 'WEB_CONTEXT_UNSUPPORTED', `${device.driverEndpoint}: ${error.detail ?? error.message}; the phone lane needs an Appium XCUITest server with Safari's web inspector on`);
+    }
+    const evaluate = (expression) => page.evaluate(expression);
+    const read = async () => evaluate(PANEL_EXPR);
+    // Native calls (touch, accessibility source, screenshot, keys) run in NATIVE_APP.
+    const hierarchy = async () => { await page.native(); return ios.hierarchy(); };
+    const touch = async (label, x, y) => { await page.native(); await ios.tap(label, x, y); };
+    const shoot = async (png) => { await page.native(); await ios.screenshot(png); };
+    // A page element -> one real touch: its rect read in the web context, mapped onto the
+    // Safari web area the accessibility tree reports, both in points.
+    const tapPage = async (label, rect, viewport) => {
+      const tree = await hierarchy();
+      const point = pageToScreen(rect, webViewFrame(tree.nodes), viewport);
+      await touch(label, point.x, point.y);
+      return point;
+    };
+    const tapSelector = async (label, selector) => {
+      const found = await evaluate(RECT_EXPR(selector));
+      if (!found) throw new StepFailed('PAGE_ELEMENT_ABSENT', `${label}: ${selector}`);
+      return tapPage(label, found.rect, found.viewport);
+    };
     // Sign in the way a person does: email typed through native key events, the emailed link
     // (read from the run-owned relay's file mailer) opened in the same Safari tab.
-    const signedIn = await ios.page.evaluate(`!!document.querySelector('[data-testid="phone-supervisor-home"]')`);
+    const signedIn = await evaluate(`!!document.querySelector('[data-testid="phone-supervisor-home"]')`);
     if (!signedIn) {
-      const tree = await ios.hierarchy();
-      const field = await ios.pageTapPoint(ios.page, tree.nodes, { hint: 'email', cdpRectExpr: ios.rectExpr('[data-testid="account-email-input"]') });
-      await ios.tap('email', field.x, field.y);
+      await tapSelector('email', '[data-testid="account-email-input"]');
+      await page.native();
       await ios.wda.keys([...shared.ownerEmail]);
       // One mail section (shared with desktop enrolment): snapshot, tap send, wait for the one new link.
       const link = await shared.signInPhone(async () => {
-        const send = await ios.pageTapPoint(ios.page, tree.nodes, { hint: 'request-link', cdpRectExpr: ios.rectExpr('[data-testid="request-magic-link-btn"]') });
-        await ios.tap('request-link', send.x, send.y);
+        await tapSelector('request-link', '[data-testid="request-magic-link-btn"]');
       });
+      await page.native();
       await ios.wda.navigate(link);
     }
     const capture = async (step, name) => {
       const png = join(lane.dir, 'tmp', `${name}.png`);
-      await ios.screenshot(png);
+      await shoot(png);
       step.artifact('screenshot', `${name}.png`, (await import('node:fs')).readFileSync(png));
-      const tree = await ios.hierarchy();
+      const tree = await hierarchy();
       step.artifact('accessibility-source', `${name}.xml`, tree.xml);
-      const page = await read();
-      step.artifact('panel-read', `${name}.page.json`, page);
-      return { tree, page };
+      const state = await read();
+      step.artifact('panel-read', `${name}.page.json`, state);
+      return { tree, page: state };
     };
-    const tapRect = async (label, r, nodes) => {
-      const point = await ios.pageTapPoint(ios.page, nodes, { hint: label, cdpRectExpr: `({ x: ${r.x}, y: ${r.y}, w: ${r.w}, h: ${r.h} })` });
-      await ios.tap(label, point.x, point.y);
-      return point;
-    };
+    const tapRect = (label, r, viewport) => tapPage(label, r, viewport);
     await until('phone supervisor home with a decision card', read, (p) => p?.home && p.cards.length > 0, { deadlineMs: 120_000 });
     // Answering changes the decision card (next nonce); hold until both desktops recorded the
     // same card, prompt and Reply, so same-card-both-desktops compares one card.
@@ -103,17 +135,24 @@ export async function runIphoneLane(lane, { device, run, shared }) {
       step.assert('button-in-gesture-area', inGestureArea(button.rect, before.page), { button: button.rect });
       step.assert('touch-target-44pt', button.rect.h >= MIN_TARGET_PT && button.rect.w >= MIN_TARGET_PT, { w: button.rect.w, h: button.rect.h });
       const mark = await shared.agentLogCursor('decision');
-      const point = await tapRect(`${kind}:${button.text}`, button.rect, before.tree.nodes);
+      const point = await tapRect(`${kind}:${button.text}`, button.rect, before.page.viewport);
       const answered = await until(`fixture pane receives ${kind}`, () => shared.agentLog('decision', mark), (entries) => entries.some((e) => e.kind === 'answered'), { deadlineMs: 60_000 });
       step.artifact('fixture-log', `${kind}.agent.jsonl`, answered.map((e) => JSON.stringify(e)).join('\n'));
       const received = answered.filter(isAnswer);
       step.assert('one-tap-one-answer', received.length === 1 && received[0].classified === kind, { received, point });
+      // The desktops prove this exact card (the nonce the pane answered) left their panels (F3-D5).
+      shared.recordPhoneAnswer({ kind, nonce: received[0].nonce });
       const after = await until('answered card leaves', read, (p) => !p.cards.some((c) => c.text === card.text), { deadlineMs: 60_000 });
       step.assert('answered-card-left', !after.cards.some((c) => c.text === card.text), { cards: after.cards.map((c) => c.text.slice(0, 200)) });
       await capture(step, `${kind}-after`);
     };
-    await runStep(lane, 'F3-P1', (step) => answer(step, 'approve'));
-    await runStep(lane, 'F3-P2', (step) => answer(step, 'reject'));
+    try {
+      await runStep(lane, 'F3-P1', (step) => answer(step, 'approve'));
+      await runStep(lane, 'F3-P2', (step) => answer(step, 'reject'));
+    } finally {
+      // The desktops' F3-D5 waits for the phone; it judges whatever was answered (none: fail).
+      shared.phoneAnswersSettled();
+    }
 
     await runStep(lane, 'F3-P3', async (step) => {
       const before = await until('Stop on the upstream session with a card visible', read, (p) => p.stops.length > 0 && p.cards.length > 0, { deadlineMs: 180_000 });
@@ -123,7 +162,7 @@ export async function runIphoneLane(lane, { device, run, shared }) {
       step.assert('card-visible-while-stopping', shot.page.cards.some((c) => inGestureArea(c.rect, shot.page)), { cards: shot.page.cards.map((c) => c.rect) });
       step.assert('stop-touch-target-44pt', stop.rect.h >= MIN_TARGET_PT && stop.rect.w >= MIN_TARGET_PT, stop.rect);
       const mark = await shared.agentLogCursor('upstream');
-      await tapRect(stop.label, stop.rect, shot.tree.nodes);
+      await tapRect(stop.label, stop.rect, shot.page.viewport);
       const log = await until('upstream session stopped', () => shared.agentLog('upstream', mark), (entries) => entries.some((e) => e.kind === 'stopped'), { deadlineMs: 60_000 });
       step.artifact('fixture-log', 'stop.agent.jsonl', log.map((e) => JSON.stringify(e)).join('\n'));
       step.assert('one-tap-stopped-session', log.filter((e) => e.kind === 'received' && e.classified === 'stop').length === 1, { log });
@@ -151,6 +190,8 @@ export async function runIphoneLane(lane, { device, run, shared }) {
       // In the web app the card is read from the accessibility tree; its command text is a
       // static text node under the card, so the fixture title in the command identifies it.
       const label = (title) => (tree) => tree.nodes.some((n) => `${n.desc} ${n.text}`.includes(`prod.example.com/${title}`));
+      // The Home Screen web app is native UI to the driver; nothing below reads a page.
+      await page.native();
       const before = await ios.hierarchy();
       step.artifact('accessibility-source', 'push-other-card.xml', before.xml);
       const shotBefore = join(lane.dir, 'tmp', 'push-other-card.png');
@@ -187,6 +228,7 @@ export async function runIphoneLane(lane, { device, run, shared }) {
     if (error instanceof LaneBlocked) lane.receipt.blocked = { code: error.code, detail: error.detail, at: new Date().toISOString() };
     else lane.receipt.failure = { code: error.code ?? 'LANE_ERROR', detail: String(error.stack ?? error).slice(0, 4000) };
   } finally {
+    shared.phoneAnswersSettled();
     markNotRun(lane, ids, lane.receipt.blocked?.code ?? 'lane stopped before this step');
     if (ios) lane.receipt.cleanup.push(...(await ios.cleanup()).map((r) => ({ ...r, action: r.action === 'deleted' ? 'session-deleted' : r.action })));
   }

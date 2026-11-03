@@ -415,7 +415,7 @@ class WdaClient {
     return this.request("GET", "/status");
   }
 
-  async startSession(bundleId) {
+  async startSession(bundleId, extraCapabilities = {}) {
     const capabilities = {
       alwaysMatch: {
         platformName: "iOS",
@@ -423,6 +423,7 @@ class WdaClient {
         "appium:usePrebuiltWDA": true,
         "appium:shouldUseSingletonTestManager": true,
         ...(bundleId ? { "appium:bundleId": bundleId } : {}),
+        ...extraCapabilities,
       },
       firstMatch: [{}],
     };
@@ -1876,7 +1877,7 @@ const PREREQ = {};
  * Fail-closed driver verification. The driver is provisioned by the verification host and only
  * READ here: this producer never launches, installs or reconfigures a driver or a device.
  */
-async function prereqProbe() {
+async function prereqProbe(extraCapabilities = {}) {
   WDA = new WdaClient(DEVICE.driverEndpoint);
   let status;
   try {
@@ -1906,7 +1907,7 @@ async function prereqProbe() {
   };
   writeJson("prereq/driver-status.json", PREREQ.driver);
 
-  const session = await WDA.startSession(null);
+  const session = await WDA.startSession(null, extraCapabilities);
   PREREQ.session = { sessionId: session.sessionId, capabilities: session.capabilities };
   writeJson("prereq/driver-session.json", PREREQ.session);
 
@@ -2376,13 +2377,13 @@ async function main() {
  * provisioned device and evidence directory, with the same fail-closed prerequisite probe
  * (driver status, session, provenance) the QA-08 run uses. It never runs a QA-08 scenario.
  */
-export async function bindIosDevice({ serial, driverEndpoint, model = null, osVersion = null, evidenceDir, timeoutMs = 20000 }) {
+export async function bindIosDevice({ serial, driverEndpoint, model = null, osVersion = null, evidenceDir, timeoutMs = 20000, capabilities = {} }) {
   ARGS = { timeoutMs, caseName: "all", scenario: null, fixtureManifest: null };
   EVIDENCE_DIR = path.resolve(evidenceDir);
   mkdirSync(EVIDENCE_DIR, { recursive: true });
   DEVICE = { serial, driverEndpoint, model, osVersion, manifestEntry: { platform: PLATFORM, serial, driverEndpoint } };
   try {
-    await prereqProbe();
+    await prereqProbe(capabilities);
   } catch (error) {
     // prereqProbe may have opened a WDA session before it threw; never leave it behind.
     await cleanup().catch(() => {});
