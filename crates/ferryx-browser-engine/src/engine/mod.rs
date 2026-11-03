@@ -462,8 +462,6 @@ fn focus_tab(tab: &str, address: bool) {
 /// and the site-info chip at the field's start.
 #[cfg(target_os = "linux")]
 fn omnibox_point(tab: &str) -> Option<(i32, i32)> {
-    const BUTTONS_END: i32 = 8 + 3 * 36;
-    const INTO_FIELD: i32 = 140;
     let (toolbar, scale) = TABS.with_borrow(|tabs| {
         let pane = tabs.get(tab)?;
         let scale = pane
@@ -474,12 +472,45 @@ fn omnibox_point(tab: &str) -> Option<(i32, i32)> {
         Some((pane.view.chrome_toolbar()?, scale))
     })?;
     let bounds = toolbar.bounds();
-    if bounds.width <= 0 || bounds.height <= 0 {
+    if bounds.height <= 0 {
         return None;
     }
-    let x = (bounds.x + BUTTONS_END + INTO_FIELD).min(bounds.x + bounds.width / 2);
+    let x = bounds.x + omnibox_offset(bounds.width)?;
     let y = bounds.y + bounds.height / 2;
     Some(((x as f32 * scale).round() as i32, (y as f32 * scale).round() as i32))
+}
+
+/// How far into a toolbar of `width` DIP the location field is clicked: 140 DIP past the
+/// back, forward and reload buttons (three 36 DIP buttons from an 8 DIP inset), but never past
+/// the toolbar's middle, where extension icons start. None when that point would not land
+/// clearly inside the field (a narrow pane): a click there would hit a button or the site-info
+/// chip, so the caller falls back to the focus command instead.
+#[cfg(any(target_os = "linux", test))]
+fn omnibox_offset(width: i32) -> Option<i32> {
+    const BUTTONS_END: i32 = 8 + 3 * 36;
+    const INTO_FIELD: i32 = 140;
+    // Past the site-info chip at the field's start, with room to spare.
+    const MIN_INTO_FIELD: i32 = 60;
+    let x = (BUTTONS_END + INTO_FIELD).min(width / 2);
+    (x >= BUTTONS_END + MIN_INTO_FIELD).then_some(x)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::omnibox_offset;
+
+    #[test]
+    fn omnibox_click_lands_in_the_field_or_not_at_all() {
+        // A wide toolbar: 140 DIP into the field.
+        assert_eq!(omnibox_offset(1200), Some(116 + 140));
+        // Narrower: capped at the middle while that is still well inside the field.
+        assert_eq!(omnibox_offset(400), Some(200));
+        // Too narrow: the point would fall on Reload/Forward/Back or the site-info chip.
+        for width in [0, 80, 120, 231, 300, 351] {
+            assert_eq!(omnibox_offset(width), None, "width {width}");
+        }
+        assert_eq!(omnibox_offset(352), Some(176));
+    }
 }
 
 /// Ferryx closed stdin (it quit or dropped this engine): close every browser, then quit.
