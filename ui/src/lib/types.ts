@@ -401,7 +401,11 @@ export type BrowserState = {
   zoomFactor: number;
   loadError?: string | null;
   visible: boolean;
+  /** "chromium" tabs draw their own toolbar, menus and extension buttons. */
+  engine?: BrowserEngine;
 };
+
+export type BrowserEngine = "system" | "chromium";
 
 export type BrowserTab = {
   kind: "browser";
@@ -413,6 +417,7 @@ export type BrowserTab = {
   loading?: boolean;
   canGoBack?: boolean;
   canGoForward?: boolean;
+  engine?: BrowserEngine;
   zoomFactor?: number;
   loadError?: string | null;
   profileId?: string;
@@ -452,10 +457,25 @@ export type ChangesTab = {
   pinned?: boolean;
 };
 
-export type WorkspaceTab = TerminalTab | BrowserTab | FileTab | ChangesTab;
+/** Remote desktop viewer of one paired host (`HostView.host_id`). Holds no PTY session. */
+export type RemoteDesktopTab = {
+  kind: "remoteDesktop";
+  id: string;
+  label: string;
+  hostId: string;
+  /**
+   * Always "": the viewer owns no frontend terminal session (the same "no PTY" marker that
+   * non-terminal leaves use in `sessionIdsByLeafId`). Typed as the literal so code that narrows
+   * away browser/file/changes tabs can still read `sessionId` as a string.
+   */
+  sessionId: "";
+  pinned?: boolean;
+};
+
+export type WorkspaceTab = TerminalTab | BrowserTab | FileTab | ChangesTab | RemoteDesktopTab;
 
 export function isTerminalTab(tab: WorkspaceTab): tab is TerminalTab {
-  return tab.kind !== "browser" && tab.kind !== "file" && tab.kind !== "changes";
+  return tab.kind !== "browser" && tab.kind !== "file" && tab.kind !== "changes" && tab.kind !== "remoteDesktop";
 }
 
 export type CreateBrowserRequest = {
@@ -600,7 +620,22 @@ export type ChangesPaneContent = {
   readonly worktree: WorktreeIdentity | null;
 };
 
-export type PaneContent = TerminalPaneContent | BrowserPaneContent | DagPaneContent | FilePaneContent | ChangesPaneContent;
+export type RemoteDesktopPaneContent = {
+  readonly kind: "remoteDesktop";
+  readonly hostId: string;
+};
+
+export type PaneContent =
+  | TerminalPaneContent
+  | BrowserPaneContent
+  | DagPaneContent
+  | FilePaneContent
+  | ChangesPaneContent
+  | RemoteDesktopPaneContent;
+
+export function createRemoteDesktopPaneContent(hostId: string): RemoteDesktopPaneContent {
+  return { kind: "remoteDesktop", hostId };
+}
 
 export function createChangesPaneContent(changes: Omit<ChangesPaneContent, "kind">): ChangesPaneContent {
   return { kind: "changes", workspaceId: changes.workspaceId, worktreePath: changes.worktreePath, worktree: changes.worktree };
@@ -707,6 +742,15 @@ export type LayoutState = {
 
 export type AgentState = "starting" | "working" | "waiting" | "exited" | "failed";
 
+/** How a reported turn ended (daemon `outcome`, set on `idle` frames only). */
+export type AgentOutcome = "done" | "error";
+
+/** What a blocked session needs from the user (daemon `kind`, set on `blocked` frames only). */
+export type AgentBlockedKind = "permission" | "question" | "auth";
+
+/** Producer marker the daemon adds when `origin` cannot name it (`protocol` = OSC 7501 report). */
+export type AgentStateSource = "protocol";
+
 export type ActiveAgent = {
   id: string;
   name: string;
@@ -773,6 +817,9 @@ export type NativeTerminalAgentStatePayload = {
   providerSession?: AgentProviderSession | null;
   detail?: string | null;
   isSnapshot?: boolean;
+  stateSource?: AgentStateSource | null;
+  outcome?: AgentOutcome | null;
+  kind?: AgentBlockedKind | null;
 };
 
 export type NativeTerminalBellPayload = {
@@ -938,7 +985,10 @@ export interface PersistedBrowserTabState {
 export interface PersistedTab {
   id: string;
   label: string;
-  kind?: "terminal" | "browser" | "file" | "changes";
+  kind?: "terminal" | "browser" | "file" | "changes" | "remoteDesktop";
+  remoteDesktop?: {
+    hostId: string;
+  };
   changes?: {
     workspaceId: string;
     worktreePath: string;

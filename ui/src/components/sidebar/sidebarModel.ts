@@ -4,7 +4,7 @@ import { projectRootWorktree } from "../../lib/projectIdentity";
 import { groupProjects, type ProjectGroup } from "../../lib/projectGrouping";
 import type { WorktreeOrder } from "../../lib/sidebarPersistence";
 import type { RegisteredProject } from "../../lib/tauri";
-import { worktreeIdentity, type AgentState, type Worktree } from "../../lib/types";
+import { worktreeIdentity, type AgentOutcome, type AgentState, type Worktree } from "../../lib/types";
 import {
   filterSidebarEntries,
   groupHeaderShowsHost,
@@ -179,7 +179,11 @@ export type SidebarLiveSignals = {
   readonly isSupervisorTyping?: (worktreePath: string) => boolean;
 };
 
-export type SidebarRowLive = { active: boolean; slot: SidebarSlotState; supervisorTyping: boolean };
+/**
+ * `outcome` is set only while the row shows an unseen completion whose program said how it ended;
+ * focusing the pane marks the completion seen, which drops it.
+ */
+export type SidebarRowLive = { active: boolean; slot: SidebarSlotState; supervisorTyping: boolean; outcome?: AgentOutcome };
 
 export type SidebarLive = {
   rows: Record<string, SidebarRowLive>;
@@ -203,7 +207,8 @@ export function worktreeRowLive(
   const unread = !paired && !active && Boolean(summary?.hasUnread || signals.unreadWorktreePaths?.[node.path]);
   const slot = worktreeRowSlot({ activitySummary: summary, unread, agentState: paired ? undefined : signals.agentStateByPath?.[node.path] });
   const typing = signals.isSupervisorTyping?.(node.path) ?? false;
-  return { active, slot, supervisorTyping: supervisorSlotWins(slot, isRemoteWorktreeRow(node), typing) };
+  const outcome = (slot === "done" || slot === "unread") ? summary?.outcome : undefined;
+  return { active, slot, supervisorTyping: supervisorSlotWins(slot, isRemoteWorktreeRow(node), typing), ...(outcome ? { outcome } : {}) };
 }
 
 /**

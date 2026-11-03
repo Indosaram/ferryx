@@ -385,7 +385,8 @@ pub fn remove_agent_state_extension() -> RemovalReport {
     report
 }
 
-/// A settings file is listed under `removed` when Ferryx entries were deleted from it.
+/// A settings file is listed under `removed` when Ferryx entries were deleted from it, and the
+/// agent's skill file when it was a managed Ferryx skill and went.
 fn remove_hooks_into_report(
     targets: &[crate::daemon::agent_hook_install::HookFileTarget],
     report: &mut RemovalReport,
@@ -395,6 +396,13 @@ fn remove_hooks_into_report(
         match crate::daemon::agent_hook_install::remove_hooks_from(target) {
             Ok(0) => {}
             Ok(_) => report.removed.push(display),
+            Err(error) => report.failed.push(RemovalFailure { path: display, error: error.to_string() }),
+        }
+        let Some(skill) = &target.skill else { continue };
+        let display = skill.to_string_lossy().into_owned();
+        match crate::daemon::agent_hook_install::remove_skill_from(target) {
+            Ok(false) => {}
+            Ok(true) => report.removed.push(display),
             Err(error) => report.failed.push(RemovalFailure { path: display, error: error.to_string() }),
         }
     }
@@ -895,9 +903,12 @@ mod p09_tests {
 
         let mut report = RemovalReport::default();
         remove_hooks_into_report(&hooks, &mut report);
-        let files: Vec<String> =
-            hooks.iter().map(|target| target.file.to_string_lossy().into_owned()).collect();
-        assert_eq!(report.removed, files, "every target is cleaned: {report:?}");
+        let files: Vec<String> = hooks
+            .iter()
+            .flat_map(|target| std::iter::once(&target.file).chain(target.skill.as_ref()))
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(report.removed, files, "every target and skill is cleaned: {report:?}");
         assert!(report.failed.is_empty() && report.kept_modified.is_empty(), "{report:?}");
         let kept: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&hooks[0].file).unwrap()).unwrap();

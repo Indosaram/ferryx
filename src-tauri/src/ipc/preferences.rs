@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 #[cfg(feature = "native-terminal")]
-use tauri::{AppHandle, Manager, Runtime, State};
+use tauri::{AppHandle, Runtime, State};
 #[cfg(feature = "native-terminal")]
 use tokio::sync::oneshot;
 
@@ -64,30 +64,29 @@ async fn rerender_native_sessions<R: Runtime>(
     state.reapply_theme_to_sessions();
     state.reapply_scrollback_to_sessions();
 
-    let sessions: Vec<(String, LogicalBounds)> = state
+    // Each session renders against the window that owns its surface; every hop runs on the one
+    // main thread, so a single dispatch through any app window covers all of them.
+    let sessions: Vec<(String, LogicalBounds, tauri::Window<R>)> = state
         .registered_session_ids()
         .into_iter()
         .filter_map(|session_id| {
-            state
-                .session_logical_bounds(&session_id)
-                .map(|bounds| (session_id, bounds))
+            let bounds = state.session_logical_bounds(&session_id)?;
+            let window = crate::window_registry::window_for_session(app, &session_id)?;
+            Some((session_id, bounds, window))
         })
         .collect();
     if sessions.is_empty() {
         return Ok(());
     }
 
-    let window = app
-        .get_window("main")
-        .ok_or_else(|| IpcError::internal("Main Ferryx window is unavailable"))?;
+    let window = sessions[0].2.clone();
     let state_inner = state.clone();
-    let surface_window = window.clone();
     let (sender, receiver) = oneshot::channel();
     window
         .run_on_main_thread(move || {
             let resized = sessions
                 .into_iter()
-                .filter_map(|(session_id, bounds)| {
+                .filter_map(|(session_id, bounds, surface_window)| {
                     let request = NativeTerminalBoundsRequest {
                         session_id: session_id.clone(),
                         bounds,
@@ -185,30 +184,39 @@ async fn push_terminal_appearance(
 /// update arrives, so the backing would keep the previous appearance's color.
 #[cfg(all(feature = "native-terminal", target_os = "macos"))]
 fn refresh_window_background<R: Runtime>(app: &AppHandle<R>) -> Result<(), IpcError> {
-    let Some(window) = app.get_window("main") else {
-        tracing::warn!("Main Ferryx window is unavailable; window background not refreshed");
+    use tauri::Manager;
+
+    let windows: Vec<tauri::Window<R>> = app
+        .windows()
+        .into_iter()
+        .filter(|(label, _)| crate::window_registry::is_app_window_label(label))
+        .map(|(_, window)| window)
+        .collect();
+    let Some(window) = windows.first().cloned() else {
+        tracing::warn!("No Ferryx window is available; window background not refreshed");
         return Ok(());
     };
     let background = crate::native_terminal::renderer::RendererTheme::from(
         cached_terminal_preferences().as_ref(),
     )
     .background;
-    let target = window.clone();
     window
         .run_on_main_thread(move || {
-            let Ok(raw_window) = target.ns_window() else {
-                return;
-            };
-            if raw_window.is_null() {
-                return;
+            for target in windows {
+                let Ok(raw_window) = target.ns_window() else {
+                    continue;
+                };
+                if raw_window.is_null() {
+                    continue;
+                }
+                // SAFETY: the pointer comes from Tauri for a live window and is used on the main
+                // thread, matching the setup path in lib.rs.
+                let native_window = unsafe { &*(raw_window as *const objc2_app_kit::NSWindow) };
+                crate::native_terminal::platform::macos::configure_window_background(
+                    native_window,
+                    background,
+                );
             }
-            // SAFETY: the pointer comes from Tauri for a live window and is used on the main
-            // thread, matching the setup path in lib.rs.
-            let native_window = unsafe { &*(raw_window as *const objc2_app_kit::NSWindow) };
-            crate::native_terminal::platform::macos::configure_window_background(
-                native_window,
-                background,
-            );
         })
         .map_err(|error| {
             IpcError::internal(format!(

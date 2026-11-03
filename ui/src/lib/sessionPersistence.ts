@@ -27,6 +27,7 @@ import {
   createBrowserPaneContent,
   createChangesPaneContent,
   createDagPaneContent,
+  createRemoteDesktopPaneContent,
   createTerminalPaneContent,
   isTerminalTab,
   worktreeIdentity,
@@ -149,6 +150,17 @@ export function serializeWorkspaceState(
         continue;
       }
 
+      if (tab.kind === "remoteDesktop") {
+        persistedTabs.push({
+          id: tab.id,
+          kind: "remoteDesktop",
+          label: tab.label,
+          pinned: Boolean(tab.pinned),
+          remoteDesktop: { hostId: tab.hostId },
+        });
+        continue;
+      }
+
       if (tab.kind === "changes") {
         persistedTabs.push({
           id: tab.id,
@@ -233,7 +245,7 @@ export function serializeWorkspaceState(
               runId: rawDag.runId ?? null,
             });
             sessionIdsByLeafId[leafId] = "";
-          } else if (content.kind === "file" || content.kind === "changes") {
+          } else if (content.kind === "file" || content.kind === "changes" || content.kind === "remoteDesktop") {
             contentsByLeafId[leafId] = content;
             sessionIdsByLeafId[leafId] = "";
           } else {
@@ -862,6 +874,20 @@ export function deserializeWorkspaceState(
         continue;
       }
 
+      if (persistedTab.kind === "remoteDesktop" || persistedTab.remoteDesktop) {
+        const hostId = persistedTab.remoteDesktop?.hostId;
+        if (!hostId) continue;
+        tabs.push({
+          id: persistedTab.id,
+          kind: "remoteDesktop",
+          label: persistedTab.label,
+          hostId,
+          sessionId: "",
+          pinned: Boolean(persistedTab.pinned),
+        });
+        continue;
+      }
+
       if (persistedTab.kind === "changes" || persistedTab.changes) {
         const changes = persistedTab.changes;
         if (!changes?.worktreePath || changes.worktree === undefined) continue;
@@ -955,6 +981,20 @@ export function deserializeWorkspaceState(
           expandedLeafId: null,
           sessionIdsByLeafId: { [leafId]: "" },
           contentsByLeafId: { [leafId]: createBrowserPaneContent(browserState) },
+        };
+        continue;
+      }
+
+      if (persistedTab.kind === "remoteDesktop" || persistedTab.remoteDesktop) {
+        const hostId = persistedTab.remoteDesktop?.hostId;
+        if (!hostId) continue;
+        const leafId = `leaf-remote-desktop:${persistedTab.id}`;
+        layoutsByTabId[persistedTab.id] = {
+          root: createLeafNode(leafId),
+          activeLeafId: leafId,
+          expandedLeafId: null,
+          sessionIdsByLeafId: { [leafId]: "" },
+          contentsByLeafId: { [leafId]: createRemoteDesktopPaneContent(hostId) },
         };
         continue;
       }
@@ -1090,7 +1130,7 @@ export function deserializeWorkspaceState(
               runId: rawDag.runId ?? null,
             });
             sessionIdsByLeafId[leafId] = "";
-          } else if (rawContent.kind === "file" || rawContent.kind === "changes") {
+          } else if (rawContent.kind === "file" || rawContent.kind === "changes" || rawContent.kind === "remoteDesktop") {
             contentsByLeafId[leafId] = rawContent;
             sessionIdsByLeafId[leafId] = "";
           } else {

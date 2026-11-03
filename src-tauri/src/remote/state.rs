@@ -113,29 +113,6 @@ pub fn is_tailscale_cgnat_address(addr: &std::net::Ipv4Addr) -> bool {
     octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000
 }
 
-/// Test-only: the first CGNAT (`100.64.0.0/10`) address bound on this machine, or `None`.
-///
-/// Gate tests must bind an overlay address, and proof is injected separately through
-/// [`set_test_overlay_proof_override`], so this deliberately does not require overlay proof -
-/// which [`SystemInterfaceResolver::tailscale_address`] would demand and a CI VM cannot supply.
-/// Loopback aliases count: any local interface carrying the address makes it bindable, even
-/// though [`enumerate_ipv4_interface_addresses`] excludes loopback for the resolver's purposes.
-#[cfg(all(test, unix))]
-pub fn test_local_cgnat_address() -> Option<std::net::Ipv4Addr> {
-    enumerate_ipv4_addresses(true)
-        .ok()?
-        .into_iter()
-        .find(is_tailscale_cgnat_address)
-}
-
-#[cfg(all(test, not(unix)))]
-pub fn test_local_cgnat_address() -> Option<std::net::Ipv4Addr> {
-    enumerate_ipv4_interface_addresses()
-        .ok()?
-        .into_iter()
-        .find(is_tailscale_cgnat_address)
-}
-
 #[cfg(test)]
 type TestOverlayFn = Box<dyn Fn(&std::net::Ipv4Addr) -> Option<bool> + Send + Sync>;
 #[cfg(test)]
@@ -878,6 +855,9 @@ pub struct RemoteGatewayState {
     pub(crate) host_lease_wired: std::sync::atomic::AtomicBool,
     pub browser_backend: parking_lot::RwLock<Arc<dyn RemoteBrowserBackend>>,
     pub admission_controller: Arc<AdmissionController>,
+    /// The daemon-owned remote desktop host behind `/api/v1/remote-desktop/*`.
+    #[cfg(feature = "remote-desktop")]
+    pub remote_desktop: Arc<crate::remote::remote_desktop::RemoteDesktopHost>,
     pub browser_service_epoch: AtomicU64,
     snapshot_cache: RwLock<Option<WorkspaceCacheEntry>>,
     snapshot_lock: tokio::sync::Mutex<()>,
@@ -1070,6 +1050,22 @@ impl RemoteGatewayState {
                 }
             }));
         }
+        #[cfg(feature = "remote-desktop")]
+        let remote_desktop = Arc::new(crate::remote::remote_desktop::RemoteDesktopHost::new(
+            // Explicit stores (fixtures, isolated daemons) keep RD state beside their auth store.
+            identity_dir
+                .as_ref()
+                .map(|dir| dir.join("remote-desktop"))
+                .or_else(crate::remote::remote_desktop::default_dir),
+        ));
+        #[cfg(feature = "remote-desktop")]
+        {
+            // A revoked device's remote desktop key must stop authenticating with its token.
+            let remote_desktop = Arc::clone(&remote_desktop);
+            auth_manager.on_device_revoked(Arc::new(move |device_id: &str| {
+                remote_desktop.revoke_device(device_id);
+            }));
+        }
         Self {
             config: RwLock::new(config),
             identity_dir,
@@ -1118,6 +1114,8 @@ impl RemoteGatewayState {
             desktop_event_sink: RwLock::new(None),
             relay_pairing: RwLock::new(None),
             relay_client: RwLock::new(None),
+            #[cfg(feature = "remote-desktop")]
+            remote_desktop,
             socket_tickets: parking_lot::Mutex::new(std::collections::HashMap::new()),
             host_lease: Arc::new(crate::remote::direct_lease::HostLeaseState::new()),
             host_lease_required: std::sync::atomic::AtomicBool::new(false),

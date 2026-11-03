@@ -32,6 +32,12 @@ import {
   previewGitHubIssue,
   listTerminalSessions,
   onNativeTerminalScrollbar,
+  onNativeTerminalBell,
+  onWindowSessionsOrphaned,
+  onWindowSessionsAdopt,
+  parseWindowSessionsAdopt,
+  takePendingWindowAdoptions,
+  moveSessionsToWindow,
   setNativeTerminalScrollbarOverlay,
   setNativeTerminalAttentionFrame,
   setNativeTerminalDomOverlayInput,
@@ -154,6 +160,98 @@ describe("Tauri IPC wrapper contract", () => {
     expect(events.listen.mock.calls[0][0]).toBe("terminal_remote_status");
     events.listen.mock.calls[0][1]({ payload: { sessionId: "stable", state: "reconnecting" } });
     expect(handler).toHaveBeenCalledWith({ sessionId: "stable", state: "reconnecting" });
+  });
+  it("parses the backend window_sessions_orphaned payload ({ label, sessionIds })", async () => {
+    events.listen.mockResolvedValueOnce(vi.fn());
+    const handler = vi.fn();
+    await onWindowSessionsOrphaned(handler);
+    expect(events.listen.mock.calls[0][0]).toBe("window_sessions_orphaned");
+    const deliver = events.listen.mock.calls[0][1];
+    deliver({ payload: { label: "ws-abc", sessionIds: ["s-1", "", 7, "s-2"] } });
+    deliver({ payload: { fromLabel: "ws-abc", sessionIds: ["s-1"] } });
+    deliver({ payload: null });
+    expect(handler.mock.calls).toEqual([[{ fromLabel: "ws-abc", sessionIds: ["s-1", "s-2"] }]]);
+  });
+  it("scopes owner-routed listeners to this window so another window's emit_to never reaches it", async () => {
+    // A plain listen() targets Any, and Tauri hands every emit_to(label) to Any listeners in all
+    // webviews: a bell routed to window 2 was also notified by main.
+    const scope = globalThis as { __TAURI_INTERNALS__?: unknown };
+    const hadInternals = "__TAURI_INTERNALS__" in scope;
+    scope.__TAURI_INTERNALS__ = {};
+    window.history.replaceState(null, "", "/?window=ws-abc");
+    try {
+      events.listen.mockReset();
+      events.listen.mockResolvedValue(vi.fn());
+      await onNativeTerminalBell(vi.fn());
+      await onWindowSessionsOrphaned(vi.fn());
+      await onWindowSessionsAdopt(vi.fn());
+      expect(events.listen.mock.calls.map((call) => [call[0], call[2]])).toEqual([
+        ["native_terminal_bell", { target: "ws-abc" }],
+        ["window_sessions_orphaned", { target: "ws-abc" }],
+        ["window_sessions_adopt", { target: "ws-abc" }],
+      ]);
+      window.history.replaceState(null, "", "/");
+      events.listen.mockClear();
+      await onNativeTerminalBell(vi.fn());
+      expect(events.listen.mock.calls[0][2]).toEqual({ target: "main" });
+    } finally {
+      window.history.replaceState(null, "", "/");
+      if (!hadInternals) delete scope.__TAURI_INTERNALS__;
+    }
+  });
+  // The exact JSON the Rust test `apply_move` asserts for WindowSessionsAdoptPayload.
+  const RUST_ADOPT_PAYLOAD = {
+    backendSessionIds: ["s1"],
+    activate: true,
+    workspaceId: "w1",
+    attemptGenerations: { s1: 4 },
+  };
+  it("parses the backend window_sessions_adopt payload field names (camelCase serde)", () => {
+    expect(parseWindowSessionsAdopt(RUST_ADOPT_PAYLOAD)).toEqual({
+      backendSessionIds: ["s1"],
+      activate: true,
+      workspaceId: "w1",
+      attemptGenerations: { s1: 4 },
+    });
+    // The backend omits workspaceId and attemptGenerations when empty.
+    expect(parseWindowSessionsAdopt({ backendSessionIds: ["s1", "", 3, "s2"], activate: false })).toEqual({
+      backendSessionIds: ["s1", "s2"],
+      activate: false,
+      attemptGenerations: {},
+    });
+    expect(parseWindowSessionsAdopt({ backend_session_ids: ["s1"] })).toBeNull();
+    expect(parseWindowSessionsAdopt({ backendSessionIds: [] })).toBeNull();
+    expect(parseWindowSessionsAdopt(null)).toBeNull();
+  });
+  it("delivers window_sessions_adopt events and drains the boot-time queue with the same shape", async () => {
+    events.listen.mockReset();
+    core.isTauri.mockReturnValue(true);
+    events.listen.mockResolvedValueOnce(vi.fn());
+    const handler = vi.fn();
+    await onWindowSessionsAdopt(handler);
+    expect(events.listen.mock.calls[0][0]).toBe("window_sessions_adopt");
+    const deliver = events.listen.mock.calls[0][1];
+    deliver({ payload: RUST_ADOPT_PAYLOAD });
+    deliver({ payload: { sessionIds: ["s1"] } });
+    expect(handler.mock.calls).toEqual([[{ ...RUST_ADOPT_PAYLOAD }]]);
+
+    core.invoke.mockReset();
+    core.invoke.mockResolvedValueOnce([RUST_ADOPT_PAYLOAD, { bogus: true }]);
+    await expect(takePendingWindowAdoptions()).resolves.toEqual([RUST_ADOPT_PAYLOAD]);
+    expect(core.invoke).toHaveBeenCalledWith("cmd_window_take_pending_adoptions", undefined);
+  });
+  it("moves sessions through cmd_window_move_sessions with camelCase arguments", async () => {
+    core.invoke.mockReset();
+    core.isTauri.mockReturnValue(true);
+    core.invoke.mockResolvedValueOnce({ targetLabel: "ws-new", moved: ["s1"], skipped: [], queued: true });
+    await expect(
+      moveSessionsToWindow({ targetLabel: null, backendSessionIds: ["s1"], workspaceId: "w1" }),
+    ).resolves.toEqual({ targetLabel: "ws-new", moved: ["s1"], skipped: [], queued: true });
+    expect(core.invoke).toHaveBeenCalledWith("cmd_window_move_sessions", {
+      targetLabel: null,
+      backendSessionIds: ["s1"],
+      workspaceId: "w1",
+    });
   });
   beforeEach(() => {
     core.invoke.mockReset();

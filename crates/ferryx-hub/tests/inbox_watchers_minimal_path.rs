@@ -69,6 +69,12 @@ esac"#,
         std::env::remove_var("FERRYX_HUB_EXTRA_PATH");
         std::env::remove_var("OMON_EXTRA_PATH");
         std::env::remove_var("EXTRA_PATH");
+        // The hub env file and the developer's shell must not configure this run.
+        std::env::remove_var("FERRYX_HUB_ENV_FILE");
+        std::env::remove_var("OMON_JEV_ENABLED");
+        std::env::remove_var("OMON_INBOX_ENABLED");
+        // The mail source is off unless an account is configured.
+        std::env::set_var("OMON_MAIL_ACCOUNT", "owner@example.test");
         std::env::set_var("OMON_PIRATETALK_URL", "http://127.0.0.1:9");
     }
     let path = tokio::task::spawn_blocking(ferryx_hub::child_env::init)

@@ -124,7 +124,7 @@ for line in sys.stdin:
     emit(response)
     if kind == 'prompt' and cfg['messages'] == ['__provider503__']:
         emit({'type':'agent_start'})
-        if model != 'gpt-6-luna':
+        if model not in ['gpt-6-luna', 'gemini-4-argon-high']:
             emit({'type':'message_end','message':{'role':'assistant','stopReason':'error','errorMessage':'503 no available accounts'}})
         else:
             emit({'type':'message_end','message':{'id':'fallback','role':'assistant','content':[{'type':'text','text':'recovered'}]}})

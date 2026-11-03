@@ -70,9 +70,14 @@ async function boot() {
     void bootstrapPairedHostReachability();
     const { bootstrapPairedHostRoute } = await import("./lib/pairedHostRoute");
     void bootstrapPairedHostRoute();
-    const { startTailscaleDiscovery } = await import("./lib/tailscaleDiscovery");
-    const stopDiscovery = startTailscaleDiscovery();
-    import.meta.hot?.dispose(stopDiscovery);
+    // Tailscale discovery publishes the app-global SSH host inventory; only the primary window
+    // runs it so a secondary window ("ws-<id>") does not race it.
+    const { isPrimaryWindow } = await import("./lib/windowIdentity");
+    if (isPrimaryWindow()) {
+      const { startTailscaleDiscovery } = await import("./lib/tailscaleDiscovery");
+      const stopDiscovery = startTailscaleDiscovery();
+      import.meta.hot?.dispose(stopDiscovery);
+    }
     const { default: App } = await import("./App");
     void bootTrace("app.imported");
     ReactDOM.createRoot(el).render(

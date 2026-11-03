@@ -3,7 +3,7 @@
 //! A fetch that cannot be parsed fails the batch. Nothing here invents a timestamp.
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::SqlitePool;
@@ -526,7 +526,9 @@ fn display_date(value: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         };
         return now.checked_sub_signed(span);
     }
-    let today = now.date_naive();
+    // A display date ("Oct 30") is a calendar day of the mail client's user: the owner.
+    let locale = crate::locale::current();
+    let today = locale.local_date(now);
     let parse_day = |text: &str| {
         ["%b %-d, %Y", "%b %d, %Y", "%b %e, %Y"]
             .iter()
@@ -543,10 +545,7 @@ fn display_date(value: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
             }
         }
     };
-    let start = chrono::Local
-        .from_local_datetime(&day.and_hms_opt(0, 0, 0)?)
-        .earliest()?;
-    Some(start.with_timezone(&Utc))
+    Some(locale.day_start(day))
 }
 
 pub const GITHUB_NOTIFY_REASONS: &[&str] = &[
@@ -800,6 +799,27 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn a_display_date_is_a_day_in_the_owners_zone() {
+        let now = DateTime::parse_from_rfc3339("2026-10-31T16:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        // Seoul is already on Nov 1: "Nov 1" is today and starts at 15:00 UTC.
+        assert_eq!(
+            display_date("Nov 1", now).unwrap().to_rfc3339(),
+            "2026-10-31T15:00:00+00:00"
+        );
+        let utc = crate::locale::with(crate::locale::OwnerLocale::english_utc(), || {
+            (display_date("Oct 30", now), display_date("Nov 1", now))
+        });
+        assert_eq!(utc.0.unwrap().to_rfc3339(), "2026-10-30T00:00:00+00:00");
+        assert_eq!(
+            utc.1.unwrap().to_rfc3339(),
+            "2025-11-01T00:00:00+00:00",
+            "a UTC owner is still on Oct 31, so Nov 1 is last year"
+        );
+    }
+
+    #[test]
     fn kakao_uses_unix_seconds_and_rejects_a_repeated_id() {
         let page = json!([{
             "id": "m2",
@@ -1044,7 +1064,10 @@ mod tests {
     #[tokio::test]
     async fn an_owner_kakao_reply_closes_only_that_rooms_earlier_owner_items() {
         let pool = crate::storage::memory().await.unwrap();
-        let rules = crate::inbox_prefilter::PrefilterRules::default();
+        let rules = crate::inbox_prefilter::PrefilterRules {
+            owner_kakao_authors: vec!["윤인도".to_owned()],
+            ..Default::default()
+        };
         let at = |minute: i64| {
             DateTime::parse_from_rfc3339("2026-10-23T05:00:00Z")
                 .unwrap()

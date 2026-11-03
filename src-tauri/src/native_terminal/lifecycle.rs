@@ -67,6 +67,10 @@ pub fn create_native_terminal(
         cell_height: AtomicU32::new(0),
         rows: AtomicU16::new(rows),
         cols: AtomicU16::new(cols),
+        program_status_sink: parking_lot::Mutex::new(None),
+        program_status_muted: AtomicBool::new(false),
+        program_status_reply_capture: AtomicBool::new(false),
+        program_status_replies: parking_lot::Mutex::new(Vec::new()),
     });
     let userdata_ptr = (&*context) as *const TerminalContext as *const c_void;
 
@@ -180,6 +184,8 @@ pub fn create_native_terminal(
 
 /// Detaches callbacks and deallocates the foreign terminal handle.
 pub fn teardown_native_terminal(handle: NonNull<GhosttyTerminalImpl>) {
+    // Program status callbacks dereference userdata, so they go before it is cleared.
+    super::program_status::unregister(handle);
     // SAFETY: Category: Foreign Resource Deallocation & Callback Lifetime.
     // Invariant: Unset foreign callbacks so terminal never dereferences context after it is deallocated.
     unsafe {

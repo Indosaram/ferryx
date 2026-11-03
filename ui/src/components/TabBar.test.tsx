@@ -279,6 +279,67 @@ describe("TabBar", () => {
     expect(onSplitRight).toHaveBeenCalledWith("tab-a");
   });
 
+  it("offers Move to New Window and Move to Window only when the move action is provided", async () => {
+    const onMoveTabToWindow = vi.fn();
+    const listOtherWindows = vi.fn(async () => ["main", "ws-abc123"]);
+    const { rerender } = render(
+      <TabBar
+        tabs={[terminalTab("tab-a", "main")]}
+        activeTabId="tab-a"
+        onActivate={vi.fn()}
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+      />,
+    );
+    fireEvent.contextMenu(getTab("main"));
+    expect(findEntryRecursively(menuItems(), "move-window:new")).toBeUndefined();
+
+    rerender(
+      <TabBar
+        tabs={[terminalTab("tab-a", "main")]}
+        activeTabId="tab-a"
+        onActivate={vi.fn()}
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        onMoveTabToWindow={onMoveTabToWindow}
+        listOtherWindows={listOtherWindows}
+      />,
+    );
+    await act(async () => {
+      fireEvent.contextMenu(getTab("main"));
+      await listOtherWindows.mock.results[0]?.value;
+    });
+    expect(menuItem("move-window:new").label).toBe("Move to New Window");
+    expect(menuItem("move-window:ws-abc123").label).toBe("Window abc123");
+
+    clickMenuItem("move-window:new");
+    expect(onMoveTabToWindow).toHaveBeenLastCalledWith("tab-a", null);
+    await act(async () => {
+      fireEvent.contextMenu(getTab("main"));
+      await listOtherWindows.mock.results[1]?.value;
+    });
+    clickMenuItem("move-window:ws-abc123");
+    expect(onMoveTabToWindow).toHaveBeenLastCalledWith("tab-a", "ws-abc123");
+  });
+
+  it("does not offer a window move for a browser tab", async () => {
+    const listOtherWindows = vi.fn(async () => []);
+    render(
+      <TabBar
+        tabs={[{ id: "tab-b", kind: "browser", label: "browser", browserId: "browser-1", url: "https://example.com" }]}
+        activeTabId="tab-b"
+        onActivate={vi.fn()}
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        onMoveTabToWindow={vi.fn()}
+        listOtherWindows={listOtherWindows}
+      />,
+    );
+    fireEvent.contextMenu(getTab("browser"));
+    expect(findEntryRecursively(menuItems(), "move-window:new")).toBeUndefined();
+    expect(listOtherWindows).not.toHaveBeenCalled();
+  });
+
   it("includes reset-agent-state in context menu and calls onResetAgentState for terminal tab", () => {
     const onResetAgentState = vi.fn();
     render(

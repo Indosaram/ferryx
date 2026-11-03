@@ -7,6 +7,7 @@ const browserMocks = vi.hoisted(() => ({
   focusBrowser: vi.fn(),
   listBrowsers: vi.fn(),
   setBrowserZoom: vi.fn(async () => 1),
+  getBrowserEngineStatus: vi.fn(async () => ({ state: "unsupported" as const })),
 }));
 
 vi.mock("../../lib/browserTauri", async (importOriginal) => {

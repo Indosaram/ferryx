@@ -375,7 +375,11 @@ pub fn transform_markdown_tables(content: &str) -> (String, Vec<RenderedTable>) 
             }
         };
         let filename = format!("table_{}.png", index + 1);
-        let placeholder = format!("\n*(📊 아래 첨부된 표 [{filename}] 참조)*\n");
+        let placeholder = if crate::locale::current().is_korean() {
+            format!("\n*(📊 아래 첨부된 표 [{filename}] 참조)*\n")
+        } else {
+            format!("\n*(📊 see the attached table [{filename}] below)*\n")
+        };
         modified.push_str(&content[cursor..span.start]);
         modified.push_str(&placeholder);
         cursor = span.end;
@@ -427,5 +431,15 @@ mod tests {
         let (kept, none) = transform_markdown_tables(malformed);
         assert_eq!(kept, malformed);
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn the_table_placeholder_is_in_the_owner_language() {
+        let raw = "| A | B |\n|---|---|\n| 1 | 2 |";
+        assert!(transform_markdown_tables(raw).0.contains("아래 첨부된 표 [table_1.png] 참조"));
+        let (english, _) = crate::locale::with(crate::locale::OwnerLocale::english_utc(), || {
+            transform_markdown_tables(raw)
+        });
+        assert!(english.contains("see the attached table [table_1.png] below"), "{english}");
     }
 }

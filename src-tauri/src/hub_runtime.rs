@@ -18,6 +18,16 @@ use crate::daemon::server::DaemonServer;
 use crate::remote::state::RemoteGatewayState;
 use crate::remote::reference_chat::types::{ReferencePart, ReferencePromptAnswer, ReferenceTurn};
 
+mod setup;
+mod seed;
+pub use setup::{
+    supervisor_adopt_all, supervisor_setup, supervisor_setup_run, supervisor_setup_status, SetupError, SetupProject,
+    SetupRunRequest, SLACK_TEAM_UNRESOLVED,
+};
+
+/// Capability a daemon advertises once it serves `DaemonRequest::SupervisorSetup`.
+pub const SUPERVISOR_SETUP_CAPABILITY: &str = "supervisorSetupV1";
+
 /// Maps a hub operation onto the daemon's agent-control request.
 /// The request id is the one the caller supplied. A lost answer is not given a new id.
 pub fn to_agent_control_op(op: &AgentOp) -> Result<AgentControlOp, String> {
@@ -228,7 +238,7 @@ impl AgentControl for DaemonBridge {
 }
 
 /// A git remote URL in a form two checkouts of one repository share.
-fn remote_key(url: &str) -> String {
+pub(crate) fn remote_key(url: &str) -> String {
     let url = url.trim().trim_end_matches('/');
     url.strip_suffix(".git").unwrap_or(url).to_ascii_lowercase()
 }
@@ -421,12 +431,14 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
             };
         }
         Some("env") => return hub_env_cli(&args[3.min(args.len())..]),
+        Some("setup") => return setup::hub_setup_cli(&args[3.min(args.len())..]),
         Some("cron") => return hub_cron_cli(&args[3.min(args.len())..]),
         Some("migrate") => {}
         _ => {
             eprintln!("usage: ferryx hub migrate [--from-omo <db>] [--cwd <dir>] [--imported-from <db>] [--dry-run]");
             eprintln!("       ferryx hub stop | start | status [--check]");
             eprintln!("       ferryx hub cutover | rollback | intake");
+            eprintln!("       {}", setup::HUB_SETUP_USAGE);
             eprintln!(
                 "       ferryx hub env import [--from-plist <omo plist>] | ferryx hub env keys"
             );
@@ -785,9 +797,9 @@ pub async fn supervisor_snapshot(state: &RemoteGatewayState) -> Value {
         let test_hub = state.supervisor_test_hub.read().clone();
         #[cfg(test)]
         if let Some((pool, _)) = test_hub {
-            return json!({ "hub": { "available": true, "running": true, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": unified_snapshot(&pool).await });
+            return json!({ "hub": { "available": true, "running": true, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": unified_snapshot(&pool).await, "setup": setup::snapshot_setup(&pool).await });
         }
-        return json!({ "hub": { "available": false, "running": false, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": null });
+        return json!({ "hub": { "available": false, "running": false, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": null, "setup": null });
     };
     // A daemon that handed the hub to its successor no longer drives anything.
     let running = running.lock().await.is_some() && !HUB_TASKS.is_retired();
@@ -800,6 +812,7 @@ pub async fn supervisor_snapshot(state: &RemoteGatewayState) -> Value {
         "watched": watched.unwrap_or_default(),
         "actions": actions,
         "supervisor": unified_snapshot(&hub.pool).await,
+        "setup": setup::snapshot_setup(&hub.pool).await,
     })
 }
 
@@ -2087,6 +2100,11 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
         gateway: Some(Arc::clone(server.remote_state())),
     });
     let hub = Hub::open(config.clone(), bridge.clone()).await.map_err(|error| error.to_string())?;
+    let directive_judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env())
+        .with_pool(hub.pool.clone());
+    ferryx_hub::owner_directives::current(&hub.pool, &directive_judge)
+        .await
+        .map_err(|error| format!("owner directives initialization failed: {error}"))?;
     if let Err(error) = ferryx_hub::chat::reply::flush_pending(&hub.pool).await {
         tracing::warn!(%error, "stored chat replies were not flushed");
     }
@@ -2207,8 +2225,21 @@ fn live_hub(running: bool, config: &HubConfig) -> ferryx_hub::control::LiveHub {
 }
 
 struct Generation {
-    #[cfg(unix)]
     tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Generation {
+    /// Aborts the generation's tasks and waits for them to end, so a following start
+    /// reconciles only after the predecessor dispatcher stopped. On every platform: a setup
+    /// restart ends the generation before it starts the next one.
+    async fn end(self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+        for task in self.tasks {
+            let _ = task.await;
+        }
+    }
 }
 
 /// The supervisor's dispatcher for this hub generation. It drains committed ready intents at
@@ -2421,16 +2452,27 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         )
     {
         let owner = launch.config.owner_slack_id.clone();
-        let binary = ferryx_hub::meta::supervisor::mhc_bin();
-        let config = ferryx_hub::chat::slack_turn::SlackTurnConfig::from_env(&binary, owner.as_deref());
-        tracing::info!(
-            binary = %binary,
-            workspace = config.omo.workspace.is_some(),
-            idle_secs = config.omo.idle_timeout.as_secs(),
-            total_secs = config.omo.total_timeout.as_secs(),
-            "slack turn path is armed (mhc RPC)"
-        );
-        ferryx_hub::chat::slack_turn::install(config);
+        // mhc_bin and from_env read the hub env file, and from_env creates the Slack workspace
+        // root: off the async runtime threads.
+        let armed = tokio::task::spawn_blocking(move || {
+            let binary = ferryx_hub::meta::supervisor::mhc_bin();
+            let config = ferryx_hub::chat::slack_turn::SlackTurnConfig::from_env(&binary, owner.as_deref());
+            (binary, config)
+        })
+        .await;
+        match armed {
+            Ok((binary, config)) => {
+                tracing::info!(
+                    binary = %binary,
+                    workspace = config.omo.workspace.is_some(),
+                    idle_secs = config.omo.idle_timeout.as_secs(),
+                    total_secs = config.omo.total_timeout.as_secs(),
+                    "slack turn path is armed (mhc RPC)"
+                );
+                ferryx_hub::chat::slack_turn::install(config);
+            }
+            Err(error) => tracing::warn!(%error, "the slack turn config was not read; slack turns stay off"),
+        }
         // omo's startup sweep: claims a restart left pending are never re-run.
         match ferryx_hub::chat::report_claims::recover_stale(&launch.hub.pool).await {
             Ok(0) => {}
@@ -2454,7 +2496,15 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     // each generation supervises it (launch, owned-exit watch, 5s..300s relaunch backoff).
     // Aborting the generation's tasks (hub stop, handover retirement) closes the engine's stdin
     // and kills it after a short grace; the next generation's supervise call re-enables it.
-    let mhc_supervisor = ferryx_hub::meta::mhc_profile::MhcProfileConfig::from_env().map(|config| {
+    // from_env reads the hub env file: off the async runtime threads.
+    let mhc_config = match tokio::task::spawn_blocking(ferryx_hub::meta::mhc_profile::MhcProfileConfig::from_env).await {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(%error, "the mhc supervisor engine config was not read");
+            None
+        }
+    };
+    let mhc_supervisor = mhc_config.map(|config| {
         ferryx_hub::meta::mhc_supervisor::install_with(|| {
             let data_dir = ferryx_hub::meta::supervisor::state_dir_from_home()
                 .unwrap_or_else(|| std::path::PathBuf::from(".ferryx/hub"));
@@ -2487,6 +2537,12 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         }
         runtime.set_work_handler(std::sync::Arc::new(work_tools));
         tasks.push(tokio::spawn(runtime.clone().supervise()));
+        tasks.push(tokio::spawn(setup::auto_setup(
+            runtime.clone(),
+            launch.hub.pool.clone(),
+            Arc::clone(launch.server.remote_state()),
+            home_dir(),
+        )));
     }
     #[cfg(unix)]
     {
@@ -2602,6 +2658,8 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     }
     // omo-gateway's lead is the owner's Slack DM session, not a lane name: action-loop items,
     // owner alerts and cron problems queued for "meta" were never delivered.
+    // There is no built-in owner: without one (HubConfig::load logged the config error) the
+    // owner DM cannot be found or opened, so the lead is OMON_LANE_DEFAULT_LEAD or the fallback.
     let lead_fallback = launch
         .config
         .meta_session_id
@@ -2612,7 +2670,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         .owner_slack_id
         .clone()
         .filter(|owner| !owner.trim().is_empty())
-        .unwrap_or_else(|| ferryx_hub::config::DEFAULT_SLACK_OWNER_ID.to_owned());
+        .unwrap_or_default();
     if ferryx_hub::autonomy::action_loop_enabled() {
         let action_pool = launch.hub.pool.clone();
         let (owner, fallback) = (lead_owner.clone(), lead_fallback.clone());
@@ -2712,10 +2770,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     for task in &tasks {
         HUB_TASKS.track(task);
     }
-    Generation {
-        #[cfg(unix)]
-        tasks,
-    }
+    Generation { tasks }
 }
 
 async fn post_cron_delivery(item: &ferryx_hub::schedule::DueDelivery) -> Option<String> {
@@ -2774,7 +2829,7 @@ async fn post_discord_delivery(channel: &str, text: &str) -> ferryx_hub::Result<
 }
 
 fn home_dir() -> std::path::PathBuf {
-    std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("."))
+    ferryx_hub::hub_env::home().unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
 fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: HubLaunch) {
@@ -2813,15 +2868,9 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                     let reply = match ferryx_hub::control::parse_control(&line) {
                         Ok(ferryx_hub::control::ControlOp::Stop) => {
                             let persisted = ferryx_hub::control::mark_stopped(&launch.hub.pool).await;
-                            if let Some(generation) = running.lock().await.take() {
-                                for task in &generation.tasks {
-                                    task.abort();
-                                }
-                                // Wait for the aborted tasks to end, so a later `hub start`
-                                // reconciles only after the predecessor dispatcher stopped.
-                                for task in generation.tasks {
-                                    let _ = task.await;
-                                }
+                            let previous = running.lock().await.take();
+                            if let Some(generation) = previous {
+                                generation.end().await;
                             }
                             match persisted {
                                 Ok(()) => "{\"status\":\"ok\",\"op\":\"stop\"}\n",
@@ -2890,6 +2939,34 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                             let reply = ferryx_hub::control::approve_rerun_reply(problem).await;
                             let mut stream = reader.into_inner();
                             let _ = stream.write_all(reply.as_bytes()).await;
+                            return;
+                        }
+                        Ok(ferryx_hub::control::ControlOp::ReportStatus(id)) => {
+                            let reply = ferryx_hub::control::report_status_reply(&launch.hub.pool, id).await;
+                            let mut stream = reader.into_inner();
+                            let _ = stream.write_all(format!("{reply}\n").as_bytes()).await;
+                            return;
+                        }
+                        Ok(ferryx_hub::control::ControlOp::ReportAdopt(request)) => {
+                            let reply = ferryx_hub::report_adoption::reply(&launch.hub.pool, &request).await;
+                            let mut stream = reader.into_inner();
+                            let _ = stream.write_all(format!("{reply}\n").as_bytes()).await;
+                            return;
+                        }
+                        Ok(ferryx_hub::control::ControlOp::ReportMutate(request)) => {
+                            let reply = ferryx_hub::report_mutation::reply(&launch.hub.pool, &request).await;
+                            let mut stream = reader.into_inner();
+                            let _ = stream.write_all(format!("{reply}\n").as_bytes()).await;
+                            return;
+                        }
+                        Ok(ferryx_hub::control::ControlOp::Report(request)) => {
+                            let reply = ferryx_hub::control::report_reply(
+                                &launch.hub.pool,
+                                &launch.hub.owner_session().storage_key(),
+                                &request,
+                            ).await;
+                            let mut stream = reader.into_inner();
+                            let _ = stream.write_all(format!("{reply}\n").as_bytes()).await;
                             return;
                         }
                         Err(_) => "{\"status\":\"failed\",\"error\":\"expected stop, start, status, approve_rerun, cutover, rollback, or intake\"}\n",

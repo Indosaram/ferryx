@@ -36,6 +36,10 @@ use tokio_rustls::LazyConfigAcceptor;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Completed handshakes waiting for the HTTP server to pick them up.
 const ACCEPTED_BACKLOG: usize = 128;
+/// Handshakes allowed in flight at once. A peer that opens connections and never sends a
+/// ClientHello holds one slot for at most [`HANDSHAKE_TIMEOUT`]; past this bound the accept
+/// loop waits for a slot instead of spawning until file descriptors run out.
+const MAX_IN_FLIGHT_HANDSHAKES: usize = 512;
 /// The relay serves HTTP/1.1 only (axum is built without http2).
 const HTTP11_ALPN: &[u8] = b"http/1.1";
 
@@ -207,7 +211,8 @@ impl TlsListener {
     pub fn new(tcp: TcpListener, mode: TlsAcceptorMode) -> io::Result<Self> {
         let local_addr = tcp.local_addr()?;
         let (tx, accepted) = mpsc::channel(ACCEPTED_BACKLOG);
-        let accept_task = tokio::spawn(accept_loop(tcp, mode, tx));
+        let handshakes = Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT_HANDSHAKES));
+        let accept_task = tokio::spawn(accept_loop(tcp, mode, tx, handshakes));
         Ok(Self {
             accepted,
             local_addr,
@@ -243,8 +248,14 @@ async fn accept_loop(
     tcp: TcpListener,
     mode: TlsAcceptorMode,
     tx: mpsc::Sender<(TlsStream<TcpStream>, SocketAddr)>,
+    handshakes: Arc<tokio::sync::Semaphore>,
 ) {
     loop {
+        // Taken before accepting, so connections past the bound wait in the kernel backlog
+        // rather than each holding a task and a descriptor here.
+        let Ok(permit) = handshakes.clone().acquire_owned().await else {
+            return;
+        };
         let (stream, peer) = match tcp.accept().await {
             Ok(accepted) => accepted,
             Err(err) => {
@@ -259,7 +270,10 @@ async fn accept_loop(
         let tx = tx.clone();
         let mode = mode.clone();
         tokio::spawn(async move {
-            match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake(stream, &mode)).await {
+            let outcome = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake(stream, &mode)).await;
+            // The slot covers the handshake only, not the wait for the HTTP server.
+            drop(permit);
+            match outcome {
                 Ok(Ok(Some(tls))) => {
                     let _ = tx.send((tls, peer)).await;
                 }
@@ -491,6 +505,63 @@ mod tests {
             .unwrap();
         assert!(response.starts_with("HTTP/1.1 200"), "{response}");
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn handshakes_wait_for_a_free_slot_instead_of_spawning_unbounded() {
+        let cert = self_signed();
+        let config = load_static_server_config(&cert.cert_path, &cert.key_path).unwrap();
+        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = tcp.local_addr().unwrap();
+        // Every slot is taken (as by stalled peers): no new handshake may start.
+        let handshakes = Arc::new(tokio::sync::Semaphore::new(0));
+        let (tx, mut accepted) = mpsc::channel(ACCEPTED_BACKLOG);
+        let accept_task = tokio::spawn(accept_loop(
+            tcp,
+            TlsAcceptorMode::Static(config),
+            tx,
+            handshakes.clone(),
+        ));
+
+        let client = async {
+            let tcp = TcpStream::connect(addr).await.unwrap();
+            let name = rustls_pki_types::ServerName::try_from("localhost").unwrap();
+            TlsConnector::from(client_config(&cert))
+                .connect(name, tcp)
+                .await
+                .unwrap()
+        };
+        let mut client = std::pin::pin!(client);
+        // With no slot the handshake cannot progress however long it waits; the paused
+        // clock only makes that wait instant.
+        tokio::time::pause();
+        assert!(
+            tokio::time::timeout(HANDSHAKE_TIMEOUT * 3, &mut client)
+                .await
+                .is_err(),
+            "a handshake ran without a free slot"
+        );
+        tokio::time::resume();
+
+        handshakes.add_permits(1);
+        let _tls = tokio::time::timeout(TEST_TIMEOUT, &mut client)
+            .await
+            .expect("a freed slot must let the waiting handshake finish");
+        tokio::time::timeout(TEST_TIMEOUT, accepted.recv())
+            .await
+            .unwrap()
+            .expect("the completed handshake reaches the HTTP server");
+        // The single slot came back once that handshake finished: a second one completes.
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let name = rustls_pki_types::ServerName::try_from("localhost").unwrap();
+        tokio::time::timeout(
+            TEST_TIMEOUT,
+            TlsConnector::from(client_config(&cert)).connect(name, tcp),
+        )
+        .await
+        .expect("the slot must be released after a handshake")
+        .unwrap();
+        accept_task.abort();
     }
 
     #[test]

@@ -1,0 +1,50 @@
+[package]
+name = "ferryx-rd-net"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+# LAN discovery through mdns-sd on Linux/Windows. Apple targets use the system Bonjour API and need
+# no extra crate. Off for the Ferryx build, which has its own paired-host discovery.
+mdns = ["dep:mdns-sd", "dep:flume"]
+# Encrypted ntfy candidate exchange (maho NAT traversal). Not used by Ferryx.
+signaling = ["dep:reqwest", "dep:base64"]
+
+[dependencies]
+ferryx-rd-proto = { path = "../ferryx-rd-proto" }
+tokio.workspace = true
+openssl.workspace = true
+openssl-sys = { version = "0.9", features = ["vendored"] }
+aes-gcm.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+base64 = { version = "0.22", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+mdns-sd = { version = "0.13", optional = true }
+if-addrs = "0.13"
+flume = { version = "0.11", default-features = false, optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[[bin]]
+name = "ferryx-rd-discover"
+path = "src/bin/ferryx_rd_discover.rs"
+required-features = ["mdns"]

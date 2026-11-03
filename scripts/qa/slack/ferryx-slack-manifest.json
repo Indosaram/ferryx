@@ -23,7 +23,8 @@
         "im:history",
         "channels:history",
         "groups:history",
-        "app_mentions:read"
+        "app_mentions:read",
+        "reactions:read"
       ]
     }
   },
@@ -33,7 +34,8 @@
         "message.channels",
         "message.groups",
         "message.im",
-        "app_mention"
+        "app_mention",
+        "reaction_added"
       ]
     },
     "interactivity": {

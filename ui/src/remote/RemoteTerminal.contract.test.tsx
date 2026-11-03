@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RemoteTerminal } from "./RemoteTerminal";
+import { registerRelayE2E } from "./relayE2E";
 import { REMOTE_TERMINAL_FRAME_PREFIX, REMOTE_TERMINAL_FRAME_TERMINATOR } from "./remoteTerminalFrames";
 import { FALLBACK_PREFERENCES } from "../lib/terminalSettings";
 
@@ -149,6 +150,8 @@ function establishReady(ws = socket()) {
       }),
     });
   });
+  expect(ws.send.mock.calls).toEqual([[JSON.stringify({ type: "acknowledgeAgentOutcome" })]]);
+  ws.send.mockClear();
 }
 
 describe("remote terminal grid contract", () => {
@@ -194,7 +197,7 @@ describe("remote terminal grid contract", () => {
       });
     });
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
-    expect(socket().send).not.toHaveBeenCalled();
+    expect(socket().send.mock.calls).toEqual([[JSON.stringify({ type: "acknowledgeAgentOutcome" })]]);
   });
 
   it("fences owner outcomes and coalesces Retry through the socket owner", async () => {
@@ -455,7 +458,7 @@ describe("remote terminal grid contract", () => {
       });
     });
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
-    expect(socket().send).not.toHaveBeenCalled();
+    expect(socket().send.mock.calls).toEqual([[JSON.stringify({ type: "acknowledgeAgentOutcome" })]]);
   });
 
   it("builds account tunnel socket URL with daemonEpoch and render=grid but no client geometry", async () => {
@@ -1208,6 +1211,8 @@ describe("remote terminal grid contract", () => {
     });
     expect(onSocketLifecycle).toHaveBeenCalledWith("session-123", "open");
     expect(surface().querySelectorAll("[data-grid-line]")).toHaveLength(frameRows);
+    expect(current.send.mock.calls).toEqual([[JSON.stringify({ type: "acknowledgeAgentOutcome" })]]);
+    current.send.mockClear();
 
     fireEvent.wheel(surface(), { deltaMode, deltaY });
 
@@ -3039,6 +3044,55 @@ describe("remote terminal grid contract", () => {
       });
       expect(ticketCalls()).toHaveLength(2);
 
+      view.unmount();
+    });
+
+    it("dials through the relay E2E registry when no createWebSocket is provided", async () => {
+      const ticketFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ ticket: "plaintext-ticket" }));
+      vi.stubGlobal("fetch", ticketFetch);
+      const base = "https://relay.example.test/host/machine-e2e";
+      const tunnelSocket = new MockWebSocket("tunnel://terminal");
+      const openWebSocket = vi.fn(async () => tunnelSocket);
+      const unregister = registerRelayE2E(base, { fetchLike: vi.fn(), openWebSocket });
+      try {
+        const view = render(<RemoteTerminal sessionId="session-e2e" token="relay-device-token" transportUrl={base} />);
+        await tunnelSocket.waitForHandlers();
+        expect(openWebSocket).toHaveBeenCalledWith(
+          "/api/v1/terminal/session-e2e?render=grid&cols=80&rows=20",
+          { Authorization: "Bearer relay-device-token" },
+        );
+        // Terminal preferences still load over plain fetch; only a plaintext socket ticket is forbidden.
+        expect(ticketFetch.mock.calls.filter(([url]) => String(url).includes("/socket-ticket"))).toEqual([]);
+        view.unmount();
+      } finally {
+        unregister();
+      }
+    });
+
+    it.each([401, 403])("treats a %s tunnel upgrade refusal as an auth denial and never auto-redials", async (status) => {
+      vi.useFakeTimers();
+      const upgradeRefusal = Object.assign(new Error(`WEBSOCKET_UPGRADE_FAILED: server returned status ${status}`), {
+        code: "WEBSOCKET_UPGRADE_FAILED",
+        status,
+      });
+      const createWebSocket = vi.fn(() => Promise.reject(upgradeRefusal));
+      const view = render(
+        <RemoteTerminal
+          sessionId="session-upgrade-denied"
+          token="relay-device-token"
+          transportUrl="https://relay.example.test/host/machine-1"
+          createWebSocket={createWebSocket}
+        />,
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(connectionStatus()).toHaveTextContent("Blocked");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60000);
+      });
+      expect(createWebSocket).toHaveBeenCalledTimes(1);
       view.unmount();
     });
 

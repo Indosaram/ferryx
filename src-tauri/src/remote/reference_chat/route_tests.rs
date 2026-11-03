@@ -22,10 +22,11 @@ use super::files as reference_files;
 use super::types::REFERENCE_CHAT_ROUTE_PREFIX;
 
 /// The frozen route table, as the plan and the contract name it.
-const REFERENCE_CHAT_ROUTES: [(&str, &str); 10] = [
+const REFERENCE_CHAT_ROUTES: [(&str, &str); 11] = [
     ("GET", "history"),
     ("GET", "screen"),
     ("GET", "prompt"),
+    ("POST", "acknowledge-outcome"),
     ("POST", "submit"),
     ("POST", "stop"),
     ("POST", "answer"),
@@ -772,6 +773,74 @@ async fn every_reference_chat_route_is_registered_behind_authentication() {
     fixture.server.stop().await;
 }
 
+#[tokio::test]
+async fn outcome_acknowledgement_clears_only_the_authenticated_current_target() {
+    use crate::daemon::protocol::AgentOutcome;
+    let fixture = fixture().await;
+    let hub = fixture.state.terminal_service.output_hub();
+    let states = fixture.state.machine_services.as_ref().unwrap().sessions.agent_state_hub();
+    assert!(hub.enable_program_status(&fixture.session_id));
+    hub.publish(&fixture.session_id, b"\x1b]7501;state=done\x1b\\".to_vec()).unwrap();
+    assert_eq!(states.current(&fixture.session_id).unwrap().outcome, Some(AgentOutcome::Done));
+    let path = fixture.route("acknowledge-outcome");
+    let query = fixture.read_query("", &fixture.daemon_epoch, &reference_files::reference_host_id(), &[]);
+    assert!(allowed_http_route(&Method::POST, &format!("reference-chat/{}/acknowledge-outcome", fixture.session_id)));
+    assert!(validate_http_query(&format!("reference-chat/{}/acknowledge-outcome", fixture.session_id), Some(&query)).is_ok());
+    let (status, _) = fixture.server.request("POST", &format!("{path}?{query}"), None, None).await;
+    assert_eq!(status, 401);
+    let stale = fixture.read_query("", "0", &reference_files::reference_host_id(), &[]);
+    let (status, _) = fixture.server.request("POST", &format!("{path}?{stale}"), Some(&fixture.control), None).await;
+    assert_eq!(status, 410);
+    assert_eq!(states.current(&fixture.session_id).unwrap().outcome, Some(AgentOutcome::Done));
+    let foreign_host = fixture.read_query("", &fixture.daemon_epoch, "not-this-host", &[]);
+    let foreign_owner = fixture.read_query_naming_owner(
+        &fixture.session_id,
+        "",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        ROUTE_TEST_FOREIGN_OWNER,
+        &[],
+    );
+    let foreign_session = fixture.read_query_for(
+        &uuid::Uuid::new_v4().to_string(),
+        "",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[],
+    );
+    // A foreign owner is refused as a foreign incarnation (410), like every other route.
+    for (foreign, expected) in [(foreign_host, 403), (foreign_owner, 410), (foreign_session, 403)] {
+        let (status, body) = fixture.server
+            .request("POST", &format!("{path}?{foreign}"), Some(&fixture.control), None)
+            .await;
+        assert_eq!(status, expected, "{body}");
+        assert_eq!(states.current(&fixture.session_id).unwrap().outcome, Some(AgentOutcome::Done));
+    }
+    let (status, body) = fixture.server.request("POST", &format!("{path}?{query}"), Some(&fixture.control), None).await;
+    assert_eq!(status, 204, "{body}");
+    assert_eq!(states.current(&fixture.session_id).unwrap().outcome, None);
+    fixture.state.terminal_service.close_session(&fixture.session_id).await.unwrap();
+    fixture.server.stop().await;
+}
+
+#[tokio::test]
+async fn a_view_only_device_cannot_acknowledge_an_outcome() {
+    use crate::daemon::protocol::AgentOutcome;
+    let fixture = fixture().await;
+    let hub = fixture.state.terminal_service.output_hub();
+    let states = fixture.state.machine_services.as_ref().unwrap().sessions.agent_state_hub();
+    assert!(hub.enable_program_status(&fixture.session_id));
+    hub.publish(&fixture.session_id, b"\x1b]7501;state=done\x1b\\".to_vec()).unwrap();
+    let path = fixture.route("acknowledge-outcome");
+    let query = fixture.read_query("", &fixture.daemon_epoch, &reference_files::reference_host_id(), &[]);
+    let (status, body) = fixture.server.request("POST", &format!("{path}?{query}"), Some(&fixture.view), None).await;
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("FORBIDDEN"), "{body}");
+    assert_eq!(states.current(&fixture.session_id).unwrap().outcome, Some(AgentOutcome::Done));
+    fixture.state.terminal_service.close_session(&fixture.session_id).await.unwrap();
+    fixture.server.stop().await;
+}
+
 /// The target fences: the daemon incarnation, the owning host and the session itself.
 #[tokio::test]
 async fn a_reference_chat_read_refuses_a_foreign_target() {
@@ -1233,6 +1302,8 @@ async fn a_history_read_naming_a_rotated_provider_session_is_refused_target_expi
         }),
         detail: None,
         origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+        outcome: None,
+        kind: None,
     });
     let stale = fixture.read_query(
         "omo",
@@ -1798,6 +1869,8 @@ fn publish_reference_provider(state: &RemoteGatewayState, session_id: &str, prov
             }),
             detail: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         });
 }
 
@@ -1823,6 +1896,8 @@ async fn reference_provider_rotation_case(rotation: &str, named: Option<&str>) {
             }),
             detail: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         });
     };
     let hook: Box<dyn Fn() + Send + Sync> = Box::new(rotate);

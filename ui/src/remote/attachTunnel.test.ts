@@ -6,6 +6,7 @@ import {
   openAccountTunnel,
   attachTunnelRefusalCode,
   AttachTunnelRefusedError,
+  TunnelError,
   WS_OPEN,
   WS_CLOSED,
   MAX_TUNNEL_WS_MESSAGE_BYTES,
@@ -288,6 +289,40 @@ describe("attachTunnel RFC 6455 WebSocket transport", () => {
     expect(ws.readyState).toBe(WS_OPEN);
   });
 
+  it("delivers a frame glued to the 101 response once onmessage is assigned later", async () => {
+    // Given an upgrade whose 101 response and first server frame arrive in one chunk
+    const stream = new ScriptedByteStream();
+    const transport = createTunnelTransport(stream);
+    const wsPromise = transport.openWebSocket("/api/v1/terminal/sess-glued");
+    await stream.waitForWrites(1);
+    const reqText = new TextDecoder().decode(concatAll(stream.written));
+    const secKey = reqText.match(/Sec-WebSocket-Key:\s*([^\r\n]+)/i)![1].trim();
+    const acceptKey = await computeAcceptKey(secKey);
+    const head = new TextEncoder().encode(
+      `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${acceptKey}\r\n\r\n`,
+    );
+    const first = new TextEncoder().encode("first");
+    const second = new TextEncoder().encode("second");
+    stream.pushIncoming(concatAll([
+      head,
+      new Uint8Array([0x81, first.length]), first,
+      new Uint8Array([0x81, second.length]), second,
+      // A trailing ping: its pong proves the receive loop already processed both messages.
+      new Uint8Array([0x89, 0x00]),
+    ]));
+    const writesBeforePong = stream.written.length;
+    const ws = await wsPromise;
+    await stream.waitForWrites(writesBeforePong + 1);
+    expect(stream.written[writesBeforePong][0]).toBe(0x8a);
+
+    // When the caller assigns onmessage only after the hand-over
+    const received: string[] = [];
+    ws.onmessage = (event) => received.push(event.data as string);
+
+    // Then both frames arrive, in order
+    expect(received).toEqual(["first", "second"]);
+  });
+
   it("reassembles a server frame split across two incoming chunks", async () => {
     // Given an established WebSocket
     const stream = new ScriptedByteStream();
@@ -314,6 +349,48 @@ describe("attachTunnel RFC 6455 WebSocket transport", () => {
     // Then the full message is delivered
     const message = await messagePromise;
     expect(message).toBe("hello world");
+  });
+
+  it("assembles a large frame arriving in many chunks with a linear amount of copying", async () => {
+    // Given an established WebSocket and a 1 MiB binary frame split into 64 chunks
+    const stream = new ScriptedByteStream();
+    const ws = await establishTestWebSocket(createTunnelTransport(stream), stream);
+    const payloadSize = 1024 * 1024;
+    const payload = new Uint8Array(payloadSize);
+    for (let i = 0; i < payloadSize; i++) payload[i] = i & 0xff;
+    const header = new Uint8Array(10);
+    header[0] = 0x82;
+    header[1] = 127;
+    new DataView(header.buffer).setBigUint64(2, BigInt(payloadSize), false);
+    const frame = concatAll([header, payload]);
+    const chunkSize = frame.length / 64;
+    const received = new Promise<Uint8Array>((resolve) => {
+      ws.onmessage = (event) => resolve(event.data as Uint8Array);
+    });
+    const copied = { bytes: 0 };
+    const originalSet = Uint8Array.prototype.set;
+    const setSpy = vi.spyOn(Uint8Array.prototype, "set").mockImplementation(function (
+      this: Uint8Array,
+      source: ArrayLike<number>,
+      offset?: number,
+    ) {
+      copied.bytes += source.length;
+      return originalSet.call(this, source, offset);
+    });
+    try {
+      // When the chunks arrive one by one
+      for (let at = 0; at < frame.length; at += chunkSize) {
+        stream.pushIncoming(frame.slice(at, Math.min(frame.length, at + chunkSize)));
+        await Promise.resolve();
+      }
+      const message = await received;
+
+      // Then the payload is intact and was copied a bounded number of times, not once per chunk
+      expect(message).toEqual(payload);
+      expect(copied.bytes).toBeLessThan(payloadSize * 4);
+    } finally {
+      setSpy.mockRestore();
+    }
   });
 
   it("masks client frames and uses extended lengths for 126+ and 65536+ payloads", async () => {
@@ -528,7 +605,8 @@ describe("attachTunnel HTTP shim deadlines and caps", () => {
       const transport = createTunnelTransport(stream);
       const hung = transport.fetchLike("/hung");
       const hungResult = expect(hung).rejects.toThrow(/HTTP_TIMEOUT/);
-      const queued = transport.fetchLike("/next");
+      // A longer deadline so the queued request outlives the hung one and sees the closed stream.
+      const queued = transport.fetchLike("/next", { timeoutMs: DEFAULT_TUNNEL_REQUEST_TIMEOUT_MS * 2 });
       const queuedResult = expect(queued).rejects.toThrow(/STREAM_CLOSED/);
 
       // When the default deadline elapses
@@ -543,6 +621,30 @@ describe("attachTunnel HTTP shim deadlines and caps", () => {
     }
   });
 
+  it("bounds a request's wait behind a slow one from the moment it is queued", async () => {
+    vi.useFakeTimers();
+    try {
+      // Given a slow in-flight request and a second request queued behind it
+      const stream = new ScriptedByteStream();
+      const transport = createTunnelTransport(stream);
+      const slow = transport.fetchLike("/slow", { timeoutMs: DEFAULT_TUNNEL_REQUEST_TIMEOUT_MS * 3 });
+      const queued = transport.fetchLike("/queued");
+      const queuedResult = expect(queued).rejects.toThrow(/HTTP_TIMEOUT/);
+
+      // When the queued request's deadline elapses while it is still waiting
+      await vi.advanceTimersByTimeAsync(DEFAULT_TUNNEL_REQUEST_TIMEOUT_MS);
+
+      // Then it rejects without closing the stream, and is never sent
+      await queuedResult;
+      expect(stream.closed).toBe(false);
+      stream.pushIncoming("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+      expect((await slow).status).toBe(200);
+      expect(stream.written).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("honours a caller AbortSignal", async () => {
     const stream = new ScriptedByteStream();
     const transport = createTunnelTransport(stream);
@@ -551,6 +653,47 @@ describe("attachTunnel HTTP shim deadlines and caps", () => {
     await stream.waitForWrites(1);
     controller.abort();
     await expect(req).rejects.toThrow(/HTTP_ABORTED/);
+  });
+
+  it("drains an aborted in-flight response instead of closing the shared tunnel", async () => {
+    // Given an in-flight request and another queued behind it
+    const stream = new ScriptedByteStream();
+    const transport = createTunnelTransport(stream);
+    const controller = new AbortController();
+    const aborted = transport.fetchLike("/switched-away", { signal: controller.signal });
+    const next = transport.fetchLike("/next");
+    await stream.waitForWrites(1);
+
+    // When the caller aborts before the response arrives
+    controller.abort();
+    await expect(aborted).rejects.toThrow(/HTTP_ABORTED/);
+    expect(stream.closed).toBe(false);
+
+    // Then its response is read and dropped, and the queued request gets its own response
+    stream.pushIncoming("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nSTALE");
+    await stream.waitForWrites(2);
+    stream.pushIncoming("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nFRESH");
+    const res = await next;
+    expect(new TextDecoder().decode(res.body)).toBe("FRESH");
+    expect(stream.closed).toBe(false);
+  });
+
+  it("still closes the tunnel when an aborted request's response never drains", async () => {
+    vi.useFakeTimers();
+    try {
+      const stream = new ScriptedByteStream();
+      const transport = createTunnelTransport(stream);
+      const controller = new AbortController();
+      const aborted = transport.fetchLike("/hung", { signal: controller.signal });
+      const abortedResult = expect(aborted).rejects.toThrow(/HTTP_ABORTED/);
+      await stream.waitForWrites(1);
+      controller.abort();
+      await abortedResult;
+      await vi.advanceTimersByTimeAsync(DEFAULT_TUNNEL_REQUEST_TIMEOUT_MS);
+      expect(stream.closed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rejects oversized headers and an oversized Content-Length body", async () => {
@@ -567,6 +710,46 @@ describe("attachTunnel HTTP shim deadlines and caps", () => {
     await stream2.waitForWrites(1);
     stream2.pushIncoming(`HTTP/1.1 200 OK\r\nContent-Length: ${MAX_TUNNEL_RESPONSE_BODY_BYTES + 1}\r\n\r\n`);
     await expect(req2).rejects.toThrow(/HTTP_BODY_TOO_LARGE/);
+  });
+
+  it("closes the stream after a parse failure so a queued request never reads leftover bytes", async () => {
+    // Given a malformed response and a second request queued behind it
+    const stream = new ScriptedByteStream();
+    const transport = createTunnelTransport(stream);
+    const bad = transport.fetchLike("/bad");
+    const badResult = expect(bad).rejects.toThrow(/HTTP_MALFORMED_STATUS_LINE/);
+    const queued = transport.fetchLike("/next");
+    const queuedResult = expect(queued).rejects.toThrow(/STREAM_CLOSED/);
+    await stream.waitForWrites(1);
+
+    // When the server answers garbage followed by a valid-looking response
+    stream.pushIncoming("garbage\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+
+    // Then the stream is closed and the queued request does not consume the leftover bytes
+    await badResult;
+    await queuedResult;
+    expect(stream.closed).toBe(true);
+    expect(transport.isClosed).toBe(true);
+  });
+
+  it("treats a response with no length or chunked framing as a desync, not an empty body", async () => {
+    const stream = new ScriptedByteStream();
+    const transport = createTunnelTransport(stream);
+    const req = transport.fetchLike("/unframed");
+    await stream.waitForWrites(1);
+    stream.pushIncoming("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nbody");
+    await expect(req).rejects.toThrow(/HTTP_DESYNC/);
+    expect(stream.closed).toBe(true);
+  });
+
+  it("still accepts a bodiless 204 without framing headers", async () => {
+    const stream = new ScriptedByteStream();
+    const transport = createTunnelTransport(stream);
+    const req = transport.fetchLike("/empty");
+    await stream.waitForWrites(1);
+    stream.pushIncoming("HTTP/1.1 204 No Content\r\n\r\n");
+    expect((await req).status).toBe(204);
+    expect(stream.closed).toBe(false);
   });
 });
 
@@ -1135,6 +1318,15 @@ describe("attachTunnel closed-state reporting", () => {
     expect(transport.isClosed).toBe(false);
     transport.close();
     expect(transport.isClosed).toBe(true);
+  });
+
+  it("rejects requests on a closed transport with a structured STREAM_CLOSED code", async () => {
+    const transport = createTunnelTransport(new ScriptedByteStream());
+    transport.close();
+    const error = await transport.fetchLike("/api/v1/sessions").then(() => null, (err: unknown) => err);
+    expect(error).toBeInstanceOf(TunnelError);
+    expect(error).toMatchObject({ code: "STREAM_CLOSED" });
+    expect((error as Error).message).toMatch(/^STREAM_CLOSED: /);
   });
 });
 

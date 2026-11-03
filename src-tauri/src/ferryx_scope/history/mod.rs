@@ -92,6 +92,8 @@ impl History {
         let decoded = self.validate(s)?;
         page(decoded.messages, cursor, limit, &s.hash, decoded.warnings)
     }
+    /// The file a searched entry was read from (database-backed stores return their database file).
+    pub fn source_path(&self, key: &str) -> Option<&Path> { self.sources.get(key).map(|source| source.cand.path.as_path()) }
     fn validate(&self, s: &Source) -> Result<Decoded> {
         let decoded = decode(s.entry.provider, &s.cand, MAX_BYTES)?;
         if decoded.hash != s.hash { return Err(HistoryError::SourceChanged); }

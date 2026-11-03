@@ -1,4 +1,4 @@
-import { GitBranch, GitCompare, Search, TerminalSquare, X } from "lucide-react";
+import { AppWindow, GitBranch, GitCompare, Search, TerminalSquare, X, type LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { isMacShortcutPlatform, resolvedShortcuts, shortcutLabel } from "../lib/shortcuts";
@@ -14,12 +14,14 @@ export type CommandPaletteProps = {
   onSelectTab: (tabId: string) => void;
   /** Present when the active worktree can show its Git changes. */
   onShowChanges?: () => void;
+  /** Present only in the desktop shell, where a second window can be opened. */
+  onNewWindow?: () => void;
   onClose: () => void;
 };
 
-type PaletteCommand = { id: string; title: string; run: () => void };
+type PaletteCommand = { id: string; title: string; run: () => void; icon: LucideIcon };
 
-export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSelectTab, onShowChanges, onClose }: CommandPaletteProps) {
+export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSelectTab, onShowChanges, onNewWindow, onClose }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const isMac = isMacShortcutPlatform();
@@ -31,9 +33,11 @@ export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSele
     [normalizedQuery, worktrees],
   );
   const filteredCommands = useMemo(() => {
-    const commands: PaletteCommand[] = onShowChanges ? [{ id: "show-changes", title: "Show changes", run: onShowChanges }] : [];
+    const commands: PaletteCommand[] = [];
+    if (onShowChanges) commands.push({ id: "show-changes", title: "Show changes", run: onShowChanges, icon: GitCompare });
+    if (onNewWindow) commands.push({ id: "window.new", title: "New Window", run: onNewWindow, icon: AppWindow });
     return commands.filter((command) => command.title.toLowerCase().includes(normalizedQuery));
-  }, [normalizedQuery, onShowChanges]);
+  }, [normalizedQuery, onNewWindow, onShowChanges]);
   const filteredTabs = useMemo(
     () => tabs.filter((tab) => staticTabLabel(tab).toLowerCase().includes(normalizedQuery)),
     [normalizedQuery, tabs],
@@ -94,7 +98,7 @@ export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSele
                   }}
                   className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-foreground hover:bg-accent"
                 >
-                  <GitCompare className="size-4 shrink-0 text-muted-foreground" />
+                  <command.icon className="size-4 shrink-0 text-muted-foreground" />
                   <span className="min-w-0 flex-1 truncate">{command.title}</span>
                 </button>
               ))}
