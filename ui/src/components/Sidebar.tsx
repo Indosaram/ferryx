@@ -159,11 +159,12 @@ export function Sidebar({
   attention,
 }: SidebarProps) {
   const inboxOpen = attention?.inboxOpen ?? false;
-  // The autonomy panel is the sidebar's Supervisor view: it opens by default, replaces the
-  // earlier lanes view (never both), and is not behind advanced features.
+  // The autonomy panel is the sidebar's Supervisor view: it replaces the earlier lanes view
+  // (never both), is not behind advanced features, and widens the sidebar. The worktree list
+  // stays the default view; the Supervisor tab switches to the panel.
   const panelMode = onFocusSupervisorSession !== undefined && attention !== undefined;
   const widthRange = panelMode ? SUPERVISOR_SIDEBAR_RANGE : DEFAULT_SIDEBAR_RANGE;
-  const [supervisorOpenState, setSupervisorOpen] = useState(panelMode);
+  const [supervisorOpenState, setSupervisorOpen] = useState(false);
   const advancedFeatures = useAdvancedFeatures();
   const supervisorOpen = supervisorOpenState && !inboxOpen && (advancedFeatures || panelMode);
   const supervisorTyping = useSupervisorTyping();

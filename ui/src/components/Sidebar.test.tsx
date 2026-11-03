@@ -913,8 +913,11 @@ describe("Sidebar navigation", () => {
       ...overrides,
     });
 
-    it("opens on the one Supervisor panel, full height, never beside the older lanes view", async () => {
+    it("shows the one Supervisor panel full height from its tab, never beside the older lanes view", async () => {
       renderSidebar(panelProps());
+      expect(screen.getByTestId("worktree-region")).toBeVisible();
+      expect(screen.queryByTestId("supervisor-panel")).toBeNull();
+      fireEvent.click(screen.getByRole("tab", { name: "Supervisor" }));
       expect(await screen.findByTestId("supervisor-panel")).toBeInTheDocument();
       expect(screen.getByRole("tab", { name: "Supervisor" })).toHaveAttribute("aria-selected", "true");
       expect(screen.getAllByTestId("supervisor-panel")).toHaveLength(1);

@@ -1,7 +1,7 @@
 import { cn } from '../../lib/cn';
 import type { RulesLineProps } from './types';
 
-export function RulesLine({ text, onChange }: RulesLineProps) {
+export function RulesLine({ text, touch, onChange }: RulesLineProps) {
   return (
     <p className={cn('border-t border-border pt-3 leading-relaxed text-muted-foreground', touch ? 'text-sm' : 'text-xs')} data-testid="rules-line">
       {text}
