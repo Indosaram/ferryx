@@ -701,10 +701,10 @@ function decodePng(path) {
  * 22-70 px wide (narrower are scrollbars/borders, wider are select boxes) whose right edge is the
  * rightmost such run on that line, then pick the run seen on the most lines. Returns its centre.
  */
-function findRowSwitch(path, label) {
+function findRowSwitch(path, label, { below = 12 } = {}) {
   const image = decodePng(path);
   const votes = new Map();
-  for (let dy = -12; dy <= 12; dy += 1) {
+  for (let dy = -12; dy <= below; dy += 1) {
     const y = Math.min(image.height - 1, Math.max(0, label.y + dy));
     // Background = the most common colour on this line (a single sample can land on a glyph).
     const counts = new Map();
@@ -740,6 +740,42 @@ function findRowSwitch(path, label) {
 }
 
 const norm = (text) => text.toLowerCase().replace(/[^a-z0-9:%./]/g, "");
+/**
+ * The controls at the right end of a multi-line row whose first-line label is `label`: column
+ * runs that differ from the row background anywhere in the band from 6px above the label to
+ * 36px below it, right of the label's text. Returns the cluster at the right end (runs closer
+ * than 120px to each other), e.g. pin, trash and switch of an extension row, left to right.
+ */
+function findRowIcons(path, label) {
+  const image = decodePng(path);
+  const y0 = Math.max(0, label.y - 6), y1 = Math.min(image.height - 1, label.y + 36);
+  const counts = new Map();
+  for (let x = 0; x < image.width; x += 3) {
+    const key = image.rgb(x, Math.min(image.height - 1, label.y + 10)).map((value) => value >> 3).join(",");
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const background = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0].split(",").map((value) => (Number(value) << 3) + 4);
+  const differs = (x, y) => image.rgb(x, y).reduce((sum, value, index) => sum + Math.abs(value - background[index]), 0) > 40;
+  const runs = [];
+  let start = -1, last = -99;
+  for (let x = label.right + 40; x < image.width; x += 1) {
+    let hit = false;
+    for (let y = y0; y <= y1 && !hit; y += 2) hit = differs(x, y);
+    if (!hit) continue;
+    if (start < 0 || x - last > 4) {
+      if (start >= 0) runs.push([start, last]);
+      start = x;
+    }
+    last = x;
+  }
+  if (start >= 0) runs.push([start, last]);
+  // A trailing run wider than any control is the window edge or the screen outside it.
+  while (runs.length && runs.at(-1)[1] - runs.at(-1)[0] > 100) runs.pop();
+  if (!runs.length) return null;
+  const cluster = [runs.at(-1)];
+  for (let index = runs.length - 2; index >= 0 && cluster[0][0] - runs[index][1] <= 120; index -= 1) cluster.unshift(runs[index]);
+  return cluster.map(([a, b]) => ({ x: Math.round((a + b) / 2), width: b - a + 1 }));
+}
 function findWord(words, text, { nth = 0, minX = 0, maxX = Infinity, pick = "first", match = null } = {}) {
   const test = match ?? ((word) => norm(word.text) === norm(text));
   const hits = (words ?? []).filter((word) => test(word) && word.left >= minX && word.left <= maxX).sort((a, b) => a.top - b.top || a.left - b.left);
@@ -1981,6 +2017,8 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
   summary.extension = record;
   let storeTab = null;
   let installButton = null;
+  let confirmPrompt = null;
+  let confirmed = false;
   await step(
     "extension-store-open",
     "Mod+Shift+B opens a Chromium tab; the CLI navigates it to uBlock Origin Lite's Chrome Web Store page",
@@ -2006,13 +2044,24 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
     "extension-store-install",
     "Click 'Add to Chrome', then 'Add extension' in Chrome's dialog; wait until the extension is in the profile",
     [
-      ["optional dismiss the 'Switch to Chrome?' prompt", () => clickText("thanks", { timeout: 6000 })],
-      // The store page is wider than the pane: its install button sits off screen to the right
-      // (horizontal scrollbar), so the CLI scrolls it into view before the real click.
+      // The store shows "Switch to Chrome?" to every Chromium that is not Google Chrome; it does
+      // not block the install. It can sit off screen right of the pane, so it is answered in the
+      // page.
+      ["optional dismiss the 'Switch to Chrome?' prompt (CLI eval)", async () => {
+        const script = "(() => { const b = [...document.querySelectorAll('button,a,[role=button]')].find((e) => (e.textContent || '').trim() === 'No thanks'); if (!b) return 'absent'; b.click(); return 'dismissed'; })()";
+        const result = storeTab ? await cliAsync("eval", "--browser-id", storeTab.browserId, "--script", script) : { ok: false, stderr: "no store tab" };
+        record.switch_to_chrome_prompt = result.ok ? result.stdout.replace(/"/g, "") : null;
+        return { ok: result.ok, prompt: record.switch_to_chrome_prompt, stderr: result.stderr };
+      }],
+      1500,
+      // The store page is wider than the pane: the CLI scrolls the install button into view and
+      // gives it dark-on-white colours so OCR reads its label (white on blue it reads nothing);
+      // the click on it is still real OS input.
       ["scroll the install button into view (CLI eval)", async () => {
-        // Also reports the "Share" link's rect: OCR reads that word reliably, so it anchors page
-        // CSS pixels to screen pixels for the click (OCR does not read the white-on-blue label).
-        const script = "(() => { const b = [...document.querySelectorAll('button')].find((e) => /Add to Chrome/i.test(e.textContent || '')); if (!b) return 'none'; b.scrollIntoView({block: 'center', inline: 'center'}); const r = b.getBoundingClientRect(); const s = [...document.querySelectorAll('a,button,span')].find((e) => (e.textContent || '').trim() === 'Share'); const q = s && s.getBoundingClientRect(); return JSON.stringify({x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), disabled: b.disabled, text: b.textContent.trim(), share: q ? {x: Math.round(q.x + q.width / 2), y: Math.round(q.y + q.height / 2)} : null, dpr: devicePixelRatio, vw: innerWidth}); })()";
+        // Also reports the "Share" link's rect, a fallback anchor from page CSS pixels to screen.
+        // Centred: on the 1024px Windows runner screen the window is wider than the screen, so a
+        // button at the pane's right edge is off screen.
+        const script = "(() => { const b = [...document.querySelectorAll('button')].find((e) => /Add to Chrome/i.test(e.textContent || '')); if (!b) return 'none'; b.scrollIntoView({block: 'center', inline: 'center'}); b.style.setProperty('background', '#ffffff', 'important'); b.style.setProperty('color', '#000000', 'important'); b.querySelectorAll('*').forEach((e) => e.style.setProperty('color', '#000000', 'important')); const r = b.getBoundingClientRect(); const s = [...document.querySelectorAll('a,button,span')].find((e) => (e.textContent || '').trim() === 'Share'); const q = s && s.getBoundingClientRect(); return JSON.stringify({x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), disabled: b.disabled, text: b.textContent.trim(), share: q ? {x: Math.round(q.x + q.width / 2), y: Math.round(q.y + q.height / 2)} : null, dpr: devicePixelRatio, vw: innerWidth}); })()";
         const deadline = Date.now() + 30000;
         let result = null;
         do {
@@ -2038,7 +2087,7 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
           const hit = findPhrase(words, "Add to Chrome")[0];
           if (hit) return { ...host.click(hit.x, hit.y), at: [hit.x, hit.y], via: "ocr" };
           // The label is white on blue: map the button's page rect through the OCR'd "Share" link.
-          const share = installButton?.share ? words.find((word) => word.text === "Share") : null;
+          const share = installButton?.share && installButton.share.x > 0 ? words.find((word) => word.text === "Share") : null;
           if (share) {
             const scale = installButton.dpr || 1;
             const at = [
@@ -2049,7 +2098,7 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
           }
           await sleep(1500);
         } while (Date.now() < deadline);
-        record.error ??= "'Add to Chrome' could not be located on screen";
+        record.error ??= `'Add to Chrome' could not be located on screen (page rect ${JSON.stringify(installButton)})`;
         return { ok: false, stderr: "'Add to Chrome' not visible" };
       }],
       ["click Add extension", async () => {
@@ -2098,8 +2147,10 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
           const label = ubolWords(ocr(path))[0];
           if (label) {
             const word = { ...label, x: label.left + Math.round(label.width / 2), y: label.top + Math.round(label.height / 2), right: label.left + label.width };
-            row = { label: word, knob: findRowSwitch(path, word) };
-            return { ok: true, label_at: [word.x, word.y], switch: row.knob };
+            // The name is the row's first line; the switch is centred on the whole (3-line) row,
+            // about 17px lower, so the probe looks further down than for single-line rows.
+            row = { label: word, knob: findRowSwitch(path, word, { below: 32 }), icons: findRowIcons(path, word) };
+            return { ok: true, label_at: [word.x, word.y], switch: row.knob, icons: row.icons };
           }
           await sleep(2000);
         } while (Date.now() < deadline);
@@ -2114,22 +2165,44 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
     "Click the row's trash button (left of its switch), confirm with Remove, then Remove in Chrome's own dialog; the row disappears",
     [
       ["click the trash button", async () => {
-        if (!row?.knob) return { ok: false, stderr: "row or its switch not located" };
-        // Switch w-9 (36px), gap-1.5 (6px), trash IconButton size-6 (24px): its centre is 18px
-        // left of the switch's left edge, scaled by the measured switch width.
-        const scale = row.knob.width / 34;
-        const switchLeft = row.knob.x - row.knob.width / 2;
-        for (const offset of [18, 22, 14]) {
-          const at = [Math.round(switchLeft - offset * scale), row.knob.y];
+        // The row ends in pin, trash and the switch: the trash is the control left of the switch.
+        // The controls are centred on the row, about 17px below its first-line name.
+        const candidates = [];
+        if (row?.icons?.length >= 2) candidates.push([row.icons.at(-2).x, row.label.y + 17]);
+        if (row?.knob) {
+          // Fallback: switch w-9 (36px), gap-1.5, trash size-6: 18px left of the switch's edge.
+          const scale = row.knob.width / 34;
+          const switchLeft = row.knob.x - row.knob.width / 2;
+          for (const offset of [18, 22, 14]) candidates.push([Math.round(switchLeft - offset * scale), row.knob.y]);
+        }
+        if (!candidates.length) return { ok: false, stderr: "row controls not located" };
+        for (const at of candidates) {
           host.click(...at);
           await sleep(1200);
           const words = ocr(probeShot()) ?? [];
-          if (findPhrase(words, "Chrome may ask").length || findPhrase(words, "once more").length) return { ok: true, at, offset };
+          const prompt = findPhrase(words, "Chrome may ask")[0] ?? findPhrase(words, "once more")[0];
+          if (prompt) {
+            confirmPrompt = prompt;
+            return { ok: true, at, tried: candidates.indexOf(at) + 1 };
+          }
         }
         return { ok: false, stderr: "the remove confirmation did not appear" };
       }],
-      ["click Remove (Ferryx confirmation)", () => clickText("Remove", { timeout: 5000, match: exactly("Remove"), pick: "rightmost" })],
+      // Only the Remove on the row's own confirmation line: the Chromium Engine group above has
+      // a "Remove" button too, and clicking that uninstalls the engine.
+      ["click Remove (Ferryx confirmation)", async () => {
+        if (!confirmPrompt) return { ok: false, stderr: "no row confirmation open" };
+        const words = ocr(probeShot()) ?? [];
+        const hit = words
+          .filter((word) => word.text === "Remove" && Math.abs(word.top - confirmPrompt.top) < 40 && word.left > confirmPrompt.left)
+          .sort((a, b) => b.left - a.left)[0];
+        if (!hit) return { ok: false, stderr: "the confirmation's Remove button not found next to its prompt" };
+        const at = [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)];
+        confirmed = true;
+        return { ...host.click(...at), at };
+      }],
       ["click Remove in Chrome's dialog", async () => {
+        if (!confirmed) return { ok: false, stderr: "Ferryx confirmation not clicked" };
         // Chrome's uninstall dialog: title 'Remove "uBlock Origin Lite"?' and a Remove button
         // below it; the bottom-most "Remove" is the button.
         const deadline = Date.now() + 30000;
