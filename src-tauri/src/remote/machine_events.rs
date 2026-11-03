@@ -463,6 +463,8 @@ mod panel_frame_tests {
             prompt_id: Some("p1".into()),
             kind: Some("approval".into()),
             screen_revision: Some("r1".into()),
+            state_since_ms: None,
+            screen_changed_at_ms: None,
         }
     }
 
