@@ -7,6 +7,8 @@
 // object outside `steps` (per-step action records are evidence, not verdicts), unless the object
 // that holds `checks` lists the name in its `informational` array, and a top-level `pass: false`.
 // A dir without a summary.json fails too. Prints one line per check and exits 1 on any failure.
+// A full UI-audit summary must also have run its engine and extension sections: an engine
+// marked `skipped` or a missing `extension` fails, so a dropped engine bundle cannot pass.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
@@ -38,6 +40,15 @@ export function collectChecks(node, path = []) {
   return rows;
 }
 
+/** Coverage failures of a full UI-audit summary: the sections that must have run. */
+export function missingCoverage(summary) {
+  if (summary?.scenario !== "full") return [];
+  const missing = [];
+  if (!summary.engine || summary.engine.skipped) missing.push(`engine skipped: ${summary.engine?.skipped ?? "no engine section"}`);
+  if (!summary.extension) missing.push("extension scenario did not run (extension is null)");
+  return missing;
+}
+
 if (import.meta.main) {
   const dirs = process.argv.slice(2);
   if (!dirs.length) {
@@ -64,6 +75,10 @@ if (import.meta.main) {
       }
       if (summary.pass === false) {
         console.log(`FAIL ${name}: pass=false`);
+        failed += 1;
+      }
+      for (const reason of missingCoverage(summary)) {
+        console.log(`FAIL ${name}: ${reason}`);
         failed += 1;
       }
       for (const row of collectChecks(summary)) {

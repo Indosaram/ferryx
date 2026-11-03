@@ -187,7 +187,7 @@ jobs:
             exit 0
           fi
           mkdir -p "$RUNNER_TEMP/engine-out"
-          (cd crates/ferryx-browser-engine && cargo run --release --bin bundle-engine -- "$RUNNER_TEMP/engine-out" --release)
+          bash scripts/browser-qa/bundle-engine-retry.sh "$RUNNER_TEMP/engine-out"
           ls -la "$RUNNER_TEMP/engine-out"
           zip=$(ls "$RUNNER_TEMP"/engine-out/engine-linux-*.zip | head -1)
           echo "FERRYX_UI_AUDIT_ENGINE_ZIP=$zip" >> "$GITHUB_ENV"
@@ -222,7 +222,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/engine-out"
-          (cd crates/ferryx-browser-engine && cargo run --release --bin bundle-engine -- "$RUNNER_TEMP/engine-out" --release)
+          bash scripts/browser-qa/bundle-engine-retry.sh "$RUNNER_TEMP/engine-out"
           # Ad-hoc signature so the helper apps inside the bundle launch on the runner.
           codesign --force --deep -s - "$RUNNER_TEMP/engine-out/ferryx_engine.app" || true
           ls -la "$RUNNER_TEMP/engine-out"
@@ -246,7 +246,7 @@ jobs:
           CEF_PATH: C:/cef-sdk
         run: |
           mkdir -p "$RUNNER_TEMP/engine-out"
-          (cd crates/ferryx-browser-engine && cargo run --release --bin bundle-engine -- "$RUNNER_TEMP/engine-out" --release)
+          bash scripts/browser-qa/bundle-engine-retry.sh "$RUNNER_TEMP/engine-out"
           exe=$(find "$(cygpath -u "$RUNNER_TEMP")/engine-out" -name ferryx_engine.exe | head -1)
           echo "engine exe: ${exe:-<none>}"
           if [ -n "$exe" ]; then
@@ -458,7 +458,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/engine-out"
-          (cd crates/ferryx-browser-engine && cargo run --release --bin bundle-engine -- "$RUNNER_TEMP/engine-out" --release)
+          bash scripts/browser-qa/bundle-engine-retry.sh "$RUNNER_TEMP/engine-out"
           dir="$RUNNER_TEMP/engine-out/engine-linux-x86_64"
           ls -la "$dir" || true
           if [ -x "$dir/ferryx_engine" ]; then echo "FERRYX_WAYLAND_ENGINE_DIR=$dir" >> "$GITHUB_ENV"; fi
