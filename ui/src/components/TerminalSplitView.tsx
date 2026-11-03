@@ -73,8 +73,7 @@ import {
   type WorkspaceDropData,
 } from "./tab-dnd/tabDragTypes";
 import { TerminalPane } from "./TerminalPane";
-import { SUPERVISOR_PANE_BAR_PX, SupervisorPaneBarView } from "./supervisor/SupervisorPaneBar";
-import { actingSessionIds, paneSupervision, useSupervisor } from "../lib/supervisor";
+import { actingSessionIds, useSupervisor } from "../lib/supervisor";
 import { IconButton } from "./ui/IconButton";
 
 const MIN_PANE_SIZE_PX = 80;
@@ -1178,12 +1177,6 @@ const PaneLeafView = React.memo(function PaneLeafView({
   );
   const flashSessionId = content.kind === "terminal" ? session.id : null;
   const flashToken = usePaneFlashToken(flashSessionId);
-  const { snapshot: supervisor, now: supervisorNow } = useSupervisor();
-  const supervision =
-    content.kind === "terminal"
-      ? paneSupervision(supervisor, session?.backendSessionId, supervisorNow, activity?.state === "waiting")
-      : null;
-  const toolbarTop = supervision ? SUPERVISOR_PANE_BAR_PX : 0;
 
   return (
     <NativeTerminalVisibilityProvider visible={tabVisible} occluded={showsDropFeedback}>
@@ -1214,8 +1207,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
       }}
       onMouseMove={(event) => {
         const rect = event.currentTarget.getBoundingClientRect();
-        // The supervisor bar takes the top strip; the pane toolbar reveals just below it.
-        const relativeY = event.clientY - rect.top - toolbarTop;
+        const relativeY = event.clientY - rect.top;
         if (relativeY >= 0 && relativeY <= 20) {
           if (!isHoveredTop) setIsHoveredTop(true);
         } else {
@@ -1266,7 +1258,6 @@ const PaneLeafView = React.memo(function PaneLeafView({
       ) : null}
       <div
         className="absolute inset-x-0 top-0 z-20 h-5 pointer-events-none"
-        style={{ top: toolbarTop }}
         data-testid="pane-toolbar-hotspot"
         onMouseEnter={() => setIsHoveredTop(true)}
         onMouseLeave={(event) => {
@@ -1282,7 +1273,6 @@ const PaneLeafView = React.memo(function PaneLeafView({
         className={`absolute inset-x-0 top-0 z-30 flex h-5 items-center justify-between overflow-visible border-b border-border/30 bg-background/85 px-2 text-[11px] text-muted-foreground transition-opacity duration-150 select-none cursor-grab touch-none active:cursor-grabbing ${
           isHoveredTop || isFocusedWithin ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"
         } ${draggable.isDragging ? "opacity-30" : ""}`}
-        style={{ top: toolbarTop }}
         data-testid="pane-toolbar"
         data-dnd-type="pane"
         onPointerDown={(event) => {
@@ -1368,7 +1358,6 @@ const PaneLeafView = React.memo(function PaneLeafView({
         </div>
       </div>
 
-      {supervision ? <SupervisorPaneBarView state={supervision} now={supervisorNow} onTakeOver={focusPaneInput} /> : null}
       {/* Browser panes keep their own toolbar at the top; clear the h-5 hover overlay off it. */}
       <div
         className={`h-full w-full min-h-0 flex-1 overflow-hidden ${content.kind === "browser" ? "pt-5" : ""}`}

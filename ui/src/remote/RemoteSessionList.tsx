@@ -2,9 +2,8 @@ import { FolderTree, GitBranch, LogOut, PanelLeft, Plus, Server, Terminal as Ter
 import React, { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { SidebarViewId } from "../components/sidebar/SidebarViewTabs";
 import { IconButton } from "../components/ui/IconButton";
-import { buildRemoteAttentionRows, type AttentionRow } from "../features/ferryx/attention/attentionModel";
 import { buildRemoteInventory, declaresOwnProperty, type RemoteInventoryModel } from "./remoteInventoryView";
-import { RemoteSidebar, type PublishedAttentionTarget, type RemoteSidebarTarget } from "./RemoteSidebar";
+import { RemoteSidebar, type RemoteSidebarTarget } from "./RemoteSidebar";
 import { RemoteTerminalTabStrip, stripTabs, type RemoteStripTab } from "./RemoteTerminalTabStrip";
 import type { RemoteSidebarSection } from "./useRemoteSidebarModel";
 import { useOverlayHistory } from "./home/usePhoneNavigation";
@@ -431,8 +430,8 @@ export function getRemoteDocumentTitle(model: RemoteWorkspaceModel): string {
 }
 
 
-/** The remote supervisor view the sidebar's Supervisor tab shows. */
-export type RemoteSidebarSupervisor = { readonly typing: boolean; readonly content: ReactNode };
+/** The remote supervisor view the sidebar's Supervisor tab shows: the shared panel. */
+export type RemoteSidebarSupervisor = { readonly content: ReactNode };
 
 type RemoteWorkspaceMirrorProps = {
   model: RemoteWorkspaceModel;
@@ -554,29 +553,6 @@ export function sidebarRowOption(model: RemoteWorkspaceModel, target: RemoteSide
   };
 }
 
-/**
- * The option a desktop-published Inbox row opens, read-only and never creating a terminal: that
- * machine's session by the pane's backend session id, otherwise the pane's worktree, otherwise the
- * workspace (its root worktree first). The row's own `sessionId` is the desktop's local pane id and
- * is never matched against the inventory.
- */
-export function publishedAttentionOption(model: RemoteWorkspaceModel, target: PublishedAttentionTarget): RemoteContextOption {
-  const { machineId, row } = target;
-  const accountMachines = model.options.some((option) => option.machineId !== undefined);
-  const onMachine = (option: RemoteContextOption) =>
-    !option.unavailable && option.workspaceId === row.workspaceId && (!accountMachines || option.machineId === machineId);
-  const attachOnly = (option: RemoteContextOption): RemoteContextOption => ({ ...option, attachOnly: true });
-  const session = row.backendSessionId
-    ? model.options.find((option) => onMachine(option) && option.sessionId === row.backendSessionId)
-    : undefined;
-  if (session) return attachOnly(session);
-  const worktrees = model.options.filter((option) => onMachine(option) && !option.sessionId);
-  const known = (row.worktreeSlug !== undefined ? worktrees.find((option) => option.worktreeSlug === row.worktreeSlug) : undefined) ??
-    worktrees.find((option) => option.worktreeSlug === null) ?? worktrees[0];
-  if (known) return attachOnly(known);
-  return attachOnly({ workspaceId: row.workspaceId, worktreeSlug: null, worktreeLabel: null, ...(accountMachines ? { machineId } : {}) });
-}
-
 const PHONE_ACTION =
   "flex h-11 shrink-0 items-center gap-1.5 rounded-lg bg-chat-surface-raised px-3 text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50";
 
@@ -623,9 +599,11 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
     if (option) selectOption(option);
   };
 
-  const [view, setView] = useState<SidebarViewId>("worktrees");
+  // The Supervisor panel is the wide sidebar's default view whenever it is offered.
+  const [chosenView, setView] = useState<SidebarViewId | null>(null);
+  const view: SidebarViewId = chosenView ?? (supervisor ? "supervisor" : "worktrees");
   useEffect(() => {
-    if (!selectorOpen && !desktopSidebar) setView("worktrees");
+    if (!selectorOpen && !desktopSidebar) setView(null);
   }, [desktopSidebar, selectorOpen]);
   const changeView = (next: SidebarViewId) => {
     setView(next);
@@ -640,24 +618,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by the request nonce; callback identity must not replay it
   }, [requestedNonce, desktopSidebar]);
 
-  const attentionRows = model.context.workspaceId
-    ? buildRemoteAttentionRows(model.context.workspaceId, model.context.workspaceId, paneTabs, model.context.activeTabId)
-    : [];
-  const openAttentionRow = (row: AttentionRow) => {
-    const tab = paneTabs.find((candidate) => candidate.id === row.id);
-    const option = tab ? paneSelectionOption(model, tab) : null;
-    if (!option) return;
-    selectOption(option);
-    onSelectorOpenChange(false);
-  };
-
-  const openPublishedAttention = (target: PublishedAttentionTarget) => {
-    if (pending !== null) return;
-    onSelectorOpenChange(false);
-    selectOption(publishedAttentionOption(model, target));
-  };
-
-  // The phone drawer is worktrees only: the phone home owns the one Inbox and the one Supervisor.
+  // The phone drawer is worktrees only: the phone home owns the one Supervisor panel.
   const phoneDrawer = !inline && !desktopSidebar;
   const drawerRef = useRef<HTMLDivElement | null>(null);
   const drawerBackdropRef = useRef<HTMLButtonElement | null>(null);
@@ -724,7 +685,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
             selectOption(sidebarRowOption(model, target));
           }}
           view={inline || phoneDrawer ? "worktrees" : view}
-          {...(inline || phoneDrawer ? {} : { onViewChange: changeView, inbox: { rows: attentionRows, onOpen: openAttentionRow }, onOpenPublishedAttention: openPublishedAttention })}
+          {...(inline || phoneDrawer ? {} : { onViewChange: changeView })}
           {...(supervisor && !inline && !phoneDrawer ? { supervisor } : {})}
           status={pickerStatus}
         />

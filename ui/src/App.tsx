@@ -1,4 +1,4 @@
-import { Inbox, PanelLeft } from "lucide-react";
+import { Bot, PanelLeft } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { STARTUP_TIMEOUT_MS } from "./lib/startupTimeout";
@@ -10,7 +10,7 @@ import { SshWorkspaceStatus } from "./components/SshWorkspaceStatus";
 import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog, type WorktreeAgentLaunch } from "./components/ProjectDialogs";
 import { ExternalWorktreeImportDialog } from "./components/ExternalWorktreeImportDialog";
 import { useExternalWorktreePrompt } from "./state/useExternalWorktreePrompt";
-import { Sidebar, type SidebarAttention } from "./components/Sidebar";
+import { Sidebar } from "./components/Sidebar";
 import { ShortcutHints } from "./components/ShortcutHints";
 import { TerminalSplitView } from "./components/TerminalSplitView";
 import { TERMINAL_COPY_MODE_EVENT, type TerminalCopyModeEventDetail } from "./components/TerminalCopyMode";
@@ -21,8 +21,7 @@ import { pairedHostInventory } from "./lib/pairedHostInventory";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { WorktreeDiskDialog } from "./components/WorktreeDiskDialog";
 import { AgentHistoryDialog } from "./components/AgentHistoryDialog";
-import { buildAttentionRows, buildPromptCandidateRows, liveActivityLookup, type AttentionRow } from "./features/ferryx/attention/attentionModel";
-import { desktopAttentionPrompts } from "./features/ferryx/attention/attentionPrompts";
+import { buildAttentionRows, liveActivityLookup } from "./features/ferryx/attention/attentionModel";
 import { agentHistoryProviderLabel, type AgentHistoryEntry } from "./lib/agentHistory";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { TerminalLinkActions } from "./components/TerminalLinkActions";
@@ -836,7 +835,6 @@ function WorkspaceApp({
     activityNotificationTargets,
     markTabUnread,
     markWorktreeUnread,
-    markSessionActivitySeen,
     subscribeTerminalBell,
     subscribeActivityNotification,
     parkedActivityVersion,
@@ -2141,7 +2139,6 @@ function WorkspaceApp({
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isResourcesOpen, setIsResourcesOpen] = useState(false);
-  const [isInboxOpen, setIsInboxOpen] = useState(false);
   const [onboardingSteps, setOnboardingSteps] = useState<OnboardingStepId[] | null>(null);
   const [onboardingInitialStepIndex, setOnboardingInitialStepIndex] = useState(0);
   const [onboardingDoneSteps, setOnboardingDoneSteps] = useState<readonly OnboardingStepId[]>([]);
@@ -2166,14 +2163,8 @@ function WorkspaceApp({
     // liveActivityLookup reads only the mounted workspace id and its per-session activity map.
     [notificationInbox, state.workspaceId, state.activityBySessionId, parkedActivityVersion],
   );
-  // Working panes whose daemon may still read a prompt (row 21): the Inbox probes them.
-  const attentionCandidates = useMemo(
-    () => buildPromptCandidateRows(notificationInbox.entries, liveActivityLookup(state, listWorkspaceSnapshots())),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- the same inputs attentionRows reads
-    [notificationInbox, state.workspaceId, state.activityBySessionId, parkedActivityVersion],
-  );
-  // Publishes what the Sidebar draws, Inbox rows included (declared here, after attentionRows). The
-  // published rows carry each pane's backend session id so a remote can open that exact pane.
+  // Publishes the attention rows (the collapsed-sidebar badge counts them too). The published rows
+  // carry each pane's backend session id so a remote can open that exact pane.
   const publishedAttentionRows = useMemo(
     () => withBackendSessions(attentionRows, [[state.workspaceId, state], ...listWorkspaceSnapshots()]),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reads only sessions and worktrees; parkedActivityVersion tracks the parked snapshots
@@ -2627,21 +2618,6 @@ function WorkspaceApp({
     [dispatchWorkspaceAction, handleSelectProject],
   );
 
-  const handleOpenAttentionRow = useCallback((row: AttentionRow) => {
-    const project = projectsRef.current.find((candidate) => candidate.workspaceId === row.workspaceId);
-    const liveState = row.workspaceId === activeProjectRef.current.workspaceId
-      ? stateRef.current
-      : getHmrWorkspaceState(row.workspaceId) ?? getWorkspaceSnapshot(row.workspaceId);
-    if (!project || !liveState || !hasNavigableSession(liveState, row.sessionId)) {
-      // A row that can no longer take you anywhere is noise; drop it instead of leaving a dead click.
-      notificationCenterStore.dismissSession(row.workspaceId, row.sessionId);
-      toast.info("Session closed; notification cleared");
-      return;
-    }
-    handleNotificationTarget({ workspaceId: row.workspaceId, sessionId: row.sessionId, revision: row.revision });
-    flashPane(row.sessionId);
-  }, [handleNotificationTarget]);
-
   // A Supervisor panel row names a session by `<hostId>:<backendSessionId>`; focus the pane that
   // runs it through the same path a notification uses (no unmount, no new surface).
   const handleFocusSupervisorSession = useCallback((sessionRef: string) => {
@@ -2656,36 +2632,6 @@ function WorkspaceApp({
     handleNotificationTarget(target);
     flashPane(target.sessionId);
   }, [handleNotificationTarget]);
-
-  // The pane frame reads activity.seen while the inbox reads entry.read: a dismissal must clear
-  // both, or the row disappears while the pane keeps glowing.
-  const dismissAttentionRows = useCallback((rows: readonly AttentionRow[]) => {
-    notificationCenterStore.markEntriesRead(rows.map((row) => ({ id: row.id, expectedRevision: row.revision })));
-    for (const row of rows) markSessionActivitySeen(row.sessionId, row.workspaceId);
-  }, [markSessionActivitySeen]);
-
-  // A needs-you row answers its pane's prompt on the daemon session behind that pane; once the
-  // answer is out the row is no longer waiting on the user, so it leaves the Inbox.
-  const attentionPrompts = useMemo(() => desktopAttentionPrompts(
-    (row) => {
-      const liveState = row.workspaceId === activeProjectRef.current.workspaceId
-        ? stateRef.current
-        : getHmrWorkspaceState(row.workspaceId) ?? getWorkspaceSnapshot(row.workspaceId);
-      return liveState?.sessions[row.sessionId]?.backendSessionId ?? null;
-    },
-    (row) => notificationCenterStore.dismissSession(row.workspaceId, row.sessionId),
-  ), []);
-
-  const sidebarAttention = useMemo<SidebarAttention>(() => ({
-    rows: attentionRows,
-    onOpen: handleOpenAttentionRow,
-    onDismiss: (row) => dismissAttentionRows([row]),
-    onDismissAll: () => dismissAttentionRows(attentionRows),
-    prompts: attentionPrompts,
-    candidates: attentionCandidates,
-    inboxOpen: isInboxOpen,
-    onInboxOpenChange: setIsInboxOpen,
-  }), [attentionCandidates, attentionPrompts, attentionRows, dismissAttentionRows, handleOpenAttentionRow, isInboxOpen]);
 
   useEffect(() => {
     if (!pendingNotificationTarget) return;
@@ -3414,14 +3360,9 @@ function WorkspaceApp({
     preloadSettingsDialog();
     setIsSettingsOpen((current) => !current);
   }, []);
-  const handleToggleNotificationCenter = useCallback(() => {
-    // The inbox lives inside the sidebar, so reaching it from a collapsed sidebar opens both.
-    if (!isSidebarOpen) {
-      setIsInboxOpen(true);
-      toggleSidebar();
-      return;
-    }
-    setIsInboxOpen((open) => !open);
+  // The Supervisor panel is the attention surface now; the old Inbox shortcut reveals the sidebar.
+  const handleRevealSupervisor = useCallback(() => {
+    if (!isSidebarOpen) toggleSidebar();
   }, [isSidebarOpen, toggleSidebar]);
   const handleCloseSearch = useCallback(() => setSearchLeafId(null), []);
   const handleCloseDeleteTarget = useCallback(() => setDeleteTarget(null), []);
@@ -4012,7 +3953,7 @@ function WorkspaceApp({
         return {
           "sidebar.left.toggle": toggleSidebar,
           "settings.toggle": handleToggleSettings,
-          "notifications.toggle": handleToggleNotificationCenter,
+          "notifications.toggle": handleRevealSupervisor,
         };
       }
       return {
@@ -4061,7 +4002,7 @@ function WorkspaceApp({
         "project.add": handleOpenAddProject,
         "commandPalette.open": handleOpenCommandPalette,
         "settings.toggle": handleToggleSettings,
-        "notifications.toggle": handleToggleNotificationCenter,
+        "notifications.toggle": handleRevealSupervisor,
         "zoom.in": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "in") : handleZoomIn,
         "zoom.out": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "out") : handleZoomOut,
         "zoom.reset": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "reset") : handleZoomReset,
@@ -4084,7 +4025,7 @@ function WorkspaceApp({
       handleSelectTerminalTabByIndex,
       handleSelectWorktreeByIndex,
       handleSplitActive,
-      handleToggleNotificationCenter,
+      handleRevealSupervisor,
       handleToggleSettings,
       handleUnsplitActive,
       handleZoomIn,
@@ -4171,7 +4112,7 @@ function WorkspaceApp({
           onOpenHistory={setHistoryProject}
           onOpenSettings={handleOpenSettings}
           onOpenResources={() => setIsResourcesOpen(true)}
-          attention={sidebarAttention}
+
           onFocusSupervisorSession={handleFocusSupervisorSession}
           onToggle={toggleSidebar}
         />
@@ -4186,12 +4127,12 @@ function WorkspaceApp({
             </IconButton>
             <IconButton
               data-shortcut="notifications.toggle"
-              label={attentionRows.length > 0 ? `Open inbox (${attentionRows.length})` : "Open inbox"}
+              label={attentionRows.length > 0 ? `Open supervisor (${attentionRows.length})` : "Open supervisor"}
               className="no-drag relative"
               size="sm"
-              onClick={handleToggleNotificationCenter}
+              onClick={handleRevealSupervisor}
             >
-              <Inbox className="size-3.5" />
+              <Bot className="size-3.5" />
               {attentionRows.length > 0 ? (
                 <span
                   data-testid="collapsed-attention-badge"

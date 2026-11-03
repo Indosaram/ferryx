@@ -10,6 +10,7 @@ import {
   stopSupervisedSession,
   undoSupervisorAction,
 } from "../tauri";
+import { setSupervisorLanePaused } from "../supervisor";
 import { extractIpcErrorMessage } from "../sshHosts";
 import { STALE_DECISION_MESSAGE, type PanelActionResult, type PanelActions } from "./actions";
 
@@ -77,6 +78,8 @@ export function desktopPanelActions(input: {
       );
     },
     setPaused: async (paused) => changed(await run(() => setSupervisorPanelPaused(paused), "Couldn't change the pause.")),
+    setLanePaused: async (laneKey, paused) =>
+      changed(await run(() => setSupervisorLanePaused(laneKey, paused), "Couldn't change the pause.")),
     converse: async (text, mentions) =>
       changed(
         await run(

@@ -23,7 +23,6 @@ import {
   RemoteWorkspaceMirror,
   useRemoteDesktopSidebar,
   type RemoteContextOption,
-  type RemoteTerminalItem,
   type RemoteTerminalTabInfo,
   type RemoteWorkspaceModel,
 } from "./RemoteSessionList";
@@ -39,9 +38,6 @@ import type { SidebarViewId } from "../components/sidebar/SidebarViewTabs";
 import { DecisionFocusContext, useDecisionDeepLink, type DecisionFocus } from "./decisionDeepLink";
 import { usePanelPresence } from "./panelPresence";
 import { SessionMuteContext, type SessionMute } from "./sessionMute";
-import { AttentionInbox } from "../features/ferryx/attention/AttentionInbox";
-import { remoteInboxEntries, useRemoteInbox, type RemoteInboxTransport } from "./remoteInbox";
-import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
 import { capRetainedMessages } from "./agentConversation";
 import {
   ReferenceHistoryFetchError,
@@ -167,19 +163,26 @@ import { toast } from "sonner";
 import { AccountSheet, getStoredAccountEmail, storeAccountEmail } from "./home/AccountSheet";
 import { createSupervisorFrameBus, useMachineEventSockets } from "./home/machineSupervisorSources";
 import { DIRECT_SIDEBAR_MACHINE, useRemoteSidebarMachines } from "./useRemoteSidebarMachines";
-import { remoteSupervisorTyping } from "./remoteSidebarLive";
 import { directSidebarInventory } from "./directSidebarInventory";
 import { useRemoteSidebarModel } from "./useRemoteSidebarModel";
-import { SupervisorHome } from "./home/SupervisorHome";
 import { AccountButton } from "./home/AccountButton";
-import { buildInboxRows, optionForSession, type InboxRow } from "./home/phoneHomeModel";
+import { optionForSession } from "./home/phoneHomeModel";
 import { PhoneHomeView } from "./home/PhoneHomeView";
 import { SupervisorSessionStrip } from "./home/SupervisorSessionStrip";
 import { usePhoneNavigation } from "./home/usePhoneNavigation";
 import { edgeSwipeHostSupported, useEdgeSwipeBack } from "./home/useEdgeSwipeBack";
 import { usePhoneSupervisor } from "./home/usePhoneSupervisor";
-import { usePhonePanel } from "./supervisorPanel/usePhonePanel";
-import { panelSessionTarget, pinPanelHost, readReferenceHostId } from "./supervisorPanel/panelHost";
+import { usePhonePanel, type PanelActionResult } from "./supervisorPanel/usePhonePanel";
+import {
+  effectivePanelState,
+  NO_HUB_HOST_MESSAGE,
+  panelSessionTarget,
+  pickSetupHost,
+  pinPanelHost,
+  readReferenceHostId,
+  SEVERAL_HUB_HOSTS_MESSAGE,
+} from "./supervisorPanel/panelHost";
+import { WidePanel } from "./supervisorPanel/WidePanel";
 import { WorktreesHome } from "./home/WorktreesHome";
 import type { TunnelTransport, TunnelWebSocket } from "./attachTunnel";
 import { getOrCreateAttachKey } from "./accountAttach";
@@ -1396,8 +1399,6 @@ export const RemoteHostConnection: React.FC<{
   }), [hostId]);
   const [model, setModel] = useState<RemoteWorkspaceModel>(EMPTY_MODEL);
   const modelRef = useRef(model);
-  /** The session the phone opened on its own from the Inbox, kept over desktop refreshes. */
-  const localSessionRef = useRef<{ workspaceId: string; tabId: string; terminal: RemoteTerminalItem } | null>(null);
   const modelMachineIdRef = useRef<string | null>(null);
   // Set by every user-driven selection that names a session or tab: the read-only
   // desktop-context sync must never replace an independently chosen session.
@@ -1475,10 +1476,6 @@ export const RemoteHostConnection: React.FC<{
   const chatPromptGenerationRef = useRef(0);
   /** Set by the prompt lane: a pushed `agentPromptChanged` frame for a session re-reads its card. */
   const chatPromptPushRef = useRef<((change: AgentPromptChange) => void) | null>(null);
-  /** The phone Inbox's handlers for the same push, and for a reconnected events socket. */
-  const inboxPushRef = useRef<((change: AgentPromptChange) => void) | null>(null);
-  const inboxRefreshRef = useRef<(() => void) | null>(null);
-  const [inboxOpen, setInboxOpen] = useState(false);
   const chatComposerRef = useRef<MobileChatComposerHandle | null>(null);
   const [chatScreenRevision, setChatScreenRevision] = useState<string | null>(null);
   const [chatTypedAnswer, setChatTypedAnswer] = useState<ReferencePromptAnswer | null>(null);
@@ -2239,18 +2236,8 @@ export const RemoteHostConnection: React.FC<{
     const refreshVersion = workspaceRefreshVersionRef.current;
     const next = await loadWorkspace();
     if (!next || workspaceRefreshVersionRef.current !== refreshVersion) return null;
-    // A session the phone opened on its own (from the Inbox) stays on screen while it is listed:
-    // a desktop refresh updates the mirror around it, never takes it back.
-    const local = localSessionRef.current;
-    const localTab = local && next.context.workspaceId === local.workspaceId
-      ? next.context.terminalTabs?.find((tab) => tab.id === local.tabId && tab.sessionId === local.terminal.sessionId)
-      : undefined;
-    if (local && !localTab) localSessionRef.current = null;
-    const shown = localTab && local
-      ? { ...next, context: { ...next.context, activeTabId: local.tabId, activeTerminal: local.terminal } }
-      : next;
-    setModel(shown);
-    return shown;
+    setModel(next);
+    return next;
   }, [loadWorkspace]);
 
   /* An inventory boundary can arrive in bursts (a busy watched tree republishes several
@@ -2437,7 +2424,6 @@ export const RemoteHostConnection: React.FC<{
       const promptChange = parseAgentPromptChange(text);
       if (promptChange) {
         chatPromptPushRef.current?.(promptChange);
-        inboxPushRef.current?.(promptChange);
         if (activeTunnelConnection) supervisorBus.emit(activeTunnelConnection.machine.machineId, text);
         else supervisorBus.emit(DIRECT_SIDEBAR_MACHINE, text);
         return;
@@ -2535,8 +2521,6 @@ export const RemoteHostConnection: React.FC<{
         attempt = 0;
         setEventsDownSince(null);
         workspaceRefreshVersionRef.current += 1;
-        // Pushes missed while the socket was down: every Inbox row reads its card again.
-        inboxRefreshRef.current?.();
         const pendingSelection = pendingSelectionRef.current;
         if (pendingSelection) void confirmSelection(pendingSelection);
         else void refreshWorkspace();
@@ -2617,7 +2601,6 @@ export const RemoteHostConnection: React.FC<{
     // A user selection naming a session (or an explicit tab) is an independent choice:
     // the read-only desktop-context sync must never replace it afterwards.
     independentSessionRef.current = Boolean(requestedOption.sessionId || requestedOption.tabId);
-    localSessionRef.current = null;
     if (!token || pendingSelectionRef.current) return false;
     // A picker can reuse an option object; each attempt needs its own identity.
     const option = { ...requestedOption };
@@ -3084,14 +3067,14 @@ export const RemoteHostConnection: React.FC<{
     bus: supervisorBus,
   });
   // The panel lives on the one live machine whose snapshot names a supervisor. Several claimants
-  // or none pin nothing, and the previous home stays: no first-live-host guess.
+  // or none pin nothing (the setup card shows): no first-live-host guess.
   const panelHostId = pinPanelHost(phoneSupervisor.unified);
   const panelFetch = panelHostId ? phoneSupervisor.fetchFor(panelHostId) : null;
   // A panel sessionRef's host part is that machine's own reference host id (`referenceHostId`
   // from /api/v1/capabilities), never its account machineId; until it answers, no ref resolves.
   const [panelReferenceHost, setPanelReferenceHost] = useState<{ machineId: string; referenceHostId: string | null } | null>(null);
   useEffect(() => {
-    if (!phoneHome || !panelHostId || !panelFetch) {
+    if (!supervisorFeedEnabled || !panelHostId || !panelFetch) {
       setPanelReferenceHost(null);
       return;
     }
@@ -3103,16 +3086,35 @@ export const RemoteHostConnection: React.FC<{
       cancelled = true;
     };
     // Only a new host or a new tunnel to it re-reads its identity.
-  }, [phoneHome, panelHostId, panelFetch]);
+  }, [supervisorFeedEnabled, panelHostId, panelFetch]);
   const phonePanel = usePhonePanel({
     hostId: panelHostId,
     fetchFor: phoneSupervisor.fetchFor,
     bus: supervisorBus,
-    enabled: phoneHome,
+    enabled: supervisorFeedEnabled,
   });
-  // The panel takes over only once the host has answered with a valid snapshot; no host, a
-  // missing route (404), an unreadable answer or a read still in flight keep the previous home.
-  const panelHome = panelHostId !== null && phonePanel.state.kind === "ready";
+  // The panel is the home with or without a hub: no pinned host is the setup card, not a fallback.
+  const panelState = effectivePanelState(panelHostId, phonePanel.state, accountDiscovery.loading);
+  const setupHost = pickSetupHost(panelHostId, phoneSupervisor.machines);
+  const panelComputerLabel = setupHost.kind === "host" ? setupHost.label : undefined;
+  // "Turn on" starts the hub through the real route (`POST /api/v1/supervisor/start`) on the
+  // host that would run it; with no single candidate it says so instead of pretending.
+  const panelTurnOn = async (): Promise<PanelActionResult> => {
+    if (panelHostId !== null) return phonePanel.actions.turnOn();
+    if (setupHost.kind !== "host") {
+      return { ok: false, stale: false, message: setupHost.kind === "none" ? NO_HUB_HOST_MESSAGE : SEVERAL_HUB_HOSTS_MESSAGE };
+    }
+    const result = await phoneSupervisor.startHub(setupHost.machineId);
+    return result.kind === "ok" ? { ok: true } : { ok: false, stale: false, message: result.message };
+  };
+  const panelBody = (
+    <WidePanel
+      state={panelState}
+      now={phoneSupervisor.now}
+      computerLabel={panelComputerLabel}
+      actions={{ ...phonePanel.actions, turnOn: panelTurnOn, openSession: (ref) => openPanelSessionRef.current(ref) }}
+    />
+  );
   // The events socket above runs only for the active connection; every other reachable machine
   // gets its own, so supervisor and sidebar changes reach a home that opened no worktree.
   const openMachineEvents = useCallback(
@@ -3223,7 +3225,7 @@ export const RemoteHostConnection: React.FC<{
   /* The worktree drawer, host drawer and Account sheet own their entries through useOverlayHistory;
      counting them here too would push twice and pop twice on a button close. */
   const overlayOpen = !desktopSidebar
-    && (switcherOpen || menuOpen || phoneAlertsOpen || inboxOpen);
+    && (switcherOpen || menuOpen || phoneAlertsOpen);
   const overlayEntryRef = useRef(false);
   useEffect(() => {
     if (!overlayOpen) {
@@ -3244,7 +3246,6 @@ export const RemoteHostConnection: React.FC<{
       setSwitcherOpen(false);
       setMenuOpen(false);
       setPhoneAlertsOpen(false);
-      setInboxOpen(false);
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -3252,8 +3253,7 @@ export const RemoteHostConnection: React.FC<{
   /** The worktree a phone tap is opening while its tunnel is acquired; shown at once on the Session screen. */
   const [phoneOpening, setPhoneOpening] = useState<string | null>(null);
   const openPhoneSessionRef = useRef<(option: AccountWorktreeOption) => void>(() => {});
-  /** Inbox rows a tap could not open, marked on the row itself as well as in the toast. */
-  const [unopenableRowIds, setUnopenableRowIds] = useState<ReadonlySet<string>>(() => new Set());
+  const openPanelSessionRef = useRef<(sessionRef: string) => void>(() => {});
   const phoneSessionLost = phoneHome && phoneNav.screen.kind === "session" && !token && !initialAccountTarget && phoneOpening === null;
   useEffect(() => {
     if (phoneSessionLost) phoneBack();
@@ -3310,25 +3310,13 @@ export const RemoteHostConnection: React.FC<{
     machine.snapshot ? [[machine.machineId, { snapshot: machine.snapshot, now: phoneSupervisor.now }]] : [])),
   [phoneSupervisor.machines, phoneSupervisor.now]);
   const sidebarSections = useRemoteSidebarModel({ machines: sidebarMachines, supervisors: sidebarSupervisors });
+  // The wide remote's Supervisor tab is the same panel the phone home shows: the pinned host's
+  // PanelSurface, setup card included when no hub is running. No lanes list, no second surface.
   const sidebarSupervisor = isAccountMode && desktopSidebar
     ? {
-        typing: remoteSupervisorTyping(sidebarSupervisors),
         content: (
-          <div data-testid="remote-sidebar-supervisor" className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-            <SupervisorHome
-              machines={phoneSupervisor.machines}
-              now={phoneSupervisor.now}
-              needsYou={new Set<string>()}
-              onSetPaused={phoneSupervisor.setPaused}
-              onStartHub={phoneSupervisor.startHub}
-              unified={phoneSupervisor.unified}
-              discovering={accountDiscovery.loading}
-              onRetry={phoneSupervisor.resync}
-              onOpenLane={(machineId, sessionId) => {
-                const option = optionForSession(accountDiscovery.accountOptions, machineId, sessionId);
-                if (option) void selectAccountOption(option);
-              }}
-            />
+          <div data-testid="remote-sidebar-supervisor" className="flex min-h-0 flex-1 flex-col overflow-y-auto px-3 pb-3 pt-1 text-xs">
+            {panelBody}
           </div>
         ),
       }
@@ -3415,94 +3403,6 @@ export const RemoteHostConnection: React.FC<{
     };
   }, [chatDaemonEpoch, chatGateway, chatProviderSession, effectiveSessionId]);
   const chatTargetKey = chatReferenceTarget === null ? null : referenceTargetKey(chatReferenceTarget);
-
-  /* The phone's Inbox reads and answers each waiting session's card through the same prompt
-     routes, bound to that session's own target. Nothing here selects a pane on the desktop. */
-  const inboxTargetFor = useCallback(
-    (sessionId: string): ReferenceTargetRef | null => {
-      const ownerId = chatGateway?.referenceOwnerId ?? null;
-      const epoch =
-        chatGateway?.daemonEpoch ?? sessionEpochs[sessionId] ?? sessionEpochsRef.current.get(sessionId) ?? null;
-      if (!ownerId || !epoch) return null;
-      return {
-        target: {
-          hostId: chatGateway?.referenceHostId ?? REFERENCE_CHAT_DEFAULT_HOST_ID,
-          ownerId,
-          epoch,
-          backendSessionId: sessionId,
-        },
-      };
-    },
-    [chatGateway, sessionEpochs],
-  );
-  const inboxTransport = useMemo<RemoteInboxTransport>(
-    () => ({
-      read: async (sessionId, registryId) => {
-        const target = inboxTargetFor(sessionId);
-        if (!target || !token) return null;
-        const path = `${referenceChatRoute(sessionId, "prompt")}?${referenceChatReadQuery(target, registryId)}`;
-        const response = await remoteFetch(transportBaseUrl, path, { headers: { Authorization: `Bearer ${token}` } });
-        if (!response.ok) throw new ReferencePromptRefused(await readChatErrorCode(response), "prompt read failed");
-        const body: unknown = await response.json();
-        const prompt = parseChatPrompt(body);
-        return { prompt, screenRevision: prompt === null ? null : parseChatScreenRevision(body) };
-      },
-      answer: async (sessionId, registryId, payload) => {
-        const target = inboxTargetFor(sessionId);
-        if (!target || !token) return { ok: false, code: "UNAUTHORIZED", message: CHAT_NO_SESSION_WARNING };
-        const outcome = await postChatMutation(transportBaseUrl, sessionId, token, "answer", {
-          requestId: newChatRequestId(),
-          target: target.target,
-          registryId,
-          params: payload,
-        });
-        return outcome.ok ? { ok: true } : { ok: false, code: outcome.code, message: outcome.message };
-      },
-    }),
-    [inboxTargetFor, token, transportBaseUrl],
-  );
-  /* One Inbox for the whole host: every waiting or finished session of every worktree, project
-     and (account mode) machine, not only the desktop's active selection. The phone home and the
-     session sheet both render these rows. */
-  const accountInboxRows: InboxRow[] = isAccountMode
-    ? buildInboxRows({
-        options: accountDiscovery.accountOptions,
-        inventories: accountDiscovery.sessionInventories,
-        lanes: phoneSupervisor.lanes,
-      })
-    : [];
-  const inboxEntries = remoteInboxEntries({
-    model: effectiveModel,
-    machineId: activeMachineId,
-    accountRows: accountInboxRows,
-  });
-  const remoteInbox = useRemoteInbox({ entries: inboxEntries, transport: inboxTransport });
-  inboxPushRef.current = remoteInbox.push;
-  /* Opening an Inbox row moves only this phone's own view to that session, the way the read-only
-     desktop follow applies a session: no /workspace/select, so the desktop's focus never moves.
-     The pick counts as the user's own, so the desktop follow does not take it back. */
-  const showSessionLocally = useCallback((tab: RemoteTerminalTabInfo) => {
-    const sessionId = tab.sessionId;
-    const workspaceId = modelRef.current.context.workspaceId;
-    if (!sessionId || !workspaceId) return;
-    independentSessionRef.current = true;
-    const active: RemoteTerminalItem = {
-      sessionId,
-      running: true,
-      title: tab.label,
-      workspaceId,
-      worktreeLabel: tab.worktreeLabel ?? modelRef.current.context.worktreeLabel ?? null,
-      ...(tab.daemonEpoch !== null && tab.daemonEpoch !== undefined ? { daemonEpoch: tab.daemonEpoch } : {}),
-    };
-    localSessionRef.current = { workspaceId, tabId: tab.id, terminal: active };
-    const apply = (prev: RemoteWorkspaceModel): RemoteWorkspaceModel =>
-      prev.context.workspaceId !== workspaceId
-        ? prev
-        : { ...prev, context: { ...prev.context, activeTabId: tab.id, activeTerminal: active } };
-    modelRef.current = apply(modelRef.current);
-    setModel(apply);
-  }, []);
-  inboxRefreshRef.current = remoteInbox.refreshAll;
 
   // Read through refs so a poll closure never runs against a pane it was not started for.
   const chatTargetRef = useRef<ReferenceTargetRef | null>(null);
@@ -4994,7 +4894,7 @@ export const RemoteHostConnection: React.FC<{
      posts `ferryx:open-url` to this window. The panel is brought up on the surface in use (the
      phone's Supervisor home, the wide layout's Supervisor tab) and the card is focused by its
      exact sessionRef; a focus no card claims expires with a note instead of landing later. */
-  const [sidebarView, setSidebarView] = useState<SidebarViewId>("worktrees");
+  const [sidebarView, setSidebarView] = useState<SidebarViewId>("supervisor");
   const [requestedSidebarView, setRequestedSidebarView] = useState<{ view: SidebarViewId; nonce: number } | null>(null);
   const showPanelForDecision = useCallback((_focus: DecisionFocus) => {
     if (phoneHome) phoneNav.selectTab("supervisor");
@@ -5332,53 +5232,10 @@ export const RemoteHostConnection: React.FC<{
       });
       return;
     }
-    openPhoneSession(option);
+    if (phoneHome) openPhoneSession(option);
+    else void selectAccountOption(option);
   };
-  const phoneNeedsYou = new Set(
-    accountDiscovery.accountOptions
-      .filter((option) => option.sessionId && option.inventoryActivityState === "waiting")
-      .map((option) => `${option.machineId}\u0000${option.sessionId}`),
-  );
-  /* Opening an Inbox row never moves the desktop's focus: a pane already mirrored is shown on this
-     phone only, and any other account session opens through the read-only account selection. */
-  const openInboxRow = (row: AttentionRow): boolean => {
-    const entry = inboxEntries.find((candidate) => candidate.key === row.id);
-    if (!entry) return false;
-    const tab = entry.tabId ? terminalTabs.find((candidate) => candidate.id === entry.tabId) : undefined;
-    if (tab) {
-      showSessionLocally(tab);
-      if (phoneHome) phoneNav.openSession();
-      return true;
-    }
-    const option = entry.machineId
-      ? optionForSession(accountDiscovery.accountOptions, entry.machineId, entry.sessionId)
-      : null;
-    if (!option) {
-      setUnopenableRowIds((previous) => new Set(previous).add(row.id));
-      toast.error("This session can't be opened from here right now", {
-        description: entry.machineId
-          ? "Its computer is offline or has not listed it yet."
-          : "Answer it here, or pick its worktree to open it.",
-      });
-      return false;
-    }
-    openPhoneSession(option);
-    return true;
-  };
-  /* Rows whose computer cannot open them here say so on the row before any tap; the model already
-     knows: no mirrored tab and no account option for that machine's session. */
-  const inboxRows = remoteInbox.rows.map((row) => {
-    const entry = inboxEntries.find((candidate) => candidate.key === row.id);
-    if (!entry) return row;
-    const openable = (entry.tabId && terminalTabs.some((candidate) => candidate.id === entry.tabId))
-      || (entry.machineId ? optionForSession(accountDiscovery.accountOptions, entry.machineId, entry.sessionId) !== null : false);
-    if (openable && !unopenableRowIds.has(row.id)) return row;
-    if (!entry.machineId && !unopenableRowIds.has(row.id)) return row;
-    // The reason rides on `unavailable`, not on `text`: the Inbox re-reads a row's prompt when its
-    // text changes, so marking a row must not send a request.
-    const note = entry.machineId ? "Computer offline. Can't open it from here right now." : "Answer it here, or pick its worktree to open it.";
-    return { ...row, unavailable: note };
-  });
+  openPanelSessionRef.current = openPanelSession;
   const activeSupervisorSnapshot = phoneHome && activeMachineId
     ? phoneSupervisor.machines.find((machine) => machine.machineId === activeMachineId)?.snapshot ?? null
     : null;
@@ -5448,12 +5305,12 @@ export const RemoteHostConnection: React.FC<{
       <Toaster />
       {showPhoneHome ? (
         <PhoneHomeView
-          panel={panelHome ? {
-            state: phonePanel.state,
+          panel={{
+            state: panelState,
             now: phoneSupervisor.now,
-            actions: { ...phonePanel.actions, openSession: openPanelSession },
+            actions: { ...phonePanel.actions, turnOn: panelTurnOn, openSession: openPanelSession },
             onStartSession: () => phoneNav.selectTab("worktrees"),
-            computerLabel: phoneSupervisor.unified.find((host) => host.machineId === panelHostId)?.label,
+            computerLabel: panelComputerLabel,
             onRefresh: () =>
               Promise.allSettled([
                 phonePanel.refresh(),
@@ -5461,46 +5318,14 @@ export const RemoteHostConnection: React.FC<{
               ]),
             headerAction: <AccountButton onOpen={() => setAccountSheetOpen(true)} />,
             resume: phoneResume,
-          } : undefined}
+          }}
           destination={phoneNav.destination}
           onSelectTab={phoneNav.selectTab}
-          supervisor={{
-            machines: phoneSupervisor.machines,
-            now: phoneSupervisor.now,
-            needsYou: phoneNeedsYou,
-            onSetPaused: phoneSupervisor.setPaused,
-            onStartHub: phoneSupervisor.startHub,
-            unified: phoneSupervisor.unified,
-            discovering: accountDiscovery.loading,
-            onRetry: phoneSupervisor.resync,
-            onOpenLane: (machineId, sessionId) => {
-              const option = optionForSession(accountDiscovery.accountOptions, machineId, sessionId);
-              if (!option) {
-                toast.error("This session is not available right now", {
-                  description: "Its computer is offline or has not listed it yet.",
-                });
-                return;
-              }
-              openPhoneSession(option);
-            },
-          }}
-          inbox={{
-            rows: inboxRows,
-            prompts: remoteInbox.prompts,
-            loading: accountInventoryLoading,
-            onOpen: (row) => {
-              openInboxRow(row);
-            },
-          }}
           worktrees={phoneWorktrees}
-          accountAction={<AccountButton onOpen={() => setAccountSheetOpen(true)} />}
-          onRefresh={(destination) => {
-            // Every list reads account discovery (worktrees, the inventory behind the Inbox), so a
-            // pull re-probes each computer; the Supervisor also re-reads every supervisor feed.
-            if (destination === "supervisor") phoneSupervisor.resync();
-            return Promise.allSettled(accountDiscovery.machines.map((machine) => accountDiscovery.retryMachine(machine.machineId)));
-          }}
-          resume={phoneResume}
+          onRefresh={() =>
+            // The Worktrees list reads account discovery, so a pull re-probes each computer.
+            Promise.allSettled(accountDiscovery.machines.map((machine) => accountDiscovery.retryMachine(machine.machineId)))
+          }
         />
       ) : (
       <div ref={sessionScreenRef} data-testid="phone-session-screen" className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -5625,12 +5450,6 @@ export const RemoteHostConnection: React.FC<{
           viewMode={viewMode === "browser" ? "chat" : viewMode}
           onViewModeChange={setViewMode}
           sessionCount={terminalTabs.length >= 1 ? terminalTabs.length : undefined}
-          inbox={{
-            count: remoteInbox.needsYou,
-            open: inboxOpen,
-            // The phone home's Inbox is the one Inbox: the Session screen links back to it.
-            onOpen: phoneHome ? () => phoneNav.selectTab("inbox") : () => setInboxOpen(true),
-          }}
           switcherOpen={switcherOpen}
           onOpenSwitcher={() => setSwitcherOpen(true)}
           menuOpen={menuOpen}
@@ -5984,23 +5803,6 @@ export const RemoteHostConnection: React.FC<{
           );
         }}
       />
-
-      <MobileSheet
-        open={inboxOpen}
-        onOpenChange={setInboxOpen}
-        title="Inbox"
-        ariaLabel="Inbox"
-        testId="mobile-inbox-sheet"
-      >
-        <AttentionInbox
-          compact
-          rows={inboxRows}
-          prompts={remoteInbox.prompts}
-          onOpen={(row) => {
-            if (openInboxRow(row)) setInboxOpen(false);
-          }}
-        />
-      </MobileSheet>
 
       <MobileOverflowSheet
         open={menuOpen}

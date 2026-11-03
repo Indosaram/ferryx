@@ -1,36 +1,32 @@
-// Seeded phone-home states for real-browser QA (no network): the supervisor-first home, the
-// Inbox, Worktrees, the account sheet and the session supervisor strip. Every state also exists
+// Seeded phone-home states for real-browser QA (no network): the supervisor panel home (with a
+// hub, and the no-hub setup card), the Worktrees screen, the account sheet and the session
+// supervisor strip. Every state also exists
 // with a "-light" suffix that renders it in the light theme. Time is fixed so relative times
 // ("2m ago") are the same on every capture.
 import React, { useEffect, useMemo, useState } from "react";
+
+import { panelSnapshotFixture } from "../lib/supervisorPanel/fixtures";
+import { emptyPanelSnapshot } from "../lib/supervisorPanel/emptySnapshot";
+import type { PanelActions } from "../lib/supervisorPanel/actions";
+import type { PanelState } from "../remote/supervisorPanel/usePhonePanel";
 
 import type { PaneSupervision } from "../lib/supervisorModel";
 import { AccountSessionError } from "../remote/accountSession";
 import { AccountButton } from "../remote/home/AccountButton";
 import { AccountSheet } from "../remote/home/AccountSheet";
-import { fixtureAction, fixtureInventory, fixtureLane, fixtureMachine, fixtureOption, fixtureSnapshot } from "../remote/home/phoneHomeFixtures";
-import { buildInboxRows, type SupervisorMachineView } from "../remote/home/phoneHomeModel";
+import { fixtureLane } from "../remote/home/phoneHomeFixtures";
 import { PhoneHomeView } from "../remote/home/PhoneHomeView";
 import { SupervisorSessionStrip } from "../remote/home/SupervisorSessionStrip";
 import type { PhoneDestination } from "../remote/home/usePhoneNavigation";
 import { WorktreesHome } from "../remote/home/WorktreesHome";
-import { remoteInboxEntries, useRemoteInbox } from "../remote/remoteInbox";
 import type { LanePauseResult } from "../remote/remoteSupervisor";
 import { RemoteWorkspaceMirror, type RemoteContextOption, type RemoteWorkspaceModel } from "../remote/RemoteSessionList";
 import { sidebarParitySections } from "./sidebarParityQa";
 
 const BASE_PHONE_HOME_QA_STATES = [
   "home-supervisor",
-  "home-supervisor-acting",
-  "home-supervisor-off",
-  "home-supervisor-unsupported",
-  "home-supervisor-long",
+  "home-supervisor-setup",
   "home-supervisor-loading",
-  "home-supervisor-discovery-empty",
-  "home-offline-cached",
-  "home-inbox",
-  "home-inbox-done-only",
-  "home-inbox-loading-partial",
   "home-worktrees",
   "home-worktrees-pending",
   "home-resume",
@@ -59,8 +55,6 @@ export const SESSION_STRIP_QA_STATES = withLight(BASE_SESSION_STRIP_QA_STATES);
 
 /** 2026-10-24 09:00 UTC: every relative time in a capture is measured from here. */
 const NOW = Date.UTC(2026, 9, 24, 9, 0, 0);
-const LONG = "an-unusually-long-machine-or-worktree-name-that-must-truncate-cleanly";
-
 function baseState(state: string): string {
   return state.endsWith("-light") ? state.slice(0, -"-light".length) : state;
 }
@@ -86,120 +80,36 @@ const pauseOk = async (_machineId: string, laneKey: string, paused: boolean): Pr
   changed: true,
 });
 
-function defaultMachines(acting: boolean): SupervisorMachineView[] {
-  const typing = fixtureLane({ key: "inbox", title: "Ship inbox", cwd: "/Users/me/code/ferryx" });
-  const actions = [
-    fixtureAction({ atMs: NOW - 120_000, sessionId: "session-docs", text: "yes, continue" }),
-    fixtureAction({ atMs: NOW - 300_000, sessionId: typing.sessionId, code: "CONTROL_CONFLICT", text: null }),
-    fixtureAction({ atMs: NOW - 600_000, sessionId: "session-auth", text: "run the migration again" }),
-    fixtureAction({ atMs: NOW - 900_000, sessionId: "session-auth", code: "RATE_LIMITED", text: null }),
-  ];
-  if (acting) actions.unshift(fixtureAction({ atMs: NOW - 1000, sessionId: typing.sessionId, text: "run the tests again" }));
-  return [
-    fixtureMachine({
-      machineId: "studio",
-      label: "Studio Mac",
-      snapshot: fixtureSnapshot({
-        lanes: [
-          typing,
-          fixtureLane({ key: "docs", title: "Docs pass", sessionId: "session-docs", cwd: "/Users/me/code/site", paused: true }),
-          fixtureLane({ key: "auth", title: "Migrate auth", sessionId: "session-auth", cwd: "/Users/me/code/api", lastReason: "tests failed twice" }),
-        ],
-        watched: ["session-extra"],
-        actions,
-      }),
-    }),
-    fixtureMachine({
-      machineId: "laptop",
-      label: "MacBook Air",
-      snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "cli", title: "CLI flags", sessionId: "session-cli", cwd: "/Users/me/code/cli", status: "waiting_on_review" })] }),
-    }),
-  ];
-}
-
-function machinesFor(state: string): SupervisorMachineView[] {
+function panelStateFor(state: string): PanelState {
   switch (state) {
-    case "home-supervisor-off":
-      return [fixtureMachine({ machineId: "studio", label: "Studio Mac", snapshot: fixtureSnapshot({ hub: { available: true, running: false } }) })];
-    case "home-supervisor-unsupported":
-      return [
-        fixtureMachine({ machineId: "old-mac", label: "Old MacBook", state: "unsupported", snapshot: null }),
-        fixtureMachine({ machineId: "linux-box", label: "Linux box", state: "offline", snapshot: null }),
-      ];
+    case "home-supervisor-setup":
+      // No hub running: the one setup card replaces sections 2-6.
+      return { kind: "ready", snapshot: emptyPanelSnapshot() };
     case "home-supervisor-loading":
-      return [
-        fixtureMachine({ machineId: "studio", label: "Studio Mac", state: "loading", snapshot: null }),
-        fixtureMachine({ machineId: "laptop", label: "MacBook Air", state: "not-connected", snapshot: null }),
-      ];
-    case "home-supervisor-discovery-empty":
-      return [];
-    case "home-offline-cached":
-      // The feed nulls the snapshot when a computer goes offline (remoteSupervisor settle), so the
-      // offline machine shows its state note next to a reachable one, never stale live lanes.
-      return [
-        defaultMachines(false)[0],
-        fixtureMachine({ machineId: "laptop", label: "MacBook Air", state: "offline", snapshot: null, error: { code: "OFFLINE", message: "" } }),
-      ];
-    case "home-supervisor-long": {
-      const lanes = Array.from({ length: 8 }, (_, index) =>
-        fixtureLane({
-          key: `long-${index}`,
-          cwd: `/Users/me/code/${LONG}-${index}`,
-          title: `${LONG} lane ${index}`,
-          goal: `Keep refactoring ${LONG} until every test stays green on CI ${index}`,
-          paused: index % 3 === 0,
-          lastReason: index % 2 === 0 ? `the hub stopped because ${LONG} needs review` : null,
-        }),
-      );
-      return [
-        fixtureMachine({
-          machineId: "long-machine",
-          label: `Studio ${LONG}`,
-          snapshot: fixtureSnapshot({
-            lanes,
-            actions: lanes.map((lane, index) =>
-              fixtureAction({ atMs: NOW - 60_000 * (index + 1), sessionId: lane.sessionId, text: `${LONG} reply ${index}` }),
-            ),
-          }),
-        }),
-      ];
-    }
+      return { kind: "loading" };
     default:
-      return defaultMachines(state === "home-supervisor-acting");
+      return { kind: "ready", snapshot: panelSnapshotFixture };
   }
 }
 
-function inboxRows(state: string) {
-  const options = [
-    fixtureOption({ machineId: "studio", machineDisplayName: "Studio Mac", sessionId: "session-auth", inventoryActivityState: "waiting" }),
-    fixtureOption({ machineId: "studio", machineDisplayName: "Studio Mac", sessionId: "session-docs", inventoryActivityState: "waiting", worktreeLabel: "docs" }),
-    fixtureOption({ machineId: "laptop", machineDisplayName: "MacBook Air", sessionId: "session-cli", inventoryActivityState: "done", agentType: "codex" }),
-    fixtureOption({ machineId: "laptop", machineDisplayName: "MacBook Air", sessionId: "session-api", inventoryActivityState: "waiting", machineOnline: false }),
-  ];
-  const inventories = {
-    studio: fixtureInventory("studio", [
-      { sessionId: "session-auth", title: "Migrate auth", activityObservedAt: NOW - 90_000 },
-      { sessionId: "session-docs", title: "Docs pass", activityObservedAt: NOW - 600_000 },
-    ]),
-    laptop: fixtureInventory("laptop", [
-      { sessionId: "session-cli", title: "CLI flags", activityObservedAt: NOW - 3_600_000 },
-      { sessionId: "session-api", title: "API cleanup", activityObservedAt: NOW - 7_200_000 },
-    ]),
-  };
-  const lanes = [{ ...fixtureLane({ key: "docs", sessionId: "session-docs", paused: true }), machineId: "studio" }];
-  const rows = buildInboxRows({ options, inventories, lanes });
-  if (state === "home-inbox-done-only") return rows.filter((row) => row.kind === "done");
-  if (state === "home-inbox-loading-partial") return rows.filter((row) => row.machineId === "studio");
-  return rows;
-}
+const ok = async () => ({ ok: true }) as const;
+const QA_ACTIONS: PanelActions = {
+  answer: ok,
+  setPaused: ok,
+  setLanePaused: ok,
+  converse: ok,
+  stop: ok,
+  undo: ok,
+  turnOn: ok,
+  openSession: () => undefined,
+};
 
 function initialDestination(state: string): PhoneDestination {
-  if (state.startsWith("home-inbox")) return "inbox";
   if (state.startsWith("home-worktrees") || state.startsWith("account-")) return "worktrees";
   return "supervisor";
 }
 
-const QA_REFRESH_STATES: ReadonlySet<string> = new Set(["home-supervisor", "home-inbox", "home-worktrees"]);
+const QA_REFRESH_STATES: ReadonlySet<string> = new Set(["home-supervisor", "home-worktrees"]);
 
 /** Pull-to-refresh for headless QA: counts each refresh on `window.__qaRefreshCount` and settles after 600ms. */
 function qaRefresh(): Promise<void> {
@@ -227,16 +137,7 @@ export const PhoneHomeQaState: React.FC<{ state: string; model: RemoteWorkspaceM
   const state = baseState(rawState);
   const [destination, setDestination] = useState<PhoneDestination>(() => initialDestination(state));
   const [accountOpen, setAccountOpen] = useState(state.startsWith("account-"));
-  const machines = useMemo(() => machinesFor(state), [state]);
-  const rows = useMemo(() => inboxRows(state), [state]);
-  const inboxEntries = useMemo(
-    () => remoteInboxEntries({ model: { context: { ...model.context, terminalTabs: [] }, options: [] }, machineId: null, accountRows: rows }),
-    [model.context, rows],
-  );
-  const inbox = useRemoteInbox({
-    entries: inboxEntries,
-    transport: { read: async () => null, answer: async () => ({ ok: true }) },
-  });
+  const panelState = useMemo(() => panelStateFor(state), [state]);
   // The connected desktop's list plus an offline second machine, as an account phone sees them.
   const sidebarSections = useMemo(() => sidebarParitySections("desktop", { offlineMachine: true }), []);
   const deleteFailure = DELETE_FAILURES[state];
@@ -246,26 +147,16 @@ export const PhoneHomeQaState: React.FC<{ state: string; model: RemoteWorkspaceM
       <PhoneHomeView
         destination={destination}
         onSelectTab={setDestination}
-        accountAction={accountAction}
         {...(QA_REFRESH_STATES.has(state) ? { onRefresh: qaRefresh } : {})}
-        supervisor={{
-          machines,
+        panel={{
+          state: panelState,
           now: NOW,
-          needsYou: new Set(["studio\u0000session-auth"]),
-          onSetPaused: pauseOk,
-          onOpenLane: () => undefined,
-          onStartHub: async () => ({ kind: "ok", started: true }),
-          onRetry: () => undefined,
-          discovering: state === "home-supervisor-loading",
-        }}
-        inbox={{
-          rows: inbox.rows,
-          prompts: inbox.prompts,
-          loading: state === "home-inbox-loading-partial",
-          onOpen: () => {
-            const qaWindow = window as typeof window & { __qaInboxOpenCount?: number };
-            qaWindow.__qaInboxOpenCount = (qaWindow.__qaInboxOpenCount ?? 0) + 1;
-          },
+          actions: QA_ACTIONS,
+          onRefresh: qaRefresh,
+          onStartSession: () => setDestination("worktrees"),
+          computerLabel: "Studio Mac",
+          headerAction: accountAction,
+          resume: state === "home-resume" ? { title: "Ship inbox", subtitle: "Studio Mac · ferryx / main", onOpen: () => undefined } : null,
         }}
         worktrees={
           <WorktreesHome headerAction={accountAction}>
@@ -282,7 +173,6 @@ export const PhoneHomeQaState: React.FC<{ state: string; model: RemoteWorkspaceM
             />
           </WorktreesHome>
         }
-        resume={state === "home-resume" ? { title: "Ship inbox", subtitle: "Studio Mac · ferryx / main", onOpen: () => undefined } : null}
       />
       <AccountSheet
         open={accountOpen}

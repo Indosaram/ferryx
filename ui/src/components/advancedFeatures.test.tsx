@@ -82,14 +82,7 @@ function renderShell() {
         activePath={worktree.path}
         onSelectWorktree={vi.fn()}
         onCreateWorktree={vi.fn()}
-        attention={{
-          rows: [],
-          onOpen: vi.fn(),
-          onDismiss: vi.fn(),
-          onDismissAll: vi.fn(),
-          inboxOpen: false,
-          onInboxOpenChange: vi.fn(),
-        }}
+        onFocusSupervisorSession={vi.fn()}
       />
       <EmptyWorkspaceView onNewTerminal={vi.fn()} onNewBrowserTab={vi.fn()} />
       <TerminalPane
@@ -122,14 +115,15 @@ function entryPoints() {
 }
 
 const CORE_ENTRIES = {
-  sidebarViews: ["Worktrees", "Inbox"],
+  // The Supervisor panel is the sidebar's default view; it is not behind advanced features.
+  sidebarViews: ["Supervisor", "Worktrees"],
   settingsSections: ["General", "Appearance", "Terminal", "Keyboard Shortcuts", "Agents", "Permissions", "Remote"],
   newBrowserTab: false,
   dagBadge: false,
 };
 
 const ALL_ENTRIES = {
-  sidebarViews: ["Worktrees", "Inbox", "Supervisor"],
+  sidebarViews: ["Supervisor", "Worktrees"],
   settingsSections: [
     "General",
     "Appearance",

@@ -352,7 +352,7 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
     render(<RemoteApp />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("mobile-home-tab-worktrees")).toBeInTheDocument();
+      expect(screen.getByTestId("phone-panel-start-session")).toBeInTheDocument();
       expect(screen.getByText("ws-ferryx / main")).toBeInTheDocument();
     });
 
@@ -435,7 +435,7 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
     render(<RemoteApp />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("mobile-home-tab-worktrees")).toBeInTheDocument();
+      expect(screen.getByTestId("phone-panel-start-session")).toBeInTheDocument();
     });
 
     expect(getAccountLastSelectedTarget(window.location.origin)).toEqual({
@@ -467,7 +467,7 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
     render(<RemoteApp />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("mobile-home-tab-worktrees")).toBeInTheDocument();
+      expect(screen.getByTestId("phone-panel-start-session")).toBeInTheDocument();
     });
 
     expect(getAccountLastSelectedTarget(window.location.origin)).toEqual({
@@ -608,7 +608,7 @@ describe("RemoteApp Account Worktree Follow-ups: Sign-out and Worktree Reload Re
     render(<RemoteApp />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("mobile-home-tab-worktrees")).toBeInTheDocument();
+      expect(screen.getByTestId("phone-panel-start-session")).toBeInTheDocument();
     });
 
     expect(getAccountLastSelectedTarget(window.location.origin)).toEqual({

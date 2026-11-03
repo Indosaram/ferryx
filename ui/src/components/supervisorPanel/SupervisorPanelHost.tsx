@@ -5,6 +5,8 @@ import type { PanelEvent, PanelSnapshot, SessionRef } from '../../lib/supervisor
 import { desktopPanelActions } from '../../lib/supervisorPanel/desktopActions';
 import { emptyPanelSnapshot } from '../../lib/supervisorPanel/emptySnapshot';
 import { applyPanelEvent } from '../../lib/supervisorPanel/model';
+import { legacyGoalsBySession } from '../../lib/supervisorPanel/legacyGoals';
+import { useSupervisor } from '../../lib/supervisor';
 import { getSupervisorPanel, onSupervisorPanelEvent } from '../../lib/tauri';
 import { PanelSurface } from './PanelSurface';
 
@@ -92,13 +94,21 @@ export function SupervisorPanelHost({
     [actionsFor, onFocusSession, reload],
   );
 
+  // Legacy lanes are a property of their session: the hub snapshot is read only to find which
+  // sessions carry a goal and whether it is paused.
+  const { snapshot: hub } = useSupervisor();
+  const goals = useMemo(
+    () => legacyGoalsBySession(snapshot?.sessions.map((session) => session.sessionRef) ?? [], hub.lanes),
+    [snapshot, hub.lanes],
+  );
+
   return (
     <div
       data-testid="supervisor-panel"
       className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 pt-1 text-xs scrollbar-sleek"
     >
       {snapshot ? (
-        <PanelSurface snapshot={snapshot} actions={actions} nowMs={tick} computerLabel="this computer" />
+        <PanelSurface snapshot={snapshot} actions={actions} nowMs={tick} goals={goals} computerLabel="this computer" />
       ) : (
         <p className="text-muted-foreground">Loading supervisor…</p>
       )}

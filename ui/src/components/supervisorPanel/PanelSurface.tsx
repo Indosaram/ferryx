@@ -7,6 +7,7 @@ import {
   type PanelActions,
 } from '../../lib/supervisorPanel/actions';
 import type { PanelSnapshot, SessionHealth, SessionRef } from '../../lib/supervisorPanel/contract';
+import type { LegacyGoal } from '../../lib/supervisorPanel/legacyGoals';
 import {
   buildPanelView,
   type ActionView,
@@ -30,6 +31,8 @@ export type PanelSurfaceProps = {
   nowMs: number;
   /** Latest health per session; a fresh `failed` report gives that row the Failed glyph. */
   health?: ReadonlyMap<SessionRef, SessionHealth>;
+  /** Legacy supervisor goals by session (D14): shown on the row, paused from its menu. */
+  goals?: ReadonlyMap<SessionRef, LegacyGoal>;
   /** What setup names: "this computer" unless the host's label is known. */
   computerLabel?: string;
   /**
@@ -141,10 +144,11 @@ function SetupSection({ actions, touch, computerLabel }: Pick<PanelSurfaceProps,
  * and the phone renders it with `touch`. All content comes from `buildPanelView`; all writes go
  * through `actions`, and a refused write shows its message where the user acted.
  */
-export function PanelSurface({ snapshot, actions, touch, nowMs, health, computerLabel, hideComposer, onComposerText }: PanelSurfaceProps) {
+export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, computerLabel, hideComposer, onComposerText }: PanelSurfaceProps) {
   const view = useMemo(() => buildPanelView(snapshot, { nowMs, health }), [snapshot, nowMs, health]);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pausing, setPausing] = useState(false);
+  const [pausingLanes, setPausingLanes] = useState<ReadonlySet<string>>(() => new Set());
   const [seed, setSeed] = useState<{ text: string; nonce: number } | null>(null);
   const titleOf = useMemo(() => new Map(snapshot.sessions.map((s) => [s.sessionRef, s])), [snapshot.sessions]);
   const mentions: MentionOption[] = useMemo(
@@ -167,6 +171,16 @@ export function PanelSurface({ snapshot, actions, touch, nowMs, health, computer
     setPausing(false);
   };
   const { headline, detail } = splitStatus(view.statusLine);
+  const toggleLane = async (goal: LegacyGoal) => {
+    if (pausingLanes.has(goal.laneKey)) return;
+    setPausingLanes((current) => new Set(current).add(goal.laneKey));
+    await report(actions.setLanePaused(goal.laneKey, !goal.paused));
+    setPausingLanes((current) => {
+      const next = new Set(current);
+      next.delete(goal.laneKey);
+      return next;
+    });
+  };
 
   return (
     <div data-testid="supervisor-panel-surface" className="flex flex-col gap-4">
@@ -214,17 +228,30 @@ export function PanelSurface({ snapshot, actions, touch, nowMs, health, computer
       ) : null}
       {view.sessions.length > 0 ? (
         <section aria-label="Sessions" className="flex flex-col gap-1">
-          {view.sessions.map((row) => (
-            <SessionRow
-              key={row.sessionRef}
-              touch={touch}
-              title={row.title}
-              detail={row.age ?? row.why}
-              computer={row.hostLabel}
-              state={SESSION_GLYPH[row.glyph]}
-              onOpen={() => actions.openSession(row.sessionRef)}
-            />
-          ))}
+          {view.sessions.map((row) => {
+            const goal = goals?.get(row.sessionRef);
+            return (
+              <SessionRow
+                key={row.sessionRef}
+                touch={touch}
+                title={row.title}
+                detail={row.age ?? row.why}
+                computer={row.hostLabel}
+                state={SESSION_GLYPH[row.glyph]}
+                onOpen={() => actions.openSession(row.sessionRef)}
+                goal={
+                  goal
+                    ? {
+                        text: goal.text,
+                        paused: goal.paused,
+                        pending: pausingLanes.has(goal.laneKey),
+                        onTogglePaused: () => void toggleLane(goal),
+                      }
+                    : undefined
+                }
+              />
+            );
+          })}
         </section>
       ) : null}
       {view.log.total > 0 ? (

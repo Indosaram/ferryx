@@ -17,6 +17,8 @@ export interface PanelActions {
   /** Answer one decision with the option at `optionIndex` of the prompt's own option list. */
   readonly answer: (decision: PanelDecisionTarget, optionIndex: number) => Promise<PanelActionResult>;
   readonly setPaused: (paused: boolean) => Promise<PanelActionResult>;
+  /** Pause or resume one session's legacy supervisor goal (D14); `laneKey` names its lane. */
+  readonly setLanePaused: (laneKey: string, paused: boolean) => Promise<PanelActionResult>;
   /** The composer: free text plus the sessions it names. */
   readonly converse: (text: string, mentions: readonly SessionRef[]) => Promise<PanelActionResult>;
   readonly stop: (sessionRef: SessionRef) => Promise<PanelActionResult>;

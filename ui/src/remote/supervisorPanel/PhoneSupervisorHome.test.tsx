@@ -13,6 +13,7 @@ function actionsMock(overrides: Partial<PanelActions> = {}): PanelActions {
   return {
     answer: vi.fn(async () => ({ ok: true }) as const),
     setPaused: vi.fn(async () => ({ ok: true }) as const),
+    setLanePaused: vi.fn(async () => ({ ok: true }) as const),
     converse: vi.fn(async () => ({ ok: true }) as const),
     stop: vi.fn(async () => ({ ok: true }) as const),
     undo: vi.fn(async () => ({ ok: true }) as const),
@@ -233,35 +234,40 @@ describe("PhoneSupervisorHome", () => {
   });
 
   it("renders no tab bar on the panel home", () => {
-    const home = props();
-    // The panel replaces the three-destination home; the other props are only for the old home.
-    const old = {
-      panel: home,
+    const view: PhoneHomeViewProps = {
+      panel: props(),
       destination: "supervisor",
       onSelectTab: vi.fn(),
-      supervisor: { machines: [], now: NOW, needsYou: new Set(), onSetPaused: vi.fn(), onOpenLane: vi.fn() },
-      inbox: { rows: [], loading: false, onOpen: vi.fn() },
       worktrees: null,
-      resume: null,
-    } as unknown as PhoneHomeViewProps;
-    render(<PhoneHomeView {...old} />);
+    };
+    render(<PhoneHomeView {...view} />);
     expect(screen.getByTestId("phone-supervisor-home")).toBeInTheDocument();
     expect(screen.queryByRole("tablist")).toBeNull();
     expect(screen.queryByTestId("mobile-home-tabs")).toBeNull();
     expect(screen.queryByTestId("mobile-home-tab-inbox")).toBeNull();
   });
 
+  it("shows the setup card, never a fallback home, when the panel reports no hub", () => {
+    const view: PhoneHomeViewProps = {
+      panel: props({ state: { kind: "ready", snapshot: { ...panelSnapshotFixture, setupRequired: true } }, computerLabel: "Studio" }),
+      destination: "supervisor",
+      onSelectTab: vi.fn(),
+      worktrees: null,
+    };
+    render(<PhoneHomeView {...view} />);
+    expect(screen.getByTestId("setup-card")).toHaveTextContent("Turn on the supervisor on Studio");
+    expect(screen.queryByTestId("decision-card")).toBeNull();
+    expect(screen.queryByTestId("session-row")).toBeNull();
+  });
+
   it("'+' shows the Worktrees list under the panel, with a way back and still no tab bar", () => {
     const onSelectTab = vi.fn();
-    const view = {
+    const view: PhoneHomeViewProps = {
       panel: props({ onStartSession: vi.fn() }),
       destination: "worktrees",
       onSelectTab,
-      supervisor: { machines: [], now: NOW, needsYou: new Set(), onSetPaused: vi.fn(), onOpenLane: vi.fn() },
-      inbox: { rows: [], loading: false, onOpen: vi.fn() },
       worktrees: <p>Worktrees list</p>,
-      resume: null,
-    } as unknown as PhoneHomeViewProps;
+    };
     render(<PhoneHomeView {...view} />);
     expect(screen.getByText("Worktrees list")).toBeInTheDocument();
     expect(screen.queryByRole("tablist")).toBeNull();

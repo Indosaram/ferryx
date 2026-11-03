@@ -6,9 +6,7 @@ import { useState, type ReactNode } from "react";
 import { sidebarLiveState } from "../components/sidebar/sidebarModel";
 import type { SidebarModel, SidebarProjectNode, SidebarWorktreeNode } from "../components/sidebar/sidebarModel";
 import { SidebarFilter } from "../components/sidebar/SidebarFilter";
-import { SidebarView, type SidebarInbox } from "../components/sidebar/SidebarView";
-import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
-import type { PublishedAttentionRow } from "../components/sidebar/sidebarSessionSignals";
+import { SidebarView } from "../components/sidebar/SidebarView";
 import type { SidebarViewId } from "../components/sidebar/SidebarViewTabs";
 import { SidebarWorktreeRow, type SidebarDensity } from "../components/sidebar/SidebarWorktreeRow";
 import { cn } from "../lib/cn";
@@ -21,7 +19,7 @@ export const NOT_SYNCED_CAPTION = "Not synced with desktop";
 /**
  * The section does not show what the desktop shows right now: the model was rebuilt from the
  * inventory, or the desktop that published it is gone and the daemon dropped its live signals.
- * Either way rows, activity and Inbox come from this machine's own session inventory.
+ * Either way rows and activity come from this machine's own session inventory.
  */
 export function sidebarNotSynced(model: SidebarModel | null): boolean {
   return model !== null && (model.source === "inventory" || model.signals === undefined);
@@ -76,13 +74,7 @@ export type RemoteSidebarProps = {
   readonly onSelect: (target: RemoteSidebarTarget) => void;
   readonly view: SidebarViewId;
   readonly onViewChange?: (view: SidebarViewId) => void;
-  readonly inbox?: SidebarInbox;
-  /**
-   * Opens a row from a desktop's published Inbox (the remote never writes desktop state, so those
-   * rows have no dismiss). Without it, a published row's click does nothing.
-   */
-  readonly onOpenPublishedAttention?: (target: PublishedAttentionTarget) => void;
-  readonly supervisor?: { readonly typing: boolean; readonly content: ReactNode };
+  readonly supervisor?: { readonly content: ReactNode };
   /** Account inventory loading/offline rows, shown above the tree. */
   readonly status?: ReactNode;
 };
@@ -139,56 +131,11 @@ type SectionProps = {
   readonly sidebar: RemoteSidebarProps;
   readonly first: boolean;
   readonly heading: boolean;
-  /** The Inbox the first section shows: the desktops' published rows, or the remote's own. */
-  readonly inbox: SidebarInbox | undefined;
   /** Touch: the page-wide filter the parent owns, so every machine shares one box. */
   readonly sharedQuery?: string;
 };
 
-/** A desktop-published Inbox row and the machine whose desktop published it. */
-export type PublishedAttentionTarget = { readonly machineId: string; readonly row: PublishedAttentionRow };
-
-/**
- * The Inbox rows the machines' desktops published, every machine's in section order. Row ids are
- * namespaced by machine so two desktops' rows never share a key; `targets` maps each back. Null when
- * no desktop-sourced section carries rows (inventory fallback or an older desktop), so the remote
- * lists its own rows. Either way the tab counts exactly the rows listed under it.
- */
-export function publishedInbox(
-  sections: readonly Pick<RemoteSidebarSection, "machineId" | "model">[],
-): { readonly rows: AttentionRow[]; readonly targets: ReadonlyMap<string, PublishedAttentionTarget> } | null {
-  let published = false;
-  const rows: AttentionRow[] = [];
-  const targets = new Map<string, PublishedAttentionTarget>();
-  for (const section of sections) {
-    const sectionRows = section.model?.source === "desktop" ? section.model.signals?.attentionRows : undefined;
-    if (sectionRows === undefined) continue;
-    published = true;
-    for (const row of sectionRows) {
-      const id = JSON.stringify([section.machineId, row.id]);
-      rows.push({ ...row, id });
-      targets.set(id, { machineId: section.machineId, row });
-    }
-  }
-  return published ? { rows, targets } : null;
-}
-
-function sidebarInbox(sidebar: RemoteSidebarProps): SidebarInbox | undefined {
-  if (!sidebar.inbox) return undefined;
-  const published = publishedInbox(sidebar.sections);
-  if (!published) return sidebar.inbox;
-  const open = sidebar.onOpenPublishedAttention;
-  return {
-    rows: published.rows,
-    onOpen: (row) => {
-      const target = published.targets.get(row.id);
-      if (target && open) open(target);
-    },
-    // No dismiss: it would write the desktop's notification centre, and the remote never does.
-  };
-}
-
-function MachineSection({ section, sidebar, first, heading, inbox, sharedQuery }: SectionProps) {
+function MachineSection({ section, sidebar, first, heading, sharedQuery }: SectionProps) {
   const [collapsed, setCollapsed] = useState<string[] | null>(() => readCollapsed(section.machineId));
   const [ownQuery, setQuery] = useState("");
   const query = sharedQuery ?? ownQuery;
@@ -255,7 +202,6 @@ function MachineSection({ section, sidebar, first, heading, inbox, sharedQuery }
           }}
           filter={{ query, onChange: setQuery }}
           view={first ? sidebar.view : "worktrees"}
-          {...(first && inbox ? { inbox } : {})}
           {...(first && sidebar.supervisor ? { supervisor: sidebar.supervisor } : {})}
           renderRow={(project, node, live) => (
             <div
@@ -287,7 +233,7 @@ function MachineSection({ section, sidebar, first, heading, inbox, sharedQuery }
 }
 
 /**
- * One SidebarView per machine; the view tabs, inbox and supervisor ride on the first section.
+ * One SidebarView per machine; the view tabs and the Supervisor panel ride on the first section.
  * Touch (the phone): one filter for the page and one scroller with sticky machine headings,
  * instead of a filter and a scroller per machine.
  */
@@ -296,7 +242,6 @@ export function RemoteSidebar(sidebar: RemoteSidebarProps) {
   const heading = sidebar.sections.length > 1;
   const sections = sidebar.view === "worktrees" ? sidebar.sections : sidebar.sections.slice(0, 1);
   if (sections.length === 0) return <>{sidebar.status}</>;
-  const inbox = sidebarInbox(sidebar);
   const touch = sidebar.density === "touch";
   const list = sections.map((section, index) => (
     <MachineSection
@@ -305,7 +250,6 @@ export function RemoteSidebar(sidebar: RemoteSidebarProps) {
       sidebar={sidebar}
       first={index === 0}
       heading={heading}
-      inbox={inbox}
       {...(touch ? { sharedQuery: query } : {})}
     />
   ));

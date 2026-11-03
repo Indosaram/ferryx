@@ -5,7 +5,7 @@
 // activity rebuilt from the session inventory, matched to model rows by workspace id and slug.
 import type { SidebarLiveSignals, SidebarModel } from "../components/sidebar/sidebarModel";
 import { supervisorTypingIn } from "../components/sidebar/sidebarSupervisor";
-import { actingSessionIds, type SupervisorSnapshot } from "../lib/supervisorModel";
+import type { SupervisorSnapshot } from "../lib/supervisorModel";
 import { summarizeActivities, type ActivitySummary, type TerminalActivity } from "../lib/activity";
 import type { RemoteSessionInventory } from "./remoteSessionInventory";
 
@@ -14,11 +14,6 @@ export type RemoteSidebarSelection = { readonly workspaceId: string; readonly wo
 
 /** A machine's hub supervisor snapshot and the clock that expires its acting window. */
 export type RemoteSidebarSupervisor = { readonly snapshot: SupervisorSnapshot; readonly now: number };
-
-/** The Supervisor tab's typing mark: any machine's hub typed within the acting window. */
-export function remoteSupervisorTyping(supervisors: Readonly<Record<string, RemoteSidebarSupervisor>>): boolean {
-  return Object.values(supervisors).some(({ snapshot, now }) => actingSessionIds(snapshot, now).size > 0);
-}
 
 export function remoteSidebarSignals(
   model: SidebarModel,

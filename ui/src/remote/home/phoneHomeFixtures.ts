@@ -1,9 +1,7 @@
-// Fixture builders for the phone home: supervisor snapshots, machine views, account options and
-// inventories. Shared by the component tests and the mobile QA harness (no network).
-import type { SupervisorAction, SupervisorLane, SupervisorSnapshot } from "../../lib/supervisorModel";
-import type { RemoteSessionInventory, RemoteSessionInventoryEntry } from "../remoteSessionInventory";
+// Fixture builders for the phone shell: supervisor lanes and account options. Shared by the
+// component tests and the mobile QA harness (no network).
+import type { SupervisorLane } from "../../lib/supervisorModel";
 import type { AccountWorktreeOption } from "../useAccountWorktrees";
-import type { SupervisorMachineView } from "./phoneHomeModel";
 
 export function fixtureLane(overrides: Partial<SupervisorLane> & Pick<SupervisorLane, "key">): SupervisorLane {
   return {
@@ -17,28 +15,6 @@ export function fixtureLane(overrides: Partial<SupervisorLane> & Pick<Supervisor
     lastReason: null,
     ...overrides,
   };
-}
-
-export function fixtureAction(overrides: Partial<SupervisorAction> & Pick<SupervisorAction, "atMs">): SupervisorAction {
-  return {
-    deviceId: "hub",
-    op: "input",
-    sessionId: null,
-    requestId: `req-${overrides.atMs}`,
-    code: "OK",
-    text: "continue",
-    ...overrides,
-  };
-}
-
-export function fixtureSnapshot(overrides: Partial<SupervisorSnapshot> = {}): SupervisorSnapshot {
-  return { hub: { available: true, running: true }, lanes: [], watched: [], actions: [], ...overrides };
-}
-
-export function fixtureMachine(
-  overrides: Partial<SupervisorMachineView> & Pick<SupervisorMachineView, "machineId">,
-): SupervisorMachineView {
-  return { label: overrides.machineId, state: "ok", snapshot: fixtureSnapshot(), error: null, ...overrides };
 }
 
 export function fixtureOption(
@@ -55,31 +31,5 @@ export function fixtureOption(
     agentType: "claude",
     inventoryActivityState: null,
     ...overrides,
-  };
-}
-
-export function fixtureInventory(
-  machineId: string,
-  entries: ReadonlyArray<Partial<RemoteSessionInventoryEntry> & Pick<RemoteSessionInventoryEntry, "sessionId">>,
-): RemoteSessionInventory {
-  return {
-    machineId,
-    revision: "1",
-    completeness: "complete",
-    entries: entries.map((entry) => ({
-      machineId,
-      workspaceId: "ferryx",
-      worktreeSlug: "main",
-      worktreeLabel: "main",
-      daemonEpoch: null,
-      title: null,
-      running: true,
-      agentType: "claude",
-      providerSessionId: null,
-      activityState: null,
-      ...entry,
-    })),
-    unavailableWorkspaceIds: [],
-    fetchedAt: 0,
   };
 }

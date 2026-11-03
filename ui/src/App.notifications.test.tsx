@@ -19,7 +19,7 @@ if (typeof window === "undefined") {
   globalThis.removeEventListener = dom.window.removeEventListener.bind(dom.window);
 }
 
-const { act, cleanup, fireEvent, render, renderHook, within } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, renderHook } = await import("@testing-library/react");
 const { afterEach, beforeEach, describe, expect, it, vi } = await import("vitest");
 await import("./test/setup");
 
@@ -252,7 +252,7 @@ const storeState = {
     ],
   },
   sessions: {
-    "sess-1": { id: "sess-1", cwd: "/repo/main", worktreePath: "/repo/main" },
+    "sess-1": { id: "sess-1", cwd: "/repo/main", worktreePath: "/repo/main", backendSessionId: "backend-sess-1" },
     "sess-2": { id: "sess-2", cwd: "/repo/feature", worktreePath: "/repo/feature" },
   },
   worktrees: [
@@ -278,20 +278,14 @@ vi.mock("./state/workspaceRuntime", () => ({
 
 let sidebarProps: {
   onResetAgentState?: (worktree: import("./lib/types").Worktree) => Promise<void>;
-  attention?: import("./components/Sidebar").SidebarAttention;
+  onFocusSupervisorSession?: (sessionRef: string) => void;
+  attention?: unknown;
 } = {};
 vi.mock("./components/Sidebar", () => ({
   SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY: "ferryx.sidebar.collapsedProjects",
   Sidebar: (props: typeof sidebarProps) => {
     sidebarProps = props;
-    const attention = props.attention;
-    return (
-      <div data-testid="mock-sidebar" data-inbox-open={String(attention?.inboxOpen ?? false)}>
-        {attention?.inboxOpen ? (
-          <AttentionInbox rows={attention.rows} onOpen={attention.onOpen} onDismiss={attention.onDismiss} />
-        ) : null}
-      </div>
-    );
+    return <div data-testid="mock-sidebar" />;
   },
 }));
 
@@ -335,7 +329,6 @@ const inboxModule = await vi.importActual<typeof import("./lib/notificationCente
 if (!inboxBox.current) inboxBox.current = inboxModule.createNotificationCenterStore();
 let inbox = inboxBox.current;
 const { notificationEntryId } = await import("./lib/notificationCenter/types");
-const { AttentionInbox } = await import("./features/ferryx/attention/AttentionInbox");
 const { App } = await import("./App");
 const { getWorkspaceRestoreStatus, resetWorkspaceRestore } = await import("./state/workspaceRestore");
 const { getWorkspaceSnapshot, setWorkspaceSnapshot, clearWorkspaceSnapshot } = await import("./state/workspaceSnapshotCache");
@@ -870,18 +863,13 @@ describe("App notification coordinator wiring", () => {
         previousState: "working", state: "done", occurredAt: 100, observed: false });
       return { workspaceId, sessionId, revision: inbox.getSnapshot().entries[0].revision };
     };
-    const rowFor = (clicked: ReturnType<typeof seedUnread>) => {
-      const row = sidebarProps.attention?.rows.find(
-        (candidate) => candidate.workspaceId === clicked.workspaceId && candidate.sessionId === clicked.sessionId,
-      );
-      expect(row).toBeDefined();
-      return { ...row!, revision: clicked.revision };
-    };
+    // A Supervisor panel row names its session `<hostId>:<backendSessionId>`; the desktop focuses
+    // the open pane behind it through the same path a notification uses.
+    const backendOf = (workspaceId: string, sessionId: string) =>
+      workspaceId === "other" ? "backend-other" : `backend-${sessionId}`;
     const clickRow = async (clicked: ReturnType<typeof seedUnread>) => {
-      const row = rowFor(clicked);
-      await act(async () => { sidebarProps.attention!.onOpen(row); });
+      await act(async () => { sidebarProps.onFocusSupervisorSession!(`mac:${backendOf(clicked.workspaceId, clicked.sessionId)}`); });
     };
-    const openInbox = () => act(() => { sidebarProps.attention!.onInboxOpenChange(true); });
 
     it("records focused observed done as seen despite the focus gate", async () => {
       currentActivityTargets = [target];
@@ -958,7 +946,7 @@ describe("App notification coordinator wiring", () => {
     });
 
     it.each([ ["ghost", "sess-1"], ["default", "closed"], ["other", "closed"] ])(
-      "drops a row whose target %s/%s is gone instead of navigating", async (workspaceId, sessionId) => {
+      "does not navigate or acknowledge when target %s/%s is gone", async (workspaceId, sessionId) => {
         seedTwoProjects();
         setWorkspaceSnapshot("other", parkedProjectSnapshot(null));
         const clicked = seedUnread(workspaceId, sessionId);
@@ -968,8 +956,7 @@ describe("App notification coordinator wiring", () => {
         await clickRow(clicked);
         expect(dispatchWorkspaceAction).not.toHaveBeenCalled();
         expect(acknowledge).not.toHaveBeenCalled();
-        expect(inbox.getSnapshot().entries).toEqual([]);
-        expect(sidebarProps.attention?.rows).toEqual([]);
+        expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
       },
     );
 
@@ -1018,76 +1005,34 @@ describe("App notification coordinator wiring", () => {
       }
     });
 
-    it("lists the unread completion in the sidebar inbox and removes it once the row is opened", async () => {
-      currentActivityTargets = [target];
+    it("mounts the Supervisor panel as the sidebar and offers no Inbox state", async () => {
       const view = render(<App />);
-      await act(async () => { await nativeFocusTrackingReady; });
-      nativeFocusChanged?.({ payload: false });
-      act(() => { emitActivityTargets(); });
-      openInbox();
-      const rows = view.getAllByTestId("attention-row");
-      expect(rows).toHaveLength(1);
-      expect(rows[0].dataset.attentionState).toBe("done");
-      expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
-
-      dispatchWorkspaceAction.mockClear();
-      fireEvent.click(rows[0]);
-
-      expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-1" });
-      expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
-      expect(view.queryAllByTestId("attention-row")).toHaveLength(0);
-      expect(view.getByTestId("attention-inbox-empty")).toBeInTheDocument();
-      expect(paneFlashSessions()).toEqual(["sess-1"]);
-    });
-
-    it("dismisses a row from the inbox without navigating", async () => {
-      currentActivityTargets = [target];
-      const view = render(<App />);
-      await act(async () => { await nativeFocusTrackingReady; });
-      nativeFocusChanged?.({ payload: false });
-      act(() => { emitActivityTargets(); });
-      openInbox();
-      dispatchWorkspaceAction.mockClear();
-
-      fireEvent.click(within(view.getByTestId("attention-inbox")).getByRole("button", { name: /^Dismiss / }));
-
-      expect(dispatchWorkspaceAction).not.toHaveBeenCalled();
-      expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
-      expect(view.queryAllByTestId("attention-row")).toHaveLength(0);
-      expect(paneFlashSessions()).toEqual([]);
-      // The pane frame reads activity.seen, so dismissing must clear it too.
-      expect(markSessionActivitySeen).toHaveBeenCalledWith("sess-1", "default");
-    });
-
-    it("dismiss-all clears every listed session's pane attention", async () => {
-      seedUnread("default", "sess-1");
-      seedUnread("other", "sess-2");
-      await act(async () => { render(<App />); });
-      markSessionActivitySeen.mockClear();
-      act(() => { sidebarProps.attention!.onDismissAll(); });
-      expect(inbox.getSnapshot().entries.every((entry) => "seen" in entry.read)).toBe(true);
-      expect(markSessionActivitySeen.mock.calls).toEqual(expect.arrayContaining([["sess-1", "default"], ["sess-2", "other"]]));
+      expect(typeof sidebarProps.onFocusSupervisorSession).toBe("function");
+      expect(sidebarProps.attention).toBeUndefined();
+      expect(view.queryByTestId("attention-inbox")).toBeNull();
     });
 
     // Defect 2: non-mac platforms use ctrlKey instead of metaKey
-    it("keeps the worktree list as the default and toggles the inbox with the notifications shortcut", async () => {
+    it("reveals the collapsed sidebar with the notifications shortcut instead of opening an inbox", async () => {
       const isMac = isMacShortcutPlatform();
       const view = render(<App />);
-      const shortcut = () => act(() => {
+      const key = (code: string, shift: boolean) => act(() => {
         window.dispatchEvent(new KeyboardEvent("keydown", {
-          key: "n", code: "KeyN", metaKey: isMac, ctrlKey: !isMac, shiftKey: true, bubbles: true, cancelable: true,
+          key: code.slice(-1).toLowerCase(), code, metaKey: isMac, ctrlKey: !isMac, shiftKey: shift, bubbles: true, cancelable: true,
         }));
       });
-      expect(view.getByTestId("mock-sidebar").dataset.inboxOpen).toBe("false");
+      key("KeyB", false);
+      expect(view.queryByTestId("mock-sidebar")).toBeNull();
 
-      shortcut();
-      expect(view.getByTestId("mock-sidebar").dataset.inboxOpen).toBe("true");
+      key("KeyN", true);
+      expect(view.getByTestId("mock-sidebar")).toBeInTheDocument();
 
-      shortcut();
-      expect(view.getByTestId("mock-sidebar").dataset.inboxOpen).toBe("false");
+      // Already open: the shortcut leaves it open.
+      key("KeyN", true);
+      expect(view.getByTestId("mock-sidebar")).toBeInTheDocument();
     });
 
-    it("shows the attention count on the collapsed sidebar and reopens the inbox from it", async () => {
+    it("shows the attention count on the collapsed sidebar and reopens the sidebar from it", async () => {
       const isMac = isMacShortcutPlatform();
       currentActivityTargets = [target];
       const view = render(<App />);
@@ -1102,10 +1047,9 @@ describe("App notification coordinator wiring", () => {
       expect(view.queryByTestId("mock-sidebar")).toBeNull();
       expect(view.getByTestId("collapsed-attention-badge")).toHaveTextContent("1");
 
-      fireEvent.click(view.getByRole("button", { name: "Open inbox (1)" }));
+      fireEvent.click(view.getByRole("button", { name: "Open supervisor (1)" }));
 
-      expect(view.getByTestId("mock-sidebar").dataset.inboxOpen).toBe("true");
-      expect(view.getAllByTestId("attention-row")).toHaveLength(1);
+      expect(view.getByTestId("mock-sidebar")).toBeInTheDocument();
     });
 
     it("preserves unread history across unmount and restart from persisted storage", async () => {
