@@ -208,6 +208,9 @@ describe("RemoteApp phone home", () => {
     expect(home).toHaveAttribute("data-destination", "supervisor");
     // The session stays open: the home offers a way back to it.
     expect(within(home).getByTestId("mobile-home-resume")).toBeInTheDocument();
+    // The header names where that session lives; workspace id and worktree label, as the
+    // resume row's subtitle does.
+    expect(within(home).getByTestId("phone-home-context")).toHaveTextContent("ws-1 / main");
   });
 
   it("switches destinations from the tab bar", async () => {

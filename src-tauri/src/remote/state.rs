@@ -1618,6 +1618,38 @@ impl RemoteGatewayState {
         );
         Ok(self.agent_control_settings())
     }
+
+    /// One-step owner enablement: turn agent control on and admit only this owner's own paired
+    /// devices (machine scope with Control permission). Any other device, including one paired
+    /// later, stays refused. Saved like [`Self::set_agent_control`]; blocking file I/O.
+    pub fn enable_agent_control_for_owner(
+        &self,
+    ) -> std::io::Result<crate::agent_control::policy::AgentControlSettings> {
+        use crate::remote::auth::{DeviceAccessScope, DevicePermission};
+        let owner_devices: Vec<String> = self
+            .auth_manager
+            .list_devices()
+            .into_iter()
+            .filter(|device| {
+                device.access_scope == DeviceAccessScope::Machine
+                    && device.permission == DevicePermission::Control
+            })
+            .map(|device| device.id)
+            .collect();
+        let next = self
+            .agent_control_policy
+            .snapshot()
+            .enabled_for_owner_devices(&owner_devices);
+        if let Some(path) = self.agent_control_path.as_deref() {
+            write_private_json(path, &next)?;
+        }
+        self.agent_control_policy.apply(&next);
+        tracing::info!(
+            devices = owner_devices.len(),
+            "agent control enabled for the owner's devices"
+        );
+        Ok(self.agent_control_settings())
+    }
 }
 
 /// Concurrent push dispatches in flight before new alerts are dropped.

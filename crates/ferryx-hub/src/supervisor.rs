@@ -3695,5 +3695,6 @@ pub mod memory;
 pub mod receipts;
 pub mod request;
 pub mod rules;
+pub mod settings;
 pub mod undo;
 pub mod wakes;

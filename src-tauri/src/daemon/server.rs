@@ -6253,7 +6253,8 @@ impl DaemonServer {
                     // their pre-existing semantics for the owner's own shell in a pane, and a
                     // supervisor goal's lane refuses them SUPERVISOR_OWNED anyway.
                     let owner_decision = matches!(req.as_ref(), Ok(DaemonRequest::SupervisorRequestV1 { .. }))
-                        || matches!(req.as_ref(), Ok(DaemonRequest::SupervisorDispatch { request }) if request.mutates());
+                        || matches!(req.as_ref(), Ok(DaemonRequest::SupervisorDispatch { request }) if request.mutates())
+                        || matches!(req.as_ref(), Ok(request) if request.is_owner_supervisor_control());
                     let peer_refusal = if owner_decision {
                         self.supervisor_peer_refusal(origin).await.map(|message| DaemonResponse::Error {
                             code: Some(super::supervisor_peer::FORBIDDEN.into()),
@@ -7543,6 +7544,7 @@ impl DaemonServer {
                     capabilities.push(crate::hub_runtime::SUPERVISOR_READ_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_ENGINE_CAPABILITY.into());
+                    capabilities.push(crate::hub_runtime::SUPERVISOR_CONTROL_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_LAUNCH_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
@@ -7578,6 +7580,54 @@ impl DaemonServer {
                         Err(error) => DaemonResponse::Error {
                             message: format!("Agent control setting task failed: {error}"),
                             code: Some("INTERNAL_ERROR".into()),
+                            details: None,
+                        },
+                    }
+                }
+                Ok(DaemonRequest::AgentControlEnableOwner) => {
+                    let state = Arc::clone(&self.remote_state);
+                    match tokio::task::spawn_blocking(move || state.enable_agent_control_for_owner()).await {
+                        Ok(Ok(settings)) => DaemonResponse::AgentControlSettingsOk { settings },
+                        Ok(Err(error)) => DaemonResponse::Error {
+                            message: format!("Failed to save the agent control setting: {error}"),
+                            code: Some("IO_ERROR".into()),
+                            details: None,
+                        },
+                        Err(error) => DaemonResponse::Error {
+                            message: format!("Agent control setting task failed: {error}"),
+                            code: Some("INTERNAL_ERROR".into()),
+                            details: None,
+                        },
+                    }
+                }
+                Ok(DaemonRequest::SupervisorGlobalPause { paused }) => {
+                    match crate::hub_runtime::set_supervisor_paused(self.remote_state(), paused, "desktop").await {
+                        Ok(changed) => DaemonResponse::SupervisorControlOk {
+                            result: serde_json::json!({ "paused": paused, "changed": changed }),
+                        },
+                        Err(error) => DaemonResponse::Error {
+                            message: error.to_string(),
+                            code: Some(error.code().into()),
+                            details: None,
+                        },
+                    }
+                }
+                Ok(DaemonRequest::SupervisorSettings { enabled }) => {
+                    match crate::hub_runtime::supervisor_settings(self.remote_state(), enabled).await {
+                        Ok(result) => DaemonResponse::SupervisorControlOk { result },
+                        Err(error) => DaemonResponse::Error {
+                            message: error.to_string(),
+                            code: Some(error.code().into()),
+                            details: None,
+                        },
+                    }
+                }
+                Ok(DaemonRequest::SupervisorActionUndo { id }) => {
+                    match crate::hub_runtime::undo_supervisor_action(self.remote_state(), id).await {
+                        Ok(()) => DaemonResponse::SupervisorControlOk { result: serde_json::json!({ "undone": id }) },
+                        Err(error) => DaemonResponse::Error {
+                            message: error.to_string(),
+                            code: Some(error.code().into()),
                             details: None,
                         },
                     }

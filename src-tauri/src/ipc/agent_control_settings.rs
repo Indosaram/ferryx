@@ -61,6 +61,27 @@ pub async fn cmd_agent_control_set(
     .await
 }
 
+/// One-step owner enablement: agent control on, only the owner's own paired machine Control
+/// devices admitted. A non-owner device, including one paired later, stays refused.
+#[tauri::command]
+pub async fn cmd_agent_control_enable_owner(
+    manager: State<'_, Arc<RemoteGatewayManager>>,
+) -> Result<AgentControlSettings, IpcError> {
+    if let Some(client) = manager.daemon_client() {
+        return settings_from(client.send_request(DaemonRequest::AgentControlEnableOwner).await?);
+    }
+    let state = Arc::clone(manager.state().expect("a manager wraps a daemon or a state"));
+    super::run_blocking(move || {
+        state.enable_agent_control_for_owner().map_err(|error| {
+            IpcError::new(
+                IpcErrorCode::IoError,
+                format!("Failed to save the agent control setting: {error}"),
+            )
+        })
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,6 +93,40 @@ mod tests {
         assert_eq!(settings_from(old).unwrap_err().code, IpcErrorCode::DaemonUpgradeRequired);
         let typed = DaemonResponse::Error { message: "disk full".into(), code: Some("IO_ERROR".into()), details: None };
         assert_eq!(settings_from(typed).unwrap_err().code, IpcErrorCode::IoError);
+    }
+
+    #[tokio::test]
+    async fn owner_enablement_admits_the_owner_device_and_refuses_the_rest() {
+        use crate::remote::auth::{DeviceAccessScope, DevicePermission};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new(crate::remote::state::RemoteGatewayState::new_with_paths(
+            Arc::new(crate::terminal::TerminalService::default()),
+            crate::worktree::WorkspaceRegistry::new(),
+            Some(dir.path().join("config.json")),
+            Some(dir.path().join("auth.json")),
+        ));
+        let pair = |permission, scope| {
+            let pin = state.auth_manager.create_scoped_pairing_code(permission, scope).expect("pin");
+            let token = state.auth_manager.exchange_pairing_code(&pin, "fixture").expect("token").0;
+            state.auth_manager.validate_token(&token).expect("device").id
+        };
+        let owner_device = pair(DevicePermission::Control, DeviceAccessScope::Machine);
+        let mirror_device = pair(DevicePermission::Control, DeviceAccessScope::Mirror);
+        let app = tauri::test::mock_builder()
+            .manage(Arc::new(RemoteGatewayManager::new(Arc::clone(&state))))
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        assert!(!state.agent_control_policy.permits(&owner_device), "off until the owner enables it");
+
+        let saved = cmd_agent_control_enable_owner(app.state()).await.expect("enable");
+
+        assert!(saved.enabled);
+        assert!(state.agent_control_policy.permits(&owner_device));
+        assert!(!state.agent_control_policy.permits(&mirror_device), "a mirror device is not an owner device");
+        // A device paired after enablement is not admitted by it.
+        let later = pair(DevicePermission::Control, DeviceAccessScope::Machine);
+        assert!(!state.agent_control_policy.permits(&later), "a later device needs its own enablement");
+        assert!(dir.path().join(crate::agent_control::policy::AGENT_CONTROL_FILE).exists());
     }
 
     #[tokio::test]

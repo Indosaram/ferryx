@@ -63,3 +63,20 @@ Non-owner subscribers never receive prompt bodies.
 `cmd_supervisor_panel`, `cmd_supervisor_converse`, `cmd_session_stop`, `cmd_supervisor_pause`, `cmd_supervisor_answer`, `cmd_supervisor_action_undo`, `cmd_supervisor_dispatch`.
 
 Note: `PanelSnapshot.sessions` lists every session; the UI reducer places each session in exactly one section (decisions, handling, sessions) per plan D5.
+
+## T9 direct controls (implemented)
+
+All of these skip the hub engine. Auth is the existing agent-control gate: machine scope, Control permission, agent control on, device admitted; a mirror, view-only or excluded device gets 403 before any body is read.
+
+| Route | Body -> response |
+|---|---|
+| `POST /api/v1/sessions/{sessionRef}/stop` | optional `{requestId}`; the provider interrupt key via agent control. A ref for another computer is 404, a malformed ref 400. |
+| `POST /api/v1/supervisor/decisions/{sessionRef}/answer` | `{promptId, screenRevision, optionIndex[, requestId]}`; an owner tap, no answer gate; stale revision is 409 `REQUEST_CONFLICT` and nothing is typed. |
+| `POST /api/v1/supervisor/pause` | `{paused}` pauses every supervisor action (hub flag `supervisor_paused`); `{laneKey, paused}` keeps pausing one lane. Same path, one handler. |
+| `POST /api/v1/supervisor/actions/{id}/undo` | runs the entry's undo handle; `restoreRule` is supported, other kinds 422 `UNSUPPORTED`, a spent or missing handle 404. |
+
+Tauri: `cmd_session_stop`, `cmd_supervisor_answer`, `cmd_supervisor_pause`, `cmd_supervisor_action_undo`, `cmd_supervisor_settings`, `cmd_supervisor_dispatch` (explicit `projectId`; no guessing), `cmd_agent_control_enable_owner` (agent control on, only the owner's own paired machine Control devices admitted).
+
+Daemon wire (capability `supervisorControlV1`): `supervisorGlobalPause`, `supervisorSettings`, `supervisorActionUndo`, `agentControlEnableOwner`. Each that changes state is refused from a process inside a Ferryx pane.
+
+Supervisor settings live in hub_meta key `supervisor_settings`: `{enabled, removeAll, ownerHome}`. `enabled` is effective only while the daemon resolves the same owner home (`OMO_HOME`, else `<home>/.omo`) that turned it on. `removeAll` is off by default.

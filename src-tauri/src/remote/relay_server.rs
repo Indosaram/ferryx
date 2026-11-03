@@ -261,6 +261,8 @@ fn agent_control_mutation(method: &Method, path: &str) -> bool {
                 .map(|route| route.split('/').collect::<Vec<_>>())
                 .as_deref(),
             Some(["agent-control", "sessions", _, "send" | "answer" | "stop"])
+                | Some(["sessions", _, "stop"])
+                | Some(["supervisor", "decisions", _, "answer"])
         )
 }
 
@@ -2652,6 +2654,11 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("GET", ["agent-control", "sessions", _])
             | ("GET", ["agent-control", "sessions", _, "wait"])
             | ("POST", ["agent-control", "sessions", _, "send" | "answer" | "stop"])
+            // Direct session stop by `<hostId>:<backendSessionId>` and an owner's decision tap;
+            // the machine authorizes the device and fences the stale screen revision.
+            | ("POST", ["sessions", _, "stop"])
+            | ("POST", ["supervisor", "decisions", _, "answer"])
+            | ("POST", ["supervisor", "actions", _, "undo"])
             // Supervisor view. The lane key rides in the pause body, never in the path.
             | ("GET", ["supervisor"])
             | ("POST", ["supervisor", "pause" | "start"])
@@ -4988,6 +4995,21 @@ mod tests {
         ));
         assert!(allowed_http_route(&Method::GET, "supervisor"));
         assert!(allowed_http_route(&Method::POST, "supervisor/pause"));
+        // T9: direct stop, decision tap and undo are admitted, and only as POST.
+        for route in [
+            "sessions/host:pane-1/stop",
+            "supervisor/decisions/host:pane-1/answer",
+            "supervisor/actions/7/undo",
+        ] {
+            assert!(allowed_http_route(&Method::POST, route), "POST {route}");
+            assert!(!allowed_http_route(&Method::GET, route), "GET {route} stays refused");
+            assert!(!allowed_http_route(&Method::DELETE, route), "DELETE {route} stays refused");
+        }
+        // The typed-into-a-pane routes are outcome-unknown mutations; undo is not a keystroke.
+        assert!(agent_control_mutation(&Method::POST, "/api/v1/sessions/host:pane-1/stop"));
+        assert!(agent_control_mutation(&Method::POST, "/api/v1/supervisor/decisions/host:pane-1/answer"));
+        assert!(!agent_control_mutation(&Method::POST, "/api/v1/supervisor/actions/7/undo"));
+        assert!(!agent_control_mutation(&Method::GET, "/api/v1/sessions/host:pane-1/stop"));
         assert!(allowed_http_route(&Method::POST, "supervisor/start"));
         assert!(allowed_http_route(&Method::POST, "supervisor/request"));
         assert!(allowed_http_route(&Method::GET, "supervisor/conversation"));

@@ -1136,6 +1136,27 @@ pub enum DaemonRequest {
         #[serde(default)]
         excluded_device_ids: Vec<String>,
     },
+    /// One-step owner enablement: agent control on, only the owner's own paired machine Control
+    /// devices admitted. Gated by `supervisorControlV1`.
+    AgentControlEnableOwner,
+    /// The owner pauses or resumes every supervisor action (the hub-wide flag, not one lane).
+    /// Never goes through the engine. Gated by `supervisorControlV1`.
+    #[serde(rename_all = "camelCase")]
+    SupervisorGlobalPause {
+        paused: bool,
+    },
+    /// Read the persisted supervisor settings, or with `enabled` set the owner turns the
+    /// supervisor on or off first. Gated by `supervisorControlV1`.
+    #[serde(rename_all = "camelCase")]
+    SupervisorSettings {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enabled: Option<bool>,
+    },
+    /// Undo one action-log entry through its undo handle. Gated by `supervisorControlV1`.
+    #[serde(rename_all = "camelCase")]
+    SupervisorActionUndo {
+        id: i64,
+    },
 }
 
 /// What a prompt asks for: pick one of its options, approve or reject an action, or type text.
@@ -1188,6 +1209,21 @@ pub struct PairedDagBinding {
     pub host_id: String,
     pub generation: crate::scoped_contracts::Epoch,
     pub remote_workspace_id: String,
+}
+
+impl DaemonRequest {
+    /// A request that changes what the supervisor may do or undoes what it did. The daemon
+    /// refuses it from a process running inside a Ferryx pane: a worker agent must not turn the
+    /// supervisor on, resume it, widen agent control or undo its log.
+    pub fn is_owner_supervisor_control(&self) -> bool {
+        match self {
+            Self::SupervisorGlobalPause { .. }
+            | Self::SupervisorActionUndo { .. }
+            | Self::AgentControlEnableOwner => true,
+            Self::SupervisorSettings { enabled } => enabled.is_some(),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1466,6 +1502,12 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     AgentIntegrationOk {
         enabled: bool,
+    },
+    /// The result of a direct supervisor control (`SupervisorGlobalPause`, `SupervisorSettings`,
+    /// `SupervisorActionUndo`).
+    #[serde(rename_all = "camelCase")]
+    SupervisorControlOk {
+        result: serde_json::Value,
     },
     /// The admission outcome (`submit`) or the dispatch status (`status`).
     #[serde(rename_all = "camelCase")]
@@ -2151,6 +2193,42 @@ mod tests {
         let text = serde_json::to_string(&ok).unwrap();
         assert!(text.contains(r#""type":"supervisorGoalOk""#), "{text}");
         assert!(matches!(serde_json::from_str::<DaemonResponse>(&text).unwrap(), DaemonResponse::SupervisorGoalOk { .. }));
+    }
+
+    #[test]
+    fn direct_supervisor_controls_round_trip_and_only_changes_are_owner_gated() {
+        let pause = serde_json::json!({"type":"supervisorGlobalPause","paused":true});
+        let request: DaemonRequest = serde_json::from_value(pause.clone()).unwrap();
+        assert!(matches!(request, DaemonRequest::SupervisorGlobalPause { paused: true }));
+        assert_eq!(serde_json::to_value(&request).unwrap(), pause);
+        assert!(request.is_owner_supervisor_control());
+
+        let undo: DaemonRequest =
+            serde_json::from_value(serde_json::json!({"type":"supervisorActionUndo","id":7})).unwrap();
+        assert!(matches!(undo, DaemonRequest::SupervisorActionUndo { id: 7 }));
+        assert!(undo.is_owner_supervisor_control());
+
+        let enable: DaemonRequest =
+            serde_json::from_value(serde_json::json!({"type":"agentControlEnableOwner"})).unwrap();
+        assert!(enable.is_owner_supervisor_control());
+
+        let read: DaemonRequest =
+            serde_json::from_value(serde_json::json!({"type":"supervisorSettings"})).unwrap();
+        assert!(matches!(read, DaemonRequest::SupervisorSettings { enabled: None }));
+        assert!(!read.is_owner_supervisor_control(), "reading the settings changes nothing");
+        let turn_on: DaemonRequest =
+            serde_json::from_value(serde_json::json!({"type":"supervisorSettings","enabled":true})).unwrap();
+        assert!(turn_on.is_owner_supervisor_control(), "turning it on is an owner decision");
+        assert_eq!(
+            serde_json::to_value(&read).unwrap(),
+            serde_json::json!({"type":"supervisorSettings"}),
+            "an absent switch is omitted on the wire"
+        );
+        assert!(!DaemonRequest::SupervisorSnapshot.is_owner_supervisor_control());
+
+        let ok = DaemonResponse::SupervisorControlOk { result: serde_json::json!({"paused": true}) };
+        let text = serde_json::to_string(&ok).unwrap();
+        assert!(text.contains(r#""type":"supervisorControlOk""#), "{text}");
     }
 
     #[test]

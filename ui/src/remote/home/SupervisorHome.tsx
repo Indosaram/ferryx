@@ -44,6 +44,8 @@ export type SupervisorHomeProps = {
   readonly phoneHeader?: boolean;
   /** Trailing header action (the Account entry). */
   readonly headerAction?: ReactNode;
+  /** Where the session already open on this phone lives, shown under the header title. */
+  readonly contextTitle?: string | null;
   /** Pull-to-refresh on the list. Absent: pulling does nothing. */
   readonly onRefresh?: RefreshHandler;
 };
@@ -210,6 +212,7 @@ export function SupervisorHome({
   onRetry,
   phoneHeader = false,
   headerAction,
+  contextTitle,
   onRefresh,
 }: SupervisorHomeProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -283,7 +286,7 @@ export function SupervisorHome({
 
   return (
     <div data-testid="supervisor-home" data-headline={headline.kind} className="flex min-h-0 flex-1 flex-col bg-chat-screen">
-      {phoneHeader ? <PhoneHomeHeader title="Supervisor" trailing={headerAction} /> : null}
+      {phoneHeader ? <PhoneHomeHeader title="Supervisor" contextTitle={contextTitle} trailing={headerAction} /> : null}
       <div ref={scrollRef} className="relative flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-y-contain scrollbar-sleek">
         {onRefresh ? <PullToRefreshIndicator {...pull} /> : null}
         <div className={cn("flex w-full flex-col gap-5 px-4 pb-6", phoneHeader ? null : "pt-4", pullContent.className)} style={pullContent.style}>

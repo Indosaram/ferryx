@@ -24,7 +24,13 @@ export type PhoneHomeViewProps = {
   };
   readonly worktrees: ReactNode;
   /** The session already open on this phone; tapping it returns to the Session screen. */
-  readonly resume: { readonly title: string; readonly subtitle: string; readonly onOpen: () => void } | null;
+  readonly resume: {
+    readonly title: string;
+    readonly subtitle: string;
+    /** Where the open session lives (workspace / worktree); titles every home header. */
+    readonly context?: string;
+    readonly onOpen: () => void;
+  } | null;
   /** The Account entry every destination's header carries. */
   readonly accountAction?: ReactNode;
   /**
@@ -45,7 +51,7 @@ export function PhoneHomeView({ destination, onSelectTab, supervisor, inbox, wor
     <div data-testid="mobile-home" data-destination={destination} className="flex min-h-0 min-w-0 flex-1 flex-col bg-chat-screen pt-[env(safe-area-inset-top)] px-safe">
       <main id={PHONE_HOME_PANEL_ID} role="tabpanel" aria-labelledby={phoneHomeTabId(destination)} className="flex min-h-0 min-w-0 flex-1 flex-col">
         {destination === "supervisor" ? (
-          <SupervisorHome {...supervisor} phoneHeader headerAction={accountAction} onRefresh={refresh} />
+          <SupervisorHome {...supervisor} phoneHeader headerAction={accountAction} contextTitle={resume?.context ?? null} onRefresh={refresh} />
         ) : destination === "inbox" ? (
           <InboxHome
             rows={inbox.rows}
@@ -55,6 +61,7 @@ export function PhoneHomeView({ destination, onSelectTab, supervisor, inbox, wor
             onOpen={inbox.onOpen}
             onBrowseWorktrees={() => onSelectTab("worktrees")}
             headerAction={accountAction}
+            contextTitle={resume?.context ?? null}
             onRefresh={refresh}
           />
         ) : (

@@ -21,18 +21,20 @@ export type InboxHomeProps = {
   /** Leaves the Inbox for the Worktrees tab, the next step when nothing waits. */
   readonly onBrowseWorktrees?: () => void;
   readonly headerAction?: ReactNode;
+  /** Where the session already open on this phone lives, shown under the header title. */
+  readonly contextTitle?: string | null;
   /** Pull-to-refresh on the list. Absent: pulling does nothing. */
   readonly onRefresh?: RefreshHandler;
 };
 
-export function InboxHome({ rows, prompts, now, loading, onOpen, onBrowseWorktrees, headerAction, onRefresh }: InboxHomeProps) {
+export function InboxHome({ rows, prompts, now, loading, onOpen, onBrowseWorktrees, headerAction, contextTitle, onRefresh }: InboxHomeProps) {
   const waiting = rows.filter((row) => row.state === "needs-you").length;
   const scrollRef = useRef<HTMLDivElement>(null);
   const pull = usePullToRefresh(scrollRef, onRefresh);
   const pullContent = pullContentProps(pull);
   return (
     <div data-testid="inbox-home" className="flex min-h-0 flex-1 flex-col bg-chat-screen">
-      <PhoneHomeHeader title="Inbox" trailing={headerAction} />
+      <PhoneHomeHeader title="Inbox" contextTitle={contextTitle} trailing={headerAction} />
       <div ref={scrollRef} className="relative flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-y-contain scrollbar-sleek">
         {onRefresh ? <PullToRefreshIndicator {...pull} /> : null}
         <div className={cn("flex w-full flex-1 flex-col gap-3 px-4 pb-6", pullContent.className)} style={pullContent.style}>

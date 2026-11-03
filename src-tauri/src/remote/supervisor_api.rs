@@ -18,10 +18,14 @@ pub(crate) const SUPERVISOR_INVALID_STATE_CODE: &str = "INVALID_STATE";
 /// The wire code a daemon without an open hub answers with, as the desktop's own request does.
 pub(crate) const SUPERVISOR_UNAVAILABLE_CODE: &str = "SUPERVISOR_UNAVAILABLE";
 
+/// `POST /api/v1/supervisor/pause` body. With `laneKey` it pauses or resumes that one lane (the
+/// original contract). Without it the owner pauses or resumes the whole supervisor (`{paused}`,
+/// the frozen panel contract): the hub-wide flag recovery and answers read before they act.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct PauseBody {
-    lane_key: String,
+    #[serde(default)]
+    lane_key: Option<String>,
     paused: bool,
 }
 
@@ -52,22 +56,64 @@ pub(crate) async fn http_pause(
     let Ok(Json(body)) = body else {
         return reference_chat_error(
             ScopeErrorCode::InvalidRequest,
-            "the pause body must be {laneKey, paused}",
+            "the pause body must be {paused} or {laneKey, paused}",
         );
     };
     let by = format!("remote:{}", device.id);
-    match crate::hub_runtime::set_lane_paused(&state, &body.lane_key, body.paused, &by).await {
+    let Some(lane_key) = body.lane_key else {
+        return match crate::hub_runtime::set_supervisor_paused(&state, body.paused, &by).await {
+            Ok(changed) => no_store(serde_json::json!({ "paused": body.paused, "changed": changed })),
+            Err(error) => control_refusal(&error),
+        };
+    };
+    match crate::hub_runtime::set_lane_paused(&state, &lane_key, body.paused, &by).await {
         Ok(changed) => (
             StatusCode::OK,
             [(header::CACHE_CONTROL, "no-store")],
             Json(serde_json::json!({
-                "laneKey": body.lane_key,
+                "laneKey": lane_key,
                 "paused": body.paused,
                 "changed": changed,
             })),
         )
             .into_response(),
         Err(error) => pause_refusal(&error),
+    }
+}
+
+/// The machine error envelope one direct-control refusal answers with.
+fn control_refusal(error: &crate::hub_runtime::SupervisorControlError) -> Response {
+    use crate::hub_runtime::SupervisorControlError as Refused;
+    use ferryx_hub::supervisor::undo::UndoError;
+    let status = match error {
+        Refused::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        Refused::NoOwnerHome => StatusCode::BAD_REQUEST,
+        Refused::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        Refused::Undo(UndoError::NotSupported) => StatusCode::UNPROCESSABLE_ENTITY,
+        Refused::Undo(UndoError::Nothing(_)) => StatusCode::NOT_FOUND,
+        Refused::Undo(UndoError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    machine_error_with_details(status, error.code(), &error.to_string(), serde_json::Map::new())
+}
+
+/// `POST /api/v1/supervisor/actions/{id}/undo`: the panel's Undo on one action-log line. Only a
+/// machine Control device the agent-control policy admits may undo; no body.
+pub(crate) async fn http_action_undo(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let device = match agent_control_service::http_device(&state, &headers, true) {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+    let Ok(id) = id.parse::<i64>() else {
+        return reference_chat_error(ScopeErrorCode::InvalidRequest, "the action id must be a number");
+    };
+    tracing::info!(device = %device.id, id, "supervisor action undo requested");
+    match crate::hub_runtime::undo_supervisor_action(&state, id).await {
+        Ok(()) => no_store(serde_json::json!({ "undone": id })),
+        Err(error) => control_refusal(&error),
     }
 }
 
