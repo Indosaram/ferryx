@@ -745,14 +745,16 @@ const norm = (text) => text.toLowerCase().replace(/[^a-z0-9:%./]/g, "");
  * prompt's text: the bounding box of strongly red pixels within 24px above or below the
  * prompt's centre line. Returns its centre and size, or null when no button-sized red area.
  */
-function findRedButton(path, prompt) {
+const isDestructiveRed = ([r, g, b]) => r > 170 && r - g > 80 && r - b > 80;
+/** Chrome's filled primary button (Remove in its uninstall dialog): white text on blue. */
+const isChromeBlue = ([r, g, b]) => b > 170 && b - r > 110 && b - g > 60;
+function findRedButton(path, prompt, matches = isDestructiveRed) {
   const image = decodePng(path);
   const y0 = Math.max(0, prompt.y - 24), y1 = Math.min(image.height - 1, prompt.y + 24);
   let left = Infinity, right = -1, top = Infinity, bottom = -1, count = 0;
   for (let y = y0; y <= y1; y += 1) {
     for (let x = Math.round(prompt.right ?? prompt.x); x < image.width; x += 1) {
-      const [r, g, b] = image.rgb(x, y);
-      if (r > 170 && r - g > 80 && r - b > 80) {
+      if (matches(image.rgb(x, y))) {
         left = Math.min(left, x); right = Math.max(right, x); top = Math.min(top, y); bottom = Math.max(bottom, y);
         count += 1;
       }
@@ -2259,13 +2261,24 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
         const deadline = Date.now() + 30000;
         do {
           await sleep(1500);
-          const words = ocr(probeShot()) ?? [];
+          const path = probeShot();
+          const words = ocr(path) ?? [];
           const cancels = words.filter((word) => word.text === "Cancel");
           const hit = words.find((word) => word.text === "Remove"
             && cancels.some((cancel) => Math.abs(cancel.top - word.top) <= 12 && word.left > cancel.left && word.left - (cancel.left + cancel.width) < 120));
           if (hit) {
             const at = [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)];
-            return { ...host.click(...at), at };
+            return { ...host.click(...at), at, via: "ocr" };
+          }
+          // White on blue, OCR reads the label partly or not at all (run 41653314878 probe-095):
+          // the filled blue button on a Cancel's line, right of it.
+          for (const cancel of cancels) {
+            const anchor = { x: cancel.left, y: cancel.top + Math.round(cancel.height / 2), right: cancel.left + cancel.width };
+            const button = findRedButton(path, anchor, isChromeBlue);
+            if (button && button.x - anchor.right < 160) {
+              const at = [button.x, button.y];
+              return { ...host.click(...at), at, via: "blue button right of Cancel", button };
+            }
           }
           if (!ubolOnDisk().prefs && !ubolWords(words).length) return { ok: true, skipped: "already removed, no Chrome dialog" };
         } while (Date.now() < deadline);
