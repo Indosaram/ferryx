@@ -829,8 +829,11 @@ pub struct RemoteGatewayState {
     /// Last desktop window-focus report from the GUI and when it arrived. Selection is not
     /// focus: this is the native window's own focus, and a stale report counts as unfocused.
     desktop_window_focus: RwLock<Option<(bool, std::time::Instant)>>,
-    /// New-card dedupe and the 30 s batch window for decision pushes.
-    pub(crate) decision_gate: crate::remote::push::DecisionGate,
+    /// New-card dedupe and the 30 s batch window for decision pushes (hub policy).
+    pub(crate) decision_gate: ferryx_hub::supervisor::push_policy::DecisionGate,
+    /// Which phone or browser clients show the panel right now; any one holds pushes back.
+    pub(crate) panel_presence: ferryx_hub::supervisor::push_policy::PanelPresence,
+    panel_push_started: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     pub(crate) machine_owned_override: MachineOwnedOverride,
     pub workspace_registry: WorkspaceRegistry,
@@ -1085,7 +1088,9 @@ impl RemoteGatewayState {
             agent_control_audit,
             push,
             desktop_window_focus: RwLock::new(None),
-            decision_gate: crate::remote::push::DecisionGate::default(),
+            decision_gate: ferryx_hub::supervisor::push_policy::DecisionGate::default(),
+            panel_presence: ferryx_hub::supervisor::push_policy::PanelPresence::default(),
+            panel_push_started: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             machine_owned_override: RwLock::new(None),
             active_selection: RwLock::new(None),
@@ -1395,49 +1400,86 @@ impl RemoteGatewayState {
         )
     }
 
+    /// Starts the task that feeds the owner panel channel (`hub_runtime::subscribe_panel_events`)
+    /// to phone push. Idempotent per state. Subscribes before it spawns, so a frame published
+    /// right after this returns is not missed.
+    pub fn start_panel_push_dispatch(self: &Arc<Self>) {
+        self.start_panel_push_from(crate::hub_runtime::subscribe_panel_events());
+    }
+
+    /// [`Self::start_panel_push_dispatch`] over an explicit frame source.
+    pub(crate) fn start_panel_push_from(self: &Arc<Self>, mut frames: broadcast::Receiver<serde_json::Value>) {
+        if self.panel_push_started.load(Ordering::Acquire) {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!("phone push dispatch not started: no async runtime");
+            return;
+        };
+        if self.panel_push_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let state = Arc::downgrade(self);
+        runtime.spawn(async move {
+            loop {
+                let frame = match frames.recv().await {
+                    Ok(frame) => frame,
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "push dispatch lagged behind panel frames");
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                };
+                let Some(state) = state.upgrade() else { return };
+                state.handle_panel_frame(&frame).await;
+            }
+        });
+    }
+
     /// Feeds one owner-channel panel frame to phone push. Only a `panel.decision` frame that
     /// carries a new escalation can push; every other frame (retries and recovery are
     /// `panel.action`, finished sessions are `panel.session`) is ignored, and a resolved
     /// decision (`decision: null`) re-arms its session. Returns how many sends were made now.
     pub async fn handle_panel_frame(self: &Arc<Self>, frame: &serde_json::Value) -> usize {
-        use ferryx_hub::supervisor::panel_contract::Escalation;
-        if frame.get("type").and_then(|kind| kind.as_str()) != Some("panel.decision") {
-            return 0;
+        use ferryx_hub::supervisor::push_policy::{classify_frame, PanelFrame};
+        match classify_frame(frame) {
+            PanelFrame::Ignore => 0,
+            PanelFrame::Resolved { session_ref } => {
+                self.decision_gate.resolved(&session_ref);
+                0
+            }
+            PanelFrame::Decision { session_ref, prompt_id } => {
+                self.push_decision(&session_ref, &prompt_id, std::time::Instant::now()).await
+            }
         }
-        let Some(session_ref) = frame.get("sessionRef").and_then(|value| value.as_str()) else {
-            return 0;
-        };
-        let decision = frame.get("decision").filter(|value| !value.is_null());
-        let Some(decision) = decision else {
-            self.decision_gate.resolved(session_ref);
-            return 0;
-        };
-        let Ok(escalation) = serde_json::from_value::<Escalation>(decision.clone()) else {
-            tracing::warn!("ignoring a malformed panel.decision frame");
-            return 0;
-        };
-        self.push_decision(session_ref, &escalation.prompt.prompt_id, std::time::Instant::now())
-            .await
     }
 
-    /// The decision push policy: not muted, a card this session has not announced, no focused
-    /// desktop; then at most one push per batch window, later cards held for the flush.
+    /// Whether any client shows the panel: the focused desktop window, or a phone or browser
+    /// whose panel is in the foreground.
+    pub fn panel_shown(&self, now: std::time::Instant) -> bool {
+        self.desktop_window_focus_suppresses_push() || self.panel_presence.shown(now)
+    }
+
+    /// A paired client reports whether it shows the panel (sent on show, hide and a heartbeat).
+    pub fn set_panel_visible(&self, device_id: &str, visible: bool) {
+        self.panel_presence.report(device_id, visible, std::time::Instant::now());
+    }
+
+    /// The decision push policy (hub `push_policy`): not muted, a card this session has not
+    /// announced, no client showing the panel; then at most one push per batch window, later
+    /// cards held for the flush.
     pub(crate) async fn push_decision(
         self: &Arc<Self>,
         session_ref: &str,
         prompt_id: &str,
         now: std::time::Instant,
     ) -> usize {
-        use crate::remote::push::WindowVerdict;
-        if self.push.store.is_session_muted(session_ref)
-            || !self.decision_gate.is_new_card(session_ref, prompt_id)
-            || self.desktop_window_focus_suppresses_push()
-        {
-            return 0;
-        }
-        match self.decision_gate.window(session_ref, now) {
-            WindowVerdict::Send => self.dispatch_decision_push(&[session_ref.to_string()]).await,
-            WindowVerdict::Held { flush_in } => {
+        use ferryx_hub::supervisor::push_policy::Admission;
+        let muted = self.push.store.is_session_muted(session_ref);
+        match self.decision_gate.admit(session_ref, prompt_id, muted, self.panel_shown(now), now) {
+            Admission::Skipped(_) => 0,
+            Admission::Send => self.dispatch_decision_push(&[session_ref.to_string()]).await,
+            Admission::Held { flush_in } => {
                 if let Some(wait) = flush_in {
                     let state = Arc::downgrade(self);
                     tokio::spawn(async move {
@@ -1452,12 +1494,15 @@ impl RemoteGatewayState {
         }
     }
 
-    /// Sends the cards held by the batch window as one push. Cards muted or shown on a focused
-    /// desktop in the meantime are dropped.
+    /// Sends the cards held by the batch window as one push. Cards muted in the meantime, or
+    /// any card while a client shows the panel, are dropped.
     pub(crate) async fn flush_decision_batch(&self, now: std::time::Instant) -> usize {
-        let mut held = self.decision_gate.take_held(now);
-        held.retain(|session_ref| !self.push.store.is_session_muted(session_ref));
-        if held.is_empty() || self.desktop_window_focus_suppresses_push() {
+        let held = self.decision_gate.flush(
+            now,
+            |session_ref| self.push.store.is_session_muted(session_ref),
+            self.panel_shown(now),
+        );
+        if held.is_empty() {
             return 0;
         }
         self.dispatch_decision_push(&held).await

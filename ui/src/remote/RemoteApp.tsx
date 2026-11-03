@@ -34,7 +34,11 @@ import { MobileSessionSwitcherSheet } from "./chat/MobileSessionSwitcherSheet";
 import { MobileOverflowSheet } from "./chat/MobileOverflowSheet";
 import { MobileSheet } from "./chat/MobileSheet";
 import { PhoneAlertsSettings } from "../components/settings/NotificationsSection";
-import type { PushRequest } from "../lib/pushSubscription";
+import { muteSessionPush, type PushRequest } from "../lib/pushSubscription";
+import type { SidebarViewId } from "../components/sidebar/SidebarViewTabs";
+import { DecisionFocusContext, useDecisionDeepLink, type DecisionFocus } from "./decisionDeepLink";
+import { usePanelPresence } from "./panelPresence";
+import { SessionMuteContext, type SessionMute } from "./sessionMute";
 import { AttentionInbox } from "../features/ferryx/attention/AttentionInbox";
 import { remoteInboxEntries, useRemoteInbox, type RemoteInboxTransport } from "./remoteInbox";
 import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
@@ -4986,6 +4990,36 @@ export const RemoteHostConnection: React.FC<{
     });
   }, [alertSessionId, token, pending, model, selectContext, phoneHome, openPhoneScreen]);
 
+  /* A tapped decision alert opens `/?panel=decision&session=<sessionRef>`, or the service worker
+     posts `ferryx:open-url` to this window. The panel is brought up on the surface in use (the
+     phone's Supervisor home, the wide layout's Supervisor tab) and the card is focused by its
+     exact sessionRef; a focus no card claims expires with a note instead of landing later. */
+  const [sidebarView, setSidebarView] = useState<SidebarViewId>("worktrees");
+  const [requestedSidebarView, setRequestedSidebarView] = useState<{ view: SidebarViewId; nonce: number } | null>(null);
+  const showPanelForDecision = useCallback((_focus: DecisionFocus) => {
+    if (phoneHome) phoneNav.selectTab("supervisor");
+    else if (desktopSidebar) setRequestedSidebarView((prev) => ({ view: "supervisor", nonce: (prev?.nonce ?? 0) + 1 }));
+  }, [phoneHome, phoneNav.selectTab, desktopSidebar]);
+  const decisionFocus = useDecisionDeepLink(showPanelForDecision, (expired) => {
+    if (expired.sessionRef) {
+      toast.error("That decision isn't waiting anymore", {
+        description: "It was answered, or its session ended.",
+      });
+    }
+  }, Boolean(token || accountSessionToken));
+  const decisionFocusApi = useMemo(
+    () => ({ focus: decisionFocus.focus, acknowledge: decisionFocus.acknowledge }),
+    [decisionFocus.focus, decisionFocus.acknowledge],
+  );
+  /* The panel is the screen: tell the gateway, so decision pushes are held back. */
+  const panelIsScreen = (phoneHome && phoneNav.screen.kind === "home" && phoneNav.destination === "supervisor")
+    || (desktopSidebar && isAccountMode && sidebarView === "supervisor");
+  usePanelPresence(token ? phonePushRequest : null, panelIsScreen);
+  const sessionMute = useMemo<SessionMute | null>(
+    () => (token ? (sessionRef, muted) => muteSessionPush(phonePushRequest, sessionRef, muted) : null),
+    [token, phonePushRequest],
+  );
+
   if ((!token && !accountSessionToken) || magicLinkActive) {
     return (
       <AccountLoginPage
@@ -5408,6 +5442,8 @@ export const RemoteHostConnection: React.FC<{
   );
 
   return (
+    <DecisionFocusContext.Provider value={decisionFocusApi}>
+    <SessionMuteContext.Provider value={sessionMute}>
     <div className="flex h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden remote-app-root bg-background text-foreground" style={visualViewportBox ? { position: "fixed", insetInline: 0, top: visualViewportBox.top, height: visualViewportBox.height } : undefined}>
       <Toaster />
       {showPhoneHome ? (
@@ -5698,6 +5734,8 @@ export const RemoteHostConnection: React.FC<{
         activeMachineId={activeMachineId}
         sidebarSections={sidebarSections}
         supervisor={sidebarSupervisor}
+        onSidebarViewChange={setSidebarView}
+        requestedView={requestedSidebarView}
         pickerStatus={
           accountPreselection && creationError ? (
             <>
@@ -6067,5 +6105,7 @@ export const RemoteHostConnection: React.FC<{
         />
       ) : null}
     </div>
+    </SessionMuteContext.Provider>
+    </DecisionFocusContext.Provider>
   );
 };

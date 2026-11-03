@@ -456,6 +456,9 @@ type RemoteWorkspaceMirrorProps = {
   /** Account mode: the Supervisor tab's content; absent hides the tab. */
   supervisor?: RemoteSidebarSupervisor;
   onSidebarViewChange?: (view: SidebarViewId) => void;
+  /** Switches the sidebar view from outside (a decision deep link opens the Supervisor tab);
+   * `nonce` lets the same view be requested again after the person left it. */
+  requestedView?: { readonly view: SidebarViewId; readonly nonce: number } | null;
   /** Inventory loading/offline/error rows, rendered above the tree. */
   pickerStatus?: ReactNode;
   /**
@@ -593,6 +596,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   sidebarSections = [],
   supervisor,
   onSidebarViewChange,
+  requestedView = null,
   pickerStatus,
   inline = false,
   children,
@@ -627,6 +631,14 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
     setView(next);
     onSidebarViewChange?.(next);
   };
+  const requestedNonce = requestedView?.nonce;
+  useEffect(() => {
+    if (!requestedView || !desktopSidebar) return;
+    if (requestedView.view === "supervisor" && !supervisor) return;
+    setView(requestedView.view);
+    onSidebarViewChange?.(requestedView.view);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by the request nonce; callback identity must not replay it
+  }, [requestedNonce, desktopSidebar]);
 
   const attentionRows = model.context.workspaceId
     ? buildRemoteAttentionRows(model.context.workspaceId, model.context.workspaceId, paneTabs, model.context.activeTabId)

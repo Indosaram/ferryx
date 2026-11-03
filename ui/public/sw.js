@@ -82,10 +82,29 @@ self.addEventListener('fetch', (event) => {
 const TEST_ALERT_TAG = 'ferryx-test';
 const DECISION_TAG = 'ferryx-decision';
 
-// A decision push carries its own deep link (`/?panel=decision&session=<sessionRef>`); only a
-// path on this origin is followed.
+// A decision push carries its own deep link (`/?panel=decision&session=<sessionRef>`). Only a
+// path that resolves to this origin is followed: `//host` and `/\host` are what a browser reads
+// as another origin, and a control character is never part of a path we issued.
 function deepLink(data) {
-  return typeof data.url === 'string' && data.url.startsWith('/') && !data.url.startsWith('//') ? data.url : '';
+  const raw = typeof data.url === 'string' ? data.url : '';
+  if (!raw.startsWith('/') || /[\\\u0000-\u001f]/.test(raw)) return '';
+  try {
+    const url = new URL(raw, self.location.origin);
+    if (url.origin !== self.location.origin) return '';
+    return url.pathname + url.search + url.hash;
+  } catch (_) {
+    return '';
+  }
+}
+
+// A decision alert never falls back to `#session=`: its agent_id is a `<hostId>:<sessionId>`
+// ref, which the session route would read as a backend id and open the wrong (or no) session.
+const PANEL_URL = '/?panel=decision';
+
+function alertUrl(data, sessionId) {
+  const link = deepLink(data);
+  if (link) return link;
+  return data.state === 'decision' ? PANEL_URL : sessionUrl(sessionId);
 }
 
 function sessionUrl(sessionId) {
@@ -107,7 +126,7 @@ function notificationFromPush(payload) {
       data: {
         sessionId,
         state: typeof data.state === 'string' ? data.state : '',
-        url: deepLink(data) || sessionUrl(sessionId),
+        url: alertUrl(data, sessionId),
       },
     },
   };
@@ -131,13 +150,14 @@ self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const data = event.notification.data || {};
   const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
-  const path = deepLink(data) || sessionUrl(sessionId);
+  const decision = data.state === 'decision';
+  const path = alertUrl(data, sessionId);
   const url = new URL(path, self.location.origin).href;
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windows) => {
       const open = windows.find((client) => new URL(client.url).origin === self.location.origin);
       if (open) {
-        if (data.state === 'decision' && deepLink(data)) open.postMessage({ type: 'ferryx:open-url', url: path });
+        if (decision) open.postMessage({ type: 'ferryx:open-url', url: path });
         else if (sessionId) open.postMessage({ type: 'ferryx:open-session', sessionId });
         return open.focus();
       }

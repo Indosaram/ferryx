@@ -135,6 +135,19 @@ pub async fn cmd_supervisor_read(
     read_from(daemon_client.send_request(DaemonRequest::SupervisorReadV1 { request }).await?)
 }
 
+/// The Supervisor panel snapshot (`PanelSnapshot`, camelCase): sessions, handling, log, rules,
+/// decisions, the pause flag and `setupRequired` when no hub runs.
+#[tauri::command]
+pub async fn cmd_supervisor_panel(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+) -> Result<serde_json::Value, IpcError> {
+    read_from(
+        daemon_client
+            .send_request(DaemonRequest::SupervisorReadV1 { request: SupervisorReadAction::Panel })
+            .await?,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

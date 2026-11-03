@@ -568,13 +568,6 @@ impl PushKind {
     }
 }
 
-/// The path a decision push opens: the panel on that session's card. `session_ref` is
-/// `<hostId>:<backendSessionId>`, so it is percent-encoded.
-pub fn decision_deep_link(session_ref: &str) -> String {
-    let encoded: String = url::form_urlencoded::byte_serialize(session_ref.as_bytes()).collect();
-    format!("/?panel=decision&session={encoded}")
-}
-
 /// The notification for decision cards: one names its agent and worktree and opens its card;
 /// several held back by the batch window collapse into one that opens the panel.
 pub fn decision_notification(refs: &[String], agent: &str, worktree: Option<&str>) -> AgentStateNotification {
@@ -588,7 +581,7 @@ pub fn decision_notification(refs: &[String], agent: &str, worktree: Option<&str
                 Some(worktree) => format!("{agent} in {worktree}"),
                 None => agent.to_string(),
             },
-            decision_deep_link(only),
+            ferryx_hub::supervisor::push_policy::decision_deep_link(only),
         ),
         _ => (
             String::new(),
@@ -596,7 +589,7 @@ pub fn decision_notification(refs: &[String], agent: &str, worktree: Option<&str
             None,
             "Decisions needed".to_string(),
             format!("{} sessions need a decision", refs.len()),
-            "/?panel=decision".to_string(),
+            ferryx_hub::supervisor::push_policy::PANEL_DEEP_LINK.to_string(),
         ),
     };
     AgentStateNotification {
@@ -607,85 +600,6 @@ pub fn decision_notification(refs: &[String], agent: &str, worktree: Option<&str
         title,
         body,
         url: Some(url),
-    }
-}
-
-/// Sessions remembered at once. Past the bound the dedupe memory restarts.
-const TRACKED_SESSIONS: usize = 1024;
-
-/// Batch window for decision pushes: the hub's 30 s (`lanes::dispatch::BATCH_WINDOW_SECS`).
-/// The hub constant is crate-private, so the value is mirrored here.
-pub const DECISION_BATCH_WINDOW: Duration = Duration::from_secs(30);
-
-/// What the window does with a decision that passed every other check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WindowVerdict {
-    /// Send now.
-    Send,
-    /// Held for the open window; `flush_in` is set for the first held card, which owns the flush.
-    Held { flush_in: Option<Duration> },
-}
-
-#[derive(Debug, Default)]
-struct DecisionGateInner {
-    /// The prompt id last announced per session ref: a repeat of it is not a new card.
-    announced: HashMap<String, String>,
-    last_sent: Option<std::time::Instant>,
-    held: Vec<String>,
-}
-
-/// Decides which decision frames are new cards and paces them: at most one push per window,
-/// the rest folded into the flush.
-#[derive(Debug, Default)]
-pub struct DecisionGate {
-    inner: Mutex<DecisionGateInner>,
-}
-
-impl DecisionGate {
-    /// True when `prompt_id` is a card this session has not announced yet; records it.
-    pub fn is_new_card(&self, session_ref: &str, prompt_id: &str) -> bool {
-        let mut inner = self.inner.lock();
-        if inner.announced.get(session_ref).is_some_and(|last| last == prompt_id) {
-            return false;
-        }
-        if !inner.announced.contains_key(session_ref) && inner.announced.len() >= TRACKED_SESSIONS {
-            inner.announced.clear();
-        }
-        inner.announced.insert(session_ref.to_string(), prompt_id.to_string());
-        true
-    }
-
-    /// The card left the panel (answered or gone): its next escalation is new again.
-    pub fn resolved(&self, session_ref: &str) {
-        self.inner.lock().announced.remove(session_ref);
-    }
-
-    pub fn window(&self, session_ref: &str, now: std::time::Instant) -> WindowVerdict {
-        let mut inner = self.inner.lock();
-        let open = inner
-            .last_sent
-            .and_then(|sent| DECISION_BATCH_WINDOW.checked_sub(now.saturating_duration_since(sent)))
-            .filter(|left| !left.is_zero());
-        match open {
-            None => {
-                inner.last_sent = Some(now);
-                WindowVerdict::Send
-            }
-            Some(left) => {
-                inner.held.push(session_ref.to_string());
-                WindowVerdict::Held { flush_in: (inner.held.len() == 1).then_some(left) }
-            }
-        }
-    }
-
-    /// Takes the held cards at flush time; a non-empty flush starts a new window.
-    pub fn take_held(&self, now: std::time::Instant) -> Vec<String> {
-        let mut inner = self.inner.lock();
-        let held = std::mem::take(&mut inner.held);
-        if !held.is_empty() {
-            inner.last_sent = Some(now);
-        }
-        held
     }
 }
 

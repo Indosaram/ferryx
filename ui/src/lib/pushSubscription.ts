@@ -42,7 +42,7 @@ function defaultRequest(apiBaseUrl: string): PushRequest {
   };
 }
 
-function jsonPost(body: unknown): RequestInit {
+export function jsonPost(body: unknown): RequestInit {
   return { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
 }
 
@@ -193,6 +193,21 @@ export async function updatePhoneAlertPreferences(
 ): Promise<boolean> {
   try {
     const res = await request("/api/v1/push/preferences", jsonPost(preferences));
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Mutes or unmutes phone push for one session (`<hostId>:<backendSessionId>`) on the gateway.
+ * The session stays in the panel; only its decision pushes stop. Resolves false when the gateway
+ * refused (not paired, no Control permission, malformed ref) or could not be reached, so the
+ * caller keeps showing the real state.
+ */
+export async function muteSessionPush(request: PushRequest, sessionRef: string, muted: boolean): Promise<boolean> {
+  try {
+    const res = await request("/api/v1/push/session-mute", jsonPost({ sessionRef, muted }));
     return res.ok;
   } catch {
     return false;

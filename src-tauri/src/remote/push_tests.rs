@@ -1,6 +1,7 @@
 //! Phone push against a local mock push service (an axum server on loopback). The mock holds
 //! the browser's half of the keys, so it decrypts what the daemon sent.
 use super::*;
+use ferryx_hub::supervisor::push_policy::{DECISION_BATCH_WINDOW, PANEL_PRESENCE_STALE};
 use crate::remote::state::RemoteGatewayState;
 use axum::{extract::State as AxState, http::StatusCode, routing::post, Router};
 use base64::Engine;
@@ -220,7 +221,7 @@ async fn retries_progress_finished_sessions_and_resolved_cards_send_nothing() {
     assert_eq!(state.handle_panel_frame(&panel_frame(REF, "p1")).await, 1);
     let resolved = serde_json::json!({"type": "panel.decision", "sessionRef": REF, "decision": null});
     assert_eq!(state.handle_panel_frame(&resolved).await, 0);
-    assert!(state.decision_gate.is_new_card(REF, "p1"));
+    assert!(state.decision_gate.is_new_card(REF, "p1"), "a resolved card re-arms its session");
 }
 
 #[tokio::test]
@@ -269,28 +270,124 @@ async fn a_second_card_inside_the_window_is_held_and_flushed_once() {
     assert_eq!(state.flush_decision_batch(t0 + DECISION_BATCH_WINDOW).await, 0, "nothing left to flush");
 }
 
-#[test]
-fn the_gate_paces_decisions_on_the_hub_window() {
-    assert_eq!(DECISION_BATCH_WINDOW, Duration::from_secs(30));
-    let gate = DecisionGate::default();
+#[tokio::test]
+async fn a_phone_showing_the_panel_holds_the_push_and_the_card_never_comes_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let mut mock = MockPush::start(StatusCode::CREATED).await;
+    subscribed_phone(&state, &mock);
+    let phone = paired_device(&state);
+
+    state.set_panel_visible(&phone, true);
+    assert_eq!(state.handle_panel_frame(&panel_frame(REF, "p1")).await, 0, "the panel is in front of the owner");
+    assert!(mock.received().is_empty());
+
+    // Leaving the panel does not turn the card the owner already saw into a push.
+    state.set_panel_visible(&phone, false);
+    assert_eq!(state.handle_panel_frame(&panel_frame(REF, "p1")).await, 0);
+    assert!(mock.received().is_empty());
+    // A different card does push once nobody shows the panel.
+    assert_eq!(state.handle_panel_frame(&panel_frame("mac:s2", "p1")).await, 1);
+    assert_eq!(mock.received().len(), 1);
+}
+
+#[tokio::test]
+async fn any_one_client_showing_the_panel_is_enough_and_a_stale_report_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let mock = MockPush::start(StatusCode::CREATED).await;
+    subscribed_phone(&state, &mock);
+    let now = Instant::now();
+
+    state.panel_presence.report("phone", true, now);
+    state.panel_presence.report("tablet", true, now);
+    state.panel_presence.report("phone", false, now);
+    assert!(state.panel_shown(now), "the tablet still shows the panel");
+    assert!(state.panel_presence.shown(now + PANEL_PRESENCE_STALE - Duration::from_secs(1)));
+    assert!(!state.panel_presence.shown(now + PANEL_PRESENCE_STALE), "a silent client stops counting");
+
+    // The desktop window counts as a client too.
+    let quiet = gateway(dir.path());
+    assert!(!quiet.panel_shown(now));
+    quiet.set_desktop_window_focused(true);
+    assert!(quiet.panel_shown(Instant::now()));
+}
+
+#[tokio::test]
+async fn a_card_held_by_the_window_is_dropped_if_the_panel_is_shown_at_the_flush() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let mut mock = MockPush::start(StatusCode::CREATED).await;
+    subscribed_phone(&state, &mock);
+    let phone = paired_device(&state);
+
     let t0 = Instant::now();
-    assert_eq!(gate.window("a", t0), WindowVerdict::Send);
-    assert_eq!(
-        gate.window("b", t0 + Duration::from_secs(5)),
-        WindowVerdict::Held { flush_in: Some(Duration::from_secs(25)) }
-    );
-    assert_eq!(gate.window("c", t0 + Duration::from_secs(6)), WindowVerdict::Held { flush_in: None });
-    assert_eq!(gate.take_held(t0 + Duration::from_secs(30)), vec!["b".to_string(), "c".to_string()]);
-    // The flush opened a new window.
-    assert!(matches!(gate.window("d", t0 + Duration::from_secs(31)), WindowVerdict::Held { .. }));
-    assert_eq!(gate.take_held(t0 + Duration::from_secs(62)), vec!["d".to_string()]);
-    // Quiet for a whole window: the next card goes straight out.
-    assert_eq!(gate.window("e", t0 + Duration::from_secs(93)), WindowVerdict::Send);
+    assert_eq!(state.push_decision("mac:s1", "p1", t0).await, 1);
+    assert_eq!(state.push_decision("mac:s2", "p1", t0 + Duration::from_secs(5)).await, 0, "held");
+    state.set_panel_visible(&phone, true);
+    assert_eq!(state.flush_decision_batch(Instant::now() + DECISION_BATCH_WINDOW).await, 0);
+    assert_eq!(mock.received().len(), 1, "only the first push went out");
+}
+
+#[tokio::test]
+async fn a_card_muted_while_held_is_dropped_at_the_flush_and_the_rest_still_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let mut mock = MockPush::start(StatusCode::CREATED).await;
+    subscribed_phone(&state, &mock);
+
+    let t0 = Instant::now();
+    assert_eq!(state.push_decision("mac:s1", "p1", t0).await, 1);
+    assert_eq!(state.push_decision("mac:s2", "p1", t0 + Duration::from_secs(5)).await, 0);
+    assert_eq!(state.push_decision("mac:s3", "p1", t0 + Duration::from_secs(6)).await, 0);
+    state.set_session_push_muted("mac:s2", true).await.unwrap();
+    assert_eq!(state.flush_decision_batch(t0 + DECISION_BATCH_WINDOW).await, 1);
+    let received = mock.received();
+    assert_eq!(received.len(), 2);
+    let payload = mock.decrypt(&received[1]);
+    assert_eq!(payload["agent_id"], "mac:s3", "the flush names the one card left, not the muted one");
+    assert_eq!(payload["url"], "/?panel=decision&session=mac%3As3");
+}
+
+/// The consumer loop: frames on the panel channel reach push with no test shim. The muted
+/// session's frame comes first and one consumer handles frames in order, so the first delivery
+/// being the second session proves the muted one sent nothing; the extra frame kinds in between
+/// (rules, retry action, finished session) must not send either.
+#[tokio::test]
+async fn the_panel_channel_feeds_push_and_a_muted_session_stays_silent() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let mut mock = MockPush::start(StatusCode::CREATED).await;
+    subscribed_phone(&state, &mock);
+    state.set_session_push_muted("chan:muted", true).await.unwrap();
+    let (frames, source) = tokio::sync::broadcast::channel(16);
+    state.start_panel_push_from(source);
+    // A second start is a no-op: one consumer, so nothing is delivered twice.
+    state.start_panel_push_from(frames.subscribe());
+
+    frames.send(serde_json::json!({"type": "panel.rules", "rules": []})).unwrap();
+    frames
+        .send(serde_json::json!({"type": "panel.action", "action": {"id": 1, "sessionRef": "chan:loud", "kind": "retried"}}))
+        .unwrap();
+    frames
+        .send(serde_json::json!({"type": "panel.session", "session": {"sessionRef": "chan:loud", "state": "idle"}}))
+        .unwrap();
+    frames.send(panel_frame("chan:muted", "p1")).unwrap();
+    frames.send(panel_frame("chan:loud", "p1")).unwrap();
+
+    let delivery = tokio::time::timeout(Duration::from_secs(10), mock.deliveries.recv())
+        .await
+        .expect("the panel channel reaches push")
+        .expect("mock alive");
+    let payload = mock.decrypt(&delivery);
+    assert_eq!(payload["agent_id"], "chan:loud");
+    assert_eq!(payload["url"], "/?panel=decision&session=chan%3Aloud");
+    assert!(mock.received().is_empty(), "nothing else was sent");
 }
 
 #[test]
 fn deep_links_open_the_card_and_name_no_terminal_content() {
-    assert_eq!(decision_deep_link("mac:s1"), "/?panel=decision&session=mac%3As1");
+    assert_eq!(ferryx_hub::supervisor::push_policy::decision_deep_link("mac:s1"), "/?panel=decision&session=mac%3As1");
     let one = decision_notification(&["mac:s1".to_string()], "Claude Code", Some("feature-x"));
     assert_eq!(one.state, "decision");
     assert_eq!(one.body, "Claude Code in feature-x");
