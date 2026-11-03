@@ -30,7 +30,7 @@ function fakeWindows(spec: Record<string, { focused?: boolean; sessions?: string
 }
 
 /** Labels of the windows that fire an OS notification for one backend event delivered to `receivers`. */
-function notifiers(windows: FakeWindow[], backendSessionId: string, receivers: FakeWindow[]): string[] {
+function notifiers(backendSessionId: string, receivers: FakeWindow[]): string[] {
   return receivers
     .filter((window) => shouldNotifyForSession({
       ownsSession: window.backendSessionIds.has(backendSessionId),
@@ -44,22 +44,22 @@ describe("notification ownership rule", () => {
   it("(a) an unfocused owner notifies once while another window is focused", () => {
     const windows = fakeWindows({ main: { focused: true }, "ws-x": { sessions: ["b1"] } });
     // Session-scoped events reach only the owner window.
-    expect(notifiers(windows, "b1", [windows[1]])).toEqual(["ws-x"]);
+    expect(notifiers("b1", [windows[1]])).toEqual(["ws-x"]);
   });
 
   it("(b) a broadcast for a session held by ws-x notifies only ws-x", () => {
     const windows = fakeWindows({ main: { sessions: ["b0"] }, "ws-x": { sessions: ["b1"] } });
-    expect(notifiers(windows, "b1", windows)).toEqual(["ws-x"]);
+    expect(notifiers("b1", windows)).toEqual(["ws-x"]);
   });
 
   it("(c) a broadcast for a session no window holds notifies only main", () => {
     const windows = fakeWindows({ main: {}, "ws-x": { sessions: ["b1"] } });
-    expect(notifiers(windows, "b-unknown", windows)).toEqual(["main"]);
+    expect(notifiers("b-unknown", windows)).toEqual(["main"]);
   });
 
   it("(d) keeps single-window behavior: a lone window notifies for its own events", () => {
     const [main] = fakeWindows({ main: { sessions: ["b1"] } });
-    expect(notifiers([main], "b1", [main])).toEqual(["main"]);
+    expect(notifiers("b1", [main])).toEqual(["main"]);
     resetNotificationLeaderForTests();
     expect(shouldThisWindowNotifyFor("b1", true)).toBe(true);
     startWindowFocusBroadcast();

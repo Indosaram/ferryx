@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
 
 import {
@@ -111,11 +111,11 @@ test("the manifest refuses a record built as another version", () => {
 
 test("macOS signing goes inside out with the right entitlements", () => {
   const listing = {
-    "/x/ferryx_engine.app/Contents/Frameworks/Chromium Embedded Framework.framework/Libraries": ["libEGL.dylib", "vk.json", "libcef_sandbox.dylib"],
-    "/x/ferryx_engine.app/Contents/Frameworks": ["Chromium Embedded Framework.framework", "ferryx_engine Helper.app", "ferryx_engine Helper (Renderer).app"],
+    [join("/x/ferryx_engine.app/Contents/Frameworks/Chromium Embedded Framework.framework/Libraries")]: ["libEGL.dylib", "vk.json", "libcef_sandbox.dylib"],
+    [join("/x/ferryx_engine.app/Contents/Frameworks")]: ["Chromium Embedded Framework.framework", "ferryx_engine Helper.app", "ferryx_engine Helper (Renderer).app"],
   };
-  const plan = macSigningPlan("/x/ferryx_engine.app", (dir) => listing[dir] ?? []);
-  const names = plan.map((step) => step.path.split("/").pop());
+  const plan = macSigningPlan(join("/x/ferryx_engine.app"), (dir) => listing[dir] ?? []);
+  const names = plan.map((step) => basename(step.path));
   assert.deepEqual(names, [
     "libEGL.dylib",
     "libcef_sandbox.dylib",

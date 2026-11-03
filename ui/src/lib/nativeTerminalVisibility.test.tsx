@@ -189,7 +189,6 @@ describe("useNativeTerminalVisibility", () => {
     expect(result.current).toBe(true);
   });
 
-  it("does not yield surface (returns true) when dialog opts out on itself", async () => {
   it("yields surface (returns false) when an alertdialog mounts", async () => {
     const { result } = renderHook(() => useNativeTerminalVisibility());
     expect(result.current).toBe(true);
@@ -225,6 +224,7 @@ describe("useNativeTerminalVisibility", () => {
     expect(result.current).toBe(false);
   });
 
+  it("does not yield surface (returns true) when dialog opts out on itself", async () => {
     const { result } = renderHook(() => useNativeTerminalVisibility());
     expect(result.current).toBe(true);
 
