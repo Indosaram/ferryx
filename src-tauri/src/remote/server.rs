@@ -1874,10 +1874,13 @@ async fn ws_events_handler(
             "MACHINE_SERVICE_UNAVAILABLE".into(),
         ))?;
         let receiver = services.workspaces.machine_events.subscribe();
+        // The owner's own devices (agent control admits them) also get prompt bodies on the
+        // `panel.session` frames; every other machine device gets state only.
+        let owner = state.agent_control_policy.permits(&device.id);
         return Ok(ws.on_upgrade(move |socket| async move {
             let _ = while_device_authorized(
                 &mut revocation,
-                super::machine_events::serve(socket, state, receiver),
+                super::machine_events::serve(socket, state, receiver, owner),
             )
             .await;
         }));
@@ -7898,6 +7901,8 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             )),
         )
         .route("/api/v1/supervisor", get(supervisor_api::http_snapshot))
+        .route("/api/v1/supervisor/panel", get(supervisor_api::http_panel))
+        .route("/api/v1/fleet/sessions", get(supervisor_api::http_fleet_sessions))
         .route("/api/v1/supervisor/start", post(supervisor_api::http_start))
         .route(
             "/api/v1/supervisor/request",
