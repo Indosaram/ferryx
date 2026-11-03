@@ -174,6 +174,7 @@ import { SupervisorSessionStrip } from "./home/SupervisorSessionStrip";
 import { usePhoneNavigation } from "./home/usePhoneNavigation";
 import { edgeSwipeHostSupported, useEdgeSwipeBack } from "./home/useEdgeSwipeBack";
 import { usePhoneSupervisor } from "./home/usePhoneSupervisor";
+import { usePhonePanel } from "./supervisorPanel/usePhonePanel";
 import { WorktreesHome } from "./home/WorktreesHome";
 import type { TunnelTransport, TunnelWebSocket } from "./attachTunnel";
 import { getOrCreateAttachKey } from "./accountAttach";
@@ -3077,6 +3078,21 @@ export const RemoteHostConnection: React.FC<{
     active: activeTunnelConnection,
     bus: supervisorBus,
   });
+  // The panel lives on the supervisor host: the machine whose snapshot names a supervisor,
+  // else the first one that answers.
+  const panelHostId =
+    phoneSupervisor.unified.find((host) => host.connection === "live")?.machineId
+    ?? phoneSupervisor.unified[0]?.machineId
+    ?? phoneSupervisor.machines.find((machine) => machine.state === "ok")?.machineId
+    ?? null;
+  const phonePanel = usePhonePanel({
+    hostId: panelHostId,
+    fetchFor: phoneSupervisor.fetchFor,
+    bus: supervisorBus,
+    enabled: phoneHome,
+  });
+  // A host without the panel route (or no host yet) keeps the previous home.
+  const panelHome = panelHostId !== null && phonePanel.state.kind !== "unsupported";
   // The events socket above runs only for the active connection; every other reachable machine
   // gets its own, so supervisor and sidebar changes reach a home that opened no worktree.
   const openMachineEvents = useCallback(
@@ -5255,6 +5271,18 @@ export const RemoteHostConnection: React.FC<{
     if (phoneHome) phoneNav.back();
     else setSelectorOpen(true);
   };
+  /* A panel row names its session as `<hostId>:<backendSessionId>`; it opens the same way an Inbox row does. */
+  const openPanelSession = (sessionRef: string) => {
+    const split = sessionRef.indexOf(":");
+    const option = split > 0 ? optionForSession(accountDiscovery.accountOptions, sessionRef.slice(0, split), sessionRef.slice(split + 1)) : null;
+    if (!option) {
+      toast.error("This session is not available right now", {
+        description: "Its computer is offline or has not listed it yet.",
+      });
+      return;
+    }
+    openPhoneSession(option);
+  };
   const phoneNeedsYou = new Set(
     accountDiscovery.accountOptions
       .filter((option) => option.sessionId && option.inventoryActivityState === "waiting")
@@ -5315,6 +5343,18 @@ export const RemoteHostConnection: React.FC<{
       .querySelector<HTMLTextAreaElement>('textarea[data-testid="remote-terminal-input-sink"]')
       ?.focus({ preventScroll: true });
   };
+  const phoneResume =
+    token && model.context.workspaceId
+      ? { title: mobileTitle, subtitle: contextName(model.context), onOpen: phoneNav.openSession }
+      : offlineLastTarget
+        ? {
+            title: offlineLastTarget.worktreeLabel ?? offlineLastTarget.worktreeSlug ?? "Your last worktree",
+            subtitle: `${offlineLastTarget.machineName} is offline. Open Ferryx on it to continue.`,
+            onOpen: () => {
+              void accountDiscovery.retryMachine(offlineLastTarget.machineId);
+            },
+          }
+        : null;
   const phoneWorktrees = (
     <WorktreesHome onOpenAccount={() => setAccountSheetOpen(true)}>
       <RemoteWorkspaceMirror
@@ -5355,6 +5395,21 @@ export const RemoteHostConnection: React.FC<{
       <Toaster />
       {showPhoneHome ? (
         <PhoneHomeView
+          panel={panelHome ? {
+            state: phonePanel.state,
+            now: phoneSupervisor.now,
+            onOpenSession: openPanelSession,
+            onAnswer: phonePanel.answer,
+            onSetPaused: phonePanel.setPaused,
+            onConverse: phonePanel.converse,
+            onRefresh: () =>
+              Promise.allSettled([
+                phonePanel.refresh(),
+                ...accountDiscovery.machines.map((machine) => accountDiscovery.retryMachine(machine.machineId)),
+              ]),
+            headerAction: <AccountButton onOpen={() => setAccountSheetOpen(true)} />,
+            resume: phoneResume,
+          } : undefined}
           destination={phoneNav.destination}
           onSelectTab={phoneNav.selectTab}
           supervisor={{
@@ -5393,20 +5448,7 @@ export const RemoteHostConnection: React.FC<{
             if (destination === "supervisor") phoneSupervisor.resync();
             return Promise.allSettled(accountDiscovery.machines.map((machine) => accountDiscovery.retryMachine(machine.machineId)));
           }}
-          resume={
-            token && model.context.workspaceId
-              ? { title: mobileTitle, subtitle: contextName(model.context), onOpen: phoneNav.openSession }
-              : offlineLastTarget
-                ? {
-                    title: offlineLastTarget.worktreeLabel ?? offlineLastTarget.worktreeSlug ?? "Your last worktree",
-                    subtitle: `${offlineLastTarget.machineName} is offline. Open Ferryx on it to continue.`,
-                    onOpen: () => {
-                      void accountDiscovery.retryMachine(offlineLastTarget.machineId);
-                      phoneNav.selectTab("worktrees");
-                    },
-                  }
-                : null
-          }
+          resume={phoneResume}
         />
       ) : (
       <div ref={sessionScreenRef} data-testid="phone-session-screen" className="flex min-h-0 min-w-0 flex-1 flex-col">

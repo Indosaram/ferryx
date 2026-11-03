@@ -9,10 +9,16 @@ import { MobileHomeTabBar, PHONE_HOME_PANEL_ID, phoneHomeTabId } from "./MobileH
 import type { AttentionRow } from "../../features/ferryx/attention/attentionModel";
 import type { AttentionPrompts } from "../../features/ferryx/attention/attentionPrompts";
 import { SupervisorHome, type SupervisorHomeProps } from "./SupervisorHome";
+import { PhoneSupervisorHome, type PhoneSupervisorHomeProps } from "../supervisorPanel/PhoneSupervisorHome";
 import type { PhoneDestination } from "./usePhoneNavigation";
 import { PullToRefreshContext } from "./usePullToRefresh";
 
 export type PhoneHomeViewProps = {
+  /**
+   * The autonomy panel as the home screen. Present: it replaces the tab bar and its three
+   * destinations. Absent (a host without the panel route): the previous home, until todo 15.
+   */
+  readonly panel?: PhoneSupervisorHomeProps;
   readonly destination: PhoneDestination;
   readonly onSelectTab: (destination: PhoneDestination) => void;
   readonly supervisor: SupervisorHomeProps;
@@ -39,7 +45,8 @@ export function inboxBadgeCount(rows: readonly AttentionRow[]): number {
   return rows.filter((row) => row.state === "needs-you").length;
 }
 
-export function PhoneHomeView({ destination, onSelectTab, supervisor, inbox, worktrees, resume, accountAction, onRefresh }: PhoneHomeViewProps) {
+export function PhoneHomeView({ panel, destination, onSelectTab, supervisor, inbox, worktrees, resume, accountAction, onRefresh }: PhoneHomeViewProps) {
+  if (panel) return <PhoneSupervisorHome {...panel} />;
   const refresh = onRefresh ? () => onRefresh(destination) : undefined;
   return (
     <div data-testid="mobile-home" data-destination={destination} className="flex min-h-0 min-w-0 flex-1 flex-col bg-chat-screen pt-[env(safe-area-inset-top)] px-safe">
