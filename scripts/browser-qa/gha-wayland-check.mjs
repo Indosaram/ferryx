@@ -264,6 +264,10 @@ async function phase(name, { extraEnv = {}, x11 = false, expectEngine, required 
 
   const c = record.checks;
   const basePass = c.app_alive === true && c.tab_listed === true && (c.fixture_visible === true || c.title_fixture_ready === true);
+  // Either signal proves the page loaded; scripts/browser-qa/check-summary.mjs gates on
+  // fixture_shown, and an optional phase gates only on its engine check.
+  c.fixture_shown = c.fixture_visible === true || c.title_fixture_ready === true;
+  record.informational = ["fixture_visible", "title_fixture_ready", ...(required ? [] : Object.keys(c).filter((name) => !name.startsWith("engine_")))];
   record.pass = Boolean(basePass && (!expectEngine || c[`engine_${expectEngine}`] === true) && c.no_engine_process !== false);
   record.finished_at = new Date().toISOString();
 

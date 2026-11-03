@@ -947,6 +947,7 @@ impl BrowserManager {
                             url: s.url.clone(),
                             title: s.title.clone(),
                             visible: s.visible,
+                            engine: s.engine,
                         },
                     )
                 })
@@ -1122,6 +1123,31 @@ mod tests {
         assert!(!manager.has_guest_views());
     }
 
+    #[test]
+    fn list_sessions_reports_each_tab_engine() {
+        // Given a webview tab and a tab the Chromium engine draws, when the sessions are
+        // listed, then each summary carries its own engine (what `ferryx browser list` prints).
+        let manager = BrowserManager::new();
+        manager.register_session(create_request("engine-system")).unwrap();
+        manager.register_session(create_request("engine-chromium")).unwrap();
+        manager.set_engine("engine-chromium", BrowserEngine::Chromium).unwrap();
+        let engines: Vec<(String, BrowserEngine)> = manager
+            .list_sessions()
+            .into_iter()
+            .map(|s| (s.browser_id, s.engine))
+            .collect();
+        assert_eq!(
+            engines,
+            vec![
+                ("engine-system".to_string(), BrowserEngine::System),
+                ("engine-chromium".to_string(), BrowserEngine::Chromium),
+            ]
+        );
+        let json = serde_json::to_value(manager.list_sessions()).unwrap();
+        assert_eq!(json[0]["engine"], "system");
+        assert_eq!(json[1]["engine"], "chromium");
+    }
+
     fn create_request(browser_id: &str) -> CreateBrowserRequest {
         CreateBrowserRequest {
             browser_id: Some(browser_id.to_string()),
@@ -1144,6 +1170,7 @@ mod tests {
             url: "https://example.com/".to_string(),
             title: None,
             visible: true,
+            engine: BrowserEngine::System,
         }
     }
 

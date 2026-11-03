@@ -17,6 +17,9 @@ vi.mock("../../lib/browserExtensions", async (importOriginal) => ({
   ...ext,
 }));
 
+const events = vi.hoisted(() => ({ listen: vi.fn() }));
+vi.mock("@tauri-apps/api/event", () => events);
+
 const base = {
   version: "1.0.0",
   description: null,
@@ -45,8 +48,26 @@ describe("BrowserExtensionsGroup", () => {
     vi.resetAllMocks();
     window.localStorage.clear();
     ext.openBrowserExtensionPage.mockResolvedValue({});
+    events.listen.mockResolvedValue(() => undefined);
   });
   afterEach(cleanup);
+
+  it("reloads when the profile's extensions changed elsewhere (CLI remove) and ignores other profiles", async () => {
+    ext.listBrowserExtensions
+      .mockResolvedValueOnce(listing([{ ...base, id: "aaa", name: "Alpha" }]))
+      .mockResolvedValue(listing([]));
+    render(<BrowserExtensionsGroup />);
+    await row("aaa");
+    await vi.waitFor(() => expect(events.listen).toHaveBeenCalledWith("browser_extensions_changed", expect.any(Function)));
+    const handler = events.listen.mock.calls.find(([name]) => name === "browser_extensions_changed")?.[1] as (event: {
+      payload: { profile: string };
+    }) => void;
+    handler({ payload: { profile: "work" } });
+    expect(ext.listBrowserExtensions).toHaveBeenCalledTimes(1);
+    handler({ payload: { profile: "default" } });
+    await vi.waitFor(() => expect(screen.queryAllByTestId("browser-extension-row")).toHaveLength(0));
+    expect(ext.listBrowserExtensions).toHaveBeenCalledTimes(2);
+  });
 
   it("renders a row per extension and opens details and options", async () => {
     ext.listBrowserExtensions.mockResolvedValue(

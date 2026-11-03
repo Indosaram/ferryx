@@ -497,6 +497,7 @@ export type BrowserSessionSummary = {
   url: string;
   title?: string | null;
   visible: boolean;
+  engine?: BrowserEngine;
 };
 
 export type BrowserAutomationElement = {

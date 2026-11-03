@@ -15,6 +15,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::AppHandle;
 
+/// Emitted after an extension change went through a profile's engine, from any caller (the
+/// Settings row, `ferryx browser extensions remove`), so the Settings list reloads.
+pub const BROWSER_EXTENSIONS_CHANGED_EVENT: &str = "browser_extensions_changed";
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionsChanged {
+    pub profile: String,
+}
+
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionsListing {
@@ -194,6 +204,7 @@ async fn change_extension<R: tauri::Runtime>(
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     {
         use crate::browser::cef_engine;
+        use tauri::Emitter;
         let data = engine_data_dir(&app)?;
         let engine_dir = crate::ipc::run_blocking(move || {
             cef_engine::engine_dir(&data).ok_or_else(engine_not_installed)
@@ -206,6 +217,10 @@ async fn change_extension<R: tauri::Runtime>(
             ENGINE_CALL_TIMEOUT
         };
         cef_engine::extensions(profile.as_str(), call, timeout).await.map_err(change_error)?;
+        let _ = app.emit(
+            BROWSER_EXTENSIONS_CHANGED_EVENT,
+            ExtensionsChanged { profile: profile.as_str().to_string() },
+        );
         let extensions = engine_listing(&profile).await?;
         Ok(engine_running_listing(&profile, extensions))
     }
@@ -246,7 +261,27 @@ pub async fn cmd_browser_extensions_remove<R: tauri::Runtime>(
     profile: Option<String>,
     extension_id: String,
 ) -> Result<ExtensionsListing, IpcError> {
-    change_extension(app, manager.inner(), profile, ExtensionCall::Remove { extension: extension_id }).await
+    remove_extension(app, manager.inner(), profile, extension_id).await
+}
+
+/// The profile's extensions, as Settings > Browser > Extensions lists them (`ferryx browser
+/// extensions list`).
+pub async fn list_extensions<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    profile: Option<String>,
+) -> Result<ExtensionsListing, IpcError> {
+    cmd_browser_extensions_list(app, profile).await
+}
+
+/// The Settings row's remove, also reached by `ferryx browser extensions remove`: the same
+/// engine call, so Chrome still asks in its own dialog.
+pub async fn remove_extension<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: &Arc<BrowserManager>,
+    profile: Option<String>,
+    extension_id: String,
+) -> Result<ExtensionsListing, IpcError> {
+    change_extension(app, manager, profile, ExtensionCall::Remove { extension: extension_id }).await
 }
 
 /// Pins or unpins an extension's toolbar button in the profile's engine.
@@ -417,5 +452,12 @@ mod tests {
         assert_eq!(value["engineRunning"], json!(true));
         assert_eq!(value["engineInstalled"], json!(true));
         assert_eq!(value["profile"], json!("default"));
+    }
+
+    #[test]
+    fn the_extensions_changed_payload_names_the_profile_in_camel_case() {
+        let payload = ExtensionsChanged { profile: "default".into() };
+        assert_eq!(serde_json::to_value(&payload).unwrap(), json!({ "profile": "default" }));
+        assert_eq!(BROWSER_EXTENSIONS_CHANGED_EVENT, "browser_extensions_changed");
     }
 }

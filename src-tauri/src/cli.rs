@@ -189,6 +189,13 @@ pub enum BrowserCliCommand {
         selector: String,
         duration_ms: Option<u64>,
     },
+    /// `extensions list` or `extensions remove <id>` (`--profile <id>`, default profile when
+    /// absent).
+    Extensions {
+        action: String,
+        extension_id: Option<String>,
+        profile: Option<String>,
+    },
     Tab {
         action: TabCliAction,
     },
@@ -691,6 +698,35 @@ where
                 _ => return Err("expected cookies <get|set|clear>".into()),
             };
             Ok(BrowserCliCommand::Cookies { browser_id, action })
+        }
+        Some("extensions") => {
+            let profile = optional_option(&args, "--profile")?;
+            let positional: Vec<&String> = {
+                let mut found = Vec::new();
+                let mut i = 3;
+                while i < args.len() {
+                    if args[i] == "--profile" {
+                        i += 2;
+                    } else {
+                        found.push(&args[i]);
+                        i += 1;
+                    }
+                }
+                found
+            };
+            match positional.as_slice() {
+                [action] if action.as_str() == "list" => Ok(BrowserCliCommand::Extensions {
+                    action: "list".into(),
+                    extension_id: None,
+                    profile,
+                }),
+                [action, id] if action.as_str() == "remove" => Ok(BrowserCliCommand::Extensions {
+                    action: "remove".into(),
+                    extension_id: Some((*id).clone()),
+                    profile,
+                }),
+                _ => Err("expected extensions <list|remove <extension-id>> [--profile <id>]".into()),
+            }
         }
         Some("storage") => {
             let browser_id = required_option(&args, "--browser-id")?;
@@ -2119,6 +2155,9 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
             selector,
             duration_ms,
         },
+        BrowserCliCommand::Extensions { action, extension_id, profile } => {
+            BrowserCliRequest::Extensions { action, extension_id, profile }
+        }
     }
 }
 
@@ -3822,6 +3861,9 @@ fn format_browser_cli_response(
                 "highlight": highlight
             }))
             .map_err(|error| error.to_string())
+        }
+        BrowserCliResponse::Extensions { listing } => {
+            serde_json::to_string(&listing).map_err(|error| error.to_string())
         }
         BrowserCliResponse::FileOpened { path } => Ok(format!("opened {path}")),
         BrowserCliResponse::Error { code, message, .. } => {
@@ -7910,6 +7952,34 @@ mod tests {
         let err = parse_browser_cli(&bad_sub).expect_err("unknown state sub-verb");
         assert!(err.contains("unknown state sub-verb"));
         assert!(err.contains("expected state <save|load>"));
+    }
+
+    #[test]
+    fn browser_cli_extensions_parse_and_map_to_the_extensions_request() {
+        const ID: &str = "ddkjiahejlhfcafbddmgiahcphecmpfh";
+        let remove = parse_browser_cli(["ferryx", "browser", "extensions", "remove", ID, "--profile", "work"])
+            .expect("parse extensions remove");
+        assert_eq!(
+            browser_cli_request(remove),
+            BrowserCliRequest::Extensions {
+                action: "remove".into(),
+                extension_id: Some(ID.into()),
+                profile: Some("work".into()),
+            }
+        );
+        let list = parse_browser_cli(["ferryx", "browser", "extensions", "list"]).expect("parse extensions list");
+        assert_eq!(
+            browser_cli_request(list),
+            BrowserCliRequest::Extensions { action: "list".into(), extension_id: None, profile: None }
+        );
+        for bad in [
+            vec!["ferryx", "browser", "extensions"],
+            vec!["ferryx", "browser", "extensions", "remove"],
+            vec!["ferryx", "browser", "extensions", "enable", ID],
+            vec!["ferryx", "browser", "extensions", "list", "extra"],
+        ] {
+            assert!(parse_browser_cli(bad.clone()).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

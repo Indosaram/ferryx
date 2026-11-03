@@ -219,6 +219,16 @@ pub enum BrowserCliRequest {
         #[serde(default)]
         protocol_version: Option<u32>,
     },
+    /// Settings > Browser > Extensions from the CLI: `list`, or `remove` of `extension_id`
+    /// (Chrome confirms the removal in its own dialog, as from the Settings row).
+    #[serde(rename_all = "camelCase")]
+    Extensions {
+        action: String,
+        #[serde(default, alias = "extension_id")]
+        extension_id: Option<String>,
+        #[serde(default)]
+        profile: Option<String>,
+    },
 }
 
 /// Custom serde deserializer that cleanly converts between a u64 integer or decimal string
@@ -1644,6 +1654,9 @@ pub enum BrowserCliResponse {
     Highlighted {
         highlight: crate::browser::picker::BrowserHighlightResult,
     },
+    Extensions {
+        listing: serde_json::Value,
+    },
     #[serde(rename_all = "camelCase")]
     FileOpened {
         path: String,
@@ -3014,6 +3027,21 @@ async fn execute_request<R: tauri::Runtime>(
                 protocol_version: protocol_version.unwrap_or(1),
             }
         }
+        BrowserCliRequest::Extensions { action, extension_id, profile } => {
+            use crate::ipc::browser_extensions::{list_extensions, remove_extension};
+            let result = match (action.as_str(), extension_id) {
+                ("list", _) => list_extensions(app.clone(), profile).await,
+                ("remove", Some(extension_id)) => remove_extension(app.clone(), manager, profile, extension_id).await,
+                ("remove", None) => Err(IpcError::new(IpcErrorCode::InvalidArgument, "extensions remove needs an extension id")),
+                (other, _) => Err(IpcError::new(IpcErrorCode::InvalidArgument, format!("unknown extensions action: {other}"))),
+            };
+            match result.and_then(|listing| {
+                serde_json::to_value(listing).map_err(|error| IpcError::new(IpcErrorCode::InternalError, error.to_string()))
+            }) {
+                Ok(listing) => BrowserCliResponse::Extensions { listing },
+                Err(error) => error_response(error),
+            }
+        }
         BrowserCliRequest::OpenInboundUrl { url } => {
             if crate::ipc::default_browser::deliver_inbound_url(app, &url) {
                 BrowserCliResponse::InboundUrlOpened
@@ -3473,9 +3501,11 @@ mod tests {
                 url: "https://example.com/".to_string(),
                 title: Some("Example".to_string()),
                 visible: true,
+                engine: crate::browser::BrowserEngine::Chromium,
             }],
         };
         let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains(r#""engine":"chromium""#), "{json}");
         let parsed: BrowserCliResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, resp);
     }
@@ -3717,6 +3747,7 @@ mod tests {
             url: registered_session.url,
             title: None,
             visible: true,
+            engine: crate::browser::BrowserEngine::System,
         };
 
         assert_eq!(
@@ -3892,6 +3923,7 @@ mod tests {
             url: registered_session.url,
             title: None,
             visible: true,
+            engine: crate::browser::BrowserEngine::System,
         };
 
         assert_eq!(
@@ -4293,6 +4325,7 @@ mod tests {
             url: registered_session.url,
             title: None,
             visible: true,
+            engine: crate::browser::BrowserEngine::System,
         };
 
         assert_eq!(
@@ -5161,6 +5194,7 @@ mod tests {
             url: "https://example.com".into(),
             title: Some("Title".into()),
             visible: true,
+            engine: crate::browser::BrowserEngine::System,
         };
         let summary_json = serde_json::to_string(&summary).unwrap();
         assert!(!summary_json.contains(token));

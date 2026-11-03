@@ -2,10 +2,14 @@ name: Browser UI audit (real OS input)
 
 # Builds the debug desktop app on each hosted OS, drives the built-in browser with real OS input
 # and uploads one full-screen screenshot per step plus summary.json as ui-audit-<os>.
-# With a bundled Chromium engine, a second run (--scenario drag-mask) drags a browser tab and
-# checks the engine window is hidden mid-drag. The wayland job runs Ferryx under a headless
-# wlroots compositor and checks the Chromium fallback to the system engine.
-# A missing UI element never fails the job; only a broken build or harness does.
+# The Chromium engine is bundled on every OS: the main run installs it from Settings (its zip,
+# FERRYX_UI_AUDIT_ENGINE_ZIP), checks typing, agent automation and an engine kill in an engine
+# tab, and installs, removes and re-checks uBlock Origin Lite across an app restart. A second
+# run (--scenario drag-mask) drags a browser tab and checks the engine window is hidden
+# mid-drag. The wayland job runs Ferryx under a headless wlroots compositor and checks the
+# Chromium fallback to the system engine.
+# Each job fails on a false check in its summary.json, except checks marked informational
+# (scripts/browser-qa/check-summary.mjs).
 on:
   workflow_dispatch:
   push:
@@ -113,6 +117,17 @@ jobs:
         if: matrix.os_name == 'windows'
         run: choco install tesseract -y --no-progress || echo "tesseract unavailable; the audit records OCR as unavailable"
 
+      # The runner's desktop is 1024x768, narrower than the 1280px audit window: the store's
+      # 'Add to Chrome' and Chrome's install dialog land off screen. Widen the display first.
+      - name: Set display resolution 1920x1080 (Windows)
+        if: matrix.os_name == 'windows'
+        shell: pwsh
+        run: |
+          try { Set-DisplayResolution -Width 1920 -Height 1080 -Force -ErrorAction Stop } catch { Write-Host "Set-DisplayResolution failed: $_" }
+          Add-Type -AssemblyName System.Windows.Forms
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          Write-Host "primary screen now $($b.Width)x$($b.Height)"
+
       - name: Use Strawberry Perl for vendored OpenSSL (Windows)
         if: matrix.os_name == 'windows'
         shell: bash
@@ -172,7 +187,7 @@ jobs:
             exit 0
           fi
           mkdir -p "$RUNNER_TEMP/engine-out"
-          (cd crates/ferryx-browser-engine && cargo run --release --bin bundle-engine -- "$RUNNER_TEMP/engine-out" --release)
+          bash scripts/browser-qa/bundle-engine-retry.sh "$RUNNER_TEMP/engine-out"
           ls -la "$RUNNER_TEMP/engine-out"
           zip=$(ls "$RUNNER_TEMP"/engine-out/engine-linux-*.zip | head -1)
           echo "FERRYX_UI_AUDIT_ENGINE_ZIP=$zip" >> "$GITHUB_ENV"
@@ -207,12 +222,18 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/engine-out"
-          (cd crates/ferryx-browser-engine && cargo run --release --bin bundle-engine -- "$RUNNER_TEMP/engine-out" --release)
+          bash scripts/browser-qa/bundle-engine-retry.sh "$RUNNER_TEMP/engine-out"
           # Ad-hoc signature so the helper apps inside the bundle launch on the runner.
           codesign --force --deep -s - "$RUNNER_TEMP/engine-out/ferryx_engine.app" || true
           ls -la "$RUNNER_TEMP/engine-out"
           if [ -x "$RUNNER_TEMP/engine-out/ferryx_engine.app/Contents/MacOS/ferryx_engine" ]; then
             echo "FERRYX_UI_AUDIT_ENGINE_DIR=$RUNNER_TEMP/engine-out" >> "$GITHUB_ENV"
+            # The archive the app installs: ferryx_engine.app at its root, as release-engine.mjs zips it.
+            zip="$RUNNER_TEMP/engine-zip/engine-macos-aarch64.zip"
+            mkdir -p "$(dirname "$zip")"
+            ditto -c -k --keepParent --norsrc "$RUNNER_TEMP/engine-out/ferryx_engine.app" "$zip"
+            ls -la "$zip"
+            echo "FERRYX_UI_AUDIT_ENGINE_ZIP=$zip" >> "$GITHUB_ENV"
           fi
 
       - name: Bundle the Chromium engine (Windows)
@@ -225,16 +246,22 @@ jobs:
           CEF_PATH: C:/cef-sdk
         run: |
           mkdir -p "$RUNNER_TEMP/engine-out"
-          (cd crates/ferryx-browser-engine && cargo run --release --bin bundle-engine -- "$RUNNER_TEMP/engine-out" --release)
+          bash scripts/browser-qa/bundle-engine-retry.sh "$RUNNER_TEMP/engine-out"
           exe=$(find "$(cygpath -u "$RUNNER_TEMP")/engine-out" -name ferryx_engine.exe | head -1)
           echo "engine exe: ${exe:-<none>}"
           if [ -n "$exe" ]; then
             echo "FERRYX_UI_AUDIT_ENGINE_DIR=$(cygpath -w "$(dirname "$exe")")" >> "$GITHUB_ENV"
+            # The archive the app installs: the engine dir's contents at its root.
+            zip="$(cygpath -u "$RUNNER_TEMP")/engine-zip/engine-windows-x86_64.zip"
+            mkdir -p "$(dirname "$zip")"
+            (cd "$(dirname "$exe")" && 7z a -tzip -mx=5 "$(cygpath -w "$zip")" . > /dev/null)
+            ls -la "$zip"
+            echo "FERRYX_UI_AUDIT_ENGINE_ZIP=$(cygpath -w "$zip")" >> "$GITHUB_ENV"
           fi
 
       - name: Run UI audit (Linux, Xvfb + openbox)
         if: matrix.os_name == 'linux'
-        timeout-minutes: 35
+        timeout-minutes: 60
         shell: bash
         run: |
           out="$RUNNER_TEMP/ui-audit"
@@ -267,7 +294,7 @@ jobs:
 
       - name: Run UI audit (macOS)
         if: matrix.os_name == 'macos'
-        timeout-minutes: 35
+        timeout-minutes: 60
         shell: bash
         run: |
           out="$RUNNER_TEMP/ui-audit"
@@ -285,7 +312,7 @@ jobs:
 
       - name: Run UI audit (Windows)
         if: matrix.os_name == 'windows'
-        timeout-minutes: 35
+        timeout-minutes: 60
         shell: bash
         run: |
           out="$RUNNER_TEMP/ui-audit"
@@ -309,6 +336,10 @@ jobs:
           path: ${{ runner.temp }}/ui-audit/
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Fail on false summary checks
+        shell: bash
+        run: bun scripts/browser-qa/check-summary.mjs "$RUNNER_TEMP/ui-audit"
 
   wayland:
     name: Wayland fallback (cage, headless)
@@ -427,7 +458,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/engine-out"
-          (cd crates/ferryx-browser-engine && cargo run --release --bin bundle-engine -- "$RUNNER_TEMP/engine-out" --release)
+          bash scripts/browser-qa/bundle-engine-retry.sh "$RUNNER_TEMP/engine-out"
           dir="$RUNNER_TEMP/engine-out/engine-linux-x86_64"
           ls -la "$dir" || true
           if [ -x "$dir/ferryx_engine" ]; then echo "FERRYX_WAYLAND_ENGINE_DIR=$dir" >> "$GITHUB_ENV"; fi
@@ -475,3 +506,7 @@ jobs:
           path: ${{ runner.temp }}/ui-audit-wayland/
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Fail on false summary checks
+        shell: bash
+        run: bun scripts/browser-qa/check-summary.mjs "$RUNNER_TEMP/ui-audit-wayland"

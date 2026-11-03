@@ -7,6 +7,8 @@ export const OPEN_SETTINGS_EVENT = "ferryx:open-settings";
 export const OPEN_BROWSER_URL_EVENT = "ferryx:open-browser-url";
 /** Fired after the engine is installed or removed so sibling settings groups can reload. */
 export const BROWSER_ENGINE_CHANGED_EVENT = "ferryx:browser-engine-changed";
+/** Tauri event: an extension of `profile` changed through its engine (from any caller). */
+export const BROWSER_EXTENSIONS_CHANGED_EVENT = "browser_extensions_changed";
 
 export type InstalledExtension = {
   id: string;

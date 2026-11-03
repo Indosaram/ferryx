@@ -777,6 +777,7 @@ mod tests {
             url: url.into(),
             title: None,
             visible: true,
+            engine: crate::browser::model::BrowserEngine::System,
         }
     }
 

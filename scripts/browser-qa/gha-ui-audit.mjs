@@ -4,13 +4,24 @@
 // Launches the debug executable with isolated FERRYX_* directories, drives it only through the
 // host's own input injection (Linux xdotool, macOS osascript/cliclick, Windows SendInput), finds
 // on-screen labels with tesseract OCR so clicks land on real controls, and captures a full-screen
-// screenshot after every step. A missing UI element never fails the run: each step's outcome and
-// its visible-text check go to summary.json, and the script exits 0 once it has started.
+// screenshot after every step. Each step's outcome and its visible-text check go to summary.json,
+// and the script exits 0 once it has started. The job then fails on any false entry of a `checks`
+// object outside `steps` unless the object's `informational` list names it
+// (scripts/browser-qa/check-summary.mjs).
 //
-// Optional Chromium engine checks (Linux): set FERRYX_UI_AUDIT_ENGINE_ZIP to a bundled
-// engine-linux-<arch>.zip. The script serves it with a manifest signed by a throwaway ed25519 key
-// that only debug builds accept (FERRYX_BROWSER_ENGINE_PUBLIC_KEY), installs it from
-// Settings > Browser, opens a Chromium tab, types into a fixture page and kills the engine.
+// Chromium engine checks (every OS): set FERRYX_UI_AUDIT_ENGINE_ZIP to the engine archive the
+// app installs on this platform (engine-linux-<arch>.zip, engine-macos-aarch64.zip with
+// ferryx_engine.app at its root, engine-windows-x86_64.zip with ferryx_engine.exe at its root).
+// The script serves it with a manifest signed by a throwaway ed25519 key that only debug builds
+// accept (FERRYX_BROWSER_ENGINE_PUBLIC_KEY), installs it from Settings > Browser, opens a
+// Chromium tab, types into a fixture page and kills the engine. The engine's window is a child
+// X window on Linux, a separate app's window on macOS and a child HWND owned by another process
+// on Windows; keyboard focus and the engine processes are read per platform.
+//
+// Extension scenario (needs the engine and network): installs uBlock Origin Lite from the Chrome
+// Web Store in an engine tab (the app has no other install path: Settings > Browser > Extensions
+// only links to the store), removes it with the trash button of its row in Settings > Browser >
+// Extensions, restarts the app and checks it stays removed. Results go to summary.extension.
 //
 // Agent automation: `ferryx browser snapshot` and act commands (fill, click with an
 // --expect-text postcondition, a click with a ref from before a reload) run against a local
@@ -27,7 +38,7 @@
 // the drop. Results go to summary.drag_mask; none of the full flow runs.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { inflateSync } from "node:zlib";
 
@@ -55,6 +66,14 @@ for (const dir of Object.values(dirs)) mkdirSync(dir, { recursive: true });
 const engineZip = scenario === "full" && process.env.FERRYX_UI_AUDIT_ENGINE_ZIP && existsSync(process.env.FERRYX_UI_AUDIT_ENGINE_ZIP)
   ? resolve(process.env.FERRYX_UI_AUDIT_ENGINE_ZIP)
   : null;
+// The app's engine platform key and executable (platform_key in engine_install.rs, ENGINE_EXE in
+// cef_engine/{linux,macos,windows}.rs).
+const enginePlatformKey = platform === "darwin"
+  ? "macos-aarch64"
+  : platform === "win32"
+    ? "windows-x86_64"
+    : `linux-${process.arch === "arm64" ? "aarch64" : "x86_64"}`;
+const ENGINE_EXE = { linux: "ferryx_engine", darwin: "ferryx_engine.app/Contents/MacOS/ferryx_engine", win32: "ferryx_engine.exe" }[platform];
 const dragEngineDir = scenario === "drag-mask" && process.env.FERRYX_UI_AUDIT_ENGINE_DIR ? resolve(process.env.FERRYX_UI_AUDIT_ENGINE_DIR) : null;
 if (scenario === "drag-mask" && (!dragEngineDir || !existsSync(dragEngineDir))) {
   throw new Error("--scenario drag-mask needs FERRYX_UI_AUDIT_ENGINE_DIR naming an unpacked engine directory");
@@ -77,7 +96,12 @@ const summary = {
     "Agent automation runs with Settings > Browser > Agent access 'require pairing' off (seeded agent-authority.json), so the CLI uses the transport token only.",
   ],
   engine: engineZip
-    ? { zip: engineZip, checks: {} }
+    ? {
+        zip: engineZip,
+        platform_key: enginePlatformKey,
+        // Every engine check starts false, so a run that stops early reports what it never reached.
+        checks: Object.fromEntries(["installed_from_settings", "engine_process_started", "fixture_loaded", "typing_reaches_page", "agent_automation", "engine_kill_closes_tabs"].map((name) => [name, false])),
+      }
     : { skipped: scenario === "full" ? "FERRYX_UI_AUDIT_ENGINE_ZIP not set or missing" : `not part of the ${scenario} scenario` },
   drag_mask: dragEngineDir ? { engine_dir: dragEngineDir } : undefined,
   agent: {},
@@ -163,7 +187,7 @@ if (engineZip) {
   const manifest = Buffer.from(JSON.stringify({
     version: summary.engine.version,
     platforms: {
-      [`linux-${process.arch === "arm64" ? "aarch64" : "x86_64"}`]: {
+      [enginePlatformKey]: {
         url: `${fixtureBase}/${basename(engineZip)}`,
         sha256: createHash("sha256").update(zipBytes).digest("hex"),
         size: zipBytes.length,
@@ -189,7 +213,7 @@ const linux = {
     return this.windowId ? run("xdotool", ["windowactivate", "--sync", this.windowId]) : { ok: false, stderr: "no window" };
   },
   keyName(key) {
-    return { Tab: "Tab", Enter: "Return", Escape: "Escape", Space: "space", ",": "comma", "=": "equal" }[key] ?? key;
+    return { Tab: "Tab", Enter: "Return", Escape: "Escape", Space: "space", ",": "comma", "=": "equal", "[": "bracketleft" }[key] ?? key;
   },
   key({ key, mods = [] }) {
     return run("xdotool", ["key", "--clearmodifiers", [...mods.map((mod) => (mod === "mod" ? "ctrl" : mod)), this.keyName(key)].join("+")]);
@@ -246,6 +270,11 @@ const mac = {
     return result.ok && Number(result.stdout) > 0 ? String(pid) : null;
   },
   focus() {
+    // `set frontmost` on an app that is already frontmost still brings all of its windows to the
+    // front, which buries the engine's pane windows (a separate app ordered above Ferryx) without
+    // a focus change that would raise them again. Only activate when Ferryx is not frontmost.
+    const front = this.osa('tell application "System Events" to get unix id of first process whose frontmost is true');
+    if (front.ok && Number(front.stdout) === this.pid) return { ok: true, already_frontmost: true };
     return this.osa(`tell application "System Events" to set frontmost of (first process whose unix id is ${this.pid}) to true`);
   },
   key({ key, mods = [] }) {
@@ -326,7 +355,7 @@ const mac = {
 
 // ---------------------------------------------------------------- platform: Windows
 const winHelper = join(out, "win-input.ps1");
-const winVk = { Tab: 0x09, Enter: 0x0d, Escape: 0x1b, Space: 0x20, ",": 0xbc, "=": 0xbb, mod: 0x11, ctrl: 0x11, shift: 0x10, alt: 0x12 };
+const winVk = { Tab: 0x09, Enter: 0x0d, Escape: 0x1b, Space: 0x20, ",": 0xbc, "=": 0xbb, "[": 0xdb, mod: 0x11, ctrl: 0x11, shift: 0x10, alt: 0x12 };
 const win = {
   pid: null,
   hwnd: null,
@@ -404,6 +433,19 @@ public static class FxInput {
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder name, int max);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct GUITHREADINFO { public int cbSize; public uint flags; public IntPtr hwndActive; public IntPtr hwndFocus; public IntPtr hwndCapture; public IntPtr hwndMenuOwner; public IntPtr hwndMoveSize; public IntPtr hwndCaret; public RECT rcCaret; }
+  [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint thread, ref GUITHREADINFO info);
+  /** "<focus hwnd> <its process id>" of the foreground thread's keyboard focus (a child HWND of
+   * another process, such as the engine's pane window, included). */
+  public static string FocusOwner() {
+    uint ignored;
+    uint thread = GetWindowThreadProcessId(GetForegroundWindow(), out ignored);
+    var info = new GUITHREADINFO(); info.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
+    if (!GetGUIThreadInfo(thread, ref info) || info.hwndFocus == IntPtr.Zero) return "0 0";
+    uint pid; GetWindowThreadProcessId(info.hwndFocus, out pid);
+    return ((long)info.hwndFocus).ToString() + " " + pid.ToString();
+  }
   public delegate bool EnumProc(IntPtr h, IntPtr l);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
@@ -480,6 +522,7 @@ switch ($Action) {
   "move" { $n = [FxInput]::Button($Width, $Height, 0x0001); if ($n -eq 0) { exit 4 } }
   "up" { $n = [FxInput]::Button($Width, $Height, 0x0004); if ($n -eq 0) { exit 4 } }
   "closedialogs" { Write-Output ([FxInput]::CloseDialogs([uint32]$ProcessId)) }
+  "focusowner" { Write-Output ([FxInput]::FocusOwner()) }
   "wheel" { $n = [FxInput]::Wheel($Width, $Height, [int]$Codes); if ($n -eq 0) { exit 4 } }
   "resize" { if (-not [FxInput]::SetWindowPos($handle, [IntPtr]::Zero, 40, 40, $Width, $Height, 0x0004)) { exit 5 } }
   "upscale" {
@@ -658,10 +701,10 @@ function decodePng(path) {
  * 22-70 px wide (narrower are scrollbars/borders, wider are select boxes) whose right edge is the
  * rightmost such run on that line, then pick the run seen on the most lines. Returns its centre.
  */
-function findRowSwitch(path, label) {
+function findRowSwitch(path, label, { below = 12 } = {}) {
   const image = decodePng(path);
   const votes = new Map();
-  for (let dy = -12; dy <= 12; dy += 1) {
+  for (let dy = -12; dy <= below; dy += 1) {
     const y = Math.min(image.height - 1, Math.max(0, label.y + dy));
     // Background = the most common colour on this line (a single sample can land on a glyph).
     const counts = new Map();
@@ -693,10 +736,108 @@ function findRowSwitch(path, label) {
   const winner = [...votes.values()].sort((a, b) => b.count - a.count)[0];
   if (!winner || winner.count < 3) return null;
   const ys = winner.ys.sort((a, b) => a - b);
-  return { x: Math.round((winner.run[0] + winner.run[1]) / 2), y: ys[Math.floor(ys.length / 2)], lines: winner.count };
+  return { x: Math.round((winner.run[0] + winner.run[1]) / 2), y: ys[Math.floor(ys.length / 2)], lines: winner.count, width: winner.run[1] - winner.run[0] };
 }
 
 const norm = (text) => text.toLowerCase().replace(/[^a-z0-9:%./]/g, "");
+/**
+ * The destructive (red) button on the line of `prompt` (an OCR phrase hit), right of the
+ * prompt's text: the bounding box of strongly red pixels within 24px above or below the
+ * prompt's centre line. Returns its centre and size, or null when no button-sized red area.
+ */
+const isDestructiveRed = ([r, g, b]) => r > 170 && r - g > 80 && r - b > 80;
+/** Chrome's filled primary button (Remove in its uninstall dialog): white text on blue. */
+const isChromeBlue = ([r, g, b]) => b > 170 && b - r > 110 && b - g > 60;
+function findRedButton(path, prompt, matches = isDestructiveRed) {
+  const image = decodePng(path);
+  const y0 = Math.max(0, prompt.y - 24), y1 = Math.min(image.height - 1, prompt.y + 24);
+  return buttonBlob(image, Math.round(prompt.right ?? prompt.x), image.width - 1, y0, y1, matches, { minWidth: 30, maxWidth: 220, minHeight: 14, maxHeight: 60 });
+}
+/**
+ * The button-sized area of `matches` pixels in the box: matching columns grouped into runs
+ * (gaps up to 3px), each run's box kept when its size fits, and the run with the most matching
+ * pixels wins. Stray pixels elsewhere on the line (run 41658910729 Windows: a 482px-wide box)
+ * or a large area of the same colour (the Windows desktop) are separate runs and drop out.
+ */
+function buttonBlob(image, x0, x1, y0, y1, matches, { minWidth, maxWidth, minHeight, maxHeight }) {
+  const runs = [];
+  let run = null;
+  for (let x = x0; x <= x1; x += 1) {
+    let top = -1, bottom = -1, count = 0;
+    for (let y = y0; y <= y1; y += 1) {
+      if (matches(image.rgb(x, y))) {
+        if (top < 0) top = y;
+        bottom = y;
+        count += 1;
+      }
+    }
+    if (!count) continue;
+    if (run && x - run.right <= 3) {
+      run.right = x; run.top = Math.min(run.top, top); run.bottom = Math.max(run.bottom, bottom); run.count += count;
+    } else {
+      run = { left: x, right: x, top, bottom, count };
+      runs.push(run);
+    }
+  }
+  const fits = runs
+    .map((entry) => ({ ...entry, width: entry.right - entry.left + 1, height: entry.bottom - entry.top + 1 }))
+    .filter((entry) => entry.count >= 200 && entry.width >= minWidth && entry.width <= maxWidth && entry.height >= minHeight && entry.height <= maxHeight)
+    .sort((a, b) => b.count - a.count);
+  const best = fits[0];
+  if (!best) return null;
+  return { x: Math.round((best.left + best.right) / 2), y: Math.round((best.top + best.bottom) / 2), width: best.width, height: best.height };
+}
+/**
+ * Chrome's uninstall dialog Remove found from the dialog's title ('Remove "uBlock Origin
+ * Lite"?', OCR reads it where it misses the buttons: runs 41658910729 macOS probe-093, Windows
+ * probe-090): the filled blue button in the 40-200px below the title. Windows puts Remove left
+ * of Cancel, macOS and Linux right of it, so only the colour picks it.
+ */
+function findChromeDialogRemove(path, title) {
+  const image = decodePng(path);
+  const x0 = Math.max(0, title.left - 80), x1 = Math.min(image.width - 1, title.left + 420);
+  const y0 = Math.min(image.height - 1, title.top + 40), y1 = Math.min(image.height - 1, title.top + 200);
+  return buttonBlob(image, x0, x1, y0, y1, isChromeBlue, { minWidth: 50, maxWidth: 200, minHeight: 20, maxHeight: 70 });
+}
+/**
+ * The controls at the right end of a multi-line row whose first-line label is `label`: column
+ * runs that differ from the row background anywhere in the band from 6px above the label to
+ * 36px below it, right of the label's text. Returns the cluster at the right end (runs closer
+ * than 120px to each other), e.g. pin, trash and switch of an extension row, left to right.
+ */
+function findRowIcons(path, label) {
+  const image = decodePng(path);
+  const y0 = Math.max(0, label.y - 6), y1 = Math.min(image.height - 1, label.y + 36);
+  const counts = new Map();
+  for (let x = 0; x < image.width; x += 3) {
+    const key = image.rgb(x, Math.min(image.height - 1, label.y + 10)).map((value) => value >> 3).join(",");
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const background = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0].split(",").map((value) => (Number(value) << 3) + 4);
+  const differs = (x, y) => image.rgb(x, y).reduce((sum, value, index) => sum + Math.abs(value - background[index]), 0) > 40;
+  const runs = [];
+  let start = -1, last = -99;
+  for (let x = label.right + 40; x < image.width; x += 1) {
+    let hit = false;
+    for (let y = y0; y <= y1 && !hit; y += 2) hit = differs(x, y);
+    if (!hit) continue;
+    if (start < 0 || x - last > 4) {
+      if (start >= 0) runs.push([start, last]);
+      start = x;
+    }
+    last = x;
+  }
+  if (start >= 0) runs.push([start, last]);
+  // A trailing run wider than any control is the window edge or the screen outside it.
+  while (runs.length && runs.at(-1)[1] - runs.at(-1)[0] > 100) runs.pop();
+  // The switch is the rightmost run 26-48px wide (a scrollbar or window edge can follow it); the
+  // controls left of it are the narrow icon runs before it (pin, trash), up to 60px apart.
+  const switchIndex = runs.findLastIndex(([a, b]) => b - a + 1 >= 26 && b - a + 1 <= 48);
+  if (switchIndex < 0) return null;
+  const cluster = [runs[switchIndex]];
+  for (let index = switchIndex - 1; index >= 0 && cluster[0][0] - runs[index][1] <= 60 && runs[index][1] - runs[index][0] < 26; index -= 1) cluster.unshift(runs[index]);
+  return cluster.map(([a, b]) => ({ x: Math.round((a + b) / 2), width: b - a + 1 }));
+}
 function findWord(words, text, { nth = 0, minX = 0, maxX = Infinity, pick = "first", match = null } = {}) {
   const test = match ?? ((word) => norm(word.text) === norm(text));
   const hits = (words ?? []).filter((word) => test(word) && word.left >= minX && word.left <= maxX).sort((a, b) => a.top - b.top || a.left - b.left);
@@ -747,18 +888,24 @@ mkdirSync(join(dirs.data, "browser"), { recursive: true });
 writeFileSync(agentAuthority, JSON.stringify({ settings: { requirePairing: false } }));
 summary.agent_access = { requirePairing: false, file: agentAuthority };
 
-const appLog = openSync(join(out, "app.log"), "w");
 let app = null;
-if (!existsSync(binary)) {
-  summary.launch = { ok: false, error: `binary not found: ${binary}` };
-} else {
-  app = spawn(binary, [], { env, stdio: ["ignore", appLog, appLog], cwd: dirs.tmp, detached: platform !== "win32" });
-  app.on("exit", (code, signal) => {
+/** Starts the app with the isolated env; its exit is recorded unless the harness restarted it. */
+function launchApp(logName) {
+  const log = openSync(join(out, logName), "w");
+  const child = spawn(binary, [], { env, stdio: ["ignore", log, log], cwd: dirs.tmp, detached: platform !== "win32" });
+  child.on("exit", (code, signal) => {
+    if (child !== app) return;
     summary.app_exit = { code, signal, at: new Date().toISOString(), during_teardown: Boolean(summary.finished_at) };
     writeSummary();
   });
+  mac.pid = win.pid = child.pid;
+  return child;
+}
+if (!existsSync(binary)) {
+  summary.launch = { ok: false, error: `binary not found: ${binary}` };
+} else {
+  app = launchApp("app.log");
   summary.launch = { ok: true, pid: app.pid };
-  mac.pid = win.pid = app.pid;
 }
 writeSummary();
 
@@ -781,8 +928,12 @@ function sessions() {
  * the command waits on (wait, snapshot, act postconditions) could not load during spawnSync.
  */
 async function cliAsync(...args) {
+  return cliAsyncWithin(30000, ...args);
+}
+/** `cliAsync` with its own kill timeout (a remove waits on Chrome's dialog, up to 120s). */
+async function cliAsyncWithin(timeoutMs, ...args) {
   const child = Bun.spawn([binary, "browser", ...args], { env, stdout: "pipe", stderr: "pipe" });
-  const timer = setTimeout(() => child.kill(), 30000);
+  const timer = setTimeout(() => child.kill(), timeoutMs);
   const [stdout, stderr, status] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
   clearTimeout(timer);
   return { ok: status === 0, status, stdout: stdout.trim().slice(0, 4000), stderr: stderr.trim().slice(0, 2000) };
@@ -895,6 +1046,8 @@ async function agentQa(engine, browserId) {
   }
   const required = ["fixture_loaded", "snapshot", "stale_ref_refused", "fill_dispatched", "click_applied", "page_reflects_act"];
   record.ok = required.every((name) => record.checks[name] === true);
+  // Observations outside `required` (isolated_world) do not fail the job.
+  record.informational = Object.keys(record.checks).filter((name) => !required.includes(name));
   writeSummary();
   return { ok: record.ok, checks: record.checks, stderr: record.ok ? "" : `failed: ${required.filter((name) => record.checks[name] !== true).join(", ")}` };
 }
@@ -994,7 +1147,8 @@ const clickOr = (text, fallback, options = {}) => [
 ];
 
 // ---------------------------------------------------------------- UI audit steps
-if (app) {
+/** Waits for the app's main window and its first render; the result goes to summary.window. */
+async function waitForWindow() {
   const deadline = Date.now() + 90000;
   let windowId = null;
   while (!windowId && Date.now() < deadline && !summary.app_exit) {
@@ -1003,9 +1157,11 @@ if (app) {
   }
   linux.windowId = windowId;
   win.hwnd = windowId;
-  summary.window = { found: Boolean(windowId), id: windowId, waited_ms: 90000 - Math.max(0, deadline - Date.now()) };
+  const found = { found: Boolean(windowId), id: windowId, waited_ms: 90000 - Math.max(0, deadline - Date.now()) };
   await sleep(15000); // first render of the web UI and daemon startup
+  return found;
 }
+if (app) summary.window = await waitForWindow();
 
 /** Click a sidebar label so keyboard focus leaves an embedded webview and app shortcuts reach the UI. */
 const chromeFocus = [
@@ -1263,7 +1419,36 @@ const closeStrayDialogs = [
   () => (platform === "win32" ? win.closeDialogs() : { ok: true, skipped: "not Windows" }),
 ];
 
-const enginePids = () => (platform === "linux" ? run("pgrep", ["-f", "ferryx_engine"]).stdout.split(/\s+/).filter(Boolean).map(Number) : []);
+/** Every ferryx_engine process (the engine and its helpers): pgrep on Linux and macOS, tasklist on Windows. */
+const enginePids = () => {
+  if (platform === "win32") {
+    return run("tasklist", ["/FI", "IMAGENAME eq ferryx_engine.exe", "/FO", "CSV", "/NH"]).stdout
+      .split(/\r?\n/)
+      .map((line) => /^"ferryx_engine\.exe","(\d+)"/i.exec(line.trim())?.[1])
+      .filter(Boolean)
+      .map(Number);
+  }
+  return run("pgrep", ["-f", "ferryx_engine"]).stdout.split(/\s+/).filter(Boolean).map(Number);
+};
+/**
+ * Which process holds keyboard focus, as { engine, detail }. Linux: the raw X focus window is a
+ * window other than the Ferryx toplevel (the engine pane is a child X window). macOS: the
+ * frontmost app is the engine (its windows belong to a separate app ordered above Ferryx).
+ * Windows: the foreground thread's focus HWND belongs to an engine process (a child HWND of the
+ * Ferryx window owned by the engine).
+ */
+function engineKeyboardFocus() {
+  if (platform === "linux") {
+    const focused = run("xdotool", ["getwindowfocus", "-f"]).stdout;
+    return { engine: /^\d+$/.test(focused) && Number(focused) > 1 && focused !== String(linux.windowId), detail: { focused, ferryx: linux.windowId } };
+  }
+  if (platform === "darwin") {
+    const front = Number(mac.osa('tell application "System Events" to get unix id of first process whose frontmost is true').stdout);
+    return { engine: enginePids().includes(front), detail: { frontmost_pid: front, ferryx_pid: mac.pid } };
+  }
+  const [hwnd, pid] = win.ps("focusowner").stdout.split(/\s+/).filter(Boolean).slice(-2).map(Number);
+  return { engine: Boolean(pid) && enginePids().includes(pid), detail: { focus_hwnd: hwnd ?? null, focus_pid: pid ?? null, ferryx_pid: win.pid } };
+}
 
 // ---------------------------------------------------------------- drag-mask scenario
 // While a tab is dragged, TerminalSplitView renders browser panes hidden (browserPanesVisible is
@@ -1423,6 +1608,12 @@ async function dragMaskFlow() {
   record.after = fixturePixels(shotPath(after));
   record.restored_after_drop = (record.after.green ?? 0) >= FIXTURE_VISIBLE_MIN;
   record.pass = record.visible_before && record.masked_mid_drag && record.restored_after_drop;
+  record.checks = {
+    chromium: record.chromium === true,
+    visible_before: record.visible_before === true,
+    masked_mid_drag: record.masked_mid_drag === true,
+    restored_after_drop: record.restored_after_drop === true,
+  };
   writeSummary();
 }
 
@@ -1550,13 +1741,24 @@ if (engineZip) {
     "Settings > Browser > Chromium Engine: click 'Download', wait for the install",
     [
       focus,
+      // The Import steps can leave Settings closed (on Windows run 41635903718 the wheel did not
+      // scroll, the import dialog never opened and its Escape closed Settings): reopen it here.
+      ["Settings > Browser on screen", async () => {
+        const words = ocr(probeShot()) ?? [];
+        if (findWord(words, "", { match: (word) => /^(Appearance|Keyboard)$/.test(word.text) })) return { ok: true, already_open: true };
+        const opened = await openSettings();
+        if (!opened.ok) return opened;
+        await sleep(500);
+        return { ...(await clickNav("Browser")), reopened: true };
+      }],
+      1500,
       // The Import step left the pane scrolled to the bottom; Chromium Engine sits above Extensions.
       ["scroll up to the Chromium Engine group", () => scrollSettingsTo("Chromium Engine", { direction: -1 })],
       // Rightmost: the group also has a "Download size" row label on the left.
       ["click Download", () => clickText("Download", { timeout: 8000, match: exactly("Download"), pick: "rightmost" })],
       3000,
       ["wait for ferryx_engine on disk", async () => {
-        // The install unpacks into <root>/.staging-<uuid>/ (ferryx_engine is there before the
+        // The install unpacks into <root>/.staging-<uuid>/ (the executable is there before the
         // unpack ends), then renames it and writes the "active" pointer last. Only the directory
         // the pointer names counts as installed.
         const root = join(dirs.data, "browser-engine");
@@ -1565,13 +1767,13 @@ if (engineZip) {
         while (Date.now() < deadline) {
           if (existsSync(pointer)) {
             const name = readFileSync(pointer, "utf8").trim();
-            if (name && !name.startsWith(".") && !/[\\/]/.test(name) && existsSync(join(root, name, "ferryx_engine"))) {
+            if (name && !name.startsWith(".") && !/[\\/]/.test(name) && existsSync(join(root, name, ENGINE_EXE))) {
               return { ok: true, dir: join(root, name), active: name };
             }
           }
           await sleep(2000);
         }
-        return { ok: false, stderr: `no "active" pointer naming a directory with ferryx_engine under ${root}` };
+        return { ok: false, stderr: `no "active" pointer naming a directory with ${ENGINE_EXE} under ${root}` };
       }],
       // The UI resolves the install after the pointer is written; wait for its result, bounded.
       waitForText(["Remove", "Installed"], 90000),
@@ -1685,10 +1887,11 @@ await step("narrow-900-settings", "At 900px, open Settings > Browser", [closeStr
 });
 await step("narrow-900-settings-closed", "Escape closes Settings at 900px", [focus, key("Escape", { key: "Escape" }), 1500]);
 
-// ---------------------------------------------------------------- Chromium engine checks (Linux)
+// ---------------------------------------------------------------- Chromium engine checks
 let xStateIndex = 0;
 /** Writes the X window tree, the raw focus window and its properties to x-state/<n>-<name>.txt. */
 const captureXState = (name) => {
+  if (platform !== "linux") return { file: null };
   xStateIndex += 1;
   const dir = join(out, "x-state");
   mkdirSync(dir, { recursive: true });
@@ -1705,21 +1908,21 @@ const captureXState = (name) => {
   ].join("\n"));
   return { file, raw_focus: rawFocus };
 };
-/** Waits until X keyboard focus leaves the Ferryx toplevel for the engine's pane window (the
- * engine moves it asynchronously after Mod+L or a click), bounded by `timeout`. Reads the raw
- * focus window (`-f`): the engine window is a child of the Ferryx window without WM_STATE, and
- * plain `getwindowfocus` walks up from it to the Ferryx client window. */
+/** Waits until keyboard focus moves to the engine (it does so asynchronously after Mod+L or a
+ * click), bounded by `timeout`; see engineKeyboardFocus for what that means on each platform.
+ * Linux reads the raw focus window (`-f`): the engine window is a child of the Ferryx window
+ * without WM_STATE, and plain `getwindowfocus` walks up from it to the Ferryx client window. */
 const waitForEngineFocus = (label, timeout = 8000) => [label, async () => {
   const deadline = Date.now() + timeout;
-  let focused = "";
+  let focus = null;
   while (Date.now() < deadline) {
-    focused = run("xdotool", ["getwindowfocus", "-f"]).stdout;
-    if (/^\d+$/.test(focused) && Number(focused) > 1 && focused !== String(linux.windowId)) {
-      return { ok: true, focused, ferryx: linux.windowId, x_state: captureXState(label.replace(/\W+/g, "-")).file };
+    focus = engineKeyboardFocus();
+    if (focus.engine) {
+      return { ok: true, ...focus.detail, x_state: captureXState(label.replace(/\W+/g, "-")).file };
     }
     await sleep(200);
   }
-  return { ok: false, focused, ferryx: linux.windowId, x_state: captureXState(label.replace(/\W+/g, "-")).file, stderr: "X keyboard focus stayed off the engine window" };
+  return { ok: false, ...(focus?.detail ?? {}), x_state: captureXState(label.replace(/\W+/g, "-")).file, stderr: "keyboard focus stayed off the engine" };
 }];
 if (engineZip && summary.engine.checks.installed_from_settings) {
   await step("engine-restore-size", "Resize back to 1280x850 before the Chromium tab", [focus, ["resize", () => host.resize(1280, 850)], 1500]);
@@ -1813,7 +2016,7 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
   await step(
     "chromium-tab-switch",
     "Mod+T (terminal tab) hides the engine view; Mod+Shift+[ returns to the Chromium tab",
-    [focus, key("Mod+T", { key: "t", mods: ["mod"] }), 3000, ["screenshot hidden", () => ({ ok: screenshot("chromium-hidden-on-terminal-tab").ok })], key("Mod+Shift+[", { key: "bracketleft", mods: ["mod", "shift"] }), 3000],
+    [focus, key("Mod+T", { key: "t", mods: ["mod"] }), 3000, ["screenshot hidden", () => ({ ok: screenshot("chromium-hidden-on-terminal-tab").ok })], key("Mod+Shift+[", { key: "[", mods: ["mod", "shift"] }), 3000],
     // agent-chromium navigated this tab to /agent.html, so its page/title read "agentqa" now.
     { any: ["~agentqa", "~ferryxqa", "fixture:"] },
   );
@@ -1839,6 +2042,407 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
     ],
   );
   summary.engine.checks.engine_kill_closes_tabs = summary.steps.at(-1).actions.at(-1)?.ok ?? false;
+}
+
+// ---------------------------------------------------------------- extension: install, remove, restart
+// uBlock Origin Lite comes from the Chrome Web Store in an engine tab: Ferryx has no other way to
+// install an extension (Settings > Browser > Extensions only opens the store). It is removed with
+// the trash button of its row in Settings > Browser > Extensions, then the app restarts and the
+// row and the profile's extension data must stay gone.
+const UBOL_ID = "ddkjiahejlhfcafbddmgiahcphecmpfh";
+const UBOL_URL = `https://chromewebstore.google.com/detail/ublock-origin-lite/${UBOL_ID}`;
+/** uBlock Origin Lite in the engine's default profile data: its Extensions/<id> dir and its
+ * extensions.settings entry in Preferences / Secure Preferences. */
+function ubolOnDisk() {
+  const root = join(dirs.data, "browser-cef", "default");
+  const result = { dir: false, prefs: false, prefs_read: [] };
+  for (const profile of [join(root, "Default"), root]) {
+    if (existsSync(join(profile, "Extensions", UBOL_ID))) result.dir = true;
+    for (const file of ["Preferences", "Secure Preferences"]) {
+      const path = join(profile, file);
+      if (!existsSync(path)) continue;
+      try {
+        const settings = JSON.parse(readFileSync(path, "utf8"))?.extensions?.settings ?? {};
+        result.prefs_read.push(`${basename(profile)}/${file}`);
+        if (settings[UBOL_ID]) {
+          result.prefs = true;
+          // What the entry is (a live install, or a leftover such as an uninstall tombstone):
+          // its top-level keys and the fields Chrome uses for state.
+          const entry = settings[UBOL_ID];
+          result.prefs_entry ??= {};
+          result.prefs_entry[`${basename(profile)}/${file}`] = {
+            keys: Object.keys(entry).sort().slice(0, 40),
+            state: entry.state ?? null,
+            location: entry.location ?? null,
+            path: entry.path ?? null,
+            disable_reasons: entry.disable_reasons ?? null,
+            has_manifest: Boolean(entry.manifest),
+          };
+        }
+      } catch {}
+    }
+  }
+  return result;
+}
+/** OCR words of the extension's row label ("uBlock Origin Lite"). */
+const ubolWords = (words) => (words ?? []).filter((word) => /^u?b[li1|]ock$/i.test(word.text.replace(/[^a-z0-9|]/gi, "")));
+/** Settings > Browser > Extensions on screen: opens Settings, the Browser nav, scrolls to the group. */
+const openExtensionsGroup = [
+  closeStrayDialogs,
+  focus,
+  chromeFocus,
+  ["open Settings", openSettings],
+  dismissStoreToast,
+  ["click nav Browser", () => clickNav("Browser")],
+  2000,
+  ["scroll to Extensions", () => scrollSettingsTo("Extensions")],
+  3000,
+];
+if (engineZip && summary.engine.checks.installed_from_settings) {
+  const record = {
+    extension: "uBlock Origin Lite",
+    id: UBOL_ID,
+    install_path: "Chrome Web Store page in a Chromium engine tab ('Add to Chrome', then Chrome's 'Add extension' dialog)",
+    checks: Object.fromEntries(["installed_from_web_store", "listed_in_settings", "removed_from_settings", "removed_from_profile", "stays_removed_after_restart"].map((name) => [name, false])),
+  };
+  summary.extension = record;
+  let storeTab = null;
+  let installButton = null;
+  let confirmPrompt = null;
+  let confirmed = false;
+  let cliRemove = null;
+  await step(
+    "extension-store-open",
+    "Mod+Shift+B opens a Chromium tab; the CLI navigates it to uBlock Origin Lite's Chrome Web Store page",
+    [
+      focus,
+      chromeFocus,
+      key("Mod+Shift+B", { key: "b", mods: ["mod", "shift"] }),
+      ["navigate to the store page (CLI)", async () => {
+        const deadline = Date.now() + 30000;
+        while (Date.now() < deadline && !storeTab) {
+          storeTab = sessions().list.find((entry) => entry.engine === "chromium") ?? null;
+          if (!storeTab) await sleep(1000);
+        }
+        if (!storeTab) return { ok: false, stderr: "no chromium tab listed" };
+        const navigated = await cliAsync("navigate", "--browser-id", storeTab.browserId, "--url", UBOL_URL);
+        return { ok: navigated.ok, browser_id: storeTab.browserId, stderr: navigated.stderr };
+      }],
+      waitForText(["Chrome"], 45000),
+    ],
+    { any: ["Chrome", "uBlock"] },
+  );
+  await step(
+    "extension-store-install",
+    "Click 'Add to Chrome', then 'Add extension' in Chrome's dialog; wait until the extension is in the profile",
+    [
+      // The store shows "Switch to Chrome?" to every Chromium that is not Google Chrome; it does
+      // not block the install. It can sit off screen right of the pane, so it is answered in the
+      // page.
+      ["optional dismiss the 'Switch to Chrome?' prompt (CLI eval)", async () => {
+        const script = "(() => { const b = [...document.querySelectorAll('button,a,[role=button]')].find((e) => (e.textContent || '').trim() === 'No thanks'); if (!b) return 'absent'; b.click(); return 'dismissed'; })()";
+        const result = storeTab ? await cliAsync("eval", "--browser-id", storeTab.browserId, "--script", script) : { ok: false, stderr: "no store tab" };
+        record.switch_to_chrome_prompt = result.ok ? result.stdout.replace(/"/g, "") : null;
+        return { ok: result.ok, prompt: record.switch_to_chrome_prompt, stderr: result.stderr };
+      }],
+      1500,
+      // The store page is wider than the pane: the CLI scrolls the install button into view and
+      // gives it dark-on-white colours so OCR reads its label (white on blue it reads nothing);
+      // the click on it is still real OS input.
+      ["scroll the install button into view (CLI eval)", async () => {
+        // Also reports the "Share" link's rect, a fallback anchor from page CSS pixels to screen.
+        // Centred: on the 1024px Windows runner screen the window is wider than the screen, so a
+        // button at the pane's right edge is off screen.
+        const script = "(() => { const b = [...document.querySelectorAll('button')].find((e) => /Add to Chrome/i.test(e.textContent || '')); if (!b) return 'none'; b.scrollIntoView({block: 'center', inline: 'center'}); b.style.setProperty('background', '#ffffff', 'important'); b.style.setProperty('color', '#000000', 'important'); b.querySelectorAll('*').forEach((e) => e.style.setProperty('color', '#000000', 'important')); const r = b.getBoundingClientRect(); const s = [...document.querySelectorAll('a,button,span')].find((e) => (e.textContent || '').trim() === 'Share'); const q = s && s.getBoundingClientRect(); return JSON.stringify({x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), disabled: b.disabled, text: b.textContent.trim(), share: q ? {x: Math.round(q.x + q.width / 2), y: Math.round(q.y + q.height / 2)} : null, dpr: devicePixelRatio, vw: innerWidth}); })()";
+        const deadline = Date.now() + 30000;
+        let result = null;
+        do {
+          result = storeTab ? await cliAsync("eval", "--browser-id", storeTab.browserId, "--script", script) : { ok: false, stderr: "no store tab" };
+          if (result.ok && !result.stdout.includes("none")) {
+            try {
+              let parsed = JSON.parse(result.stdout);
+              if (typeof parsed === "string") parsed = JSON.parse(parsed);
+              installButton = parsed;
+            } catch {}
+            return { ok: Boolean(installButton), button: installButton ?? result.stdout };
+          }
+          await sleep(2000);
+        } while (Date.now() < deadline);
+        record.error = "the store page offers no 'Add to Chrome' button";
+        return { ok: false, last: result?.stdout ?? null, stderr: result?.stderr || "no 'Add to Chrome' button in the page" };
+      }],
+      1500,
+      ["click Add to Chrome", async () => {
+        const deadline = Date.now() + 20000;
+        do {
+          const words = ocr(probeShot()) ?? [];
+          const hit = findPhrase(words, "Add to Chrome")[0];
+          if (hit) return { ...host.click(hit.x, hit.y), at: [hit.x, hit.y], via: "ocr" };
+          // The label is white on blue: map the button's page rect through the OCR'd "Share" link.
+          const share = installButton?.share && installButton.share.x > 0 ? words.find((word) => word.text === "Share") : null;
+          if (share) {
+            const scale = installButton.dpr || 1;
+            const at = [
+              Math.round(share.left + share.width / 2 + (installButton.x - installButton.share.x) * scale),
+              Math.round(share.top + share.height / 2 + (installButton.y - installButton.share.y) * scale),
+            ];
+            return { ...host.click(...at), at, via: "page rect anchored on 'Share'" };
+          }
+          await sleep(1500);
+        } while (Date.now() < deadline);
+        record.error ??= `'Add to Chrome' could not be located on screen (page rect ${JSON.stringify(installButton)})`;
+        return { ok: false, stderr: "'Add to Chrome' not visible" };
+      }],
+      ["click Add extension", async () => {
+        const deadline = Date.now() + 30000;
+        do {
+          await sleep(1500);
+          const words = ocr(probeShot()) ?? [];
+          const hit = findPhrase(words, "Add extension").at(-1);
+          if (hit) return { ...host.click(hit.x, hit.y), at: [hit.x, hit.y] };
+        } while (Date.now() < deadline);
+        const text = storeTab ? await cliAsync("eval", "--browser-id", storeTab.browserId, "--script", "(document.body && document.body.innerText || '').slice(0, 600)") : null;
+        record.error ??= "Chrome's 'Add extension' dialog did not appear after clicking 'Add to Chrome'";
+        record.page_after_click = text?.stdout ?? null;
+        return { ok: false, stderr: "Chrome's 'Add extension' button not visible" };
+      }],
+      ["wait for the extension in the profile", async () => {
+        const deadline = Date.now() + 120000;
+        let disk = ubolOnDisk();
+        while (!disk.dir && Date.now() < deadline) {
+          await sleep(2000);
+          disk = ubolOnDisk();
+        }
+        if (!disk.dir) record.error ??= `no Extensions/${UBOL_ID} in the engine profile after 120s`;
+        return { ok: disk.dir, disk, stderr: disk.dir ? "" : `no Extensions/${UBOL_ID} in the engine profile after 120s` };
+      }],
+      // Chrome commits Preferences on a 10s timer; the Settings list reads them when no engine runs.
+      12000,
+    ],
+    { any: ["added", "uBlock"] },
+  );
+  record.checks.installed_from_web_store = summary.steps.at(-1).actions.at(-1)?.ok ?? false;
+  await step("extension-store-tab-closed", "Close the store tab (CLI) so its page cannot show through Settings", [
+    ["close the store tab", () => (storeTab ? cli("close", "--browser-id", storeTab.browserId) : { ok: false, stderr: "no store tab" })],
+    2000,
+  ]);
+  let row = null;
+  await step(
+    "extension-listed",
+    "Settings > Browser > Extensions lists uBlock Origin Lite",
+    [
+      ...openExtensionsGroup,
+      ["find the uBlock Origin Lite row", async () => {
+        const deadline = Date.now() + 30000;
+        do {
+          const path = probeShot();
+          const label = ubolWords(ocr(path))[0];
+          if (label) {
+            const word = { ...label, x: label.left + Math.round(label.width / 2), y: label.top + Math.round(label.height / 2), right: label.left + label.width };
+            // The name is the row's first line; the switch is centred on the whole (3-line) row,
+            // about 17px lower, so the probe looks further down than for single-line rows.
+            row = { label: word, knob: findRowSwitch(path, word, { below: 32 }), icons: findRowIcons(path, word) };
+            return { ok: true, label_at: [word.x, word.y], switch: row.knob, icons: row.icons };
+          }
+          await sleep(2000);
+        } while (Date.now() < deadline);
+        return { ok: false, stderr: "no uBlock row in the Extensions group" };
+      }],
+    ],
+    { any: ["uBlock", "Origin"] },
+  );
+  record.checks.listed_in_settings = Boolean(row);
+  await step(
+    "extension-remove",
+    "Click the row's trash button (left of its switch), confirm with Remove, then Remove in Chrome's own dialog; the row disappears",
+    [
+      ["click the trash button", async () => {
+        // The row ends in pin, trash and the switch: the trash is the control left of the switch.
+        // The controls are centred on the row, about 17px below its first-line name.
+        const candidates = [];
+        if (row?.icons?.length >= 2) candidates.push([row.icons.at(-2).x, row.label.y + 17]);
+        if (row?.knob) {
+          // Fallback: switch w-9 (36px), gap-1.5, trash size-6: 18px left of the switch's edge.
+          const scale = row.knob.width / 34;
+          const switchLeft = row.knob.x - row.knob.width / 2;
+          for (const offset of [18, 22, 14]) candidates.push([Math.round(switchLeft - offset * scale), row.knob.y]);
+        }
+        if (!candidates.length) return { ok: false, stderr: "row controls not located" };
+        for (const at of candidates) {
+          host.click(...at);
+          await sleep(1200);
+          const words = ocr(probeShot()) ?? [];
+          const prompt = findPhrase(words, "Chrome may ask")[0] ?? findPhrase(words, "once more")[0];
+          if (prompt) {
+            confirmPrompt = prompt;
+            return { ok: true, at, tried: candidates.indexOf(at) + 1 };
+          }
+        }
+        return { ok: false, stderr: "the remove confirmation did not appear" };
+      }],
+      // The confirmation's Remove is white text on the destructive red: OCR does not read it
+      // (runs 41635903718 and 41642552143 clicked off it), so it is the red button on the
+      // prompt's line, right of the prompt. Only that one: the Chromium Engine group's own
+      // "Remove" uninstalls the engine.
+      ["click Remove (Ferryx confirmation)", async () => {
+        if (!confirmPrompt) return { ok: false, stderr: "no row confirmation open" };
+        // The trash button's tooltip ("Remove uBlock Origin Lite") covers the red button while
+        // the pointer stays on the trash (run 41658910729 Linux probe-072): move onto the prompt.
+        host.mouseMove(confirmPrompt.x, confirmPrompt.y);
+        await sleep(800);
+        const path = probeShot();
+        const button = findRedButton(path, confirmPrompt);
+        if (!button) return { ok: false, probe: basename(path), stderr: "no red Remove button on the confirmation line" };
+        const at = [button.x, button.y];
+        const clicked = host.click(...at);
+        await sleep(1500);
+        // The confirmation closes when its Remove is clicked (the row's change starts).
+        const after = ocr(probeShot()) ?? [];
+        confirmed = !(findPhrase(after, "Chrome may ask").length || findPhrase(after, "once more").length);
+        return { ...clicked, ok: clicked.ok && confirmed, at, button, stderr: confirmed ? "" : "the confirmation stayed open after clicking its Remove" };
+      }],
+      // The product path from here: Ferryx asks the engine to uninstall and Chrome shows its own
+      // dialog. When the click above did not get there, `ferryx browser extensions remove` runs
+      // the same engine call (the CLI's admitted path), and Chrome's dialog is answered below.
+      ["optional CLI fallback (ferryx browser extensions remove)", () => {
+        if (confirmed) return { ok: true, skipped: "the Settings row started the removal" };
+        cliRemove = cliAsyncWithin(150000, "extensions", "remove", UBOL_ID);
+        record.removed_via = "cli";
+        return { ok: true, started: true };
+      }],
+      ["click Remove in Chrome's dialog", async () => {
+        if (confirmed) record.removed_via = "settings-row";
+        // Chrome's uninstall dialog: 'Remove "uBlock Origin Lite"?' over Cancel and Remove, with
+        // Remove right of Cancel on one line. Ferryx's own rows have Remove buttons too (the
+        // engine's, the confirmation's Remove left of its Cancel), so only that pair counts.
+        const deadline = Date.now() + 30000;
+        do {
+          await sleep(1500);
+          const path = probeShot();
+          const words = ocr(path) ?? [];
+          const cancels = words.filter((word) => word.text === "Cancel");
+          const hit = words.find((word) => word.text === "Remove"
+            && cancels.some((cancel) => Math.abs(cancel.top - word.top) <= 12 && word.left > cancel.left && word.left - (cancel.left + cancel.width) < 120));
+          if (hit) {
+            const at = [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)];
+            return { ...host.click(...at), at, via: "ocr" };
+          }
+          // White on blue, OCR reads the label partly or not at all (run 41653314878 probe-095):
+          // the filled blue button on a Cancel's line, right of it.
+          for (const cancel of cancels) {
+            const anchor = { x: cancel.left, y: cancel.top + Math.round(cancel.height / 2), right: cancel.left + cancel.width };
+            const button = findRedButton(path, anchor, isChromeBlue);
+            if (button && button.x - anchor.right < 160) {
+              const at = [button.x, button.y];
+              return { ...host.click(...at), at, via: "blue button right of Cancel", button };
+            }
+          }
+          // The dialog's title: a "Remove" with a quoted uBlock right after it on its line.
+          const title = words.find((word) => word.text === "Remove"
+            && words.some((next) => /^["“”']/.test(next.text) && ubolWords([next]).length
+              && Math.abs(next.top - word.top) <= 8 && next.left > word.left && next.left - (word.left + word.width) < 30));
+          if (title) {
+            const button = findChromeDialogRemove(path, title);
+            if (button) {
+              const at = [button.x, button.y];
+              return { ...host.click(...at), at, via: "blue button below the dialog title", button };
+            }
+          }
+          if (!ubolOnDisk().prefs && !ubolWords(words).length) return { ok: true, skipped: "already removed, no Chrome dialog" };
+        } while (Date.now() < deadline);
+        return { ok: false, stderr: "Chrome's Remove dialog not visible" };
+      }],
+      ["optional CLI fallback answered", async () => {
+        if (!cliRemove) return { ok: true, skipped: "no CLI fallback" };
+        const result = await cliRemove;
+        let listing = null;
+        try {
+          listing = JSON.parse(result.stdout);
+        } catch {}
+        record.cli_remove = { ok: result.ok, status: result.status, still_listed: listing ? listing.extensions?.some((entry) => entry.id === UBOL_ID) : null, stderr: result.stderr.slice(0, 400) };
+        return { ok: result.ok, ...record.cli_remove };
+      }],
+      ["wait for the row to disappear", async () => {
+        const deadline = Date.now() + 60000;
+        let words = [];
+        do {
+          await sleep(2000);
+          words = ocr(probeShot()) ?? [];
+          if (!ubolWords(words).length && findSettingsHeading(words, "Extensions").heading) return { ok: true };
+        } while (Date.now() < deadline);
+        return { ok: false, stderr: "uBlock row still listed (or the Extensions group is off screen)", seen: ubolWords(words).map((word) => word.text) };
+      }],
+    ],
+    { none: ["uBlock"] },
+  );
+  // Removal checks only count once the extension was really installed: without it the row and
+  // the profile data are absent anyway.
+  const installed = record.checks.installed_from_web_store;
+  record.checks.removed_from_settings = installed && (summary.steps.at(-1).actions.at(-1)?.ok ?? false);
+  // Which product path removed it: the Settings row (real clicks) or the CLI's extensions
+  // remove (the same engine call); either way Chrome's own dialog was answered by a click.
+  record.removed_via ??= null;
+  // Chrome commits Preferences on a 10s timer.
+  await sleep(15000);
+  record.disk_after_remove = ubolOnDisk();
+  record.checks.removed_from_profile = installed && !record.disk_after_remove.prefs && !record.disk_after_remove.dir;
+  await step("extension-settings-closed", "Escape closes Settings", [focus, key("Escape", { key: "Escape" }), 1500]);
+
+  // Restart: stop only the app process, so its engine sees stdin close and quits by itself
+  // (as when the user quits Ferryx), then launch the same binary on the same data dirs.
+  await step("extension-restart", "Quit the app (its engine follows), launch it again on the same data", [
+    ["stop the app", async () => {
+      const old = app;
+      app = null;
+      const exited = new Promise((done) => old.once("exit", done));
+      if (platform === "win32") run("taskkill", ["/PID", String(old.pid), "/F"]);
+      else old.kill("SIGTERM");
+      const stopped = await Promise.race([exited.then(() => true), sleep(20000).then(() => false)]);
+      const deadline = Date.now() + 30000;
+      while (enginePids().length && Date.now() < deadline) await sleep(1000);
+      const leftover = enginePids();
+      for (const pid of leftover) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {}
+      }
+      return { ok: stopped, engine_left_running: leftover, stderr: stopped ? "" : "the app did not exit within 20s" };
+    }],
+    ["launch again", async () => {
+      app = launchApp("app-restart.log");
+      record.restart_window = await waitForWindow();
+      return { ok: record.restart_window.found, pid: app.pid, stderr: record.restart_window.found ? "" : "no window after the restart" };
+    }],
+    ["optional dismiss onboarding", () => clickText("Skip", { timeout: 4000 })],
+  ]);
+  record.restarted = summary.steps.at(-1).actions.slice(0, 2).every((action) => action.ok);
+  await step(
+    "extension-after-restart",
+    "After the restart, Settings > Browser > Extensions still has no uBlock Origin Lite row",
+    [
+      ...openExtensionsGroup,
+      ["the group is shown without the uBlock row", async () => {
+        let words = [];
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          words = ocr(probeShot()) ?? [];
+          if (findSettingsHeading(words, "Extensions").heading && findPhrase(words, "Open Chrome Web Store").length) break;
+          await sleep(2000);
+        }
+        const heading = Boolean(findSettingsHeading(words, "Extensions").heading);
+        const listed = ubolWords(words).length > 0;
+        return { ok: heading && !listed, heading, listed, empty_message: findPhrase(words, "No extensions installed").length > 0, stderr: !heading ? "Extensions group not on screen" : listed ? "uBlock row is back" : "" };
+      }],
+    ],
+    { any: ["Extensions"], none: ["uBlock"] },
+  );
+  record.disk_after_restart = ubolOnDisk();
+  record.checks.stays_removed_after_restart = installed
+    && record.restarted
+    && (summary.steps.at(-1).actions.at(-1)?.ok ?? false)
+    && !record.disk_after_restart.prefs
+    && !record.disk_after_restart.dir;
+  await step("extension-settings-closed-after-restart", "Escape closes Settings", [focus, key("Escape", { key: "Escape" }), 1500]);
+  writeSummary();
 }
 
 // ---------------------------------------------------------------- teardown

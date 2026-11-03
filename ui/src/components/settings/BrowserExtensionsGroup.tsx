@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { AlertCircle, ExternalLink, Loader2, Pin, PinOff, Puzzle, RefreshCw, Settings2, Store, Trash2 } from "lucide-react";
 
 import {
   CHROME_WEB_STORE_URL,
   BROWSER_ENGINE_CHANGED_EVENT,
+  BROWSER_EXTENSIONS_CHANGED_EVENT,
   listBrowserExtensions,
   openBrowserExtensionPage,
   openBrowserUrlInNewTab,
@@ -252,6 +254,26 @@ export function BrowserExtensionsGroup() {
     window.addEventListener(BROWSER_ENGINE_CHANGED_EVENT, reload);
     return () => window.removeEventListener(BROWSER_ENGINE_CHANGED_EVENT, reload);
   }, []);
+
+  // A change made elsewhere (`ferryx browser extensions remove`, another window) reloads the
+  // list of the profile it touched; without it the removed row stays until Settings reopens.
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    void listen<{ profile: string }>(BROWSER_EXTENSIONS_CHANGED_EVENT, (event) => {
+      if (event.payload.profile === activeProfileId) setReloadToken((token) => token + 1);
+    }).then(
+      (stop) => {
+        if (cancelled) stop();
+        else unlisten = stop;
+      },
+      () => undefined,
+    );
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [activeProfileId]);
 
   const open = useCallback(
     (page: BrowserExtensionPage) => {
