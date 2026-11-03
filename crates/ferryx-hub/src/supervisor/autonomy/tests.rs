@@ -397,6 +397,10 @@ async fn undoing_an_autonomous_answer_restores_the_decision_card_without_a_secon
     assert_eq!(handle.kind, RESTORE_DECISION);
     assert!(fixture.autonomy.escalation_source().pending().await.unwrap().is_empty());
 
+    // Baselines after the autonomous answer: teaching opened one card per owner answer.
+    let calls_before = fixture.control.calls();
+    let opened_before = fixture.frames.count("decision mac:s1 open");
+
     fixture.autonomy.undo(answered.id).await.unwrap();
 
     let open = fixture.autonomy.escalation_source().pending().await.unwrap();
@@ -405,8 +409,8 @@ async fn undoing_an_autonomous_answer_restores_the_decision_card_without_a_secon
     assert_eq!(open[0].prompt.screen_revision.as_deref(), Some("rev-p4"));
     assert_eq!(open[0].recommended_index, 1);
     assert!(open[0].reason.contains("You chose pnpm the last 3 times"), "{}", open[0].reason);
-    assert_eq!(fixture.frames.count("decision mac:s1 open"), 1);
-    assert_eq!(fixture.control.calls().len(), 1, "undo never answers by itself");
+    assert_eq!(fixture.frames.count("decision mac:s1 open"), opened_before + 1);
+    assert_eq!(fixture.control.calls(), calls_before, "undo never answers by itself");
 
     let entry = fixture
         .autonomy
@@ -427,8 +431,8 @@ async fn undoing_an_autonomous_answer_restores_the_decision_card_without_a_secon
     // Repeating the undo is a typed refusal and changes nothing.
     assert_eq!(fixture.autonomy.undo(answered.id).await, Err(UndoError::Nothing(answered.id)));
     assert_eq!(fixture.autonomy.escalation_source().pending().await.unwrap().len(), 1);
-    assert_eq!(fixture.frames.count("decision mac:s1 open"), 1);
-    assert_eq!(fixture.control.calls().len(), 1);
+    assert_eq!(fixture.frames.count("decision mac:s1 open"), opened_before + 1);
+    assert_eq!(fixture.control.calls(), calls_before);
 }
 
 #[tokio::test]
