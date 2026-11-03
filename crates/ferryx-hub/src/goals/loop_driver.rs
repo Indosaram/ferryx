@@ -1154,8 +1154,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_typed_supervisor_fault_stops_the_lane_as_degraded_not_judge_unavailable() {
-    #[tokio::test]
     async fn recovery_giving_up_blocks_the_lane_as_degraded_with_its_detail() {
         let pool = lane_pool(Some(GoalMode::Full)).await;
         let outcome = stop_degraded(&pool, LANE, "recovery gave up after 5 retries")

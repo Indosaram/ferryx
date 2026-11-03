@@ -735,7 +735,7 @@ async fn a_decision_tap_needs_its_exact_body_and_is_audited_as_an_answer() {
 }
 
 #[tokio::test]
-async fn the_global_pause_without_a_hub_is_unavailable_and_a_malformed_body_is_invalid() {
+async fn a_recovery_card_tap_for_a_remote_session_is_answered_over_http() {
     let gateway = Gateway::start().await;
     let token = gateway.authorized_machine_token();
     let card = crate::hub_runtime::panel_autonomy::tests::take_recovery_card().await;

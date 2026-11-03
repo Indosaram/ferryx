@@ -792,7 +792,6 @@ async fn unix_exchange(server: &Arc<DaemonServer>, request: DaemonRequest) -> Da
     serde_json::from_str(line.trim()).unwrap()
 }
 
-fn pause_request() -> DaemonRequest {
 /// A recovery card answered over the owner socket for a session on another computer
 /// (`host_id: Some`): the scheduler answers it here, nothing is forwarded to the host.
 #[cfg(unix)]
