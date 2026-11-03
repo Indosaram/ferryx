@@ -424,3 +424,64 @@ async fn a_non_owner_socket_never_gets_a_decision_frame_with_its_question() {
     drop((owner, other));
     fixture.stop().await;
 }
+
+#[tokio::test]
+async fn disabling_agent_control_stops_owner_frames_on_an_open_socket_at_once() {
+    let _channel = PANEL_CHANNEL.lock().await;
+    let (fixture, token) = fixture(DeviceAccessScope::Machine).await;
+    let state = fixture.owner.remote_state().clone();
+    state.agent_control_policy.set_enabled(true);
+    let mut socket = fixture.events_socket(&token).await;
+    wait_for_boundary(&mut socket).await;
+
+    let decision = escalation();
+    crate::hub_runtime::publish_panel_decision(&decision.session_ref, Some(&decision));
+    next_frame_of(&mut socket, "panel.decision").await;
+
+    // The socket was opened as an owner; the policy is asked again for every frame.
+    state.agent_control_policy.set_enabled(false);
+    crate::hub_runtime::publish_panel_decision(&decision.session_ref, Some(&decision));
+    state.agent_events.publish(draft("machine-session", "p1"));
+    let mut seen = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let message = socket.next().await.unwrap().unwrap();
+            let Ok(text) = message.to_text() else { continue };
+            let Ok(event) = serde_json::from_str::<Value>(text) else { continue };
+            assert!(!text.contains("Run the migration?"), "{text}");
+            let kind = event["type"].as_str().unwrap_or_default().to_owned();
+            seen.push(kind.clone());
+            if kind == "panel.session" {
+                assert!(event.get("session").is_none(), "{event}");
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the demoted socket still gets the slim panel.session frame");
+    assert!(!seen.iter().any(|kind| kind == "panel.decision"), "{seen:?}");
+
+    drop(socket);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn an_owner_transition_whose_session_cannot_be_read_is_a_resync_not_a_session_less_frame() {
+    let _channel = PANEL_CHANNEL.lock().await;
+    let (fixture, token) = fixture(DeviceAccessScope::Machine).await;
+    let state = fixture.owner.remote_state().clone();
+    state.agent_control_policy.set_enabled(true);
+    let mut socket = fixture.events_socket(&token).await;
+    wait_for_boundary(&mut socket).await;
+
+    // No pane backs this session, so the owner's fleet read fails.
+    state.agent_events.publish(draft("ghost-session", "p1"));
+    let frame = tokio::time::timeout(Duration::from_secs(2), next_frame_of(&mut socket, "panel.resync"))
+        .await
+        .expect("the resync arrives within two seconds");
+    assert_eq!(frame["reason"], "sessionUnavailable");
+    assert!(frame["sessionRef"].as_str().unwrap().ends_with(":ghost-session"));
+
+    drop(socket);
+    fixture.stop().await;
+}

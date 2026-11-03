@@ -99,7 +99,22 @@ struct Observed {
     screen: Option<reference_types::ReferenceScreenSnapshot>,
 }
 
+/// One session's status without its last assistant line. Every mutation path (send, answer,
+/// prompt reads) uses this: it never opens the history store.
 async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Observed, ScopeError> {
+    observe_entry(state, session_id, false).await
+}
+
+/// One session's status with `lastAssistantLine`, for the List and Read ops only.
+async fn observe_with_line(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Observed, ScopeError> {
+    observe_entry(state, session_id, true).await
+}
+
+async fn observe_entry(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+    with_last_line: bool,
+) -> Result<Observed, ScopeError> {
     let details = state
         .session_backend
         .describe_session(session_id)
@@ -157,13 +172,13 @@ async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Ob
         .filter(|seen| seen.screen_revision == screen_revision)
         .and_then(|seen| seen.screen_changed_at_ms);
     let last_assistant_line = match &agent {
-        Some(agent) => {
+        Some(agent) if with_last_line => {
             let identity = reference_chat_identity(state, &target, Some(agent)).await;
             last_assistant_line(state, session_id, identity).await
         }
-        None => None,
+        _ => None,
     };
-    let entry = serde_json::json!({
+    let mut entry = serde_json::json!({
         "sessionId": session_id,
         "running": details.running,
         "cols": details.cols,
@@ -180,9 +195,19 @@ async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Ob
         "screenRevision": screen_revision,
         "screenChangedAt": screen_changed_at,
         "screenReadable": readable,
-        "lastAssistantLine": last_assistant_line,
+        // When this entry was read, so a hub that caches a list can show how old it is.
+        "observedAt": observed_at_ms(),
     });
+    if with_last_line {
+        entry["lastAssistantLine"] = serde_json::json!(last_assistant_line);
+    }
     Ok(Observed { entry, screen })
+}
+
+fn observed_at_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
 }
 
 /// The longest `lastAssistantLine` a list or read entry carries.
@@ -395,7 +420,7 @@ async fn dispatch(
             let ids = state.session_backend.list_sessions().await;
             let entries: Vec<serde_json::Value> = stream::iter(ids)
                 .map(|id| async move {
-                    match observe(state, &id).await {
+                    match observe_with_line(state, &id).await {
                         Ok(observed) => observed.entry,
                         // A session that vanished between the list and its read is reported, not dropped.
                         Err(error) => serde_json::json!({
@@ -415,7 +440,7 @@ async fn dispatch(
         }
         AgentControlOp::Read { session_id } => {
             live(state, &session_id).await?;
-            let observed = observe(state, &session_id).await?;
+            let observed = observe_with_line(state, &session_id).await?;
             let mut entry = observed.entry;
             entry["screen"] = match observed.screen {
                 Some(snapshot) => serde_json::json!({
@@ -1303,6 +1328,19 @@ mod tests {
         assert!(entry["lastAssistantLine"].is_null(), "a pane with no transcript has no line: {listed}");
         let read = handle(&state, AgentControlOp::Read { session_id: session_id.to_string() }).await.expect("read");
         assert!(read["session"].get("lastAssistantLine").is_some(), "{read}");
+    }
+
+    #[tokio::test]
+    async fn a_mutation_path_observation_never_reads_the_history_store() {
+        let session_id = "agent-control-no-line-on-mutation";
+        let (_backend, state) = pane(session_id, CLAUDE_APPROVAL);
+        let plain = observe(&state, session_id).await.expect("observe");
+        assert!(plain.entry.get("lastAssistantLine").is_none(), "{}", plain.entry);
+        let with_line = observe_with_line(&state, session_id).await.expect("observe with line");
+        assert!(with_line.entry.get("lastAssistantLine").is_some(), "{}", with_line.entry);
+        for entry in [&plain.entry, &with_line.entry] {
+            assert!(entry["observedAt"].as_i64().is_some_and(|at| at > 0), "{entry}");
+        }
     }
 
     const CLAUDE_APPROVAL: &str = include_str!("reference_chat/fixtures/claude/prompt/approval-command.screen");

@@ -1875,12 +1875,13 @@ async fn ws_events_handler(
         ))?;
         let receiver = services.workspaces.machine_events.subscribe();
         // The owner's own devices (agent control admits them) also get prompt bodies on the
-        // `panel.session` frames; every other machine device gets state only.
-        let owner = state.agent_control_policy.permits(&device.id);
+        // `panel.session` frames; every other machine device gets state only. The socket asks the
+        // policy again for every frame, so a later change takes effect at once.
+        let device_id = device.id.clone();
         return Ok(ws.on_upgrade(move |socket| async move {
             let _ = while_device_authorized(
                 &mut revocation,
-                super::machine_events::serve(socket, state, receiver, owner),
+                super::machine_events::serve(socket, state, receiver, device_id),
             )
             .await;
         }));

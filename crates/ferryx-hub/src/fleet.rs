@@ -205,7 +205,9 @@ fn fleet_session(
             .get("pending")
             .and_then(|pending| pending_prompt(pending, text("screenRevision"))),
         last_assistant_line: text("lastAssistantLine").map(str::to_owned),
-        updated_at_ms: now_ms,
+        // The daemon's own read time, so a cached (stale) entry keeps its real age; an older
+        // daemon that omits it falls back to the merge time.
+        updated_at_ms: millis("observedAt").unwrap_or(now_ms),
         stale,
     })
 }
@@ -422,6 +424,24 @@ mod tests {
         let linux = &merged[2];
         assert_eq!(linux.session_ref, SessionRef::new("linux", "l1"));
         assert!(linux.stale, "a host that timed out is served from cache, stale");
+    }
+
+    #[test]
+    fn a_session_keeps_the_time_its_daemon_read_it_not_the_merge_time() {
+        let entries = vec![host_entry(
+            "mac",
+            vec![
+                json!({"sessionId": "fresh", "observedAt": 5000, "stateSince": 1000}),
+                json!({"sessionId": "old-daemon"}),
+            ],
+            Some("host mac timed out"),
+            true,
+        )];
+        let merged = merge_sessions(&HashMap::new(), &entries, 99_000);
+        assert_eq!(merged[0].updated_at_ms, 5000, "a cached entry keeps its real age");
+        assert_eq!(merged[0].state_since_ms, Some(1000));
+        assert!(merged[0].stale);
+        assert_eq!(merged[1].updated_at_ms, 99_000, "no observedAt falls back to the merge time");
     }
 
     struct FakeLog(Vec<ActionEntry>);

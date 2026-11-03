@@ -59,10 +59,89 @@ struct PanelTransitions {
     seen: std::collections::HashMap<String, (crate::agent_control::AgentControlState, Option<String>)>,
 }
 
+/// The event type that tells a subscriber it may have missed panel frames and must re-read
+/// `GET /api/v1/supervisor/panel`. It never carries a prompt body.
+pub(crate) const PANEL_RESYNC_EVENT: &str = "panel.resync";
+
+/// The `panel.resync` frame. `reason` is `lagged`, `backlog` or `sessionUnavailable`;
+/// `skipped` is how many frames a lagged receiver lost; `session_ref` names the one session
+/// whose owner frame could not be built.
+pub(crate) fn panel_resync_frame(
+    reason: &str,
+    skipped: Option<u64>,
+    session_ref: Option<&ferryx_hub::supervisor::panel_contract::SessionRef>,
+) -> String {
+    json!({
+        "type": PANEL_RESYNC_EVENT,
+        "reason": reason,
+        "skipped": skipped,
+        "sessionRef": session_ref,
+    })
+    .to_string()
+}
+
+/// Transitions queued for the per-socket worker that reads the owner's fleet entry.
+const PANEL_WORK_QUEUE: usize = 64;
+
+/// How long the worker waits for one owner fleet read; under the two seconds a frame is due in.
+const PANEL_SESSION_READ: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// One transition after the owner read: `session` is the fleet entry, `failed` says the owner
+/// read did not produce one (an owner frame without `session` is invalid, so it is never sent).
+struct PanelWork {
+    observation: crate::agent_control::events::AgentObservation,
+    session: Option<ferryx_hub::supervisor::panel_contract::FleetSession>,
+    failed: bool,
+}
+
+/// The frame for `work`, decided at send time: `owner` is the device's current policy answer,
+/// so a device that lost agent control while the read ran gets the slim frame and no body.
+fn panel_work_frame(host_id: &str, work: &PanelWork, owner: bool) -> String {
+    if owner && work.failed {
+        return panel_resync_frame(
+            "sessionUnavailable",
+            None,
+            Some(&ferryx_hub::supervisor::panel_contract::SessionRef::new(
+                host_id,
+                &work.observation.session_id,
+            )),
+        );
+    }
+    panel_session_frame(host_id, &work.observation, work.session.as_ref().filter(|_| owner))
+}
+
+/// The text of an owner-channel frame for this device right now: `None` unless the device
+/// is currently an owner, so a decision's question never reaches anyone else.
+fn owner_panel_frame(owner: bool, frame: &Value) -> Option<String> {
+    owner.then(|| frame.to_string())
+}
+
+async fn push_text(socket: &mut axum::extract::ws::WebSocket, text: String) -> bool {
+    matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            socket.send(axum::extract::ws::Message::Text(text.into())),
+        )
+        .await,
+        Ok(Ok(()))
+    )
+}
+
+/// Remembers each session's last state and prompt so only a transition makes a frame.
+#[derive(Default)]
+struct PanelTransitions {
+    seen: std::collections::HashMap<String, (crate::agent_control::AgentControlState, Option<String>)>,
+}
+
 /// Sessions remembered at once; past it the memory restarts and one spare frame per session is sent.
 const PANEL_TRANSITIONS_MAX: usize = 1024;
 
 impl PanelTransitions {
+    /// Forgets every remembered reading, so the next observation of each session is a transition.
+    fn clear(&mut self) {
+        self.seen.clear();
+    }
+
     fn moved(&mut self, observation: &crate::agent_control::events::AgentObservation) -> bool {
         let reading = (observation.state, observation.prompt_id.clone());
         if self.seen.get(&observation.session_id) == Some(&reading) {
@@ -180,7 +259,7 @@ pub(crate) async fn serve(
     mut socket: axum::extract::ws::WebSocket,
     state: Arc<super::state::RemoteGatewayState>,
     mut receiver: broadcast::Receiver<Value>,
-    owner: bool,
+    device_id: String,
 ) {
     use axum::extract::ws::Message;
     use futures_util::StreamExt;
@@ -212,10 +291,45 @@ pub(crate) async fn serve(
     let mut agent_open = true;
     let mut prompts = crate::agent_control::events::PromptChangeFilter::default();
     let mut panel = PanelTransitions::default();
-    // Decision, action and rule frames go to owner subscribers only.
+    // Decision, action and rule frames go to owner subscribers only. Ownership is the device's
+    // current agent-control permission, asked again for every frame, so `set_enabled(false)`,
+    // `exclude` and `restrict_to` stop prompt bodies at once.
     let mut panel_rx = crate::hub_runtime::subscribe_panel_events();
-    let mut panel_open = owner;
+    let mut panel_open = true;
+    let is_owner: Arc<dyn Fn() -> bool + Send + Sync> = {
+        let policy = Arc::clone(&state.agent_control_policy);
+        Arc::new(move || policy.permits(&device_id))
+    };
     let host_id = super::reference_chat::files::reference_host_id();
+    // The owner's fleet read can take a second; it runs on this worker so the socket loop keeps
+    // forwarding other events. Dropping the set on exit aborts the worker.
+    let (work_tx, mut work_rx) = tokio::sync::mpsc::channel::<crate::agent_control::events::AgentObservation>(PANEL_WORK_QUEUE);
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<PanelWork>(PANEL_WORK_QUEUE);
+    let mut panel_worker = tokio::task::JoinSet::new();
+    panel_worker.spawn({
+        let state = Arc::clone(&state);
+        let is_owner = Arc::clone(&is_owner);
+        async move {
+            while let Some(observation) = work_rx.recv().await {
+                let (session, failed) = if is_owner() {
+                    match tokio::time::timeout(
+                        PANEL_SESSION_READ,
+                        crate::hub_runtime::local_fleet_session(&state, &observation.session_id),
+                    )
+                    .await
+                    {
+                        Ok(Some(session)) => (Some(session), false),
+                        _ => (None, true),
+                    }
+                } else {
+                    (None, false)
+                };
+                if out_tx.send(PanelWork { observation, session, failed }).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
     loop {
         // The cursor is read BEFORE inventory construction. Any overlapping commit
         // is therefore replayed, never discarded as already in this boundary.
@@ -412,33 +526,32 @@ pub(crate) async fn serve(
                         if let Some(frame) = prompts.frame(&observation) {
                             if !matches!(tokio::time::timeout(std::time::Duration::from_secs(10), socket.send(Message::Text(frame.into()))).await, Ok(Ok(()))) { return; }
                         }
-                        if panel.moved(&observation) {
-                            // The prompt body travels only to an owner subscriber.
-                            let session = if owner {
-                                tokio::time::timeout(
-                                    std::time::Duration::from_secs(5),
-                                    crate::hub_runtime::local_fleet_session(&state, &observation.session_id),
-                                )
-                                .await
-                                .ok()
-                                .flatten()
-                            } else {
-                                None
-                            };
-                            let frame = panel_session_frame(&host_id, &observation, session.as_ref());
-                            if !matches!(tokio::time::timeout(std::time::Duration::from_secs(10), socket.send(Message::Text(frame.into()))).await, Ok(Ok(()))) { return; }
+                        if panel.moved(&observation) && work_tx.try_send(observation).is_err() {
+                            // The worker is saturated: say so instead of dropping the transition.
+                            panel.clear();
+                            if !push_text(&mut socket, panel_resync_frame("backlog", None, None)).await { return; }
                         }
                     },
-                    // A lagged reader only loses pushes; the client's prompt poll still converges.
-                    Err(broadcast::error::RecvError::Lagged(_)) => {},
+                    // A lagged reader loses pushes: tell the client to re-read the panel, and make
+                    // the next reading of every session a transition again.
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        panel.clear();
+                        if !push_text(&mut socket, panel_resync_frame("lagged", Some(skipped), None)).await { return; }
+                    },
                     Err(broadcast::error::RecvError::Closed) => agent_open = false,
+                },
+                Some(work) = out_rx.recv() => {
+                    let frame = panel_work_frame(&host_id, &work, is_owner());
+                    if !push_text(&mut socket, frame).await { return; }
                 },
                 frame = panel_rx.recv(), if panel_open => match frame {
                     Ok(frame) => {
-                        if !matches!(tokio::time::timeout(std::time::Duration::from_secs(10), socket.send(Message::Text(frame.to_string().into()))).await, Ok(Ok(()))) { return; }
+                        let Some(text) = owner_panel_frame(is_owner(), &frame) else { continue };
+                        if !push_text(&mut socket, text).await { return; }
                     },
-                    // A lagged owner re-reads the panel snapshot; only the pushes are lost.
-                    Err(broadcast::error::RecvError::Lagged(_)) => {},
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        if is_owner() && !push_text(&mut socket, panel_resync_frame("lagged", Some(skipped), None)).await { return; }
+                    },
                     Err(broadcast::error::RecvError::Closed) => panel_open = false,
                 },
                 event = receiver.recv() => match event {
@@ -524,6 +637,57 @@ mod panel_frame_tests {
         assert_eq!(frame["type"], PANEL_SESSION_EVENT);
         assert_eq!(frame["session"]["pendingPrompt"]["question"], "Run the migration?");
         assert_eq!(frame["session"]["sessionRef"], "mac:s1");
+    }
+
+    #[test]
+    fn an_owner_frame_without_its_session_is_a_resync_never_a_session_less_panel_session() {
+        let failed = PanelWork { observation: observation(), session: None, failed: true };
+        let frame: Value = serde_json::from_str(&panel_work_frame("mac", &failed, true)).unwrap();
+        assert_eq!(frame["type"], PANEL_RESYNC_EVENT);
+        assert_eq!(frame["reason"], "sessionUnavailable");
+        assert_eq!(frame["sessionRef"], "mac:s1");
+        assert!(frame.get("session").is_none() && !frame.to_string().contains("Run the migration?"));
+    }
+
+    #[test]
+    fn a_device_that_lost_agent_control_during_the_read_gets_the_slim_frame_without_a_body() {
+        let read = PanelWork { observation: observation(), session: Some(session()), failed: false };
+        let owner: Value = serde_json::from_str(&panel_work_frame("mac", &read, true)).unwrap();
+        assert_eq!(owner["session"]["pendingPrompt"]["question"], "Run the migration?");
+        let demoted = panel_work_frame("mac", &read, false);
+        let demoted: Value = serde_json::from_str(&demoted).unwrap();
+        assert_eq!(demoted["type"], PANEL_SESSION_EVENT);
+        assert!(demoted.get("session").is_none(), "{demoted}");
+        assert!(!demoted.to_string().contains("Run the migration?"));
+        // A non-owner never sees a failed read either: it is just a slim transition.
+        let failed = PanelWork { observation: observation(), session: None, failed: true };
+        let slim: Value = serde_json::from_str(&panel_work_frame("mac", &failed, false)).unwrap();
+        assert_eq!(slim["type"], PANEL_SESSION_EVENT);
+    }
+
+    #[test]
+    fn owner_channel_frames_are_text_for_an_owner_and_nothing_otherwise() {
+        let frame = json!({"type": "panel.decision", "decision": {"prompt": {"question": "Run the migration?"}}});
+        assert!(owner_panel_frame(true, &frame).is_some_and(|text| text.contains("Run the migration?")));
+        assert_eq!(owner_panel_frame(false, &frame), None);
+    }
+
+    #[test]
+    fn a_resync_frame_names_its_reason_and_the_frames_lost() {
+        let frame: Value = serde_json::from_str(&panel_resync_frame("lagged", Some(12), None)).unwrap();
+        assert_eq!(frame["type"], PANEL_RESYNC_EVENT);
+        assert_eq!(frame["reason"], "lagged");
+        assert_eq!(frame["skipped"], 12);
+        assert!(frame["sessionRef"].is_null());
+    }
+
+    #[test]
+    fn clearing_the_memory_makes_the_next_reading_a_transition_again() {
+        let mut transitions = PanelTransitions::default();
+        assert!(transitions.moved(&observation()));
+        assert!(!transitions.moved(&observation()));
+        transitions.clear();
+        assert!(transitions.moved(&observation()), "a lag resync re-announces every session");
     }
 
     #[test]
