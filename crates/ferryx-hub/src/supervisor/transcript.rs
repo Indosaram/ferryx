@@ -410,9 +410,9 @@ fn parse_rule_change(text: &str) -> Result<Option<RuleChange>, RequestFailure> {
 }
 
 fn human_interval(secs: u64) -> String {
-    if secs % 3_600 == 0 {
+    if secs.is_multiple_of(3_600) {
         format!("{} h", secs / 3_600)
-    } else if secs % 60 == 0 {
+    } else if secs.is_multiple_of(60) {
         format!("{} min", secs / 60)
     } else {
         format!("{secs} s")
