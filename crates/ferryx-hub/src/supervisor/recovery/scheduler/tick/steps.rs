@@ -101,33 +101,6 @@ impl RecoveryScheduler {
             let summary = format!("Retrying {} after upstream errors", sessions(inc.ever.len()));
             self.row(inc, ActionKind::Retried, summary, true, now).await;
         }
-        let budget = budget_ms(rules);
-        if (!inc.succeeded
-            || !inc.silent.is_empty()
-            || faulted.iter().any(|r| !inc.done.contains(r)))
-            && inc.escalated.is_none()
-            && now - inc.budget_from_ms >= budget
-        {
-            let n = inc.ever.len();
-            let mins = minutes(budget);
-            let every = minutes(every_secs(rules) * 1000);
-            self.escalate(
-                inc,
-                format!("{} still cannot reach the upstream after {mins} minutes.", sessions(n)),
-                ["Keep retrying", "Stop the sessions"],
-                [Choice::KeepGoing, Choice::Stop],
-                format!(
-                    "Upstream errors outlasted the {mins} minute budget for {}; retrying every {every} minutes is cheap and safe",
-                    sessions(n)
-                ),
-                now,
-            );
-            let summary = format!(
-                "Upstream errors outlasted the retry budget for {}; asked the owner",
-                sessions(n)
-            );
-            self.row(inc, ActionKind::Escalated, summary, true, now).await;
-        }
         if !inc.succeeded && !st.sent.contains_key(&inc.primary) {
             if !faulted.contains(&inc.primary) {
                 match faulted.first() {
@@ -188,6 +161,42 @@ impl RecoveryScheduler {
                 }
                 self.finish(inc);
             }
+        }
+        // The budget is judged after this pass's probe and sweep, so a member about to be
+        // swept after a confirmed probe is not "still failing". A resume still inside its
+        // confirmation window has no verdict yet: the owner is asked only once it failed.
+        let budget = budget_ms(rules);
+        let confirming = inc
+            .ever
+            .iter()
+            .any(|r| st.sent.get(r).is_some_and(|at| now - *at < confirm));
+        if !inc.closed
+            && (!inc.succeeded
+                || !inc.silent.is_empty()
+                || faulted.iter().any(|r| !inc.done.contains(r)))
+            && !confirming
+            && inc.escalated.is_none()
+            && now - inc.budget_from_ms >= budget
+        {
+            let n = inc.ever.len();
+            let mins = minutes(budget);
+            let every = minutes(every_secs(rules) * 1000);
+            self.escalate(
+                inc,
+                format!("{} still cannot reach the upstream after {mins} minutes.", sessions(n)),
+                ["Keep retrying", "Stop the sessions"],
+                [Choice::KeepGoing, Choice::Stop],
+                format!(
+                    "Upstream errors outlasted the {mins} minute budget for {}; retrying every {every} minutes is cheap and safe",
+                    sessions(n)
+                ),
+                now,
+            );
+            let summary = format!(
+                "Upstream errors outlasted the retry budget for {}; asked the owner",
+                sessions(n)
+            );
+            self.row(inc, ActionKind::Escalated, summary, true, now).await;
         }
     }
 

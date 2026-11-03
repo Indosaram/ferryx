@@ -618,14 +618,20 @@ pub(crate) mod tests {
         }
     }
 
-    /// Records what recovery does to a session and serves a proxy error as its terminal tail.
+    /// Records what recovery does to a session and serves its terminal tail; `outage` makes a
+    /// proxy error appear after recovery has already seen the session.
     #[derive(Default)]
     struct ScriptedControl {
         stops: std::sync::Mutex<Vec<String>>,
         sends: std::sync::Mutex<Vec<(String, String)>>,
+        fresh: std::sync::Mutex<String>,
     }
 
     impl ScriptedControl {
+        fn outage(&self) {
+            self.fresh.lock().unwrap().push_str("API Error: 502 Bad Gateway\n");
+        }
+
         fn stops(&self) -> Vec<String> {
             self.stops.lock().unwrap().clone()
         }
@@ -649,7 +655,7 @@ pub(crate) mod tests {
             Ok(())
         }
         async fn read_tail(&self, _: &SessionRef, _: usize) -> ferryx_hub::error::Result<String> {
-            Ok("working on the relay\nAPI Error: 502 Bad Gateway\n".to_owned())
+            Ok(format!("working on the relay\n{}", self.fresh.lock().unwrap()))
         }
     }
 
@@ -693,7 +699,8 @@ pub(crate) mod tests {
     }
 
     /// The real scheduler over real autonomy stores (in-memory database), with a scripted
-    /// session control, a fixed fleet and a fake clock.
+    /// session control, a fixed fleet and a fake clock. Recovery has seen the session once
+    /// (its baseline pass) before the proxy outage starts: old scrollback is never news.
     async fn recovery_fixture() -> RecoveryFixture {
         let pool = ferryx_hub::storage::memory().await.unwrap();
         let autonomy = Autonomy::open(pool, Arc::new(NoControl), Arc::new(Silent)).await.unwrap();
@@ -705,6 +712,8 @@ pub(crate) mod tests {
             Arc::new(FixedFleet { sessions: vec![outage_session()] }),
             clock.clone(),
         );
+        scheduler.tick().await;
+        control.outage();
         RecoveryFixture { autonomy, scheduler, control, clock }
     }
 

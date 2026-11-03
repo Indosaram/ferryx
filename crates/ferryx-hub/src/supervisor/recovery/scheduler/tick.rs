@@ -83,7 +83,7 @@ impl State {
             && self
                 .absent_since
                 .get(r)
-                .map_or(true, |since| now - *since >= grace_ms)
+                .is_none_or(|since| now - *since >= grace_ms)
     }
 
     /// Closes `inc`'s fault generation, so the next incident of the scope has a new key.
