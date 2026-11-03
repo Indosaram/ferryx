@@ -1,0 +1,57 @@
+{
+  "$comment": "F3 real-surface acceptance config. Copy outside the repo, fill every value, never commit secrets. Paths are on the named host; mahordExecutable, tesseract and sshExecutable are on the control host.",
+  "ownerEmail": "owner@example.invalid",
+  "mahordExecutable": "/Users/indo/.cargo/bin/maho-client",
+  "tesseract": "/opt/homebrew/bin/tesseract",
+  "sshExecutable": "ssh",
+  "relayPort": 47930,
+  "hosts": {
+    "windows": {
+      "hostId": "maho-win",
+      "platform": "win32",
+      "sshDestination": "maho-win",
+      "tailnetAddress": "100.68.224.49",
+      "mahordAddress": "100.68.224.49",
+      "pairingId": "<maho-win MahoRD pairing id>",
+      "mahordNudgeMs": 500,
+      "bun": "C:\\Users\\sook\\AppData\\Local\\Microsoft\\WinGet\\Links\\bun.exe",
+      "worktreeRoot": "C:\\Users\\sook\\ferryx-wt",
+      "worktree": "C:\\Users\\sook\\ferryx-wt\\supv-f3-final",
+      "hostHelper": "C:\\Users\\sook\\ferryx-wt\\supv-f3-final\\scripts\\qa\\supervisor-f3\\host-helper.mjs",
+      "remoteAgent": "C:\\Users\\sook\\ferryx-wt\\supv-f3-final\\scripts\\qa\\fixtures\\native-remote-agent.mjs",
+      "binary": "C:\\Users\\sook\\ferryx-wt\\supv-f3-final\\src-tauri\\target\\debug\\ferryx.exe",
+      "cli": "C:\\Users\\sook\\ferryx-wt\\supv-f3-final\\src-tauri\\target\\debug\\ferryx-cli.exe",
+      "relay": "C:\\Users\\sook\\ferryx-wt\\supv-f3-final\\src-tauri\\target\\debug\\ferryx-relay.exe",
+      "uiDist": "C:\\Users\\sook\\ferryx-wt\\supv-f3-final\\ui\\dist",
+      "buildManifest": "C:\\Users\\sook\\ferryx-wt\\supv-f3-final\\scripts\\qa\\fixtures\\candidate-manifest.json",
+      "exportLabel": "Export transcript",
+      "viewerLabel": "Open in Viewer"
+    },
+    "macos": {
+      "hostId": "maho-mac",
+      "platform": "darwin",
+      "sshDestination": "maho-mac",
+      "mahordAddress": "<maho-mac tailnet address>",
+      "pairingId": "<maho-mac MahoRD pairing id>",
+      "launchTerminalHotkey": ["Meta", "Space"],
+      "bun": "/Users/<user>/.bun/bin/bun",
+      "worktreeRoot": "/Users/<user>/ferryx-wt",
+      "worktree": "/Users/<user>/ferryx-wt/supv-f3-final",
+      "hostHelper": "/Users/<user>/ferryx-wt/supv-f3-final/scripts/qa/supervisor-f3/host-helper.mjs",
+      "remoteAgent": "/Users/<user>/ferryx-wt/supv-f3-final/scripts/qa/fixtures/native-remote-agent.mjs",
+      "binary": "/Users/<user>/ferryx-wt/supv-f3-final/src-tauri/target/debug/ferryx",
+      "cli": "/Users/<user>/ferryx-wt/supv-f3-final/src-tauri/target/debug/ferryx-cli",
+      "relay": "/Users/<user>/ferryx-wt/supv-f3-final/src-tauri/target/debug/ferryx-relay",
+      "uiDist": "/Users/<user>/ferryx-wt/supv-f3-final/ui/dist",
+      "buildManifest": "/Users/<user>/ferryx-wt/supv-f3-final/scripts/qa/fixtures/candidate-manifest.json",
+      "exportLabel": "Export transcript",
+      "viewerLabel": "Open in Viewer"
+    }
+  },
+  "iphone": {
+    "serial": "<iPhone UDID>",
+    "driverEndpoint": "http://127.0.0.1:8100",
+    "model": null,
+    "osVersion": null
+  }
+}
