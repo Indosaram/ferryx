@@ -49,6 +49,7 @@ import { useAdvancedFeatures } from "../lib/advancedFeatures";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
 import { pruneWorktreeOrder, readSidebarDragData, worktreeOrdersEqual, type SidebarDragData } from "./sidebar-dnd/sidebarDragData";
 import { projectSortableId, SortableProjectSection } from "./sidebar-dnd/SortableProjectSection";
+import { SupervisorPanelHost } from "./supervisorPanel/SupervisorPanelHost";
 import { SupervisorPanel, useSupervisorTyping } from "./supervisor/SupervisorPanel";
 import { isStandaloneRemoteGroup, projectDisplayLabel, projectHostLabel } from "./sidebar/sidebarLabels";
 import { sidebarLiveState, type SidebarProjectNode, type SidebarRowLive, type SidebarWorktreeNode } from "./sidebar/sidebarModel";
@@ -103,6 +104,8 @@ type SidebarProps = {
   onOpenResources?: () => void;
   onToggle?: () => void;
   onHide?: () => void;
+  /** Focuses the terminal tab of a Supervisor panel row; the panel shows only when this is set. */
+  onFocusSupervisorSession?: (sessionRef: string) => void;
   /** Present when the sidebar offers the attention inbox as a sub view behind its header icon. */
   attention?: SidebarAttention;
 };
@@ -152,6 +155,7 @@ export function Sidebar({
   onOpenResources,
   onToggle,
   onHide,
+  onFocusSupervisorSession,
   attention,
 }: SidebarProps) {
   const inboxOpen = attention?.inboxOpen ?? false;
@@ -516,6 +520,7 @@ export function Sidebar({
           filter={{ query: filterQuery, onChange: setFilterQuery }}
           view={sidebarView}
           inbox={attention}
+          panel={onFocusSupervisorSession ? <SupervisorPanelHost onFocusSession={onFocusSupervisorSession} /> : undefined}
           supervisor={attention ? { typing: supervisorTyping, content: <SupervisorPanel /> } : undefined}
           titlebarLeading={isMac ? <div data-testid="titlebar-traffic-light-pad" className="w-[72px] shrink-0" aria-hidden="true" /> : null}
           titlebarProps={{ "data-testid": "sidebar-drag-region", "data-tauri-drag-region": true }}
