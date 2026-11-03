@@ -145,6 +145,15 @@ impl Fixture {
                 Err(err) => panic!("fixture session close failed for {session_id}: {err:?}"),
             }
         }
+        // The host's agent-stamp writer writes into `host/` after a batching window; it must be
+        // finished before the caller removes the directory.
+        let host_state = Arc::clone(&self.host_state);
+        crate::ipc::run_blocking(move || {
+            host_state.finish_agent_stamp_writer();
+            Ok(())
+        })
+        .await
+        .unwrap();
         self.tasks.shutdown().await;
     }
 }

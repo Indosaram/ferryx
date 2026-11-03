@@ -881,6 +881,9 @@ pub struct RemoteGatewayState {
         RwLock<Option<Arc<dyn ferryx_hub::supervisor::panel_contract::RuleStore>>>,
     /// The app-transcript requests running now, one flight per request id.
     pub(crate) supervisor_flights: ferryx_hub::supervisor::transcript::Flights,
+    /// The agent-stamp writer thread, kept so a test fixture can end it before its directory goes.
+    #[cfg(test)]
+    agent_stamp_writer: parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl RemoteGatewayState {
@@ -892,12 +895,30 @@ impl RemoteGatewayState {
         let workspaces = Arc::clone(&sessions.workspace_service);
         self.workspace_registry = workspaces.registry.clone();
         self.session_backend = sessions.clone();
-        install_agent_stamp_persistence(&self.agent_events, &workspaces);
+        let stamp_writer = install_agent_stamp_persistence(&self.agent_events, &workspaces);
+        #[cfg(test)]
+        {
+            *self.agent_stamp_writer.lock() = stamp_writer;
+        }
+        #[cfg(not(test))]
+        drop(stamp_writer);
         self.machine_services = Some(Arc::new(crate::daemon::MachineServices {
             sessions,
             workspaces,
         }));
         self
+    }
+
+    /// Ends the agent-stamp writer after it has written everything queued, and waits for it. The
+    /// writer batches for `AGENT_STAMP_WRITE_WINDOW` and writes into the machine journal's
+    /// directory, so a test that removes that directory calls this first. Publishes after it are
+    /// not persisted.
+    #[cfg(test)]
+    pub(crate) fn finish_agent_stamp_writer(&self) {
+        self.agent_events.clear_stamp_sink();
+        if let Some(writer) = self.agent_stamp_writer.lock().take() {
+            let _ = writer.join();
+        }
     }
 
     pub fn new(
@@ -1084,6 +1105,8 @@ impl RemoteGatewayState {
             #[cfg(test)]
             supervisor_test_rules: RwLock::new(None),
             supervisor_flights: Default::default(),
+            #[cfg(test)]
+            agent_stamp_writer: parking_lot::Mutex::new(None),
             auth_manager,
             terminal_service,
             daemon_epoch: AtomicU64::new(0),
@@ -1648,7 +1671,7 @@ const AGENT_STAMP_WRITE_WINDOW: std::time::Duration = std::time::Duration::from_
 fn install_agent_stamp_persistence(
     bus: &Arc<crate::agent_control::events::AgentEventBus>,
     workspaces: &Arc<crate::daemon::workspace_service::DaemonWorkspaceService>,
-) {
+) -> Option<std::thread::JoinHandle<()>> {
     match workspaces.journal.agent_stamps() {
         Ok(stamps) => bus.seed_stamps(stamps),
         Err(error) => tracing::warn!(%error, "agent stamps were not loaded from the machine journal"),
@@ -1676,6 +1699,7 @@ fn install_agent_stamp_persistence(
     if let Err(error) = spawned {
         tracing::warn!(%error, "the agent stamp writer did not start");
     }
+    spawned.ok()
 }
 
 /// The `/api/v1/sessions` visibility rule applied to pushes: a Machine-scope Control device
