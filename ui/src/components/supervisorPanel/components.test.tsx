@@ -139,6 +139,25 @@ describe('Composer', () => {
   });
 
   it('refuses an ambiguous prefix and keeps the text', async () => {
+    const onSend = vi.fn(async () => ({ ok: true as const, reply: { text: 'I sent it.', unverified: true } }));
+    render(<Composer sessions={sessions} onSend={onSend} />);
+    type('tell build to go on');
+    fireEvent.keyDown(input(), { key: 'Enter' });
+    const reply = await screen.findByTestId('supervisor-reply');
+    expect(reply).toHaveTextContent('I sent it.');
+    expect(within(reply).getByText('Unverified')).toBeInTheDocument();
+  });
+
+  it('shows no Unverified chip on a reply that carries delivery evidence', async () => {
+    const onSend = vi.fn(async () => ({ ok: true as const, reply: { text: 'Done.', unverified: false } }));
+    render(<Composer sessions={sessions} onSend={onSend} />);
+    type('go');
+    fireEvent.keyDown(input(), { key: 'Enter' });
+    const reply = await screen.findByTestId('supervisor-reply');
+    expect(within(reply).queryByText('Unverified')).toBeNull();
+  });
+
+  it('refuses an ambiguous prefix and keeps the text', async () => {
     const onSend = vi.fn();
     render(<Composer sessions={sessions} onSend={onSend} />);
     type('@build go on');

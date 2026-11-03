@@ -560,7 +560,9 @@ impl Autonomy {
             summary,
             basis,
             evidence: vec![EvidenceRef {
-                kind: "prompt".to_owned(),
+                // Written only after agent control accepted the answer, so the accepted
+                // answer is the delivery receipt; the prompt id names what it answered.
+                kind: "receipt".to_owned(),
                 id: prompt.prompt_id.clone(),
             }],
             undo,

@@ -10,6 +10,7 @@ import type { PanelSnapshot, SessionHealth, SessionRef } from '../../lib/supervi
 import type { LegacyGoal } from '../../lib/supervisorPanel/legacyGoals';
 import {
   buildPanelView,
+  isReplyUnverified,
   type ActionView,
   type DecisionView,
   type SessionGlyph,
@@ -21,7 +22,7 @@ import { RulesLine } from './RulesLine';
 import { HandlingRow, SessionRow } from './Rows';
 import { SetupCard } from './SetupCard';
 import { StatusLine } from './StatusLine';
-import type { ActionLogLine, GlyphState, MentionOption } from './types';
+import type { ActionLogLine, ComposerSendResult, GlyphState, MentionOption } from './types';
 
 export type PanelSurfaceProps = {
   snapshot: PanelSnapshot;
@@ -275,7 +276,13 @@ export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, c
           touch={touch}
           sessions={mentions}
           seed={seed}
-          onSend={(text, refs) => actions.converse(text, refs)}
+          onSend={async (text, refs): Promise<ComposerSendResult> => {
+            const result = await actions.converse(text, refs);
+            if (!result.ok) return { ok: false, message: result.message };
+            return result.reply
+              ? { ok: true, reply: { text: result.reply.text, unverified: isReplyUnverified(result.reply.evidence) } }
+              : { ok: true };
+          }}
         />
       )}
     </div>

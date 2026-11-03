@@ -6,6 +6,7 @@ import type {
   ActionEntry,
   ActionKind,
   Escalation,
+  EvidenceRef,
   FleetSession,
   FleetSessionState,
   PanelEvent,
@@ -260,6 +261,28 @@ const CLAIM_KINDS: ReadonlySet<ActionKind> = new Set<ActionKind>([
   "finished",
 ]);
 
+/**
+ * D9: what counts as a delivery event. A ref to a prompt, a session or a goal names what the
+ * claim is about, not proof that anything happened; only a delivery receipt, a state-transition
+ * sequence, an answer-history entry or a commit does.
+ */
+export const DELIVERY_EVIDENCE_KINDS: ReadonlySet<string> = new Set([
+  "receipt",
+  "delivery",
+  "stateTransition",
+  "answerHistory",
+  "commit",
+]);
+
+export function hasDeliveryEvidence(evidence: readonly EvidenceRef[]): boolean {
+  return evidence.some((ref) => DELIVERY_EVIDENCE_KINDS.has(ref.kind));
+}
+
+/** A supervisor chat reply is a claim unless it carries a delivery event or the rule it wrote. */
+export function isReplyUnverified(evidence: readonly EvidenceRef[]): boolean {
+  return !(hasDeliveryEvidence(evidence) || evidence.some((ref) => ref.kind === "rule"));
+}
+
 function actionView(entry: ActionEntry): ActionView {
   return {
     id: entry.id,
@@ -267,7 +290,7 @@ function actionView(entry: ActionEntry): ActionView {
     kind: entry.kind,
     summary: entry.summary,
     basis: entry.basis,
-    unverified: CLAIM_KINDS.has(entry.kind) && entry.evidence.length === 0,
+    unverified: CLAIM_KINDS.has(entry.kind) && !hasDeliveryEvidence(entry.evidence),
     undoable: entry.undo !== null,
     live: entry.live,
     createdAtMs: entry.createdAtMs,

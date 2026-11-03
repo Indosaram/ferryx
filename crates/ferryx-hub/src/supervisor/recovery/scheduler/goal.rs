@@ -114,7 +114,7 @@ impl RecoveryScheduler {
             summary,
             basis: "quotaResume rule: resume at the reset time, else after the fallback".to_owned(),
             evidence: vec![EvidenceRef {
-                kind: "goal".to_owned(),
+                kind: if live { "goal" } else { "stateTransition" }.to_owned(),
                 id: lane_key.to_owned(),
             }],
             undo: None,

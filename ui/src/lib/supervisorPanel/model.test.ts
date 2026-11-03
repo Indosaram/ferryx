@@ -6,6 +6,7 @@ import {
   applyPanelEvent,
   buildPanelView,
   formatStatusLine,
+  isReplyUnverified,
   parseMentions,
 } from "./model";
 
@@ -207,6 +208,19 @@ describe("supervisor panel view", () => {
       [4, true],
       [3, false],
     ]);
+  });
+
+  it("treats a subject ref as no proof: only a delivery event verifies a claim", () => {
+    const claim = (evidence: ActionEntry["evidence"]) =>
+      buildPanelView({ ...panelSnapshotFixture, log: [{ ...panelSnapshotFixture.log[0], evidence }] }, options).log.all[0].unverified;
+    expect(claim([{ kind: "prompt", id: "p1" }])).toBe(true);
+    expect(claim([{ kind: "session", id: "mac:one" }])).toBe(true);
+    expect(claim([{ kind: "receipt", id: "r1" }])).toBe(false);
+    expect(claim([{ kind: "stateTransition", id: "seq-1" }])).toBe(false);
+    expect(claim([{ kind: "commit", id: "abc" }])).toBe(false);
+    expect(isReplyUnverified([])).toBe(true);
+    expect(isReplyUnverified([{ kind: "rule", id: "5" }])).toBe(false);
+    expect(isReplyUnverified([{ kind: "receipt", id: "r1" }])).toBe(false);
   });
 
   it("describes the rules in one sentence", () => {

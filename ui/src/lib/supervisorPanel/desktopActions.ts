@@ -12,7 +12,7 @@ import {
 } from "../tauri";
 import { setSupervisorLanePaused } from "../supervisor";
 import { extractIpcErrorMessage } from "../sshHosts";
-import { STALE_DECISION_MESSAGE, type PanelActionResult, type PanelActions } from "./actions";
+import { parseConverseReply, STALE_DECISION_MESSAGE, type PanelActionResult, type PanelActions } from "./actions";
 
 /** Tauri rejects an unregistered command with a string naming it. */
 function missingCommand(error: unknown): string | null {
@@ -34,8 +34,9 @@ export function failure(error: unknown, fallback: string): PanelActionResult {
 
 async function run(call: () => Promise<unknown>, fallback: string): Promise<PanelActionResult> {
   try {
-    await call();
-    return { ok: true };
+    const value = await call();
+    const reply = parseConverseReply(value);
+    return reply ? { ok: true, reply } : { ok: true };
   } catch (error) {
     return failure(error, fallback);
   }

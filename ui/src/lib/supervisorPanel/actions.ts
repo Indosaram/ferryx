@@ -1,9 +1,27 @@
 // What the panel can ask the host to do. Desktop implements it over Tauri commands, the phone
 // over the hub's HTTP routes; a result is never `ok` unless the backend accepted the call.
-import type { SessionRef } from "./contract";
+import type { EvidenceRef, SessionRef } from "./contract";
+
+/** The supervisor's answer to a composer message, with the evidence it carries (D9). */
+export interface SupervisorReply {
+  readonly text: string;
+  readonly evidence: readonly EvidenceRef[];
+}
+
+/** `{owner, reply}` as the converse command and route return it; null for any other shape. */
+export function parseConverseReply(value: unknown): SupervisorReply | null {
+  const reply = value && typeof value === "object" ? (value as Record<string, unknown>).reply : null;
+  if (!reply || typeof reply !== "object") return null;
+  const { text, evidence } = reply as Record<string, unknown>;
+  if (typeof text !== "string" || text.trim() === "") return null;
+  const refs = Array.isArray(evidence)
+    ? evidence.filter((ref): ref is EvidenceRef => !!ref && typeof (ref as EvidenceRef).kind === "string" && typeof (ref as EvidenceRef).id === "string")
+    : [];
+  return { text, evidence: refs };
+}
 
 export type PanelActionResult =
-  | { readonly ok: true }
+  | { readonly ok: true; readonly reply?: SupervisorReply }
   /** `stale`: the thing acted on changed (409 / REQUEST_CONFLICT); nothing was done. */
   | { readonly ok: false; readonly stale: boolean; readonly message: string };
 
