@@ -100,14 +100,14 @@ pub fn quota_recovery() -> Option<Arc<dyn QuotaRecovery>> {
 
 /// Re-runs the goal loop for a lane whose quota fault recovery waited out.
 pub(super) struct GoalRetry {
-    pool: sqlx::SqlitePool,
+    pool: ferryx_hub::goals::SqlitePool,
     bridge: Arc<super::DaemonBridge>,
     quota: Arc<dyn QuotaRecovery>,
 }
 
 impl GoalRetry {
     pub(super) fn new(
-        pool: sqlx::SqlitePool,
+        pool: ferryx_hub::goals::SqlitePool,
         bridge: Arc<super::DaemonBridge>,
         quota: Arc<dyn QuotaRecovery>,
     ) -> Self {
