@@ -10,6 +10,8 @@ import {
   codesignArgs,
   engineVersion,
   keygen,
+  linuxBundlePaths,
+  linuxSigningRecord,
   macSigningPlan,
   parseArgs,
   platformKey,
@@ -45,7 +47,25 @@ test("the engine version is read from engine_install.rs", () => {
 test("platform keys match the app's", () => {
   assert.equal(platformKey("darwin", "arm64"), "macos-aarch64");
   assert.equal(platformKey("win32", "x64"), "windows-x86_64");
-  assert.equal(platformKey("linux", "x64"), null);
+  assert.equal(platformKey("linux", "x64"), "linux-x86_64");
+  assert.equal(platformKey("linux", "arm64"), "linux-aarch64");
+  assert.equal(platformKey("darwin", "x64"), null);
+  assert.equal(platformKey("freebsd", "x64"), null);
+});
+
+test("a Linux engine is taken from bundle-engine's layout and recorded as not code-signed", () => {
+  const paths = linuxBundlePaths("/b", "linux-x86_64");
+  assert.equal(paths.dir, join("/b", "engine-linux-x86_64"));
+  assert.equal(paths.zip, join("/b", "engine-linux-x86_64.zip"));
+  assert.equal(paths.executable, join("/b", "engine-linux-x86_64", "ferryx_engine"));
+  assert.equal(linuxBundlePaths("/b", "linux-aarch64").zip, join("/b", "engine-linux-aarch64.zip"));
+  assert.deepEqual(linuxSigningRecord(), { codeSigned: false, authority: null });
+  const version = "1.0.0-ferryx.1";
+  const manifest = buildManifest({
+    version,
+    records: [{ version, platform: "linux-aarch64", file: "engine-linux-aarch64.zip", sha256: "ab", size: 2, ...linuxSigningRecord() }],
+  });
+  assert.deepEqual(manifest.platforms["linux-aarch64"], { url: assetUrl(version, "engine-linux-aarch64.zip"), sha256: "ab", size: 2 });
 });
 
 test("keygen refuses a path inside the repository", () => {

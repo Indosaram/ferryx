@@ -12,11 +12,15 @@
  *       [--notarize --notary-profile <profile>] [--signtool-cert <thumbprint>]
  *       Builds and bundles the engine for this OS (release profile), signs it (macOS:
  *       Developer ID, hardened runtime, inside-out; Windows: Authenticode when a certificate
- *       is given, else the artifact is recorded as unsigned), zips it into
+ *       is given, else the artifact is recorded as unsigned; Linux (x86_64, aarch64): no code
+ *       signing, always recorded as unsigned, integrity comes from the signed manifest's sha256),
+ *       zips it into
  *       <dir>/engine-<platform>.zip and writes <dir>/engine-<platform>.json (sha256, size,
  *       signing record). Notarization runs only with --notarize. --adhoc signs with "-" (local
  *       tests only; such an engine fails Gatekeeper and is recorded as not code-signed).
  *       FERRYX_ENGINE_SIGNTOOL_CERT may name the Windows certificate thumbprint instead.
+ *       On Linux, bundle-engine lays out engine-linux-<arch>/ (ferryx_engine at its root, no
+ *       chrome-sandbox) and zips it keeping Unix modes; that archive is used as is.
  *   bun scripts/browser-engine/release-engine.mjs manifest --dir <dir> --key <file>
  *       Writes <dir>/manifest.json from every engine-<platform>.json in <dir> and signs it into
  *       <dir>/manifest.json.sig. The key path may also come from FERRYX_ENGINE_SIGNING_KEY.
@@ -32,7 +36,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -63,6 +67,8 @@ export function assetUrl(version, file) {
 export function platformKey(os = process.platform, arch = process.arch) {
   if (os === "darwin" && arch === "arm64") return "macos-aarch64";
   if (os === "win32" && arch === "x64") return "windows-x86_64";
+  if (os === "linux" && arch === "x64") return "linux-x86_64";
+  if (os === "linux" && arch === "arm64") return "linux-aarch64";
   return null;
 }
 
@@ -254,6 +260,21 @@ function signWindows({ dir, thumbprint }) {
   return { codeSigned: true, authority: thumbprint };
 }
 
+/**
+ * Where bundle-engine leaves a Linux engine: engine-linux-<arch>/ with ferryx_engine at its root
+ * (ENGINE_EXE in src-tauri/src/browser/cef_engine/linux.rs) and engine-linux-<arch>.zip beside
+ * it. <arch> is Rust's ARCH, which is the platform key's suffix.
+ */
+export function linuxBundlePaths(bundleDir, platform) {
+  const dir = join(bundleDir, `engine-${platform}`);
+  return { dir, zip: `${dir}.zip`, executable: join(dir, "ferryx_engine") };
+}
+
+/** Linux engines carry no code signature; the ed25519-signed manifest sha256 is their integrity. */
+export function linuxSigningRecord() {
+  return { codeSigned: false, authority: null };
+}
+
 export async function buildEngine({ out, identity = DEFAULT_IDENTITY, notarize = false, notaryProfile = null, signtoolCert = null, adhoc = false, log = console.log }) {
   const platform = platformKey();
   if (!platform) throw new Error(`no engine is built for ${process.platform}/${process.arch}`);
@@ -278,6 +299,15 @@ export async function buildEngine({ out, identity = DEFAULT_IDENTITY, notarize =
       notarization = await notarizeMac({ zipPath, appPath, notaryProfile });
       zipMac(appPath, zipPath); // re-zip so the archive carries the stapled ticket
     }
+  } else if (platform.startsWith("linux")) {
+    const paths = linuxBundlePaths(bundleDir, platform);
+    if (!existsSync(paths.executable)) throw new Error(`bundle-engine left no ${paths.executable}`);
+    if (!existsSync(paths.zip)) throw new Error(`bundle-engine left no ${paths.zip}`);
+    signing = linuxSigningRecord();
+    log("Linux engines are not code-signed (recorded in the manifest record); the signed manifest sha256 covers them");
+    rmSync(zipPath, { force: true });
+    // bundle-engine's zip keeps each file's Unix mode, which the installer restores.
+    copyFileSync(paths.zip, zipPath);
   } else {
     signing = signtoolCert ? signWindows({ dir: bundleDir, thumbprint: signtoolCert }) : { codeSigned: false, authority: null };
     if (!signtoolCert) log("WARNING: no --signtool-cert: the Windows engine is UNSIGNED (recorded in the manifest record)");
