@@ -626,6 +626,11 @@ pub enum SupervisorReadAction {
         after: Option<i64>,
     },
     Memory,
+    /// The app transcript after a message-id cursor.
+    Transcript {
+        #[serde(default)]
+        cursor: Option<i64>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -913,6 +918,15 @@ pub enum DaemonRequest {
     #[serde(rename = "supervisorReadV1", rename_all = "camelCase")]
     SupervisorReadV1 {
         request: SupervisorReadAction,
+    },
+    /// One owner message from the panel composer, answered by the supervisor on the `app`
+    /// channel; both are stored in the app transcript. Gated by `supervisorConverseV1`.
+    #[serde(rename = "supervisorConverseV1", rename_all = "camelCase")]
+    SupervisorConverseV1 {
+        text: String,
+        #[serde(default)]
+        mentions: Vec<String>,
+        request_id: String,
     },
     /// Host load and per-session process cost, sampled by the daemon on demand.
     ResourceUsage,
@@ -1498,6 +1512,11 @@ pub enum DaemonResponse {
     /// The view a `SupervisorReadV1` asked for.
     #[serde(rename = "supervisorReadV1Ok", rename_all = "camelCase")]
     SupervisorReadV1Ok {
+        value: serde_json::Value,
+    },
+    /// The stored owner message and supervisor reply of a `SupervisorConverseV1`.
+    #[serde(rename = "supervisorConverseV1Ok", rename_all = "camelCase")]
+    SupervisorConverseV1Ok {
         value: serde_json::Value,
     },
     #[serde(rename_all = "camelCase")]
@@ -2316,6 +2335,30 @@ mod tests {
         let ok = DaemonResponse::SupervisorReadV1Ok { value: serde_json::json!({"next": 4}) };
         let text = serde_json::to_string(&ok).unwrap();
         assert!(text.contains(r#""type":"supervisorReadV1Ok""#), "{text}");
+    }
+
+    #[test]
+    fn the_supervisor_converse_round_trips_on_the_daemon_wire() {
+        let request: DaemonRequest = serde_json::from_value(serde_json::json!(
+            {"type": "supervisorConverseV1", "text": "hi", "requestId": "r1"}
+        ))
+        .unwrap();
+        assert!(matches!(
+            request,
+            DaemonRequest::SupervisorConverseV1 { ref text, ref mentions, ref request_id }
+                if text == "hi" && mentions.is_empty() && request_id == "r1"
+        ));
+        let transcript: DaemonRequest = serde_json::from_value(serde_json::json!(
+            {"type": "supervisorReadV1", "request": {"view": "transcript", "cursor": 4}}
+        ))
+        .unwrap();
+        assert!(matches!(
+            transcript,
+            DaemonRequest::SupervisorReadV1 { request: SupervisorReadAction::Transcript { cursor: Some(4) } }
+        ));
+        let ok = DaemonResponse::SupervisorConverseV1Ok { value: serde_json::json!({"replayed": false}) };
+        let text = serde_json::to_string(&ok).unwrap();
+        assert!(text.contains(r#""type":"supervisorConverseV1Ok""#), "{text}");
     }
 
     #[test]

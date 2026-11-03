@@ -891,6 +891,10 @@ pub struct RemoteGatewayState {
     /// daemon's opened hub instead.
     #[cfg(test)]
     pub(crate) supervisor_test_hub: RwLock<Option<(ferryx_hub::goals::SqlitePool, String)>>,
+    /// Test-only app conversation standing in for the installed mhc engine.
+    #[cfg(test)]
+    pub(crate) supervisor_test_engine:
+        RwLock<Option<Arc<dyn ferryx_hub::supervisor::transcript::AppConversation>>>,
 }
 
 impl RemoteGatewayState {
@@ -1072,6 +1076,8 @@ impl RemoteGatewayState {
             agent_history_home: RwLock::new(None),
             #[cfg(test)]
             supervisor_test_hub: RwLock::new(None),
+            #[cfg(test)]
+            supervisor_test_engine: RwLock::new(None),
             auth_manager,
             terminal_service,
             daemon_epoch: AtomicU64::new(0),

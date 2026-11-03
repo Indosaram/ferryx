@@ -6252,7 +6252,10 @@ impl DaemonServer {
                     // goal (hub_runtime::set_lane_paused); the legacy lane-goal requests keep
                     // their pre-existing semantics for the owner's own shell in a pane, and a
                     // supervisor goal's lane refuses them SUPERVISOR_OWNED anyway.
-                    let owner_decision = matches!(req.as_ref(), Ok(DaemonRequest::SupervisorRequestV1 { .. }))
+                    let owner_decision = matches!(
+                        req.as_ref(),
+                        Ok(DaemonRequest::SupervisorRequestV1 { .. } | DaemonRequest::SupervisorConverseV1 { .. })
+                    )
                         || matches!(req.as_ref(), Ok(DaemonRequest::SupervisorDispatch { request }) if request.mutates());
                     let peer_refusal = if owner_decision {
                         self.supervisor_peer_refusal(origin).await.map(|message| DaemonResponse::Error {
@@ -7541,6 +7544,7 @@ impl DaemonServer {
                     capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_REQUEST_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_READ_CAPABILITY.into());
+                    capabilities.push(crate::hub_runtime::SUPERVISOR_CONVERSE_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_ENGINE_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY.into());
@@ -7638,6 +7642,23 @@ impl DaemonServer {
                 Ok(DaemonRequest::SupervisorReadV1 { request }) => {
                     match crate::hub_runtime::supervisor_read(self.remote_state(), request).await {
                         Ok(value) => DaemonResponse::SupervisorReadV1Ok { value },
+                        Err(failure) => DaemonResponse::Error {
+                            message: failure.message.clone(),
+                            code: Some(failure.code.clone()),
+                            details: Some(failure.to_json()),
+                        },
+                    }
+                }
+                Ok(DaemonRequest::SupervisorConverseV1 { text, mentions, request_id }) => {
+                    let input = ferryx_hub::supervisor::transcript::ConverseInput { text, mentions, request_id };
+                    match crate::hub_runtime::supervisor_converse(
+                        self.remote_state(),
+                        crate::hub_runtime::SupervisorCaller::Desktop,
+                        input,
+                    )
+                    .await
+                    {
+                        Ok(value) => DaemonResponse::SupervisorConverseV1Ok { value },
                         Err(failure) => DaemonResponse::Error {
                             message: failure.message.clone(),
                             code: Some(failure.code.clone()),

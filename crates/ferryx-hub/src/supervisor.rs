@@ -3695,5 +3695,9 @@ pub mod health;
 pub mod memory;
 pub mod receipts;
 pub mod request;
+<<<<<<< HEAD
 pub mod rules;
+=======
+pub mod transcript;
+>>>>>>> feat/supv-t7-20261102
 pub mod wakes;

@@ -493,3 +493,102 @@ async fn the_legacy_pause_route_pauses_a_supervisor_goal_through_the_shared_serv
     assert_eq!(goal_row(&pool, &goal_id).await, ("ready".into(), 2));
     gateway.stop().await;
 }
+
+// The app converse route (todo 7): a view-only device is refused, an owner device's message and
+// the supervisor's reply land in the transcript, and a retried request id stores nothing twice.
+
+struct EchoEngine;
+
+#[async_trait::async_trait]
+impl ferryx_hub::supervisor::transcript::AppConversation for EchoEngine {
+    async fn converse(
+        &self,
+        scope: &ferryx_hub::meta::mhc_profile::ConversationScope,
+        message: &str,
+    ) -> Result<String, ferryx_hub::meta::mhc_fault::SupervisorFault> {
+        assert_eq!(scope.channel_key, "app");
+        Ok(format!("heard: {message}"))
+    }
+}
+
+async fn converse_hub(gateway: &Gateway) -> ferryx_hub::goals::SqlitePool {
+    let pool = ferryx_hub::storage::memory().await.expect("hub db");
+    *gateway.state().supervisor_test_hub.write() = Some((pool.clone(), OWNER.into()));
+    *gateway.state().supervisor_test_engine.write() = Some(std::sync::Arc::new(EchoEngine));
+    pool
+}
+
+const CONVERSE: &str = "/api/v1/supervisor/converse";
+
+#[tokio::test]
+async fn a_view_only_device_cannot_converse_and_nothing_is_stored() {
+    let gateway = Gateway::start().await;
+    let pool = converse_hub(&gateway).await;
+    let view_only = gateway.token(DevicePermission::View, DeviceAccessScope::Mirror);
+    let outsider = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    gateway.state().agent_control_policy.restrict_to(["another-device"]);
+    let body = r#"{"text":"hello","mentions":[],"requestId":"r1"}"#;
+
+    for token in [&view_only, &outsider] {
+        let (status, _, answer) = gateway.post_to(CONVERSE, token, body).await;
+        assert_eq!(status, 403, "{answer}");
+        assert_eq!(answer["error"]["code"], "FORBIDDEN");
+    }
+    let (status, _, _) = gateway.get("/api/v1/supervisor/transcript", &view_only).await;
+    assert_eq!(status, 403);
+    let page = ferryx_hub::supervisor::transcript::page(&pool, 0, 10).await.expect("page");
+    assert!(page["messages"].as_array().expect("messages").is_empty());
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn an_owner_device_converses_and_both_messages_are_stored_once() {
+    let gateway = Gateway::start().await;
+    let pool = converse_hub(&gateway).await;
+    let token = gateway.authorized_machine_token();
+    let body = r#"{"text":"restart the build","mentions":[],"requestId":"r1"}"#;
+
+    let (status, cache, answer) = gateway.post_to(CONVERSE, &token, body).await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(cache.as_deref(), Some("no-store"));
+    assert_eq!(answer["owner"]["text"], "restart the build");
+    assert_eq!(answer["reply"]["text"], "heard: restart the build");
+    assert_eq!(answer["reply"]["evidence"], serde_json::json!([]));
+
+    let (status, _, again) = gateway.post_to(CONVERSE, &token, body).await;
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["replayed"], true);
+
+    let (status, _, page) = gateway.get("/api/v1/supervisor/transcript?cursor=0", &token).await;
+    assert_eq!(status, 200, "{page}");
+    let messages = page["messages"].as_array().expect("messages");
+    assert_eq!(messages.len(), 2, "{page}");
+    assert_eq!(messages[0]["role"], "owner");
+    assert_eq!(messages[1]["role"], "supervisor");
+    let stored = ferryx_hub::supervisor::transcript::by_request(&pool, "r1").await.expect("row");
+    assert_eq!(stored.expect("owner row").text, "restart the build");
+
+    let (status, _, rest) = gateway
+        .get(&format!("/api/v1/supervisor/transcript?cursor={}", page["nextCursor"]), &token)
+        .await;
+    assert_eq!(status, 200, "{rest}");
+    assert!(rest["messages"].as_array().expect("messages").is_empty());
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn a_malformed_converse_body_is_400_and_a_closed_hub_is_503() {
+    let gateway = Gateway::start().await;
+    let token = gateway.authorized_machine_token();
+
+    let (status, _, answer) = gateway.post_to(CONVERSE, &token, r#"{"text":"hi"}"#).await;
+    assert_eq!(status, 400, "{answer}");
+    assert_eq!(answer["error"]["code"], "INVALID_REQUEST");
+
+    let (status, _, answer) = gateway
+        .post_to(CONVERSE, &token, r#"{"text":"hi","mentions":[],"requestId":"r1"}"#)
+        .await;
+    assert_eq!(status, 503, "{answer}");
+    assert_eq!(answer["error"]["code"], SUPERVISOR_UNAVAILABLE_CODE);
+    gateway.stop().await;
+}

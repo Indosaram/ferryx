@@ -1395,6 +1395,66 @@ pub async fn supervisor_conversation(
     request::conversation(&pool, &context, project_id, after).await
 }
 
+/// Capability a daemon advertises once it serves `DaemonRequest::SupervisorConverseV1`.
+pub const SUPERVISOR_CONVERSE_CAPABILITY: &str = "supervisorConverseV1";
+
+/// The supervisor conversation the app channel talks to: the installed mhc engine.
+fn app_conversation(
+    state: &RemoteGatewayState,
+) -> Option<Arc<dyn ferryx_hub::supervisor::transcript::AppConversation>> {
+    #[cfg(test)]
+    if let Some(engine) = state.supervisor_test_engine.read().clone() {
+        return Some(engine);
+    }
+    let _ = state;
+    ferryx_hub::meta::mhc_supervisor::installed().map(|supervisor| {
+        Arc::new(supervisor) as Arc<dyn ferryx_hub::supervisor::transcript::AppConversation>
+    })
+}
+
+/// One owner message from the panel composer and the supervisor's reply, both stored in the app
+/// transcript. Without the engine nothing is stored and the answer is `MHC_NOT_RUNNING`.
+/// The reply tells the Supervisor views to refetch.
+pub async fn supervisor_converse(
+    state: &RemoteGatewayState,
+    caller: SupervisorCaller,
+    input: ferryx_hub::supervisor::transcript::ConverseInput,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    use ferryx_hub::supervisor::request::RequestFailure;
+    use ferryx_hub::supervisor::transcript;
+    let (pool, owner, _) = supervisor_service(state).await?;
+    if owner.is_none() {
+        return Err(RequestFailure::new(
+            "UNAUTHORIZED",
+            "this installation has no single supervisor owner",
+        ));
+    }
+    let Some(engine) = app_conversation(state) else {
+        return Err(RequestFailure::new(
+            "MHC_NOT_RUNNING",
+            "no mhc supervisor engine is installed in this daemon; nothing was stored",
+        ));
+    };
+    let answer = transcript::converse(&pool, engine.as_ref(), &input, &transcript::now_ms).await?;
+    let mut payload = json!({ "supervisorConverse": input.request_id });
+    if let SupervisorCaller::Remote { device_id } = &caller {
+        if let Some(fields) = payload.as_object_mut() {
+            fields.insert("by".into(), json!(format!("remote:{device_id}")));
+        }
+    }
+    crate::remote::server::agent_control_service::publish_supervisor_changed(state, payload);
+    Ok(answer)
+}
+
+/// One page of the app transcript after `cursor` (a message id; 0 starts from the beginning).
+pub async fn supervisor_transcript(
+    state: &RemoteGatewayState,
+    cursor: i64,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    let (pool, _, _) = supervisor_service(state).await?;
+    ferryx_hub::supervisor::transcript::page(&pool, cursor, ferryx_hub::supervisor::transcript::PAGE_LIMIT).await
+}
+
 /// The owner's native memory receipts with their provenance, read from the installed mhc
 /// engine. A closed hub is SUPERVISOR_UNAVAILABLE; a daemon without the engine is
 /// MEMORY_UNAVAILABLE, never an empty success.
@@ -1435,6 +1495,7 @@ pub async fn supervisor_read(
             supervisor_conversation(state, SupervisorCaller::Desktop, &project_id, after.unwrap_or(0)).await
         }
         SupervisorReadAction::Memory => supervisor_memory(state, SupervisorCaller::Desktop).await,
+        SupervisorReadAction::Transcript { cursor } => supervisor_transcript(state, cursor.unwrap_or(0)).await,
     }
 }
 
