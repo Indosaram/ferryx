@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type TouchEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 
@@ -136,19 +136,34 @@ export function ReportViewer({ message, onClose }: { message: TranscriptMessage;
     [onClose],
   );
 
-  // A touch outside the dialog (on the dim backdrop) must not scroll or refresh what is behind.
-  const stopBackdropTouch = useCallback((event: TouchEvent<HTMLDivElement>) => {
-    if (event.target === event.currentTarget && event.cancelable) event.preventDefault();
-    event.stopPropagation();
-  }, []);
+  // Touch containment. React registers touch handlers as passive, where preventDefault is
+  // ignored, so these are native non-passive listeners on the backdrop. A touch on the dim
+  // backdrop itself is cancelled (it cannot scroll or pull-to-refresh what is behind), and no
+  // touch inside the Viewer bubbles out to page-level handlers; touches inside the dialog are
+  // not cancelled, so the report still scrolls.
+  const backdropRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const backdrop = backdropRef.current;
+    if (!backdrop) return;
+    const contain = (event: Event) => {
+      if (event.target === backdrop && event.cancelable) event.preventDefault();
+      event.stopPropagation();
+    };
+    const options = { passive: false } as const;
+    backdrop.addEventListener("touchstart", contain, options);
+    backdrop.addEventListener("touchmove", contain, options);
+    return () => {
+      backdrop.removeEventListener("touchstart", contain);
+      backdrop.removeEventListener("touchmove", contain);
+    };
+  }, [host]);
 
   if (!host) return null;
   return createPortal(
     <div
+      ref={backdropRef}
       data-testid="report-viewer-backdrop"
       className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm [touch-action:none] sm:p-6"
-      onTouchStart={stopBackdropTouch}
-      onTouchMove={stopBackdropTouch}
     >
       <div
         ref={dialogRef}
