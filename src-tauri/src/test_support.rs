@@ -65,7 +65,14 @@ fn cli_build_command(
         }
     }
     command
-        .args(["build", "--bin", "ferryx-cli", "--manifest-path"])
+        // A plain `cargo build --bin` resolves features without dev-dependencies, so tokio
+        // loses the `test-util` feature the test build has. That is a different tokio, and
+        // every crate above it, ferryx_lib included, compiles a second time here; the next
+        // test or example build in the same target dir then rebuilds its own units again.
+        // Naming an example as well (one `cargo test` already compiles) resolves features
+        // the way the test build does, so the CLI reuses the units the tests were built from.
+        .args(["build", "--bin", "ferryx-cli", "--example", CLI_FEATURE_PEER_EXAMPLE])
+        .arg("--manifest-path")
         .arg(manifest_dir.join("Cargo.toml"))
         .arg("--target-dir")
         .arg(target_dir)
@@ -80,6 +87,10 @@ fn cli_build_command(
     let binary = profile_dir.join(format!("ferryx-cli{}", std::env::consts::EXE_SUFFIX));
     (command, binary)
 }
+
+/// A small example with no required features, built next to the CLI so feature
+/// resolution includes dev-dependencies (see `cli_build_command`).
+const CLI_FEATURE_PEER_EXAMPLE: &str = "remote_grid_frame_dump";
 
 /// Variables cargo sets for the package it builds or runs, never for cargo itself.
 fn is_cargo_package_env(key: &str) -> bool {
@@ -108,12 +119,13 @@ mod tests {
             std::ffi::OsStr::new("cargo"), Path::new(exe), Path::new("checkout/src-tauri"), triple,
         );
         let mut expected = vec![
-            "build", "--bin", "ferryx-cli", "--manifest-path", "checkout/src-tauri/Cargo.toml",
+            "build", "--bin", "ferryx-cli", "--example", "remote_grid_frame_dump",
+            "--manifest-path", "checkout/src-tauri/Cargo.toml",
             "--target-dir", expected_root, "--profile", expected_profile,
         ];
         if explicit { expected.extend(["--target", triple]); }
         let mut expected: Vec<std::ffi::OsString> = expected.into_iter().map(Into::into).collect();
-        expected[4] = Path::new("checkout/src-tauri").join("Cargo.toml").into_os_string();
+        expected[6] = Path::new("checkout/src-tauri").join("Cargo.toml").into_os_string();
         assert_eq!(command.get_args().collect::<Vec<_>>(),
             expected.iter().map(std::ffi::OsString::as_os_str).collect::<Vec<_>>());
         assert_eq!(binary, Path::new(exe).parent().unwrap().parent().unwrap()
