@@ -5,9 +5,12 @@
 #![deny(clippy::print_stdout)]
 
 pub mod agent_control;
+pub mod adoption;
 pub mod autonomy;
 pub mod browser;
 pub mod chat;
+pub mod checkpoint;
+pub mod checkpoint_import;
 pub mod child_env;
 pub mod config;
 pub mod context;
@@ -24,6 +27,7 @@ pub mod effect;
 pub mod error;
 pub mod fleet;
 pub mod goals;
+pub mod holder;
 pub mod http;
 pub mod hub;
 pub mod hub_env;

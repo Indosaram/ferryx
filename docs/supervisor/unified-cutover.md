@@ -261,6 +261,305 @@ sqlite3 -readonly ~/.ferryx/hub/hub.sqlite \
 To cut over again later, repeat the preflight and run `ferryx hub cutover`. Kept ready intents
 are dispatched, kept wakes are delivered, and the adopted goals continue.
 
+## One active supervisor per account
+
+With an account relay that serves the supervisor lease (`docs/relay-failover.md`, "Supervisor
+lease on the relay"), exactly one machine of the account runs the supervisor: admission,
+dispatch, wakes, cron, Slack and Discord, chat replies and the backfill sweeper. That machine
+holds the lease. Every other machine whose hub is on is a standby: healthy, visible, and doing
+no supervisor work of its own.
+
+### Lease and fence
+
+The holder renews every 20 s and a lease lasts 120 s. The holder stops 15 s before its local
+deadline, counted from when it sent the last successful renew; after sleep or a wall clock
+jump it drops to standby at once until the next renew succeeds. Another machine can take a
+lease only 30 s after it expired.
+
+Every supervisor send to a pane carries the lease fence. An executing daemon that has seen a
+higher fence for the account rejects the send with `STALE_SUPERVISOR_FENCE`, and the goal is
+held instead of settled. Manual input and requests without a fence are never fenced. A holder
+that is told its fence is stale stands down and releases the lease.
+
+A rolling daemon upgrade on the holder keeps the lease: the old daemon freezes its lease
+client at the handover commit and hands `{machine_id, fence, deadline}` to the new one, whose
+first request is a renew with the same machine id and fence. The new daemon starts the hub only
+once that renew is granted. No other machine sees a free lease during the handover.
+
+### Standby behaviour
+
+- Slack Socket Mode is never opened on a standby, and no Slack or Discord post or chat reply
+  leaves it; queued replies stay queued for the holder.
+- `ferryx hub start` on a standby answers `{"status":"standby","holder":...}` and starts
+  nothing.
+- Phone routes (`POST /api/v1/supervisor/start`, supervisor requests, conversation, memory,
+  pause) answer HTTP 409 `SUPERVISOR_STANDBY` with details `{holderMachineId, holderLabel}`, and
+  the phone switches to the holder.
+- `supervisor.request` from the owner's CLI or MCP is forwarded to the holder, and so are
+  observations of this machine's own panes (keystrokes, relayed input, worker reports;
+  `POST /api/v1/supervisor/observe` on the holder). The holder supervises the standby's panes.
+- `ferryx-cli mcp` asks the daemon for its role at startup and again every 5 s while it serves.
+  On standby it never opens the hub database, and supervisor reads and writes are refused with
+  `SUPERVISOR_STANDBY`, naming the holder. It fails closed: if this machine has a lease client and
+  the daemon does not answer, it refuses with `SUPERVISOR_UNAVAILABLE`. A process started on
+  standby keeps refusing (`SUPERVISOR_UNAVAILABLE`) after this machine takes over. Restart it
+  to serve supervisor state.
+- Forwarding needs a machine grant on the holder. A standby without one pairs itself: it
+  redeems a grant through the account, signed with its enrolled machine key and bound to the
+  device key it pairs with, so the account vouches that the device is a machine of the same
+  account. The holder honours that only when the account's signature over the grant, which the
+  relay forwards with it, verifies against the account key the holder pinned at enrollment (or
+  `FERRYX_RELAY_ACCOUNT_PUBLIC_KEY`); a relay cannot mint the mark itself. With an older relay
+  or no pinned key the grant still pairs, but follows the agent-control switch like any other
+  device. The account session comes from
+  `FERRYX_ACCOUNT_SESSION_TOKEN` when set, otherwise from the saved session (see "The saved
+  account session" below). Without a session, or if redeeming fails (retried after 5 minutes),
+  the standby is "not paired to holder": requests are refused with `SUPERVISOR_STANDBY` and
+  observations are dropped and counted in `observeDropped`. Without a session, `ferryx hub
+  status` and the snapshot also carry `holderPairingReason` naming the fix (`ferryx account
+  login`).
+- A standby that already had a grant on the holder from before this release (for example one
+  the desktop paired) holds a grant without the account's same-machine marker, which the holder
+  refuses with 403 `FORBIDDEN` while agent control is off. That refusal carries
+  `details.refusal = "agentControl"`. On the first such refusal from a machine-to-machine
+  route (checkpoint pull, `release-to`, forwarded `supervisor/request`, `observe`) the standby
+  sets that grant aside, redeems one fresh grant through the account and retries the call once.
+  If the holder still refuses, the refusal is reported and no other grant is redeemed for 5
+  minutes. Any other `FORBIDDEN` (a view-only device, a device excluded in Settings, or the
+  supervisor's own answer such as a goal of another owner) is reported as it is and redeems
+  nothing.
+- The "allow agent control" switch does not govern these same-account machine-to-machine
+  paths: checkpoint pull (`GET /api/v1/supervisor/checkpoint`), `release-to`, `observe`,
+  forwarded `supervisor/request` and the fence push work on a default install. They also skip
+  the restricted-device allowlist: a same-account machine peer is admitted even when the
+  owner limited agent control to listed devices. Scope and permission still apply (a view-only
+  device cannot pull a checkpoint), and excluding the device in Settings still refuses it.
+  Phones and the web app keep following the switch and the allowlist on every route,
+  including these.
+
+#### The saved account session
+
+The daemon keeps the account session in `account-session.json` in the identity directory:
+`~/.ferryx/remote/account-session.json` on macOS and Linux, `%LOCALAPPDATA%\Ferryx\remote\account-session.json`
+on Windows, or `$FERRYX_DATA_DIR/remote/account-session.json` when `FERRYX_DATA_DIR` is set.
+It is owner-only (mode 0600, or an owner-only ACL on Windows) and only sent to the account
+origin that issued it. It is written by:
+
+- `ferryx account login`. On a machine already enrolled to the same owner at that account
+  origin it only saves the session: the enrollment, and its enrollment epoch, stay as they
+  were, so devices already paired to the machine keep working. A machine not enrolled there,
+  or enrolled to another owner, is enrolled as before;
+- `ferryx-cli up` when the owner approves the machine in the browser (an install key carries
+  no session);
+- the desktop app when it first links the computer to the account (onboarding). A computer
+  that is already linked is not linked again, so this does not refresh a session.
+
+`ferryx account enroll --code` does not save one; run `ferryx account login` on such a machine.
+The session lasts 30 days from when it was issued; after that the standby is "not paired to
+holder" until `ferryx account login` is run again.
+To remove the saved session, delete the file (there is no `ferryx account logout` command);
+`FERRYX_ACCOUNT_SESSION_TOKEN` still wins over it when set.
+
+Approving a machine (the browser approval of `ferryx-cli up` or of `ferryx account login`)
+lets it act as a machine of the account: with its saved session it can pair to the account's
+other machines and pull their supervisor checkpoints, which carry secrets, even while their
+"allow agent control" switch is off. Approve only machines you own.
+
+`hub_stopped` still means "the owner turned the supervisor off" and is independent of the
+lease. Losing the lease stops the hub tasks without setting it, so the machine starts again by
+itself when it becomes holder.
+
+`ferryx hub stop` on the holder sets `hub_stopped`, stops the hub tasks and then hands the
+supervisor on: it publishes a final checkpoint first and then releases the lease, and the
+release records that checkpoint. The relay treats a released lease as free without waiting
+for the grace period, for a machine that presents that checkpoint. If the final checkpoint cannot
+be published, the lease is kept rather than released with an older checkpoint recorded. It
+then expires normally (120 s plus the 30 s grace). If the relay does not acknowledge the
+release, for example while only the standby relay is up, the lease also just expires. A stop
+on a standby, or on a self-hosted holder with fence `0`, publishes and releases nothing.
+
+### Moving the supervisor
+
+On the machine that should run the supervisor:
+
+```bash
+ferryx hub move-here
+```
+
+The phone does the same with `POST /api/v1/supervisor/move` on the target machine, body
+`{"force": false, "replaceLocal": false}` (`replaceLocal` is optional), answer
+`{"moved": true}` (`false`: it already ran there). The desktop panel has a "Move supervisor
+here" button (`cmd_supervisor_move_here` with `force` and an optional `replace_local`). The
+target asks the holder, over the paired end-to-end
+channel, to stop (`POST /api/v1/supervisor/release-to`). The holder publishes a final
+checkpoint and releases the lease reserved for the target. The target pulls that checkpoint
+(`GET /api/v1/supervisor/checkpoint`), imports it and acquires the lease with the next fence.
+
+The released lease stays reserved for the target for 120 s after the release. Until then the
+relay refuses every other machine with `LEASE_RESERVED`, the old holder and `--force`
+included, so a holder that restarts mid-move cannot take the lease back. If the move fails or is
+cancelled, the old holder (or any machine) gets the lease again once the window has passed; in
+between no machine runs the supervisor.
+
+What moves: goals, the supervisor identity, hub settings and secrets (the hub env file), the mhc
+supervisor profile and the supervisor memory. Provider sessions do not move; the new holder
+starts fresh ones. Before the import replaces anything, the target keeps its previous database
+as `hub.sqlite.pre-move-<ts>` (with its `-wal`/`-shm`), and the previous env file and memory
+repo as `*.pre-move-<ts>`. Hosts are remapped to the target's paired hosts. A host the exporter
+could not scope is written as `unmapped:<id>`; its goals are held with `REMOTE_HOST_UNMAPPED`
+and never sent to another pane. A target with the same supervisor identity, or one whose
+supervisor was already archived (see "First rollout"), imports without an archive.
+
+If the target hub holds a different supervisor, the move is refused with
+`SUPERVISOR_IDENTITY_MISMATCH` (HTTP 409). Nothing is archived or staged, and the lease does
+not move. The CLI prints a hint to add `--replace-local`. Only the owner can replace that
+local supervisor, and only explicitly:
+
+```bash
+ferryx hub move-here --replace-local                    # holder reachable
+ferryx hub move-here --force --confirm --replace-local  # forced takeover (see below)
+```
+
+On the phone, send `{"force": ..., "replaceLocal": true}`. The desktop command takes
+`replace_local: true`. With it, the target first archives its own supervisor as
+`hub.sqlite.pre-lease-<ts>` (with its `-wal`) and then imports again. The archive is written
+once and never deleted, and its open goals become adoptable (see "First rollout").
+Automatic takeover never replaces a local supervisor.
+
+If the holder cannot be reached, the move succeeds only when the lease expired past the grace
+period and this machine has the checkpoint the relay recorded last. Otherwise it fails with
+HTTP 409 `SUPERVISOR_FORCE_REQUIRED`, details `{holderLabel, checkpointAt}`, and the message
+names what will be lost ("changes since <checkpointAt> on <holder>"). To take over anyway:
+
+```bash
+ferryx hub move-here --force --confirm
+```
+
+`--force` alone is sent unforced and only prints the warning; `--confirm` without `--force` is
+a usage error. On the phone, send `{"force": true}`. A holder whose lease is still live cannot
+be forced out; the move answers `SUPERVISOR_STANDBY`.
+
+A forced takeover first imports this machine's newest pulled checkpoint, if it has one, and
+only then asks the relay for the lease. That import runs the same identity check. A hub that
+holds a different supervisor is therefore refused with `SUPERVISOR_IDENTITY_MISMATCH` before
+the lease moves, unless `--replace-local` is also given. If the relay then refuses the lease,
+the staged import is discarded and this machine keeps its own database.
+
+### Checkpoints and automatic takeover
+
+The holder publishes a checkpoint every 300 s and on every release. Standbys pull the newest
+one over the paired channel and keep the two newest, readable by the owner only. A checkpoint
+contains the Slack and provider tokens and the hub secrets, so a standby holds them too. A
+checkpoint is at most 64 MiB compressed (`CHECKPOINT_TOO_LARGE` otherwise), and reading one
+stops once it unpacks past 512 MiB, so a small archive cannot fill the disk.
+
+When the holder's lease expired past the grace period, a standby takes over automatically only
+if its hub is not stopped and its newest checkpoint is the one the relay recorded. It imports
+that checkpoint (keeping `hub.sqlite.pre-move-<ts>`) before its hub reopens. The relay decides
+between several candidates. This import never replaces a different local supervisor. It is
+refused with `SUPERVISOR_IDENTITY_MISMATCH`, the refusal is logged, and the hub reopens on its
+own database, which the refused import never touched. A standby that is blocked says why in
+`promotionBlockReason`:
+`HUB_STOPPED`, `CHECKPOINT_MISSING`, `CHECKPOINT_STALE`, `LEASE_HELD` or the relay's refusal
+code. Nothing forces a takeover automatically.
+
+An old holder that comes back (after sleep or a network cut) finds another machine holding the
+lease and becomes standby; every send it had queued is rejected with `STALE_SUPERVISOR_FENCE`.
+While the relay runs on its standby, nothing changes hands, but the standby cannot extend the
+lease: the holder keeps the supervisor at most until the expiry the primary last recorded, then
+stands down (see "Supervisor lease on the relay" in `docs/relay-failover.md`). A move or a
+takeover waits for the primary relay or its promotion.
+
+### Status fields
+
+The supervisor snapshot's `hub` object reports:
+
+| field | shape | meaning |
+| --- | --- | --- |
+| `role` | `holder` \| `standby` \| `unleased` | `unleased`: no lease can be confirmed (for example `RELAY_LEASE_UNSUPPORTED`); treated like standby |
+| `holderMachineId`, `holderLabel` | string, null if unknown | the machine running the supervisor |
+| `holderPaired` | bool | this standby can forward to the holder |
+| `holderPairing` | `paired` \| `not paired to holder` \| `no holder` | the pairing state behind `holderPaired` |
+| `holderPairingReason` | string; absent unless the owner can fix it | why this standby is not paired, e.g. no account session: run `ferryx account login` |
+| `fence` | int | the lease fence this machine last saw |
+| `leaseExpiresIn` | int seconds | until the holder's lease expires unless renewed |
+| `checkpointId`, `checkpointAge` | string, int seconds; absent if none | the newest checkpoint stored here |
+| `observeDropped` | int | pane observations this standby could not forward |
+| `promotionBlockReason` | `{code, message}`; absent if nothing blocks | why this standby would not take over |
+| `unreachableHosts` | `[{host, reason}]`, `host` null for this machine | machines the holder could not push its fence to; their sessions wait |
+| `unmappedHosts` | `[string]` | host ids from an imported checkpoint this machine cannot map |
+| `adoptable` | `[{goalId, title, supervisorId, fromMachine}]`; absent when empty | open goals of this machine's archived supervisor not adopted yet |
+
+The fields marked "absent" are omitted, not null. A daemon without lease support sends none of
+these fields and runs its own supervisor as before.
+
+`ferryx hub status` reports the same lease fields under `supervisor_lease`, including
+`supervisor_lease.holderPairing`. On standby it also prints a `status_hint` line naming the
+holder and the pairing state.
+
+### First rollout
+
+Order matters, because a daemon without lease support still runs its own supervisor and its own
+Slack socket:
+
+1. Upgrade both relays: the standby relay, then the primary (`docs/relay-failover.md`, "Deploy
+   order for the lease").
+2. Upgrade and start the machine that should keep the supervisor first: the one that has the
+   Slack tokens today. The first machine of the account that gets the lease keeps its
+   supervisor identity, goals and memory.
+3. Upgrade every other daemon of the account before relying on the lease.
+4. On every machine enrolled before this release (including those the desktop app linked and
+   those set up with an install key or `ferryx account enroll --code`), run
+   `ferryx account login` once after the upgrade, approving it as the account's owner. It only
+   saves an account session for the daemon to pair with the holder (see "The saved account
+   session"): the machine is not re-enrolled and its enrollment epoch does not change, so its
+   existing pairings keep working. Machines set up afterwards with `ferryx account login`,
+   `ferryx-cli up` (browser approval) or the desktop's first link already have one. A standby
+   still paired by an older desktop grant replaces it by itself on the holder's first
+   agent-control refusal once it has a session. Upgrade the relay first (step 1): an account
+   service older than this release returns no session, so login then enrolls the machine as
+   before and saves nothing.
+
+Every other machine whose hub ran its own supervisor before the lease archives it once it is
+standby for a holder with a different supervisor id. The standby learns that id from the
+holder's checkpoint it pulls; until it has one, nothing is archived. It copies its database
+(and `-wal`) to `hub.sqlite.pre-lease-<ts>` once and never writes or deletes that copy. A
+former holder that moved away keeps the holder's own identity, so it is never archived and
+lists nothing as adoptable. A move onto a machine
+that still holds a different supervisor archives it the same way only with the owner's
+`--replace-local` (see "Moving the supervisor"); without it the move is refused. An archived
+hub counts as fresh for a later move into this machine.
+
+The archive's open goals (neither completed nor cancelled) are listed in `adoptable` and in the
+standby UI ("Adoptable from <fromMachine>"). Nothing is adopted automatically. To adopt them,
+run this on the machine that holds the archive:
+
+```bash
+ferryx hub adopt-archived --goal <goalId>   # one goal
+ferryx hub adopt-archived --all             # every goal not adopted yet (also the default)
+```
+
+The desktop app does the same with `cmd_supervisor_adopt_archived` (`goalId`, or none for
+all). `cmd_supervisor_adoptable` returns `{"adoptable": [...]}`, whose entries also carry
+`projectName` and `runState`. Each adopted goal is sent to the holder as a `supervisor.request`
+`submit` with its original request text, contract and project identity; a standby forwards it
+over the paired channel. The `requestId` is `archived:<supervisor_id>:<goal_id>`. The holder
+admits it once by that id, so adopting the same goal again, from any adapter, returns the same
+goal. The reply is `{"adopted": [{goalId, sourceId, adopted, answer, error}]}`, and the
+command exits 1 if any goal was not adopted. Adopted goals are recorded in
+`adopted-goals.json` beside the hub database, not in the archive, and drop out of `adoptable`.
+A goal that failed is not recorded, so the next adopt retries it under the same `requestId`.
+
+If the relay is ever downgraded on purpose to a version without the lease, daemons that saw the
+lease stay on standby (`RELAY_LEASE_UNSUPPORTED`). Clear that with
+`ferryx hub lease reset-capability` on each machine.
+
+### Self-hosted and single-machine installs
+
+A daemon with no account enrollment, or whose relay never advertised the lease, is its own
+permanent holder with fence `0` and behaves as before. If the relay is unreachable at boot, the
+last holder of a one-machine account starts without waiting.
+
 ## Disaster recovery from the backup
 
 Use this only if the hub database itself is damaged. It replaces every hub row written since the

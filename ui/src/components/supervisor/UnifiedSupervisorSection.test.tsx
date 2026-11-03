@@ -241,6 +241,15 @@ describe("UnifiedSupervisorSection", () => {
     expect(engine.textContent).toContain("401 from provider");
   });
 
+  it("says where the supervisor runs when this computer is on standby, without an alert or error code", async () => {
+    await renderSection({ connection: "standby", hostLabel: "Studio", client: null, connectionError: { code: "SUPERVISOR_STANDBY", message: "" } });
+    const banner = screen.getByTestId("supervisor-connection");
+    expect(banner.dataset.state).toBe("standby");
+    expect(banner.getAttribute("role")).toBe("status");
+    expect(banner.textContent).toBe("Supervisor runs on Studio. This computer is on standby.");
+    expect(screen.getByTestId("supervisor-unified").dataset.connection).toBe("standby");
+  });
+
   it("keeps the last goals visible but sends nothing while the host is disconnected", async () => {
     const { conversation, memory } = await renderSection({ connection: "disconnected", client: null, connectionError: { code: "OFFLINE", message: "" } });
     const banner = screen.getByTestId("supervisor-connection");

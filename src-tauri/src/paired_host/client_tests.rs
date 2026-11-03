@@ -679,6 +679,29 @@ async fn gatefix_remote_error_never_projects_bearer_text() {
     }
 }
 
+/// F4 MINOR-1: the agent-control access refusal keeps its fixed marker through the safe
+/// projection (a standby keys its grant repair on it); a plain FORBIDDEN, or another detail
+/// value, carries none.
+#[test]
+fn the_agent_control_refusal_marker_survives_the_projection() {
+    let error = |code: &str, details: serde_json::Value| m::MachineError {
+        code: code.into(),
+        message: "Bearer fixture-secret".into(),
+        retryable: false,
+        request_id: "3941b9de-b16d-4d9a-ae0a-118f90fd91f4".into(),
+        details: details.as_object().cloned().unwrap_or_default(),
+    };
+    let marked = project_remote_error(error("FORBIDDEN", json!({"refusal": "agentControl", "secret": "fixture-secret"})));
+    assert_eq!(serde_json::to_value(&marked.details).unwrap(), json!({"refusal": "agentControl"}));
+    assert!(crate::agent_control::policy::is_agent_control_refusal(&marked.details));
+    let plain = project_remote_error(error("FORBIDDEN", json!({})));
+    assert!(plain.details.is_empty());
+    let other = project_remote_error(error("FORBIDDEN", json!({"refusal": "fixture-secret"})));
+    assert!(other.details.is_empty());
+    let not_forbidden = project_remote_error(error("NOT_FOUND", json!({"refusal": "agentControl"})));
+    assert!(not_forbidden.details.is_empty());
+}
+
 #[tokio::test]
 async fn gatefix_journal_error_uses_the_same_safe_projection() {
     let id = "3941b9de-b16d-4d9a-ae0a-118f90fd91f4";
@@ -1746,11 +1769,14 @@ fn agent_control_routes_require_the_remote_capability_and_skip_the_journal() {
             text: "hi".into(),
             request_id: Some("same-id".into()),
         },
+        fence: None,
     };
     assert!(send.is_mutation());
     assert_eq!(send.agent_control_mutation_id().as_deref(), Some("same-id"));
     let route = send.route().expect("send route");
     assert_eq!(route.capability, Some("agentControlRemoteV1"));
+    let body: serde_json::Value = serde_json::from_slice(route.body.as_ref().unwrap()).unwrap();
+    assert!(body.get("supervisorFence").is_none(), "a person's send carries no fence");
     assert_eq!(
         route.segments,
         vec!["agent-control", "sessions", "s-1", "send"]
@@ -1762,6 +1788,36 @@ fn agent_control_routes_require_the_remote_capability_and_skip_the_journal() {
     );
     assert!(!route.idempotent);
 
+    // A supervisor's send carries its lease fence and account in the body.
+    let fenced = Operation::AgentControl {
+        op: AgentControlOp::Send {
+            session_id: "s-1".into(),
+            text: "hi".into(),
+            request_id: Some("fenced-id".into()),
+        },
+        fence: Some(crate::agent_control::fence::SupervisorFence {
+            account: "user-1".into(),
+            fence: 7,
+        }),
+    };
+    let route = fenced.route().expect("fenced send route");
+    let body: serde_json::Value = serde_json::from_slice(route.body.as_ref().unwrap()).unwrap();
+    assert_eq!(body["supervisorFence"], 7);
+    assert_eq!(body["supervisorAccount"], "user-1");
+    assert_eq!(body["requestId"], "fenced-id");
+
+    // A new holder's fence push rides POST supervisor/fence behind its own capability.
+    let push = Operation::SupervisorFence {
+        account: "user-1".into(),
+        fence: 8,
+    };
+    let route = push.route().expect("fence push route");
+    assert_eq!(route.capability, Some("supervisorFenceV1"));
+    assert_eq!(route.segments, vec!["supervisor", "fence"]);
+    assert_eq!(route.method, Method::POST);
+    let body: serde_json::Value = serde_json::from_slice(route.body.as_ref().unwrap()).unwrap();
+    assert_eq!(body, serde_json::json!({ "account": "user-1", "fence": 8 }));
+
     let wait = Operation::AgentControl {
         op: AgentControlOp::Wait {
             session_id: "s-1".into(),
@@ -1770,6 +1826,7 @@ fn agent_control_routes_require_the_remote_capability_and_skip_the_journal() {
             after: 4,
             timeout_ms: 300_000,
         },
+        fence: None,
     };
     assert!(!wait.is_mutation());
     let route = wait.route().expect("wait route");
@@ -1799,6 +1856,7 @@ fn a_delivery_rides_the_send_route_only_to_a_host_with_receipts() {
             request_id: "sv-goal-r1-d1".into(),
             observe_ms: 20_000,
         },
+        fence: None,
     };
     assert!(deliver.is_mutation());
     assert_eq!(deliver.agent_control_mutation_id().as_deref(), Some("sv-goal-r1-d1"));
@@ -1850,6 +1908,7 @@ async fn a_delivery_to_a_host_without_receipts_reaches_nothing_and_is_a_capabili
                         request_id: "sv-goal-r1-d1".into(),
                         observe_ms: 20_000,
                     },
+                    fence: None,
                 },
             ),
         )

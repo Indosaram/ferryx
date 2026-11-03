@@ -72,8 +72,57 @@ export type UnifiedSupervisorView = {
   error: { code: string; message: string } | null;
 };
 
-/** How a surface reaches the designated supervisor host right now. */
-export type SupervisorConnection = "live" | "unavailable" | "disconnected";
+/**
+ * How a surface reaches the designated supervisor host right now. `standby`: the machine is
+ * reachable but another computer of the account holds the supervisor lease.
+ */
+export type SupervisorConnection = "live" | "unavailable" | "disconnected" | "standby";
+
+/** 409 refusal of a standby machine: the account supervisor runs on `holderMachineId`. */
+export const SUPERVISOR_STANDBY = "SUPERVISOR_STANDBY";
+/** A move whose holder is unreachable and whose checkpoint is not current needs `force`. */
+export const SUPERVISOR_FORCE_REQUIRED = "SUPERVISOR_FORCE_REQUIRED";
+
+/** The answer to "Move supervisor here" (`POST /api/v1/supervisor/move`, desktop IPC). */
+export type SupervisorMoveResult =
+  | { kind: "ok"; moved: boolean }
+  /** Only a forced move can proceed; changes on the holder after `checkpointAt` (ms) are lost. */
+  | { kind: "force-required"; holderLabel: string | null; checkpointAt: number | null; message: string }
+  | { kind: "error"; code: string; message: string; status: number | null };
+
+/** Epoch seconds (relay rows) or milliseconds or an ISO string, as milliseconds. */
+export function checkpointMs(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) return value < 1e12 ? value * 1000 : value;
+  if (typeof value === "string" && value) {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+  return null;
+}
+
+/** A refused move from its structured `{code, message, details}`; never from the message text. */
+export function moveRefusal(code: string, message: string, status: number | null, details: unknown): SupervisorMoveResult {
+  if (code !== SUPERVISOR_FORCE_REQUIRED) return { kind: "error", code, message, status };
+  const raw = record(details);
+  return {
+    kind: "force-required",
+    holderLabel: text(raw?.holderLabel),
+    checkpointAt: checkpointMs(raw?.checkpointAt),
+    message,
+  };
+}
+
+/** The data-loss window a forced move needs the owner to confirm. */
+export function forceMoveWarning(
+  refusal: { holderLabel: string | null; checkpointAt: number | null },
+  fallbackHolder: string,
+  formatTime: (atMs: number) => string,
+): string {
+  const holder = refusal.holderLabel || fallbackHolder;
+  return refusal.checkpointAt === null
+    ? `${holder} cannot be reached. Changes on ${holder} since its last checkpoint will be lost.`
+    : `${holder} cannot be reached. Changes since ${formatTime(refusal.checkpointAt)} on ${holder} will be lost.`;
+}
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;

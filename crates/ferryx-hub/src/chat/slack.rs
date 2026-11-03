@@ -839,7 +839,8 @@ pub async fn upload_external(
     bytes: Vec<u8>,
     title: &str,
 ) -> Result<bool> {
-    if bot_token().is_none() || bytes.is_empty() {
+    // An upload is a bot post: only the lease holder makes one.
+    if !crate::holder::is_holder_now() || bot_token().is_none() || bytes.is_empty() {
         return Ok(false);
     }
     // Uploading bytes alone does not publish a message. Only completion below
@@ -1024,6 +1025,10 @@ async fn fetch_own(channel: &str, ts: &str, root: Option<&str>) -> Result<OwnMes
 
 #[cfg(feature = "hub-slack")]
 async fn slack_form(method: &str, fields: &[(&str, &str)]) -> Result<Value> {
+    // auth.test, conversations.open and upload tickets leave only the lease holder.
+    if !crate::holder::is_holder_now() {
+        return Ok(json!({"ok": false, "error": crate::holder::SUPERVISOR_STANDBY}));
+    }
     let Some(token) = bot_token() else {
         return Ok(json!({"ok": false}));
     };
@@ -1140,6 +1145,11 @@ async fn slack_call_checked(
     method: &str,
     body: Value,
 ) -> std::result::Result<Option<Value>, CallFailure> {
+    // Every bot post (replies, cron, lane deliveries, outbox chunks, cards, uploads) leaves
+    // only the holder; a standby reports nothing sent, so the row stays queued.
+    if !crate::holder::is_holder_now() {
+        return Ok(None);
+    }
     let Some(token) = bot_token() else {
         return Ok(None);
     };
@@ -1721,6 +1731,13 @@ async fn connect_once(
 ) -> Result<SlackSocket> {
     *attempt = attempt.saturating_add(1);
     let attempt = *attempt;
+    // A standby never opens Socket Mode: only the lease holder takes Slack events.
+    if !crate::holder::is_holder_now() {
+        return Err(HubError::message(format!(
+            "{}: this machine does not hold the supervisor lease",
+            crate::holder::SUPERVISOR_STANDBY
+        )));
+    }
     if credentials.app_token.is_empty() {
         return Err(HubError::config("SLACK_APP_TOKEN is not set"));
     }
@@ -2788,6 +2805,31 @@ mod tests {
         client.abort();
     }
 
+    /// A standby keeps retrying on its backoff but never reaches `apps.connections.open` on
+    /// the loopback fake Slack: the holder check comes before any request.
+    #[cfg(feature = "hub-slack")]
+    #[tokio::test(start_paused = true)]
+    async fn a_standby_never_calls_connections_open() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut accepts = spawn_stalled_accepts(listener);
+        let pace = test_pace();
+        let creds = test_credentials(format!("http://127.0.0.1:{port}"));
+        let standby: crate::holder::HolderGate = std::sync::Arc::new(|| false);
+        let socket = crate::holder::scope(
+            standby,
+            run_socket_mode(move || Ok(creds.clone()), pace, |_| async {}),
+        );
+        let window = (pace.connect_timeout + pace.backoff_cap) * 20;
+        tokio::select! {
+            ended = socket => panic!("a standby socket loop never ends on its own: {ended:?}"),
+            accepted = tokio::time::timeout(window, accepts.recv()) => {
+                assert!(accepted.is_err(), "a standby opened a connection to the fake Slack");
+            }
+        }
+        assert!(accepts.try_recv().is_err(), "zero connections.open calls");
+    }
+
     #[cfg(feature = "hub-slack")]
     #[tokio::test]
     async fn a_websocket_handshake_that_stalls_after_accept_reconnects_within_the_connect_timeout()
@@ -3153,5 +3195,57 @@ mod tests {
         assert_eq!(complete["thread_ts"], "1700.1");
         assert_eq!(complete["files"][0]["id"], "F1");
         assert_eq!(complete["files"][0]["title"], "Voice reply");
+    }
+
+    /// A standby's Slack egress stays local: no upload ticket, no byte POST, no
+    /// `auth.test` / `conversations.open`. The same fake Slack answers a holder, so the
+    /// zero count is the gate, not an unreachable server.
+    #[cfg(feature = "hub-slack")]
+    #[tokio::test]
+    async fn a_standby_uploads_nothing_and_opens_no_dm() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let counter = hits.clone();
+        let app = axum::Router::new().fallback(move || {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({
+                    "ok": true,
+                    "upload_url": format!("http://127.0.0.1:{port}/bytes"),
+                    "file_id": "F1",
+                    "user_id": "UBOT",
+                    "channel": {"id": "D1"}
+                }))
+            }
+        });
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let api = (format!("http://127.0.0.1:{port}"), "xoxb-test".to_owned());
+        let standby: crate::holder::HolderGate = std::sync::Arc::new(|| false);
+        let (uploaded, dm) = SLACK_API_TEST
+            .scope(
+                api.clone(),
+                crate::holder::scope(standby, async {
+                    let uploaded =
+                        upload_external("C1", Some("1700.1"), "table.png", vec![1, 2, 3], "t")
+                            .await;
+                    (uploaded, open_owner_dm("U-owner").await)
+                }),
+            )
+            .await;
+        assert!(!uploaded.unwrap(), "a standby uploads nothing");
+        assert_eq!(dm, None, "a standby opens no DM");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "zero calls reached the fake Slack");
+
+        let holder: crate::holder::HolderGate = std::sync::Arc::new(|| true);
+        let dm = SLACK_API_TEST
+            .scope(api, crate::holder::scope(holder, open_owner_dm("U-owner")))
+            .await;
+        assert_eq!(dm, Some(("D1".to_owned(), "UBOT".to_owned())));
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "the holder reaches the same fake Slack");
     }
 }

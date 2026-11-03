@@ -323,8 +323,10 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
+            capabilities.push(crate::agent_control::fence::SUPERVISOR_FENCE_CAPABILITY);
             if crate::hub_runtime::supervisor_available() {
                 capabilities.push(crate::remote::server::supervisor_api::SUPERVISOR_CAPABILITY);
+                capabilities.push(crate::remote::server::supervisor_api::SUPERVISOR_OBSERVE_CAPABILITY);
             }
             serde_json::json!(capabilities)
         } else { serde_json::json!([]) };

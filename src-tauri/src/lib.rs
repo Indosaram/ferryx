@@ -20,6 +20,8 @@ pub mod cli;
 pub mod clipboard_image;
 pub mod daemon;
 pub mod hub_runtime;
+pub mod supervisor_checkpoint;
+pub mod supervisor_move;
 pub mod dag;
 pub use dag::journal as dag_journal;
 pub mod host_boot;
@@ -2040,7 +2042,10 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::agent_control_settings::cmd_agent_control_set,
         ipc::supervisor::cmd_supervisor_goal,
         ipc::supervisor::cmd_supervisor_request,
+        ipc::supervisor::cmd_supervisor_adopt_archived,
+        ipc::supervisor::cmd_supervisor_adoptable,
         ipc::supervisor::cmd_supervisor_read,
+        ipc::supervisor::cmd_supervisor_move_here,
         ipc::supervisor::cmd_supervisor_setup_status,
         ipc::supervisor::cmd_supervisor_setup_run,
         ipc::supervisor::cmd_supervisor_adopt_all,

@@ -3297,8 +3297,9 @@ export const RemoteHostConnection: React.FC<{
               now={phoneSupervisor.now}
               needsYou={new Set<string>()}
               onSetPaused={phoneSupervisor.setPaused}
-              onStartHub={phoneSupervisor.startHub}
-              unified={phoneSupervisor.unified}
+              onMoveHere={phoneSupervisor.moveHere}
+              onAdoptArchived={phoneSupervisor.adoptArchived}
+              host={phoneSupervisor.host}
               discovering={accountDiscovery.loading}
               onRetry={phoneSupervisor.resync}
               onOpenLane={(machineId, sessionId) => {
@@ -5414,8 +5415,9 @@ export const RemoteHostConnection: React.FC<{
             now: phoneSupervisor.now,
             needsYou: phoneNeedsYou,
             onSetPaused: phoneSupervisor.setPaused,
-            onStartHub: phoneSupervisor.startHub,
-            unified: phoneSupervisor.unified,
+            onMoveHere: phoneSupervisor.moveHere,
+            onAdoptArchived: phoneSupervisor.adoptArchived,
+            host: phoneSupervisor.host,
             discovering: accountDiscovery.loading,
             onRetry: phoneSupervisor.resync,
             onOpenLane: (machineId, sessionId) => {

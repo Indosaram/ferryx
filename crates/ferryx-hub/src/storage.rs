@@ -24,24 +24,12 @@ pub const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10)
 /// failed with code 5 "database is locked" despite `BUSY_TIMEOUT` (2026-10-28, q28: 9 of 10
 /// runs on Linux). The lock also keeps two openers from migrating at once.
 pub async fn connect(path: &Path) -> Result<SqlitePool> {
-    let lock_path = {
-        let mut name = path.as_os_str().to_owned();
-        name.push(".open-lock");
-        std::path::PathBuf::from(name)
-    };
-    let _open_lock = tokio::task::spawn_blocking(move || -> std::io::Result<std::fs::File> {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock_path)?;
-        file.lock()?;
-        Ok(file)
-    })
-    .await
-    .map_err(|error| {
-        crate::error::HubError::message(format!("hub database open lock: {error}"))
-    })??;
+    let db_path = path.to_owned();
+    let _open_lock = tokio::task::spawn_blocking(move || lock_open(&db_path))
+        .await
+        .map_err(|error| {
+            crate::error::HubError::message(format!("hub database open lock: {error}"))
+        })??;
     let uri = format!("sqlite://{}", path.display());
     let options = SqliteConnectOptions::from_str(&uri)
         .map_err(|error| crate::error::HubError::config(format!("hub database url: {error}")))?
@@ -57,6 +45,42 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
     migrate(&pool).await?;
     Ok(pool)
 }
+
+/// Takes the exclusive `<db_path>.open-lock` that [`connect`] holds while it opens and
+/// migrates; released when the returned file drops. Blocking.
+pub fn lock_open(db_path: &Path) -> std::io::Result<std::fs::File> {
+    let mut name = db_path.as_os_str().to_owned();
+    name.push(".open-lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(std::path::PathBuf::from(name))?;
+    file.lock()?;
+    Ok(file)
+}
+
+/// Closes `pool` and returns once every one of its SQLite connections is closed, so another
+/// connection may change the file's journal mode or rename it right after (the staged-database
+/// seal and swap). sqlx 0.8's `Pool::close` can return early: a connection whose release was
+/// in flight lands in the idle queue after the last pop, and closing an idle connection hands
+/// back a permit it no longer held, so on a multi-connection pool the permit wait can finish
+/// while connections are still open. Each further close pops the idle queue again; the pool's
+/// size counts open connections, so close until it is zero (bounded: a connection that never
+/// comes back is logged, not waited for forever).
+pub async fn close_fully(pool: &SqlitePool) {
+    for _ in 0..CLOSE_ROUNDS {
+        pool.close().await;
+        if pool.size() == 0 {
+            return;
+        }
+        tokio::time::sleep(CLOSE_ROUND_PAUSE).await;
+    }
+    tracing::warn!(open = pool.size(), "hub database pool still has open connections after close");
+}
+
+const CLOSE_ROUNDS: usize = 200;
+const CLOSE_ROUND_PAUSE: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// Opens an existing database without applying migrations. Import uses this so a
 /// live omo-gateway file is never rewritten by the hub's own schema.
@@ -100,6 +124,7 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<()> {
     // the hub does not open. A failed run is retried while the applied count still grows (the
     // winner's commits, or this run's own progress); a failure with no progress is a real one.
     // Bounded: the count cannot exceed the number of migrations.
+    reconcile_line_ending_checksums(pool, &migrator).await?;
     let mut applied = applied_migrations(pool).await;
     loop {
         match migrator.run(pool).await {
@@ -122,6 +147,60 @@ async fn applied_migrations(pool: &SqlitePool) -> i64 {
         .fetch_one(pool)
         .await
         .unwrap_or(0)
+}
+
+/// sqlx stores the SHA-384 of each migration's SQL text as the binary embedded it. A checkout
+/// with `core.autocrlf=true` (Windows) embeds CRLF text, so a hub database created by an LF build
+/// failed to open there with "migration 1 was previously applied but has been modified", and
+/// vice versa; a supervisor checkpoint moved between OSes could not be opened (2026-11-02).
+/// A stored checksum that equals the SQL with its line endings normalized to LF or to CRLF is
+/// rewritten to the embedded one; any other mismatch is left for sqlx to report.
+async fn reconcile_line_ending_checksums(
+    pool: &SqlitePool,
+    migrator: &sqlx::migrate::Migrator,
+) -> Result<()> {
+    use sha2::{Digest, Sha384};
+
+    let has_table: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if has_table == 0 {
+        return Ok(());
+    }
+    for migration in migrator.iter() {
+        if migration.migration_type.is_down_migration() {
+            continue;
+        }
+        let stored: Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
+                .bind(migration.version)
+                .fetch_optional(pool)
+                .await?;
+        let Some(stored) = stored else { continue };
+        if stored.as_slice() == migration.checksum.as_ref() {
+            continue;
+        }
+        let lf = migration.sql.replace("\r\n", "\n");
+        let crlf = lf.replace('\n', "\r\n");
+        let matches_variant = [lf, crlf]
+            .iter()
+            .any(|text| Sha384::digest(text.as_bytes()).as_slice() == stored.as_slice());
+        if !matches_variant {
+            continue;
+        }
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+            .bind(migration.checksum.as_ref())
+            .bind(migration.version)
+            .execute(pool)
+            .await?;
+        tracing::info!(
+            version = migration.version,
+            "hub migration checksum differed only by line endings; rewrote it to this build's"
+        );
+    }
+    Ok(())
 }
 
 /// Every hub transaction writes, and most read first (next sequence number, existing row).
@@ -147,6 +226,75 @@ pub fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sha384(text: &str) -> Vec<u8> {
+        use sha2::{Digest, Sha384};
+        Sha384::digest(text.as_bytes()).to_vec()
+    }
+
+    async fn stored_checksum(pool: &SqlitePool, version: i64) -> Vec<u8> {
+        sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
+            .bind(version)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn set_checksum(pool: &SqlitePool, version: i64, checksum: &[u8]) {
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+            .bind(checksum)
+            .bind(version)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// A hub database created by a build whose migrations had the other line endings (LF on
+    /// Linux/macOS, CRLF on a Windows `core.autocrlf` checkout) still opens. Both stored
+    /// variants are tried, skipping the one equal to the embedded text, so every host covers
+    /// the rewrite.
+    #[tokio::test]
+    async fn a_checksum_differing_only_by_line_endings_is_reconciled() {
+        let migrator = sqlx::migrate!("./migrations");
+        let first = migrator.iter().find(|m| m.version == 1).unwrap();
+        let lf = first.sql.replace("\r\n", "\n");
+        let crlf = lf.replace('\n', "\r\n");
+        let mut rewritten = 0;
+        for (name, text) in [("LF", lf), ("CRLF", crlf)] {
+            let checksum = sha384(&text);
+            if checksum.as_slice() == first.checksum.as_ref() {
+                continue;
+            }
+            let pool = memory().await.unwrap();
+            set_checksum(&pool, 1, &checksum).await;
+
+            migrate(&pool)
+                .await
+                .unwrap_or_else(|error| panic!("{name} checksum is reconciled: {error:?}"));
+            assert_eq!(
+                stored_checksum(&pool, 1).await.as_slice(),
+                first.checksum.as_ref(),
+                "{name}"
+            );
+            pool.close().await;
+            rewritten += 1;
+        }
+        assert!(rewritten >= 1, "at least one line-ending variant differs from the embedded text");
+    }
+
+    /// A checksum of genuinely different SQL is still reported as a modified migration.
+    #[tokio::test]
+    async fn a_checksum_of_modified_sql_still_fails_migration() {
+        let pool = memory().await.unwrap();
+        let migrator = sqlx::migrate!("./migrations");
+        let first = migrator.iter().find(|m| m.version == 1).unwrap();
+        let modified = sha384(&format!("{}\n-- modified\n", first.sql));
+        set_checksum(&pool, 1, &modified).await;
+
+        migrate(&pool).await.expect_err("a modified migration is still detected");
+        assert_eq!(stored_checksum(&pool, 1).await, modified);
+        pool.close().await;
+    }
 
     /// Several processes may open a fresh hub database at once (the daemon's hub start beside
     /// a `ferryx-cli supervisor` command, 2026-10-28 q24): every opener gets the full schema.
@@ -278,6 +426,43 @@ mod tests {
             .unwrap();
         assert_eq!(after, before + 2);
         pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// After `close_fully` no connection of a busy multi-connection pool keeps the file open:
+    /// leaving WAL mode, which needs every other connection gone, succeeds right after.
+    #[tokio::test]
+    async fn close_fully_leaves_no_connection_open_on_a_busy_pool() {
+        let dir = std::env::temp_dir().join(format!("ferryx-hub-close-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let database = dir.join("hub.sqlite");
+        for round in 0..20 {
+            let pool = connect(&database).await.unwrap();
+            let queries: Vec<_> = (0..8)
+                .map(|_| {
+                    let pool = pool.clone();
+                    tokio::spawn(async move {
+                        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sqlite_master").fetch_one(&pool).await
+                    })
+                })
+                .collect();
+            close_fully(&pool).await;
+            assert_eq!(pool.size(), 0, "round {round}: every connection is closed");
+            for query in queries {
+                let _ = query.await.unwrap();
+            }
+            let mut conn = <sqlx::SqliteConnection as sqlx::Connection>::connect_with(
+                &SqliteConnectOptions::new().filename(&database),
+            )
+            .await
+            .unwrap();
+            let mode: String = sqlx::query_scalar("PRAGMA journal_mode=DELETE").fetch_one(&mut conn).await.unwrap();
+            assert_eq!(mode.to_ascii_lowercase(), "delete", "round {round}");
+            let back: String = sqlx::query_scalar("PRAGMA journal_mode=WAL").fetch_one(&mut conn).await.unwrap();
+            assert_eq!(back.to_ascii_lowercase(), "wal", "round {round}");
+            sqlx::Connection::close(conn).await.unwrap();
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

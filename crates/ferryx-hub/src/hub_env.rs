@@ -36,23 +36,30 @@ const PROCESS_KEYS: &[&str] = &[
 
 static FILE_ENV: OnceLock<BTreeMap<String, String>> = OnceLock::new();
 
-/// `~/.ferryx/hub/env`, or `FERRYX_HUB_ENV_FILE`. The home is [`home`].
+/// The user's home directory: `HOME`, else `USERPROFILE` (Windows). Empty values are unset.
+/// `None` when neither resolves; callers must not fall back to a relative path.
+pub fn home_dir() -> Option<PathBuf> {
+    home_dir_from(|key| std::env::var_os(key))
+}
+
+fn home_dir_from(lookup: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    ["HOME", "USERPROFILE"]
+        .into_iter()
+        .find_map(|key| lookup(key).filter(|value| !value.is_empty()))
+        .map(PathBuf::from)
+}
+
+/// The owner's home: `HOME`, else `USERPROFILE` (Windows). Same as [`home_dir`].
+pub fn home() -> Option<PathBuf> {
+    home_dir()
+}
+
+/// `~/.ferryx/hub/env`, or `FERRYX_HUB_ENV_FILE`. The home is [`home_dir`].
 pub fn env_file_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("FERRYX_HUB_ENV_FILE").filter(|path| !path.is_empty()) {
         return Some(PathBuf::from(path));
     }
-    home().map(|home| home.join(".ferryx").join("hub").join("env"))
-}
-
-/// The owner's home: `HOME`, else `USERPROFILE` (Windows).
-pub fn home() -> Option<PathBuf> {
-    home_from(std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
-}
-
-fn home_from(home: Option<OsString>, profile: Option<OsString>) -> Option<PathBuf> {
-    home.filter(|home| !home.is_empty())
-        .or_else(|| profile.filter(|profile| !profile.is_empty()))
-        .map(PathBuf::from)
+    home_dir().map(|home| home.join(".ferryx").join("hub").join("env"))
 }
 
 /// Entries from the hub env file, read once. A missing or unreadable file is empty.
@@ -306,6 +313,34 @@ mod tests {
 
     use super::*;
 
+    fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
+        move |key| pairs.iter().find(|(name, _)| *name == key).map(|(_, value)| OsString::from(value))
+    }
+
+    #[test]
+    fn home_is_home_then_userprofile_and_never_empty() {
+        assert_eq!(
+            home_dir_from(env_of(&[("HOME", "/home/me"), ("USERPROFILE", "/other")])),
+            Some(PathBuf::from("/home/me"))
+        );
+        assert_eq!(
+            home_dir_from(env_of(&[("HOME", ""), ("USERPROFILE", "/profile")])),
+            Some(PathBuf::from("/profile"))
+        );
+        assert_eq!(home_dir_from(env_of(&[("HOME", "")])), None);
+        assert_eq!(home_dir_from(env_of(&[])), None);
+    }
+
+    /// Windows sets `USERPROFILE`, not `HOME`: the home resolves to an absolute path.
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_userprofile_is_the_home() {
+        let home = home_dir_from(env_of(&[("USERPROFILE", r"C:\Users\me")])).unwrap();
+        assert!(home.is_absolute());
+        assert_eq!(home.join(".ferryx").join("hub").join("env"), PathBuf::from(r"C:\Users\me\.ferryx\hub\env"));
+        assert!(home_dir().is_some_and(|home| home.is_absolute()), "the test host resolves a home");
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "ferryx-hub-env-{name}-{}-{}",
@@ -407,18 +442,18 @@ mod tests {
     #[test]
     fn the_home_falls_back_to_userprofile() {
         assert_eq!(
-            home_from(Some("/home/me".into()), Some("C:\\Users\\me".into())),
+            home_dir_from(env_of(&[("HOME", "/home/me"), ("USERPROFILE", "C:\\Users\\me")])),
             Some(PathBuf::from("/home/me"))
         );
         assert_eq!(
-            home_from(None, Some("C:\\Users\\me".into())),
+            home_dir_from(env_of(&[("USERPROFILE", "C:\\Users\\me")])),
             Some(PathBuf::from("C:\\Users\\me"))
         );
         assert_eq!(
-            home_from(Some("".into()), Some("C:\\Users\\me".into())),
+            home_dir_from(env_of(&[("HOME", ""), ("USERPROFILE", "C:\\Users\\me")])),
             Some(PathBuf::from("C:\\Users\\me"))
         );
-        assert_eq!(home_from(None, None), None);
+        assert_eq!(home_dir_from(env_of(&[])), None);
     }
 
     #[test]

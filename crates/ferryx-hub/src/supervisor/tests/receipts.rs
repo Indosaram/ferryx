@@ -518,6 +518,38 @@ async fn a_paired_host_run_settles_from_a_wait_on_that_host() {
     );
 }
 
+/// A dispatcher that ends with its hub generation (a stand-down drops it) takes its paired
+/// settle watches with it: nothing it started records a settle on the standby. The settle
+/// probe's sender lives in the dispatcher and in each watch, so the probe closes only once
+/// every watch is gone; a detached watch would report the run unobserved after its waits.
+#[tokio::test]
+async fn a_dropped_dispatcher_ends_its_paired_settle_watches() {
+    let pool = owner_pool().await;
+    let (_goal_id, request_id) = paired_goal(&pool).await;
+    let control = Arc::new(RecordingControl::observing());
+    let (probe_tx, mut probe_rx) = mpsc::unbounded_channel();
+    let dispatcher = Dispatcher::new(
+        pool.clone(),
+        control.clone(),
+        Arc::new(FixedLauncher::new(PANE)),
+        LOCAL_HOST_ID,
+    )
+    .with_settle_probe(probe_tx);
+    assert_eq!(
+        dispatcher.drain().await,
+        vec![DispatchResult::Transmitted {
+            request_id: request_id.clone(),
+            outcome: SendOutcome::Started,
+        }]
+    );
+
+    drop(dispatcher);
+
+    let report = timeout(DEADLINE, probe_rx.recv()).await.expect("the watches ended with the dispatcher");
+    assert_eq!(report, None, "no settle was recorded after the dispatcher was dropped");
+    assert_eq!(dispatch_row(&pool, &request_id).await.0, "started");
+}
+
 #[tokio::test]
 async fn a_paired_host_run_whose_end_cannot_be_observed_holds_its_goal() {
     let pool = owner_pool().await;

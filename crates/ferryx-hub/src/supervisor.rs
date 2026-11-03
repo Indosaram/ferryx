@@ -178,6 +178,10 @@ pub enum SupervisorError {
     /// been cut over yet, or a rollback. New work is refused (503-class); nothing was written.
     #[error("SUPERVISOR_INTAKE_CLOSED: {0}")]
     IntakeClosed(String),
+    /// This machine does not hold the supervisor lease now: the goal write is held, nothing
+    /// was written.
+    #[error("SUPERVISOR_STANDBY: goal {goal_id} is held; this machine does not hold the supervisor lease")]
+    Standby { goal_id: String },
     /// A cutover needs the mhc engine with every required capability; `code` is the engine's
     /// fault code (`MHC_CAPABILITY_MISSING`, `MHC_NOT_RUNNING`, ...). Nothing was changed.
     #[error("{code}: {detail}")]
@@ -215,6 +219,7 @@ impl SupervisorError {
             SupervisorError::SetupConflict(_) => SETUP_CONFLICT,
             SupervisorError::SessionAlreadyBound { .. } => SESSION_ALREADY_BOUND,
             SupervisorError::IntakeClosed(_) => cutover::SUPERVISOR_INTAKE_CLOSED,
+            SupervisorError::Standby { .. } => crate::holder::SUPERVISOR_STANDBY,
             SupervisorError::EngineUnavailable { code, .. } => code,
             SupervisorError::Invalid(_)
             | SupervisorError::Unknown { .. }
@@ -2408,6 +2413,9 @@ async fn transition_goal_in(
     to: RunState,
     detail: Option<&str>,
 ) -> Result<SupervisorGoal, SupervisorError> {
+    // Every goal settle or complete write is a supervisor side effect: re-checked here,
+    // immediately before it, so a holder whose lease ran out leaves the goal as it was.
+    require_holder(goal_id)?;
     if to == RunState::Dispatching {
         return Err(SupervisorError::Invalid(
             "a goal enters dispatching only by claiming its ready dispatch".into(),
@@ -2499,6 +2507,18 @@ async fn transition_goal_in(
         revision,
         updated_at: now,
         ..goal
+    })
+}
+
+/// Every goal, dispatch and receipt write is a supervisor side effect: the lease is asked
+/// immediately before it, so a standby (or a holder whose lease ran out) writes nothing and
+/// the row stays as it was for the holder. `subject` names the goal or dispatch held.
+fn require_holder(subject: &str) -> Result<(), SupervisorError> {
+    if crate::holder::is_holder_now() {
+        return Ok(());
+    }
+    Err(SupervisorError::Standby {
+        goal_id: subject.to_owned(),
     })
 }
 
@@ -2658,6 +2678,7 @@ pub async fn claim_dispatch(
     expected_revision: i64,
     generation: i64,
 ) -> Result<Dispatch, SupervisorError> {
+    require_holder(request_id)?;
     let mut tx = pool.begin_write().await?;
     let dispatch = require_dispatch(&mut tx, request_id).await?;
     let goal = require_goal(&mut tx, &dispatch.goal_id).await?;
@@ -2735,6 +2756,7 @@ pub async fn confirm_claim_before_transmit(
     pool: &SqlitePool,
     request_id: &str,
 ) -> Result<Dispatch, SupervisorError> {
+    require_holder(request_id)?;
     let mut tx = pool.begin_write().await?;
     let dispatch = require_dispatch(&mut tx, request_id).await?;
     if dispatch.state != DispatchState::Claimed {
@@ -2822,6 +2844,7 @@ pub async fn resolve_uncertain_delivery(
              {expected_state}"
         )));
     }
+    require_holder(goal_id)?;
     let mut tx = pool.begin_write().await?;
     let goal = require_goal(&mut tx, goal_id).await?;
     check_revision(&goal, expected_revision)?;
@@ -2918,6 +2941,7 @@ async fn mark_uncertain_resolved(
 pub async fn reconcile_claims_after_restart(
     pool: &SqlitePool,
 ) -> Result<Vec<Dispatch>, SupervisorError> {
+    require_holder("reconciled after restart")?;
     let mut tx = pool.begin_write().await?;
     let sql = format!(
         "SELECT {DISPATCH_COLUMNS} FROM supervisor_dispatches
@@ -3070,6 +3094,9 @@ async fn apply_receipt(
     generation: i64,
     receipt: &Receipt,
 ) -> Result<AppliedReceipt, SupervisorError> {
+    // The lowest common write of every receipt (accepted, started, settled, uncertain), from
+    // the dispatcher, the paired-host settle watch and the PTY observer alike.
+    require_holder(request_id)?;
     let dispatch = require_dispatch(conn, request_id).await?;
     let binding = require_binding(conn, &dispatch.goal_id).await?;
     check_generation(dispatch.generation, generation)?;
@@ -3716,6 +3743,7 @@ pub mod panel_contract;
 pub mod cutover;
 pub mod delivery;
 pub mod dispatcher;
+pub mod fence_gate;
 pub mod health;
 pub mod lessons;
 pub mod memory;

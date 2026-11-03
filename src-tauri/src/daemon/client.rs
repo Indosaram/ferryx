@@ -810,6 +810,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::SupervisorSetPaused { .. } => "supervisorSetPaused",
         DaemonRequest::SupervisorGoal { .. } => "supervisorGoal",
         DaemonRequest::SupervisorEngine { .. } => "supervisorEngine",
+        DaemonRequest::SupervisorMoveHere { .. } => "supervisorMoveHere",
         DaemonRequest::SupervisorRequestV1 { .. } => "supervisorRequestV1",
         DaemonRequest::SupervisorReadV1 { .. } => "supervisorReadV1",
         DaemonRequest::SupervisorSetup { .. } => "supervisorSetup",
@@ -1016,6 +1017,8 @@ fn request_timeout(request: &DaemonRequest) -> std::time::Duration {
         DaemonRequest::SupervisorGoal { request } if request.mutates() => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
         // A cancel stops the worker's pane before it answers.
         DaemonRequest::SupervisorRequestV1 { .. } => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
+        // A move waits for the holder's final checkpoint, its transfer and the import.
+        DaemonRequest::SupervisorMoveHere { .. } => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
         // Turning the remote desktop host on probes capture and binds; the host bounds that at 30 s.
         DaemonRequest::RemoteDesktopHostSet { .. } => REMOTE_DESKTOP_SET_TIMEOUT,
         _ => DEFAULT_REQUEST_TIMEOUT,
@@ -2225,6 +2228,7 @@ impl DaemonClient {
             DaemonRequest::PairedHostOperation { request: op } => {
                 if let crate::paired_host::client::Operation::AgentControl {
                     op: crate::agent_control::AgentControlOp::Wait { timeout_ms, .. },
+                    ..
                 } = &op.operation
                 {
                     std::time::Duration::from_millis(
@@ -2493,7 +2497,14 @@ impl DaemonClient {
             | Operation::FileRead { .. }
             | Operation::Resources
             | Operation::Operation { .. } => None,
-            Operation::AgentControl { op } => op.mutation_request_id(),
+            // Idempotent: a holder's fence push raises a maximum and never types anything.
+            Operation::SupervisorFence { .. } => None,
+            Operation::AgentControl { op, .. } => op.mutation_request_id(),
+            Operation::SupervisorRequest { envelope } => envelope
+                .get("requestId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            Operation::SupervisorObserve { .. } => None,
         };
         let transport_error = |error: crate::paired_host::service::ServiceError| ClientError {
             code: error.code,

@@ -470,7 +470,8 @@ async fn account_grant_seals_an_offer_the_daemon_can_open() {
     );
 
     let auth = AuthManager::with_persistence(Some(manager_dir.path().join("remote-auth.json")));
-    let ack = apply_grant_offer(&auth, &attach, &identity.machine_id, &epoch, &envelope, now)
+    // No requester machine is named here, so whether the account signature verified is moot.
+    let ack = apply_grant_offer(&auth, &attach, &identity.machine_id, &epoch, &envelope, false, now)
         .expect("the machine registers the capability");
     assert_eq!(ack.status, "ready");
 

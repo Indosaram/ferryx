@@ -202,6 +202,33 @@ async fn a_crash_after_claim_is_uncertain_and_never_resent() {
     assert_eq!(sends(&control), 0, "sent-unknown is never resent");
 }
 
+/// A standby (or a holder whose lease ran out) claims nothing and records no receipt: both
+/// are refused SUPERVISOR_STANDBY and the dispatch and goal stay as they were for the holder.
+#[tokio::test]
+async fn a_standby_claims_no_dispatch_and_records_no_receipt() {
+    let pool = owner_pool().await;
+    let (goal_id, request_id) = admit(&pool).await;
+    let goal_before = goal_state(&pool, &goal_id).await;
+    let dispatch_before = dispatch_state(&pool, &request_id).await;
+    let standby: crate::holder::HolderGate = Arc::new(|| false);
+    let (claimed, receipt, reconciled) = crate::holder::scope(standby, async {
+        (
+            claim_dispatch(&pool, &request_id, 1, 1).await,
+            record_receipt(&pool, &request_id, 1, &Receipt::Accepted).await,
+            reconcile_claims_after_restart(&pool).await,
+        )
+    })
+    .await;
+    assert_eq!(claimed.unwrap_err().code(), crate::holder::SUPERVISOR_STANDBY);
+    assert_eq!(receipt.unwrap_err().code(), crate::holder::SUPERVISOR_STANDBY);
+    assert_eq!(reconciled.unwrap_err().code(), crate::holder::SUPERVISOR_STANDBY);
+    assert_eq!(goal_state(&pool, &goal_id).await, goal_before);
+    assert_eq!(dispatch_state(&pool, &request_id).await, dispatch_before);
+    // The holder claims the very same dispatch.
+    claim_dispatch(&pool, &request_id, 1, 1).await.unwrap();
+    assert_eq!(dispatch_state(&pool, &request_id).await.0, "claimed");
+}
+
 #[tokio::test]
 async fn a_crash_after_send_before_the_start_receipt_is_uncertain_and_a_late_start_still_counts() {
     let pool = owner_pool().await;

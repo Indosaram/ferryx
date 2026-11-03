@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use super::service::{authenticate_user, parse_json, run_account_blocking, AccountState, ApiError};
 use super::store::{
     normalize_email, now_secs, random_token, token_hash, AccountStore, EnrollmentCodeRecord,
-    MachineRequestRecord, ENROLLMENT_CODE_TTL, MACHINE_REQUEST_APPROVED,
+    MachineRequestRecord, SessionRecord, ENROLLMENT_CODE_TTL, MACHINE_REQUEST_APPROVED, SESSION_TTL,
     MACHINE_REQUEST_DELIVERED, MACHINE_REQUEST_DENIED, MACHINE_REQUEST_PENDING,
 };
 
@@ -63,6 +63,11 @@ pub struct PollMachineRequestResponse {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enrollment_code: Option<String>,
+    /// An account session for the approving owner, minted once with the enrollment code so a
+    /// machine set up with `ferryx-cli up` can later ask for grants on its sibling machines
+    /// (supervisor failover) without a user-exported `FERRYX_ACCOUNT_SESSION_TOKEN`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -336,21 +341,37 @@ pub async fn poll_machine_request(
             }
             record.last_polled_at = Some(now);
             let status = record.status.clone();
+            let decided_by = record.decided_by.clone();
             let response = match status.as_str() {
                 MACHINE_REQUEST_PENDING => PollMachineRequestResponse {
                     status: MACHINE_REQUEST_PENDING.into(),
                     enrollment_code: None,
+                    session_token: None,
                 },
                 MACHINE_REQUEST_DENIED => PollMachineRequestResponse {
                     status: MACHINE_REQUEST_DENIED.into(),
                     enrollment_code: None,
+                    session_token: None,
                 },
                 MACHINE_REQUEST_APPROVED => {
                     let code = record.enrollment_code.take();
                     record.status = MACHINE_REQUEST_DELIVERED.to_string();
+                    // The approver's session, delivered once with the code (as the device
+                    // poll does): the owner who approved this machine stands behind it.
+                    let session_token = decided_by
+                        .filter(|user_id| store.users.contains_key(user_id))
+                        .map(|user_id| {
+                            let bearer_token = random_token();
+                            store.sessions.insert(
+                                token_hash(&bearer_token),
+                                SessionRecord { user_id, expires_at: now + SESSION_TTL.as_secs() },
+                            );
+                            bearer_token
+                        });
                     PollMachineRequestResponse {
                         status: MACHINE_REQUEST_APPROVED.into(),
                         enrollment_code: code,
+                        session_token,
                     }
                 }
                 _ => {

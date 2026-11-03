@@ -113,6 +113,29 @@ pub async fn cmd_supervisor_request(
     )
 }
 
+/// The owner's Adopt action on this machine's archived goals (plan todo 13): `goalId` adopts
+/// one, none adopts every goal not adopted yet. Each goal goes to the lease holder as a
+/// `submit` keyed `archived:<supervisor>:<goal>`, so a repeated Adopt is idempotent.
+#[tauri::command]
+pub async fn cmd_supervisor_adopt_archived(goal_id: Option<String>) -> Result<serde_json::Value, IpcError> {
+    crate::hub_runtime::adopt_archived(goal_id)
+        .await
+        .map(|reports| serde_json::json!({ "adopted": reports }))
+        .map_err(|failure| failure_with_details(failure.message.clone(), failure.code.clone(), failure.to_json()))
+}
+
+/// The open goals of this machine's archived hub that the owner can adopt.
+#[tauri::command]
+pub async fn cmd_supervisor_adoptable() -> Result<serde_json::Value, IpcError> {
+    Ok(serde_json::json!({ "adoptable": crate::hub_runtime::adoptable_goals().await }))
+}
+
+fn failure_with_details(message: String, code: String, details: serde_json::Value) -> IpcError {
+    let mut error = failure(message, Some(code));
+    error.details = Some(details);
+    error
+}
+
 fn read_from(response: DaemonResponse) -> Result<serde_json::Value, IpcError> {
     match response {
         DaemonResponse::SupervisorReadV1Ok { value } => Ok(value),
@@ -135,6 +158,33 @@ pub async fn cmd_supervisor_read(
     request: SupervisorReadAction,
 ) -> Result<serde_json::Value, IpcError> {
     read_from(daemon_client.send_request(DaemonRequest::SupervisorReadV1 { request }).await?)
+}
+
+fn moved_from(response: DaemonResponse) -> Result<serde_json::Value, IpcError> {
+    match response {
+        DaemonResponse::SupervisorMoveHereOk { moved } => Ok(serde_json::json!({ "moved": moved })),
+        DaemonResponse::Error { message, code, details } => {
+            let mut error = failure(message, code);
+            if details.is_some() {
+                error.details = details;
+            }
+            Err(error)
+        }
+        _ => Err(IpcError::internal("Unexpected daemon supervisor move response")),
+    }
+}
+
+/// Move the supervisor to this machine: `{force, replaceLocal?}` -> `{moved}`. Refusals keep
+/// their wire code (`SUPERVISOR_STANDBY`, `SUPERVISOR_FORCE_REQUIRED` with
+/// `{holderLabel, checkpointAt}`, `SUPERVISOR_IDENTITY_MISMATCH` without `replaceLocal`, ...).
+#[tauri::command]
+pub async fn cmd_supervisor_move_here(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+    force: bool,
+    replace_local: Option<bool>,
+) -> Result<serde_json::Value, IpcError> {
+    let replace_local = replace_local.unwrap_or(false);
+    moved_from(daemon_client.send_request(DaemonRequest::SupervisorMoveHere { force, replace_local }).await?)
 }
 
 fn setup_from(response: DaemonResponse) -> Result<serde_json::Value, IpcError> {
@@ -188,6 +238,22 @@ pub async fn cmd_supervisor_adopt_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_move_refusal_keeps_its_code_and_details() {
+        let refusal = DaemonResponse::Error {
+            message: "changes since 900 on Laptop A will be lost".into(),
+            code: Some(crate::supervisor_checkpoint::SUPERVISOR_FORCE_REQUIRED.into()),
+            details: Some(serde_json::json!({"holderLabel": "Laptop A", "checkpointAt": 900})),
+        };
+        let error = moved_from(refusal).unwrap_err();
+        assert_eq!(error.code, IpcErrorCode::Custom("SUPERVISOR_FORCE_REQUIRED".into()));
+        assert_eq!(error.details, Some(serde_json::json!({"holderLabel": "Laptop A", "checkpointAt": 900})));
+        assert_eq!(
+            moved_from(DaemonResponse::SupervisorMoveHereOk { moved: true }).unwrap(),
+            serde_json::json!({"moved": true})
+        );
+    }
 
     #[test]
     fn a_setup_answer_is_its_value_and_an_untyped_error_is_an_older_daemon() {

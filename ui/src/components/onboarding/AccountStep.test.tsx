@@ -41,7 +41,7 @@ describe("AccountStep", () => {
     render(<AccountStep origin={ORIGIN} deps={d} onLinked={onLinked} />);
     await waitFor(() => expect(onLinked).toHaveBeenCalledTimes(1));
     expect(d.issueCode).toHaveBeenCalledWith(ORIGIN, "tok");
-    expect(d.enroll).toHaveBeenCalledWith(ORIGIN, "ENR-1");
+    expect(d.enroll).toHaveBeenCalledWith(ORIGIN, "ENR-1", "tok");
     expect(screen.getByTestId("onboarding-account").dataset.phase).toBe("linked");
   });
 
@@ -58,6 +58,6 @@ describe("AccountStep", () => {
     await waitFor(() =>
       expect(screen.getByTestId("onboarding-account").dataset.phase).toBe("linked"),
     );
-    expect(d.enroll).toHaveBeenCalledWith(ORIGIN, "ENR-2");
+    expect(d.enroll).toHaveBeenCalledWith(ORIGIN, "ENR-2", "tok");
   });
 });

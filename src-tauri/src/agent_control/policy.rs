@@ -160,6 +160,12 @@ impl AgentControlPolicy {
         self.enabled.load(Ordering::Acquire)
     }
 
+    /// Whether the owner excluded this device by name. Checked even for the same-account
+    /// machine peers the switch does not govern.
+    pub fn excludes(&self, device_id: &str) -> bool {
+        self.excluded.read().contains(device_id)
+    }
+
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Release);
     }
@@ -236,6 +242,16 @@ pub fn authorize_agent_control(
         ));
     }
     Ok(())
+}
+
+/// The `details` key of a machine-peer route's agent-control access refusal, and its value.
+/// A same-account standby repairs its grant on the holder only on this refusal.
+pub const REFUSAL_DETAIL: &str = "refusal";
+pub const AGENT_CONTROL_REFUSAL: &str = "agentControl";
+
+/// True when a machine error's `details` mark it as the agent-control access refusal.
+pub fn is_agent_control_refusal(details: &serde_json::Map<String, serde_json::Value>) -> bool {
+    details.get(REFUSAL_DETAIL).and_then(serde_json::Value::as_str) == Some(AGENT_CONTROL_REFUSAL)
 }
 
 pub fn refusal(code: ScopeErrorCode, message: impl Into<String>) -> ScopeError {
@@ -399,6 +415,7 @@ mod tests {
             revoked: false,
             installation_id: None,
             attach_public_key: None,
+            account_machine_id: None,
         }
     }
 
