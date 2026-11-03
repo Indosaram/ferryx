@@ -2979,9 +2979,16 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             || if Some(index) == ref_position {
                 !encoded_session_ref_is_admissible(part)
             } else {
-                !part
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.' | b'~'))
+                // The route is split raw, then each segment is decoded and held to the old
+                // character rule, so `daemon-session%3Aabc` is `daemon-session:abc` as it was
+                // when the wildcard arrived decoded, while `%2F`, `%20`, controls, malformed
+                // escapes and encoded dot segments stay refused.
+                !decoded_segment(part).is_some_and(|decoded| {
+                    !matches!(decoded.as_slice(), b"." | b"..")
+                        && decoded.iter().all(|b| {
+                            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.' | b'~')
+                        })
+                })
             }
     }) {
         return false;
@@ -3040,6 +3047,24 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("GET" | "POST", ["supervisor", "memory"])
             | ("GET", ["attach"])
     )
+}
+
+/// One raw path segment with its `%XX` escapes decoded. `None` for a malformed escape.
+fn decoded_segment(segment: &str) -> Option<Vec<u8>> {
+    let mut decoded = Vec::with_capacity(segment.len());
+    let mut bytes = segment.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            let digit = |b: Option<u8>| b.and_then(|b| (b as char).to_digit(16));
+            let (Some(hi), Some(lo)) = (digit(bytes.next()), digit(bytes.next())) else {
+                return None;
+            };
+            decoded.push((hi * 16 + lo) as u8);
+        } else {
+            decoded.push(byte);
+        }
+    }
+    Some(decoded)
 }
 
 /// One raw path segment holding a session ref: plain route characters or valid `%XX` escapes,
@@ -5705,6 +5730,26 @@ mod tests {
         assert_eq!(body["requestId"], "agent-req-1");
         state.unregister_control_channel("agent-host", generation);
         server.abort();
+    }
+
+    #[test]
+    fn an_encoded_colon_in_an_id_segment_is_admitted_and_other_escapes_are_not() {
+        assert!(allowed_http_route(&Method::GET, "agent-history/daemon-session%3Aabc"));
+        assert!(allowed_http_route(
+            &Method::POST,
+            "reference-chat/daemon-session%3Aabc/acknowledge-outcome"
+        ));
+        for route in [
+            "agent-history/a%2Fb",
+            "agent-history/%2e%2e",
+            "agent-history/%2E",
+            "agent-history/a%20b",
+            "agent-history/a%0Ab",
+            "agent-history/a%zz",
+            "agent-history/a%",
+        ] {
+            assert!(!allowed_http_route(&Method::GET, route), "{route}");
+        }
     }
 
     #[test]
