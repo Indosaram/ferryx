@@ -124,6 +124,24 @@ Google may block sign-in inside embedded browsers with "This browser or app may 
 - The system webview is more likely to be blocked.
 - Signing the browser itself into a Google account, or Chrome Sync, isn't available in CEF.
 
+When a system-webview tab lands on an identity provider's refusal page (Google
+`disallowed_useragent` or "This browser or app may not be secure"; Apple, Microsoft or Okta
+"unsupported browser"), a bar above the page offers a handoff that keeps the user in Ferryx.
+`src-tauri/src/browser/sign_in_handoff.rs` builds the offer and
+`ui/src/components/BrowserSignInHandoffBar.tsx` shows it:
+
+| Platform | Engine installed | Offered first | Then |
+| --- | --- | --- | --- |
+| macOS | yes | Sign in with Chromium engine (same profile) | Sign in with macOS (`ASWebAuthenticationSession`), then Open in default browser after "Not now" |
+| macOS | no | Install Chromium engine and sign in | Sign in with macOS, then Open in default browser after "Not now" |
+| Windows, Linux | yes | Sign in with Chromium engine (same profile) | Open in default browser after "Not now" |
+| Windows, Linux | no | Install Chromium engine and sign in | Open in default browser after "Not now" |
+| Any | unusable or unsupported | Sign in with macOS where available, otherwise Open in default browser | Open in default browser after "Not now" |
+
+Windows and Linux have no OS web-authentication session
+(`src-tauri/src/browser/auth_session/unsupported.rs` reports it as unavailable), so the Chromium
+engine is their in-app path. Cancelling any handoff leaves the original tab as it was.
+
 ## Fallback behavior
 
 | Situation | Result |
