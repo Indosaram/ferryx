@@ -206,6 +206,8 @@ mod prompt_changed_event_tests {
             prompt_id: Some("p-1".into()),
             kind: None,
             screen_revision: Some("r-1".into()),
+            state_since_ms: None,
+            screen_changed_at_ms: None,
         };
         let frame = crate::agent_control::events::PromptChangeFilter::default()
             .frame(&observation)
@@ -257,6 +259,8 @@ mod prompt_changed_event_tests {
             prompt_id: prompt.map(str::to_string),
             kind: None,
             screen_revision: Some(revision.into()),
+            state_since_ms: None,
+            screen_changed_at_ms: None,
         };
         let mut shown = HashMap::new();
         assert!(prompt_moved(&mut shown, &observation(Some("p"), "r1")), "a first prompt is news");
