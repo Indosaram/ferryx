@@ -3685,6 +3685,7 @@ pub mod admission;
 pub mod answers;
 pub mod changes;
 pub mod completion;
+pub mod contract;
 pub mod cutover;
 pub mod delivery;
 pub mod dispatcher;
