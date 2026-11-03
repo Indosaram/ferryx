@@ -74,6 +74,13 @@ struct Incident {
     ever: HashSet<SessionRef>,
     done: HashSet<SessionRef>,
     last_row: String,
+    /// Sessions sent the resume text that then showed no output at all: neither confirmed nor
+    /// failed, so never counted as resumed (H3). Retried on the backoff like a failed probe.
+    silent: HashSet<SessionRef>,
+    /// Stall restarts sent in this incident and the time of the last one. Per incident, so a
+    /// later, distinct stall of the same session starts with a fresh budget (H1).
+    restarts: u64,
+    last_restart_ms: i64,
 }
 
 #[derive(Default)]
@@ -83,8 +90,10 @@ struct State {
     sent: HashMap<SessionRef, i64>,
     /// The terminal tail at the last resume: only lines after it count as news.
     base: HashMap<SessionRef, String>,
-    /// Stall restarts per session: count and the time of the last one.
-    restarts: HashMap<SessionRef, (u64, i64)>,
+    /// Every session in the fleet this pass, readable or not.
+    present: HashSet<SessionRef>,
+    /// Sessions whose terminal could not be read this pass: not vanished, not recovered.
+    unreadable: HashSet<SessionRef>,
     refused: HashSet<SessionRef>,
     /// Fault generation per scope; bumped when an incident closes.
     gens: HashMap<String, u32>,

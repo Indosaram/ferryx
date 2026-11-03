@@ -9,6 +9,9 @@ pub(super) struct Obs {
     pub session: FleetSession,
     pub tail: String,
     pub kind: HealthKind,
+    /// Fresh output since the baseline that is neither a fault nor the echo of the resume text
+    /// we typed: the only evidence that a resume worked (H3).
+    pub progress: bool,
 }
 
 fn faulted(kind: &HealthKind) -> bool {
@@ -35,7 +38,19 @@ fn new_incident(key: String, scope: String, fault: Fault, o: &Obs, next_at_ms: i
         ever: HashSet::from([primary]),
         done: HashSet::new(),
         last_row: String::new(),
+        silent: HashSet::new(),
+        restarts: 0,
+        last_restart_ms: 0,
     }
+}
+
+/// A terminal line that only shows the resume text we typed, behind a prompt glyph.
+fn is_echo(line: &str, text: &str) -> bool {
+    line.trim_start_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '>' | '$' | '\u{276f}' | '\u{203a}' | '\u{2502}')
+    })
+    .trim()
+        == text
 }
 
 impl RecoveryScheduler {
@@ -50,6 +65,8 @@ impl RecoveryScheduler {
             return;
         };
         let mut st = self.state.lock().await;
+        st.present = fleet.iter().map(|s| s.session_ref.clone()).collect();
+        st.unreadable.clear();
         let mut obs: HashMap<SessionRef, Obs> = HashMap::new();
         for session in fleet {
             if session.stale || session.pending_prompt.is_some() {
@@ -61,17 +78,33 @@ impl RecoveryScheduler {
                 .read_tail(&session.session_ref, TAIL_LINES)
                 .await
             else {
+                st.unreadable.insert(session.session_ref.clone());
                 continue;
             };
-            let seen = match st.base.get(&session.session_ref) {
-                Some(base) => fresh_lines(base, &tail).join("\n"),
-                None => tail.clone(),
+            // A session seen for the first time (startup, or back after its baseline was
+            // lost) only sets the baseline: old scrollback is never news (H2).
+            let base = st.base.get(&session.session_ref).cloned();
+            let (seen, progress) = match base {
+                Some(base) => {
+                    let fresh = fresh_lines(&base, &tail);
+                    let text = resume_for(&session.agent).unwrap_or_default();
+                    let progress = fresh.iter().any(|l| !l.trim().is_empty() && !is_echo(l, text));
+                    (fresh.join("\n"), progress)
+                }
+                None => {
+                    st.base.insert(session.session_ref.clone(), tail.clone());
+                    (String::new(), false)
+                }
             };
             let kind = self.deps.classifier.classify(&session, &seen, &rules, now);
-            obs.insert(session.session_ref.clone(), Obs { session, tail, kind });
+            obs.insert(session.session_ref.clone(), Obs { session, tail, kind, progress });
         }
-        st.sent.retain(|r, _| obs.contains_key(r));
-        st.base.retain(|r, _| obs.contains_key(r));
+        // A session that left the fleet loses its baseline and pending send; one that is only
+        // unreadable (or showing a prompt) this pass keeps both.
+        let present = std::mem::take(&mut st.present);
+        st.sent.retain(|r, _| present.contains(r));
+        st.base.retain(|r, _| present.contains(r));
+        st.present = present;
         self.refusals(&mut st, &obs, now).await;
         self.open_incidents(&mut st, &obs, &rules, now);
         let mut incidents = std::mem::take(&mut st.incidents);
@@ -84,6 +117,12 @@ impl RecoveryScheduler {
         }
         for inc in incidents.iter().filter(|inc| inc.closed) {
             *st.gens.entry(inc.scope.clone()).or_insert(0) += 1;
+            // The handled fault lines are consumed: they never open the next incident.
+            for r in inc.ever.iter().chain([&inc.primary]) {
+                if let Some(o) = obs.get(r) {
+                    st.base.insert(r.clone(), o.tail.clone());
+                }
+            }
         }
         incidents.retain(|inc| !inc.closed);
         st.incidents = incidents;

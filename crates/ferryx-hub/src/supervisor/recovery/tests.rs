@@ -83,10 +83,16 @@ impl RecoveryEscalations for Cards {
 struct World {
     tails: Mutex<HashMap<SessionRef, String>>,
     up: AtomicBool,
+    /// While set, a send produces no output at all.
+    mute: AtomicBool,
     ops: Mutex<Vec<String>>,
     error: Mutex<String>,
 }
 impl World {
+    fn push(&self, session: &SessionRef, line: &str) {
+        let mut tails = self.tails.lock().unwrap();
+        tails.entry(session.clone()).or_default().push_str(&format!("{line}\n"));
+    }
     fn ops(&self) -> Vec<String> {
         self.ops.lock().unwrap().clone()
     }
@@ -112,6 +118,9 @@ impl SessionControl for World {
         } else {
             format!("{} ({n})", self.error.lock().unwrap())
         };
+        if self.mute.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         let mut tails = self.tails.lock().unwrap();
         let tail = tails.entry(session.clone()).or_default();
         tail.push_str(&format!("{line}\n"));
@@ -163,6 +172,8 @@ fn session(host: &str, id: &str, agent: &str, state: &str, source: &str, changed
 
 struct Rig {
     sched: Arc<RecoveryScheduler>,
+    fleet: Arc<Fleet>,
+    refs: Vec<SessionRef>,
     clock: Arc<FakeClock>,
     pause: Arc<Pause>,
     log: Arc<Log>,
@@ -184,8 +195,10 @@ fn rig(sessions: Vec<FleetSession>, initial_tail: &str) -> Rig {
     let pause = Arc::new(Pause(AtomicBool::new(false)));
     let log = Arc::new(Log::default());
     let cards = Arc::new(Cards::default());
+    let refs: Vec<SessionRef> = sessions.iter().map(|s| s.session_ref.clone()).collect();
+    let fleet = Arc::new(Fleet(Mutex::new(sessions)));
     let sched = Arc::new(RecoveryScheduler::new(RecoveryDeps {
-        fleet: Arc::new(Fleet(Mutex::new(sessions))),
+        fleet: fleet.clone(),
         control: world.clone(),
         rules: Arc::new(Rules),
         log: log.clone(),
@@ -194,10 +207,17 @@ fn rig(sessions: Vec<FleetSession>, initial_tail: &str) -> Rig {
         pause: pause.clone(),
         escalations: cards.clone(),
     }));
-    Rig { sched, clock, pause, log, cards, world }
+    Rig { sched, fleet, refs, clock, pause, log, cards, world }
 }
 
 impl Rig {
+    /// A fresh fault line appears in every session after the baseline pass (the initial tail
+    /// is only old scrollback, which recovery must never act on).
+    fn outbreak(&self, line: &str) {
+        for r in &self.refs {
+            self.world.push(r, line);
+        }
+    }
     async fn step(&self, by_ms: i64) {
         self.clock.0.fetch_add(by_ms, Ordering::SeqCst);
         self.sched.tick().await;
@@ -221,6 +241,8 @@ fn four_claude_sessions() -> Vec<FleetSession> {
 #[tokio::test]
 async fn a_twenty_minute_outage_resumes_all_four_sessions_with_one_row_and_no_card() {
     let rig = rig(four_claude_sessions(), BAD_GATEWAY);
+    rig.sched.tick().await;
+    rig.outbreak(BAD_GATEWAY);
     rig.sched.tick().await;
     let mut elapsed = 0;
     while elapsed < 18 * MIN {
@@ -255,6 +277,8 @@ async fn a_twenty_minute_outage_resumes_all_four_sessions_with_one_row_and_no_ca
 async fn an_outage_past_the_budget_escalates_once_with_a_recommendation() {
     let rig = rig(four_claude_sessions(), BAD_GATEWAY);
     rig.sched.tick().await;
+    rig.outbreak(BAD_GATEWAY);
+    rig.sched.tick().await;
     let mut elapsed = 0;
     while elapsed < BUDGET_MS - 30_000 {
         rig.step(30_000).await;
@@ -279,6 +303,8 @@ async fn a_429_waits_for_the_reset_and_never_rereads_old_output() {
         "Usage limit reached. Try again in 3 minutes",
     );
     rig.world.up.store(true, Ordering::SeqCst);
+    rig.sched.tick().await;
+    rig.outbreak("Usage limit reached. Try again in 3 minutes");
     rig.sched.tick().await;
     rig.step(2 * MIN).await;
     assert!(rig.world.ops().is_empty(), "still before the reset");
@@ -347,6 +373,8 @@ async fn an_unknown_agent_is_refused_with_a_typed_error_and_nothing_is_sent() {
         vec![session("mac-2", "s1", "omo", "working", "screen", T0)],
         BAD_GATEWAY,
     );
+    rig.sched.tick().await;
+    rig.outbreak(BAD_GATEWAY);
     for _ in 0..40 {
         rig.step(30_000).await;
     }
@@ -369,4 +397,94 @@ async fn a_goal_quota_fault_is_retried_at_the_parsed_reset_with_one_row() {
     let rows = rig.rows();
     assert_eq!(rows.len(), 1);
     assert!(!rows[0].live);
+}
+
+#[tokio::test]
+async fn an_error_already_in_the_scrollback_at_startup_drives_no_recovery() {
+    let rig = rig(four_claude_sessions(), BAD_GATEWAY);
+    for _ in 0..60 {
+        rig.step(30_000).await;
+    }
+    assert!(rig.world.ops().is_empty(), "old scrollback is not news");
+    assert!(rig.rows().is_empty());
+    assert!(rig.opened().is_empty());
+}
+
+#[tokio::test]
+async fn a_session_that_lost_its_baseline_does_not_replay_its_old_fault() {
+    let rig = rig(
+        vec![session("mac-2", "s1", "claude", "working", "screen", T0)],
+        BAD_GATEWAY,
+    );
+    rig.sched.tick().await;
+    let kept = rig.fleet.0.lock().unwrap().clone();
+    // The session leaves the fleet (baseline lost) and comes back with the same scrollback.
+    rig.fleet.0.lock().unwrap().clear();
+    rig.step(30_000).await;
+    *rig.fleet.0.lock().unwrap() = kept;
+    for _ in 0..60 {
+        rig.step(30_000).await;
+    }
+    assert!(rig.world.ops().is_empty());
+    assert!(rig.rows().is_empty());
+}
+
+#[tokio::test]
+async fn thirty_seconds_of_silence_after_a_resume_does_not_close_the_outage() {
+    let rig = rig(
+        vec![session("mac-2", "s1", "claude", "working", "screen", T0)],
+        BAD_GATEWAY,
+    );
+    rig.sched.tick().await;
+    rig.outbreak(BAD_GATEWAY);
+    rig.world.mute.store(true, Ordering::SeqCst);
+    rig.sched.tick().await;
+    rig.step(61_000).await;
+    assert_eq!(rig.world.ops().len(), 1, "first probe sent");
+    rig.step(31_000).await;
+    rig.step(31_000).await;
+    let rows = rig.rows();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].live, "silence is not a recovery: {rows:?}");
+    assert_ne!(rows[0].kind, ActionKind::Resumed);
+    // Output returns: the same incident, same row, now closed.
+    rig.world.mute.store(false, Ordering::SeqCst);
+    rig.world.up.store(true, Ordering::SeqCst);
+    for _ in 0..80 {
+        if rig.rows().iter().any(|row| !row.live) {
+            break;
+        }
+        rig.step(30_000).await;
+    }
+    let rows = rig.rows();
+    assert_eq!(rows.len(), 1, "one incident, one row: {rows:?}");
+    assert_eq!(rows[0].kind, ActionKind::Resumed);
+    assert!(!rows[0].live);
+}
+
+#[tokio::test]
+async fn a_second_stall_after_recovery_gets_a_fresh_restart_budget() {
+    let stalled = session("mac-2", "s1", "claude", "working", "provider", T0 - 10 * MIN);
+    let rig = rig(vec![stalled], "thinking...");
+    rig.sched.tick().await;
+    assert_eq!(rig.world.ops().len(), 2, "stop + continue");
+    // Screen moves: the first incident closes.
+    let fresh = |at: i64| {
+        let mut s = session("mac-2", "s1", "claude", "working", "provider", at);
+        s.screen_changed_at_ms = Some(at);
+        s
+    };
+    *rig.fleet.0.lock().unwrap() = vec![fresh(T0 + MIN)];
+    rig.step(MIN).await;
+    assert_eq!(rig.rows().len(), 1);
+    assert!(!rig.rows()[0].live);
+    // Much later a distinct stall: acted on again, not escalated for lack of budget.
+    rig.step(60 * MIN).await;
+    *rig.fleet.0.lock().unwrap() = vec![fresh(T0 + MIN)];
+    rig.step(MIN).await;
+    assert_eq!(rig.world.ops().len(), 4, "{:?}", rig.world.ops());
+    assert!(rig.opened().is_empty());
+    let rows = rig.rows();
+    assert_eq!(rows.len(), 2, "unique incident keys: {rows:?}");
+    assert_ne!(rows[0].incident_key, rows[1].incident_key);
 }
