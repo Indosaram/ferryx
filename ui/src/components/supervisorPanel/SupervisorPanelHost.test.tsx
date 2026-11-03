@@ -127,7 +127,10 @@ describe("SupervisorPanelHost", () => {
     const { actions } = renderHost(emptyPanelSnapshot(), {
       turnOn: vi.fn(async () => ({ ok: false, stale: false, message: "no desktop command" }) as const),
     });
-    await act(async () => fireEvent.click(await screen.findByRole("button", { name: "Turn on" })));
+    // Wait for the loaded setup card outside act: inside it, React holds the load's state update
+    // until act exits, so the lookup could never see it.
+    const turnOn = await screen.findByRole("button", { name: "Turn on" });
+    await act(async () => fireEvent.click(turnOn));
     expect(actions.turnOn).toHaveBeenCalled();
     expect(screen.getByRole("alert")).toHaveTextContent("no desktop command");
   });
