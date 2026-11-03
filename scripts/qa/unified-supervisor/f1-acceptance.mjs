@@ -144,11 +144,12 @@ export async function runF1Acceptance(ctx, deps) {
     inits.push(await hubAgent.rpc('init', { runId: ctx.runId, dataRoot: fleet.hub.agentDataRoot, bun: process.execPath }));
     for (const [index, target] of fleet.targets.entries()) inits.push(await agents[index + 1].rpc('init', { runId: ctx.runId, dataRoot: target.dataRoot, bun: target.bun }));
     const revs = [];
-    for (const agent of agents) revs.push(await agent.rpc('rev'));
+    for (const [index, agent] of agents.entries()) revs.push(await agent.rpc('rev', { ferryxCli: index === 0 ? config.ferryxCli : fleet.targets[index - 1].ferryxCli }));
     clause('fleet-agents-ready', inits.every((init) => typeof init.runRoot === 'string'), { inits });
-    clause('fleet-same-revision', revs.every((rev) => rev.head === localRev && !rev.dirty), { localRev, revs });
+    clause('fleet-same-revision', revs.every((rev) => rev.head === localRev && rev.dirty === null && typeof rev.ferryxCli?.sha256 === 'string'), { localRev, revs });
     for (const [index, agent] of agents.entries()) {
-      evidence.hosts[agent.id] = { role: ['hub', 'outage', 'quota'][index], label: index === 0 ? fleet.hub.label : fleet.targets[index - 1].label, hostname: inits[index].hostname, agentPid: inits[index].agentPid, runRoot: inits[index].runRoot, clockAtInitMs: inits[index].nowMs };
+      evidence.hosts[agent.id] = { role: ['hub', 'outage', 'quota'][index], label: index === 0 ? fleet.hub.label : fleet.targets[index - 1].label, hostname: inits[index].hostname, agentPid: inits[index].agentPid, runRoot: inits[index].runRoot, clockAtInitMs: inits[index].nowMs,
+        repo: { root: revs[index].repoRoot, head: revs[index].head, dirty: revs[index].dirty }, ferryxCli: revs[index].ferryxCli };
     }
     const proxies = [];
     for (const agent of agents) proxies.push((await agent.rpc('proxyStart', { quotaResetMs })).url);
@@ -222,6 +223,19 @@ export async function runF1Acceptance(ctx, deps) {
       socket.addEventListener('error', () => resolveOpen(false), { once: true });
       setTimeout(() => resolveOpen(false), 30_000);
     });
+    // A closed, errored or resynced owner socket may have lost decision frames: any of these
+    // during recovery invalidates the zero-cards verdict.
+    const socketBreaks = [];
+    socket.addEventListener('close', (event) => {
+      const entry = { atMs: now(), kind: 'close', code: event.code, reason: event.reason };
+      socketBreaks.push(entry);
+      ctx.evidence.appendJsonl('f1/owner-frames.jsonl', entry);
+    });
+    socket.addEventListener('error', () => {
+      const entry = { atMs: now(), kind: 'error' };
+      socketBreaks.push(entry);
+      ctx.evidence.appendJsonl('f1/owner-frames.jsonl', entry);
+    });
     clause('owner-event-socket-open', opened && ticket.status === 200, { ticketStatus: ticket.status });
     const panel = async (label) => {
       const read = await http(`panel-${label}`, 'GET', '/api/v1/supervisor/panel', { token: owner.token });
@@ -274,7 +288,8 @@ export async function runF1Acceptance(ctx, deps) {
     evidence.scenarios.stall = { host: fleet.hub.label, hostId: hubHostId, session: { label: stallSession.label, sessionRef: hubHostId ? ref(hubHostId, stallSession) : null, sessionId: stallSession.sessionId, spawnedAtMs: stallSession.spawnedAtMs } };
     clause('outage-injected-real-duration', outageMs === REAL_OUTAGE_MS, { outageMs, required: REAL_OUTAGE_MS, injectedAtMs: outage.startedAtMs });
     clause('quota-session-reset-three-minutes', quotaResetMs === REAL_QUOTA_RESET_MS, { quotaResetMs, required: REAL_QUOTA_RESET_MS });
-    clause('three-computers', new Set(inits.map((init) => init.hostname)).size === 3 && new Set([hubHostId, ...targets.map((t) => t.hostId)]).size === 3,
+    clause('three-computers', typeof hubHostId === 'string' && hubHostId !== '' && new Set(inits.map((init) => init.hostname)).size === 3
+      && targets.every((t) => typeof t.hostId === 'string' && t.hostId !== '') && new Set([hubHostId, ...targets.map((t) => t.hostId)]).size === 3,
       { hostnames: inits.map((init) => init.hostname), hostIds: [hubHostId, ...targets.map((t) => t.hostId)] });
     clause('four-outage-sessions-on-one-computer', outageSessions.length === 4 && new Set(outageSessions.map((s) => s.sessionId)).size === 4, { sessions: evidence.scenarios.outage.sessions });
     clause('stall-session-provider-working', stallWorking && stallEntry?.state === 'working' && stallEntry?.stateSource === 'provider', { stallEntry });
@@ -297,6 +312,7 @@ export async function runF1Acceptance(ctx, deps) {
     }, 5 * 60_000).catch(() => null);
     const afterRecovery = await panel('after-recovery');
     const recoveryEndMs = now();
+    const socketOpenAtRecoveryEnd = socket.readyState === WebSocket.OPEN;
 
     // Recovery actions, per session, from what each pane received and returned.
     const actionsOf = (agentId, label) => paneEvents(ctx, agentId).filter((r) => r.label === label && ['input', 'turn', 'done', 'reported'].includes(r.kind))
@@ -317,8 +333,12 @@ export async function runF1Acceptance(ctx, deps) {
     clause('outage-sessions-recovered-after-outage', outageOk, { outageEndsAtMs: outage.untilMs, sessions: evidence.scenarios.outage.sessions.map((s) => ({ sessionRef: s.sessionRef, turns: s.recoveryActions.filter((a) => a.kind === 'turn') })) });
     const quotaUntil = quotaProxy.quotaUntil['quota-1'];
     const quotaTurns = evidence.scenarios.quota.session.recoveryActions.filter((a) => a.kind === 'turn');
-    clause('quota-resumed-at-reset', quotaTurns[0]?.status === 429 && quotaTurns.at(-1)?.status === 200 && quotaTurns.at(-1).atMs >= quotaUntil
-      && quotaTurns.filter((t) => t.status === 429).length === 1, { quotaUntil, turns: quotaTurns });
+    const firstQuotaOk = quotaTurns.find((t) => t.status === 200) ?? null;
+    // Resumed at the reset the 429 named: not before it, and within one minute after it (the
+    // scheduler's 15 s tick plus the 30 s resume grace), never by the 10 min fallback.
+    clause('quota-resumed-at-reset', Number.isFinite(quotaUntil) && quotaTurns[0]?.status === 429 && quotaTurns.at(-1)?.status === 200
+      && firstQuotaOk !== null && firstQuotaOk.atMs >= quotaUntil && firstQuotaOk.atMs <= quotaUntil + 60_000
+      && quotaTurns.filter((t) => t.status === 429).length === 1, { quotaUntil, latestAllowedMs: Number.isFinite(quotaUntil) ? quotaUntil + 60_000 : null, firstOkAtMs: firstQuotaOk?.atMs ?? null, turns: quotaTurns });
     const stallInputs = evidence.scenarios.stall.session.recoveryActions.filter((a) => a.kind === 'input');
     const stallStart = evidence.scenarios.stall.session.spawnedAtMs;
     clause('stall-cancelled-and-resumed', stallInputs.some((a) => a.escape) && stallInputs.some((a) => a.text === 'continue') && stallInputs[0]?.atMs - stallStart >= 5 * 60_000,
@@ -336,7 +356,11 @@ export async function runF1Acceptance(ctx, deps) {
     clause('recovery-rows-closed', finalRows.length === 3 && finalRows.every((row) => row.live === 0) && (afterRecovery.handling ?? []).length === 0, { live: finalRows.map((row) => ({ key: row.incident_key, live: row.live })), handling: afterRecovery.handling });
     const recoveryCardFrames = evidence.frames.filter((f) => f.frame.type === 'panel.decision' && f.frame.decision !== null);
     const panelDecisionCounts = evidence.panel.map((p) => ({ label: p.label, decisions: p.decisions?.length ?? null }));
-    clause('zero-cards-during-recovery', recoveryCardFrames.length === 0 && panelDecisionCounts.every((p) => p.decisions === 0), { cardFrames: recoveryCardFrames, panelDecisionCounts });
+    const resyncsDuringRecovery = evidence.frames.filter((f) => f.frame.type === 'panel.resync' && f.atMs <= recoveryEndMs);
+    const breaksDuringRecovery = socketBreaks.filter((b) => b.atMs <= recoveryEndMs);
+    clause('zero-cards-during-recovery', recoveryCardFrames.length === 0 && panelDecisionCounts.every((p) => p.decisions === 0)
+      && socketOpenAtRecoveryEnd && breaksDuringRecovery.length === 0 && resyncsDuringRecovery.length === 0,
+    { cardFrames: recoveryCardFrames, panelDecisionCounts, socketOpenAtRecoveryEnd, socketBreaks: breaksDuringRecovery, resyncs: resyncsDuringRecovery });
     const recoveryPushes = pushSink.received.filter((p) => p.atMs <= recoveryEndMs);
     clause('zero-pushes-during-recovery', recoveryPushes.length === 0, { pushes: recoveryPushes });
 
@@ -366,7 +390,7 @@ export async function runF1Acceptance(ctx, deps) {
     { createStatus: created.status, approvalRef, decisions, cardFrames });
     const approvalInputs = paneEvents(ctx, hubAgent.id).filter((r) => r.label === 'approval-1' && r.kind === 'input');
     const answeredRows = rows().filter((row) => row.session_ref === approvalRef && row.kind === 'answered');
-    clause('approval-not-answered-by-supervisor', approvalInputs.length === 0 && answeredRows.length === 0, { approvalInputs, answeredRows });
+    clause('approval-not-answered-by-supervisor', approvalRef !== null && approvalInputs.length === 0 && answeredRows.length === 0, { approvalRef, approvalInputs, answeredRows });
     const approvalPushes = pushSink.received.slice(pushCursor);
     clause('approval-exactly-one-push', approvalPushes.length === 1 && pushSink.received.length === 1, { pushes: approvalPushes, windowMs: PUSH_BATCH_WINDOW_MS });
     evidence.pushes = { total: pushSink.received.length, duringRecovery: recoveryPushes.length, afterApproval: approvalPushes.length, received: pushSink.received.map(({ atMs, path, bytes, sha256 }) => ({ atMs, path, bytes, sha256 })) };

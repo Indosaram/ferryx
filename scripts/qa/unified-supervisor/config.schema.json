@@ -31,7 +31,7 @@
           "required": ["label", "agentDataRoot"],
           "properties": {
             "label": { "type": "string", "minLength": 1, "description": "Display label of the hub computer in evidence." },
-            "agentDataRoot": { "type": "string", "minLength": 1, "description": "Absolute task-owned root for the hub computer's host agent (fixture panes, proxy). Absent or holding only runs/; disjoint from dataRoot." }
+            "agentDataRoot": { "type": "string", "minLength": 1, "description": "Absolute task-owned root for the hub computer's host agent (fixture panes, proxy). Absent or holding only runs/; must be disjoint from dataRoot, memoryRoot and projectRoot (enforced)." }
           }
         },
         "targets": {
@@ -47,8 +47,8 @@
               "label": { "type": "string", "minLength": 1 },
               "ssh": { "type": "string", "minLength": 1, "description": "ssh destination (host alias or user@host)." },
               "sshOptions": { "type": "array", "items": { "type": "string" }, "description": "Extra ssh arguments placed before the destination." },
-              "bun": { "type": "string", "minLength": 1, "description": "Absolute bun path on the target." },
-              "repoDir": { "type": "string", "minLength": 1, "description": "Absolute checkout of this revision on the target (clean; the run asserts the same HEAD)." },
+              "bun": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._/-]+$", "description": "Absolute bun path on the target (placed on the remote shell command line)." },
+              "repoDir": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._/-]+$", "description": "Absolute checkout of this revision on the target. The whole repository must be clean (git status --porcelain) at the hub's HEAD." },
               "ferryxCli": { "type": "string", "minLength": 1, "description": "Absolute debug ferryx-cli on the target built from the same revision." },
               "dataRoot": { "type": "string", "minLength": 1, "description": "Absolute task-owned root on the target: absent or holding only runs/. The target daemon's HOME, data, runtime and panes live under runs/<runId>." }
             }

@@ -12,6 +12,7 @@
 // this run's pane script and log dir. Its stdin closing (runner gone, ssh dropped) tears down.
 // All state lives under <dataRoot>/runs/<runId>; a dataRoot holding anything else is refused.
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { homedir, hostname } from 'node:os';
@@ -227,12 +228,26 @@ const ops = {
     return { text: existsSync(logPath) ? readFileSync(logPath, 'utf8').slice(-40_000) : null };
   },
 
-  // The checkout this agent runs from: the evidence records each computer's revision.
-  async rev() {
+  // The checkout this agent runs from (whole repository, not only this directory) and the
+  // ferryx-cli this computer runs: the evidence records each computer's provenance.
+  async rev({ ferryxCli } = {}) {
     const dir = dirname(PANE);
-    const head = spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 10_000 });
-    const dirty = spawnSync('git', ['-C', dir, 'status', '--porcelain', '--', '.'], { encoding: 'utf8', timeout: 10_000 });
-    return { head: head.stdout.trim() || null, dirty: dirty.stdout.trim() || null, script: PANE };
+    const git = (args) => spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', timeout: 20_000 });
+    const top = git(['rev-parse', '--show-toplevel']);
+    const repoRoot = top.status === 0 ? top.stdout.trim() : null;
+    const head = git(['rev-parse', 'HEAD']);
+    const status = repoRoot ? spawnSync('git', ['-C', repoRoot, 'status', '--porcelain'], { encoding: 'utf8', timeout: 20_000 }) : null;
+    const dirty = status?.status === 0 ? (status.stdout.trim() || null) : 'git status failed';
+    let binary = null;
+    if (typeof ferryxCli === 'string' && isAbsolute(ferryxCli)) {
+      try {
+        const info = statSync(ferryxCli);
+        binary = { path: ferryxCli, sha256: createHash('sha256').update(readFileSync(ferryxCli)).digest('hex'), bytes: info.size, mtimeMs: info.mtimeMs };
+      } catch (error) {
+        binary = { path: ferryxCli, error: String(error?.message ?? error) };
+      }
+    }
+    return { repoRoot, head: head.stdout.trim() || null, dirty, script: PANE, ferryxCli: binary };
   },
 
   async call({ socket, request, deadlineMs }) {

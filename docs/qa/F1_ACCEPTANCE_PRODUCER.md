@@ -17,6 +17,9 @@ bun scripts/qa/unified-supervisor.mjs --scenario f1-acceptance --config <f1.json
 Exit codes: 0 PASS, 1 FAIL, 2 config/usage refusal, 4 harness error or deadline, 5 cleanup incomplete, 130 interrupted.
 The deadline is 75 min. The outage alone takes 20 min of real time.
 Clean up after a crashed run with `--cleanup --config <f1.json> --evidence <dir>`.
+That only covers processes recorded on the hub computer: the relay, the hub daemon, the hub agent and the two ssh client processes.
+It cannot reach a target computer. If a remote host agent dies without tearing down (for example `kill -9`, or the target reboots mid-run), that target's isolated daemon and its fixture panes keep running. Stop them by the pid recorded in `f1/rpc.jsonl` (the `daemonStart` reply) on that computer, after checking that the argv still names `<target dataRoot>/runs/<runId>`.
+If ssh merely drops, the remote agent's stdin closes and it tears down its own daemon.
 
 ### Config (`f1.json`)
 
@@ -45,7 +48,10 @@ The F1 fleet:
 
 Prerequisites:
 
-- Each target has a clean checkout at `repoDir` with the same HEAD as the hub computer; the run asserts this.
+- Each computer (hub and targets) must have a clean checkout of the same HEAD. The run checks `git status --porcelain` across the whole repository, not only the QA directory; any dirty file fails `fleet-same-revision`.
+- For each computer, the run records the sha256, size and mtime of the `ferryxCli` that computer runs. These go in `f1-evidence.json` under `hosts.<agent>.ferryxCli`, next to `hosts.<agent>.repo` (root, head, dirty). `fleet-same-revision` also fails when a binary cannot be hashed.
+- `f1Fleet.hub.agentDataRoot` must be disjoint from `dataRoot`, `memoryRoot` and `projectRoot`; the config check enforces this.
+- A target's `bun` and `repoDir` are passed through the remote shell. They may contain only `A-Za-z0-9._/-`.
 - Port 43821, the product's fixed gateway port, must be free on all three computers. Nothing is stopped to free it.
 - ssh must work non-interactively (BatchMode).
 - `outageDurationMs` and `quotaResetMs` default to the real 20 min and 3 min. Any other value fails its clause; it never passes as a shortened run.
@@ -74,14 +80,14 @@ The supervisor, health classifier, recovery scheduler, action log, panel snapsho
 
 | Clause | Assertion |
 |---|---|
-| 3 computers | `three-computers`, `targets-paired-by-machine-grant` |
+| 3 computers | `three-computers` (3 distinct hostnames, non-null hub host id, 3 distinct host ids), `targets-paired-by-machine-grant` |
 | 4 sessions, real 20 min proxy outage | `outage-injected-real-duration`, `four-outage-sessions-on-one-computer`, `outage-sessions-recovered-after-outage` |
-| 429 with 3 min reset | `quota-session-reset-three-minutes`, `quota-resumed-at-reset` |
+| 429 with 3 min reset | `quota-session-reset-three-minutes`, `quota-resumed-at-reset` (the first 200 turn falls inside [reset, reset + 60 s]; the 10 min fallback fails it) |
 | provider-Working session stops drawing | `stall-session-provider-working`, `stall-cancelled-and-resumed` |
 | all sessions finish | `all-recovery-sessions-finished` |
 | exactly one log row per incident | `one-log-row-per-incident`, `recovery-rows-closed` |
-| zero cards and zero pushes during recovery | `zero-cards-during-recovery`, `zero-pushes-during-recovery` |
-| non-local `sqlx migrate run`: one card with a recommendation | `approval-one-card-with-recommendation`, `approval-not-answered-by-supervisor` |
+| zero cards and zero pushes during recovery | `zero-cards-during-recovery` (also fails if the owner socket closed, errored or got a `panel.resync` during recovery, or was not open at the end of recovery), `zero-pushes-during-recovery` |
+| non-local `sqlx migrate run`: one card with a recommendation | `approval-one-card-with-recommendation`, `approval-not-answered-by-supervisor` (requires the approval session ref to be resolved) |
 | exactly one push | `approval-exactly-one-push` (observed across the full 30 s decision batch window) |
 | owned teardown | `fleet-teardown-clean` |
 
@@ -106,5 +112,5 @@ Harness files: `assertions.json`, `cleanup.json`, `owned.jsonl`.
 - The runner records each process it spawns: the relay, the hub daemon, the hub agent and the two ssh agents. The harness tears them down by recorded handle.
 - Each host agent stops only the daemons it started, by recorded pid and process group.
 - A pane process is signalled only when its pid comes from its own `pane-<pid>.jsonl` and its argv names this run's pane script and log directory.
-- If an agent's stdin closes (the runner exits or ssh drops), that agent tears down.
+- If an agent's stdin closes (the runner exits or ssh drops), that agent tears down. If the agent itself is killed, nothing on its computer tears down (see `--cleanup` above).
 - All state lives under `<root>/runs/<runId>`. A root that holds anything else is refused.
