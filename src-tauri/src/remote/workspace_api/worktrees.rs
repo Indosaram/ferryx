@@ -44,6 +44,18 @@ fn domain(error: WorktreeError) -> String {
         _ => "INVALID_WORKTREE".into(),
     }
 }
+/// Test builds only: the real cause behind an `OPERATION_OUTCOME_UNKNOWN`, which the response
+/// deliberately flattens. Printed to the test log; it changes no response, fence or mutation.
+#[cfg(test)]
+fn note_outcome_unknown(site: &str, catalog_path: &std::path::Path, cause: &str) {
+    eprintln!(
+        "OUTCOME_UNKNOWN_DIAG site={site} cause={cause:?} catalog={} catalog_dir_exists={} thread={:?}",
+        catalog_path.display(),
+        catalog_path.parent().is_some_and(|dir| dir.is_dir()),
+        std::thread::current().name(),
+    );
+}
+
 pub(crate) fn commit_legacy_revision(
     service: &crate::daemon::workspace_service::DaemonWorkspaceService,
     workspace: &str,
@@ -65,7 +77,12 @@ pub(crate) fn commit_legacy_revision(
         .0
         .checked_add(1)
         .ok_or("CAPACITY_EXCEEDED")?;
-    if super::super::workspace_catalog::persist(&service.catalog_path, &catalog).is_err() {
+    let persisted = super::super::workspace_catalog::persist(&service.catalog_path, &catalog);
+    #[cfg(test)]
+    if let Err(error) = &persisted {
+        note_outcome_unknown("commit_legacy_revision persist", &service.catalog_path, error);
+    }
+    if persisted.is_err() {
         *service.catalog.lock() = Err("MACHINE_SERVICE_UNAVAILABLE".into());
         return Err("OPERATION_OUTCOME_UNKNOWN".into());
     }
@@ -931,9 +948,13 @@ pub async fn mutate_worktree(
                         status,
                         outcome.clone(),
                     )?);
-                    if super::super::workspace_catalog::persist(&service.catalog_path, &catalog)
-                        .is_err()
-                    {
+                    let persisted =
+                        super::super::workspace_catalog::persist(&service.catalog_path, &catalog);
+                    #[cfg(test)]
+                    if let Err(error) = &persisted {
+                        note_outcome_unknown("mutate_worktree persist", &service.catalog_path, error);
+                    }
+                    if persisted.is_err() {
                         *service.catalog.lock() = Err("MACHINE_SERVICE_UNAVAILABLE".into());
                         return Err("OPERATION_OUTCOME_UNKNOWN".into());
                     }
@@ -942,6 +963,16 @@ pub async fn mutate_worktree(
                     service.worktree_committed(&payload.workspace_id, delete, revision, &event_row);
                     Ok::<_, String>((status, outcome))
                 })();
+                #[cfg(test)]
+                if let Err(code) = &outcome {
+                    if code == "OPERATION_OUTCOME_UNKNOWN" || side_effect_started {
+                        note_outcome_unknown(
+                            &format!("mutate_worktree error (side_effect_started={side_effect_started})"),
+                            &service.catalog_path,
+                            code,
+                        );
+                    }
+                }
                 let (status, outcome) = match outcome {
                     Ok(value) => value,
                     Err(code) if code == "OPERATION_OUTCOME_UNKNOWN" || side_effect_started => {
