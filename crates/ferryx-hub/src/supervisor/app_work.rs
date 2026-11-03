@@ -321,6 +321,23 @@ mod tests {
     const OWNER: &str = "desktop:owner";
     const WORK: &str = "Create result.txt containing READY. Run the verifier.";
 
+    /// A test gate that allows exactly the intended answer (option 0 of the fixture prompt).
+    struct AllowFirstOption;
+
+    #[async_trait]
+    impl crate::meta::mhc_supervisor::AnswerGate for AllowFirstOption {
+        async fn allow(
+            &self,
+            _session: &crate::supervisor::panel_contract::FleetSession,
+            _prompt: &crate::supervisor::panel_contract::PendingPrompt,
+            option_index: usize,
+        ) -> std::result::Result<(), String> {
+            (option_index == 0)
+                .then_some(())
+                .ok_or_else(|| "only option 0 is allowed here".to_owned())
+        }
+    }
+
     async fn owner_pool() -> SqlitePool {
         let pool = crate::storage::memory().await.unwrap();
         let identity = ensure_identity(&pool, OWNER).await.unwrap();
@@ -430,7 +447,8 @@ mod tests {
     fn with_sessions(pool: &SqlitePool) -> (Arc<FakeControl>, AppWorkTools, Vec<FleetSession>) {
         let fleet = vec![fleet_session()];
         let control = Arc::new(FakeControl::default());
-        let sessions = SessionTools::new(control.clone(), Arc::new(FakeFleet(fleet.clone())));
+        let sessions = SessionTools::new(control.clone(), Arc::new(FakeFleet(fleet.clone())))
+            .with_gate(Arc::new(AllowFirstOption));
         (
             control,
             AppWorkTools::new(pool.clone()).with_sessions(Arc::new(sessions)),

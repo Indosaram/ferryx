@@ -178,6 +178,23 @@ mod tests {
         assert!(matches!(&ops[2].1, AgentOp::Read { session_id } if session_id == "s1"));
     }
 
+    /// A test gate that allows exactly the intended answer (option 0 of the fixture prompt).
+    struct AllowFirstOption;
+
+    #[async_trait]
+    impl crate::meta::mhc_supervisor::AnswerGate for AllowFirstOption {
+        async fn allow(
+            &self,
+            _session: &crate::supervisor::panel_contract::FleetSession,
+            _prompt: &crate::supervisor::panel_contract::PendingPrompt,
+            option_index: usize,
+        ) -> std::result::Result<(), String> {
+            (option_index == 0)
+                .then_some(())
+                .ok_or_else(|| "only option 0 is allowed here".to_owned())
+        }
+    }
+
     struct OneFleet;
 
     #[async_trait]
@@ -215,7 +232,8 @@ mod tests {
         let tools = crate::meta::mhc_supervisor::SessionTools::new(
             Arc::new(AgentSessionControl::new(recording.clone())),
             Arc::new(OneFleet),
-        );
+        )
+        .with_gate(Arc::new(AllowFirstOption));
         let call =
             |revision: Option<&str>| crate::meta::mhc_supervisor::WorkToolCall::AnswerPrompt {
                 session_ref: session(),
