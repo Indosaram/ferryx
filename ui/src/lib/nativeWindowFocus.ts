@@ -1,4 +1,5 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { publishWindowFocus, startWindowFocusBroadcast } from "./notificationLeader";
 import { reportDesktopWindowFocus } from "./tauri";
 
 const FOCUS_REPORT_INTERVAL_MS = 60_000;
@@ -25,6 +26,7 @@ function syncFocusReporting(focused: boolean | null): void {
     focusReportTimer = null;
   }
   if (focused === null) return;
+  publishWindowFocus(focused);
   void reportFocus(focused);
   if (focused) {
     focusReportTimer = setInterval(() => {
@@ -36,6 +38,7 @@ function syncFocusReporting(focused: boolean | null): void {
 export function startNativeWindowFocusTracking(): void {
   if (trackingStarted || unlistenFocusChanged) return;
   trackingStarted = true;
+  startWindowFocusBroadcast();
 
   void (async () => {
     let receivedFocusEvent = false;

@@ -111,6 +111,13 @@ const { noteObservationInteraction } = await import("./lib/notificationCenter/ac
 
 vi.mock("./lib/tauri", () => ({
   listExternalWorktrees: vi.fn(async () => []),
+  discardWindowSession: vi.fn(async () => undefined),
+  onWindowSessionsOrphaned: vi.fn(async () => () => undefined),
+  onWindowSessionsAdopt: vi.fn(async () => () => undefined),
+  takePendingWindowAdoptions: vi.fn(async () => []),
+  moveSessionsToWindow: vi.fn(async () => ({ targetLabel: "ws-new", moved: [], skipped: [], queued: false })),
+  listAppWindows: vi.fn(async () => []),
+  openNewWindow: vi.fn(async () => undefined),
   listenDagRunUpdated: vi.fn(() => Promise.resolve(() => undefined)),
   listenDagWatchStatus: vi.fn(async () => () => undefined),
   // The notification coordinator re-consults the authoritative OS permission status before it
@@ -1075,7 +1082,7 @@ describe("App notification coordinator wiring", () => {
       const view = render(<App />);
       const shortcut = () => act(() => {
         window.dispatchEvent(new KeyboardEvent("keydown", {
-          key: "n", code: "KeyN", metaKey: isMac, ctrlKey: !isMac, shiftKey: true, bubbles: true, cancelable: true,
+          key: "i", code: "KeyI", metaKey: isMac, ctrlKey: !isMac, shiftKey: true, bubbles: true, cancelable: true,
         }));
       });
       expect(view.getByTestId("mock-sidebar").dataset.inboxOpen).toBe("false");

@@ -154,6 +154,7 @@ struct SocketBackend {
     attach_gate: Option<Arc<Gate>>,
     input_gate: Arc<Gate>,
     completed_inputs: AtomicUsize,
+    acknowledged_outcomes: AtomicUsize,
     resize_calls: Arc<AtomicUsize>,
     restore_calls: Arc<AtomicUsize>,
 }
@@ -169,6 +170,7 @@ impl SocketBackend {
             attach_gate,
             input_gate: Arc::new(Gate::default()),
             completed_inputs: AtomicUsize::new(0),
+            acknowledged_outcomes: AtomicUsize::new(0),
             resize_calls: Arc::new(AtomicUsize::new(0)),
             restore_calls: Arc::new(AtomicUsize::new(0)),
         })
@@ -176,6 +178,13 @@ impl SocketBackend {
 }
 
 impl RemoteSessionBackend for SocketBackend {
+    fn acknowledge_agent_outcome<'a>(
+        &'a self,
+        _: &'a str,
+    ) -> BoxFuture<'a, Result<(), crate::remote::backend::OutcomeAckError>> {
+        self.acknowledged_outcomes.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
+    }
     fn recovery<'a>(
         &'a self,
         _: &'a str,
@@ -923,4 +932,37 @@ async fn socket_close_restores_desktop_geometry_only_if_resized() {
     );
 
     server.stop().await;
+}
+
+/// Sends one outcome acknowledgement and then closes. The socket reads its frames in
+/// order and awaits the acknowledgement inline, so observing the close proves the
+/// acknowledgement frame was fully handled.
+async fn acknowledged_outcomes_after_close(path: &str, permission: DevicePermission) -> usize {
+    let backend = SocketBackend::new(None);
+    let state = socket_state(backend.clone());
+    let (token, _) = pair(&state, permission);
+    let server = SecurityServer::start(state).await;
+    let mut socket = open_ws_stream(server.addr, path, Some(&token)).await;
+    assert!(!matches!(frame(&mut socket).await, ServerWebSocketFrame::Close));
+    write_client_ws_frame(&mut socket, 1, br#"{"type":"acknowledgeAgentOutcome"}"#).await;
+    write_client_ws_frame(&mut socket, 8, &[]).await;
+    while !matches!(frame(&mut socket).await, ServerWebSocketFrame::Close) {}
+    drop(socket);
+    server.stop().await;
+    backend.acknowledged_outcomes.load(Ordering::SeqCst)
+}
+
+#[tokio::test]
+async fn raw_socket_outcome_acknowledgement_requires_control() {
+    let path = "/api/v1/terminal/session";
+    assert_eq!(acknowledged_outcomes_after_close(path, DevicePermission::View).await, 0);
+    assert_eq!(acknowledged_outcomes_after_close(path, DevicePermission::Control).await, 1);
+}
+
+#[cfg(feature = "native-terminal")]
+#[tokio::test]
+async fn grid_socket_outcome_acknowledgement_requires_control() {
+    let path = "/api/v1/terminal/session?render=grid";
+    assert_eq!(acknowledged_outcomes_after_close(path, DevicePermission::View).await, 0);
+    assert_eq!(acknowledged_outcomes_after_close(path, DevicePermission::Control).await, 1);
 }

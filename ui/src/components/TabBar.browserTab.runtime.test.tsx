@@ -18,6 +18,7 @@ const browserMocks = vi.hoisted(() => ({
   onBrowserDownloadRequested: vi.fn(async () => () => undefined),
   onBrowserDownloadUpdated: vi.fn(async () => () => undefined),
   onBrowserElementPicked: vi.fn(async () => () => undefined),
+  onBrowserStateChanged: vi.fn(async () => () => undefined),
   getBrowserSnapshotCapability: vi.fn(async () => ({ supported: false, formats: [], pick: false })),
   getBrowserState: vi.fn(async () => undefined),
   focusBrowser: vi.fn(async () => undefined),

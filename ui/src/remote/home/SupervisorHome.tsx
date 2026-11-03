@@ -7,6 +7,8 @@ import { toast } from "sonner";
 import { cn } from "../../lib/cn";
 import { actingSessionIds, type SupervisorLane } from "../../lib/supervisorModel";
 import { UnifiedSupervisorSection } from "../../components/supervisor/UnifiedSupervisorSection";
+import { SupervisorSetupBanner } from "../../components/supervisor/SupervisorSetupBanner";
+import type { SetupActions } from "../../lib/supervisorSetupModel";
 import type { HubStartResult, LanePauseResult } from "../remoteSupervisor";
 import { userFacingError } from "../userFacingError";
 import { PhoneHomeHeader } from "./PhoneHomeHeader";
@@ -46,6 +48,8 @@ export type SupervisorHomeProps = {
   readonly headerAction?: ReactNode;
   /** Pull-to-refresh on the list. Absent: pulling does nothing. */
   readonly onRefresh?: RefreshHandler;
+  /** Setup actions for one machine; null (or absent) for a view-only device, which sees the text only. */
+  readonly setupActions?: (machineId: string) => SetupActions | null;
 };
 
 const RECENT_COLLAPSED = 3;
@@ -211,6 +215,7 @@ export function SupervisorHome({
   phoneHeader = false,
   headerAction,
   onRefresh,
+  setupActions,
 }: SupervisorHomeProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const pull = usePullToRefresh(scrollRef, onRefresh);
@@ -237,6 +242,11 @@ export function SupervisorHome({
     });
   }, [machines, optimistic]);
   const headline = supervisorHeadline(machines, now, discovering);
+  const unifiedIds = new Set(unified.map((host) => host.machineId));
+  const setupFor = (machine: SupervisorMachineView) => ({
+    status: machine.snapshot?.setup ?? null,
+    actions: setupActions?.(machine.machineId) ?? null,
+  });
   const recent = recentActions(machines);
   const shownRecent = recentExpanded ? recent : recent.slice(0, RECENT_COLLAPSED);
   const readable = machines.filter((machine) => machine.snapshot);
@@ -293,17 +303,21 @@ export function SupervisorHome({
             </p>
           ) : null}
 
-          {unified.map((host) => (
-            <UnifiedSupervisorSection
-              key={host.machineId}
-              surface="phone"
-              hostLabel={host.label}
-              connection={host.connection}
-              connectionError={host.error}
-              view={host.view}
-              client={host.client}
-            />
-          ))}
+          {unified.map((host) => {
+            const machine = machines.find((item) => item.machineId === host.machineId);
+            return (
+              <UnifiedSupervisorSection
+                key={host.machineId}
+                surface="phone"
+                hostLabel={host.label}
+                connection={host.connection}
+                connectionError={host.error}
+                view={host.view}
+                client={host.client}
+                setup={machine ? { ...setupFor(machine), runLabel: "Finish setup" } : undefined}
+              />
+            );
+          })}
 
           {machines.length === 0 ? (
             discovering ? (
@@ -327,6 +341,9 @@ export function SupervisorHome({
               <section key={machine.machineId} data-testid={`supervisor-machine-${machine.machineId}`} aria-label={machine.label} className="flex flex-col gap-2">
                 <h2 className="truncate px-1 text-sm font-semibold text-chat-foreground">{machine.label}</h2>
                 {snapshot ? null : <MachineStateNote machine={machine} {...(onRetry ? { onRetry: () => onRetry(machine.machineId) } : {})} />}
+                {unifiedIds.has(machine.machineId) ? null : (
+                  <SupervisorSetupBanner surface="phone" runLabel="Finish setup" {...setupFor(machine)} />
+                )}
                 {hubOff ? (
                   <div data-testid="supervisor-hub-off" className="flex min-w-0 items-center gap-2 rounded-xl bg-chat-surface px-3 py-2 text-sm leading-snug text-chat-foreground-secondary">
                     {onStartHub && snapshot.hub.available ? (

@@ -10,6 +10,7 @@ import {
   FileVideo,
   GitCompare,
   Globe,
+  Monitor,
   NotebookPen,
   Pin,
   Sheet,
@@ -90,7 +91,7 @@ export const SortableTab = memo(function SortableTab({
     disabled: isRenaming,
     data: sortableData,
   });
-  const resolvedActivity = tab.kind === "browser" || tab.kind === "file" || tab.kind === "changes" ? null : resolveActivityIndicator(activity);
+  const resolvedActivity = tab.kind === "browser" || tab.kind === "file" || tab.kind === "changes" || tab.kind === "remoteDesktop" ? null : resolveActivityIndicator(activity);
   const activityIndicator = unread && (resolvedActivity === null || resolvedActivity === "done") ? "unread" : resolvedActivity;
   const isPinned = Boolean(tab.pinned);
   const agentType = activity?.agentType;
@@ -151,6 +152,8 @@ export const SortableTab = memo(function SortableTab({
         <Globe className="size-3 shrink-0 text-primary" />
       ) : tab.kind === "changes" ? (
         <GitCompare data-testid="tab-changes-icon" className="size-3 shrink-0 text-primary" />
+      ) : tab.kind === "remoteDesktop" ? (
+        <Monitor data-testid="tab-remote-desktop-icon" className="size-3 shrink-0 text-primary" />
       ) : tab.kind === "file" ? (
         <FileIcon
           data-testid="tab-file-icon"

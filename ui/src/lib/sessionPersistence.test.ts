@@ -112,6 +112,23 @@ function workspaceState(): WorkspaceState {
 }
 
 describe("sessionPersistence v3 serialization and migration", () => {
+  it("round trips a remote desktop tab without inventing a terminal session", () => {
+    const state = workspaceState();
+    state.layout = layoutReducer(state.layout, {
+      type: "ADD_TAB",
+      tab: { kind: "remoteDesktop", id: "tab-rd", label: "Studio Mac", hostId: "host-1", sessionId: "" },
+    });
+    const saved = serializeWorkspaceState("default", "/workspace/main", state);
+    const restored = deserializeWorkspaceState("default", saved, ["backend-1", "backend-2", "backend-3"]);
+    expect(restored?.layout.tabs.find((tab) => tab.id === "tab-rd")).toEqual({
+      kind: "remoteDesktop", id: "tab-rd", label: "Studio Mac", hostId: "host-1", sessionId: "", pinned: false,
+    });
+    const paneLayout = restored?.layout.layoutsByTabId["tab-rd"];
+    const leafId = paneLayout?.activeLeafId ?? "";
+    expect(paneLayout?.contentsByLeafId?.[leafId]).toEqual({ kind: "remoteDesktop", hostId: "host-1" });
+    expect(paneLayout?.sessionIdsByLeafId[leafId]).toBe("");
+  });
+
   it.each(["ssh:host:project", `daemon:${"a".repeat(64)}`])("restores confirmed-gone %s panes with their conversation ready to resume", (workspaceId) => {
     const state = workspaceState();
     const providerSession = { key: "session_id" as const, id: "saved-conversation", launcher: "mhc" as const };

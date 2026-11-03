@@ -2,7 +2,8 @@
 //! `[[measure ["argv",...] expect~"regex"]]` after a factual sentence. The marker never reaches
 //! Slack; 30 seconds after the reply, the hub re-runs the read-only command (a strict allowlist
 //! on top of the `read` effect, secrets stripped from its environment, 120 s ceiling) and posts
-//! "정정: <sentence> -> 실제 측정값: <output>" into the thread when the output no longer matches.
+//! "정정: <sentence> -> 실제 측정값: <output>" (English "Correction: <sentence> -> measured:
+//! <output>") into the thread when the output no longer matches.
 //! `OMON_REPORT_CLAIMS_ENABLED=0|false|no|off` turns it off. Pending claims left by a restart
 //! become `unmeasurable`.
 use std::path::PathBuf;
@@ -177,13 +178,22 @@ pub async fn execute_pending_claim(
     if regex.is_match(&stdout) {
         return mark(pool, claim_id, "confirmed", Some(&shown)).await;
     }
-    let correction = format!("정정: {sentence} -> 실제 측정값: {shown}");
+    let correction = correction_text(&sentence, &shown);
     if let Err(error) =
         super::slack::deliver(&target.channel, target.thread.as_deref(), &correction).await
     {
         tracing::warn!(%error, "report claim correction was not posted");
     }
     mark(pool, claim_id, "corrected", Some(&shown)).await
+}
+
+/// The owner-facing correction of a claim whose re-measurement no longer matches.
+fn correction_text(sentence: &str, shown: &str) -> String {
+    if crate::locale::current().is_korean() {
+        format!("정정: {sentence} -> 실제 측정값: {shown}")
+    } else {
+        format!("Correction: {sentence} -> measured: {shown}")
+    }
 }
 
 async fn mark(
@@ -554,6 +564,14 @@ mod tests {
         );
         assert!(dir.join("a.txt").exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn corrections_follow_the_owner_language() {
+        assert_eq!(correction_text("3 lines.", "4"), "정정: 3 lines. -> 실제 측정값: 4");
+        crate::locale::with(crate::locale::OwnerLocale::english_utc(), || {
+            assert_eq!(correction_text("3 lines.", "4"), "Correction: 3 lines. -> measured: 4");
+        });
     }
 
     #[tokio::test]

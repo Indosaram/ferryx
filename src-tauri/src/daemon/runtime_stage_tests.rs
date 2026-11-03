@@ -559,3 +559,67 @@ fn a_missing_mhc_payload_leaves_no_partial_copy() {
     let staged_dir = generation.join(ferryx_hub::meta::supervisor::BUNDLED_MHC_DIR);
     assert!(dir_names(&staged_dir).is_empty());
 }
+
+#[cfg(feature = "remote-desktop")]
+#[test]
+fn ffmpeg_copy_set_selects_only_ffmpeg_libraries_per_platform() {
+    for name in ["libavcodec.62.dylib", "libswscale.9.dylib", "libavutil.dylib"] {
+        assert!(is_ffmpeg_library(name, "macos"), "{name}");
+    }
+    for name in ["libopus.0.dylib", "libavcodec.62.so", "avcodec-62.dll", "libavcodecx.dylib"] {
+        assert!(!is_ffmpeg_library(name, "macos"), "{name}");
+    }
+    for name in ["libavformat.so.62", "libswresample.so.6.1.100", "libavutil.so"] {
+        assert!(is_ffmpeg_library(name, "linux"), "{name}");
+    }
+    for name in ["libssl.so.3", "libavutil.dylib", "libavcodec_extra.so"] {
+        assert!(!is_ffmpeg_library(name, "linux"), "{name}");
+    }
+    for name in ["avcodec-62.dll", "AVFORMAT-62.DLL", "swscale-9.dll", "swresample-6.dll", "avutil.dll"] {
+        assert!(is_ffmpeg_library(name, "windows"), "{name}");
+    }
+    for name in ["WebView2Loader.dll", "ferryx.exe", "avcodec-62.lib", "opus.dll"] {
+        assert!(!is_ffmpeg_library(name, "windows"), "{name}");
+    }
+    assert!(!is_ffmpeg_library("libavcodec.62.dylib", "freebsd"));
+}
+
+#[cfg(feature = "remote-desktop")]
+#[test]
+fn ffmpeg_sources_follow_the_install_and_staged_layouts() {
+    let mac = ffmpeg_source_candidates(Path::new("/A.app/Contents/MacOS/ferryx"), "macos");
+    assert_eq!(mac[0], Path::new("/A.app/Contents/MacOS/../Frameworks"));
+    let linux = ffmpeg_source_candidates(Path::new("/usr/bin/ferryx"), "linux");
+    assert_eq!(linux[0], Path::new("/usr/bin/../lib/Ferryx/ffmpeg"));
+    // Forward slashes parse on every host, so this runs on Unix too.
+    let windows = ffmpeg_source_candidates(Path::new("C:/Ferryx/ferryx.exe"), "windows");
+    assert_eq!(windows, vec![PathBuf::from("C:/Ferryx")]);
+}
+
+#[cfg(feature = "remote-desktop")]
+#[test]
+fn ffmpeg_libraries_land_in_the_generation_layout() {
+    let dir = tempfile::tempdir().unwrap();
+    let install = dir.path().join("install");
+    fs::create_dir_all(&install).unwrap();
+    for name in ["libavcodec.so.62", "libavutil.so.60", "libssl.so.3"] {
+        fs::write(install.join(name), name).unwrap();
+    }
+    let libraries = ffmpeg_libraries_in(&install, "linux");
+    assert_eq!(libraries.len(), 2);
+
+    let generation = dir.path().join("gen");
+    fs::create_dir_all(&generation).unwrap();
+    ensure_ffmpeg(&generation, &libraries, "linux").unwrap();
+    assert_eq!(dir_names(&generation.join(FFMPEG_DIR)), vec!["libavcodec.so.62", "libavutil.so.60"]);
+    // Re-staging keeps the existing copy and leaves no temp dir behind.
+    ensure_ffmpeg(&generation, &libraries, "linux").unwrap();
+    assert_eq!(dir_names(&generation), vec![FFMPEG_DIR.to_string()]);
+
+    let windows_generation = dir.path().join("win");
+    fs::create_dir_all(&windows_generation).unwrap();
+    let dll = install.join("avcodec-62.dll");
+    fs::write(&dll, "dll").unwrap();
+    ensure_ffmpeg(&windows_generation, &[dll], "windows").unwrap();
+    assert!(windows_generation.join("avcodec-62.dll").is_file());
+}

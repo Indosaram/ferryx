@@ -12,6 +12,10 @@ use crate::agent_control::{AgentControl, AgentOp, TaskLauncher};
 use crate::error::{HubError, Result};
 use crate::judge::Judge;
 
+/// Code of a refused drive of an owner-supervised legacy lane after a cutover stopped the
+/// legacy intake.
+pub const LEGACY_INTAKE_STOPPED: &str = "LEGACY_INTAKE_STOPPED";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DriveReport {
     pub session_id: String,
@@ -41,6 +45,16 @@ impl LaneRunner {
         // omo's runner skips a paused lane: no launch, no nudge, no claim reading.
         if super::pause::is_paused(&self.pool, key).await? {
             return Err(HubError::message(format!("lane {key} is paused")));
+        }
+        // A lane under a legacy goal contract is the owner's legacy supervision; once a cutover
+        // stopped the legacy intake only an adoption moves it. Lanes without one (cron
+        // remediation, tracker issues) keep running whatever the intake.
+        if supervised_by_legacy_goal(&self.pool, key).await?
+            && !crate::supervisor::cutover::legacy_intake_runs(&self.pool).await?
+        {
+            return Err(HubError::message(format!(
+                "{LEGACY_INTAKE_STOPPED}: lane {key} is under a legacy goal and the supervisor cutover stopped the legacy intake; adopt it to continue"
+            )));
         }
         let mut session_id = pane.unwrap_or_default();
         let mut cwd = cwd;
@@ -156,6 +170,16 @@ impl LaneRunner {
         let _ = json!({"sessionId": session_id});
         Ok(DriveReport { session_id, status })
     }
+}
+
+/// The lane carries a legacy goal contract that is not off: owner supervision.
+async fn supervised_by_legacy_goal(pool: &SqlitePool, key: &str) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM lane_goal WHERE lane_key = ? AND mode <> 'off')",
+    )
+    .bind(key)
+    .fetch_one(pool)
+    .await?)
 }
 
 /// A `[CLAIM_DONE] {key} | evidence` line is a claim. A `[REPORT]` line is not.
@@ -330,5 +354,56 @@ mod tests {
         assert!(launcher.remote.lock().unwrap().is_empty());
         assert!(control.ops().is_empty());
         assert_eq!(state::status_of(&pool, "lane-f").await.unwrap(), Some(LaneStatus::Queued));
+    }
+
+    #[tokio::test]
+    async fn after_a_cutover_only_lanes_under_a_legacy_goal_are_refused() {
+        use crate::goals::contract::{set_contract, RequirementSpec};
+        use crate::goals::types::GoalMode;
+        let pool = crate::storage::memory().await.unwrap();
+        for key in ["lane-goal", "lane-cron"] {
+            state::insert_lane(&pool, key, "work", "lead", "/repo", "merged acme/app#1")
+                .await
+                .unwrap();
+        }
+        set_contract(
+            &pool,
+            "lane-goal",
+            &[RequirementSpec {
+                id: "r1".into(),
+                text: "ship".into(),
+                verifier: "cargo test".into(),
+            }],
+            GoalMode::Supervised,
+            5,
+        )
+        .await
+        .unwrap();
+        let identity = crate::supervisor::provision_identity(&pool, "local:owner").await.unwrap();
+        sqlx::query(
+            "INSERT INTO supervisor_cutover(supervisor_id, legacy_intake, unified_intake, origin, updated_at)
+             VALUES(?, 'stopped', 'open', 'cutover', '2026-11-01T00:00:00Z')",
+        )
+        .bind(&identity.supervisor_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let control = Arc::new(RecordingControl::default());
+        *control.result.lock().unwrap() = json!({"session": {"screen": {"text": "", "revision": "1"}}});
+        let runner = LaneRunner {
+            pool: pool.clone(),
+            control: control.clone(),
+            launcher: Arc::new(FixedLauncher::new("pane-x")),
+            judge: Judge::fallback_yes(),
+            load: HostLoad { load: 0.1, mem_free_pct: 50, disk_free_gb: 100, active_lanes: 0 },
+            thresholds: GuardThresholds { load_alert: 10.0, mem_free_min_pct: 10, disk_free_min_gb: 1, lanes_max: 4 },
+        };
+        let refused = runner.drive("lane-goal").await.unwrap_err();
+        assert!(refused.to_string().contains(LEGACY_INTAKE_STOPPED), "{refused}");
+        assert!(control.ops().is_empty(), "nothing was launched or sent");
+        assert_eq!(state::status_of(&pool, "lane-goal").await.unwrap(), Some(LaneStatus::Queued));
+        // A lane without a legacy goal (a cron remediation lane) still runs.
+        let report = runner.drive("lane-cron").await.unwrap();
+        assert_eq!(report.status, LaneStatus::Working);
     }
 }

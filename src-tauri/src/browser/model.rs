@@ -120,6 +120,17 @@ pub struct ImportBrowserCookiesResult {
     pub imported_count: usize,
 }
 
+/// Which engine draws a browser tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BrowserEngine {
+    /// The platform webview (WKWebView, WebView2, WebKitGTK).
+    #[default]
+    System,
+    /// A Chromium engine process that draws its own toolbar, menus and extension buttons.
+    Chromium,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserState {
@@ -141,6 +152,8 @@ pub struct BrowserState {
     /// loads as `Unavailable`, the conservative kind.
     #[serde(default)]
     pub trusted_bridge: crate::browser::bridge::TrustedBridgeKind,
+    #[serde(default)]
+    pub engine: BrowserEngine,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -196,6 +209,7 @@ pub struct BrowserStateChangedPayload {
     pub load_error: Option<String>,
     /// Lets the toolbar re-read the pick capability when the bridge kind changes.
     pub trusted_bridge: crate::browser::bridge::TrustedBridgeKind,
+    pub engine: BrowserEngine,
 }
 
 impl From<&BrowserState> for BrowserStateChangedPayload {
@@ -211,6 +225,7 @@ impl From<&BrowserState> for BrowserStateChangedPayload {
             zoom_factor: state.zoom_factor,
             load_error: state.load_error.clone(),
             trusted_bridge: state.trusted_bridge,
+            engine: state.engine,
         }
     }
 }

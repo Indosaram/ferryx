@@ -24,6 +24,159 @@ pub const MODEL_OVERRIDE_KEY: &str = "model_override";
 /// Environment variable carrying the job's model to its script and monitor script.
 pub const CRON_MODEL_ENV: &str = "FERRYX_CRON_MODEL";
 
+/// Environment variable carrying the run id to the job's scripts. A script that reports to the
+/// hub names its failure with it, so the hub's own remediation of that run is recognised as the
+/// same incident ([`crate::report_gate::Report::incident`]).
+pub const CRON_RUN_ENV: &str = "FERRYX_CRON_RUN_ID";
+
+tokio::task_local! {
+    static CRON_RUN: String;
+    static CRON_INCIDENT: String;
+}
+
+/// Runs `future` (a job's payload) with `run_id` exported to the scripts it starts.
+pub async fn with_run<F: std::future::Future>(run_id: &str, future: F) -> F::Output {
+    CRON_RUN.scope(run_id.to_owned(), future).await
+}
+
+/// Runs `future` (a remediation rerun) as part of the failing run `run_id`: the scripts it starts
+/// see that run as [`CRON_RUN_ENV`], so a script's own report about the rerun names the same
+/// incident as the hub's remediation notice and the report gate tells the owner once.
+pub async fn with_incident<F: std::future::Future>(run_id: &str, future: F) -> F::Output {
+    CRON_INCIDENT.scope(run_id.to_owned(), future).await
+}
+
+/// The run id exported to scripts: the incident a rerun belongs to, else the run itself.
+pub fn exported_run() -> Option<String> {
+    CRON_INCIDENT
+        .try_with(Clone::clone)
+        .ok()
+        .or_else(|| CRON_RUN.try_with(Clone::clone).ok())
+}
+
+/// Prefix of a run error that is a host/environment fault, not a job fault.
+pub const ENVIRONMENT_FAULT: &str = "cron environment fault: missing ";
+
+/// What a host/environment fault found missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingKind {
+    /// The configured cron working directory.
+    WorkingDirectory,
+    /// A directory a job's script lives in (the top-most missing ancestor of the script).
+    Directory,
+    /// A job's script file.
+    Script,
+    /// The interpreter the hub spawns.
+    Program,
+}
+
+impl MissingKind {
+    const ALL: [Self; 4] = [Self::WorkingDirectory, Self::Directory, Self::Script, Self::Program];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkingDirectory => "working directory",
+            Self::Directory => "directory",
+            Self::Script => "script",
+            Self::Program => "program",
+        }
+    }
+
+    /// The owner-facing name of what is missing, in the owner's language.
+    pub fn owner_label(self) -> String {
+        match self {
+            Self::WorkingDirectory => crate::locale::text("크론 작업 폴더", "cron working directory"),
+            Self::Directory => crate::locale::text("폴더", "directory"),
+            Self::Script => crate::locale::text("스크립트", "script"),
+            Self::Program => crate::locale::text("실행 프로그램", "program"),
+        }
+    }
+}
+
+/// A deterministic host/environment fault: a path every affected job needs does not exist.
+/// It is detected before any judge call and is one incident per missing path, whichever jobs
+/// it fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvironmentFault {
+    pub missing: MissingKind,
+    pub path: String,
+}
+
+impl EnvironmentFault {
+    /// The run error recorded for the fault; [`EnvironmentFault::parse`] reads it back.
+    pub fn message(&self) -> String {
+        format!("{ENVIRONMENT_FAULT}{}: {}", self.missing.as_str(), self.path)
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        let rest = &text[text.find(ENVIRONMENT_FAULT)? + ENVIRONMENT_FAULT.len()..];
+        MissingKind::ALL.into_iter().find_map(|missing| {
+            let path = rest.strip_prefix(missing.as_str())?.strip_prefix(": ")?;
+            let path = path.lines().next()?.trim();
+            (!path.is_empty()).then(|| Self { missing, path: path.to_owned() })
+        })
+    }
+
+    /// The report-gate incident every notice about this fault shares.
+    pub fn incident(&self) -> String {
+        format!("env:{}", self.path)
+    }
+
+    /// True once the missing path exists again (a program: once the child PATH finds it).
+    pub fn resolved(&self) -> bool {
+        let path = Path::new(&self.path);
+        if self.missing == MissingKind::Program && !path.is_absolute() {
+            return std::env::split_paths(crate::child_env::child_path())
+                .any(|dir| dir.join(path).is_file());
+        }
+        path.exists()
+    }
+
+    fn error(&self) -> HubError {
+        HubError::message(self.message())
+    }
+}
+
+/// The top-most missing ancestor of a missing `path`: jobs whose scripts lived under one deleted
+/// directory share that directory as their fault.
+fn missing_root(path: &Path) -> PathBuf {
+    let mut root = path;
+    while let Some(parent) = root.parent().filter(|parent| {
+        !parent.as_os_str().is_empty() && !parent.exists()
+    }) {
+        root = parent;
+    }
+    root.to_path_buf()
+}
+
+fn missing_path(missing: MissingKind, path: &Path) -> EnvironmentFault {
+    let root = missing_root(path);
+    // A script whose directory is gone is a missing directory; a working directory stays one.
+    let missing = if missing == MissingKind::Script && root != path { MissingKind::Directory } else { missing };
+    EnvironmentFault { missing, path: root.to_string_lossy().into_owned() }
+}
+
+/// The environment fault behind a failed script run, if its working directory is gone or its
+/// stderr names an absolute path from the script that does not exist.
+fn failed_run_fault(script: &str, stderr: &str, cwd: Option<&Path>) -> Option<EnvironmentFault> {
+    if let Some(cwd) = cwd.filter(|cwd| !cwd.is_dir()) {
+        return Some(missing_path(MissingKind::WorkingDirectory, cwd));
+    }
+    let lower = stderr.to_ascii_lowercase();
+    let missing_file = ["no such file or directory", "not found", "can't open", "cannot open"]
+        .iter()
+        .any(|marker| lower.contains(marker));
+    if !missing_file {
+        return None;
+    }
+    script
+        .split_whitespace()
+        .map(|token| token.trim_matches(|c: char| matches!(c, '"' | '\'' | ';' | '(' | ')' | '`')))
+        .filter(|token| Path::new(token).is_absolute() && stderr.contains(token))
+        .find(|token| !Path::new(token).exists())
+        .map(|token| missing_path(MissingKind::Script, Path::new(token)))
+}
+
 /// A model id the hub accepts for a job: `provider/model`, no whitespace.
 pub fn validate_model_id(model: &str) -> Result<String> {
     let model = model.trim();
@@ -48,16 +201,21 @@ pub fn model_override(payload: &Value) -> Option<String> {
         .and_then(|model| validate_model_id(model).ok())
 }
 
-/// The model a job runs on: its `model_override`, else the background model.
-pub fn job_model(payload: &Value) -> String {
-    model_override(payload).unwrap_or_else(crate::model_policy::background_model)
+/// The model a job runs on: its `model_override`, else the background model. `None` means the
+/// default model.
+pub fn job_model(payload: &Value) -> Option<String> {
+    model_override(payload).or_else(crate::model_policy::background_model)
 }
+
+/// How `ferryx hub cron list` and `set_model_override` name the default model.
+pub const DEFAULT_MODEL_LABEL: &str = "default";
 
 /// One job and the model it runs on, for `ferryx hub cron list`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobModel {
     pub id: String,
     pub enabled: bool,
+    /// The job's model, or [`DEFAULT_MODEL_LABEL`].
     pub model: String,
     /// True when the job set its own `model_override`.
     pub overridden: bool,
@@ -75,7 +233,7 @@ pub async fn job_models(pool: &sqlx::SqlitePool) -> Result<Vec<JobModel>> {
             JobModel {
                 id,
                 enabled: enabled == 1,
-                model: job_model(&payload),
+                model: job_model(&payload).unwrap_or_else(|| DEFAULT_MODEL_LABEL.into()),
                 overridden: model_override(&payload).is_some(),
             }
         })
@@ -83,7 +241,7 @@ pub async fn job_models(pool: &sqlx::SqlitePool) -> Result<Vec<JobModel>> {
 }
 
 /// Sets (`Some`) or clears (`None`) a job's `model_override`. Returns the model the job
-/// now runs on, or `None` when no such job exists.
+/// now runs on ([`DEFAULT_MODEL_LABEL`] for the default model), or `None` when no such job exists.
 pub async fn set_model_override(
     pool: &sqlx::SqlitePool,
     job_id: &str,
@@ -121,7 +279,7 @@ pub async fn set_model_override(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(Some(job_model(&payload)))
+    Ok(Some(job_model(&payload).unwrap_or_else(|| DEFAULT_MODEL_LABEL.into())))
 }
 pub const CRON_HINT: &str = "[IMPORTANT: You are running as a scheduled cron job. DELIVERY: Your final response will be automatically delivered to the user — do NOT use send_message or try to deliver the output yourself. Just produce your report/output as your final response and the system handles the rest. SILENT: If there is genuinely nothing new to report, respond with exactly \"[SILENT]\" (nothing else) to suppress delivery. Never combine [SILENT] with content — either report your findings normally, or say [SILENT] and nothing more.]\n\n";
 
@@ -271,7 +429,7 @@ pub async fn run_payload(
                 script,
                 timeout_secs(payload),
                 cwd.as_deref(),
-                Some(&model_id),
+                model_id.as_deref(),
             )
             .await?,
         )
@@ -317,7 +475,7 @@ pub async fn run_payload(
             monitor_hash: None,
         });
     }
-    let monitor_hash = match monitor_hash(pool, job_id, payload, cwd.as_deref(), &model_id).await? {
+    let monitor_hash = match monitor_hash(pool, job_id, payload, cwd.as_deref(), model_id.as_deref()).await? {
         Monitor::Same => {
             return Ok(Executed {
                 output: String::new(),
@@ -352,21 +510,16 @@ pub async fn run_payload(
             monitor_hash,
         });
     }
-    let mut task = String::from(CRON_HINT);
-    if !skills.is_empty() {
-        task.push_str(&skills);
-        if !prompt.trim().is_empty() {
-            task.push_str("\n\n[Task]\n");
-        }
+    let projection = owner_projection(pool).await;
+    if let Some(projection) = projection.as_ref().filter(|p| !p.body.is_empty()) {
+        tracing::info!(job_id, directives = %projection.hash, "cron prompt carries owner directives");
     }
-    task.push_str(&prompt);
-    if let Some(output) = script_output
-        .as_deref()
-        .filter(|output| !output.trim().is_empty())
-    {
-        task.push_str("\n\n[Script output]\n");
-        task.push_str(output);
-    }
+    let mut task = compose_task(
+        projection.as_ref(),
+        &skills,
+        &prompt,
+        script_output.as_deref(),
+    );
     if let Some(context) = context_from_block(pool, payload).await? {
         task.push('\n');
         task.push_str(&context);
@@ -387,13 +540,51 @@ pub async fn run_payload(
         })
         .unwrap_or_default();
     let output = model
-        .complete_with(&task, Some(&model_id), &toolsets)
+        .complete_with(&task, model_id.as_deref(), &toolsets)
         .await?;
     Ok(Executed {
         deliver: should_post(&output),
         output,
         monitor_hash,
     })
+}
+
+/// The cron task text: the owner-directive projection, the cron hint, skills, the prompt and
+/// the script output, in that order.
+pub fn compose_task(
+    projection: Option<&crate::owner_directives::Projection>,
+    skills: &str,
+    prompt: &str,
+    script_output: Option<&str>,
+) -> String {
+    let mut task = crate::owner_directives::cron_prefix(projection);
+    task.push_str(CRON_HINT);
+    if !skills.is_empty() {
+        task.push_str(skills);
+        if !prompt.trim().is_empty() {
+            task.push_str("\n\n[Task]\n");
+        }
+    }
+    task.push_str(prompt);
+    if let Some(output) = script_output.filter(|output| !output.trim().is_empty()) {
+        task.push_str("\n\n[Script output]\n");
+        task.push_str(output);
+    }
+    task
+}
+
+/// The current owner-directive projection. A failure is logged and the prompt goes without it,
+/// so a broken memory repo never stops a cron job.
+async fn owner_projection(pool: &sqlx::SqlitePool) -> Option<crate::owner_directives::Projection> {
+    let judge = crate::judge::Judge::from_config(crate::judge::typesafe_from_env())
+        .with_pool(pool.clone());
+    match crate::owner_directives::current(pool, &judge).await {
+        Ok(projection) => projection,
+        Err(error) => {
+            tracing::warn!("owner directive projection unavailable for cron prompt: {error}");
+            None
+        }
+    }
 }
 
 pub async fn commit_monitor(pool: &sqlx::SqlitePool, job_id: &str, hash: &str) -> Result<()> {
@@ -456,13 +647,13 @@ async fn monitor_hash(
     job_id: &str,
     payload: &Value,
     cwd: Option<&Path>,
-    model: &str,
+    model: Option<&str>,
 ) -> Result<Monitor> {
     let script = payload.get("monitor_script").and_then(Value::as_str);
     let Some(script) = script else {
         return Ok(Monitor::Absent);
     };
-    let output = run_script(script, timeout_secs(payload), cwd, Some(model)).await?;
+    let output = run_script(script, timeout_secs(payload), cwd, model).await?;
     let hash = format!("{:x}", Sha256::digest(output.as_bytes()));
     let previous: Option<String> =
         sqlx::query_scalar("SELECT last_hash FROM cron_monitor_states WHERE job_id = ?")
@@ -525,7 +716,16 @@ async fn run_script(
     if let Some(model) = model {
         command.env(CRON_MODEL_ENV, model);
     }
-    if let Some(cwd) = cwd.filter(|cwd| !cwd.as_os_str().is_empty()) {
+    if let Some(run) = exported_run() {
+        command.env(CRON_RUN_ENV, run);
+    }
+    let cwd = cwd.filter(|cwd| !cwd.as_os_str().is_empty());
+    if let Some(cwd) = cwd {
+        // A deleted working directory fails every job the same way: one environment fault,
+        // recorded before the spawn reports a bare "No such file or directory".
+        if !cwd.is_dir() {
+            return Err(missing_path(MissingKind::WorkingDirectory, cwd).error());
+        }
         command.current_dir(cwd);
     }
     let output = tokio::time::timeout(
@@ -534,12 +734,24 @@ async fn run_script(
     )
     .await
     .map_err(|_| HubError::message("cron script timed out"))?
-    .map_err(|error| HubError::message(error.to_string()))?;
+    .map_err(|error| {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return HubError::message(error.to_string());
+        }
+        match cwd.filter(|cwd| !cwd.is_dir()) {
+            Some(cwd) => missing_path(MissingKind::WorkingDirectory, cwd).error(),
+            None => EnvironmentFault { missing: MissingKind::Program, path: "sh".into() }.error(),
+        }
+    })?;
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if let Some(fault) = failed_run_fault(script, &stderr, cwd) {
+            return Err(fault.error());
+        }
         return Err(HubError::message(format!(
             "cron script failed with {:?}: {}",
             output.status.code(),
-            String::from_utf8_lossy(&output.stderr).trim()
+            stderr.trim()
         )));
     }
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -596,7 +808,7 @@ mod tests {
         );
         assert_eq!(
             job_model(&serde_json::json!({"model_override": " mahoquot/claude-sonnet-5-5 "})),
-            "mahoquot/claude-sonnet-5-5"
+            Some("mahoquot/claude-sonnet-5-5".to_owned())
         );
         assert_eq!(
             job_model(&serde_json::json!({"model_override": "sonnet"})),
@@ -605,6 +817,18 @@ mod tests {
         assert!(validate_model_id("a b/c").is_err());
         assert!(validate_model_id("/c").is_err());
         assert!(validate_model_id("mahoquot/").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_script_learns_the_cron_run_it_belongs_to() {
+        let pool = crate::storage::memory().await.unwrap();
+        let script = serde_json::json!({"no_agent": true, "script": "printf %s \"$FERRYX_CRON_RUN_ID\""});
+        // A scheduled or rerun job names its run to the scripts it starts; outside a run it is unset.
+        let named = with_run("run-7", run_payload(&pool, "named", &script, &StaticModel(String::new()), None))
+            .await.unwrap();
+        assert_eq!(named.output, "run-7");
+        let unnamed = run_payload(&pool, "unnamed", &script, &StaticModel(String::new()), None).await.unwrap();
+        assert_eq!(unnamed.output, "");
     }
 
     #[tokio::test]
@@ -620,7 +844,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(plain.output, background);
+        // The default model (no background model configured) exports no model.
+        assert_eq!(plain.output, background.unwrap_or_default());
         let chosen = run_payload(
             &pool,
             "chosen",
@@ -669,7 +894,7 @@ mod tests {
             .is_err());
         assert_eq!(
             set_model_override(&pool, "j", None).await.unwrap(),
-            Some(crate::model_policy::background_model())
+            Some(crate::model_policy::background_model().unwrap_or_else(|| DEFAULT_MODEL_LABEL.into()))
         );
         assert!(stored(pool.clone()).await.get("model_override").is_none());
         assert_eq!(
@@ -682,6 +907,59 @@ mod tests {
     fn a_script_without_a_timeout_gets_five_minutes() {
         assert_eq!(timeout_secs(&serde_json::json!({"script": "x"})), 300);
         assert_eq!(timeout_secs(&serde_json::json!({"timeout_secs": 30})), 30);
+    }
+
+    /// 2026-11-01 09:06: the configured cron working directory was deleted and every job failed
+    /// with a bare "No such file or directory (os error 2)", which remediation read as a login
+    /// problem. The run error now names the missing path as an environment fault.
+    #[tokio::test]
+    async fn a_deleted_working_directory_is_an_environment_fault_naming_the_path() {
+        let root = std::env::temp_dir().join(format!("fx-cron-env-{}", uuid::Uuid::new_v4().simple()));
+        let gone = root.join("gateway");
+        let error = run_script("printf hi", 10, Some(&gone), None).await.unwrap_err().to_string();
+        let fault = EnvironmentFault::parse(&error).expect("environment fault");
+        // The top-most missing ancestor is the fault, so jobs under it share one incident.
+        assert_eq!(fault.missing, MissingKind::WorkingDirectory);
+        assert_eq!(fault.path, root.to_string_lossy());
+        assert_eq!(fault.incident(), format!("env:{}", root.display()));
+        assert!(!fault.resolved());
+        std::fs::create_dir_all(&gone).unwrap();
+        assert!(fault.resolved());
+        assert_eq!(run_script("printf hi", 10, Some(&gone), None).await.unwrap(), "hi");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_missing_script_path_is_an_environment_fault_and_a_script_bug_is_not() {
+        let root = std::env::temp_dir().join(format!("fx-cron-env-{}", uuid::Uuid::new_v4().simple()));
+        let script = root.join("jobs/collect.sh");
+        let error = run_script(&format!("sh {}", script.display()), 10, None, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        let fault = EnvironmentFault::parse(&error).unwrap_or_else(|| panic!("{error}"));
+        assert_eq!(fault.missing, MissingKind::Directory);
+        assert_eq!(fault.path, root.to_string_lossy());
+        let bug = run_script("echo 'KeyError: x' 1>&2; exit 2", 10, None, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(EnvironmentFault::parse(&bug).is_none(), "{bug}");
+        assert_eq!(
+            EnvironmentFault::parse("cron environment fault: missing script: /a/b.sh"),
+            Some(EnvironmentFault { missing: MissingKind::Script, path: "/a/b.sh".into() })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rerun_exports_the_failing_run_as_its_incident() {
+        let script = "printf %s \"$FERRYX_CRON_RUN_ID\"";
+        let rerun = with_incident("run-failed", with_run("run-rerun", run_script(script, 10, None, None)))
+            .await
+            .unwrap();
+        assert_eq!(rerun, "run-failed");
+        let plain = with_run("run-1", run_script(script, 10, None, None)).await.unwrap();
+        assert_eq!(plain, "run-1");
     }
 
     #[test]
@@ -967,7 +1245,7 @@ mod tests {
         .unwrap();
         assert_eq!(agent.output, "report");
         let (model_id, toolsets) = routed.0.lock().unwrap().clone();
-        assert_eq!(model_id, crate::model_policy::background_model());
+        assert_eq!(model_id, crate::model_policy::background_model().unwrap_or_default());
         assert_ne!(model_id, "mahoquot/gemini-3.8-flash-high");
         assert_eq!(toolsets, vec!["terminal", "browser", "file"]);
         let chosen = run_payload(

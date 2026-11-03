@@ -97,10 +97,11 @@ impl crate::lanes::kibitzer::ModelTurn for RpcModel {
             let request = super::omo_client::TurnRequest {
                 thread_id: None,
                 system_prompt: Some(prompt.to_owned()),
-                // Every turn through this client is a background turn.
-                model: Some(
-                    model.map_or_else(crate::model_policy::background_model, str::to_owned),
-                ),
+                // Every turn through this client is a background turn: the caller's model,
+                // else the background model, else (unset) the engine's default model.
+                model: model
+                    .map(str::to_owned)
+                    .or_else(crate::model_policy::background_model),
                 toolsets: (!toolsets.is_empty()).then(|| toolsets.to_vec()),
                 text: prompt.to_owned(),
                 pin_model: true,
@@ -151,8 +152,13 @@ mod tests {
             .find(|f| f["type"] == "fixture_launch")
             .unwrap();
         let args = launch["args"].as_array().unwrap();
-        let flag = args.iter().position(|arg| arg == "--model").unwrap();
-        assert_eq!(args[flag + 1], "mahoquot/gpt-6-luna");
+        // No model named: the background model, and with none configured no --model flag at
+        // all (the engine's default model), never a built-in model.
+        let launched = args
+            .iter()
+            .position(|arg| arg == "--model")
+            .map(|flag| args[flag + 1].as_str().unwrap().to_owned());
+        assert_eq!(launched, crate::model_policy::background_model());
         assert!(!frames.iter().any(|f| matches!(
             f["type"].as_str(),
             Some("set_model" | "set_thinking_level" | "set_auto_retry")

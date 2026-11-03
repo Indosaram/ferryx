@@ -60,6 +60,29 @@ pub const GHOSTTY_TERMINAL_OPT_SELECTION: c_int = 21;
 pub const GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES: c_int = 27;
 pub const GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES: c_int = 28;
 pub const GHOSTTY_TERMINAL_OPT_MODE: c_int = 34;
+pub const GHOSTTY_TERMINAL_OPT_SEMANTIC_PROMPT: c_int = 42;
+pub const GHOSTTY_TERMINAL_OPT_RESET: c_int = 43;
+pub const GHOSTTY_TERMINAL_OPT_PROGRAM_STATUS: c_int = 46;
+
+// GhosttyProgramStatusState matching `ghostty/vt/terminal.h`.
+pub const GHOSTTY_PROGRAM_STATUS_STATE_IDLE: c_int = 0;
+pub const GHOSTTY_PROGRAM_STATUS_STATE_WORKING: c_int = 1;
+pub const GHOSTTY_PROGRAM_STATUS_STATE_DONE: c_int = 2;
+pub const GHOSTTY_PROGRAM_STATUS_STATE_BLOCKED: c_int = 3;
+pub const GHOSTTY_PROGRAM_STATUS_STATE_ERROR: c_int = 4;
+pub const GHOSTTY_PROGRAM_STATUS_STATE_CLEAR: c_int = 5;
+
+// GhosttyProgramStatusKind matching `ghostty/vt/terminal.h`. KIND_NONE (0) and unknown
+// values both map to "no kind".
+pub const GHOSTTY_PROGRAM_STATUS_KIND_PERMISSION: c_int = 1;
+pub const GHOSTTY_PROGRAM_STATUS_KIND_QUESTION: c_int = 2;
+pub const GHOSTTY_PROGRAM_STATUS_KIND_AUTH: c_int = 3;
+
+// GhosttySemanticPromptKind / GhosttySemanticPromptPromptKind matching `ghostty/vt/terminal.h`.
+pub const GHOSTTY_SEMANTIC_PROMPT_PROMPT_START: c_int = 1;
+pub const GHOSTTY_SEMANTIC_PROMPT_PROMPT_RIGHT: c_int = 1;
+pub const GHOSTTY_SEMANTIC_PROMPT_PROMPT_CONTINUATION: c_int = 2;
+pub const GHOSTTY_SEMANTIC_PROMPT_PROMPT_SECONDARY: c_int = 3;
 
 // GhosttyTerminalScrollViewportTag matching `ghostty/vt/terminal.h`.
 pub const GHOSTTY_SCROLL_VIEWPORT_TOP: c_int = 0;

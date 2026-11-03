@@ -190,9 +190,9 @@ async fn popup_native_menu<R: Runtime>(
     app: &AppHandle<R>,
     request: NativePopupMenuRequest,
 ) -> Result<(), IpcError> {
-    let window: tauri::Window<R> = app
-        .get_window("main")
-        .ok_or_else(|| IpcError::internal("Main Ferryx window is unavailable"))?;
+    // A context menu is opened by a click in the window the user works in, i.e. the focused one.
+    let window: tauri::Window<R> = crate::window_registry::focused_window(app)
+        .ok_or_else(|| IpcError::internal("No Ferryx window is available"))?;
     let window_clone = window.clone();
     let (sender, receiver) = tokio::sync::oneshot::channel();
     window
@@ -250,12 +250,14 @@ pub async fn cmd_native_sidebar_context_menu<R: Runtime>(
 
 pub fn register_menu_event_forwarder<R: Runtime>(app: &AppHandle<R>) {
     app.on_menu_event(move |app_handle, event| {
-        let _ = app_handle.emit(
-            MENU_ACTION_EVENT,
-            NativeMenuActionPayload {
-                id: event.id().0.clone(),
-            },
-        );
+        let payload = NativeMenuActionPayload {
+            id: event.id().0.clone(),
+        };
+        // The popup belonged to the focused window; the other windows must not act on its choice.
+        let _ = match crate::window_registry::focused_window(app_handle) {
+            Some(window) => app_handle.emit_to(window.label(), MENU_ACTION_EVENT, payload),
+            None => app_handle.emit(MENU_ACTION_EVENT, payload),
+        };
     });
 }
 

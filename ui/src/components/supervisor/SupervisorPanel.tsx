@@ -19,7 +19,9 @@ import {
   type SupervisorSnapshot,
 } from "../../lib/supervisor";
 import { LANE_KEY_PREFIX, type SupervisorConnection, type UnifiedSupervisorClient, type UnifiedSupervisorView } from "../../lib/unifiedSupervisor";
+import { desktopSetupActions, type SetupActions, type SetupProject } from "../../lib/supervisorSetup";
 import { SegmentedControl } from "../ui/SegmentedControl";
+import { SupervisorSetupBanner } from "./SupervisorSetupBanner";
 import { UnifiedSupervisorSection, type AdoptableLane } from "./UnifiedSupervisorSection";
 
 function clock(atMs: number): string {
@@ -177,9 +179,14 @@ export function adoptableLanes(snapshot: SupervisorSnapshot, unified: UnifiedSup
     .map((lane) => ({ key: lane.key, title: lane.title }));
 }
 
-function UnifiedForDesktop({ snapshot, lastUnified, client }: { snapshot: SupervisorSnapshot; lastUnified: UnifiedSupervisorView | null; client: UnifiedSupervisorClient }) {
+type DesktopSetup = { actions: SetupActions | null; projects: readonly SetupProject[] };
+
+function UnifiedForDesktop({ snapshot, lastUnified, client, setup }: { snapshot: SupervisorSnapshot; lastUnified: UnifiedSupervisorView | null; client: UnifiedSupervisorClient; setup: DesktopSetup }) {
   const view = snapshot.supervisor ?? lastUnified;
-  if (!view) return null;
+  if (!view) {
+    // No unified view yet (engine off, no owner): setup is the only thing to offer.
+    return <SupervisorSetupBanner surface="desktop" status={snapshot.setup ?? null} actions={setup.actions} projects={setup.projects} className="mx-2 mb-1.5" />;
+  }
   const connection = desktopConnection(snapshot);
   return (
     <div className="mx-2 mb-1.5">
@@ -191,6 +198,7 @@ function UnifiedForDesktop({ snapshot, lastUnified, client }: { snapshot: Superv
         view={view}
         client={connection === "live" ? client : null}
         adoptable={connection === "live" ? adoptableLanes(snapshot, view) : []}
+        setup={{ status: snapshot.setup ?? null, actions: setup.actions, projects: setup.projects }}
       />
     </div>
   );
@@ -202,12 +210,18 @@ export function SupervisorPanelView({
   now,
   lastUnified = null,
   client = desktopUnifiedClient,
+  setupActions = desktopSetupActions,
+  projects = [],
 }: {
   snapshot: SupervisorSnapshot;
   now: number;
   lastUnified?: UnifiedSupervisorView | null;
   client?: UnifiedSupervisorClient;
+  setupActions?: SetupActions | null;
+  /** Local projects "Turn on supervisor" maps. */
+  projects?: readonly SetupProject[];
 }) {
+  const setup: DesktopSetup = { actions: setupActions, projects };
   const { hub, lanes, watched, actions } = snapshot;
   const acting = actingSessionIds(snapshot, now);
   const allPaused = lanes.length > 0 && lanes.every((lane) => lane.paused);
@@ -232,7 +246,7 @@ export function SupervisorPanelView({
         </span>
         {hub.error ? <span className="font-mono text-[10.5px]">{hub.error}</span> : null}
         <div className="-mx-2">
-          <UnifiedForDesktop snapshot={snapshot} lastUnified={lastUnified} client={client} />
+          <UnifiedForDesktop snapshot={snapshot} lastUnified={lastUnified} client={client} setup={setup} />
         </div>
       </div>
     );
@@ -257,7 +271,7 @@ export function SupervisorPanelView({
         </p>
       </div>
 
-      <UnifiedForDesktop snapshot={snapshot} lastUnified={lastUnified} client={client} />
+      <UnifiedForDesktop snapshot={snapshot} lastUnified={lastUnified} client={client} setup={setup} />
 
       <div className="flex h-8 shrink-0 items-center justify-between px-3.5 text-[11px] font-medium text-muted-foreground">
         <span>Supervising</span><span>{lanes.length}</span>
@@ -326,9 +340,9 @@ export function SupervisorPanelView({
   );
 }
 
-export function SupervisorPanel() {
+export function SupervisorPanel({ projects = [] }: { projects?: readonly SetupProject[] }) {
   const { snapshot, now, lastUnified } = useSupervisor();
-  return <SupervisorPanelView snapshot={snapshot} now={now} lastUnified={lastUnified} />;
+  return <SupervisorPanelView snapshot={snapshot} now={now} lastUnified={lastUnified} projects={projects} />;
 }
 
 /** Segment-label indicator: true while the supervisor typed somewhere moments ago. */

@@ -1,0 +1,60 @@
+[package]
+name = "ferryx_engine"
+version = "156.2.0"
+edition = "2024"
+description = "Chromium (CEF) engine process for Ferryx browser panes, downloaded on demand"
+license = "MIT"
+publish = false
+
+# Not part of any parent workspace: it builds against the CEF binary distribution, which the
+# Ferryx app never links.
+[workspace]
+
+[lib]
+# Windows runs the engine through CEF's bootstrap.exe, which loads this library.
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ferryx_engine"
+path = "src/main.rs"
+
+[[bin]]
+name = "ferryx_engine_helper"
+path = "src/bin/helper.rs"
+
+[[bin]]
+name = "bundle-engine"
+path = "src/bin/bundle.rs"
+
+[features]
+default = ["sandbox"]
+sandbox = ["cef/sandbox"]
+
+[package.metadata.cef.bundle]
+helper_name = "ferryx_engine_helper"
+resources_path = "resources"
+
+[dependencies]
+cef = { version = "=156.2.0", default-features = false, features = ["build-util"] }
+ferryx-browser-engine-protocol = { path = "../browser-engine-protocol" }
+semver = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.3"
+objc2-foundation = "0.3.2"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSApplication",
+    "NSEvent",
+    "NSResponder",
+    "NSUserInterfaceValidation",
+    "NSView",
+    "NSWindow",
+] }
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }

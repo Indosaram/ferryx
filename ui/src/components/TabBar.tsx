@@ -41,6 +41,13 @@ type TabBarProps = {
   onRenameTab?: (id: string, newLabel: string) => void;
   onTogglePin?: (id: string, pinned: boolean) => void;
   onResetAgentState?: (tabId: string) => void;
+  /**
+   * Multi-window: moves a terminal tab to another window (`null` opens a new one). Only passed
+   * when the multi-window shell is available, so the menu items stay hidden otherwise.
+   */
+  onMoveTabToWindow?: (tabId: string, targetLabel: string | null) => void;
+  /** Labels of the other open windows, read each time the tab menu opens. */
+  listOtherWindows?: () => Promise<string[]>;
   /** Session that the tab menu's Restart acts on. Defaults to the tab's own session. */
   sessionIdForLifecycle?: (tab: WorkspaceTab) => string | null;
   filePathsForTab?: (tab: FileTab) => { absolute: string; relative: string | null };
@@ -78,6 +85,11 @@ const WINDOWS_SHELL_OPTIONS = [
   { id: "new-terminal:cmd", shell: "cmd", label: "Command Prompt" },
   { id: "new-terminal:wsl", shell: "wsl", label: "WSL" },
 ] as const;
+
+/** Menu label for a desktop window label (`main` or `ws-<id>`). */
+export function windowMenuLabel(label: string): string {
+  return label === "main" ? "Main Window" : `Window ${label.replace(/^ws-/, "").slice(0, 6)}`;
+}
 
 /**
  * True when `label` is a label this app generates for `path` (the basename or a
@@ -124,6 +136,8 @@ export function TabBar({
   onRenameTab,
   onTogglePin,
   onResetAgentState,
+  onMoveTabToWindow,
+  listOtherWindows,
   sessionIdForLifecycle,
   filePathsForTab,
   onReloadFileTab,
@@ -324,6 +338,7 @@ export function TabBar({
   const handleContextMenu = useCallback((event: React.MouseEvent, tab: WorkspaceTab) => {
     event.preventDefault();
     event.stopPropagation();
+    const position = { x: event.clientX, y: event.clientY };
     const index = tabs.findIndex((candidate) => candidate.id === tab.id);
     const hasTabsToRight = index >= 0 && index < tabs.length - 1;
     const hasTabsToLeft = index > 0;
@@ -466,8 +481,39 @@ export function TabBar({
       items.push({ kind: "item", id: "close-left", label: "Close tabs to left", enabled: hasTabsToLeft });
       actions["close-left"] = () => onCloseToLeft(tab.id);
     }
-    openMenu("cmd_native_tab_context_menu", items, { x: event.clientX, y: event.clientY }, actions);
-  }, [browserSettings, tabs, handleStartRename, onActivate, onClose, onCloseOthers, onCloseToLeft, onCloseToRight, onDuplicateBrowser, onMoveTabToSplit, onResetAgentState, onSplitDown, onSplitRight, onTogglePin, sessionIdForLifecycle, filePathsForTab, onReloadFileTab, onOpenFileExternally, onRevealFileTab]);
+    if (!(onMoveTabToWindow && isTerminalTab(tab))) {
+      openMenu("cmd_native_tab_context_menu", items, position, actions);
+      return;
+    }
+    // The move entries sit above the close group; the window list is read when the menu opens so
+    // a window opened or closed since the last menu is reflected.
+    const closeIndex = items.findIndex((entry) => entry.kind === "item" && entry.id === "close");
+    const insertAt = closeIndex < 0 ? items.length : closeIndex;
+    const openWithWindows = (otherWindows: string[]) => {
+      const moveItems: NativeMenuEntry[] = [{ kind: "item", id: "move-window:new", label: "Move to New Window" }];
+      actions["move-window:new"] = () => onMoveTabToWindow(tab.id, null);
+      if (otherWindows.length > 0) {
+        moveItems.push({
+          kind: "submenu",
+          label: "Move to Window",
+          items: otherWindows.map((label) => ({
+            kind: "item" as const,
+            id: `move-window:${label}`,
+            label: windowMenuLabel(label),
+          })),
+        });
+        for (const label of otherWindows) actions[`move-window:${label}`] = () => onMoveTabToWindow(tab.id, label);
+      }
+      moveItems.push({ kind: "separator" });
+      const withMove = [...items.slice(0, insertAt), ...moveItems, ...items.slice(insertAt)];
+      openMenu("cmd_native_tab_context_menu", withMove, position, actions);
+    };
+    if (!listOtherWindows) {
+      openWithWindows([]);
+      return;
+    }
+    void listOtherWindows().catch(() => [] as string[]).then(openWithWindows);
+  }, [browserSettings, tabs, handleStartRename, onActivate, onClose, onCloseOthers, onCloseToLeft, onCloseToRight, onDuplicateBrowser, onMoveTabToSplit, onMoveTabToWindow, listOtherWindows, onResetAgentState, onSplitDown, onSplitRight, onTogglePin, sessionIdForLifecycle, filePathsForTab, onReloadFileTab, onOpenFileExternally, onRevealFileTab]);
 
   const handleCommitRename = useCallback((tabId: string) => {
     const cancelled = renameCancelledRef.current;

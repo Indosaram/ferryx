@@ -39,7 +39,13 @@ export function remoteSidebarSignals(
       if (published) continue;
       const activities: TerminalActivity[] = (inventory?.entries ?? []).flatMap((entry) =>
         entry.activityState && entry.workspaceId === node.workspaceId && entry.worktreeSlug === node.worktreeSlug
-          ? [{ state: entry.activityState, title: entry.title ?? "", isAgent: entry.agentType !== null, ...(entry.agentType ? { agentType: entry.agentType } : {}) }]
+          ? [{
+              state: entry.activityState,
+              title: entry.title ?? "",
+              isAgent: entry.agentType !== null,
+              ...(entry.agentType ? { agentType: entry.agentType } : {}),
+              ...(entry.activityOutcome ? { outcome: entry.activityOutcome } : {}),
+            }]
           : []);
       if (activities.length > 0) activityByWorktreePath[node.path] = summarizeActivities(activities);
     }

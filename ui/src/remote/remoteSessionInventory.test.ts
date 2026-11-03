@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  acknowledgeSessionOutcome,
   applySessionActivity,
   applyWorktreeLabels,
   emptyInventory,
@@ -414,6 +415,48 @@ describe("parseMachineAgentStateFrame", () => {
       parseMachineAgentStateFrame(JSON.stringify({ type: "inventoryInvalidated", payload: {} })),
     ).toBeNull();
     expect(parseMachineAgentStateFrame("binary\u0001\u0002")).toBeNull();
+  });
+
+  it("decodes the daemon's stateSource, outcome and kind and maps its own state words", () => {
+    const target = { machineId: MACHINE, sessionId: "s-1a-working", daemonEpoch: 101 };
+    expect(parseMachineAgentStateFrame({ type: "agent_state", target, state: "idle", stateSource: "protocol", outcome: "error" }))
+      .toEqual({ machineId: MACHINE, sessionId: "s-1a-working", daemonEpoch: "101", state: "done", agent: null, stateSource: "protocol", outcome: "error" });
+    expect(parseMachineAgentStateFrame({ type: "agent_state", target, state: "blocked", stateSource: "protocol", kind: "question", detail: "<b>x</b>" }))
+      .toEqual({ machineId: MACHINE, sessionId: "s-1a-working", daemonEpoch: "101", state: "waiting", agent: null, stateSource: "protocol", kind: "question" });
+    // A bare idle names no finished turn, so it reports nothing.
+    expect(parseMachineAgentStateFrame({ type: "agent_state", target, state: "idle", stateSource: "protocol" })).toBeNull();
+  });
+
+  it("decodes a frame without the new fields exactly as before and ignores unknown values", () => {
+    const target = { sessionId: "s-1" };
+    expect(parseMachineAgentStateFrame({ type: "agent_state", target, state: "done" }))
+      .toEqual({ machineId: null, sessionId: "s-1", daemonEpoch: null, state: "done", agent: null });
+    expect(parseMachineAgentStateFrame({ type: "agent_state", target, state: "idle" })).toBeNull();
+    expect(parseMachineAgentStateFrame({ type: "agent_state", target, state: "done", outcome: "cancelled", kind: "other" }))
+      .toEqual({ machineId: null, sessionId: "s-1", daemonEpoch: null, state: "done", agent: null });
+  });
+});
+
+describe("session outcome", () => {
+  const parsed = parseSessionsPayload(MACHINE, boundaryPayload());
+  const inventory = parsed.ok ? parsed.inventory : emptyInventory(MACHINE);
+
+  it("keeps an observed outcome on the row until the session is opened", () => {
+    const observed = applySessionActivity(inventory, [
+      { sessionId: "s-1a-working", state: "done", source: "agent_state", outcome: "error" },
+    ]);
+    expect(observed?.entries.find((entry) => entry.sessionId === "s-1a-working")?.activityOutcome).toBe("error");
+    const opened = acknowledgeSessionOutcome(observed, "s-1a-working");
+    const row = opened?.entries.find((entry) => entry.sessionId === "s-1a-working");
+    expect(row?.activityOutcome).toBeUndefined();
+    expect(row?.activityState).toBe("done");
+    expect(acknowledgeSessionOutcome(opened, "s-1a-working")).toBe(opened);
+  });
+
+  it("drops the outcome when the session starts a new turn", () => {
+    const done = applySessionActivity(inventory, [{ sessionId: "s-1a-working", state: "done", source: "agent_state", outcome: "done" }]);
+    const working = applySessionActivity(done, [{ sessionId: "s-1a-working", state: "working", source: "agent_state" }]);
+    expect(working?.entries.find((entry) => entry.sessionId === "s-1a-working")?.activityOutcome).toBeUndefined();
   });
 });
 

@@ -45,7 +45,11 @@ jobs:
             libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev \
             libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev \
             cmake pkg-config xvfb xdotool x11-utils openbox imagemagick \
-            dbus-x11 iproute2 mesa-vulkan-drivers libvulkan1 fonts-dejavu-core
+            dbus-x11 iproute2 mesa-vulkan-drivers libvulkan1 fonts-dejavu-core \
+            clang libclang-dev libpipewire-0.3-dev libspa-0.2-dev libdbus-1-dev \
+            libva-dev libdrm-dev libgbm-dev libegl-dev libgl-dev libxcb1-dev libxcb-shm0-dev \
+            libxcb-randr0-dev libxcb-xfixes0-dev libx11-dev libxext-dev libxrandr-dev \
+            libxfixes-dev libxtst-dev libxi-dev libevdev-dev libudev-dev
       - name: Verify runtime isolation guards
         run: python3 -m unittest discover -s scripts/qa -p 'pr24_native_smoke_test.py'
       - name: Build actual desktop assets and executable (not a release bundle)
@@ -55,6 +59,7 @@ jobs:
           bun install --cwd ui --frozen-lockfile
           bun run --cwd ui build
           bun scripts/release-workflow-policy.mjs
+          bun scripts/fetch-ffmpeg.mjs --target x86_64-unknown-linux-gnu
           python3 scripts/ci-run-bounded.py --timeout-seconds 2400 \
             --log "$RUNNER_TEMP/desktop-qa/build.log" -- \
             cargo build --manifest-path src-tauri/Cargo.toml --bin ferryx --features tauri/custom-protocol

@@ -2,6 +2,7 @@
 // the cross-machine Inbox, and the merged audit list. No React, no transport.
 import { formatAttentionTime } from "../../features/ferryx/attention/attentionModel";
 import { actingSessionIds, type SupervisorAction, type SupervisorLane, type SupervisorSnapshot } from "../../lib/supervisorModel";
+import { setupNeedsAttention } from "../../lib/supervisorSetupModel";
 import type { RemoteSupervisorEntry, RemoteSupervisorLane } from "../remoteSupervisor";
 import type { RemoteSessionInventory } from "../remoteSessionInventory";
 import type { AccountWorktreeOption } from "../useAccountWorktrees";
@@ -21,11 +22,21 @@ export type SupervisorHeadline =
   | { readonly kind: "checking" }
   | { readonly kind: "unknown" }
   | { readonly kind: "off" }
+  | { readonly kind: "needs_setup"; readonly machine: string }
   | { readonly kind: "paused"; readonly lanes: number }
   | { readonly kind: "typing"; readonly lanes: number }
   | { readonly kind: "active"; readonly lanes: number; readonly watched: number };
 
-/** The SupervisorPanelView headline, over every machine whose snapshot is readable. */
+/** The first readable machine whose supervisor setup needs the person, or null. */
+export function setupMachine(machines: readonly SupervisorMachineView[]): SupervisorMachineView | null {
+  return machines.find((m) => setupNeedsAttention(m.snapshot?.setup ?? null)) ?? null;
+}
+
+/**
+ * The SupervisorPanelView headline, over every machine whose snapshot is readable:
+ * off > needs setup > paused > typing > active. A machine that does not report setup
+ * (older daemon) never reads as needing it.
+ */
 export function supervisorHeadline(machines: readonly SupervisorMachineView[], now: number, discovering = false): SupervisorHeadline {
   const snapshots = machines.flatMap((m) => (m.snapshot ? [m.snapshot] : []));
   if (snapshots.length === 0) {
@@ -35,6 +46,8 @@ export function supervisorHeadline(machines: readonly SupervisorMachineView[], n
   }
   const lanes = snapshots.flatMap((s) => s.lanes);
   if (!snapshots.some((s) => s.hub.running)) return { kind: "off" };
+  const setupHost = setupMachine(machines);
+  if (setupHost) return { kind: "needs_setup", machine: setupHost.label };
   if (lanes.length > 0 && lanes.every((lane) => lane.paused)) return { kind: "paused", lanes: lanes.length };
   if (snapshots.some((s) => {
     const acting = actingSessionIds(s, now);
@@ -56,6 +69,8 @@ export function headlineSentence(headline: SupervisorHeadline): string {
       return "Can't reach the supervisor on your computers right now.";
     case "off":
       return "The supervisor isn't running on any of your computers.";
+    case "needs_setup":
+      return `Supervisor setup isn't finished on ${headline.machine || "your computer"}.`;
     case "paused":
       return "Paused on every lane. It still reads your sessions but sends nothing.";
     case "typing":

@@ -2,7 +2,7 @@
 //! inbox items collected against those that passed the prefilter. omo's `omon usage --since
 //! Nm|Nh|Nd [--json]` is `GET /api/usage?since=..&json=1` on the hub, and the daily digest
 //! carries yesterday's line.
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::SqlitePool;
 
@@ -18,10 +18,9 @@ pub struct Report {
     pub inbox_passed: i64,
 }
 
-fn kst_day(at: DateTime<Utc>) -> String {
-    at.with_timezone(&chrono_tz::Asia::Seoul)
-        .date_naive()
-        .to_string()
+/// The owner-local calendar day of `at`, as `inbox_filter_stats.day` stores it.
+fn owner_day(at: DateTime<Utc>) -> String {
+    crate::locale::current().local_date(at).to_string()
 }
 
 /// Judge calls and omo fallbacks in `[since, until)`. Rows of the retained mhc supervisor engine
@@ -55,8 +54,8 @@ pub async fn report(
     let dropped: i64 = sqlx::query_scalar(
         "SELECT COALESCE(sum(count),0) FROM inbox_filter_stats WHERE day >= ? AND day <= ?",
     )
-    .bind(kst_day(since))
-    .bind(kst_day(until))
+    .bind(owner_day(since))
+    .bind(owner_day(until))
     .fetch_one(pool)
     .await?;
     Ok(Report {
@@ -75,14 +74,22 @@ pub async fn report(
 
 impl Report {
     pub fn digest_line(&self) -> String {
-        format!(
-            "어제: jev {}회(폴백 {}, 상한 도달 {}), 인박스 수집 {}건 중 필터 통과 {}건",
+        let (calls, fallbacks, capped, collected, passed) = (
             self.judge_calls,
             self.fallback_calls,
             self.cap_reached,
             self.inbox_collected,
-            self.inbox_passed
-        )
+            self.inbox_passed,
+        );
+        if crate::locale::current().is_korean() {
+            format!(
+                "어제: jev {calls}회(폴백 {fallbacks}, 상한 도달 {capped}), 인박스 수집 {collected}건 중 필터 통과 {passed}건"
+            )
+        } else {
+            format!(
+                "Yesterday: jev {calls} calls ({fallbacks} fallbacks, cap reached {capped}), inbox collected {collected}, {passed} passed the filter"
+            )
+        }
     }
 }
 
@@ -133,22 +140,15 @@ fn since_start(since: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>> {
         .ok_or_else(|| HubError::message("--since out of range"))
 }
 
-/// omo `usage::yesterday`: the previous KST day, for the digest.
+/// omo `usage::yesterday`: the owner's previous local day, for the digest.
 pub async fn yesterday(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Report> {
-    let day = now.with_timezone(&chrono_tz::Asia::Seoul).date_naive();
-    let end = day
-        .and_hms_opt(0, 0, 0)
-        .and_then(|midnight| {
-            chrono_tz::Asia::Seoul
-                .from_local_datetime(&midnight)
-                .single()
-        })
-        .map(|at| at.with_timezone(&Utc))
-        .ok_or_else(|| HubError::message("invalid usage day"))?;
-    let mut report = report(pool, end - chrono::Duration::days(1), end).await?;
+    let locale = crate::locale::current();
+    let day = locale.local_date(now);
     let previous = day
         .pred_opt()
         .ok_or_else(|| HubError::message("invalid previous day"))?;
+    let end = locale.day_start(day);
+    let mut report = report(pool, locale.day_start(previous), end).await?;
     let dropped: i64 =
         sqlx::query_scalar("SELECT COALESCE(sum(count),0) FROM inbox_filter_stats WHERE day = ?")
             .bind(previous.to_string())
@@ -421,6 +421,30 @@ pub async fn supervisor_calls(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+
+    #[tokio::test]
+    async fn yesterday_is_the_owners_local_day_and_the_line_is_in_their_language() {
+        let pool = crate::storage::memory().await.unwrap();
+        // 20:00Z on Oct 22 is Oct 22 in UTC but already Oct 23 05:00 in Seoul.
+        sqlx::query("INSERT INTO judge_calls(id, purpose, kind, ms, outcome, used_fallback, created_at) VALUES('late', 'inbox_class', 'choice', 1, 'hold', 0, '2026-10-22T20:00:00+00:00')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Oct 23 12:00Z: yesterday is Oct 22 in both zones, but Seoul's Oct 22 ended at 15:00Z.
+        let now = Utc.with_ymd_and_hms(2026, 10, 23, 12, 0, 0).unwrap();
+        assert_eq!(yesterday(&pool, now).await.unwrap().judge_calls, 0);
+        let (calls, line) = crate::locale::scope(crate::locale::OwnerLocale::english_utc(), async {
+            let report = yesterday(&pool, now).await.unwrap();
+            (report.judge_calls, report.digest_line())
+        })
+        .await;
+        assert_eq!(calls, 1);
+        assert_eq!(
+            line,
+            "Yesterday: jev 1 calls (0 fallbacks, cap reached false), inbox collected 0, 0 passed the filter"
+        );
+    }
 
     #[tokio::test]
     async fn yesterdays_judge_and_inbox_counts_make_omos_digest_line() {

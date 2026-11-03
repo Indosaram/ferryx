@@ -5,10 +5,22 @@ import type { DeliveryReceipt, RunTarget } from "./scopedContracts";
 export const DEFAULT_TERMINAL_FONT_STACK = 'MesloLGS NF, "Noto Sans KR", monospace';
 import { defaultRemoteClient, getRemoteAuthToken, RemoteClient, type RemotePreferenceTarget } from "./remoteClient";
 import { invoke, isTauri as isTauriShell } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { listen, type EventCallback, type UnlistenFn } from "@tauri-apps/api/event";
 import { switchDebug } from "./switchDebug";
 import { shortcutContext, traceShortcutAction } from "./shortcutDiagnostics";
 import { getDurableNativeBinding } from "./nativeTerminalLifecycle";
+import { currentWindowLabel } from "./windowIdentity";
+
+/**
+ * Listens for an event the backend routes to one window with `emit_to(label)` (session-owner and
+ * focused-window events). A plain `listen()` registers with target `Any`, and Tauri delivers every
+ * `emit_to` to all `Any` listeners in every webview, so each window would act on the others'
+ * events. Scoping the listener to this window's label keeps `emit_to` targeted while a broadcast
+ * `emit` still reaches it.
+ */
+export function listenToThisWindow<T>(event: string, handler: EventCallback<T>): Promise<UnlistenFn> {
+  return listen<T>(event, handler, { target: currentWindowLabel() });
+}
 
 export type {
   AttachTerminalRequest,
@@ -890,7 +902,7 @@ export async function resizeTerminalRemote(request: { sessionId: string; generat
 
 export async function onTerminalRemoteStatus(handler: (status: import("./types").TerminalRemoteStatus) => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<import("./types").TerminalRemoteStatus>("terminal_remote_status", event => handler(event.payload));
+  return listenToThisWindow<import("./types").TerminalRemoteStatus>("terminal_remote_status", event => handler(event.payload));
 }
 
 export async function onTerminalOutput(handler: (payload: TerminalOutputPayload) => void): Promise<UnlistenFn> {
@@ -918,21 +930,21 @@ export async function onNativeTerminalTitle(
   handler: (payload: NativeTerminalTitlePayload) => void,
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<NativeTerminalTitlePayload>("native_terminal_title", (event) => handler(event.payload));
+  return listenToThisWindow<NativeTerminalTitlePayload>("native_terminal_title", (event) => handler(event.payload));
 }
 
 export async function onNativeTerminalBell(
   handler: (payload: NativeTerminalBellPayload) => void,
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<NativeTerminalBellPayload>("native_terminal_bell", (event) => handler(event.payload));
+  return listenToThisWindow<NativeTerminalBellPayload>("native_terminal_bell", (event) => handler(event.payload));
 }
 
 export async function onNativeTerminalAgentState(
   handler: (payload: NativeTerminalAgentStatePayload) => void,
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<NativeTerminalAgentStatePayload>("native_terminal_agent_state", (event) => handler(event.payload));
+  return listenToThisWindow<NativeTerminalAgentStatePayload>("native_terminal_agent_state", (event) => handler(event.payload));
 }
 
 export interface NativeTerminalInputReceiptPayload {
@@ -953,7 +965,7 @@ export async function onNativeTerminalInputReceipt(
   handler: (payload: NativeTerminalInputReceiptPayload) => void,
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<NativeTerminalInputReceiptPayload>("native_terminal_input_receipt", (event) =>
+  return listenToThisWindow<NativeTerminalInputReceiptPayload>("native_terminal_input_receipt", (event) =>
     handler(event.payload),
   );
 }
@@ -962,7 +974,7 @@ export async function onNativeTerminalScrollbar(
   handler: (payload: NativeTerminalScrollbarPayload) => void,
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<NativeTerminalScrollbarPayload>("native_terminal_scrollbar", (event) => handler(event.payload));
+  return listenToThisWindow<NativeTerminalScrollbarPayload>("native_terminal_scrollbar", (event) => handler(event.payload));
 }
 
 export async function setNativeTerminalScrollbarOverlay(
@@ -1048,7 +1060,7 @@ export async function onNativeTerminalFocus(
   handler: (sessionId: string) => void,
 ): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
-  return listen<string>("native_terminal_focus", (event) => handler(event.payload));
+  return listenToThisWindow<string>("native_terminal_focus", (event) => handler(event.payload));
 }
 
 /**
@@ -1061,7 +1073,7 @@ async function listenShortcut<T>(action: string, handler: (payload: T) => void):
   const registration = ++nativeShortcutRegistration;
   switchDebug("shortcut.native.register.start", { action, registration });
   try {
-    const dispose = await listen<T>(action, (event) => {
+    const dispose = await listenToThisWindow<T>(action, (event) => {
       const details = { action, registration, ...shortcutContext() };
       switchDebug("shortcut.native.receipt", details);
       return traceShortcutAction(action, () => handler(event.payload), { registration, source: "native-event" });
@@ -1235,6 +1247,15 @@ export async function resetAgentState(sessionId: string): Promise<void> {
   await invokeCommand<void>("cmd_agent_state_reset", {
     sessionId,
   });
+}
+
+/**
+ * Tells the daemon the user has looked at this session, so it drops the program's done/error
+ * outcome (daemon request `acknowledgeAgentOutcome`). `sessionId` is the backend PTY id.
+ */
+export async function acknowledgeAgentOutcome(sessionId: string): Promise<void> {
+  if (!isTauri()) return;
+  await invokeCommand<void>("cmd_agent_acknowledge_outcome", { sessionId });
 }
 
 export type AgentPromptKind = "choice" | "approval" | "freeText";
@@ -1602,6 +1623,138 @@ export async function loadSession(): Promise<import('./types').PersistedWorkspac
 export async function clearSession(): Promise<void> {
   if (!isTauri()) return;
   return invokeCommand<void>('cmd_session_clear');
+}
+
+/**
+ * Deletes a closed secondary window's session file once its sessions were adopted elsewhere.
+ * Session save/load/clear above are already window-scoped: Tauri injects the calling window.
+ */
+export async function discardWindowSession(label: string): Promise<void> {
+  if (!isTauri()) return;
+  return invokeCommand<void>('cmd_session_discard_window', { label });
+}
+
+/** Opens a new empty desktop window (label `ws-<id>`). */
+export async function openNewWindow(): Promise<void> {
+  if (!isTauri()) return;
+  return invokeCommand<void>('cmd_window_new');
+}
+
+export const WINDOW_SESSIONS_ORPHANED_EVENT = 'window_sessions_orphaned';
+
+export type WindowSessionsOrphanedPayload = { fromLabel: string; sessionIds: string[] };
+
+/** Event telling this window to adopt backend sessions another window moved to it. */
+export const WINDOW_SESSIONS_ADOPT_EVENT = 'window_sessions_adopt';
+
+/**
+ * Mirrors `WindowSessionsAdoptPayload` in `src-tauri/src/ipc/window.rs` (serde camelCase). The
+ * backend omits `workspaceId` and `attemptGenerations` when empty, so both are optional on the
+ * wire; `attemptGenerations` is always present here (possibly empty).
+ */
+export type WindowSessionsAdoptPayload = {
+  backendSessionIds: string[];
+  activate: boolean;
+  workspaceId?: string;
+  /** Native attach generation each session last had; a new attach must use a higher one. */
+  attemptGenerations: Record<string, number>;
+};
+
+/** Mirrors `WindowMoveOutcome` in `src-tauri/src/ipc/window.rs`. */
+export type WindowMoveOutcome = {
+  targetLabel: string;
+  moved: string[];
+  skipped: string[];
+  queued: boolean;
+};
+
+/** Returns null for anything that is not a well-formed adopt payload. */
+export function parseWindowSessionsAdopt(raw: unknown): WindowSessionsAdoptPayload | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const payload = raw as Record<string, unknown>;
+  if (!Array.isArray(payload.backendSessionIds)) return null;
+  const backendSessionIds = payload.backendSessionIds.filter(
+    (id): id is string => typeof id === 'string' && id.length > 0,
+  );
+  if (backendSessionIds.length === 0) return null;
+  const attemptGenerations: Record<string, number> = {};
+  if (payload.attemptGenerations && typeof payload.attemptGenerations === 'object') {
+    for (const [id, generation] of Object.entries(payload.attemptGenerations)) {
+      if (typeof generation === 'number' && Number.isInteger(generation) && generation >= 0) {
+        attemptGenerations[id] = generation;
+      }
+    }
+  }
+  return {
+    backendSessionIds,
+    activate: payload.activate === true,
+    ...(typeof payload.workspaceId === 'string' && payload.workspaceId.length > 0
+      ? { workspaceId: payload.workspaceId }
+      : {}),
+    attemptGenerations,
+  };
+}
+
+export async function onWindowSessionsAdopt(
+  listener: (payload: WindowSessionsAdoptPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listenToThisWindow<unknown>(WINDOW_SESSIONS_ADOPT_EVENT, (event) => {
+    const payload = parseWindowSessionsAdopt(event.payload);
+    if (payload) listener(payload);
+  });
+}
+
+/**
+ * Adoption requests queued for this window while it booted. Call once, after the
+ * `window_sessions_adopt` listener is registered; later requests arrive as events.
+ */
+export async function takePendingWindowAdoptions(): Promise<WindowSessionsAdoptPayload[]> {
+  if (!isTauri()) return [];
+  const raw = await invokeCommand<unknown>('cmd_window_take_pending_adoptions');
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    const payload = parseWindowSessionsAdopt(entry);
+    return payload ? [payload] : [];
+  });
+}
+
+/** Labels of the open desktop windows (`main` and `ws-*`). */
+export async function listAppWindows(): Promise<string[]> {
+  if (!isTauri()) return [];
+  return invokeCommand<string[]>('cmd_window_list');
+}
+
+/**
+ * Moves live backend sessions to another window (`null` opens a new one). The sessions are never
+ * closed; the caller drops its own tabs after this resolves.
+ */
+export async function moveSessionsToWindow(request: {
+  targetLabel: string | null;
+  backendSessionIds: string[];
+  workspaceId: string | null;
+}): Promise<WindowMoveOutcome> {
+  return invokeCommand<WindowMoveOutcome>('cmd_window_move_sessions', {
+    targetLabel: request.targetLabel,
+    backendSessionIds: request.backendSessionIds,
+    workspaceId: request.workspaceId,
+  });
+}
+
+/** A closed secondary window left live backend sessions for this window to adopt. */
+export async function onWindowSessionsOrphaned(
+  listener: (payload: WindowSessionsOrphanedPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listenToThisWindow<unknown>(WINDOW_SESSIONS_ORPHANED_EVENT, (event) => {
+    // The backend payload is `{ label, sessionIds }` (WindowSessionsOrphanedPayload in lib.rs).
+    const payload = event.payload as { label?: unknown; sessionIds?: unknown } | null;
+    if (!payload || typeof payload.label !== 'string' || !Array.isArray(payload.sessionIds)) return;
+    listener({
+      fromLabel: payload.label,
+      sessionIds: payload.sessionIds.filter((id): id is string => typeof id === 'string' && id.length > 0),
+    });
+  });
 }
 
 export type RemoteTerminalTabInfo = {

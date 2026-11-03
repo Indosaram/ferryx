@@ -15,7 +15,7 @@ use crate::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::{sync::Arc, time::Duration};
+use std::{collections::VecDeque, sync::Arc, time::Duration};
 use tokio_tungstenite::tungstenite::Message;
 #[cfg(feature = "local-split-qa")]
 use {crate::paired_host::secure_http::PairedStream, tokio_tungstenite::MaybeTlsStream};
@@ -23,6 +23,25 @@ type Result<T> = std::result::Result<T, ClientError>;
 /// Bound on one relay->direct upgrade. Input queued in the owner mailbox while
 /// it runs must still be answered well inside the 30s operation deadline.
 const UPGRADE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long an untagged owner rejection may trail an outcome acknowledgement. The
+/// owner answers a successful acknowledgement with nothing; an owner that predates
+/// operation-tagged error frames answers a rejected one with an uncorrelated error
+/// frame, so a legacy rejection code inside this window is that rejection.
+const ACK_REPLY_WINDOW: Duration = Duration::from_secs(30);
+/// The `op` an owner puts on the error frame answering an outcome acknowledgement.
+const ACK_OP: &str = "acknowledgeAgentOutcome";
+/// The codes an owner without operation-tagged error frames answers a rejected
+/// acknowledgement with while its session lives. Such an owner admits its machine
+/// socket only for a local PTY (`machine_pty`), so its router takes the local
+/// branch: no SSH workspace is registered for the session, no paired chain or
+/// legacy peer is consulted, and the only backend failure is a missing mirror. The
+/// socket itself answers a stale-generation acknowledgement with
+/// INVALID_CONTROL_OR_GENERATION. Left fatal on purpose: STALE_GENERATION
+/// (authority revoked, the stream is fenced anyway) and "Session unavailable",
+/// which such an owner sends only when the PTY vanished between its frame check
+/// and the router (the session is gone, its exit or expiry is on the way).
+const LEGACY_ACK_REJECTIONS: [&str; 2] =
+    ["INVALID_CONTROL_OR_GENERATION", "Session has no program status mirror"];
 fn error(code: &str) -> ClientError {
     ClientError::local(code)
 }
@@ -96,6 +115,8 @@ pub struct Proxy {
     reconnect_delay: Duration,
     blocked: Option<String>,
     exit_code: Option<i32>,
+    /// Send instants of outcome acknowledgements whose rejection may still arrive.
+    pending_acks: VecDeque<tokio::time::Instant>,
 }
 #[cfg(feature = "local-split-qa")]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -140,6 +161,7 @@ impl Proxy {
             reconnect_delay: Duration::from_millis(500),
             blocked: None,
             exit_code: None,
+            pending_acks: VecDeque::new(),
         })
     }
     pub(crate) fn set_agent_sink(&mut self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
@@ -273,6 +295,7 @@ impl Proxy {
         }
         self.hub.record_initial_size(&self.id, cols, rows);
         self.controller = Some(generation);
+        self.pending_acks.clear();
         self.blocked = None;
         self.reconnect_delay = Duration::from_millis(500);
         self.replay_pending = true;
@@ -447,6 +470,42 @@ impl Proxy {
         self.desired_geometry = Some((cols, rows));
         Ok(())
     }
+    /// Fire-and-forget: Ok means the frame was sent, not that the owner applied it.
+    /// The wire carries no request id and the owner answers success with nothing,
+    /// so its rejection (tagged `op: acknowledgeAgentOutcome`, or an older owner's
+    /// untagged legacy code) is consumed in `receive` and never tears down the
+    /// stream; any other owner error still fails it.
+    pub async fn acknowledge_agent_outcome(&mut self, generation: Epoch) -> Result<()> {
+        self.send(generation, Message::Text(serde_json::json!({
+            "type": "acknowledgeAgentOutcome",
+            "generation": generation,
+        }).to_string().into())).await?;
+        self.pending_acks.push_back(tokio::time::Instant::now());
+        Ok(())
+    }
+    /// Consumes one outstanding acknowledgement if an error frame may answer it.
+    pub(crate) fn take_pending_ack(&mut self) -> bool {
+        let now = tokio::time::Instant::now();
+        while self.pending_acks.front().is_some_and(|sent| now.duration_since(*sent) > ACK_REPLY_WINDOW) {
+            self.pending_acks.pop_front();
+        }
+        self.pending_acks.pop_front().is_some()
+    }
+    /// Whether an owner error frame is the rejection of an outcome acknowledgement.
+    /// A tagged frame names the operation it answers; an untagged one comes from an
+    /// older owner and counts only with a legacy rejection code while an
+    /// acknowledgement is still outstanding.
+    pub(crate) fn consumes_ack_rejection(&mut self, frame: &serde_json::Value) -> bool {
+        if let Some(op) = frame.get("op") {
+            let answers_ack = op.as_str() == Some(ACK_OP);
+            if answers_ack {
+                self.take_pending_ack();
+            }
+            return answers_ack;
+        }
+        frame["code"].as_str().is_some_and(|code| LEGACY_ACK_REJECTIONS.contains(&code))
+            && self.take_pending_ack()
+    }
     pub async fn interrupt(&mut self, generation: Epoch) -> Result<()> {
         self.interrupt_with_intent(generation, None).await
     }
@@ -555,6 +614,14 @@ impl Proxy {
                     self.controller = None;
                     self.transport = None;
                 } else if value["type"].as_str() == Some("error") {
+                    if self.consumes_ack_rejection(&value) {
+                        tracing::warn!(
+                            session_id = %self.id,
+                            code = value["code"].as_str().unwrap_or("unknown"),
+                            "paired owner rejected an outcome acknowledgement",
+                        );
+                        return Ok(None);
+                    }
                     let m::Control::Error { error: rejection } = serde_json::from_value(value.clone())
                         .map_err(|_| error("PAIRED_HOST_INVALID_RESPONSE"))? else {
                             return Err(error("PAIRED_HOST_INVALID_RESPONSE"));
@@ -590,13 +657,16 @@ impl Proxy {
                         return Err(error("PAIRED_HOST_WRONG_MACHINE"));
                     }
                     if let Some(sink) = &self.agent_sink {
+                        let origin = msg.origin();
                         sink.accept(crate::daemon::agent_state::AgentState {
                             session_id: self.id.clone(),
                             state: msg.state,
                             agent: msg.agent,
                             provider_session: msg.provider_session,
                             detail: msg.detail,
-                            origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+                            origin,
+                            outcome: msg.outcome,
+                            kind: msg.kind,
                         });
                     }
                 }
