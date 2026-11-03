@@ -79,7 +79,7 @@ Limits of the re-fetch: it is a second request, so a one-time URL or a POST-only
 | Capability | macOS webview | macOS Chromium | Windows webview | Windows Chromium | Linux webview | Linux Chromium (X11 / XWayland) |
 | --- | --- | --- | --- | --- | --- | --- |
 | Page rendering | Yes | Yes | Yes | Yes | Yes | Yes, in CI under Xvfb and XWayland |
-| Chrome Web Store extensions and popups | No | Yes | No | Yes | No | Not verified |
+| Chrome Web Store extensions and popups | No | Yes | No | Yes | No | Yes, Web Store install and removal in the CI UI audit (Xvfb) |
 | Extension management | No | Yes, Settings > Browser > Extensions | No | Yes, Settings > Browser > Extensions | No | Yes, Settings > Browser > Extensions |
 | Shared logins and cookies across tabs of a profile | Not verified | Yes, one engine per profile | Not verified | Yes, one engine per profile | Not verified | One engine per profile, not verified by hand |
 | Cookie persistence across restart | Not verified | Yes, checked by killing the engine | Not verified | Yes, checked by killing the engine | Not verified | Not verified |
