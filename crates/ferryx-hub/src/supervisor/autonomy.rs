@@ -26,6 +26,7 @@ use super::panel_contract::{
     ActionEntry, ActionKind, ActionLog, AnswerDecision, Escalation, EvidenceRef, FleetSession,
     PendingPrompt, RuleStore, SessionControl, SessionRef, StandingRule,
 };
+use super::recovery::RecoveryEscalations;
 use super::rules::SqliteRuleStore;
 use crate::error::Result;
 use crate::fleet::EscalationSource;
@@ -110,6 +111,9 @@ impl RuleStore for PublishingRuleStore {
 #[derive(Default)]
 pub struct EscalationRegistry {
     open: Mutex<HashMap<SessionRef, Escalation>>,
+    /// Recovery escalations (a session the supervisor could not recover). Kept apart from
+    /// `open` so a prompt observation clearing its card never withdraws them.
+    recovery: Mutex<HashMap<SessionRef, Escalation>>,
 }
 
 impl EscalationRegistry {
@@ -124,12 +128,26 @@ impl EscalationRegistry {
     fn remove(&self, session_ref: &SessionRef) -> Option<Escalation> {
         self.guard().remove(session_ref)
     }
+
+    fn recovery_guard(&self) -> std::sync::MutexGuard<'_, HashMap<SessionRef, Escalation>> {
+        self.recovery.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn put_recovery(&self, escalation: Escalation) {
+        self.recovery_guard()
+            .insert(escalation.session_ref.clone(), escalation);
+    }
+
+    fn remove_recovery(&self, session_ref: &SessionRef) -> Option<Escalation> {
+        self.recovery_guard().remove(session_ref)
+    }
 }
 
 #[async_trait]
 impl EscalationSource for EscalationRegistry {
     async fn pending(&self) -> Result<Vec<Escalation>> {
         let mut open: Vec<Escalation> = self.guard().values().cloned().collect();
+        open.extend(self.recovery_guard().values().cloned());
         open.sort_by(|a, b| {
             a.created_at_ms
                 .cmp(&b.created_at_ms)
@@ -594,6 +612,20 @@ impl Autonomy {
     pub async fn owner_answered(&self, backend_session_id: &str, prompt_id: &str, option_index: usize) {
         if let Some(answer) = self.take_owner_answer(backend_session_id, prompt_id) {
             self.record_owner_answer(answer, option_index).await;
+        }
+    }
+}
+
+impl RecoveryEscalations for Autonomy {
+    fn open(&self, escalation: Escalation) {
+        self.escalations.put_recovery(escalation.clone());
+        self.publisher
+            .decision(&escalation.session_ref, Some(&escalation));
+    }
+
+    fn resolve(&self, session: &SessionRef) {
+        if self.escalations.remove_recovery(session).is_some() {
+            self.publisher.decision(session, None);
         }
     }
 }

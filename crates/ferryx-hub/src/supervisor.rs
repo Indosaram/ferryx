@@ -3697,6 +3697,7 @@ pub mod dispatcher;
 pub mod health;
 pub mod memory;
 pub mod receipts;
+pub mod recovery;
 pub mod request;
 pub mod rules;
 pub mod session_control;

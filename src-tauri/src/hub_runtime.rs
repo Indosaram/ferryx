@@ -2299,6 +2299,24 @@ fn spawn_supervisor_wakes(launch: &HubLaunch) -> tokio::task::JoinHandle<()> {
     tokio::spawn(scheduler.run(ferryx_hub::supervisor::wakes::wake_signal()))
 }
 
+/// The supervisor's recovery scheduler for this hub generation: it watches the fleet for
+/// upstream errors, quota stops and stalls, and retries goal lanes whose model hit a quota.
+/// Without an installed autonomy service there is nothing to run. The scheduler reads the
+/// owner's persisted pause itself, through the decision gate, on every tick.
+fn spawn_supervisor_recovery(launch: &HubLaunch) -> tokio::task::JoinHandle<()> {
+    let scheduler = panel_autonomy::recovery();
+    let quota = panel_autonomy::quota_recovery();
+    let pool = launch.hub.pool.clone();
+    let bridge = launch.bridge.clone();
+    tokio::spawn(async move {
+        let (Some(scheduler), Some(quota)) = (scheduler, quota) else {
+            return;
+        };
+        scheduler.set_loop_retry(Arc::new(panel_autonomy::GoalRetry::new(pool, bridge, quota)));
+        scheduler.run(std::time::Duration::from_secs(15)).await;
+    })
+}
+
 /// Forwards the store's goal-change announcements ([`ferryx_hub::supervisor::changes`]) to the
 /// desktop and phone Supervisor views as `supervisor_changed {goalId}`, so a goal the
 /// dispatcher, a worker receipt or the wake scheduler moved is refetched without an owner
@@ -2400,6 +2418,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     tasks.push(spawn_supervisor_dispatcher(launch, idle));
     tasks.push(spawn_supervisor_change_forwarder(launch));
     tasks.push(spawn_supervisor_wakes(launch));
+    tasks.push(spawn_supervisor_recovery(launch));
     let addr = launch.config.tracker_addr.clone().unwrap_or_else(|| "127.0.0.1:9119".into());
     let router = ferryx_hub::http::router(launch.hub.pool.clone(), ferryx_hub::http::web_root());
     tasks.push(tokio::spawn(async move {
@@ -2921,7 +2940,17 @@ fn settle_goal_turn(server: Arc<DaemonServer>, hub: Arc<Hub>, bridge: Arc<Daemon
             }
         };
         let judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env());
-        match ferryx_hub::goals::r#loop::on_turn_settled(&hub.pool, &judge, bridge.as_ref(), &lane_key, true).await {
+        let quota = panel_autonomy::quota_recovery();
+        match ferryx_hub::goals::r#loop::on_turn_settled_with(
+            &hub.pool,
+            &judge,
+            bridge.as_ref(),
+            &lane_key,
+            true,
+            quota.as_deref(),
+        )
+        .await
+        {
             Ok(Some(outcome)) => server.remote_state().emit_desktop_event(
                 crate::remote::server::agent_control_service::SUPERVISOR_CHANGED_EVENT,
                 json!({
