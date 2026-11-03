@@ -1299,7 +1299,10 @@ mod tests {
     #[tokio::test]
     async fn answers_without_a_revision_dedupe_by_shape_label_and_time() {
         let store = AnswerHistory::new(crate::storage::memory().await.unwrap());
-        let bare = layout();
+        let bare = PendingPrompt {
+            screen_revision: None,
+            ..layout()
+        };
         let revised = PendingPrompt {
             screen_revision: Some("rev-1".into()),
             ..layout()
@@ -1325,7 +1328,11 @@ mod tests {
     #[tokio::test]
     async fn history_is_pruned_per_shape_and_overall() {
         let store = AnswerHistory::new(crate::storage::memory().await.unwrap());
-        let p = layout();
+        // No screen revision: nothing but shape, label and time tells two answers apart.
+        let p = PendingPrompt {
+            screen_revision: None,
+            ..layout()
+        };
         for n in 0..(HISTORY_WINDOW as i64 + 5) {
             let label = format!("choice {n}");
             assert!(store
@@ -1342,11 +1349,14 @@ mod tests {
         // The overall cap drops the oldest rows of any shape.
         let store = AnswerHistory::new(crate::storage::memory().await.unwrap());
         for n in 0..6_i64 {
-            let q = prompt(
-                &format!("Question number {}?", "x".repeat(n as usize + 1)),
-                None,
-                &["A", "B"],
-            );
+            let q = PendingPrompt {
+                screen_revision: None,
+                ..prompt(
+                    &format!("Question number {}?", "x".repeat(n as usize + 1)),
+                    None,
+                    &["A", "B"],
+                )
+            };
             assert!(store
                 .record_bounded(&record(&q, "A", n * 60_000), 3)
                 .await
@@ -1365,9 +1375,14 @@ mod tests {
         let store = AnswerHistory::new(crate::storage::memory().await.unwrap());
         let p = layout();
         for at_ms in 0..3 {
+            // Three separate prompts (own screen revision), not one answer seen three times.
+            let answered = PendingPrompt {
+                screen_revision: Some(format!("r{at_ms}")),
+                ..p.clone()
+            };
             store
                 .record(&AnswerRecord {
-                    prompt: &p,
+                    prompt: &answered,
                     repo: "ferryx",
                     agent: "claude",
                     option_label: "Single page",
