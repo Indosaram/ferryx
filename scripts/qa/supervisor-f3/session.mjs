@@ -117,6 +117,13 @@ export function startSession({ config, run, windows }) {
     return Buffer.from(file.base64, 'base64').toString('utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line)).slice(after);
   };
   shared.agentLogCursor = async (mode) => (await shared.agentLog(mode)).length;
+  // The phone's answers (F3-P1, F3-P2) in order: each names the nonce of the prompt it answered,
+  // so a desktop can prove that exact card left its panel (F3-D5). Settles once P1 and P2 ran.
+  const answered = latch();
+  shared.phoneAnswers = [];
+  shared.recordPhoneAnswer = (entry) => { shared.phoneAnswers.push(entry); };
+  shared.phoneAnswersDone = answered.promise;
+  shared.phoneAnswersSettled = () => answered.open();
   const typeInto = (mode, text) => session().call(`write-${mode}`, [{ type: 'write', sessionId: shared.panes[mode], data: Buffer.from(`${text}\r`).toString('base64') }]);
   shared.releaseHeldDecision = () => typeInto('held', 'F3-DRAW');
   shared.sendLongReport = (token) => typeInto('decision', `F3-REPORT:${token}`);

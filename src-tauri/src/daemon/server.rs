@@ -636,6 +636,49 @@ fn active_transport_qa_profile() -> bool {
     transport_qa_isolated_profile(&get_runtime_dir(), std::env::var_os("FERRYX_DATA_DIR").as_deref())
 }
 
+/// QA-only gateway port (supervisor F3 harness): an isolated QA daemon must not try to bind the
+/// production gateway port a live Ferryx on the same host already owns. Honored only in a
+/// `local-split-qa` build while the QA run marker is set; a value that is not a port in
+/// 1024..=65535 is refused instead of silently falling back to the production port.
+pub(crate) const QA_GATEWAY_PORT_ENV: &str = "FERRYX_QA_GATEWAY_PORT";
+
+/// The port the gateway binds: the QA override when [`qa_gateway_port`] grants one, else
+/// [`REMOTE_GATEWAY_PORT`].
+pub(crate) fn effective_gateway_port() -> Result<u16, String> {
+    Ok(qa_gateway_port(
+        std::env::var(crate::host_boot::QA_RUN_ID_ENV).ok().as_deref(),
+        std::env::var(QA_GATEWAY_PORT_ENV).ok().as_deref(),
+    )?
+    .unwrap_or(REMOTE_GATEWAY_PORT))
+}
+
+pub(crate) fn qa_gateway_port(run_id: Option<&str>, value: Option<&str>) -> Result<Option<u16>, String> {
+    if !cfg!(feature = "local-split-qa") || !matches!(run_id, Some(id) if !id.trim().is_empty()) {
+        return Ok(None);
+    }
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    match value.parse::<u16>() {
+        Ok(port) if port >= 1024 => Ok(Some(port)),
+        _ => Err(format!("{QA_GATEWAY_PORT_ENV}={value} is not a port in 1024..=65535")),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn qa_gateway_port_is_qa_only_and_never_falls_back_silently() {
+    assert_eq!(qa_gateway_port(Some("run"), None), Ok(None));
+    assert_eq!(qa_gateway_port(None, Some("47000")), Ok(None), "no QA marker, no override");
+    if cfg!(feature = "local-split-qa") {
+        assert_eq!(qa_gateway_port(Some("run"), Some(" 47000 ")), Ok(Some(47000)));
+        assert!(qa_gateway_port(Some("run"), Some("80")).is_err());
+        assert!(qa_gateway_port(Some("run"), Some("nope")).is_err());
+    } else {
+        assert_eq!(qa_gateway_port(Some("run"), Some("47000")), Ok(None), "a release build ignores it");
+    }
+}
+
 #[cfg(all(test, feature = "local-split-qa"))]
 #[test]
 fn transport_qa_profile_refuses_missing_and_shared_profile_paths() {
@@ -9432,7 +9475,7 @@ impl DaemonServer {
         &self,
         mut config: RemoteGatewayConfig,
     ) -> Result<(), String> {
-        config.port = REMOTE_GATEWAY_PORT;
+        config.port = effective_gateway_port()?;
         refresh_cors_saved_host_origins(self.paired_hosts.clone(), Arc::clone(&self.remote_state))
             .await;
         self.configure_gateway(config).await

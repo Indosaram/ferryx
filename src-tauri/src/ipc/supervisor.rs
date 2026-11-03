@@ -208,13 +208,36 @@ fn write_download_with(
 /// app transcript is saved to the Downloads folder; the reply is the saved path.
 #[tauri::command]
 pub async fn cmd_supervisor_transcript_export(file_name: String, text: String) -> Result<String, IpcError> {
-    // The platform's Downloads folder (Known Folder redirection on Windows, XDG on Linux); a
-    // home-relative `Downloads` only when the platform names none.
-    let downloads = dirs::download_dir()
-        .or_else(|| ferryx_hub::hub_env::home().map(|home| home.join("Downloads")))
-        .ok_or_else(|| IpcError::new(IpcErrorCode::IoError, "the transcript was not saved: this account has no Downloads folder"))?;
+    let downloads = export_dir(
+        qa_isolated_home(std::env::var("FERRYX_QA_ISOLATED").ok().as_deref(), ferryx_hub::hub_env::home()),
+        dirs::download_dir(),
+        ferryx_hub::hub_env::home(),
+    )
+    .ok_or_else(|| IpcError::new(IpcErrorCode::IoError, "the transcript was not saved: this account has no Downloads folder"))?;
     let path = write_download(&downloads, &file_name, &text)?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+/// The isolated QA profile's home (`HOME`/`USERPROFILE` point into it), only in a
+/// `local-split-qa` build launched with `FERRYX_QA_ISOLATED=1`.
+fn qa_isolated_home(isolated: Option<&str>, home: Option<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    (cfg!(feature = "local-split-qa") && isolated == Some("1")).then_some(home).flatten()
+}
+
+/// Where an export is saved: an isolated QA profile's `home/Downloads` first (Windows resolves
+/// Downloads through the Known Folder API, which ignores `USERPROFILE`, so a QA run would
+/// otherwise write into the real user's Downloads); else the platform's Downloads folder (Known
+/// Folder redirection on Windows, XDG on Linux); a home-relative `Downloads` only when the
+/// platform names none.
+fn export_dir(
+    qa_home: Option<std::path::PathBuf>,
+    platform_downloads: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    qa_home
+        .map(|home| home.join("Downloads"))
+        .or(platform_downloads)
+        .or_else(|| home.map(|home| home.join("Downloads")))
 }
 
 /// One owner message from the panel composer: the supervisor answers on the `app` channel and
@@ -772,5 +795,23 @@ mod tests {
         assert!(!dir.path().join("t.txt").exists(), "no partial file is left");
         let again = write_download(dir.path(), "t.txt", "text").unwrap();
         assert_eq!(again, dir.path().join("t.txt"));
+    }
+
+    #[test]
+    fn an_isolated_qa_profile_exports_into_its_own_home_never_the_users_downloads() {
+        use std::path::PathBuf;
+        let profile_home = PathBuf::from("/qa/profile/home");
+        let user = Some(PathBuf::from("/Users/real/Downloads"));
+        let qa = qa_isolated_home(Some("1"), Some(profile_home.clone()));
+        if cfg!(feature = "local-split-qa") {
+            assert_eq!(export_dir(qa, user.clone(), None), Some(profile_home.join("Downloads")));
+        } else {
+            assert_eq!(qa, None, "a release build never reads the QA marker");
+        }
+        assert_eq!(qa_isolated_home(None, Some(profile_home.clone())), None);
+        assert_eq!(qa_isolated_home(Some("0"), Some(profile_home.clone())), None);
+        assert_eq!(export_dir(None, user.clone(), Some(profile_home.clone())), user);
+        assert_eq!(export_dir(None, None, Some(profile_home.clone())), Some(profile_home.join("Downloads")));
+        assert_eq!(export_dir(None, None, None), None);
     }
 }
