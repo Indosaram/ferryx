@@ -1980,6 +1980,7 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
   };
   summary.extension = record;
   let storeTab = null;
+  let installButton = null;
   await step(
     "extension-store-open",
     "Mod+Shift+B opens a Chromium tab; the CLI navigates it to uBlock Origin Lite's Chrome Web Store page",
@@ -2009,25 +2010,46 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
       // The store page is wider than the pane: its install button sits off screen to the right
       // (horizontal scrollbar), so the CLI scrolls it into view before the real click.
       ["scroll the install button into view (CLI eval)", async () => {
-        const script = "(() => { const b = [...document.querySelectorAll('button')].find((e) => /Add to Chrome/i.test(e.textContent || '')); if (!b) return 'none'; b.scrollIntoView({block: 'center', inline: 'center'}); const r = b.getBoundingClientRect(); return JSON.stringify({x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), disabled: b.disabled, vw: innerWidth}); })()";
+        // Also reports the "Share" link's rect: OCR reads that word reliably, so it anchors page
+        // CSS pixels to screen pixels for the click (OCR does not read the white-on-blue label).
+        const script = "(() => { const b = [...document.querySelectorAll('button')].find((e) => /Add to Chrome/i.test(e.textContent || '')); if (!b) return 'none'; b.scrollIntoView({block: 'center', inline: 'center'}); const r = b.getBoundingClientRect(); const s = [...document.querySelectorAll('a,button,span')].find((e) => (e.textContent || '').trim() === 'Share'); const q = s && s.getBoundingClientRect(); return JSON.stringify({x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), disabled: b.disabled, text: b.textContent.trim(), share: q ? {x: Math.round(q.x + q.width / 2), y: Math.round(q.y + q.height / 2)} : null, dpr: devicePixelRatio, vw: innerWidth}); })()";
         const deadline = Date.now() + 30000;
         let result = null;
         do {
           result = storeTab ? await cliAsync("eval", "--browser-id", storeTab.browserId, "--script", script) : { ok: false, stderr: "no store tab" };
-          if (result.ok && !result.stdout.includes("none")) return { ok: true, button: result.stdout };
+          if (result.ok && !result.stdout.includes("none")) {
+            try {
+              let parsed = JSON.parse(result.stdout);
+              if (typeof parsed === "string") parsed = JSON.parse(parsed);
+              installButton = parsed;
+            } catch {}
+            return { ok: Boolean(installButton), button: installButton ?? result.stdout };
+          }
           await sleep(2000);
         } while (Date.now() < deadline);
+        record.error = "the store page offers no 'Add to Chrome' button";
         return { ok: false, last: result?.stdout ?? null, stderr: result?.stderr || "no 'Add to Chrome' button in the page" };
       }],
       1500,
       ["click Add to Chrome", async () => {
-        const deadline = Date.now() + 30000;
+        const deadline = Date.now() + 20000;
         do {
           const words = ocr(probeShot()) ?? [];
           const hit = findPhrase(words, "Add to Chrome")[0];
-          if (hit) return { ...host.click(hit.x, hit.y), at: [hit.x, hit.y] };
+          if (hit) return { ...host.click(hit.x, hit.y), at: [hit.x, hit.y], via: "ocr" };
+          // The label is white on blue: map the button's page rect through the OCR'd "Share" link.
+          const share = installButton?.share ? words.find((word) => word.text === "Share") : null;
+          if (share) {
+            const scale = installButton.dpr || 1;
+            const at = [
+              Math.round(share.left + share.width / 2 + (installButton.x - installButton.share.x) * scale),
+              Math.round(share.top + share.height / 2 + (installButton.y - installButton.share.y) * scale),
+            ];
+            return { ...host.click(...at), at, via: "page rect anchored on 'Share'" };
+          }
           await sleep(1500);
         } while (Date.now() < deadline);
+        record.error ??= "'Add to Chrome' could not be located on screen";
         return { ok: false, stderr: "'Add to Chrome' not visible" };
       }],
       ["click Add extension", async () => {
@@ -2038,6 +2060,9 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
           const hit = findPhrase(words, "Add extension").at(-1);
           if (hit) return { ...host.click(hit.x, hit.y), at: [hit.x, hit.y] };
         } while (Date.now() < deadline);
+        const text = storeTab ? await cliAsync("eval", "--browser-id", storeTab.browserId, "--script", "(document.body && document.body.innerText || '').slice(0, 600)") : null;
+        record.error ??= "Chrome's 'Add extension' dialog did not appear after clicking 'Add to Chrome'";
+        record.page_after_click = text?.stdout ?? null;
         return { ok: false, stderr: "Chrome's 'Add extension' button not visible" };
       }],
       ["wait for the extension in the profile", async () => {
@@ -2047,6 +2072,7 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
           await sleep(2000);
           disk = ubolOnDisk();
         }
+        if (!disk.dir) record.error ??= `no Extensions/${UBOL_ID} in the engine profile after 120s`;
         return { ok: disk.dir, disk, stderr: disk.dir ? "" : `no Extensions/${UBOL_ID} in the engine profile after 120s` };
       }],
       // Chrome commits Preferences on a 10s timer; the Settings list reads them when no engine runs.
