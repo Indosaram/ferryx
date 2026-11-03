@@ -3091,8 +3091,9 @@ export const RemoteHostConnection: React.FC<{
     bus: supervisorBus,
     enabled: phoneHome,
   });
-  // A host without the panel route (or no host yet) keeps the previous home.
-  const panelHome = panelHostId !== null && phonePanel.state.kind !== "unsupported";
+  // The panel takes over only once the host has answered with a valid snapshot; no host, a
+  // missing route (404), an unreadable answer or a read still in flight keep the previous home.
+  const panelHome = panelHostId !== null && phonePanel.state.kind === "ready";
   // The events socket above runs only for the active connection; every other reachable machine
   // gets its own, so supervisor and sidebar changes reach a home that opened no worktree.
   const openMachineEvents = useCallback(
