@@ -9940,6 +9940,87 @@ mod remote_ssh_tests;
 mod protocol_release_tests {
     use super::*;
 
+    /// Plan task 9 QA (line 159: "the session leaves Working", not "the PTY exits"): with no hub
+    /// open, an agent-control Stop reaches a real pane, whose program answers ESC by reporting
+    /// `idle` over OSC 7501; the observed session leaves Working while the PTY stays alive.
+    #[tokio::test]
+    async fn a_stop_with_no_hub_takes_a_working_session_out_of_working() {
+        use crate::agent_control::{AgentControlOp, AgentControlState};
+        assert!(!crate::hub_runtime::supervisor_available(), "no hub is open in this test");
+        let (directory, script) = crate::ipc::run_blocking(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let script = directory.path().join("stoppable");
+            std::fs::write(
+                &script,
+                "printf '\\033]7501;state=working:app=e2e\\033\\\\'\nstty raw -echo\ndd bs=1 count=1 >/dev/null 2>&1\nprintf '\\033]7501;state=idle:app=e2e\\033\\\\'\nsleep 30\n",
+            )
+            .unwrap();
+            Ok((directory, script))
+        })
+        .await
+        .unwrap();
+        let server = Arc::new(DaemonServer::new());
+        let mut command = portable_pty::CommandBuilder::new("/bin/bash");
+        command.args(["--noprofile", "--norc", "-i"]);
+        let (id, _lifecycle) = server
+            .terminal_service
+            .spawn_resolved_with_id(
+                uuid::Uuid::new_v4().to_string(),
+                command,
+                80,
+                24,
+                crate::terminal::pty::ResolvedSpawnContext {
+                    root: directory.path().to_owned(),
+                    cwd: directory.path().to_owned(),
+                    managed_workspace_id: None,
+                },
+            )
+            .unwrap();
+        server.remote_state.agent_observers.watch(&id);
+        // Subscribed before the program starts, so neither transition can be missed.
+        let mut observations = server.remote_state.agent_events.subscribe();
+        server
+            .terminal_service
+            .write_input(&id, format!("/bin/sh '{}'\n", script.display()).as_bytes())
+            .unwrap();
+        let mut wait_for = async |wanted_working: bool| {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    match observations.recv().await {
+                        Ok(observation)
+                            if observation.session_id == id
+                                && (observation.state == AgentControlState::Working) == wanted_working =>
+                        {
+                            return observation;
+                        }
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => panic!("observation bus closed"),
+                    }
+                }
+            })
+            .await
+            .expect("the awaited state transition")
+        };
+        wait_for(true).await;
+
+        let stopped = crate::remote::server::agent_control_service::handle(
+            &server.remote_state,
+            AgentControlOp::Stop { session_id: id.clone(), request_id: None },
+        )
+        .await
+        .expect("the stop is accepted with no hub");
+        assert_eq!(stopped["receipt"]["stage"], "accepted", "{stopped}");
+
+        let left = wait_for(false).await;
+        assert_ne!(left.state, AgentControlState::Working);
+        assert!(
+            server.terminal_service.get_session(&id).is_some(),
+            "Stop ends the work, not the PTY"
+        );
+        server.terminal_service.close_session(&id).await.unwrap();
+        drop(directory);
+    }
+
     /// F4: an agent killed mid-turn shows `health: failed` from telemetry alone. A real PTY runs
     /// an agent-named program that reports `working` and is SIGKILLed; the observer sees the
     /// shell take the foreground back and the owner panel channel (subscribed BEFORE the kill)
