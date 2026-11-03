@@ -20,7 +20,7 @@ use sqlx::SqlitePool;
 use super::answers::{
     routine_answer, AnswerDecision as ContractVerdict, PromptDecision, PromptKind, WorkerPrompt,
 };
-use super::contract::{AnswerDecision, PendingPrompt, RuleScope, StandingRule};
+use super::panel_contract::{AnswerDecision, PendingPrompt, RuleScope, StandingRule};
 use crate::error::Result;
 
 /// Same choice needed, at least this many times, before the supervisor answers for the owner.
@@ -513,7 +513,7 @@ mod tests {
     use serde_json::json;
 
     use crate::supervisor::answers::DecisionSource;
-    use crate::supervisor::contract::RuleKind;
+    use crate::supervisor::panel_contract::RuleKind;
 
     fn prompt(question: &str, command: Option<&str>, options: &[&str]) -> PendingPrompt {
         PendingPrompt {

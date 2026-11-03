@@ -3,7 +3,7 @@
 use serde::Deserialize;
 
 use crate::supervisor::answer_history::irreversible_or_external;
-use crate::supervisor::contract::{AnswerDecision, PendingPrompt};
+use crate::supervisor::panel_contract::{AnswerDecision, PendingPrompt};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
