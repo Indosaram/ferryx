@@ -152,6 +152,7 @@ import { groupProjects } from "./lib/projectGrouping";
 import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
 import { isStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON, setSessionRebindHandler } from "./lib/sessionLifecycle";
 import { flashPane } from "./lib/paneFlash";
+import { findSessionByBackendId } from "./components/supervisorPanel/findSession";
 import { getAgentReconnectAffordance } from "./lib/agentResumeAffordance";
 import { persistActiveProjectId, persistProjects, persistSidebarOpen } from "./lib/appShellPersistence";
 import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
@@ -2641,6 +2642,21 @@ function WorkspaceApp({
     flashPane(row.sessionId);
   }, [handleNotificationTarget]);
 
+  // A Supervisor panel row names a session by `<hostId>:<backendSessionId>`; focus the pane that
+  // runs it through the same path a notification uses (no unmount, no new surface).
+  const handleFocusSupervisorSession = useCallback((sessionRef: string) => {
+    const target = findSessionByBackendId(sessionRef, [
+      [activeProjectRef.current.workspaceId, stateRef.current],
+      ...listWorkspaceSnapshots(),
+    ]);
+    if (!target) {
+      toast.info("That session is not open on this computer");
+      return;
+    }
+    handleNotificationTarget(target);
+    flashPane(target.sessionId);
+  }, [handleNotificationTarget]);
+
   // The pane frame reads activity.seen while the inbox reads entry.read: a dismissal must clear
   // both, or the row disappears while the pane keeps glowing.
   const dismissAttentionRows = useCallback((rows: readonly AttentionRow[]) => {
@@ -4156,6 +4172,7 @@ function WorkspaceApp({
           onOpenSettings={handleOpenSettings}
           onOpenResources={() => setIsResourcesOpen(true)}
           attention={sidebarAttention}
+          onFocusSupervisorSession={handleFocusSupervisorSession}
           onToggle={toggleSidebar}
         />
       ) : (

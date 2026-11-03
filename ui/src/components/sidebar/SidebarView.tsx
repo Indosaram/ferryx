@@ -61,6 +61,8 @@ export type SidebarViewProps = {
   readonly inbox?: SidebarInbox;
   /** The Supervisor tab's content; the tab shows when this is set and advanced features are on. */
   readonly supervisor?: { readonly typing: boolean; readonly content: ReactNode };
+  /** Always-visible Supervisor panel above the view tabs (desktop only; not gated by advanced features). */
+  readonly panel?: ReactNode;
   /** Leading titlebar content (desktop traffic-light pad). */
   readonly titlebarLeading?: ReactNode;
   readonly titlebarProps?: Readonly<Record<string, string | boolean | undefined>>;
@@ -86,6 +88,7 @@ export function SidebarView({
   view = "worktrees",
   inbox,
   supervisor,
+  panel,
   titlebarLeading,
   titlebarProps,
   shortcuts = {},
@@ -179,6 +182,8 @@ export function SidebarView({
           ) : null}
         </div>
       ) : null}
+
+      {panel}
 
       {inbox && actions.onViewChange ? (
         <SidebarViewTabs

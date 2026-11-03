@@ -2,6 +2,8 @@ import { isDesktopShell } from "./clientRuntime";
 import type { SidebarModel } from "../components/sidebar/sidebarModel";
 import type { DagRunSnapshot } from "./dagTypes";
 import type { DeliveryReceipt, RunTarget } from "./scopedContracts";
+import type { PanelEvent, PanelSnapshot } from "./supervisorPanel/contract";
+import { emptyPanelSnapshot } from "./supervisorPanel/emptySnapshot";
 export const DEFAULT_TERMINAL_FONT_STACK = 'MesloLGS NF, "Noto Sans KR", monospace';
 import { defaultRemoteClient, getRemoteAuthToken, RemoteClient, type RemotePreferenceTarget } from "./remoteClient";
 import { invoke, isTauri as isTauriShell } from "@tauri-apps/api/core";
@@ -548,6 +550,18 @@ export async function getWorktreeDiskScanResult(workspaceId: string): Promise<Di
   return invokeCommand<DiskScanSnapshot | null>("cmd_worktree_disk_scan_result", {
     workspaceId,
   });
+}
+
+/** The Supervisor panel snapshot; outside the desktop shell there is no hub, so setup is shown. */
+export async function getSupervisorPanel(): Promise<PanelSnapshot> {
+  if (!isTauri()) return emptyPanelSnapshot();
+  return invokeCommand<PanelSnapshot>("cmd_supervisor_panel");
+}
+
+/** `panel.*` owner frames forwarded by the desktop shell as `supervisor_panel_event`. */
+export async function onSupervisorPanelEvent(handler: (event: PanelEvent) => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<PanelEvent>("supervisor_panel_event", (event) => handler(event.payload));
 }
 
 export async function onWorktreeDiskScanProgress(
