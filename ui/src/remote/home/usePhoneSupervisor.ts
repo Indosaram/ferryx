@@ -13,6 +13,7 @@ import {
   type HubStartResult,
   type LanePauseResult,
   type RemoteSupervisorLane,
+  type SupervisorFetch,
 } from "../remoteSupervisor";
 import type { UseAccountWorktreesResult } from "../useAccountWorktrees";
 import { useMachineSupervisorSources, type MachineLink, type SupervisorFrameBus } from "./machineSupervisorSources";
@@ -32,6 +33,8 @@ export type PhoneSupervisor = {
   readonly setPaused: (machineId: string, laneKey: string, paused: boolean) => Promise<LanePauseResult>;
   readonly startHub: (machineId: string) => Promise<HubStartResult>;
   readonly resync: (machineId?: string) => void;
+  /** One machine's request function, or null while no tunnel to it is open. */
+  readonly fetchFor: (machineId: string) => SupervisorFetch | null;
   /** Every machine that hosts (or last hosted) the unified supervisor. */
   readonly unified: UnifiedHostView[];
 };
@@ -164,5 +167,5 @@ export function usePhoneSupervisor({ enabled, discovery, active, bus }: PhoneSup
     [machines, clients],
   );
 
-  return { machines, lanes: feed.lanes, now: feed.now, setPaused, startHub, resync, unified };
+  return { machines, lanes: feed.lanes, now: feed.now, setPaused, startHub, resync, fetchFor, unified };
 }
