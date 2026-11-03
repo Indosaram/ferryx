@@ -1465,6 +1465,26 @@ async fn staged_preview_keeps_original_bytes_after_parent_replacement() {
         let outside_dir = if replacement == "base" { outside.path().join(id) } else { outside.path().to_path_buf() };
         std::fs::create_dir_all(&outside_dir).expect("outside parent");
         std::fs::write(outside_dir.join("original.txt"), b"outsider").expect("same-size outside bytes");
+        let query = fixture.read_query(
+            "codex", &fixture.daemon_epoch, &reference_files::reference_host_id(), &[],
+        );
+        // Windows refuses to rename a file, or a directory above it, while the gateway holds that
+        // file open, so there the replacement this test guards against cannot happen at all. The
+        // refusal is the OS enforcing the same property: the preview still serves the original.
+        #[cfg(windows)]
+        if let Err(error) = std::fs::rename(&replaced, &held) {
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied, "{error}");
+            let (status, body) = fixture.server.request(
+                "GET", &format!("{}?{query}", fixture.route(&format!("files/{id}"))),
+                Some(&fixture.control), None,
+            ).await;
+            assert_eq!(status, 200, "{body}");
+            let preview: serde_json::Value = serde_json::from_str(&body).expect("preview");
+            assert_eq!(preview["contentBase64"], base64::engine::general_purpose::STANDARD.encode(b"original"), "{body}");
+            fixture.server.stop().await;
+            continue;
+        }
+        #[cfg(unix)]
         std::fs::rename(&replaced, &held).expect("rename parent while handle is retained");
         let link_target = if replacement == "leaf" {
             outside_dir.join("original.txt")
@@ -1480,9 +1500,6 @@ async fn staged_preview_keeps_original_bytes_after_parent_replacement() {
             std::os::windows::fs::symlink_dir(&link_target, &replaced)
                 .expect("directory symlink fixture requires Windows Developer Mode or symlink privilege");
         }
-        let query = fixture.read_query(
-            "codex", &fixture.daemon_epoch, &reference_files::reference_host_id(), &[],
-        );
         for _ in 0..2 {
             let (status, body) = fixture.server.request(
                 "GET", &format!("{}?{query}", fixture.route(&format!("files/{id}"))),
@@ -3491,7 +3508,22 @@ async fn a_stale_staging_dir_in_a_cwd_the_pane_left_is_swept() {
     // Age the directory past the TTL, as a previous gateway process's leftovers would be.
     let old = std::time::SystemTime::now()
         - std::time::Duration::from_millis(reference_files::reference_unreferenced_ttl_ms() + 60_000);
-    std::fs::File::open(&left_dir)
+    // Setting a time needs a writable handle on the directory itself; Windows opens a directory
+    // only with FILE_FLAG_BACKUP_SEMANTICS and grants the change with FILE_WRITE_ATTRIBUTES.
+    let mut options = std::fs::OpenOptions::new();
+    #[cfg(unix)]
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        options
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    }
+    options
+        .open(&left_dir)
         .expect("open staged dir")
         .set_modified(old)
         .expect("age staged dir");

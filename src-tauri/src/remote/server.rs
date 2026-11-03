@@ -5134,13 +5134,17 @@ mod file_read_session_base_tests {
     #[tokio::test]
     async fn live_shell_cwd_wins_over_the_desktop_supplied_cwd() {
         // The desktop always sends the session's stored spawn cwd; the shell may have cd'ed since.
+        // Both paths must be absolute on the host OS; "/wt" has no drive on Windows.
+        let worktree = std::env::temp_dir().join("wt");
+        let live = worktree.join("sub").join("dir");
+        let worktree_text = worktree.to_str().expect("UTF-8 temp dir").to_owned();
         let backend = LiveCwdBackend {
-            worktree: PathBuf::from("/wt"),
-            live: Some(PathBuf::from("/wt/sub/dir")),
+            worktree: worktree.clone(),
+            live: Some(live.clone()),
         };
-        let mut request = req("shot.png", Some("/wt"));
+        let mut request = req("shot.png", Some(&worktree_text));
         let base = file_read_session_base(&backend, &request).await.ok().flatten();
-        assert_eq!(base, Some(PathBuf::from("/wt/sub/dir")));
+        assert_eq!(base, Some(live.clone()));
         apply_file_read_session_base(&mut request, base.as_deref());
         let resolved = crate::paired_host::file_read::resolve_host_path(
             &request.path,
@@ -5149,9 +5153,11 @@ mod file_read_session_base_tests {
             base.as_deref(),
         )
         .unwrap();
-        assert_eq!(resolved, PathBuf::from("/wt/sub/dir/shot.png"));
+        assert_eq!(resolved, live.join("shot.png"));
         // Absolute and home paths never consult the session.
-        assert_eq!(file_read_session_base(&backend, &req("/abs/x.png", Some("/wt"))).await.ok().flatten(), None);
+        let absolute = worktree.join("abs").join("x.png");
+        let absolute = absolute.to_str().expect("UTF-8 temp dir");
+        assert_eq!(file_read_session_base(&backend, &req(absolute, Some(&worktree_text))).await.ok().flatten(), None);
     }
 }
 
@@ -6508,10 +6514,12 @@ async fn reference_chat_siblings(
     siblings
 }
 
-/// Is this session's transcript on another host?
+/// Does this session run on another host?
 ///
 /// A remote session's store entry carries its own host; this gateway must not read, guess or
-/// substitute a local file for it.
+/// substitute a local file for it. Membership in the store is the answer: whether a transcript
+/// location can be derived from the record (it cannot for a Windows host's project path) is a
+/// separate question, and answering "local" for such a record staged its files on this disk.
 async fn reference_chat_session_is_remote(
     state: &Arc<RemoteGatewayState>,
     session_id: &str,
@@ -6528,7 +6536,7 @@ async fn reference_chat_session_is_remote(
     else {
         return false;
     };
-    crate::agent_transcript::remote_target_from_store(&raw, session_id).is_some()
+    crate::agent_transcript::store_holds_remote_session(&raw, session_id)
 }
 
 /// The cursor a read names, or the refusal that keeps a cursor from being re-anchored.
