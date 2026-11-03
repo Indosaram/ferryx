@@ -10757,13 +10757,9 @@ mod tests {
         let registry = WorkspaceRegistry::new();
         registry.register("workspace-fail", &repo).unwrap();
 
-        // Corrupt the repo so manager.list_worktrees() fails. The `.git` entry must stay
-        // present: removing it makes the manager re-probe Git backing and treat the root as a
-        // plain folder, which legitimately lists empty. A dangling gitdir pointer keeps the
-        // root Git-backed while `git worktree list` fails.
-        let git_dir = repo.join(".git");
-        std::fs::remove_dir_all(&git_dir).unwrap();
-        std::fs::write(&git_dir, "gitdir: /nonexistent/ferryx-corrupt-gitdir\n").unwrap();
+        // Corrupt the git repo so manager.list_worktrees() fails. .git stays in place: a
+        // removed .git turns the root into a plain folder, which lists no worktrees by design.
+        std::fs::write(repo.join(".git").join("HEAD"), "not a ref\n").unwrap();
 
         let pty = Arc::new(crate::terminal::PtyManager::new());
         let hub = Arc::new(TerminalOutputHub::default());
