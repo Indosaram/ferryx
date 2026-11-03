@@ -187,10 +187,9 @@ fn fleet_session(
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| backend_id.to_owned());
-    let state = match text("state") {
-        Some(state @ ("working" | "blocked" | "idle")) => state,
-        _ => "unknown",
-    };
+    let state = text("state")
+        .filter(|state| matches!(*state, "working" | "blocked" | "idle"))
+        .unwrap_or("unknown");
     Some(FleetSession {
         session_ref: SessionRef::new(host_id, backend_id),
         host_id: host_id.to_owned(),
