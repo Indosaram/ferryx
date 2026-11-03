@@ -43,6 +43,8 @@ export async function runIphoneLane(lane, { device, run, shared }) {
     try {
       ios = await bindIosDevice({ serial: device.serial, driverEndpoint: device.driverEndpoint, model: device.model, osVersion: device.osVersion, evidenceDir: join(lane.dir, 'wda') });
     } catch (error) {
+      // bindIosDevice deletes a WDA session the probe opened before rethrowing; keep that proof.
+      lane.receipt.cleanup.push(...(error.cleanup ?? []).map((r) => ({ ...r, action: r.action === 'deleted' ? 'session-deleted' : r.action })));
       throw new LaneBlocked(error.reason === 'device-owner-acknowledgment-needed' ? 'DEVICE_CONSENT_NEEDED' : 'DEVICE_UNAVAILABLE', `${device.serial} via ${device.driverEndpoint}: ${error.message}`);
     }
     lane.receipt.machine = { id: device.serial, model: ios.device.model, osVersion: ios.device.osVersion, driverEndpoint: device.driverEndpoint, session: ios.session };

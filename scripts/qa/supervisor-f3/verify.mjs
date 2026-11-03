@@ -82,7 +82,12 @@ function manifestErrors(dir) {
 
 function scriptErrors(run) {
   const recorded = new Map((run?.control?.scripts ?? []).map((s) => [s.path, s.sha256]));
-  return scriptHashes().filter((s) => recorded.get(s.path) !== s.sha256).map((s) => `control script ${s.path} differs from the script validating now`);
+  const current = scriptHashes();
+  const now = new Set(current.map((s) => s.path));
+  return [
+    ...current.filter((s) => recorded.get(s.path) !== s.sha256).map((s) => `control script ${s.path} differs from the script validating now`),
+    ...[...recorded.keys()].filter((path) => !now.has(path)).map((path) => `control script ${path} was recorded but is not among the scripts validating now`),
+  ];
 }
 
 /** Receipt verdict plus every on-disk check; `withManifest` is false only before it is written. */

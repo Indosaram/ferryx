@@ -218,8 +218,8 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       step.assert('viewer-shows-report-heading', head.read.text.includes(heading), { heading, text: head.read.text.slice(0, 1500) });
       step.assert('viewer-marker-shown', head.read.text.includes(host.viewerMarker), { marker: host.viewerMarker });
       await mahord.hotkey(host.platform === 'darwin' ? ['Meta', 'ArrowDown'] : ['Control', 'End'], signal);
-      const tail = keep(step, 'viewer-tail', await until('report end in Viewer', () => frame('viewer-tail'), ({ read: r }) => r.text.includes(end), { deadlineMs: 60_000 }));
-      step.assert('viewer-shows-report-end', tail.read.text.includes(end), { end, text: tail.read.text.slice(0, 1500) });
+      const tail = keep(step, 'viewer-tail', await until('report end in Viewer', () => frame('viewer-tail'), ({ read: r }) => r.text.includes(end) && r.text.includes(host.viewerMarker), { deadlineMs: 60_000 }));
+      step.assert('viewer-shows-report-end', tail.read.text.includes(end) && tail.read.text.includes(host.viewerMarker), { end, marker: host.viewerMarker, text: tail.read.text.slice(0, 1500) });
     });
   } catch (error) {
     if (error instanceof LaneBlocked) lane.receipt.blocked = { code: error.code, detail: error.detail, at: new Date().toISOString() };
@@ -240,7 +240,17 @@ async function cleanupLane({ lane, agent, helper, mahord, setup, gui, daemon }) 
   const attempt = async (resource, body) => {
     try { await body(); } catch (error) { record({ resource, action: 'reported-not-killed', error: String(error?.message ?? error) }); }
   };
-  if (agent && gui) record(await stopExact(agent, { resource: 'gui', receipt: gui }));
+  if (agent && gui) {
+    // darwin: the GUI is not the agent's child and the agent's `exit` is Linux pidfd for
+    // non-children, so only the launcher's exit receipt (same pid + processStart) proves it gone.
+    const exitProof = lane.name === 'macos'
+      ? async () => {
+        const file = await helper.call('read-b64', { profile: setup.profile, path: join(setup.profile, 'receipts', 'gui-launch.json.exit.json') }, AbortSignal.timeout(10_000));
+        return JSON.parse(Buffer.from(file.base64, 'base64').toString('utf8'));
+      }
+      : null;
+    record(await stopExact(agent, { resource: 'gui', receipt: gui, exitProof }));
+  }
   if (agent && daemon) record(await stopExact(agent, { resource: 'daemon', receipt: daemon }));
   if (helper && setup) await attempt('helper-children', async () => { for (const entry of await helper.call('cleanup', {})) record(entry); });
   const alive = lane.receipt.cleanup.some((entry) => ['gui', 'daemon'].includes(entry.resource) && !['killed', 'already-exited'].includes(entry.action));
@@ -255,6 +265,8 @@ async function cleanupLane({ lane, agent, helper, mahord, setup, gui, daemon }) 
 async function launchGui({ agent, mahord, setup, host, run, lane }) {
   const { specPath, launcherShortPath } = await agent.call('provision-gui-launch', { setup, worktreeRoot: host.worktreeRoot, hostId: host.hostId, runId: run.runId, operationId: `f3-${run.runId}` });
   const receipt = agent.call('await-gui-launch', { profile: setup.profile, timeoutMs: 180_000 });
+  // Handled now so a failed MahoRD launch step cannot leave it rejecting unobserved; awaited below.
+  receipt.catch(() => {});
   const command = host.platform === 'win32' ? launcherShortPath : `${quote(host.bun)} ${quote(host.remoteAgent)} --launch-gui ${quote(specPath)}`;
   await mahord.hotkey(host.platform === 'win32' ? ['Meta', 'r'] : host.launchTerminalHotkey, AbortSignal.timeout(30_000));
   if (host.platform === 'win32') await mahord.hotkey(['Control', 'a'], AbortSignal.timeout(30_000));

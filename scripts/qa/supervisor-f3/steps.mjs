@@ -72,15 +72,35 @@ export function markNotRun(lane, scenarioIds, reason) {
  * `terminate {pid, executable, processStart}`, then await that exit. The entry proves the
  * outcome (killed / already-exited); any error is recorded as reported-not-killed, which the
  * validator fails.
+ *
+ * `exitProof` (darwin GUI): the agent cannot subscribe to a non-child darwin pid (its `exit`
+ * falls through to Linux pidfd), so exit is proven only by the launcher's own exit receipt
+ * (receipts/gui-launch.json.exit.json) naming the same pid and processStart. Without that
+ * receipt nothing is recorded as gone, whatever probe says.
  */
-export async function stopExact(agent, { resource, receipt, deadlineMs = 60_000 }) {
+export async function stopExact(agent, { resource, receipt, exitProof = null, deadlineMs = 60_000 }) {
   const { pid, executable, processStart } = receipt ?? {};
   if (!pid || !executable || !processStart) return { resource, pid, action: 'reported-not-killed', error: 'receipt lacks pid, executable or processStart' };
+  const proven = async () => {
+    const exit = await exitProof().catch(() => null);
+    return exit && exit.status === 'exited' && exit.pid === pid && exit.processStart === processStart ? exit : null;
+  };
   try {
     const signal = AbortSignal.timeout(deadlineMs);
+    if (exitProof) {
+      const early = await proven();
+      if (early) return { resource, pid, processStart, action: 'already-exited', proof: 'exit-receipt', exit: early };
+      const live = await agent.call('probe', { pid }, signal).catch((error) => ({ probeError: String(error?.message ?? error) }));
+      if (!live.probeError && !live.exited) await agent.call('terminate', { pid, executable, processStart }, signal);
+      const exit = await until(`${resource} exit receipt`, proven, Boolean, { deadlineMs, gapMs: 1_000 }).catch(() => null);
+      if (!exit) return { resource, pid, processStart, action: 'reported-not-killed', error: `no exit receipt with this pid and processStart${live.probeError ? `; probe failed: ${live.probeError}` : ''}` };
+      return { resource, pid, processStart, action: live.exited ? 'already-exited' : 'killed', proof: 'exit-receipt', exit };
+    }
     const live = await agent.call('probe', { pid }, signal);
     if (live.exited) return { resource, pid, processStart, action: 'already-exited' };
     const exited = agent.call('exit', { pid, processStart }, signal);
+    // Handled now so a terminate failure cannot leave it rejecting unobserved; awaited below.
+    exited.catch(() => {});
     const terminated = await agent.call('terminate', { pid, executable, processStart }, signal);
     await exited;
     return { resource, pid, processStart, action: terminated?.exited ? 'already-exited' : 'killed' };
