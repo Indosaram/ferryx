@@ -3689,6 +3689,7 @@ pub mod panel_contract;
 pub mod cutover;
 pub mod delivery;
 pub mod dispatcher;
+pub mod health;
 pub mod memory;
 pub mod receipts;
 pub mod request;
