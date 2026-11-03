@@ -704,7 +704,6 @@ async fn a_stop_routes_by_session_ref_and_stays_on_this_computer() {
 
     // Another computer's ref never reaches a local pane: it goes to the daemon's paired-host
     // forwarding path. This daemon has no paired host named "otherhost", which that path reports.
-    let (daemon, loopback) = loopback_daemon(&gateway).await;
     let (status, _, body) = gateway
         .post_to("/api/v1/sessions/otherhost:no-such-pane/stop", &token, "")
         .await;
@@ -715,47 +714,18 @@ async fn a_stop_routes_by_session_ref_and_stays_on_this_computer() {
         "the forward reached the daemon's paired-host path: {body}"
     );
     let audit = gateway.state().agent_control_audit.recent();
+    let forwarded: Vec<_> = audit.iter().skip(audited).collect();
+    assert_eq!(forwarded.len(), 1, "exactly one audit line for the forward: {audit:?}");
     assert!(
-        audit.iter().skip(audited).any(|record| record.op == "stop"
-            && record.session_id.as_deref() == Some("no-such-pane")
-            && record.device_id != "owner"),
+        forwarded[0].op == "stop" && forwarded[0].session_id.as_deref() == Some("no-such-pane") && forwarded[0].device_id != "owner",
         "the forward is audited under the calling device: {audit:?}"
     );
-    drop((daemon, loopback));
 
     // A handle with no host is malformed.
     let (status, _, body) = gateway.post_to("/api/v1/sessions/nohost/stop", &token, "").await;
     assert_eq!(status, 400, "{body}");
     assert_eq!(body["error"]["code"], "INVALID_REQUEST");
     gateway.stop().await;
-}
-
-/// A second daemon on a unix socket under `root`, installed as the gateway's loopback owner
-/// socket, so the forwards the gateway makes reach a real `DaemonRequest::AgentControl` handler
-/// (which has no paired hosts). Dropping the returned join set stops it.
-async fn loopback_daemon(
-    gateway: &Gateway,
-) -> (Arc<crate::daemon::server::DaemonServer>, tokio::task::JoinSet<()>) {
-    let root = gateway._root.path();
-    let daemon = Arc::new(crate::daemon::server::DaemonServer::new_with_paths(
-        Some(root.join("loopback/config")),
-        Some(root.join("loopback/auth")),
-    ));
-    let socket = root.join("loopback.sock");
-    let listener = tokio::net::UnixListener::bind(&socket).expect("bind loopback");
-    let owner = Arc::clone(&daemon);
-    let mut tasks = tokio::task::JoinSet::new();
-    tasks.spawn(async move {
-        let mut clients = tokio::task::JoinSet::new();
-        while let Ok((stream, _)) = listener.accept().await {
-            let owner = Arc::clone(&owner);
-            clients.spawn(async move { owner.handle_client(stream).await });
-        }
-    });
-    gateway
-        .state()
-        .set_agent_control_loopback_for_test(Arc::new(crate::daemon::client::DaemonClient::new_with_socket(socket)));
-    (daemon, tasks)
 }
 
 #[tokio::test]
@@ -779,7 +749,6 @@ async fn a_decision_tap_needs_its_exact_body_and_is_audited_as_an_answer() {
 async fn a_decision_tap_for_another_computer_is_forwarded_and_audited_per_device() {
     let gateway = Gateway::start().await;
     let token = gateway.authorized_machine_token();
-    let (_daemon, _tasks) = loopback_daemon(&gateway).await;
 
     let path = "/api/v1/supervisor/decisions/otherhost:pane-9/answer";
     let (status, _, body) = gateway.post_to(path, &token, TAP).await;
@@ -796,23 +765,6 @@ async fn a_decision_tap_for_another_computer_is_forwarded_and_audited_per_device
     gateway.state().agent_control_policy.restrict_to(["another-device"]);
     let (status, _, body) = gateway.post_to(path, &token, TAP).await;
     assert_eq!(status, 403, "{body}");
-    gateway.stop().await;
-}
-
-#[tokio::test]
-async fn a_forward_with_no_daemon_to_carry_it_is_outcome_unknown_not_a_404() {
-    let gateway = Gateway::start().await;
-    let token = gateway.authorized_machine_token();
-    let dead = gateway._root.path().join("no-daemon.sock");
-    gateway
-        .state()
-        .set_agent_control_loopback_for_test(Arc::new(crate::daemon::client::DaemonClient::existing_only_at(
-            dead,
-            Duration::from_millis(50),
-        )));
-    let (status, _, body) = gateway.post_to("/api/v1/sessions/otherhost:pane-9/stop", &token, "").await;
-    assert_eq!(status, 409, "{body}");
-    assert_eq!(body["error"]["code"], "OPERATION_OUTCOME_UNKNOWN");
     gateway.stop().await;
 }
 

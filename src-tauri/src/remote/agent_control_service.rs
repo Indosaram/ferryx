@@ -1257,7 +1257,8 @@ async fn stop_session(
 }
 
 /// One op for one authorized device: in-process for a pane on this computer, else forwarded to
-/// the paired computer that owns it through the daemon's own `AgentControl` path.
+/// the paired computer that owns it through the same paired-host forward the daemon's
+/// `AgentControl { host_id: Some(..) }` request uses.
 async fn control_ref_op(
     state: &Arc<RemoteGatewayState>,
     headers: &HeaderMap,
@@ -1272,46 +1273,39 @@ async fn control_ref_op(
     })
 }
 
-/// Forward one input op for a paired computer's pane. The device is re-authorized right before
-/// the forward and the call is audited under its id. The daemon executes once: a lost answer is
-/// `OPERATION_OUTCOME_UNKNOWN` and is never sent again. An owner answer joins this computer's
-/// answer history, looked up under the paired host's session refs only.
+/// Forward one input op for a paired computer's pane, in-process, as one authorized device.
+///
+/// The device is re-authorized right before the forward and the call is audited once under its
+/// id (the daemon's own owner-socket forward is not on this path, so there is no second line or
+/// second `supervisor_changed`). The forward executes once: a lost answer is
+/// `OPERATION_OUTCOME_UNKNOWN` and is never sent again. The request id is minted here when the
+/// caller sent none. An owner answer joins this computer's answer history, looked up under the
+/// paired host's session refs only.
 async fn forward_as(
     state: &Arc<RemoteGatewayState>,
     host_id: String,
-    op: AgentControlOp,
+    mut op: AgentControlOp,
     actor: &str,
     authorize: Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>,
 ) -> Result<serde_json::Value, ScopeError> {
+    match &mut op {
+        AgentControlOp::Stop { request_id, .. } | AgentControlOp::Answer { request_id, .. } => {
+            *request_id = Some(request_id_or_new(request_id.take()));
+        }
+        _ => {}
+    }
     let owner_answer = crate::hub_runtime::panel_autonomy::forwarded_owner_answer_of(&host_id, &op);
     let result = match authorize() {
         Err(error) => Err(error),
-        Ok(()) => {
-            let request = crate::daemon::protocol::DaemonRequest::AgentControl {
-                request: op.clone(),
-                host_id: Some(host_id),
-            };
-            match state.agent_control_loopback().send_request(request).await {
-                Ok(crate::daemon::protocol::DaemonResponse::AgentControlOk { result }) => Ok(result),
-                Ok(crate::daemon::protocol::DaemonResponse::Error { message, code, .. }) => {
-                    let code = code.unwrap_or_default();
-                    Err(reference_chat_scope(
-                        serde_json::from_value(serde_json::Value::String(code))
-                            .unwrap_or(ScopeErrorCode::InventoryIncomplete),
-                        message,
-                    ))
-                }
-                Ok(_) => Err(reference_chat_scope(
-                    ScopeErrorCode::InventoryIncomplete,
-                    "the daemon returned an unexpected agent-control response",
-                )),
-                // The request may have reached the paired computer; it is not sent again.
-                Err(error) => Err(reference_chat_scope(
-                    ScopeErrorCode::OperationOutcomeUnknown,
-                    format!("the forward did not finish; its outcome is unknown: {error}"),
-                )),
-            }
-        }
+        Ok(()) => match state.paired_hosts() {
+            None => Err(reference_chat_scope(
+                ScopeErrorCode::InventoryIncomplete,
+                "this computer has no paired-host service",
+            )),
+            Some(hosts) => forward_once(&hosts, &host_id, op.clone())
+                .await
+                .map_err(|failure| reference_chat_scope(forward_scope_code(&failure.code), failure.message)),
+        },
     };
     if let (Ok(_), Some(answer)) = (&result, owner_answer) {
         tokio::spawn(answer.recorded());
@@ -1328,6 +1322,34 @@ async fn forward_as(
         ),
     );
     result
+}
+
+/// The phone-facing code for a failed forward. The paired computer's own refusals keep their
+/// typed code (stale screen, provider owned, not found...). Its credential or reachability
+/// failures are this computer's unavailable service, never a 401/403 about the phone's token.
+/// Anything unrecognised after the request left may have been applied, so it is outcome-unknown.
+fn forward_scope_code(code: &str) -> ScopeErrorCode {
+    match code {
+        "INVALID_REQUEST" => ScopeErrorCode::InvalidRequest,
+        "NOT_FOUND" => ScopeErrorCode::NotFound,
+        "TARGET_EXPIRED" => ScopeErrorCode::TargetExpired,
+        "CONTROL_CONFLICT" => ScopeErrorCode::ControlConflict,
+        "REQUEST_CONFLICT" => ScopeErrorCode::RequestConflict,
+        "PROVIDER_OWNED" => ScopeErrorCode::ProviderOwned,
+        "UNSUPPORTED" | "PAIRED_HOST_CAPABILITY_UNAVAILABLE" => ScopeErrorCode::Unsupported,
+        "PAYLOAD_TOO_LARGE" => ScopeErrorCode::PayloadTooLarge,
+        "CAPTURE_UNSUPPORTED" => ScopeErrorCode::CaptureUnsupported,
+        "INVENTORY_INCOMPLETE"
+        | "UNAUTHORIZED"
+        | "FORBIDDEN"
+        | "MACHINE_ACCESS_REQUIRED"
+        | "REPAIR_REQUIRED"
+        | "HOST_UNAVAILABLE"
+        | "PAIRED_HOST_STALE_GENERATION"
+        | "PAIRED_HOST_WRONG_MACHINE"
+        | "PAIRED_HOST_REDIRECT_REJECTED" => ScopeErrorCode::InventoryIncomplete,
+        _ => ScopeErrorCode::OperationOutcomeUnknown,
+    }
 }
 
 /// A `<hostId>:<backendSessionId>` handle split for agent control: the paired host that owns the
@@ -1486,6 +1508,43 @@ mod tests {
         ] {
             assert!(serde_json::from_value::<DecisionAnswerBody>(bad.clone()).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_forward_failure_never_reaches_the_phone_as_its_own_401_and_unknown_is_outcome_unknown() {
+        for code in ["UNAUTHORIZED", "FORBIDDEN", "MACHINE_ACCESS_REQUIRED", "REPAIR_REQUIRED", "HOST_UNAVAILABLE"] {
+            assert_eq!(forward_scope_code(code), ScopeErrorCode::InventoryIncomplete, "{code}");
+        }
+        assert_eq!(forward_scope_code("REQUEST_CONFLICT"), ScopeErrorCode::RequestConflict);
+        assert_eq!(forward_scope_code("PROVIDER_OWNED"), ScopeErrorCode::ProviderOwned);
+        assert_eq!(forward_scope_code("NOT_FOUND"), ScopeErrorCode::NotFound);
+        assert_eq!(forward_scope_code("OPERATION_OUTCOME_UNKNOWN"), ScopeErrorCode::OperationOutcomeUnknown);
+        assert_eq!(forward_scope_code("PAIRED_HOST_INVALID_RESPONSE"), ScopeErrorCode::OperationOutcomeUnknown);
+    }
+
+    #[tokio::test]
+    async fn a_forward_is_re_authorized_audited_once_under_the_device_and_mints_nothing_when_refused() {
+        let (_backend, state) = pane("agent-control-forward-auth", CLAUDE_APPROVAL);
+        let refuse: Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync> =
+            Arc::new(|| Err(reference_chat_scope(ScopeErrorCode::Unauthorized, "the caller's device is no longer authorized")));
+        let before = state.agent_control_audit.recent().len();
+
+        let error = forward_as(
+            &state,
+            "omarchy".into(),
+            AgentControlOp::Stop { session_id: "pane-9".into(), request_id: None },
+            "device-1",
+            refuse,
+        )
+        .await
+        .expect_err("the second authorization check refuses");
+
+        assert_eq!(error.code, ScopeErrorCode::Unauthorized);
+        let audit = state.agent_control_audit.recent();
+        assert_eq!(audit.len(), before + 1, "exactly one audit line: {audit:?}");
+        let line = audit.last().unwrap();
+        assert_eq!((line.device_id.as_str(), line.op.as_str(), line.code.as_str()), ("device-1", "stop", "UNAUTHORIZED"));
+        assert!(line.request_id.is_some(), "a stop with no request id gets one before it is forwarded");
     }
 
     #[tokio::test]

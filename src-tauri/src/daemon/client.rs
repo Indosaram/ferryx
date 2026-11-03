@@ -1024,6 +1024,13 @@ fn request_timeout(request: &DaemonRequest) -> std::time::Duration {
         DaemonRequest::SupervisorRequestV1 { .. } | DaemonRequest::SupervisorConverseV1 { .. } => {
             SUPERVISOR_GOAL_REQUEST_TIMEOUT
         }
+        // A stop or answer for a paired computer's pane runs the paired mutation: capabilities,
+        // journal and the mutation itself. A flat 15 s would call a slow success outcome-unknown.
+        DaemonRequest::AgentControl {
+            host_id: Some(_),
+            request: crate::agent_control::AgentControlOp::Stop { .. }
+                | crate::agent_control::AgentControlOp::Answer { .. },
+        } => DaemonClient::PAIRED_MUTATION_OUTER_TIMEOUT,
         // Turning the remote desktop host on probes capture and binds; the host bounds that at 30 s.
         DaemonRequest::RemoteDesktopHostSet { .. } => REMOTE_DESKTOP_SET_TIMEOUT,
         _ => DEFAULT_REQUEST_TIMEOUT,
@@ -5837,6 +5844,28 @@ mod tests {
         assert_eq!(request_timeout(&show), std::time::Duration::from_secs(15));
         assert_eq!(request_timeout(&DaemonRequest::SupervisorSnapshot), std::time::Duration::from_secs(15));
         assert_eq!(request_timeout(&DaemonRequest::Ping), std::time::Duration::from_secs(15));
+    }
+
+    #[test]
+    fn a_paired_stop_or_answer_gets_the_paired_mutation_budget_and_a_local_one_does_not() {
+        use crate::agent_control::AgentControlOp;
+        let stop = |host_id: Option<&str>| DaemonRequest::AgentControl {
+            request: AgentControlOp::Stop { session_id: "s".into(), request_id: None },
+            host_id: host_id.map(str::to_owned),
+        };
+        assert_eq!(request_timeout(&stop(Some("omarchy"))), DaemonClient::PAIRED_MUTATION_OUTER_TIMEOUT);
+        assert_eq!(request_timeout(&stop(None)), std::time::Duration::from_secs(15));
+        let answer = DaemonRequest::AgentControl {
+            request: AgentControlOp::Answer {
+                session_id: "s".into(),
+                prompt_id: "p".into(),
+                screen_revision: "r".into(),
+                answer: Default::default(),
+                request_id: None,
+            },
+            host_id: Some("omarchy".into()),
+        };
+        assert_eq!(request_timeout(&answer), DaemonClient::PAIRED_MUTATION_OUTER_TIMEOUT);
     }
     use crate::daemon::server::DaemonServer;
     use crate::remote::state::RemoteNetworkMode;

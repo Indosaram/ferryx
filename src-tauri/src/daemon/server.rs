@@ -4172,6 +4172,7 @@ impl DaemonServer {
             });
         }
 
+        remote_state.set_paired_hosts(paired_hosts.clone());
         Self {
             paired_hosts,
             session_router,
@@ -4223,6 +4224,7 @@ impl DaemonServer {
         &mut self,
         service: crate::paired_host::service::PairedHostService,
     ) {
+        self.remote_state.set_paired_hosts(service.clone());
         self.paired_hosts = service;
     }
 
