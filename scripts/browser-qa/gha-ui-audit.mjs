@@ -2052,10 +2052,12 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
 const UBOL_ID = "ddkjiahejlhfcafbddmgiahcphecmpfh";
 const UBOL_URL = `https://chromewebstore.google.com/detail/ublock-origin-lite/${UBOL_ID}`;
 /** uBlock Origin Lite in the engine's default profile data: its Extensions/<id> dir and its
- * extensions.settings entry in Preferences / Secure Preferences. */
+ * extensions.settings entry in Preferences / Secure Preferences. `prefs` counts only an entry
+ * that describes an install (a manifest, path or state): after an uninstall Chromium leaves an
+ * empty `{}` husk under the id (run 41670774160, all 3 OSes), reported as `prefs_husk`. */
 function ubolOnDisk() {
   const root = join(dirs.data, "browser-cef", "default");
-  const result = { dir: false, prefs: false, prefs_read: [] };
+  const result = { dir: false, prefs: false, prefs_husk: false, prefs_read: [] };
   for (const profile of [join(root, "Default"), root]) {
     if (existsSync(join(profile, "Extensions", UBOL_ID))) result.dir = true;
     for (const file of ["Preferences", "Secure Preferences"]) {
@@ -2065,10 +2067,12 @@ function ubolOnDisk() {
         const settings = JSON.parse(readFileSync(path, "utf8"))?.extensions?.settings ?? {};
         result.prefs_read.push(`${basename(profile)}/${file}`);
         if (settings[UBOL_ID]) {
-          result.prefs = true;
-          // What the entry is (a live install, or a leftover such as an uninstall tombstone):
-          // its top-level keys and the fields Chrome uses for state.
           const entry = settings[UBOL_ID];
+          const installed = Boolean(entry.manifest) || entry.path != null || entry.state != null;
+          if (installed) result.prefs = true;
+          else result.prefs_husk = true;
+          // What the entry is (a live install, or a leftover such as an uninstall husk):
+          // its top-level keys and the fields Chrome uses for state.
           result.prefs_entry ??= {};
           result.prefs_entry[`${basename(profile)}/${file}`] = {
             keys: Object.keys(entry).sort().slice(0, 40),
@@ -2436,11 +2440,31 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
     { any: ["Extensions"], none: ["uBlock"] },
   );
   record.disk_after_restart = ubolOnDisk();
+  // Second, independent signal: the product's own listing (`ferryx browser extensions list`,
+  // the running engine's answer, else the profile files) must not name the id.
+  const listed = await cliAsync("extensions", "list");
+  let listing = null;
+  try {
+    listing = JSON.parse(listed.stdout);
+  } catch {}
+  const ids = Array.isArray(listing?.extensions) ? listing.extensions.map((entry) => entry.id) : null;
+  record.cli_list_after_restart = {
+    ok: listed.ok && ids !== null,
+    status: listed.status,
+    engine_running: listing?.engineRunning ?? null,
+    ids,
+    listed: ids ? ids.includes(UBOL_ID) : null,
+    stderr: listed.stderr.slice(0, 400),
+  };
+  record.removal_signals_after_restart = {
+    profile_files: !record.disk_after_restart.dir && !record.disk_after_restart.prefs,
+    cli_list: record.cli_list_after_restart.ok && record.cli_list_after_restart.listed === false,
+  };
   record.checks.stays_removed_after_restart = installed
     && record.restarted
     && (summary.steps.at(-1).actions.at(-1)?.ok ?? false)
-    && !record.disk_after_restart.prefs
-    && !record.disk_after_restart.dir;
+    && record.removal_signals_after_restart.profile_files
+    && record.removal_signals_after_restart.cli_list;
   await step("extension-settings-closed-after-restart", "Escape closes Settings", [focus, key("Escape", { key: "Escape" }), 1500]);
   writeSummary();
 }
