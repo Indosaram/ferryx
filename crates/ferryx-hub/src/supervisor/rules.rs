@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use sqlx::SqlitePool;
 
-use super::contract::{default_rules, RuleStore, StandingRule};
+use super::panel_contract::{default_rules, RuleStore, StandingRule};
 use crate::error::{HubError, Result};
 use crate::storage::WriteTx;
 
@@ -117,7 +117,7 @@ impl RuleStore for SqliteRuleStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::supervisor::contract::{RuleKind, RuleScope};
+    use crate::supervisor::panel_contract::{RuleKind, RuleScope};
 
     #[tokio::test]
     async fn defaults_are_present_on_an_empty_database_and_seeded_once() {

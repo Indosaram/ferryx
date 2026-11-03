@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use sqlx::SqlitePool;
 
-use super::contract::{ActionEntry, ActionLog, SessionRef};
+use super::panel_contract::{ActionEntry, ActionLog, SessionRef};
 use crate::error::{HubError, Result};
 use crate::storage::WriteTx;
 
@@ -148,7 +148,7 @@ impl ActionLog for SqliteActionLog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::supervisor::contract::{ActionKind, EvidenceRef, UndoHandle};
+    use crate::supervisor::panel_contract::{ActionKind, EvidenceRef, UndoHandle};
 
     fn entry(summary: &str, live: bool, at_ms: i64) -> ActionEntry {
         ActionEntry {
