@@ -493,6 +493,9 @@ pub fn irreversible_or_external(
 }
 
 fn classify_text(text: &str, worktree: Option<&str>) -> Option<&'static str> {
+    // `cargo build --release` builds; it does not cut a release. Tokenized before the local
+    // `words` binding below shadows the function.
+    let words_without_release_flag = words(&text.replace("--release", " "));
     let words = words(text);
     let any = |list: &[&str]| words.iter().any(|w| list.contains(&w.as_str()));
     let prefixed = |prefixes: &[&str]| {
@@ -541,8 +544,7 @@ fn classify_text(text: &str, worktree: Option<&str>) -> Option<&'static str> {
     if prefixed(&["publish"]) {
         return Some("publish");
     }
-    // `cargo build --release` builds; it does not cut a release.
-    if words(&text.replace("--release", " "))
+    if words_without_release_flag
         .iter()
         .any(|w| w.starts_with("release"))
     {
