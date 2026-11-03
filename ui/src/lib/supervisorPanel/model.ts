@@ -12,6 +12,7 @@ import type {
   PanelSnapshot,
   PendingPrompt,
   RuleKind,
+  SessionHealth,
   SessionRef,
   StandingRule,
 } from "./contract";
@@ -20,8 +21,11 @@ const MINUTE_MS = 60_000;
 const DEFAULT_STALL_THRESHOLD_SECS = 300;
 const LOG_COLLAPSED_COUNT = 2;
 
-/** D12 glyphs a session row can carry. */
-export type SessionGlyph = "needsYou" | "working" | "idle";
+/**
+ * D12 glyphs a session row can carry. `failed` only ever comes from a fresh `failed` health
+ * observation passed in `PanelViewOptions.health`; the wire snapshot itself carries none.
+ */
+export type SessionGlyph = "needsYou" | "failed" | "working" | "idle";
 
 export interface DecisionOptionView {
   /** Index into the prompt's original `options` (what the answer route takes). */
@@ -106,41 +110,97 @@ export interface PanelViewOptions {
   nowMs: number;
   /** Start of the owner's local day; defaults to local midnight of `nowMs`. */
   startOfDayMs?: number;
+  /** Latest health per session, when the caller has it (not part of `PanelSnapshot`). */
+  health?: ReadonlyMap<SessionRef, SessionHealth>;
 }
 
 // ---------------------------------------------------------------------------
 // Reducer
 
-function withoutAction(list: ActionEntry[], id: number): ActionEntry[] {
-  return list.filter((entry) => entry.id !== id);
+/** Sorted newest first, the order the hub lists them in. */
+function sortedActions(list: ActionEntry[]): ActionEntry[] {
+  return [...list].sort(newestFirst);
 }
 
+/**
+ * Whether `next` may replace `current` (same action id). Older reports never win; at the same
+ * instant a completion is terminal, so a repeated live frame cannot reopen a finished action.
+ */
+function supersedes(next: ActionEntry, current: ActionEntry): boolean {
+  if (next.updatedAtMs !== current.updatedAtMs) return next.updatedAtMs > current.updatedAtMs;
+  return !(next.live && !current.live);
+}
+
+function replaceOrAppend<T>(list: T[], match: (item: T) => boolean, next: T): T[] {
+  const index = list.findIndex(match);
+  if (index < 0) return [...list, next];
+  const copy = list.slice();
+  copy[index] = next;
+  return copy;
+}
+
+/**
+ * The one reducer for owner `panel.*` frames, used by the desktop host and the phone alike.
+ *
+ * - `panel.action`: upsert by action `id`. A live frame lives in `handling`, a finished one in
+ *   `log` (newest first); the other list drops it, so an action is never in both. A frame older
+ *   than the stored one (`updatedAtMs`) is ignored, so a late live frame cannot resurrect a
+ *   completed action; a genuinely newer live frame (the incident came back) reopens it.
+ * - `panel.decision`: `null` removes the session's decision; otherwise it replaces it in place
+ *   (new ones append). An older prompt never replaces a newer one, and an escalation that breaks
+ *   the contract (no usable recommendation, blank reason) is ignored, never shown.
+ * - `panel.session`: upsert by ref; an older report never replaces a newer one.
+ * - `panel.rules`: replaces the list.
+ */
 export function applyPanelEvent(
   snapshot: PanelSnapshot,
   event: PanelEvent,
 ): PanelSnapshot {
   switch (event.type) {
     case "panel.decision": {
-      const rest = snapshot.decisions.filter(
-        (decision) => decision.sessionRef !== event.sessionRef,
-      );
+      const { decision } = event;
+      if (decision === null) {
+        return {
+          ...snapshot,
+          decisions: snapshot.decisions.filter((item) => item.sessionRef !== event.sessionRef),
+        };
+      }
+      if (decision.sessionRef !== event.sessionRef || validateEscalation(decision) !== null) {
+        return snapshot;
+      }
+      const current = snapshot.decisions.find((item) => item.sessionRef === event.sessionRef);
+      if (current && decision.createdAtMs < current.createdAtMs) return snapshot;
       return {
         ...snapshot,
-        decisions: event.decision ? [...rest, event.decision] : rest,
+        decisions: replaceOrAppend(
+          snapshot.decisions,
+          (item) => item.sessionRef === event.sessionRef,
+          decision,
+        ),
       };
     }
     case "panel.action": {
-      const handling = withoutAction(snapshot.handling, event.action.id);
-      const log = withoutAction(snapshot.log, event.action.id);
-      return event.action.live
-        ? { ...snapshot, handling: [...handling, event.action], log }
-        : { ...snapshot, handling, log: [...log, event.action] };
+      const { action } = event;
+      const known = [...snapshot.handling, ...snapshot.log].filter((entry) => entry.id === action.id);
+      if (!known.every((entry) => supersedes(action, entry))) return snapshot;
+      const handling = snapshot.handling.filter((entry) => entry.id !== action.id);
+      const log = snapshot.log.filter((entry) => entry.id !== action.id);
+      return action.live
+        ? { ...snapshot, handling: sortedActions([...handling, action]), log }
+        : { ...snapshot, handling, log: sortedActions([...log, action]) };
     }
     case "panel.session": {
-      const rest = snapshot.sessions.filter(
-        (session) => session.sessionRef !== event.session.sessionRef,
-      );
-      return { ...snapshot, sessions: [...rest, event.session] };
+      const { session } = event;
+      const current = snapshot.sessions.find((item) => item.sessionRef === session.sessionRef);
+      if (current && session.updatedAtMs < current.updatedAtMs) return snapshot;
+      return {
+        ...snapshot,
+        sessions: replaceOrAppend(
+          snapshot.sessions,
+          (item) => item.sessionRef === session.sessionRef,
+          session,
+        ),
+      };
     }
     case "panel.rules":
       return { ...snapshot, rules: event.rules };
@@ -161,13 +221,17 @@ function formatMinutes(ms: number): string {
   return minutes < 120 ? `${minutes} min` : `${Math.floor(minutes / 60)} h`;
 }
 
-function validateEscalation(escalation: Escalation): string | null {
+export function validateEscalation(escalation: Escalation): string | null {
   const index: unknown = escalation.recommendedIndex;
   if (typeof index !== "number" || !Number.isInteger(index)) {
     return "missing recommendedIndex";
   }
   if (index < 0 || index >= escalation.prompt.options.length) {
     return "recommendedIndex out of range";
+  }
+  const reason: unknown = escalation.reason;
+  if (typeof reason !== "string" || reason.trim() === "") {
+    return "missing reason";
   }
   return null;
 }
@@ -273,14 +337,24 @@ function glyphFor(state: FleetSessionState): SessionGlyph {
   }
 }
 
-const GLYPH_RANK: Record<SessionGlyph, number> = { needsYou: 0, working: 1, idle: 2 };
+const GLYPH_RANK: Record<SessionGlyph, number> = { needsYou: 0, failed: 1, working: 2, idle: 3 };
+
+/** A failed health report counts only while the session has not changed state since it. */
+function hasFailed(session: FleetSession, health: SessionHealth | undefined): boolean {
+  return (
+    !session.stale &&
+    health?.kind.type === "failed" &&
+    health.observedAtMs >= (session.stateSinceMs ?? 0)
+  );
+}
 
 function sessionRow(
   session: FleetSession,
   nowMs: number,
   stallMs: number,
+  health: SessionHealth | undefined,
 ): SessionRowView {
-  const glyph = glyphFor(session.state);
+  const glyph = hasFailed(session, health) ? "failed" : glyphFor(session.state);
   const stalled =
     session.state === "working" &&
     session.stateSource === "provider" &&
@@ -366,7 +440,7 @@ export function buildPanelView(
   const stallMs = stallThresholdMs(snapshot.rules);
   const sessions = [...fleet.values()]
     .filter((session) => !shownRefs.has(session.sessionRef))
-    .map((session) => sessionRow(session, nowMs, stallMs))
+    .map((session) => sessionRow(session, nowMs, stallMs, options.health?.get(session.sessionRef)))
     .sort(
       (a, b) =>
         GLYPH_RANK[a.glyph] - GLYPH_RANK[b.glyph] || a.title.localeCompare(b.title),
@@ -402,6 +476,9 @@ export function buildPanelView(
 // ---------------------------------------------------------------------------
 // Mentions (D11)
 
+/** What a mention can name: the fields the resolver reads. */
+export type MentionTarget = Pick<FleetSession, "sessionRef" | "title" | "hostLabel">;
+
 export interface AmbiguousMention {
   /** The matched text including the leading "@". */
   mention: string;
@@ -425,7 +502,7 @@ function backendId(ref: SessionRef): string {
   return ref.slice(ref.indexOf(":") + 1);
 }
 
-function exactNames(session: FleetSession): string[] {
+function exactNames(session: MentionTarget): string[] {
   return [
     `${session.title} · ${session.hostLabel}`,
     session.title,
@@ -437,7 +514,7 @@ function exactNames(session: FleetSession): string[] {
 
 function resolveAt(
   rest: string,
-  sessions: FleetSession[],
+  sessions: readonly MentionTarget[],
 ): { length: number; refs: SessionRef[] } | null {
   const lower = rest.toLowerCase();
 
@@ -472,7 +549,7 @@ function resolveAt(
   return matches.length > 0 ? { length: token.length, refs: [...new Set(matches)] } : null;
 }
 
-export function parseMentions(text: string, sessions: FleetSession[]): ParsedMentions {
+export function parseMentions(text: string, sessions: readonly MentionTarget[]): ParsedMentions {
   const targets: SessionRef[] = [];
   const ambiguous: AmbiguousMention[] = [];
   let i = 0;

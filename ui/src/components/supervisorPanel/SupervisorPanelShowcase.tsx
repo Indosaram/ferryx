@@ -1,42 +1,36 @@
-import { useState, type ReactNode } from 'react';
+import { type ReactNode } from 'react';
 
+import type { PanelActions } from '../../lib/supervisorPanel/actions';
 import { panelSnapshotFixture } from '../../lib/supervisorPanel/fixtures';
-import type { ActionEntry, FleetSession, PanelSnapshot } from '../../lib/supervisorPanel/contract';
-import { ActionLog } from './ActionLog';
-import { Composer } from './Composer';
+import type { PanelSnapshot, SessionHealth } from '../../lib/supervisorPanel/contract';
 import { DecisionCard } from './DecisionCard';
-import { RulesLine } from './RulesLine';
-import { SetupCard } from './SetupCard';
+import { PanelSurface } from './PanelSurface';
 import { StatusGlyph } from './StatusGlyph';
-import { StatusLine } from './StatusLine';
-import { HandlingRow, SessionRow } from './Rows';
-import { GLYPH_LABEL, type ActionLogLine, type GlyphState, type MentionOption } from './types';
+import { GLYPH_LABEL, type GlyphState } from './types';
 
-// Showcase only: the real mapping from PanelSnapshot lives in the reducer (todo 10).
+// Showcase only: every write is inert. The mapping from PanelSnapshot is the shared model's.
 const noop = () => undefined;
+const ok = () => Promise.resolve({ ok: true } as const);
+const inertActions: PanelActions = {
+  answer: ok,
+  setPaused: ok,
+  converse: ok,
+  stop: ok,
+  undo: ok,
+  turnOn: ok,
+  openSession: noop,
+};
 
-function glyphFor(session: FleetSession): GlyphState {
-  if (session.state === 'blocked') return 'needs';
-  if (session.state === 'working') return 'working';
-  if (session.state === 'idle') return 'done';
-  return 'idle';
-}
+// The fixture's clock, so ages read the same on every render.
+const SHOWCASE_NOW = Date.UTC(2026, 10, 2, 14, 17, 0);
 
-function timeLabel(ms: number): string {
-  const d = new Date(ms);
-  return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
-}
-
-function logLine(entry: ActionEntry): ActionLogLine {
-  return {
-    id: entry.id,
-    summary: entry.summary,
-    timeLabel: timeLabel(entry.createdAtMs),
-    basis: entry.basis,
-    unverified: entry.evidence.length === 0,
-    undoable: entry.undo !== null,
-  };
-}
+/** One finished session reads Idle; a Failed row needs a fresh failed health report. */
+const failedHealth: ReadonlyMap<string, SessionHealth> = new Map([
+  [
+    'mac:wtlist',
+    { sessionRef: 'mac:wtlist', kind: { type: 'failed', reason: 'exit 1' }, observedAtMs: SHOWCASE_NOW },
+  ],
+]);
 
 function Block({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -47,76 +41,24 @@ function Block({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-function Surface({ touch, snapshot }: { touch: boolean; snapshot: PanelSnapshot }) {
-  const byRef = new Map(snapshot.sessions.map((s) => [s.sessionRef, s]));
-  const mentions: MentionOption[] = snapshot.sessions.map((s) => ({
-    sessionRef: s.sessionRef,
-    title: s.title,
-    computer: s.hostLabel,
-  }));
-  const handlingRefs = new Set(snapshot.handling.map((h) => h.sessionRef));
-  const decisionRefs = new Set(snapshot.decisions.map((d) => d.sessionRef));
-  const [paused, setPaused] = useState(snapshot.paused);
-  const log = snapshot.log.map(logLine);
-  // Demonstrate the Unverified chip on one line.
-  if (log[1]) log[1] = { ...log[1], unverified: true };
-
-  if (snapshot.setupRequired) {
-    return <SetupCard computer="This Mac" touch={touch} onTurnOn={noop} />;
-  }
+function Surface({
+  touch,
+  snapshot,
+  health,
+}: {
+  touch: boolean;
+  snapshot: PanelSnapshot;
+  health?: ReadonlyMap<string, SessionHealth>;
+}) {
   return (
-    <div className="flex flex-col gap-4">
-      <StatusLine
-        touch={touch}
-        summary={paused ? 'Paused · nothing is answered or retried' : '2 running · handled 4 things today'}
-        headline={snapshot.decisions.length > 0 ? `${snapshot.decisions.length} decisions for you.` : 'Nothing needs you.'}
-        detail={snapshot.decisions.length > 0 ? 'The rest is running.' : undefined}
-        clear={snapshot.decisions.length === 0}
-        paused={paused}
-        onTogglePause={() => setPaused((p) => !p)}
-      />
-      {snapshot.decisions.map((d) => {
-        const s = byRef.get(d.sessionRef);
-        return (
-          <DecisionCard
-            key={d.sessionRef}
-            touch={touch}
-            sessionName={s?.title ?? d.sessionRef}
-            computer={s?.hostLabel ?? ''}
-            question={d.prompt.question}
-            command={d.prompt.command}
-            options={d.prompt.options}
-            recommendation={{ index: d.recommendedIndex, reason: d.reason }}
-            onAnswer={noop}
-            onOpenTerminal={noop}
-          />
-        );
-      })}
-      {snapshot.handling.map((h) => (
-        <HandlingRow key={h.id} touch={touch} title={byRef.get(h.sessionRef ?? '')?.title ?? h.summary} detail={h.summary} onOpen={noop} onStop={noop} />
-      ))}
-      <div className="flex flex-col gap-1">
-        {snapshot.sessions
-          .filter((s) => !handlingRefs.has(s.sessionRef) && !decisionRefs.has(s.sessionRef))
-          .map((s) => (
-            <SessionRow
-              key={s.sessionRef}
-              touch={touch}
-              title={s.title}
-              detail={s.lastAssistantLine ?? ''}
-              computer={s.hostLabel}
-              state={glyphFor(s)}
-              onOpen={noop}
-            />
-          ))}
-      </div>
-      <ActionLog entries={log} touch={touch} onUndo={noop} />
-      <RulesLine
-        text="Retry upstream errors every 10 min · restart after 5 min with no output · resume after usage limits · ask you only before irreversible steps"
-        onChange={noop}
-      />
-      <Composer sessions={mentions} touch={touch} onSend={noop} />
-    </div>
+    <PanelSurface
+      touch={touch}
+      snapshot={snapshot}
+      actions={inertActions}
+      nowMs={SHOWCASE_NOW}
+      health={health}
+      computerLabel="This Mac"
+    />
   );
 }
 
@@ -142,6 +84,9 @@ export function SupervisorPanelShowcase() {
           <Surface touch snapshot={panelSnapshotFixture} />
         </Block>
         <div className="flex flex-col gap-6">
+          <Block title="A failed session">
+            <Surface touch={false} snapshot={{ ...panelSnapshotFixture, decisions: [] }} health={failedHealth} />
+          </Block>
           <Block title="Nothing needs you, paused">
             <Surface touch={false} snapshot={{ ...panelSnapshotFixture, decisions: [], paused: true }} />
           </Block>

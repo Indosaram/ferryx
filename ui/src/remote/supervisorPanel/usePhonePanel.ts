@@ -4,10 +4,13 @@
 // direct hub routes (answer, pause, converse); each refetches on success so the card leaves.
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { PanelSnapshot, SessionRef } from "../../lib/supervisorPanel/contract";
+import type { PanelActionResult, PanelActions } from "../../lib/supervisorPanel/actions";
+import type { PanelSnapshot } from "../../lib/supervisorPanel/contract";
 import type { SupervisorFrameBus } from "../home/machineSupervisorSources";
 import type { SupervisorFetch } from "../remoteSupervisor";
 import { applyPanelEvent, parsePanelFrame } from "./panelModel";
+
+export type { PanelActionResult };
 
 export type PanelState =
   | { readonly kind: "loading" }
@@ -15,8 +18,6 @@ export type PanelState =
   /** The host has no panel route (404): the caller keeps the previous home until it does. */
   | { readonly kind: "unsupported" }
   | { readonly kind: "error"; readonly message: string };
-
-export type PanelActionResult = { readonly ok: true } | { readonly ok: false; readonly stale: boolean; readonly message: string };
 
 function decode(body: Uint8Array | string): unknown {
   try {
@@ -55,14 +56,25 @@ function isResyncFrame(frame: unknown): boolean {
 }
 
 function jsonPost(body: unknown) {
-  return { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  return body === undefined
+    ? { method: "POST" }
+    : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
 }
 
-async function post(fetchLike: SupervisorFetch, path: string, body: unknown): Promise<PanelActionResult> {
+async function post(fetchLike: SupervisorFetch, path: string, body?: unknown): Promise<PanelActionResult> {
   try {
     const res = await fetchLike(path, jsonPost(body));
     if (res.status >= 200 && res.status < 300) return { ok: true };
-    return { ok: false, stale: res.status === 409, message: res.status === 403 ? "This phone can only view the panel." : "That didn't go through." };
+    return {
+      ok: false,
+      stale: res.status === 409,
+      message:
+        res.status === 403
+          ? "This phone can only view the panel."
+          : res.status === 404
+            ? "This computer doesn't support that yet. Update Ferryx on it."
+            : "That didn't go through.",
+    };
   } catch {
     return { ok: false, stale: false, message: "This computer is not reachable right now." };
   }
@@ -72,9 +84,8 @@ export type PhonePanel = {
   readonly state: PanelState;
   /** Refetches; the promise settles when the new snapshot is in (pull-to-refresh holds on it). */
   readonly refresh: () => Promise<void>;
-  readonly answer: (sessionRef: SessionRef, promptId: string, screenRevision: string | null, optionIndex: number) => Promise<PanelActionResult>;
-  readonly setPaused: (paused: boolean) => Promise<PanelActionResult>;
-  readonly converse: (text: string) => Promise<PanelActionResult>;
+  /** The panel's writes, as direct hub routes; `openSession` is filled in by the caller. */
+  readonly actions: Omit<PanelActions, "openSession">;
 };
 
 export function usePhonePanel(input: {
@@ -122,7 +133,7 @@ export function usePhonePanel(input: {
   }, [enabled, hostId, fetchLike, bus, refresh]);
 
   const act = useCallback(
-    async (path: string, body: unknown): Promise<PanelActionResult> => {
+    async (path: string, body?: unknown): Promise<PanelActionResult> => {
       const current = fetchRef.current;
       if (!current) return { ok: false, stale: false, message: "This computer is not connected right now." };
       const result = await post(current, path, body);
@@ -133,12 +144,19 @@ export function usePhonePanel(input: {
     [refresh],
   );
 
-  return {
-    state,
-    refresh,
-    answer: (sessionRef, promptId, screenRevision, optionIndex) =>
-      act(`/api/v1/supervisor/decisions/${encodeURIComponent(sessionRef)}/answer`, { promptId, screenRevision, optionIndex }),
+  const actions: PhonePanel["actions"] = {
+    answer: (decision, optionIndex) =>
+      act(`/api/v1/supervisor/decisions/${encodeURIComponent(decision.sessionRef)}/answer`, {
+        promptId: decision.promptId,
+        screenRevision: decision.screenRevision,
+        optionIndex,
+      }),
     setPaused: (paused) => act("/api/v1/supervisor/pause", { paused }),
-    converse: (text) => act("/api/v1/supervisor/converse", { text, mentions: [], requestId: globalThis.crypto.randomUUID() }),
+    converse: (text, mentions) =>
+      act("/api/v1/supervisor/converse", { text, mentions: [...mentions], requestId: globalThis.crypto.randomUUID() }),
+    stop: (sessionRef) => act(`/api/v1/sessions/${encodeURIComponent(sessionRef)}/stop`),
+    undo: (actionId) => act(`/api/v1/supervisor/actions/${actionId}/undo`),
+    turnOn: () => act("/api/v1/supervisor/start"),
   };
+  return { state, refresh, actions };
 }

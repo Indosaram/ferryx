@@ -59,10 +59,11 @@ export type SidebarViewProps = {
   /** Active tab; the tabs render only when an inbox is offered. */
   readonly view?: SidebarViewId;
   readonly inbox?: SidebarInbox;
-  /** The Supervisor tab's content; the tab shows when this is set and advanced features are on. */
-  readonly supervisor?: { readonly typing: boolean; readonly content: ReactNode };
-  /** Always-visible Supervisor panel above the view tabs (desktop only; not gated by advanced features). */
-  readonly panel?: ReactNode;
+  /**
+   * The Supervisor tab's content; the tab shows when this is set and advanced features are on.
+   * `always` shows it regardless (the autonomy panel is the sidebar, not an advanced feature).
+   */
+  readonly supervisor?: { readonly typing: boolean; readonly content: ReactNode; readonly always?: boolean };
   /** Leading titlebar content (desktop traffic-light pad). */
   readonly titlebarLeading?: ReactNode;
   readonly titlebarProps?: Readonly<Record<string, string | boolean | undefined>>;
@@ -88,7 +89,6 @@ export function SidebarView({
   view = "worktrees",
   inbox,
   supervisor,
-  panel,
   titlebarLeading,
   titlebarProps,
   shortcuts = {},
@@ -97,7 +97,7 @@ export function SidebarView({
   reorder,
 }: SidebarViewProps) {
   const touch = density === "touch";
-  const showSupervisor = Boolean(supervisor) && model.advancedFeatures;
+  const showSupervisor = Boolean(supervisor) && (Boolean(supervisor?.always) || model.advancedFeatures);
   const activeView: SidebarViewId = view === "supervisor" && !showSupervisor ? "worktrees" : view;
   const worktreesHidden = activeView !== "worktrees";
   const collapsed = new Set(model.collapsedGroupIds);
@@ -182,8 +182,6 @@ export function SidebarView({
           ) : null}
         </div>
       ) : null}
-
-      {panel}
 
       {inbox && actions.onViewChange ? (
         <SidebarViewTabs

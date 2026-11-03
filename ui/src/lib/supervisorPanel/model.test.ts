@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { Escalation, FleetSession, PanelSnapshot } from "./contract";
+import type { ActionEntry, Escalation, FleetSession, PanelEvent, PanelSnapshot, SessionHealth } from "./contract";
 import { panelSnapshotFixture } from "./fixtures";
 import {
   applyPanelEvent,
@@ -221,6 +221,37 @@ describe("supervisor panel view", () => {
   });
 });
 
+function actionEntry(overrides: Partial<ActionEntry>): ActionEntry {
+  return {
+    id: 9,
+    incidentKey: "upstream:x",
+    sessionRef: "mac:one",
+    kind: "retried",
+    summary: "Retried",
+    basis: "Default rule",
+    evidence: [{ kind: "receipt", id: "r1" }],
+    undo: null,
+    live: true,
+    createdAtMs: NOW - 5 * MIN,
+    updatedAtMs: NOW - 5 * MIN,
+    ...overrides,
+  };
+}
+
+function apply(snapshot: PanelSnapshot, ...events: PanelEvent[]): PanelSnapshot {
+  return events.reduce(applyPanelEvent, snapshot);
+}
+
+const emptyPanel: PanelSnapshot = {
+  decisions: [],
+  handling: [],
+  sessions: [],
+  log: [],
+  rules: [],
+  paused: false,
+  setupRequired: false,
+};
+
 describe("supervisor panel events", () => {
   it("removes a decision when the frame carries null", () => {
     const next = applyPanelEvent(panelSnapshotFixture, {
@@ -232,11 +263,71 @@ describe("supervisor panel events", () => {
     expect(next.decisions.map((d) => d.sessionRef)).toEqual(["win:roblox"]);
   });
 
+  it("replaces a decision in place and appends a new one", () => {
+    const [relay, roblox] = panelSnapshotFixture.decisions;
+    const newer = { ...relay, reason: "New reason", createdAtMs: relay.createdAtMs + 1 };
+    const replaced = apply(panelSnapshotFixture, {
+      type: "panel.decision",
+      sessionRef: relay.sessionRef,
+      decision: newer,
+    });
+    expect(replaced.decisions.map((d) => [d.sessionRef, d.reason])).toEqual([
+      ["mac:relay", "New reason"],
+      ["win:roblox", roblox.reason],
+    ]);
+
+    const appended = apply(emptyPanel, {
+      type: "panel.decision",
+      sessionRef: relay.sessionRef,
+      decision: relay,
+    });
+    expect(appended.decisions).toEqual([relay]);
+  });
+
+  it("ignores a decision older than the one it would replace", () => {
+    const [relay] = panelSnapshotFixture.decisions;
+    const stale = { ...relay, reason: "Old", createdAtMs: relay.createdAtMs - 1 };
+    const next = apply(panelSnapshotFixture, {
+      type: "panel.decision",
+      sessionRef: relay.sessionRef,
+      decision: stale,
+    });
+    expect(next).toBe(panelSnapshotFixture);
+  });
+
+  it("rejects a decision with a blank reason, a bad index, or another session's ref", () => {
+    const [relay] = panelSnapshotFixture.decisions;
+    for (const decision of [
+      { ...relay, reason: "   " },
+      { ...relay, recommendedIndex: 7 },
+      { ...relay, sessionRef: "win:other" },
+    ]) {
+      expect(
+        apply(emptyPanel, { type: "panel.decision", sessionRef: "mac:relay", decision }).decisions,
+      ).toEqual([]);
+    }
+  });
+
+  it("rejects an empty reason in the built view too", () => {
+    const [relay] = panelSnapshotFixture.decisions;
+    const view = buildPanelView(
+      { ...panelSnapshotFixture, decisions: [{ ...relay, reason: "" }] },
+      options,
+    );
+    expect(view.decisions).toEqual([]);
+    expect(view.rejected).toEqual([{ sessionRef: "mac:relay", reason: "missing reason" }]);
+  });
+
   it("moves an action from handling to the log when it stops being live", () => {
     const live = panelSnapshotFixture.handling[0];
     const next = applyPanelEvent(panelSnapshotFixture, {
       type: "panel.action",
-      action: { ...live, live: false, summary: "Resumed Windows installer tests" },
+      action: {
+        ...live,
+        live: false,
+        summary: "Resumed Windows installer tests",
+        updatedAtMs: live.updatedAtMs + 1,
+      },
     });
 
     expect(next.handling).toEqual([]);
@@ -244,6 +335,87 @@ describe("supervisor panel events", () => {
     expect(buildPanelView(next, options).sessions.map((s) => s.sessionRef)).toContain(
       "win:wintests",
     );
+  });
+
+  it("upserts a live action by id: one entry, updated in place", () => {
+    const first = actionEntry({ id: 9, summary: "Tried once", updatedAtMs: NOW - 4 * MIN });
+    const second = { ...first, summary: "Tried twice", updatedAtMs: NOW - 3 * MIN };
+    const next = apply(
+      emptyPanel,
+      { type: "panel.action", action: first },
+      { type: "panel.action", action: second },
+    );
+
+    expect(next.handling.map((e) => [e.id, e.summary])).toEqual([[9, "Tried twice"]]);
+    expect(next.log).toEqual([]);
+  });
+
+  it("keeps handling and the log newest first, whatever the arrival order", () => {
+    const a = actionEntry({ id: 1, createdAtMs: NOW - 3 * MIN, updatedAtMs: NOW - 3 * MIN });
+    const b = actionEntry({ id: 2, createdAtMs: NOW - 1 * MIN, updatedAtMs: NOW - 1 * MIN });
+    const c = actionEntry({ id: 3, createdAtMs: NOW - 2 * MIN, updatedAtMs: NOW - 2 * MIN });
+    const live = apply(
+      emptyPanel,
+      ...[a, b, c].map((action): PanelEvent => ({ type: "panel.action", action })),
+    );
+    expect(live.handling.map((e) => e.id)).toEqual([2, 3, 1]);
+
+    const done = apply(
+      emptyPanel,
+      ...[a, b, c].map((action): PanelEvent => ({ type: "panel.action", action: { ...action, live: false } })),
+    );
+    expect(done.log.map((e) => e.id)).toEqual([2, 3, 1]);
+  });
+
+  it("completes a live action into the log with no duplicate in either list", () => {
+    const live = actionEntry({ id: 9 });
+    const done = { ...live, live: false, summary: "Resumed", updatedAtMs: live.updatedAtMs + MIN };
+    const next = apply(
+      emptyPanel,
+      { type: "panel.action", action: live },
+      { type: "panel.action", action: done },
+    );
+
+    expect(next.handling).toEqual([]);
+    expect(next.log.map((e) => [e.id, e.summary])).toEqual([[9, "Resumed"]]);
+  });
+
+  it("does not resurrect a completed action from a late or repeated live frame", () => {
+    const live = actionEntry({ id: 9 });
+    const done = { ...live, live: false, updatedAtMs: live.updatedAtMs + MIN };
+    const completed = apply(emptyPanel, { type: "panel.action", action: done });
+
+    // A late frame (older), and a repeat at the same instant: both are dropped.
+    for (const late of [live, { ...live, updatedAtMs: done.updatedAtMs }]) {
+      const next = apply(completed, { type: "panel.action", action: late });
+      expect(next).toBe(completed);
+      expect(next.handling).toEqual([]);
+    }
+  });
+
+  it("reopens an action when a newer live frame says the incident came back", () => {
+    const live = actionEntry({ id: 9 });
+    const done = { ...live, live: false, updatedAtMs: live.updatedAtMs + MIN };
+    const again = { ...live, summary: "Again", updatedAtMs: done.updatedAtMs + MIN };
+    const next = apply(
+      emptyPanel,
+      { type: "panel.action", action: done },
+      { type: "panel.action", action: again },
+    );
+
+    expect(next.handling.map((e) => e.summary)).toEqual(["Again"]);
+    expect(next.log).toEqual([]);
+  });
+
+  it("ignores a stale completed frame for an action already completed later", () => {
+    const early = actionEntry({ id: 9, live: false, summary: "Early", updatedAtMs: NOW - 2 * MIN });
+    const late = { ...early, summary: "Late", updatedAtMs: NOW - MIN };
+    const next = apply(
+      emptyPanel,
+      { type: "panel.action", action: late },
+      { type: "panel.action", action: early },
+    );
+    expect(next.log.map((e) => e.summary)).toEqual(["Late"]);
   });
 
   it("upserts a session by ref", () => {
@@ -254,6 +426,65 @@ describe("supervisor panel events", () => {
 
     expect(next.sessions.filter((s) => s.sessionRef === "mac:wtlist")).toHaveLength(1);
     expect(next.sessions.find((s) => s.sessionRef === "mac:wtlist")?.state).toBe("working");
+  });
+
+  it("keeps a session's place and ignores an older report of it", () => {
+    const refs = panelSnapshotFixture.sessions.map((s) => s.sessionRef);
+    const target = panelSnapshotFixture.sessions[2];
+    const updated = apply(panelSnapshotFixture, {
+      type: "panel.session",
+      session: { ...target, state: "idle", updatedAtMs: target.updatedAtMs + 1 },
+    });
+    expect(updated.sessions.map((s) => s.sessionRef)).toEqual(refs);
+    expect(updated.sessions[2].state).toBe("idle");
+
+    const older = apply(updated, {
+      type: "panel.session",
+      session: { ...target, state: "working", updatedAtMs: target.updatedAtMs - 1 },
+    });
+    expect(older).toBe(updated);
+  });
+
+  it("replaces the rules wholesale", () => {
+    const next = apply(panelSnapshotFixture, { type: "panel.rules", rules: [] });
+    expect(next.rules).toEqual([]);
+    expect(buildPanelView(next, options).rulesLine).toBe("No standing rules.");
+  });
+});
+
+describe("session glyphs", () => {
+  const health = (kind: SessionHealth["kind"], observedAtMs: number): ReadonlyMap<string, SessionHealth> =>
+    new Map([["mac:one", { sessionRef: "mac:one", kind, observedAtMs }]]);
+  const idle = withSessions([fleetSession({ state: "idle", stateSinceMs: NOW - 10 * MIN })]);
+
+  it("shows Failed only for a fresh failed health report", () => {
+    const failed = health({ type: "failed", reason: "exit 1" }, NOW - MIN);
+    expect(buildPanelView(idle, { ...options, health: failed }).sessions[0].glyph).toBe("failed");
+    expect(buildPanelView(idle, options).sessions[0].glyph).toBe("idle");
+  });
+
+  it("drops Failed once the session changed state after the report", () => {
+    const old = health({ type: "failed", reason: "exit 1" }, NOW - 20 * MIN);
+    expect(buildPanelView(idle, { ...options, health: old }).sessions[0].glyph).toBe("idle");
+  });
+
+  it("does not turn a non-failed health into Failed", () => {
+    const quota = health({ type: "quota", resetAtMs: null }, NOW - MIN);
+    expect(buildPanelView(idle, { ...options, health: quota }).sessions[0].glyph).toBe("idle");
+  });
+
+  it("ranks Failed right after Needs you", () => {
+    const view = buildPanelView(
+      withSessions([
+        fleetSession({ sessionRef: "mac:one", title: "A", state: "working" }),
+        fleetSession({ sessionRef: "mac:two", title: "B", state: "idle", stateSinceMs: NOW - 10 * MIN }),
+      ]),
+      {
+        ...options,
+        health: new Map([["mac:two", { sessionRef: "mac:two", kind: { type: "failed", reason: "x" }, observedAtMs: NOW }]]),
+      },
+    );
+    expect(view.sessions.map((s) => s.glyph)).toEqual(["failed", "working"]);
   });
 });
 

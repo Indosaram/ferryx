@@ -1,11 +1,15 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { panelSnapshotFixture } from '../../lib/supervisorPanel/fixtures';
+
 import { ActionLog } from './ActionLog';
+import { Composer } from './Composer';
+import { localTimeLabel, PanelSurface } from './PanelSurface';
 import { DecisionCard } from './DecisionCard';
 import { HandlingRow } from './Rows';
 import { SupervisorPanelShowcase } from './SupervisorPanelShowcase';
-import type { ActionLogLine, DecisionCardProps } from './types';
+import type { ActionLogLine, DecisionCardProps, MentionOption } from './types';
 
 afterEach(cleanup);
 
@@ -96,6 +100,154 @@ describe('ActionLog', () => {
     expect(screen.queryByText('Because 1')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Why: Did thing 1' }));
     expect(screen.getByText('Because 1')).toBeInTheDocument();
+  });
+});
+
+describe('DecisionCard answer state', () => {
+  it('disables every option while pending and shows the error', () => {
+    render(<DecisionCard {...cardProps({ pending: true, error: 'This question changed. Look again.' })} />);
+    for (const button of screen.getAllByRole('button').filter((b) => b.hasAttribute('data-primary'))) {
+      expect(button).toBeDisabled();
+    }
+    expect(screen.getByRole('alert')).toHaveTextContent('This question changed.');
+  });
+});
+
+describe('HandlingRow without a session', () => {
+  it('has no Stop when there is nothing to stop', () => {
+    render(<HandlingRow title="Proxy" detail="502" onOpen={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: /Stop/ })).toBeNull();
+  });
+});
+
+describe('Composer', () => {
+  const sessions: MentionOption[] = [
+    { sessionRef: 'mac:a', title: 'Build', computer: 'This Mac' },
+    { sessionRef: 'win:b', title: 'Build', computer: 'maho-win' },
+    { sessionRef: 'win:roblox', title: 'Roblox build', computer: 'maho-win' },
+  ];
+  const input = () => screen.getByRole('combobox', { name: 'Tell the supervisor anything' });
+  const type = (value: string) => fireEvent.change(input(), { target: { value, selectionStart: value.length } });
+
+  it('sends the sessions named by free-typed text, with a unique prefix resolving', async () => {
+    const onSend = vi.fn();
+    render(<Composer sessions={sessions} onSend={onSend} />);
+    type('@roblox stop it');
+    fireEvent.keyDown(input(), { key: 'Escape' });
+    fireEvent.keyDown(input(), { key: 'Enter' });
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith('@roblox stop it', ['win:roblox']));
+  });
+
+  it('refuses an ambiguous prefix and keeps the text', async () => {
+    const onSend = vi.fn();
+    render(<Composer sessions={sessions} onSend={onSend} />);
+    type('@build go on');
+    fireEvent.keyDown(input(), { key: 'Escape' });
+    fireEvent.keyDown(input(), { key: 'Enter' });
+    expect(await screen.findByTestId('supervisor-composer-error')).toHaveTextContent('@build fits 2 sessions');
+    expect(onSend).not.toHaveBeenCalled();
+    expect(input()).toHaveValue('@build go on');
+  });
+
+  it('a full "Title · computer" name picks one of two same-titled sessions', async () => {
+    const onSend = vi.fn();
+    render(<Composer sessions={sessions} onSend={onSend} />);
+    type('@Build · maho-win go on');
+    fireEvent.keyDown(input(), { key: 'Escape' });
+    fireEvent.keyDown(input(), { key: 'Enter' });
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith('@Build · maho-win go on', ['win:b']));
+  });
+
+  it('does not send or pick on Enter while an IME is composing', () => {
+    const onSend = vi.fn();
+    render(<Composer sessions={sessions} onSend={onSend} />);
+    type('@roblox');
+    fireEvent.keyDown(input(), { key: 'Enter', isComposing: true });
+    fireEvent.keyDown(input(), { key: 'Enter', keyCode: 229 });
+    expect(onSend).not.toHaveBeenCalled();
+    expect(input()).toHaveValue('@roblox');
+  });
+
+  it('captures Tab only while the mention list is showing', () => {
+    render(<Composer sessions={sessions} onSend={vi.fn()} />);
+    type('plain text');
+    const free = fireEvent.keyDown(input(), { key: 'Tab' });
+    expect(free).toBe(true); // not prevented: focus moves on
+
+    type('@roblox');
+    const open = fireEvent.keyDown(input(), { key: 'Tab' });
+    expect(open).toBe(false); // prevented: it picked the highlighted session
+    expect(input()).toHaveValue('@Roblox build · maho-win ');
+  });
+
+  it('points aria-activedescendant at the highlighted option and follows the arrows', () => {
+    render(<Composer sessions={sessions} onSend={vi.fn()} />);
+    expect(input()).not.toHaveAttribute('aria-activedescendant');
+    type('@build');
+    const options = screen.getAllByRole('option');
+    expect(options).toHaveLength(3);
+    expect(input()).toHaveAttribute('aria-activedescendant', options[0].id);
+    fireEvent.keyDown(input(), { key: 'ArrowDown' });
+    expect(input()).toHaveAttribute('aria-activedescendant', screen.getAllByRole('option')[1].id);
+    expect(screen.getAllByRole('option')[1]).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('keeps the text and shows the reason when the send is refused', async () => {
+    const onSend = vi.fn(async () => ({ ok: false, message: 'Offline' }) as const);
+    render(<Composer sessions={sessions} onSend={onSend} />);
+    type('hello');
+    fireEvent.keyDown(input(), { key: 'Enter' });
+    expect(await screen.findByTestId('supervisor-composer-error')).toHaveTextContent('Offline');
+    expect(input()).toHaveValue('hello');
+  });
+});
+
+describe('PanelSurface', () => {
+  const NOW = Date.UTC(2026, 10, 2, 14, 17, 0);
+  const inert = {
+    answer: vi.fn(),
+    setPaused: vi.fn(),
+    converse: vi.fn(),
+    stop: vi.fn(),
+    undo: vi.fn(),
+    turnOn: vi.fn(),
+    openSession: vi.fn(),
+  } as never;
+
+  it('shows the Failed glyph only for a failed health report', () => {
+    const snapshot = { ...panelSnapshotFixture, decisions: [], handling: [] };
+    const health = new Map([
+      ['mac:wtlist', { sessionRef: 'mac:wtlist', kind: { type: 'failed' as const, reason: 'x' }, observedAtMs: NOW }],
+    ]);
+    const { rerender } = render(<PanelSurface snapshot={snapshot} actions={inert} nowMs={NOW} health={health} />);
+    expect(screen.getAllByTestId('session-row').find((r) => r.textContent?.includes('Worktree list refresh'))).toHaveAttribute('data-state', 'failed');
+    rerender(<PanelSurface snapshot={snapshot} actions={inert} nowMs={NOW} />);
+    expect(screen.getAllByTestId('session-row').find((r) => r.textContent?.includes('Worktree list refresh'))).toHaveAttribute('data-state', 'idle');
+  });
+
+  it('never shows an idle session as finished', () => {
+    render(<PanelSurface snapshot={panelSnapshotFixture} actions={inert} nowMs={NOW} />);
+    expect(document.querySelectorAll('[data-testid="session-row"] [data-glyph="done"]')).toHaveLength(0);
+  });
+
+  it('marks Unverified only on claim kinds without evidence', () => {
+    const base = panelSnapshotFixture.log[0];
+    const snapshot = {
+      ...panelSnapshotFixture,
+      log: [
+        { ...base, id: 11, kind: 'answered' as const, evidence: [], summary: 'Claim' },
+        { ...base, id: 12, kind: 'escalated' as const, evidence: [], summary: 'Not a claim' },
+      ],
+    };
+    render(<PanelSurface snapshot={snapshot} actions={inert} nowMs={NOW} />);
+    const lines = screen.getAllByTestId('action-log-line');
+    expect(within(lines.find((l) => l.textContent?.includes('Claim'))!).getByText('Unverified')).toBeInTheDocument();
+    expect(within(lines.find((l) => l.textContent?.includes('Not a claim'))!).queryByText('Unverified')).toBeNull();
+  });
+
+  it('labels log times in local time, not UTC', () => {
+    const ms = new Date(2026, 10, 2, 9, 5).getTime();
+    expect(localTimeLabel(ms)).toBe('09:05');
   });
 });
 

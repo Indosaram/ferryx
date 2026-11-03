@@ -10,6 +10,9 @@ import type {
   SessionRef,
 } from "../../lib/supervisorPanel/contract";
 
+// The phone folds frames with the same reducer the desktop does.
+export { applyPanelEvent } from "../../lib/supervisorPanel/model";
+
 export type PanelSections = {
   readonly decisions: readonly Escalation[];
   readonly handling: readonly ActionEntry[];
@@ -96,35 +99,5 @@ export function parsePanelFrame(frame: unknown): PanelEvent | null {
       return Array.isArray(object?.rules) ? (object as unknown as PanelEvent) : null;
     default:
       return null;
-  }
-}
-
-function upsertAction(list: readonly ActionEntry[], action: ActionEntry): ActionEntry[] {
-  const rest = list.filter((entry) => entry.id !== action.id);
-  return [action, ...rest].sort((a, b) => b.updatedAtMs - a.updatedAtMs);
-}
-
-export function applyPanelEvent(snapshot: PanelSnapshot, event: PanelEvent): PanelSnapshot {
-  switch (event.type) {
-    case "panel.decision": {
-      const rest = snapshot.decisions.filter((decision) => decision.sessionRef !== event.sessionRef);
-      return { ...snapshot, decisions: event.decision ? [...rest, event.decision] : rest };
-    }
-    case "panel.action": {
-      const { action } = event;
-      return {
-        ...snapshot,
-        handling: action.live
-          ? upsertAction(snapshot.handling, action)
-          : snapshot.handling.filter((entry) => entry.id !== action.id),
-        log: action.live ? snapshot.log.filter((entry) => entry.id !== action.id) : upsertAction(snapshot.log, action),
-      };
-    }
-    case "panel.session": {
-      const rest = snapshot.sessions.filter((session) => session.sessionRef !== event.session.sessionRef);
-      return { ...snapshot, sessions: [...rest, event.session] };
-    }
-    case "panel.rules":
-      return { ...snapshot, rules: event.rules };
   }
 }

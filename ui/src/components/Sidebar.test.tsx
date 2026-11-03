@@ -896,6 +896,60 @@ describe("Sidebar navigation", () => {
     expect(onOpenHistory).toHaveBeenCalledWith(testProjects[0]);
   });
 
+  describe("with the Supervisor panel as the sidebar", () => {
+    const attention = {
+      rows: [],
+      onOpen: vi.fn(),
+      onDismiss: vi.fn(),
+      onDismissAll: vi.fn(),
+      inboxOpen: false,
+      onInboxOpenChange: vi.fn(),
+    };
+    const panelProps = (overrides: Record<string, unknown> = {}) => ({
+      attention,
+      onFocusSupervisorSession: vi.fn(),
+      projects,
+      activeProjectId: "maho-workspace",
+      ...overrides,
+    });
+
+    it("opens on the one Supervisor panel, full height, never beside the older lanes view", async () => {
+      renderSidebar(panelProps());
+      expect(await screen.findByTestId("supervisor-panel")).toBeInTheDocument();
+      expect(screen.getByRole("tab", { name: "Supervisor" })).toHaveAttribute("aria-selected", "true");
+      expect(screen.getAllByTestId("supervisor-panel")).toHaveLength(1);
+      expect(screen.getByTestId("supervisor-panel").className).not.toMatch(/max-h-/);
+      expect(screen.getByTestId("supervisor-panel").className).toContain("flex-1");
+      expect(screen.getByTestId("worktree-region")).not.toBeVisible();
+    });
+
+    it("is 380px wide by default and resizes within 320 to 480", () => {
+      renderSidebar(panelProps());
+      const sidebar = screen.getByRole("complementary");
+      const handle = screen.getByRole("separator", { name: "Resize sidebar" });
+      expect(sidebar).toHaveStyle({ width: "380px" });
+      expect(handle).toHaveAttribute("aria-valuemin", "320");
+      expect(handle).toHaveAttribute("aria-valuemax", "480");
+
+      fireEvent.pointerDown(handle, { clientX: 380, pointerId: 1 });
+      fireEvent.pointerMove(window, { clientX: 900, pointerId: 1 });
+      expect(sidebar).toHaveStyle({ width: "480px" });
+      fireEvent.pointerUp(window, { clientX: 900, pointerId: 1 });
+      expect(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY)).toBe("480");
+
+      fireEvent.pointerDown(handle, { clientX: 480, pointerId: 2 });
+      fireEvent.pointerMove(window, { clientX: 10, pointerId: 2 });
+      expect(sidebar).toHaveStyle({ width: "320px" });
+      fireEvent.pointerUp(window, { clientX: 10, pointerId: 2 });
+      expect(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY)).toBe("320");
+    });
+
+    it("keeps the 236px sidebar when no panel is offered", () => {
+      renderSidebar({ attention, projects, activeProjectId: "maho-workspace" });
+      expect(screen.getByRole("complementary")).toHaveStyle({ width: "236px" });
+    });
+  });
+
   it("shows the worktree tree by default and swaps to the inbox only through the inbox tab", () => {
     const attention = {
       rows: [{

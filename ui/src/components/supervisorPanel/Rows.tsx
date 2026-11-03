@@ -39,17 +39,19 @@ export function HandlingRow({ title, detail, computer, touch, onOpen, onStop }: 
         <RowText title={title} detail={detail} />
         {computer ? <span className="mt-0.5 shrink-0 text-xs text-muted-foreground">{computer}</span> : null}
       </button>
-      <button
-        type="button"
-        onClick={onStop}
-        aria-label={`Stop ${title}`}
-        className={cn(
-          'shrink-0 rounded-md px-2 text-xs text-muted-foreground underline underline-offset-2 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
-          touch ? 'min-h-11 min-w-11 text-sm' : 'min-h-8',
-        )}
-      >
-        Stop
-      </button>
+      {onStop ? (
+        <button
+          type="button"
+          onClick={onStop}
+          aria-label={`Stop ${title}`}
+          className={cn(
+            'shrink-0 rounded-md px-2 text-xs text-muted-foreground underline underline-offset-2 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+            touch ? 'min-h-11 min-w-11 text-sm' : 'min-h-8',
+          )}
+        >
+          Stop
+        </button>
+      ) : null}
     </div>
   );
 }

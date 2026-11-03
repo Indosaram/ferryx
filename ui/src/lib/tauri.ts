@@ -558,6 +558,32 @@ export async function getSupervisorPanel(): Promise<PanelSnapshot> {
   return invokeCommand<PanelSnapshot>("cmd_supervisor_panel");
 }
 
+/**
+ * Panel writes. Each names the Tauri command `docs/plans/SUPERVISOR_PANEL_CONTRACT.md` fixes for
+ * it; none of them is registered in `src-tauri` on every build, and a missing command rejects
+ * (never resolves), so the caller shows the failure instead of a success that did not happen.
+ */
+export async function converseSupervisor(request: { text: string; mentions: string[]; requestId: string }): Promise<unknown> {
+  if (!isTauri()) throw toIpcError(new Error("The supervisor is reachable only in the desktop app"));
+  return invokeCommand<unknown>("cmd_supervisor_converse", request);
+}
+
+export async function setSupervisorPanelPaused(paused: boolean): Promise<void> {
+  if (!isTauri()) throw toIpcError(new Error("The supervisor is reachable only in the desktop app"));
+  await invokeCommand<unknown>("cmd_supervisor_pause", { paused });
+}
+
+/** Stops one session straight through agent control, not via the engine. */
+export async function stopSupervisedSession(sessionRef: string): Promise<void> {
+  if (!isTauri()) throw toIpcError(new Error("The supervisor is reachable only in the desktop app"));
+  await invokeCommand<unknown>("cmd_session_stop", { sessionRef });
+}
+
+export async function undoSupervisorAction(actionId: number): Promise<void> {
+  if (!isTauri()) throw toIpcError(new Error("The supervisor is reachable only in the desktop app"));
+  await invokeCommand<unknown>("cmd_supervisor_action_undo", { actionId });
+}
+
 /** `panel.*` owner frames forwarded by the desktop shell as `supervisor_panel_event`. */
 export async function onSupervisorPanelEvent(handler: (event: PanelEvent) => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;

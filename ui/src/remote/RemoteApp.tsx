@@ -175,6 +175,7 @@ import { usePhoneNavigation } from "./home/usePhoneNavigation";
 import { edgeSwipeHostSupported, useEdgeSwipeBack } from "./home/useEdgeSwipeBack";
 import { usePhoneSupervisor } from "./home/usePhoneSupervisor";
 import { usePhonePanel } from "./supervisorPanel/usePhonePanel";
+import { panelSessionTarget, pinPanelHost, readReferenceHostId } from "./supervisorPanel/panelHost";
 import { WorktreesHome } from "./home/WorktreesHome";
 import type { TunnelTransport, TunnelWebSocket } from "./attachTunnel";
 import { getOrCreateAttachKey } from "./accountAttach";
@@ -3078,13 +3079,27 @@ export const RemoteHostConnection: React.FC<{
     active: activeTunnelConnection,
     bus: supervisorBus,
   });
-  // The panel lives on the supervisor host: the machine whose snapshot names a supervisor,
-  // else the first one that answers.
-  const panelHostId =
-    phoneSupervisor.unified.find((host) => host.connection === "live")?.machineId
-    ?? phoneSupervisor.unified[0]?.machineId
-    ?? phoneSupervisor.machines.find((machine) => machine.state === "ok")?.machineId
-    ?? null;
+  // The panel lives on the one live machine whose snapshot names a supervisor. Several claimants
+  // or none pin nothing, and the previous home stays: no first-live-host guess.
+  const panelHostId = pinPanelHost(phoneSupervisor.unified);
+  const panelFetch = panelHostId ? phoneSupervisor.fetchFor(panelHostId) : null;
+  // A panel sessionRef's host part is that machine's own reference host id (`referenceHostId`
+  // from /api/v1/capabilities), never its account machineId; until it answers, no ref resolves.
+  const [panelReferenceHost, setPanelReferenceHost] = useState<{ machineId: string; referenceHostId: string | null } | null>(null);
+  useEffect(() => {
+    if (!phoneHome || !panelHostId || !panelFetch) {
+      setPanelReferenceHost(null);
+      return;
+    }
+    let cancelled = false;
+    void readReferenceHostId(panelFetch).then((referenceHostId) => {
+      if (!cancelled) setPanelReferenceHost({ machineId: panelHostId, referenceHostId });
+    });
+    return () => {
+      cancelled = true;
+    };
+    // Only a new host or a new tunnel to it re-reads its identity.
+  }, [phoneHome, panelHostId, panelFetch]);
   const phonePanel = usePhonePanel({
     hostId: panelHostId,
     fetchFor: phoneSupervisor.fetchFor,
@@ -5272,10 +5287,11 @@ export const RemoteHostConnection: React.FC<{
     if (phoneHome) phoneNav.back();
     else setSelectorOpen(true);
   };
-  /* A panel row names its session as `<hostId>:<backendSessionId>`; it opens the same way an Inbox row does. */
+  /* A panel row names its session as `<hostId>:<backendSessionId>`. It opens only when that host is
+     the pinned panel machine's own reference host id; the target is then that machine's session. */
   const openPanelSession = (sessionRef: string) => {
-    const split = sessionRef.indexOf(":");
-    const option = split > 0 ? optionForSession(accountDiscovery.accountOptions, sessionRef.slice(0, split), sessionRef.slice(split + 1)) : null;
+    const target = panelSessionTarget(sessionRef, panelReferenceHost);
+    const option = target ? optionForSession(accountDiscovery.accountOptions, target.machineId, target.sessionId) : null;
     if (!option) {
       toast.error("This session is not available right now", {
         description: "Its computer is offline or has not listed it yet.",
@@ -5399,10 +5415,9 @@ export const RemoteHostConnection: React.FC<{
           panel={panelHome ? {
             state: phonePanel.state,
             now: phoneSupervisor.now,
-            onOpenSession: openPanelSession,
-            onAnswer: phonePanel.answer,
-            onSetPaused: phonePanel.setPaused,
-            onConverse: phonePanel.converse,
+            actions: { ...phonePanel.actions, openSession: openPanelSession },
+            onStartSession: () => phoneNav.selectTab("worktrees"),
+            computerLabel: phoneSupervisor.unified.find((host) => host.machineId === panelHostId)?.label,
             onRefresh: () =>
               Promise.allSettled([
                 phonePanel.refresh(),

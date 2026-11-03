@@ -9,6 +9,17 @@ export const DEFAULT_SIDEBAR_WIDTH = 236;
 export const MIN_SIDEBAR_WIDTH = 220;
 export const MAX_SIDEBAR_WIDTH = 420;
 
+export type SidebarWidthRange = { readonly min: number; readonly max: number; readonly initial: number };
+
+export const DEFAULT_SIDEBAR_RANGE: SidebarWidthRange = {
+  min: MIN_SIDEBAR_WIDTH,
+  max: MAX_SIDEBAR_WIDTH,
+  initial: DEFAULT_SIDEBAR_WIDTH,
+};
+
+/** The sidebar that carries the Supervisor panel: 380px, resizable between 320 and 480. */
+export const SUPERVISOR_SIDEBAR_RANGE: SidebarWidthRange = { min: 320, max: 480, initial: 380 };
+
 export type WorktreeOrder = Record<string, string[]>;
 
 const persistenceListeners = new Set<() => void>();
@@ -23,8 +34,8 @@ function notifySidebarPersistence() {
   for (const listener of persistenceListeners) listener();
 }
 
-export function clampSidebarWidth(width: number) {
-  return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(width)));
+export function clampSidebarWidth(width: number, range: SidebarWidthRange = DEFAULT_SIDEBAR_RANGE) {
+  return Math.min(range.max, Math.max(range.min, Math.round(width)));
 }
 
 export function loadWorktreeOrder(): WorktreeOrder {
@@ -76,19 +87,19 @@ export function persistCollapsedProjects(collapsed: Set<string>) {
   notifySidebarPersistence();
 }
 
-export function loadSidebarWidth() {
+export function loadSidebarWidth(range: SidebarWidthRange = DEFAULT_SIDEBAR_RANGE) {
   try {
     const raw = getMigratedItem(SIDEBAR_WIDTH_STORAGE_KEY);
     const stored = Number(raw);
-    return Number.isFinite(stored) && stored > 0 ? clampSidebarWidth(stored) : DEFAULT_SIDEBAR_WIDTH;
+    return Number.isFinite(stored) && stored > 0 ? clampSidebarWidth(stored, range) : range.initial;
   } catch {
-    return DEFAULT_SIDEBAR_WIDTH;
+    return range.initial;
   }
 }
 
-export function persistSidebarWidth(width: number) {
+export function persistSidebarWidth(width: number, range: SidebarWidthRange = DEFAULT_SIDEBAR_RANGE) {
   try {
-    window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(clampSidebarWidth(width)));
+    window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(clampSidebarWidth(width, range)));
   } catch {
     // A storage failure should not break pointer resizing for this session.
   }

@@ -29,8 +29,8 @@ import {
   loadCollapsedProjects,
   loadSidebarWidth,
   loadWorktreeOrder,
-  MAX_SIDEBAR_WIDTH,
-  MIN_SIDEBAR_WIDTH,
+  DEFAULT_SIDEBAR_RANGE,
+  SUPERVISOR_SIDEBAR_RANGE,
   persistCollapsedProjects,
   persistSidebarWidth,
   persistWorktreeOrder,
@@ -159,14 +159,18 @@ export function Sidebar({
   attention,
 }: SidebarProps) {
   const inboxOpen = attention?.inboxOpen ?? false;
-  const [supervisorOpenState, setSupervisorOpen] = useState(false);
+  // The autonomy panel is the sidebar's Supervisor view: it opens by default, replaces the
+  // earlier lanes view (never both), and is not behind advanced features.
+  const panelMode = onFocusSupervisorSession !== undefined && attention !== undefined;
+  const widthRange = panelMode ? SUPERVISOR_SIDEBAR_RANGE : DEFAULT_SIDEBAR_RANGE;
+  const [supervisorOpenState, setSupervisorOpen] = useState(panelMode);
   const advancedFeatures = useAdvancedFeatures();
-  const supervisorOpen = supervisorOpenState && !inboxOpen && advancedFeatures;
+  const supervisorOpen = supervisorOpenState && !inboxOpen && (advancedFeatures || panelMode);
   const supervisorTyping = useSupervisorTyping();
   const sidebarView: SidebarViewId = supervisorOpen ? "supervisor" : inboxOpen ? "inbox" : "worktrees";
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [resizing, setResizing] = useState(false);
-  const [width, setWidth] = useState(loadSidebarWidth);
+  const [width, setWidth] = useState(() => loadSidebarWidth(widthRange));
   const widthRef = useRef(width);
   widthRef.current = width;
   const [worktreeOrder, setWorktreeOrder] = useState<WorktreeOrder>(loadWorktreeOrder);
@@ -377,16 +381,16 @@ export function Sidebar({
   const endResize = useCallback(() => {
     if (!dragRef.current) return;
     dragRef.current = null;
-    persistSidebarWidth(widthRef.current);
+    persistSidebarWidth(widthRef.current, widthRange);
     document.body.style.cursor = "";
     setResizing(false);
-  }, []);
+  }, [widthRange]);
 
   useEffect(() => {
     const handlePointerMove = (event: PointerEvent) => {
       const drag = dragRef.current;
       if (!drag) return;
-      const nextWidth = clampSidebarWidth(drag.startWidth + event.clientX - drag.startX);
+      const nextWidth = clampSidebarWidth(drag.startWidth + event.clientX - drag.startX, widthRange);
       widthRef.current = nextWidth;
       setWidth(nextWidth);
     };
@@ -399,7 +403,7 @@ export function Sidebar({
       window.removeEventListener("pointercancel", endResize);
       document.body.style.cursor = "";
     };
-  }, [endResize]);
+  }, [endResize, widthRange]);
 
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -419,10 +423,10 @@ export function Sidebar({
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
     const delta = event.key === "ArrowLeft" ? -SIDEBAR_KEYBOARD_STEP : SIDEBAR_KEYBOARD_STEP;
-    const nextWidth = clampSidebarWidth(widthRef.current + delta);
+    const nextWidth = clampSidebarWidth(widthRef.current + delta, widthRange);
     widthRef.current = nextWidth;
     setWidth(nextWidth);
-    persistSidebarWidth(nextWidth);
+    persistSidebarWidth(nextWidth, widthRange);
   };
 
   const handleDragStart = (event: DragStartEvent) => {
@@ -490,7 +494,7 @@ export function Sidebar({
     <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd} onDragCancel={() => setActiveDrag(null)}>
       <aside
         className="relative flex h-full shrink-0 flex-col overflow-hidden bg-worktree-sidebar text-worktree-sidebar-foreground"
-        style={{ width: `${width}px`, minWidth: `${MIN_SIDEBAR_WIDTH}px`, maxWidth: `${MAX_SIDEBAR_WIDTH}px` }}
+        style={{ width: `${width}px`, minWidth: `${widthRange.min}px`, maxWidth: `${widthRange.max}px` }}
       >
         <SidebarView
           model={model}
@@ -520,8 +524,13 @@ export function Sidebar({
           filter={{ query: filterQuery, onChange: setFilterQuery }}
           view={sidebarView}
           inbox={attention}
-          panel={onFocusSupervisorSession ? <SupervisorPanelHost onFocusSession={onFocusSupervisorSession} /> : undefined}
-          supervisor={attention ? { typing: supervisorTyping, content: <SupervisorPanel /> } : undefined}
+          supervisor={
+            attention
+              ? panelMode && onFocusSupervisorSession
+                ? { typing: supervisorTyping, always: true, content: <SupervisorPanelHost onFocusSession={onFocusSupervisorSession} /> }
+                : { typing: supervisorTyping, content: <SupervisorPanel /> }
+              : undefined
+          }
           titlebarLeading={isMac ? <div data-testid="titlebar-traffic-light-pad" className="w-[72px] shrink-0" aria-hidden="true" /> : null}
           titlebarProps={{ "data-testid": "sidebar-drag-region", "data-tauri-drag-region": true }}
           shortcuts={{
@@ -539,8 +548,8 @@ export function Sidebar({
           role="separator"
           aria-label="Resize sidebar"
           aria-orientation="vertical"
-          aria-valuemin={MIN_SIDEBAR_WIDTH}
-          aria-valuemax={MAX_SIDEBAR_WIDTH}
+          aria-valuemin={widthRange.min}
+          aria-valuemax={widthRange.max}
           aria-valuenow={width}
           tabIndex={0}
           onPointerDown={startResize}

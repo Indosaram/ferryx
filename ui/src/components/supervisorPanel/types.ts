@@ -28,6 +28,10 @@ export interface DecisionCardProps extends TouchProps {
   recommendation: { index: number; reason: string } | null;
   onAnswer: (optionIndex: number) => void;
   onOpenTerminal: () => void;
+  /** An answer is in flight: every option is disabled. */
+  pending?: boolean;
+  /** Why the last answer did not go through. */
+  error?: string | null;
 }
 
 export interface HandlingRowProps extends TouchProps {
@@ -35,7 +39,8 @@ export interface HandlingRowProps extends TouchProps {
   detail: string;
   computer?: string;
   onOpen: () => void;
-  onStop: () => void;
+  /** Absent when the action names no session to stop. */
+  onStop?: () => void;
 }
 
 export interface SessionRowProps extends TouchProps {
@@ -76,7 +81,7 @@ export interface StatusLineProps extends TouchProps {
   onTogglePause: () => void;
 }
 
-export interface RulesLineProps {
+export interface RulesLineProps extends TouchProps {
   text: string;
   onChange: () => void;
 }
@@ -87,12 +92,19 @@ export interface MentionOption {
   computer: string;
 }
 
+export type ComposerSendResult = { ok: true } | { ok: false; message: string };
+
 export interface ComposerProps extends TouchProps {
   sessions: MentionOption[];
-  onSend: (text: string, mentions: string[]) => void;
+  /** A returned failure keeps the text and shows its message; void means it was sent. */
+  onSend: (text: string, mentions: string[]) => void | Promise<ComposerSendResult | void>;
+  /** Putting text in the box and focusing it (the rules line's "Change"). `nonce` re-applies. */
+  seed?: { text: string; nonce: number } | null;
 }
 
 export interface SetupCardProps extends TouchProps {
   computer: string;
   onTurnOn: () => void;
+  pending?: boolean;
+  error?: string | null;
 }

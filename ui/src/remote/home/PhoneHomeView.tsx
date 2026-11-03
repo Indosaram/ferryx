@@ -1,7 +1,7 @@
 // The phone home container: the destination body, an optional resume row for the session
 // already open, and the bottom tab bar. RemoteApp supplies the Worktrees body because it owns
 // the selection callbacks.
-import { ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { InboxHome } from "./InboxHome";
@@ -46,8 +46,25 @@ export function inboxBadgeCount(rows: readonly AttentionRow[]): number {
 }
 
 export function PhoneHomeView({ panel, destination, onSelectTab, supervisor, inbox, worktrees, resume, accountAction, onRefresh }: PhoneHomeViewProps) {
-  if (panel) return <PhoneSupervisorHome {...panel} />;
   const refresh = onRefresh ? () => onRefresh(destination) : undefined;
+  if (panel && destination !== "worktrees") return <PhoneSupervisorHome {...panel} />;
+  if (panel) {
+    // "+" on the panel: the Worktrees list is where a session is started. Back returns to the panel.
+    return (
+      <div data-testid="mobile-home" data-destination="worktrees" data-home="panel-start" className="flex min-h-0 min-w-0 flex-1 flex-col bg-chat-screen pt-[env(safe-area-inset-top)] px-safe">
+        <button
+          type="button"
+          data-testid="phone-panel-start-back"
+          onClick={() => onSelectTab("supervisor")}
+          className="flex min-h-11 shrink-0 items-center gap-1 px-3 text-sm text-chat-foreground transition-colors hover:bg-chat-row-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          <ChevronLeft aria-hidden="true" className="size-4" />
+          Back to the supervisor
+        </button>
+        <PullToRefreshContext.Provider value={refresh}>{worktrees}</PullToRefreshContext.Provider>
+      </div>
+    );
+  }
   return (
     <div data-testid="mobile-home" data-destination={destination} className="flex min-h-0 min-w-0 flex-1 flex-col bg-chat-screen pt-[env(safe-area-inset-top)] px-safe">
       <main id={PHONE_HOME_PANEL_ID} role="tabpanel" aria-labelledby={phoneHomeTabId(destination)} className="flex min-h-0 min-w-0 flex-1 flex-col">

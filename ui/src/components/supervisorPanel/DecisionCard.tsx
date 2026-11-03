@@ -12,6 +12,8 @@ export function DecisionCard({
   recommendation,
   onAnswer,
   onOpenTerminal,
+  pending,
+  error,
   touch,
 }: DecisionCardProps) {
   // A decision without a recommended option and its reason is never shown.
@@ -70,9 +72,11 @@ export function DecisionCard({
               key={i}
               type="button"
               data-primary={primary ? 'true' : 'false'}
+              data-recommended={primary ? 'true' : 'false'}
+              disabled={pending}
               onClick={() => onAnswer(i)}
               className={cn(
-                'inline-flex items-center justify-center rounded-md px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+                'inline-flex items-center justify-center rounded-md px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50',
                 touch ? 'min-h-11 flex-1' : 'min-h-8',
                 primary
                   ? 'bg-primary text-primary-foreground hover:bg-primary/90'
@@ -84,6 +88,11 @@ export function DecisionCard({
           );
         })}
       </div>
+      {error ? (
+        <p role="alert" data-testid="decision-card-error" className={cn('text-status-warning', touch ? 'text-sm' : 'text-xs')}>
+          {error}
+        </p>
+      ) : null}
     </article>
   );
 }

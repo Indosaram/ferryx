@@ -2,7 +2,7 @@ import { cn } from '../../lib/cn';
 import { SupervisorMark } from './StatusLine';
 import type { SetupCardProps } from './types';
 
-export function SetupCard({ computer, touch, onTurnOn }: SetupCardProps) {
+export function SetupCard({ computer, touch, onTurnOn, pending, error }: SetupCardProps) {
   return (
     <section
       aria-label="Supervisor setup"
@@ -19,13 +19,19 @@ export function SetupCard({ computer, touch, onTurnOn }: SetupCardProps) {
       <button
         type="button"
         onClick={onTurnOn}
+        disabled={pending}
         className={cn(
-          'inline-flex items-center justify-center self-start rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+          'inline-flex items-center justify-center self-start rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50',
           touch ? 'min-h-11 w-full' : 'min-h-8',
         )}
       >
         Turn on
       </button>
+      {error ? (
+        <p role="alert" className={cn('text-status-warning', touch ? 'text-sm' : 'text-xs')}>
+          {error}
+        </p>
+      ) : null}
     </section>
   );
 }
