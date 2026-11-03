@@ -639,6 +639,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::LoadSession
             | DaemonRequest::RemoteSetActiveSelection { .. }
             | DaemonRequest::RemoteSetWindowFocused { .. }
+            | DaemonRequest::SessionMute { .. }
             | DaemonRequest::PairedTerminalDescriptor { .. }
             | DaemonRequest::RetryPairedSession { .. }
             | DaemonRequest::PairedRecoveryOutcome { .. }
@@ -760,6 +761,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::RemoteSetActiveSelection { .. } => "remoteSetActiveSelection",
         DaemonRequest::RemoteGetActiveSelection => "remoteGetActiveSelection",
         DaemonRequest::RemoteSetWindowFocused { .. } => "remoteSetWindowFocused",
+        DaemonRequest::SessionMute { .. } => "sessionMute",
         DaemonRequest::SubscribeRemoteEvents => "subscribeRemoteEvents",
         DaemonRequest::UpgradeBinary { .. } => "upgradeBinary",
         DaemonRequest::PrepareHandover => "prepareHandover",
@@ -5086,6 +5088,25 @@ impl DaemonClient {
             DaemonResponse::RemoteSetActiveSelectionOk => Ok(()),
             DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
+            }
+            _ => Err(IpcError::new(
+                IpcErrorCode::InternalError,
+                "Unexpected daemon response",
+            )),
+        }
+    }
+
+    pub async fn session_mute(&self, session_ref: &str, muted: bool) -> Result<(), IpcError> {
+        let resp = self
+            .send_request(DaemonRequest::SessionMute {
+                session_ref: session_ref.to_string(),
+                muted,
+            })
+            .await?;
+        match resp {
+            DaemonResponse::SessionMuteOk => Ok(()),
+            DaemonResponse::Error { message, .. } => {
+                Err(IpcError::new(IpcErrorCode::DaemonUpgradeRequired, message))
             }
             _ => Err(IpcError::new(
                 IpcErrorCode::InternalError,

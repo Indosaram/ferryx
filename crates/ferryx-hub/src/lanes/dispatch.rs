@@ -15,7 +15,7 @@ const REPEAT_WINDOW_HOURS: i64 = 6;
 /// old, and a target gets at most one delivery per window. The window is anchored on the
 /// oldest event, so continuous traffic never extends it. The supervisor's goal wakes
 /// (`supervisor::wakes`) use the same policy.
-pub(crate) const BATCH_WINDOW_SECS: i64 = 30;
+pub const BATCH_WINDOW_SECS: i64 = 30;
 
 /// True once a group whose oldest event arrived at `oldest` may be admitted at `now`.
 pub(crate) fn batch_window_elapsed(

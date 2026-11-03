@@ -4022,6 +4022,7 @@ async fn push_test(
         state: "test".into(),
         title: "Test alert".into(),
         body: "Phone alerts are working.".into(),
+        url: None,
     };
     let outcomes = futures_util::future::join_all(
         targets.iter().map(|sub| state.push.send(sub, &notification)),

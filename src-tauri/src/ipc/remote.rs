@@ -760,6 +760,23 @@ pub async fn cmd_remote_set_window_focused(
     }
 }
 
+/// Mutes or unmutes phone push for one session (`<hostId>:<sessionId>`). The session still
+/// shows in the panel; only its decision pushes stop.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_session_mute(
+    manager: State<'_, Arc<RemoteGatewayManager>>,
+    session_ref: String,
+    muted: bool,
+) -> Result<(), IpcError> {
+    match &manager.inner {
+        RemoteGatewayManagerInner::Daemon(client) => client.session_mute(&session_ref, muted).await,
+        RemoteGatewayManagerInner::State { state, .. } => {
+            state.set_session_push_muted(&session_ref, muted).await
+        }
+    }
+}
+
 fn get_local_ip() -> Option<String> {
     use std::net::UdpSocket;
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;

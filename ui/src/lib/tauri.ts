@@ -1644,6 +1644,12 @@ export async function reportDesktopWindowFocus(focused: boolean): Promise<void> 
   return invokeCommand<void>("cmd_remote_set_window_focused", { focused });
 }
 
+/** Mutes or unmutes phone push for one session (`<hostId>:<sessionId>`); the panel still lists it. */
+export async function setSessionPushMuted(sessionRef: string, muted: boolean): Promise<void> {
+  if (!isTauri()) return;
+  return invokeCommand<void>("cmd_session_mute", { sessionRef, muted });
+}
+
 export async function publishFocusedTerminal(payload: FocusedTerminalPayload | null): Promise<void> {
   if (!isTauri()) return;
   const terminalTabs = payload?.terminalTabs ?? payload?.tabs ?? [];

@@ -80,6 +80,13 @@ self.addEventListener('fetch', (event) => {
 // carries only the agent name, worktree, state, title and body; `agent_id` is the backend
 // session id, so one notification per session is kept (tag) and a tap opens that session.
 const TEST_ALERT_TAG = 'ferryx-test';
+const DECISION_TAG = 'ferryx-decision';
+
+// A decision push carries its own deep link (`/?panel=decision&session=<sessionRef>`); only a
+// path on this origin is followed.
+function deepLink(data) {
+  return typeof data.url === 'string' && data.url.startsWith('/') && !data.url.startsWith('//') ? data.url : '';
+}
 
 function sessionUrl(sessionId) {
   return sessionId ? '/#session=' + encodeURIComponent(sessionId) : '/';
@@ -92,12 +99,16 @@ function notificationFromPush(payload) {
     title: typeof data.title === 'string' && data.title ? data.title : 'Ferryx',
     options: {
       body: typeof data.body === 'string' && data.body ? data.body : 'An agent on your computer needs you.',
-      tag: sessionId || TEST_ALERT_TAG,
+      tag: sessionId || (data.state === 'decision' ? DECISION_TAG : TEST_ALERT_TAG),
       renotify: true,
       icon: '/icon-192.png',
       badge: '/badge-mono.png',
       actions: sessionId ? [{ action: 'open', title: 'Open' }] : [],
-      data: { sessionId, state: typeof data.state === 'string' ? data.state : '', url: sessionUrl(sessionId) },
+      data: {
+        sessionId,
+        state: typeof data.state === 'string' ? data.state : '',
+        url: deepLink(data) || sessionUrl(sessionId),
+      },
     },
   };
 }
@@ -120,12 +131,14 @@ self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const data = event.notification.data || {};
   const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
-  const url = new URL(sessionUrl(sessionId), self.location.origin).href;
+  const path = deepLink(data) || sessionUrl(sessionId);
+  const url = new URL(path, self.location.origin).href;
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windows) => {
       const open = windows.find((client) => new URL(client.url).origin === self.location.origin);
       if (open) {
-        if (sessionId) open.postMessage({ type: 'ferryx:open-session', sessionId });
+        if (data.state === 'decision' && deepLink(data)) open.postMessage({ type: 'ferryx:open-url', url: path });
+        else if (sessionId) open.postMessage({ type: 'ferryx:open-session', sessionId });
         return open.focus();
       }
       return self.clients.openWindow(url);

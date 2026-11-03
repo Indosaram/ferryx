@@ -1,13 +1,14 @@
 //! Phone push: VAPID keys, subscriptions persisted per paired device, and the sender.
 //!
 //! The payload names the agent, its worktree and the state. Terminal content never enters it.
+//! Push is for decision cards only (plan D13): a new supervisor escalation, deep-linked to its
+//! card, never progress, retries or finished sessions.
 //! Sending goes through the async reqwest client; key and store disk I/O runs on blocking
 //! workers.
 
-use crate::agent_control::AgentControlState;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -38,9 +39,12 @@ pub struct AgentStateNotification {
     pub agent_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
-    pub state: String, // "waiting_input", "finished" or "test"
+    pub state: String, // "decision" or "test"
     pub title: String,
     pub body: String,
+    /// Where a tap goes (a path on the phone's own origin). Absent for the test alert.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 pub fn format_agent_push_payload(notif: &AgentStateNotification) -> Result<String, String> {
@@ -107,6 +111,9 @@ pub struct StoredSubscription {
 struct PersistedPushStore {
     #[serde(default)]
     subscriptions: Vec<StoredSubscription>,
+    /// Session refs the owner muted: they stay in the panel and never push.
+    #[serde(default)]
+    muted_sessions: BTreeSet<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -123,6 +130,8 @@ pub enum PushStoreError {
 #[derive(Debug, Default)]
 pub struct PushStore {
     subscriptions: Mutex<HashMap<String, StoredSubscription>>,
+    /// Locked only while `subscriptions` is held or alone, never the other way round.
+    muted: Mutex<BTreeSet<String>>,
     path: Option<PathBuf>,
     allow_loopback: std::sync::atomic::AtomicBool,
 }
@@ -144,14 +153,13 @@ impl PushStore {
                 None
             }
         });
-        let subscriptions = persisted
-            .map(|store| store.subscriptions)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|sub| (sub.endpoint.clone(), sub))
-            .collect();
+        let (stored, muted) = persisted
+            .map(|store| (store.subscriptions, store.muted_sessions))
+            .unwrap_or_default();
+        let subscriptions = stored.into_iter().map(|sub| (sub.endpoint.clone(), sub)).collect();
         Self {
             subscriptions: Mutex::new(subscriptions),
+            muted: Mutex::new(muted),
             path,
             allow_loopback: std::sync::atomic::AtomicBool::new(loopback_endpoints_allowed()),
         }
@@ -164,13 +172,20 @@ impl PushStore {
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    fn persist(&self, subs: &HashMap<String, StoredSubscription>) -> std::io::Result<()> {
+    fn persist(
+        &self,
+        subs: &HashMap<String, StoredSubscription>,
+        muted: &BTreeSet<String>,
+    ) -> std::io::Result<()> {
         let Some(path) = self.path.as_deref() else {
             return Ok(());
         };
         let mut subscriptions: Vec<_> = subs.values().cloned().collect();
         subscriptions.sort_by(|a, b| a.endpoint.cmp(&b.endpoint));
-        crate::remote::auth::write_private_json(path, &PersistedPushStore { subscriptions })
+        crate::remote::auth::write_private_json(
+            path,
+            &PersistedPushStore { subscriptions, muted_sessions: muted.clone() },
+        )
     }
 
     /// Mutates under the lock and persists; a failed write rolls the change back.
@@ -182,12 +197,35 @@ impl PushStore {
         let before = subs.clone();
         let result = change(&mut subs)?;
         if *subs != before {
-            if let Err(error) = self.persist(&subs) {
+            if let Err(error) = self.persist(&subs, &self.muted.lock()) {
                 *subs = before;
                 return Err(error.into());
             }
         }
         Ok(result)
+    }
+
+    /// Mutes or unmutes one session and persists; a failed write rolls the change back.
+    /// Returns whether the set changed.
+    pub fn set_session_muted(&self, session_ref: &str, muted: bool) -> Result<bool, PushStoreError> {
+        let subs = self.subscriptions.lock();
+        let mut set = self.muted.lock();
+        let changed = if muted { set.insert(session_ref.to_string()) } else { set.remove(session_ref) };
+        if changed {
+            if let Err(error) = self.persist(&subs, &set) {
+                if muted {
+                    set.remove(session_ref);
+                } else {
+                    set.insert(session_ref.to_string());
+                }
+                return Err(error.into());
+            }
+        }
+        Ok(changed)
+    }
+
+    pub fn is_session_muted(&self, session_ref: &str) -> bool {
+        self.muted.lock().contains(session_ref)
     }
 
     pub fn subscribe(&self, device_id: &str, request: PushSubscribeRequest) -> Result<(), PushStoreError> {
@@ -516,90 +554,138 @@ fn encrypt_request(
     })
 }
 
-/// A phone alert an agent transition earns.
+/// The only phone alert: a new decision card for the owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushKind {
-    NeedsInput,
-    /// A turn ended; the duration is how long the agent worked.
-    Finished(Duration),
+    Decision,
 }
 
 impl PushKind {
     pub fn wanted_by(self, sub: &StoredSubscription) -> bool {
         match self {
-            PushKind::NeedsInput => sub.needs_input,
-            PushKind::Finished(turn) => sub.finished_mode.allows(turn),
-        }
-    }
-
-    pub fn notification(self, session_id: &str, agent: &str, worktree: Option<&str>) -> AgentStateNotification {
-        let (state, title) = match self {
-            PushKind::NeedsInput => ("waiting_input", "Needs input"),
-            PushKind::Finished(_) => ("finished", "Finished"),
-        };
-        let body = match worktree {
-            Some(worktree) => format!("{agent} in {worktree}"),
-            None => agent.to_string(),
-        };
-        AgentStateNotification {
-            agent_id: session_id.to_string(),
-            agent_name: agent.to_string(),
-            worktree: worktree.map(str::to_string),
-            state: state.to_string(),
-            title: title.to_string(),
-            body,
+            PushKind::Decision => sub.needs_input,
         }
     }
 }
 
-/// Sessions remembered at once. A forgotten idle session only loses a turn that has not begun.
+/// The path a decision push opens: the panel on that session's card. `session_ref` is
+/// `<hostId>:<backendSessionId>`, so it is percent-encoded.
+pub fn decision_deep_link(session_ref: &str) -> String {
+    let encoded: String = url::form_urlencoded::byte_serialize(session_ref.as_bytes()).collect();
+    format!("/?panel=decision&session={encoded}")
+}
+
+/// The notification for decision cards: one names its agent and worktree and opens its card;
+/// several held back by the batch window collapse into one that opens the panel.
+pub fn decision_notification(refs: &[String], agent: &str, worktree: Option<&str>) -> AgentStateNotification {
+    let (agent_id, agent_name, worktree, title, body, url) = match refs {
+        [only] => (
+            only.clone(),
+            agent.to_string(),
+            worktree.map(str::to_string),
+            "Decision needed".to_string(),
+            match worktree {
+                Some(worktree) => format!("{agent} in {worktree}"),
+                None => agent.to_string(),
+            },
+            decision_deep_link(only),
+        ),
+        _ => (
+            String::new(),
+            "Ferryx".to_string(),
+            None,
+            "Decisions needed".to_string(),
+            format!("{} sessions need a decision", refs.len()),
+            "/?panel=decision".to_string(),
+        ),
+    };
+    AgentStateNotification {
+        agent_id,
+        agent_name,
+        worktree,
+        state: "decision".to_string(),
+        title,
+        body,
+        url: Some(url),
+    }
+}
+
+/// Sessions remembered at once. Past the bound the dedupe memory restarts.
 const TRACKED_SESSIONS: usize = 1024;
 
-#[derive(Debug, Clone, Copy)]
-struct TurnState {
-    state: AgentControlState,
-    turn_started: Option<std::time::Instant>,
+/// Batch window for decision pushes: the hub's 30 s (`lanes::dispatch::BATCH_WINDOW_SECS`).
+/// The hub constant is crate-private, so the value is mirrored here.
+pub const DECISION_BATCH_WINDOW: Duration = Duration::from_secs(30);
+
+/// What the window does with a decision that passed every other check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowVerdict {
+    /// Send now.
+    Send,
+    /// Held for the open window; `flush_in` is set for the first held card, which owns the flush.
+    Held { flush_in: Option<Duration> },
 }
 
-/// Turns agent-state observations into alerts: entering `Blocked` is "needs input"; `Idle` after
-/// `Working` is a finished turn, timed from the first `Working` of that turn.
 #[derive(Debug, Default)]
-pub struct TurnTracker {
-    sessions: HashMap<String, TurnState>,
+struct DecisionGateInner {
+    /// The prompt id last announced per session ref: a repeat of it is not a new card.
+    announced: HashMap<String, String>,
+    last_sent: Option<std::time::Instant>,
+    held: Vec<String>,
 }
 
-impl TurnTracker {
-    pub fn observe(
-        &mut self,
-        session_id: &str,
-        state: AgentControlState,
-        now: std::time::Instant,
-    ) -> Option<PushKind> {
-        if !self.sessions.contains_key(session_id) && self.sessions.len() >= TRACKED_SESSIONS {
-            self.sessions.retain(|_, turn| turn.turn_started.is_some());
+/// Decides which decision frames are new cards and paces them: at most one push per window,
+/// the rest folded into the flush.
+#[derive(Debug, Default)]
+pub struct DecisionGate {
+    inner: Mutex<DecisionGateInner>,
+}
+
+impl DecisionGate {
+    /// True when `prompt_id` is a card this session has not announced yet; records it.
+    pub fn is_new_card(&self, session_ref: &str, prompt_id: &str) -> bool {
+        let mut inner = self.inner.lock();
+        if inner.announced.get(session_ref).is_some_and(|last| last == prompt_id) {
+            return false;
         }
-        let entry = self.sessions.entry(session_id.to_string()).or_insert(TurnState {
-            state: AgentControlState::Unknown,
-            turn_started: None,
-        });
-        let previous = entry.state;
-        // Unknown is a gap in the reading, not a state change: keep the last known state so
-        // Blocked -> Unknown -> Blocked stays one wait.
-        if state != AgentControlState::Unknown {
-            entry.state = state;
+        if !inner.announced.contains_key(session_ref) && inner.announced.len() >= TRACKED_SESSIONS {
+            inner.announced.clear();
         }
-        match state {
-            AgentControlState::Working => {
-                entry.turn_started.get_or_insert(now);
-                None
+        inner.announced.insert(session_ref.to_string(), prompt_id.to_string());
+        true
+    }
+
+    /// The card left the panel (answered or gone): its next escalation is new again.
+    pub fn resolved(&self, session_ref: &str) {
+        self.inner.lock().announced.remove(session_ref);
+    }
+
+    pub fn window(&self, session_ref: &str, now: std::time::Instant) -> WindowVerdict {
+        let mut inner = self.inner.lock();
+        let open = inner
+            .last_sent
+            .and_then(|sent| DECISION_BATCH_WINDOW.checked_sub(now.saturating_duration_since(sent)))
+            .filter(|left| !left.is_zero());
+        match open {
+            None => {
+                inner.last_sent = Some(now);
+                WindowVerdict::Send
             }
-            AgentControlState::Blocked => (previous != AgentControlState::Blocked).then_some(PushKind::NeedsInput),
-            AgentControlState::Idle => entry
-                .turn_started
-                .take()
-                .map(|started| PushKind::Finished(now.saturating_duration_since(started))),
-            AgentControlState::Unknown => None,
+            Some(left) => {
+                inner.held.push(session_ref.to_string());
+                WindowVerdict::Held { flush_in: (inner.held.len() == 1).then_some(left) }
+            }
         }
+    }
+
+    /// Takes the held cards at flush time; a non-empty flush starts a new window.
+    pub fn take_held(&self, now: std::time::Instant) -> Vec<String> {
+        let mut inner = self.inner.lock();
+        let held = std::mem::take(&mut inner.held);
+        if !held.is_empty() {
+            inner.last_sent = Some(now);
+        }
+        held
     }
 }
 
