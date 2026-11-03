@@ -90,13 +90,37 @@ impl WriterLeaseRegistry {
 #[derive(Debug, Clone)]
 pub struct WorktreeManager {
     repo_root: PathBuf,
-    git_backed: bool,
+    /// Shared by every clone so the registry's copy sees a `git init` or a removed `.git`.
+    git_backing: Arc<GitBacking>,
     /// `<data>/worktree-settings.json`; `None` when no data directory resolves.
     settings_path: Option<PathBuf>,
     writer_leases: WriterLeaseRegistry,
     delete_lock: Arc<Mutex<()>>,
     dirty_snapshots: Arc<Mutex<HashMap<PathBuf, bool>>>,
     revision: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// Whether the root is a Git checkout, re-probed only when its `.git` entry appears or
+/// disappears, so the steady state costs one `stat` and never a `git` subprocess.
+#[derive(Debug)]
+struct GitBacking {
+    backed: std::sync::atomic::AtomicBool,
+    marker_present: std::sync::atomic::AtomicBool,
+}
+
+impl GitBacking {
+    fn new(backed: bool, marker_present: bool) -> Self {
+        Self {
+            backed: std::sync::atomic::AtomicBool::new(backed),
+            marker_present: std::sync::atomic::AtomicBool::new(marker_present),
+        }
+    }
+}
+
+/// The canonical Git top level containing `path`, or `None` outside a checkout.
+fn git_top_level(path: &Path) -> Option<PathBuf> {
+    let top_level = run_git(path, &["rev-parse", "--show-toplevel"]).ok()?;
+    fs::canonicalize(PathBuf::from(top_level.trim())).ok()
 }
 
 impl WorktreeManager {
@@ -116,7 +140,7 @@ impl WorktreeManager {
     pub(crate) fn for_test_root(root: PathBuf) -> Self {
         Self {
             repo_root: root,
-            git_backed: false,
+            git_backing: Arc::new(GitBacking::new(false, false)),
             settings_path: None,
             writer_leases: WriterLeaseRegistry::default(),
             delete_lock: Arc::new(Mutex::new(())),
@@ -137,16 +161,14 @@ impl WorktreeManager {
 
         // Plain-folder mode: a non-Git directory is a valid (terminal-only)
         // workspace root; only worktree operations are unavailable.
-        let (repo_root, git_backed) = match run_git(&canonical, &["rev-parse", "--show-toplevel"]) {
-            Ok(top_level) => match fs::canonicalize(PathBuf::from(top_level.trim())) {
-                Ok(git_root) => (git_root, true),
-                Err(_) => (canonical, false),
-            },
-            Err(_) => (canonical, false),
+        let (repo_root, git_backed) = match git_top_level(&canonical) {
+            Some(git_root) => (git_root, true),
+            None => (canonical, false),
         };
+        let marker_present = repo_root.join(".git").exists();
         Ok(Self {
             repo_root,
-            git_backed,
+            git_backing: Arc::new(GitBacking::new(git_backed, marker_present)),
             settings_path: naming::settings_path(),
             writer_leases: WriterLeaseRegistry::default(),
             delete_lock: Arc::new(Mutex::new(())),
@@ -238,13 +260,22 @@ impl WorktreeManager {
     }
 
     /// Whether this workspace root is a Git repository (worktree operations
-    /// require it). Plain-folder workspaces are terminal-only.
+    /// require it). Plain-folder workspaces are terminal-only. Tracks the live
+    /// root: a later `git init` or a removed `.git` takes effect on the next call.
     pub fn is_git_backed(&self) -> bool {
-        self.git_backed
+        use std::sync::atomic::Ordering;
+        let backing = &self.git_backing;
+        let marker_present = self.repo_root.join(".git").exists();
+        if backing.marker_present.swap(marker_present, Ordering::AcqRel) != marker_present {
+            // Only a checkout rooted exactly here can serve this root jail.
+            let backed = git_top_level(&self.repo_root).as_deref() == Some(self.repo_root.as_path());
+            backing.backed.store(backed, Ordering::Release);
+        }
+        backing.backed.load(Ordering::Acquire)
     }
 
     fn require_git_backed(&self) -> Result<(), WorktreeError> {
-        if self.git_backed {
+        if self.is_git_backed() {
             Ok(())
         } else {
             Err(WorktreeError::NotAGitRepository {
@@ -615,7 +646,7 @@ impl WorktreeManager {
     }
 
     pub fn list_worktrees(&self) -> Result<Vec<Worktree>, WorktreeError> {
-        if !self.git_backed {
+        if !self.is_git_backed() {
             return Ok(Vec::new());
         }
         let worktrees = git_worktree_list(&self.repo_root)?;
@@ -634,7 +665,7 @@ impl WorktreeManager {
     /// asks the user whether to import each as its own project. Only `git worktree list` is read;
     /// other tools' metadata files are never opened.
     pub fn list_external_worktrees(&self) -> Result<Vec<ExternalWorktree>, WorktreeError> {
-        if !self.git_backed {
+        if !self.is_git_backed() {
             return Ok(Vec::new());
         }
         let worktrees = git_worktree_list(&self.repo_root)?;

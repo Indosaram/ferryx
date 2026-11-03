@@ -38,7 +38,7 @@ import {
   type CopyModeGridSize,
   type TerminalCopyModeEventDetail,
 } from "./TerminalCopyMode";
-import { openTerminalToken, resolveTokenAtCol } from "../lib/linkRouting";
+import { openTerminalToken } from "../lib/linkRouting";
 import { loadFileLinkEditor } from "../lib/fileLinkSettings";
 import {
   acknowledgeAgentOutcome,
@@ -52,6 +52,7 @@ import {
   setNativeTerminalScrollbarOverlay,
   setNativeTerminalAttentionFrame,
 } from "../lib/tauri";
+import { currentWindowLabel } from "../lib/windowIdentity";
 import { decodeBase64 } from "../lib/terminalOutput";
 import { useNativeTerminalVisibilityState } from "../lib/nativeTerminalVisibility";
 import { classifyNativeTerminalAttachError } from "../lib/nativeTerminalAttachPolicy";
@@ -89,6 +90,9 @@ import type { TerminalToken } from "../lib/linkRouting";
 import {
   tokenFromHyperlink,
   readLinkLine,
+  resolveLinkLine,
+  linkTokenSpans,
+  linkWordSpans,
   isLikelyRemoteFilePath,
   openRemoteFileToken,
   remoteFetchCwd,
@@ -101,6 +105,18 @@ import {
 } from "../lib/terminalLinkTarget";
 
 const terminalLinkPathCache = createPathExistenceCache(resolveFilePreviewPath);
+
+/**
+ * Confirms a path that exists only because rows were joined as a TUI word wrap. A remote
+ * pane cannot stat locally, so a path-shaped guess is accepted there and the fetch reports.
+ */
+function wrappedLinkConfirmer(backendSessionId: string, workspaceId: string | null, remote: boolean) {
+  return async (path: string): Promise<boolean> => {
+    if (remote) return isLikelyRemoteFilePath(path);
+    const resolved = await terminalLinkPathCache.check(path, backendSessionId, workspaceId);
+    return Boolean(resolved?.exists);
+  };
+}
 
 export interface TerminalBounds {
   x: number;
@@ -691,7 +707,7 @@ export function NativeTerminalPane({
   const [linkHover, setLinkHover] = useState<{
     left: number;
     top: number;
-    width: number;
+    underlines: Array<{ left: number; top: number; width: number }>;
     kind?: TerminalLinkHintKind;
   } | null>(null);
   const linkHoverRevision = useRef(0);
@@ -847,7 +863,8 @@ export function NativeTerminalPane({
       emitNativeTerminalPresentation(tuple);
       emitNativeObservationRef.current("presentation", { presented: true, producerComponent: "native-frontend-presentation" });
       presentNativeTerminalLifecycle(targetSessionId, tuple.bindingKey);
-    }).then((stop) => {
+      // Owner-routed (emit_to): listen on this window only, see listenToThisWindow in tauri.ts.
+    }, { target: currentWindowLabel() }).then((stop) => {
       if (disposed) stop();
       else unlisten = stop;
     }).catch((error: unknown) => {
@@ -1076,7 +1093,14 @@ export function NativeTerminalPane({
         if (!token) {
           const line = await readLinkLine(invoke, targetSessionId, col, row, rows, cols);
           if (line && line.text) {
-            token = resolveTokenAtCol(line.text, line.col);
+            const remote = Boolean(
+              session?.workspaceId && (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)),
+            );
+            const resolved = await resolveLinkLine(
+              line,
+              wrappedLinkConfirmer(targetSessionId, session?.workspaceId ?? null, remote),
+            );
+            token = resolved?.token ?? null;
           }
         }
 
@@ -1177,6 +1201,8 @@ export function NativeTerminalPane({
     const height = (cellSizeRef.current?.height ?? 16 * scale) / scale;
     const col = Math.floor((point.x - rect.left) / width);
     const row = Math.floor((point.y - rect.top) / height);
+    const cols = Math.max(1, Math.floor(rect.width / width));
+    const rows = Math.max(1, Math.floor(rect.height / height));
     const cellKey = `${targetSessionId}:${col}:${row}`;
     if (cellKey === linkHoverCellRef.current) return;
     linkHoverCellRef.current = cellKey;
@@ -1204,51 +1230,32 @@ export function NativeTerminalPane({
         } catch {
         }
 
-        let receipt: { text: string; col: number; row: number } | null = null;
-        try {
-          receipt = await invoke<{ text: string; col: number; row: number }>("cmd_native_terminal_line_at", {
-            sessionId: targetSessionId,
-            col,
-            row,
-          });
-        } catch {
-        }
-
+        const remote = Boolean(
+          session?.workspaceId && (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)),
+        );
+        const line = await readLinkLine(invoke, targetSessionId, col, row, rows, cols);
+        if (revision !== linkHoverRevision.current) return;
+        const resolution = line && line.text
+          ? await resolveLinkLine(line, wrappedLinkConfirmer(targetSessionId, session?.workspaceId ?? null, remote))
+          : null;
         if (revision !== linkHoverRevision.current) return;
         if (!token) {
-          if (!receipt || !receipt.text) return;
-          token = resolveTokenAtCol(receipt.text, receipt.col);
-          if (!token) return;
+          if (!resolution) return;
+          token = resolution.token;
         }
 
-        let start = col;
-        let end = col + 1;
-        if (receipt && receipt.text) {
-          const lineToken = resolveTokenAtCol(receipt.text, receipt.col);
-          if (lineToken && JSON.stringify(lineToken) === JSON.stringify(token)) {
-            const key = JSON.stringify(lineToken);
-            start = receipt.col;
-            end = start + 1;
-            while (start > 0 && JSON.stringify(resolveTokenAtCol(receipt.text, start - 1)) === key) start--;
-            while (end < receipt.text.length * 2 && JSON.stringify(resolveTokenAtCol(receipt.text, end)) === key) end++;
-          } else {
-            const txt = receipt.text;
-            start = Math.min(receipt.col, txt.length > 0 ? txt.length - 1 : 0);
-            while (start > 0 && !/\s/.test(txt[start - 1])) start--;
-            end = Math.min(receipt.col + 1, txt.length);
-            while (end < txt.length && !/\s/.test(txt[end])) end++;
-            if (end <= start) end = start + 1;
-          }
+        let spans = [{ row, start: col, end: col + 1 }];
+        if (resolution && JSON.stringify(resolution.token) === JSON.stringify(token)) {
+          spans = linkTokenSpans(resolution);
+        } else if (line && line.col >= 0 && line.text) {
+          spans = linkWordSpans(line.exact ?? line);
         }
 
         let kind: TerminalLinkHintKind;
         if (token.type === "url") {
           kind = "url";
         } else {
-          const isRemote = Boolean(
-            session?.workspaceId && (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)),
-          );
-          if (isRemote) {
+          if (remote) {
             // No local stat is possible: only real path shapes get a hint ("I/O" is prose).
             // An explicit Cmd+click still fetches and reports a failure.
             if (!isLikelyRemoteFilePath(token.path)) return;
@@ -1266,13 +1273,14 @@ export function NativeTerminalPane({
         }
 
         const host = containerRef.current?.getBoundingClientRect();
-        if (host && revision === linkHoverRevision.current) {
-          setLinkHover({
-            left: rect.left - host.left + start * width,
-            top: rect.top - host.top + (row + 1) * height - 1,
-            width: (end - start) * width,
-            kind,
-          });
+        if (host && revision === linkHoverRevision.current && spans.length > 0) {
+          const underlines = spans.map((span) => ({
+            left: rect.left - host.left + span.start * width,
+            top: rect.top - host.top + (span.row + 1) * height - 1,
+            width: (span.end - span.start) * width,
+          }));
+          const anchor = underlines[spans.findIndex((span) => span.row === row)] ?? underlines[0];
+          setLinkHover({ left: anchor.left, top: anchor.top, underlines, kind });
         }
       } catch {
         if (revision === linkHoverRevision.current) setLinkHover(null);
@@ -2927,6 +2935,7 @@ export function NativeTerminalPane({
             });
             insertPathsIfInsidePane(paths ?? [], position.x, position.y);
           },
+          { target: currentWindowLabel() },
         );
 
         if (disposed) unlistenNative();
@@ -3663,7 +3672,7 @@ export function NativeTerminalPane({
           streamRecoveryPending = false;
         }
       })();
-    }).then((unlisten) => {
+    }, { target: currentWindowLabel() }).then((unlisten) => {
       if (!isSubscribed) { unlisten(); return; }
       unlistenStreamEnded = unlisten;
     }).catch((error: unknown) => {
@@ -3942,12 +3951,15 @@ export function NativeTerminalPane({
     >
       {isCmdHeld && linkHover && (
         <>
-          <div
-            aria-hidden="true"
-            data-testid="terminal-link-underline"
-            className="pointer-events-none absolute z-10 h-px bg-foreground"
-            style={{ left: linkHover.left, top: linkHover.top, width: linkHover.width }}
-          />
+          {linkHover.underlines.map((underline) => (
+            <div
+              key={`${underline.top}:${underline.left}`}
+              aria-hidden="true"
+              data-testid="terminal-link-underline"
+              className="pointer-events-none absolute z-10 h-px bg-foreground"
+              style={{ left: underline.left, top: underline.top, width: underline.width }}
+            />
+          ))}
           {linkHover.kind && (
             <div
               data-testid="terminal-link-hint"

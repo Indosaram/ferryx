@@ -279,17 +279,23 @@ async fn sync_sign_in_cookies<R: Runtime>(
     Ok(cookies.len())
 }
 
-/// Queues `url` for the UI and brings the main window forward. Non-http(s) URLs are dropped.
+/// Queues `url` for the UI and brings the focused app window forward, which is the one told to
+/// open it. Non-http(s) URLs are dropped.
 pub fn deliver_inbound_url<R: Runtime>(app: &AppHandle<R>, url: &str) -> bool {
     let Some(url) = default_browser::classify_inbound_url(url) else {
         tracing::warn!("ignored an inbound URL that is not http(s)");
         return false;
     };
     default_browser::queue_inbound_url(url);
-    if let Err(error) = app.emit(INBOUND_URL_EVENT, ()) {
+    let target = crate::window_registry::focused_window(app);
+    let notified = match target.as_ref() {
+        Some(window) => app.emit_to(window.label(), INBOUND_URL_EVENT, ()),
+        None => app.emit(INBOUND_URL_EVENT, ()),
+    };
+    if let Err(error) = notified {
         tracing::warn!(%error, "could not notify the UI of an inbound URL; it stays queued");
     }
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = target {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();

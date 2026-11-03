@@ -56,6 +56,7 @@ export type ShortcutActionId =
   | "sidebar.left.toggle"
   | "project.add"
   | "commandPalette.open"
+  | "window.new"
   | "settings.toggle"
   | "notifications.toggle"
   | "zoom.in"
@@ -447,6 +448,14 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     source: "ferryx",
   },
   {
+    // Desktop only: App registers no handler outside the Tauri shell, so the chord stays inert.
+    id: "window.new",
+    title: "New window",
+    group: "Global",
+    binding: { key: "n", mod: true, shift: true },
+    source: "ferryx",
+  },
+  {
     id: "settings.toggle",
     title: "Toggle settings",
     group: "Global",
@@ -457,8 +466,8 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "notifications.toggle",
     title: "Toggle notification center",
     group: "Global",
-    binding: { key: "n", mod: true, shift: true },
-    aliases: [{ key: "i", mod: true, shift: true }],
+    // Mod+Shift+N moved to "window.new" (multi-window); Mod+Shift+I was already the alias.
+    binding: { key: "i", mod: true, shift: true },
     source: "ferryx",
   },
   {

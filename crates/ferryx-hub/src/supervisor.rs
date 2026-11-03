@@ -3707,17 +3707,21 @@ pub async fn attach_legacy_pane(
 #[cfg(test)]
 mod tests;
 
+pub mod activity;
 pub mod admission;
 pub mod answers;
 pub mod changes;
 pub mod completion;
+pub mod panel_contract;
 pub mod cutover;
 pub mod delivery;
 pub mod dispatcher;
+pub mod health;
 pub mod lessons;
 pub mod memory;
 pub mod memory_import;
 pub mod receipts;
 pub mod request;
+pub mod rules;
 pub mod setup;
 pub mod wakes;

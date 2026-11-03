@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { TerminalTab, Worktree } from "../lib/types";
@@ -64,6 +64,26 @@ describe("CommandPalette", () => {
       <CommandPalette open worktrees={worktrees} tabs={tabs} onSelectWorktree={vi.fn()} onSelectTab={vi.fn()} onClose={onClose} />,
     );
     fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+  it("offers New Window only when the desktop shell provides it", () => {
+    const onNewWindow = vi.fn();
+    const onClose = vi.fn();
+    const first = render(
+      <CommandPalette open worktrees={worktrees} tabs={tabs} onSelectWorktree={vi.fn()} onSelectTab={vi.fn()} onClose={vi.fn()} />,
+    );
+    expect(within(first.container).queryByRole("button", { name: "New Window" })).not.toBeInTheDocument();
+    first.unmount();
+
+    const { container } = render(
+      <CommandPalette open worktrees={worktrees} tabs={tabs} onSelectWorktree={vi.fn()} onSelectTab={vi.fn()} onNewWindow={onNewWindow} onClose={onClose} />,
+    );
+    const palette = within(container);
+    fireEvent.change(palette.getByPlaceholderText("Search worktrees and terminal tabs"), { target: { value: "window" } });
+    const command = palette.getByRole("button", { name: "New Window" });
+    expect(command).toHaveAttribute("data-command-id", "window.new");
+    fireEvent.click(command);
+    expect(onNewWindow).toHaveBeenCalledOnce();
     expect(onClose).toHaveBeenCalledOnce();
   });
 });

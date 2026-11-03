@@ -133,10 +133,14 @@ fn main() {
             manifest_path.display()
         );
         let attrs = tauri_build::Attributes::new()
-            .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest());
+            .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest())
+            .codegen(tauri_build::CodegenContext::new());
         tauri_build::try_build(attrs).expect("tauri build failed");
     } else {
-        tauri_build::build();
+        tauri_build::try_build(
+            tauri_build::Attributes::new().codegen(tauri_build::CodegenContext::new()),
+        )
+        .expect("tauri build failed");
     }
 }
 

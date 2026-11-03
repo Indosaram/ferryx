@@ -1,6 +1,6 @@
 //! Safe terminal selection helpers.
 
-use std::ffi::c_void;
+use std::ffi::{c_int, c_void};
 use std::ptr::NonNull;
 
 use super::error::NativeTerminalError;
@@ -8,7 +8,8 @@ use super::guards::{SelectionGestureEventGuard, SelectionGestureGuard};
 use super::mouse::{MouseAction, MouseButton, MouseEvent};
 use super::search::screen_cell_text;
 use super::sys::ffi::{
-    ghostty_free, ghostty_grid_ref_hyperlink_uri, ghostty_selection_gesture_event,
+    ghostty_free, ghostty_grid_ref_hyperlink_uri, ghostty_grid_ref_row, ghostty_row_get,
+    ghostty_selection_gesture_event,
     ghostty_selection_gesture_event_new, ghostty_selection_gesture_event_set,
     ghostty_selection_gesture_get, ghostty_selection_gesture_new, ghostty_selection_gesture_reset,
     ghostty_terminal_get, ghostty_terminal_grid_ref, ghostty_terminal_point_from_grid_ref,
@@ -17,12 +18,14 @@ use super::sys::ffi::{
     ghostty_terminal_set,
 };
 use super::sys::types::{
-    GhosttyGridRef, GhosttyPoint, GhosttyPointCoordinate, GhosttyPointValue, GhosttySelection,
+    GhosttyGridRef, GhosttyPoint, GhosttyPointCoordinate, GhosttyPointValue, GhosttyRow,
+    GhosttySelection,
     GhosttySelectionGesture, GhosttySelectionGestureEvent, GhosttySelectionGestureGeometry,
     GhosttySurfacePosition, GhosttyTerminalImpl, GhosttyTerminalSelectLineOptions,
     GhosttyTerminalSelectWordOptions, GhosttyTerminalSelectionFormatOptions,
     GHOSTTY_FORMATTER_FORMAT_PLAIN, GHOSTTY_NO_VALUE, GHOSTTY_OUT_OF_SPACE,
-    GHOSTTY_POINT_TAG_SCREEN, GHOSTTY_POINT_TAG_VIEWPORT,
+    GHOSTTY_POINT_TAG_SCREEN, GHOSTTY_POINT_TAG_VIEWPORT, GHOSTTY_ROW_DATA_WRAP,
+    GHOSTTY_ROW_DATA_WRAP_CONTINUATION,
     GHOSTTY_SELECTION_GESTURE_DATA_CLICK_COUNT, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_GEOMETRY,
     GHOSTTY_SELECTION_GESTURE_EVENT_OPT_POSITION, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF,
     GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_DISTANCE,
@@ -573,6 +576,42 @@ pub fn line_text_at(
         rectangle: true,
     };
     Ok(format_selection(handle, Some(&selection), false)?.unwrap_or_default())
+}
+
+/// Soft-wrap state of one physical viewport row, as the terminal recorded it while printing:
+/// `(wraps into the next row, continues the previous row)`. An explicit newline never sets
+/// either flag, even when the row is exactly full.
+pub fn line_wrap_at(
+    handle: NonNull<GhosttyTerminalImpl>,
+    row: u16,
+) -> Result<(bool, bool), NativeTerminalError> {
+    let grid_ref = viewport_ref(handle, 0, row)?;
+    let mut raw_row: GhosttyRow = 0;
+    // SAFETY: Category: Foreign Row Extraction.
+    // Invariant: grid_ref was just produced by this live terminal; out_row is writable stack storage.
+    let result = unsafe { ghostty_grid_ref_row(&grid_ref, &mut raw_row) };
+    NativeTerminalError::from_c_result(result, "ghostty_grid_ref_row")?;
+    Ok((
+        row_flag(raw_row, GHOSTTY_ROW_DATA_WRAP, "ghostty_row_get(Wrap)")?,
+        row_flag(
+            raw_row,
+            GHOSTTY_ROW_DATA_WRAP_CONTINUATION,
+            "ghostty_row_get(WrapContinuation)",
+        )?,
+    ))
+}
+
+fn row_flag(
+    row: GhosttyRow,
+    data: c_int,
+    context: &'static str,
+) -> Result<bool, NativeTerminalError> {
+    let mut value: u8 = 0;
+    // SAFETY: Category: Foreign Row Data Extraction.
+    // Invariant: row is passed by value; both requested kinds are documented to write one C bool.
+    let result = unsafe { ghostty_row_get(row, data, &mut value as *mut u8 as *mut c_void) };
+    NativeTerminalError::from_c_result(result, context)?;
+    NativeTerminalError::decode_c_bool(value, context)
 }
 
 /// Returns the OSC 8 hyperlink URI associated with the cell at (col, row) in viewport coordinates, if any.

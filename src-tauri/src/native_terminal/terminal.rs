@@ -29,7 +29,7 @@ use super::render_pass::capture_render_snapshot;
 use super::search::{search_grid, search_with_ghostty};
 use super::selection;
 use super::selection::{
-    apply_mouse_gesture, clear_selection, create_selection_gesture, line_text_at,
+    apply_mouse_gesture, clear_selection, create_selection_gesture, line_text_at, line_wrap_at,
     reset_selection_gesture, select_all, select_line_at, select_word_at, selection_range,
     selection_text,
 };
@@ -860,6 +860,10 @@ impl TerminalEngine for NativeTerminal {
 
     fn line_text_at(&self, col: u16, row: u16) -> Result<String, NativeTerminalError> {
         line_text_at(self.handle, col, row)
+    }
+
+    fn line_wrap_at(&self, row: u16) -> Result<(bool, bool), NativeTerminalError> {
+        line_wrap_at(self.handle, row)
     }
 
     fn bell_count(&self) -> u64 {
@@ -1709,6 +1713,20 @@ mod tests {
 
         // Active selection should remain None (not altered by reading line text)
         assert_eq!(terminal.selection_text().unwrap(), None);
+    }
+
+    #[test]
+    fn test_line_wrap_at_reports_soft_wrap_but_not_explicit_newline() {
+        let mut terminal = NativeTerminal::new(10, 5).expect("create native terminal");
+        // Row 0 is exactly full and ends with an explicit newline; rows 1-2 are one
+        // logical line the terminal wrapped itself.
+        terminal
+            .feed(b"0123456789\r\nabcdefghijKLM")
+            .expect("feed full row and wrapped line");
+
+        assert_eq!(terminal.line_wrap_at(0).unwrap(), (false, false));
+        assert_eq!(terminal.line_wrap_at(1).unwrap(), (true, false));
+        assert_eq!(terminal.line_wrap_at(2).unwrap(), (false, true));
     }
 
     #[test]

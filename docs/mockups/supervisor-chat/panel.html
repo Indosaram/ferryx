@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ferryx Supervisor - panel prototype</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+html, body { height: 100%; }
+body { overflow: hidden; }
+.app { height: 100vh; display: grid; grid-template-columns: 380px minmax(0, 1fr); background: var(--background); }
+.panel { background: #1b1d22; border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+.p-h { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--border); flex: none; }
+.p-h .n { flex: 1; min-width: 0; }
+.p-h b { display: block; font-weight: 600; }
+.p-h small { display: block; font-size: 12px; color: var(--tertiary); }
+.p-body { flex: 1; overflow: auto; padding: 14px 14px 20px; display: flex; flex-direction: column; gap: 18px; }
+.hero { font-size: 14px; color: var(--muted); display: flex; gap: 8px; align-items: center; }
+.hero b { color: var(--foreground); font-weight: 600; }
+.hero .st { color: var(--success); }
+.sec { display: flex; flex-direction: column; gap: 10px; }
+.sec h2 { font-size: 12px; font-weight: 500; color: var(--tertiary); display: flex; align-items: center; gap: 6px; }
+.sec h2 .sp { flex: 1; }
+.card2 { background: var(--card); border: 1px solid rgba(251,191,36,.35); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 9px; }
+.card2 .who { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--tertiary); width: 100%; text-align: left; }
+.card2 .who b { color: var(--muted); font-weight: 500; }
+.card2 .who .sp { flex: 1; }
+.card2 .q { font-size: 15px; font-weight: 500; line-height: 1.35; }
+.card2 .cmd { font: 12px/1.4 var(--mono); color: var(--muted); background: #0f1012; border-radius: 6px; padding: 6px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card2 .rec { display: flex; gap: 8px; font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+.card2 .rec .avatar { width: 16px; height: 16px; border-radius: 4px; font-size: 9px; margin-top: 1px; box-shadow: none; }
+.card2 .a { display: flex; gap: 6px; flex-wrap: wrap; }
+.card2 .a .btn { min-height: 32px; padding: 0 12px; font-size: 13px; }
+.panel .row { border: 0; }
+.row { display: flex; gap: 10px; align-items: flex-start; padding: 7px 8px; margin: 0 -8px; border-radius: 8px; text-align: left; width: calc(100% + 16px); font-size: 13px; }
+.row:hover { background: rgba(255,255,255,.04); }
+.row.sel { background: var(--worktree-accent); }
+.row .st { margin-top: 2px; }
+.row .n { flex: 1; min-width: 0; }
+.row .n b { display: block; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .n small { display: block; color: var(--tertiary); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .host { font-size: 11px; color: var(--tertiary); white-space: nowrap; margin-top: 2px; }
+.row .x { font-size: 12px; color: var(--muted); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: rgba(255,255,255,.2); white-space: nowrap; }
+.log { display: flex; flex-direction: column; gap: 9px; }
+.log .l { display: flex; gap: 8px; font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+.log .l .st { margin-top: 2px; color: var(--tertiary); }
+.log .l b { color: var(--foreground); font-weight: 500; }
+.log .l .t { color: var(--tertiary); font-size: 11px; white-space: nowrap; margin-left: auto; padding-left: 8px; }
+.log .l .u { color: var(--muted); text-decoration: underline; text-underline-offset: 3px; margin-left: 4px; font-size: 12px; }
+.toggle { font-size: 12px; color: var(--tertiary); text-decoration: underline; text-underline-offset: 3px; }
+.rules { font-size: 12px; color: var(--tertiary); line-height: 1.55; border-top: 1px solid var(--border); padding-top: 12px; }
+.rules .toggle { margin-left: 4px; }
+.p-compose { padding: 10px 12px 12px; border-top: 1px solid var(--border); flex: none; }
+.p-compose .box { background: var(--card); border: 1px solid var(--border-strong); border-radius: 12px; display: flex; align-items: flex-end; gap: 8px; padding: 8px 8px 8px 12px; }
+.p-compose textarea { flex: 1; background: none; border: 0; color: var(--foreground); resize: none; font: 13.5px/1.4 var(--font); outline: none; padding: 5px 0; }
+.p-compose .send { width: 32px; height: 32px; border-radius: 8px; background: var(--primary); color: #fff; display: grid; place-items: center; flex: none; }
+.reply { font-size: 13px; color: var(--foreground); line-height: 1.5; }
+.mine { align-self: flex-end; background: var(--accent); border-radius: 12px; padding: 7px 11px; font-size: 13px; max-width: 85%; }
+
+.ws { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.tabs { height: 40px; display: flex; align-items: flex-end; gap: 2px; padding: 0 10px; border-bottom: 1px solid var(--border); background: #1b1d22; flex: none; overflow-x: auto; scrollbar-width: none; }
+.tab { height: 32px; padding: 0 12px; display: flex; align-items: center; gap: 7px; border-radius: 8px 8px 0 0; font-size: 12.5px; color: var(--tertiary); white-space: nowrap; }
+.tab.on { background: var(--background); color: var(--foreground); }
+.ws-h { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--border); flex: none; }
+.ws-h b { font-weight: 600; }
+.ws-h small { color: var(--tertiary); font-size: 12px; }
+.ws-h .sp { flex: 1; }
+.term { flex: 1; overflow: auto; background: #282c34; margin: 12px; border-radius: 8px; padding: 12px 14px; font: 12.5px/1.6 var(--mono); color: #c8ccd4; white-space: pre-wrap; }
+.term .y { color: #e5c07b; } .term .g { color: #98c379; } .term .b { color: #61afef; } .term .r { color: #e06c75; }
+.back { display: none; }
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(20px); opacity: 0; background: #2b2e35; border: 1px solid var(--border-strong); border-radius: 10px; padding: 9px 14px; font-size: 13px; transition: .2s; pointer-events: none; }
+.toast.on { opacity: 1; transform: translateX(-50%); }
+
+@media (max-width: 1023px) {
+  .app { grid-template-columns: 1fr; }
+  .ws { display: none; }
+  .app.in-term .panel { display: none; }
+  .app.in-term .ws { display: flex; }
+  .tabs { display: none; }
+  .back { display: grid; width: 40px; height: 40px; margin-left: -8px; place-items: center; }
+  .p-h { padding-top: calc(12px + env(safe-area-inset-top)); }
+  .card2 .a .btn { min-height: 44px; flex: 1 1 auto; justify-content: center; }
+  .row { padding: 10px 8px; }
+  .p-body { padding: 14px 16px 20px; }
+}
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <aside class="panel" aria-label="Supervisor">
+    <div class="p-h"><span class="avatar sv">S</span><div class="n"><b>Supervisor</b><small id="sub"></small></div><button type="button" class="btn ghost" id="pause" style="min-height:30px;padding:0 8px;font-size:12px">Pause</button></div>
+    <div class="p-body" id="body"></div>
+    <div class="p-compose"><div class="box"><textarea id="input" rows="1" placeholder="Tell the supervisor anything"></textarea><button type="button" class="send" id="send" aria-label="Send"><svg aria-hidden="true" class="i" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button></div></div>
+  </aside>
+  <main class="ws" aria-label="Workspace">
+    <div class="tabs" id="tabs"></div>
+    <div class="ws-h"><button type="button" class="back" id="back" aria-label="Back to Supervisor"><svg aria-hidden="true" class="i" viewBox="0 0 24 24" style="width:22px;height:22px"><path d="m15 18-6-6 6-6"/></svg></button><span id="wsGlyph"></span><div><b id="wsTitle"></b> <small id="wsSub"></small></div><span class="sp"></span></div>
+    <div class="term" id="term"></div>
+  </main>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+const G = {
+  needs: '<svg aria-hidden="true" viewBox="0 0 16 16"><path d="M8 1.5 15 14H1z" fill="currentColor"/><path d="M8 6v3.5M8 11.6v.1" stroke="#0f1012" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  working: '<svg aria-hidden="true" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="26 12"/></svg>',
+  done: '<svg aria-hidden="true" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="currentColor"/><path d="m5 8.2 2 2 4-4.4" stroke="#0f1012" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  failed: '<svg aria-hidden="true" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="currentColor"/><path d="m5.5 5.5 5 5m0-5-5 5" stroke="#0f1012" stroke-width="1.8" stroke-linecap="round"/></svg>',
+  idle: '<svg aria-hidden="true" viewBox="0 0 16 16"><circle cx="8" cy="8" r="4" fill="currentColor"/></svg>',
+};
+const LABEL = { needs: 'Needs you', working: 'Working', done: 'Finished', failed: 'Failed', idle: 'Idle' };
+const glyph = s => `<span class="st ${s}">${G[s]}</span>`;
+const esc = t => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const S = [
+  { id: 'relay', title: 'Fix relay reconnect', short: 'Relay reconnect', repo: 'ferryx / relay-fix', host: 'This Mac', agent: 'Claude Code', ab: 'CC', state: 'needs', ago: '2m',
+    why: 'Wants to run a migration on the relay database',
+    prompt: { kind: 'approval', q: 'Run the relay database migration?', cmd: 'sqlx migrate run --database-url $RELAY_DB', options: ['Allow', 'Deny'], rec: 0, why: 'Adds one nullable column. $RELAY_DB is the dev database on this Mac, so production is not touched.' },
+    term: '<span class="b">●</span> Running reconnect tests needs the new column.\n\n<span class="y">Bash</span>(sqlx migrate run --database-url $RELAY_DB)\n  ⎿ Waiting for permission\n\n Do you want to proceed?\n <span class="g">❯ 1. Yes</span>\n   2. Yes, and don\'t ask again for sqlx\n   3. No, tell Claude what to do differently',
+    chat: [['u', 'make reconnect survive a relay restart'], ['a', 'I added a backoff loop to the relay client and a test that restarts the relay mid-session.']],
+    changes: [['src-tauri/src/remote/relay_client.rs', 42, 9], ['src-tauri/src/remote/relay_client_tests.rs', 88, 0], ['relay/migrations/0042_session_epoch.sql', 6, 0]] },
+  { id: 'notes', title: 'Release notes for 11.2', short: 'Release notes', repo: 'site / main', host: 'omarchy', agent: 'Codex', ab: 'CX', state: 'working', ago: '6m',
+    why: 'Tagging v2026.1102.1',
+    prompt: { kind: 'question', q: 'Which version should I tag?', options: ['v2026.1102.1', 'v2026.1102.0-rc'], rec: 0, why: 'You chose the stable tag over -rc for the last 4 releases.' },
+    term: '<span class="b">codex</span> Drafted RELEASE_NOTES.md (14 entries).\n\n<span class="y">?</span> Which version should I tag?\n  1. v2026.1102.1\n  2. v2026.1102.0-rc\n  3. Other',
+    chat: [['u', 'write release notes for everything merged since 11.1'], ['a', 'Drafted 14 entries grouped into Remote, Terminal and Supervisor. Which version should I tag?'], ['s', 'Supervisor answered v2026.1102.1 · you chose the stable tag for the last 4 releases']],
+    changes: [['site/src/content/releases/2026-11-02.md', 61, 0]] },
+  { id: 'wintests', title: 'Windows installer tests', short: 'Windows tests', repo: 'ferryx / win-tests', host: 'maho-win', agent: 'omo', ab: 'OM', state: 'working', ago: 'now',
+    why: 'Retrying · proxy 502, next try 14:20',
+    term: '<span class="b">omo</span> cargo test --test msix_install\n  running 7 tests\n  test install_fresh ... <span class="g">ok</span>\n  test install_upgrade ... <span class="g">ok</span>\n  test install_per_user ... <span class="g">ok</span>\n  test install_with_daemon_running ...',
+    chat: [['u', 'run the MSIX install suite on maho-win'], ['a', 'Started. 3 of 7 tests passed so far.']], changes: [] },
+  { id: 'gestures', title: 'Mobile sheet gestures', short: 'Sheet gestures', repo: 'ferryx / native-feel', host: 'This Mac', agent: 'Claude Code', ab: 'CC', state: 'working', ago: 'now',
+    why: 'Restarted after 5 min with no output',
+    term: '<span class="b">●</span> Editing ui/src/remote/mobile/useSheetDrag.ts\n  velocity window 30ms → 64ms',
+    chat: [['u', 'flick-to-dismiss misses short flicks on iPhone'], ['a', 'Switching velocity to an average over the last 64ms.']], changes: [['ui/src/remote/mobile/useSheetDrag.ts', 12, 5]] },
+  { id: 'mhc', title: 'mhc plugin cleanup', short: 'mhc cleanup', repo: 'mhc / main', host: 'omarchy', agent: 'omo', ab: 'OM', state: 'working', ago: '1m',
+    why: 'Resumed after a usage limit', term: '<span class="b">omo</span> rm -r plugins/legacy-*\n  removed 3 directories', chat: [['a', 'Removing 3 unused plugins, then running the plugin tests.']], changes: [] },
+  { id: 'wtlist', title: 'Worktree list refresh', short: 'Worktree refresh', repo: 'ferryx / main', host: 'This Mac', agent: 'Claude Code', ab: 'CC', state: 'done', ago: '1h',
+    why: '4 files changed, tests pass', term: '<span class="g">✓</span> 212 tests passed', chat: [['a', 'Done. The worktree list now refreshes on focus and after git operations.']],
+    changes: [['ui/src/state/worktreeList.ts', 31, 12], ['ui/src/state/worktreeList.test.ts', 54, 0], ['src-tauri/src/worktree/list.rs', 8, 3], ['ui/src/components/WorktreeList.tsx', 6, 2]] },
+  { id: 'roblox', title: 'Roblox build', short: 'Roblox build', repo: 'roblox-game-forge', host: 'maho-win', agent: 'Codex', ab: 'CX', state: 'needs', ago: '4m',
+    why: 'Still failing after 2 fix attempts',
+    prompt: { kind: 'question', q: 'Still 3 failing tests after 2 fix attempts. What next?', options: ['Revert the physics change', 'Keep trying', 'Stop'], rec: 0, why: 'All 3 failures started with the physics change in a4c1. Reverting it passed locally.' }, term: '<span class="r">✗</span> PlayerController.spec.lua: 3 failed\n  expected jumpHeight 7.2, got 0', chat: [['a', '3 tests failed in PlayerController after the physics change.'], ['s', 'Supervisor asked Codex to fix it twice; 3 tests still fail']], changes: [['src/PlayerController.lua', 14, 6]] },
+];
+S.find(s => s.id === 'wintests').why = 'Retrying · proxy 502, next try 14:20';
+const $ = id => document.getElementById(id);
+const byId = id => S.find(s => s.id === id);
+const isPhone = () => matchMedia('(max-width: 1023px)').matches;
+const st = { sel: 'wintests', showLog: false, paused: false, convo: [],
+  log: [
+    { at: '14:04', sid: 'notes', undo: true, html: 'Answered <b>Release notes</b>: v2026.1102.1 · you picked the stable tag the last 4 times' },
+    { at: '14:01', html: 'Restarted <b>Sheet gestures</b> · no output for 5 min' },
+    { at: '13:58', html: 'Resumed <b>mhc cleanup</b> when its usage limit reset' },
+    { at: '13:50', html: '<b>Proxy errors</b> 13:20–13:50 · retried every 10 min · resumed 4 sessions' },
+  ],
+  live: [{ sid: 'wintests', title: 'Windows installer tests', next: 'Proxy 502 · tried 2 times · next try 14:20' }],
+};
+function toast(t) { const el = $('toast'); el.textContent = t; el.classList.add('on'); clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.remove('on'), 2200); }
+
+function card(s) {
+  const p = s.prompt;
+  return `<div class="card2"><button type="button" class="who" data-focus="${s.id}">${glyph('needs')}<b>${esc(s.short)}</b>· ${s.host}<span class="sp"></span><span class="toggle">Terminal</span></button>
+    <div class="q">${esc(p.q)}</div>${p.cmd ? `<div class="cmd" title="${esc(p.cmd)}">${esc(p.cmd)}</div>` : ''}
+    <div class="rec"><span class="avatar sv">S</span><span>${esc(p.why)}</span></div>
+    <div class="a">${p.options.map((o, i) => `<button type="button" class="btn ${i === p.rec ? 'primary' : ''}" data-answer="${s.id}" data-opt="${esc(o)}">${esc(o)}</button>`).join('')}</div></div>`;
+}
+function row(s, extra = '') {
+  return `<button type="button" class="row ${!isPhone() && st.sel === s.id ? 'sel' : ''}" data-focus="${s.id}">${glyph(s.state)}<span class="n"><b>${esc(s.title)}</b><small>${esc(s.why)}</small></span><span class="host">${s.host}</span></button>`;
+}
+function render() {
+  const needs = S.filter(s => s.state === 'needs');
+  const running = S.filter(s => s.state === 'working');
+  const done = S.filter(s => s.state === 'done' || s.state === 'failed');
+  $('sub').textContent = st.paused ? 'Paused · nothing is answered or retried' : `${running.length} running · handled ${st.log.length} things today`;
+  $('pause').textContent = st.paused ? 'Resume' : 'Pause';
+  const hero = needs.length ? `<div class="hero"><b>${needs.length} decision${needs.length > 1 ? 's' : ''} for you.</b> The rest is running.</div>`
+    : `<div class="hero">${glyph('done')}<b>Nothing needs you.</b></div>`;
+  const sec = (t, body, right = '') => body ? `<section class="sec"><h2>${t}<span class="sp"></span>${right}</h2>${body}</section>` : '';
+  const logRows = (st.showLog ? st.log : st.log.slice(0, 2)).map(l => `<div class="l">${glyph('done')}<span>${l.html}${l.undo ? `<button type="button" class="u" data-undo="${l.sid}">Undo</button>` : ''}</span><span class="t">${l.at}</span></div>`).join('');
+  const liveRows = st.live.map(l => `<button type="button" class="row" data-focus="${l.sid}">${glyph('working')}<span class="n"><b>${l.title}</b><small>${l.next}</small></span><span class="x" data-stop="${l.sid}">Stop</span></button>`).join('');
+  const convo = st.convo.map(m => m.me ? `<div class="mine">${esc(m.t)}</div>` : `<div class="reply">${m.t}</div>`).join('');
+  $('body').innerHTML = hero
+    + sec('Needs your decision', needs.map(card).join(''))
+    + sec('I\'m handling', liveRows)
+    + sec('Sessions', [...running, ...done].filter(s => !st.live.some(l => l.sid === s.id)).map(s => row(s)).join(''))
+    + sec('Done for you today', `<div class="log">${logRows}</div>`, st.log.length > 2 ? `<button type="button" class="toggle" data-log>${st.showLog ? 'Less' : `All ${st.log.length}`}</button>` : '')
+    + (convo ? `<section class="sec">${convo}</section>` : '')
+    + `<div class="rules">Retry upstream errors every 10 min · restart after 5 min with no output · resume after usage limits · ask you only before irreversible steps<button type="button" class="toggle" data-rules>Change</button></div>`;
+  const s = byId(st.sel);
+  $('tabs').innerHTML = S.map(x => `<button type="button" class="tab ${x.id === st.sel ? 'on' : ''}" data-focus="${x.id}">${glyph(x.state)}${esc(x.short)}</button>`).join('');
+  $('wsGlyph').innerHTML = glyph(s.state);
+  $('wsTitle').textContent = s.title;
+  $('wsSub').textContent = `${s.repo} · ${s.host} · ${s.agent}`;
+  $('term').innerHTML = s.term;
+}
+function answer(id, opt) {
+  const s = byId(id);
+  s.state = 'working'; s.why = id === 'relay' ? 'Running reconnect tests' : 'Reverting the physics change';
+  s.term += `\n\n<span class="g">✓</span> ${esc(opt)} (from Supervisor)`;
+  render();
+  setTimeout(() => { s.state = 'done'; s.why = id === 'relay' ? '3 files changed, 18 tests pass' : '3 tests pass now'; s.term += '\n<span class="g">✓</span> tests passed'; render(); }, 2200);
+}
+document.addEventListener('click', e => {
+  const t = e.target.closest('button, [data-stop]'); if (!t) return;
+  const d = t.dataset;
+  if (e.target.dataset.stop) { st.live = []; const s = byId(e.target.dataset.stop); s.state = 'failed'; s.why = 'Stopped retrying · proxy 502'; render(); return toast('Stopped retrying Windows tests'); }
+  if (d.answer) return answer(d.answer, d.opt);
+  if (d.undo) { st.log = st.log.filter(l => l.sid !== d.undo); const s = byId(d.undo); s.state = 'needs'; s.why = 'Asks which version to tag'; render(); return toast('Undone · it asks you now'); }
+  if (d.log !== undefined) { st.showLog = !st.showLog; return render(); }
+  if (d.rules !== undefined) { $('input').value = 'Retry upstream errors every '; return $('input').focus(); }
+  if (d.focus) { st.sel = d.focus; $('app').classList.toggle('in-term', isPhone()); return render(); }
+  if (t.id === 'pause') { st.paused = !st.paused; return render(); }
+  if (t.id === 'back') { $('app').classList.remove('in-term'); return render(); }
+  if (t.id === 'send') send();
+});
+function send() {
+  const v = $('input').value.trim(); if (!v) return;
+  $('input').value = ''; st.convo.push({ me: true, t: v });
+  st.convo.push({ t: /retry|every/i.test(v) ? 'OK. From now on I retry upstream errors on that interval for these sessions.' : 'On it. I\'ll put anything that needs you at the top.' });
+  render(); $('body').scrollTop = $('body').scrollHeight;
+}
+$('input').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+addEventListener('resize', render);
+render();
+</script>
+</body>
+</html>

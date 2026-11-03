@@ -4579,6 +4579,37 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       expect(pane.classList.contains("cursor-pointer")).toBe(false);
     }));
 
+  it("underlines both rows of a path a TUI wrapped across two lines", () =>
+    withMacHost(async () => {
+      const session = createSession("hover-wrapped", "hover-wrapped-backend");
+      const rows = [
+        "/Users/indo/.aside/u/1/sessions/2026-11-02_sIAW3lPLLPzn4OMC/",
+        "qr-fresh.png",
+      ];
+      const joined = `${rows[0]}${rows[1]}`;
+      tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
+        if (command === "cmd_native_terminal_hyperlink_at") return null;
+        if (command === "cmd_native_terminal_line_at") {
+          return { text: rows[args.row] ?? "", col: args.col, row: args.row, wrapped: false, wrapContinuation: false };
+        }
+        if (command === "cmd_file_preview_resolve") {
+          return args.path === joined
+            ? { resolvedPath: joined, exists: true, isDirectory: false }
+            : { resolvedPath: `/x/${args.path}`, exists: false, isDirectory: false };
+        }
+        return undefined;
+      });
+      const view = await renderNative(<NativeTerminalPane session={session} />);
+      const pane = view.getByTestId("native-terminal-pane");
+      vi.spyOn(view.getByTestId("native-terminal-viewport"), "getBoundingClientRect")
+        .mockReturnValue(new DOMRect(0, 0, 600, 480));
+      await act(async () => {
+        fireEvent.pointerMove(pane, { pointerId: 1, clientX: 20, clientY: 24, metaKey: true, buttons: 0 });
+      });
+      await waitFor(() => expect(view.getAllByTestId("terminal-link-underline")).toHaveLength(2));
+      view.unmount();
+    }));
+
   it("handles Cmd+click on indented lines without coordinate drift", () =>
     withMacHost(async () => {
       const session = {

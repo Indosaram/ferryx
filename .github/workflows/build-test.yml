@@ -149,6 +149,14 @@ jobs:
       - name: Test native terminal thread policy gate
         run: bun test scripts/native-terminal-thread-policy.test.mjs
 
+      # Multi-window invariant: production code never looks up the desktop window by the
+      # literal "main" label; window_registry.rs resolves the caller, owner or focused window.
+      - name: Verify multi-window policy
+        run: bun scripts/multi-window-policy.mjs
+
+      - name: Test multi-window policy gate
+        run: bun test scripts/multi-window-policy.test.mjs
+
       # ---- Unit and integration suites ----
       - name: Test CI process supervision
         run: python3 -m unittest discover -s scripts -p 'ci_*_test.py'

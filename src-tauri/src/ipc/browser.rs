@@ -1066,6 +1066,19 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
     request: CreateBrowserRequest,
     opener: Option<crate::browser::BrowserOpenerLink>,
 ) -> Result<BrowserState, IpcError> {
+    create_browser_session_in_window(app, manager, request, opener, None).await
+}
+
+/// Creates a browser session whose webview mounts in `host_window`: the calling window for UI
+/// commands. Without one (CLI, remote and other background callers) it mounts in the focused app
+/// window, which is `main` while only one window exists.
+pub async fn create_browser_session_in_window<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &Arc<BrowserManager>,
+    request: CreateBrowserRequest,
+    opener: Option<crate::browser::BrowserOpenerLink>,
+    host_window: Option<tauri::Window<R>>,
+) -> Result<BrowserState, IpcError> {
     if let Some(restored_browser_id) = request.browser_id.as_deref() {
         if let Ok(existing) = manager.get_state(restored_browser_id) {
             record_session_created(&existing.browser_id);
@@ -1079,6 +1092,12 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
         }
     }
 
+    // UI commands mount the tab in their calling window; background callers (CLI, remote) in
+    // the focused app window.
+    let host_window = host_window
+        .filter(|window| crate::window_registry::is_app_window_label(window.label()))
+        .or_else(|| crate::window_registry::focused_window(app));
+
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     let cef_engine_dir = if opener.is_none() {
         engine_data_dir(app)
@@ -1090,7 +1109,10 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
     // A native Wayland window has no X window to host the engine's: those tabs stay on the
     // system webview. Settings > Browser says why, and so does the pane once it is registered.
     #[cfg(target_os = "linux")]
-    let has_x_parent = linux_engine_parent(app).is_some();
+    let has_x_parent = host_window
+        .as_ref()
+        .and_then(crate::browser::cef_engine::parent_xid)
+        .is_some();
     #[cfg(target_os = "linux")]
     let wayland_notice = wayland_engine_notice(cef_engine_dir.is_some(), has_x_parent);
     #[cfg(target_os = "linux")]
@@ -1149,7 +1171,7 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
     let state = match cef_engine_dir {
         Some(engine_dir) => {
             let browser_id = state.browser_id.clone();
-            match create_cef_browser_session(app, manager, state, engine_dir, None).await {
+            match create_cef_browser_session(app, manager, state, engine_dir, None, host_window.clone()).await {
                 Ok(state) => return Ok(state),
                 // The engine could not open the tab: it opens on the system webview instead,
                 // and its pane says why.
@@ -1161,7 +1183,7 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
         None => state,
     };
 
-    if let Some(main_window) = app.get_window("main") {
+    if let Some(host_window) = host_window {
         let label = state.webview_label.clone();
         let target_url = state.url.clone();
         let bounds = request.bounds.clone();
@@ -1226,8 +1248,8 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
             }
         }
 
-        let window_clone = main_window.clone();
-        let run_result = main_window.run_on_main_thread(move || {
+        let window_clone = host_window.clone();
+        let run_result = host_window.run_on_main_thread(move || {
             let target_parsed: Option<tauri::Url> = target_url.parse().ok();
             let parsed_url: tauri::WebviewUrl = match "about:blank".parse() {
                 Ok(blank) => tauri::WebviewUrl::External(blank),
@@ -1612,7 +1634,7 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
         // No host window to attach to: a session without a webview would be picked as the
         // active tab and fail every later command with WEBVIEW_NOT_FOUND.
         discard_failed_session(manager, &state.browser_id);
-        return Err(BrowserError::CreateFailed("main window unavailable".into()).into());
+        return Err(BrowserError::CreateFailed("no host window available".into()).into());
     }
 
     if let Some(link) = opener.as_ref() {
@@ -1636,7 +1658,9 @@ fn emit_session_state<R: tauri::Runtime>(app: &AppHandle<R>, state: &BrowserStat
 }
 
 /// Opens the tab in its profile's Chromium engine, whose browser window sits over the pane.
-/// The engine reports the page's address, title and loading state as events.
+/// The engine reports the page's address, title and loading state as events. The tab belongs
+/// to `host_window` (the focused app window without one), which the registry records as its
+/// owner.
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub(crate) async fn create_cef_browser_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -1644,6 +1668,7 @@ pub(crate) async fn create_cef_browser_session<R: tauri::Runtime>(
     state: BrowserState,
     engine_dir: std::path::PathBuf,
     engine_url: Option<String>,
+    host_window: Option<tauri::Window<R>>,
 ) -> Result<BrowserState, IpcError> {
     use crate::browser::cef_engine;
     let browser_id = state.browser_id.clone();
@@ -1656,21 +1681,24 @@ pub(crate) async fn create_cef_browser_session<R: tauri::Runtime>(
         Ok(state) => state,
         Err(error) => return Err(fail(error.to_string())),
     };
-    let Some(main_window) = app.get_window("main") else {
-        return Err(fail("main window unavailable".into()));
+    let Some(host_window) = host_window
+        .filter(|window| crate::window_registry::is_app_window_label(window.label()))
+        .or_else(|| crate::window_registry::focused_window(app))
+    else {
+        return Err(fail("no app window available".into()));
     };
     #[cfg(target_os = "windows")]
-    let parent = match main_window.hwnd() {
+    let parent = match host_window.hwnd() {
         Ok(hwnd) => hwnd.0 as isize,
-        Err(error) => return Err(fail(format!("main window handle: {error}"))),
+        Err(error) => return Err(fail(format!("app window handle: {error}"))),
     };
     #[cfg(target_os = "macos")]
-    let Some(parent) = cef_engine::window_number(&main_window) else {
-        return Err(fail("main window number unavailable".into()));
+    let Some(parent) = cef_engine::window_number(&host_window) else {
+        return Err(fail("app window number unavailable".into()));
     };
     #[cfg(target_os = "linux")]
-    let Some(parent) = cef_engine::parent_xid(&main_window) else {
-        return Err(fail("main window has no X11 window (Wayland session)".into()));
+    let Some(parent) = cef_engine::parent_xid(&host_window) else {
+        return Err(fail("app window has no X11 window (Wayland session)".into()));
     };
     let bounds = manager
         .get_bounds(&browser_id)
@@ -1682,7 +1710,7 @@ pub(crate) async fn create_cef_browser_session<R: tauri::Runtime>(
             width: 800.0,
             height: 600.0,
         });
-    let rect = cef_pane_rect(&main_window, &bounds);
+    let rect = cef_pane_rect(&host_window, &bounds);
     // One engine per profile shares cookies, logins and extensions across that profile's tabs;
     // a private tab's engine keeps its data in memory.
     let profile = state.profile_id.as_str().to_string();
@@ -1711,12 +1739,13 @@ pub(crate) async fn create_cef_browser_session<R: tauri::Runtime>(
         discard_failed_session(manager, &browser_id);
         return Err(error);
     }
+    crate::window_registry::record_owner(app, &browser_id, host_window.label());
     emit_session_state(app, &state);
     Ok(state)
 }
 
 /// Starts the profile's Chromium engine without opening a tab (Settings > Extensions talks to
-/// it), with the same window, data dir and event sink as the profile's tabs.
+/// it) in the focused app window, with the same data dir and event sink as the profile's tabs.
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub(crate) async fn ensure_cef_engine<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -1725,20 +1754,19 @@ pub(crate) async fn ensure_cef_engine<R: tauri::Runtime>(
     engine_dir: std::path::PathBuf,
 ) -> Result<(), IpcError> {
     use crate::browser::cef_engine;
-    let main_window = app
-        .get_window("main")
-        .ok_or_else(|| BrowserError::CreateFailed("main window unavailable".into()))?;
+    let host_window = crate::window_registry::focused_window(app)
+        .ok_or_else(|| BrowserError::CreateFailed("no app window available".into()))?;
     #[cfg(target_os = "windows")]
-    let parent = main_window
+    let parent = host_window
         .hwnd()
         .map(|hwnd| hwnd.0 as isize)
-        .map_err(|error| BrowserError::CreateFailed(format!("main window handle: {error}")))?;
+        .map_err(|error| BrowserError::CreateFailed(format!("app window handle: {error}")))?;
     #[cfg(target_os = "macos")]
-    let parent = cef_engine::window_number(&main_window)
-        .ok_or_else(|| BrowserError::CreateFailed("main window number unavailable".into()))?;
+    let parent = cef_engine::window_number(&host_window)
+        .ok_or_else(|| BrowserError::CreateFailed("app window number unavailable".into()))?;
     #[cfg(target_os = "linux")]
-    let parent = cef_engine::parent_xid(&main_window)
-        .ok_or_else(|| BrowserError::CreateFailed("main window has no X11 window (Wayland session)".into()))?;
+    let parent = cef_engine::parent_xid(&host_window)
+        .ok_or_else(|| BrowserError::CreateFailed("app window has no X11 window (Wayland session)".into()))?;
     let profile_id = profile.as_str().to_string();
     let cache_dir = if profile.is_private() {
         None
@@ -1880,6 +1908,10 @@ fn adopt_cef_popup<R: tauri::Runtime>(
     if !crate::browser::cef_engine::adopt(profile, &state.browser_id, popup) {
         discard_failed_session(manager, &state.browser_id);
         return;
+    }
+    // The engine opened it from the page the user works in.
+    if let Some(window) = crate::window_registry::focused_window(app) {
+        crate::window_registry::record_owner(app, &state.browser_id, window.label());
     }
     let _ = app.emit(
         crate::browser::guest::BROWSER_SESSION_CREATED_EVENT,
@@ -2040,11 +2072,12 @@ pub(crate) async fn dispatch_trusted_action<R: tauri::Runtime>(
 #[tauri::command]
 pub async fn cmd_browser_create<R: tauri::Runtime>(
     app: AppHandle<R>,
+    window: tauri::Window<R>,
     manager: State<'_, Arc<BrowserManager>>,
     request: CreateBrowserRequest,
     opener: Option<crate::browser::BrowserOpenerLink>,
 ) -> Result<BrowserState, IpcError> {
-    create_browser_session_with_opener(&app, manager.inner(), request, opener).await
+    create_browser_session_in_window(&app, manager.inner(), request, opener, Some(window)).await
 }
 
 #[tauri::command]
@@ -2737,8 +2770,8 @@ pub async fn cmd_browser_set_bounds<R: tauri::Runtime>(
     manager.set_bounds(&browser_id, bounds.clone())?;
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     if crate::browser::cef_engine::is_cef_tab(&browser_id) {
-        if let Some(main_window) = app.get_window("main") {
-            crate::browser::cef_engine::set_bounds(&browser_id, cef_pane_rect(&main_window, &bounds));
+        if let Some(window) = crate::window_registry::window_for_session(&app, &browser_id) {
+            crate::browser::cef_engine::set_bounds(&browser_id, cef_pane_rect(&window, &bounds));
         }
         return Ok(());
     }
@@ -2873,7 +2906,10 @@ pub fn focus_browser_session<R: tauri::Runtime>(
     // address bar. Refocusing an already focused Ferryx window would only race that request.
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     if crate::browser::cef_engine::is_cef_tab(browser_id) {
-        present_main_window(app, false)?;
+        // The window that owns the tab (the primary window when no owner is known).
+        if let Some(window) = crate::window_registry::window_for_session(app, browser_id) {
+            present_window(&window, false)?;
+        }
         crate::browser::cef_engine::focus(browser_id, address)?;
         return Ok(());
     }
@@ -2881,34 +2917,35 @@ pub fn focus_browser_session<R: tauri::Runtime>(
     let webview = app
         .get_webview(&state.webview_label)
         .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
-    present_main_window(app, true)?;
+    // Raise the window that hosts this browser's webview, not a fixed window.
+    let host_window = webview.window();
+    if crate::window_registry::is_app_window_label(host_window.label()) {
+        present_window(&host_window, true)?;
+    }
     webview.set_focus().map_err(|error| {
         BrowserError::Internal(format!("failed to focus browser webview: {error}"))
     })?;
     Ok(())
 }
 
-/// Shows and unminimizes the main window, and focuses it (`always_focus`, else only when it is
-/// not focused yet).
-fn present_main_window<R: tauri::Runtime>(
-    app: &AppHandle<R>,
+/// Shows and unminimizes a browser's window, and focuses it (`always_focus`, else only when it
+/// is not focused yet).
+fn present_window<R: tauri::Runtime>(
+    window: &tauri::Window<R>,
     always_focus: bool,
 ) -> Result<(), IpcError> {
-    let Some(window) = app.get_window("main") else {
-        return Ok(());
-    };
     window.show().map_err(|error| {
-        BrowserError::Internal(format!("failed to show the main window: {error}"))
+        BrowserError::Internal(format!("failed to show the browser's window: {error}"))
     })?;
     window.unminimize().map_err(|error| {
-        BrowserError::Internal(format!("failed to unminimize the main window: {error}"))
+        BrowserError::Internal(format!("failed to unminimize the browser's window: {error}"))
     })?;
     let focused = window.is_focused().map_err(|error| {
-        BrowserError::Internal(format!("failed to read the main window focus: {error}"))
+        BrowserError::Internal(format!("failed to read the browser's window focus: {error}"))
     })?;
     if always_focus || !focused {
         window.set_focus().map_err(|error| {
-            BrowserError::Internal(format!("failed to focus the main window: {error}"))
+            BrowserError::Internal(format!("failed to focus the browser's window: {error}"))
         })?;
     }
     Ok(())
@@ -2928,23 +2965,30 @@ pub async fn cmd_browser_focus<R: tauri::Runtime>(
 /// bar) receives typed keys while a page view holds focus: a WebView2/WebKitGTK child webview,
 /// a WKWebView, or a Chromium engine window (a child window on Windows and X11, a window of
 /// another app on macOS). Focusing a DOM input alone leaves the keys with the page view.
-pub fn focus_app_webview<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), IpcError> {
+/// `window` is the calling app window; anything else falls back to the focused app window.
+pub fn focus_app_webview<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    window: tauri::Window<R>,
+) -> Result<(), IpcError> {
+    let window = Some(window)
+        .filter(|window| crate::window_registry::is_app_window_label(window.label()))
+        .or_else(|| crate::window_registry::focused_window(app))
+        .ok_or_else(|| BrowserError::Internal("no app window to focus".into()))?;
+    // An app window's webview carries the window's label.
     let webview = app
-        .get_webview("main")
-        .ok_or_else(|| BrowserError::WebviewNotFound("main".into()))?;
-    if let Some(window) = app.get_window("main") {
-        // macOS: activates Ferryx again when the engine app took the keyboard.
-        window.set_focus().map_err(|error| {
-            BrowserError::Internal(format!("failed to focus the main window: {error}"))
-        })?;
-        // X11: the engine's child window keeps X input focus even while the toplevel is
-        // active, so the toplevel takes it back before GTK focuses the webview widget.
-        #[cfg(target_os = "linux")]
-        if let Some(xid) = crate::browser::cef_engine::parent_xid(&window) {
-            window
-                .run_on_main_thread(move || crate::browser::cef_engine::take_x_focus(xid))
-                .map_err(|error| BrowserError::Internal(format!("failed to schedule X focus: {error}")))?;
-        }
+        .get_webview(window.label())
+        .ok_or_else(|| BrowserError::WebviewNotFound(window.label().to_string()))?;
+    // macOS: activates Ferryx again when the engine app took the keyboard.
+    window.set_focus().map_err(|error| {
+        BrowserError::Internal(format!("failed to focus the app window: {error}"))
+    })?;
+    // X11: the engine's child window keeps X input focus even while the toplevel is
+    // active, so the toplevel takes it back before GTK focuses the webview widget.
+    #[cfg(target_os = "linux")]
+    if let Some(xid) = crate::browser::cef_engine::parent_xid(&window) {
+        window
+            .run_on_main_thread(move || crate::browser::cef_engine::take_x_focus(xid))
+            .map_err(|error| BrowserError::Internal(format!("failed to schedule X focus: {error}")))?;
     }
     webview.set_focus().map_err(|error| {
         BrowserError::Internal(format!("failed to focus the app webview: {error}"))
@@ -2953,8 +2997,11 @@ pub fn focus_app_webview<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), Ip
 }
 
 #[tauri::command]
-pub async fn cmd_browser_focus_app<R: tauri::Runtime>(app: AppHandle<R>) -> Result<(), IpcError> {
-    focus_app_webview(&app)
+pub async fn cmd_browser_focus_app<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    window: tauri::Window<R>,
+) -> Result<(), IpcError> {
+    focus_app_webview(&app, window)
 }
 
 #[tauri::command]
@@ -3771,6 +3818,7 @@ pub async fn close_browser_session<R: tauri::Runtime>(
         .remove_session(browser_id)
         .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
     crate::browser::agent::service::tab_closed(browser_id);
+    crate::window_registry::release_owner(app, browser_id);
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     crate::browser::agent::cef_backend::forget(browser_id);
     crate::browser::bridge::forget_webview(app, &session.webview_label);
@@ -3965,11 +4013,12 @@ pub(crate) fn engine_inactive_reason<R: tauri::Runtime>(app: &AppHandle<R>) -> O
     None
 }
 
-/// The X window the engine's windows go into: the main window's, which a native Wayland
-/// session does not have.
+/// The primary app window's X window, which a native Wayland session does not have. X11 or
+/// Wayland is a property of the whole session, so every app window answers the same.
 #[cfg(target_os = "linux")]
 fn linux_engine_parent<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<isize> {
-    app.get_window("main").and_then(|window| crate::browser::cef_engine::parent_xid(&window))
+    crate::window_registry::primary_window(app)
+        .and_then(|window| crate::browser::cef_engine::parent_xid(&window))
 }
 
 /// The pane notice for a tab that would have used the installed engine but cannot, because the
@@ -4010,15 +4059,20 @@ fn cef_pane_rect<R: tauri::Runtime>(
     }
 }
 
-/// Moves every engine window back over its pane after the main window moved, resized or came
-/// to the front. Only macOS needs it: there the engine windows are separate windows, while on
-/// Windows they are children that move with the main window.
+/// Moves the engine windows of `window`'s tabs back over their panes after that app window
+/// moved, resized or came to the front. Only macOS needs it: there the engine windows are
+/// separate windows, while on Windows they are children that move with their window.
 #[cfg(target_os = "macos")]
-pub(crate) fn follow_main_window<R: tauri::Runtime>(
+pub(crate) fn follow_app_window<R: tauri::Runtime>(
     window: &tauri::Window<R>,
     manager: &BrowserManager,
 ) {
     for browser_id in crate::browser::cef_engine::tab_ids() {
+        let owned = crate::window_registry::window_for_session(window.app_handle(), &browser_id)
+            .is_some_and(|owner| owner.label() == window.label());
+        if !owned {
+            continue;
+        }
         if let Ok(Some(bounds)) = manager.get_bounds(&browser_id) {
             crate::browser::cef_engine::set_bounds(&browser_id, cef_pane_rect(window, &bounds));
         }

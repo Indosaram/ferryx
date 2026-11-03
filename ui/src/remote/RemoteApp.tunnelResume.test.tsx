@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { RemoteApp } from "./RemoteApp";
 import { openWorkspacePicker } from "./home/phoneHomeTestUtils";
 import { requireSidebarRow } from "./remoteSidebarTestUtils";
@@ -35,7 +35,7 @@ type FakeTunnel = {
   isClosed: boolean;
   fetchLike: ReturnType<typeof vi.fn>;
   openWebSocket: ReturnType<typeof vi.fn>;
-  close: ReturnType<typeof vi.fn<() => void>>;
+  close: Mock<() => void>;
 };
 
 function makeTunnel(): FakeTunnel {
@@ -103,7 +103,7 @@ describe("RemoteApp account tunnel resume", () => {
     vi.spyOn(attachTunnelModule, "openAccountTunnel").mockImplementation(async () => {
       const tunnel = makeTunnel();
       tunnels.push(tunnel);
-      return { transport: tunnel as never, close: tunnel.close };
+      return { transport: tunnel as never, close: () => tunnel.close() };
     });
     vi.spyOn(accountAttachModule, "getOrCreateAttachKey").mockResolvedValue({
       publicKey: "phone-initiator-pub-key-base64",

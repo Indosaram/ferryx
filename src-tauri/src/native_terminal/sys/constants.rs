@@ -133,6 +133,10 @@ pub const GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_UTF8: c_int = 9;
 // GhosttyCellData C integer constants matching `ghostty/vt/screen.h`.
 pub const GHOSTTY_CELL_DATA_WIDE: c_int = 3;
 
+// GhosttyRowData C integer constants matching `ghostty/vt/screen.h`.
+pub const GHOSTTY_ROW_DATA_WRAP: c_int = 1;
+pub const GHOSTTY_ROW_DATA_WRAP_CONTINUATION: c_int = 2;
+
 // GhosttyMouseEncoderOption matching `ghostty/vt/mouse/encoder.h`.
 pub const GHOSTTY_MOUSE_ENCODER_OPT_SIZE: c_int = 2;
 

@@ -457,6 +457,9 @@ impl Default for GhosttyStyle {
 /// Packed cell representation matching `include/ghostty/vt/screen.h`.
 pub type GhosttyCell = u64;
 
+/// Packed row representation matching `include/ghostty/vt/screen.h`.
+pub type GhosttyRow = u64;
+
 /// Render-state cursor information matching `include/ghostty/vt/render.h`.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

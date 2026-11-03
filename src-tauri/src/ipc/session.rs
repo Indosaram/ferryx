@@ -1,11 +1,12 @@
 use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
 use crate::session::{
     clear_session_from_path, load_session_from_path, save_session_to_path,
-    PersistedWorkspaceSession,
+    session_path_for_window, with_session_path_lock, PersistedWorkspaceSession,
+    PRIMARY_SESSION_WINDOW_LABEL,
 };
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Manager, Runtime, Window};
 
 /// The UI session file: `FERRYX_SESSION_DIR`, else the `FERRYX_DATA_DIR` isolation root (one
 /// file for dev and release, as the root is already per run), else the app data dir with its
@@ -34,7 +35,8 @@ fn session_file_path<E>(
     ))
 }
 
-fn get_session_file_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, IpcError> {
+/// Today's single-window session file. The primary window keeps exactly this path.
+pub(crate) fn get_session_file_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, IpcError> {
     session_file_path(
         crate::daemon::server::session_dir_override(),
         std::env::var_os("FERRYX_DATA_DIR").as_deref(),
@@ -50,27 +52,60 @@ fn get_session_file_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, IpcE
     )
 }
 
+/// The session file owned by `label`: "main" keeps today's path, "ws-<id>" maps to
+/// `session-ws-<id>.json` in the same directory. Any other label is rejected.
+fn get_window_session_file_path<R: Runtime>(
+    app: &AppHandle<R>,
+    label: &str,
+) -> Result<PathBuf, IpcError> {
+    let primary = get_session_file_path(app)?;
+    session_path_for_window(&primary, label)
+}
+
 #[tauri::command]
 pub async fn cmd_session_save<R: Runtime>(
     app: AppHandle<R>,
+    window: Window<R>,
     session: PersistedWorkspaceSession,
 ) -> Result<(), IpcError> {
-    let path = get_session_file_path(&app)?;
-    run_blocking(move || save_session_to_path(&path, &session)).await
+    let path = get_window_session_file_path(&app, window.label())?;
+    run_blocking(move || with_session_path_lock(&path, || save_session_to_path(&path, &session)))
+        .await
 }
 
 #[tauri::command]
 pub async fn cmd_session_load<R: Runtime>(
     app: AppHandle<R>,
+    window: Window<R>,
 ) -> Result<Option<PersistedWorkspaceSession>, IpcError> {
-    let path = get_session_file_path(&app)?;
-    run_blocking(move || load_session_from_path(&path)).await
+    let path = get_window_session_file_path(&app, window.label())?;
+    run_blocking(move || with_session_path_lock(&path, || load_session_from_path(&path))).await
 }
 
 #[tauri::command]
-pub async fn cmd_session_clear<R: Runtime>(app: AppHandle<R>) -> Result<(), IpcError> {
-    let path = get_session_file_path(&app)?;
-    run_blocking(move || clear_session_from_path(&path)).await
+pub async fn cmd_session_clear<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+) -> Result<(), IpcError> {
+    let path = get_window_session_file_path(&app, window.label())?;
+    run_blocking(move || with_session_path_lock(&path, || clear_session_from_path(&path))).await
+}
+
+/// Deletes a closed secondary window's session file after its tabs were adopted by another
+/// window. The primary window's file is never discarded through this path.
+#[tauri::command]
+pub async fn cmd_session_discard_window<R: Runtime>(
+    app: AppHandle<R>,
+    label: String,
+) -> Result<(), IpcError> {
+    if label == PRIMARY_SESSION_WINDOW_LABEL {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidArgument,
+            "The primary window session cannot be discarded",
+        ));
+    }
+    let path = get_window_session_file_path(&app, &label)?;
+    run_blocking(move || with_session_path_lock(&path, || clear_session_from_path(&path))).await
 }
 
 #[cfg(test)]

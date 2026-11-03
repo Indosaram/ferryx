@@ -139,6 +139,16 @@ export function gridColToCharIndex(line: string, gridCol: number): number {
   return line.length;
 }
 
+/** Grid columns covered by the first `charIndex` UTF-16 characters of `line`. */
+export function charIndexToGridCol(line: string, charIndex: number): number {
+  let col = 0;
+  const limit = Math.min(charIndex, line.length);
+  for (let i = 0; i < limit; i++) {
+    col += isEastAsianWide(line.charCodeAt(i)) ? 2 : 1;
+  }
+  return col;
+}
+
 function isIpAddress(str: string): boolean {
   return /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d+)?$/.test(str);
 }

@@ -228,15 +228,15 @@ fn start_session<R: tauri::Runtime>(
     Ok(())
 }
 
-/// The "main" Ferryx window, else the key or main AppKit window.
+/// The focused Ferryx app window (the primary one when none is focused), else the key or main
+/// AppKit window.
 fn anchor_window<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     mtm: MainThreadMarker,
 ) -> Option<Retained<NSWindow>> {
-    let main = app
-        .get_webview_window("main")
+    let main = crate::window_registry::focused_window(app)
         .and_then(|window| window.ns_window().ok())
-        // SAFETY: tauri returns the live NSWindow of the main window (or null); retaining it
+        // SAFETY: tauri returns the live NSWindow of the app window (or null); retaining it
         // keeps it valid for the session.
         .and_then(|raw| unsafe { Retained::retain(raw.cast::<NSWindow>()) });
     main.or_else(|| {

@@ -3,6 +3,58 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Mirrors `window_registry::PRIMARY_WINDOW_LABEL`; kept local so session persistence stays
+/// usable from the daemon build, which does not link the window registry.
+pub const PRIMARY_SESSION_WINDOW_LABEL: &str = "main";
+/// Mirrors `window_registry::SECONDARY_WINDOW_PREFIX`.
+pub const SECONDARY_SESSION_WINDOW_PREFIX: &str = "ws-";
+
+/// Maps a window label to its session file. `primary_path` is today's single-window file, which
+/// the primary window keeps unchanged (old files keep loading, no migration). A secondary window
+/// `ws-<id>` stores `session-ws-<id>.json` next to it. Labels that are not app windows, or that
+/// could escape the session directory, are rejected.
+pub fn session_path_for_window(primary_path: &Path, label: &str) -> Result<PathBuf, IpcError> {
+    if label == PRIMARY_SESSION_WINDOW_LABEL {
+        return Ok(primary_path.to_path_buf());
+    }
+    let id = label
+        .strip_prefix(SECONDARY_SESSION_WINDOW_PREFIX)
+        .filter(|id| {
+            !id.is_empty()
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
+        .ok_or_else(|| {
+            IpcError::new(
+                IpcErrorCode::InvalidArgument,
+                format!("Not an app window label: {label:?}"),
+            )
+        })?;
+    let file_name = format!("session-{SECONDARY_SESSION_WINDOW_PREFIX}{id}.json");
+    Ok(match primary_path.parent() {
+        Some(parent) => parent.join(file_name),
+        None => PathBuf::from(file_name),
+    })
+}
+
+/// Serializes every read/write/remove of one session file inside this process. Each window
+/// saves through its own IPC call, so a slow save could otherwise overlap a later one for the
+/// same window and publish the older snapshot last.
+pub fn with_session_path_lock<T>(path: &Path, operation: impl FnOnce() -> T) -> T {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let lock = {
+        let mut locks = LOCKS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Arc::clone(locks.entry(path.to_path_buf()).or_default())
+    };
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    operation()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -418,6 +470,73 @@ pub fn clear_session_from_path(path: &Path) -> Result<(), IpcError> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn test_session_path_for_main_window_is_unchanged() {
+        let primary = PathBuf::from("/data/ferryx/session_state.json");
+        assert_eq!(session_path_for_window(&primary, "main").unwrap(), primary);
+        let dev = PathBuf::from("/data/ferryx/dev/session_state.json");
+        assert_eq!(session_path_for_window(&dev, "main").unwrap(), dev);
+    }
+
+    #[test]
+    fn test_session_path_for_secondary_window_is_mapped_next_to_primary() {
+        let primary = PathBuf::from("/data/ferryx/session_state.json");
+        assert_eq!(
+            session_path_for_window(&primary, "ws-0f3a-b2_c").unwrap(),
+            PathBuf::from("/data/ferryx/session-ws-0f3a-b2_c.json")
+        );
+        assert_eq!(
+            session_path_for_window(&primary, "ws-test").unwrap(),
+            PathBuf::from("/data/ferryx/session-ws-test.json")
+        );
+    }
+
+    #[test]
+    fn test_session_path_rejects_non_app_and_unsafe_labels() {
+        let primary = PathBuf::from("/data/ferryx/session_state.json");
+        for label in [
+            "",
+            "ws-",
+            "settings",
+            "Main",
+            "browser-1",
+            "ws-../evil",
+            "ws-a/b",
+            "ws-a\\b",
+            "ws-..",
+            "ws-a.b",
+            "ws- a",
+        ] {
+            let error = session_path_for_window(&primary, label).unwrap_err();
+            assert_eq!(error.code, IpcErrorCode::InvalidArgument, "label {label:?}");
+        }
+    }
+
+    #[test]
+    fn test_window_session_files_do_not_overwrite_each_other() {
+        let dir = tempdir().unwrap();
+        let primary = dir.path().join("session_state.json");
+        let secondary = session_path_for_window(&primary, "ws-test").unwrap();
+
+        with_session_path_lock(&primary, || {
+            save_session_to_path(&primary, &minimal_v3_session("main"))
+        })
+        .unwrap();
+        with_session_path_lock(&secondary, || {
+            save_session_to_path(&secondary, &minimal_v3_session("secondary"))
+        })
+        .unwrap();
+
+        let main_loaded = load_session_from_path(&primary).unwrap().unwrap();
+        let secondary_loaded = load_session_from_path(&secondary).unwrap().unwrap();
+        assert_eq!(main_loaded.extra["testMarker"], "main");
+        assert_eq!(secondary_loaded.extra["testMarker"], "secondary");
+
+        clear_session_from_path(&secondary).unwrap();
+        assert!(!secondary.exists());
+        assert!(primary.exists());
+    }
 
     #[test]
     fn test_session_save_load_clear_cycle() {

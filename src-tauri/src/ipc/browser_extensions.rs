@@ -326,7 +326,7 @@ async fn open_page<R: tauri::Runtime>(
     let state = manager.register_session(request).map_err(IpcError::from)?;
     crate::ipc::browser::record_session_created(&state.browser_id);
     let state =
-        crate::ipc::browser::create_cef_browser_session(app, manager, state, engine_dir, Some(url))
+        crate::ipc::browser::create_cef_browser_session(app, manager, state, engine_dir, Some(url), None)
             .await?;
     let _ = app.emit(
         crate::browser::guest::BROWSER_SESSION_CREATED_EVENT,

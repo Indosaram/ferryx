@@ -3,7 +3,9 @@ import {
   isLikelyRemoteFilePath,
   isSessionMouseTrackingEnabled,
   openRemoteFileToken,
+  linkTokenSpans,
   readLinkLine,
+  resolveLinkLine,
   remoteFileFetchErrorMessage,
   remoteFetchCwd,
   setSessionMouseTracking,
@@ -130,42 +132,98 @@ describe("terminalLinkTarget", () => {
   });
 
   describe("readLinkLine", () => {
-    it("stitches rows when row0 fills cols and continues into row1", async () => {
-      const rows = [
-        { text: "https://exa", col: 0, row: 0 },
-        { text: "mple.com/pa", col: 3, row: 1 },
-        { text: "th-end", col: 0, row: 2 },
-      ];
-      const fakeInvoke = vi.fn(async (_cmd: string, args?: Record<string, unknown>) => {
+    const rowsInvoke = (rows: Array<{ text: string; wrapped?: boolean }>, clickedRow: number, clickedCol: number) =>
+      vi.fn(async (_cmd: string, args?: Record<string, unknown>) => {
         const r = args?.row as number;
-        return rows[r];
+        if (!rows[r]) throw new Error("Out of range");
+        return { ...rows[r], col: r === clickedRow ? clickedCol : 0, row: r };
       });
 
-      const result = await readLinkLine(fakeInvoke as unknown as TerminalInvokeFn, "session-1", 3, 1, 3, 11);
-      expect(result).not.toBeNull();
-      expect(result?.text).toBe("https://example.com/path-end");
-      expect(result?.col).toBe(3 + 11);
-      expect(fakeInvoke).toHaveBeenCalledTimes(3);
+    it("joins every row the terminal soft-wrapped, using its wrap flags", async () => {
+      const rows = [
+        { text: "$ echo", wrapped: false },
+        { text: "https://exa", wrapped: true },
+        { text: "mple.com/pa", wrapped: true },
+        { text: "th-end     ", wrapped: false },
+        { text: "next", wrapped: false },
+      ];
+      const invoke = rowsInvoke(rows, 2, 3);
+      const line = await readLinkLine(invoke as unknown as TerminalInvokeFn, "session-1", 3, 2, 5, 11);
+      expect(line?.text).toBe("https://example.com/path-end     ");
+      expect(line?.col).toBe(11 + 3);
+      expect(line?.exact).toBeUndefined();
+      expect(await resolveLinkLine(line!)).toMatchObject({ token: { type: "url", target: "https://example.com/path-end" } });
     });
 
-    it("ignores neighbour row failure and still stitches available rows", async () => {
+    it("treats a full row that ended with a newline only as a guess, never a terminal wrap", async () => {
+      const rows = [
+        { text: "src/aaaaaaa", wrapped: false },
+        { text: "bbb.ts", wrapped: false },
+      ];
+      const line = await readLinkLine(rowsInvoke(rows, 1, 1) as unknown as TerminalInvokeFn, "session-1", 1, 1, 2, 11);
+      expect(line?.exact?.text).toBe("bbb.ts");
+      expect((await resolveLinkLine(line!, async () => false))?.token).toMatchObject({ type: "file", path: "bbb.ts" });
+    });
+
+    it("stitches full rows by shape when the backend sends no wrap flags", async () => {
+      const rows = [{ text: "https://exa" }, { text: "mple.com/pa" }, { text: "th-end" }];
+      const line = await readLinkLine(rowsInvoke(rows, 1, 3) as unknown as TerminalInvokeFn, "session-1", 3, 1, 3, 11);
+      expect(line?.text).toBe("https://example.com/path-end");
+      expect(line?.col).toBe(3 + 11);
+    });
+
+    it("joins a path a TUI wrapped with its own newline and keeps the exact line as fallback", async () => {
+      const rows = [
+        { text: "  /Users/indo/.aside/u/1/sessions/2026-11-02_sIAW3lPLLPzn4OMC/", wrapped: false },
+        { text: "  qr-fresh.png", wrapped: false },
+      ];
+      const line = await readLinkLine(rowsInvoke(rows, 1, 4) as unknown as TerminalInvokeFn, "session-1", 4, 1, 2, 66);
+      expect(line?.text).toBe("  /Users/indo/.aside/u/1/sessions/2026-11-02_sIAW3lPLLPzn4OMC/qr-fresh.png");
+      expect(line?.exact?.text).toBe("  qr-fresh.png");
+
+      const confirm = vi.fn(async (path: string) => path.endsWith("/qr-fresh.png"));
+      const resolved = await resolveLinkLine(line!, confirm);
+      expect(resolved?.token).toMatchObject({
+        type: "file",
+        path: "/Users/indo/.aside/u/1/sessions/2026-11-02_sIAW3lPLLPzn4OMC/qr-fresh.png",
+      });
+      expect(linkTokenSpans(resolved!)).toEqual([
+        { row: 0, start: 2, end: 62 },
+        { row: 1, start: 2, end: 14 },
+      ]);
+    });
+
+    it("falls back to the exact line when the joined path does not exist", async () => {
+      const rows = [
+        { text: "see docs/very/long/directory/name/that/fills/the/row/", wrapped: false },
+        { text: "notes.md in the repo", wrapped: false },
+      ];
+      const line = await readLinkLine(rowsInvoke(rows, 1, 2) as unknown as TerminalInvokeFn, "session-1", 2, 1, 2, 60);
+      expect(line?.exact).toBeDefined();
+      const resolved = await resolveLinkLine(line!, async () => false);
+      expect(resolved?.token).toMatchObject({ type: "file", path: "notes.md" });
+    });
+
+    it("joins a URL a TUI broke mid-token across rows", async () => {
+      const rows = [
+        { text: "  https://github.com/Indosaram/ferryx/blob/main/src-tauri/src/native_ter", wrapped: false },
+        { text: "  minal/selection.rs#L560 is the reader", wrapped: false },
+      ];
+      const line = await readLinkLine(rowsInvoke(rows, 1, 5) as unknown as TerminalInvokeFn, "session-1", 5, 1, 2, 80);
+      expect(await resolveLinkLine(line!, async () => false)).toMatchObject({
+        token: { type: "url", target: "https://github.com/Indosaram/ferryx/blob/main/src-tauri/src/native_terminal/selection.rs#L560" },
+      });
+    });
+
+    it("ignores neighbour row failure and still reads the clicked row", async () => {
       const fakeInvoke = vi.fn(async (_cmd: string, args?: Record<string, unknown>) => {
         const r = args?.row as number;
-        if (r === 0) {
-          throw new Error("Pty read error on row 0");
-        }
-        if (r === 1) {
-          return { text: "current-line", col: 2, row: 1 };
-        }
-        if (r === 2) {
-          return { text: "cont", col: 0, row: 2 };
-        }
-        throw new Error("Out of range");
+        if (r === 1) return { text: "current-line", col: 2, row: 1, wrapped: false };
+        throw new Error("Pty read error");
       });
 
       const result = await readLinkLine(fakeInvoke as unknown as TerminalInvokeFn, "session-1", 2, 1, 3, 12);
-      expect(result).not.toBeNull();
-      expect(result?.text).toBe("current-linecont");
+      expect(result?.text).toBe("current-line");
       expect(result?.col).toBe(2);
     });
 
@@ -178,12 +236,12 @@ describe("terminalLinkTarget", () => {
       expect(result).toBeNull();
     });
 
-    it("skips row - 1 when row is 0 and skips row + 1 when row is rows - 1", async () => {
+    it("never reads rows outside the viewport", async () => {
       const queriedRows: number[] = [];
       const fakeInvoke = vi.fn(async (_cmd: string, args?: Record<string, unknown>) => {
         const r = args?.row as number;
         queriedRows.push(r);
-        return { text: "single", col: 0, row: r };
+        return { text: "single", col: 0, row: r, wrapped: false };
       });
 
       await readLinkLine(fakeInvoke as unknown as TerminalInvokeFn, "session-1", 0, 0, 5, 80);
@@ -197,7 +255,7 @@ describe("terminalLinkTarget", () => {
     it("returns current unstitched line when cols is not provided", async () => {
       const fakeInvoke = vi.fn(async () => ({ text: "no cols specified", col: 5, row: 2 }));
       const result = await readLinkLine(fakeInvoke as unknown as TerminalInvokeFn, "session-1", 5, 2);
-      expect(result).toEqual({ text: "no cols specified", col: 5 });
+      expect(result).toMatchObject({ text: "no cols specified", col: 5 });
       expect(fakeInvoke).toHaveBeenCalledTimes(1);
     });
   });
