@@ -194,7 +194,13 @@ mod imp {
         let _: () = unsafe { msg_send![&*ns, orderWindow: 1isize, relativeTo: parent] };
     }
 
-    pub fn focus(_window: &Window) {}
+    /// Ferryx's own focus requests (Mod+L, a click on the pane): the engine is a separate app, so
+    /// its window only takes keys once the engine app is active and the window is key. Activating
+    /// also orders it to the front, above the Ferryx window; `on_window_activation_changed` then
+    /// focuses the page or the address bar.
+    pub fn focus(window: &Window) {
+        window.activate();
+    }
 }
 
 #[cfg(target_os = "linux")]

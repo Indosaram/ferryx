@@ -270,6 +270,11 @@ const mac = {
     return result.ok && Number(result.stdout) > 0 ? String(pid) : null;
   },
   focus() {
+    // `set frontmost` on an app that is already frontmost still brings all of its windows to the
+    // front, which buries the engine's pane windows (a separate app ordered above Ferryx) without
+    // a focus change that would raise them again. Only activate when Ferryx is not frontmost.
+    const front = this.osa('tell application "System Events" to get unix id of first process whose frontmost is true');
+    if (front.ok && Number(front.stdout) === this.pid) return { ok: true, already_frontmost: true };
     return this.osa(`tell application "System Events" to set frontmost of (first process whose unix id is ${this.pid}) to true`);
   },
   key({ key, mods = [] }) {
@@ -2000,6 +2005,21 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
     "extension-store-install",
     "Click 'Add to Chrome', then 'Add extension' in Chrome's dialog; wait until the extension is in the profile",
     [
+      ["optional dismiss the 'Switch to Chrome?' prompt", () => clickText("thanks", { timeout: 6000 })],
+      // The store page is wider than the pane: its install button sits off screen to the right
+      // (horizontal scrollbar), so the CLI scrolls it into view before the real click.
+      ["scroll the install button into view (CLI eval)", async () => {
+        const script = "(() => { const b = [...document.querySelectorAll('button')].find((e) => /Add to Chrome/i.test(e.textContent || '')); if (!b) return 'none'; b.scrollIntoView({block: 'center', inline: 'center'}); const r = b.getBoundingClientRect(); return JSON.stringify({x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), disabled: b.disabled, vw: innerWidth}); })()";
+        const deadline = Date.now() + 30000;
+        let result = null;
+        do {
+          result = storeTab ? await cliAsync("eval", "--browser-id", storeTab.browserId, "--script", script) : { ok: false, stderr: "no store tab" };
+          if (result.ok && !result.stdout.includes("none")) return { ok: true, button: result.stdout };
+          await sleep(2000);
+        } while (Date.now() < deadline);
+        return { ok: false, last: result?.stdout ?? null, stderr: result?.stderr || "no 'Add to Chrome' button in the page" };
+      }],
+      1500,
       ["click Add to Chrome", async () => {
         const deadline = Date.now() + 30000;
         do {
@@ -2112,11 +2132,14 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
     ],
     { none: ["uBlock"] },
   );
-  record.checks.removed_from_settings = summary.steps.at(-1).actions.at(-1)?.ok ?? false;
+  // Removal checks only count once the extension was really installed: without it the row and
+  // the profile data are absent anyway.
+  const installed = record.checks.installed_from_web_store;
+  record.checks.removed_from_settings = installed && (summary.steps.at(-1).actions.at(-1)?.ok ?? false);
   // Chrome commits Preferences on a 10s timer.
   await sleep(15000);
   record.disk_after_remove = ubolOnDisk();
-  record.checks.removed_from_profile = !record.disk_after_remove.prefs && !record.disk_after_remove.dir;
+  record.checks.removed_from_profile = installed && !record.disk_after_remove.prefs && !record.disk_after_remove.dir;
   await step("extension-settings-closed", "Escape closes Settings", [focus, key("Escape", { key: "Escape" }), 1500]);
 
   // Restart: stop only the app process, so its engine sees stdin close and quits by itself
@@ -2167,7 +2190,8 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
     { any: ["Extensions"], none: ["uBlock"] },
   );
   record.disk_after_restart = ubolOnDisk();
-  record.checks.stays_removed_after_restart = record.restarted
+  record.checks.stays_removed_after_restart = installed
+    && record.restarted
     && (summary.steps.at(-1).actions.at(-1)?.ok ?? false)
     && !record.disk_after_restart.prefs
     && !record.disk_after_restart.dir;
