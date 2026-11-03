@@ -1,11 +1,13 @@
 //! Unified browser automation authority (plan contracts C1 and C2).
 //!
-//! Every browser operation, whatever its ingress (local CLI socket, future pipe
-//! and MCP adapters, framed remote control, desktop chrome), is classified into
-//! one canonical [`ToolId`] and decided against a host-constructed [`Principal`].
-//! This module defines the model and the pure decision functions only; ingress
-//! wiring, the controller registry, origin grants and tab ownership enforce the
-//! returned [`Obligation`]s in later stages.
+//! Every browser operation, whatever its ingress (local CLI socket, the
+//! `browser pipe` NDJSON and `browser mcp` stdio adapters, framed remote control,
+//! desktop chrome), is classified into one canonical [`ToolId`] and decided
+//! against a host-constructed [`Principal`]. `policy` holds the pure decision
+//! functions; `authority` is the controller registry, origin grants and tab
+//! leases that enforce the returned [`Obligation`]s; `service` admits each CLI
+//! request on that path. `pipe` and `mcp` are CLI-side clients of the same
+//! socket: they translate their frames into CLI requests and hold no policy.
 
 pub mod authority;
 mod catalog;
@@ -17,6 +19,8 @@ pub mod cef_backend;
 #[cfg(all(test, feature = "desktop", any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 mod fake_cdp;
 pub(crate) mod platform;
+pub mod mcp;
+pub mod pipe;
 mod policy;
 #[cfg(feature = "desktop")]
 pub mod observe;

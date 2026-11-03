@@ -75,9 +75,12 @@ fn main() {
         }
     }
     if args.get(1).is_some_and(|arg| arg == "browser") {
-        let outcome = match ferryx_lib::cli::parse_browser_controllers_cli(&args) {
-            Some(parsed) => parsed.and_then(ferryx_lib::cli::run_browser_controllers_cli),
-            None => parse_browser_cli(&args).and_then(run_browser_cli),
+        let outcome = if let Some(parsed) = ferryx_lib::cli::parse_browser_controllers_cli(&args) {
+            parsed.and_then(ferryx_lib::cli::run_browser_controllers_cli)
+        } else if let Some(parsed) = ferryx_lib::cli::parse_browser_adapter_cli(&args) {
+            parsed.and_then(ferryx_lib::cli::run_browser_adapter_cli)
+        } else {
+            parse_browser_cli(&args).and_then(run_browser_cli)
         };
         match outcome {
             Ok(()) => return,

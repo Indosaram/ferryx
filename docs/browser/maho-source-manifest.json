@@ -37,25 +37,25 @@
       "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
       "path": "maho/crates/maho-browser-mcp/src/client.rs",
       "blob": "8729d16e5202aa6718654acdbc85bc848f6f983c",
-      "destination": null,
-      "reuseMode": "not-imported",
-      "note": "Planned destination (browser/agent/mcp.rs or pipe.rs, plan T6) was never created: Ferryx has no browser MCP or pipe adapter yet. Recorded so the source stays traceable."
+      "destination": "src-tauri/src/browser/agent/pipe.rs",
+      "reuseMode": "behavior-reference",
+      "note": "The client role (adapter to running browser) is pipe.rs `SocketTransport`, which sends Ferryx browser CLI requests over the existing socket with the paired controller credential. No source text copied."
     },
     {
       "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
       "path": "maho/crates/maho-browser-mcp/src/server.rs",
       "blob": "abf87ab32e8f9013140a080589e315f9399d6247",
-      "destination": null,
-      "reuseMode": "not-imported",
-      "note": "Planned destination (browser/agent/mcp.rs or pipe.rs, plan T6) was never created: Ferryx has no browser MCP or pipe adapter yet. Recorded so the source stays traceable."
+      "destination": "src-tauri/src/browser/agent/mcp.rs",
+      "reuseMode": "behavior-reference",
+      "note": "Stdio MCP server (initialize, tools/list, tools/call) reimplemented over the Ferryx tool catalog; calls are admitted by the same authority path as the browser CLI. No source text copied."
     },
     {
       "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
       "path": "maho/crates/maho-cli/src/browser_pipe.rs",
       "blob": "e6798962fccf8d921c6fb21891424229123a6688",
-      "destination": null,
-      "reuseMode": "not-imported",
-      "note": "Planned destination (browser/agent/mcp.rs or pipe.rs, plan T6) was never created: Ferryx has no browser MCP or pipe adapter yet. Recorded so the source stays traceable."
+      "destination": "src-tauri/src/browser/agent/pipe.rs",
+      "reuseMode": "behavior-reference",
+      "note": "NDJSON `{id, op, ...}` request/response framing reimplemented with bounded frames; ops translate to Ferryx browser CLI requests. No source text copied."
     },
     {
       "commit": "c2830251946a19c22b6bda4e680d9c91c905cf61",
