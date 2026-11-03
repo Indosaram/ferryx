@@ -1,7 +1,7 @@
 import { renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { muteSessionPush } from "../lib/pushSubscription";
+import { muteSessionPush, type PushRequest } from "../lib/pushSubscription";
 import { PANEL_PRESENCE_HEARTBEAT_MS, reportPanelVisible, usePanelPresence } from "./panelPresence";
 
 function bodies(request: ReturnType<typeof vi.fn>): boolean[] {
@@ -73,14 +73,14 @@ describe("panel presence", () => {
 
 describe("muteSessionPush", () => {
   it("posts the exact session ref and the asked-for state", async () => {
-    const request = vi.fn(async () => new Response(null, { status: 204 }));
+    const request = vi.fn<PushRequest>(async () => new Response(null, { status: 204 }));
     await expect(muteSessionPush(request, "mac:s1", true)).resolves.toBe(true);
     expect(request).toHaveBeenCalledWith("/api/v1/push/session-mute", expect.objectContaining({
       method: "POST",
       body: JSON.stringify({ sessionRef: "mac:s1", muted: true }),
     }));
     await muteSessionPush(request, "mac:s1", false);
-    expect(JSON.parse(String((request.mock.calls[1][1] as RequestInit).body))).toEqual({ sessionRef: "mac:s1", muted: false });
+    expect(JSON.parse(String(request.mock.calls[1][1]?.body))).toEqual({ sessionRef: "mac:s1", muted: false });
   });
 
   it("reports false when the gateway refuses or cannot be reached, so the row keeps its real state", async () => {

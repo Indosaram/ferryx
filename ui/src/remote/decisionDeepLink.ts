@@ -122,13 +122,16 @@ export function useDecisionDeepLink(
     return () => worker.removeEventListener("message", onMessage);
   }, []);
 
-  // The link this page opened on is reported once, after mount.
+  // The link this page opened on is reported once, at mount. Mount-only on purpose: an effect
+  // keyed on `focus` would also fire for the first warm link and report it a second time (the
+  // message handler already reports every warm link itself).
   const reportedInitial = useRef(false);
   useEffect(() => {
-    if (reportedInitial.current || !focus) return;
+    if (reportedInitial.current) return;
     reportedInitial.current = true;
-    onLinkRef.current?.(focus);
-  }, [focus]);
+    if (focus) onLinkRef.current?.(focus);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount only, see above
+  }, []);
 
   const acknowledge = useCallback((seq: number) => {
     setFocus((current) => (current && current.seq === seq ? null : current));
