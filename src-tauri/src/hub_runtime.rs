@@ -1400,9 +1400,32 @@ pub async fn supervisor_conversation(
 /// Capability a daemon advertises once it serves `DaemonRequest::SupervisorConverseV1`.
 pub const SUPERVISOR_CONVERSE_CAPABILITY: &str = "supervisorConverseV1";
 
-/// The supervisor conversation the app channel talks to: the installed mhc engine.
+/// The installed mhc engine as one app request's conversation: the turn registers the owner's
+/// message with `app_work::converse`, so the work tools the turn calls (submit and the session
+/// tools) act for the installation's owner and only while this turn is live.
+struct AppTurnEngine {
+    supervisor: ferryx_hub::meta::mhc_supervisor::MhcSupervisor,
+    request_id: String,
+    owner_text: String,
+}
+
+#[async_trait]
+impl ferryx_hub::supervisor::transcript::AppConversation for AppTurnEngine {
+    async fn converse(
+        &self,
+        scope: &ferryx_hub::meta::mhc_profile::ConversationScope,
+        message: &str,
+    ) -> Result<String, ferryx_hub::meta::mhc_fault::SupervisorFault> {
+        debug_assert_eq!(scope, &ferryx_hub::supervisor::app_work::app_scope());
+        ferryx_hub::supervisor::app_work::converse(&self.supervisor, &self.request_id, &self.owner_text, message).await
+    }
+}
+
+/// The supervisor conversation the app channel talks to for one request: the installed mhc
+/// engine, through the turn-token helper.
 fn app_conversation(
     state: &RemoteGatewayState,
+    input: &ferryx_hub::supervisor::transcript::ConverseInput,
 ) -> Option<Arc<dyn ferryx_hub::supervisor::transcript::AppConversation>> {
     #[cfg(test)]
     if let Some(engine) = state.supervisor_test_engine.read().clone() {
@@ -1410,7 +1433,11 @@ fn app_conversation(
     }
     let _ = state;
     ferryx_hub::meta::mhc_supervisor::installed().map(|supervisor| {
-        Arc::new(supervisor) as Arc<dyn ferryx_hub::supervisor::transcript::AppConversation>
+        Arc::new(AppTurnEngine {
+            supervisor,
+            request_id: input.request_id.clone(),
+            owner_text: input.text.trim().to_owned(),
+        }) as Arc<dyn ferryx_hub::supervisor::transcript::AppConversation>
     })
 }
 
@@ -1454,7 +1481,7 @@ pub async fn supervisor_converse(
             "this installation has no single supervisor owner",
         ));
     }
-    let Some(engine) = app_conversation(state) else {
+    let Some(engine) = app_conversation(state, &input) else {
         return Err(RequestFailure::new(
             "MHC_NOT_RUNNING",
             "no mhc supervisor engine is installed in this daemon; nothing was stored",
@@ -1679,10 +1706,16 @@ async fn hub_running(state: &RemoteGatewayState) -> bool {
 pub async fn supervisor_panel(state: &Arc<RemoteGatewayState>) -> ferryx_hub::supervisor::panel_contract::PanelSnapshot {
     let sessions = panel_autonomy::fleet_sessions(state).await;
     let sources = PANEL_SOURCES.read().clone();
+    // The pause the owner set is the hub's persisted flag; the in-process one only covers a
+    // daemon whose hub is not open.
+    let paused = match supervisor_service(state).await {
+        Ok((pool, _, _)) => ferryx_hub::control::is_paused(&pool).await.unwrap_or(false),
+        Err(_) => PANEL_PAUSED.load(std::sync::atomic::Ordering::Acquire),
+    };
     ferryx_hub::fleet::assemble_panel(
         &sources,
         sessions,
-        PANEL_PAUSED.load(std::sync::atomic::Ordering::Acquire),
+        paused,
         hub_running(state).await,
         unix_ms() - PANEL_LOG_WINDOW_MS,
     )
