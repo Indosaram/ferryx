@@ -166,6 +166,9 @@ pub struct BrowserSessionSummary {
     pub url: String,
     pub title: Option<String>,
     pub visible: bool,
+    /// Which engine draws the tab (`system` or `chromium`); `ferryx browser list` prints it.
+    #[serde(default)]
+    pub engine: BrowserEngine,
 }
 
 impl From<&BrowserState> for BrowserSessionSummary {
@@ -178,6 +181,7 @@ impl From<&BrowserState> for BrowserSessionSummary {
             url: state.url.clone(),
             title: state.title.clone(),
             visible: state.visible,
+            engine: state.engine,
         }
     }
 }

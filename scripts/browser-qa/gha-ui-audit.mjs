@@ -4,13 +4,24 @@
 // Launches the debug executable with isolated FERRYX_* directories, drives it only through the
 // host's own input injection (Linux xdotool, macOS osascript/cliclick, Windows SendInput), finds
 // on-screen labels with tesseract OCR so clicks land on real controls, and captures a full-screen
-// screenshot after every step. A missing UI element never fails the run: each step's outcome and
-// its visible-text check go to summary.json, and the script exits 0 once it has started.
+// screenshot after every step. Each step's outcome and its visible-text check go to summary.json,
+// and the script exits 0 once it has started. The job then fails on any false entry of a `checks`
+// object outside `steps` unless the object's `informational` list names it
+// (scripts/browser-qa/check-summary.mjs).
 //
-// Optional Chromium engine checks (Linux): set FERRYX_UI_AUDIT_ENGINE_ZIP to a bundled
-// engine-linux-<arch>.zip. The script serves it with a manifest signed by a throwaway ed25519 key
-// that only debug builds accept (FERRYX_BROWSER_ENGINE_PUBLIC_KEY), installs it from
-// Settings > Browser, opens a Chromium tab, types into a fixture page and kills the engine.
+// Chromium engine checks (every OS): set FERRYX_UI_AUDIT_ENGINE_ZIP to the engine archive the
+// app installs on this platform (engine-linux-<arch>.zip, engine-macos-aarch64.zip with
+// ferryx_engine.app at its root, engine-windows-x86_64.zip with ferryx_engine.exe at its root).
+// The script serves it with a manifest signed by a throwaway ed25519 key that only debug builds
+// accept (FERRYX_BROWSER_ENGINE_PUBLIC_KEY), installs it from Settings > Browser, opens a
+// Chromium tab, types into a fixture page and kills the engine. The engine's window is a child
+// X window on Linux, a separate app's window on macOS and a child HWND owned by another process
+// on Windows; keyboard focus and the engine processes are read per platform.
+//
+// Extension scenario (needs the engine and network): installs uBlock Origin Lite from the Chrome
+// Web Store in an engine tab (the app has no other install path: Settings > Browser > Extensions
+// only links to the store), removes it with the trash button of its row in Settings > Browser >
+// Extensions, restarts the app and checks it stays removed. Results go to summary.extension.
 //
 // Agent automation: `ferryx browser snapshot` and act commands (fill, click with an
 // --expect-text postcondition, a click with a ref from before a reload) run against a local
@@ -27,7 +38,7 @@
 // the drop. Results go to summary.drag_mask; none of the full flow runs.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { inflateSync } from "node:zlib";
 
@@ -55,6 +66,14 @@ for (const dir of Object.values(dirs)) mkdirSync(dir, { recursive: true });
 const engineZip = scenario === "full" && process.env.FERRYX_UI_AUDIT_ENGINE_ZIP && existsSync(process.env.FERRYX_UI_AUDIT_ENGINE_ZIP)
   ? resolve(process.env.FERRYX_UI_AUDIT_ENGINE_ZIP)
   : null;
+// The app's engine platform key and executable (platform_key in engine_install.rs, ENGINE_EXE in
+// cef_engine/{linux,macos,windows}.rs).
+const enginePlatformKey = platform === "darwin"
+  ? "macos-aarch64"
+  : platform === "win32"
+    ? "windows-x86_64"
+    : `linux-${process.arch === "arm64" ? "aarch64" : "x86_64"}`;
+const ENGINE_EXE = { linux: "ferryx_engine", darwin: "ferryx_engine.app/Contents/MacOS/ferryx_engine", win32: "ferryx_engine.exe" }[platform];
 const dragEngineDir = scenario === "drag-mask" && process.env.FERRYX_UI_AUDIT_ENGINE_DIR ? resolve(process.env.FERRYX_UI_AUDIT_ENGINE_DIR) : null;
 if (scenario === "drag-mask" && (!dragEngineDir || !existsSync(dragEngineDir))) {
   throw new Error("--scenario drag-mask needs FERRYX_UI_AUDIT_ENGINE_DIR naming an unpacked engine directory");
@@ -77,7 +96,12 @@ const summary = {
     "Agent automation runs with Settings > Browser > Agent access 'require pairing' off (seeded agent-authority.json), so the CLI uses the transport token only.",
   ],
   engine: engineZip
-    ? { zip: engineZip, checks: {} }
+    ? {
+        zip: engineZip,
+        platform_key: enginePlatformKey,
+        // Every engine check starts false, so a run that stops early reports what it never reached.
+        checks: Object.fromEntries(["installed_from_settings", "engine_process_started", "fixture_loaded", "typing_reaches_page", "agent_automation", "engine_kill_closes_tabs"].map((name) => [name, false])),
+      }
     : { skipped: scenario === "full" ? "FERRYX_UI_AUDIT_ENGINE_ZIP not set or missing" : `not part of the ${scenario} scenario` },
   drag_mask: dragEngineDir ? { engine_dir: dragEngineDir } : undefined,
   agent: {},
@@ -163,7 +187,7 @@ if (engineZip) {
   const manifest = Buffer.from(JSON.stringify({
     version: summary.engine.version,
     platforms: {
-      [`linux-${process.arch === "arm64" ? "aarch64" : "x86_64"}`]: {
+      [enginePlatformKey]: {
         url: `${fixtureBase}/${basename(engineZip)}`,
         sha256: createHash("sha256").update(zipBytes).digest("hex"),
         size: zipBytes.length,
@@ -189,7 +213,7 @@ const linux = {
     return this.windowId ? run("xdotool", ["windowactivate", "--sync", this.windowId]) : { ok: false, stderr: "no window" };
   },
   keyName(key) {
-    return { Tab: "Tab", Enter: "Return", Escape: "Escape", Space: "space", ",": "comma", "=": "equal" }[key] ?? key;
+    return { Tab: "Tab", Enter: "Return", Escape: "Escape", Space: "space", ",": "comma", "=": "equal", "[": "bracketleft" }[key] ?? key;
   },
   key({ key, mods = [] }) {
     return run("xdotool", ["key", "--clearmodifiers", [...mods.map((mod) => (mod === "mod" ? "ctrl" : mod)), this.keyName(key)].join("+")]);
@@ -326,7 +350,7 @@ const mac = {
 
 // ---------------------------------------------------------------- platform: Windows
 const winHelper = join(out, "win-input.ps1");
-const winVk = { Tab: 0x09, Enter: 0x0d, Escape: 0x1b, Space: 0x20, ",": 0xbc, "=": 0xbb, mod: 0x11, ctrl: 0x11, shift: 0x10, alt: 0x12 };
+const winVk = { Tab: 0x09, Enter: 0x0d, Escape: 0x1b, Space: 0x20, ",": 0xbc, "=": 0xbb, "[": 0xdb, mod: 0x11, ctrl: 0x11, shift: 0x10, alt: 0x12 };
 const win = {
   pid: null,
   hwnd: null,
@@ -404,6 +428,19 @@ public static class FxInput {
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder name, int max);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct GUITHREADINFO { public int cbSize; public uint flags; public IntPtr hwndActive; public IntPtr hwndFocus; public IntPtr hwndCapture; public IntPtr hwndMenuOwner; public IntPtr hwndMoveSize; public IntPtr hwndCaret; public RECT rcCaret; }
+  [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint thread, ref GUITHREADINFO info);
+  /** "<focus hwnd> <its process id>" of the foreground thread's keyboard focus (a child HWND of
+   * another process, such as the engine's pane window, included). */
+  public static string FocusOwner() {
+    uint ignored;
+    uint thread = GetWindowThreadProcessId(GetForegroundWindow(), out ignored);
+    var info = new GUITHREADINFO(); info.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
+    if (!GetGUIThreadInfo(thread, ref info) || info.hwndFocus == IntPtr.Zero) return "0 0";
+    uint pid; GetWindowThreadProcessId(info.hwndFocus, out pid);
+    return ((long)info.hwndFocus).ToString() + " " + pid.ToString();
+  }
   public delegate bool EnumProc(IntPtr h, IntPtr l);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
@@ -480,6 +517,7 @@ switch ($Action) {
   "move" { $n = [FxInput]::Button($Width, $Height, 0x0001); if ($n -eq 0) { exit 4 } }
   "up" { $n = [FxInput]::Button($Width, $Height, 0x0004); if ($n -eq 0) { exit 4 } }
   "closedialogs" { Write-Output ([FxInput]::CloseDialogs([uint32]$ProcessId)) }
+  "focusowner" { Write-Output ([FxInput]::FocusOwner()) }
   "wheel" { $n = [FxInput]::Wheel($Width, $Height, [int]$Codes); if ($n -eq 0) { exit 4 } }
   "resize" { if (-not [FxInput]::SetWindowPos($handle, [IntPtr]::Zero, 40, 40, $Width, $Height, 0x0004)) { exit 5 } }
   "upscale" {
@@ -693,7 +731,7 @@ function findRowSwitch(path, label) {
   const winner = [...votes.values()].sort((a, b) => b.count - a.count)[0];
   if (!winner || winner.count < 3) return null;
   const ys = winner.ys.sort((a, b) => a - b);
-  return { x: Math.round((winner.run[0] + winner.run[1]) / 2), y: ys[Math.floor(ys.length / 2)], lines: winner.count };
+  return { x: Math.round((winner.run[0] + winner.run[1]) / 2), y: ys[Math.floor(ys.length / 2)], lines: winner.count, width: winner.run[1] - winner.run[0] };
 }
 
 const norm = (text) => text.toLowerCase().replace(/[^a-z0-9:%./]/g, "");
@@ -747,18 +785,24 @@ mkdirSync(join(dirs.data, "browser"), { recursive: true });
 writeFileSync(agentAuthority, JSON.stringify({ settings: { requirePairing: false } }));
 summary.agent_access = { requirePairing: false, file: agentAuthority };
 
-const appLog = openSync(join(out, "app.log"), "w");
 let app = null;
-if (!existsSync(binary)) {
-  summary.launch = { ok: false, error: `binary not found: ${binary}` };
-} else {
-  app = spawn(binary, [], { env, stdio: ["ignore", appLog, appLog], cwd: dirs.tmp, detached: platform !== "win32" });
-  app.on("exit", (code, signal) => {
+/** Starts the app with the isolated env; its exit is recorded unless the harness restarted it. */
+function launchApp(logName) {
+  const log = openSync(join(out, logName), "w");
+  const child = spawn(binary, [], { env, stdio: ["ignore", log, log], cwd: dirs.tmp, detached: platform !== "win32" });
+  child.on("exit", (code, signal) => {
+    if (child !== app) return;
     summary.app_exit = { code, signal, at: new Date().toISOString(), during_teardown: Boolean(summary.finished_at) };
     writeSummary();
   });
+  mac.pid = win.pid = child.pid;
+  return child;
+}
+if (!existsSync(binary)) {
+  summary.launch = { ok: false, error: `binary not found: ${binary}` };
+} else {
+  app = launchApp("app.log");
   summary.launch = { ok: true, pid: app.pid };
-  mac.pid = win.pid = app.pid;
 }
 writeSummary();
 
@@ -895,6 +939,8 @@ async function agentQa(engine, browserId) {
   }
   const required = ["fixture_loaded", "snapshot", "stale_ref_refused", "fill_dispatched", "click_applied", "page_reflects_act"];
   record.ok = required.every((name) => record.checks[name] === true);
+  // Observations outside `required` (isolated_world) do not fail the job.
+  record.informational = Object.keys(record.checks).filter((name) => !required.includes(name));
   writeSummary();
   return { ok: record.ok, checks: record.checks, stderr: record.ok ? "" : `failed: ${required.filter((name) => record.checks[name] !== true).join(", ")}` };
 }
@@ -994,7 +1040,8 @@ const clickOr = (text, fallback, options = {}) => [
 ];
 
 // ---------------------------------------------------------------- UI audit steps
-if (app) {
+/** Waits for the app's main window and its first render; the result goes to summary.window. */
+async function waitForWindow() {
   const deadline = Date.now() + 90000;
   let windowId = null;
   while (!windowId && Date.now() < deadline && !summary.app_exit) {
@@ -1003,9 +1050,11 @@ if (app) {
   }
   linux.windowId = windowId;
   win.hwnd = windowId;
-  summary.window = { found: Boolean(windowId), id: windowId, waited_ms: 90000 - Math.max(0, deadline - Date.now()) };
+  const found = { found: Boolean(windowId), id: windowId, waited_ms: 90000 - Math.max(0, deadline - Date.now()) };
   await sleep(15000); // first render of the web UI and daemon startup
+  return found;
 }
+if (app) summary.window = await waitForWindow();
 
 /** Click a sidebar label so keyboard focus leaves an embedded webview and app shortcuts reach the UI. */
 const chromeFocus = [
@@ -1263,7 +1312,36 @@ const closeStrayDialogs = [
   () => (platform === "win32" ? win.closeDialogs() : { ok: true, skipped: "not Windows" }),
 ];
 
-const enginePids = () => (platform === "linux" ? run("pgrep", ["-f", "ferryx_engine"]).stdout.split(/\s+/).filter(Boolean).map(Number) : []);
+/** Every ferryx_engine process (the engine and its helpers): pgrep on Linux and macOS, tasklist on Windows. */
+const enginePids = () => {
+  if (platform === "win32") {
+    return run("tasklist", ["/FI", "IMAGENAME eq ferryx_engine.exe", "/FO", "CSV", "/NH"]).stdout
+      .split(/\r?\n/)
+      .map((line) => /^"ferryx_engine\.exe","(\d+)"/i.exec(line.trim())?.[1])
+      .filter(Boolean)
+      .map(Number);
+  }
+  return run("pgrep", ["-f", "ferryx_engine"]).stdout.split(/\s+/).filter(Boolean).map(Number);
+};
+/**
+ * Which process holds keyboard focus, as { engine, detail }. Linux: the raw X focus window is a
+ * window other than the Ferryx toplevel (the engine pane is a child X window). macOS: the
+ * frontmost app is the engine (its windows belong to a separate app ordered above Ferryx).
+ * Windows: the foreground thread's focus HWND belongs to an engine process (a child HWND of the
+ * Ferryx window owned by the engine).
+ */
+function engineKeyboardFocus() {
+  if (platform === "linux") {
+    const focused = run("xdotool", ["getwindowfocus", "-f"]).stdout;
+    return { engine: /^\d+$/.test(focused) && Number(focused) > 1 && focused !== String(linux.windowId), detail: { focused, ferryx: linux.windowId } };
+  }
+  if (platform === "darwin") {
+    const front = Number(mac.osa('tell application "System Events" to get unix id of first process whose frontmost is true').stdout);
+    return { engine: enginePids().includes(front), detail: { frontmost_pid: front, ferryx_pid: mac.pid } };
+  }
+  const [hwnd, pid] = win.ps("focusowner").stdout.split(/\s+/).filter(Boolean).slice(-2).map(Number);
+  return { engine: Boolean(pid) && enginePids().includes(pid), detail: { focus_hwnd: hwnd ?? null, focus_pid: pid ?? null, ferryx_pid: win.pid } };
+}
 
 // ---------------------------------------------------------------- drag-mask scenario
 // While a tab is dragged, TerminalSplitView renders browser panes hidden (browserPanesVisible is
@@ -1423,6 +1501,12 @@ async function dragMaskFlow() {
   record.after = fixturePixels(shotPath(after));
   record.restored_after_drop = (record.after.green ?? 0) >= FIXTURE_VISIBLE_MIN;
   record.pass = record.visible_before && record.masked_mid_drag && record.restored_after_drop;
+  record.checks = {
+    chromium: record.chromium === true,
+    visible_before: record.visible_before === true,
+    masked_mid_drag: record.masked_mid_drag === true,
+    restored_after_drop: record.restored_after_drop === true,
+  };
   writeSummary();
 }
 
@@ -1556,7 +1640,7 @@ if (engineZip) {
       ["click Download", () => clickText("Download", { timeout: 8000, match: exactly("Download"), pick: "rightmost" })],
       3000,
       ["wait for ferryx_engine on disk", async () => {
-        // The install unpacks into <root>/.staging-<uuid>/ (ferryx_engine is there before the
+        // The install unpacks into <root>/.staging-<uuid>/ (the executable is there before the
         // unpack ends), then renames it and writes the "active" pointer last. Only the directory
         // the pointer names counts as installed.
         const root = join(dirs.data, "browser-engine");
@@ -1565,13 +1649,13 @@ if (engineZip) {
         while (Date.now() < deadline) {
           if (existsSync(pointer)) {
             const name = readFileSync(pointer, "utf8").trim();
-            if (name && !name.startsWith(".") && !/[\\/]/.test(name) && existsSync(join(root, name, "ferryx_engine"))) {
+            if (name && !name.startsWith(".") && !/[\\/]/.test(name) && existsSync(join(root, name, ENGINE_EXE))) {
               return { ok: true, dir: join(root, name), active: name };
             }
           }
           await sleep(2000);
         }
-        return { ok: false, stderr: `no "active" pointer naming a directory with ferryx_engine under ${root}` };
+        return { ok: false, stderr: `no "active" pointer naming a directory with ${ENGINE_EXE} under ${root}` };
       }],
       // The UI resolves the install after the pointer is written; wait for its result, bounded.
       waitForText(["Remove", "Installed"], 90000),
@@ -1685,10 +1769,11 @@ await step("narrow-900-settings", "At 900px, open Settings > Browser", [closeStr
 });
 await step("narrow-900-settings-closed", "Escape closes Settings at 900px", [focus, key("Escape", { key: "Escape" }), 1500]);
 
-// ---------------------------------------------------------------- Chromium engine checks (Linux)
+// ---------------------------------------------------------------- Chromium engine checks
 let xStateIndex = 0;
 /** Writes the X window tree, the raw focus window and its properties to x-state/<n>-<name>.txt. */
 const captureXState = (name) => {
+  if (platform !== "linux") return { file: null };
   xStateIndex += 1;
   const dir = join(out, "x-state");
   mkdirSync(dir, { recursive: true });
@@ -1705,21 +1790,21 @@ const captureXState = (name) => {
   ].join("\n"));
   return { file, raw_focus: rawFocus };
 };
-/** Waits until X keyboard focus leaves the Ferryx toplevel for the engine's pane window (the
- * engine moves it asynchronously after Mod+L or a click), bounded by `timeout`. Reads the raw
- * focus window (`-f`): the engine window is a child of the Ferryx window without WM_STATE, and
- * plain `getwindowfocus` walks up from it to the Ferryx client window. */
+/** Waits until keyboard focus moves to the engine (it does so asynchronously after Mod+L or a
+ * click), bounded by `timeout`; see engineKeyboardFocus for what that means on each platform.
+ * Linux reads the raw focus window (`-f`): the engine window is a child of the Ferryx window
+ * without WM_STATE, and plain `getwindowfocus` walks up from it to the Ferryx client window. */
 const waitForEngineFocus = (label, timeout = 8000) => [label, async () => {
   const deadline = Date.now() + timeout;
-  let focused = "";
+  let focus = null;
   while (Date.now() < deadline) {
-    focused = run("xdotool", ["getwindowfocus", "-f"]).stdout;
-    if (/^\d+$/.test(focused) && Number(focused) > 1 && focused !== String(linux.windowId)) {
-      return { ok: true, focused, ferryx: linux.windowId, x_state: captureXState(label.replace(/\W+/g, "-")).file };
+    focus = engineKeyboardFocus();
+    if (focus.engine) {
+      return { ok: true, ...focus.detail, x_state: captureXState(label.replace(/\W+/g, "-")).file };
     }
     await sleep(200);
   }
-  return { ok: false, focused, ferryx: linux.windowId, x_state: captureXState(label.replace(/\W+/g, "-")).file, stderr: "X keyboard focus stayed off the engine window" };
+  return { ok: false, ...(focus?.detail ?? {}), x_state: captureXState(label.replace(/\W+/g, "-")).file, stderr: "keyboard focus stayed off the engine" };
 }];
 if (engineZip && summary.engine.checks.installed_from_settings) {
   await step("engine-restore-size", "Resize back to 1280x850 before the Chromium tab", [focus, ["resize", () => host.resize(1280, 850)], 1500]);
@@ -1813,7 +1898,7 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
   await step(
     "chromium-tab-switch",
     "Mod+T (terminal tab) hides the engine view; Mod+Shift+[ returns to the Chromium tab",
-    [focus, key("Mod+T", { key: "t", mods: ["mod"] }), 3000, ["screenshot hidden", () => ({ ok: screenshot("chromium-hidden-on-terminal-tab").ok })], key("Mod+Shift+[", { key: "bracketleft", mods: ["mod", "shift"] }), 3000],
+    [focus, key("Mod+T", { key: "t", mods: ["mod"] }), 3000, ["screenshot hidden", () => ({ ok: screenshot("chromium-hidden-on-terminal-tab").ok })], key("Mod+Shift+[", { key: "[", mods: ["mod", "shift"] }), 3000],
     // agent-chromium navigated this tab to /agent.html, so its page/title read "agentqa" now.
     { any: ["~agentqa", "~ferryxqa", "fixture:"] },
   );
@@ -1839,6 +1924,255 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
     ],
   );
   summary.engine.checks.engine_kill_closes_tabs = summary.steps.at(-1).actions.at(-1)?.ok ?? false;
+}
+
+// ---------------------------------------------------------------- extension: install, remove, restart
+// uBlock Origin Lite comes from the Chrome Web Store in an engine tab: Ferryx has no other way to
+// install an extension (Settings > Browser > Extensions only opens the store). It is removed with
+// the trash button of its row in Settings > Browser > Extensions, then the app restarts and the
+// row and the profile's extension data must stay gone.
+const UBOL_ID = "ddkjiahejlhfcafbddmgiahcphecmpfh";
+const UBOL_URL = `https://chromewebstore.google.com/detail/ublock-origin-lite/${UBOL_ID}`;
+/** uBlock Origin Lite in the engine's default profile data: its Extensions/<id> dir and its
+ * extensions.settings entry in Preferences / Secure Preferences. */
+function ubolOnDisk() {
+  const root = join(dirs.data, "browser-cef", "default");
+  const result = { dir: false, prefs: false, prefs_read: [] };
+  for (const profile of [join(root, "Default"), root]) {
+    if (existsSync(join(profile, "Extensions", UBOL_ID))) result.dir = true;
+    for (const file of ["Preferences", "Secure Preferences"]) {
+      const path = join(profile, file);
+      if (!existsSync(path)) continue;
+      try {
+        const settings = JSON.parse(readFileSync(path, "utf8"))?.extensions?.settings ?? {};
+        result.prefs_read.push(`${basename(profile)}/${file}`);
+        if (settings[UBOL_ID]) result.prefs = true;
+      } catch {}
+    }
+  }
+  return result;
+}
+/** OCR words of the extension's row label ("uBlock Origin Lite"). */
+const ubolWords = (words) => (words ?? []).filter((word) => /^u?b[li1|]ock$/i.test(word.text.replace(/[^a-z0-9|]/gi, "")));
+/** Settings > Browser > Extensions on screen: opens Settings, the Browser nav, scrolls to the group. */
+const openExtensionsGroup = [
+  closeStrayDialogs,
+  focus,
+  chromeFocus,
+  ["open Settings", openSettings],
+  dismissStoreToast,
+  ["click nav Browser", () => clickNav("Browser")],
+  2000,
+  ["scroll to Extensions", () => scrollSettingsTo("Extensions")],
+  3000,
+];
+if (engineZip && summary.engine.checks.installed_from_settings) {
+  const record = {
+    extension: "uBlock Origin Lite",
+    id: UBOL_ID,
+    install_path: "Chrome Web Store page in a Chromium engine tab ('Add to Chrome', then Chrome's 'Add extension' dialog)",
+    checks: Object.fromEntries(["installed_from_web_store", "listed_in_settings", "removed_from_settings", "removed_from_profile", "stays_removed_after_restart"].map((name) => [name, false])),
+  };
+  summary.extension = record;
+  let storeTab = null;
+  await step(
+    "extension-store-open",
+    "Mod+Shift+B opens a Chromium tab; the CLI navigates it to uBlock Origin Lite's Chrome Web Store page",
+    [
+      focus,
+      chromeFocus,
+      key("Mod+Shift+B", { key: "b", mods: ["mod", "shift"] }),
+      ["navigate to the store page (CLI)", async () => {
+        const deadline = Date.now() + 30000;
+        while (Date.now() < deadline && !storeTab) {
+          storeTab = sessions().list.find((entry) => entry.engine === "chromium") ?? null;
+          if (!storeTab) await sleep(1000);
+        }
+        if (!storeTab) return { ok: false, stderr: "no chromium tab listed" };
+        const navigated = await cliAsync("navigate", "--browser-id", storeTab.browserId, "--url", UBOL_URL);
+        return { ok: navigated.ok, browser_id: storeTab.browserId, stderr: navigated.stderr };
+      }],
+      waitForText(["Chrome"], 45000),
+    ],
+    { any: ["Chrome", "uBlock"] },
+  );
+  await step(
+    "extension-store-install",
+    "Click 'Add to Chrome', then 'Add extension' in Chrome's dialog; wait until the extension is in the profile",
+    [
+      ["click Add to Chrome", async () => {
+        const deadline = Date.now() + 30000;
+        do {
+          const words = ocr(probeShot()) ?? [];
+          const hit = findPhrase(words, "Add to Chrome")[0];
+          if (hit) return { ...host.click(hit.x, hit.y), at: [hit.x, hit.y] };
+          await sleep(1500);
+        } while (Date.now() < deadline);
+        return { ok: false, stderr: "'Add to Chrome' not visible" };
+      }],
+      ["click Add extension", async () => {
+        const deadline = Date.now() + 30000;
+        do {
+          await sleep(1500);
+          const words = ocr(probeShot()) ?? [];
+          const hit = findPhrase(words, "Add extension").at(-1);
+          if (hit) return { ...host.click(hit.x, hit.y), at: [hit.x, hit.y] };
+        } while (Date.now() < deadline);
+        return { ok: false, stderr: "Chrome's 'Add extension' button not visible" };
+      }],
+      ["wait for the extension in the profile", async () => {
+        const deadline = Date.now() + 120000;
+        let disk = ubolOnDisk();
+        while (!disk.dir && Date.now() < deadline) {
+          await sleep(2000);
+          disk = ubolOnDisk();
+        }
+        return { ok: disk.dir, disk, stderr: disk.dir ? "" : `no Extensions/${UBOL_ID} in the engine profile after 120s` };
+      }],
+      // Chrome commits Preferences on a 10s timer; the Settings list reads them when no engine runs.
+      12000,
+    ],
+    { any: ["added", "uBlock"] },
+  );
+  record.checks.installed_from_web_store = summary.steps.at(-1).actions.at(-1)?.ok ?? false;
+  await step("extension-store-tab-closed", "Close the store tab (CLI) so its page cannot show through Settings", [
+    ["close the store tab", () => (storeTab ? cli("close", "--browser-id", storeTab.browserId) : { ok: false, stderr: "no store tab" })],
+    2000,
+  ]);
+  let row = null;
+  await step(
+    "extension-listed",
+    "Settings > Browser > Extensions lists uBlock Origin Lite",
+    [
+      ...openExtensionsGroup,
+      ["find the uBlock Origin Lite row", async () => {
+        const deadline = Date.now() + 30000;
+        do {
+          const path = probeShot();
+          const label = ubolWords(ocr(path))[0];
+          if (label) {
+            const word = { ...label, x: label.left + Math.round(label.width / 2), y: label.top + Math.round(label.height / 2), right: label.left + label.width };
+            row = { label: word, knob: findRowSwitch(path, word) };
+            return { ok: true, label_at: [word.x, word.y], switch: row.knob };
+          }
+          await sleep(2000);
+        } while (Date.now() < deadline);
+        return { ok: false, stderr: "no uBlock row in the Extensions group" };
+      }],
+    ],
+    { any: ["uBlock", "Origin"] },
+  );
+  record.checks.listed_in_settings = Boolean(row);
+  await step(
+    "extension-remove",
+    "Click the row's trash button (left of its switch), confirm with Remove, then Remove in Chrome's own dialog; the row disappears",
+    [
+      ["click the trash button", async () => {
+        if (!row?.knob) return { ok: false, stderr: "row or its switch not located" };
+        // Switch w-9 (36px), gap-1.5 (6px), trash IconButton size-6 (24px): its centre is 18px
+        // left of the switch's left edge, scaled by the measured switch width.
+        const scale = row.knob.width / 34;
+        const switchLeft = row.knob.x - row.knob.width / 2;
+        for (const offset of [18, 22, 14]) {
+          const at = [Math.round(switchLeft - offset * scale), row.knob.y];
+          host.click(...at);
+          await sleep(1200);
+          const words = ocr(probeShot()) ?? [];
+          if (findPhrase(words, "Chrome may ask").length || findPhrase(words, "once more").length) return { ok: true, at, offset };
+        }
+        return { ok: false, stderr: "the remove confirmation did not appear" };
+      }],
+      ["click Remove (Ferryx confirmation)", () => clickText("Remove", { timeout: 5000, match: exactly("Remove"), pick: "rightmost" })],
+      ["click Remove in Chrome's dialog", async () => {
+        // Chrome's uninstall dialog: title 'Remove "uBlock Origin Lite"?' and a Remove button
+        // below it; the bottom-most "Remove" is the button.
+        const deadline = Date.now() + 30000;
+        do {
+          await sleep(1500);
+          const words = ocr(probeShot()) ?? [];
+          const hits = words.filter((word) => word.text === "Remove").sort((a, b) => b.top - a.top);
+          if (hits.length) {
+            const at = [hits[0].left + Math.round(hits[0].width / 2), hits[0].top + Math.round(hits[0].height / 2)];
+            return { ...host.click(...at), at, candidates: hits.length };
+          }
+          if (!ubolOnDisk().prefs && !ubolWords(words).length) return { ok: true, skipped: "already removed, no Chrome dialog" };
+        } while (Date.now() < deadline);
+        return { ok: false, stderr: "Chrome's Remove dialog not visible" };
+      }],
+      ["wait for the row to disappear", async () => {
+        const deadline = Date.now() + 60000;
+        let words = [];
+        do {
+          await sleep(2000);
+          words = ocr(probeShot()) ?? [];
+          if (!ubolWords(words).length && findSettingsHeading(words, "Extensions").heading) return { ok: true };
+        } while (Date.now() < deadline);
+        return { ok: false, stderr: "uBlock row still listed (or the Extensions group is off screen)", seen: ubolWords(words).map((word) => word.text) };
+      }],
+    ],
+    { none: ["uBlock"] },
+  );
+  record.checks.removed_from_settings = summary.steps.at(-1).actions.at(-1)?.ok ?? false;
+  // Chrome commits Preferences on a 10s timer.
+  await sleep(15000);
+  record.disk_after_remove = ubolOnDisk();
+  record.checks.removed_from_profile = !record.disk_after_remove.prefs && !record.disk_after_remove.dir;
+  await step("extension-settings-closed", "Escape closes Settings", [focus, key("Escape", { key: "Escape" }), 1500]);
+
+  // Restart: stop only the app process, so its engine sees stdin close and quits by itself
+  // (as when the user quits Ferryx), then launch the same binary on the same data dirs.
+  await step("extension-restart", "Quit the app (its engine follows), launch it again on the same data", [
+    ["stop the app", async () => {
+      const old = app;
+      app = null;
+      const exited = new Promise((done) => old.once("exit", done));
+      if (platform === "win32") run("taskkill", ["/PID", String(old.pid), "/F"]);
+      else old.kill("SIGTERM");
+      const stopped = await Promise.race([exited.then(() => true), sleep(20000).then(() => false)]);
+      const deadline = Date.now() + 30000;
+      while (enginePids().length && Date.now() < deadline) await sleep(1000);
+      const leftover = enginePids();
+      for (const pid of leftover) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {}
+      }
+      return { ok: stopped, engine_left_running: leftover, stderr: stopped ? "" : "the app did not exit within 20s" };
+    }],
+    ["launch again", async () => {
+      app = launchApp("app-restart.log");
+      record.restart_window = await waitForWindow();
+      return { ok: record.restart_window.found, pid: app.pid, stderr: record.restart_window.found ? "" : "no window after the restart" };
+    }],
+    ["optional dismiss onboarding", () => clickText("Skip", { timeout: 4000 })],
+  ]);
+  record.restarted = summary.steps.at(-1).actions.slice(0, 2).every((action) => action.ok);
+  await step(
+    "extension-after-restart",
+    "After the restart, Settings > Browser > Extensions still has no uBlock Origin Lite row",
+    [
+      ...openExtensionsGroup,
+      ["the group is shown without the uBlock row", async () => {
+        let words = [];
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          words = ocr(probeShot()) ?? [];
+          if (findSettingsHeading(words, "Extensions").heading && findPhrase(words, "Open Chrome Web Store").length) break;
+          await sleep(2000);
+        }
+        const heading = Boolean(findSettingsHeading(words, "Extensions").heading);
+        const listed = ubolWords(words).length > 0;
+        return { ok: heading && !listed, heading, listed, empty_message: findPhrase(words, "No extensions installed").length > 0, stderr: !heading ? "Extensions group not on screen" : listed ? "uBlock row is back" : "" };
+      }],
+    ],
+    { any: ["Extensions"], none: ["uBlock"] },
+  );
+  record.disk_after_restart = ubolOnDisk();
+  record.checks.stays_removed_after_restart = record.restarted
+    && (summary.steps.at(-1).actions.at(-1)?.ok ?? false)
+    && !record.disk_after_restart.prefs
+    && !record.disk_after_restart.dir;
+  await step("extension-settings-closed-after-restart", "Escape closes Settings", [focus, key("Escape", { key: "Escape" }), 1500]);
+  writeSummary();
 }
 
 // ---------------------------------------------------------------- teardown

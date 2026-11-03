@@ -3444,9 +3444,11 @@ mod tests {
                 url: "https://example.com/".to_string(),
                 title: Some("Example".to_string()),
                 visible: true,
+                engine: crate::browser::BrowserEngine::Chromium,
             }],
         };
         let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains(r#""engine":"chromium""#), "{json}");
         let parsed: BrowserCliResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, resp);
     }
@@ -3688,6 +3690,7 @@ mod tests {
             url: registered_session.url,
             title: None,
             visible: true,
+            engine: crate::browser::BrowserEngine::System,
         };
 
         assert_eq!(
@@ -3863,6 +3866,7 @@ mod tests {
             url: registered_session.url,
             title: None,
             visible: true,
+            engine: crate::browser::BrowserEngine::System,
         };
 
         assert_eq!(
@@ -4264,6 +4268,7 @@ mod tests {
             url: registered_session.url,
             title: None,
             visible: true,
+            engine: crate::browser::BrowserEngine::System,
         };
 
         assert_eq!(
@@ -5132,6 +5137,7 @@ mod tests {
             url: "https://example.com".into(),
             title: Some("Title".into()),
             visible: true,
+            engine: crate::browser::BrowserEngine::System,
         };
         let summary_json = serde_json::to_string(&summary).unwrap();
         assert!(!summary_json.contains(token));
