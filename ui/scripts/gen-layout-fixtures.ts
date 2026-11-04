@@ -14,7 +14,7 @@ function project(state: LayoutState) {
     : { type: "leaf", content: content[node.leafId]?.kind === "browser"
         ? { kind: "browser", url: content[node.leafId].browser.url }
         : { kind: "terminal", backendSessionId: content[node.leafId]?.sessionId ?? "" } };
-  return state.tabs.map((tab) => ({ tabId: tab.id, label: tab.label, pinned: tab.pinned ?? false,
+  return state.tabs.map((tab) => ({ tabId: tab.id, label: "customLabel" in tab ? tab.customLabel ?? tab.label : tab.label, pinned: tab.pinned ?? false,
     paneTree: tree(state.layoutsByTabId[tab.id].root, state.layoutsByTabId[tab.id].contentsByLeafId ?? {}) }));
 }
 // createLayoutState uses the stable initial group identity.
