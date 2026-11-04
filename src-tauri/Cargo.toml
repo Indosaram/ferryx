@@ -310,6 +310,7 @@ webkit2gtk = { version = "2.0.2", default-features = false, optional = true }
 javascriptcore = { package = "javascriptcore-rs", version = "=1.1.2", default-features = false, optional = true }
 
 [dev-dependencies]
+proptest = "1"
 tempfile = "3.17"
 tokio-test = "0.4"
 tokio = { version = "1.53", features = ["test-util"] }

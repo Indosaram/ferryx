@@ -26,7 +26,7 @@ use crate::terminal::program_status_ingest::{
 
 /// Rows of history the mirror keeps above the screen. Bounds both memory and the size of the
 /// reconstruction that a full attach and a handover carry.
-const MIRROR_SCROLLBACK_LINES: usize = 2_000;
+pub(crate) const MIRROR_SCROLLBACK_LINES: usize = 2_000;
 /// The mirror never reports pixels; any non-zero cell size satisfies the parser.
 const CELL_WIDTH_PX: u32 = 8;
 const CELL_HEIGHT_PX: u32 = 16;
@@ -376,6 +376,20 @@ impl Drop for ScreenMirror {
     fn drop(&mut self) {
         // Wakes a driver waiting for activity so it sees the mirror is gone and exits.
         self.activity.notify_one();
+    }
+}
+
+/// Read-only grid access for the property tests in `terminal::fuzz_tests`.
+#[cfg(test)]
+impl ScreenMirror {
+    pub(crate) fn scrollback_rows_for_test(&self) -> usize {
+        self.terminal.scrollback_rows().unwrap()
+    }
+
+    /// Visible text of every grid row, scrollback first.
+    pub(crate) fn grid_text_for_test(&self) -> Vec<String> {
+        let total = self.scrollback_rows_for_test() + usize::from(self.terminal.rows().unwrap());
+        (0..total).map(|row| self.terminal.screen_row_text(row).unwrap()).collect()
     }
 }
 

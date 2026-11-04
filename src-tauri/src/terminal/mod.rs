@@ -34,6 +34,8 @@ pub enum PtyError {
 }
 
 pub(crate) mod foreground;
+#[cfg(test)]
+mod fuzz_tests;
 pub mod manual_ssh;
 pub(crate) mod metrics;
 pub mod output_hub;

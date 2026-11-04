@@ -1,0 +1,35 @@
+# libFuzzer targets for the daemon's VT parsing paths (Linux, nightly only):
+#   cd src-tauri && cargo +nightly fuzz run screen_mirror -- -max_total_time=1800
+# This crate is its own workspace and is never part of the normal build.
+[package]
+name = "ferryx-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# hub-slack only because src-tauri/src/hub_runtime/seed.rs uses ferryx_hub's omo_client, which
+# that feature gates; the lib does not build with no features at all.
+ferryx = { path = "..", default-features = false, features = ["hub-slack"] }
+serde_json = "1.0"
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "screen_mirror"
+path = "fuzz_targets/screen_mirror.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vt_stream"
+path = "fuzz_targets/vt_stream.rs"
+test = false
+doc = false
+bench = false
