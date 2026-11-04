@@ -3558,6 +3558,45 @@ mod tests {
     use crate::terminal::paired_daemon::{Descriptor, Proxy};
 
     #[tokio::test]
+    async fn size_ownership_real_pty_resize_detach_and_competing_clients() {
+        use futures_util::FutureExt;
+        use std::panic::AssertUnwindSafe;
+        let server = DaemonServer::new();
+        let service = server.session_service();
+        let (id, _) = service.terminal_service.spawn_shell(120, 40).unwrap();
+        let result = AssertUnwindSafe(async {
+            tokio::time::timeout(std::time::Duration::from_secs(20), async {
+                let pty = service.terminal_service.get_session(&id).unwrap();
+                service.record_desktop_geometry(&id, 120, 40);
+                assert!(!service.resize_remote_owner(&id, "viewer", 10, 10, false, true).await.unwrap());
+                assert_eq!(pty.get_size(), (120, 40));
+                assert!(service.resize_remote_owner(&id, "phone", 60, 30, true, false).await.unwrap());
+                assert_eq!(pty.get_size(), (60, 30));
+                assert_eq!(service.size_owner(&id), "phone");
+                assert!(!service.prefer_desktop_geometry(&id, 130, 45));
+                service.detach_size_owner(&id, "phone").await.unwrap();
+                assert_eq!(pty.get_size(), (130, 45));
+                assert_eq!(service.size_owner(&id), "desktop");
+                service.resize_remote_owner(&id, "a", 60, 30, true, false).await.unwrap();
+                service.resize_remote_owner(&id, "b", 70, 35, true, false).await.unwrap();
+                service.resize_remote_owner(&id, "a", 60, 30, true, true).await.unwrap();
+                for _ in 0..100 {
+                    assert!(!service.resize_remote_owner(&id, "b", 70, 35, true, false).await.unwrap());
+                    assert!(service.resize_remote_owner(&id, "a", 60, 30, true, false).await.unwrap());
+                    assert_eq!(pty.get_size(), (60, 30));
+                }
+                service.resize_session(&id, 120, 40).await.unwrap();
+                assert!(!service.resize_remote_owner(&id, "a", 60, 30, true, false).await.unwrap());
+                assert_eq!(pty.get_size(), (120, 40));
+                let DaemonResponse::DescribeSessionOk { session, .. } = service.handle_describe_session(&id) else { panic!("describe") };
+                assert_eq!(session.size_owner.as_deref(), Some("desktop"));
+            }).await.unwrap();
+        }).catch_unwind().await;
+        service.terminal_service.close_session(&id).await.unwrap();
+        if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    }
+
+    #[tokio::test]
     async fn local_split_reliability_conflicting_fingerprint_reuse_is_rejected_without_creating_a_session() {
         let server = DaemonServer::new();
         let service = server.session_service();
