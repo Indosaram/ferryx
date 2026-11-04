@@ -4,6 +4,7 @@ mod machine_gateway;
 // Server side of the frozen control-v1 channel (todo 15).
 #[path = "control_server.rs"]
 mod control_server;
+mod script_api;
 #[cfg(any(unix, test))]
 use super::handover::HandoverManager;
 use super::session_service::*;
@@ -6356,7 +6357,28 @@ impl DaemonServer {
         // client released by that signal can spawn a pane immediately, and the pane reads its
         // agent-state endpoint from disk as it spawns, so a listener started afterwards leaves
         // that pane with no endpoint for its whole lifetime.
-        let _script_runtime = crate::script::start(script_registry).await?;
+        let _script_runtime = crate::script::start(script_registry, self.script_host()).await?;
+        let mut script_events = self.remote_event_tx.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match script_events.recv().await {
+                    Ok(event) => {
+                        let name = match event.event.as_str() {
+                            "LayoutChanged" => "layout.changed",
+                            "AgentStateChanged" => "agent.state",
+                            "AgentDone" => "agent.done",
+                            "SessionExit" => "session.exit",
+                            _ => continue,
+                        };
+                        if let Err(error) = crate::script::control::event(name.into(), event.payload) {
+                            tracing::error!(%error, "Script event delivery failed");
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(count)) => tracing::warn!(count, "Script event stream lagged"),
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
         let agent_state_ingress = self.spawn_agent_state_listener();
         self.spawn_foreground_observer();
         self.spawn_paired_host_probe(crate::paired_host::client::PROBE_INTERVAL);
@@ -7782,6 +7804,10 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::Panes { request }) => self.handle_panes(request).await,
+                Ok(DaemonRequest::Script { action }) => match crate::script::control::request(action).await {
+                    Ok(value) => DaemonResponse::ScriptOk { value },
+                    Err(error) => daemon_error(error),
+                },
                 Ok(DaemonRequest::PluginsList) => match self.plugins.list().await {
                     Ok(plugins) => DaemonResponse::PluginsOk { plugins },
                     Err(error) => daemon_error(error),
@@ -8309,6 +8335,7 @@ impl DaemonServer {
                     capabilities.push("daemonLayoutV1".into());
                     capabilities.push(super::onboarding::CAPABILITY.into());
                     capabilities.push(crate::script::CAPABILITY.into());
+                    capabilities.push(crate::script::api::CAPABILITY.into());
                     capabilities.push("detachedPanesV1".into());
                     capabilities.push("terminalOscEffectsV1".into());
                     capabilities.push("blockPluginsV1".into());
