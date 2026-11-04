@@ -1296,6 +1296,7 @@ pub struct HandoverManager {
     size_ownership: RwLock<Option<super::size_ownership::SizeOwnershipRegistry>>,
     layouts: RwLock<Option<super::layout::Registry>>,
     onboarding: RwLock<Option<super::onboarding::Registry>>,
+    script: RwLock<Option<crate::script::store::Registry>>,
 }
 
 impl HandoverManager {
@@ -1355,6 +1356,23 @@ impl HandoverManager {
 
     pub fn set_onboarding(&self, registry: super::onboarding::Registry) {
         *self.onboarding.write() = Some(registry);
+    }
+
+    pub fn set_script(&self, registry: crate::script::store::Registry) {
+        *self.script.write() = Some(registry);
+    }
+
+    pub fn adopt_recorded_script(&self, legacy: &std::path::Path) -> Result<(), String> {
+        use super::handover_transaction::{HandoverState, HandoverTransaction};
+        let bytes = fs::read(legacy.with_extension("transaction")).map_err(|error| error.to_string())?;
+        let transaction: HandoverTransaction = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        if transaction.transfer_id != legacy.to_string_lossy() || transaction.state != HandoverState::Retired {
+            return Err("Script adoption requires a committed predecessor".into());
+        }
+        if let (Some(ledger), Some(registry)) = (transaction.script_ledger, self.script.read().clone()) {
+            registry.store.lock().adopt(ledger)?;
+        }
+        Ok(())
     }
 
     pub fn adopt_recorded_onboarding(&self, legacy: &std::path::Path) -> Result<(), String> {
@@ -1462,10 +1480,13 @@ impl HandoverManager {
         } else {
             None
         };
+        let script = if committed { self.script.read().clone() } else { None };
+        transaction.script_ledger = script.as_ref().map(|registry| registry.freeze());
         let written = Self::write_decision(&legacy, &transaction);
         // Renewing resumes only when no decision reached the disk: a record that landed despite
         // the error is the commit, and the successor renews that lease.
         if written.is_err() && Self::decision_missing(&Self::recorded_decision(&legacy)) {
+            if let Some(script) = &script { script.resume(); }
             if let Some(lease) = &lease {
                 lease.thaw_after_failed_handover();
             }
@@ -1571,6 +1592,7 @@ impl HandoverManager {
             size_ownership: RwLock::new(None),
             layouts: RwLock::new(None),
             onboarding: RwLock::new(None),
+            script: RwLock::new(None),
         }
     }
 
