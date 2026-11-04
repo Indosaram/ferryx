@@ -1,4 +1,4 @@
-use crate::daemon::protocol::{AgentProviderSession, TerminalStartup};
+use crate::daemon::protocol::{AgentProviderSession, ContinueMode, TerminalStartup};
 use serde::Deserialize;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read};
@@ -17,12 +17,17 @@ struct SessionHeader {
 pub(crate) fn resolve_agent_resume_cwd(
     startup: Option<&TerminalStartup>,
 ) -> io::Result<Option<PathBuf>> {
-    let Some(TerminalStartup::AgentResume {
-        agent_type,
-        provider_session,
-    }) = startup
-    else {
-        return Ok(None);
+    let (agent_type, provider_session) = match startup {
+        Some(TerminalStartup::AgentResume {
+            agent_type,
+            provider_session,
+        })
+        | Some(TerminalStartup::AgentContinue {
+            agent_type,
+            provider_session,
+            mode: ContinueMode::Resume,
+        }) => (agent_type, provider_session),
+        _ => return Ok(None),
     };
     if !agent_type.trim().eq_ignore_ascii_case("omo") {
         return Ok(None);

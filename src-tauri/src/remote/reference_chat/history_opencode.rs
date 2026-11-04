@@ -16,9 +16,13 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 use super::history_parse::{
-    reference_timestamp, reference_tool_input, reference_tool_summary, ReferenceTurnLog,
+    reference_bounded_tool_input, reference_native_model, reference_native_patch_body,
+    reference_timestamp, reference_tool_input, reference_tool_summary, reference_usage_from_object,
+    ReferenceTurnLog,
 };
-use super::types::{ReferenceHistoryParser, ReferenceNativeHistoryKind, ReferencePart, ReferenceTurn};
+use super::types::{
+    ReferenceHistoryParser, ReferenceNativeHistoryKind, ReferencePart, ReferenceTurn, ReferenceTurnRole,
+};
 
 /// The lane's parser: opencode-transcript only; any other kind is refused.
 pub fn parse_reference_opencode_history(
@@ -131,7 +135,7 @@ pub fn parse_opencode_projection(text: &str) -> Vec<ReferenceTurn> {
                     log.user(
                         at.map(str::to_string),
                         None,
-                        vec![ReferencePart::Text { text: prompt.join("\n"), phase: None }],
+                        vec![ReferencePart::Text { text: prompt.join("\n"), phase: None , id: None}],
                     );
                 }
             }
@@ -140,7 +144,7 @@ pub fn parse_opencode_projection(text: &str) -> Vec<ReferenceTurn> {
                     match part.get("type").and_then(Value::as_str) {
                         Some("text") => {
                             if let Some(text) = part.get("text").and_then(Value::as_str).filter(|text| !text.is_empty()) {
-                                log.part(at, ReferencePart::Text { text: text.to_string(), phase: None });
+                                log.part(at, ReferencePart::Text { text: text.to_string(), phase: None , id: None});
                             }
                         }
                         Some("tool") => {
@@ -149,14 +153,37 @@ pub fn parse_opencode_projection(text: &str) -> Vec<ReferenceTurn> {
                             };
                             let key = part.get("callID").and_then(Value::as_str).unwrap_or("");
                             let input = part.pointer("/state/input");
-                            log.tool(at, key, name, reference_tool_summary(input), reference_tool_input(input));
+                            let payload = input.cloned().unwrap_or(Value::Null);
+                            let rendered = reference_bounded_tool_input(name, &payload, reference_tool_input(input));
+                            log.tool(at, key, name, reference_tool_summary(input), rendered);
+                            let failed = part.pointer("/state/status").and_then(Value::as_str).is_some_and(|status| {
+                                matches!(status.to_ascii_lowercase().as_str(), "error" | "failed" | "failure" | "errored")
+                            });
                             if let Some(output) = part.pointer("/state/output").and_then(Value::as_str) {
-                                log.tool_output(at, key, output.to_string(), false);
+                                log.tool_output(at, key, output.to_string(), failed);
+                            }
+                            if let Some(status) = part.pointer("/state/status").and_then(Value::as_str) {
+                                log.tool_status(key, status);
+                            }
+                            if let Some(body) = reference_native_patch_body(name, &payload) {
+                                log.push_diff(at, &body);
+                            }
+                        }
+                        Some("patch") => {
+                            let body = part.get("diff").or_else(|| part.get("patch")).and_then(Value::as_str);
+                            if let Some(body) = body.filter(|body| !body.is_empty()) {
+                                log.push_diff(at, body);
                             }
                         }
                         _ => {}
                     }
                 }
+                log.annotate_role(
+                    ReferenceTurnRole::Assistant,
+                    ReferenceNativeHistoryKind::Opencode,
+                    reference_native_model(message.pointer("/info/modelID")),
+                    message.pointer("/info/tokens").and_then(reference_usage_from_object),
+                );
             }
             _ => {}
         }
@@ -210,7 +237,7 @@ mod tests {
         .expect("opencode reads its own store");
         assert_eq!(turns.len(), 4);
         assert_eq!(turns[0].role, ReferenceTurnRole::User);
-        assert_eq!(turns[0].parts, [ReferencePart::Text { text: "run ls".into(), phase: None }]);
+        assert_eq!(turns[0].parts, [ReferencePart::Text { text: "run ls".into(), phase: None , id: None}]);
         assert_eq!(turns[0].started_at.as_deref(), Some("2026-10-22T07:16:05.533Z"));
         let ReferencePart::Tool { name, input, output, .. } = &turns[1].parts[0] else {
             panic!("the call comes first: {:?}", turns[1].parts);
@@ -218,10 +245,10 @@ mod tests {
         assert_eq!(name, "bash");
         assert!(input.contains("\"command\": \"ls\""), "{input}");
         assert_eq!(output, "README.md\n");
-        assert_eq!(turns[1].parts[1], ReferencePart::Text { text: "README.md".into(), phase: None });
+        assert_eq!(turns[1].parts[1], ReferencePart::Text { text: "README.md".into(), phase: None , id: None});
         assert_eq!(
             turns[3].parts.last(),
-            Some(&ReferencePart::Text { text: "Created `created.txt`.".into(), phase: None })
+            Some(&ReferencePart::Text { text: "Created `created.txt`.".into(), phase: None , id: None})
         );
     }
 
@@ -286,5 +313,31 @@ mod tests {
     fn opencode_parser_refuses_another_family() {
         assert!(parse_reference_opencode_history(ReferenceNativeHistoryKind::Cline, "").is_err());
         assert!(parse_reference_opencode_history(ReferenceNativeHistoryKind::Unavailable, "").is_err());
+    }
+
+    #[test]
+    fn native_work_opencode_sums_message_tokens_and_reads_tool_status() {
+        let (messages, parts) = rows();
+        let turns = parse_reference_opencode_history(
+            ReferenceNativeHistoryKind::Opencode,
+            &opencode_projection(&messages, &parts),
+        )
+        .expect("reads");
+        let usage = turns[1].meta.as_ref().unwrap().usage.as_ref().unwrap();
+        assert_eq!(usage.input_tokens, Some(16358 + 531));
+        assert_eq!(usage.output_tokens, Some(27 + 4));
+        assert_eq!(usage.cache_read_tokens, Some(1536 + 17408));
+        assert_eq!(usage.cache_write_tokens, Some(0));
+        assert_eq!(turns[1].meta.as_ref().unwrap().model.as_deref(), Some("big-pickle"));
+        let ReferencePart::Tool { status, .. } = &turns[1].parts[0] else { panic!("{:?}", turns[1].parts) };
+        assert_eq!(*status, Some(crate::remote::reference_chat::types::ReferenceToolStatus::Completed));
+        let inline = r#"{"time_created":1,"info":{"role":"assistant","modelID":"m"},"parts":[{"type":"tool","tool":"edit","callID":"e1","state":{"status":"error","input":{"old_string":"a","new_string":"b"}}}]}"#;
+        let turns = parse_reference_opencode_history(ReferenceNativeHistoryKind::Opencode, inline).unwrap();
+        let ReferencePart::Tool { status, .. } = &turns[0].parts[0] else { panic!("{:?}", turns[0].parts) };
+        assert_eq!(*status, Some(crate::remote::reference_chat::types::ReferenceToolStatus::Failed));
+        assert!(turns[0].parts.iter().any(|part| matches!(part, ReferencePart::Diff { .. })));
+        let prose = r#"{"time_created":1,"info":{"role":"user"},"parts":[{"type":"text","text":"usage input 9 status failed"}]}"#;
+        let turns = parse_reference_opencode_history(ReferenceNativeHistoryKind::Opencode, prose).unwrap();
+        assert!(turns[0].meta.is_none());
     }
 }

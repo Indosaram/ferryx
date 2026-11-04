@@ -43,6 +43,11 @@ use base64::Engine as _;
 use regex::Regex;
 use serde_json::{json, Value};
 
+use super::history_parse::{
+    reference_assign_result_status, reference_diff_part, reference_native_model,
+    reference_native_patch_body, reference_native_tool_status, reference_note_turn_meta,
+    reference_push_orphan_result, reference_stamp_tool_call, reference_usage_from_object,
+};
 use super::types::{
     ReferenceAbandonedBranch, ReferenceHistoryParser, ReferenceImageRef, ReferenceNativeHistoryKind,
     ReferencePart, ReferenceSkillActivity, ReferenceSkillEvidence, ReferenceSkillStatus,
@@ -249,6 +254,7 @@ struct PiMessage {
     stop_reason: Option<String>,
     error_message: Option<String>,
     is_error: bool,
+    status: Option<String>,
 }
 
 /// One tool result, with the images it carries (`transcript-records.ts`: `piResults`).
@@ -256,6 +262,7 @@ struct PiToolResult {
     id: String,
     text: String,
     error: bool,
+    status: Option<String>,
     /// Media types only, in order: the bytes stay in the file, and the page's ref quotes the
     /// position of the image inside this one result.
     images: Vec<String>,
@@ -316,7 +323,7 @@ fn parse_pi_records(text: &str) -> Vec<ReferenceTurn> {
                 .and_then(Value::as_str)
                 .filter(|summary| !summary.trim().is_empty())
             {
-                turns.push(user_turn(timestamp, vec![ReferencePart::Compact { text: summary.to_string() }]));
+                turns.push(user_turn(timestamp, vec![ReferencePart::Compact { text: summary.to_string() , id: None}]));
             }
             continue;
         }
@@ -346,14 +353,14 @@ fn parse_pi_records(text: &str) -> Vec<ReferenceTurn> {
                     .join(" "),
                 None => prompt,
             };
-            let mut parts = vec![ReferencePart::Text { text: asked, phase: None }];
+            let mut parts = vec![ReferencePart::Text { text: asked, phase: None , id: None}];
             if let Some(invocation) = &invocation {
                 parts.extend(
                     invocation
                         .skills
                         .iter()
                         .cloned()
-                        .map(|skill| ReferencePart::Skill { skill }),
+                        .map(|skill| ReferencePart::Skill { skill, id: None }),
                 );
             }
             turns.push(user_turn(timestamp, parts));
@@ -365,13 +372,19 @@ fn parse_pi_records(text: &str) -> Vec<ReferenceTurn> {
             if let Some(timestamp) = timestamp {
                 turns[turn_index].ended_at = Some(timestamp.to_string());
             }
+            reference_note_turn_meta(
+                &mut turns[turn_index],
+                ReferenceNativeHistoryKind::Pi,
+                reference_native_model(entry.pointer("/message/model")),
+                entry.pointer("/message/usage").and_then(reference_usage_from_object),
+            );
             for block in &message.content {
                 if block.get("type").and_then(Value::as_str) == Some("text") {
                     if let Some(body) = block.get("text").and_then(Value::as_str) {
                         if !body.is_empty() {
                             turns[turn_index]
                                 .parts
-                                .push(ReferencePart::Text { text: body.to_string(), phase: None });
+                                .push(ReferencePart::Text { text: body.to_string(), phase: None , id: None});
                         }
                     }
                 } else if block.get("type").and_then(Value::as_str) == Some("thinking") {
@@ -383,7 +396,7 @@ fn parse_pi_records(text: &str) -> Vec<ReferenceTurn> {
                     if !thinking.is_empty() {
                         turns[turn_index]
                             .parts
-                            .push(ReferencePart::Thinking { text: thinking.to_string() });
+                            .push(ReferencePart::Thinking { text: thinking.to_string() , id: None});
                     }
                 } else if block.get("type").and_then(Value::as_str) == Some("toolCall") {
                     if let Some(name) = block.get("name").and_then(Value::as_str) {
@@ -400,6 +413,7 @@ fn parse_pi_records(text: &str) -> Vec<ReferenceTurn> {
                             Some(intent) => intent.to_string(),
                             None => tool_summary(name, &arguments),
                         };
+                        let patch_body = reference_native_patch_body(name, &arguments);
                         let part_index = turns[turn_index].parts.len();
                         turns[turn_index].parts.push(ReferencePart::Tool {
                             name: name.to_string(),
@@ -411,9 +425,19 @@ fn parse_pi_records(text: &str) -> Vec<ReferenceTurn> {
                             output_ref: None,
                             output_size: None,
                             images: Vec::new(),
+                        
+                            id: None, call_id: None, status: None, output_payload: Box::new(None),
                         });
                         if let Some(id) = block.get("id").and_then(Value::as_str) {
+                            if let Some(part) = turns[turn_index].parts.last_mut() {
+                                reference_stamp_tool_call(part, id);
+                            }
                             pending.insert(id.to_string(), (turn_index, part_index));
+                        } else if let Some(part) = turns[turn_index].parts.last_mut() {
+                            reference_stamp_tool_call(part, "");
+                        }
+                        if let Some(body) = patch_body {
+                            turns[turn_index].parts.push(reference_diff_part(&body));
                         }
                     }
                 }
@@ -428,7 +452,7 @@ fn parse_pi_records(text: &str) -> Vec<ReferenceTurn> {
                 {
                     turns[turn_index]
                         .parts
-                        .push(ReferencePart::Text { text: format!("Error: {error}"), phase: None });
+                        .push(ReferencePart::Text { text: format!("Error: {error}"), phase: None , id: None});
                 }
             }
             settled = message.stop_reason.as_deref() == Some("stop");
@@ -447,6 +471,8 @@ fn user_turn(timestamp: Option<&str>, parts: Vec<ReferencePart>) -> ReferenceTur
         source: None,
         parts,
         abandoned: None,
+    
+        id: None, meta: None,
     }
 }
 
@@ -464,21 +490,24 @@ fn assistant_turn(turns: &mut Vec<ReferenceTurn>, settled: bool, timestamp: Opti
         source: None,
         parts: Vec::new(),
         abandoned: None,
+    
+        id: None, meta: None,
     });
     turns.len() - 1
 }
 
 /// Fold this record's tool results into the tool parts they answer.
 fn apply_results(
-    turns: &mut [ReferenceTurn],
+    turns: &mut Vec<ReferenceTurn>,
     pending: &mut HashMap<String, (usize, usize)>,
     message: &PiMessage,
 ) {
     for result in pi_results(message) {
         let Some((turn_index, part_index)) = pending.remove(&result.id) else {
+            reference_push_orphan_result(turns, None, &result.id, result.text.clone(), result.error);
             continue;
         };
-        let Some(ReferencePart::Tool { name, output, error, images, output_ref, output_size, .. }) =
+        let Some(ReferencePart::Tool { name, output, error, images, output_ref, output_size, status, .. }) =
             turns
                 .get_mut(turn_index)
                 .and_then(|turn| turn.parts.get_mut(part_index))
@@ -488,6 +517,12 @@ fn apply_results(
         trim_output(name, output, output_ref, output_size, &result.text, &result.id);
         if result.error {
             *error = Some(true);
+        }
+        reference_assign_result_status(status, result.error);
+        if let Some(raw) = result.status.as_deref() {
+            if let Some(mapped) = reference_native_tool_status(raw) {
+                *status = Some(mapped);
+            }
         }
         if !result.images.is_empty() {
             // Addressed by the call it answers: a nested result shares its entry with other blocks,
@@ -581,6 +616,11 @@ fn pi_message(entry: &Value) -> Option<PiMessage> {
         stop_reason: message.get("stopReason").and_then(Value::as_str).map(str::to_string),
         error_message: message.get("errorMessage").and_then(Value::as_str).map(str::to_string),
         is_error: message.get("isError").and_then(Value::as_bool).unwrap_or(false),
+        status: message
+            .get("status")
+            .and_then(Value::as_str)
+            .filter(|status| !status.is_empty())
+            .map(str::to_string),
     })
 }
 
@@ -628,7 +668,12 @@ fn normalize_block(value: &Value) -> Value {
 fn pi_results(message: &PiMessage) -> Vec<PiToolResult> {
     if message.role.as_deref() == Some("toolResult") {
         let content = Value::Array(message.content.clone());
-        return result_of(message.tool_call_id.as_deref(), &content, message.is_error)
+        return result_of(
+            message.tool_call_id.as_deref(),
+            &content,
+            message.is_error,
+            message.status.as_deref(),
+        )
             .into_iter()
             .collect();
     }
@@ -641,18 +686,34 @@ fn pi_results(message: &PiMessage) -> Vec<PiToolResult> {
             }
             let id = block.get("toolCallId").and_then(Value::as_str);
             let content = block.get("content").cloned().unwrap_or(Value::Null);
-            result_of(id, &content, block.get("isError").and_then(Value::as_bool).unwrap_or(false))
+            result_of(
+                id,
+                &content,
+                block.get("isError").and_then(Value::as_bool).unwrap_or(false),
+                block.get("status").and_then(Value::as_str),
+            )
         })
         .collect()
 }
 
-fn result_of(tool_call_id: Option<&str>, content: &Value, is_error: bool) -> Option<PiToolResult> {
+fn result_of(
+    tool_call_id: Option<&str>,
+    content: &Value,
+    is_error: bool,
+    status: Option<&str>,
+) -> Option<PiToolResult> {
     let id = tool_call_id?.to_string();
     let images = content
         .as_array()
         .map(|blocks| blocks.iter().filter_map(pi_image_of).map(|image| image.media_type).collect())
         .unwrap_or_default();
-    Some(PiToolResult { id, text: result_text(content), error: is_error, images })
+    Some(PiToolResult {
+        id,
+        text: result_text(content),
+        error: is_error,
+        status: status.filter(|status| !status.is_empty()).map(str::to_string),
+        images,
+    })
 }
 
 /// The `index`th image of the tool result answering `tool_call_id`
@@ -745,6 +806,8 @@ fn pi_notice(entry: &Value) -> Option<ReferencePart> {
     Some(ReferencePart::Notice {
         text: text.to_string(),
         source: entry.get("customType").and_then(Value::as_str).map(str::to_string),
+    
+        id: None,
     })
 }
 
@@ -1225,6 +1288,7 @@ fn branch_text(bytes: &[u8], segments: &[PiTranscriptSegment]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::types::ReferenceToolStatus;
     use crate::remote::reference_chat::types::ReferencePartKind;
 
     /// pi's own record shape, written by the pinned runtime: `message` records on an entry tree,
@@ -1292,14 +1356,14 @@ mod tests {
 
         // a runtime notice and a compaction each open their own turn
         match parts_of(&turns[4], ReferencePartKind::Notice).first() {
-            Some(ReferencePart::Notice { text, source }) => {
+            Some(ReferencePart::Notice { text, source , ..}) => {
                 assert_eq!(text, "background job finished");
                 assert_eq!(source.as_deref(), Some("async-result"));
             }
             other => panic!("expected a notice, got {other:?}"),
         }
         match parts_of(&turns[5], ReferencePartKind::Compact).first() {
-            Some(ReferencePart::Compact { text }) => {
+            Some(ReferencePart::Compact { text , ..}) => {
                 assert_eq!(text, "Folded the earlier API discussion into a summary.");
             }
             other => panic!("expected a compaction, got {other:?}"),
@@ -1327,7 +1391,7 @@ mod tests {
         assert!(!text_of(&turns[0]).contains("# Review"));
         // the skill the runtime loaded rides the request as its own part
         assert_eq!(turns[0].parts.len(), 2, "the request then the chip");
-        let ReferencePart::Skill { skill } = &turns[0].parts[1] else {
+        let ReferencePart::Skill { skill , id: None} = &turns[0].parts[1] else {
             panic!("the second part is the skill chip, got {:?}", turns[0].parts[1].kind());
         };
         assert_eq!(skill.name, "review");
@@ -1530,5 +1594,24 @@ Style the badge.
         let parser: ReferenceHistoryParser = pi_history_parser();
         let turns = parser(ReferenceNativeHistoryKind::Pi, NORMAL).expect("readable");
         assert_eq!(turns.len(), parse_pi_history(ReferenceNativeHistoryKind::Pi, NORMAL).unwrap().len());
+    }
+
+    #[test]
+    fn native_work_pi_usage_status_and_diff_are_native_only() {
+        let text = concat!(
+            r#"{"type":"message","id":"u1","timestamp":"2026-10-06T13:00:00.000Z","message":{"role":"user","content":"usage input_tokens 9 status failed"}}"#,
+            "\n",
+            r#"{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-10-06T13:00:01.000Z","message":{"role":"assistant","model":"pi-model","usage":{"input":1,"output":2,"cacheRead":3},"content":[{"type":"toolCall","id":"c1","name":"edit","arguments":{"old_string":"a","new_string":"b"}}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"r1","parentId":"a1","timestamp":"2026-10-06T13:00:02.000Z","message":{"role":"toolResult","toolCallId":"c1","isError":false,"status":"cancelled","content":"stopped"}}"#,
+            "\n",
+        );
+        let turns = parse_pi_transcript(text.as_bytes()).expect("reads");
+        assert!(turns[0].meta.is_none());
+        assert_eq!(turns[1].meta.as_ref().unwrap().model.as_deref(), Some("pi-model"));
+        assert_eq!(turns[1].meta.as_ref().unwrap().usage.as_ref().unwrap().cache_read_tokens, Some(3));
+        let ReferencePart::Tool { status, .. } = turns[1].parts.iter().find(|part| matches!(part, ReferencePart::Tool { .. })).unwrap() else { unreachable!() };
+        assert_eq!(*status, Some(ReferenceToolStatus::Cancelled));
+        assert!(turns[1].parts.iter().any(|part| matches!(part, ReferencePart::Diff { .. })));
     }
 }

@@ -418,4 +418,175 @@ describe("MobileChatComposer", () => {
     );
     expect(screen.getByTestId("stop-button")).toHaveAttribute("title", "Stop the running turn");
   });
+
+  it("hides queue and steer while the agent is working when follow-up is not advertised", () => {
+    render(
+      <MobileChatComposer
+        onSend={vi.fn()}
+        onStop={vi.fn()}
+        isRunning
+        value="later"
+        composerCapabilities={{ models: null, options: [], slashCommands: [], followUp: { queue: false, steer: false } }}
+      />,
+    );
+    expect(screen.queryByTestId("queue-follow-up-button")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("steer-button")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("send-button")).not.toBeInTheDocument();
+    expect(screen.getByTestId("stop-button")).toBeInTheDocument();
+  });
+
+  it("offers queue and steer only for the advertised actions, and Enter queues", () => {
+    const onSend = vi.fn();
+    const onQueue = vi.fn(() => true);
+    const onSteer = vi.fn(() => true);
+    const { rerender } = render(
+      <MobileChatComposer
+        onSend={onSend}
+        onQueue={onQueue}
+        onSteer={onSteer}
+        isRunning
+        value="after this turn"
+        composerCapabilities={{ models: null, options: [], slashCommands: [], followUp: { queue: true, steer: true } }}
+      />,
+    );
+    expect(screen.getByTestId("queue-follow-up-button")).toBeInTheDocument();
+    expect(screen.getByTestId("steer-button")).toBeInTheDocument();
+    expect(screen.queryByTestId("send-button")).not.toBeInTheDocument();
+    fireEvent.keyDown(screen.getByTestId("chat-composer-textarea"), { key: "Enter", keyCode: 13 });
+    expect(onQueue).toHaveBeenCalledWith("after this turn");
+    expect(onSteer).not.toHaveBeenCalled();
+    expect(onSend).not.toHaveBeenCalled();
+
+    rerender(
+      <MobileChatComposer
+        onSend={onSend}
+        onQueue={onQueue}
+        onSteer={onSteer}
+        isRunning
+        value="now"
+        composerCapabilities={{ models: null, options: [], slashCommands: [], followUp: { queue: false, steer: true } }}
+      />,
+    );
+    expect(screen.queryByTestId("queue-follow-up-button")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("steer-button"));
+    expect(onSteer).toHaveBeenCalledWith("now");
+  });
+
+  it("shows a queued row and cancels it only before delivery", () => {
+    const onCancelQueued = vi.fn();
+    render(
+      <MobileChatComposer
+        onSend={vi.fn()}
+        queuedMessages={[
+          { id: "q1", text: "first", ownerId: "o", epoch: "1", phase: "queued", requestId: null },
+          { id: "q2", text: "second", ownerId: "o", epoch: "1", phase: "unknown", requestId: "r2" },
+        ]}
+        onCancelQueued={onCancelQueued}
+      />,
+    );
+    expect(screen.getByTestId("queued-follow-up-q1")).toHaveTextContent("first");
+    expect(screen.getByTestId("queued-follow-up-q2")).toHaveTextContent("Not confirmed");
+    fireEvent.click(screen.getByTestId("queued-follow-up-cancel-q1"));
+    expect(onCancelQueued).toHaveBeenCalledWith("q1");
+    expect(screen.getByTestId("queued-follow-up-cancel-q2")).toBeDisabled();
+  });
+});
+
+const commandCapabilities = {
+  models: {
+    current: "sonnet",
+    choices: [
+      { id: "sonnet", label: "Sonnet", efforts: ["low", "high"] },
+      { id: "opus", label: "Opus", efforts: [] },
+    ],
+    apply: "command" as const,
+  },
+  options: [
+    { id: "thinking", label: "Thinking", values: ["on", "off"], current: "off", apply: "command" as const },
+    { id: "theme", label: "Theme", values: ["dark"], current: "dark", apply: "start-only" as const },
+  ],
+  slashCommands: [{ name: "compact", description: "Compact the transcript" }],
+  followUp: { queue: false, steer: false },
+};
+
+describe("composer capabilities and dictation", () => {
+  afterEach(() => {
+    cleanup();
+    delete (window as { SpeechRecognition?: unknown }).SpeechRecognition;
+  });
+
+  it("hides model, option, and slash controls when capabilities are absent or empty", () => {
+    const { rerender } = render(<MobileChatComposer onSend={vi.fn()} value="/compact" />);
+    expect(screen.queryByTestId("composer-model-control")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("composer-slash-list")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("dictation-mic-button")).not.toBeInTheDocument();
+    rerender(
+      <MobileChatComposer
+        onSend={vi.fn()}
+        value="/compact"
+        composerCapabilities={{ models: null, options: [], slashCommands: [], followUp: { queue: false, steer: false } }}
+      />,
+    );
+    expect(screen.queryByTestId("composer-controls")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("composer-slash-list")).not.toBeInTheDocument();
+  });
+
+  it("inserts a slash command at the caret and does not send", () => {
+    const onSend = vi.fn();
+    const onValueChange = vi.fn();
+    render(
+      <MobileChatComposer
+        onSend={onSend}
+        value="please /co"
+        onValueChange={onValueChange}
+        composerCapabilities={commandCapabilities}
+      />,
+    );
+    const textarea = screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement;
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    fireEvent.keyUp(textarea);
+    const option = screen.getByTestId("composer-slash-option-compact");
+    fireEvent.click(option);
+    expect(onSend).not.toHaveBeenCalled();
+    expect(onValueChange).toHaveBeenCalledWith("please /compact ");
+  });
+
+  it("inserts dictation at the caret and discards a late result when the target changes", () => {
+    const onSend = vi.fn();
+    const onValueChange = vi.fn();
+    const instances: Array<{ onresult: ((event: unknown) => void) | null; start: () => void; stop: () => void; abort: () => void }> = [];
+    class FakeSpeech {
+      continuous = false;
+      interimResults = false;
+      onresult: ((event: unknown) => void) | null = null;
+      onerror: ((event: unknown) => void) | null = null;
+      onend: (() => void) | null = null;
+      constructor() {
+        instances.push(this);
+      }
+      start() {}
+      stop() {}
+      abort() {}
+    }
+    (window as { SpeechRecognition?: unknown }).SpeechRecognition = FakeSpeech;
+    const view = render(
+      <MobileChatComposer onSend={onSend} onValueChange={onValueChange} value="hello" dictationFence="pane-a" />,
+    );
+    const textarea = screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement;
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    fireEvent.click(screen.getByTestId("dictation-mic-button"));
+    const handler = instances.at(-1)?.onresult;
+    expect(handler).toEqual(expect.any(Function));
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    handler?.({ resultIndex: 0, results: [{ isFinal: false, 0: { transcript: " there" }, length: 1 }] });
+    expect(onValueChange).toHaveBeenCalledWith("hello there");
+    expect(onSend).not.toHaveBeenCalled();
+    const late = instances.at(-1)?.onresult ?? handler;
+    view.rerender(
+      <MobileChatComposer onSend={onSend} onValueChange={onValueChange} value="other" dictationFence="pane-b" />,
+    );
+    late?.({ resultIndex: 0, results: [{ isFinal: true, 0: { transcript: "nope" }, length: 1 }] });
+    expect(onValueChange).not.toHaveBeenCalledWith(expect.stringContaining("nope"));
+    expect(onSend).not.toHaveBeenCalled();
+  });
 });

@@ -15,11 +15,13 @@ import {
   RemoteApp,
   chatDaemonEpochFromRows,
   chatProviderSessionId,
+  continuationCreateDisposition,
   parseChatGatewayIdentity,
 } from "./RemoteApp";
 import { referenceDrafts } from "./chat/referenceDraft";
 import { referenceQueues } from "./chat/referenceQueue";
 import type { ReferenceTargetRef } from "./chat/referenceTypes";
+import { bindReferencePayloadRoute } from "./chat/referencePayload";
 
 vi.mock("./RemoteTerminal", () => ({
   RemoteTerminal: ({
@@ -122,6 +124,8 @@ interface HarnessCall {
   url: string;
   method: string;
   body: unknown;
+  authorization?: string | null;
+  signal?: AbortSignal;
 }
 
 interface Harness {
@@ -1171,6 +1175,7 @@ describe("reference chat lane (task 12)", () => {
       referenceHostId: null,
       referenceOwnerId: null,
       machineId: null,
+      capabilities: [],
     });
     // a non-canonical or non-string epoch is not an incarnation this route could compare
     expect(parseChatGatewayIdentity({ daemonEpoch: "007" })).toBeNull();
@@ -1183,6 +1188,7 @@ describe("reference chat lane (task 12)", () => {
       referenceHostId: "named-host",
       referenceOwnerId: null,
       machineId: "mach-1",
+      capabilities: [],
     });
     // the machine identity is never promoted to the host id
     expect(parseChatGatewayIdentity({ daemonEpoch: "5", machineId: "mach-1" })!.referenceHostId).toBeNull();
@@ -1286,7 +1292,17 @@ function installLane(route: LaneRoute = () => undefined): HarnessCall[] {
           body = init.body;
         }
       }
-      const call = { url, method, body };
+      const headers = init?.headers;
+      let authorization: string | null = null;
+      if (headers instanceof Headers) authorization = headers.get("Authorization");
+      else if (Array.isArray(headers)) {
+        const found = headers.find(([name]) => name.toLowerCase() === "authorization");
+        authorization = found ? String(found[1]) : null;
+      } else if (headers) {
+        const record = headers as Record<string, string>;
+        authorization = record.Authorization ?? record.authorization ?? null;
+      }
+      const call = { url, method, body, authorization, signal: init?.signal ?? undefined };
       calls.push(call);
       const routed = route(call);
       if (routed) return routed;
@@ -1392,6 +1408,13 @@ describe("reference chat lane review fixes", () => {
     cleanup();
     localStorage.clear();
     vi.unstubAllGlobals();
+    // Outcome-unknown holds live on the draft singleton, not in storage. A test that
+    // leaves one would make every later begin() refuse, which looks like a timeout.
+    for (const backendSessionId of [SESSION_ID, SECOND_SESSION_ID]) {
+      referenceDrafts.end({
+        target: { hostId: "local", ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH, backendSessionId },
+      });
+    }
   });
 
   it("acknowledges the current chat again after a pushed screen refresh without reopening it", async () => {
@@ -3552,10 +3575,18 @@ describe("reference chat lane review fixes", () => {
       };
       const ended = deferred<void>();
       let sending = false;
+      const unknownOutcome =
+        result === "fetch-lost" || result === "body-truncated" || result === "invalid-envelope";
       const unsubscribe = referenceDrafts.subscribe(() => {
         const draft = referenceDrafts.read(target);
         if (draft.sending) sending = true;
-        else if (sending) ended.resolve();
+        // Lost, truncated, and unreadable submit bodies are outcome-unknown. The draft
+        // stays sending and held, so settlement is the hold, not sending going false.
+        if (unknownOutcome) {
+          if (sending && referenceDrafts.isUnknownHeld(target)) ended.resolve();
+          return;
+        }
+        if (sending && !draft.sending) ended.resolve();
       });
       try {
         const dispatched = bounded(arrived.promise);
@@ -3589,6 +3620,7 @@ describe("reference chat lane review fixes", () => {
         expect(screen.getByText("B0")).toBeInTheDocument();
       } finally {
         unsubscribe();
+        referenceDrafts.end(target);
       }
     },
   );
@@ -3624,5 +3656,1379 @@ describe("reference chat lane review fixes", () => {
     await drainSettledResponses();
 
     expect(savedDrafts().some((text) => text.includes("@notes.txt"))).toBe(false);
+  });
+
+  /** Resolves when the composer matches, or immediately if it already does. Armed before the trigger. */
+  function whenComposer(matches: () => boolean, label: string): Promise<void> {
+    if (matches()) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        observer.disconnect();
+        reject(new Error(label));
+      }, 2000);
+      const observer = new MutationObserver(() => {
+        if (!matches()) return;
+        clearTimeout(timer);
+        observer.disconnect();
+        resolve();
+      });
+      observer.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true });
+    });
+  }
+
+  it("T10: two Send activations before the first settles produce one POST and one request id", async () => {
+    const begin = vi.spyOn(referenceDrafts, "begin");
+    try {
+    const submit = deferred<Response>();
+    let posts = 0;
+    const firstPosted = deferred<HarnessCall>();
+    let onSubmit: (call: HarnessCall) => void = (call) => {
+      if (posts === 1) firstPosted.resolve(call);
+    };
+    const calls = installLane((call) => {
+      if (!call.url.includes("/submit")) return undefined;
+      posts += 1;
+      onSubmit(call);
+      return submit.promise;
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    const textarea = screen.getByTestId("chat-composer-textarea");
+    fireEvent.change(textarea, { target: { value: "race me" } });
+    const posted = firstPosted.promise;
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+      fireEvent.keyDown(textarea, { key: "Enter", keyCode: 13 });
+    });
+    const first = await posted;
+    expect(posts).toBe(1);
+    const firstId = (first.body as { requestId: string }).requestId;
+    expect(firstId.length).toBeGreaterThan(0);
+
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "race me follow up" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    expect(calls.filter((call) => call.url.includes("/submit") && call.method === "POST")).toHaveLength(1);
+
+    const settled = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        stop();
+        reject(new Error("in-flight send did not settle"));
+      }, 2000);
+      const stop = referenceDrafts.subscribe(() => {
+        if (referenceDrafts.read(begin.mock.calls[0][0]).sending) return;
+        clearTimeout(timer);
+        stop();
+        resolve();
+      });
+    });
+    await act(async () => {
+      submit.resolve(okSubmit());
+    });
+    await settled;
+    expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value).toBe("race me follow up");
+
+    const secondPosted = deferred<HarnessCall>();
+    onSubmit = (call) => {
+      if (posts === 2) secondPosted.resolve(call);
+    };
+    const secondSeen = secondPosted.promise;
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    const second = await secondSeen;
+    expect(posts).toBe(2);
+    expect((second.body as { requestId: string }).requestId).not.toBe(firstId);
+    } finally {
+      begin.mockRestore();
+    }
+  });
+
+  it("T10: a settled rejection then a manual retry creates a new request id", async () => {
+    let rejectSend = true;
+    let posts = 0;
+    const firstPosted = deferred<HarnessCall>();
+    let onSubmit: (call: HarnessCall) => void = (call) => {
+      if (posts === 1) firstPosted.resolve(call);
+    };
+    const calls = installLane((call) => {
+      if (!call.url.includes("/submit")) return undefined;
+      posts += 1;
+      onSubmit(call);
+      return rejectSend
+        ? jsonResponse({ ok: false, error: { code: "FORBIDDEN", message: "no", retryable: false } }, false, 403)
+        : okSubmit();
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    const restored = whenComposer(
+      () =>
+        (screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value === "retry me" &&
+        (screen.queryByTestId("chat-composer-warning")?.textContent ?? "").includes("can only view"),
+      "rejected draft was not restored",
+    );
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "retry me" } });
+    const firstSeen = firstPosted.promise;
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    const first = await firstSeen;
+    await restored;
+    const firstId = (first.body as { requestId: string }).requestId;
+
+    const secondPosted = deferred<HarnessCall>();
+    onSubmit = (call) => {
+      if (posts === 2) secondPosted.resolve(call);
+    };
+    rejectSend = false;
+    const secondSeen = secondPosted.promise;
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    const second = await secondSeen;
+    expect(calls.filter((call) => call.url.includes("/submit"))).toHaveLength(2);
+    expect((second.body as { requestId: string }).requestId).not.toBe(firstId);
+  });
+
+  it("T10: an outcome-unknown send is not resent across reconnect or owner handover", async () => {
+    const begin = vi.spyOn(referenceDrafts, "begin");
+    try {
+      seedSavedHost();
+      const submit = deferred<Response>();
+      let posts = 0;
+      let ownerId = REFERENCE_OWNER_ID;
+      let epoch = DAEMON_EPOCH;
+      const firstPosted = deferred<HarnessCall>();
+      let historyWatch: ((call: HarnessCall) => void) | null = null;
+      const calls = installLane((call) => {
+        historyWatch?.(call);
+        if (call.url.includes("/api/v1/capabilities")) {
+          return jsonResponse({
+            apiVersion: 1,
+            machineId: "mach-1",
+            daemonEpoch: epoch,
+            referenceOwnerId: ownerId,
+          });
+        }
+        if (!call.url.includes("/submit")) return undefined;
+        posts += 1;
+        if (posts === 1) firstPosted.resolve(call);
+        return submit.promise;
+      });
+      render(<RemoteApp />);
+      await laneReady();
+      fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "maybe sent" } });
+      const posted = firstPosted.promise;
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("send-button"));
+      });
+      await posted;
+      const held = whenComposer(() => {
+        const box = screen.queryByTestId("chat-composer-textarea") as HTMLTextAreaElement | null;
+        const warning = screen.queryByTestId("chat-composer-warning")?.textContent ?? "";
+        return box?.disabled === true && box.value.includes("maybe sent") && warning.includes("won't be sent again");
+      }, "unknown send was not held read-only");
+      await act(async () => {
+        submit.resolve(
+          jsonResponse(
+            { ok: false, error: { code: "OPERATION_OUTCOME_UNKNOWN", message: "lost", retryable: false } },
+            false,
+            409,
+          ),
+        );
+      });
+      await held;
+      expect(posts).toBe(1);
+
+      const reconnected = new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          historyWatch = null;
+          reject(new Error("reconnect did not re-read history"));
+        }, 2000);
+        historyWatch = (call) => {
+          if (!call.url.includes("/history")) return;
+          clearTimeout(timer);
+          historyWatch = null;
+          resolve();
+        };
+      });
+      await act(async () => {
+        window.dispatchEvent(new Event("online"));
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await reconnected;
+      expect(posts).toBe(1);
+
+      ownerId = "owner-pub-2";
+      epoch = "7";
+      const handed = new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          historyWatch = null;
+          reject(new Error("handover did not re-read history"));
+        }, 2000);
+        historyWatch = (call) => {
+          if (!call.url.includes("/host/mach-1/") || !call.url.includes("/history")) return;
+          clearTimeout(timer);
+          historyWatch = null;
+          resolve();
+        };
+      });
+      const stillHeld = whenComposer(() => {
+        const box = screen.queryByTestId("chat-composer-textarea") as HTMLTextAreaElement | null;
+        return box?.disabled === true && box.value.includes("maybe sent");
+      }, "handover did not keep the unknown send read-only");
+      moveTransportBase();
+      await handed;
+      await stillHeld;
+      expect(posts).toBe(1);
+      expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).disabled).toBe(true);
+      expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value).toContain("maybe sent");
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("send-button"));
+      });
+      expect(calls.filter((call) => call.url.includes("/submit"))).toHaveLength(1);
+      expect(referenceDrafts.isUnknownHeld(begin.mock.calls[0][0])).toBe(true);
+    } finally {
+      for (const [target] of begin.mock.calls) referenceDrafts.end(target);
+      begin.mockRestore();
+      remoteHostStore.reset();
+    }
+  });
+
+  function commandComposer() {
+    return {
+      models: {
+        current: "sonnet",
+        choices: [
+          { id: "sonnet", label: "Sonnet", efforts: ["low"] },
+          { id: "opus", label: "Opus", efforts: ["high"] },
+        ],
+        apply: "command",
+      },
+      options: [],
+      slashCommands: [{ name: "compact", description: "Compact" }],
+      followUp: { queue: false, steer: false },
+    };
+  }
+
+  function followUpComposer(queue: boolean, steer: boolean) {
+    return { models: null, options: [], slashCommands: [], followUp: { queue, steer } };
+  }
+
+  function workingState(activityState: string) {
+    return {
+      activeContext: {
+        ...remoteState.activeContext,
+        terminalTabs: remoteState.activeContext.terminalTabs.map((tab) => ({ ...tab, activityState })),
+      },
+    };
+  }
+
+  function seedFollowUps(messages: readonly Record<string, unknown>[]): void {
+    localStorage.setItem(
+      `ferryx.referenceChat.followUp:local|${SESSION_ID}`,
+      JSON.stringify({ version: 1, messages }),
+    );
+  }
+
+  it("T10: capability absent shows no queue or steer control while the agent is working", async () => {
+    installLane((call) => {
+      if (call.url.includes("/workspace/state")) return jsonResponse(workingState("working"));
+      if (call.url.includes("/history") && call.url.includes(SESSION_ID)) {
+        return jsonResponse(nativePage({ composer: followUpComposer(false, false) }));
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "later" } });
+    expect(screen.queryByTestId("queue-follow-up-button")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("steer-button")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("send-button")).not.toBeInTheDocument();
+    expect(screen.getByTestId("stop-button")).toBeInTheDocument();
+  });
+
+  it("T10: queued rows deliver once, in order, when the target is idle", async () => {
+    const posted: HarnessCall[] = [];
+    let activity = "idle";
+    const first = deferred<HarnessCall>();
+    const second = deferred<HarnessCall>();
+    seedFollowUps([
+      { id: "q1", text: "first", ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH, phase: "queued", requestId: null },
+      { id: "q2", text: "second", ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH, phase: "queued", requestId: null },
+    ]);
+    installLane((call) => {
+      if (call.url.includes("/workspace/state")) return jsonResponse(workingState(activity));
+      if (call.url.includes("/history") && call.url.includes(SESSION_ID)) {
+        return jsonResponse(nativePage({ composer: followUpComposer(true, false) }));
+      }
+      if (call.url.includes("/submit")) {
+        posted.push(call);
+        if (posted.length === 1) first.resolve(call);
+        if (posted.length === 2) second.resolve(call);
+        return okSubmit();
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await first.promise;
+    await drainSettledResponses();
+    // The post-send observation is still the idle read that admitted q1. q2 must not ride it.
+    expect(posted).toHaveLength(1);
+    expect((posted[0]?.body as { params: { text: string } }).params.text).toBe("first");
+
+    await waitFor(() => {
+      expect(StubWebSocket.instances.some((socket) => socket.url.includes("/events") && socket.onmessage)).toBe(true);
+    });
+    const publishActivity = async (next: string) => {
+      activity = next;
+      await act(async () => {
+        for (const socket of StubWebSocket.instances) {
+          if (!socket.url.includes("/events") || !socket.onmessage) continue;
+          socket.onmessage({
+            data: JSON.stringify({
+              event: "remote_active_selection_changed",
+              payload: { workspaceId: "ferryx", worktreeSlug: "main", tabId: "tab-main" },
+            }),
+          } as MessageEvent);
+        }
+      });
+    };
+
+    await publishActivity("waiting");
+    expect(await screen.findByText("Needs approval")).toBeInTheDocument();
+    await drainSettledResponses();
+    expect(posted).toHaveLength(1);
+
+    await publishActivity("working");
+    expect(await screen.findByText("Working")).toBeInTheDocument();
+    await drainSettledResponses();
+    expect(posted).toHaveLength(1);
+
+    await publishActivity("idle");
+    await second.promise;
+    const bodies = posted.map((call) => (call.body as { requestId: string; params: { text: string } }));
+    expect(bodies.map((body) => body.params.text)).toEqual(["first", "second"]);
+    expect(new Set(bodies.map((body) => body.requestId)).size).toBe(2);
+    await drainSettledResponses();
+    expect(posted).toHaveLength(2);
+  });
+
+  it("T10: a waiting pane holds the queue", async () => {
+    const calls = installLane((call) => {
+      if (call.url.includes("/workspace/state")) return jsonResponse(workingState("waiting"));
+      if (call.url.includes("/history") && call.url.includes(SESSION_ID)) {
+        return jsonResponse(nativePage({ composer: followUpComposer(true, false) }));
+      }
+      return undefined;
+    });
+    seedFollowUps([
+      { id: "q1", text: "held while waiting", ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH, phase: "queued", requestId: null },
+    ]);
+    render(<RemoteApp />);
+    expect(await screen.findByText("Needs approval")).toBeInTheDocument();
+    await laneReady();
+    await drainSettledResponses();
+    expect(calls.some((call) => call.url.includes("/submit"))).toBe(false);
+    expect(screen.getByTestId("queued-follow-up-q1")).toHaveTextContent("held while waiting");
+  });
+
+  async function republishHistory(): Promise<void> {
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+  }
+
+  it("T10: a closed assistant tail releases the next row while activity stays idle", async () => {
+    const posted: HarnessCall[] = [];
+    const first = deferred<HarnessCall>();
+    const second = deferred<HarnessCall>();
+    let history = nativePage({ composer: followUpComposer(true, false) });
+    seedFollowUps([
+      { id: "q1", text: "first", ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH, phase: "queued", requestId: null },
+      { id: "q2", text: "second", ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH, phase: "queued", requestId: null },
+    ]);
+    installLane((call) => {
+      if (call.url.includes("/workspace/state")) return jsonResponse(workingState("idle"));
+      if (call.url.includes("/history") && call.url.includes(SESSION_ID)) return jsonResponse(history);
+      if (call.url.includes("/submit")) {
+        posted.push(call);
+        if (posted.length === 1) first.resolve(call);
+        if (posted.length === 2) second.resolve(call);
+        return okSubmit();
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await first.promise;
+    await drainSettledResponses();
+    expect(posted).toHaveLength(1);
+
+    history = nativePage({
+      composer: followUpComposer(true, false),
+      turns: [
+        { id: "u-q1", role: "user", parts: [{ kind: "text", text: "first" }], startedAt: "2026-10-06T00:00:02Z" },
+        {
+          id: "a-answered",
+          role: "assistant",
+          parts: [
+            {
+              kind: "tool",
+              name: "read",
+              summary: "Read the queued file",
+              input: "",
+              output: "done",
+              callId: "c-answered",
+              status: "completed",
+            },
+            { kind: "text", text: "Answered the first queued turn" },
+          ],
+          startedAt: "2026-10-06T00:00:03Z",
+        },
+      ],
+    });
+    await republishHistory();
+    expect(await screen.findByText("Answered the first queued turn")).toBeInTheDocument();
+    await second.promise;
+    await drainSettledResponses();
+    expect(posted.map((call) => (call.body as { params: { text: string } }).params.text)).toEqual(["first", "second"]);
+    expect(posted).toHaveLength(2);
+  });
+
+  it("T10: an assistant tail that ends in a tool result does not release the next row", async () => {
+    const posted: HarnessCall[] = [];
+    const first = deferred<HarnessCall>();
+    let history = nativePage({ composer: followUpComposer(true, false) });
+    seedFollowUps([
+      { id: "q1", text: "first", ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH, phase: "queued", requestId: null },
+      { id: "q2", text: "second", ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH, phase: "queued", requestId: null },
+    ]);
+    installLane((call) => {
+      if (call.url.includes("/workspace/state")) return jsonResponse(workingState("idle"));
+      if (call.url.includes("/history") && call.url.includes(SESSION_ID)) return jsonResponse(history);
+      if (call.url.includes("/submit")) {
+        posted.push(call);
+        if (posted.length === 1) first.resolve(call);
+        return okSubmit();
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await first.promise;
+    await drainSettledResponses();
+    expect(posted).toHaveLength(1);
+
+    history = nativePage({
+      composer: followUpComposer(true, false),
+      turns: [
+        { id: "u-q1", role: "user", parts: [{ kind: "text", text: "first" }], startedAt: "2026-10-06T00:00:02Z" },
+        {
+          id: "a-between-calls",
+          role: "assistant",
+          parts: [{
+            kind: "tool",
+            name: "read",
+            summary: "Read between model calls",
+            input: "",
+            output: "partial",
+            callId: "c-between",
+            status: "completed",
+          }],
+          startedAt: "2026-10-06T00:00:03Z",
+        },
+      ],
+    });
+    await republishHistory();
+    expect(await screen.findByText("Read between model calls")).toBeInTheDocument();
+    await drainSettledResponses();
+    expect(posted).toHaveLength(1);
+    expect(screen.getByTestId("queued-follow-up-q2")).toHaveTextContent("second");
+  });
+
+  it("T10: a rejected row does not let the next row go first on the same observation", async () => {
+    const posted: HarnessCall[] = [];
+    const first = deferred<HarnessCall>();
+    seedFollowUps([
+      { id: "q1", text: "first", ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH, phase: "queued", requestId: null },
+      { id: "q2", text: "second", ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH, phase: "queued", requestId: null },
+    ]);
+    installLane((call) => {
+      if (call.url.includes("/workspace/state")) return jsonResponse(workingState("idle"));
+      if (call.url.includes("/history") && call.url.includes(SESSION_ID)) {
+        return jsonResponse(nativePage({ composer: followUpComposer(true, false) }));
+      }
+      if (call.url.includes("/submit")) {
+        posted.push(call);
+        if (posted.length === 1) first.resolve(call);
+        return jsonResponse({ ok: false, error: { code: "INVALID_REQUEST", message: "no", retryable: false } }, false, 400);
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await first.promise;
+    await waitFor(() => {
+      expect((screen.getByTestId("chat-composer-textarea") as HTMLTextAreaElement).value).toBe("first");
+    });
+    await drainSettledResponses();
+    await drainSettledResponses();
+    expect(posted).toHaveLength(1);
+    expect(screen.getByTestId("queued-follow-up-q2")).toHaveTextContent("second");
+  });
+
+  it("T10: a submitted user tail does not release the next row while activity stays idle", async () => {
+    const posted: HarnessCall[] = [];
+    const first = deferred<HarnessCall>();
+    let history = nativePage({ composer: followUpComposer(true, false) });
+    seedFollowUps([
+      { id: "q1", text: "first", ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH, phase: "queued", requestId: null },
+      { id: "q2", text: "second", ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH, phase: "queued", requestId: null },
+    ]);
+    installLane((call) => {
+      if (call.url.includes("/workspace/state")) return jsonResponse(workingState("idle"));
+      if (call.url.includes("/history") && call.url.includes(SESSION_ID)) return jsonResponse(history);
+      if (call.url.includes("/submit")) {
+        posted.push(call);
+        if (posted.length === 1) first.resolve(call);
+        return okSubmit();
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await first.promise;
+    await drainSettledResponses();
+    expect(posted).toHaveLength(1);
+
+    history = nativePage({
+      composer: followUpComposer(true, false),
+      turns: [
+        {
+          id: "u-submitted",
+          role: "user",
+          parts: [{ kind: "text", text: "submitted and unanswered" }],
+          startedAt: "2026-10-06T00:00:04Z",
+        },
+      ],
+    });
+    await republishHistory();
+    expect(await screen.findByText("submitted and unanswered")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText("The parser now streams line by line.")).not.toBeInTheDocument();
+    });
+    await drainSettledResponses();
+    expect(posted).toHaveLength(1);
+    expect(screen.getByTestId("queued-follow-up-q2")).toHaveTextContent("second");
+  });
+
+  it("T10: cancel before delivery removes the row and does not post it", async () => {
+    const history = deferred<Response>();
+    const calls = installLane((call) => {
+      if (call.url.includes("/workspace/state")) return jsonResponse(workingState("idle"));
+      if (call.url.includes("/history") && call.url.includes(SESSION_ID)) return history.promise;
+      return undefined;
+    });
+    seedFollowUps([
+      { id: "q1", text: "do not send", ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH, phase: "queued", requestId: null },
+    ]);
+    render(<RemoteApp />);
+    fireEvent.click(await screen.findByTestId("queued-follow-up-cancel-q1"));
+    expect(screen.queryByTestId("queued-follow-up-q1")).not.toBeInTheDocument();
+    history.resolve(jsonResponse(nativePage({ composer: followUpComposer(true, false) })));
+    await laneReady();
+    await drainSettledResponses();
+    expect(calls.some((call) => call.url.includes("/submit"))).toBe(false);
+  });
+
+  it("T10: an unknown queued delivery holds the queue and is not posted again", async () => {
+    const first = deferred<HarnessCall>();
+    let posts = 0;
+    installLane((call) => {
+      if (call.url.includes("/workspace/state")) return jsonResponse(workingState("idle"));
+      if (call.url.includes("/history") && call.url.includes(SESSION_ID)) {
+        return jsonResponse(nativePage({ composer: followUpComposer(true, true) }));
+      }
+      if (call.url.includes("/submit")) {
+        posts += 1;
+        if (posts === 1) first.resolve(call);
+        return jsonResponse(
+          { ok: false, error: { code: "OPERATION_OUTCOME_UNKNOWN", message: "lost", retryable: false } },
+          false,
+          409,
+        );
+      }
+      return undefined;
+    });
+    seedFollowUps([
+      { id: "q1", text: "maybe", ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH, phase: "queued", requestId: null },
+      { id: "q2", text: "later", ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH, phase: "queued", requestId: null },
+    ]);
+    const seen = first.promise;
+    render(<RemoteApp />);
+    await seen;
+    const held = whenComposer(
+      () => screen.queryByTestId("queued-follow-up-q1")?.textContent?.includes("Not confirmed") === true,
+      "unknown queued row was not held",
+    );
+    await held;
+    cleanup();
+    render(<RemoteApp />);
+    await laneReady();
+    await drainSettledResponses();
+    expect(posts).toBe(1);
+    expect(screen.getByTestId("queued-follow-up-q1")).toHaveTextContent("Not confirmed");
+    expect(screen.getByTestId("queued-follow-up-q2")).toHaveTextContent("later");
+  });
+
+  it("T10: an owner change drops queued rows and says so", async () => {
+    const calls = installLane((call) => {
+      if (call.url.includes("/workspace/state")) return jsonResponse(workingState("idle"));
+      if (call.url.includes("/history") && call.url.includes(SESSION_ID)) {
+        return jsonResponse(nativePage({ composer: followUpComposer(true, false) }));
+      }
+      return undefined;
+    });
+    seedFollowUps([
+      { id: "q1", text: "stale", ownerId: "owner-old", epoch: DAEMON_EPOCH, phase: "queued", requestId: null },
+    ]);
+    render(<RemoteApp />);
+    expect(await screen.findByText("Queued messages were dropped because this session changed owner.")).toBeInTheDocument();
+    await laneReady();
+    await drainSettledResponses();
+    expect(screen.queryByTestId("queued-follow-up-q1")).not.toBeInTheDocument();
+    expect(calls.some((call) => call.url.includes("/submit"))).toBe(false);
+  });
+
+  it("T10: steer posts once through submit when it is advertised", async () => {
+    const submit = deferred<Response>();
+    const posted: HarnessCall[] = [];
+    const first = deferred<HarnessCall>();
+    installLane((call) => {
+      if (call.url.includes("/workspace/state")) return jsonResponse(workingState("working"));
+      if (call.url.includes("/history") && call.url.includes(SESSION_ID)) {
+        return jsonResponse(nativePage({ composer: followUpComposer(false, true) }));
+      }
+      if (call.url.includes("/submit")) {
+        posted.push(call);
+        if (posted.length === 1) first.resolve(call);
+        return submit.promise;
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "steer now" } });
+    const seen = first.promise;
+    const steer = screen.getByTestId("steer-button");
+    await act(async () => {
+      fireEvent.click(steer);
+      fireEvent.click(steer);
+    });
+    const call = await seen;
+    expect(posted).toHaveLength(1);
+    expect((call.body as { params: { text: string }; requestId: string }).params.text).toBe("steer now");
+    expect((call.body as { requestId: string }).requestId.length).toBeGreaterThan(0);
+    expect(call.url).toContain("/submit");
+  });
+
+  it("hides composer controls when the page has no capabilities", async () => {
+    installLane();
+    render(<RemoteApp />);
+    await laneReady();
+    expect(screen.queryByTestId("composer-model-control")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("composer-slash-list")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("dictation-mic-button")).not.toBeInTheDocument();
+  });
+
+  it("posts one model apply and does not retry an unknown result", async () => {
+    const posted = deferred<HarnessCall>();
+    let controlPosts = 0;
+    installLane((call) => {
+      if (call.method === "POST" && call.url.includes("/control")) {
+        controlPosts += 1;
+        posted.resolve(call);
+        return jsonResponse({ ok: true, data: { outcome: "unknown" } });
+      }
+      if (call.url.includes("/history") && call.url.includes(SESSION_ID)) {
+        return jsonResponse(nativePage({ composer: commandComposer() }));
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    const select = await screen.findByTestId("composer-model-control");
+    const seen = posted.promise;
+    fireEvent.change(select, { target: { value: "opus" } });
+    const call = await seen;
+    expect(call.body).toMatchObject({
+      controlId: "model",
+      valueId: "opus",
+      registryId: "claude",
+      target: { backendSessionId: SESSION_ID, ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH },
+    });
+    expect(await screen.findByTestId("composer-control-notice")).toHaveAttribute("data-status", "unknown");
+    fireEvent.change(select, { target: { value: "opus" } });
+    await drainSettledResponses();
+    expect(controlPosts).toBe(1);
+  });
+
+  it.each([
+    ["applied", { ok: true, data: { outcome: "accepted" } }, 200],
+    ["rejected", { ok: false, error: { code: "NOT_FOUND", message: "missing" } }, 404],
+  ] as const)("shows a %s control result without sending the draft", async (status, body, httpStatus) => {
+    const posted = deferred<HarnessCall>();
+    const calls = installLane((call) => {
+      if (call.method === "POST" && call.url.includes("/control")) {
+        posted.resolve(call);
+        return jsonResponse(body, httpStatus < 400, httpStatus);
+      }
+      if (call.url.includes("/history") && call.url.includes(SESSION_ID)) {
+        return jsonResponse(nativePage({ composer: commandComposer() }));
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    const seen = posted.promise;
+    fireEvent.change(await screen.findByTestId("composer-model-control"), { target: { value: "opus" } });
+    await seen;
+    expect(await screen.findByTestId("composer-control-notice")).toHaveAttribute("data-status", status);
+    expect(calls.filter((call) => call.method === "POST" && call.url.includes("/submit"))).toHaveLength(0);
+  });
+
+  it("inserts a slash suggestion without submitting", async () => {
+    const calls = installLane((call) => {
+      if (call.url.includes("/history") && call.url.includes(SESSION_ID)) {
+        return jsonResponse(nativePage({ composer: commandComposer() }));
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    const textarea = await screen.findByTestId("chat-composer-textarea") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "/co" } });
+    textarea.setSelectionRange(3, 3);
+    fireEvent.keyUp(textarea);
+    fireEvent.click(await screen.findByTestId("composer-slash-option-compact"));
+    await waitFor(() => expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("/compact "));
+    expect(calls.filter((call) => call.method === "POST" && call.url.includes("/submit"))).toHaveLength(0);
+  });
+
+  it("forwards agentContinue startup, selects the new pane, and leaves the source draft", async () => {
+    const created = deferred<HarnessCall>();
+    const continued = deferred<void>();
+    let createPosts = 0;
+    installLane((call) => {
+      if (call.url.includes("/api/v1/capabilities")) {
+        return jsonResponse({
+          apiVersion: 1,
+          machineId: "mach-1",
+          daemonEpoch: DAEMON_EPOCH,
+          referenceOwnerId: REFERENCE_OWNER_ID,
+          capabilities: ["terminalContinueV1"],
+        });
+      }
+      if (call.method === "GET" && call.url.includes("/api/v1/sessions")) {
+        return jsonResponse({
+          sessions: [{
+            sessionId: SESSION_ID,
+            daemonEpoch: DAEMON_EPOCH,
+            running: true,
+            agentType: "claude",
+            providerSession: { key: "session_id", id: "prov-1" },
+          }],
+        });
+      }
+      if (call.method === "POST" && call.url.includes("/api/v1/sessions")) {
+        createPosts += 1;
+        created.resolve(call);
+        return jsonResponse({ sessionId: "sess-continued", daemonEpoch: DAEMON_EPOCH, running: true });
+      }
+      if (call.url.includes("/history") && call.url.includes("sess-continued")) {
+        continued.resolve();
+        return jsonResponse(nativePage({
+          turns: [{ role: "user", parts: [{ kind: "text", text: "CONTINUED_PANE" }], startedAt: "2026-10-06T00:00:00Z" }],
+        }));
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    const textarea = await screen.findByTestId("chat-composer-textarea") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "source draft" } });
+    const sourceTarget: ReferenceTargetRef = {
+      target: { hostId: "local", ownerId: REFERENCE_OWNER_ID, epoch: DAEMON_EPOCH, backendSessionId: SESSION_ID },
+    };
+    await waitFor(() => expect(referenceDrafts.read(sourceTarget).text).toBe("source draft"));
+    const started = created.promise;
+    const selected = continued.promise;
+    fireEvent.click(await screen.findByTestId("continue-in-new-pane-fork"));
+    const call = await started;
+    expect(call.body).toMatchObject({
+      inheritFromSessionId: null,
+      startup: {
+        kind: "agentContinue",
+        mode: "fork",
+        agentType: "claude",
+        providerSession: { key: "session_id", id: "prov-1" },
+      },
+    });
+    expect(JSON.stringify(call.body)).not.toContain("argv");
+    await selected;
+    expect(await screen.findByText("CONTINUED_PANE")).toBeInTheDocument();
+    expect(referenceDrafts.read(sourceTarget).text).toBe("source draft");
+    expect(screen.getByTestId("chat-composer-textarea")).not.toHaveValue("source draft");
+    expect(createPosts).toBe(1);
+  });
+
+  it("offers resume for an exited published desktop tab and posts mode resume once", async () => {
+    const created = deferred<HarnessCall>();
+    let createPosts = 0;
+    installLane((call) => {
+      if (call.url.includes("/api/v1/capabilities")) {
+        return jsonResponse({
+          apiVersion: 1,
+          machineId: "mach-1",
+          daemonEpoch: DAEMON_EPOCH,
+          referenceOwnerId: REFERENCE_OWNER_ID,
+          capabilities: ["terminalContinueV1"],
+        });
+      }
+      if (call.url.includes("/api/v1/workspace/state")) {
+        return jsonResponse({
+          activeContext: {
+            workspaceId: "ferryx",
+            worktreeSlug: "main",
+            worktreeLabel: "main",
+            sessionId: SESSION_ID,
+            tabId: "tab-main",
+            terminalTabs: [{
+              id: "tab-main",
+              sessionId: SESSION_ID,
+              label: "claude",
+              agentType: "claude",
+              running: false,
+              providerSession: { key: "session_id", id: "prov-exited" },
+            }],
+          },
+          sessions: [],
+        });
+      }
+      if (call.method === "GET" && call.url.includes("/api/v1/sessions") && !call.url.includes("/api/v1/sessions/")) {
+        return jsonResponse({ sessions: [] });
+      }
+      if (call.url.includes("/history")) {
+        return jsonResponse({ error: { code: "NOT_FOUND", message: "no live session has that id on this host" } }, false, 404);
+      }
+      if (call.method === "POST" && call.url.includes("/api/v1/sessions")) {
+        createPosts += 1;
+        created.resolve(call);
+        return jsonResponse({ sessionId: "sess-resumed", daemonEpoch: DAEMON_EPOCH, running: true });
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    const started = created.promise;
+    fireEvent.click(await screen.findByTestId("continue-in-new-pane-resume"));
+    expect(screen.queryByTestId("continue-unavailable-resume")).not.toBeInTheDocument();
+    const call = await started;
+    expect(call.body).toMatchObject({
+      startup: {
+        kind: "agentContinue",
+        mode: "resume",
+        agentType: "claude",
+        providerSession: { key: "session_id", id: "prov-exited" },
+      },
+    });
+    await drainSettledResponses();
+    expect(createPosts).toBe(1);
+  });
+
+  it("does not retry a continuation create whose outcome is unknown", async () => {
+    let createPosts = 0;
+    const created = deferred<void>();
+    installLane((call) => {
+      if (call.url.includes("/api/v1/capabilities")) {
+        return jsonResponse({
+          apiVersion: 1,
+          machineId: "mach-1",
+          daemonEpoch: DAEMON_EPOCH,
+          referenceOwnerId: REFERENCE_OWNER_ID,
+          capabilities: ["terminalContinueV1"],
+        });
+      }
+      if (call.method === "GET" && call.url.includes("/api/v1/sessions")) {
+        return jsonResponse({
+          sessions: [{
+            sessionId: SESSION_ID,
+            daemonEpoch: DAEMON_EPOCH,
+            running: true,
+            agentType: "claude",
+            providerSession: { key: "session_id", id: "prov-1" },
+          }],
+        });
+      }
+      if (call.method === "POST" && call.url.includes("/api/v1/sessions")) {
+        createPosts += 1;
+        created.resolve();
+        return jsonResponse({ error: { code: "TIMEOUT", message: "timed out" } }, false, 504);
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    const started = created.promise;
+    fireEvent.click(await screen.findByTestId("continue-in-new-pane-fork"));
+    await started;
+    expect(await screen.findByTestId("composer-control-notice")).toHaveAttribute("data-status", "unknown");
+    fireEvent.click(screen.getByTestId("continue-in-new-pane-fork"));
+    await drainSettledResponses();
+    expect(createPosts).toBe(1);
+    expect(screen.getByText("The parser now streams line by line.")).toBeInTheDocument();
+  });
+
+  it("holds a 409 OPERATION_OUTCOME_UNKNOWN continuation and does not post it again", async () => {
+    const lane = installContinuationCreate("prov-outcome-unknown", () => jsonResponse(
+      { error: { code: "OPERATION_OUTCOME_UNKNOWN", message: "the writer did not answer" } },
+      false,
+      409,
+    ));
+    render(<RemoteApp />);
+    await laneReady();
+    fireEvent.click(await screen.findByTestId("continue-in-new-pane-fork"));
+    expect(await screen.findByTestId("composer-control-notice")).toHaveAttribute("data-status", "unknown");
+    expect(screen.getByTestId("continue-in-new-pane-fork")).toBeDisabled();
+    fireEvent.click(screen.getByTestId("continue-in-new-pane-fork"));
+    await drainSettledResponses();
+    expect(lane.posts()).toBe(1);
+  });
+
+  it("rejects a 409 continuation whose structured code is not OPERATION_OUTCOME_UNKNOWN", async () => {
+    const lane = installContinuationCreate("prov-cwd-mismatch", () => jsonResponse(
+      { error: { code: "AGENT_CWD_MISMATCH", message: "OPERATION_OUTCOME_UNKNOWN" } },
+      false,
+      409,
+    ));
+    render(<RemoteApp />);
+    await laneReady();
+    fireEvent.click(await screen.findByTestId("continue-in-new-pane-fork"));
+    expect(await screen.findByTestId("composer-control-notice")).toHaveAttribute("data-status", "rejected");
+    await drainSettledResponses();
+    expect(screen.getByTestId("continue-in-new-pane-fork")).toBeEnabled();
+    fireEvent.click(screen.getByTestId("continue-in-new-pane-fork"));
+    await drainSettledResponses();
+    expect(lane.posts()).toBe(2);
+  });
+
+  it("selects the new pane when continuation create answers 201", async () => {
+    const lane = installContinuationCreate("prov-created", () => jsonResponse(
+      { sessionId: "sess-continued", daemonEpoch: DAEMON_EPOCH, running: true },
+      true,
+      201,
+    ));
+    render(<RemoteApp />);
+    await laneReady();
+    fireEvent.click(await screen.findByTestId("continue-in-new-pane-fork"));
+    expect(await screen.findByText("CONTINUED_PANE")).toBeInTheDocument();
+    expect(screen.queryByTestId("composer-control-notice")).toBeNull();
+    expect(lane.posts()).toBe(1);
+  });
+});
+
+function installContinuationCreate(providerSessionId: string, create: () => Response): { posts: () => number } {
+  let createPosts = 0;
+  installLane((call) => {
+    if (call.url.includes("/api/v1/capabilities")) {
+      return jsonResponse({
+        apiVersion: 1,
+        machineId: "mach-1",
+        daemonEpoch: DAEMON_EPOCH,
+        referenceOwnerId: REFERENCE_OWNER_ID,
+        capabilities: ["terminalContinueV1"],
+      });
+    }
+    if (call.method === "GET" && call.url.includes("/api/v1/sessions")) {
+      return jsonResponse({
+        sessions: [{
+          sessionId: SESSION_ID,
+          daemonEpoch: DAEMON_EPOCH,
+          running: true,
+          agentType: "claude",
+          providerSession: { key: "session_id", id: providerSessionId },
+        }],
+      });
+    }
+    if (call.method === "POST" && call.url.includes("/api/v1/sessions")) {
+      createPosts += 1;
+      return create();
+    }
+    if (call.url.includes("/history") && call.url.includes("sess-continued")) {
+      return jsonResponse(nativePage({
+        turns: [{ role: "user", parts: [{ kind: "text", text: "CONTINUED_PANE" }], startedAt: "2026-10-06T00:00:00Z" }],
+      }));
+    }
+    return undefined;
+  });
+  return { posts: () => createPosts };
+}
+
+
+describe("continuation create disposition", () => {
+  it("treats 409 OPERATION_OUTCOME_UNKNOWN as unknown, another 409 code as rejected, and 201 as created", () => {
+    expect(continuationCreateDisposition(409, {
+      error: { code: "OPERATION_OUTCOME_UNKNOWN", message: "the writer did not answer" },
+    })).toBe("unknown");
+    expect(continuationCreateDisposition(409, {
+      error: { code: "AGENT_CWD_MISMATCH", message: "OPERATION_OUTCOME_UNKNOWN" },
+    })).toBe("rejected");
+    expect(continuationCreateDisposition(201, {
+      sessionId: "sess-continued",
+      daemonEpoch: DAEMON_EPOCH,
+    })).toBe("created");
+  });
+});
+
+function deltaCapabilities(): Record<string, unknown> {
+  return {
+    apiVersion: 1,
+    machineId: "mach-1",
+    daemonEpoch: DAEMON_EPOCH,
+    referenceOwnerId: REFERENCE_OWNER_ID,
+    capabilities: ["referenceHistoryDeltaV1"],
+  };
+}
+
+function alignedPage(turns?: unknown[]): Record<string, unknown> {
+  return nativePage({
+    generation: "stream-1:inc-2",
+    cursor: null,
+    hasMore: false,
+    turns: turns ?? [
+      { id: "u1", role: "user", parts: [{ kind: "text", text: "what changed in the parser?" }], startedAt: "2026-10-06T00:00:00Z" },
+      { id: "a1", role: "assistant", parts: [{ kind: "text", text: "The parser now streams line by line." }], startedAt: "2026-10-06T00:00:01Z" },
+    ],
+  });
+}
+
+function historyChanged(sessionId = SESSION_ID, changeSeq = "1"): Record<string, unknown> {
+  return {
+    type: "referenceHistoryChanged",
+    target: {
+      hostId: "local",
+      ownerId: REFERENCE_OWNER_ID,
+      epoch: DAEMON_EPOCH,
+      backendSessionId: sessionId,
+    },
+    changeSeq,
+  };
+}
+
+async function historySockets(): Promise<StubWebSocket[]> {
+  await waitFor(() => {
+    expect(StubWebSocket.instances.some((socket) => socket.url.includes("/events") && socket.onmessage)).toBe(true);
+  });
+  return StubWebSocket.instances.filter((socket) => socket.url.includes("/events") && socket.onmessage);
+}
+
+async function pushHistory(frame: unknown): Promise<void> {
+  const sockets = await historySockets();
+  await act(async () => {
+    for (const socket of sockets) {
+      socket.onmessage?.({ data: JSON.stringify(frame) } as MessageEvent);
+    }
+  });
+}
+
+describe("reference history delta sync", () => {
+  beforeEach(() => {
+    StubWebSocket.instances = [];
+    localStorage.clear();
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    vi.stubGlobal("WebSocket", StubWebSocket);
+    setWidth(390);
+  });
+
+  afterEach(() => {
+    bindReferencePayloadRoute(null);
+    vi.useRealTimers();
+    cleanup();
+    localStorage.clear();
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps polling and omits after when the host does not advertise the delta capability", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const calls = installLane();
+    render(<RemoteApp />);
+    await laneReady();
+    await historySockets();
+    const before = calls.filter((call) => call.url.includes("/history")).length;
+    await pushHistory(historyChanged());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    const history = calls.filter((call) => call.url.includes("/history"));
+    expect(history.length).toBeGreaterThan(before);
+    expect(history.every((call) => !new URL(call.url, "http://harness.invalid").searchParams.has("after"))).toBe(true);
+  });
+
+  it("fetches one delta for a matching frame, replaces the open turn, and appends", async () => {
+    let historyReads = 0;
+    const calls = installLane((call) => {
+      if (call.url.includes("/api/v1/capabilities")) return jsonResponse(deltaCapabilities());
+      if (call.url.includes("/history")) {
+        historyReads += 1;
+        if (historyReads === 1) return jsonResponse(alignedPage());
+        return jsonResponse({
+          mode: "delta",
+          source: "claude-transcript",
+          generation: "stream-1:inc-2",
+          replaceFromTurnId: "a1",
+          turns: [
+            { id: "a1", role: "assistant", parts: [{ kind: "text", text: "The parser now streams tokens." }] },
+            { id: "a2", role: "assistant", parts: [{ kind: "text", text: "And it appends." }] },
+          ],
+          nextAnchor: {
+            streamId: "stream-1",
+            generation: "stream-1:inc-2",
+            anchorTurnId: "a2",
+            previousTurnFingerprint: "fp",
+          },
+          tailOpen: true,
+        });
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    const before = calls.filter((call) => call.url.includes("/history")).length;
+    await pushHistory(historyChanged());
+    expect(await screen.findByText("And it appends.")).toBeInTheDocument();
+    expect(screen.getByText("The parser now streams tokens.")).toBeInTheDocument();
+    expect(screen.queryByText("The parser now streams line by line.")).toBeNull();
+    const history = calls.filter((call) => call.url.includes("/history"));
+    expect(history.length).toBe(before + 1);
+    const after = JSON.parse(new URL(history[history.length - 1].url, "http://harness.invalid").searchParams.get("after") ?? "");
+    expect(after.anchorTurnId).toBe("a1");
+    expect(after.streamId).toBe("stream-1");
+  });
+
+  it("refetches a full page without after when the delta read resets", async () => {
+    let historyReads = 0;
+    installLane((call) => {
+      if (call.url.includes("/api/v1/capabilities")) return jsonResponse(deltaCapabilities());
+      if (!call.url.includes("/history")) return undefined;
+      historyReads += 1;
+      if (historyReads === 1) return jsonResponse(alignedPage());
+      if (new URL(call.url, "http://harness.invalid").searchParams.has("after")) {
+        return jsonResponse({
+          mode: "reset",
+          reason: "generationChanged",
+          page: alignedPage(),
+        });
+      }
+      return jsonResponse(alignedPage([
+        { id: "u1", role: "user", parts: [{ kind: "text", text: "what changed in the parser?" }] },
+        { id: "a9", role: "assistant", parts: [{ kind: "text", text: "Rebuilt from the full page." }] },
+      ]));
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    await pushHistory(historyChanged());
+    expect(await screen.findByText("Rebuilt from the full page.")).toBeInTheDocument();
+    expect(historyReads).toBe(3);
+  });
+
+  it("ignores a foreign-target frame and a malformed frame", async () => {
+    const calls = installLane((call) => {
+      if (call.url.includes("/api/v1/capabilities")) return jsonResponse(deltaCapabilities());
+      if (call.url.includes("/history")) return jsonResponse(alignedPage());
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    const before = calls.filter((call) => call.url.includes("/history")).length;
+    await pushHistory(historyChanged("sess-other"));
+    await pushHistory({ type: "referenceHistoryChanged", changeSeq: 1 });
+    await drainSettledResponses();
+    expect(calls.filter((call) => call.url.includes("/history"))).toHaveLength(before);
+  });
+
+  it("drops a stale delta after the visible target changes", async () => {
+    const held = deferred<Response>();
+    let mainReads = 0;
+    installLane((call) => {
+      if (call.url.includes("/api/v1/capabilities")) return jsonResponse(deltaCapabilities());
+      if (call.url.includes(`/reference-chat/${SESSION_ID}/history`)) {
+        mainReads += 1;
+        if (mainReads === 1) return jsonResponse(alignedPage());
+        return held.promise;
+      }
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    const started = waitFor(() => expect(mainReads).toBe(2));
+    await pushHistory(historyChanged());
+    await started;
+    await switchToSecondTab();
+    await act(async () => {
+      held.resolve(jsonResponse({
+        mode: "delta",
+        source: "claude-transcript",
+        generation: "stream-1:inc-2",
+        replaceFromTurnId: "a1",
+        turns: [{ id: "a1", role: "assistant", parts: [{ kind: "text", text: "STALE-DELTA" }] }],
+        nextAnchor: { streamId: "stream-1", generation: "stream-1:inc-2", anchorTurnId: "a1", previousTurnFingerprint: null },
+        tailOpen: true,
+      }));
+    });
+    await drainSettledResponses();
+    expect(screen.queryByText("STALE-DELTA")).toBeNull();
+    expect(screen.getByText("B0")).toBeInTheDocument();
+  });
+
+  it("keeps a single in-flight history read and one follow-up for frames that arrive during it", async () => {
+    const held = deferred<Response>();
+    const follow = deferred<Response>();
+    let mainReads = 0;
+    installLane((call) => {
+      if (call.url.includes("/api/v1/capabilities")) return jsonResponse(deltaCapabilities());
+      if (!call.url.includes(`/reference-chat/${SESSION_ID}/history`)) return undefined;
+      mainReads += 1;
+      if (mainReads === 1) return jsonResponse(alignedPage());
+      if (mainReads === 2) return held.promise;
+      return follow.promise;
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    const started = waitFor(() => expect(mainReads).toBe(2));
+    await pushHistory(historyChanged(SESSION_ID, "1"));
+    await started;
+    await pushHistory(historyChanged(SESSION_ID, "2"));
+    await pushHistory(historyChanged(SESSION_ID, "3"));
+    await drainSettledResponses();
+    expect(mainReads).toBe(2);
+    const followed = waitFor(() => expect(mainReads).toBe(3));
+    await act(async () => {
+      held.resolve(jsonResponse({
+        mode: "delta",
+        source: "claude-transcript",
+        generation: "stream-1:inc-2",
+        replaceFromTurnId: "a1",
+        turns: [{ id: "a1", role: "assistant", parts: [{ kind: "text", text: "The parser now streams line by line." }] }],
+        nextAnchor: { streamId: "stream-1", generation: "stream-1:inc-2", anchorTurnId: "a1", previousTurnFingerprint: "fp" },
+        tailOpen: true,
+      }));
+    });
+    await followed;
+    await act(async () => {
+      follow.resolve(jsonResponse(alignedPage()));
+    });
+    expect(mainReads).toBe(3);
+  });
+
+  it("shows turn meta after a meta-only update", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let historyReads = 0;
+    installLane((call) => {
+      if (!call.url.includes("/history")) return undefined;
+      historyReads += 1;
+      const assistant = {
+        role: "assistant",
+        parts: [{ kind: "text", text: "The parser now streams line by line." }],
+        startedAt: "2026-10-06T00:00:01Z",
+        ...(historyReads === 1 ? {} : { meta: { provider: "claude", model: "opus", usage: { inputTokens: 3 } } }),
+      };
+      return jsonResponse(nativePage({ turns: [
+        { role: "user", parts: [{ kind: "text", text: "what changed in the parser?" }], startedAt: "2026-10-06T00:00:00Z" },
+        assistant,
+      ] }));
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    expect(screen.queryByTestId("reference-turn-usage")).toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(await screen.findByTestId("reference-turn-usage")).toHaveTextContent("opus");
+    expect(screen.getByTestId("reference-turn-usage")).toHaveTextContent("3 in");
+  });
+
+  it("hides Load details unless the host advertises referencePayloadV1", async () => {
+    installLane((call) => {
+      if (!call.url.includes("/history")) return undefined;
+      return jsonResponse(nativePage({
+        turns: [{
+          role: "assistant",
+          startedAt: "2026-10-06T00:00:01Z",
+          parts: [
+            { kind: "text", text: "The parser now streams line by line." },
+            { kind: "diff", patch: { ref: "patch-1", byteLength: 12, digest: "abc", truncated: false } },
+          ],
+        }],
+      }));
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    expect(screen.queryByTestId("reference-load-payload")).toBeNull();
+  });
+
+  it("loads payload details once with the history bearer and aborts on target switch", async () => {
+    const calls = installLane((call) => {
+      if (call.url.includes("/api/v1/capabilities")) {
+        return jsonResponse({
+          apiVersion: 1,
+          machineId: "mach-1",
+          daemonEpoch: DAEMON_EPOCH,
+          referenceOwnerId: REFERENCE_OWNER_ID,
+          capabilities: ["referencePayloadV1"],
+        });
+      }
+      if (call.url.includes("/history")) {
+        if (call.url.includes(SECOND_SESSION_ID)) {
+          return jsonResponse(nativePage({
+            turns: [{ role: "user", parts: [{ kind: "text", text: "B0" }], startedAt: "2026-10-06T00:00:00Z" }],
+          }));
+        }
+        return jsonResponse(nativePage({
+          turns: [{
+            role: "assistant",
+            startedAt: "2026-10-06T00:00:01Z",
+            parts: [
+              { kind: "text", text: "The parser now streams line by line." },
+              { kind: "diff", patch: { ref: "patch-1", byteLength: 12, digest: "abc", truncated: false } },
+            ],
+          }],
+        }));
+      }
+      if (call.url.includes("/payload")) return new Promise(() => undefined);
+      return undefined;
+    });
+    render(<RemoteApp />);
+    await laneReady();
+    const button = await screen.findByTestId("reference-load-payload");
+    const seen = waitFor(() => {
+      expect(calls.some((call) => call.url.includes("/payload"))).toBe(true);
+    });
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    await seen;
+    const payload = calls.filter((call) => call.url.includes("/payload"));
+    expect(payload).toHaveLength(1);
+    expect(payload[0].authorization).toBe("Bearer test-token");
+    const query = new URL(payload[0].url, "http://harness.invalid").searchParams;
+    expect(query.get("ref")).toBe("patch-1");
+    expect(query.get("registryId")).toBe("claude");
+    expect(query.get("epoch")).toBe(DAEMON_EPOCH);
+    expect(query.get("ownerId")).toBe(REFERENCE_OWNER_ID);
+    expect(query.get("backendSessionId")).toBe(SESSION_ID);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("reference-load-payload"));
+    });
+    await drainSettledResponses();
+    expect(calls.filter((call) => call.url.includes("/payload"))).toHaveLength(1);
+    await switchToSecondTab();
+    expect(payload[0].signal?.aborted).toBe(true);
   });
 });

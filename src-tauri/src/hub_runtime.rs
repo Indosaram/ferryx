@@ -90,7 +90,7 @@ fn lines_of(turns: &[ReferenceTurn]) -> Vec<String> {
         .iter()
         .flat_map(|turn| {
             turn.parts.iter().filter_map(|part| match part {
-                ReferencePart::Text { text, .. } | ReferencePart::Thinking { text } => Some(text.clone()),
+                ReferencePart::Text { text, .. } | ReferencePart::Thinking { text, .. } => Some(text.clone()),
                 _ => None,
             })
         })

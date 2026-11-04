@@ -50,6 +50,11 @@ export class ReferenceDraftStore {
   private pending = new Map<string, { sent: string; edited: boolean }>();
   /** sends whose `begin` was refused because another send was in flight: no pending record */
   private overlapped = new Map<string, string[]>();
+  /**
+   * Durable-key sends whose outcome is unknown. The draft stays sending and read-only; a later
+   * begin is refused so reconnect or owner/epoch handover cannot replay them.
+   */
+  private unknownHeld = new Set<string>();
   private listeners = new Set<() => void>();
 
   constructor(private storage: () => DraftStorage = () => window.localStorage) {}
@@ -90,13 +95,30 @@ export class ReferenceDraftStore {
     this.setKey(referenceDraftKey(target), value);
   }
 
-  /** `sent`: the draft text this send carries, settled once it is acknowledged. */
+  /**
+   * Begin one send. False means another send is already in flight, or this draft is held because
+   * an earlier send's outcome is unknown: the caller must not allocate a request id or POST.
+   */
   begin(target: ReferenceTargetRef, sent?: string): boolean {
     return this.beginKey(referenceDraftKey(target), sent);
   }
 
   end(target: ReferenceTargetRef, sent?: string): void {
     this.endKey(referenceDraftKey(target), sent);
+  }
+
+  /**
+   * The send settled as outcome-unknown. Keep it held on the durable draft key (owner and epoch
+   * are not part of that key) so a handover cannot turn it into a new operation.
+   */
+  holdUnknown(target: ReferenceTargetRef): void {
+    this.unknownHeld.add(referenceDraftKey(target));
+    this.notify();
+  }
+
+  /** True while an outcome-unknown send for this draft must stay read-only and unreplayed. */
+  isUnknownHeld(target: ReferenceTargetRef): boolean {
+    return this.unknownHeld.has(referenceDraftKey(target));
   }
 
   /** Remove only the acknowledged prefix; edits within the sent text stay unsent. */
@@ -182,6 +204,7 @@ export class ReferenceDraftStore {
   }
 
   private beginKey(key: string, sent?: string): boolean {
+    if (this.unknownHeld.has(key)) return false;
     const draft = this.readKey(key);
     if (draft.sending) {
       if (sent !== undefined) this.overlapped.set(key, [...(this.overlapped.get(key) ?? []), sent]);
@@ -199,6 +222,7 @@ export class ReferenceDraftStore {
     const pending = this.pending.get(key);
     if (sent !== undefined && pending !== undefined && pending.sent !== sent) return;
     this.pending.delete(key);
+    this.unknownHeld.delete(key);
     this.drafts.set(key, { ...this.readKey(key), sending: false });
     this.notify();
   }

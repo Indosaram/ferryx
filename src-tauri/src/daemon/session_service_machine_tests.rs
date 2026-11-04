@@ -138,6 +138,41 @@ fn request(workspace: String) -> CreateSessionRequest {
         startup: Startup::Shell,
     }
 }
+
+#[test]
+fn fork_create_row_omits_source_provider_session_and_resume_keeps_it() {
+    let source = crate::daemon::protocol::AgentProviderSession {
+        launcher: None,
+        key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
+        id: "source-provider".into(),
+        transcript_path: None,
+    };
+    let fork = Startup::AgentContinue {
+        agent_type: "claude".into(),
+        provider_session: source.clone(),
+        mode: crate::daemon::protocol::ContinueMode::Fork,
+    };
+    let resume = Startup::AgentResume {
+        agent_type: "claude".into(),
+        provider_session: source.clone(),
+    };
+    let continue_resume = Startup::AgentContinue {
+        agent_type: "codex".into(),
+        provider_session: source.clone(),
+        mode: crate::daemon::protocol::ContinueMode::Resume,
+    };
+    // This is the provider_session written onto the machine createSession journal row.
+    assert_eq!(super::published_create_provider_session_for_startup(&fork), None);
+    assert_eq!(
+        super::published_create_provider_session_for_startup(&resume),
+        Some(source.clone())
+    );
+    assert_eq!(
+        super::published_create_provider_session_for_startup(&continue_resume),
+        Some(source)
+    );
+}
+
 fn target() -> RemoteTerminalTarget {
     RemoteTerminalTarget {
         machine_id: "private-machine".into(),

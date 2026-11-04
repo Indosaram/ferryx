@@ -19,6 +19,10 @@ import {
 import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { getEventCoordinates } from "@dnd-kit/utilities";
 import { Columns2, Copy, Rows2, X } from "lucide-react";
+import { continuationOutcomeUnknown, continuationUnknownHeld } from "../lib/agentResume";
+import { getContinuationAffordance } from "../lib/agentResumeAffordance";
+import type { AgentContinueMode, SpawnTerminalRequest } from "../lib/tauri";
+import { ContinueInNewPaneButtons } from "./ContinueInNewPaneButtons";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { clearPaneFlash, usePaneFlashToken } from "../lib/paneFlash";
 
@@ -175,7 +179,10 @@ export function createWorkspaceCollisionDetection(
   };
 }
 
-type SplitPaneOptions = { position?: "first" | "second" };
+type SplitPaneOptions = {
+  position?: "first" | "second";
+  startup?: SpawnTerminalRequest["startup"];
+};
 
 type TerminalSplitViewProps = {
   layout: LayoutState;
@@ -1137,6 +1144,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
 }: PaneLeafViewProps) {
   const [isHoveredTop, setIsHoveredTop] = React.useState(false);
   const [isFocusedWithin, setIsFocusedWithin] = React.useState(false);
+  const [continuationHeld, setContinuationHeld] = React.useState(false);
   const leafRef = React.useRef<HTMLDivElement | null>(null);
   const focusFrameRef = React.useRef<number | null>(null);
   const focusTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1198,6 +1206,32 @@ const PaneLeafView = React.memo(function PaneLeafView({
       ? paneSupervision(supervisor, session?.backendSessionId, supervisorNow, activity?.state === "waiting")
       : null;
   const toolbarTop = supervision ? SUPERVISOR_PANE_BAR_PX : 0;
+  const continuation = content.kind === "terminal"
+    ? getContinuationAffordance(session, {
+        sessions,
+        activityState: activity?.state,
+        terminalContinueV1: isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)
+          ? undefined
+          : true,
+      })
+    : null;
+  const continueInNewPane = (mode: AgentContinueMode) => {
+    if (!continuation || continuationHeld) return;
+    const startup = continuation.startup(mode);
+    if (!startup || continuationUnknownHeld(startup)) {
+      setContinuationHeld(true);
+      return;
+    }
+    const pending = onSplitPane(tab.id, leafId, "horizontal", { startup });
+    void Promise.resolve(pending).then(
+      () => {
+        if (continuationUnknownHeld(startup)) setContinuationHeld(true);
+      },
+      (error: unknown) => {
+        if (continuationOutcomeUnknown(error) || continuationUnknownHeld(startup)) setContinuationHeld(true);
+      },
+    );
+  };
 
   return (
     <NativeTerminalVisibilityProvider visible={tabVisible} occluded={showsDropFeedback}>
@@ -1338,6 +1372,12 @@ const PaneLeafView = React.memo(function PaneLeafView({
           ) : null}
         </div>
         <div className="ml-auto flex items-center gap-0.5">
+          <ContinueInNewPaneButtons
+            modes={continuation?.availableModes}
+            onContinue={continueInNewPane}
+            held={continuationHeld}
+            compact
+          />
           <IconButton
             label="Split pane right"
             data-shortcut={tab.kind === "terminal" || tab.kind === undefined ? "terminal.splitRight" : undefined}
@@ -1422,6 +1462,9 @@ const PaneLeafView = React.memo(function PaneLeafView({
                   onRefreshSessionIdentity={onRefreshSessionIdentity}
                   onOpenNewShell={onOpenNewShell}
                   onBackendSessionUnavailable={onBackendSessionUnavailable}
+                  continuationModes={continuation?.availableModes}
+                  onContinueInNewPane={continueInNewPane}
+                  continuationHeld={continuationHeld}
                 />
               );
             }

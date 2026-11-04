@@ -17,11 +17,12 @@
 //!
 //! Pure: it reads the bytes the resolver handed over and never resolves a session itself.
 
-use std::collections::VecDeque;
-
 use serde_json::Value;
 
-use super::history_parse::{reference_tool_input, reference_tool_summary, ReferenceTurnLog};
+use super::history_parse::{
+    reference_bounded_tool_input, reference_field_u64, reference_native_patch_body, reference_tool_input,
+    reference_tool_summary, reference_usage_counts, ReferenceTurnLog,
+};
 use super::types::{
     ReferenceHistoryParser, ReferenceNativeHistoryKind, ReferencePart, ReferenceTurn, ReferenceTurnSource,
 };
@@ -54,7 +55,6 @@ pub fn antigravity_line_opens_turn(line: &str) -> bool {
 /// Split one agy transcript into turns. A torn or unparseable line is skipped.
 pub fn parse_antigravity_transcript(text: &str) -> Vec<ReferenceTurn> {
     let mut log = ReferenceTurnLog::default();
-    let mut pending: VecDeque<String> = VecDeque::new();
     for line in text.split('\n') {
         let Ok(entry) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
@@ -67,53 +67,63 @@ pub fn parse_antigravity_transcript(text: &str) -> Vec<ReferenceTurn> {
                 if prompt.is_empty() {
                     continue;
                 }
-                pending.clear();
-                log.user(at.map(str::to_string), None, vec![ReferencePart::Text { text: prompt, phase: None }]);
+                log.user(at.map(str::to_string), None, vec![ReferencePart::Text { text: prompt, phase: None, id: None }]);
             }
             Some("SYSTEM_MESSAGE") => {
                 let message = system_message(content);
                 if message.is_empty() {
                     continue;
                 }
-                pending.clear();
                 log.user(
                     at.map(str::to_string),
                     Some(ReferenceTurnSource::Runtime),
-                    vec![ReferencePart::Notice { text: message, source: Some("SYSTEM_MESSAGE".to_string()) }],
+                    vec![ReferencePart::Notice { text: message, source: Some("SYSTEM_MESSAGE".to_string()), id: None }],
                 );
             }
             Some("PLANNER_RESPONSE") => {
                 if let Some(thinking) = entry.get("thinking").and_then(Value::as_str).filter(|text| !text.is_empty()) {
-                    log.part(at, ReferencePart::Thinking { text: thinking.to_string() });
+                    log.part(at, ReferencePart::Thinking { text: thinking.to_string(), id: None });
                 }
                 if !content.is_empty() {
-                    log.part(at, ReferencePart::Text { text: content.to_string(), phase: None });
+                    log.part(at, ReferencePart::Text { text: content.to_string(), phase: None, id: None });
                 }
-                let step = entry.get("step_index").map(Value::to_string).unwrap_or_default();
                 let calls = entry.get("tool_calls").and_then(Value::as_array);
-                for (index, call) in calls.into_iter().flatten().enumerate() {
+                for call in calls.into_iter().flatten() {
                     let Some(name) = call.get("name").and_then(Value::as_str) else {
                         continue;
                     };
-                    let key = format!("agy-{step}-{index}");
                     let args = call.get("args");
-                    log.tool(at, &key, name, reference_tool_summary(args), reference_tool_input(args));
-                    pending.push_back(key);
+                    let payload = args.cloned().unwrap_or(Value::Null);
+                    log.tool(
+                        at,
+                        "",
+                        name,
+                        reference_tool_summary(args),
+                        reference_bounded_tool_input(name, &payload, reference_tool_input(args)),
+                    );
+                    if let Some(body) = reference_native_patch_body(name, &payload) {
+                        log.push_diff(at, &body);
+                    }
                 }
+                log.annotate(
+                    ReferenceNativeHistoryKind::Antigravity,
+                    None,
+                    reference_usage_counts(
+                        reference_field_u64(&entry, "input_tokens"),
+                        reference_field_u64(&entry, "output_tokens"),
+                        reference_field_u64(&entry, "cache_read_tokens"),
+                        reference_field_u64(&entry, "cache_write_tokens"),
+                    ),
+                );
             }
             Some("GENERIC") => {
-                let failed = entry.get("error").is_some_and(|error| !error.is_null());
-                match pending.pop_front() {
-                    Some(key) => log.tool_output(at, &key, content.to_string(), failed),
-                    None if !content.is_empty() => {
-                        log.part(at, ReferencePart::Notice { text: content.to_string(), source: Some("GENERIC".to_string()) })
-                    }
-                    None => {}
+                if !content.is_empty() {
+                    log.part(at, ReferencePart::Notice { text: content.to_string(), source: Some("GENERIC".to_string()), id: None });
                 }
             }
             Some("ERROR_MESSAGE") => {
                 if let Some(error) = entry.get("error").and_then(Value::as_str).filter(|text| !text.is_empty()) {
-                    log.part(at, ReferencePart::Notice { text: error.to_string(), source: Some("ERROR_MESSAGE".to_string()) });
+                    log.part(at, ReferencePart::Notice { text: error.to_string(), source: Some("ERROR_MESSAGE".to_string()), id: None });
                 }
             }
             _ => {}
@@ -169,19 +179,24 @@ mod tests {
         assert_eq!(assistant.role, ReferenceTurnRole::Assistant);
         assert_eq!(assistant.started_at.as_deref(), Some("2026-09-26T05:55:48Z"));
         assert_eq!(assistant.ended_at.as_deref(), Some("2026-09-26T05:56:19Z"));
-        let tools: Vec<(&str, &str)> = assistant
+        let tools: Vec<&str> = assistant
             .parts
             .iter()
             .filter_map(|part| match part {
-                ReferencePart::Tool { name, output, .. } => Some((name.as_str(), output.as_str())),
+                ReferencePart::Tool { name, output, call_id, .. } => {
+                    assert!(output.is_empty(), "a result is not folded by position");
+                    assert!(call_id.is_none(), "agy records no native call id");
+                    Some(name.as_str())
+                }
                 _ => None,
             })
             .collect();
-        assert_eq!(tools.len(), 3);
-        assert_eq!(tools[0].0, "generate_image");
-        assert!(tools[0].1.contains("Using prompt:"), "{}", tools[0].1);
-        assert_eq!(tools[1].0, "run_command");
-        assert!(tools[1].1.contains("The command exited with code 0."), "{}", tools[1].1);
+        assert_eq!(tools, ["generate_image", "run_command", "run_command"]);
+        assert!(assistant.parts.iter().any(|part| matches!(
+            part,
+            ReferencePart::Notice { text, source: Some(source), .. }
+                if source == "GENERIC" && text.contains("Using prompt:")
+        )));
         assert!(matches!(assistant.parts.first(), Some(ReferencePart::Thinking { .. })));
         assert!(matches!(
             assistant.parts.last(),
@@ -193,7 +208,7 @@ mod tests {
     fn antigravity_runtime_messages_land_in_the_user_seat() {
         let turns = parse(SUBAGENT_SESSION);
         assert_eq!(turns[0].source, Some(ReferenceTurnSource::Runtime));
-        let ReferencePart::Notice { text, source } = &turns[0].parts[0] else {
+        let ReferencePart::Notice { text, source, .. } = &turns[0].parts[0] else {
             panic!("a system message is a notice: {:?}", turns[0].parts);
         };
         assert!(text.starts_with("[Message] timestamp="), "{text}");
@@ -212,7 +227,7 @@ mod tests {
         assert_eq!(turns[1].parts.len(), 2);
         assert!(turns[1].parts.iter().all(|part| matches!(
             part,
-            ReferencePart::Notice { text, source: Some(source) }
+            ReferencePart::Notice { text, source: Some(source), .. }
                 if text.contains("RESOURCE_EXHAUSTED") && source == "ERROR_MESSAGE"
         )));
     }
@@ -228,5 +243,22 @@ mod tests {
     fn antigravity_parser_refuses_another_family() {
         assert!(parse_reference_antigravity_history(ReferenceNativeHistoryKind::Copilot, TOOL_SESSION).is_err());
         assert!(parse_reference_antigravity_history(ReferenceNativeHistoryKind::Unavailable, "").is_err());
+    }
+
+    #[test]
+    fn native_work_antigravity_sums_recorded_tokens_and_ignores_prose() {
+        let turns = parse(SUBAGENT_SESSION);
+        let meta = turns[1].meta.as_ref().expect("planner records carry token fields");
+        assert_eq!(meta.usage.as_ref().unwrap().input_tokens, Some(3337 + 6137 + 7312));
+        assert_eq!(meta.usage.as_ref().unwrap().output_tokens, Some(1561 + 1067 + 30));
+        assert_eq!(meta.usage.as_ref().unwrap().cache_read_tokens, Some(0));
+        assert!(meta.usage.as_ref().unwrap().cache_write_tokens.is_none());
+        assert!(turns[1].parts.iter().all(|part| match part {
+            ReferencePart::Tool { status, .. } => !matches!(status, Some(crate::remote::reference_chat::types::ReferenceToolStatus::Completed) | Some(crate::remote::reference_chat::types::ReferenceToolStatus::Failed)),
+            _ => true,
+        }), "a step status of DONE is not a tool completion");
+        let prose = r#"{"type":"PLANNER_RESPONSE","content":"usage input_tokens 9 status failed","created_at":"2026-10-14T14:00:00Z"}"#;
+        let turns = parse(prose);
+        assert!(turns[0].meta.is_none());
     }
 }

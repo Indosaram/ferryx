@@ -414,4 +414,18 @@ describe("reference draft overlapping sends", () => {
     expect(store.settle(paneA, "fix")).toEqual({ text: "fix the test", edited: true });
     expect(store.read(paneA).text).toBe("fix the test");
   });
+
+  it("an outcome-unknown hold refuses another begin until the send is explicitly ended", () => {
+    const { store } = fixture();
+    expect(store.begin(paneA, "maybe sent")).toBe(true);
+    store.holdUnknown(paneA);
+    expect(store.isUnknownHeld(paneA)).toBe(true);
+    expect(store.read(paneA).sending).toBe(true);
+    expect(store.begin(paneA, "maybe sent")).toBe(false);
+    expect(store.begin(paneB, "other")).toBe(true);
+    store.end(paneA, "maybe sent");
+    expect(store.isUnknownHeld(paneA)).toBe(false);
+    expect(store.read(paneA).sending).toBe(false);
+    expect(store.begin(paneA, "retry after release")).toBe(true);
+  });
 });

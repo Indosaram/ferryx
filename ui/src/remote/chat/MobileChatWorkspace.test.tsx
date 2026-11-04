@@ -34,6 +34,30 @@ describe("MobileChatWorkspace", () => {
     expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("B_DRAFT_MARKER");
   });
 
+  it("forwards advertised queue and steer actions and a cancel before delivery", () => {
+    const onQueueMessage = vi.fn(() => true);
+    const onSteerMessage = vi.fn();
+    const onCancelQueued = vi.fn();
+    render(
+      <MobileChatWorkspace
+        messages={[]}
+        onSendMessage={vi.fn()}
+        isRunning
+        draft="follow up"
+        composerCapabilities={{ models: null, options: [], slashCommands: [], followUp: { queue: true, steer: false } }}
+        queuedMessages={[{ id: "q1", text: "waiting", ownerId: "o", epoch: "1", phase: "queued", requestId: null }]}
+        onQueueMessage={onQueueMessage}
+        onSteerMessage={onSteerMessage}
+        onCancelQueued={onCancelQueued}
+      />,
+    );
+    expect(screen.queryByTestId("steer-button")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("queue-follow-up-button"));
+    expect(onQueueMessage).toHaveBeenCalledWith("follow up");
+    fireEvent.click(screen.getByTestId("queued-follow-up-cancel-q1"));
+    expect(onCancelQueued).toHaveBeenCalledWith("q1");
+  });
+
   it("1. renders a quiet empty state with context line and no starter prompts", () => {
     render(
       <MobileChatWorkspace
@@ -562,6 +586,26 @@ describe("MobileChatWorkspace", () => {
     rerender(<MobileChatWorkspace messages={messages} onSendMessage={vi.fn()} />);
     expect(screen.queryByTestId("chat-empty-state")).not.toBeInTheDocument();
     expect(screen.queryByTestId("chat-empty-starter")).not.toBeInTheDocument();
+  });
+
+  it("hides composer controls without capabilities and shows typed continuation reasons", () => {
+    const onContinue = vi.fn();
+    render(
+      <MobileChatWorkspace
+        messages={[]}
+        onSendMessage={vi.fn()}
+        continuationOffers={[
+          { mode: "fork", available: true, reason: null },
+          { mode: "resume", available: false, reason: "liveClaim" },
+        ]}
+        onContinueInNewPane={onContinue}
+      />,
+    );
+    expect(screen.queryByTestId("composer-model-control")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("continue-in-new-pane-fork"));
+    expect(onContinue).toHaveBeenCalledWith("fork");
+    expect(screen.getByTestId("continue-unavailable-resume")).toHaveAttribute("data-reason", "liveClaim");
+    expect(screen.queryByTestId("continue-in-new-pane-resume")).not.toBeInTheDocument();
   });
 });
 

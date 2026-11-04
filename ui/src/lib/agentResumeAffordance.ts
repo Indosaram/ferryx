@@ -1,11 +1,15 @@
 import {
   agentProviderSessionsEqual,
+  buildAgentContinueStartup,
   buildResumeArgv,
   canCaptureAuthoritativeProviderSession,
   canResumeAgent,
   normalizeAgentProviderSession,
+  verifiedContinuationModes,
 } from "./agentResume";
+import { isPairedWorkspaceId, isRemoteWorkspaceId } from "./remoteProject";
 import { isStandbyBackendSessionId } from "./sessionLifecycle";
+import type { AgentContinueMode, AgentContinueStartup } from "./tauri";
 import type {
   AgentProviderSession,
   ReconnectLifecycle,
@@ -244,4 +248,143 @@ export function collectResumableAgentPanes(
     }
   }
   return result;
+}
+
+/** Why a continuation mode is hidden. There is no stop reason: continuation never stops the source. */
+export const CONTINUATION_UNAVAILABLE_REASONS = [
+  "sourceWorking",
+  "liveClaim",
+  "providerUnsupported",
+  "missingNativeHistory",
+  "remoteCapabilityAbsent",
+] as const;
+
+export type ContinuationUnavailableReason = (typeof CONTINUATION_UNAVAILABLE_REASONS)[number];
+
+export type ContinuationModeOffer = {
+  readonly mode: AgentContinueMode;
+  readonly available: boolean;
+  readonly reason: ContinuationUnavailableReason | null;
+};
+
+export type ContinuationAffordance = {
+  readonly availableModes: readonly AgentContinueMode[];
+  readonly modes: readonly ContinuationModeOffer[];
+  /** Startup for an available mode, otherwise null. Never includes argv and never stops the source. */
+  readonly startup: (mode: AgentContinueMode) => AgentContinueStartup | null;
+};
+
+export type ContinuationAffordanceContext = {
+  readonly sessions?: Readonly<Record<string, TerminalSession>> | readonly TerminalSession[];
+  /** `false` means the native transcript or provenance was not verified. Omitted does not invent absence. */
+  readonly nativeHistory?: boolean;
+  /** Required advertisement for a remote or paired owning host. Local omission means the desktop daemon. */
+  readonly terminalContinueV1?: boolean;
+  readonly remoteOwner?: boolean;
+  /** Agent activity, when the session lifecycle has not yet caught up. */
+  readonly activityState?: "working" | "waiting" | "done";
+};
+
+function continuationPanes(
+  sessions: ContinuationAffordanceContext["sessions"],
+): readonly TerminalSession[] {
+  if (!sessions) return [];
+  return Array.isArray(sessions) ? sessions : Object.values(sessions);
+}
+
+function sourceIsWorking(session: TerminalSession, context: ContinuationAffordanceContext): boolean {
+  return session.lifecycle === "working" || session.lifecycle === "starting" || context.activityState === "working";
+}
+
+function sourceIsReconnecting(session: TerminalSession): boolean {
+  return (
+    session.reconnectLifecycle === "validating"
+    || session.reconnectLifecycle === "spawning"
+    || session.reconnectLifecycle === "binding"
+  );
+}
+
+/** Exited source with no live backend and no reconnect in flight. Desktop publication uses this same predicate. */
+export function isExitedContinuationSource(session: TerminalSession): boolean {
+  return session.lifecycle === "exited" && !hasLiveBackend(session) && !sourceIsReconnecting(session);
+}
+
+function sourceIsExited(session: TerminalSession): boolean {
+  return isExitedContinuationSource(session);
+}
+
+function sameProviderClaim(source: TerminalSession, candidate: TerminalSession): boolean {
+  if (candidate.id === source.id || !source.agentType || !candidate.agentType) return false;
+  if (candidate.agentType.trim().toLowerCase() !== source.agentType.trim().toLowerCase()) return false;
+  const left = extractNormalizedProviderSession(source);
+  const right = extractNormalizedProviderSession(candidate);
+  return Boolean(left && right && agentProviderSessionsEqual(source.agentType, left, right));
+}
+
+function otherWorkingClaim(source: TerminalSession, sessions: readonly TerminalSession[]): boolean {
+  return sessions.some((candidate) =>
+    sameProviderClaim(source, candidate)
+    && (candidate.lifecycle === "working" || candidate.lifecycle === "starting"),
+  );
+}
+
+function otherLiveClaim(source: TerminalSession, sessions: readonly TerminalSession[]): boolean {
+  return sessions.some((candidate) => {
+    if (!sameProviderClaim(source, candidate)) return false;
+    const live = hasLiveBackend(candidate) || candidate.lifecycle !== "exited";
+    const reconnecting =
+      candidate.reconnectLifecycle === "validating"
+      || candidate.reconnectLifecycle === "spawning"
+      || candidate.reconnectLifecycle === "binding";
+    return live || reconnecting;
+  });
+}
+
+function remoteCapabilityMissing(session: TerminalSession, context: ContinuationAffordanceContext): boolean {
+  const remote = context.remoteOwner === true
+    || (context.remoteOwner !== false && (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)));
+  return remote && context.terminalContinueV1 !== true;
+}
+
+function continuationReason(
+  session: TerminalSession,
+  mode: AgentContinueMode,
+  context: ContinuationAffordanceContext,
+): ContinuationUnavailableReason | null {
+  if (remoteCapabilityMissing(session, context)) return "remoteCapabilityAbsent";
+  if (!verifiedContinuationModes(session.agentType ?? "").includes(mode)) return "providerUnsupported";
+  if (context.nativeHistory === false) return "missingNativeHistory";
+  const providerSession = extractNormalizedProviderSession(session);
+  if (!providerSession || !session.agentType) return "missingNativeHistory";
+  if (!buildAgentContinueStartup(session.agentType, providerSession, mode)) return "missingNativeHistory";
+  if (sourceIsWorking(session, context)) return "sourceWorking";
+  const others = continuationPanes(context.sessions);
+  if (mode === "resume" && (!sourceIsExited(session) || otherLiveClaim(session, others))) return "liveClaim";
+  if (mode === "fork" && otherWorkingClaim(session, others)) return "liveClaim";
+  return null;
+}
+
+/**
+ * Continuation affordance for one pane. Resume needs an exited source and no live claim.
+ * Fork needs a non-working source. Neither path stops the source.
+ */
+export function getContinuationAffordance(
+  session: TerminalSession,
+  context: ContinuationAffordanceContext = {},
+): ContinuationAffordance {
+  const modes = (["fork", "resume"] as const).map((mode): ContinuationModeOffer => {
+    const reason = continuationReason(session, mode, context);
+    return { mode, available: reason === null, reason };
+  });
+  return {
+    modes,
+    availableModes: modes.filter((mode) => mode.available).map((mode) => mode.mode),
+    startup(mode) {
+      const offer = modes.find((candidate) => candidate.mode === mode);
+      if (!offer?.available || !session.agentType) return null;
+      const providerSession = extractNormalizedProviderSession(session);
+      if (!providerSession) return null;
+      return buildAgentContinueStartup(session.agentType, providerSession, mode);
+    },
+  };
 }

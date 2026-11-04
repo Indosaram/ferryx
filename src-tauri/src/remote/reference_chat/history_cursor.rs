@@ -21,7 +21,9 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::history_parse::ReferenceTurnLog;
+use super::history_parse::{
+    reference_native_model, reference_usage_from_object, ReferenceTurnLog,
+};
 use super::types::{ReferenceHistoryParser, ReferenceNativeHistoryKind, ReferencePart, ReferenceTurn};
 
 /// The lane's parser: cursor-transcript only; any other kind is refused.
@@ -178,12 +180,13 @@ pub fn parse_cursor_projection(text: &str) -> Vec<ReferenceTurn> {
         match message.get("role").and_then(Value::as_str) {
             Some("user") => {
                 if let Some(query) = user_query(&message) {
-                    log.user(None, None, vec![ReferencePart::Text { text: query, phase: None }]);
+                    log.user(None, None, vec![ReferencePart::Text { text: query, phase: None , id: None}]);
                 }
             }
-            Some("assistant") => match message.get("content") {
+            Some("assistant") => {
+                match message.get("content") {
                 Some(Value::String(text)) if !text.is_empty() => {
-                    log.part(None, ReferencePart::Text { text: text.clone(), phase: None });
+                    log.part(None, ReferencePart::Text { text: text.clone(), phase: None , id: None});
                 }
                 Some(Value::Array(blocks)) => {
                     for block in blocks {
@@ -192,14 +195,20 @@ pub fn parse_cursor_projection(text: &str) -> Vec<ReferenceTurn> {
                             continue;
                         }
                         match block.get("type").and_then(Value::as_str) {
-                            Some("text") => log.part(None, ReferencePart::Text { text: text.to_string(), phase: None }),
-                            Some("reasoning") => log.part(None, ReferencePart::Thinking { text: text.to_string() }),
+                            Some("text") => log.part(None, ReferencePart::Text { text: text.to_string(), phase: None , id: None}),
+                            Some("reasoning") => log.part(None, ReferencePart::Thinking { text: text.to_string() , id: None}),
                             _ => {}
                         }
                     }
                 }
                 _ => {}
-            },
+                }
+                log.annotate(
+                    ReferenceNativeHistoryKind::Cursor,
+                    reference_native_model(message.get("model")),
+                    message.get("usage").and_then(reference_usage_from_object),
+                );
+            }
             _ => {}
         }
     }
@@ -277,13 +286,15 @@ mod tests {
             .expect("cursor reads its own store");
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].role, ReferenceTurnRole::User);
-        assert_eq!(turns[0].parts, [ReferencePart::Text { text: "hi".into(), phase: None }]);
+        assert_eq!(turns[0].parts, [ReferencePart::Text { text: "hi".into(), phase: None , id: None}]);
         assert_eq!(turns[1].role, ReferenceTurnRole::Assistant);
         assert_eq!(
             turns[1].parts,
             [ReferencePart::Text {
                 text: "Hi! What are you working on in `opencode-inflearn`, and what would you like me to help with?".into(),
                 phase: None,
+            
+                id: None,
             }]
         );
     }
@@ -336,5 +347,17 @@ mod tests {
     fn cursor_parser_refuses_another_family() {
         assert!(parse_reference_cursor_history(ReferenceNativeHistoryKind::Opencode, "").is_err());
         assert!(parse_reference_cursor_history(ReferenceNativeHistoryKind::Unavailable, "").is_err());
+    }
+
+    #[test]
+    fn native_work_cursor_prose_does_not_invent_usage() {
+        let prose = r#"{"role":"assistant","content":"status failed usage input_tokens 9 model opus"}"#;
+        let turns = parse_cursor_projection(prose);
+        assert!(turns[0].meta.is_none());
+        assert!(turns[0].parts.iter().all(|part| !matches!(part, ReferencePart::Diff { .. })));
+        let recorded = r#"{"role":"assistant","model":"cursor-model","usage":{"input_tokens":2,"output_tokens":3},"content":"ok"}"#;
+        let turns = parse_cursor_projection(recorded);
+        assert_eq!(turns[0].meta.as_ref().unwrap().model.as_deref(), Some("cursor-model"));
+        assert_eq!(turns[0].meta.as_ref().unwrap().usage.as_ref().unwrap().output_tokens, Some(3));
     }
 }

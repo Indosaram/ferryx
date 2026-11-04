@@ -12,9 +12,13 @@ import {
 } from "./MobileChatComponents";
 import { MobileChatMessage, MobileChatMessageProps } from "./MobileChatMessage";
 import { MobileChatComposer, MobileChatComposerHandle } from "./MobileChatComposer";
+import type { ComposerControlChange, ComposerControlNotice } from "./MobileChatComposer";
 import type { HeldMessage } from "./referenceQueue";
+import type { FollowUpMessage } from "./referenceFollowUp";
 import type {
   ReferenceAbandonedBranch,
+  ReferenceContinueMode,
+  ReferenceComposerCapabilities,
   ReferenceFileReceipt,
 } from "./referenceTypes";
 
@@ -44,6 +48,22 @@ export interface MobileChatWorkspaceProps {
 
   /** Switch to the explicit terminal for this same session; never a replacement conversation. */
   readonly onOpenTerminal?: () => void;
+  /**
+   * Available continuation modes for a new pane on the same host. The owner decides availability.
+   * This component only forwards the press; it does not stop the source or retry an unknown create.
+   */
+  readonly continuationModes?: readonly ReferenceContinueMode[];
+  readonly onContinueInNewPane?: (mode: ReferenceContinueMode) => void;
+  readonly continuationHeld?: boolean;
+  /**
+   * Full affordance for this pane. Unavailable modes stay visible as typed reasons.
+   * Absent falls back to `continuationModes` and shows no reasons.
+   */
+  readonly continuationOffers?: readonly {
+    readonly mode: ReferenceContinueMode;
+    readonly available: boolean;
+    readonly reason: string | null;
+  }[];
 
   /** The disclosure for this page source; null when the page is native. */
   readonly pageDisclosure?: string | null;
@@ -72,6 +92,11 @@ export interface MobileChatWorkspaceProps {
   readonly onEditHeld?: (id: string, text: string) => void;
   readonly onSendHeld?: (id: string) => void;
   readonly onRemoveHeld?: (id: string) => void;
+  /** Follow-ups waiting for the turn to end. The owner admits, cancels, and delivers them. */
+  readonly queuedMessages?: readonly FollowUpMessage[];
+  readonly onCancelQueued?: (id: string) => void;
+  readonly onQueueMessage?: (text: string) => boolean | void;
+  readonly onSteerMessage?: (text: string) => boolean | void;
 
   /**
    * A prompt waiting on the original pane. It is drawn at the end of the message stream, not in
@@ -91,6 +116,11 @@ export interface MobileChatWorkspaceProps {
   readonly warnings?: readonly string[];
   readonly composerPlaceholder?: string;
   readonly disabled?: boolean;
+  readonly composerCapabilities?: ReferenceComposerCapabilities | null;
+  readonly onApplyControl?: (change: ComposerControlChange) => void;
+  readonly controlNotice?: ComposerControlNotice | null;
+  readonly dictationFence?: string;
+  readonly dictationSuspended?: boolean;
 
   readonly headerTitle?: string;
   readonly headerSubtitle?: string;
@@ -106,6 +136,77 @@ function prefersReducedMotion(): boolean {
   return (
     typeof window !== "undefined" &&
     window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true
+  );
+}
+
+const CONTINUATION_REASON_TEXT: Record<string, string> = {
+  sourceWorking: "The source is still working. Continuation does not stop it.",
+  liveClaim: "A live claim already exists for this provider session.",
+  providerUnsupported: "This provider cannot continue that way.",
+  missingNativeHistory: "Native history for this pane is not available.",
+  remoteCapabilityAbsent: "This host does not advertise continuation.",
+};
+
+function continuationReasonText(reason: string): string {
+  return CONTINUATION_REASON_TEXT[reason] ?? reason;
+}
+
+function ContinuationStrip({
+  offers,
+  modes,
+  held,
+  onContinue,
+}: {
+  readonly offers?: readonly {
+    readonly mode: ReferenceContinueMode;
+    readonly available: boolean;
+    readonly reason: string | null;
+  }[];
+  readonly modes?: readonly ReferenceContinueMode[];
+  readonly held: boolean;
+  readonly onContinue?: (mode: ReferenceContinueMode) => void;
+}) {
+  const rows = offers ?? (modes ?? []).map((mode) => ({ mode, available: true, reason: null as string | null }));
+  if (!onContinue || rows.length === 0) return null;
+  const available = rows.filter((row) => row.available);
+  return (
+    <div data-testid="continuation-strip" className="flex flex-col gap-1 px-3 pt-2">
+      {available.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          {available.map((row) => {
+            const label = available.length === 1 ? "Continue in new pane" : `Continue in new pane (${row.mode})`;
+            return (
+              <button
+                key={row.mode}
+                type="button"
+                data-testid={`continue-in-new-pane-${row.mode}`}
+                data-mode={row.mode}
+                aria-label={label}
+                title={label}
+                disabled={held}
+                onClick={() => {
+                  if (!held) onContinue(row.mode);
+                }}
+                className="flex h-11 shrink-0 items-center rounded-md px-3 text-sm text-chat-foreground-secondary transition-colors hover:bg-chat-surface-hover hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {rows.filter((row) => !row.available && row.reason).map((row) => (
+        <p
+          key={row.mode}
+          data-testid={`continue-unavailable-${row.mode}`}
+          data-reason={row.reason ?? ""}
+          role="status"
+          className="text-xs text-chat-foreground-secondary"
+        >
+          {row.mode}: {continuationReasonText(row.reason ?? "")}
+        </p>
+      ))}
+    </div>
   );
 }
 
@@ -160,6 +261,10 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   agentType = null,
   showHeader = true,
   onOpenTerminal,
+  continuationModes,
+  onContinueInNewPane,
+  continuationHeld = false,
+  continuationOffers,
   pageDisclosure = null,
   pageAbandoned = null,
   hasOlderPage = false,
@@ -180,6 +285,10 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   onEditHeld,
   onSendHeld,
   onRemoveHeld,
+  queuedMessages,
+  onCancelQueued,
+  onQueueMessage,
+  onSteerMessage,
   promptCard,
   composerHandleRef,
   composerWarning = null,
@@ -189,6 +298,11 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   warnings,
   composerPlaceholder,
   disabled = false,
+  composerCapabilities = null,
+  onApplyControl,
+  controlNotice = null,
+  dictationFence,
+  dictationSuspended = false,
   headerTitle,
   headerSubtitle,
   onBack,
@@ -495,6 +609,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
                 pending={msg.pending ?? msg.id.startsWith("pending-")}
                 referenceParts={msg.referenceParts}
                 referenceSource={msg.referenceSource}
+                referenceMeta={msg.referenceMeta}
                 referenceContext={referenceContext}
               />
             ))}
@@ -531,6 +646,12 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
           )}
           {/* Scrolls on its own when the keyboard and large text leave less room than the composer needs. */}
           <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+          <ContinuationStrip
+            offers={continuationOffers}
+            modes={continuationOffers ? undefined : continuationModes}
+            held={continuationHeld}
+            onContinue={onContinueInNewPane}
+          />
           <MobileChatComposer
             ref={bindComposer}
             value={activeDraft}
@@ -547,6 +668,10 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             onEditHeld={onEditHeld}
             onSendHeld={onSendHeld}
             onRemoveHeld={onRemoveHeld}
+            queuedMessages={queuedMessages}
+            onCancelQueued={onCancelQueued}
+            onQueue={onQueueMessage}
+            onSteer={onSteerMessage}
             promptOpen={promptCard !== undefined && promptCard !== null}
             warning={composerWarning}
             warningAction={composerWarningAction}
@@ -555,6 +680,11 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             isRunning={isRunning}
             disabled={disabled}
             placeholder={composerPlaceholder}
+            composerCapabilities={composerCapabilities}
+            onApplyControl={onApplyControl}
+            controlNotice={controlNotice}
+            dictationFence={dictationFence}
+            dictationSuspended={dictationSuspended}
           />
           </div>
         </div>

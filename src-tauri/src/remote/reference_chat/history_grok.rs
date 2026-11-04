@@ -15,7 +15,11 @@
 
 use serde_json::Value;
 
-use super::history_parse::{reference_timestamp, reference_tool_input, reference_tool_summary, ReferenceTurnLog};
+use super::history_parse::{
+    reference_bounded_tool_input, reference_native_patch_body,
+    reference_timestamp, reference_tool_input, reference_tool_summary, reference_usage_counts,
+    reference_field_u64, reference_finalize_work_status, ReferenceTurnLog,
+};
 use super::types::{ReferenceHistoryParser, ReferenceNativeHistoryKind, ReferenceTurn};
 
 /// The lane's parser: grok-transcript only; any other kind is refused.
@@ -56,7 +60,14 @@ pub fn parse_grok_updates(text: &str) -> Vec<ReferenceTurn> {
         let at = reference_timestamp(entry.get("timestamp"), 1000.0);
         let chunk = update.pointer("/content/text").and_then(Value::as_str).unwrap_or("");
         match update.get("sessionUpdate").and_then(Value::as_str) {
-            Some("user_message_chunk") => log.user_text_chunk(at, chunk),
+            Some("user_message_chunk") => {
+                log.user_text_chunk(at, chunk);
+                let model = update
+                    .pointer("/_meta/modelId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                log.annotate(ReferenceNativeHistoryKind::Grok, model.as_deref(), None);
+            }
             Some("agent_message_chunk") => log.stream_text(at.as_deref(), chunk, false),
             Some("agent_thought_chunk") => log.stream_text(at.as_deref(), chunk, true),
             Some("tool_call") => {
@@ -65,7 +76,24 @@ pub fn parse_grok_updates(text: &str) -> Vec<ReferenceTurn> {
                 };
                 let name = update.get("title").and_then(Value::as_str).unwrap_or("tool");
                 let input = update.get("rawInput");
-                log.tool(at.as_deref(), key, name, reference_tool_summary(input), reference_tool_input(input));
+                let payload = input.cloned().unwrap_or(Value::Null);
+                log.tool(
+                    at.as_deref(),
+                    key,
+                    name,
+                    reference_tool_summary(input),
+                    reference_bounded_tool_input(name, &payload, reference_tool_input(input)),
+                );
+                if let Some(raw) = entry
+                    .pointer("/params/_meta/updateParams/status")
+                    .or_else(|| update.get("status"))
+                    .and_then(Value::as_str)
+                {
+                    log.tool_status(key, raw);
+                }
+                if let Some(body) = reference_native_patch_body(name, &payload) {
+                    log.push_diff(at.as_deref(), &body);
+                }
             }
             Some("tool_call_update") => {
                 let Some(key) = update.get("toolCallId").and_then(Value::as_str) else {
@@ -83,11 +111,27 @@ pub fn parse_grok_updates(text: &str) -> Vec<ReferenceTurn> {
                 if !output.is_empty() {
                     log.tool_output(at.as_deref(), key, output, false);
                 }
+                if let Some(raw) = entry
+                    .pointer("/params/_meta/updateParams/status")
+                    .or_else(|| update.get("status"))
+                    .and_then(Value::as_str)
+                {
+                    log.tool_status(key, raw);
+                }
+                let usage = reference_usage_counts(
+                    reference_field_u64(update, "input_tokens"),
+                    reference_field_u64(update, "output_tokens"),
+                    reference_field_u64(update, "cache_read_tokens"),
+                    reference_field_u64(update, "cache_write_tokens"),
+                );
+                log.annotate(ReferenceNativeHistoryKind::Grok, None, usage);
             }
             _ => {}
         }
     }
-    log.finish()
+    let mut turns = log.finish();
+    reference_finalize_work_status(&mut turns, false);
+    turns
 }
 
 #[cfg(test)]
@@ -104,7 +148,7 @@ mod tests {
             .expect("grok reads its own store");
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].role, ReferenceTurnRole::User);
-        assert_eq!(turns[0].parts, [ReferencePart::Text { text: "PARITY_TOOL remove a file".into(), phase: None }]);
+        assert_eq!(turns[0].parts, [ReferencePart::Text { text: "PARITY_TOOL remove a file".into(), phase: None , id: None}]);
         assert_eq!(turns[0].started_at.as_deref(), Some("2026-10-22T07:13:00.000Z"));
         assert_eq!(turns[1].role, ReferenceTurnRole::Assistant);
         let [ReferencePart::Tool { name, summary, input, output, .. }] = &turns[1].parts[..] else {
@@ -132,8 +176,8 @@ mod tests {
         assert_eq!(
             turns[1].parts,
             [
-                ReferencePart::Thinking { text: "th".into() },
-                ReferencePart::Text { text: "Hello".into(), phase: None },
+                ReferencePart::Thinking { text: "th".into() , id: None},
+                ReferencePart::Text { text: "Hello".into(), phase: None , id: None},
             ]
         );
         assert_eq!(turns[1].ended_at.as_deref(), Some("1970-01-01T00:00:03.000Z"));
@@ -148,5 +192,101 @@ mod tests {
     fn grok_parser_refuses_another_family() {
         assert!(parse_reference_grok_history(ReferenceNativeHistoryKind::Kimi, UPDATES).is_err());
         assert!(parse_reference_grok_history(ReferenceNativeHistoryKind::Unavailable, "").is_err());
+    }
+
+    #[test]
+    fn native_work_grok_status_model_and_ignored_prose() {
+        let text = concat!(
+            r#"{"timestamp":10,"params":{"update":{"sessionUpdate":"user_message_chunk","content":{"text":"status failed usage 9"},"_meta":{"modelId":"grok-2"}}}}"#,
+            "\n",
+            r#"{"timestamp":11,"params":{"update":{"sessionUpdate":"tool_call","toolCallId":"c1","title":"Edit","rawInput":{"old_string":"a","new_string":"b"}},"_meta":{"updateParams":{"status":"Pending"}}}}"#,
+            "\n",
+            r#"{"timestamp":12,"params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","content":[{"type":"content","content":{"text":"no"}}]},"_meta":{"updateParams":{"status":"cancelled"}}}}"#,
+            "\n",
+        );
+        let turns = parse_grok_updates(text);
+        assert_eq!(turns[0].meta.as_ref().unwrap().model.as_deref(), Some("grok-2"));
+        assert!(turns[0].meta.as_ref().unwrap().usage.is_none());
+        let ReferencePart::Tool { status, .. } = &turns[1].parts[0] else { panic!("{:?}", turns[1].parts) };
+        assert_eq!(*status, Some(crate::remote::reference_chat::types::ReferenceToolStatus::Cancelled));
+        assert!(turns[1].parts.iter().any(|part| matches!(part, ReferencePart::Diff { .. })));
+    }
+
+    fn grok_call(status: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "timestamp": 11,
+                "params": {
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "c-life",
+                        "title": "bash",
+                        "rawInput": { "command": "sleep" },
+                        "status": status
+                    }
+                }
+            })
+        )
+    }
+
+    fn grok_status(text: &str) -> Option<crate::remote::reference_chat::types::ReferenceToolStatus> {
+        let turns = parse_grok_updates(text);
+        turns.into_iter().find_map(|turn| {
+            turn.parts.into_iter().find_map(|part| match part {
+                ReferencePart::Tool { status, .. } => status,
+                _ => None,
+            })
+        })
+    }
+
+    #[test]
+    fn grok_unknown_tool_word_is_omitted_not_failed() {
+        assert_eq!(grok_status(&grok_call("mystery")), None);
+    }
+
+    #[test]
+    fn grok_unfinished_tool_in_a_closed_stream_is_unverifiable() {
+        let later = format!(
+            "{}{}\n",
+            grok_call("running"),
+            serde_json::json!({
+                "timestamp": 12,
+                "params": { "update": { "sessionUpdate": "user_message_chunk", "content": { "text": "later" } } }
+            })
+        );
+        assert_eq!(
+            grok_status(&later),
+            Some(crate::remote::reference_chat::types::ReferenceToolStatus::Unverifiable)
+        );
+    }
+
+    #[test]
+    fn grok_open_tail_tool_is_running_only_on_a_live_owning_tail() {
+        let text = grok_call("running");
+        assert_eq!(
+            grok_status(&text),
+            Some(crate::remote::reference_chat::types::ReferenceToolStatus::Unverifiable)
+        );
+        let mut turns = parse_grok_updates(&text);
+        reference_finalize_work_status(&mut turns, true);
+        let ReferencePart::Tool { status, .. } = &turns[0].parts[0] else { panic!("{:?}", turns) };
+        assert_eq!(*status, Some(crate::remote::reference_chat::types::ReferenceToolStatus::Running));
+    }
+
+    #[test]
+    fn grok_recorded_failure_stays_failed() {
+        assert_eq!(
+            grok_status(&grok_call("failed")),
+            Some(crate::remote::reference_chat::types::ReferenceToolStatus::Failed)
+        );
+    }
+
+    #[test]
+    fn grok_recorded_cancel_stays_cancelled() {
+        assert_eq!(
+            grok_status(&grok_call("cancelled")),
+            Some(crate::remote::reference_chat::types::ReferenceToolStatus::Cancelled)
+        );
     }
 }

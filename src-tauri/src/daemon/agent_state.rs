@@ -305,6 +305,10 @@ impl AgentStateHub {
         self.retained.lock().get(session_id).cloned()
     }
 
+    pub(crate) fn retained(&self) -> Vec<AgentState> {
+        self.retained.lock().values().cloned().collect()
+    }
+
     pub fn remove(&self, session_id: &str) {
         let mut retained = self.retained.lock();
         retained.remove(session_id);

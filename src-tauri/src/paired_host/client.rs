@@ -520,9 +520,18 @@ impl Operation {
                 r.query
                     .push(("daemonEpoch".into(), daemon_epoch.0.to_string()));
             }
-            Self::CreateSession { .. } | Self::CloseSession { .. } => {
+            Self::CloseSession { .. } => {
                 path = "sessions";
                 r.capability = Some("terminalCreateV1");
+            }
+            Self::CreateSession { request } => {
+                path = "sessions";
+                r.capability = Some(match request.startup {
+                    m::Startup::AgentContinue { .. } => {
+                        crate::daemon::protocol::TERMINAL_CONTINUE_CAPABILITY
+                    }
+                    _ => "terminalCreateV1",
+                });
             }
             Self::Operation { .. } => {
                 path = "workspace/operations";

@@ -23,6 +23,8 @@ pub const PASTE_CANCEL_CAPABILITY: &str = "pasteCancelV1";
 pub const AGENT_PROMPT_CAPABILITY: &str = "agentPromptV1";
 /// Advertised in `GetCapabilities` by a daemon that spawns `TerminalStartup::AgentLaunch`.
 pub const AGENT_LAUNCH_CAPABILITY: &str = "agentLaunchV1";
+/// Advertised by a host that accepts `agentContinue` and builds the continuation argv itself.
+pub const TERMINAL_CONTINUE_CAPABILITY: &str = "terminalContinueV1";
 /// Advertised in `GetCapabilities` by a daemon built with the `remote-desktop` feature, which
 /// serves `RemoteDesktopHost{Get,Set,Respond}`. Consent prompts reach the GUI as the remote event
 /// `rd-host-consent` `{requestId, clientName}`.
@@ -317,6 +319,13 @@ where
     Ok(deserialize_lenient_option(deserializer)?.unwrap_or_default())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ContinueMode {
+    Fork,
+    Resume,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum TerminalStartup {
@@ -333,6 +342,14 @@ pub enum TerminalStartup {
     AgentResume {
         agent_type: String,
         provider_session: AgentProviderSession,
+    },
+    /// Host-validated continuation. The client names the source session and mode; the host
+    /// builds argv and never accepts a client argv array.
+    #[serde(rename_all = "camelCase")]
+    AgentContinue {
+        agent_type: String,
+        provider_session: AgentProviderSession,
+        mode: ContinueMode,
     },
     /// A fresh agent launch: the command and args the desktop agent settings resolved.
     #[serde(rename_all = "camelCase")]

@@ -160,6 +160,9 @@ pub(crate) async fn serve(
     let (owner_changed, mut owner_changes) = tokio::sync::mpsc::channel(64);
     let mut agent_rx = state.agent_events.subscribe();
     let mut agent_open = true;
+    // Subscribed before the inventory boundary, so a frame published after that boundary is queued.
+    let mut history_rx = state.agent_events.subscribe_history();
+    let mut history_open = true;
     let mut prompts = crate::agent_control::events::PromptChangeFilter::default();
     loop {
         // The cursor is read BEFORE inventory construction. Any overlapping commit
@@ -360,6 +363,15 @@ pub(crate) async fn serve(
                     // A lagged reader only loses pushes; the client's prompt poll still converges.
                     Err(broadcast::error::RecvError::Lagged(_)) => {},
                     Err(broadcast::error::RecvError::Closed) => agent_open = false,
+                },
+                history = history_rx.recv(), if history_open => match history {
+                    Ok(frame) => {
+                        // Machine scope sees every session, including machine-only ones. The
+                        // frame is the contract object, forwarded unchanged.
+                        if !matches!(tokio::time::timeout(std::time::Duration::from_secs(10), socket.send(Message::Text(frame.into()))).await, Ok(Ok(()))) { return; }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {},
+                    Err(broadcast::error::RecvError::Closed) => history_open = false,
                 },
                 event = receiver.recv() => match event {
                     Ok(event) => {
