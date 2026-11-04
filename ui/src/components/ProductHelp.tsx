@@ -1,11 +1,15 @@
 import { useEffect, useState } from "react";
-import { SHORTCUTS, shortcutLabel } from "../lib/shortcuts";
+import { SHORTCUTS, shortcutLabel, isMacShortcutPlatform } from "../lib/shortcuts";
+import { useShortcutOverrides, useShortcutPreset } from "../lib/shortcutOverrides";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "./ui/dialog";
 
 type DocHeading = { path: string; title: string; text: string };
 
 /** Help is bundled and usable offline; shortcut labels use the same registry as dispatch. */
 export function ProductHelp() {
+  const isMac = isMacShortcutPlatform();
+  const { overrides } = useShortcutOverrides();
+  const { preset } = useShortcutPreset(isMac);
   const [page, setPage] = useState<"shortcuts" | "docs" | null>(null);
   const [docs, setDocs] = useState<DocHeading[]>([]);
   const [error, setError] = useState("");
@@ -36,7 +40,7 @@ export function ProductHelp() {
         <DialogDescription>{page === "shortcuts" ? "Current keyboard bindings" : "Search bundled documentation"}</DialogDescription>
         {page === "shortcuts" ? <dl className="grid grid-cols-2 gap-2 text-sm">
           {SHORTCUTS.map((shortcut) => <div key={shortcut.id} className="contents">
-            <dt>{shortcut.title}</dt><dd>{shortcutLabel(shortcut.id)}</dd>
+            <dt>{shortcut.title}</dt><dd>{shortcutLabel(shortcut.id, isMac, overrides, preset) || "Unbound"}</dd>
           </div>)}
         </dl> : <>
           <input aria-label="Search documentation" value={query} onChange={(event) => setQuery(event.target.value)} className="rounded border border-border bg-background p-2" />
