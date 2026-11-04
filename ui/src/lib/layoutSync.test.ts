@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { createLayoutState, layoutReducer } from "../state/layout";
 import type { WorkspaceState } from "../state/workspaceStore";
-import { hydrateLayout, intentForAction, LayoutSync, type DaemonLayout, type LayoutReply, type LayoutTransport } from "./layoutSync";
+import { hydrateLayout, intentForAction, layoutScope, rehydrateWorkspace, LayoutSync, type DaemonLayout, type LayoutReply, type LayoutTransport } from "./layoutSync";
+import { tabTransferIntent } from "../state/windowMove";
 import { closeTerminal } from "./tauri";
 import { withTimeout } from "./withTimeout";
 
@@ -24,6 +25,53 @@ function ready(layout: DaemonLayout): LayoutReply {
 }
 
 describe("daemon layout revisions", () => {
+  it("selects parked checkout scopes and reconstructs panes without a GUI registry", () => {
+    const state = workspace();
+    const parked = daemon();
+    parked.scope = layoutScope(state);
+    parked.tabs[0].paneTree = { type: "split", dir: "horizontal", ratio: 0.5,
+      a: { type: "leaf", nodeId: 71, content: { kind: "browser", browserId: "browser-scope", url: "https://example.org" } },
+      b: { type: "leaf", nodeId: 72, content: { kind: "file", path: "/repo/file", line: 2, col: 3,
+        backendSessionId: "backend", workspaceId: "sync-test", previewId: "owned-preview" } } };
+    parked.tabs[0].activeNodeId = 71;
+    const root = daemon(); root.scope = JSON.stringify(["other", null]);
+    root.parkedLayouts = { [parked.scope]: parked };
+    const restored = rehydrateWorkspace({ ...state, sessions: {}, layout: createLayoutState() }, { revision: 1, layout: root });
+    const contents = Object.values(restored.layout.layoutsByTabId.tab.contentsByLeafId!);
+    expect(contents).toContainEqual(expect.objectContaining({ kind: "browser", browser: expect.objectContaining({ browserId: "browser-scope" }) }));
+    expect(contents).toContainEqual(expect.objectContaining({ kind: "file", previewId: "owned-preview", backendSessionId: "backend" }));
+    const terminal = daemon(); terminal.scope = parked.scope;
+    const admitted = rehydrateWorkspace({ ...state, sessions: {} }, { revision: 1, layout: terminal });
+    expect(admitted.sessions.backend.backendSessionId).toBe("backend");
+    const other = rehydrateWorkspace({ ...state, activeWorktreePath: "/other" }, { revision: 1, layout: root });
+    expect(other.layout.tabs).toHaveLength(0);
+  });
+
+  it("encodes transfer and replacement intents without frontend visual identities", async () => {
+    const state = workspace();
+    expect(tabTransferIntent(state, "tab", "second")).toEqual({ type: "SCOPED", scope: layoutScope(state),
+      intent: { type: "TRANSFER_TAB", tabId: "tab", targetWindow: "second", targetScope: layoutScope(state) } });
+    const sync = new LayoutSync({ get: async () => ready(daemon()), apply: vi.fn() });
+    await sync.refresh();
+    const replacement = { id: "new", label: "new", sessionId: "front" };
+    const after = { ...state, layout: layoutReducer(state.layout, { type: "CLOSE_TAB", tabId: "tab", replacementTab: replacement }) };
+    expect(intentForAction(sync, { type: "CLOSE_TAB", tabId: "tab", replacement: { tab: replacement } }, state, after)).toEqual({
+      type: "SCOPED", scope: layoutScope(state), intent: { type: "CLOSE_TAB", tabId: "tab", replacement: {
+        tabId: "new", label: "new", content: { kind: "terminal", backendSessionId: "backend" },
+      } },
+    });
+  });
+
+  it("sends resolved collinear seam geometry", async () => {
+    const state = workspace();
+    state.layout = layoutReducer(state.layout, { type: "SPLIT_PANE", tabId: "tab", direction: "horizontal", newLeafId: "second", sessionId: "front" });
+    const sync = new LayoutSync({ get: async () => ready(daemon()), apply: vi.fn() });
+    await sync.refresh();
+    const action = { type: "SET_PANE_RATIO" as const, tabId: "tab", path: "", ratio: 0.7 };
+    expect(intentForAction(sync, action, state, state)).toMatchObject({ type: "SCOPED", intent: {
+      type: "SET_PANE_RATIO", seam: { direction: "horizontal", targetPath: "", members: [{ path: "", origin: 0, span: 1 }] },
+    } });
+  });
   it("applies optimistically then replaces a conflict without closing a PTY", async () => {
     vi.mocked(closeTerminal).mockClear();
     const io: LayoutTransport = { get: vi.fn(async () => ready(daemon())),
@@ -38,7 +86,7 @@ describe("daemon layout revisions", () => {
     await sync.send(() => intentForAction(sync, action, before, after), () => {
       after = { ...after, layout: hydrateLayout(sync.current()!, after) };
     });
-    expect(io.apply).toHaveBeenCalledWith(1, action);
+    expect(io.apply).toHaveBeenCalledWith(1, { type: "SCOPED", scope: layoutScope(before), intent: action });
     expect(after.layout.tabs[0].label).toBe("daemon");
     expect(after.sessions).toBe(before.sessions);
     expect(closeTerminal).not.toHaveBeenCalled();
