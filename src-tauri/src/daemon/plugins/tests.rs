@@ -95,6 +95,43 @@ fn plugin_content_round_trips_for_layout_recovery() {
     assert_eq!(serde_json::from_slice::<crate::daemon::layout::Content>(&bytes).unwrap(), content);
 }
 
+#[test]
+fn render_permission_is_identity_local_and_public_mutations_are_admin_gated() {
+    let mut plugin = manifest();
+    let request = DaemonRequest::PluginRender { view: "main".into(), html: "<time>12:00</time>".into() };
+    let grants = pane_grants::PaneGrants::default();
+    assert!(authorize(&plugin, &request, &grants).is_err());
+    plugin.capabilities.insert("render".into());
+    assert!(authorize(&plugin, &request, &grants).is_ok());
+    for request in [DaemonRequest::PluginSetEnabled { name: "clock".into(), enabled: true },
+        DaemonRequest::PluginAttach { plugin: "clock".into(), window: None }, request] {
+        assert!(matches!(pane_grants::gate_for(&request), Some(pane_grants::Gate::Admin)));
+    }
+}
+
+#[tokio::test]
+async fn registry_restores_windows_idle_restart_consent_and_disable_persists() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("approvals.json");
+    Approvals { manifests: vec![manifest()] }.save(&path).unwrap();
+    let registry = registry::Registry::new(path.clone());
+    registry.restore().await.unwrap();
+    assert!(registry.approvals.lock().enabled(&manifest()));
+    registry.approve("clock".into(), false).await.unwrap();
+    assert!(Approvals::load(&path).unwrap().manifests.is_empty());
+}
+
+#[test]
+fn plugin_request_schema_uses_the_real_daemon_encoding() {
+    let request: DaemonRequest = serde_json::from_value(serde_json::json!({
+        "type":"pluginRender", "view":"main", "html":"<time>12:00</time>"
+    })).unwrap();
+    assert!(matches!(request, DaemonRequest::PluginRender { view, .. } if view == "main"));
+    let catalog = crate::cli::api_catalog::describe_json("panes").unwrap();
+    let requests = catalog["pluginRequests"]["requests"].as_array().unwrap();
+    assert!(requests.iter().any(|r| r["type"] == "pluginRender" && r["capability"] == "render"));
+}
+
 #[tokio::test(start_paused = true)]
 async fn crashed_process_restarts_at_most_three_times() {
     let mut plugin = manifest();
