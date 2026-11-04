@@ -508,6 +508,52 @@ async fn test_v5_ownership_transfer_is_the_default_without_the_flag() {
     run_v5_handover_case(None).await;
 }
 
+#[tokio::test]
+async fn ten_thousand_line_session_handover_preserves_screen_hash() {
+    let mut daemons = PrivateDaemons::with_v5_flag(None);
+    let socket = daemons.socket();
+    let d1 = daemons.launch(None).await;
+    let pid = daemons.pid(d1);
+    let mut client = TestDaemonClient::connect(&socket, pid).await.unwrap();
+    let repo = daemons.repo();
+    client.register_workspace("hash-contract", &repo).await.unwrap();
+    let session = client.spawn_with_shell("hash-contract", "hash-contract", 300, 24,
+        Some("/bin/sh"), Some(&repo)).await.unwrap();
+    assert!(matches!(client.send_request(&DaemonRequest::SetScrollbackBudget {
+        session_id: session.clone(), lines: 100_000,
+    }).await.unwrap(), DaemonResponse::Error { code: Some(code), .. }
+        if code == "SCROLLBACK_BUDGET_EXCEEDED"));
+    assert!(matches!(client.send_request(&DaemonRequest::SetScrollbackBudget {
+        session_id: session.clone(), lines: 10_000,
+    }).await.unwrap(), DaemonResponse::SetScrollbackBudgetOk));
+    let mut attach = TestAttachStream::attach(&socket, pid, &session, None).await.unwrap();
+    client.write_input(&session,
+        b"stty -echo; awk 'BEGIN { for(i=0;i<12000;i++) printf \"%0295d\\r\\n\", i }'; printf '\\033[1;31mRED\\033[0m'; printf 'HASH_%s' READY\n"
+    ).await.unwrap();
+    attach.await_pattern_in_history_or_stream("HASH_READY", Duration::from_secs(30)).await.unwrap();
+    let before = client.send_request(&DaemonRequest::DescribeScreenHash {
+        session_id: session.clone(),
+    }).await.unwrap();
+    let DaemonResponse::DescribeScreenHashOk { hash, text_hash, vt_version, retained_lines } = before else {
+        panic!("expected screen hash: {before:?}");
+    };
+    assert_eq!(retained_lines, 10_000);
+    let prepared = client.send_request(&DaemonRequest::PrepareHandover).await.unwrap();
+    let DaemonResponse::PrepareHandoverOk { legacy_socket_path, .. } = prepared else {
+        panic!("expected handover preparation: {prepared:?}");
+    };
+    let d2 = daemons.launch(Some(Path::new(&legacy_socket_path))).await;
+    let mut successor = TestDaemonClient::connect(&socket, daemons.pid(d2)).await.unwrap();
+    let after = successor.send_request(&DaemonRequest::DescribeScreenHash { session_id: session }).await.unwrap();
+    let DaemonResponse::DescribeScreenHashOk {
+        hash: after_hash, text_hash: after_text, vt_version: after_vt, retained_lines: after_lines,
+    } = after else { panic!("expected successor screen hash: {after:?}"); };
+    assert_eq!(after_lines, 10_000);
+    assert_eq!(vt_version, after_vt);
+    assert_eq!(hash, after_hash);
+    assert_eq!(text_hash, after_text);
+}
+
 async fn run_v5_handover_case(v5_flag: Option<&'static str>) {
     let mut daemons = PrivateDaemons::with_v5_flag(v5_flag);
     let socket_path = daemons.socket();
