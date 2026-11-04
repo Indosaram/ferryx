@@ -751,6 +751,10 @@ impl DaemonSessionService {
     }
 
     pub(crate) async fn resize_remote_owner(&self, id: &str, client: &str, cols: u16, rows: u16, control: bool, take: bool) -> Result<bool, String> {
+        self.resize_remote_owner_generation(id, client, cols, rows, control, take, None).await
+    }
+
+    pub(crate) async fn resize_remote_owner_generation(&self, id: &str, client: &str, cols: u16, rows: u16, control: bool, take: bool, supplied: Option<u64>) -> Result<bool, String> {
         if !control { return Ok(false); }
         self.validate_session_ssh_target(id).await.map_err(|e| e.to_string())?;
         // Admission and operation submission are synchronous under the same lock: queued
@@ -763,7 +767,7 @@ impl DaemonSessionService {
             let state = states.entry(id.into()).or_insert_with(|| super::size_ownership::SizeOwnership::new(initial));
             let previous = state.clone();
             if !state.remote_resize(client, (cols, rows), control, take) { return Ok(false); }
-            let generation = self.terminal_service.remote().details(id).map(|d| d.generation).unwrap_or(0);
+            let generation = supplied.unwrap_or_else(|| self.terminal_service.remote().details(id).map(|d| d.generation).unwrap_or(0));
             match self.terminal_service.resize_operation(id, generation, cols, rows) {
                 Ok(pending) => {
                     if previous.owner != state.owner { self.publish_size_owner(id, state); }
