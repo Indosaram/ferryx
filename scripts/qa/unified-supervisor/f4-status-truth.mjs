@@ -272,9 +272,12 @@ const sessionRowState = (html, title) => {
 const logLineChunk = (html, summary) => html.split('data-testid="action-log-line"').slice(1).find((chunk) => chunk.split('</li>')[0].includes(summary))?.split('</li>')[0] ?? null;
 
 // --- teardown by recorded pid -----------------------------------------------------------------
-// A zombie (exited, not yet reaped by its new parent) is not alive.
-const zombie = (pid) => { try { return readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /s, '').startsWith('Z'); } catch { return false; } };
-const alive = (pid) => { try { process.kill(pid, 0); return !zombie(pid); } catch (error) { return error?.code === 'EPERM'; } };
+// A zombie (exited, not yet reaped by its new parent) is not alive, and neither is a process
+// mid-exit: the kernel empties /proc/<pid>/cmdline once its address space is released, so it
+// can never run user code again.
+const procState = (pid) => { try { return readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /s, '')[0] ?? null; } catch { return null; } };
+const exiting = (pid) => { try { return readFileSync(`/proc/${pid}/cmdline`).length === 0; } catch { return false; } };
+const alive = (pid) => { try { process.kill(pid, 0); return procState(pid) !== 'Z' && !exiting(pid); } catch (error) { return error?.code === 'EPERM'; } };
 const argvOf = (pid) => { try { return readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').join(' '); } catch { return spawnSync('ps', ['-o', 'args=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim() || null; } };
 async function teardown(daemon) {
   try { daemon.socketWs?.close(); } catch { /* closed */ }
@@ -288,11 +291,12 @@ async function teardown(daemon) {
   receipt.exited = record.exited;
   receipt.aliveAfter = alive(record.pid);
   for (const pid of [...new Set(paneRecords(daemon.logDir).map((r) => r.pid))]) {
+    const state = procState(pid);
     const live = alive(pid);
     const argv = live ? argvOf(pid) : null;
     const ours = live && Boolean(argv?.includes(daemon.entry));
     if (ours) { try { process.kill(pid, 'SIGTERM'); } catch { /* raced its exit */ } }
-    receipt.panes.push({ pid, aliveAtTeardown: live, signalled: ours, argv });
+    receipt.panes.push({ pid, aliveAtTeardown: live, procState: state, exiting: state !== null && exiting(pid), signalled: ours, argv });
   }
   for (const name of readdirSync(daemon.logDir)) copyFileSync(join(daemon.logDir, name), join(out, `${daemon.label}-${name}`));
   const log = join(daemon.env.FERRYX_DATA_DIR, 'logs', 'daemon.log');
