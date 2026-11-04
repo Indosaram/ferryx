@@ -8,6 +8,19 @@ use std::sync::Arc;
 use tauri::{State, WebviewWindow};
 
 #[tauri::command]
+pub async fn cmd_script(
+    manager: State<'_, Arc<RemoteGatewayManager>>,
+    action: crate::script::control::Action,
+) -> Result<serde_json::Value, IpcError> {
+    let client = manager.daemon_client().ok_or_else(|| IpcError::internal("Daemon unavailable"))?;
+    match client.send_request(DaemonRequest::Script { action }).await? {
+        DaemonResponse::ScriptOk { value } => Ok(value),
+        DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
+        response => Err(IpcError::internal(format!("Unexpected script response: {response:?}"))),
+    }
+}
+
+#[tauri::command]
 pub async fn cmd_plugins(
     manager: State<'_, Arc<RemoteGatewayManager>>,
     name: Option<String>,
