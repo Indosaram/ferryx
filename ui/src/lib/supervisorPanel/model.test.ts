@@ -76,6 +76,46 @@ describe("supervisor panel view", () => {
     expect(view.sessions.filter((s) => s.sessionRef === dup.sessionRef)).toHaveLength(1);
   });
 
+  it("keeps a session with a decision out of Handling (Needs you wins)", () => {
+    const relayRetry = actionEntry({ id: 6, sessionRef: "mac:relay", updatedAtMs: NOW - MIN });
+    const view = buildPanelView(
+      { ...panelSnapshotFixture, handling: [...panelSnapshotFixture.handling, relayRetry] },
+      options,
+    );
+
+    expect(view.decisions.map((d) => d.sessionRef)).toContain("mac:relay");
+    expect(view.handling.map((h) => h.sessionRef)).toEqual(["win:wintests"]);
+    expect(view.sessions.map((s) => s.sessionRef)).not.toContain("mac:relay");
+  });
+
+  it("collapses several live incidents on one session to the most recently updated", () => {
+    const older = actionEntry({ id: 5, sessionRef: "win:wintests", createdAtMs: NOW - 9 * MIN, updatedAtMs: NOW - 4 * MIN });
+    const newer = actionEntry({ id: 7, sessionRef: "win:wintests", createdAtMs: NOW - 2 * MIN, updatedAtMs: NOW - 2 * MIN, summary: "Restarting" });
+    const fleetWide = actionEntry({ id: 8, sessionRef: null, summary: "Proxy errors" });
+    for (const handling of [[older, newer, fleetWide], [newer, fleetWide, older]]) {
+      const view = buildPanelView({ ...panelSnapshotFixture, decisions: [], handling }, options);
+      expect(view.handling.map((h) => [h.id, h.sessionRef])).toEqual([
+        [7, "win:wintests"],
+        [8, null],
+      ]);
+      const refs = [...view.handling.map((h) => h.sessionRef), ...view.sessions.map((s) => s.sessionRef)].filter(Boolean);
+      expect(new Set(refs).size).toBe(refs.length);
+    }
+  });
+
+  it("keeps raw ids out of a decision reason", () => {
+    for (const decision of panelSnapshotFixture.decisions) {
+      expect(decision.reason).not.toMatch(/\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{4,40}\b/);
+    }
+    const reason = "Broke in a4c1 (3f9e2b7c0d) for run 123e4567-e89b-12d3-a456-426614174000. Took 1200 ms, retry at 14:20.";
+    const view = buildPanelView(
+      { ...panelSnapshotFixture, decisions: [{ ...panelSnapshotFixture.decisions[1], reason }] },
+      options,
+    );
+
+    expect(view.decisions[0].reason).toBe("Broke in \u2026 (\u2026) for run \u2026. Took 1200 ms, retry at 14:20.");
+  });
+
   it("lists the recommended option first and flagged", () => {
     const view = buildPanelView(panelSnapshotFixture, options);
     const relay = view.decisions.find((d) => d.sessionRef === "mac:relay");

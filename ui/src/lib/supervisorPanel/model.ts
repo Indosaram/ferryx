@@ -411,6 +411,23 @@ function sessionRow(
   };
 }
 
+const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+/** A hex token with at least one digit and one letter: a commit hash or an internal id. */
+const HEX_ID_RE = /\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{4,40}\b/gi;
+
+/**
+ * Plan "Must NOT have": no raw ids in default views. A reason is free text from the hub (model
+ * output, error strings), so a commit hash or uuid in it is elided rather than shown.
+ */
+export function plainReason(reason: string): string {
+  return reason.replace(UUID_RE, "\u2026").replace(HEX_ID_RE, "\u2026");
+}
+
+/** Of several live incidents on one session, the one updated last is what is happening now. */
+function moreCurrent(a: ActionEntry, b: ActionEntry): boolean {
+  return (a.updatedAtMs - b.updatedAtMs || a.createdAtMs - b.createdAtMs || a.id - b.id) > 0;
+}
+
 function localStartOfDay(nowMs: number): number {
   const day = new Date(nowMs);
   day.setHours(0, 0, 0, 0);
@@ -456,13 +473,28 @@ export function buildPanelView(
       screenRevision: escalation.prompt.screenRevision,
       question: escalation.prompt.question,
       command: escalation.prompt.command,
-      reason: escalation.reason,
+      reason: plainReason(escalation.reason),
       options: orderedOptions(escalation.prompt, escalation.recommendedIndex),
       createdAtMs: escalation.createdAtMs,
     };
   });
 
-  const liveHandling = snapshot.handling.filter((entry) => entry.live);
+  // A session is in exactly one section: Needs you > Handling > Sessions. A session with a
+  // decision leaves Handling, and several live incidents on one session collapse to one row.
+  const fleetWide: ActionEntry[] = [];
+  const handlingByRef = new Map<SessionRef, ActionEntry>();
+  for (const entry of snapshot.handling) {
+    if (!entry.live) continue;
+    const ref = entry.sessionRef;
+    if (ref === null) {
+      fleetWide.push(entry);
+      continue;
+    }
+    if (decisionByRef.has(ref)) continue;
+    const prev = handlingByRef.get(ref);
+    if (!prev || moreCurrent(entry, prev)) handlingByRef.set(ref, entry);
+  }
+  const liveHandling = [...fleetWide, ...handlingByRef.values()];
   const handling = [...liveHandling].sort(newestFirst).map(actionView);
 
   const shownRefs = new Set<SessionRef>(decisionByRef.keys());

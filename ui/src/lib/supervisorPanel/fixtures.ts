@@ -75,7 +75,7 @@ export const panelSnapshotFixture: PanelSnapshot = {
       sessionRef: 'win:roblox',
       prompt: robloxPrompt,
       recommendedIndex: 0,
-      reason: 'All 3 failures started with the physics change in a4c1. Reverting it passed locally.',
+      reason: 'All 3 failures started with the physics change. Reverting it passed locally.',
       createdAtMs: NOW - 4 * MIN,
     },
   ],
