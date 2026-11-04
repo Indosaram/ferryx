@@ -9,6 +9,7 @@ use crate::ipc::error::IpcErrorCode;
 
 fn details(workspace_id: Option<&str>, cwd: Option<&str>) -> DaemonSessionDetails {
     DaemonSessionDetails {
+        size_owner: None,
         session_id: "backend-1".into(),
         workspace_id: workspace_id.map(str::to_string),
         worktree: None,
