@@ -2139,8 +2139,7 @@ async fn ws_terminal_handler(
                 GatewaySocketContext { device, state: Arc::clone(&state) },
                 render_grid,
                 requested_geometry,
-                Arc::clone(&resized),
-                size_client.clone(),
+                (Arc::clone(&resized), size_client.clone()),
             ),
         )
         .await;
@@ -2937,9 +2936,9 @@ async fn handle_terminal_socket(
     context: GatewaySocketContext,
     render_grid: bool,
     requested_geometry: Option<(u16, u16)>,
-    resized: Arc<std::sync::atomic::AtomicBool>,
-    size_client: String,
+    size_owner: (Arc<std::sync::atomic::AtomicBool>, String),
 ) {
+    let (resized, size_client) = size_owner;
     let GatewaySocketContext { device, state } = context;
     let recovery_state = Arc::new(parking_lot::RwLock::new(None));
     let mut recovery = match state.session_backend.recovery(&session_id).await {
@@ -2983,8 +2982,7 @@ async fn handle_terminal_socket(
             GatewaySocketContext { device, state },
             recovery,
             recovery_state,
-            resized,
-            size_client,
+            (resized, size_client),
         )
         .await;
         return;
@@ -3297,9 +3295,9 @@ async fn handle_terminal_grid_socket(
     context: GatewaySocketContext,
     mut recovery: Option<RecoveryStream>,
     recovery_state: Arc<parking_lot::RwLock<Option<RemoteRecoveryStatus>>>,
-    resized: Arc<std::sync::atomic::AtomicBool>,
-    size_client: String,
+    size_owner: (Arc<std::sync::atomic::AtomicBool>, String),
 ) {
+    let (resized, size_client) = size_owner;
     let GatewaySocketContext { device, state } = context;
     let is_ssh = recovery_state.read().is_some();
     if let Ok(Some(outcome)) = state.session_backend.paired_recovery_outcome(&session_id).await {

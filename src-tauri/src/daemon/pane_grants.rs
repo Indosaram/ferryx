@@ -551,7 +551,8 @@ mod tests {
         let configure = DaemonRequest::RemoteConfigure { config: Default::default() };
         let upgrade = DaemonRequest::UpgradeBinary { new_binary_path: None };
         let pairing = DaemonRequest::RemoteCreatePairingCode { permission: None };
-        let table: Vec<(&str, DaemonRequest, Result<(), &str>, Result<(), &str>)> = vec![
+        type RegressionCase<'a> = (&'a str, DaemonRequest, Result<(), &'a str>, Result<(), &'a str>);
+        let table: Vec<RegressionCase<'_>> = vec![
             ("agents list", agents(AgentControlOp::List), Ok(()), Ok(())),
             ("agents read b", agents(AgentControlOp::Read { session_id: "b".into() }), Ok(()), Ok(())),
             ("agents events", agents(AgentControlOp::Events { after: 0 }), Ok(()), Ok(())),

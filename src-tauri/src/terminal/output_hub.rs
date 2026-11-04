@@ -890,10 +890,11 @@ async fn drive_screen_compression(hub: Weak<RwLock<SessionHub>>, activity: Arc<t
 }
 
 pub(crate) type OscEffectSink = Arc<dyn Fn(&str, crate::native_terminal::osc_effects::OscEffect) + Send + Sync>;
+type OscLocalSession = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 #[derive(Clone)]
 pub struct TerminalOutputHub {
-    osc_local_session: Arc<RwLock<Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>>>,
+    osc_local_session: Arc<RwLock<Option<OscLocalSession>>>,
     osc_effect_sink: Arc<RwLock<Option<OscEffectSink>>>,
     osc52_write: Arc<std::sync::atomic::AtomicBool>,
     sessions: Arc<RwLock<HashMap<String, Arc<RwLock<SessionHub>>>>>,
