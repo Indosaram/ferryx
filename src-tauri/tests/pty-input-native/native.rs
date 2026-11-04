@@ -3,6 +3,8 @@
 pub mod suspension;
 #[path = "../../src/terminal/output_hub.rs"]
 pub mod output_hub;
+#[path = "../../src/terminal/vt_stream.rs"]
+pub mod vt_stream;
 #[path = "../../src/terminal/session.rs"]
 pub mod session;
 
