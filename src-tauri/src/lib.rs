@@ -1054,9 +1054,13 @@ fn install_macos_file_drop_destination<R: tauri::Runtime>(
     if let Err(error) = crate::macos_file_drop::install(raw_window, move |paths, x, y| {
         let payload = serde_json::json!({ "paths": paths, "position": { "x": x, "y": y } });
         if let Err(error) = app_handle.emit_to(label.as_str(), "ferryx://file-drop", payload) {
+            crate::macos_file_drop::trace_note(&format!("emit failed: {error}"));
             tracing::warn!("failed to forward file drop to the frontend: {error}");
+        } else {
+            crate::macos_file_drop::trace_note(&format!("emit: forwarded to window {label}"));
         }
     }) {
+        crate::macos_file_drop::trace_note(&format!("install failed: {error}"));
         tracing::warn!("failed to install the macOS file drop destination: {error}");
     }
 

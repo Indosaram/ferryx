@@ -49,6 +49,8 @@ export function isReleasePersistedInputEvent(event: string): boolean {
     // reported `presented` can still show nothing; they fire per pane change, not per frame.
     || event.startsWith("terminal.surface.bounds.")
     || event.startsWith("terminal.surface.detach.")
+    // File drops are rare, user-initiated, and the only record of a drop that produced no paste.
+    || event.startsWith("terminal.surface.drop.")
     || event === "terminal.surface.skipped"
     || event === "terminal.surface.cover"
     // Worktree selection and workspace swaps/restores: rare, user-driven, and the only record of
