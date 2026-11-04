@@ -88,6 +88,26 @@ describe("BrowserLibraryPanel bookmarks", () => {
     fireEvent.click(screen.getByRole("button", { name: "Delete Docs" }));
     await waitFor(() => expect(calls).toContainEqual({ command: "cmd_browser_bookmark_delete", args: { id: "b1" } }));
   });
+
+  it("creates a folder through the inline editor without window.prompt", async () => {
+    const promptSpy = vi.spyOn(window, "prompt").mockReturnValue(null);
+    try {
+      render(<BrowserLibraryPanel view="bookmarks" {...props} />);
+      fireEvent.click(await screen.findByRole("button", { name: "New folder" }));
+      const input = await screen.findByLabelText("New folder name");
+      fireEvent.change(input, { target: { value: "QAFolder" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      // createBookmarkFolder("QAFolder", "bar") — the manager starts on the bookmarks bar root.
+      await waitFor(() => expect(calls).toContainEqual({
+        command: "cmd_browser_bookmark_folder_create",
+        args: { name: "QAFolder", parentId: "bar" },
+      }));
+      await waitFor(() => expect(screen.queryByLabelText("New folder name")).not.toBeInTheDocument());
+      expect(promptSpy).not.toHaveBeenCalled();
+    } finally {
+      promptSpy.mockRestore();
+    }
+  });
 });
 
 describe("BrowserLibraryPanel downloads", () => {

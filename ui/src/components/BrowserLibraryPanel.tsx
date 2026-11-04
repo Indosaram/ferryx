@@ -135,11 +135,20 @@ function BookmarksManager({ onOpen }: { onOpen: (url: string) => void }) {
   const [folderId, setFolderId] = useState(BOOKMARK_BAR_ROOT);
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<{ id: string; title: string; url: string | null } | null>(null);
+  const [newFolderName, setNewFolderName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const folders = useMemo(() => folderOptions(tree), [tree]);
 
   const run = (action: () => Promise<unknown>, label: string) => {
     void action().then(() => setError(null)).catch((err: unknown) => setError(`${label} failed: ${errorCode(err)}`));
+  };
+
+  // Inline editor instead of window.prompt, which WKWebView (wry) answers with null.
+  const submitNewFolder = () => {
+    const name = newFolderName?.trim();
+    if (!name) return;
+    setNewFolderName(null);
+    run(() => createBookmarkFolder(name, folderId), "New folder");
   };
 
   const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
@@ -174,16 +183,37 @@ function BookmarksManager({ onOpen }: { onOpen: (url: string) => void }) {
         <select aria-label="Folder" value={folderId} onChange={(event) => setFolderId(event.target.value)} className="h-7 rounded border border-border bg-background px-1">
           {folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.label}</option>)}
         </select>
-        <button
-          type="button"
-          onClick={() => {
-            const name = window.prompt("Folder name");
-            if (name?.trim()) run(() => createBookmarkFolder(name.trim(), folderId), "New folder");
-          }}
-          className="flex items-center gap-1 rounded border border-border px-2 py-1 hover:bg-accent"
-        >
-          <FolderPlus className="size-3.5" /> New folder
-        </button>
+        {newFolderName === null ? (
+          <button
+            type="button"
+            onClick={() => setNewFolderName("")}
+            className="flex items-center gap-1 rounded border border-border px-2 py-1 hover:bg-accent"
+          >
+            <FolderPlus className="size-3.5" /> New folder
+          </button>
+        ) : (
+          <>
+            <input
+              aria-label="New folder name"
+              placeholder="Folder name"
+              autoFocus
+              value={newFolderName}
+              onChange={(event) => setNewFolderName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  submitNewFolder();
+                } else if (event.key === "Escape") {
+                  event.preventDefault();
+                  setNewFolderName(null);
+                }
+              }}
+              className="h-7 min-w-32 rounded border border-border bg-background px-2 outline-none focus:border-ring"
+            />
+            <button type="button" onClick={submitNewFolder} className="rounded border border-border px-2 py-1 hover:bg-accent">Create</button>
+            <button type="button" onClick={() => setNewFolderName(null)} className="rounded border border-border px-2 py-1 hover:bg-accent">Cancel</button>
+          </>
+        )}
       </div>
       {!terms.length ? (
         <nav aria-label="Folder path" className="flex gap-1 px-3 py-1 text-[11px] text-muted-foreground">
