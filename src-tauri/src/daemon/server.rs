@@ -4955,15 +4955,14 @@ impl DaemonServer {
     ///
     /// herdr lines carry no token. They are accepted only here, where the 0600 socket is the
     /// ownership boundary, and never on the loopback TCP ingress, which needs this boot's token.
-    #[cfg(unix)]
-    async fn serve_agent_state_connection(
+    async fn serve_agent_state_connection<S>(
         self: Arc<Self>,
         states: Arc<AgentStateHub>,
         sessions: Arc<DaemonSessionService>,
         epoch: crate::scoped_contracts::Epoch,
-        stream: tokio::net::UnixStream,
-    ) {
-        let (read_half, mut write_half) = stream.into_split();
+        stream: S,
+    ) where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin {
+        let (read_half, mut write_half) = tokio::io::split(stream);
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
         while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
@@ -6284,6 +6283,8 @@ impl DaemonServer {
         // daemon locks. A committed HandoverCandidate binds it here too: without it the next GUI
         // would see a pre-plan daemon and could never upgrade it again.
         self.bind_control_endpoint().await?;
+        #[cfg(windows)]
+        self.bind_windows_pipes()?;
 
         // Every start adopts every route in the manifest, handover or not (todo 8): routes are
         // direct, so a successor talks to each generation that still owns sessions over that
@@ -6418,6 +6419,48 @@ impl DaemonServer {
             }
         }
 
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn bind_windows_pipes(self: &Arc<Self>) -> Result<(), String> {
+        use super::windows_pipe::{identity, Listener};
+        let mut daemon = Listener::bind("daemon").map_err(|e| e.to_string())?;
+        let mut agent = Listener::bind("agent-state").map_err(|e| e.to_string())?;
+        let server = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                match daemon.accept().await {
+                    Ok(stream) => {
+                        let server = Arc::clone(&server);
+                        tokio::spawn(async move {
+                            let (origin, ancestry) = identity(&stream).await;
+                            // Unknown pipe identities must never inherit the TCP exemption.
+                            if !matches!(origin, super::supervisor_peer::PeerOrigin::Process(_)) { return; }
+                            server.handle_client_with_origin(stream, origin, ancestry).await;
+                        });
+                    }
+                    Err(error) => { tracing::error!(%error, "Daemon pipe accept failed"); break; }
+                }
+            }
+        });
+        let server = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                match agent.accept().await {
+                    Ok(stream) => {
+                        let server = Arc::clone(&server);
+                        tokio::spawn(async move {
+                            server.clone().serve_agent_state_connection(
+                                Arc::clone(&server.agent_states), server.session_service.clone(),
+                                crate::scoped_contracts::Epoch(server.epoch), stream,
+                            ).await;
+                        });
+                    }
+                    Err(error) => { tracing::error!(%error, "Agent state pipe accept failed"); break; }
+                }
+            }
+        });
         Ok(())
     }
 
@@ -6703,7 +6746,7 @@ impl DaemonServer {
         // Set once the connection has presented this boot's transport token. Unix inherits the
         // socket's ownership boundary and never needs the check.
         #[cfg(not(unix))]
-        let mut transport_authenticated = false;
+        let mut transport_authenticated = matches!(origin, super::supervisor_peer::PeerOrigin::Process(_));
         #[cfg(not(unix))]
         const TRANSPORT_REJECTION: &str =
             "Daemon connection rejected: transport token missing or invalid";
