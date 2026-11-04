@@ -404,7 +404,7 @@ pub struct DaemonSessionService {
     pub(super) ssh_store_path: PathBuf,
     pub(super) session_metadata: Arc<RwLock<HashMap<String, StoredSessionMeta>>>,
     pub(super) provider_session_claims: Arc<Mutex<HashMap<ProviderSessionClaimKey, String>>>,
-    pub(super) desktop_geometries: Arc<Mutex<HashMap<String, super::size_ownership::SizeOwnership>>>,
+    pub(super) size_ownerships: Arc<Mutex<HashMap<String, super::size_ownership::SizeOwnership>>>,
     pub(super) agent_states: Arc<AgentStateHub>,
     /// Installed once the gateway's observer exists. Sessions spawned before that are caught by
     /// `watch_live` at install time.
@@ -720,7 +720,7 @@ impl DaemonSessionService {
     }
 
     pub fn record_desktop_geometry(&self, session_id: &str, cols: u16, rows: u16) {
-        let mut states = self.desktop_geometries.lock();
+        let mut states = self.size_ownerships.lock();
         let state = states.entry(session_id.into()).or_insert_with(|| super::size_ownership::SizeOwnership::new((cols, rows)));
         let changed = state.owner != super::size_ownership::DESKTOP;
         state.desktop_resize((cols, rows));
@@ -728,11 +728,11 @@ impl DaemonSessionService {
     }
 
     pub fn desktop_geometry(&self, session_id: &str) -> Option<(u16, u16)> {
-        self.desktop_geometries.lock().get(session_id).map(|state| state.desktop)
+        self.size_ownerships.lock().get(session_id).map(|state| state.desktop)
     }
 
     pub(crate) fn prefer_desktop_geometry(&self, id: &str, cols: u16, rows: u16) -> bool {
-        let mut states = self.desktop_geometries.lock();
+        let mut states = self.size_ownerships.lock();
         let state = states.entry(id.into()).or_insert_with(|| super::size_ownership::SizeOwnership::new((cols, rows)));
         state.desktop = (cols, rows);
         state.owner == super::size_ownership::DESKTOP
@@ -746,7 +746,7 @@ impl DaemonSessionService {
     }
 
     pub fn size_owner(&self, id: &str) -> String {
-        self.desktop_geometries.lock().get(id)
+        self.size_ownerships.lock().get(id)
             .map(|state| state.owner.clone()).unwrap_or_else(|| super::size_ownership::DESKTOP.into())
     }
 
@@ -760,7 +760,7 @@ impl DaemonSessionService {
         // Admission and operation submission are synchronous under the same lock: queued
         // runtime operations cannot be submitted in the opposite ownership order.
         let pending = {
-            let mut states = self.desktop_geometries.lock();
+            let mut states = self.size_ownerships.lock();
             let initial = self.terminal_service.get_session(id).map(|s| s.get_size())
                 .or_else(|| self.terminal_service.remote().details(id).map(|d| (d.descriptor.cols, d.descriptor.rows)))
                 .unwrap_or((80, 24));
@@ -782,7 +782,7 @@ impl DaemonSessionService {
 
     pub(crate) async fn detach_size_owner(&self, id: &str, client: &str) -> Result<(), String> {
         let pending = {
-            let mut states = self.desktop_geometries.lock();
+            let mut states = self.size_ownerships.lock();
             let Some(state) = states.get_mut(id) else { return Ok(()); };
             if !state.detach(client) { return Ok(()); }
             let (cols, rows) = state.applied;
@@ -1501,7 +1501,7 @@ impl DaemonSessionService {
             .map(|d| d.generation)
             .unwrap_or(0);
         let pending = {
-            let mut states = self.desktop_geometries.lock();
+            let mut states = self.size_ownerships.lock();
             let state = states.entry(id.into()).or_insert_with(|| super::size_ownership::SizeOwnership::new((cols, rows)));
             let changed = state.owner != super::size_ownership::DESKTOP;
             let pending = self.terminal_service.resize_operation(id, generation, cols, rows).map_err(|e| e.to_string())?;
@@ -2548,7 +2548,7 @@ impl DaemonSessionService {
         let agent_states = Arc::clone(&self.agent_states);
         let agent_watch = self.agent_watch.lock().clone();
         let cleanup_watch = agent_watch.clone();
-        let desktop_geometries = Arc::clone(&self.desktop_geometries);
+        let size_ownerships = Arc::clone(&self.size_ownerships);
         let handover_manager = self.handover_manager.clone();
         let machine_lifecycles = self.machine_lifecycles.clone();
         let client_request_id = client_request_id.to_string();
@@ -2921,7 +2921,7 @@ impl DaemonSessionService {
                 let cleanup_cache = Arc::clone(&spawn_idempotency_cache);
                 let cleanup_metadata = Arc::clone(&session_metadata);
                 let cleanup_claims = Arc::clone(&provider_session_claims);
-                let cleanup_desktop_geometries = Arc::clone(&desktop_geometries);
+                let cleanup_size_ownerships = Arc::clone(&size_ownerships);
                 let cleanup_agent_states = Arc::clone(&agent_states);
                 let cleanup_watch = cleanup_watch.clone();
                 let handover_manager = handover_manager.clone();
@@ -3099,7 +3099,7 @@ impl DaemonSessionService {
                                 .retain(|key, owner| key != &claim || owner != &cleanup_session_id);
                         }
                     }
-                    cleanup_desktop_geometries
+                    cleanup_size_ownerships
                         .lock()
                         .remove(&cleanup_session_id);
                     if let Some(manager) = handover_manager.upgrade() {
@@ -3220,7 +3220,7 @@ impl DaemonSessionService {
 
     pub(super) fn release_session_ownership(&self, session_id: &str) {
         self.session_router.remove_workspace(session_id);
-        self.desktop_geometries.lock().remove(session_id);
+        self.size_ownerships.lock().remove(session_id);
         self.spawn_idempotency_cache
             .lock()
             .retain(|_, entry| entry.session_id != session_id);
