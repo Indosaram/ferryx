@@ -63,7 +63,8 @@ fn identity_key(scope: &str, tab: &str, visual: &str) -> String {
 
 fn convert_workspace(workspace: &Value, id: &str, mapping: &mut BTreeMap<String, u64>) -> Result<Layout, String> {
     let saved = workspace.get("layout").unwrap_or(workspace);
-    let mut layout = convert_saved(saved, workspace, &scope_key(id, None), mapping)?;
+    let active_path = workspace["activeWorktreePath"].as_str().filter(|path| !path.is_empty());
+    let mut layout = convert_saved(saved, workspace, &scope_key(id, active_path), mapping)?;
     for field in ["layoutByWorktree", "worktreeLayouts"] {
         if let Some(parked) = workspace[field].as_object() {
             for (path, saved) in parked {
@@ -130,7 +131,7 @@ fn content(state: &Value, workspace: &Value, tab: &Value, visual: &str) -> Resul
             let file = pane.get("file").unwrap_or(pane);
             Content::File { path: file["path"].as_str().or_else(|| tab["path"].as_str()).unwrap_or("").into(), line: file["line"].as_u64(), col: file["col"].as_u64(), ownership: metadata(pane, tab, &["backendSessionId", "workspaceId", "previewId", "remote"]) }
         },
-        "browser" => Content::Browser { url: pane["browser"]["url"].as_str().or_else(|| pane["url"].as_str()).or_else(|| tab["browser"]["url"].as_str()).or_else(|| tab["url"].as_str()).unwrap_or("").into(), identity: metadata(pane.get("browser").unwrap_or(pane), tab, &["browserId", "workspaceId", "worktreePath"]) },
+        "browser" => Content::Browser { url: pane["browser"]["url"].as_str().or_else(|| pane["url"].as_str()).or_else(|| tab["browser"]["url"].as_str()).or_else(|| tab["url"].as_str()).unwrap_or("").into(), identity: metadata(pane.get("browser").unwrap_or(pane), tab, &["browserId", "workspaceId", "worktreePath", "profileId"]) },
         "dag" => Content::Dag,
         "changes" => Content::Changes { checkout: metadata(pane, tab, &["workspaceId", "worktreePath", "worktree"]) },
         "remote-desktop" | "remoteDesktop" => Content::RemoteDesktop { host_id: text(pane, "hostId").into() },
