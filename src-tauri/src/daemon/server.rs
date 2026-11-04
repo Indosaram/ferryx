@@ -9514,7 +9514,12 @@ impl DaemonServer {
         &self,
         mut config: RemoteGatewayConfig,
     ) -> Result<(), String> {
-        config.port = REMOTE_GATEWAY_PORT;
+        // An isolated QA daemon must never contend with the owner's live gateway.
+        #[cfg(feature = "local-split-qa")]
+        let isolated = active_transport_qa_profile();
+        #[cfg(not(feature = "local-split-qa"))]
+        let isolated = false;
+        if !isolated { config.port = REMOTE_GATEWAY_PORT; }
         refresh_cors_saved_host_origins(self.paired_hosts.clone(), Arc::clone(&self.remote_state))
             .await;
         self.configure_gateway(config).await
