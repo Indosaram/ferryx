@@ -1140,6 +1140,8 @@ async fn remote_terminal_spawn_forwards_worktree_and_cwd_to_daemon() {
                                 session_id: "remote-mock-session".into(),
                                 epoch: 1,
                                 session: DaemonSessionDetails {
+                                    foreground_command: None,
+                                    agent: None,
                                     size_owner: None,
                                     session_id: "remote-mock-session".into(),
                                     workspace_id: None,
