@@ -39,8 +39,11 @@ Commit waits for a running callback, pauses predecessor execution, and snapshots
 the ledger; a failed decision with no durable record resumes the predecessor.
 
 The successor reads the committed ledger before starting its own worker. It
-reloads source rather than transferring VM objects. Only `after` and `log` are
-provided here; broader host bindings belong to todo 24.
+reloads source rather than transferring VM objects. The versioned `luauApiV1`
+bindings, desktop Settings and shortcut precedence are documented in
+[docs/scripting.md](../../../docs/scripting.md). `api.rs` owns argument validation,
+`control.rs` the owner control channel, and `daemon/server/script_api.rs` adapts
+host effects to existing owner requests.
 
 No build, test, QA, or mutation command was run during implementation, per the
 implement-first instruction. The integration verification must resolve the new
