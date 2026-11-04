@@ -158,7 +158,7 @@ export function startSession({ config, run, lane }) {
     const s = session();
     const panes = {};
     for (const mode of ['decision', 'held', 'upstream']) {
-      const reply = await s.call(`spawn-${mode}`, [{ type: 'spawn', clientRequestId: randomUUID(), workspaceId: 'f3', worktree: null, cwd: s.setup.worktree, cols: 120, rows: 32, shell: s.wrappers.wrappers[mode].shell }]);
+      const reply = await s.call(`spawn-${mode}`, [{ type: 'spawn', clientRequestId: randomUUID(), workspaceId: 'f3', worktree: null, cwd: s.setup.repo ?? s.setup.worktree, cols: 120, rows: 32, shell: s.wrappers.wrappers[mode].shell }]);
       if (reply?.type !== 'spawnOk') throw new StepFailed('FIXTURE_PANES', `spawn ${mode}: ${JSON.stringify(reply)}`);
       panes[mode] = reply.sessionId;
     }
