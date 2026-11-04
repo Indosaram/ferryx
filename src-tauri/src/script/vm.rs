@@ -20,6 +20,7 @@ pub struct Vm {
 }
 
 impl Vm {
+    #[cfg(test)]
     pub fn new(
         identity: String,
         clock: Rc<dyn Fn() -> u64>,
@@ -79,6 +80,7 @@ impl Vm {
     }
 
     pub fn key(&self, keys: &str, session: &str) -> mlua::Result<()> {
+        *self.api.session.borrow_mut() = Some(session.into());
         *self.budget.borrow_mut() = cpu_time::ThreadTime::now();
         let keys = super::api::chord(keys).map_err(mlua::Error::runtime)?;
         let callback = self.api.bindings.borrow().get(&keys).map(|(_, callback)| callback.clone());
