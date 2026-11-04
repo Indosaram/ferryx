@@ -1,5 +1,5 @@
 //! Out-of-process plugin SDK. All filesystem APIs here are blocking-worker APIs.
-//! The owner-facing daemon adapter must supply consent, dispatch and shutdown.
+//! The daemon registry owns explicit consent, dispatch and process shutdown.
 use super::{pane_grants, protocol::DaemonRequest, supervisor_peer::PeerClass};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::{Path, PathBuf}};
