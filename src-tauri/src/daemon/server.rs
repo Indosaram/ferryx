@@ -411,8 +411,6 @@ mod pane_liveness_adopted_ownership_tests {
         worktree: Option<WorktreeIdentity>,
         incarnation: Option<&str>,
     ) -> DaemonSessionDetails {
-        foreground_command: None,
-        agent: None,
         let mut details = DaemonSessionDetails::new(crate::daemon::protocol::DaemonSessionDetailsParams {
             session_id: "session-owned".into(),
             workspace_id: workspace_id.map(str::to_owned),
