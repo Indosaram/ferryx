@@ -30,7 +30,7 @@ impl State {
 }
 
 pub fn path(daemon: bool) -> Result<PathBuf, String> {
-    crate::worktree::naming::data_dir_with_env(std::env::var_os)
+    crate::worktree::naming::data_dir_with_env(|key| std::env::var_os(key))
         .map(|root| root.join(if daemon { "onboarding-daemon.json" } else { "onboarding.json" }))
         .ok_or_else(|| "No onboarding data directory".into())
 }
