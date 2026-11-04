@@ -91,6 +91,7 @@ pub fn parse(source: &str) -> Result<Preview, String> {
                 ("font_size", Value::Number(n)) => out.settings.number("font-size", &n.to_string()),
                 ("font_size", Value::Integer(n)) => out.settings.number("font-size", &n.to_string()),
                 ("scrollback_lines", Value::Integer(n)) => out.settings.number("scrollback", &n.to_string()),
+                ("scrollback_lines", Value::Number(n)) => out.settings.number("scrollback", &n.to_string()),
                 ("default_cursor_style", Value::String(s)) => {
                     let style = match s.to_str()?.as_ref() { "SteadyBar" | "BlinkingBar" => Some("bar"),
                         "SteadyBlock" | "BlinkingBlock" => Some("block"), "SteadyUnderline" | "BlinkingUnderline" => Some("underline"), _ => None };
@@ -122,6 +123,7 @@ pub fn parse(source: &str) -> Result<Preview, String> {
             };
             if !accepted { out.skipped.push(key); }
         }
+        if start.elapsed() >= Duration::from_millis(10) { return Err(mlua::Error::runtime("IMPORT_BUDGET")); }
         Ok(())
     };
     let mut read = read;
