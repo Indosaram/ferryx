@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::{Path, PathBuf}};
 
 pub mod runtime;
+pub mod registry;
 #[cfg(test)]
 mod tests;
 
@@ -32,7 +33,7 @@ impl Manifest {
             .map_err(|e| e.to_string())?;
         if manifest.name != name || manifest.version.is_empty() || manifest.command.is_empty()
             || !Path::new(&manifest.command[0]).is_absolute()
-            || manifest.capabilities.iter().any(|c| !matches!(c.as_str(), "listSessions" | "getCapabilities" | "write")) {
+            || manifest.capabilities.iter().any(|c| !matches!(c.as_str(), "listSessions" | "getCapabilities" | "write" | "render")) {
             return Err("invalid manifest or unsupported capability".into());
         }
         Ok(manifest)
@@ -80,6 +81,7 @@ pub fn authorize(manifest: &Manifest, request: &DaemonRequest, grants: &pane_gra
         DaemonRequest::ListSessions => "listSessions",
         DaemonRequest::GetCapabilities => "getCapabilities",
         DaemonRequest::Write { .. } => "write",
+        DaemonRequest::PluginRender { .. } => "render",
         _ => return Err(Forbidden { code: "FORBIDDEN", reason: "PLUGIN_CAPABILITY_REQUIRED" }),
     };
     if !manifest.capabilities.contains(capability) {
