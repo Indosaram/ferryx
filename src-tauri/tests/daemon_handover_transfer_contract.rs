@@ -2052,10 +2052,13 @@ async fn layout_survives_handover() {
     let socket = daemons.socket();
     let d1 = daemons.launch(None).await;
     let mut predecessor = TestDaemonClient::connect(&socket, daemons.pid(d1)).await.unwrap();
+    let repo = daemons.repo();
+    predecessor.register_workspace("layout-contract", &repo).await.unwrap();
+    let session = predecessor.spawn_with_shell("layout-contract", "layout-contract", 80, 24, Some("/bin/sh"), Some(&repo)).await.unwrap();
     let before = match predecessor.send_request(&DaemonRequest::LayoutApply {
         window: "main".into(), base_revision: 0,
         intent: Intent::AddTabWithSession { tab_id: "tab-a".into(), label: "A".into(),
-            content: Content::Terminal { backend_session_id: "pty-a".into() }, activate: true },
+            content: Content::Terminal { backend_session_id: session }, activate: true },
     }).await.unwrap() {
         DaemonResponse::LayoutOk { view } => view.layout,
         other => panic!("Expected layout, got {other:?}"),
