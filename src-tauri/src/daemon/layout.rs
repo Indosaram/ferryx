@@ -114,8 +114,8 @@ fn ratio(value: f64) -> f64 { if value.is_finite() { value.clamp(0.1, 0.9) } els
 impl Node {
     fn first(&self) -> u64 { match self { Self::Leaf { node_id, .. } => *node_id, Self::Split { a, .. } => a.first() } }
     fn find_mut(&mut self, id: u64) -> Option<&mut Node> {
+        if matches!(self, Self::Leaf { node_id, .. } if *node_id == id) { return Some(self); }
         match self {
-            Self::Leaf { node_id, .. } if *node_id == id => Some(self),
             Self::Leaf { .. } => None,
             Self::Split { a, b, .. } => a.find_mut(id).or_else(|| b.find_mut(id)),
         }
@@ -189,8 +189,8 @@ impl TabGroupLayout {
         }
     }
     fn group_mut(&mut self, id: &str) -> Option<&mut Self> {
+        if matches!(self, Self::Group { group_id, .. } if group_id == id) { return Some(self); }
         match self {
-            Self::Group { group_id, .. } if group_id == id => Some(self),
             Self::Group { .. } => None,
             Self::Split { a, b, .. } => a.group_mut(id).or_else(|| b.group_mut(id)),
         }
