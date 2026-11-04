@@ -237,21 +237,215 @@ async function closeLibrary(ctx) {
 }
 
 /**
+ * macOS accessibility helper (JXA through System Events) for a native open panel. The panel is
+ * owned by the process that opened it: the engine app "ferryx_engine" for a Chromium tab, Ferryx
+ * itself for a WKWebView tab. Blind keystrokes lost the path in macOS run 41824966041 (probe 278:
+ * the Chromium panel's "Go to" sheet held only "/"), and OCR missed the panel, so it stayed over
+ * Settings for the whole profile scenario. Here the panel is found by its buttons, raised, and
+ * answered by setting the "Go to" field's value and clicking "Open" / "Cancel" directly.
+ *   find          -> { panels: [{ pid, process, kind, title, subrole, buttons }] }
+ *   open <path>   -> raise, Cmd+Shift+G (else "/"), set the field, Return, click Open
+ *   cancel        -> Escape a Go to sheet, then click Cancel on every panel found
+ */
+const MAC_PANEL_JXA = String.raw`
+function run(argv) {
+  var action = argv[0], pids = (argv[1] || "").split(",").filter(Boolean).map(Number), path = argv[2] || "";
+  var se = Application("System Events");
+  var out = { action: action, steps: [] };
+  function safe(f, d) { try { return f(); } catch (e) { return d === undefined ? null : d; } }
+  function procs() {
+    var seen = {}, list = [];
+    function add(p) { var id = safe(function () { return p.unixId(); }); if (id && !seen[id]) { seen[id] = true; list.push(p); } }
+    pids.forEach(function (pid) { safe(function () { return se.processes.whose({ unixId: pid })(); }, []).forEach(add); });
+    ["ferryx_engine", "ferryx", "Ferryx"].forEach(function (name) { safe(function () { return se.processes.whose({ name: name })(); }, []).forEach(add); });
+    return list;
+  }
+  // Buttons of el and of its groups: the remote open-panel view on recent macOS nests them.
+  var CONTAINERS = ["AXGroup", "AXSplitGroup", "AXSheet", "AXPopover", "AXScrollArea", "AXLayoutArea"];
+  function buttonsIn(el, depth) {
+    var list = safe(function () { return el.buttons(); }, []) || [];
+    if (depth > 0) {
+      safe(function () { return el.uiElements(); }, []).forEach(function (kid) {
+        if (CONTAINERS.indexOf(safe(function () { return kid.role(); })) >= 0) list = list.concat(buttonsIn(kid, depth - 1));
+      });
+    }
+    return list;
+  }
+  function buttonNames(el) { return buttonsIn(el, 3).map(function (b) { return safe(function () { return b.name(); }) || safe(function () { return b.title(); }) || ""; }); }
+  // Every window or sheet with a Cancel button, or a dialog-subrole window with buttons.
+  function panels() {
+    var found = [];
+    procs().forEach(function (proc) {
+      safe(function () { return proc.windows(); }, []).forEach(function (win) {
+        function visit(el, kind, depth) {
+          var names = buttonNames(el);
+          var subrole = safe(function () { return el.subrole(); });
+          if (names.indexOf("Cancel") >= 0 || (kind === "window" && /Dialog/.test(subrole || "") && names.length)) {
+            found.push({ proc: proc, win: win, el: el, kind: kind, depth: depth, buttons: names, subrole: subrole });
+          }
+          if (depth < 2) safe(function () { return el.sheets(); }, []).forEach(function (sheet) { visit(sheet, "sheet", depth + 1); });
+        }
+        visit(win, "window", 0);
+      });
+    });
+    return found;
+  }
+  function describe(list) {
+    return list.map(function (p) {
+      return { pid: safe(function () { return p.proc.unixId(); }), process: safe(function () { return p.proc.name(); }), kind: p.kind,
+        title: safe(function () { return p.win.title(); }), subrole: p.subrole, buttons: p.buttons };
+    });
+  }
+  var OPEN = ["Open", "Choose", "Upload", "Select"];
+  function isPanel(p) { return p.buttons.some(function (name) { return OPEN.indexOf(name) >= 0; }); }
+  function fieldIn(el, depth) {
+    var kids = safe(function () { return el.uiElements(); }, []);
+    for (var i = 0; i < kids.length; i++) {
+      var role = safe(function () { return kids[i].role(); });
+      // The panel's own search box is an AXSearchField; the Go to field is a plain text field.
+      if ((role === "AXTextField" || role === "AXComboBox") && safe(function () { return kids[i].subrole(); }) !== "AXSearchField") return kids[i];
+      if (depth > 0 && CONTAINERS.indexOf(role) >= 0) {
+        var hit = fieldIn(kids[i], depth - 1);
+        if (hit) return hit;
+      }
+    }
+    return null;
+  }
+  // The Go to field lives in a sheet (or popover) of the panel; a sheet that has an Open button is
+  // the panel itself (WKWebView panels can be sheets), so it is skipped. Last, the panel's own
+  // tree minus its search field (where the remote view hosts the Go to box inline).
+  function goField(panel, inline) {
+    var hosts = safe(function () { return panel.el.sheets(); }, []).concat(panel.el === panel.win ? [] : safe(function () { return panel.win.sheets(); }, []));
+    for (var i = 0; i < hosts.length; i++) {
+      if (buttonNames(hosts[i]).some(function (name) { return OPEN.indexOf(name) >= 0; })) continue;
+      var field = fieldIn(hosts[i], 3);
+      if (field) return field;
+    }
+    // Only after Go to was opened: before that an inline text field is not the Go to box.
+    return inline ? fieldIn(panel.el, 4) : null;
+  }
+  function clickButton(el, names) {
+    var all = buttonsIn(el, 3);
+    for (var i = 0; i < names.length; i++) {
+      for (var j = 0; j < all.length; j++) {
+        var button = all[j];
+        var name = safe(function () { return button.name(); }) || safe(function () { return button.title(); });
+        if (name !== names[i] || safe(function () { return button.enabled(); }, true) === false) continue;
+        if (safe(function () { button.click(); return true; }, false)) return names[i];
+      }
+    }
+    return null;
+  }
+  function raise(p) {
+    safe(function () { p.proc.frontmost = true; });
+    safe(function () { p.win.actions.byName("AXRaise").perform(); });
+    delay(0.5);
+  }
+  var list = panels();
+  out.panels = describe(list);
+  if (action === "find") return JSON.stringify(out);
+  if (action === "cancel") {
+    out.clicked = [];
+    // Deepest first, so a nested sheet goes before the window under it.
+    list.sort(function (a, b) { return b.depth - a.depth; }).forEach(function (p) {
+      raise(p);
+      // A Go to sheet (it has no Cancel button on recent macOS, probe 278) blocks the panel's
+      // buttons: Escape closes it first.
+      if (isPanel(p) && goField(p)) { se.keyCode(53); out.steps.push("escape go-to sheet"); delay(0.6); }
+      out.clicked.push(clickButton(p.el, ["Cancel"]));
+      delay(0.6);
+    });
+    delay(0.6);
+    out.remaining = describe(panels());
+    out.ok = out.remaining.length === 0;
+    return JSON.stringify(out);
+  }
+  // open <path>
+  var panel = list.filter(isPanel)[0];
+  if (!panel) { out.ok = false; out.reason = "no panel with an Open button"; return JSON.stringify(out); }
+  out.owner = describe([panel])[0];
+  raise(panel);
+  var field = goField(panel);
+  if (!field) {
+    se.keystroke("g", { using: ["command down", "shift down"] });
+    out.steps.push("cmd-shift-g");
+    for (var i = 0; i < 12 && !field; i++) { delay(0.25); field = goField(panel, true); }
+  }
+  if (!field) {
+    // Typing "/" in an open panel opens the same sheet with "/" prefilled (probe 278).
+    se.keystroke("/");
+    out.steps.push("slash");
+    for (var j = 0; j < 12 && !field; j++) { delay(0.25); field = goField(panel, true); }
+  }
+  if (!field) { out.ok = false; out.reason = "Go to field not found"; return JSON.stringify(out); }
+  safe(function () { field.focused = true; });
+  safe(function () { field.value = path; });
+  delay(0.4);
+  out.field_value = safe(function () { return field.value(); });
+  if (out.field_value !== path) {
+    // The value did not stick: type it into the focused field, the panel's process frontmost.
+    se.keystroke("a", { using: ["command down"] });
+    se.keystroke(path);
+    delay(0.4);
+    out.field_value = safe(function () { return field.value(); });
+    out.steps.push("typed into field");
+  } else {
+    out.steps.push("set field value");
+  }
+  se.keyCode(36);
+  out.steps.push("return");
+  delay(1.5);
+  // Return on a file path selects the file (or opens it directly on some versions); Open confirms.
+  var after = panels().filter(isPanel)[0];
+  out.open_clicked = after ? clickButton(after.el, OPEN) : null;
+  if (after && !out.open_clicked) { se.keyCode(36); out.steps.push("return (Open not clickable)"); }
+  delay(1.2);
+  out.remaining = describe(panels());
+  out.ok = out.remaining.length === 0;
+  return JSON.stringify(out);
+}
+`;
+
+/** Runs MAC_PANEL_JXA with `action`; returns its parsed JSON or { ok: false, panels: [], stderr }. */
+function macPanel(ctx, action, path = "") {
+  const script = join(ctx.out, "mac-panel.js");
+  writeFileSync(script, MAC_PANEL_JXA);
+  // Ferryx's pid and every engine pid; the script also looks both apps up by process name.
+  const pids = [ctx.host.pid, ...ctx.run("pgrep", ["-f", "ferryx_engine"]).stdout.split(/\s+/).filter(Boolean).map(Number)].filter(Boolean);
+  const result = ctx.run("osascript", ["-l", "JavaScript", script, action, pids.join(","), path], { timeout: 60000 });
+  try {
+    return JSON.parse(result.stdout);
+  } catch {
+    return { ok: false, panels: [], stderr: (result.stderr || result.stdout).slice(0, 600) };
+  }
+}
+
+/**
  * macOS: closes a native open panel (and its "Go to folder" sheet) left on screen. A leaked
- * Chromium open panel covered the app for the rest of macOS run 41801115761 (probes 234-295), so
- * Settings never opened for the profile scenario. Escape twice (the sheet, then the panel),
- * confirmed by OCR, retried once.
+ * Chromium open panel covered the app for the rest of macOS runs 41801115761 and 41824966041
+ * (probes 270-298), so Settings never opened for the profile scenario, while the OCR test alone
+ * reported open:false. System Events finds the panel (a window or sheet with a Cancel button in
+ * Ferryx or ferryx_engine) and clicks Cancel; Escape twice stays as the fallback.
  */
 async function closeFilePanel(ctx) {
   if (ctx.platform !== "darwin") return null;
-  const panelOpen = () => {
+  const ocrOpen = () => {
     const words = screenWords(ctx);
     return has(words, "cancel") && words.some((word) => /^(new|folder|recents|applications|go|to:|open)$/i.test(word.text));
   };
-  const record = { open: false, escapes: 0 };
+  const axPanels = () => macPanel(ctx, "find").panels ?? [];
+  const record = { open: false, escapes: 0, ax: [] };
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    if (!panelOpen()) return { ...record, ok: true };
+    const found = axPanels();
+    if (!found.length && !ocrOpen()) return { ...record, ok: true };
     record.open = true;
+    record.found = found;
+    if (found.length) {
+      const cancel = macPanel(ctx, "cancel");
+      record.ax.push({ clicked: cancel.clicked ?? null, steps: cancel.steps ?? [], ok: cancel.ok ?? false, stderr: cancel.stderr });
+      await sleep(800);
+      if (!axPanels().length && !ocrOpen()) return { ...record, ok: true, via: "system events cancel" };
+    }
     // Escape goes to the frontmost app, which owns the panel (the engine for a Chromium tab), so
     // the Ferryx window is not focused first.
     for (let press = 0; press < 2; press += 1) {
@@ -260,7 +454,8 @@ async function closeFilePanel(ctx) {
       await sleep(800);
     }
   }
-  return { ...record, ok: !panelOpen() };
+  const left = axPanels();
+  return { ...record, left, ok: !left.length && !ocrOpen(), via: "escape" };
 }
 
 /** Closes the OS file-manager window a drag source opened, so it covers nothing later. */
@@ -496,8 +691,25 @@ function fixtureFile(ctx) {
   return { path, name: "upload-fixture.txt", size: statSync(path).size };
 }
 
-/** Types `path` into the platform's native open-file dialog (which has just opened) and confirms. */
+/**
+ * Types `path` into the platform's native open-file dialog (which has just opened) and confirms.
+ * Returns how it was answered ({ via, ... }); the caller verifies through the page title.
+ */
 async function answerOpenDialog(ctx, path) {
+  if (ctx.platform === "darwin") {
+    // System Events first: find the panel in whichever process owns it, raise it, set the Go to
+    // field and click Open. Blind keystrokes reached the wrong window (macOS run 41824966041).
+    const shown = await until(() => (macPanel(ctx, "find").panels ?? []).length > 0, 8000, 500);
+    const ax = shown ? macPanel(ctx, "open", path) : { ok: false, reason: "no panel found through System Events" };
+    const record = { via: "system events", ax: { ok: ax.ok ?? false, owner: ax.owner ?? null, steps: ax.steps ?? [], field_value: ax.field_value ?? null, open_clicked: ax.open_clicked ?? null, reason: ax.reason ?? null, remaining: ax.remaining ?? null, stderr: ax.stderr ?? null } };
+    if (ax.ok) return record;
+    // Do not type blind into the page when the panel already went away (picked or closed).
+    const stillOpen = (macPanel(ctx, "find").panels ?? []).some((panel) => panel.buttons.some((name) => /^(Open|Choose|Upload|Select)$/.test(name)));
+    if (shown && !stillOpen) return { ...record, via: "system events (panel gone)" };
+    record.via = "keystrokes (system events failed)";
+    await macKeystrokeAnswer(ctx, path);
+    return record;
+  }
   await sleep(2500);
   if (ctx.platform === "linux") {
     ctx.host.key({ key: "l", mods: ["ctrl"] });
@@ -510,20 +722,24 @@ async function answerOpenDialog(ctx, path) {
     ctx.win.ps("typeraw", ["-Text", path]);
     await sleep(400);
     ctx.win.ps("keysraw", ["-Codes", "13"]);
-  } else {
-    // The Chromium panel's "Go to folder" sheet kept only "/" of the typed path (macOS run
-    // 41801115761 probe 234): it was still opening when typing started. Wait longer, and select
-    // the field's text so the whole path replaces whatever the sheet prefilled.
-    ctx.host.key({ key: "g", mods: ["mod", "shift"] });
-    await sleep(2500);
-    ctx.host.key({ key: "a", mods: ["mod"] });
-    await sleep(300);
-    ctx.host.type(path);
-    await sleep(600);
-    ctx.host.key({ key: "Enter" });
-    await sleep(1200);
-    ctx.host.key({ key: "Enter" });
   }
+  return { via: "keystrokes" };
+}
+
+/** macOS fallback: blind keystrokes to the frontmost app (Go to folder, path, Return twice). */
+async function macKeystrokeAnswer(ctx, path) {
+  // The Chromium panel's "Go to folder" sheet kept only "/" of the typed path (macOS run
+  // 41801115761 probe 234): it was still opening when typing started. Wait longer, and select
+  // the field's text so the whole path replaces whatever the sheet prefilled.
+  ctx.host.key({ key: "g", mods: ["mod", "shift"] });
+  await sleep(2500);
+  ctx.host.key({ key: "a", mods: ["mod"] });
+  await sleep(300);
+  ctx.host.type(path);
+  await sleep(600);
+  ctx.host.key({ key: "Enter" });
+  await sleep(1200);
+  ctx.host.key({ key: "Enter" });
 }
 
 /** Real drag of a file from an OS file source onto screen point `to`. */
@@ -963,7 +1179,7 @@ export async function dailyWebviewBefore(ctx) {
   await run(ctx, "daily-g8-upload", "Webview /upload.html: click UPLOADPICK, type the path in the native dialog; then drag the file from the OS onto DROPZONE", async () => {
     await visit(ctx, `${fixtureBase}/upload.html`, "UPLOADPICK");
     await clickWord(ctx, (text) => /UPLOADPICK/i.test(text), { timeout: 8000 });
-    await answerOpenDialog(ctx, file.path);
+    g8.picker_answer = await answerOpenDialog(ctx, file.path);
     const picked = await until(() => tab(ctx, daily.tabB)?.title === `picked:${file.name}:${file.size}`, 12000);
     g8.checks.upload_picker = Boolean(picked);
     g8.picker_title = tab(ctx, daily.tabB)?.title ?? null;
@@ -1325,13 +1541,21 @@ export async function dailyChromium(ctx) {
   };
 
   await run(ctx, "daily-g8-chromium", "Chromium tab /upload.html: native file chooser and an OS file drag onto DROPZONE", async () => {
+    try {
+      return await g8Chromium();
+    } finally {
+      // On every path: an open panel left here covered Settings for G11 (macOS run 41824966041).
+      g8.chromium_panel_closed_end = await closeFilePanel(ctx);
+    }
+  });
+  async function g8Chromium() {
     const created = await newChromiumTab();
     if (!created) return { ok: false, stderr: "no chromium tab" };
     g8.chromium_tab = created.browserId;
     g8.chromium_nav = await chromiumNavigate(created.browserId, `${fixtureBase}/upload.html`);
     await waitWords(ctx, ["uploadpick"], 15000);
     await clickWord(ctx, (text) => /UPLOADPICK/i.test(text), { timeout: 8000 });
-    await answerOpenDialog(ctx, file.path);
+    g8.chromium_picker_answer = await answerOpenDialog(ctx, file.path);
     const picked = await until(() => tab(ctx, created.browserId)?.title === `picked:${file.name}:${file.size}`, 12000);
     g8.checks.upload_picker_chromium = Boolean(picked);
     g8.chromium_picker_title = tab(ctx, created.browserId)?.title ?? null;
@@ -1347,7 +1571,7 @@ export async function dailyChromium(ctx) {
     g8.chromium_drop_title = tab(ctx, created.browserId)?.title ?? null;
     ctx.host.focus();
     return { ok: g8.checks.upload_picker_chromium && g8.checks.drag_in_chromium };
-  });
+  }
 
   await run(ctx, "daily-g13-pdf-chromium", "Chromium tab: /doc.pdf renders in the PDF viewer, with 2 pages", async () => {
     const browserId = g8.chromium_tab;
@@ -1377,17 +1601,54 @@ export async function dailyChromium(ctx) {
     let scrolled = await ctx.scrollSettingsTo("Session & Cookies");
     // OCR can split or drop the "&"; the next group's heading is right below the profile input.
     if (!scrolled.ok) scrolled = await ctx.scrollSettingsTo("Active Browser Tabs");
-    const input = await clickWord(ctx, (text) => /^Profile$/.test(text), { timeout: 6000, pick: "rightmost" });
+    // The input's placeholder is "Profile name" and the "Add Profile" button sits right of it, so
+    // the rightmost "Profile" was the button (an empty draft: a no-op) and "work" was typed
+    // nowhere. Click the "Profile" that has "name" right after it on its line.
+    const placeholder = await until(() => {
+      const words = screenWords(ctx);
+      return words.filter((word) => /^Profile$/.test(word.text)).find((word) => words.some((next) => /^name$/i.test(next.text)
+        && Math.abs(next.top - word.top) < 10 && next.left > word.left && next.left - (word.left + word.width) < 40)) ?? null;
+    }, 6000, 800);
+    let input = null;
+    let inputVia = "placeholder 'Profile name'";
+    if (placeholder) {
+      input = [placeholder.left + Math.round(placeholder.width / 2), placeholder.top + Math.round(placeholder.height / 2)];
+    } else {
+      // The muted placeholder is easy for OCR to miss; the input (w-36, 144px) ends 6px left of
+      // the "Add Profile" button, so its middle is about 100px left of the word "Add".
+      const words = screenWords(ctx);
+      const addWord = words.filter((word) => /^Add$/.test(word.text)).find((word) => words.some((next) => /^Profile$/.test(next.text)
+        && Math.abs(next.top - word.top) < 10 && next.left > word.left && next.left - (word.left + word.width) < 40));
+      if (addWord) {
+        input = [addWord.left - 100 * (ctx.host.scale?.() ?? 1), addWord.top + Math.round(addWord.height / 2)];
+        inputVia = "left of 'Add Profile'";
+      }
+    }
+    if (input) ctx.host.click(...input);
+    await sleep(300);
     ctx.host.type("work");
     await sleep(300);
+    // Enter in the input adds the profile (BrowserSection's onKeyDown). Add is clicked as well:
+    // after a successful Enter the draft is empty and addProfile returns without adding a second.
+    ctx.host.key({ key: "Enter" });
+    await sleep(800);
     const add = await clickWord(ctx, (text) => /^Add$/.test(text), { timeout: 5000, pick: "rightmost" });
     await sleep(1500);
-    g11.settings = { opened: opened.ok, scrolled: scrolled.ok, input, add };
+    g11.settings = { opened: opened.ok, scrolled: scrolled.ok, input, input_via: input ? inputVia : null, add, work_row: await waitWords(ctx, ["work"], 3000) };
     ctx.host.key({ key: "Escape" });
     await sleep(1500);
     // Duplicate the Chromium tab into the "work" profile from its tab context menu.
     const before = new Set(ctx.sessions().list.map((entry) => entry.browserId));
-    const title = await until(() => screenWords(ctx).filter((word) => /ferryxpdf|doc\.pdf|upload/i.test(word.text)).sort((a, b) => a.top - b.top)[0], 8000);
+    // The tab title only: above the address bar (the PDF viewer's own "doc.pdf" heading is in the
+    // page, where a right-click opens Chromium's menu), and not the URL itself. OCR read the tab
+    // as "be.pdf" in macOS run 41824966041 (screenshot 59), so any "*.pdf" word counts.
+    const title = await until(() => {
+      const words = screenWords(ctx);
+      const url = addressWord(words);
+      return words.filter((word) => /ferryxpdf|\.pdf$|upload/i.test(word.text) && !/[/:]/.test(word.text) && (!url || word.top < url.top))
+        .sort((a, b) => a.top - b.top)[0];
+    }, 8000);
+    g11.duplicate_from = title ? { text: title.text, at: [title.left, title.top] } : null;
     if (title) {
       ctx.host.rightClick(title.left + Math.round(title.width / 2), title.top + Math.round(title.height / 2));
       await sleep(1200);
