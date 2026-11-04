@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // Run with Bun on an isolated Linux/macOS acceptance host, never the owner's Mac.
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, watch } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn, execFile } from 'node:child_process';
@@ -18,10 +18,28 @@ const children = [];
 const sockets = [];
 const timeout = () => AbortSignal.timeout(90_000);
 async function launch(legacy) {
+  const controller = new AbortController();
+  const events = legacy ? watch(env.FERRYX_RUNTIME_DIR, { signal: controller.signal }) : null;
+  const changed = events?.next();
   const child = spawn(binary, ['--daemon', ...(legacy ? ['--handover-from', legacy] : [])], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   children.push(child);
   child.stderr.pipe(process.stderr);
   const lines = createInterface({ input: child.stdout });
+  if (legacy) {
+    try {
+      const signal = timeout();
+      let event = changed;
+      while (true) {
+        await Promise.race([event, new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('successor readiness timeout')), { once: true }))]);
+        // Subscribe before probing: handover keeps the same listener, so only an
+        // exact-PID handshake proves the successor has committed ownership.
+        event = events.next();
+        try { const probe = await client(child.pid); probe.socket.destroy(); break; }
+        catch (error) { if (signal.aborted) throw error; }
+      }
+    } finally { controller.abort(); }
+    return child;
+  }
   await new Promise((resolveReady, reject) => {
     const signal = timeout();
     const abort = () => reject(new Error('daemon readiness timeout'));
@@ -34,7 +52,7 @@ async function launch(legacy) {
   });
   return child;
 }
-async function client() {
+async function client(expectedPid) {
   const socket = connect(join(env.FERRYX_RUNTIME_DIR, 'daemon.sock'));
   sockets.push(socket);
   await once(socket, 'connect', { signal: timeout() });
@@ -51,7 +69,9 @@ async function client() {
     socket.write(`${JSON.stringify(value)}\n`);
     return response;
   }
-  assert.equal((await request({ type: 'handshake', version: 5, token: null })).type, 'handshakeOk');
+  const handshake = await request({ type: 'handshake', version: 5, token: null });
+  assert.equal(handshake.type, 'handshakeOk');
+  if (expectedPid !== undefined) assert.equal(handshake.pid, expectedPid);
   return { request, socket };
 }
 async function cli(...args) {
