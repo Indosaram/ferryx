@@ -57,17 +57,18 @@ impl Registry {
         let path = self.path.clone();
         let approvals = Arc::clone(&self.approvals);
         crate::ipc::run_blocking(move || {
-            let mut next = approvals.lock().clone();
+            let mut current = approvals.lock();
+            let mut next = current.clone();
             next.manifests.retain(|m| m.name != name);
             if enabled {
                 let root = super::config_root().ok_or_else(|| crate::ipc::IpcError::internal("plugin config root unavailable"))?;
                 next.manifests.push(Manifest::load(&root, &name).map_err(crate::ipc::IpcError::internal)?);
             }
             next.save(&path).map_err(crate::ipc::IpcError::internal)?;
-            *approvals.lock() = next;
+            *current = next;
             Ok(())
         }).await.map_err(|e| e.to_string())?;
-        if !enabled { self.stop(&stopped_name).await?; }
+        self.stop(&stopped_name).await?;
         Ok(())
     }
 
