@@ -743,6 +743,86 @@ mod tests {
     use super::*;
     use std::os::unix::net::UnixStream;
 
+    fn large_export() -> crate::terminal::session::PtySessionExport {
+        let hub = crate::terminal::output_hub::TerminalOutputHub::default();
+        let _receiver = hub.register_session("large");
+        hub.record_resize("large", 300, 24).unwrap();
+        hub.set_scrollback_budget("large", 10_000).unwrap().unwrap();
+        let mut output = Vec::new();
+        for line in 0..12_000 {
+            output.extend_from_slice(format!("{line:05} {}\r\n", "x".repeat(290)).as_bytes());
+        }
+        hub.publish("large", output).unwrap();
+        let mut state = hub.export_session_state("large").unwrap();
+        state.screen_seed = hub.handover_screen_seed("large", 16 * 1024 * 1024);
+        assert!(state.screen_seed.as_ref().unwrap().bytes.len() > 1024 * 1024);
+        let snapshot = crate::terminal::session::PtySessionSnapshot {
+            session_id: "large".into(), incarnation: None, pid: None, pgid: None,
+            cols: 300, rows: 24, worktree_path: None,
+            state: crate::terminal::PtySessionState::Running,
+            hub_snapshot: Some(state), suspension_receipt: None,
+        };
+        crate::terminal::session::PtySessionExport::from_parts(
+            snapshot, File::open("/dev/null").unwrap().into(),
+        )
+    }
+
+    #[test]
+    fn ten_thousand_line_continuation_handover_hash_equal() {
+        let export = large_export();
+        let before = crate::terminal::output_hub::TerminalOutputHub::default();
+        before.import_session_state("large", export.hub_snapshot.clone().unwrap()).unwrap();
+        let hash = before.describe_screen_hash("large").unwrap();
+        assert_eq!(hash.retained_lines, 10_000);
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        receiver.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
+        let sending = std::thread::spawn(move || {
+            send_session_negotiated(&sender, "3f2b8c1e-0d4a-4b6e-9a51-7c2d8e9f0a1b", 1, export, None, true).unwrap();
+        });
+        let (received, _) = recv_session_with_owner(&receiver).unwrap().unwrap();
+        sending.join().unwrap();
+        let after = crate::terminal::output_hub::TerminalOutputHub::default();
+        after.import_session_state("large", received.hub_snapshot.unwrap()).unwrap();
+        assert_eq!(hash, after.describe_screen_hash("large").unwrap());
+    }
+
+    #[test]
+    fn old_successor_receives_no_continuation_and_oversize_seed_is_dropped() {
+        let request: crate::daemon::protocol::DaemonRequest = serde_json::from_value(
+            serde_json::json!({"type":"transferSessions", "handoverSocketPath":"unused"}),
+        ).unwrap();
+        assert!(matches!(request, crate::daemon::protocol::DaemonRequest::TransferSessions { session_cont: false, .. }));
+        let export = large_export();
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        receiver.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
+        let sending = std::thread::spawn(move || {
+            send_session(&sender, "3f2b8c1e-0d4a-4b6e-9a51-7c2d8e9f0a1b", 1, export, None).unwrap();
+        });
+        let frame = recv_frame(receiver.as_raw_fd()).unwrap();
+        assert_eq!(frame.kind, KIND_SESSION);
+        let meta: SessionTransferMetadata = serde_json::from_value(frame.payload).unwrap();
+        assert!(meta.session_snapshot.hub_snapshot.unwrap().screen_seed.is_none());
+        sending.join().unwrap();
+    }
+
+    #[test]
+    fn new_successor_with_v1_predecessor_keeps_authority() {
+        let fixture = AuthorityFixture::new();
+        let (candidate, predecessor) = UnixStream::pair().unwrap();
+        candidate.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+        let sources = fixture.sources();
+        // V1 sends no hello and no CONT, then waits for the existing authority request.
+        let serving = std::thread::spawn(move || {
+            send_transfer_done(&predecessor, "3f2b8c1e-0d4a-4b6e-9a51-7c2d8e9f0a1b", 1).unwrap();
+            serve_authority_request(&predecessor, sources).unwrap();
+        });
+        assert!(recv_session(&candidate).unwrap().is_none());
+        let authority = request_authority(&candidate, "3f2b8c1e-0d4a-4b6e-9a51-7c2d8e9f0a1b").unwrap();
+        validate_authority(&authority, &fixture.expected()).unwrap();
+        fixture.assert_authority_held("before commit with v1 predecessor");
+        serving.join().unwrap();
+    }
+
     #[test]
     fn test_authority_frame_roundtrip() {
         let (sender, receiver) = UnixStream::pair().expect("socketpair");
