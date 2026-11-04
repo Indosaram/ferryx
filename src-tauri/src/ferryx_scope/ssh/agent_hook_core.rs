@@ -329,6 +329,13 @@ pub fn prepare(
 pub fn send(endpoint: &Endpoint, line: &str) -> std::io::Result<()> {
     match endpoint {
         Endpoint::Tcp { port, .. } => {
+            #[cfg(windows)]
+            if let Some(path) = std::env::var_os("FERRYX_AGENT_STATE_PIPE") {
+                // Fall back only before sending: a partial write must not duplicate a report.
+                if let Ok(mut pipe) = std::fs::OpenOptions::new().write(true).open(path) {
+                    return pipe.write_all(line.as_bytes());
+                }
+            }
             let address = std::net::SocketAddr::from(([127, 0, 0, 1], *port));
             let mut stream = std::net::TcpStream::connect_timeout(&address, SEND_TIMEOUT)?;
             stream.set_write_timeout(Some(SEND_TIMEOUT))?;
