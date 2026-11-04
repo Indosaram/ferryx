@@ -4,6 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SystemPermissionsStatus } from "../../lib/types";
 import { TerminalSection } from "./TerminalSection";
 
+// Plugin Settings has its own transport/consent integration test. Keep unrelated
+// terminal preference tests from sending daemon IPC or resolving async child state.
+vi.mock("./PluginsSection", () => ({ PluginsSection: () => null }));
+
 const mockTauri = vi.hoisted(() => ({
   getSystemPermissionsStatus: vi.fn(),
 }));
