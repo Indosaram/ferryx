@@ -362,6 +362,7 @@ impl NativeTerminal {
     /// Ticks Kitty animations for a frame about to be drawn and records when the next frame is
     /// due. Skipped while the image storage holds no image. Returns `true` when this tick armed
     /// a deadline that was not armed before, so a pump that is not waiting on one must re-read.
+    #[cfg(any(feature = "native-terminal", test))]
     pub(crate) fn advance_animations(&self) -> Result<bool, NativeTerminalError> {
         let was_armed = self.animation_deadline.get().is_some();
         if !super::images::kitty_storage_in_use(self.handle.as_ptr())? {

@@ -1499,6 +1499,7 @@ impl LeaseGate for crate::daemon::supervisor_lease_client::SupervisorLeaseHandle
         self.acquire(false).await
     }
 
+    #[cfg(any(feature = "desktop", test))]
     fn takeover_wait(&self) -> std::time::Duration {
         self.state().takeover_wait()
     }
