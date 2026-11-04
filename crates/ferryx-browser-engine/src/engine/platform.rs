@@ -97,6 +97,33 @@ mod imp {
         unsafe { SetFocus(hwnd(window)) };
     }
 
+    /// Posts a left click at (`x`, `y`) (window pixels) to the window's own message queue, so
+    /// Chrome handles it like a user's click without the cursor moving. False when a message
+    /// could not be posted.
+    pub fn post_click(window: &Window, x: i32, y: i32) -> bool {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            PostMessageW, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+        };
+        // MK_LBUTTON (the left button is down), in the message's wParam.
+        const MK_LBUTTON: usize = 0x0001;
+        let hwnd = hwnd(window);
+        let point = ((y as u32 & 0xffff) << 16 | (x as u32 & 0xffff)) as isize;
+        [(WM_MOUSEMOVE, 0), (WM_LBUTTONDOWN, MK_LBUTTON), (WM_LBUTTONUP, 0)]
+            .into_iter()
+            .all(|(message, keys)| unsafe { PostMessageW(hwnd, message, keys, point) } != 0)
+    }
+
+    /// Whether the window or one of its children holds the keyboard focus. A child window of
+    /// another process's window shares that thread's input state, so `GetFocus` sees Ferryx's
+    /// focused window too.
+    pub fn native_focus(window: &Window) -> Option<bool> {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
+        use windows_sys::Win32::UI::WindowsAndMessaging::IsChild;
+        let hwnd = hwnd(window);
+        let focused = unsafe { GetFocus() };
+        Some(!focused.is_null() && (focused == hwnd || unsafe { IsChild(hwnd, focused) } != 0))
+    }
+
     /// A child window is never activated, so Chrome never takes keyboard focus for it on its
     /// own: clicks reach the page while keys keep going to Ferryx. A mouse hook on the UI thread
     /// gives the clicked pane window keyboard focus.
@@ -200,6 +227,11 @@ mod imp {
     /// focuses the page or the address bar.
     pub fn focus(window: &Window) {
         window.activate();
+    }
+
+    /// The engine app's key window carries the keyboard focus.
+    pub fn native_focus(_window: &Window) -> Option<bool> {
+        None
     }
 }
 
@@ -384,6 +416,11 @@ mod imp {
             XGetInputFocus(display, &mut focused, &mut revert);
         }
         eprintln!("ferryx-engine: focus: XSetInputFocus({target:#x}), X focus now {focused:#x}");
+    }
+
+    /// X focus moves with activation here (see `focus`).
+    pub fn native_focus(_window: &Window) -> Option<bool> {
+        None
     }
 
     /// Clicks the window at (`x`, `y`) (window pixels) through the X server, the way a user
@@ -655,8 +692,14 @@ mod imp {
     pub fn raise(_window: &Window) {}
 
     pub fn focus(_window: &Window) {}
+
+    pub fn native_focus(_window: &Window) -> Option<bool> {
+        None
+    }
 }
 
-pub use imp::{embed, focus, handle, place, raise};
+pub use imp::{embed, focus, handle, native_focus, place, raise};
 #[cfg(target_os = "linux")]
 pub use imp::click_and_select_all;
+#[cfg(target_os = "windows")]
+pub use imp::post_click;
