@@ -8941,9 +8941,8 @@ impl DaemonServer {
                             DaemonResponse::CommitHandoverOk
                         }
                         Err(e) => {
-                            if let Err(error) = self.start_plugins().await {
-                                tracing::error!(%error, "Plugin resume failed after rejected commit");
-                            }
+                            // An I/O error may follow a durable decision. Do not restart
+                            // here: only a confirmed abort can safely resume the predecessor.
                             handover_failure_response(None, e.to_string())
                         },
                     }
@@ -8958,6 +8957,9 @@ impl DaemonServer {
                     }).await {
                         Ok(()) => {
                             self.handover_manager.clear_transferred_locals();
+                            if let Err(error) = self.start_plugins().await {
+                                tracing::error!(%error, "Plugin resume failed after confirmed handover abort");
+                            }
                             #[cfg(all(unix, feature = "local-split-qa", feature = "native-terminal"))]
                             crate::daemon::qa_producers::note_authority_stage("predecessor-aborted", &self.handover_manager).await;
                             let resumed = self
