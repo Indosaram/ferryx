@@ -3,6 +3,7 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useS
 
 import { STARTUP_TIMEOUT_MS } from "./lib/startupTimeout";
 import { withTimeout } from "./lib/withTimeout";
+import { layoutSync } from "./lib/layoutSync";
 
 import { CommandPalette } from "./components/CommandPalette";
 import { DeepLinkBridge } from "./components/DeepLinkBridge";
@@ -516,6 +517,8 @@ export function App() {
         const storedBootstrap = loadProjectBootstrap();
         // loadSession is window-scoped by the backend: a secondary window reads only its own file.
         const savedSession = await loadSession().catch(() => null);
+        // Capability-gated: an older daemon retains the legacy restore path.
+        await layoutSync.refresh();
         const recovered = recoverProjectBootstrap(savedSession);
         const prepared = isPrimary
           ? canonicalizeProjectBootstrap(
@@ -1596,6 +1599,9 @@ function WorkspaceApp({
         if (!existing) {
           existing = await loadSession().catch(() => null);
         }
+        // Compatibility dual-write for the first daemonLayoutV1 release. Keep
+        // serializing current UI state so rollback also retains queued gestures.
+        // Removal is tracked in docs/releases/DAEMON_LAYOUT_COMPATIBILITY.md.
         const session = serializeWorkspaceState(
           workspaceId,
           repoRoot,
