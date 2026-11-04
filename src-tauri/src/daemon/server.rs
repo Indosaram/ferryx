@@ -2287,6 +2287,7 @@ pub struct DaemonServer {
     /// Cross-pane grants (`pane-grants.json`, rex todo 5), carried by the handover record.
     pub(crate) pane_grants: Arc<crate::daemon::pane_grants::PaneGrants>,
     layouts: super::layout::Registry,
+    onboarding: super::onboarding::Registry,
     /// Bearer token every connection must present before a request is dispatched. Windows has no
     /// filesystem ownership boundary on the transport, so the published port alone cannot
     /// authenticate a client.
@@ -4077,8 +4078,10 @@ impl DaemonServer {
         let session_path = get_default_session_path();
         let layout_root = get_persistent_lock_path().and_then(|path| path.parent().map(Path::to_path_buf))
             .unwrap_or_else(|| session_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf());
-        let layouts = Arc::new(Mutex::new(super::layout::Store::with_session_path(layout_root, session_path)));
+        let layouts = Arc::new(Mutex::new(super::layout::Store::with_session_path(layout_root.clone(), session_path)));
         handover_manager.set_layouts(Arc::clone(&layouts));
+        let onboarding = Arc::new(Mutex::new(super::onboarding::Store::new(layout_root.join("onboarding-daemon.json"))));
+        handover_manager.set_onboarding(Arc::clone(&onboarding));
         // OSC 7501 summaries from every mirror this daemon answers for become Protocol states.
         let protocol_reporters =
             Arc::new(crate::terminal::foreground::ProtocolReporters::default());
@@ -4251,6 +4254,7 @@ impl DaemonServer {
         Self {
             paired_hosts,
             layouts,
+            onboarding,
             session_router,
             handover_manager,
             resource_sampler: Arc::new(crate::daemon::resource_usage::ResourceSampler::new()),
@@ -6302,6 +6306,8 @@ impl DaemonServer {
             if let Err(error) = crate::ipc::run_blocking(move || {
                 manager.adopt_recorded_size_ownership(&grants_legacy)
                     .map_err(crate::ipc::IpcError::internal)?;
+                manager.adopt_recorded_onboarding(&grants_legacy)
+                    .map_err(crate::ipc::IpcError::internal)?;
                 manager.adopt_recorded_layouts(&grants_legacy)
                     .map_err(crate::ipc::IpcError::internal)?;
                 manager
@@ -7709,6 +7715,19 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::Panes { request }) => self.handle_panes(request).await,
+                Ok(request @ (DaemonRequest::OnboardingGet | DaemonRequest::OnboardingSet { .. })) => {
+                    let registry = Arc::clone(&self.onboarding);
+                    match crate::ipc::run_blocking(move || {
+                        let store = registry.lock();
+                        match request {
+                            DaemonRequest::OnboardingSet { state, migrate } => store.set(state, migrate).map(Some),
+                            _ => store.get(),
+                        }.map_err(crate::ipc::IpcError::internal)
+                    }).await {
+                        Ok(state) => DaemonResponse::OnboardingOk { state },
+                        Err(error) => daemon_error(error.to_string()),
+                    }
+                }
                 Ok(DaemonRequest::LayoutGetScoped { window, scope }) => {
                     let layouts = Arc::clone(&self.layouts);
                     match crate::ipc::run_blocking(move || layouts.lock().get_scoped(&window, Some(&scope)).map_err(crate::ipc::IpcError::internal)).await {
@@ -8165,6 +8184,7 @@ impl DaemonServer {
                     capabilities.push("scrollbackBudgetV1".into());
                     capabilities.push("sizeOwnershipV1".into());
                     capabilities.push("daemonLayoutV1".into());
+                    capabilities.push(super::onboarding::CAPABILITY.into());
                     capabilities.push("detachedPanesV1".into());
                     capabilities.push("terminalOscEffectsV1".into());
                     capabilities.push("foregroundCommandV1".into());
