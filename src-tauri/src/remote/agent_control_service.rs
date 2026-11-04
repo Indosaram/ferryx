@@ -158,6 +158,7 @@ async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Ob
         .and_then(|seen| seen.screen_changed_at_ms);
     let entry = serde_json::json!({
         "sessionId": session_id,
+        "name": crate::session_names::name_for(details.workspace_id.as_deref(), session_id),
         "running": details.running,
         "cols": details.cols,
         "rows": details.rows,
@@ -375,6 +376,8 @@ async fn dispatch(
     match op {
         AgentControlOp::List => {
             let ids = state.session_backend.list_sessions().await;
+            // A full listing knows every live session, so names of gone ones can be given again.
+            crate::session_names::retain_live(ids.iter().map(String::as_str));
             let entries: Vec<serde_json::Value> = stream::iter(ids)
                 .map(|id| async move {
                     match observe(state, &id).await {
@@ -1526,6 +1529,23 @@ mod tests {
             .await
             .expect_err("a card is answered once");
         assert_eq!(replay.code, ScopeErrorCode::RequestConflict, "{}", replay.message);
+    }
+
+    #[tokio::test]
+    async fn session_names_agents_list_gives_each_session_a_stable_readable_name() {
+        let session_id = "agent-control-list-name";
+        let (_backend, state) = pane(session_id, "$ ");
+
+        let listed = handle(&state, AgentControlOp::List).await.expect("list");
+        let name = listed["sessions"][0]["name"].as_str().expect("a name field").to_owned();
+
+        assert_eq!(name, crate::session_names::base_name(session_id), "{listed}");
+        let again = handle(&state, AgentControlOp::List).await.expect("list again");
+        assert_eq!(again["sessions"][0]["name"], name.as_str(), "a session keeps its name");
+        let read = handle(&state, AgentControlOp::Read { session_id: session_id.to_string() })
+            .await
+            .expect("read");
+        assert_eq!(read["session"]["name"], name.as_str());
     }
 
     #[tokio::test]

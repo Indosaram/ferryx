@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WorkspaceState } from "../state/workspaceStore";
+import { computeTerminalTabDisplay } from "../state/tabDisplay";
 import { deserializeWorkspaceState, serializeWorkspaceState } from "./sessionPersistence";
 
 function workspaceState(customLabel?: string): WorkspaceState {
@@ -72,5 +73,33 @@ describe("terminal tab custom label persistence", () => {
     const restored = deserializeWorkspaceState("default", saved, ["backend-1"])!;
 
     expect(restored.layout.tabs[0]).not.toHaveProperty("customLabel");
+  });
+
+  it("shows a new session's readable name in its tab and keeps it across a restart", () => {
+    const state = workspaceState();
+    state.sessions["sess-1"] = { ...state.sessions["sess-1"], name: "brisk-otter" };
+    const saved = serializeWorkspaceState("default", "/workspace/main", state);
+    const restored = deserializeWorkspaceState("default", saved, ["backend-1"])!;
+
+    expect(restored.sessions["sess-1"]).toMatchObject({ name: "brisk-otter" });
+    const display = computeTerminalTabDisplay(restored.layout.tabs, restored.layout, restored.sessions);
+    expect(display["tab-1"]?.text).toBe("brisk-otter");
+  });
+
+  it("lets a user rename win over the readable name", () => {
+    const state = workspaceState("release build");
+    state.sessions["sess-1"] = { ...state.sessions["sess-1"], name: "brisk-otter" };
+    const display = computeTerminalTabDisplay(state.layout.tabs, state.layout, state.sessions);
+
+    expect(display["tab-1"]?.text).toBe("release build");
+  });
+
+  it("does not rename an existing session that has no readable name", () => {
+    const saved = serializeWorkspaceState("default", "/workspace/main", workspaceState());
+    const restored = deserializeWorkspaceState("default", saved, ["backend-1"])!;
+
+    expect(restored.sessions["sess-1"]).not.toHaveProperty("name");
+    const display = computeTerminalTabDisplay(restored.layout.tabs, restored.layout, restored.sessions);
+    expect(display["tab-1"]?.text).toBe("main");
   });
 });

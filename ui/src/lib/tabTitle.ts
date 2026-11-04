@@ -205,6 +205,8 @@ export function cleanAgentTask(
 export type ResolveTerminalTabTextInput = {
   customLabel?: string;
   baseLabel: string;
+  /** The session's readable default name; replaces the base label, never a rename/agent/title. */
+  sessionName?: string;
   activity?: {
     title?: string;
     isAgent?: boolean;
@@ -293,6 +295,15 @@ export function resolveTerminalTabText(
       text: rawTitle,
       tooltip,
       source: "title",
+    };
+  }
+
+  const sessionName = input.sessionName?.trim();
+  if (sessionName) {
+    return {
+      text: sessionName,
+      tooltip: sessionName !== cleanBase ? cleanBase : undefined,
+      source: "base",
     };
   }
 

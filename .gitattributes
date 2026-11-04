@@ -4,3 +4,5 @@
 crates/ferryx-hub/migrations/*.sql text eol=lf
 # Agent skills are shipped byte-for-byte (include_str!), so keep them LF on every checkout.
 src-tauri/resources/agent-skills/**/*.md text eol=lf
+# Session name word lists are embedded (include_str!) and mirrored by the UI; keep them LF.
+src-tauri/resources/names/*.txt text eol=lf

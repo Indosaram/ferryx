@@ -331,6 +331,8 @@ export type TerminalSession = {
   worktree: WorktreeIdentity | null;
   /** Native PTY identity. This is intentionally distinct from `id`. */
   backendSessionId: string | null;
+  /** Readable default name (`<adjective>-<noun>`) given at creation; a user rename wins. Absent on sessions created before names existed. */
+  name?: string;
   /** Backing-process resource state, independent from agent activity. */
   processState?: SessionProcessState;
   lifecycle: TerminalLifecycle;
@@ -1044,6 +1046,8 @@ export interface PersistedTerminalSession {
   localSessionId?: string;
   /** v2 native PTY identity. `null` means it must be respawned on restore. */
   backendSessionId?: string | null;
+  /** Readable default name given when the session was created. */
+  name?: string;
   /** v1 compatibility field (v1 accidentally stored the local id here). */
   sessionId?: string;
   /** Persisted backing-process resource state. */

@@ -1332,7 +1332,7 @@ function machineTabsFromInventory(
     if ((entry.worktreeSlug ?? null) !== (worktreeSlug ?? null)) return [];
     return [{
       id: entry.sessionId,
-      label: entry.title ?? "Terminal",
+      label: entry.title ?? entry.name ?? "Terminal",
       sessionId: entry.sessionId,
       ...(worktreeSlug ? { worktreeSlug } : {}),
       ...(worktreeLabel ? { worktreeLabel } : {}),

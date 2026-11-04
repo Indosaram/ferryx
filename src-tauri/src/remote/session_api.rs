@@ -391,6 +391,25 @@ pub(super) async fn detail(
 ) -> Result<Response, Refusal> {
     read(state, headers, Some(path.map(|p| p.0)), None).await
 }
+/// Adds each row's readable default `name` (`<adjective>-<noun>`, unique per workspace) so the
+/// phone can show the same name as `agents list`. The wire struct stays unchanged; old clients
+/// ignore the extra field.
+fn with_session_names(rows: Sessions) -> serde_json::Value {
+    let names: Vec<String> = rows
+        .sessions
+        .iter()
+        .map(|row| {
+            crate::session_names::name_for(Some(&row.workspace_id), &row.target.session_id)
+        })
+        .collect();
+    let mut value = serde_json::to_value(rows).expect("sessions serialize");
+    if let Some(sessions) = value.get_mut("sessions").and_then(serde_json::Value::as_array_mut) {
+        for (row, name) in sessions.iter_mut().zip(names) {
+            row["name"] = serde_json::Value::String(name);
+        }
+    }
+    value
+}
 async fn read(
     state: Arc<RemoteGatewayState>,
     headers: HeaderMap,
@@ -434,7 +453,7 @@ async fn read(
                 if let Some(workspace) = &workspace {
                     rows.sessions.retain(|row| &row.workspace_id == workspace);
                 }
-                json(200, rows)
+                json(200, with_session_names(rows))
             }
         };
         check()?;
