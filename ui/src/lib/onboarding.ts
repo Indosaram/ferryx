@@ -187,7 +187,6 @@ export function saveOnboardingState(
 
 let persistence: Promise<void> = Promise.resolve();
 
-
 /** Hydrate before opening; localStorage is only a cache on desktop. */
 export async function hydrateOnboardingState(): Promise<OnboardingState> {
   const cache = loadOnboardingState();
