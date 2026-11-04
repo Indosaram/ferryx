@@ -734,6 +734,8 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::OnboardingGet => "onboardingGet",
         DaemonRequest::OnboardingSet { .. } => "onboardingSet",
         DaemonRequest::LayoutGet { .. } => "layoutGet",
+        DaemonRequest::LayoutOffer { .. } => "layoutOffer",
+        DaemonRequest::LayoutImport { .. } => "layoutImport",
         DaemonRequest::LayoutGetScoped { .. } => "layoutGetScoped",
         DaemonRequest::LayoutApply { .. } => "layoutApply",
         DaemonRequest::Panes { .. } => "panes",
