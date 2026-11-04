@@ -158,6 +158,8 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
   }, [onClose]);
 
   const hasLocalTerminalOverride =
+    localSettings.cursorStyle != null ||
+    localSettings.theme != null ||
     settings.fontFamilySource === "local" ||
     settings.macosOptionAsAltSource === "local" ||
     settings.fontSizeSource === "local" ||
@@ -242,6 +244,8 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
               onScrollbackCompression={(scrollbackCompression) => updateSettings({ scrollbackCompression })}
               onUseImported={() => {
                 updateSettings({
+                  cursorStyle: null,
+                  theme: null,
                   fontFamily: null,
                   macosOptionAsAlt: null,
                   fontSize: null,
