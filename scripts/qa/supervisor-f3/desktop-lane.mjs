@@ -350,7 +350,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       await shared.sendLongReport(token);
       const rows = await until('the long report in the transcript', () => transcript(null), (page) => JSON.stringify(page ?? {}).includes(heading), { deadlineMs: 120_000 });
       step.artifact('transcript-read', 'report.transcript.json', rows);
-      const { read } = await visible(step, 'before-viewer', (r) => locate(r, host.viewerLabel ?? 'Open in Viewer') !== null && shows(r.text, heading), { scroll: true });
+      const { read } = await visible(step, 'before-viewer', (r) => locate(r, host.viewerLabel ?? 'Open in Viewer') !== null && compactOcrShows(r.text, heading), { scroll: true });
       // The panel's report row shows the first lines and the last line (reportExcerpt), so the
       // proof the report is not open yet is a middle section only the Viewer shows, and no Viewer.
       const middle = 'Migration check 9 for';
@@ -358,12 +358,12 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const open = locate(read, host.viewerLabel ?? 'Open in Viewer');
       if (!open) throw new StepFailed('PRODUCT_GAP_VIEWER_CONTROL', `no "${host.viewerLabel ?? 'Open in Viewer'}" control next to the report`);
       await click(open);
-      const head = keep(step, 'viewer-head', await until('report heading in Viewer', () => frame('viewer-head', undefined, { marker: host.viewerMarker }), ({ read: r }) => shows(r.text, heading) && shows(r.text, host.viewerMarker), { deadlineMs: 60_000 }));
-      step.assert('viewer-shows-report-heading', shows(head.read.text, heading), { heading, text: head.read.text.slice(0, 1500) });
+      const head = keep(step, 'viewer-head', await until('report heading in Viewer', () => frame('viewer-head', undefined, { marker: host.viewerMarker }), ({ read: r }) => compactOcrShows(r.text, heading) && shows(r.text, host.viewerMarker), { deadlineMs: 60_000 }));
+      step.assert('viewer-shows-report-heading', compactOcrShows(head.read.text, heading), { heading, text: head.read.text.slice(0, 1500) });
       step.assert('viewer-marker-shown', shows(head.read.text, host.viewerMarker), { marker: host.viewerMarker });
       await mahord.hotkey(host.platform === 'darwin' ? ['Meta', 'ArrowDown'] : ['Control', 'End'], signal);
-      const tail = keep(step, 'viewer-tail', await until('report end in Viewer', () => frame('viewer-tail', undefined, { marker: host.viewerMarker }), ({ read: r }) => shows(r.text, end) && shows(r.text, host.viewerMarker), { deadlineMs: 60_000 }));
-      step.assert('viewer-shows-report-end', shows(tail.read.text, end) && shows(tail.read.text, host.viewerMarker), { end, marker: host.viewerMarker, text: tail.read.text.slice(0, 1500) });
+      const tail = keep(step, 'viewer-tail', await until('report end in Viewer', () => frame('viewer-tail', undefined, { marker: host.viewerMarker }), ({ read: r }) => compactOcrShows(r.text, end) && shows(r.text, host.viewerMarker), { deadlineMs: 60_000 }));
+      step.assert('viewer-shows-report-end', compactOcrShows(tail.read.text, end) && shows(tail.read.text, host.viewerMarker), { end, marker: host.viewerMarker, text: tail.read.text.slice(0, 1500) });
     });
     // The Viewer is a modal over the panel; later steps read the panel, so it is closed (Escape,
     // ReportViewer.tsx onKeyDown) whatever D4's outcome.

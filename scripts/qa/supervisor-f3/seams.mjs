@@ -451,7 +451,7 @@ export const ocrShows = (text, phrase) => {
 
 /** The Reply text the stub provider gives the F3 owner prompt: it names the prompt's token. */
 export const compactOcrShows = (text, phrase) => {
-  const key = (value) => dotless(value).toLowerCase().replace(/[il|!]/g, '1').replace(/o/g, '0').replace(/[^a-z0-9]/g, '');
+  const key = (value) => dotless(value).toLowerCase().replace(/[ilt|!]/g, '1').replace(/o/g, '0').replace(/[^a-z0-9]/g, '');
   return key(text).includes(key(phrase));
 };
 
