@@ -10,6 +10,7 @@ vi.mock("../lib/tauri", () => ({
   listenToThisWindow: vi.fn(async (_event: string, listener: NonNullable<typeof bridge.listener>) => { bridge.listener = listener; return () => {}; }),
   describeTerminal: vi.fn(async () => ({ sizeOwner: "phone:1", cols: 60, rows: 30 })),
   resizeTerminal: bridge.resize,
+  reportDesktopWindowFocus: vi.fn(async () => {}),
 }));
 
 describe("SizeOwner", () => {
@@ -21,7 +22,7 @@ describe("SizeOwner", () => {
 
   it("claims the matching session and observes ownership restoration", async () => {
     await act(async () => { render(<SizeOwner sessionId="pty-1" />); });
-    fireEvent.click(screen.getByRole("button"));
+    await act(async () => { fireEvent.click(screen.getByRole("button")); });
     expect(bridge.resize).toHaveBeenCalledWith({ sessionId: "pty-1", cols: 60, rows: 30 });
     act(() => bridge.listener?.({ payload: { sessionId: "other", owner: "desktop", cols: 120, rows: 40 } }));
     expect(screen.getByRole("button")).toBeTruthy();
