@@ -3006,6 +3006,95 @@ pub async fn cmd_browser_focus_app<R: tauri::Runtime>(
     focus_app_webview(&app, window)
 }
 
+/// Windows: activating an app window (Alt+Tab, a title-bar click, a Chromium engine window
+/// handing activation back) leaves Win32 keyboard focus on the window frame itself. The app
+/// webview is a child window, so typed keys and shortcuts such as Mod+L never reach the UI
+/// (maho-win G16 and CI-UI `input_failed`: focus stayed on the Ferryx frame). The focus is
+/// forwarded to the app webview; a focused child (the webview, an engine pane) is left alone.
+/// tao reports `Focused(true)` only when its own active-and-focused state flips, which most
+/// re-activations do not do, so the frame is subclassed for WM_SETFOCUS (the way wry handles
+/// its `WRY_WEBVIEW` container). Installing is idempotent; it runs on every app window focus.
+#[cfg(target_os = "windows")]
+pub fn forward_frame_focus<R: tauri::Runtime>(window: &tauri::Window<R>) {
+    let Ok(frame) = window.hwnd() else { return };
+    let frame = frame.0;
+    // `Window::hwnd` and window events are only served on the UI thread that owns the frame.
+    // SAFETY: the subclass procedure is a plain function with no reference data.
+    if unsafe { frame_focus::SetWindowSubclass(frame, Some(frame_focus::on_frame_message), frame_focus::ID, 0) } == 0 {
+        tracing::warn!("could not subclass the app window frame for keyboard focus");
+    }
+    frame_focus::forward_if_frame_focused(frame);
+}
+
+#[cfg(target_os = "windows")]
+mod frame_focus {
+    use std::ffi::c_void;
+
+    type Hwnd = *mut c_void;
+    const WM_SETFOCUS: u32 = 0x0007;
+    /// Subclass id: "fxfo".
+    pub const ID: usize = 0x6678_666f;
+
+    #[link(name = "comctl32")]
+    unsafe extern "system" {
+        pub fn SetWindowSubclass(
+            hwnd: Hwnd,
+            callback: Option<unsafe extern "system" fn(Hwnd, u32, usize, isize, usize, usize) -> isize>,
+            id: usize,
+            data: usize,
+        ) -> i32;
+        fn DefSubclassProc(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> isize;
+    }
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetFocus() -> Hwnd;
+        fn SetFocus(hwnd: Hwnd) -> Hwnd;
+        fn FindWindowExW(parent: Hwnd, after: Hwnd, class: *const u16, title: *const u16) -> Hwnd;
+    }
+
+    pub unsafe extern "system" fn on_frame_message(
+        hwnd: Hwnd,
+        message: u32,
+        wparam: usize,
+        lparam: isize,
+        _id: usize,
+        _data: usize,
+    ) -> isize {
+        // tao handles WM_SETFOCUS first (its Focused bookkeeping); then the focus moves on.
+        let result = unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+        if message == WM_SETFOCUS {
+            forward_if_frame_focused(hwnd);
+        }
+        result
+    }
+
+    /// Moves a keyboard focus resting on the frame to the app webview's container, which
+    /// (wry's own WM_SETFOCUS handler) hands it on to the WebView2 document.
+    pub fn forward_if_frame_focused(frame: Hwnd) {
+        // SAFETY: Win32 calls on windows owned by this (UI) thread.
+        unsafe {
+            if !super::frame_holds_focus(GetFocus() as isize, frame as isize) {
+                return;
+            }
+            let class: Vec<u16> = "WRY_WEBVIEW\0".encode_utf16().collect();
+            let container = FindWindowExW(frame, std::ptr::null_mut(), class.as_ptr(), std::ptr::null());
+            if container.is_null() {
+                tracing::warn!("the app window has no WRY_WEBVIEW child; its frame keeps the keyboard focus");
+                return;
+            }
+            SetFocus(container);
+        }
+        tracing::debug!("app window frame took the keyboard focus; moved it to the app webview");
+    }
+}
+
+/// Whether the keyboard focus sits on the app window frame itself rather than on a child.
+#[cfg(any(target_os = "windows", test))]
+fn frame_holds_focus(focused: isize, frame: isize) -> bool {
+    focused != 0 && focused == frame
+}
+
 #[tauri::command]
 pub async fn cmd_browser_get_state(
     manager: State<'_, Arc<BrowserManager>>,
@@ -4372,6 +4461,16 @@ async fn resolve_session_cwd(
 mod tests {
     use super::*;
     use super::{windows_open_request, WindowsOpenRequest};
+
+    /// Only focus on the frame itself is forwarded to the app webview: a focused child (the
+    /// webview, a Chromium pane) and no focus at all are left alone.
+    #[test]
+    fn only_frame_focus_is_forwarded() {
+        assert!(frame_holds_focus(100, 100));
+        assert!(!frame_holds_focus(200, 100));
+        assert!(!frame_holds_focus(0, 100));
+        assert!(!frame_holds_focus(0, 0));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

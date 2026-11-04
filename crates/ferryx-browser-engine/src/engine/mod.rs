@@ -410,20 +410,66 @@ fn execute(command: Command) {
                     return;
                 }
             }
+            // Windows: the same holds for the embedded child window (maho-win G16: after
+            // IDC_FOCUS_LOCATION and Ctrl+L the page's BrowserView stays focused and typed text
+            // is lost). The window takes Win32 focus, then a click is posted to its location bar;
+            // a first click into the omnibox selects its text.
+            #[cfg(target_os = "windows")]
+            if address && let Some((x, y)) = omnibox_point(&tab) {
+                platform::focus(&window);
+                let clicked = platform::post_click(&window, x, y);
+                eprintln!("ferryx-engine: focus {tab} address: posted a click on the location bar at ({x}, {y}): {clicked}");
+                if clicked {
+                    return;
+                }
+            }
             // Moving X focus into the window activates its widget only once Chromium handles the
             // FocusIn, and activation restores the widget's last focused view: a view focused
             // before that (Chrome's address bar) loses focus again. An inactive window gets its
             // view focused from `on_window_activation_changed` instead.
             let active = window.is_active() != 0;
-            eprintln!("ferryx-engine: focus {tab} address={address}: window active {active}");
-            if active {
-                focus_tab(&tab, address);
-            } else {
-                PENDING_FOCUS.with_borrow_mut(|pending| pending.insert(tab.clone(), address));
-                platform::focus(&window);
+            let native_focus = platform::native_focus(&window);
+            eprintln!("ferryx-engine: focus {tab} address={address}: window active {active}, native focus {native_focus:?}");
+            match focus_step(active, native_focus) {
+                FocusStep::Now => focus_tab(&tab, address),
+                FocusStep::AfterActivation => {
+                    PENDING_FOCUS.with_borrow_mut(|pending| pending.insert(tab.clone(), address));
+                    platform::focus(&window);
+                }
+                FocusStep::AfterNativeFocus => {
+                    // Windows: the window is active but another window (Ferryx's webview) has
+                    // the keyboard focus. Win32 focus first; the focus change restores the
+                    // widget's stored focused view, so the view is focused from a task after it.
+                    platform::focus(&window);
+                    let mut task = FocusTab::new(tab.clone(), address);
+                    post_task(ThreadId::UI, Some(&mut task));
+                }
             }
         }
         Command::Extensions { id, call } => extensions::call(id, call),
+    }
+}
+
+/// How a `focus` command reaches its tab's view.
+#[derive(Debug, PartialEq, Eq)]
+enum FocusStep {
+    /// The window is active and holds the keyboard focus: focus the view right away.
+    Now,
+    /// The window is inactive: give it OS focus, then focus the view once it is activated.
+    AfterActivation,
+    /// The window is active but another window holds the keyboard focus (a Windows child
+    /// window stays active while Ferryx's own webview has the focus): give it the focus, then
+    /// focus the view.
+    AfterNativeFocus,
+}
+
+/// `native_focus` is whether the window holds the OS keyboard focus, where that is separate
+/// from activation (Windows); `None` where activation carries the focus.
+fn focus_step(active: bool, native_focus: Option<bool>) -> FocusStep {
+    match (active, native_focus) {
+        (false, _) => FocusStep::AfterActivation,
+        (true, Some(false)) => FocusStep::AfterNativeFocus,
+        (true, _) => FocusStep::Now,
     }
 }
 
@@ -460,7 +506,7 @@ fn focus_tab(tab: &str, address: bool) {
 /// Where Chrome's location bar is in the tab's window, in pixels: the middle of the toolbar
 /// row, past the back, forward and reload buttons (three 36 DIP buttons from an 8 DIP inset)
 /// and the site-info chip at the field's start.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn omnibox_point(tab: &str) -> Option<(i32, i32)> {
     let (toolbar, scale) = TABS.with_borrow(|tabs| {
         let pane = tabs.get(tab)?;
@@ -485,7 +531,7 @@ fn omnibox_point(tab: &str) -> Option<(i32, i32)> {
 /// the toolbar's middle, where extension icons start. None when that point would not land
 /// clearly inside the field (a narrow pane): a click there would hit a button or the site-info
 /// chip, so the caller falls back to the focus command instead.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 fn omnibox_offset(width: i32) -> Option<i32> {
     const BUTTONS_END: i32 = 8 + 3 * 36;
     const INTO_FIELD: i32 = 140;
@@ -497,7 +543,18 @@ fn omnibox_offset(width: i32) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::omnibox_offset;
+    use super::{focus_step, omnibox_offset, FocusStep};
+
+    #[test]
+    fn focus_waits_for_the_keyboard_focus_an_active_window_lacks() {
+        // An active Windows child window without the keyboard focus (CI-UI and maho-win G16:
+        // Mod+L left the focus on Ferryx) takes it before its view is focused.
+        assert_eq!(focus_step(true, Some(false)), FocusStep::AfterNativeFocus);
+        assert_eq!(focus_step(true, Some(true)), FocusStep::Now);
+        assert_eq!(focus_step(true, None), FocusStep::Now);
+        assert_eq!(focus_step(false, Some(false)), FocusStep::AfterActivation);
+        assert_eq!(focus_step(false, None), FocusStep::AfterActivation);
+    }
 
     #[test]
     fn omnibox_click_lands_in_the_field_or_not_at_all() {

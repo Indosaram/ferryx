@@ -719,7 +719,7 @@ export function BrowserPane({
           </div>
         ) : null}
         <BrowserEngineFallbackNotice browserId={tab.browserId} />
-        <BrowserVaultBar browserId={liveTab.browserId} url={liveTab.url} />
+        <BrowserVaultBar browserId={liveTab.browserId} url={liveTab.url} loading={Boolean(liveTab.loading)} />
         {paneAlert ? (
           <div
             role="alert"
