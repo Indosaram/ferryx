@@ -1,11 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { LayoutAction } from "../state/layout";
 import { normalizeLayout } from "../state/layout";
 import type { PaneNode } from "../state/paneTree";
 import type { WorkspaceState } from "../state/workspaceStore";
 import type { LayoutState, PaneContent, TabGroupLayoutNode, WorkspaceTab } from "./types";
 import { createBrowserPaneContent } from "./types";
+import type { WorkspaceAction } from "../state/workspaceStore";
 
 type Direction = "horizontal" | "vertical";
 export type DaemonContent =
@@ -113,4 +113,90 @@ export class LayoutSync {
 export const layoutSync = new LayoutSync();
 export function onLayoutChanged(refresh: () => void): Promise<() => void> {
   return listen<{ window: string; revision: number }>("LayoutChanged", () => refresh());
+}
+
+export function layoutScope(state: WorkspaceState): string {
+  return JSON.stringify([state.workspaceId ?? "", null]);
+}
+
+/** Reuse both the visual identity and the surface-bearing content. Reading a
+ * daemon revision never calls terminal close, browser close, or native detach. */
+export function hydrateLayout(view: LayoutView, state: WorkspaceState, scope = layoutScope(state)): LayoutState {
+  const saved = view.layout;
+  const result: LayoutState = { tabs: [], activeTabId: saved.activeTabId, layoutsByTabId: {},
+    tabGroups: {}, focusedGroupId: saved.focusedGroupId };
+  for (const tab of saved.tabs) {
+    const previous = state.layout.layoutsByTabId[tab.tabId];
+    const contents: Record<string, PaneContent> = {};
+    const sessions: Record<string, string> = {};
+    const used = new Set<string>();
+    const leafFor = (node: number) => identities.leaves[identityKey(scope, tab.tabId, node)] ?? `daemon-leaf-${node}`;
+    const walk = (node: DaemonNode): PaneNode => {
+      if (node.type === "split") return { type: "split", direction: node.dir, ratio: node.ratio,
+        first: walk(node.a), second: walk(node.b) };
+      const key = identityKey(scope, tab.tabId, node.nodeId);
+      // Migration maps are scoped tuples; no legacy visual id is sent back.
+      const migrated = Object.entries(view.migrationMap ?? {}).find(([key, id]) => {
+        const tuple = JSON.parse(key) as [string, string, string];
+        return id === node.nodeId && tuple[0] === scope && tuple[1] === tab.tabId;
+      });
+      let leaf = identities.leaves[key] ?? (migrated ? (JSON.parse(migrated[0]) as string[])[2] : undefined);
+      if (!leaf) leaf = Object.keys(previous?.sessionIdsByLeafId ?? {}).find((id) => {
+        if (used.has(id)) return false;
+        const content = previous?.contentsByLeafId?.[id];
+        return node.content.kind === "terminal"
+          ? state.sessions[previous.sessionIdsByLeafId[id]]?.backendSessionId === node.content.backendSessionId
+          : content?.kind === node.content.kind;
+      });
+      leaf ??= `daemon-leaf-${node.nodeId}`;
+      identities.leaves[key] = leaf;
+      used.add(leaf);
+      const old = previous?.contentsByLeafId?.[leaf] ?? identities.contents[key];
+      const wire = node.content;
+      let content: PaneContent;
+      switch (wire.kind) {
+        case "terminal": {
+          const session = Object.values(state.sessions).find((session) => session.backendSessionId === wire.backendSessionId);
+          content = { kind: "terminal", sessionId: session?.id ?? wire.backendSessionId };
+          break;
+        }
+        case "browser": content = createBrowserPaneContent({
+          ...(old?.kind === "browser" ? old.browser : {}),
+          browserId: old?.kind === "browser" ? old.browser?.browserId ?? old.browserId ?? "" : "",
+          url: wire.url,
+        }); break;
+        case "file": content = { kind: "file", backendSessionId: "", workspaceId: state.workspaceId ?? null,
+          previewId: `daemon-preview-${node.nodeId}`, ...(old?.kind === "file" ? old : {}),
+          path: wire.path, line: wire.line, col: wire.col }; break;
+        case "changes": content = old?.kind === "changes" ? old : { kind: "changes",
+          workspaceId: state.workspaceId ?? "", worktreePath: state.activeWorktreePath ?? "", worktree: null }; break;
+        default: content = wire;
+      }
+      identities.contents[key] = content;
+      contents[leaf] = content;
+      sessions[leaf] = content.kind === "terminal" ? content.sessionId : "";
+      return { type: "leaf", leafId: leaf };
+    };
+    const root = walk(tab.paneTree);
+    const activeLeafId = leafFor(tab.activeNodeId);
+    const primary = contents[activeLeafId] ?? Object.values(contents)[0];
+    const oldTab = state.layout.tabs.find((candidate) => candidate.id === tab.tabId);
+    let frontend: WorkspaceTab;
+    const base = { id: tab.tabId, label: tab.label, pinned: tab.pinned };
+    if (primary.kind === "terminal") frontend = { ...base, sessionId: primary.sessionId };
+    else if (primary.kind === "browser") frontend = { ...base, kind: "browser", browserId: primary.browser?.browserId ?? "", url: primary.browser?.url ?? "" };
+    else if (primary.kind === "remoteDesktop") frontend = { ...base, kind: "remoteDesktop", hostId: primary.hostId, sessionId: "" };
+    else if (primary.kind === "file" || primary.kind === "changes") frontend = { ...primary, ...base };
+    else frontend = oldTab ?? { ...base, sessionId: "" };
+    result.tabs.push({ ...oldTab, ...frontend });
+    result.layoutsByTabId[tab.tabId] = { root, activeLeafId, expandedLeafId: tab.expandedNodeId === null ? null : leafFor(tab.expandedNodeId),
+      contentsByLeafId: contents, sessionIdsByLeafId: sessions };
+  }
+  const group = (node: DaemonGroup): TabGroupLayoutNode => {
+    if (node.type === "split") return { type: "split", direction: node.dir, ratio: node.ratio, first: group(node.a), second: group(node.b) };
+    result.tabGroups![node.groupId] = { id: node.groupId, tabIds: node.tabIds, activeTabId: node.activeTabId };
+    return { type: "group", groupId: node.groupId };
+  };
+  result.tabGroupLayout = group(saved.tabGroupLayout);
+  return normalizeLayout(result);
 }
