@@ -243,7 +243,7 @@ describe("useDesktopSidebarPublisher", () => {
   const input: DesktopSidebarInput = {
     enabled: true, projects: [project("hook")], activeProjectId: "hook", worktrees: [],
     inactiveProjectWorktrees: {}, emptyWorkspaceIds: [], activityByWorktreePath: {},
-    unreadWorktreePaths: {}, agents: [], attentionRows: [],
+    unreadWorktreePaths: {}, agents: [],
   };
 
   it.each([null, "STALE_EPOCH"])("forces publication after a missed resync and initial result %s", async (code) => {

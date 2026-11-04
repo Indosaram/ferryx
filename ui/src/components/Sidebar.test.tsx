@@ -4,7 +4,6 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Worktree } from "../lib/types";
-import { notificationCenterStore } from "../lib/notificationCenter/notificationCenterStore";
 import { SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, SIDEBAR_WIDTH_STORAGE_KEY, Sidebar } from "./Sidebar";
 
 const nativeMenu = vi.hoisted(() => ({
@@ -66,7 +65,6 @@ function projectToggle(workspaceId: string) {
 
 beforeEach(() => {
   localStorage.clear();
-  notificationCenterStore.clearAll();
 });
 afterEach(cleanup);
 

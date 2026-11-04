@@ -69,9 +69,7 @@ import type {
 import { createLayoutState, getFocusedGroupId, getGroupForTab, getTabsForGroup, layoutReducer } from "./layout";
 import { collectLeafIds, type PaneDirection, type ResolvedSeam } from "./paneTree";
 import { moveTabIntoPaneSplit } from "./tabPaneDrop";
-import { notificationCenterStore, type NotificationCenterStore } from "../lib/notificationCenter/notificationCenterStore";
-import { hasRecentObservationInteraction } from "../lib/notificationCenter/activityRecording";
-import { countAttentionEntries, liveActivityLookup } from "../features/ferryx/attention/attentionModel";
+import { hasRecentObservationInteraction } from "../lib/observationInteraction";
 import { formatRecoveryKey, RecoveryScheduler, type AuthorityCorrectionReceipt, type RecoveryClock } from "../lib/sessionRecovery";
 
 const LAST_TAB_EXIT_TIMEOUT_MS = 5_000;
@@ -986,8 +984,7 @@ export function useWorkspaceStore({
   const dispatch = useCallback(
     (action: WorkspaceAction) => {
       const previous = stateRef.current;
-      // Same observation rule the inbox recorder applies: a frontmost window with nobody at it
-      // is not watching, so the pane must keep its frame exactly when the inbox keeps the row.
+      // A frontmost window with nobody at it is not watching, so the pane keeps its frame.
       const contextualAction = action.type === "SESSION_TITLE_ACTIVITY" || action.type === "SESSION_SCREEN_ACTIVITY" || action.type === "MARK_TAB_UNREAD"
         ? { ...action, observed: (getNativeWindowFocused() ?? isWindowForegroundFocused()) && hasRecentObservationInteraction() }
         : action;
@@ -2690,17 +2687,11 @@ export function useWorkspaceStore({
     () => selectActivityNotificationTargets(renderedState),
     [renderedState.layout, renderedState.worktreeLayouts, renderedState.worktrees, renderedState.activityBySessionId, renderedState.sessions],
   );
-  const [notificationVersion, setNotificationVersion] = useState(0);
-  useEffect(() => {
-    return notificationCenterStore.subscribe(() => {
-      setNotificationVersion((v) => v + 1);
-    });
-  }, []);
   const unreadBadgeCount = useMemo(
     () => selectGlobalUnreadBadgeCount(renderedState, workspaceId),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- parkedActivityVersion and notificationVersion
-    // are external change signals that useMemo cannot observe directly from renderedState.
-    [renderedState, workspaceId, parkedActivityVersion, notificationVersion],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- parkedActivityVersion is an external
+    // change signal that useMemo cannot observe directly from renderedState.
+    [renderedState, workspaceId, parkedActivityVersion],
   );
 
   return {
@@ -3091,16 +3082,7 @@ export function selectWorktreeActivitySummariesAcrossWorkspaces(
 export function selectGlobalUnreadBadgeCount(
   currentState?: WorkspaceState,
   currentWorkspaceId?: string,
-  store: NotificationCenterStore = notificationCenterStore,
 ): number {
-  const storeEntries = store.getSnapshot().entries;
-  if (store !== notificationCenterStore || storeEntries.length > 0) {
-    const mounted = currentState
-      ? { workspaceId: currentState.workspaceId ?? currentWorkspaceId, activityBySessionId: currentState.activityBySessionId }
-      : null;
-    return countAttentionEntries(storeEntries, liveActivityLookup(mounted, listWorkspaceSnapshots()));
-  }
-
   if (!currentState) return 0;
 
   const countAttention = (state: WorkspaceState): number =>

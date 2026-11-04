@@ -21,7 +21,6 @@ import { pairedHostInventory } from "./lib/pairedHostInventory";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { WorktreeDiskDialog } from "./components/WorktreeDiskDialog";
 import { AgentHistoryDialog } from "./components/AgentHistoryDialog";
-import { buildAttentionRows, liveActivityLookup } from "./features/ferryx/attention/attentionModel";
 import { agentHistoryProviderLabel, type AgentHistoryEntry } from "./lib/agentHistory";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { TerminalLinkActions } from "./components/TerminalLinkActions";
@@ -39,11 +38,8 @@ import { CLI_OPEN_FILE_EVENT, parseCliOpenFilePayload } from "./lib/cliOpenFile"
 import { registerBuiltInBrowserLinkOpener, registerWorktreePathOpener } from "./lib/linkRouting";
 import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
-import { isNotificationTargetObserved, wireActivityRecording, wireBellRecording, type RecordingListener, type RecordingTarget } from "./lib/notificationCenter/activityRecording";
-import { notificationCenterStore } from "./lib/notificationCenter/notificationCenterStore";
-import { syncSupervisorNotifications, type SupervisorPaneResolver } from "./lib/notificationCenter/supervisorRecording";
-import { notificationEntryId } from "./lib/notificationCenter/types";
-import { getSupervisorSnapshot, startSupervisorFeed, subscribeSupervisorSnapshot } from "./lib/supervisor";
+import { startSupervisorFeed } from "./lib/supervisor";
+import { usePanelDecisionCount } from "./lib/supervisorPanel/usePanelDecisionCount";
 import { getSetupStatus, setupFinished, setupProjectsFrom } from "./lib/supervisorSetup";
 import { DesktopSupervisorSetupBanner } from "./components/supervisor/DesktopSupervisorSetupBanner";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
@@ -196,7 +192,6 @@ import { createClosedTabStack } from "./lib/closedTabStack";
 import { switchDebug } from "./lib/switchDebug";
 import { useInactiveProjectWorktrees } from "./state/inactiveProjectWorktrees";
 import { useDesktopSidebarPublisher } from "./lib/desktopSidebarSync";
-import { withBackendSessions } from "./components/sidebar/sidebarSessionSignals";
 import {
   isTerminalTab,
   worktreeIdentity,
@@ -220,14 +215,6 @@ import { listPairedProjectWorktrees } from "./state/pairedProjectWorktrees";
 import { getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectWorktreeActivitySummaries, setLocalRecoveryPersistence, wakeLocalSessionRecovery, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
 
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
-type InboxNavigationTarget = NotificationTarget & { revision?: number };
-
-function acknowledgeNotificationTarget(target: InboxNavigationTarget): void {
-  notificationCenterStore.markEntriesRead([{
-    id: notificationEntryId(target.workspaceId, target.sessionId), expectedRevision: target.revision,
-  }]);
-}
-
 const DEFAULT_PROJECT: RegisteredProject = { workspaceId: DEFAULT_WORKSPACE_ID, repoRoot: ".", gitRoot: null };
 const loadSettingsDialog = () =>
   import("./components/SettingsDialog").then((m) => ({ default: m.SettingsDialog }));
@@ -1001,10 +988,6 @@ function WorkspaceApp({
   const activityNotificationTargetsRef = useRef(activityNotificationTargets);
   activityNotificationTargetsRef.current = activityNotificationTargets;
 
-  const isNotificationObserved = useCallback((target: RecordingTarget) => isNotificationTargetObserved(
-    stateRef.current, target, getNativeWindowFocused() ?? isWindowForegroundFocused(),
-  ), []);
-
   const handleResetTabAgentState = useCallback(
     async (tabId: string) => {
       const tab = state.layout.tabs.find((t) => t.id === tabId);
@@ -1033,52 +1016,21 @@ function WorkspaceApp({
     [resetWorktreeAgentState],
   );
 
-  useEffect(() => wireActivityRecording({
-    events: (record) => subscribeActivityNotification((event) => {
-      // Activity edges come from this window's own store, so this window owns the session.
-      const backendSessionId = findBackendSessionId(stateRef.current, event.sessionId, event.workspaceId);
-      const decision = coordinatorRef.current!.handleAgentStateChange({
-        ...event,
-        nextState: event.state,
-        backendSessionId: backendSessionId ?? undefined,
-        ownsSession: true,
-      });
-      record({ ...event, workspaceId: event.workspaceId ?? stateRef.current.workspaceId }, decision);
-    }),
-    isObserved: isNotificationObserved,
-  }), [subscribeActivityNotification, isNotificationObserved]);
+  useEffect(() => subscribeActivityNotification((event) => {
+    // Activity edges come from this window's own store, so this window owns the session.
+    const backendSessionId = findBackendSessionId(stateRef.current, event.sessionId, event.workspaceId);
+    coordinatorRef.current!.handleAgentStateChange({
+      ...event,
+      nextState: event.state,
+      backendSessionId: backendSessionId ?? undefined,
+      ownsSession: true,
+    });
+  }), [subscribeActivityNotification]);
 
-  // Supervisor stops and awaiting approvals reach the Inbox from the event-fed snapshot. A lane is
-  // matched to the open pane whose PTY it drives, in the mounted workspace first, then parked ones.
-  useEffect(() => {
-    const resolvePane: SupervisorPaneResolver = (hubSessionId) => {
-      const candidates: WorkspaceState[] = [stateRef.current];
-      for (const [, parked] of listWorkspaceSnapshots()) candidates.push(parked);
-      for (const candidate of candidates) {
-        if (!candidate.workspaceId) continue;
-        const session = Object.values(candidate.sessions).find((value) => value.backendSessionId === hubSessionId);
-        if (!session || !hasNavigableSession(candidate, session.id)) continue;
-        const worktreePath = session.worktreePath ?? session.cwd;
-        const worktree = candidate.worktrees.find((value) => value.path === worktreePath);
-        return {
-          workspaceId: candidate.workspaceId,
-          sessionId: session.id,
-          labels: {
-            workspaceLabel: selectNotificationWorkspaceLabel(candidate),
-            worktreeLabel: worktree ? workspaceName(worktree) : undefined,
-          },
-        };
-      }
-      return null;
-    };
-    const sync = () => { syncSupervisorNotifications(getSupervisorSnapshot(), resolvePane); };
-    const unsubscribe = subscribeSupervisorSnapshot(sync);
-    void startSupervisorFeed();
-    sync();
-    return unsubscribe;
-  }, []);
+  // The supervisor snapshot feeds the setup banner and the panes' supervision; start it once.
+  useEffect(() => { void startSupervisorFeed(); }, []);
 
-  const handleTerminalBell = useCallback((sessionId: string, tabId: string, eventTarget: import("./state/workspaceStore").ActivityNotificationTarget | undefined, record: RecordingListener<RecordingTarget>) => {
+  const handleTerminalBell = useCallback((sessionId: string, tabId: string, eventTarget: import("./state/workspaceStore").ActivityNotificationTarget | undefined) => {
     const targets = activityNotificationTargetsRef.current ?? [];
     const target = eventTarget ?? targets.find(
       (candidate) => candidate.sessionId === sessionId,
@@ -1102,7 +1054,7 @@ function WorkspaceApp({
 
     // The bell resolved against this window's own store (mounted or parked), so it owns the session.
     const backendSessionId = findBackendSessionId(stateRef.current, sessionId, target?.workspaceId);
-    const decision = coordinatorRef.current!.handleTerminalBell({
+    coordinatorRef.current!.handleTerminalBell({
       backendSessionId: backendSessionId ?? undefined,
       ownsSession: true,
       workspaceId: target?.workspaceId,
@@ -1113,38 +1065,15 @@ function WorkspaceApp({
       worktreeLabel,
       terminalTitle,
     });
-    record({
-      workspaceId: target?.workspaceId ?? stateRef.current.workspaceId,
-      workspaceLabel, sessionId, tabId, worktreeLabel: worktreeLabel ?? "",
-      terminalTitle: terminalTitle ?? "", agentLabel: target?.agentLabel,
-    }, decision);
   }, []);
 
   // The bell arrives from the store's global native subscription, not from a pane prop: only the
   // active tab's panes are mounted, and a bell in the tab you are watching is not what notifies.
-  useEffect(() => wireBellRecording({
-    events: (record) => subscribeTerminalBell((sessionId, tabId, target) => handleTerminalBell(sessionId, tabId, target, record)),
-    isObserved: isNotificationObserved,
-  }), [handleTerminalBell, subscribeTerminalBell, isNotificationObserved]);
+  useEffect(
+    () => subscribeTerminalBell((sessionId, tabId, target) => handleTerminalBell(sessionId, tabId, target)),
+    [handleTerminalBell, subscribeTerminalBell],
+  );
 
-  // Acknowledge session notifications when user interacts with a pane (focus, input, paste, navigation)
-  useEffect(() => {
-    const onSessionInteracted = (event: Event) => {
-      const detail = (event as CustomEvent<{ sessionId?: string; revision?: number }>).detail;
-      const sessionId = detail?.sessionId;
-      if (!sessionId || !state.workspaceId) return;
-      if (!state.sessions[sessionId]) return;
-
-      const entryId = notificationEntryId(state.workspaceId, sessionId);
-      const entry = notificationCenterStore.getSnapshot().entries.find((e) => e.id === entryId);
-      if (entry && !("seen" in entry.read)) {
-        notificationCenterStore.markEntriesRead([{ id: entry.id, expectedRevision: entry.revision }]);
-      }
-    };
-
-    window.addEventListener("ferryx:session-interacted", onSessionInteracted);
-    return () => window.removeEventListener("ferryx:session-interacted", onSessionInteracted);
-  }, [state.workspaceId, state.sessions]);
   useEffect(() => {
     switchDebug("workspace.render", {
       activeProjectId: activeProject.workspaceId,
@@ -2267,19 +2196,8 @@ function WorkspaceApp({
   const deleteOwnerProject = projects.find((p) => p.workspaceId === deleteOwnerId);
   const [diskManageProject, setDiskManageProject] = useState<RegisteredProject | null>(null);
   const [historyProject, setHistoryProject] = useState<RegisteredProject | null>(null);
-  const notificationInbox = useSyncExternalStore(notificationCenterStore.subscribe, notificationCenterStore.getSnapshot);
-  const attentionRows = useMemo(
-    () => buildAttentionRows(notificationInbox.entries, liveActivityLookup(state, listWorkspaceSnapshots())),
-    // liveActivityLookup reads only the mounted workspace id and its per-session activity map.
-    [notificationInbox, state.workspaceId, state.activityBySessionId, parkedActivityVersion],
-  );
-  // Publishes the attention rows (the collapsed-sidebar badge counts them too). The published rows
-  // carry each pane's backend session id so a remote can open that exact pane.
-  const publishedAttentionRows = useMemo(
-    () => withBackendSessions(attentionRows, [[state.workspaceId, state], ...listWorkspaceSnapshots()]),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- reads only sessions and worktrees; parkedActivityVersion tracks the parked snapshots
-    [attentionRows, state.workspaceId, state.sessions, state.worktrees, parkedActivityVersion],
-  );
+  // The collapsed sidebar's badge counts the Supervisor panel's decisions for the owner.
+  const supervisorDecisionCount = usePanelDecisionCount();
   useDesktopSidebarPublisher({
     // One desktop sidebar model per app (consumed by remote clients): the primary publishes it.
     enabled: isNativeRuntime && isPrimary,
@@ -2291,7 +2209,6 @@ function WorkspaceApp({
     activityByWorktreePath: worktreeActivity,
     unreadWorktreePaths: state.unreadWorktreePaths,
     agents,
-    attentionRows: publishedAttentionRows,
   });
   const [pendingTabClose, setPendingTabClose] = useState<{
     kind: "pane" | "tab";
@@ -2315,7 +2232,7 @@ function WorkspaceApp({
     slug?: string | null;
     tabId?: string | null;
   } | null>(null);
-  const [pendingNotificationTarget, setPendingNotificationTarget] = useState<InboxNavigationTarget | null>(null);
+  const [pendingNotificationTarget, setPendingNotificationTarget] = useState<NotificationTarget | null>(null);
 
   const focusedTerminalPayload = useMemo(
     () => deriveFocusedTerminal(activeProject.workspaceId, state, listWorkspaceSnapshots()),
@@ -2726,7 +2643,7 @@ function WorkspaceApp({
   }, [handleRemoteSelectionRequested]);
 
   const handleNotificationTarget = useCallback(
-    (target: InboxNavigationTarget) => {
+    (target: NotificationTarget) => {
       if (!target || !target.workspaceId || !target.sessionId) return;
       const project = projectsRef.current.find((candidate) => candidate.workspaceId === target.workspaceId);
       // An unregistered/removed project is stale: never navigate or fall back to another pane.
@@ -2736,7 +2653,6 @@ function WorkspaceApp({
         // no-ops on the same check, but guarding here avoids a needless dispatch.
         if (!hasNavigableSession(stateRef.current, target.sessionId)) return;
         dispatchWorkspaceAction({ type: "FOCUS_EXISTING_SESSION", sessionId: target.sessionId });
-        acknowledgeNotificationTarget(target);
         return;
       }
       // Cross-project: inspect the target workspace's cached state BEFORE switching. A stale or
@@ -2780,7 +2696,6 @@ function WorkspaceApp({
     setPendingNotificationTarget(null);
     if (hasNavigableSession(state, sessionId)) {
       dispatchWorkspaceAction({ type: "FOCUS_EXISTING_SESSION", sessionId });
-      acknowledgeNotificationTarget(pendingNotificationTarget);
     }
   }, [
     activeProject.workspaceId,
@@ -4465,18 +4380,18 @@ function WorkspaceApp({
             </IconButton>
             <IconButton
               data-shortcut="notifications.toggle"
-              label={attentionRows.length > 0 ? `Open supervisor (${attentionRows.length})` : "Open supervisor"}
+              label={supervisorDecisionCount > 0 ? `Open supervisor (${supervisorDecisionCount})` : "Open supervisor"}
               className="no-drag relative"
               size="sm"
               onClick={handleRevealSupervisor}
             >
               <Bot className="size-3.5" />
-              {attentionRows.length > 0 ? (
+              {supervisorDecisionCount > 0 ? (
                 <span
                   data-testid="collapsed-attention-badge"
                   className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-status-warning px-1 text-[9px] font-semibold leading-none text-black"
                 >
-                  {attentionRows.length > 9 ? "9+" : attentionRows.length}
+                  {supervisorDecisionCount > 9 ? "9+" : supervisorDecisionCount}
                 </span>
               ) : null}
             </IconButton>

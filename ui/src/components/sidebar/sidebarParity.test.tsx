@@ -132,7 +132,6 @@ function DesktopSidebar() {
     activityByWorktreePath: fx.desktopActivity,
     unreadWorktreePaths: fx.desktopUnread,
     agents: fx.desktopAgents,
-    attentionRows: fx.desktopAttention,
   });
   return (
     <Sidebar

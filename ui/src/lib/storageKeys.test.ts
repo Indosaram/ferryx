@@ -5,8 +5,11 @@ import {
   ACTIVE_PROJECT_STORAGE_KEY,
   GENERAL_SETTINGS_STORAGE_KEY,
   getMigratedItem,
+  LEGACY_STORAGE_KEY_MAP,
   NOTIFICATION_SETTINGS_STORAGE_KEY,
   PROJECTS_STORAGE_KEY,
+  removeRetiredStorageKeys,
+  RETIRED_STORAGE_KEYS,
   SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY,
   SIDEBAR_OPEN_STORAGE_KEY,
   SIDEBAR_WIDTH_STORAGE_KEY,
@@ -108,5 +111,28 @@ describe("storageKeys unification and migration", () => {
     localStorage.removeItem(NOTIFICATION_SETTINGS_STORAGE_KEY);
 
     expect(getMigratedItem(NOTIFICATION_SETTINGS_STORAGE_KEY, localStorage)).toBeNull();
+  });
+
+  it("removes the retired notification history, window-scoped copies and legacy names included", () => {
+    localStorage.setItem("ferryx.notifications.history:v1", "{}");
+    localStorage.setItem("ferryx.notifications.history:v1@ws-2", "{}");
+    localStorage.setItem("orca.notifications.history:v1", "{}");
+    localStorage.setItem("rorca.notifications.history:v1", "{}");
+    localStorage.setItem(PROJECTS_STORAGE_KEY, "[]");
+    localStorage.setItem(NOTIFICATION_SETTINGS_STORAGE_KEY, "{}");
+
+    removeRetiredStorageKeys(localStorage);
+
+    expect(Object.keys(localStorage).sort()).toEqual([NOTIFICATION_SETTINGS_STORAGE_KEY, PROJECTS_STORAGE_KEY].sort());
+  });
+
+  it("never migrates a retired key forward", () => {
+    const canonical = Object.keys(LEGACY_STORAGE_KEY_MAP);
+    const legacy = Object.values(LEGACY_STORAGE_KEY_MAP).flat();
+    for (const key of RETIRED_STORAGE_KEYS) {
+      expect(canonical).not.toContain(key);
+      expect(legacy).not.toContain(key);
+    }
+    expect(Object.values(storageKeys)).not.toContain("ferryx.notifications.history:v1");
   });
 });

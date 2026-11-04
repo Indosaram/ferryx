@@ -1,5 +1,5 @@
-// The desktop still publishes `signals.attentionRows` (older remotes read them), and the remote
-// loader still validates them. Nothing renders them any more: this guards only the wire.
+// Older desktops publish `signals.attentionRows`; a current desktop has no Inbox and sends none.
+// The remote loader still validates them. Nothing renders them any more: this guards only the wire.
 import { describe, expect, it } from "vitest";
 
 import { PUBLISHED_ATTENTION_ROWS_CAP, sidebarSessionSignals } from "../components/sidebar/sidebarSessionSignals";

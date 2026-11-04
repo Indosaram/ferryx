@@ -274,6 +274,8 @@ vi.mock("./lib/tauri", () => ({
   bootTrace: vi.fn(async () => undefined),
   toIpcError: (error: unknown) => error,
   isStructuredIpcError: (_error: unknown) => false,
+  getSupervisorPanel: vi.fn(async () => ({ decisions: [], handling: [], sessions: [], log: [], rules: [], paused: false, setupRequired: true })),
+  onSupervisorPanelEvent: vi.fn(async () => () => undefined),
 }));
 
 vi.mock("./lib/updater", async (importOriginal) => {

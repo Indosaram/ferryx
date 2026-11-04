@@ -6,7 +6,6 @@ export const SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY = "ferryx.sidebar.collapsedP
 export const SIDEBAR_WORKTREE_ORDER_STORAGE_KEY = "ferryx.sidebar.worktreeOrder";
 export const TERMINAL_SETTINGS_STORAGE_KEY = "ferryx.terminal.settings";
 export const NOTIFICATION_SETTINGS_STORAGE_KEY = "ferryx.settings.notifications:v1";
-export const NOTIFICATION_HISTORY_STORAGE_KEY = "ferryx.notifications.history:v1";
 export const APPEARANCE_SETTINGS_STORAGE_KEY = "ferryx.settings.appearance";
 export const BROWSER_SETTINGS_STORAGE_KEY = "ferryx.settings.browser";
 export const BROWSER_HISTORY_STORAGE_KEY = "ferryx.browser.history";
@@ -38,7 +37,6 @@ export const LEGACY_STORAGE_KEY_MAP: Record<string, string[]> = {
   [SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY]: ["rorca.sidebar.collapsedProjects", "orca.sidebar.collapsedProjects"],
   [TERMINAL_SETTINGS_STORAGE_KEY]: ["orca.terminal.settings", "rorca.terminal.settings"],
   [NOTIFICATION_SETTINGS_STORAGE_KEY]: ["rorca:settings:notifications:v1", "orca:settings:notifications:v1"],
-  [NOTIFICATION_HISTORY_STORAGE_KEY]: ["rorca.notifications.history:v1", "orca.notifications.history:v1"],
   [GENERAL_SETTINGS_STORAGE_KEY]: ["rorca.settings.general", "orca.settings.general"],
   [REMOTE_INSTALLATION_ID_STORAGE_KEY]: ["rorca.remote.installation-id", "orca.remote.installation-id"],
 };
@@ -46,7 +44,7 @@ export const LEGACY_STORAGE_KEY_MAP: Record<string, string[]> = {
 export function getMigratedItem(
   key: string,
   // `removeItem` is optional: callers legitimately pass narrower storage shims
-  // (see notificationCenterPersistence.ts and terminalSettings.ts). Migration
+  // (see terminalSettings.ts). Migration
   // consumes the legacy key when the shim supports it and otherwise degrades to
   // the old copy-forward behaviour rather than forcing every caller to widen.
   storage: (Pick<Storage, "getItem" | "setItem"> & Partial<Pick<Storage, "removeItem">>) | null = typeof window !== "undefined" && window.localStorage ? window.localStorage : null,
@@ -74,6 +72,34 @@ export function getMigratedItem(
     }
   }
   return null;
+}
+
+/**
+ * Keys of stores that no longer exist, with their legacy `rorca.` / `orca.` names. The desktop
+ * Inbox kept a per-desktop notification history here (one key per window, `<key>@<window>` for
+ * secondary windows) until the Supervisor panel replaced it.
+ */
+export const RETIRED_STORAGE_KEYS: readonly string[] = [
+  "ferryx.notifications.history:v1",
+  "rorca.notifications.history:v1",
+  "orca.notifications.history:v1",
+];
+
+/** Deletes every retired key, window-scoped copies included. Safe to run on every start. */
+export function removeRetiredStorageKeys(
+  storage: Pick<Storage, "length" | "key" | "removeItem"> | null = typeof window !== "undefined" && window.localStorage ? window.localStorage : null,
+): void {
+  if (!storage) return;
+  try {
+    const doomed: string[] = [];
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (key && RETIRED_STORAGE_KEYS.some((retired) => key === retired || key.startsWith(`${retired}@`))) doomed.push(key);
+    }
+    for (const key of doomed) storage.removeItem(key);
+  } catch {
+    // ignore disabled storage
+  }
 }
 
 export function getOrCreateInstallationId(

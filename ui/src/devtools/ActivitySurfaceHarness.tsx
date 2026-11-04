@@ -1,12 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import { selectActivityNotificationTargets, type ActivityNotificationEvent, selectGlobalUnreadBadgeCount, selectTabActivitySummaries, selectWorktreeActivitySummaries, workspaceReducer, type WorkspaceAction, type WorkspaceState } from "../state/workspaceStore";
 import { TabBar } from "../components/TabBar";
 import { WorktreeList } from "../components/WorktreeList";
 import type { Worktree } from "../lib/types";
 import { NotificationCoordinator } from "../lib/notificationCoordinator";
-import { isNotificationTargetObserved, wireActivityRecording, type RecordingListener } from "../lib/notificationCenter/activityRecording";
-import { notificationCenterStore } from "../lib/notificationCenter/notificationCenterStore";
 
 const worktreeMain: Worktree = {
   path: "/repo/main",
@@ -93,16 +91,6 @@ export function ActivitySurfaceHarness() {
     // This browser-only QA surface records pre-focus decisions without invoking native IPC.
     isWindowFocused: () => true,
   }));
-  const [activityListeners] = useState(() => new Set<RecordingListener<ActivityNotificationEvent>>());
-
-  useEffect(() => wireActivityRecording({
-    events: (listener) => {
-      activityListeners.add(listener);
-      return () => { activityListeners.delete(listener); };
-    },
-    isObserved: (target) => isNotificationTargetObserved(stateRef.current, target, true),
-    store: notificationCenterStore,
-  }), [activityListeners]);
 
   const dispatch = (action: WorkspaceAction) => {
     const previous = stateRef.current;
@@ -113,9 +101,8 @@ export function ActivitySurfaceHarness() {
     for (const target of selectActivityNotificationTargets(next)) {
       const previousState = previous.activityBySessionId?.[target.sessionId]?.state;
       if (previousState === target.state) continue;
-      const event = { ...target, previousState };
-      const decision = coordinator.handleAgentStateChange({ ...event, nextState: event.state });
-      activityListeners.forEach((listener) => listener(event, decision));
+      const event: ActivityNotificationEvent = { ...target, previousState };
+      coordinator.handleAgentStateChange({ ...event, nextState: event.state });
     }
   };
 
@@ -273,7 +260,6 @@ export function ActivitySurfaceHarness() {
       stateRef.current = initialState();
       setState(stateRef.current);
       coordinator.reset();
-      notificationCenterStore.clearAll();
     } },
   ];
 

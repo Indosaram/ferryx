@@ -61,6 +61,9 @@ async function boot() {
     // Resolve the new-vs-existing install default before App can persist any workspace state.
     const { loadAdvancedFeatures } = await import("./lib/advancedFeatures");
     loadAdvancedFeatures();
+    // The per-desktop Inbox history is gone (the Supervisor panel replaced it); drop its keys.
+    const { removeRetiredStorageKeys } = await import("./lib/storageKeys");
+    removeRetiredStorageKeys();
     const { installNativeShortcutTablePush } = await import("./lib/nativeShortcutTable");
     const stopNativeShortcutTablePush = installNativeShortcutTablePush();
     import.meta.hot?.dispose(stopNativeShortcutTablePush);
