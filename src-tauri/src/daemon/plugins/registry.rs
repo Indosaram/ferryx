@@ -13,6 +13,7 @@ struct Running { stop: watch::Sender<bool>, task: tokio::task::JoinHandle<Result
 pub struct Registry {
     pub approvals: Arc<parking_lot::Mutex<Approvals>>,
     path: PathBuf,
+    consent: Mutex<()>,
     running: Mutex<BTreeMap<String, Running>>,
     pub views: Arc<parking_lot::RwLock<BTreeMap<(String, String), String>>>,
 }
@@ -20,7 +21,7 @@ pub struct Registry {
 impl Registry {
     pub fn new(path: PathBuf) -> Self {
         Self { path, approvals: Arc::new(parking_lot::Mutex::new(Approvals::default())),
-            running: Mutex::new(BTreeMap::new()), views: Arc::new(parking_lot::RwLock::new(BTreeMap::new())) }
+            consent: Mutex::new(()), running: Mutex::new(BTreeMap::new()), views: Arc::new(parking_lot::RwLock::new(BTreeMap::new())) }
     }
 
     pub async fn restore(&self) -> Result<(), String> {
@@ -53,6 +54,7 @@ impl Registry {
     }
 
     pub async fn approve(&self, name: String, enabled: bool) -> Result<(), String> {
+        let _consent = self.consent.lock().await;
         let stopped_name = name.clone();
         let path = self.path.clone();
         let approvals = Arc::clone(&self.approvals);
@@ -77,9 +79,9 @@ impl Registry {
           Fut: Future<Output = Result<serde_json::Value, String>> + Send + 'static,
     {
         let mut running = self.running.lock().await;
-        if running.contains_key(&manifest.name) { return Ok(()); }
         let approvals = self.approvals.lock().clone();
         if !approvals.enabled(&manifest) { return Err("plugin is not enabled".into()); }
+        if running.contains_key(&manifest.name) { return Ok(()); }
         let name = manifest.name.clone();
         let observer_name = name.clone();
         let task_name = name.clone();
