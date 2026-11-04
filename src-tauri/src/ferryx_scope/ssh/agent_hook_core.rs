@@ -267,9 +267,13 @@ pub enum Endpoint {
 pub fn endpoint(env: &impl Fn(&str) -> Option<String>) -> Option<Endpoint> {
     #[cfg(windows)]
     if let Some(path) = env("FERRYX_AGENT_STATE_PIPE").filter(|path| !path.is_empty()) {
-        let fallback = endpoint(&|key| if key == "FERRYX_AGENT_STATE_PIPE" { None } else { env(key) });
+        let fallback = legacy_endpoint(env);
         return Some(Endpoint::Pipe { path, fallback: fallback.map(Box::new) });
     }
+    legacy_endpoint(env)
+}
+
+fn legacy_endpoint(env: &impl Fn(&str) -> Option<String>) -> Option<Endpoint> {
     let port = env("FERRYX_AGENT_STATE_PORT")
         .and_then(|port| port.trim().parse::<u16>().ok())
         .filter(|port| *port > 0);
