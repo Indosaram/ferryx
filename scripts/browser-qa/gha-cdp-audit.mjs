@@ -1597,6 +1597,27 @@ function pillButtons(path, { x0, x1, y0, y1 }) {
   }
   return { primary, secondary };
 }
+/** The rightmost light text cluster in a row band: a text button's label that OCR missed. */
+function rowButtonLabel(path, { x0, x1, y0, y1 }) {
+  const image = decodePng(path);
+  if (!image) return null;
+  const left0 = Math.max(0, Math.round(x0)), right0 = Math.min(image.width - 1, Math.round(x1));
+  const top0 = Math.max(0, Math.round(y0)), bottom0 = Math.min(image.height - 1, Math.round(y1));
+  const clusters = [];
+  for (let x = left0; x <= right0; x += 1) {
+    const lit = [];
+    for (let y = top0; y <= bottom0; y += 1) if (Math.min(...image.rgb(x, y)) > 180) lit.push(y);
+    if (!lit.length) continue;
+    const last = clusters.at(-1);
+    if (last && x - last.right <= 8) {
+      last.right = x;
+      last.top = Math.min(last.top, lit[0]);
+      last.bottom = Math.max(last.bottom, lit.at(-1));
+    } else clusters.push({ left: x, right: x, top: lit[0], bottom: lit.at(-1) });
+  }
+  const label = clusters.filter((cluster) => cluster.right - cluster.left >= 12 && cluster.right - cluster.left <= 120 && cluster.bottom - cluster.top <= 24).at(-1);
+  return label ? { x: Math.round((label.left + label.right) / 2), y: Math.round((label.top + label.bottom) / 2) } : null;
+}
 async function clickCardButton(label, timeout = 20000) {
   const hit = await until(() => {
     const path = probeShot();
@@ -2094,13 +2115,26 @@ await section("media", async (record) => {
   };
   const reset = async (label) => {
     const group = await settingsBrowserGroup("Site settings");
-    const words = ocr(probeShot()) ?? [];
+    const path = probeShot();
+    const words = ocr(path) ?? [];
     const origin = words.find((word) => word.text.includes(`localhost:${server.port}`));
     const resetWord = words.filter((word) => word.text === "Reset" && (!origin || Math.abs(word.top - origin.top) <= 30)).sort((a, b) => a.top - b.top)[0];
     let clicked = { ok: false, stderr: "no Reset button on the site's row" };
-    if (resetWord) clicked = host.click(resetWord.left + Math.round(resetWord.width / 2), resetWord.top + Math.round(resetWord.height / 2));
+    let via = null;
+    if (resetWord) {
+      clicked = host.click(resetWord.left + Math.round(resetWord.width / 2), resetWord.top + Math.round(resetWord.height / 2));
+      via = "ocr";
+    } else if (origin) {
+      // Windows OCR misses the small "Reset" label (run 41818275381): it is the light text at the
+      // right end of the origin's row.
+      const button = rowButtonLabel(path, { x0: origin.left + 200, x1: origin.left + 900, y0: origin.top - 14, y1: origin.top + 22 });
+      if (button) {
+        clicked = { ...host.click(button.x, button.y), at: [button.x, button.y] };
+        via = "pixels";
+      }
+    }
     const cleared = await until(() => permissionEntries().length === 0, 8000, 500);
-    await step(`media-reset-${label}`, "Settings > Browser > Site settings: click Reset on the fixture origin's row", [["reset", () => ({ ok: Boolean(cleared), group_found: group.ok, origin_seen: Boolean(origin), clicked: clicked.ok })]]);
+    await step(`media-reset-${label}`, "Settings > Browser > Site settings: click Reset on the fixture origin's row", [["reset", () => ({ ok: Boolean(cleared), group_found: group.ok, origin_seen: Boolean(origin), clicked: clicked.ok, via, at: clicked.at })]]);
     host.key({ key: "Escape" });
     await sleep(1200);
     return Boolean(cleared) && clicked.ok;
@@ -2371,8 +2405,8 @@ await section("import", async (record) => {
       await sleep(300);
       rawKey({ key: "Enter" });
     }
-    await sleep(2500);
-    const chosen = Boolean(findWord(ocr(probeShot()) ?? [], "", { match: (word) => word.text.includes(basename(path)) }));
+    // The picked path shows next to "Choose file…"; Import stays disabled until it does.
+    const chosen = Boolean(await until(() => findWord(ocr(probeShot()) ?? [], "", { match: (word) => word.text.includes(basename(path)) }), 10000));
     const imported = await clickDialogButton("primary", "Import");
     const done = await results();
     const outcome = { dialog: opened.ok, format_picked: formatPicked, format_via: formatVia, format_anchor: chooser ? "label" : value ? "value" : null, choose: choose.ok, file_shown: chosen, import_clicked: imported.ok, lines: lines(done) };
