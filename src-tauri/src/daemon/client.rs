@@ -725,6 +725,8 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::Attach { .. } => "attach",
         DaemonRequest::SaveSession { .. } => "saveSession",
         DaemonRequest::LoadSession => "loadSession",
+        DaemonRequest::OnboardingGet => "onboardingGet",
+        DaemonRequest::OnboardingSet { .. } => "onboardingSet",
         DaemonRequest::ClearSession => "clearSession",
         DaemonRequest::RemoteGetStatus => "remoteGetStatus",
         DaemonRequest::GetCapabilities => "getCapabilities",
