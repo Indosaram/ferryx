@@ -4024,6 +4024,7 @@ impl DaemonServer {
             #[cfg(test)]
             test_shell_command: parking_lot::Mutex::new(None),
         });
+        handover_manager.set_size_ownership(Arc::clone(&session_service.size_ownerships));
         // OSC 7501 summaries from every mirror this daemon answers for become Protocol states.
         let protocol_reporters =
             Arc::new(crate::terminal::foreground::ProtocolReporters::default());
@@ -6216,6 +6217,7 @@ impl DaemonServer {
         }
 
         if handover_from.is_none() {
+            self.session_service.restore_size_ownership().await?;
             self.restore_remote_sessions_at(self.remote_sessions_path.clone())
                 .await?;
         } else if let Some(legacy) = handover_from.clone() {
@@ -6234,6 +6236,8 @@ impl DaemonServer {
             // The predecessor's cross-pane grants ride the same record (rex todo 5).
             let manager = Arc::clone(&self.handover_manager);
             if let Err(error) = crate::ipc::run_blocking(move || {
+                manager.adopt_recorded_size_ownership(&grants_legacy)
+                    .map_err(crate::ipc::IpcError::internal)?;
                 manager
                     .adopt_recorded_pane_grants(&grants_legacy)
                     .map_err(crate::ipc::IpcError::internal)
@@ -9458,6 +9462,10 @@ impl DaemonServer {
                         return DaemonResponse::UpgradeUnsupported;
                     }
                 };
+                if let Err(error) = self.session_service.persist_size_ownership().await {
+                    tracing::error!(%error, "Idle daemon restart aborted: ownership checkpoint failed");
+                    return DaemonResponse::UpgradeUnsupported;
+                }
                 // The successor waits for our instance lock, so it must be running before we
                 // release it. No session is live here, so the exit cannot cost a terminal.
                 let mut successor = std::process::Command::new(&exe);
