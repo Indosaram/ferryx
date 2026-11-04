@@ -869,6 +869,22 @@ mod spawn_owner_tests {
     }
 
     #[test]
+    fn plugins_approval_survives_handover_without_killing_predecessor() {
+        use super::super::plugins::{Approvals, Manifest};
+        let (_root, manager, terminals, legacy) = committing_fixture();
+        let plugin = Manifest { name: "clock".into(), version: "1".into(),
+            command: vec!["/absolute/clock".into()], capabilities: ["render".into()].into() };
+        manager.set_plugin_approvals(Arc::new(Mutex::new(Approvals { manifests: vec![plugin.clone()] })));
+        manager.commit_handover_v5(&terminals).unwrap();
+        let successor = HandoverManager::new(legacy.with_file_name("successor.sock"));
+        let approvals = Arc::new(Mutex::new(Approvals::default()));
+        successor.set_plugin_approvals(approvals.clone());
+        successor.adopt_recorded_plugins(&legacy).unwrap();
+        assert!(approvals.lock().enabled(&plugin));
+        assert!(manager.is_draining(), "predecessor remains available after its decision");
+    }
+
+    #[test]
     fn layout_uses_the_committed_decision_not_shared_disk() {
         use super::super::layout::{Content, Intent, Store};
         let (root, manager, terminals, legacy) = committing_fixture();
@@ -1295,6 +1311,7 @@ pub struct HandoverManager {
     pane_grants: RwLock<Option<Arc<super::pane_grants::PaneGrants>>>,
     size_ownership: RwLock<Option<super::size_ownership::SizeOwnershipRegistry>>,
     layouts: RwLock<Option<super::layout::Registry>>,
+    plugin_approvals: RwLock<Option<Arc<Mutex<super::plugins::Approvals>>>>,
     onboarding: RwLock<Option<super::onboarding::Registry>>,
 }
 
@@ -1372,6 +1389,23 @@ impl HandoverManager {
 
     pub fn set_layouts(&self, registry: super::layout::Registry) {
         *self.layouts.write() = Some(registry);
+    }
+
+    pub fn set_plugin_approvals(&self, approvals: Arc<Mutex<super::plugins::Approvals>>) {
+        *self.plugin_approvals.write() = Some(approvals);
+    }
+
+    pub fn adopt_recorded_plugins(&self, legacy: &std::path::Path) -> Result<(), String> {
+        use super::handover_transaction::{HandoverState, HandoverTransaction};
+        let bytes = fs::read(legacy.with_extension("transaction")).map_err(|e| e.to_string())?;
+        let record: HandoverTransaction = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        if record.transfer_id != legacy.to_string_lossy() || record.state != HandoverState::Retired {
+            return Err("Plugin adoption requires a committed predecessor".into());
+        }
+        if let (Some(bytes), Some(store)) = (record.plugin_approvals, self.plugin_approvals.read().clone()) {
+            *store.lock() = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
 
     pub fn adopt_recorded_layouts(&self, legacy: &std::path::Path) -> Result<(), String> {
@@ -1458,6 +1492,9 @@ impl HandoverManager {
                 .transpose().map_err(|error| error.to_string())?
         } else { None };
         transaction.pane_grants = if committed {
+            transaction.plugin_approvals = self.plugin_approvals.read().as_ref()
+                .map(|store| serde_json::to_vec(&*store.lock()))
+                .transpose().map_err(|e| e.to_string())?;
             self.pane_grants.read().as_ref().map(|grants| grants.list())
         } else {
             None
@@ -1570,6 +1607,7 @@ impl HandoverManager {
             pane_grants: RwLock::new(None),
             size_ownership: RwLock::new(None),
             layouts: RwLock::new(None),
+            plugin_approvals: RwLock::new(None),
             onboarding: RwLock::new(None),
         }
     }

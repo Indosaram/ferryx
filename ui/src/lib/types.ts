@@ -628,6 +628,7 @@ export type RemoteDesktopPaneContent = {
 };
 
 export type PaneContent =
+  | { readonly kind: "plugin"; readonly plugin: string; readonly view: string }
   | TerminalPaneContent
   | BrowserPaneContent
   | DagPaneContent

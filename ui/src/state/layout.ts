@@ -715,6 +715,8 @@ export function toPaneContent(raw: unknown, fallbackSessionId = ""): PaneContent
   if (raw && typeof raw === "object" && "kind" in raw) {
     const item = raw as {
       kind: string;
+      plugin?: string;
+      view?: string;
       sessionId?: string;
       browser?: BrowserPaneState;
       browserId?: string;
@@ -729,6 +731,9 @@ export function toPaneContent(raw: unknown, fallbackSessionId = ""): PaneContent
     };
     if (item.kind === "terminal") {
       return createTerminalPaneContent(item.sessionId ?? fallbackSessionId);
+    }
+    if (item.kind === "plugin" && typeof item.plugin === "string" && typeof item.view === "string") {
+      return { kind: "plugin", plugin: item.plugin, view: item.view };
     }
     if (item.kind === "browser") {
       const browserState: BrowserPaneState = item.browser

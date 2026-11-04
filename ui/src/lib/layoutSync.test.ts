@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createLayoutState, layoutReducer } from "../state/layout";
+import { createLayoutState, layoutReducer, toPaneContent } from "../state/layout";
 import type { WorkspaceState } from "../state/workspaceStore";
 import { hydrateLayout, intentForAction, layoutScope, rehydrateWorkspace, LayoutSync, type DaemonLayout, type LayoutReply, type LayoutTransport } from "./layoutSync";
 import { tabTransferIntent } from "../state/windowMove";
@@ -25,6 +25,18 @@ function ready(layout: DaemonLayout): LayoutReply {
 }
 
 describe("daemon layout revisions", () => {
+  it("restores plugin identity without creating or closing terminal sessions", () => {
+    const state = workspace();
+    const saved = daemon();
+    saved.tabs[0].paneTree = { type: "leaf", nodeId: 501,
+      content: { kind: "plugin", plugin: "clock", view: "main" } };
+    saved.tabs[0].activeNodeId = 501;
+    const layout = hydrateLayout({ revision: 1, layout: saved }, state);
+    const content = Object.values(layout.layoutsByTabId.tab.contentsByLeafId!)[0];
+    expect(content).toEqual({ kind: "plugin", plugin: "clock", view: "main" });
+    expect(toPaneContent(content)).toEqual(content);
+    expect(Object.values(layout.layoutsByTabId.tab.sessionIdsByLeafId)).toEqual([""]);
+  });
   it("selects parked checkout scopes and reconstructs panes without a GUI registry", () => {
     const state = workspace();
     const parked = daemon();

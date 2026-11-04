@@ -12,6 +12,7 @@ pub enum Content {
     Dag,
     Changes { #[serde(default, flatten)] checkout: BTreeMap<String, serde_json::Value> },
     RemoteDesktop { host_id: String },
+    Plugin { plugin: String, view: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -940,6 +940,12 @@ pub enum DaemonRequest {
     ClearSession,
     RemoteGetStatus,
     GetCapabilities,
+    PluginsList,
+    PluginSetEnabled { name: String, enabled: bool },
+    PluginView { plugin: String, view: String },
+    /// Accepted only over the plugin's own stdio; never a public owner request.
+    PluginRender { view: String, html: String },
+    PluginAttach { plugin: String, window: Option<String> },
     /// Owner-only local preference, persisted independently of process lifetime.
     #[serde(rename_all = "camelCase")]
     SetTerminalOsc52Write { enabled: bool },
@@ -1701,6 +1707,8 @@ pub enum DaemonResponse {
     SaveSessionOk,
     LayoutOk { view: crate::daemon::layout::View },
     PanesOk { detached: crate::daemon::layout::DetachedRegistry },
+    PluginsOk { plugins: Vec<crate::daemon::plugins::registry::Status> },
+    PluginViewOk { document: String },
     #[serde(rename_all = "camelCase")]
     LayoutConflict { code: String, revision: u64, layout: crate::daemon::layout::Layout },
     #[serde(rename_all = "camelCase")]
