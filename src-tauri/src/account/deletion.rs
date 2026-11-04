@@ -63,6 +63,7 @@ fn purge_user(store: &mut AccountStore, user_id: &str, email: &str) {
         .collect();
 
     store.users.remove(user_id);
+    store.onboarding.remove(user_id);
     store.sessions.retain(|_, s| s.user_id != user_id);
     store.enrollment_codes.retain(|_, c| c.user_id != user_id);
     store.machines.retain(|_, m| m.owner_user_id != user_id);

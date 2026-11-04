@@ -1867,6 +1867,14 @@ pub fn router(state: Arc<AccountState>) -> Router {
         .route("/api/account/v1/device/approve", get(device_approve_get))
         .route("/api/account/v1/logout", post(logout))
         .route(
+            "/api/v1/account/onboarding",
+            get(super::onboarding_sync::get_progress).put(super::onboarding_sync::put_progress),
+        )
+        .route(
+            "/api/account/v1/onboarding",
+            get(super::onboarding_sync::get_progress).put(super::onboarding_sync::put_progress),
+        )
+        .route(
             "/api/account/v1/account/delete",
             post(super::deletion::delete_account),
         )

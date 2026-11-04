@@ -389,6 +389,7 @@ describe("dismissOnboarding", () => {
       version: 1,
       completedSteps: ["intro"],
       dismissed: true,
+      updatedAt: expect.any(Number),
     });
     expect(loadOnboardingState(storage).dismissed).toBe(true);
   });

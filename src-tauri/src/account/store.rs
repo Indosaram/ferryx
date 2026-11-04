@@ -54,6 +54,37 @@ pub struct UserRecord {
     pub created_at: u64,
 }
 
+/// Account-level wizard progress only; never host paths or credentials.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OnboardingRecord {
+    pub completed_steps: Vec<String>,
+    pub dismissed: bool,
+    #[serde(default)]
+    pub updated_at: u64,
+}
+
+impl OnboardingRecord {
+    pub fn merge(&self, other: &Self) -> Self {
+        let (newer, older) = if other.updated_at > self.updated_at {
+            (other, self)
+        } else {
+            (self, other)
+        };
+        let mut steps = Vec::new();
+        for step in newer.completed_steps.iter().chain(&older.completed_steps) {
+            if !steps.contains(step) {
+                steps.push(step.clone());
+            }
+        }
+        Self {
+            completed_steps: steps,
+            dismissed: self.dismissed || other.dismissed,
+            updated_at: self.updated_at.max(other.updated_at),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionRecord {
@@ -316,6 +347,8 @@ impl std::fmt::Debug for AccountSigningKeyRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountStore {
+    #[serde(default)]
+    pub onboarding: BTreeMap<String, OnboardingRecord>,
     #[serde(default)]
     pub users: BTreeMap<String, UserRecord>,
     #[serde(default)]

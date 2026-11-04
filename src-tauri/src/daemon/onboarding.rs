@@ -13,10 +13,12 @@ pub struct State {
     pub version: u8,
     pub completed_steps: Vec<String>,
     pub dismissed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<u64>,
 }
 
 impl Default for State {
-    fn default() -> Self { Self { version: 1, completed_steps: vec![], dismissed: false } }
+    fn default() -> Self { Self { version: 1, completed_steps: vec![], dismissed: false, updated_at: None } }
 }
 
 impl State {
@@ -86,7 +88,7 @@ mod tests {
     fn bootstrap_restart_corruption_and_daemon_migration_once() {
         let dir = tempfile::tempdir().unwrap();
         let bootstrap = dir.path().join("onboarding.json");
-        let state = State { completed_steps: vec!["intro".into(), "features".into(), "agents".into()], ..State::default() };
+        let state = State { completed_steps: vec!["intro".into(), "features".into(), "agents".into()], updated_at: Some(42), ..State::default() };
         write(&bootstrap, &state).unwrap();
         assert_eq!(read(&bootstrap).unwrap(), Some(state.clone()));
         let daemon = dir.path().join("onboarding-daemon.json");
@@ -118,7 +120,7 @@ mod tests {
         let signal = retired.clone();
         manager.set_retirement_action(move || { signal.store(true, Ordering::SeqCst); });
         let store = Arc::new(parking_lot::Mutex::new(Store::new(root.path().join("old.json"))));
-        let expected = State { completed_steps: vec!["agents".into()], ..State::default() };
+        let expected = State { completed_steps: vec!["agents".into()], updated_at: Some(42), ..State::default() };
         store.lock().set(expected.clone(), false).unwrap();
         manager.set_onboarding(store);
         let terminals = Arc::new(crate::terminal::TerminalService::default());

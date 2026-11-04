@@ -4,7 +4,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use rusqlite::Connection;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 /// Schema version written by the original table set, before the onboarding migration.
 const BASE_SCHEMA_VERSION: u32 = 1;
@@ -263,6 +263,9 @@ pub fn init_schema(conn: &mut Connection, read_only: bool) -> Result<(), String>
     };
     if user_version < SUPERVISOR_LEASE_SCHEMA_VERSION && !read_only {
         migrate_to_v3(conn)?;
+    }
+    if user_version < CURRENT_SCHEMA_VERSION && !read_only {
+        super::migration::migrate_to_v4(conn)?;
     }
 
     Ok(())
