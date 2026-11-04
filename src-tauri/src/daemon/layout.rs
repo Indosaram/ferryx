@@ -315,8 +315,11 @@ impl Layout {
             MoveTabToPaneSplit { source_tab_id, target_tab_id, target_node_id, dir, first } => {
                 if source_tab_id == target_tab_id { return Err("Cannot move tab into itself".into()); }
                 let source = self.close(&source_tab_id)?;
-                self.tab(&target_tab_id)?.pane_tree.split(target_node_id, source.pane_tree, dir, first)?;
-                self.active_tab_id = Some(target_tab_id);
+                let target = self.tab(&target_tab_id)?;
+                target.pane_tree.split(target_node_id, source.pane_tree, dir, first)?;
+                target.active_node_id = source.active_node_id;
+                target.expanded_node_id = None;
+                self.apply(Intent::ActivateTab { tab_id: target_tab_id })?;
             },
             DetachPaneToTab { source_tab_id, node_id, tab_id, label, target_group_id } => {
                 let insertion = match self.tab_group_layout.group_mut(&target_group_id) {
@@ -501,10 +504,22 @@ mod tests {
             .current_dir(root).output().expect("Bun is required to generate UI reducer fixtures");
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         let cases: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+        for required in ["UPDATE_BROWSER_TAB", "MOVE_TAB_TO_PANE_SPLIT"] {
+            assert!(cases.iter().any(|case| case["intent"]["type"] == required), "Missing golden: {required}");
+        }
         for case in cases {
             let dir = tempfile::tempdir().unwrap();
             std::fs::write(dir.path().join("session_state.json"), serde_json::to_vec(&case["session"]).unwrap()).unwrap();
             let mut store = Store::new(dir.path().into());
+            let before = store.get("main").unwrap().layout;
+            fn collect_groups(tree: &TabGroupLayout, ids: &mut Vec<String>) {
+                match tree {
+                    TabGroupLayout::Group { group_id, .. } => ids.push(group_id.clone()),
+                    TabGroupLayout::Split { a, b, .. } => { collect_groups(a, ids); collect_groups(b, ids); }
+                }
+            }
+            let mut group_ids = Vec::new();
+            collect_groups(&before.tab_group_layout, &mut group_ids);
             let intent: Intent = serde_json::from_value(case["intent"].clone()).unwrap();
             let view = store.apply("main", 0, intent).unwrap();
             fn project(node: &Node) -> serde_json::Value {
@@ -513,10 +528,36 @@ mod tests {
                     Node::Split { dir, ratio, a, b } => serde_json::json!({"type":"split","dir":dir,"ratio":ratio,"a":project(a),"b":project(b)}),
                 }
             }
-            let actual: Vec<_> = view.layout.tabs.iter().map(|tab| serde_json::json!({
+            fn location(node: &Node, id: u64, path: String) -> Option<String> {
+                match node {
+                    Node::Leaf { node_id, .. } => (*node_id == id).then_some(path),
+                    Node::Split { a, b, .. } => location(a, id, format!("{path}a")).or_else(|| location(b, id, format!("{path}b"))),
+                }
+            }
+            fn canonical_group(id: &str, ids: &mut Vec<String>) -> String {
+                if !ids.iter().any(|existing| existing == id) { ids.push(id.into()); }
+                format!("g{}", ids.iter().position(|existing| existing == id).unwrap())
+            }
+            fn groups(tree: &TabGroupLayout, ids: &mut Vec<String>) -> serde_json::Value {
+                match tree {
+                    TabGroupLayout::Group { group_id, tab_ids, active_tab_id } => serde_json::json!({
+                        "type":"group","groupId":canonical_group(group_id, ids),"tabIds":tab_ids,"activeTabId":active_tab_id,
+                    }),
+                    TabGroupLayout::Split { dir, ratio, a, b } => {
+                        let first = groups(a, ids); let second = groups(b, ids);
+                        serde_json::json!({"type":"split","dir":dir,"ratio":ratio,"a":first,"b":second})
+                    },
+                }
+            }
+            let tabs: Vec<_> = view.layout.tabs.iter().map(|tab| serde_json::json!({
                 "tabId":tab.tab_id,"label":tab.label,"pinned":tab.pinned,"paneTree":project(&tab.pane_tree),
+                "activePane":location(&tab.pane_tree, tab.active_node_id, String::new()),
+                "expandedPane":tab.expanded_node_id.and_then(|id| location(&tab.pane_tree, id, String::new())),
             })).collect();
-            assert_eq!(serde_json::json!(actual), case["expected"], "intent: {}", case["intent"]);
+            let group_tree = groups(&view.layout.tab_group_layout, &mut group_ids);
+            let actual = serde_json::json!({"tabs":tabs,"activeTabId":view.layout.active_tab_id,
+                "focusedGroupId":canonical_group(&view.layout.focused_group_id, &mut group_ids),"tabGroupLayout":group_tree});
+            assert_eq!(actual, case["expected"], "intent: {}", case["intent"]);
         }
     }
     fn add(id: &str) -> Intent {
