@@ -1066,6 +1066,7 @@ async fn a_failed_transfer_leaves_every_predecessor_session_readable_and_writabl
     let transfer = client
         .send_request(&DaemonRequest::TransferSessions {
             handover_socket_path: missing.to_string_lossy().into_owned(),
+            session_cont: false,
         })
         .await
         .expect("TransferSessions answered");
