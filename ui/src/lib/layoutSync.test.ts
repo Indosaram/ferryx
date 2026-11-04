@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { createLayoutState, layoutReducer } from "../state/layout";
 import type { WorkspaceState } from "../state/workspaceStore";
 import { hydrateLayout, intentForAction, LayoutSync, type DaemonLayout, type LayoutReply, type LayoutTransport } from "./layoutSync";
+import { closeTerminal } from "./tauri";
+
+vi.mock("./tauri", () => ({ closeTerminal: vi.fn() }));
 
 function daemon(revision = 1): DaemonLayout {
   return { revision, activeTabId: "tab", focusedGroupId: "main",
@@ -21,7 +24,7 @@ function ready(layout: DaemonLayout): LayoutReply {
 
 describe("daemon layout revisions", () => {
   it("applies optimistically then replaces a conflict without closing a PTY", async () => {
-    const closeIpc = vi.fn();
+    vi.mocked(closeTerminal).mockClear();
     const io: LayoutTransport = { get: vi.fn(async () => ready(daemon())),
       apply: vi.fn(async () => ({ type: "conflict", code: "LAYOUT_CONFLICT", revision: 8, layout: daemon(8) })) };
     const sync = new LayoutSync(io);
@@ -37,19 +40,17 @@ describe("daemon layout revisions", () => {
     expect(io.apply).toHaveBeenCalledWith(1, action);
     expect(after.layout.tabs[0].label).toBe("daemon");
     expect(after.sessions).toBe(before.sessions);
-    expect(closeIpc).not.toHaveBeenCalled();
+    expect(closeTerminal).not.toHaveBeenCalled();
     expect(sync.revision).toBe(8);
   });
 
   it("discards queued stale closes on conflict instead of replaying them", async () => {
     let respond!: (reply: LayoutReply) => void;
-    const applied = new Promise<void>((resolve) => {
-      const io: LayoutTransport = { get: async () => ready(daemon()),
-        apply: vi.fn(() => { resolve(); return new Promise<LayoutReply>((done) => { respond = done; }); }) };
-      fixture = { sync: new LayoutSync(io), io };
-    });
-    // The fixture is assigned synchronously by the Promise executor.
-    const { sync, io } = fixture!;
+    let started!: () => void;
+    const applied = new Promise<void>((resolve) => { started = resolve; });
+    const io: LayoutTransport = { get: async () => ready(daemon()),
+      apply: vi.fn(() => { started(); return new Promise<LayoutReply>((done) => { respond = done; }); }) };
+    const sync = new LayoutSync(io);
     await sync.refresh();
     const first = sync.send(() => ({ type: "RENAME_TAB", tabId: "tab", label: "a" }), () => {});
     const staleClose = sync.send(() => ({ type: "CLOSE_TAB", tabId: "tab" }), () => {});
@@ -78,4 +79,4 @@ describe("daemon layout revisions", () => {
   });
 });
 
-let fixture: { sync: LayoutSync; io: LayoutTransport } | undefined;
+
