@@ -527,6 +527,8 @@ pub struct HandoverTransaction {
     /// JSON layout snapshot, encoded as bytes so transaction equality stays exact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layouts: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_approvals: Option<Vec<u8>>,
 }
 
 /// The predecessor's held supervisor lease at handover commit: the machine identity and fence
@@ -580,6 +582,7 @@ impl HandoverTransaction {
             pane_grants: None,
             size_ownership: None,
             layouts: None,
+            plugin_approvals: None,
         }
     }
 
