@@ -218,6 +218,25 @@ mod tests {
     }
 
     #[test]
+    fn output_hub_checks_local_ownership_before_clipboard_delivery() {
+        use std::sync::Arc;
+        let hub = crate::terminal::TerminalOutputHub::default();
+        let effects = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let sink = Arc::clone(&effects);
+        hub.set_osc_effect_sink(Arc::new(move |id, effect| sink.lock().push((id.to_string(), effect))));
+        hub.set_osc_local_session(Arc::new(|id| id == "local"));
+        hub.set_osc52_write(true);
+        let _local = hub.register_session("local");
+        let _remote = hub.register_session("remote");
+        assert!(hub.enable_program_status("local"));
+        assert!(hub.enable_program_status("remote"));
+        hub.publish("remote", b"\x1b]52;c;aGk=\x07".to_vec());
+        assert!(effects.lock().is_empty());
+        hub.publish("local", b"\x1b]52;c;aGk=\x07".to_vec());
+        assert_eq!(*effects.lock(), vec![("local".into(), OscEffect::Clipboard { text: "hi".into() })]);
+    }
+
+    #[test]
     fn notification_rate_limit_and_owned_copy() {
         let mut terminal = NativeTerminal::new(80, 24).unwrap();
         terminal.enable_osc_effects().unwrap();
