@@ -6503,10 +6503,10 @@ impl DaemonServer {
         let layouts = Arc::clone(&self.layouts);
         let mutates = request.mutates();
         let result = crate::ipc::run_blocking(move || {
-            layouts.lock().panes(request, &live).map_err(crate::ipc::IpcError::internal)
+            Ok(layouts.lock().panes(request, &live))
         }).await;
         match result {
-            Ok(detached) => {
+            Ok(Ok(detached)) => {
                 if mutates {
                     for (window, layout) in &self.layouts.lock().layouts {
                         let _ = self.remote_event_tx.send(DaemonRemoteEvent {
@@ -6516,7 +6516,8 @@ impl DaemonServer {
                 }
                 DaemonResponse::PanesOk { detached }
             },
-            Err(error) if error.to_string().contains("SESSION_NOT_FOUND") => daemon_session_not_found("unknown", "panes"),
+            Ok(Err(code)) if code == "SESSION_NOT_FOUND" => daemon_session_not_found("unknown", "panes"),
+            Ok(Err(error)) => daemon_error(error),
             Err(error) => daemon_error(error.to_string()),
         }
     }
@@ -7671,6 +7672,7 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::LayoutApply { window, base_revision, intent }) => {
                     let layouts = Arc::clone(&self.layouts);
+                    let live = self.session_router.list_sessions().await.into_iter().collect();
                     let changed_window = window.clone();
                     fn destination(intent: &super::layout::Intent) -> Option<String> {
                         match intent {
@@ -7680,7 +7682,26 @@ impl DaemonServer {
                         }
                     }
                     let target_window = destination(&intent);
-                    let result = crate::ipc::run_blocking(move || Ok(layouts.lock().apply(&window, base_revision, intent))).await;
+                    let result = crate::ipc::run_blocking(move || {
+                        fn session(intent: &super::layout::Intent) -> Option<(&str, bool)> {
+                            match intent {
+                                super::layout::Intent::Scoped { intent, .. } => session(intent),
+                                super::layout::Intent::AttachDetached { backend_session_id, .. } => Some((backend_session_id, true)),
+                                super::layout::Intent::ReplaceSession { backend_session_id, .. } => Some((backend_session_id, false)),
+                                _ => None,
+                            }
+                        }
+                        let mut store = layouts.lock();
+                        if let Some((session, attach)) = session(&intent) {
+                            if !std::collections::BTreeSet::<String>::contains(&live, session) {
+                                return Ok(Err(super::layout::ApplyError::Invalid("SESSION_NOT_FOUND".into())));
+                            }
+                            if attach && !store.detached(&live).map_err(crate::ipc::IpcError::internal)?.contains(session) {
+                                return Ok(Err(super::layout::ApplyError::Invalid("SESSION_ALREADY_ATTACHED".into())));
+                            }
+                        }
+                        Ok(store.apply(&window, base_revision, intent))
+                    }).await;
                     match result {
                         Ok(Ok(view)) => {
                             if let Some(window) = target_window {
@@ -7700,6 +7721,7 @@ impl DaemonServer {
                         Ok(Err(super::layout::ApplyError::Conflict(layout))) => DaemonResponse::LayoutConflict {
                             code: "LAYOUT_CONFLICT".into(), revision: layout.revision, layout,
                         },
+                        Ok(Err(super::layout::ApplyError::Invalid(error))) if error == "SESSION_NOT_FOUND" => daemon_session_not_found("unknown", "layout_attach"),
                         Ok(Err(super::layout::ApplyError::Invalid(error))) => daemon_error(error),
                         Err(error) => daemon_error(error.to_string()),
                     }
