@@ -28,6 +28,7 @@ mod lifecycle;
 mod mouse;
 mod mouse_encoder;
 mod paste;
+pub mod osc_effects;
 #[cfg(feature = "native-terminal")]
 pub mod platform;
 mod placeholders;

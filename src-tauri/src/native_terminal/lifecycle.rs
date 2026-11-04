@@ -57,6 +57,8 @@ pub fn create_native_terminal(
     }
 
     let context = Box::new(TerminalContext {
+        osc_effects: parking_lot::Mutex::new(super::osc_effects::Effects::default()),
+        osc52_write: AtomicBool::new(false),
         bell_counter: AtomicU64::new(0),
         title_updated: AtomicBool::new(false),
         pty_writes_suppressed: AtomicBool::new(false),
@@ -186,6 +188,7 @@ pub fn create_native_terminal(
 pub fn teardown_native_terminal(handle: NonNull<GhosttyTerminalImpl>) {
     // Program status callbacks dereference userdata, so they go before it is cleared.
     super::program_status::unregister(handle);
+    super::osc_effects::unregister(handle);
     // SAFETY: Category: Foreign Resource Deallocation & Callback Lifetime.
     // Invariant: Unset foreign callbacks so terminal never dereferences context after it is deallocated.
     unsafe {

@@ -931,6 +931,9 @@ pub enum DaemonRequest {
     ClearSession,
     RemoteGetStatus,
     GetCapabilities,
+    /// Owner-only local preference, persisted independently of process lifetime.
+    #[serde(rename_all = "camelCase")]
+    SetTerminalOsc52Write { enabled: bool },
     /// Reads the daemon-held agent-state integration setting.
     GetAgentIntegration,
     /// Turns the agent-state integration on or off; panes spawned afterwards follow it.

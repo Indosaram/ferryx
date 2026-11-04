@@ -365,6 +365,7 @@ export type TerminalOverrides = {
   shell?: string | null;
   scrollback?: number | null;
   scrollbackCompression?: boolean | null;
+  osc52Write?: boolean;
 };
 
 export type TerminalOverridesRequest = TerminalOverrides;

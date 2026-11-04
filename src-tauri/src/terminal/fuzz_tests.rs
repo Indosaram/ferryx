@@ -104,6 +104,31 @@ fn stream() -> impl Strategy<Value = Vec<Vec<u8>>> {
     prop::collection::vec(chunk(), 1..40)
 }
 
+proptest! {
+    #![proptest_config(config())]
+    #[test]
+    fn osc_effects(chunks in stream()) {
+        let mut mirror = ScreenMirror::new(80, 24).unwrap();
+        prop_assert!(mirror.enable_program_status());
+        mirror.set_osc52_write(true);
+        for bytes in chunks {
+            mirror.feed(&bytes);
+            for effect in mirror.take_osc_effects() {
+                use crate::native_terminal::osc_effects::{sanitize, OscEffect};
+                match effect {
+                    OscEffect::Notify { title, body } => {
+                        prop_assert_eq!(sanitize(&title), title);
+                        prop_assert_eq!(sanitize(&body), body);
+                    },
+                    OscEffect::Clipboard { text } => prop_assert_eq!(sanitize(&text), text),
+                }
+            }
+            mirror.feed_replay(&bytes);
+            prop_assert!(mirror.take_osc_effects().is_empty());
+        }
+    }
+}
+
 /// The single place the properties feed a mirror.
 fn feed_mirror(mirror: &mut ScreenMirror, bytes: &[u8]) {
     mirror.feed(bytes);

@@ -3516,6 +3516,7 @@ impl DaemonSessionService {
             ),
             None => (None, None, worktree_cwd),
         };
+        let cwd = self.terminal_service.output_hub().osc_cwd(session_id).or(cwd);
 
         DaemonResponse::DescribeSessionOk {
             daemon_epoch: None,

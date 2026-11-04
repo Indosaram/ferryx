@@ -101,6 +101,15 @@ describe("TerminalSection", () => {
     expect(screen.getByRole("switch", { name: /compress idle scrollback/i })).toHaveAttribute("aria-checked", "false");
   });
 
+  it("keeps OSC clipboard writes off until explicitly enabled", () => {
+    const onOsc52Write = vi.fn();
+    const { container } = render(<TerminalSection {...defaultProps} onOsc52Write={onOsc52Write} />);
+    const toggle = container.querySelector("#terminal-osc52-write")!;
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    fireEvent.click(toggle);
+    expect(onOsc52Write).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
   it("buffers font family changes and commits only on blur or Enter", () => {
     const onFontFamily = vi.fn();
     render(<TerminalSection {...defaultProps} onFontFamily={onFontFamily} />);
