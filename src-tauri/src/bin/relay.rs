@@ -420,6 +420,8 @@ async fn main() {
     };
     if let Some(mode) = tls {
         tracing::info!("ferryx-relay listening on {addr} (HTTPS)");
+        // HSTS only on the TLS listener: a plain-http relay must not pin browsers to https.
+        let router = ferryx_lib::remote::security_headers::with_hsts(router);
         if let Err(err) = relay_tls::serve(listener, mode, router).await {
             eprintln!("ferryx-relay: server error: {err}");
             std::process::exit(1);

@@ -4288,7 +4288,34 @@ fn apply_cors_headers(headers: &mut HeaderMap) {
     );
 }
 
+/// Whether the relay answers `path` cross-origin with `*`: the JSON APIs (relay, account,
+/// grant and the proxied `/host/<machine>/api/v1/*` routes) and the health probe. The SPA,
+/// its assets, installers and downloads stay same-origin.
+fn relay_cors_applies(path: &str) -> bool {
+    path == "/healthz"
+        || path.starts_with("/api/")
+        || path
+            .strip_prefix("/host/")
+            .and_then(|rest| rest.split_once('/'))
+            .is_some_and(|(_, rest)| rest.starts_with("api/v1/"))
+}
+
+fn is_html_response(response: &Response) -> bool {
+    response
+        .headers()
+        .get_all(header::CONTENT_TYPE)
+        .iter()
+        .any(|value| {
+            value
+                .to_str()
+                .is_ok_and(|value| value.trim().to_ascii_lowercase().starts_with("text/html"))
+        })
+}
+
 async fn relay_cors_middleware(request: Request<Body>, next: axum::middleware::Next) -> Response {
+    if !relay_cors_applies(request.uri().path()) {
+        return next.run(request).await;
+    }
     if request.method() == Method::OPTIONS {
         let mut response = StatusCode::OK.into_response();
         apply_cors_headers(response.headers_mut());
@@ -4296,8 +4323,49 @@ async fn relay_cors_middleware(request: Request<Body>, next: axum::middleware::N
     }
 
     let mut response = next.run(request).await;
-    apply_cors_headers(response.headers_mut());
+    // Never on a document, even one that ends up under an API prefix.
+    if !is_html_response(&response) {
+        apply_cors_headers(response.headers_mut());
+    }
     response
+}
+
+/// Security-header and WebSocket-origin policy of the relay web surface. The relay origin is
+/// fixed when the router is built: the account service's configured relay origin
+/// (`FERRYX_ACCOUNT_RELAY_ORIGIN`) and public origin, or the default relay without one.
+struct RelaySurfacePolicy {
+    trusted_origins: Vec<String>,
+}
+
+impl RelaySurfacePolicy {
+    fn new(account: Option<&crate::account::service::AccountState>) -> Self {
+        let configured: Vec<&str> = match account {
+            Some(account) => vec![account.relay_origin.as_str(), account.origin.as_str()],
+            None => vec![crate::remote::state::DEFAULT_RELAY_URL],
+        };
+        let mut trusted_origins = Vec::new();
+        for origin in configured
+            .into_iter()
+            .filter_map(crate::remote::security_headers::web_origin)
+        {
+            if !trusted_origins.contains(&origin) {
+                trusted_origins.push(origin);
+            }
+        }
+        Self { trusted_origins }
+    }
+}
+
+impl crate::remote::security_headers::WebSurfacePolicy for RelaySurfacePolicy {
+    fn connect_origins(&self) -> Vec<String> {
+        self.trusted_origins.clone()
+    }
+
+    fn websocket_origin_allowed(&self, origin: &str, headers: &HeaderMap) -> bool {
+        crate::remote::security_headers::is_same_host_origin(origin, headers)
+            || crate::remote::security_headers::is_desktop_app_origin(origin)
+            || self.trusted_origins.iter().any(|allowed| allowed == origin)
+    }
 }
 
 /// Builds the Axum router exposing the three tunnel endpoints.
@@ -4322,6 +4390,7 @@ pub fn relay_router_with_account(
         account_public_key,
         delivery: state.clone(),
     };
+    let surface_policy = Arc::new(RelaySurfacePolicy::new(account_state.as_deref()));
     let mut router = Router::new()
         .route("/healthz", get(healthz_handler))
         .route("/api/v1/pair/exchange", post(pair_exchange_handler))
@@ -4381,8 +4450,12 @@ pub fn relay_router_with_account(
     // the moment it is called, so layering before the account and grant routers are
     // merged leaves their preflights unanswered and their responses without CORS
     // headers. That blocks every account call from the desktop app (origin
-    // `tauri://localhost`) and from the remote client the app serves.
-    router.layer(axum::middleware::from_fn(relay_cors_middleware))
+    // `tauri://localhost`) and from the remote client the app serves. The security layer
+    // goes on last so its WebSocket origin check runs before CORS and before routing.
+    crate::remote::security_headers::harden(
+        router.layer(axum::middleware::from_fn(relay_cors_middleware)),
+        surface_policy,
+    )
 }
 
 /// Back-compat wrapper: relay-only router with no embedded account service.
@@ -4812,6 +4885,9 @@ struct AuthQuery {
     token: Option<String>,
 }
 
+/// WebSocket close reason (with code 1008) when a first-frame authentication fails.
+pub const AUTH_FAILED: &str = "AUTH_FAILED";
+
 /// `GET /tunnel/control` - the desktop daemon's long-lived control channel.
 ///
 /// Without a legacy bearer token, the upgraded socket must prove ownership
@@ -4981,6 +5057,23 @@ async fn authenticate_control_socket(
                 let close_frame = axum::extract::ws::CloseFrame {
                     code: axum::extract::ws::close_code::POLICY,
                     reason: "REMOTE_SUSPENDED".into(),
+                };
+                if !matches!(
+                    timeout(
+                        CONTROL_AUTH_TIMEOUT,
+                        socket.send(Message::Close(Some(close_frame)))
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ) {
+                    tracing::debug!("relay rejected control socket close failed or timed out");
+                }
+            } else if credential_failure {
+                // The daemon's own credential was refused: say so with a policy close the
+                // client can tell apart from a network drop.
+                let close_frame = axum::extract::ws::CloseFrame {
+                    code: axum::extract::ws::close_code::POLICY,
+                    reason: AUTH_FAILED.into(),
                 };
                 if !matches!(
                     timeout(
@@ -9908,16 +10001,242 @@ mod tests {
             authenticate(&base, &identity(1, "machine-a"), true, false).await;
         assert!(!response.success);
         assert!(response.error.is_some());
-        assert!(matches!(
-            timeout(Duration::from_secs(5), socket.next())
+        // A refused credential ends the socket with a policy close the daemon can tell
+        // apart from a network drop.
+        let close = loop {
+            match timeout(Duration::from_secs(5), socket.next())
                 .await
-                .unwrap(),
-            Some(Ok(TMessage::Close(_))) | None
-        ));
+                .expect("the refused control socket closes in time")
+            {
+                Some(Ok(TMessage::Close(frame))) => break frame,
+                Some(Ok(TMessage::Ping(_) | TMessage::Pong(_))) => continue,
+                other => panic!("expected a close frame, got {other:?}"),
+            }
+        };
+        let close = close.expect("the close frame carries a code");
+        assert_eq!(u16::from(close.code), 1008);
+        assert_eq!(close.reason.as_str(), AUTH_FAILED);
         // A failed proof must not claim the ID.
         let (_, response) = authenticate(&base, &identity(2, "machine-a"), false, false).await;
         assert!(response.success);
         server.abort();
+    }
+
+    /// A malformed first frame on `/tunnel/control` is an authentication failure too.
+    #[tokio::test]
+    async fn a_malformed_control_auth_frame_closes_with_policy_auth_failed() {
+        let (base, server) = spawn_test_relay().await;
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/control"))
+            .await
+            .unwrap();
+        let _challenge: ControlChallenge = receive_json(&mut socket).await;
+        socket
+            .send(TMessage::Text("{not json".to_string().into()))
+            .await
+            .unwrap();
+        let response: ControlAuthResponse = receive_json(&mut socket).await;
+        assert!(!response.success);
+        let close = loop {
+            match timeout(Duration::from_secs(5), socket.next())
+                .await
+                .expect("the refused control socket closes in time")
+            {
+                Some(Ok(TMessage::Close(frame))) => break frame,
+                Some(Ok(TMessage::Ping(_) | TMessage::Pong(_))) => continue,
+                other => panic!("expected a close frame, got {other:?}"),
+            }
+        }
+        .expect("the close frame carries a code");
+        assert_eq!(u16::from(close.code), 1008);
+        assert_eq!(close.reason.as_str(), AUTH_FAILED);
+        server.abort();
+    }
+
+    /// Sends a raw WebSocket upgrade and returns the response status code.
+    async fn relay_upgrade_status(base: &str, path: &str, origin: Option<&str>) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let authority = base.trim_start_matches("ws://");
+        let mut stream = tokio::net::TcpStream::connect(authority).await.unwrap();
+        let origin = origin
+            .map(|origin| format!("Origin: {origin}\r\n"))
+            .unwrap_or_default();
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: {authority}\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             Sec-WebSocket-Version: 13\r\n{origin}\r\n"
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut buf = [0u8; 512];
+        let n = timeout(Duration::from_secs(5), stream.read(&mut buf))
+            .await
+            .expect("the relay answers the upgrade in time")
+            .unwrap();
+        String::from_utf8_lossy(&buf[..n])
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .unwrap_or(0)
+    }
+
+    fn relay_account(dir: &std::path::Path, relay_origin: &str) -> Arc<crate::account::service::AccountState> {
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(dir.join("mail")));
+        Arc::new(
+            crate::account::service::AccountState::new(
+                dir.join("account"),
+                "https://account.relay.test",
+                mailer,
+            )
+            .with_relay_origin(relay_origin),
+        )
+    }
+
+    #[tokio::test]
+    async fn relay_websocket_upgrades_check_origin_before_routing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let account = relay_account(tmp.path(), "wss://relay.selfhost.test");
+        let (base, server) =
+            spawn_test_relay_with_account_state(test_state(vec![]), Some(account)).await;
+        let own = base.replace("ws://", "http://");
+
+        // A foreign Origin is refused with 403 on every socket route, including a /host/
+        // route for a machine the relay does not know and a path no route matches.
+        for path in [
+            "/host/x/api/v1/events?ticket=bad",
+            "/host/unknown-machine/api/v1/terminal/t1?ticket=bad",
+            "/host/unknown-machine/api/v1/workspace/dag",
+            "/host/unknown-machine/api/v1/browser/b1",
+            "/host/unknown-machine/no/such/route",
+            "/tunnel/control",
+            "/tunnel/client/s1",
+            "/no/such/route",
+        ] {
+            for origin in ["https://evil.example", "null", "https://relay.selfhost.test.evil.example"] {
+                assert_eq!(
+                    relay_upgrade_status(&base, path, Some(origin)).await,
+                    403,
+                    "{origin} upgrading {path}"
+                );
+            }
+        }
+
+        // Native clients (no Origin), the relay's own origin, the configured relay and account
+        // origins and the desktop shell pass the guard and reach the route's own checks.
+        for origin in [
+            None,
+            Some(own.as_str()),
+            Some("https://relay.selfhost.test"),
+            Some("https://account.relay.test"),
+            Some("tauri://localhost"),
+            Some("http://tauri.localhost"),
+            Some("https://tauri.localhost"),
+        ] {
+            let status = relay_upgrade_status(&base, "/host/x/api/v1/events?ticket=bad", origin).await;
+            assert_ne!(status, 403, "{origin:?} must pass the origin guard");
+            assert_ne!(status, 0, "{origin:?} must get an HTTP answer");
+        }
+        // The daemon's control tunnel still upgrades.
+        assert_eq!(relay_upgrade_status(&base, "/tunnel/control", None).await, 101);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn relay_spa_html_gets_security_headers_and_no_cors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let account = relay_account(tmp.path(), "https://relay.selfhost.test");
+        let (base, server) =
+            spawn_test_relay_with_account_state(test_state(vec![]), Some(account)).await;
+        let http_base = base.replace("ws://", "http://");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let header = |response: &reqwest::Response, name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+
+        for path in ["/", "/index.html", "/some/client/route"] {
+            let response = client
+                .get(format!("{http_base}{path}"))
+                .header("Origin", "https://evil.example")
+                .send()
+                .await
+                .unwrap();
+            let content_type = header(&response, "content-type").unwrap_or_default();
+            assert!(content_type.starts_with("text/html"), "{path}: {content_type}");
+            let csp = header(&response, "content-security-policy").expect("csp on the SPA");
+            assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
+            assert!(csp.contains("script-src 'self';"), "{csp}");
+            assert!(csp.contains("base-uri 'none'"), "{csp}");
+            assert!(csp.contains("form-action 'self'"), "{csp}");
+            assert!(
+                csp.contains("https://relay.selfhost.test wss://relay.selfhost.test"),
+                "the configured relay origin is connectable: {csp}"
+            );
+            assert!(!csp.split([' ', ';']).any(|token| token == "wss:" || token == "ws:"));
+            assert_eq!(header(&response, "x-frame-options").as_deref(), Some("DENY"));
+            assert_eq!(header(&response, "referrer-policy").as_deref(), Some("no-referrer"));
+            assert_eq!(header(&response, "x-content-type-options").as_deref(), Some("nosniff"));
+            // Plain-http relay: no HSTS.
+            assert_eq!(header(&response, "strict-transport-security"), None);
+            assert_eq!(
+                header(&response, "access-control-allow-origin"),
+                None,
+                "{path}: CORS must never be sent on SPA HTML"
+            );
+        }
+        // A preflight against the SPA is not answered with CORS either.
+        let preflight = client
+            .request(reqwest::Method::OPTIONS, format!("{http_base}/"))
+            .header("Origin", "https://evil.example")
+            .header("Access-Control-Request-Method", "GET")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(header(&preflight, "access-control-allow-origin"), None);
+
+        // JSON keeps `*` and gets nosniff + Referrer-Policy, but no document headers.
+        for path in ["/healthz", "/api/v1/pair/exchange"] {
+            let response = client
+                .get(format!("{http_base}{path}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(header(&response, "access-control-allow-origin").as_deref(), Some("*"), "{path}");
+            assert_eq!(header(&response, "x-content-type-options").as_deref(), Some("nosniff"), "{path}");
+            assert_eq!(header(&response, "referrer-policy").as_deref(), Some("no-referrer"), "{path}");
+            assert_eq!(header(&response, "x-frame-options"), None, "{path}");
+            assert_eq!(header(&response, "content-security-policy"), None, "{path}");
+        }
+        server.abort();
+    }
+
+    #[test]
+    fn relay_cors_scope_covers_json_apis_only() {
+        for path in [
+            "/healthz",
+            "/api/v1/pair/exchange",
+            "/api/account/v1/machines",
+            "/host/m1/api/v1/workspace/state",
+        ] {
+            assert!(relay_cors_applies(path), "{path}");
+        }
+        for path in [
+            "/",
+            "/index.html",
+            "/assets/index.js",
+            "/install.sh",
+            "/download/ferryx-cli",
+            "/host/m1",
+            "/host/m1/index.html",
+            "/hostile/api/v1/x",
+        ] {
+            assert!(!relay_cors_applies(path), "{path}");
+        }
     }
 
     #[tokio::test]

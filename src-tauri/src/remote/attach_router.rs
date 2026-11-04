@@ -13,9 +13,8 @@ use axum::{
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use futures_util::{Sink as _, Stream as _};
 
-use crate::remote::session_transport::{
-    establish_session, proxy_secure_to_gateway, SessionTransport,
-};
+use crate::remote::attach_crypto::{AttachError, AttachResponder, SecureStream};
+use crate::remote::session_transport::proxy_secure_to_gateway;
 
 pub type AttachAuthorizer = Arc<dyn Fn(&[u8]) -> bool + Send + Sync>;
 
@@ -54,22 +53,46 @@ async fn serve_direct_attach(
     let Ok(gateway) = tokio::net::TcpStream::connect(&deps.gateway_addr).await else {
         return;
     };
-    let stream = AxumWebSocketStream::new(socket);
-    let opened = establish_session(
-        stream,
-        true,
-        Some(&attach),
-        &machine_id,
-        "direct",
-        &enrollment_epoch,
-        {
+    let mut stream = AxumWebSocketStream::new(socket);
+    let accepted = match AttachResponder::new(&attach, &machine_id, "direct", &enrollment_epoch) {
+        Ok(responder) => {
             let authorize = Arc::clone(&deps.authorize);
-            move |key| authorize(key)
-        },
+            // The handshake borrows the socket so a refusal can still close it below.
+            responder
+                .accept(&mut stream, move |key| authorize(key))
+                .await
+                .map(|(secure, _device_key)| secure.transport)
+        }
+        Err(error) => Err(error),
+    };
+    match accepted {
+        Ok(transport) => {
+            let secure = SecureStream {
+                inner: stream,
+                transport,
+            };
+            let _ = proxy_secure_to_gateway(secure, gateway).await;
+        }
+        // The peer left mid-handshake; there is nobody to tell.
+        Err(AttachError::StreamClosed) => {}
+        Err(_) => close_auth_failed(stream.socket).await,
+    }
+}
+
+/// Ends a socket whose first-frame authentication failed with 1008 `AUTH_FAILED`, so the
+/// client can tell a refused credential from a network drop.
+async fn close_auth_failed(mut socket: axum::extract::ws::WebSocket) {
+    let frame = axum::extract::ws::CloseFrame {
+        code: axum::extract::ws::close_code::POLICY,
+        reason: crate::remote::relay_server::AUTH_FAILED.into(),
+    };
+    let sent = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        socket.send(axum::extract::ws::Message::Close(Some(frame))),
     )
     .await;
-    if let Ok(SessionTransport::Attached(secure)) = opened {
-        let _ = proxy_secure_to_gateway(secure, gateway).await;
+    if !matches!(sent, Ok(Ok(()))) {
+        tracing::debug!("direct attach auth-failure close failed or timed out");
     }
 }
 
@@ -183,8 +206,14 @@ mod tests {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use tokio::io::AsyncReadExt;
 
+    /// Both tests load or create the canonical machine and attach identities, and the
+    /// machine identity has no file lock: two tests creating it at once on a fresh machine get
+    /// different machine ids, so one handshake's prologue no longer matches.
+    static CANONICAL_IDENTITY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn a_lan_attach_reaches_the_local_gateway_decrypted() {
+        let _identity = CANONICAL_IDENTITY.lock().await;
         let client_dir = tempfile::tempdir().unwrap();
         let client_identity =
             load_or_generate_client_attach_identity(client_dir.path()).expect("client identity");
@@ -243,5 +272,88 @@ mod tests {
             .await
             .expect("gateway received bytes in time");
         assert_eq!(seen.expect("gateway read"), b"sentinel".to_vec());
+    }
+
+    /// Reads frames until the close frame and returns its code and reason.
+    async fn close_of<S>(ws: &mut tokio_tungstenite::WebSocketStream<S>) -> (u16, String)
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        use futures_util::StreamExt as _;
+        use tokio_tungstenite::tungstenite::Message;
+        loop {
+            let message = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+                .await
+                .expect("the attach socket closes in time")
+                .expect("a close frame, not a bare end")
+                .expect("no transport error");
+            match message {
+                Message::Close(Some(frame)) => {
+                    return (u16::from(frame.code), frame.reason.to_string())
+                }
+                Message::Close(None) => panic!("close without a code"),
+                _ => continue,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_first_attach_frame_closes_with_policy_auth_failed() {
+        use futures_util::SinkExt as _;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let _identity = CANONICAL_IDENTITY.lock().await;
+        let attach = crate::remote::attach_identity::load_or_generate_canonical_attach_identity()
+            .expect("machine attach identity");
+        let machine_public = STANDARD.decode(&attach.public_key).unwrap();
+        let machine_id = crate::remote::auth::canonical_identity_dir()
+            .ok()
+            .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir).ok())
+            .map(|identity| identity.machine_id)
+            .expect("machine identity");
+        let enrollment_epoch = crate::account::enroll_client::load_enrollment_record()
+            .map(|record| record.enrollment_epoch)
+            .unwrap_or_default();
+
+        // The gateway is never reached: authentication fails first.
+        let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let deps = Arc::new(AttachRouterDeps {
+            gateway_addr: gateway_listener.local_addr().unwrap().to_string(),
+            authorize: Arc::new(|_| false),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, attach_router(deps)).await.unwrap();
+        });
+        let url = format!("ws://{addr}/api/v1/attach");
+
+        // A well-formed Noise IK first message from a key no device of this machine owns.
+        let params: snow::params::NoiseParams =
+            "Noise_IK_25519_ChaChaPoly_BLAKE2s".parse().unwrap();
+        let prologue = format!(
+            "{}:{machine_id}:direct:{enrollment_epoch}",
+            crate::remote::attach_crypto::ATTACH_PROLOGUE_PREFIX
+        );
+        let mut initiator = snow::Builder::new(params)
+            .local_private_key(&[7u8; 32])
+            .remote_public_key(&machine_public)
+            .prologue(prologue.as_bytes())
+            .build_initiator()
+            .unwrap();
+        let mut first = vec![0u8; 1024];
+        let written = initiator.write_message(&[], &mut first).unwrap();
+        let mut framed = (written as u32).to_be_bytes().to_vec();
+        framed.extend_from_slice(&first[..written]);
+
+        // A garbage first frame is refused the same way.
+        let mut garbage = 8u32.to_be_bytes().to_vec();
+        garbage.extend_from_slice(b"not-ikv1");
+
+        for first_frame in [framed, garbage] {
+            let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            ws.send(Message::Binary(first_frame.into())).await.unwrap();
+            assert_eq!(close_of(&mut ws).await, (1008, "AUTH_FAILED".to_string()));
+        }
     }
 }

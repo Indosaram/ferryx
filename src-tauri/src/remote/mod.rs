@@ -30,6 +30,7 @@ pub mod security_settings;
 pub mod session_transport;
 pub mod relay_server;
 pub mod relay_tls;
+pub mod security_headers;
 #[cfg(feature = "remote-desktop")]
 pub mod remote_desktop;
 pub(crate) mod repo_discovery;

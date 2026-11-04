@@ -3875,8 +3875,18 @@ pub(crate) async fn serve_static_or_index(uri: axum::http::Uri) -> Response {
     serve_static_from(dist_dir, uri).await
 }
 
-/// Serves `uri` from the asset root `dist_dir`, falling back to its index.html.
+/// Serves `uri` from the asset root `dist_dir`, falling back to its index.html. Every
+/// response is marked as the web client so the security layer sends the SPA's full
+/// Content-Security-Policy (see `remote::security_headers`).
 pub(crate) async fn serve_static_from(dist_dir: PathBuf, uri: axum::http::Uri) -> Response {
+    let mut response = serve_static_file(dist_dir, uri).await;
+    response
+        .extensions_mut()
+        .insert(crate::remote::security_headers::WebClientDocument);
+    response
+}
+
+async fn serve_static_file(dist_dir: PathBuf, uri: axum::http::Uri) -> Response {
     let Some(path) = static_relative_path(uri.path()) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
@@ -7864,31 +7874,49 @@ async fn reference_chat_delete_file(
         .into_response()
 }
 
-/// The web origin (`scheme://host[:port]`) of a URL; `ws`/`wss` map to `http`/`https`.
-fn web_origin(url: &str) -> Option<String> {
-    let mut parsed = url::Url::parse(url.trim()).ok()?;
-    let scheme = match parsed.scheme() {
-        "ws" => "http",
-        "wss" => "https",
-        other => other,
+use crate::remote::security_headers::web_origin;
+
+/// Cross-origin peers this gateway trusts: the default relay, the configured relay override
+/// and the origins of this machine's saved paired hosts.
+fn gateway_trusted_origins(state: &RemoteGatewayState) -> Vec<String> {
+    let relay_override = state.config.read().relay_url.clone();
+    let saved = state.cors_saved_host_origins.read().clone();
+    std::iter::once(crate::remote::state::DEFAULT_RELAY_URL)
+        .chain(relay_override.as_deref())
+        .chain(saved.iter().map(String::as_str))
+        .filter_map(web_origin)
+        .collect()
+}
+
+/// The gateway's origin allowlist, shared by CORS and the WebSocket upgrade guard: the
+/// gateway's own origin (`Host`), the desktop shell, and [`gateway_trusted_origins`].
+fn gateway_origin_allowed(state: &RemoteGatewayState, origin: &str, headers: &HeaderMap) -> bool {
+    crate::remote::security_headers::is_same_host_origin(origin, headers)
+        || crate::remote::security_headers::is_desktop_app_origin(origin)
+        || gateway_trusted_origins(state)
+            .iter()
+            .any(|allowed| allowed == origin)
+}
+
+/// Security-header and WebSocket-origin policy of the gateway web surface.
+struct GatewaySurfacePolicy(Arc<RemoteGatewayState>);
+
+impl crate::remote::security_headers::WebSurfacePolicy for GatewaySurfacePolicy {
+    fn connect_origins(&self) -> Vec<String> {
+        gateway_trusted_origins(&self.0)
     }
-    .to_string();
-    if scheme != parsed.scheme() {
-        parsed.set_scheme(&scheme).ok()?;
+
+    fn websocket_origin_allowed(&self, origin: &str, headers: &HeaderMap) -> bool {
+        gateway_origin_allowed(&self.0, origin, headers)
     }
-    let origin = parsed.origin();
-    origin
-        .is_tuple()
-        .then(|| origin.ascii_serialization())
 }
 
 /// Whether a cross-origin browser call may read this gateway's response.
 ///
 /// Only `/api/v1/*` (minus the health probe and the push registration routes) answers
 /// cross-origin; health, push registration and static assets stay same-origin, as the
-/// `/api/push/*` aliases always were. Admitted origins: the gateway's own origin, the default
-/// relay and the configured relay override, and the origins of this machine's saved paired
-/// hosts. Never with credentials.
+/// `/api/push/*` aliases always were. Admitted origins: [`gateway_origin_allowed`]. Never
+/// with credentials.
 pub(crate) fn cors_origin_allowed(
     state: &RemoteGatewayState,
     origin: &axum::http::HeaderValue,
@@ -7910,27 +7938,7 @@ pub(crate) fn cors_origin_allowed(
     let Ok(origin) = origin.to_str() else {
         return false;
     };
-    if let Some(host) = parts
-        .headers
-        .get(header::HOST)
-        .and_then(|host| host.to_str().ok())
-    {
-        if origin == format!("http://{host}") || origin == format!("https://{host}") {
-            return true;
-        }
-    }
-    let relay_override = state.config.read().relay_url.clone();
-    let relay_allowed = std::iter::once(crate::remote::state::DEFAULT_RELAY_URL)
-        .chain(relay_override.as_deref())
-        .filter_map(web_origin)
-        .any(|allowed| allowed == origin);
-    relay_allowed
-        || state
-            .cors_saved_host_origins
-            .read()
-            .iter()
-            .filter_map(|saved| web_origin(saved))
-            .any(|allowed| allowed == origin)
+    gateway_origin_allowed(state, origin, &parts.headers)
 }
 
 pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
@@ -8230,7 +8238,8 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         router = router.merge(crate::remote::attach_router::attach_router(deps));
     }
 
-    router
+    // Last, so every merged sub-router (remote desktop, attach) is covered too.
+    crate::remote::security_headers::harden(router, Arc::new(GatewaySurfacePolicy(state)))
 }
 
 /// Response header carrying the replacement bearer token after a transparent rotation.
