@@ -1201,11 +1201,8 @@ impl TerminalOutputHub {
             .push_with_read_timestamp(chunk_bytes, metrics_read_unix_micros)?;
         let ingest = hub.screen.as_ref().map(|screen| {
             let mut screen = screen.lock();
-            // Remote SSH and paired IDs never receive clipboard permission, regardless
-            // of their host's setting. Notifications still flow from SSH mirrors.
-            let remote = super::paired_runtime::Runtime::owns(session_id)
-                || session_id.starts_with("remote-");
-            screen.set_osc52_write(!remote && self.osc52_write.load(std::sync::atomic::Ordering::Acquire));
+            // The daemon sink additionally checks real local PTY ownership, never an ID prefix.
+            screen.set_osc52_write(self.osc52_write.load(std::sync::atomic::Ordering::Acquire));
             screen.feed(&chunk.bytes);
             (screen.take_program_status(), screen.take_osc_effects())
         });
