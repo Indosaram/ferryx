@@ -1,6 +1,6 @@
 use super::store::Registry;
 use mlua::{Function, Lua, VmState};
-use std::{cell::{Cell, RefCell}, rc::Rc, time::{Duration, Instant}};
+use std::{cell::{Cell, RefCell}, rc::Rc, time::Duration};
 
 pub struct Timer {
     pub id: String,
@@ -21,11 +21,11 @@ impl Vm {
     pub fn new(
         identity: String,
         clock: Rc<dyn Fn() -> u64>,
-        log: impl Fn(String) -> Result<(), String> + 'static,
+        log: impl Fn(String, bool) -> Result<(), String> + 'static,
     ) -> mlua::Result<Self> {
         let lua = Lua::new();
         lua.set_memory_limit(64 * 1024 * 1024)?;
-        for name in ["io", "os", "package", "debug", "load", "loadfile", "loadstring", "dofile", "require"] {
+        for name in ["io", "os", "package", "debug", "load", "loadfile", "loadstring", "dofile", "require", "pcall", "xpcall"] {
             lua.globals().set(name, mlua::Nil)?;
         }
         let budget = Rc::new(RefCell::new(cpu_time::ThreadTime::now()));
@@ -51,12 +51,14 @@ impl Vm {
             timers.push(Timer { id: id.clone(), period, due: timer_clock().saturating_add(period), callback });
             Ok(id)
         })?)?;
+        let startup = Rc::new(Cell::new(true));
+        let in_startup = startup.clone();
         ferryx.set("log", lua.create_function(move |_, message: String| {
-            log(message).map_err(mlua::Error::runtime)
+            log(message, in_startup.get()).map_err(mlua::Error::runtime)
         })?)?;
         lua.globals().set("ferryx", ferryx)?;
         lua.sandbox(true)?;
-        Ok(Self { lua, timers, clock, startup: Rc::new(Cell::new(true)), budget })
+        Ok(Self { lua, timers, clock, startup, budget })
     }
 
     pub fn load(&self, source: &str) -> mlua::Result<()> {
@@ -96,10 +98,4 @@ impl Vm {
         Ok(())
     }
 
-    pub fn interrupted_within(source: &str, limit: Duration) -> bool {
-        let start = Instant::now();
-        let result = Self::new("test".into(), Rc::new(|| 0), |_| Ok(()))
-            .and_then(|vm| vm.load(source));
-        result.is_err() && start.elapsed() < limit
-    }
 }
