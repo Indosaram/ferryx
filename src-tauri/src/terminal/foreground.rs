@@ -1466,6 +1466,32 @@ mod tests {
         assert_eq!(command_basename(r#""C:\Program Files\timeout.exe" /t 30"#).as_deref(), Some("timeout.exe"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn script_name_does_not_leak_password_argument() {
+        let (dir, script) = crate::ipc::run_blocking(|| {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir()?;
+            let script = dir.path().join("long-runner");
+            std::fs::write(&script, "#!/bin/sh\nprintf 'NAME_READY>'\nread answer\n")?;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+            Ok((dir, script))
+        }).await.unwrap();
+        let manager = crate::terminal::PtyManager::new();
+        let mut command = portable_pty::CommandBuilder::new(script);
+        command.arg("--password=x");
+        let (id, mut output) = manager.spawn(command, 80, 24).unwrap();
+        output_until(&mut output, "NAME_READY>").await;
+        let session = manager.get_session(&id).unwrap();
+        let name = crate::ipc::run_blocking(move || {
+            Ok(capture_process_snapshot()?.foreground_command(&session))
+        }).await.unwrap();
+        manager.close_session(&id).await.unwrap();
+        assert_eq!(name.as_deref(), Some("long-runner"));
+        assert!(!serde_json::json!({"foregroundCommand": name}).to_string().contains("password"));
+        drop((output, dir));
+    }
+
     #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn foreground_command_of_real_pty() {
