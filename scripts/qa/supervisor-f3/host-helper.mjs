@@ -21,7 +21,7 @@ import { homedir, hostname, platform, release } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { activationScript, guiBundleFiles, parseEnvBlock, windowsEnvScript } from './seams.mjs';
+import { activationScript, guiBundleFiles, parseEnvBlock, windowBoundsScript, windowsEnvScript } from './seams.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CHECKOUT = resolve(HERE, '..', '..', '..');
@@ -327,10 +327,16 @@ async function activateGui({ pid, executable }) {
   return JSON.parse((await run('/usr/bin/osascript', ['-l', 'JavaScript', '-e', activationScript(pid, executable)])).trim());
 }
 
+async function guiBounds({ pid, executable }) {
+  if (!MAC) return { bounds: null, reason: 'macOS only' };
+  if (!isAbsolute(executable ?? '') || !inside(CHECKOUT, executable)) throw fail('BOUNDS_REFUSED', `${executable} is not a candidate binary of ${CHECKOUT}`);
+  return JSON.parse((await run('/usr/bin/osascript', ['-l', 'JavaScript', '-e', windowBoundsScript(pid, executable)])).trim());
+}
+
 const METHODS = {
   identity, daemon, 'write-wrappers': writeWrappers, 'spawn-owned': spawnOwned, 'await-exit': awaitExit,
   cleanup, 'read-b64': readB64, 'list-files': listFiles, 'remove-owned-dir': removeOwnedDir, 'free-port': freePort,
-  'serve-status': serveStatus, 'serve-add': serveAdd, 'serve-remove': serveRemove, 'open-gui-bundle': openGuiBundle, 'process-isolation': processIsolation, 'activate-gui': activateGui,
+  'serve-status': serveStatus, 'serve-add': serveAdd, 'serve-remove': serveRemove, 'open-gui-bundle': openGuiBundle, 'process-isolation': processIsolation, 'activate-gui': activateGui, 'gui-bounds': guiBounds,
 };
 
 if (process.argv.includes('--rpc')) {

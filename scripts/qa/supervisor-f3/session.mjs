@@ -172,7 +172,9 @@ export function startSession({ config, run, lane }) {
     const view = await until('the fleet decision card', async () => (await s.call('panel', [{ type: 'supervisorReadV1', request: { view: 'panel' } }]))?.value,
       (v) => (v?.decisions ?? []).some(mine), { deadlineMs: 180_000 });
     const decision = view.decisions.find(mine);
-    return { sessionRef: decision.sessionRef, promptId: decision.promptId, commandFragment: `prod.example.com/${shared.decisionTitle}`, decision };
+    return { sessionRef: decision.sessionRef, promptId: decision.promptId, // The card shows the command on one truncated line (DecisionCard.tsx `truncate`), so the
+    // fragment read on screen is its head; the panel read proves the whole command.
+    commandFragment: decision.prompt.command.split('\n')[0].split(/\s+/).slice(0, 3).join(' '), decision };
   };
   const logPath = (mode) => remotePath(host, session().wrappers.logs, `agent-${session().wrappers.wrappers[mode].title}.jsonl`);
   shared.agentLog = async (mode, after = 0) => {

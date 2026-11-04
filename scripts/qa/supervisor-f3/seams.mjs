@@ -362,9 +362,49 @@ export function activationScript(pid, executable) {
     `const a = $.NSRunningApplication.runningApplicationWithProcessIdentifier(${pid});`,
     `const want = ${JSON.stringify(executable)};`,
     "const exe = a.isNil() ? null : ObjC.unwrap(a.executableURL.path);",
-    "JSON.stringify(exe === null ? { activated: false, reason: 'absent' } : exe !== want ? { activated: false, reason: 'not the run GUI', executable: exe }",
-    "  : (a.unhide, { activated: a.activateWithOptions(3) === true, executable: exe }));",
+    // activateWithOptions is only a request (macOS cooperative activation may ignore it from a
+    // background process), so success is the frontmost application being this exact pid, read
+    // back; System Events (the same pid, after the same executable check) is the fallback.
+    "const front = () => ObjC.unwrap($.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier);",
+    `const settle = () => { for (let i = 0; i < 20 && front() !== ${pid}; i += 1) delay(0.1); return front(); };`,
+    "let result;",
+    "if (exe === null) result = { activated: false, reason: 'absent' };",
+    "else if (exe !== want) result = { activated: false, reason: 'not the run GUI', executable: exe };",
+    "else {",
+    "  a.unhide; a.activateWithOptions(3); let frontPid = settle(); let via = 'NSRunningApplication';",
+    `  if (frontPid !== ${pid}) { try { const se = Application('System Events'); const p = se.processes.whose({ unixId: ${pid} })(); if (p.length === 1) { p[0].frontmost = true; via = 'System Events'; } } catch (e) { via = 'System Events failed: ' + e; } frontPid = settle(); }`,
+    `  result = { activated: frontPid === ${pid}, frontPid, via, executable: exe };`,
+    "}",
+    "JSON.stringify(result);",
   ].join('\n');
+}
+
+/**
+ * The JXA that reads the on-screen bounds (points, top-left origin) of the largest normal window
+ * of exactly one run-owned GUI, with the main screen size, so a frame can be cut to that window.
+ * The same executable check as `activationScript`; another process is reported, never read.
+ */
+export function windowBoundsScript(pid, executable) {
+  activationScript(pid, executable);
+  return [
+    "ObjC.import('AppKit'); ObjC.import('CoreGraphics');",
+    `const a = $.NSRunningApplication.runningApplicationWithProcessIdentifier(${pid});`,
+    `const want = ${JSON.stringify(executable)};`,
+    "const exe = a.isNil() ? null : ObjC.unwrap(a.executableURL.path);",
+    "const list = exe === want ? (ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements, 0))) || []) : [];",
+    `const mine = list.filter((w) => w.kCGWindowOwnerPID === ${pid} && w.kCGWindowLayer === 0 && w.kCGWindowBounds).map((w) => w.kCGWindowBounds).sort((p, q) => q.Width * q.Height - p.Width * p.Height);`,
+    "const f = $.NSScreen.mainScreen.frame;",
+    "JSON.stringify(exe === null ? { bounds: null, reason: 'absent' } : exe !== want ? { bounds: null, reason: 'not the run GUI', executable: exe }",
+    "  : { bounds: mine[0] ? { x: mine[0].X, y: mine[0].Y, width: mine[0].Width, height: mine[0].Height } : null, screen: { width: f.size.width, height: f.size.height },",
+    "      frontPid: ObjC.unwrap($.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier) });",
+  ].join('\n');
+}
+
+/** The frame-pixel rectangle of window `bounds` (screen points) in a frame `frameWidth` pixels wide. */
+export function windowRect(bounds, screen, frameWidth) {
+  if (!bounds || !screen?.width) return null;
+  const k = frameWidth / screen.width;
+  return { x: bounds.x * k, y: bounds.y * k, width: bounds.width * k, height: bounds.height * k };
 }
 
 /** A path on `host`, joined with that host's separator. */

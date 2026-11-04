@@ -1,10 +1,11 @@
 // Self-tests of the F3 harness seams. Pure: no host, device, daemon or network.
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { decodePng, encodePng, ocrImage } from './png.mjs';
 import {
   PRODUCTION_GATEWAY_PORT, acceptedReply, configProblems, configureGateway, decisionsNamingNonce, gatewayBound, gatewayPortFor,
   activationScript, globalRetryRule, guiBundleFiles, hubEnv, isolationProblems, namesNonce, newRunId, parseEnvBlock, untypeableShortNames, windowsEnvScript, pageToScreen, relayListenPort, remotePath, rowFocusVerdict, rpcCommand, rulesLineText,
-  runLanes, sameServeConfig, serveAddedProblems, typedInto, uniqueSession, webContextFrom, webPageChannel,
+  runLanes, sameServeConfig, serveAddedProblems, typedInto, uniqueSession, webContextFrom, webPageChannel, windowBoundsScript, windowRect,
 } from './seams.mjs';
 import { LANE_SCHEMA, RUN_SCHEMA, SCENARIOS, validateRun } from './contract.mjs';
 
@@ -364,6 +365,9 @@ describe('all-local run', () => {
     expect(script).not.toContain('runningApplicationsWithBundleIdentifier');
     expect(code(() => activationScript(0, '/w/ferryx'))).toBe('GUI_NOT_FRONT');
     expect(code(() => activationScript(4242, 'ferryx'))).toBe('GUI_NOT_FRONT');
+    // Raised means the frontmost application is that pid, read back, not the request's answer.
+    expect(script).toContain('activated: frontPid === 4242');
+    expect(script.indexOf('exe !== want')).toBeLessThan(script.indexOf('System Events'));
   });
 
   test('every isolated daemon runs the hub on a database inside its own profile', () => {
@@ -456,3 +460,26 @@ describe('session host in the verdict', () => {
     expect(verdict.verdict).not.toBe('pass');
   });
 });
+
+describe('frame OCR input', () => {
+  test('a frame is cut to the run window, inverted to dark-on-light and doubled, boxes mapping back', () => {
+    // 4x2 RGB frame: white text pixel (255) on dark (20) at (2,1).
+    const gray = Buffer.from([20, 20, 20, 20, 20, 20, 255, 20]);
+    const rgb = Buffer.alloc(8 * 3); gray.forEach((v, i) => rgb.fill(v, i * 3, i * 3 + 3));
+    const frame = encodePng(4, 2, 3, rgb);
+    const image = ocrImage(frame, { x: 1, y: 0, width: 3, height: 2 }, 2);
+    const out = decodePng(image.png);
+    expect([out.width, out.height, out.channels]).toEqual([6, 4, 1]);
+    expect(out.px[2 * 6 + 2]).toBe(0); // the white pixel is now black
+    expect(out.px[0]).toBe(235); // the dark background is now light
+    expect(image.origin).toEqual({ x: 1, y: 0 });
+  });
+
+  test('window bounds in points map to frame pixels on a Retina frame', () => {
+    expect(windowRect({ x: 194, y: 63, width: 640, height: 425 }, { width: 1028, height: 664.5 }, 2056)).toEqual({ x: 388, y: 126, width: 1280, height: 850 });
+    expect(windowRect(null, { width: 1 }, 2)).toBeNull();
+    expect(() => windowBoundsScript(8754, 'relative')).toThrow();
+    expect(windowBoundsScript(42, '/w/.qa/f3-bin/gui/ferryx')).toContain('kCGWindowOwnerPID === 42');
+  });
+});
+

@@ -18,15 +18,34 @@
 // ends the GUI and daemon by exact pid identity, then removes only the profile this run made.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { connectNativeMahord, rpcProcess } from '../fixtures/native-configured-adapters.mjs';
 import { FRONTEND_DEV_URL } from '../../lib/qa-scenarios/frontend-server.mjs';
 import { LaneBlocked, StepFailed, markNotRun, runStep, stopExact, until } from './steps.mjs';
 import { scenariosForLane } from './contract.mjs';
-import { acceptedReply, configureGateway, decisionsNamingNonce, gatewayPortFor, hubEnv, isolationProblems, globalRetryRule, namesNonce, rowFocusVerdict, rpcCommand, rulesLineText, typedInto, uniqueSession } from './seams.mjs';
+import { acceptedReply, configureGateway, decisionsNamingNonce, gatewayPortFor, hubEnv, isolationProblems, globalRetryRule, namesNonce, rowFocusVerdict, rpcCommand, rulesLineText, typedInto, uniqueSession, windowRect } from './seams.mjs';
+import { ocrImage } from './png.mjs';
 
-/** OCR words with boxes (tesseract TSV) of one PNG on the control host. */
-async function ocr(tesseract, pngPath) {
+/**
+ * OCR words with boxes (tesseract TSV) of one frame on the control host. With `rect` (the
+ * run-owned window in frame pixels) tesseract reads that window cut out, gray, inverted and
+ * doubled (png.mjs; the dark panel is unreadable otherwise), written next to the frame as
+ * `<frame>.ocr-input.png`; word boxes are mapped back to frame pixels for clicks.
+ */
+async function ocr(tesseract, pngPath, rect = null) {
+  let input = pngPath; let map = (x, y) => ({ x, y }); let scale = 1;
+  if (rect) {
+    const image = ocrImage(readFileSync(pngPath), rect, 2);
+    input = pngPath.replace(/\.png$/, '.ocr-input.png');
+    writeFileSync(input, image.png);
+    scale = image.scale;
+    map = (x, y) => ({ x: image.origin.x + x / image.scale, y: image.origin.y + y / image.scale });
+  }
+  return ocrFile(tesseract, input, map, scale);
+}
+
+async function ocrFile(tesseract, pngPath, map, scale) {
   const tsv = await new Promise((resolveOcr, reject) => {
     const child = spawn(tesseract, [pngPath, 'stdout', 'tsv'], { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = ''; let err = '';
@@ -36,7 +55,7 @@ async function ocr(tesseract, pngPath) {
     child.once('close', (code) => (code === 0 ? resolveOcr(out) : reject(new StepFailed('OCR_FAILED', err))));
   });
   const words = tsv.split('\n').slice(1).map((line) => line.split('\t')).filter((f) => f.length >= 12 && f[11].trim())
-    .map((f) => ({ text: f[11].trim(), x: Number(f[6]), y: Number(f[7]), w: Number(f[8]), h: Number(f[9]), line: `${f[2]}.${f[3]}.${f[4]}` }));
+    .map((f) => ({ text: f[11].trim(), ...map(Number(f[6]), Number(f[7])), w: Number(f[8]) / scale, h: Number(f[9]) / scale, line: `${f[2]}.${f[3]}.${f[4]}` }));
   const lines = new Map();
   for (const word of words) lines.set(word.line, [...(lines.get(word.line) ?? []), word]);
   return { tsv, words, text: [...lines.values()].map((ws) => ws.map((w) => w.text).join(' ')).join('\n') };
@@ -151,11 +170,19 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     }
     // A frame: real MahoRD pixels plus their OCR. Attached to a step only when `step` is given,
     // so a polled frame attaches exactly the frame its assertion read (see `keep`).
+    // macOS: OCR reads the run-owned window only (its live bounds, read by exact pid).
+    const windowOf = async (frameWidth) => {
+      if (host.platform !== 'darwin') return null;
+      const seen = await helper.call('gui-bounds', { pid: gui.pid, executable: gui.executable });
+      // Read right after the capture: a frame taken while another app was in front is never OCRed.
+      if (!seen.bounds || seen.frontPid !== gui.pid) throw new StepFailed('GUI_NOT_FRONT', `run-owned GUI pid ${gui.pid} not frontmost with a window at capture: ${JSON.stringify(seen)}`);
+      return windowRect(seen.bounds, seen.screen, frameWidth);
+    };
     const frame = async (name, step) => {
       await raise();
       const bytes = await mahord.screenshot(signal);
       const shot = step ? step.artifact('screenshot', `${name}.png`, bytes) : lane.write('screenshot', `frames/${name}-${Date.now()}.png`, bytes);
-      const read = await ocr(run.tesseract, join(run.evidenceDir, shot.path));
+      const read = await ocr(run.tesseract, join(run.evidenceDir, shot.path), await windowOf(bytes.readUInt32BE(16)));
       if (step) step.artifact('ocr', `${name}.ocr.tsv`, read.tsv);
       return { shot, read, bytes };
     };
