@@ -12,6 +12,12 @@
 //!    `sudo`-style children of another uid;
 //! 3. the parent chain up to pid 1.
 //!
+//! The pane children live in a [`PaneRegistry`] the PTY manager keeps as panes spawn, are
+//! adopted by handover and exit, so a gated request never rebuilds it. The parent chain is
+//! walked once at accept and kept on the connection ([`Ancestry`], each ancestor bound to its
+//! start time); a request re-reads only the peer (start time, session, terminal) and walks again
+//! only when the kept chain ended unfinished. [`classify`] names the pane session a peer is in.
+//!
 //! Fail closed: a peer whose pid or start time cannot be read, whose start time changed since
 //! accept (the pid was reused), or an ancestor that vanished mid-walk (the chain changed under
 //! the walk) is refused. An ancestor that exists but cannot be read (another uid's process,
@@ -41,7 +47,7 @@
 //! connection is therefore refused every gated request with `FORBIDDEN`, like an `Unknown`
 //! peer: on Windows the supervisor cannot be mutated over the daemon socket (not from the
 //! desktop app either) until the transport can prove the owner's origin. Reads stay served.
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 /// How deep a parent chain is followed before the walk gives up (and refuses).
 const MAX_ANCESTRY: usize = 128;
@@ -74,6 +80,8 @@ pub enum PeerOrigin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcInfo {
     pub ppid: u32,
+    /// Process group; `None` when unknown.
+    pub pgid: Option<u32>,
     pub session: Option<u32>,
     /// Controlling terminal device; `None` when the process has none.
     pub tty: Option<u64>,
@@ -182,11 +190,13 @@ pub fn proc_info(pid: u32) -> Result<ProcInfo, ProcError> {
                 .and_then(|value| value.parse::<i64>().ok())
         };
         let ppid = field(1).ok_or(ProcError::Unreadable)?;
+        let pgid = field(2).ok_or(ProcError::Unreadable)?;
         let session = field(3).ok_or(ProcError::Unreadable)?;
         let tty = field(4).ok_or(ProcError::Unreadable)?;
         let start = field(19).ok_or(ProcError::Unreadable)?;
         Ok(ProcInfo {
             ppid: u32::try_from(ppid).unwrap_or(0),
+            pgid: u32::try_from(pgid).ok().filter(|pgid| *pgid > 0),
             session: u32::try_from(session).ok().filter(|session| *session > 0),
             tty: u64::try_from(tty).ok().filter(|tty| *tty != 0),
             start: u64::try_from(start).unwrap_or(0),
@@ -220,6 +230,7 @@ pub fn proc_info(pid: u32) -> Result<ProcInfo, ProcError> {
         const NODEV: u32 = u32::MAX;
         Ok(ProcInfo {
             ppid: info.pbi_ppid,
+            pgid: (info.pbi_pgid > 0).then_some(info.pbi_pgid),
             session: (session > 0).then_some(session as u32),
             tty: (info.e_tdev != NODEV && info.e_tdev != 0).then_some(u64::from(info.e_tdev)),
             start: info
@@ -253,93 +264,279 @@ fn absent_or_hidden(pid: u32) -> ProcError {
     }
 }
 
-/// The daemon's pane children and the sessions and terminals they own.
-#[derive(Debug, Default, Clone)]
-pub struct PaneSet {
-    pub pids: HashSet<u32>,
-    pub sessions: HashSet<u32>,
-    pub ttys: HashSet<u64>,
+/// One pane child as the daemon recorded it when the pane was spawned or adopted: its pid,
+/// process group, session, controlling terminal and start time (`None` where the kernel did not
+/// tell). A pane child is its own session leader, so its pid also names its session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneEntry {
+    pub pid: u32,
+    pub pgid: Option<u32>,
+    pub sid: Option<u32>,
+    pub tty: Option<u64>,
+    pub start: Option<u64>,
 }
 
-impl PaneSet {
-    /// The pane children `pids`, with their sessions (a pane child is its own session leader)
-    /// and controlling terminals as `table` reports them.
-    pub fn of(pids: impl IntoIterator<Item = u32>, table: &impl ProcTable) -> Self {
-        let mut set = PaneSet::default();
-        for pid in pids {
-            set.pids.insert(pid);
-            set.sessions.insert(pid);
-            if let Ok(info) = table.info(pid) {
-                set.sessions.extend(info.session);
-                set.ttys.extend(info.tty);
-            }
+impl PaneEntry {
+    /// The pane child `pid` as `table` reports it now.
+    pub fn read(pid: u32, table: &impl ProcTable) -> Self {
+        let info = table.info(pid).ok();
+        PaneEntry {
+            pid,
+            pgid: info.and_then(|info| info.pgid),
+            sid: info.and_then(|info| info.session),
+            tty: info.and_then(|info| info.tty),
+            start: info.map(|info| info.start),
         }
-        set
     }
 }
 
-/// Why a peer may not mutate supervisor state, or `None` when it may.
-pub fn refusal(origin: PeerOrigin, panes: &PaneSet, table: &impl ProcTable) -> Option<String> {
+/// The daemon's pane children by session id, kept as panes are spawned, adopted (handover
+/// import) and exit, so a gated request never rebuilds the pane set from the process table.
+#[derive(Debug, Default)]
+pub struct PaneRegistry {
+    panes: parking_lot::RwLock<HashMap<String, PaneEntry>>,
+}
+
+impl PaneRegistry {
+    /// Records the pane child `pid` of `session_id`, read from `table`. Blocking when `table`
+    /// is the kernel.
+    pub fn insert(&self, session_id: &str, pid: u32, table: &impl ProcTable) {
+        let entry = PaneEntry::read(pid, table);
+        self.panes.write().insert(session_id.to_owned(), entry);
+    }
+
+    /// Forgets the pane of `session_id` (it exited, was closed or was handed over).
+    pub fn remove(&self, session_id: &str) -> Option<PaneEntry> {
+        self.panes.write().remove(session_id)
+    }
+
+    pub fn entry(&self, session_id: &str) -> Option<PaneEntry> {
+        self.panes.read().get(session_id).copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.panes.read().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.panes.read().is_empty()
+    }
+
+    fn find(&self, matches: impl Fn(&PaneEntry) -> bool) -> Option<(String, PaneEntry)> {
+        self.panes
+            .read()
+            .iter()
+            .find(|(_, entry)| matches(entry))
+            .map(|(session_id, entry)| (session_id.clone(), *entry))
+    }
+}
+
+/// How the accept-time parent walk ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalkEnd {
+    /// Reached pid 1, a self-parented process or another uid's process.
+    Complete,
+    /// The ancestor `pid` exited mid-walk.
+    Changed { pid: u32 },
+    /// Deeper than [`MAX_ANCESTRY`].
+    TooDeep,
+}
+
+/// A connection peer's parent chain, walked once at accept and kept on the connection: every
+/// ancestor's pid with its start time (`None` for the last one when it could not be read).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ancestry {
+    peer: PeerProcess,
+    chain: Vec<(u32, Option<u64>)>,
+    end: WalkEnd,
+}
+
+impl Ancestry {
+    /// Walks the parent chain of `peer`, whose own record is `info`.
+    fn walk(peer: PeerProcess, info: &ProcInfo, table: &impl ProcTable) -> Self {
+        let mut chain = Vec::new();
+        let mut current = info.ppid;
+        for _ in 0..MAX_ANCESTRY {
+            if current <= 1 {
+                return Ancestry { peer, chain, end: WalkEnd::Complete };
+            }
+            match table.info(current) {
+                Ok(next) => {
+                    chain.push((current, Some(next.start)));
+                    if next.ppid == current {
+                        return Ancestry { peer, chain, end: WalkEnd::Complete };
+                    }
+                    current = next.ppid;
+                }
+                // Another uid's process (a root sshd or login): pane descendants of another uid
+                // are caught by session and terminal.
+                Err(ProcError::Unreadable) => {
+                    chain.push((current, None));
+                    return Ancestry { peer, chain, end: WalkEnd::Complete };
+                }
+                Err(ProcError::Vanished) => {
+                    chain.push((current, None));
+                    return Ancestry { peer, chain, end: WalkEnd::Changed { pid: current } };
+                }
+            }
+        }
+        Ancestry { peer, chain, end: WalkEnd::TooDeep }
+    }
+
+    /// The parent chain of the connection's peer, read at accept; `None` for a peer that is not
+    /// a readable process (the request-time check refuses it anyway).
+    pub fn at_accept(origin: PeerOrigin, table: &impl ProcTable) -> Option<Self> {
+        let PeerOrigin::Process(peer) = origin else {
+            return None;
+        };
+        let info = table.info(peer.pid).ok().filter(|info| info.start == peer.start)?;
+        Some(Self::walk(peer, &info, table))
+    }
+}
+
+/// Who a connection's peer is, as far as owner decisions go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerClass {
+    /// A process outside every pane: the owner's.
+    Owner,
+    /// A process inside the pane of `session_id`; `why` names the signal that matched.
+    Pane { session_id: String, why: String },
+    /// See [`PeerOrigin::Unknown`].
+    Unknown,
+    /// See [`PeerOrigin::TokenAuthenticated`].
+    TokenAuthenticated,
+}
+
+/// Classifies a connection's peer against the pane registry. The peer's start time is re-read
+/// on every call (a reused pid is refused); its session and terminal come from that same read;
+/// the parent chain comes from `ancestry`, walked at accept, and is walked again only when it is
+/// missing, belongs to another process or ended unfinished (an ancestor exited mid-walk), so a
+/// transient refusal is retried like before. `Err` is a fail-closed refusal reason.
+pub fn classify(
+    origin: PeerOrigin,
+    ancestry: &mut Option<Ancestry>,
+    panes: &PaneRegistry,
+    table: &impl ProcTable,
+) -> Result<PeerClass, String> {
     let peer = match origin {
-        PeerOrigin::TokenAuthenticated => {
-            return Some("this connection proved only the transport token, which a Ferryx pane process can read too, and the daemon cannot identify its process, so it may not change the supervisor".into())
-        }
-        PeerOrigin::Unknown => {
-            return Some("the daemon cannot identify this connection's process, so it may not change the supervisor".into())
-        }
+        PeerOrigin::TokenAuthenticated => return Ok(PeerClass::TokenAuthenticated),
+        PeerOrigin::Unknown => return Ok(PeerClass::Unknown),
         PeerOrigin::Process(peer) => peer,
     };
     let pid = peer.pid;
     let info = match table.info(pid) {
         Ok(info) if info.start == peer.start => info,
-        Ok(_) => return Some(format!("process {pid} is not the process that connected (its pid was reused); it may not change the supervisor")),
-        Err(_) => return Some(format!("process {pid} could not be read; it may not change the supervisor")),
+        Ok(_) => return Err(format!("process {pid} is not the process that connected (its pid was reused); it may not change the supervisor")),
+        Err(_) => return Err(format!("process {pid} could not be read; it may not change the supervisor")),
     };
-    let inside = |why: String| {
-        Some(format!("process {pid} runs inside a Ferryx pane ({why}); a pane process may not change the supervisor"))
+    let pane = |session_id: String, why: String| Ok(PeerClass::Pane { session_id, why });
+    if let Some((session_id, _)) = panes.find(|entry| entry.pid == pid) {
+        return pane(session_id, format!("pane process {pid}"));
+    }
+    if let Some(session) = info.session {
+        if let Some((session_id, _)) =
+            panes.find(|entry| entry.pid == session || entry.sid == Some(session))
+        {
+            return pane(session_id, format!("pane session {session}"));
+        }
+    }
+    if let Some(tty) = info.tty {
+        if let Some((session_id, _)) = panes.find(|entry| entry.tty == Some(tty)) {
+            return pane(session_id, format!("pane terminal {tty}"));
+        }
+    }
+    let fresh = match ancestry.as_ref() {
+        Some(cached) => cached.peer != peer || cached.end != WalkEnd::Complete,
+        None => true,
     };
-    if panes.pids.contains(&pid) {
-        return inside(format!("pane process {pid}"));
+    if fresh {
+        *ancestry = Some(Ancestry::walk(peer, &info, table));
     }
-    if let Some(session) = info
-        .session
-        .filter(|session| panes.sessions.contains(session))
-    {
-        return inside(format!("pane session {session}"));
-    }
-    if let Some(tty) = info.tty.filter(|tty| panes.ttys.contains(tty)) {
-        return inside(format!("pane terminal {tty}"));
-    }
-    let mut current = info.ppid;
-    for _ in 0..MAX_ANCESTRY {
-        if current <= 1 {
-            return None;
+    let walked = ancestry.as_ref().expect("walked above");
+    for &(ancestor, start) in &walked.chain {
+        // A pane whose start time differs is a later process that reused an ancestor's pid.
+        let descends = |entry: &PaneEntry| {
+            entry.pid == ancestor
+                && match (entry.start, start) {
+                    (Some(recorded), Some(seen)) => recorded == seen,
+                    _ => true,
+                }
+        };
+        if let Some((session_id, _)) = panes.find(descends) {
+            return pane(session_id, format!("pane process {ancestor}"));
         }
-        if panes.pids.contains(&current) {
-            return inside(format!("pane process {current}"));
+    }
+    match walked.end {
+        WalkEnd::Complete => Ok(PeerClass::Owner),
+        WalkEnd::Changed { pid: current } => Err(format!(
+            "the parent chain of process {pid} changed while it was checked (process {current} exited); retry"
+        )),
+        WalkEnd::TooDeep => Err(format!(
+            "the parent chain of process {pid} is deeper than {MAX_ANCESTRY}"
+        )),
+    }
+}
+
+/// Why a peer may not mutate supervisor state, or `None` when it may (see [`classify`]).
+pub fn refusal(
+    origin: PeerOrigin,
+    ancestry: &mut Option<Ancestry>,
+    panes: &PaneRegistry,
+    table: &impl ProcTable,
+) -> Option<String> {
+    match classify(origin, ancestry, panes, table) {
+        Ok(PeerClass::Owner) => None,
+        Ok(PeerClass::TokenAuthenticated) => Some("this connection proved only the transport token, which a Ferryx pane process can read too, and the daemon cannot identify its process, so it may not change the supervisor".into()),
+        Ok(PeerClass::Unknown) => Some("the daemon cannot identify this connection's process, so it may not change the supervisor".into()),
+        Ok(PeerClass::Pane { why, .. }) => {
+            let pid = match origin {
+                PeerOrigin::Process(peer) => peer.pid,
+                _ => 0,
+            };
+            Some(format!("process {pid} runs inside a Ferryx pane ({why}); a pane process may not change the supervisor"))
         }
-        match table.info(current) {
-            Ok(next) if next.ppid == current => return None,
-            Ok(next) => current = next.ppid,
-            // Another uid's process (a root sshd or login): pane descendants of another uid
-            // were already caught by session and terminal.
-            Err(ProcError::Unreadable) => return None,
-            Err(ProcError::Vanished) => {
-                return Some(format!(
-                    "the parent chain of process {pid} changed while it was checked (process {current} exited); retry"
-                ))
+        Err(reason) => Some(reason),
+    }
+}
+/// A spawned pane is in the registry while it runs and leaves it when it exits.
+#[cfg(unix)]
+#[cfg(test)]
+#[tokio::test]
+async fn registry_drops_exited_pane() {
+    let manager = crate::terminal::PtyManager::new();
+    let mut cmd = portable_pty::CommandBuilder::new("/bin/sh");
+    cmd.arg("-c");
+    cmd.arg("read line; exit 0");
+    let (session_id, _rx) = manager.spawn(cmd, 80, 24).expect("spawn shell");
+    let pid = manager.get_session(&session_id).and_then(|session| session.pid());
+    let entry = manager.pane_registry().entry(&session_id).expect("registered on spawn");
+    assert_eq!(Some(entry.pid), pid);
+    assert_eq!(entry.sid, pid, "a pane child leads its own session");
+    assert!(entry.tty.is_some() && entry.start.is_some(), "{entry:?}");
+
+    let removal = manager.removal_notify();
+    manager.write_input(&session_id, b"go\n").expect("release the shell");
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while manager.has_session(&session_id) {
+            let notified = removal.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !manager.has_session(&session_id) {
+                break;
             }
+            notified.await;
         }
-    }
-    Some(format!(
-        "the parent chain of process {pid} is deeper than {MAX_ANCESTRY}"
-    ))
+    })
+    .await
+    .expect("the shell's exit is observed");
+    assert_eq!(manager.pane_registry().entry(&session_id), None, "dropped on exit");
+    assert!(manager.pane_registry().is_empty());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     /// A fake process table: pid -> (ppid, session, tty); missing pids are `Vanished`, pids in
     /// `unreadable` exist but cannot be read.
@@ -366,6 +563,7 @@ mod tests {
                         pid,
                         ProcInfo {
                             ppid,
+                            pgid: Some(pid),
                             session: Some(session),
                             tty,
                             start: u64::from(pid) * 10,
@@ -375,6 +573,13 @@ mod tests {
                 .collect(),
             unreadable: HashSet::new(),
         }
+    }
+
+    /// A registry holding the pane child `pid` as session `pane-<pid>`.
+    fn panes_of(pid: u32, table: &impl ProcTable) -> PaneRegistry {
+        let panes = PaneRegistry::default();
+        panes.insert(&format!("pane-{pid}"), pid, table);
+        panes
     }
 
     fn peer(pid: u32) -> PeerOrigin {
@@ -401,10 +606,73 @@ mod tests {
     #[test]
     fn a_pane_descendant_is_refused_and_an_outside_process_is_not() {
         let procs = world();
-        let panes = PaneSet::of([200], &procs);
-        assert!(refusal(peer(220), &panes, &procs).is_some_and(|why| why.contains("pane")));
-        assert!(refusal(peer(200), &panes, &procs).is_some());
-        assert_eq!(refusal(peer(70), &panes, &procs), None);
+        let panes = panes_of(200, &procs);
+        assert!(refusal(peer(220), &mut None, &panes, &procs).is_some_and(|why| why.contains("pane")));
+        assert!(refusal(peer(200), &mut None, &panes, &procs).is_some());
+        assert_eq!(refusal(peer(70), &mut None, &panes, &procs), None);
+    }
+
+    #[test]
+    fn classify_returns_the_session_the_peer_descends_from() {
+        let mut procs = world();
+        let panes = panes_of(200, &procs);
+        panes.insert("pane-50", 50, &procs);
+        assert!(panes.remove("pane-50").is_some());
+        assert_eq!(panes.len(), 1);
+        // A descendant that left the pane's session and terminal is still found by its chain.
+        procs.procs.insert(
+            260,
+            ProcInfo { ppid: 210, pgid: Some(260), session: Some(260), tty: None, start: 2600 },
+        );
+        for pid in [200, 220, 260] {
+            match classify(peer(pid), &mut None, &panes, &procs) {
+                Ok(PeerClass::Pane { session_id, .. }) => assert_eq!(session_id, "pane-200"),
+                other => panic!("{pid}: {other:?}"),
+            }
+        }
+        assert_eq!(classify(peer(70), &mut None, &panes, &procs), Ok(PeerClass::Owner));
+        assert_eq!(classify(PeerOrigin::Unknown, &mut None, &panes, &procs), Ok(PeerClass::Unknown));
+        assert_eq!(
+            classify(PeerOrigin::TokenAuthenticated, &mut None, &panes, &procs),
+            Ok(PeerClass::TokenAuthenticated)
+        );
+    }
+
+    /// The chain is walked at accept and reused: an ancestor exiting later does not refuse the
+    /// peer, a pane closing later lets it through, but the peer itself is re-read every time.
+    #[test]
+    fn the_accept_time_chain_is_reused_and_the_peer_re_read() {
+        let mut procs = world();
+        procs.procs.insert(
+            260,
+            ProcInfo { ppid: 210, pgid: Some(260), session: Some(260), tty: None, start: 2600 },
+        );
+        let panes = panes_of(200, &procs);
+        let mut ancestry = Ancestry::at_accept(peer(260), &procs);
+        assert!(ancestry.is_some());
+        procs.procs.remove(&210);
+        assert!(matches!(
+            classify(peer(260), &mut ancestry, &panes, &procs),
+            Ok(PeerClass::Pane { ref session_id, .. }) if session_id == "pane-200"
+        ));
+        assert!(refusal(peer(260), &mut None, &panes, &procs).is_some_and(|why| why.contains("changed")));
+        panes.remove("pane-200");
+        assert_eq!(classify(peer(260), &mut ancestry, &panes, &procs), Ok(PeerClass::Owner));
+        // Pid reuse: 260 is now another process; the cached chain does not vouch for it.
+        procs.procs.get_mut(&260).expect("peer").start = 1;
+        assert!(refusal(peer(260), &mut ancestry, &panes, &procs).is_some_and(|why| why.contains("reused")));
+    }
+
+    /// A pane child whose pid an ancestor of the peer had before (the ancestor exited and the pid
+    /// was reused by a new pane) is not the peer's pane.
+    #[test]
+    fn a_reused_ancestor_pid_is_not_a_pane() {
+        let mut procs = world();
+        let mut ancestry = Ancestry::at_accept(peer(70), &procs);
+        // The shell 60 exits and a new pane child gets pid 60 with another start time.
+        procs.procs.insert(60, ProcInfo { ppid: 100, pgid: Some(60), session: Some(60), tty: Some(11), start: 9999 });
+        let panes = panes_of(60, &procs);
+        assert_eq!(classify(peer(70), &mut ancestry, &panes, &procs), Ok(PeerClass::Owner));
     }
 
     #[test]
@@ -415,68 +683,71 @@ mod tests {
             230,
             ProcInfo {
                 ppid: 1,
+                pgid: None,
                 session: Some(200),
                 tty: Some(9),
                 start: 2300,
             },
         );
-        let panes = PaneSet::of([200], &procs);
-        assert!(refusal(peer(230), &panes, &procs).is_some_and(|why| why.contains("session 200")));
+        let panes = panes_of(200, &procs);
+        assert!(refusal(peer(230), &mut None, &panes, &procs).is_some_and(|why| why.contains("session 200")));
         // `setsid` kept the pane terminal: refused by terminal.
         procs.procs.insert(
             240,
             ProcInfo {
                 ppid: 1,
+                pgid: None,
                 session: Some(240),
                 tty: Some(9),
                 start: 2400,
             },
         );
-        assert!(refusal(peer(240), &panes, &procs).is_some_and(|why| why.contains("terminal 9")));
+        assert!(refusal(peer(240), &mut None, &panes, &procs).is_some_and(|why| why.contains("terminal 9")));
     }
 
     #[test]
     fn a_reused_pid_and_an_ancestor_that_vanishes_mid_walk_are_refused() {
         let mut procs = world();
-        let panes = PaneSet::of([200], &procs);
+        let panes = panes_of(200, &procs);
         // The pid that connected was 70 started at 700; now 70 is another process.
         let stale = PeerOrigin::Process(PeerProcess { pid: 70, start: 1 });
-        assert!(refusal(stale, &panes, &procs).is_some_and(|why| why.contains("reused")));
+        assert!(refusal(stale, &mut None, &panes, &procs).is_some_and(|why| why.contains("reused")));
         // The shell (60) exits between reading the cli and walking up: fail closed.
         procs.procs.remove(&60);
-        assert!(refusal(peer(70), &panes, &procs).is_some_and(|why| why.contains("changed")));
+        assert!(refusal(peer(70), &mut None, &panes, &procs).is_some_and(|why| why.contains("changed")));
     }
 
     #[test]
     fn unknown_or_unreadable_peers_are_refused() {
         let mut procs = world();
-        let panes = PaneSet::of([200], &procs);
-        assert!(refusal(PeerOrigin::Unknown, &panes, &procs).is_some());
+        let panes = panes_of(200, &procs);
+        assert!(refusal(PeerOrigin::Unknown, &mut None, &panes, &procs).is_some());
         assert!(
-            refusal(peer(999), &panes, &procs).is_some(),
+            refusal(peer(999), &mut None, &panes, &procs).is_some(),
             "a peer that is gone is refused"
         );
         procs.unreadable.insert(70);
         assert!(
-            refusal(peer(70), &panes, &procs).is_some(),
+            refusal(peer(70), &mut None, &panes, &procs).is_some(),
             "an unreadable peer is refused"
         );
         procs.unreadable.clear();
         // An unreadable ancestor (a root sshd) ends the walk outside the panes...
         procs.unreadable.insert(50);
-        assert_eq!(refusal(peer(70), &panes, &procs), None);
+        assert_eq!(refusal(peer(70), &mut None, &panes, &procs), None);
         // ...and a pane process under a root `sudo` is still caught by its session.
         procs.procs.insert(
             250,
             ProcInfo {
                 ppid: 245,
+                pgid: None,
                 session: Some(200),
                 tty: Some(9),
                 start: 2500,
             },
         );
         procs.unreadable.insert(245);
-        assert!(refusal(peer(250), &panes, &procs).is_some());
+        assert!(refusal(peer(250), &mut None, &panes, &procs).is_some());
     }
 
     /// A token alone (Windows loopback TCP) does not tell the owner from a pane process that
@@ -484,8 +755,8 @@ mod tests {
     #[test]
     fn a_token_authenticated_peer_is_refused() {
         let procs = world();
-        for panes in [PaneSet::default(), PaneSet::of([200], &procs)] {
-            assert!(refusal(PeerOrigin::TokenAuthenticated, &panes, &procs)
+        for panes in [PaneRegistry::default(), panes_of(200, &procs)] {
+            assert!(refusal(PeerOrigin::TokenAuthenticated, &mut None, &panes, &procs)
                 .is_some_and(|why| why.contains("transport token")));
         }
     }
@@ -516,10 +787,10 @@ mod tests {
         assert!(matches!(origin, PeerOrigin::Process(PeerProcess { pid, .. }) if pid == me));
         let parent = proc_info(me).expect("own process").ppid;
         // This test process is not under a pane...
-        assert_eq!(refusal(origin, &PaneSet::default(), &SystemProcs), None);
+        assert_eq!(refusal(origin, &mut None, &PaneRegistry::default(), &SystemProcs), None);
         // ...but it is when its parent is a pane child.
-        let panes = PaneSet::of([parent], &SystemProcs);
-        assert!(refusal(origin, &panes, &SystemProcs).is_some());
+        let panes = panes_of(parent, &SystemProcs);
+        assert!(refusal(origin, &mut None, &panes, &SystemProcs).is_some());
     }
 
     #[cfg(unix)]
