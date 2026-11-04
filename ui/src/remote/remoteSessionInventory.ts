@@ -41,6 +41,7 @@ export type RemoteSessionInventoryEntry = {
   /** Readable default name the machine gave the session (`<adjective>-<noun>`); absent on older hosts. */
   readonly name?: string | null;
   readonly running: boolean;
+  readonly detached?: boolean;
   readonly agentType: string | null;
   readonly providerSessionId: string | null;
   readonly activityState: SessionActivityState | null;
@@ -227,6 +228,7 @@ export function parseSessionsPayload(
       title: text(row.title),
       ...(text(row.name) ? { name: text(row.name) } : {}),
       running: row.running,
+      ...(typeof row.detached === "boolean" ? { detached: row.detached } : {}),
       agentType: text(row.agentType ?? row.agent_type),
       providerSessionId: text(record(row.providerSession ?? row.provider_session)?.id),
       activityState: null,
