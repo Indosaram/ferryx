@@ -71,6 +71,8 @@ desktop = [
     "dep:tauri-plugin-process",
     "dep:tauri-plugin-window-state",
     "dep:tauri-plugin-updater",
+    "dep:tauri-plugin-deep-link",
+    "dep:tauri-plugin-single-instance",
     "dep:minisign-verify",
     "dep:semver",
     "dep:rodio",
@@ -181,6 +183,10 @@ tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-process = { version = "2", optional = true }
 # 2.5 requires tauri ^2.12; stay on 2.4.x until tauri itself is bumped.
 tauri-plugin-window-state = { version = "~2.4", optional = true }
+# ferryx:// links (todo 20). single-instance forwards a link that launched a second process to
+# the running app through deep-link, so a link never opens a second window set.
+tauri-plugin-deep-link = { version = "2", optional = true }
+tauri-plugin-single-instance = { version = "2", optional = true, features = ["deep-link"] }
 rodio = { version = "0.22", default-features = false, optional = true, features = [
     "playback",
     "wav",

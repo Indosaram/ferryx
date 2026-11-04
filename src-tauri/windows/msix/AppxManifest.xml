@@ -48,6 +48,11 @@
         </uap:DefaultTile>
         <uap:SplashScreen Image="Assets\Square310x310Logo.png" />
       </uap:VisualElements>
+      <Extensions>
+        <uap:Extension Category="windows.protocol">
+          <uap:Protocol Name="ferryx"/>
+        </uap:Extension>
+      </Extensions>
     </Application>
   </Applications>
 

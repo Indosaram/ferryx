@@ -1,4 +1,5 @@
 import { Activity, Settings2 } from "lucide-react";
+import { ProductHelp } from "../ProductHelp";
 
 import { cn } from "../../lib/cn";
 import { IconButton } from "../ui/IconButton";
@@ -19,6 +20,7 @@ export function SidebarFooter({ summary, onOpenResources, onOpenSettings, settin
       <span data-testid="sidebar-status-footer" className={cn("mr-auto min-w-0 truncate pl-0.5 text-muted-foreground", density === "touch" ? "text-xs" : "text-[10px]")}>
         {summary}
       </span>
+      <ProductHelp />
       {onOpenResources ? (
         <IconButton label="System resources" size="sm" onClick={onOpenResources}>
           <Activity className="size-3.5" />
