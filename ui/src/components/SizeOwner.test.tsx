@@ -7,7 +7,7 @@ const bridge = vi.hoisted(() => ({
   resize: vi.fn(async () => {}),
 }));
 vi.mock("../lib/tauri", () => ({
-  listenToThisWindow: vi.fn(async (_event, listener) => { bridge.listener = listener; return () => {}; }),
+  listenToThisWindow: vi.fn(async (_event: string, listener: NonNullable<typeof bridge.listener>) => { bridge.listener = listener; return () => {}; }),
   describeTerminal: vi.fn(async () => ({ sizeOwner: "phone:1", cols: 60, rows: 30 })),
   resizeTerminal: bridge.resize,
 }));
