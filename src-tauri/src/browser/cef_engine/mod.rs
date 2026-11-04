@@ -78,6 +78,10 @@ struct Tab {
 }
 
 static ENGINES: LazyLock<Mutex<HashMap<String, Engine>>> = LazyLock::new(Default::default);
+/// Held from the "is it running" check to the engine's registration: two tabs of one profile
+/// opening at once (a restored tab and an inbound link on a cold launch) would otherwise start
+/// two engines on one profile dir, and the second fails CEF initialization.
+static LAUNCHING: Mutex<()> = Mutex::new(());
 static TABS: LazyLock<Mutex<HashMap<String, Tab>>> = LazyLock::new(Default::default);
 
 /// A DevTools call waiting for its answer: the profile whose engine runs it, and the waiter.
@@ -229,18 +233,32 @@ pub fn ensure_running(launch: &EngineLaunch<'_>, profile: &str, sink: EventSink)
     if let Some(pid) = dead {
         engine_gone(profile, pid);
     }
-    if is_running(profile) {
+    start_once(
+        || is_running(profile),
+        || {
+            let failed = |error: std::io::Error| BrowserError::CreateFailed(format!("CEF engine: {error}"));
+            let mut command = Command::new(launch.engine_dir.join(ENGINE_EXE));
+            command.current_dir(launch.engine_dir);
+            if let Some(cache_dir) = launch.cache_dir {
+                std::fs::create_dir_all(cache_dir).map_err(failed)?;
+                command.env("FERRYX_CEF_CACHE", cache_dir);
+            }
+            platform::configure(&mut command, launch.parent);
+            start(command, profile, launch.parent, sink).map_err(failed)
+        },
+    )
+}
+
+/// Runs `start` unless `running`, with no other engine launch in between (see [`LAUNCHING`]).
+fn start_once(
+    running: impl Fn() -> bool,
+    start: impl FnOnce() -> Result<(), BrowserError>,
+) -> Result<(), BrowserError> {
+    let _launching = LAUNCHING.lock();
+    if running() {
         return Ok(());
     }
-    let failed = |error: std::io::Error| BrowserError::CreateFailed(format!("CEF engine: {error}"));
-    let mut command = Command::new(launch.engine_dir.join(ENGINE_EXE));
-    command.current_dir(launch.engine_dir);
-    if let Some(cache_dir) = launch.cache_dir {
-        std::fs::create_dir_all(cache_dir).map_err(failed)?;
-        command.env("FERRYX_CEF_CACHE", cache_dir);
-    }
-    platform::configure(&mut command, launch.parent);
-    start(command, profile, launch.parent, sink).map_err(failed)
+    start()
 }
 
 /// Opens a tab in its profile's engine, starting the engine first when it is not running.
@@ -767,6 +785,35 @@ mod tests {
         );
         assert!(!is_cef_tab("stand-in-tab"));
         assert!(!ENGINES.lock().contains_key(profile));
+    }
+
+    /// Two tabs of one profile opening at once (a restored tab and a cold launch's inbound
+    /// link, seen on maho-win) start one engine: the second waits for the first launch and then
+    /// finds it running. A barrier lines both threads up at the call.
+    #[test]
+    fn concurrent_opens_of_one_profile_start_one_engine() {
+        let started = std::sync::atomic::AtomicUsize::new(0);
+        let running = std::sync::atomic::AtomicBool::new(false);
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    start_once(
+                        || running.load(Ordering::SeqCst),
+                        || {
+                            started.fetch_add(1, Ordering::SeqCst);
+                            // Widen the window between the check and the registration.
+                            std::thread::yield_now();
+                            running.store(true, Ordering::SeqCst);
+                            Ok(())
+                        },
+                    )
+                    .expect("start");
+                });
+            }
+        });
+        assert_eq!(started.load(Ordering::SeqCst), 1);
     }
 
     /// Print and Save as PDF on a Chromium tab: `cmd_browser_print` routes to the tab's engine
