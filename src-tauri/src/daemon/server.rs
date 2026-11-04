@@ -2271,6 +2271,7 @@ pub struct DaemonServer {
     agent_integration: Arc<crate::daemon::agent_extension::AgentIntegration>,
     /// Cross-pane grants (`pane-grants.json`, rex todo 5), carried by the handover record.
     pub(crate) pane_grants: Arc<crate::daemon::pane_grants::PaneGrants>,
+    layouts: super::layout::Registry,
     /// Bearer token every connection must present before a request is dispatched. Windows has no
     /// filesystem ownership boundary on the transport, so the published port alone cannot
     /// authenticate a client.
@@ -4025,6 +4026,9 @@ impl DaemonServer {
             test_shell_command: parking_lot::Mutex::new(None),
         });
         handover_manager.set_size_ownership(Arc::clone(&session_service.size_ownerships));
+        let layout_root = get_default_session_path().parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+        let layouts = Arc::new(Mutex::new(super::layout::Store::new(layout_root)));
+        handover_manager.set_layouts(Arc::clone(&layouts));
         // OSC 7501 summaries from every mirror this daemon answers for become Protocol states.
         let protocol_reporters =
             Arc::new(crate::terminal::foreground::ProtocolReporters::default());
@@ -4195,6 +4199,7 @@ impl DaemonServer {
 
         Self {
             paired_hosts,
+            layouts,
             session_router,
             handover_manager,
             resource_sampler: Arc::new(crate::daemon::resource_usage::ResourceSampler::new()),
@@ -6241,6 +6246,8 @@ impl DaemonServer {
             if let Err(error) = crate::ipc::run_blocking(move || {
                 manager.adopt_recorded_size_ownership(&grants_legacy)
                     .map_err(crate::ipc::IpcError::internal)?;
+                manager.adopt_recorded_layouts(&grants_legacy)
+                    .map_err(crate::ipc::IpcError::internal)?;
                 manager
                     .adopt_recorded_pane_grants(&grants_legacy)
                     .map_err(crate::ipc::IpcError::internal)
@@ -7621,6 +7628,32 @@ impl DaemonServer {
                         Err(e) => daemon_error(e.to_string()),
                     }
                 }
+                Ok(DaemonRequest::LayoutGet { window }) => {
+                    let layouts = Arc::clone(&self.layouts);
+                    match crate::ipc::run_blocking(move || layouts.lock().get(&window).map_err(crate::ipc::IpcError::internal)).await {
+                        Ok(view) => DaemonResponse::LayoutOk { view },
+                        Err(error) => daemon_error(error.to_string()),
+                    }
+                }
+                Ok(DaemonRequest::LayoutApply { window, base_revision, intent }) => {
+                    let layouts = Arc::clone(&self.layouts);
+                    let changed_window = window.clone();
+                    let result = crate::ipc::run_blocking(move || Ok(layouts.lock().apply(&window, base_revision, intent))).await;
+                    match result {
+                        Ok(Ok(view)) => {
+                            let _ = self.remote_event_tx.send(DaemonRemoteEvent {
+                                event: "LayoutChanged".into(),
+                                payload: serde_json::json!({"window": changed_window, "revision": view.revision}),
+                            });
+                            DaemonResponse::LayoutOk { view }
+                        },
+                        Ok(Err(super::layout::ApplyError::Conflict(layout))) => DaemonResponse::LayoutConflict {
+                            code: "LAYOUT_CONFLICT".into(), revision: layout.revision, layout,
+                        },
+                        Ok(Err(super::layout::ApplyError::Invalid(error))) => daemon_error(error),
+                        Err(error) => daemon_error(error.to_string()),
+                    }
+                }
                 Ok(DaemonRequest::ClearSession) => {
                     match crate::ipc::run_blocking(move || clear_session_from_path(&get_default_session_path())).await {
                         Ok(()) => DaemonResponse::ClearSessionOk,
@@ -7983,6 +8016,7 @@ impl DaemonServer {
                     capabilities.push("screenHashV1".into());
                     capabilities.push("scrollbackBudgetV1".into());
                     capabilities.push("sizeOwnershipV1".into());
+                    capabilities.push("daemonLayoutV1".into());
                     #[cfg(feature = "local-split-qa")]
                     capabilities.push("sizeOwnershipQaV1".into());
                     #[cfg(feature = "remote-desktop")]
