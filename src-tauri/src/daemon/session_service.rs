@@ -770,6 +770,7 @@ impl DaemonSessionService {
             let generation = supplied.unwrap_or_else(|| self.terminal_service.remote().details(id).map(|d| d.generation).unwrap_or(0));
             match self.terminal_service.resize_operation(id, generation, cols, rows) {
                 Ok(pending) => {
+                    state.generation = generation;
                     if previous.owner != state.owner { self.publish_size_owner(id, state); }
                     pending
                 }
@@ -797,6 +798,23 @@ impl DaemonSessionService {
         };
         pending.await.map_err(|e| e.to_string())
     }
+    pub(crate) async fn persist_size_ownership(&self) -> Result<(), String> {
+        let path = self.remote_sessions_path.with_file_name("size-ownership.json");
+        let snapshot = self.size_ownerships.lock().clone();
+        crate::ipc::run_blocking(move || {
+            super::size_ownership::persist(&path, &snapshot).map_err(crate::ipc::IpcError::internal)
+        }).await.map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn restore_size_ownership(&self) -> Result<(), String> {
+        let path = self.remote_sessions_path.with_file_name("size-ownership.json");
+        let snapshot = crate::ipc::run_blocking(move || {
+            super::size_ownership::restore(&path).map_err(crate::ipc::IpcError::internal)
+        }).await.map_err(|error| error.to_string())?;
+        *self.size_ownerships.lock() = snapshot;
+        Ok(())
+    }
+
     pub fn session_activity_state(&self, session_id: &str) -> Option<String> {
         let current = self.agent_states.current(session_id)?;
         match current.state.trim().to_ascii_lowercase().as_str() {
