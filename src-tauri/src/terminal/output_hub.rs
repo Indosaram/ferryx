@@ -1453,6 +1453,9 @@ impl TerminalOutputHub {
     /// its first attach) keeps its output for that first attach, which then removes it; returns
     /// `false` in that case so the caller can bound the wait with `remove_ended_session`.
     pub fn end_session(&self, session_id: &str) -> bool {
+        if let Err(error) = crate::script::control::event("session.exit".into(), serde_json::json!({"sessionId":session_id})) {
+            tracing::debug!(%error, "Script exit subscriber unavailable");
+        }
         let Some(session_hub) = self.sessions.read().get(session_id).cloned() else {
             return true;
         };
