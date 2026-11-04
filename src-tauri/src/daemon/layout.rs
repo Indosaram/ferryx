@@ -709,6 +709,53 @@ mod tests {
         Intent::AddTabWithSession { tab_id: id.into(), label: id.into(), content: Content::Terminal { backend_session_id: format!("pty-{id}") }, activate: true }
     }
     #[test]
+    fn scoped_transfer_survives_restart_and_handover() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::new(root.path().into());
+        let scope = "[\"workspace\",\"/checkout\"]";
+        let scoped = |intent| Intent::Scoped { scope: scope.into(), intent: Box::new(intent) };
+        store.apply("main", 0, scoped(add("one"))).unwrap();
+        assert!(store.get("main").unwrap().layout.tabs.is_empty());
+        assert_eq!(store.get_scoped("main", Some(scope)).unwrap().layout.tabs.len(), 1);
+        let content: Content = serde_json::from_value(serde_json::json!({"kind":"browser","url":"https://example.org","browserId":"surface"})).unwrap();
+        store.apply("main", 1, scoped(Intent::SplitPane { tab_id: "one".into(), target_node_id: 1, dir: Direction::Horizontal, first: false, content })).unwrap();
+        store.apply("main", 2, scoped(Intent::TransferTab { tab_id: "one".into(), target_window: "second".into(), target_scope: Some(scope.into()) })).unwrap();
+        assert!(store.get_scoped("main", Some(scope)).unwrap().layout.tabs.is_empty());
+        let transferred = store.get_scoped("second", Some(scope)).unwrap();
+        let json = serde_json::to_value(&transferred.layout).unwrap();
+        assert_eq!(json["tabs"][0]["paneTree"]["b"]["content"]["browserId"], "surface");
+        assert_eq!(Store::new(root.path().into()).get_scoped("second", Some(scope)).unwrap().layout, transferred.layout);
+        let mut successor = Store::new(root.path().join("successor"));
+        successor.adopt(store.layouts.clone()).unwrap();
+        assert_eq!(successor.get_scoped("second", Some(scope)).unwrap().layout, transferred.layout);
+    }
+    #[test]
+    fn pane_ownership_roundtrips() {
+        for value in [
+            serde_json::json!({"kind":"file","path":"old","line":null,"col":null,"backendSessionId":"pty","workspaceId":"w","previewId":"preview","remote":{"hostId":"host"}}),
+            serde_json::json!({"kind":"changes","workspaceId":"w","worktreePath":"/checkout","worktree":{"branch":"topic"}}),
+        ] {
+            let content: Content = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(content).unwrap(), value);
+        }
+    }
+    #[test]
+    fn replacement_and_collinear_seams_match_ui() {
+        let mut layout = Layout::default();
+        layout.apply(add("one")).unwrap();
+        layout.apply(Intent::CloseTab { tab_id: "one".into(), replacement: Some(ReplacementTab { tab_id: "replacement".into(), label: "replacement".into(), content: Content::Dag }) }).unwrap();
+        assert_eq!(layout.active_tab_id.as_deref(), Some("replacement"));
+        let leaf = || Node::Leaf { node_id: 1, content: Content::Dag };
+        let row = || Node::Split { dir: Direction::Horizontal, ratio: 0.5, a: Box::new(leaf()), b: Box::new(leaf()) };
+        let mut root = Node::Split { dir: Direction::Vertical, ratio: 0.5, a: Box::new(row()), b: Box::new(row()) };
+        let seam = root.resolve_seam("first");
+        assert_eq!(seam.members.len(), 2);
+        root.apply_seam(seam, 0.7).unwrap();
+        for path in ["first", "second"] {
+            assert!(matches!(root.at(path), Some(Node::Split { ratio, .. }) if *ratio == 0.7));
+        }
+    }
+    #[test]
     fn conflict_rebase_and_idle_restart() {
         let root = tempfile::tempdir().unwrap();
         let mut store = Store::new(root.path().into());
