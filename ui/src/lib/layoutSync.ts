@@ -231,7 +231,7 @@ function unscopedIntentForAction(sync: LayoutSync, action: WorkspaceAction, befo
     case "ADD_TAB_WITH_SESSION": return { type: action.type, tabId: action.tab.id,
       label: action.tab.label, activate: action.activate !== false, content: content(action.tab.id) };
     case "CLOSE_TAB": return { type: action.type, tabId: action.tabId,
-      replacement: action.replacement ? { tabId: action.replacement.tab.id, label: action.replacement.tab.label,
+      replacement: action.replacement && after.layout.tabs.some((tab) => tab.id === action.replacement!.tab.id) ? { tabId: action.replacement.tab.id, label: action.replacement.tab.label,
         content: content(action.replacement.tab.id) } : null };
     case "SET_PANE_RATIO": return { ...action, seam: action.isolated ? null : action.seam ?? resolveSeam(before.layout.layoutsByTabId[action.tabId].root, action.path) };
     case "ACTIVATE_TAB": case "REORDER_TAB": case "RENAME_TAB":
@@ -281,6 +281,16 @@ export function isLayoutIntentAction(action: WorkspaceAction): boolean {
 
 export function rehydrateWorkspace(state: WorkspaceState, view = layoutSync.current()): WorkspaceState {
   if (!view) return state;
+  const sessions = { ...state.sessions };
+  const admit = (node: DaemonNode) => {
+    if (node.type === "split") { admit(node.a); admit(node.b); return; }
+    if (node.content.kind !== "terminal") return;
+    const id = node.content.backendSessionId;
+    if (!Object.values(sessions).some((session) => session.backendSessionId === id)) {
+      sessions[id] = { id, backendSessionId: id, workspaceId: state.workspaceId ?? "", cwd: state.activeWorktreePath ?? "",
+        worktree: null, lifecycle: "working" };
+    }
+  };
   const find = (layout: DaemonLayout, scope: string): DaemonLayout | undefined => {
     if (layout.scope === scope || !layout.scope && scope === JSON.stringify([state.workspaceId ?? "", null])) return layout;
     if (layout.parkedLayouts?.[scope]) return layout.parkedLayouts[scope];
@@ -289,6 +299,8 @@ export function rehydrateWorkspace(state: WorkspaceState, view = layoutSync.curr
   };
   const saved = find(view.layout, layoutScope(state));
   if (!saved) return { ...state, layout: createLayoutState() };
+  for (const tab of saved.tabs) admit(tab.paneTree);
+  state = { ...state, sessions };
   const layout = hydrateLayout({ ...view, layout: saved }, state);
   const worktreeLayouts = { ...state.worktreeLayouts };
   for (const [scope, parked] of Object.entries(saved.parkedLayouts ?? {})) {
