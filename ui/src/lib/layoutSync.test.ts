@@ -3,6 +3,7 @@ import { createLayoutState, layoutReducer } from "../state/layout";
 import type { WorkspaceState } from "../state/workspaceStore";
 import { hydrateLayout, intentForAction, LayoutSync, type DaemonLayout, type LayoutReply, type LayoutTransport } from "./layoutSync";
 import { closeTerminal } from "./tauri";
+import { withTimeout } from "./withTimeout";
 
 vi.mock("./tauri", () => ({ closeTerminal: vi.fn() }));
 
@@ -54,9 +55,9 @@ describe("daemon layout revisions", () => {
     await sync.refresh();
     const first = sync.send(() => ({ type: "RENAME_TAB", tabId: "tab", label: "a" }), () => {});
     const staleClose = sync.send(() => ({ type: "CLOSE_TAB", tabId: "tab" }), () => {});
-    await applied;
+    await withTimeout(applied, 1_000, "layout apply signal");
     respond({ type: "conflict", code: "LAYOUT_CONFLICT", revision: 2, layout: daemon(2) });
-    await Promise.all([first, staleClose]);
+    await withTimeout(Promise.all([first, staleClose]), 1_000, "layout conflict reconciliation");
     expect(io.apply).toHaveBeenCalledTimes(1);
     expect(sync.current()!.layout.tabs).toHaveLength(1);
   });
@@ -78,5 +79,4 @@ describe("daemon layout revisions", () => {
     expect(io.apply).not.toHaveBeenCalled();
   });
 });
-
 
