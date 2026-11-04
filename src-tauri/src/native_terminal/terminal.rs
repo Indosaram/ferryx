@@ -56,11 +56,13 @@ use crate::terminal::TerminalThemeColors;
 
 /// Shortest spacing between two animation redraws: one frame at 120 Hz, as kitty_graphics.h
 /// ("Animation", step 2) recommends. Playback advances at most one frame per tick anyway.
+#[cfg(any(feature = "native-terminal", test))]
 const MIN_ANIMATION_FRAME_MS: u64 = 8;
 
 /// Converts the next due frame `next_ms` (on the terminal's animation clock that started at
 /// `epoch`) into a pump deadline no sooner than one minimum frame interval after `now_ms`.
 /// `None` only if the due time is beyond what `Instant` can represent.
+#[cfg(any(feature = "native-terminal", test))]
 fn clamp_animation_deadline(
     epoch: std::time::Instant,
     now_ms: u64,
@@ -144,6 +146,7 @@ pub struct NativeTerminal {
     synchronized_output_deadline: Option<tokio::time::Instant>,
     /// Start of this terminal's monotonic Kitty animation clock. libghostty requires one clock
     /// with one starting point for the terminal's whole lifetime.
+    #[cfg(any(feature = "native-terminal", test))]
     animation_epoch: std::time::Instant,
     /// When the next Kitty animation frame is due, from the last tick; `None` when nothing plays.
     animation_deadline: std::cell::Cell<Option<tokio::time::Instant>>,
@@ -181,6 +184,7 @@ impl NativeTerminal {
             gesture,
             image_cache: Default::default(),
             synchronized_output_deadline: None,
+            #[cfg(any(feature = "native-terminal", test))]
             animation_epoch: std::time::Instant::now(),
             animation_deadline: std::cell::Cell::new(None),
             scrollback_pruned_rows: 0,
@@ -322,6 +326,7 @@ impl NativeTerminal {
         Ok(config.value)
     }
 
+    #[cfg(any(feature = "native-terminal", test))]
     pub(crate) fn synchronized_output_deadline(&self) -> Option<tokio::time::Instant> {
         self.synchronized_output_deadline
     }
@@ -378,12 +383,14 @@ impl NativeTerminal {
     }
 
     /// When the next Kitty animation frame is due, as recorded by the last tick.
+    #[cfg(any(feature = "native-terminal", test))]
     pub(crate) fn animation_deadline(&self) -> Option<tokio::time::Instant> {
         self.animation_deadline.get()
     }
 
     /// Forgets a deadline that is due at `now`, so a wakeup that cannot redraw (no layout yet)
     /// does not fire again immediately. The next tick arms a fresh one.
+    #[cfg(feature = "native-terminal")]
     pub(crate) fn clear_due_animation_deadline(&self, now: tokio::time::Instant) {
         if self.animation_deadline.get().is_some_and(|deadline| deadline <= now) {
             self.animation_deadline.set(None);
@@ -392,10 +399,12 @@ impl NativeTerminal {
 
     /// Forgets the animation deadline of a pane that cannot show it (detached or occluded), so
     /// the first tick after it becomes visible again counts as newly armed and wakes the pump.
+    #[cfg(feature = "native-terminal")]
     pub(crate) fn forget_animation_deadline(&self) {
         self.animation_deadline.set(None);
     }
 
+    #[cfg(any(feature = "native-terminal", test))]
     pub(crate) fn expire_synchronized_output(
         &mut self,
         now: tokio::time::Instant,
@@ -410,6 +419,7 @@ impl NativeTerminal {
         Ok(true)
     }
 
+    #[cfg(any(feature = "native-terminal", test))]
     pub(crate) fn finish_synchronized_output(&mut self) -> Result<(), NativeTerminalError> {
         self.set_synchronized_output(false)?;
         self.synchronized_output_deadline = None;

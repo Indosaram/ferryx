@@ -3,7 +3,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "desktop")]
 const HISTOGRAM_CAPACITY: usize = 4096;
+#[cfg(feature = "desktop")]
 const DUMP_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy)]
@@ -12,11 +14,13 @@ struct PtyReadMark {
     unix_micros: u64,
 }
 
+#[cfg(feature = "desktop")]
 struct LatencyHistogram {
     samples_ms: VecDeque<f64>,
     last_dump: Instant,
 }
 
+#[cfg(feature = "desktop")]
 impl LatencyHistogram {
     fn new() -> Self {
         Self {
@@ -51,6 +55,7 @@ impl LatencyHistogram {
 static METRICS_ENABLED: OnceLock<bool> = OnceLock::new();
 static PTY_READ_MARKS: Mutex<Option<HashMap<String, VecDeque<PtyReadMark>>>> = Mutex::new(None);
 static PENDING_BATCH_READS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
+#[cfg(feature = "desktop")]
 static READ_TO_CHANNEL_SEND: OnceLock<Mutex<LatencyHistogram>> = OnceLock::new();
 
 pub(crate) fn terminal_metrics_enabled() -> bool {
@@ -109,6 +114,7 @@ pub(crate) fn clear_pty_read_timestamps(session_id: &str) {
     }
 }
 
+#[cfg(feature = "desktop")]
 pub(crate) fn note_batch_read_timestamp(session_id: &str, read_unix_micros: Option<u64>) {
     if !terminal_metrics_enabled() {
         return;
@@ -125,6 +131,7 @@ pub(crate) fn note_batch_read_timestamp(session_id: &str, read_unix_micros: Opti
         .or_insert(read_unix_micros);
 }
 
+#[cfg(feature = "desktop")]
 pub(crate) fn record_channel_send_for_session(session_id: &str) {
     if !terminal_metrics_enabled() {
         return;
@@ -145,6 +152,7 @@ pub(crate) fn clear_pending_batch_read(session_id: &str) {
     }
 }
 
+#[cfg(feature = "desktop")]
 fn record_read_to_channel_send(read_unix_micros: Option<u64>) {
     if !terminal_metrics_enabled() {
         return;
@@ -179,6 +187,7 @@ fn unix_micros_now() -> Option<u64> {
     u64::try_from(micros).ok()
 }
 
+#[cfg(feature = "desktop")]
 fn percentile(sorted: &[f64], percentile: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
