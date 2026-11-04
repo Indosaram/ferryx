@@ -47,6 +47,7 @@ async function client() {
       const signal = timeout();
       signal.addEventListener('abort', () => reject(new Error(`request timeout: ${value.type}`)), { once: true });
     });
+    if (value.type === 'write' && Array.isArray(value.data)) value.data = Buffer.from(value.data).toString('base64');
     socket.write(`${JSON.stringify(value)}\n`);
     return response;
   }
@@ -75,7 +76,7 @@ try {
   output.on('line', line => {
     const message = JSON.parse(line);
     if (message.type === 'output') {
-      transcript += Buffer.from(message.data).toString();
+      transcript += Buffer.from(message.data, 'base64').toString();
       for (const entry of observed) if (transcript.includes(entry.pattern)) entry.done();
     }
   });
