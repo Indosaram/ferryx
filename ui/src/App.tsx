@@ -76,7 +76,7 @@ import {
   OPEN_ONBOARDING_EVENT,
   dismissOnboarding,
   initialWizardStepIndex,
-  loadOnboardingState,
+  hydrateOnboardingState,
   markOnboardingStepsCompleted,
   satisfiedOnboardingSteps,
   shouldAutoOpenOnboarding,
@@ -3657,6 +3657,10 @@ function WorkspaceApp({
     let cancelled = false;
     const timer = setTimeout(async () => {
       if (activeRemoteHostRef.current) return;
+      try { await hydrateOnboardingState(); } catch (error) {
+        toast.error(String(error));
+        return;
+      }
       const [permissions, cli, enrollment, devices, setup] = await Promise.all([
         getSystemPermissionsStatus().catch(() => null),
         getCliLauncherStatus().catch(() => null),
@@ -3674,10 +3678,12 @@ function WorkspaceApp({
         cli,
         projectCount: projectsRef.current.length,
         accountLinked: enrollment?.enrolled === true,
+        enrollmentReady: false,
+        skillsReady: false,
         pairedDeviceCount: devices ? devices.filter((device) => !device.revoked).length : null,
         supervisorReady: setup.kind === "ok" ? setupFinished(setup.status) : null,
       };
-      const state = loadOnboardingState();
+      const state = await hydrateOnboardingState();
       if (shouldAutoOpenOnboarding(state, ctx)) {
         const wizard = wizardSteps(ctx);
         setOnboardingDoneSteps(satisfiedOnboardingSteps(state, ctx));
@@ -3711,10 +3717,12 @@ function WorkspaceApp({
         cli,
         projectCount: projectsRef.current.length,
         accountLinked: enrollment?.enrolled === true,
+        enrollmentReady: false,
+        skillsReady: false,
         pairedDeviceCount: devices ? devices.filter((device) => !device.revoked).length : null,
         supervisorReady: setup.kind === "ok" ? setupFinished(setup.status) : null,
       };
-      setOnboardingDoneSteps(satisfiedOnboardingSteps(loadOnboardingState(), ctx));
+      setOnboardingDoneSteps(satisfiedOnboardingSteps(await hydrateOnboardingState(), ctx));
       const steps = wizardSteps(ctx);
       const requested = (event as CustomEvent<{ step?: OnboardingStepId }>).detail?.step;
       setOnboardingInitialStepIndex(requested ? Math.max(0, steps.indexOf(requested)) : 0);
