@@ -7,13 +7,15 @@ export function Detached({ scope }: { scope?: string }) {
   const [error, setError] = useState<string | null>(null);
   const refresh = useCallback(async () => {
     try {
-      setSessions(await invoke<string[]>("cmd_panes", { request: { action: "list" } }));
+      const inventory = await invoke<string[]>("cmd_panes", { request: { action: "list" } });
+      if (!Array.isArray(inventory)) throw new Error("Invalid detached inventory");
+      setSessions(inventory);
       setError(null);
     } catch (failure) { setError(String(failure)); }
   }, []);
   useEffect(() => {
 
-    const subscription = listen("LayoutChanged", () => { void refresh(); });
+    const subscription = listen("LayoutChanged", () => { void refresh(); }).catch(failure => { setError(String(failure)); return () => {}; });
     void refresh();
     return () => { void subscription.then(unlisten => unlisten()); };
   }, [refresh]);
