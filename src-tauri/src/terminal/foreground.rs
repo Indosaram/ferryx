@@ -552,6 +552,7 @@ pub(crate) fn observe_with_snapshot(
 }
 
 /// A display name only: never return arguments, even when they contain credentials.
+#[cfg(any(windows, test))]
 fn command_basename(command: &str) -> Option<String> {
     let token = command_tokens(command).first().copied()?;
     basename(token.trim_matches('"'))
