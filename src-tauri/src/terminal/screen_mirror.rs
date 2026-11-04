@@ -687,6 +687,38 @@ mod tests {
         assert_eq!(serde_json::from_str::<ScreenSeed>(&json).unwrap(), seed);
     }
 
+    #[test]
+    fn seed_round_trip_grid_hash_equal() {
+        let mut mirror = ScreenMirror::new(80, 24).unwrap();
+        mirror.feed(b"history\r\n\x1b[1;31mRED\x1b[0m\r\n");
+        let mut rebuilt = ScreenMirror::from_seed(&mirror.seed().unwrap()).unwrap();
+        assert_eq!(mirror.grid_hash(), rebuilt.grid_hash());
+    }
+
+    #[test]
+    fn grid_hash_differs_on_attribute_change() {
+        let mut plain = ScreenMirror::new(80, 24).unwrap();
+        let mut bold = ScreenMirror::new(80, 24).unwrap();
+        plain.feed(b"text");
+        bold.feed(b"\x1b[1mtext\x1b[0m");
+        let plain = plain.grid_hash().unwrap();
+        let bold = bold.grid_hash().unwrap();
+        assert_ne!(plain.hash, bold.hash);
+        assert_eq!(plain.text_hash, bold.text_hash);
+    }
+
+    #[test]
+    fn scrollback_budget_enforces_lines_and_memory() {
+        assert!(check_scrollback_budget(10_000, 80).is_ok());
+        assert!(check_scrollback_budget(100_000, 80).is_err());
+        assert!(check_scrollback_budget(10_000, 500).is_err());
+        let mut mirror = ScreenMirror::new(80, 24).unwrap();
+        assert_eq!(mirror.scrollback_lines(), 2_000);
+        mirror.set_scrollback_lines(10_000).unwrap();
+        assert!(mirror.set_scrollback_lines(100_000).is_err());
+        assert_eq!(mirror.scrollback_lines(), 10_000);
+    }
+
     /// A seed taken by the previous libghostty-vt pin (6a508fd) crosses a rolling handover into
     /// this build's mirror. The fixture holds the rows, cursor and screen the old build saw; this
     /// parser must rebuild exactly that screen from the old seed bytes.
