@@ -8,6 +8,7 @@ export type OnboardingStepId =
   | "account"
   | "intro"
   | "features"
+  | "import"
   | "agents"
   | "enroll"
   | "skills"
@@ -31,6 +32,7 @@ export const ONBOARDING_VERSION = 1;
 export const ONBOARDING_STEP_ORDER: readonly OnboardingStepId[] = [
   "intro",
   "features",
+  "import",
   "agents",
   "enroll",
   "skills",
@@ -287,6 +289,7 @@ export function isOnboardingStepSatisfied(
     case "cli":
       return ctx.cli === null || !ctx.cli.isSupported || ctx.cli.isInstalled;
     case "features":
+    case "import":
       // Informational step: only completedSteps marks it as done.
       return false;
     case "project":
@@ -343,7 +346,7 @@ export function initialWizardStepIndex(
   ctx: OnboardingContext
 ): number {
   const pending = pendingOnboardingSteps(state, ctx);
-  const target = pending.find((step) => step !== "features") ?? pending[0];
+  const target = pending.find((step) => step !== "features" && step !== "import") ?? pending[0];
   if (!target) return 0;
   return Math.max(0, steps.indexOf(target));
 }
@@ -364,6 +367,7 @@ export function shouldAutoOpenOnboarding(
       // force the wizard open (already-onboarded users get the supervisor setup banner instead).
       (step) =>
         step !== "features" &&
+        step !== "import" &&
         step !== "cli" &&
         step !== "try" &&
         step !== "account" &&

@@ -25,12 +25,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+#[cfg(windows)]
+type OwnedReadHalf = tokio::io::ReadHalf<DaemonStream>;
+#[cfg(windows)]
+type OwnedWriteHalf = tokio::io::WriteHalf<DaemonStream>;
 #[cfg(unix)]
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 use tokio::net::TcpStream as DaemonStream;
+#[cfg(windows)]
+use super::windows_pipe::Stream as DaemonStream;
 #[cfg(unix)]
 use tokio::net::UnixStream as DaemonStream;
 use tokio::sync::mpsc;
@@ -1641,7 +1647,7 @@ impl DaemonClient {
                     let credential = read_transport_token_for(&path);
                     #[cfg(unix)]
                     let endpoint = path;
-                    #[cfg(not(unix))]
+                    #[cfg(not(any(unix, windows)))]
                     let endpoint = {
                         let port = fs::read_to_string(&path)
                             .map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string()))?;
@@ -1650,6 +1656,8 @@ impl DaemonClient {
                         })?;
                         std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, port)
                     };
+                    #[cfg(windows)]
+                    let endpoint = path;
                     Ok((credential, endpoint))
                 })
                 .await
@@ -1662,8 +1670,11 @@ impl DaemonClient {
             "connect",
             SplitDelivery::NotSent,
             async {
-                DaemonStream::connect(endpoint)
-                    .await
+                #[cfg(windows)]
+                let connected = Self::connect_socket(&endpoint).await;
+                #[cfg(not(windows))]
+                let connected = DaemonStream::connect(endpoint).await;
+                connected
                     .map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string()))
             },
         )
@@ -2695,6 +2706,12 @@ impl DaemonClient {
     }
 
     fn validate_existing_socket_path(path: &Path) -> Result<(), IpcError> {
+        #[cfg(windows)]
+        if path == get_socket_path() && !path.exists() {
+            // A pipe-only connection has no rendezvous file to validate. The pipe's protected
+            // DACL is its trust boundary; connect_socket will still fail if no pipe is present.
+            return Ok(());
+        }
         #[cfg(feature = "local-split-qa")]
         {
             if let Some(forwarder) = Self::resolve_qa_forwarder_socket_path() {
@@ -2729,6 +2746,10 @@ impl DaemonClient {
 
     #[cfg(not(unix))]
     async fn connect_socket(path: &Path) -> Result<DaemonStream, std::io::Error> {
+        #[cfg(windows)]
+        if path == get_socket_path() {
+            if let Ok(stream) = DaemonStream::pipe("daemon") { return Ok(stream); }
+        }
         let port_str = fs::read_to_string(path)?;
         let port: u16 = port_str
             .trim()
@@ -2990,6 +3011,10 @@ impl DaemonClient {
     }
 
     async fn try_connect_existing_socket(&self) -> Result<DaemonStream, std::io::Error> {
+        #[cfg(windows)]
+        if self.socket_path == get_socket_path() {
+            if let Ok(stream) = DaemonStream::pipe("daemon") { return Ok(stream); }
+        }
         if fs::symlink_metadata(&self.socket_path).is_ok()
             && Self::validate_existing_socket_path(&self.socket_path).is_ok()
         {
@@ -5266,7 +5291,7 @@ mod local_control_isolation_tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap());
         let (client, accepted) = tokio::join!(client, listener.accept());
-        (client.unwrap(), accepted.unwrap().0)
+        (client.unwrap().into(), accepted.unwrap().0.into())
     }
 
     #[tokio::test]
@@ -8060,7 +8085,7 @@ mod local_split_transport_tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap());
         let (client, accepted) = tokio::join!(client, listener.accept());
-        (client.unwrap(), accepted.unwrap().0)
+        (client.unwrap().into(), accepted.unwrap().0.into())
     }
 
     use std::pin::Pin;

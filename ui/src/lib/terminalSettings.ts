@@ -12,6 +12,8 @@ import {
 } from "./tauri";
 
 export type TerminalSettings = {
+  cursorStyle?: "bar" | "block" | "underline" | null;
+  theme?: Partial<TerminalThemeColors> | null;
   osc52Write?: boolean;
   fontFamily: string | null;
   macosOptionAsAlt: boolean | null;
@@ -174,8 +176,8 @@ export function resolveTerminalSettings(
     scrollbackCompression: typeof local.scrollbackCompression === "boolean"
       ? local.scrollbackCompression
       : nativePreferences.scrollbackCompression ?? true,
-    cursorStyle,
-    theme: nativePreferences.theme ?? DEFAULT_TERMINAL_THEME,
+    cursorStyle: local.cursorStyle ?? cursorStyle,
+    theme: { ...(nativePreferences.theme ?? DEFAULT_TERMINAL_THEME), ...local.theme },
     fontFamilySource: localFontFamily ? "local" : ghosttyImported ? "ghostty" : "fallback",
     macosOptionAsAltSource: hasLocalOptionOverride ? "local" : ghosttyImported ? "ghostty" : "fallback",
     fontSizeSource: hasLocalFontSizeOverride ? "local" : ghosttyImported ? "ghostty" : "fallback",
@@ -194,6 +196,8 @@ export function resetTerminalPreferencesCache() {
 
 async function syncNativeOverrides(settings: TerminalSettings): Promise<void> {
   const payload = {
+    cursorStyle: settings.cursorStyle ?? null,
+    theme: settings.theme ? { ...DEFAULT_TERMINAL_THEME, ...settings.theme } : null,
     fontFamily: settings.fontFamily,
     fontSize: settings.fontSize,
     macosOptionAsAlt: settings.macosOptionAsAlt,
@@ -299,6 +303,8 @@ export function useTerminalSettings(remote?: RemotePreferenceTarget) {
 
 function normalizeTerminalSettings(settings: Partial<TerminalSettings>): TerminalSettings {
   return {
+    cursorStyle: settings.cursorStyle === "bar" || settings.cursorStyle === "underline" || settings.cursorStyle === "block" ? settings.cursorStyle : null,
+    theme: settings.theme ?? null,
     osc52Write: settings.osc52Write === true,
     fontFamily: normalizeOptionalFontFamily(settings.fontFamily),
     macosOptionAsAlt: typeof settings.macosOptionAsAlt === "boolean" ? settings.macosOptionAsAlt : null,

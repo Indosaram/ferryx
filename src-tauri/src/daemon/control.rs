@@ -446,6 +446,16 @@ impl std::fmt::Debug for ControlClient {
 
 /// Connects to the control endpoint inside runtime_dir.
 pub async fn connect(runtime_dir: &std::path::Path) -> std::io::Result<ControlConnection> {
+    #[cfg(windows)]
+    if runtime_dir == super::server::get_runtime_dir() {
+        if let Ok(stream) = super::windows_pipe::connect("control") {
+            let (reader, writer) = tokio::io::split(stream);
+            return Ok(ControlConnection::Connected(ControlClient {
+                reader: tokio::io::BufReader::new(Box::new(reader)),
+                writer: Box::new(writer), token: None,
+            }));
+        }
+    }
     #[cfg(unix)]
     {
         let path = runtime_dir.join(CONTROL_SOCKET_FILE);

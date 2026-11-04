@@ -15,6 +15,8 @@ import {
 } from "lucide-react";
 
 import { isMacShortcutPlatform } from "../lib/shortcuts";
+import { useTranslation } from "../i18n";
+import { ImportSection } from "./settings/ImportSection";
 import { useAdvancedFeatures } from "../lib/advancedFeatures";
 import { useShortcutOverrides, useShortcutPreset } from "../lib/shortcutOverrides";
 import { DEFAULT_TERMINAL_SETTINGS, useTerminalSettings } from "../lib/terminalSettings";
@@ -57,6 +59,7 @@ export function SettingsDialog({
 type SettingsDialogBodyProps = Omit<SettingsDialogProps, "open">;
 
 const VALID_SECTIONS: readonly SectionId[] = [
+  "import",
   "general",
   "appearance",
   "terminal",
@@ -158,6 +161,8 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
   }, [onClose]);
 
   const hasLocalTerminalOverride =
+    localSettings.cursorStyle != null ||
+    localSettings.theme != null ||
     settings.fontFamilySource === "local" ||
     settings.macosOptionAsAltSource === "local" ||
     settings.fontSizeSource === "local" ||
@@ -197,6 +202,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
             <NavButton active={section === "general"} icon={<Settings2 />} label="General" onClick={() => setSection("general")} />
             <NavButton active={section === "appearance"} icon={<Palette />} label="Appearance" onClick={() => setSection("appearance")} />
             <NavButton active={section === "terminal"} icon={<TerminalSquare />} label="Terminal" onClick={() => setSection("terminal")} />
+            <NavButton active={section === "import"} icon={<TerminalSquare />} label={t("settings.import.title")} onClick={() => setSection("import")} />
             <NavButton active={section === "shortcuts"} icon={<Keyboard />} label="Keyboard Shortcuts" onClick={() => setSection("shortcuts")} />
             <NavButton active={section === "agents"} icon={<Bot />} label="Agents" onClick={() => setSection("agents")} />
             <NavButton active={section === "paneAccess"} icon={<KeyRound />} label="Pane access" onClick={() => setSection("paneAccess")} />
@@ -220,6 +226,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
         <div data-tauri-drag-region className="h-titlebar shrink-0 border-b border-border/70" />
         <div className="selectable mx-auto w-full max-w-[896px] px-8 pb-16 pt-10">
           {section === "general" ? <GeneralSection /> : null}
+          {section === "import" ? <ImportSection /> : null}
           {section === "appearance" ? <AppearanceSection /> : null}
           {section === "terminal" ? (
             <TerminalSection
@@ -241,6 +248,8 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
               onScrollbackCompression={(scrollbackCompression) => updateSettings({ scrollbackCompression })}
               onUseImported={() => {
                 updateSettings({
+                  cursorStyle: null,
+                  theme: null,
                   fontFamily: null,
                   macosOptionAsAlt: null,
                   fontSize: null,

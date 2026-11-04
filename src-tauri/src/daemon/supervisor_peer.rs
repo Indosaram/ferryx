@@ -239,7 +239,51 @@ pub fn proc_info(pid: u32) -> Result<ProcInfo, ProcError> {
                 .saturating_add(info.pbi_start_tvusec),
         })
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE},
+            System::{
+                Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS},
+                Threading::{OpenProcess, GetProcessTimes, PROCESS_QUERY_LIMITED_INFORMATION},
+            },
+        };
+        // Hold a process handle while taking the snapshot so pid reuse cannot substitute a
+        // different process between the parent and creation-time reads.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return Err(if std::io::Error::last_os_error().raw_os_error() == Some(87) {
+                ProcError::Vanished
+            } else { ProcError::Unreadable });
+        }
+        let result = (|| {
+            let mut creation: FILETIME = unsafe { std::mem::zeroed() };
+            let mut exit = creation;
+            let mut kernel = creation;
+            let mut user = creation;
+            if unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
+                return Err(ProcError::Unreadable);
+            }
+            let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+            if snapshot == INVALID_HANDLE_VALUE { return Err(ProcError::Unreadable); }
+            let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut found = None;
+            let mut more = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+            while more {
+                if entry.th32ProcessID == pid { found = Some(entry.th32ParentProcessID); break; }
+                more = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+            }
+            unsafe { CloseHandle(snapshot) };
+            Ok(ProcInfo {
+                ppid: found.ok_or(ProcError::Vanished)?, pgid: None, session: None, tty: None,
+                start: (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime),
+            })
+        })();
+        unsafe { CloseHandle(process) };
+        result
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = pid;
         Err(ProcError::Unreadable)

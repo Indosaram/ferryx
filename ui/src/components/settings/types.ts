@@ -2,6 +2,7 @@ import type { ShortcutOverrides } from "../../lib/shortcutOverrides";
 import type { ShortcutActionId, ShortcutBinding, ShortcutPreset } from "../../lib/shortcuts";
 
 export type SectionId =
+  | "import"
   | "general"
   | "appearance"
   | "terminal"

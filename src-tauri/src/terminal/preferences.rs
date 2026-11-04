@@ -866,6 +866,8 @@ pub fn load_terminal_preferences_for(appearance: TerminalAppearance) -> Terminal
 /// Local, user-set terminal preferences that take precedence over the Ghostty import.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TerminalPreferenceOverrides {
+    pub cursor_style: Option<String>,
+    pub theme: Option<TerminalThemeColors>,
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
     pub macos_option_as_alt: Option<bool>,
@@ -888,6 +890,12 @@ pub fn apply_terminal_preference_overrides(
     overrides: &TerminalPreferenceOverrides,
 ) -> TerminalPreferences {
     let mut effective = imported.clone();
+    if let Some(style) = overrides.cursor_style.as_deref().filter(|s| ["bar", "block", "underline"].contains(s)) {
+        effective.cursor_style = style.to_owned();
+    }
+    if let Some(theme) = &overrides.theme {
+        effective.theme = theme.clone();
+    }
     if let Some(font_family) = overrides
         .font_family
         .as_deref()

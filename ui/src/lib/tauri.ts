@@ -359,6 +359,8 @@ export async function getTerminalPreferences(remote?: RemotePreferenceTarget): P
 }
 
 export type TerminalOverrides = {
+  cursorStyle?: "bar" | "block" | "underline" | null;
+  theme?: TerminalThemeColors | null;
   fontFamily: string | null;
   fontSize: number | null;
   macosOptionAsAlt: boolean | null;

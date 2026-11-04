@@ -437,7 +437,9 @@ pub(super) async fn connect_daemon() -> Result<tokio::net::UnixStream, (Value, i
 }
 
 #[cfg(not(unix))]
-pub(super) async fn connect_daemon() -> Result<tokio::net::TcpStream, (Value, i32)> {
+pub(super) async fn connect_daemon() -> Result<ControlStream, (Value, i32)> {
+    #[cfg(windows)]
+    if let Ok(stream) = ControlStream::pipe("daemon") { return Ok(stream); }
     let path = crate::daemon::server::get_socket_path();
     let not_running = || {
         let (value, _) = failure("NOT_FOUND", "no Ferryx daemon is listening");
@@ -448,8 +450,13 @@ pub(super) async fn connect_daemon() -> Result<tokio::net::TcpStream, (Value, i3
         .ok()
         .and_then(|text| text.trim().parse().ok())
         .ok_or_else(not_running)?;
-    tokio::net::TcpStream::connect(("127.0.0.1", port)).await.map_err(|_| not_running())
+    ControlStream::connect(("127.0.0.1", port)).await.map_err(|_| not_running())
 }
+
+#[cfg(windows)]
+type ControlStream = crate::daemon::windows_pipe::Stream;
+#[cfg(not(any(unix, windows)))]
+type ControlStream = tokio::net::TcpStream;
 
 /// Send one goal action to the running daemon, gated on `supervisorGoalV1` so an older daemon
 /// never receives a request it cannot parse. A lost answer to a mutation is

@@ -118,6 +118,7 @@ remote-desktop = [
 iroh-direct = ["dep:iroh"]
 
 [dependencies]
+plist = "1.10"
 mlua = { version = "0.12", features = ["luau", "serialize"] }
 cpu-time = "1"
 ferryx-hub = { path = "../crates/ferryx-hub" }
@@ -308,6 +309,11 @@ notify-rust = "4.18.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", default-features = false, features = [
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
