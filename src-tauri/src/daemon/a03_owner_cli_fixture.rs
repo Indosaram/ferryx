@@ -269,6 +269,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push("daemonLayoutV1");
             capabilities.push(crate::daemon::onboarding::CAPABILITY);
             capabilities.push(crate::script::CAPABILITY);
+            capabilities.push(crate::script::api::CAPABILITY);
             capabilities.push("detachedPanesV1");
             capabilities.push("terminalOscEffectsV1");
             capabilities.push("blockPluginsV1");
