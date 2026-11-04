@@ -3964,6 +3964,35 @@ impl DaemonServer {
         ));
         handover_manager.set_pane_grants(Some(Arc::clone(&pane_grants)));
         let remote_event_tx = broadcast::channel::<DaemonRemoteEvent>(64).0;
+        let osc_tx = remote_event_tx.clone();
+        let osc_terminal = Arc::downgrade(&terminal_service);
+        terminal_service.output_hub().set_osc_effect_sink(Arc::new(move |session_id, kind| {
+            if matches!(kind, crate::native_terminal::osc_effects::OscEffect::Clipboard { .. })
+                && !osc_terminal.upgrade().is_some_and(|service| service.get_session(session_id).is_some()) {
+                return;
+            }
+            if osc_tx.receiver_count() == 0 {
+                tracing::debug!(session_id, "terminal OSC effect dropped: no desktop attached");
+                return;
+            }
+            let _ = osc_tx.send(DaemonRemoteEvent {
+                event: "TerminalOscEffect".into(),
+                payload: serde_json::json!({"sessionId": session_id, "kind": kind}),
+            });
+        }));
+        // Durable owner preference: a successor and a Windows idle restart read the
+        // same atomic record before accepting any output. Absence means deny.
+        let osc_path = get_persistent_lock_path().and_then(|path| path.parent().map(|p| p.join("terminal-osc52-write.json")));
+        if let Some(path) = osc_path {
+            match fs::read(&path) {
+                Ok(bytes) => match serde_json::from_slice::<bool>(&bytes) {
+                    Ok(enabled) => terminal_service.output_hub().set_osc52_write(enabled),
+                    Err(error) => tracing::warn!(%error, "invalid OSC clipboard preference; denied"),
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                Err(error) => tracing::warn!(%error, "OSC clipboard preference unavailable; denied"),
+            }
+        }
         let catalog_path = isolated_dir
             .clone()
             .unwrap_or_else(|| {
@@ -8063,6 +8092,25 @@ impl DaemonServer {
                         .await;
                     DaemonResponse::PairedHostForgetOk
                 }
+                Ok(DaemonRequest::SetTerminalOsc52Write { enabled }) => {
+                    let result = crate::ipc::run_blocking(move || {
+                        let path = get_persistent_lock_path()
+                            .and_then(|path| path.parent().map(|p| p.join("terminal-osc52-write.json")))
+                            .ok_or_else(|| crate::ipc::IpcError::internal("persistent data directory unavailable"))?;
+                        let temp = path.with_extension("json.tmp");
+                        fs::write(&temp, if enabled { b"true".as_slice() } else { b"false".as_slice() })
+                            .and_then(|()| fs::rename(&temp, &path))
+                            .map_err(crate::ipc::IpcError::internal)?;
+                        Ok(())
+                    }).await;
+                    match result {
+                        Ok(()) => {
+                            self.terminal_service.output_hub().set_osc52_write(enabled);
+                            DaemonResponse::CapabilitiesOk { capabilities: vec!["terminalOscEffectsV1".into()] }
+                        },
+                        Err(error) => DaemonResponse::Error { message: error.to_string(), code: Some("IO_ERROR".into()), details: None },
+                    }
+                }
                 Ok(DaemonRequest::GetCapabilities) => {
                     let mut capabilities = vec!["machinePairingV1".into(), "sshPasswordV1".into(), "dagStreamingV1".into()];
                     if self.paired_hosts.available().await {
@@ -8092,6 +8140,7 @@ impl DaemonServer {
                     capabilities.push("sizeOwnershipV1".into());
                     capabilities.push("daemonLayoutV1".into());
                     capabilities.push("detachedPanesV1".into());
+                    capabilities.push("terminalOscEffectsV1".into());
                     #[cfg(feature = "local-split-qa")]
                     capabilities.push("sizeOwnershipQaV1".into());
                     #[cfg(feature = "remote-desktop")]
