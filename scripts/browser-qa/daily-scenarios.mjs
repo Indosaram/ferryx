@@ -695,6 +695,22 @@ function fixtureFile(ctx) {
  * Types `path` into the platform's native open-file dialog (which has just opened) and confirms.
  * Returns how it was answered ({ via, ... }); the caller verifies through the page title.
  */
+/**
+ * The GTK file chooser window on Linux (WebKitGTK and the Chromium engine both use one), found by
+ * its title through xdotool; null when none appears within `timeout`.
+ */
+async function linuxFileChooser(ctx, timeout) {
+  // WebKitGTK titles its chooser "Select File(s)"; GTK/portal choosers use "Open File(s)" or "File Upload".
+  const titles = ["Select File", "Open File", "File Upload", "Choose File", "Upload"];
+  return until(() => {
+    for (const title of titles) {
+      const id = ctx.run("xdotool", ["search", "--onlyvisible", "--name", `^${title}`]).stdout.split(/\s+/).filter(Boolean)[0];
+      if (id) return id;
+    }
+    return null;
+  }, timeout, 500);
+}
+
 async function answerOpenDialog(ctx, path) {
   if (ctx.platform === "darwin") {
     // System Events first: find the panel in whichever process owns it, raise it, set the Go to
@@ -712,11 +728,18 @@ async function answerOpenDialog(ctx, path) {
   }
   await sleep(2500);
   if (ctx.platform === "linux") {
+    // Ctrl+L and the path only belong in the file chooser. Linux run 41824966041 (screenshot 19)
+    // typed them into the Ferryx address bar when no chooser was open, and Enter loaded
+    // "/upload.html/home/runner/..." ("not found"), which hid DROPZONE for the drag check.
+    const chooser = await linuxFileChooser(ctx, 3000);
+    if (!chooser) return { via: "none", chooser: null };
+    ctx.run("xdotool", ["windowactivate", "--sync", chooser]);
     ctx.host.key({ key: "l", mods: ["ctrl"] });
     await sleep(500);
     ctx.host.type(path);
     await sleep(400);
     ctx.host.key({ key: "Enter" });
+    return { via: "keystrokes", chooser };
   } else if (ctx.platform === "win32") {
     // The common file dialog focuses its File name box; SendInput types into the foreground.
     ctx.win.ps("typeraw", ["-Text", path]);
@@ -1075,15 +1098,31 @@ export async function dailyWebviewBefore(ctx) {
       // The keys went elsewhere (Windows run 41801115761: typed ["",0], the LOGINPAGE click hit
       // nothing). Give the webview keyboard focus through the CLI, then click each field itself.
       g3.focus_cli = (await ctx.cliAsync("focus", "--browser-id", loginTab)).ok;
-      for (const [placeholder, value] of [["USERNAME", "qauser"], ["PASSWORD", "qa-pass-123"]]) {
-        await clickWord(ctx, (text) => new RegExp(`^${placeholder}$`, "i").test(text), { timeout: 5000, pick: "bottom" });
+      // Linux run 41824966041 (probes 063-070): the first pass put the password into USERNAME
+      // (keyboard focus began in the app chrome), and a click on the PASSWORD placeholder left that
+      // field empty. The username field is clicked by its placeholder, or by the text the first
+      // pass left in it; the password is reached with Tab from there, as a user moves through a form.
+      // Each pass is checked through the readback, and a second pass retries the missing field.
+      g3.typed_passes = [];
+      for (let pass = 0; pass < 2 && !typedOk(fields); pass += 1) {
+        const userOk = Array.isArray(fields) && fields[0] === "qauser";
+        const userField = (text) => /^USERNAME$/i.test(text) || (Array.isArray(fields) && fields[0] && text === fields[0]);
+        const clicked = await clickWord(ctx, userField, { timeout: 5000, pick: "bottom" });
+        await sleep(400);
+        if (!userOk || !clicked) {
+          ctx.host.key({ key: "a", mods: ["mod"] });
+          ctx.host.type("qauser");
+          await sleep(300);
+        }
+        ctx.host.key({ key: "Tab" });
         await sleep(400);
         ctx.host.key({ key: "a", mods: ["mod"] });
-        ctx.host.type(value);
-        await sleep(300);
+        ctx.host.type("qa-pass-123");
+        await sleep(500);
+        fields = await loginFields(ctx, loginTab);
+        g3.typed_passes.push({ clicked, fields: fields ? [fields[0], String(fields[1] ?? "").length] : null });
       }
-      fields = await loginFields(ctx, loginTab);
-      g3.typed_via = "cli focus + field clicks";
+      g3.typed_via = "cli focus + username click + Tab";
     }
     g3.typed = fields ? [fields[0], String(fields[1] ?? "").length] : null;
     // Enter in the password field: a trusted keydown for the capture script and an implicit submit.
@@ -1186,6 +1225,12 @@ export async function dailyWebviewBefore(ctx) {
     if (!picked) ctx.closeDialogs();
     g8.panel_closed = await closeFilePanel(ctx);
     ctx.host.focus();
+    // A picker answer that went astray can leave the tab off the upload page; the drag check
+    // needs DROPZONE on screen, so the page is loaded again first.
+    if (!(tab(ctx, daily.tabB)?.url ?? "").split(/[?#]/)[0].endsWith("/upload.html")) {
+      g8.reloaded_upload = true;
+      await visit(ctx, `${fixtureBase}/upload.html`, "DROPZONE");
+    }
     const zone = await until(() => {
       const hit = screenWords(ctx).find((word) => /DROPZONE/i.test(word.text));
       return hit ? [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)] : null;
@@ -1213,6 +1258,14 @@ export async function dailyWebviewBefore(ctx) {
       try {
         await visit(ctx, `${fixtureBase}/notify.html`, "NOTIFYME");
         await clickWord(ctx, (text) => /NOTIFYME/i.test(text), { timeout: 8000 });
+        // The page sets "perm:asking" on the click. Linux run 41824966041 stayed on "perm:idle":
+        // the click never reached the page, so it is repeated once before waiting for the prompt.
+        g6.asked = Boolean(await until(() => /^perm:(asking|granted|denied)/.test(tab(ctx, daily.tabB)?.title ?? ""), 4000, 500));
+        if (!g6.asked) {
+          ctx.host.focus();
+          await clickWord(ctx, (text) => /NOTIFYME/i.test(text), { timeout: 5000 });
+          g6.asked_retry = Boolean(await until(() => /^perm:(asking|granted|denied)/.test(tab(ctx, daily.tabB)?.title ?? ""), 4000, 500));
+        }
         await waitWords(ctx, ["wants"], 10000);
         // OCR reads the small "Allow" as "atow" or misses it (linux run 41767162699), so fuzzy
         // spellings count, and the filled button right of "wants" on the prompt line is the fallback.
