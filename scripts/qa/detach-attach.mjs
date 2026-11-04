@@ -50,7 +50,7 @@ async function client() {
     socket.write(`${JSON.stringify(value)}\n`);
     return response;
   }
-  assert.equal((await request({ type: 'Handshake', version: 5, token: null })).type, 'HandshakeOk');
+  assert.equal((await request({ type: 'handshake', version: 5, token: null })).type, 'handshakeOk');
   return { request, socket };
 }
 async function cli(...args) {
@@ -62,45 +62,63 @@ try {
   await promisify(execFile)('git', ['init', join(root, 'repo')]);
   const predecessor = await launch();
   const a = await client();
-  assert.equal((await a.request({ type: 'RegisterWorkspace', workspaceId: 'detached-qa', repoRoot: join(root, 'repo') })).type, 'RegisterWorkspaceOk');
-  const spawned = await a.request({ type: 'Spawn', clientRequestId: 'detached-qa', workspaceId: 'detached-qa', cwd: join(root, 'repo'), cols: 80, rows: 24, shell: '/bin/sh' });
-  assert.equal(spawned.type, 'SpawnOk');
+  assert.equal((await a.request({ type: 'registerWorkspace', workspaceId: 'detached-qa', repoRoot: join(root, 'repo') })).type, 'registerWorkspaceOk');
+  const spawned = await a.request({ type: 'spawn', clientRequestId: 'detached-qa', workspaceId: 'detached-qa', cwd: join(root, 'repo'), cols: 80, rows: 24, shell: '/bin/sh' });
+  assert.equal(spawned.type, 'spawnOk');
   const id = spawned.sessionId;
-  const view = await a.request({ type: 'LayoutGet', window: 'main' });
-  assert.equal((await a.request({ type: 'LayoutApply', window: 'main', baseRevision: view.view.revision, intent: { type: 'ADD_TAB_WITH_SESSION', tabId: 'cat', label: 'cat', content: { kind: 'terminal', backendSessionId: id }, activate: true } })).type, 'LayoutOk');
+  const view = await a.request({ type: 'layoutGet', window: 'main' });
+  assert.equal((await a.request({ type: 'layoutApply', window: 'main', baseRevision: view.view.revision, intent: { type: 'ADD_TAB_WITH_SESSION', tabId: 'cat', label: 'cat', content: { kind: 'terminal', backendSessionId: id }, activate: true } })).type, 'layoutOk');
   const stream = await client();
   const output = createInterface({ input: stream.socket });
-  const ready = new Promise((done, reject) => {
-    const signal = timeout();
-    signal.addEventListener('abort', () => reject(new Error('cat readiness timeout')), { once: true });
-    output.on('line', line => { if (line.includes('CAT_READY')) done(); });
+  let transcript = '';
+  const observed = [];
+  output.on('line', line => {
+    const message = JSON.parse(line);
+    if (message.type === 'output') {
+      transcript += Buffer.from(message.data).toString();
+      for (const entry of observed) if (transcript.includes(entry.pattern)) entry.done();
+    }
   });
-  await stream.request({ type: 'Attach', sessionId: id });
-  await a.request({ type: 'Write', sessionId: id, data: [...Buffer.from("stty -echo; printf 'CAT_%s\\n' READY; exec cat\n")] });
+  function observe(pattern) { return new Promise((done, reject) => {
+    const signal = timeout();
+    signal.addEventListener('abort', () => reject(new Error(`output timeout: ${pattern}`)), { once: true });
+    observed.push({ pattern, done });
+    if (transcript.includes(pattern)) done();
+  }); }
+  const ready = observe('CAT_READY');
+  const pidReady = observe('CAT_PID=');
+  await stream.request({ type: 'attach', sessionId: id });
+  await a.request({ type: 'write', sessionId: id, data: [...Buffer.from("stty -echo; printf 'CAT_PID=%s;\\n' \"$$\"; printf 'CAT_%s\\n' READY; exec cat\n")] });
   await ready;
+  await pidReady;
+  const childPid = Number(transcript.match(/CAT_PID=(\d+);/)[1]);
+  process.kill(childPid, 0);
   await cli('detach', id);
   assert.deepEqual(await cli('list', '--json'), [id]);
-  const before = await a.request({ type: 'DescribeSession', sessionId: id });
+
   await cli('attach', id);
   const b = await client();
-  assert.equal((await b.request({ type: 'Write', sessionId: id, data: [...Buffer.from('x\n')] })).type, 'WriteOk');
+  const written = observe('x\r\n');
+  assert.equal((await b.request({ type: 'write', sessionId: id, data: [...Buffer.from('x\n')] })).type, 'writeOk');
+  await written;
   await cli('detach', id);
   await cli('attach', id);
   assert.deepEqual(await cli('list', '--json'), []);
-  const hashA = await a.request({ type: 'DescribeScreenHash', sessionId: id });
-  const hashB = await b.request({ type: 'DescribeScreenHash', sessionId: id });
+  const hashA = await a.request({ type: 'describeScreenHash', sessionId: id });
+  const hashB = await b.request({ type: 'describeScreenHash', sessionId: id });
   assert.deepEqual(hashA, hashB);
-  const unknown = await a.request({ type: 'Panes', request: { action: 'attach', session: 'unknown', window: null, split: null } });
+  const unknown = await a.request({ type: 'panes', request: { action: 'attach', session: 'unknown', window: null, split: null } });
   assert.equal(unknown.code, 'SESSION_NOT_FOUND');
   await cli('detach', id);
-  const prepared = await a.request({ type: 'PrepareHandover' });
+  const prepared = await a.request({ type: 'prepareHandover' });
   process.kill(predecessor.pid, 0);
   await launch(prepared.legacySocketPath);
   const successor = await client();
   assert.deepEqual(await cli('list', '--json'), [id]);
-  const after = await successor.request({ type: 'DescribeSession', sessionId: id });
-  assert.equal(after.details?.pid, before.details?.pid);
-  assert.equal((await successor.request({ type: 'Write', sessionId: id, data: [...Buffer.from('alive\n')] })).type, 'WriteOk');
+  const after = await successor.request({ type: 'describeSession', sessionId: id });
+  assert.equal(after.session.running, true);
+  process.kill(childPid, 0);
+  assert.equal((await successor.request({ type: 'write', sessionId: id, data: [...Buffer.from('alive\n')] })).type, 'writeOk');
   console.log('DETACH_ROUNDTRIP_OK');
 } finally {
   for (const socket of sockets) socket.destroy();
