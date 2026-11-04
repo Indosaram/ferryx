@@ -209,10 +209,16 @@ fn ferryx_command_event<'a>(command: &'a str, agent: &str) -> Option<&'a str> {
     // other platform, and `Path` only knows this one's.
     let name = exe.rsplit(['/', '\\']).next()?;
     // `ferryx-remote-helper` is the reporter the SSH integration installs on a remote host
-    // (`ssh/remote_hooks.rs`); it runs the same `agent-hook` code.
+    // (`ssh/remote_hooks.rs`), and `ferryx-cli` is the reporter of a headless install; both run
+    // the same `agent-hook` code.
     matches!(
         name,
-        "ferryx" | "ferryx.exe" | "ferryx-remote-helper" | "ferryx-remote-helper.exe"
+        "ferryx"
+            | "ferryx.exe"
+            | "ferryx-cli"
+            | "ferryx-cli.exe"
+            | "ferryx-remote-helper"
+            | "ferryx-remote-helper.exe"
     )
     .then_some(event)
 }
@@ -1078,6 +1084,57 @@ mod tests {
         assert_eq!(ferryx_command_event("\"C:\\x\\ferryx.exe\" agent-hook codex Stop", "codex"), Some("Stop"));
         assert_eq!(ferryx_command_event("'/bin/ferryx' agent-hook claude Stop; rm -rf /", "claude"), None);
         assert_eq!(ferryx_command_event("ferryx agent-hook claude Stop", "claude"), None);
+    }
+
+    fn cli_exe() -> PathBuf {
+        PathBuf::from("/usr/local/bin/ferryx-cli")
+    }
+
+    #[test]
+    fn a_ferryx_cli_command_is_recognised() {
+        let command = hook_command(&cli_exe(), "claude", "Stop");
+        assert_eq!(ferryx_command_event(&command, "claude"), Some("Stop"), "{command}");
+        assert_eq!(ferryx_command_event(&command, "codex"), None);
+        // A Windows headless install double-quotes ferryx-cli.exe; the desktop also recognises
+        // that form when it writes entries for a Windows host.
+        let windows = hook_command_for("C:\\Ferryx\\ferryx-cli.exe", true, "codex", "Stop");
+        assert_eq!(ferryx_command_event(&windows, "codex"), Some("Stop"), "{windows}");
+        assert_eq!(ferryx_command_event("'/usr/bin/ferryx-client' agent-hook claude Stop", "claude"), None);
+    }
+
+    #[test]
+    fn installing_twice_with_ferryx_cli_leaves_one_entry_per_event() {
+        let home = temp_home();
+        let target = target(home.path(), "claude");
+        std::fs::create_dir_all(&target.agent_dir).unwrap();
+        assert!(install_hooks_into(&target, &cli_exe()).unwrap());
+        assert!(!install_hooks_into(&target, &cli_exe()).unwrap(), "a second install is a no-op");
+        let settings = read(&target.file);
+        for event in target.events {
+            let groups = settings["hooks"][*event].as_array().unwrap();
+            assert_eq!(groups.len(), 1, "{event}: {settings}");
+            assert_eq!(
+                ferryx_group_command(&groups[0], "claude"),
+                Some(hook_command(&cli_exe(), "claude", event).as_str())
+            );
+        }
+        // A later desktop install replaces the ferryx-cli entries instead of appending beside them.
+        assert!(install_hooks_into(&target, &exe()).unwrap());
+        let settings = read(&target.file);
+        for event in target.events {
+            assert_eq!(settings["hooks"][*event].as_array().unwrap().len(), 1, "{event}: {settings}");
+        }
+    }
+
+    #[test]
+    fn removal_deletes_the_ferryx_cli_entries() {
+        let home = temp_home();
+        let target = target(home.path(), "claude");
+        std::fs::create_dir_all(&target.agent_dir).unwrap();
+        std::fs::write(&target.file, serde_json::to_string(&user_settings()).unwrap()).unwrap();
+        assert!(install_hooks_into(&target, &cli_exe()).unwrap());
+        assert_eq!(remove_hooks_from(&target).unwrap(), target.events.len());
+        assert_eq!(read(&target.file), user_settings(), "removal restores the user's settings exactly");
     }
 
     /// Grok's file lives in a subdirectory of the directory that gates the install, so the install
