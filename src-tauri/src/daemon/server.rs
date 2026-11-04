@@ -2287,6 +2287,7 @@ pub struct DaemonServer {
     /// Cross-pane grants (`pane-grants.json`, rex todo 5), carried by the handover record.
     pub(crate) pane_grants: Arc<crate::daemon::pane_grants::PaneGrants>,
     layouts: super::layout::Registry,
+    plugins: Arc<super::plugins::registry::Registry>,
     /// Bearer token every connection must present before a request is dispatched. Windows has no
     /// filesystem ownership boundary on the transport, so the published port alone cannot
     /// authenticate a client.
@@ -4079,6 +4080,9 @@ impl DaemonServer {
             .unwrap_or_else(|| session_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf());
         let layouts = Arc::new(Mutex::new(super::layout::Store::with_session_path(layout_root, session_path)));
         handover_manager.set_layouts(Arc::clone(&layouts));
+        let plugins = Arc::new(super::plugins::registry::Registry::new(
+            isolated_dir.clone().unwrap_or_else(|| get_default_session_path().parent()
+                .unwrap_or_else(|| Path::new(".")).to_path_buf()).join("plugin-approvals.json")));
         // OSC 7501 summaries from every mirror this daemon answers for become Protocol states.
         let protocol_reporters =
             Arc::new(crate::terminal::foreground::ProtocolReporters::default());
@@ -4251,6 +4255,7 @@ impl DaemonServer {
         Self {
             paired_hosts,
             layouts,
+            plugins,
             session_router,
             handover_manager,
             resource_sampler: Arc::new(crate::daemon::resource_usage::ResourceSampler::new()),
@@ -5342,6 +5347,9 @@ impl DaemonServer {
     /// 2026-10-07 incident had to be reconstructed from, and it could not be.
     pub async fn shutdown_gracefully(&self, reason: &str) {
         tracing::warn!(reason, "Daemon shutting down");
+        if let Err(error) = self.plugins.stop_all().await {
+            tracing::error!(%error, "Failed to stop plugins during shutdown");
+        }
         if let Err(message) = self
             .persist_remote_sessions_at(self.remote_sessions_path.clone())
             .await
@@ -6309,6 +6317,9 @@ impl DaemonServer {
             }
         }
 
+        self.plugins.restore().await?;
+        self.start_plugins().await?;
+
         // Both platform listeners share this call site: unix binds the socket path, every other
         // platform binds a loopback TCP port. This runs before the readiness signal below: a
         // client released by that signal can spawn a pane immediately, and the pane reads its
@@ -6546,6 +6557,37 @@ impl DaemonServer {
     }
 
     /// Serves `PaneGrant`; the gate above already refused Add/Remove from anyone but the owner.
+    async fn start_plugins(&self) -> Result<(), String> {
+        for status in self.plugins.list().await? {
+            if !status.enabled { continue; }
+            let service = Arc::clone(&self.session_service);
+            let views = Arc::clone(&self.plugins.views);
+            let name = status.manifest.name.clone();
+            self.plugins.start(status.manifest, Arc::clone(&self.pane_grants), move |request| {
+                let service = Arc::clone(&service);
+                let views = Arc::clone(&views);
+                let name = name.clone();
+                async move {
+                    match request {
+                        DaemonRequest::GetCapabilities => Ok(serde_json::json!({"capabilities":["blockPluginsV1"]})),
+                        DaemonRequest::ListSessions => Ok(serde_json::json!({"sessions":service.session_router.list_sessions().await})),
+                        DaemonRequest::Write { session_id, data } => {
+                            service.write_session_input(&session_id, data).await.map_err(|e| e.to_string())?;
+                            Ok(serde_json::json!({"type":"writeOk"}))
+                        },
+                        DaemonRequest::PluginRender { view, html } => {
+                            let document = super::plugins::block_document(&name, &html)?;
+                            views.write().insert((name, view), document);
+                            Ok(serde_json::json!({"type":"renderOk"}))
+                        },
+                        _ => Err("unsupported plugin request".into()),
+                    }
+                }
+            }).await?;
+        }
+        Ok(())
+    }
+
     async fn handle_panes(&self, request: super::layout::PaneAction) -> DaemonResponse {
         let live = self.session_router.list_sessions().await.into_iter().collect();
         let layouts = Arc::clone(&self.layouts);
@@ -7704,6 +7746,57 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::Panes { request }) => self.handle_panes(request).await,
+                Ok(DaemonRequest::PluginsList) => match self.plugins.list().await {
+                    Ok(plugins) => DaemonResponse::PluginsOk { plugins },
+                    Err(error) => daemon_error(error),
+                },
+                Ok(DaemonRequest::PluginSetEnabled { name, enabled }) => {
+                    match self.plugins.approve(name, enabled).await {
+                        Ok(()) => match self.start_plugins().await {
+                            Ok(()) => match self.plugins.list().await {
+                                Ok(plugins) => DaemonResponse::PluginsOk { plugins },
+                                Err(error) => daemon_error(error),
+                            },
+                            Err(error) => daemon_error(error),
+                        },
+                        Err(error) => daemon_error(error),
+                    }
+                },
+                Ok(DaemonRequest::PluginRender { .. }) => daemon_error("Plugin render requires stdio identity"),
+                Ok(DaemonRequest::PluginView { plugin, view }) => {
+                    match self.plugins.views.read().get(&(plugin, view)).cloned() {
+                        Some(document) => DaemonResponse::PluginViewOk { document },
+                        None => daemon_error("Plugin view unavailable"),
+                    }
+                },
+                Ok(DaemonRequest::PluginAttach { plugin, window }) => {
+                    let enabled = self.plugins.list().await.map(|list| list.into_iter()
+                        .any(|s| s.enabled && s.manifest.name == plugin));
+                    match enabled {
+                        Ok(true) => {
+                            let layouts = Arc::clone(&self.layouts);
+                            let window = window.unwrap_or_else(|| "main".into());
+                            let changed_window = window.clone();
+                            match crate::ipc::run_blocking(move || {
+                                let mut store = layouts.lock();
+                                let revision = store.get(&window).map_err(crate::ipc::IpcError::internal)?.revision;
+                                store.apply(&window, revision, super::layout::Intent::AddTabWithSession {
+                                    tab_id: uuid::Uuid::new_v4().to_string(), label: plugin.clone(),
+                                    content: super::layout::Content::Plugin { plugin, view: "main".into() }, activate: true,
+                                }).map_err(|e| crate::ipc::IpcError::internal(format!("{e:?}")))
+                            }).await {
+                                Ok(view) => {
+                                    let _ = self.remote_event_tx.send(DaemonRemoteEvent { event: "LayoutChanged".into(),
+                                        payload: serde_json::json!({"window":changed_window,"revision":view.revision}) });
+                                    DaemonResponse::LayoutOk { view }
+                                },
+                                Err(error) => daemon_error(error.to_string()),
+                            }
+                        },
+                        Ok(false) => daemon_error("Plugin is not enabled"),
+                        Err(error) => daemon_error(error),
+                    }
+                },
                 Ok(DaemonRequest::LayoutGetScoped { window, scope }) => {
                     let layouts = Arc::clone(&self.layouts);
                     match crate::ipc::run_blocking(move || layouts.lock().get_scoped(&window, Some(&scope)).map_err(crate::ipc::IpcError::internal)).await {
