@@ -935,6 +935,8 @@ pub enum DaemonRequest {
     LayoutGetScoped { window: String, scope: String },
     #[serde(rename_all = "camelCase")]
     LayoutApply { window: String, base_revision: u64, intent: crate::daemon::layout::Intent },
+    OnboardingGet,
+    OnboardingSet { state: crate::daemon::onboarding::State, #[serde(default)] migrate: bool },
     ClearSession,
     RemoteGetStatus,
     GetCapabilities,
@@ -1695,6 +1697,7 @@ pub enum DaemonResponse {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remote_generation: Option<u64>,
     },
+    OnboardingOk { state: Option<crate::daemon::onboarding::State> },
     SaveSessionOk,
     LayoutOk { view: crate::daemon::layout::View },
     PanesOk { detached: crate::daemon::layout::DetachedRegistry },
