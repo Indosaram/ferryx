@@ -205,6 +205,8 @@ describe("onboarding exports and constants", () => {
       "intro",
       "features",
       "agents",
+      "enroll",
+      "skills",
       "cli",
       "project",
       "supervisor",
@@ -665,6 +667,8 @@ describe("wizardSteps", () => {
       "intro",
       "features",
       "agents",
+      "enroll",
+      "skills",
       "cli",
       "project",
       "supervisor",
@@ -700,6 +704,8 @@ describe("wizardSteps", () => {
       "intro",
       "features",
       "agents",
+      "enroll",
+      "skills",
       "cli",
       "project",
       "supervisor",
@@ -733,6 +739,8 @@ describe("satisfiedOnboardingSteps", () => {
       "intro",
       "features",
       "agents",
+      "enroll",
+      "skills",
       "cli",
       "project",
       "supervisor",
@@ -754,7 +762,7 @@ describe("satisfiedOnboardingSteps", () => {
       projectCount: 0,
       accountLinked: true,
     };
-    expect(satisfiedOnboardingSteps(state, ctx)).toEqual(["supervisor", "phone", "account"]);
+    expect(satisfiedOnboardingSteps(state, ctx)).toEqual(["enroll", "skills", "supervisor", "phone", "account"]);
   });
 
   it("reports only cli when its status is unknown and nothing else is done", () => {
@@ -770,7 +778,7 @@ describe("satisfiedOnboardingSteps", () => {
       projectCount: 0,
       accountLinked: true,
     };
-    expect(satisfiedOnboardingSteps(state, ctx)).toEqual(["cli", "supervisor", "phone", "account"]);
+    expect(satisfiedOnboardingSteps(state, ctx)).toEqual(["enroll", "skills", "cli", "supervisor", "phone", "account"]);
   });
 });
 
@@ -899,6 +907,8 @@ describe("features step", () => {
     expect(satisfiedOnboardingSteps(upgraded, satisfiedCtx)).toEqual([
       "intro",
       "agents",
+      "enroll",
+      "skills",
       "cli",
       "project",
       "supervisor",
