@@ -189,7 +189,7 @@ impl DaemonServer {
 
         #[cfg(windows)]
         {
-            let mut listener = super::windows_pipe::Listener::bind("control")
+            let mut listener = crate::daemon::windows_pipe::Listener::bind("control")
                 .map_err(|error| format!("Failed to bind control pipe: {error}"))?;
             let server = Arc::clone(self);
             tokio::spawn(async move {
@@ -198,8 +198,8 @@ impl DaemonServer {
                         Ok(stream) => {
                             let server = Arc::clone(&server);
                             tokio::spawn(async move {
-                                let (origin, ancestry) = super::windows_pipe::identity(&stream).await;
-                                if !matches!(origin, super::supervisor_peer::PeerOrigin::Process(_)) { return; }
+                                let (origin, ancestry) = crate::daemon::windows_pipe::identity(&stream).await;
+                                if !matches!(origin, crate::daemon::supervisor_peer::PeerOrigin::Process(_)) { return; }
                                 server.handle_control_connection_with_origin(stream, None, origin, ancestry).await;
                             });
                         }
