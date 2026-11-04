@@ -4249,15 +4249,16 @@ impl DaemonServer {
         {
             // Keep the gateway's CORS allowlist in step with the saved paired hosts. The lister
             // is cloned before the sink is installed, so it shares the inventory but not the sink.
+            // The gateway is held weakly: it stores this service (`set_paired_hosts`), so a strong
+            // handle here would keep the gateway, and every PTY session under it, alive forever.
             let cors_lister = paired_hosts.clone();
-            let cors_state = Arc::clone(&remote_state);
+            let cors_state = Arc::downgrade(&remote_state);
             let inventory_sink_tx = remote_event_tx.clone();
             paired_hosts.set_event_sink(Arc::new(move |event| {
-                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                    runtime.spawn(refresh_cors_saved_host_origins(
-                        cors_lister.clone(),
-                        Arc::clone(&cors_state),
-                    ));
+                if let (Ok(runtime), Some(cors_state)) =
+                    (tokio::runtime::Handle::try_current(), cors_state.upgrade())
+                {
+                    runtime.spawn(refresh_cors_saved_host_origins(cors_lister.clone(), cors_state));
                 }
                 let payload = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
                 let _ = inventory_sink_tx.send(DaemonRemoteEvent {
