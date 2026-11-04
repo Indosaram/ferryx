@@ -3497,6 +3497,8 @@ mod qa_split_producers {
         }
 
         fn session_details() -> DaemonSessionDetails {
+            foreground_command: None,
+            agent: None,
             let mut details = DaemonSessionDetails::new(crate::daemon::protocol::DaemonSessionDetailsParams {
                 session_id: "session-1".into(),
                 workspace_id: Some("ws-1".into()),
@@ -4853,6 +4855,8 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             session_id: proxy_session_id.clone(),
             epoch: host.generation.0,
             session: crate::daemon::protocol::DaemonSessionDetails {
+                foreground_command: None,
+                agent: None,
                 size_owner: None,
                 session_id: proxy_session_id,
                 workspace_id: Some(request.workspace_id.clone()),
