@@ -341,6 +341,10 @@ impl ScreenMirror {
     /// sessions this daemon answers for. Every other PTY write stays suppressed. Returns false
     /// when the parser refused the callbacks.
     pub fn enable_program_status(&mut self) -> bool {
+        if let Err(error) = self.terminal.enable_osc_effects() {
+            tracing::warn!(%error, "screen mirror OSC effects unavailable");
+            return false;
+        }
         if self.program_status.is_some() {
             return true;
         }
@@ -368,12 +372,26 @@ impl ScreenMirror {
     /// Feeds bytes that already reached the program before (seed, retained history, a gap seam):
     /// no program status report is ingested and no query reply is kept.
     pub fn feed_replay(&mut self, bytes: &[u8]) {
+        self.terminal.mute_osc_effects(true);
         self.terminal.set_program_status_muted(true);
         self.terminal.set_program_status_reply_capture(false);
         self.feed(bytes);
+        self.terminal.mute_osc_effects(false);
         self.terminal.set_program_status_muted(false);
         self.terminal
             .set_program_status_reply_capture(self.program_status.is_some());
+    }
+
+    pub(crate) fn set_osc52_write(&self, allowed: bool) {
+        self.terminal.set_osc52_write(allowed);
+    }
+
+    pub(crate) fn take_osc_effects(&self) -> Vec<crate::native_terminal::osc_effects::OscEffect> {
+        self.terminal.take_osc_effects()
+    }
+
+    pub(crate) fn osc_cwd(&self) -> Option<String> {
+        self.terminal.osc_cwd()
     }
 
     /// Drains the query replies kept since the last call and reports the summary when it changed.
