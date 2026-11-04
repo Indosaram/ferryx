@@ -1,18 +1,18 @@
 // allow: SIZE_OK — IPC module bundling terminal commands, output batching, and macOS libproc CWD resolution within constrained write scope
 use crate::daemon::client::{DaemonClient};
-#[cfg(any(feature = "desktop", test))]
+#[cfg(feature = "desktop")]
 use crate::daemon::client::{DaemonAttachment};
 use crate::daemon::protocol::{TerminalStartup};
-#[cfg(any(feature = "desktop", test))]
+#[cfg(feature = "desktop")]
 use crate::daemon::protocol::{DaemonStreamMessage};
 use crate::ipc::{IpcError, IpcErrorCode};
-#[cfg(any(feature = "desktop", test))]
+#[cfg(feature = "desktop")]
 use crate::ipc::{run_blocking};
 use crate::terminal::TerminalSignal;
 use crate::worktree::{WorktreeIdentity};
-#[cfg(any(feature = "desktop", test))]
+#[cfg(feature = "desktop")]
 use crate::worktree::{WorkspaceRegistry, WorktreeError};
-#[cfg(any(feature = "desktop", test))]
+#[cfg(feature = "desktop")]
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};

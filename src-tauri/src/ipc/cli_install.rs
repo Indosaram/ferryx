@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(feature = "desktop", test))]
-use crate::ipc::{run_blocking, IpcError};
+use crate::ipc::{IpcError};
+#[cfg(feature = "desktop")]
+use crate::ipc::{run_blocking};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CliInstallError {

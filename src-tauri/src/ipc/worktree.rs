@@ -1,8 +1,8 @@
 use crate::daemon::{protocol::{DaemonRequest, DaemonResponse}};
-#[cfg(any(feature = "desktop", test))]
+#[cfg(feature = "desktop")]
 use crate::daemon::{DaemonClient};
 use crate::ipc::{IpcError, IpcErrorCode};
-#[cfg(any(feature = "desktop", test))]
+#[cfg(feature = "desktop")]
 use crate::ipc::{run_blocking};
 use crate::worktree::changes::{GitChangeError, GitDiffScope};
 #[cfg(feature = "desktop")]
@@ -10,10 +10,10 @@ use crate::worktree::changes::{
     git_changes_status, git_commit, git_diff, git_push, git_stage, git_unstage, GitPushResult,
 };
 use crate::worktree::{WorkspaceRegistry, WorktreeIdentity};
-#[cfg(any(feature = "desktop", test))]
+#[cfg(feature = "desktop")]
 use crate::worktree::{BranchDeletionPreview, DirtyState, ExternalWorktree, Worktree};
 use serde::{Deserialize, Serialize};
-#[cfg(any(feature = "desktop", test))]
+#[cfg(feature = "desktop")]
 use std::sync::Arc;
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};

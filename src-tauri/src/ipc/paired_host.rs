@@ -3,7 +3,7 @@ use crate::{daemon::client::DaemonClient, paired_host::{
         inventory::{HostView, MigrationReceipt}, service::{InventoryChangeEvent, Result}, }};
 #[cfg(any(feature = "desktop", test))]
 use crate::paired_host::service::{MigrationRequest, PairRequest, RedeemGrantRequest};
-#[cfg(any(feature = "desktop", test))]
+#[cfg(feature = "desktop")]
 use std::sync::Arc;
 #[cfg(feature = "desktop")]
 use tauri::{Emitter, State};

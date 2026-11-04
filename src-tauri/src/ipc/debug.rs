@@ -1,5 +1,7 @@
 #[cfg(any(feature = "desktop", test))]
-use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+use crate::ipc::{IpcError, IpcErrorCode};
+#[cfg(feature = "desktop")]
+use crate::ipc::{run_blocking};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;

@@ -17,7 +17,7 @@
 //! worktrees of OTHER checkouts outside the root are intentionally not part
 //! of a workspace, consistent with the path jail.
 
-#[cfg(any(feature = "desktop", test))]
+#[cfg(feature = "desktop")]
 use crate::ipc::run_blocking;
 #[cfg(feature = "desktop")]
 use crate::ipc::worktree::emit_worktree_changed;

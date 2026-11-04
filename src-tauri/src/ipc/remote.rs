@@ -6,11 +6,11 @@ use crate::remote::auth::{PairingWindowStatus};
 #[cfg(any(feature = "desktop", test))]
 use crate::remote::auth::{DeviceInfo, DevicePermission};
 use crate::remote::protocol::{RemoteSessionAttention, RemoteTerminalTabInfo, RemoteWorktreeAttention};
-#[cfg(any(feature = "desktop", test))]
+#[cfg(feature = "desktop")]
 use crate::remote::protocol::{RemoteActiveDesktopSelection};
 use crate::remote::server::{start_remote_server, RemoteServerHandle};
 use crate::remote::state::{RemoteGatewayState, RemoteNetworkMode, RemoteRestartPolicy};
-#[cfg(any(feature = "desktop", test))]
+#[cfg(feature = "desktop")]
 use crate::remote::state::{RemoteGatewayConfig, REMOTE_GATEWAY_PORT};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};

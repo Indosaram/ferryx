@@ -1,13 +1,15 @@
 use crate::agent_history::history::{HistoryError};
 #[cfg(any(feature = "desktop", test))]
-use crate::agent_history::history::{Entry, History, Message, Page};
+use crate::agent_history::history::{Message, Page};
+#[cfg(feature = "desktop")]
+use crate::agent_history::history::{Entry, History};
 use crate::ipc::{IpcError, IpcErrorCode};
-#[cfg(any(feature = "desktop", test))]
+#[cfg(feature = "desktop")]
 use crate::ipc::{run_blocking};
 use crate::scoped_contracts::CanonicalProvider;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-#[cfg(any(feature = "desktop", test))]
+#[cfg(feature = "desktop")]
 use std::sync::{Mutex, OnceLock};
 
 /// On-disk store root per provider, one entry for every `CanonicalProvider`, resolved against this
