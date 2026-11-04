@@ -1,0 +1,4 @@
+default EXIT=0
+headless EXIT=0
+clippy EXIT=0
+test EXIT=0

@@ -1,0 +1,7 @@
+From https://github.com/Indosaram/ferryx
+ * branch              ci/rex-buildgreen-7 -> FETCH_HEAD
+ * [new branch]        ci/rex-buildgreen-7 -> origin/ci/rex-buildgreen-7
+Previous HEAD position was bbb57a26 build: supply required worktree in layout test fixture
+HEAD is now at e2463b46 build: decouple headless imports and owner seed from desktop and Slack
+M	ui/public/llms.txt
+M	ui/public/search.json

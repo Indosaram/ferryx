@@ -1,0 +1,162 @@
+   Compiling ferryx v2026.1101.1 (/Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/src-tauri)
+error: method `handle_control_connection` is never used
+   --> src/daemon/control_server.rs:257:14
+    |
+ 56 | impl DaemonServer {
+    | ----------------- method in this implementation
+...
+257 |     async fn handle_control_connection<S>(self: Arc<Self>, stream: S, expected_token: Option<&str>)
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `-D dead-code` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(dead_code)]`
+
+error: using `contains()` instead of `iter().any()` is more efficient
+   --> src/cli/integrations.rs:103:47
+    |
+103 |             .find(|agent| agent.id == name || agent.aliases.iter().any(|alias| *alias == name))
+    |                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `agent.aliases.contains(&name)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#manual_contains
+    = note: `-D clippy::manual-contains` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::manual_contains)]`
+
+error: deref which would be done by auto-deref
+   --> src/daemon/agent_hook_install.rs:158:35
+    |
+158 |         Some(SkillTarget { agent: *agent, agent_dir: home_relative(&home, dir), file: home_relative(&home, rel) })
+    |                                   ^^^^^^ help: try: `agent`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#explicit_auto_deref
+    = note: `-D clippy::explicit-auto-deref` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::explicit_auto_deref)]`
+
+error: this boolean expression can be simplified
+    --> src/daemon/server.rs:3989:20
+     |
+3989 |                 && !osc_terminal.upgrade().is_some_and(|service| service.get_session(session_id).is_some()) {
+     |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `osc_terminal.upgrade().is_none_or(|service| service.get_session(session_id).is_none())`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#nonminimal_bool
+     = note: `-D clippy::nonminimal-bool` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::nonminimal_bool)]`
+
+error: this function has too many arguments (8/7)
+   --> src/daemon/session_service.rs:757:5
+    |
+757 |     pub(crate) async fn resize_remote_owner_generation(&self, id: &str, client: &str, cols: u16, rows: u16, control: bool, take: bool, supplied: Option<u64>) -> Result<bool, String> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+    = note: `-D clippy::too-many-arguments` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::too_many_arguments)]`
+
+error: large size difference between variants
+   --> src/daemon/layout.rs:168:1
+    |
+168 | pub enum ApplyError { Conflict(Layout), Invalid(String) }
+    | ^^^^^^^^^^^^^^^^^^^^^^----------------^^---------------^^
+    | |                     |                 |
+    | |                     |                 the second-largest variant contains at least 24 bytes
+    | |                     the largest variant contains at least 280 bytes
+    | the entire enum is at least 280 bytes
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#large_enum_variant
+    = note: `-D clippy::large-enum-variant` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::large_enum_variant)]`
+help: consider boxing the large fields or introducing indirection in some other way to reduce the total size of the enum
+    |
+168 - pub enum ApplyError { Conflict(Layout), Invalid(String) }
+168 + pub enum ApplyError { Conflict(Box<Layout>), Invalid(String) }
+    |
+
+error: the `Err`-variant returned from this function is very large
+   --> src/daemon/layout.rs:747:73
+    |
+168 | pub enum ApplyError { Conflict(Layout), Invalid(String) }
+    |                       ---------------- the largest variant contains at least 280 bytes
+...
+747 |     pub fn apply(&mut self, window: &str, base: u64, intent: Intent) -> Result<View, ApplyError> {
+    |                                                                         ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: try reducing the size of `daemon::layout::ApplyError`, for example by boxing large elements or replacing it with `Box<daemon::layout::ApplyError>`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#result_large_err
+    = note: `-D clippy::result-large-err` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::result_large_err)]`
+
+error: the `Err`-variant returned from this function is very large
+   --> src/daemon/layout.rs:799:140
+    |
+168 | ... { Conflict(Layout), Invalid(String) }
+    |       ---------------- the largest variant contains at least 280 bytes
+...
+799 | ...t self, window: &str, base: u64, scope: Option<&str>, tab_id: &str, target_window: &str, target_scope: Option<&str>) -> Result<View, ApplyError> {
+    |                                                                                                                            ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: try reducing the size of `daemon::layout::ApplyError`, for example by boxing large elements or replacing it with `Box<daemon::layout::ApplyError>`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#result_large_err
+
+error: this function has too many arguments (10/7)
+   --> src/ipc/window.rs:640:1
+    |
+640 | / pub async fn cmd_window_move_sessions<R: Runtime>(
+641 | |     app: AppHandle<R>,
+642 | |     window: Window<R>,
+643 | |     registry: State<'_, WindowRegistry>,
+...   |
+650 | |     manager: State<'_, std::sync::Arc<super::remote::RemoteGatewayManager>>,
+651 | | ) -> Result<WindowMoveOutcome, IpcError> {
+    | |________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+error: this function has too many arguments (8/7)
+    --> src/remote/server.rs:2933:1
+     |
+2933 | / async fn handle_terminal_socket(
+2934 | |     mut socket: WebSocket,
+2935 | |     session_id: String,
+2936 | |     attachment: SessionAttachment,
+...    |
+2941 | |     size_client: String,
+2942 | | ) {
+     | |_^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+error: this function has too many arguments (8/7)
+    --> src/remote/server.rs:3293:1
+     |
+3293 | / async fn handle_terminal_grid_socket(
+3294 | |     mut socket: WebSocket,
+3295 | |     session_id: String,
+3296 | |     attachment: SessionAttachment,
+...    |
+3301 | |     size_client: String,
+3302 | | ) {
+     | |_^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+error: very complex type used. Consider factoring parts into `type` definitions
+   --> src/terminal/output_hub.rs:896:24
+    |
+896 |     osc_local_session: Arc<RwLock<Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>>>,
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+    = note: `-D clippy::type-complexity` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::type_complexity)]`
+
+error: could not compile `ferryx` (lib) due to 12 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: very complex type used. Consider factoring parts into `type` definitions
+   --> src/daemon/pane_grants.rs:554:20
+    |
+554 |         let table: Vec<(&str, DaemonRequest, Result<(), &str>, Result<(), &str>)> = vec![
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+    = note: `-D clippy::type-complexity` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::type_complexity)]`
+

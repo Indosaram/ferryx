@@ -1,0 +1,323 @@
+From https://github.com/Indosaram/ferryx
+ * branch              ci/rex-buildgreen-18 -> FETCH_HEAD
+ * [new branch]        ci/rex-buildgreen-18 -> origin/ci/rex-buildgreen-18
+Previous HEAD position was 21a49214 build: complete declared desktop integration target requirements
+HEAD is now at 90233488 build: require desktop for native surface host example
+M	src-tauri/gen/schemas/acl-manifests.json
+M	src-tauri/gen/schemas/capabilities.json
+M	src-tauri/gen/schemas/desktop-schema.json
+M	src-tauri/gen/schemas/windows-schema.json
+M	ui/public/llms.txt
+M	ui/public/search.json
+    Checking ferryx v2026.1101.1 (C:\Users\sook\ferryx-wt\rex-buildgreen-20261104\src-tauri)
+error[E0433]: cannot find `updater` in `ipc`
+   --> src\daemon\supervisor.rs:621:49
+    |
+621 |         task::supported_for_install(crate::ipc::updater::updater_managed_externally())
+    |                                                 ^^^^^^^ could not find `updater` in `ipc`
+    |
+note: found an item that was configured out
+   --> src\ipc\mod.rs:85:9
+    |
+ 84 | #[cfg(feature = "desktop")]
+    |       ------------------- the item is gated behind the `desktop` feature
+ 85 | pub mod updater;
+    |         ^^^^^^^
+
+error[E0433]: cannot find module or crate `tauri` in this scope
+    --> src\ipc\browser_cli.rs:1892:5
+     |
+1892 |     tauri::async_runtime::spawn(async move {
+     |     ^^^^^ use of unresolved module or unlinked crate `tauri`
+     |
+     = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `tauri` in this scope
+    --> src\ipc\browser_cli.rs:1910:17
+     |
+1910 |                 tauri::async_runtime::spawn(async move {
+     |                 ^^^^^ use of unresolved module or unlinked crate `tauri`
+     |
+     = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0425]: cannot find type `AppHandle` in this scope
+    --> src\ipc\browser_cli.rs:1851:10
+     |
+1851 |     app: AppHandle<R>,
+     |          ^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find type `AppHandle` in this scope
+    --> src\ipc\browser_cli.rs:1859:10
+     |
+1859 |     app: AppHandle<R>,
+     |          ^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `handle_connection` in this scope
+    --> src\ipc\browser_cli.rs:1911:43
+     |
+1911 |                     log_connection_result(handle_connection(stream, app, manager, token).await);
+     |                                           ^^^^^^^^^^^^^^^^^ not found in this scope
+     |
+note: function `crate::ssh::helper_runtime::helper::agent_state::handle_connection` exists but is inaccessible
+    --> src\ssh\..\ferryx_scope\ssh\agent_state.rs:406:1
+     |
+ 406 | / fn handle_connection(
+ 407 | |     mut stream: TcpStream,
+ 408 | |     registry: &Mutex<HashMap<String, SessionRegistration>>,
+ 409 | |     stop: &AgentStateShutdown,
+...    |
+ 511 | |     signal.notify_all();
+ 512 | | }
+     | |_^ not accessible
+
+warning: unused import: `crate::browser::security::BrowserError`
+  --> src\browser\bridge\mod.rs:66:5
+   |
+66 | use crate::browser::security::BrowserError;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Entry`, `Message`, and `Page`
+ --> src\ipc\agent_history.rs:1:37
+  |
+1 | use crate::agent_history::history::{Entry, History, HistoryError, Message, Page};
+  |                                     ^^^^^                         ^^^^^^^  ^^^^
+
+warning: unused import: `run_blocking`
+ --> src\ipc\agent_history.rs:2:18
+  |
+2 | use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+  |                  ^^^^^^^^^^^^
+
+warning: unused imports: `BrowserDialogHandleRequest`, `BrowserDownloadRequest`, `BrowserSessionCreatedPayload`, and `CreateBrowserRequest`
+ --> src\ipc\browser_cli.rs:3:5
+  |
+3 |     BrowserDialogHandleRequest, BrowserDownloadRequest, BrowserError, BrowserManager,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+4 |     BrowserSessionCreatedPayload, BrowserSessionSummary, BrowserWaitCondition,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+5 |     CreateBrowserRequest,
+  |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `IpcError` and `run_blocking`
+ --> src\ipc\cli_install.rs:5:18
+  |
+5 | use crate::ipc::{run_blocking, IpcError};
+  |                  ^^^^^^^^^^^^  ^^^^^^^^
+
+warning: unused import: `run_blocking`
+ --> src\ipc\debug.rs:1:18
+  |
+1 | use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+  |                  ^^^^^^^^^^^^
+
+warning: unused imports: `HostView`, `InventoryChangeEvent`, `MigrationReceipt`, `MigrationRequest`, `PairRequest`, and `RedeemGrantRequest`
+ --> src\ipc\paired_host.rs:5:21
+  |
+5 |         inventory::{HostView, MigrationReceipt},
+  |                     ^^^^^^^^  ^^^^^^^^^^^^^^^^
+6 |         service::{InventoryChangeEvent, MigrationRequest, PairRequest, RedeemGrantRequest, Result},
+  |                   ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> src\ipc\paired_host.rs:9:5
+  |
+9 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `crate::daemon::DaemonClient`
+ --> src\ipc\project.rs:1:5
+  |
+1 | use crate::daemon::DaemonClient;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `run_blocking`
+ --> src\ipc\project.rs:2:18
+  |
+2 | use crate::ipc::{run_blocking, IpcError};
+  |                  ^^^^^^^^^^^^
+
+warning: unused import: `run_git`
+ --> src\ipc\project.rs:3:23
+  |
+3 | use crate::worktree::{run_git, WorkspaceRegistry, WorktreeError, WorktreeManager};
+  |                       ^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> src\ipc\project.rs:6:5
+  |
+6 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `RemoteActiveDesktopSelection`
+ --> src\ipc\remote.rs:6:5
+  |
+6 |     RemoteActiveDesktopSelection, RemoteSessionAttention, RemoteTerminalTabInfo,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `REMOTE_GATEWAY_PORT` and `RemoteGatewayConfig`
+  --> src\ipc\remote.rs:11:5
+   |
+11 |     RemoteGatewayConfig, RemoteGatewayState, RemoteNetworkMode, RemoteRestartPolicy,
+   |     ^^^^^^^^^^^^^^^^^^^
+12 |     REMOTE_GATEWAY_PORT,
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `run_blocking`
+ --> src\ipc\remote_file.rs:1:18
+  |
+1 | use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+  |                  ^^^^^^^^^^^^
+
+warning: unused import: `DaemonAttachment`
+ --> src\ipc\terminal.rs:2:29
+  |
+2 | use crate::daemon::client::{DaemonAttachment, DaemonClient};
+  |                             ^^^^^^^^^^^^^^^^
+
+warning: unused import: `DaemonStreamMessage`
+ --> src\ipc\terminal.rs:3:31
+  |
+3 | use crate::daemon::protocol::{DaemonStreamMessage, TerminalStartup};
+  |                               ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `run_blocking`
+ --> src\ipc\terminal.rs:4:18
+  |
+4 | use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+  |                  ^^^^^^^^^^^^
+
+warning: unused import: `WorkspaceRegistry`
+ --> src\ipc\terminal.rs:6:23
+  |
+6 | use crate::worktree::{WorkspaceRegistry, WorktreeError, WorktreeIdentity};
+  |                       ^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Engine as _` and `engine::general_purpose::STANDARD`
+ --> src\ipc\terminal.rs:7:14
+  |
+7 | use base64::{engine::general_purpose::STANDARD, Engine as _};
+  |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^
+
+warning: unused imports: `DaemonClient` and `DaemonRequest`
+ --> src\ipc\worktree.rs:2:16
+  |
+2 |     protocol::{DaemonRequest, DaemonResponse},
+  |                ^^^^^^^^^^^^^
+3 |     DaemonClient,
+  |     ^^^^^^^^^^^^
+
+warning: unused import: `run_blocking`
+ --> src\ipc\worktree.rs:5:18
+  |
+5 | use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+  |                  ^^^^^^^^^^^^
+
+warning: unused imports: `BranchDeletionPreview`, `DirtyState`, `ExternalWorktree`, and `Worktree`
+  --> src\ipc\worktree.rs:12:5
+   |
+12 |     BranchDeletionPreview, DirtyState, ExternalWorktree, WorkspaceRegistry, Worktree,
+   |     ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^  ^^^^^^^^^^^^^^^^                     ^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+  --> src\ipc\worktree.rs:16:5
+   |
+16 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `crate::ipc::run_blocking`
+  --> src\worktree\rescan.rs:20:5
+   |
+20 | use crate::ipc::run_blocking;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+  --> src\worktree\rescan.rs:30:5
+   |
+30 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+error[E0433]: cannot find module or crate `tauri` in this scope
+   --> src\browser\snapshot_source_tests.rs:341:15
+    |
+341 |     let app = tauri::test::mock_builder()
+    |               ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `tauri` in this scope
+   --> src\browser\snapshot_source_tests.rs:342:16
+    |
+342 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `tauri` in this scope
+   --> src\browser\snapshot_source_tests.rs:342:42
+    |
+342 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                                          ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+warning: unused import: `Entry`
+ --> src\ipc\agent_history.rs:1:37
+  |
+1 | use crate::agent_history::history::{Entry, History, HistoryError, Message, Page};
+  |                                     ^^^^^
+
+warning: unused import: `run_blocking`
+ --> src\ipc\cli_install.rs:5:18
+  |
+5 | use crate::ipc::{run_blocking, IpcError};
+  |                  ^^^^^^^^^^^^
+
+error[E0433]: cannot find module or crate `tauri` in this scope
+    --> src\ipc\browser_cli.rs:1850:36
+     |
+1850 | pub fn start_browser_cli_server<R: tauri::Runtime>(
+     |                                    ^^^^^ use of unresolved module or unlinked crate `tauri`
+     |
+     = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `tauri` in this scope
+    --> src\ipc\browser_cli.rs:1858:40
+     |
+1858 | fn start_browser_cli_server_at_path<R: tauri::Runtime>(
+     |                                        ^^^^^ use of unresolved module or unlinked crate `tauri`
+     |
+     = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0425]: cannot find function `serve_accept_loop` in this scope
+    --> src\ipc\browser_cli.rs:1904:9
+     |
+1904 |         serve_accept_loop(
+     |         ^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `log_connection_result` in this scope
+    --> src\ipc\browser_cli.rs:1911:21
+     |
+1911 |                     log_connection_result(handle_connection(stream, app, manager, token).await);
+     |                     ^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+Some errors have detailed explanations: E0425, E0433.
+For more information about an error, try `rustc --explain E0425`.
+warning: `ferryx` (lib) generated 26 warnings
+error: could not compile `ferryx` (lib) due to 10 previous errors; 26 warnings emitted
+warning: build failed, waiting for other jobs to finish...
+error[E0433]: cannot find type `TauriBrowserSnapshotSource` in this scope
+   --> src\browser\snapshot_source_tests.rs:344:18
+    |
+344 |     let source = TauriBrowserSnapshotSource::new(app.handle().clone());
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^ use of undeclared type `TauriBrowserSnapshotSource`
+    |
+help: a struct with a similar name exists
+    |
+344 -     let source = TauriBrowserSnapshotSource::new(app.handle().clone());
+344 +     let source = FakeBrowserSnapshotSource::new(app.handle().clone());
+    |
+
+warning: `ferryx` (lib test) generated 24 warnings (22 duplicates)
+error: could not compile `ferryx` (lib test) due to 14 previous errors; 24 warnings emitted

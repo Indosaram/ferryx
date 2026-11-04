@@ -1,0 +1,41 @@
+ui-typecheck EXIT=0
+ffmpeg EXIT=0
+default EXIT=101
+headless EXIT=101
+clippy EXIT=101
+test EXIT=101
+DONE
+ui-typecheck EXIT=0
+ffmpeg EXIT=0
+default EXIT=101
+headless EXIT=101
+ui-typecheck EXIT=0
+ffmpeg EXIT=0
+default EXIT=0
+headless EXIT=101
+clippy EXIT=101
+ui-typecheck EXIT=0
+ffmpeg EXIT=0
+default EXIT=0
+headless EXIT=101
+clippy EXIT=101
+test EXIT=0
+DONE
+ui-typecheck EXIT=0
+ffmpeg EXIT=0
+default EXIT=0
+headless EXIT=101
+clippy EXIT=0
+headless-final EXIT=101
+test EXIT=0
+DONE
+cli-build EXIT=0
+llms EXIT=0
+llms-check EXIT=0
+ui-typecheck EXIT=0
+ffmpeg EXIT=0
+default EXIT=0
+headless EXIT=0
+clippy EXIT=0
+test EXIT=0
+DONE

@@ -1,0 +1,36 @@
+ui-install EXIT=0
+ui-build EXIT=1
+ui-typecheck EXIT=1
+ffmpeg EXIT=0
+default EXIT=101
+headless EXIT=101
+clippy EXIT=101
+test EXIT=1
+DONE
+ui-install EXIT=0
+ui-build EXIT=0
+ui-typecheck EXIT=0
+ffmpeg EXIT=0
+default EXIT=101
+headless EXIT=101
+clippy EXIT=101
+test EXIT=0
+DONE
+ui-install EXIT=0
+ui-build EXIT=0
+ui-typecheck EXIT=0
+ffmpeg EXIT=0
+default EXIT=0
+headless EXIT=101
+clippy EXIT=0
+test EXIT=0
+DONE
+ui-install EXIT=0
+ui-build EXIT=0
+ui-typecheck EXIT=0
+ffmpeg EXIT=0
+default EXIT=0
+headless EXIT=101
+clippy EXIT=0
+test EXIT=0
+DONE

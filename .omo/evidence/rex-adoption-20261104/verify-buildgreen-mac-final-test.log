@@ -1,0 +1,3 @@
+   Compiling ferryx v2026.1101.1 (/Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 56s
+  Executable unittests src/lib.rs (/Users/I552267/code/ferryx-wt/.target/debug/deps/ferryx_lib-d1c76f999131b034)

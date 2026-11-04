@@ -1,0 +1,476 @@
+[1m[92m   Compiling[0m ferryx v2026.1101.1 (/home/runner/work/ferryx/ferryx/src-tauri)
+[1m[91merror[E0282][0m[1m: type annotations needed for `std::result::Result<serde_json::Value, _>`[0m
+   [1m[94m--> [0msrc/script/mod.rs:111:21
+    [1m[94m|[0m
+[1m[94m111[0m [1m[94m|[0m                 let result = (|| {
+    [1m[94m|[0m                     [1m[91m^^^^^^[0m
+[1m[94m...[0m
+[1m[94m137[0m [1m[94m|[0m                     let message = error.clone();
+    [1m[94m|[0m                                   [1m[94m-----[0m [1m[94mtype must be known at this point[0m
+    [1m[94m|[0m
+[1m[96mhelp[0m: consider giving `result` an explicit type, where the type for type parameter `E` is specified
+    [1m[94m|[0m
+[1m[94m111[0m [1m[94m| [0m                let result[92m: std::result::Result<_, E>[0m = (|| {
+    [1m[94m|[0m                           [92m+++++++++++++++++++++++++++[0m
+
+[1m[91merror[E0277][0m[1m: the trait bound `tauri::WebviewWindow: tauri::ipc::CommandArg<'_, R>` is not satisfied[0m
+    [1m[94m--> [0msrc/ipc/layout.rs:108:1
+     [1m[94m|[0m
+[1m[94m 108[0m [1m[94m|[0m   #[tauri::command]
+     [1m[94m|[0m   [1m[91m^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `_::_serde::Deserialize<'_>` is not implemented for `tauri::WebviewWindow`[0m
+     [1m[94m|[0m
+    [1m[94m::: [0msrc/lib.rs:1835:71
+     [1m[94m|[0m
+[1m[94m1835[0m [1m[94m|[0m       let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+     [1m[94m|[0m [1m[94m _______________________________________________________________________-[0m
+[1m[94m1836[0m [1m[94m|[0m [1m[94m|[0m         deep_link::cmd_deep_link_take_pending,
+[1m[94m1837[0m [1m[94m|[0m [1m[94m|[0m         cmd_native_qa_enabled,
+[1m[94m1838[0m [1m[94m|[0m [1m[94m|[0m         cmd_shortcuts_set_native_table,
+[1m[94m...[0m    [1m[94m|[0m
+[1m[94m2103[0m [1m[94m|[0m [1m[94m|[0m         dag_discover_watch_roots,
+[1m[94m2104[0m [1m[94m|[0m [1m[94m|[0m     ]);
+     [1m[94m|[0m [1m[94m|_____-[0m [1m[94min this macro invocation[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: the following other types implement trait `_::_serde::Deserialize<'de>`:
+               `&'a [u8]` implements `_::_serde::Deserialize<'de>`
+               `&'a bstr::bstr::BStr` implements `_::_serde::Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `_::_serde::Deserialize<'de>`
+               `&'a std::path::Path` implements `_::_serde::Deserialize<'de>`
+               `&'a str` implements `_::_serde::Deserialize<'de>`
+               `&'p jsonptr::pointer::Pointer` implements `_::_serde::Deserialize<'de>`
+               `()` implements `_::_serde::Deserialize<'de>`
+               `(T,)` implements `_::_serde::Deserialize<'de>`
+             and 1914 others
+     [1m[94m= [0m[1mnote[0m: required for `tauri::WebviewWindow` to implement `tauri::ipc::CommandArg<'_, R>`
+     [1m[94m= [0m[1mnote[0m: the full name for the type has been written to '/home/runner/work/ferryx/ferryx/src-tauri/target/debug/deps/ferryx_lib-e168b1afbe012673.long-type-13301892421093711743.txt'
+     [1m[94m= [0m[1mnote[0m: consider using `--verbose` to print the full type name to the console
+     [1m[94m= [0m[1mnote[0m: this error originates in the macro `ipc::layout::__cmd__cmd_layout_get` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+[1m[91merror[E0277][0m[1m: the trait bound `tauri::AppHandle: tauri::ipc::CommandArg<'_, R>` is not satisfied[0m
+    [1m[94m--> [0msrc/ipc/layout.rs:129:1
+     [1m[94m|[0m
+[1m[94m 129[0m [1m[94m|[0m   #[tauri::command]
+     [1m[94m|[0m   [1m[91m^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `_::_serde::Deserialize<'_>` is not implemented for `tauri::AppHandle`[0m
+     [1m[94m|[0m
+    [1m[94m::: [0msrc/lib.rs:1835:71
+     [1m[94m|[0m
+[1m[94m1835[0m [1m[94m|[0m       let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+     [1m[94m|[0m [1m[94m _______________________________________________________________________-[0m
+[1m[94m1836[0m [1m[94m|[0m [1m[94m|[0m         deep_link::cmd_deep_link_take_pending,
+[1m[94m1837[0m [1m[94m|[0m [1m[94m|[0m         cmd_native_qa_enabled,
+[1m[94m1838[0m [1m[94m|[0m [1m[94m|[0m         cmd_shortcuts_set_native_table,
+[1m[94m...[0m    [1m[94m|[0m
+[1m[94m2103[0m [1m[94m|[0m [1m[94m|[0m         dag_discover_watch_roots,
+[1m[94m2104[0m [1m[94m|[0m [1m[94m|[0m     ]);
+     [1m[94m|[0m [1m[94m|_____-[0m [1m[94min this macro invocation[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: the following other types implement trait `_::_serde::Deserialize<'de>`:
+               `&'a [u8]` implements `_::_serde::Deserialize<'de>`
+               `&'a bstr::bstr::BStr` implements `_::_serde::Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `_::_serde::Deserialize<'de>`
+               `&'a std::path::Path` implements `_::_serde::Deserialize<'de>`
+               `&'a str` implements `_::_serde::Deserialize<'de>`
+               `&'p jsonptr::pointer::Pointer` implements `_::_serde::Deserialize<'de>`
+               `()` implements `_::_serde::Deserialize<'de>`
+               `(T,)` implements `_::_serde::Deserialize<'de>`
+             and 1914 others
+     [1m[94m= [0m[1mnote[0m: required for `tauri::AppHandle` to implement `tauri::ipc::CommandArg<'_, R>`
+     [1m[94m= [0m[1mnote[0m: the full name for the type has been written to '/home/runner/work/ferryx/ferryx/src-tauri/target/debug/deps/ferryx_lib-e168b1afbe012673.long-type-13301892421093711743.txt'
+     [1m[94m= [0m[1mnote[0m: consider using `--verbose` to print the full type name to the console
+     [1m[94m= [0m[1mnote[0m: this error originates in the macro `ipc::layout::__cmd__cmd_layout_import` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+[1m[91merror[E0277][0m[1m: the trait bound `tauri::WebviewWindow: tauri::ipc::CommandArg<'_, R>` is not satisfied[0m
+    [1m[94m--> [0msrc/ipc/layout.rs:129:1
+     [1m[94m|[0m
+[1m[94m 129[0m [1m[94m|[0m   #[tauri::command]
+     [1m[94m|[0m   [1m[91m^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `_::_serde::Deserialize<'_>` is not implemented for `tauri::WebviewWindow`[0m
+     [1m[94m|[0m
+    [1m[94m::: [0msrc/lib.rs:1835:71
+     [1m[94m|[0m
+[1m[94m1835[0m [1m[94m|[0m       let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+     [1m[94m|[0m [1m[94m _______________________________________________________________________-[0m
+[1m[94m1836[0m [1m[94m|[0m [1m[94m|[0m         deep_link::cmd_deep_link_take_pending,
+[1m[94m1837[0m [1m[94m|[0m [1m[94m|[0m         cmd_native_qa_enabled,
+[1m[94m1838[0m [1m[94m|[0m [1m[94m|[0m         cmd_shortcuts_set_native_table,
+[1m[94m...[0m    [1m[94m|[0m
+[1m[94m2103[0m [1m[94m|[0m [1m[94m|[0m         dag_discover_watch_roots,
+[1m[94m2104[0m [1m[94m|[0m [1m[94m|[0m     ]);
+     [1m[94m|[0m [1m[94m|_____-[0m [1m[94min this macro invocation[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: the following other types implement trait `_::_serde::Deserialize<'de>`:
+               `&'a [u8]` implements `_::_serde::Deserialize<'de>`
+               `&'a bstr::bstr::BStr` implements `_::_serde::Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `_::_serde::Deserialize<'de>`
+               `&'a std::path::Path` implements `_::_serde::Deserialize<'de>`
+               `&'a str` implements `_::_serde::Deserialize<'de>`
+               `&'p jsonptr::pointer::Pointer` implements `_::_serde::Deserialize<'de>`
+               `()` implements `_::_serde::Deserialize<'de>`
+               `(T,)` implements `_::_serde::Deserialize<'de>`
+             and 1914 others
+     [1m[94m= [0m[1mnote[0m: required for `tauri::WebviewWindow` to implement `tauri::ipc::CommandArg<'_, R>`
+     [1m[94m= [0m[1mnote[0m: the full name for the type has been written to '/home/runner/work/ferryx/ferryx/src-tauri/target/debug/deps/ferryx_lib-e168b1afbe012673.long-type-13301892421093711743.txt'
+     [1m[94m= [0m[1mnote[0m: consider using `--verbose` to print the full type name to the console
+     [1m[94m= [0m[1mnote[0m: this error originates in the macro `ipc::layout::__cmd__cmd_layout_import` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+[1m[91merror[E0277][0m[1m: the trait bound `tauri::WebviewWindow: tauri::ipc::CommandArg<'_, R>` is not satisfied[0m
+    [1m[94m--> [0msrc/ipc/layout.rs:62:1
+     [1m[94m|[0m
+[1m[94m  62[0m [1m[94m|[0m   #[tauri::command]
+     [1m[94m|[0m   [1m[91m^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `_::_serde::Deserialize<'_>` is not implemented for `tauri::WebviewWindow`[0m
+     [1m[94m|[0m
+    [1m[94m::: [0msrc/lib.rs:1835:71
+     [1m[94m|[0m
+[1m[94m1835[0m [1m[94m|[0m       let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+     [1m[94m|[0m [1m[94m _______________________________________________________________________-[0m
+[1m[94m1836[0m [1m[94m|[0m [1m[94m|[0m         deep_link::cmd_deep_link_take_pending,
+[1m[94m1837[0m [1m[94m|[0m [1m[94m|[0m         cmd_native_qa_enabled,
+[1m[94m1838[0m [1m[94m|[0m [1m[94m|[0m         cmd_shortcuts_set_native_table,
+[1m[94m...[0m    [1m[94m|[0m
+[1m[94m2103[0m [1m[94m|[0m [1m[94m|[0m         dag_discover_watch_roots,
+[1m[94m2104[0m [1m[94m|[0m [1m[94m|[0m     ]);
+     [1m[94m|[0m [1m[94m|_____-[0m [1m[94min this macro invocation[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: the following other types implement trait `_::_serde::Deserialize<'de>`:
+               `&'a [u8]` implements `_::_serde::Deserialize<'de>`
+               `&'a bstr::bstr::BStr` implements `_::_serde::Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `_::_serde::Deserialize<'de>`
+               `&'a std::path::Path` implements `_::_serde::Deserialize<'de>`
+               `&'a str` implements `_::_serde::Deserialize<'de>`
+               `&'p jsonptr::pointer::Pointer` implements `_::_serde::Deserialize<'de>`
+               `()` implements `_::_serde::Deserialize<'de>`
+               `(T,)` implements `_::_serde::Deserialize<'de>`
+             and 1914 others
+     [1m[94m= [0m[1mnote[0m: required for `tauri::WebviewWindow` to implement `tauri::ipc::CommandArg<'_, R>`
+     [1m[94m= [0m[1mnote[0m: the full name for the type has been written to '/home/runner/work/ferryx/ferryx/src-tauri/target/debug/deps/ferryx_lib-e168b1afbe012673.long-type-13301892421093711743.txt'
+     [1m[94m= [0m[1mnote[0m: consider using `--verbose` to print the full type name to the console
+     [1m[94m= [0m[1mnote[0m: this error originates in the macro `ipc::layout::__cmd__cmd_panes` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+[1m[91merror[E0277][0m[1m: the trait bound `tauri::WebviewWindow: tauri::ipc::CommandArg<'_, R>` is not satisfied[0m
+    [1m[94m--> [0msrc/ipc/layout.rs:145:1
+     [1m[94m|[0m
+[1m[94m 145[0m [1m[94m|[0m   #[tauri::command]
+     [1m[94m|[0m   [1m[91m^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `_::_serde::Deserialize<'_>` is not implemented for `tauri::WebviewWindow`[0m
+     [1m[94m|[0m
+    [1m[94m::: [0msrc/lib.rs:1835:71
+     [1m[94m|[0m
+[1m[94m1835[0m [1m[94m|[0m       let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+     [1m[94m|[0m [1m[94m _______________________________________________________________________-[0m
+[1m[94m1836[0m [1m[94m|[0m [1m[94m|[0m         deep_link::cmd_deep_link_take_pending,
+[1m[94m1837[0m [1m[94m|[0m [1m[94m|[0m         cmd_native_qa_enabled,
+[1m[94m1838[0m [1m[94m|[0m [1m[94m|[0m         cmd_shortcuts_set_native_table,
+[1m[94m...[0m    [1m[94m|[0m
+[1m[94m2103[0m [1m[94m|[0m [1m[94m|[0m         dag_discover_watch_roots,
+[1m[94m2104[0m [1m[94m|[0m [1m[94m|[0m     ]);
+     [1m[94m|[0m [1m[94m|_____-[0m [1m[94min this macro invocation[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: the following other types implement trait `_::_serde::Deserialize<'de>`:
+               `&'a [u8]` implements `_::_serde::Deserialize<'de>`
+               `&'a bstr::bstr::BStr` implements `_::_serde::Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `_::_serde::Deserialize<'de>`
+               `&'a std::path::Path` implements `_::_serde::Deserialize<'de>`
+               `&'a str` implements `_::_serde::Deserialize<'de>`
+               `&'p jsonptr::pointer::Pointer` implements `_::_serde::Deserialize<'de>`
+               `()` implements `_::_serde::Deserialize<'de>`
+               `(T,)` implements `_::_serde::Deserialize<'de>`
+             and 1914 others
+     [1m[94m= [0m[1mnote[0m: required for `tauri::WebviewWindow` to implement `tauri::ipc::CommandArg<'_, R>`
+     [1m[94m= [0m[1mnote[0m: the full name for the type has been written to '/home/runner/work/ferryx/ferryx/src-tauri/target/debug/deps/ferryx_lib-e168b1afbe012673.long-type-13301892421093711743.txt'
+     [1m[94m= [0m[1mnote[0m: consider using `--verbose` to print the full type name to the console
+     [1m[94m= [0m[1mnote[0m: this error originates in the macro `ipc::layout::__cmd__cmd_layout_apply` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+[1m[91merror[E0502][0m[1m: cannot borrow `next` as immutable because it is also borrowed as mutable[0m
+   [1m[94m--> [0msrc/daemon/pane_grants.rs:264:21
+    [1m[94m|[0m
+[1m[94m262[0m [1m[94m|[0m         match next.iter_mut().find(|known| known.from == grant.from && known.to == grant.to) {
+    [1m[94m|[0m               [1m[94m----[0m [1m[94mmutable borrow occurs here[0m
+[1m[94m263[0m [1m[94m|[0m             Some(known) => known.ops.extend(grant.ops),
+[1m[94m264[0m [1m[94m|[0m             None if next.len() >= MAX_GRANTS => return Err(format!("at most {MAX_GRANTS} pane grants are kept")),
+    [1m[94m|[0m                     [1m[91m^^^^[0m                   [1m[94m-[0m [1m[94mmutable borrow later used here[0m
+    [1m[94m|[0m                     [1m[91m|[0m
+    [1m[94m|[0m                     [1m[91mimmutable borrow occurs here[0m
+
+[1mSome errors have detailed explanations: E0277, E0282, E0502.[0m
+[1mFor more information about an error, try `rustc --explain E0277`.[0m
+[1m[91merror[0m: could not compile `ferryx` (lib) due to 7 previous errors
+[1m[33mwarning[0m: build failed, waiting for other jobs to finish...
+[1m[91merror[E0277][0m[1m: `?` couldn't convert the error to `ipc::error::IpcError`[0m
+    [1m[94m--> [0msrc/terminal/foreground.rs:1474:42
+     [1m[94m|[0m
+[1m[94m1474[0m [1m[94m|[0m             let dir = tempfile::tempdir()?;
+     [1m[94m|[0m                       [1m[94m-------------------[0m[1m[91m^[0m [1m[91mthe trait `std::convert::From<std::io::Error>` is not implemented for `ipc::error::IpcError`[0m
+     [1m[94m|[0m                       [1m[94m|[0m
+     [1m[94m|[0m                       [1m[94mthis can't be annotated with `?` because it has type `Result<_, std::io::Error>`[0m
+     [1m[94m|[0m
+[1m[92mnote[0m: `ipc::error::IpcError` needs to implement `From<std::io::Error>`
+    [1m[94m--> [0msrc/ipc/error.rs:267:1
+     [1m[94m|[0m
+[1m[94m 267[0m [1m[94m|[0m pub struct IpcError {
+     [1m[94m|[0m [1m[92m^^^^^^^^^^^^^^^^^^^[0m
+     [1m[94m= [0m[1mnote[0m: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+     [1m[94m= [0m[1mhelp[0m: `ipc::error::IpcError` implements trait `std::convert::From<T>`:
+               std::convert::From<browser::security::BrowserError>
+               std::convert::From<ipc::cli_install::CliInstallError>
+               std::convert::From<native_terminal::error::NativeTerminalError>
+               std::convert::From<terminal::PtyError>
+               std::convert::From<terminal::service::PasteChunkError>
+               std::convert::From<worktree::changes::GitChangeError>
+               std::convert::From<worktree::model::WorktreeError>
+
+[1m[91merror[E0277][0m[1m: `?` couldn't convert the error to `ipc::error::IpcError`[0m
+    [1m[94m--> [0msrc/terminal/foreground.rs:1476:86
+     [1m[94m|[0m
+[1m[94m1476[0m [1m[94m|[0m             std::fs::write(&script, "#!/bin/sh\nprintf 'NAME_READY>'\nread answer\n")?;
+     [1m[94m|[0m             [1m[94m-------------------------------------------------------------------------[0m[1m[91m^[0m [1m[91mthe trait `std::convert::From<std::io::Error>` is not implemented for `ipc::error::IpcError`[0m
+     [1m[94m|[0m             [1m[94m|[0m
+     [1m[94m|[0m             [1m[94mthis can't be annotated with `?` because it has type `Result<_, std::io::Error>`[0m
+     [1m[94m|[0m
+[1m[92mnote[0m: `ipc::error::IpcError` needs to implement `From<std::io::Error>`
+    [1m[94m--> [0msrc/ipc/error.rs:267:1
+     [1m[94m|[0m
+[1m[94m 267[0m [1m[94m|[0m pub struct IpcError {
+     [1m[94m|[0m [1m[92m^^^^^^^^^^^^^^^^^^^[0m
+     [1m[94m= [0m[1mnote[0m: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+     [1m[94m= [0m[1mhelp[0m: `ipc::error::IpcError` implements trait `std::convert::From<T>`:
+               std::convert::From<browser::security::BrowserError>
+               std::convert::From<ipc::cli_install::CliInstallError>
+               std::convert::From<native_terminal::error::NativeTerminalError>
+               std::convert::From<terminal::PtyError>
+               std::convert::From<terminal::service::PasteChunkError>
+               std::convert::From<worktree::changes::GitChangeError>
+               std::convert::From<worktree::model::WorktreeError>
+
+[1m[91merror[E0277][0m[1m: `?` couldn't convert the error to `ipc::error::IpcError`[0m
+    [1m[94m--> [0msrc/terminal/foreground.rs:1477:86
+     [1m[94m|[0m
+[1m[94m1477[0m [1m[94m|[0m             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+     [1m[94m|[0m             [1m[94m-------------------------------------------------------------------------[0m[1m[91m^[0m [1m[91mthe trait `std::convert::From<std::io::Error>` is not implemented for `ipc::error::IpcError`[0m
+     [1m[94m|[0m             [1m[94m|[0m
+     [1m[94m|[0m             [1m[94mthis can't be annotated with `?` because it has type `Result<_, std::io::Error>`[0m
+     [1m[94m|[0m
+[1m[92mnote[0m: `ipc::error::IpcError` needs to implement `From<std::io::Error>`
+    [1m[94m--> [0msrc/ipc/error.rs:267:1
+     [1m[94m|[0m
+[1m[94m 267[0m [1m[94m|[0m pub struct IpcError {
+     [1m[94m|[0m [1m[92m^^^^^^^^^^^^^^^^^^^[0m
+     [1m[94m= [0m[1mnote[0m: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+     [1m[94m= [0m[1mhelp[0m: `ipc::error::IpcError` implements trait `std::convert::From<T>`:
+               std::convert::From<browser::security::BrowserError>
+               std::convert::From<ipc::cli_install::CliInstallError>
+               std::convert::From<native_terminal::error::NativeTerminalError>
+               std::convert::From<terminal::PtyError>
+               std::convert::From<terminal::service::PasteChunkError>
+               std::convert::From<worktree::changes::GitChangeError>
+               std::convert::From<worktree::model::WorktreeError>
+
+[1m[91merror[E0277][0m[1m: `?` couldn't convert the error to `ipc::error::IpcError`[0m
+    [1m[94m--> [0msrc/terminal/foreground.rs:1487:42
+     [1m[94m|[0m
+[1m[94m1487[0m [1m[94m|[0m             Ok(capture_process_snapshot()?.foreground_command(&session))
+     [1m[94m|[0m                [1m[94m--------------------------[0m[1m[91m^[0m [1m[91mthe trait `std::convert::From<std::io::Error>` is not implemented for `ipc::error::IpcError`[0m
+     [1m[94m|[0m                [1m[94m|[0m
+     [1m[94m|[0m                [1m[94mthis can't be annotated with `?` because it has type `Result<_, std::io::Error>`[0m
+     [1m[94m|[0m
+[1m[92mnote[0m: `ipc::error::IpcError` needs to implement `From<std::io::Error>`
+    [1m[94m--> [0msrc/ipc/error.rs:267:1
+     [1m[94m|[0m
+[1m[94m 267[0m [1m[94m|[0m pub struct IpcError {
+     [1m[94m|[0m [1m[92m^^^^^^^^^^^^^^^^^^^[0m
+     [1m[94m= [0m[1mnote[0m: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+     [1m[94m= [0m[1mhelp[0m: `ipc::error::IpcError` implements trait `std::convert::From<T>`:
+               std::convert::From<browser::security::BrowserError>
+               std::convert::From<ipc::cli_install::CliInstallError>
+               std::convert::From<native_terminal::error::NativeTerminalError>
+               std::convert::From<terminal::PtyError>
+               std::convert::From<terminal::service::PasteChunkError>
+               std::convert::From<worktree::changes::GitChangeError>
+               std::convert::From<worktree::model::WorktreeError>
+
+[1m[91merror[E0277][0m[1m: `?` couldn't convert the error to `ipc::error::IpcError`[0m
+    [1m[94m--> [0msrc/terminal/foreground.rs:1511:42
+     [1m[94m|[0m
+[1m[94m1511[0m [1m[94m|[0m             Ok(capture_process_snapshot()?.foreground_command(&session))
+     [1m[94m|[0m                [1m[94m--------------------------[0m[1m[91m^[0m [1m[91mthe trait `std::convert::From<std::io::Error>` is not implemented for `ipc::error::IpcError`[0m
+     [1m[94m|[0m                [1m[94m|[0m
+     [1m[94m|[0m                [1m[94mthis can't be annotated with `?` because it has type `Result<_, std::io::Error>`[0m
+     [1m[94m|[0m
+[1m[92mnote[0m: `ipc::error::IpcError` needs to implement `From<std::io::Error>`
+    [1m[94m--> [0msrc/ipc/error.rs:267:1
+     [1m[94m|[0m
+[1m[94m 267[0m [1m[94m|[0m pub struct IpcError {
+     [1m[94m|[0m [1m[92m^^^^^^^^^^^^^^^^^^^[0m
+     [1m[94m= [0m[1mnote[0m: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+     [1m[94m= [0m[1mhelp[0m: `ipc::error::IpcError` implements trait `std::convert::From<T>`:
+               std::convert::From<browser::security::BrowserError>
+               std::convert::From<ipc::cli_install::CliInstallError>
+               std::convert::From<native_terminal::error::NativeTerminalError>
+               std::convert::From<terminal::PtyError>
+               std::convert::From<terminal::service::PasteChunkError>
+               std::convert::From<worktree::changes::GitChangeError>
+               std::convert::From<worktree::model::WorktreeError>
+
+[1m[91merror[E0277][0m[1m: the trait bound `tauri::WebviewWindow: tauri::ipc::CommandArg<'_, R>` is not satisfied[0m
+    [1m[94m--> [0msrc/ipc/layout.rs:108:1
+     [1m[94m|[0m
+[1m[94m 108[0m [1m[94m|[0m   #[tauri::command]
+     [1m[94m|[0m   [1m[91m^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `_::_serde::Deserialize<'_>` is not implemented for `tauri::WebviewWindow`[0m
+     [1m[94m|[0m
+    [1m[94m::: [0msrc/lib.rs:1835:71
+     [1m[94m|[0m
+[1m[94m1835[0m [1m[94m|[0m       let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+     [1m[94m|[0m [1m[94m _______________________________________________________________________-[0m
+[1m[94m1836[0m [1m[94m|[0m [1m[94m|[0m         deep_link::cmd_deep_link_take_pending,
+[1m[94m1837[0m [1m[94m|[0m [1m[94m|[0m         cmd_native_qa_enabled,
+[1m[94m1838[0m [1m[94m|[0m [1m[94m|[0m         cmd_shortcuts_set_native_table,
+[1m[94m...[0m    [1m[94m|[0m
+[1m[94m2103[0m [1m[94m|[0m [1m[94m|[0m         dag_discover_watch_roots,
+[1m[94m2104[0m [1m[94m|[0m [1m[94m|[0m     ]);
+     [1m[94m|[0m [1m[94m|_____-[0m [1m[94min this macro invocation[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: the following other types implement trait `_::_serde::Deserialize<'de>`:
+               `&'a [u8]` implements `_::_serde::Deserialize<'de>`
+               `&'a bstr::bstr::BStr` implements `_::_serde::Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `_::_serde::Deserialize<'de>`
+               `&'a std::path::Path` implements `_::_serde::Deserialize<'de>`
+               `&'a str` implements `_::_serde::Deserialize<'de>`
+               `&'p jsonptr::pointer::Pointer` implements `_::_serde::Deserialize<'de>`
+               `()` implements `_::_serde::Deserialize<'de>`
+               `(T,)` implements `_::_serde::Deserialize<'de>`
+             and 1914 others
+     [1m[94m= [0m[1mnote[0m: required for `tauri::WebviewWindow` to implement `tauri::ipc::CommandArg<'_, R>`
+     [1m[94m= [0m[1mnote[0m: the full name for the type has been written to '/home/runner/work/ferryx/ferryx/src-tauri/target/debug/deps/ferryx_lib-2c3235226affa0ec.long-type-13119094753652417065.txt'
+     [1m[94m= [0m[1mnote[0m: consider using `--verbose` to print the full type name to the console
+     [1m[94m= [0m[1mnote[0m: this error originates in the macro `ipc::layout::__cmd__cmd_layout_get` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+[1m[91merror[E0277][0m[1m: the trait bound `tauri::AppHandle: tauri::ipc::CommandArg<'_, R>` is not satisfied[0m
+    [1m[94m--> [0msrc/ipc/layout.rs:129:1
+     [1m[94m|[0m
+[1m[94m 129[0m [1m[94m|[0m   #[tauri::command]
+     [1m[94m|[0m   [1m[91m^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `_::_serde::Deserialize<'_>` is not implemented for `tauri::AppHandle`[0m
+     [1m[94m|[0m
+    [1m[94m::: [0msrc/lib.rs:1835:71
+     [1m[94m|[0m
+[1m[94m1835[0m [1m[94m|[0m       let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+     [1m[94m|[0m [1m[94m _______________________________________________________________________-[0m
+[1m[94m1836[0m [1m[94m|[0m [1m[94m|[0m         deep_link::cmd_deep_link_take_pending,
+[1m[94m1837[0m [1m[94m|[0m [1m[94m|[0m         cmd_native_qa_enabled,
+[1m[94m1838[0m [1m[94m|[0m [1m[94m|[0m         cmd_shortcuts_set_native_table,
+[1m[94m...[0m    [1m[94m|[0m
+[1m[94m2103[0m [1m[94m|[0m [1m[94m|[0m         dag_discover_watch_roots,
+[1m[94m2104[0m [1m[94m|[0m [1m[94m|[0m     ]);
+     [1m[94m|[0m [1m[94m|_____-[0m [1m[94min this macro invocation[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: the following other types implement trait `_::_serde::Deserialize<'de>`:
+               `&'a [u8]` implements `_::_serde::Deserialize<'de>`
+               `&'a bstr::bstr::BStr` implements `_::_serde::Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `_::_serde::Deserialize<'de>`
+               `&'a std::path::Path` implements `_::_serde::Deserialize<'de>`
+               `&'a str` implements `_::_serde::Deserialize<'de>`
+               `&'p jsonptr::pointer::Pointer` implements `_::_serde::Deserialize<'de>`
+               `()` implements `_::_serde::Deserialize<'de>`
+               `(T,)` implements `_::_serde::Deserialize<'de>`
+             and 1914 others
+     [1m[94m= [0m[1mnote[0m: required for `tauri::AppHandle` to implement `tauri::ipc::CommandArg<'_, R>`
+     [1m[94m= [0m[1mnote[0m: the full name for the type has been written to '/home/runner/work/ferryx/ferryx/src-tauri/target/debug/deps/ferryx_lib-2c3235226affa0ec.long-type-13119094753652417065.txt'
+     [1m[94m= [0m[1mnote[0m: consider using `--verbose` to print the full type name to the console
+     [1m[94m= [0m[1mnote[0m: this error originates in the macro `ipc::layout::__cmd__cmd_layout_import` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+[1m[91merror[E0277][0m[1m: the trait bound `tauri::WebviewWindow: tauri::ipc::CommandArg<'_, R>` is not satisfied[0m
+    [1m[94m--> [0msrc/ipc/layout.rs:129:1
+     [1m[94m|[0m
+[1m[94m 129[0m [1m[94m|[0m   #[tauri::command]
+     [1m[94m|[0m   [1m[91m^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `_::_serde::Deserialize<'_>` is not implemented for `tauri::WebviewWindow`[0m
+     [1m[94m|[0m
+    [1m[94m::: [0msrc/lib.rs:1835:71
+     [1m[94m|[0m
+[1m[94m1835[0m [1m[94m|[0m       let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+     [1m[94m|[0m [1m[94m _______________________________________________________________________-[0m
+[1m[94m1836[0m [1m[94m|[0m [1m[94m|[0m         deep_link::cmd_deep_link_take_pending,
+[1m[94m1837[0m [1m[94m|[0m [1m[94m|[0m         cmd_native_qa_enabled,
+[1m[94m1838[0m [1m[94m|[0m [1m[94m|[0m         cmd_shortcuts_set_native_table,
+[1m[94m...[0m    [1m[94m|[0m
+[1m[94m2103[0m [1m[94m|[0m [1m[94m|[0m         dag_discover_watch_roots,
+[1m[94m2104[0m [1m[94m|[0m [1m[94m|[0m     ]);
+     [1m[94m|[0m [1m[94m|_____-[0m [1m[94min this macro invocation[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: the following other types implement trait `_::_serde::Deserialize<'de>`:
+               `&'a [u8]` implements `_::_serde::Deserialize<'de>`
+               `&'a bstr::bstr::BStr` implements `_::_serde::Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `_::_serde::Deserialize<'de>`
+               `&'a std::path::Path` implements `_::_serde::Deserialize<'de>`
+               `&'a str` implements `_::_serde::Deserialize<'de>`
+               `&'p jsonptr::pointer::Pointer` implements `_::_serde::Deserialize<'de>`
+               `()` implements `_::_serde::Deserialize<'de>`
+               `(T,)` implements `_::_serde::Deserialize<'de>`
+             and 1914 others
+     [1m[94m= [0m[1mnote[0m: required for `tauri::WebviewWindow` to implement `tauri::ipc::CommandArg<'_, R>`
+     [1m[94m= [0m[1mnote[0m: the full name for the type has been written to '/home/runner/work/ferryx/ferryx/src-tauri/target/debug/deps/ferryx_lib-2c3235226affa0ec.long-type-13119094753652417065.txt'
+     [1m[94m= [0m[1mnote[0m: consider using `--verbose` to print the full type name to the console
+     [1m[94m= [0m[1mnote[0m: this error originates in the macro `ipc::layout::__cmd__cmd_layout_import` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+[1m[91merror[E0277][0m[1m: the trait bound `tauri::WebviewWindow: tauri::ipc::CommandArg<'_, R>` is not satisfied[0m
+    [1m[94m--> [0msrc/ipc/layout.rs:62:1
+     [1m[94m|[0m
+[1m[94m  62[0m [1m[94m|[0m   #[tauri::command]
+     [1m[94m|[0m   [1m[91m^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `_::_serde::Deserialize<'_>` is not implemented for `tauri::WebviewWindow`[0m
+     [1m[94m|[0m
+    [1m[94m::: [0msrc/lib.rs:1835:71
+     [1m[94m|[0m
+[1m[94m1835[0m [1m[94m|[0m       let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+     [1m[94m|[0m [1m[94m _______________________________________________________________________-[0m
+[1m[94m1836[0m [1m[94m|[0m [1m[94m|[0m         deep_link::cmd_deep_link_take_pending,
+[1m[94m1837[0m [1m[94m|[0m [1m[94m|[0m         cmd_native_qa_enabled,
+[1m[94m1838[0m [1m[94m|[0m [1m[94m|[0m         cmd_shortcuts_set_native_table,
+[1m[94m...[0m    [1m[94m|[0m
+[1m[94m2103[0m [1m[94m|[0m [1m[94m|[0m         dag_discover_watch_roots,
+[1m[94m2104[0m [1m[94m|[0m [1m[94m|[0m     ]);
+     [1m[94m|[0m [1m[94m|_____-[0m [1m[94min this macro invocation[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: the following other types implement trait `_::_serde::Deserialize<'de>`:
+               `&'a [u8]` implements `_::_serde::Deserialize<'de>`
+               `&'a bstr::bstr::BStr` implements `_::_serde::Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `_::_serde::Deserialize<'de>`
+               `&'a std::path::Path` implements `_::_serde::Deserialize<'de>`
+               `&'a str` implements `_::_serde::Deserialize<'de>`
+               `&'p jsonptr::pointer::Pointer` implements `_::_serde::Deserialize<'de>`
+               `()` implements `_::_serde::Deserialize<'de>`
+               `(T,)` implements `_::_serde::Deserialize<'de>`
+             and 1914 others
+     [1m[94m= [0m[1mnote[0m: required for `tauri::WebviewWindow` to implement `tauri::ipc::CommandArg<'_, R>`
+     [1m[94m= [0m[1mnote[0m: the full name for the type has been written to '/home/runner/work/ferryx/ferryx/src-tauri/target/debug/deps/ferryx_lib-2c3235226affa0ec.long-type-13119094753652417065.txt'
+     [1m[94m= [0m[1mnote[0m: consider using `--verbose` to print the full type name to the console
+     [1m[94m= [0m[1mnote[0m: this error originates in the macro `ipc::layout::__cmd__cmd_panes` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+[1m[91merror[E0277][0m[1m: the trait bound `tauri::WebviewWindow: tauri::ipc::CommandArg<'_, R>` is not satisfied[0m
+    [1m[94m--> [0msrc/ipc/layout.rs:145:1
+     [1m[94m|[0m
+[1m[94m 145[0m [1m[94m|[0m   #[tauri::command]
+     [1m[94m|[0m   [1m[91m^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `_::_serde::Deserialize<'_>` is not implemented for `tauri::WebviewWindow`[0m
+     [1m[94m|[0m
+    [1m[94m::: [0msrc/lib.rs:1835:71
+     [1m[94m|[0m
+[1m[94m1835[0m [1m[94m|[0m       let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+     [1m[94m|[0m [1m[94m _______________________________________________________________________-[0m
+[1m[94m1836[0m [1m[94m|[0m [1m[94m|[0m         deep_link::cmd_deep_link_take_pending,
+[1m[94m1837[0m [1m[94m|[0m [1m[94m|[0m         cmd_native_qa_enabled,
+[1m[94m1838[0m [1m[94m|[0m [1m[94m|[0m         cmd_shortcuts_set_native_table,
+[1m[94m...[0m    [1m[94m|[0m
+[1m[94m2103[0m [1m[94m|[0m [1m[94m|[0m         dag_discover_watch_roots,
+[1m[94m2104[0m [1m[94m|[0m [1m[94m|[0m     ]);
+     [1m[94m|[0m [1m[94m|_____-[0m [1m[94min this macro invocation[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: the following other types implement trait `_::_serde::Deserialize<'de>`:
+               `&'a [u8]` implements `_::_serde::Deserialize<'de>`
+               `&'a bstr::bstr::BStr` implements `_::_serde::Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `_::_serde::Deserialize<'de>`
+               `&'a std::path::Path` implements `_::_serde::Deserialize<'de>`
+               `&'a str` implements `_::_serde::Deserialize<'de>`
+               `&'p jsonptr::pointer::Pointer` implements `_::_serde::Deserialize<'de>`
+               `()` implements `_::_serde::Deserialize<'de>`
+               `(T,)` implements `_::_serde::Deserialize<'de>`
+             and 1914 others
+     [1m[94m= [0m[1mnote[0m: required for `tauri::WebviewWindow` to implement `tauri::ipc::CommandArg<'_, R>`
+     [1m[94m= [0m[1mnote[0m: the full name for the type has been written to '/home/runner/work/ferryx/ferryx/src-tauri/target/debug/deps/ferryx_lib-2c3235226affa0ec.long-type-13119094753652417065.txt'
+     [1m[94m= [0m[1mnote[0m: consider using `--verbose` to print the full type name to the console
+     [1m[94m= [0m[1mnote[0m: this error originates in the macro `ipc::layout::__cmd__cmd_layout_apply` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+[1m[91merror[0m: could not compile `ferryx` (lib test) due to 12 previous errors

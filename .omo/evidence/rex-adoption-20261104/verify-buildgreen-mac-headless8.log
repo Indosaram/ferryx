@@ -1,0 +1,1716 @@
+    Checking ferryx v2026.1101.1 (/Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/src-tauri)
+warning: unused import: `crate::browser::security::BrowserError`
+  --> src/browser/bridge/mod.rs:66:5
+   |
+66 | use crate::browser::security::BrowserError;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Entry`, `Message`, and `Page`
+ --> src/ipc/agent_history.rs:1:37
+  |
+1 | use crate::agent_history::history::{Entry, History, HistoryError, Message, Page};
+  |                                     ^^^^^                         ^^^^^^^  ^^^^
+
+warning: unused import: `run_blocking`
+ --> src/ipc/agent_history.rs:2:18
+  |
+2 | use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+  |                  ^^^^^^^^^^^^
+
+warning: unused imports: `BrowserDialogHandleRequest`, `BrowserDownloadRequest`, `BrowserManager`, `BrowserSessionCreatedPayload`, and `CreateBrowserRequest`
+ --> src/ipc/browser_cli.rs:3:5
+  |
+3 |     BrowserDialogHandleRequest, BrowserDownloadRequest, BrowserError, BrowserManager,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^                ^^^^^^^^^^^^^^
+4 |     BrowserSessionCreatedPayload, BrowserSessionSummary, BrowserWaitCondition,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+5 |     CreateBrowserRequest,
+  |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+  --> src/ipc/browser_cli.rs:20:5
+   |
+20 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused imports: `IpcError` and `run_blocking`
+ --> src/ipc/cli_install.rs:5:18
+  |
+5 | use crate::ipc::{run_blocking, IpcError};
+  |                  ^^^^^^^^^^^^  ^^^^^^^^
+
+warning: unused import: `run_blocking`
+ --> src/ipc/debug.rs:1:18
+  |
+1 | use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+  |                  ^^^^^^^^^^^^
+
+warning: unused imports: `HostView`, `InventoryChangeEvent`, `MigrationReceipt`, `MigrationRequest`, `PairRequest`, and `RedeemGrantRequest`
+ --> src/ipc/paired_host.rs:5:21
+  |
+5 |         inventory::{HostView, MigrationReceipt},
+  |                     ^^^^^^^^  ^^^^^^^^^^^^^^^^
+6 |         service::{InventoryChangeEvent, MigrationRequest, PairRequest, RedeemGrantRequest, Result},
+  |                   ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> src/ipc/paired_host.rs:9:5
+  |
+9 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `crate::daemon::DaemonClient`
+ --> src/ipc/project.rs:1:5
+  |
+1 | use crate::daemon::DaemonClient;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `run_blocking`
+ --> src/ipc/project.rs:2:18
+  |
+2 | use crate::ipc::{run_blocking, IpcError};
+  |                  ^^^^^^^^^^^^
+
+warning: unused import: `run_git`
+ --> src/ipc/project.rs:3:23
+  |
+3 | use crate::worktree::{run_git, WorkspaceRegistry, WorktreeError, WorktreeManager};
+  |                       ^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> src/ipc/project.rs:6:5
+  |
+6 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `RemoteActiveDesktopSelection`
+ --> src/ipc/remote.rs:6:5
+  |
+6 |     RemoteActiveDesktopSelection, RemoteSessionAttention, RemoteTerminalTabInfo,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `REMOTE_GATEWAY_PORT` and `RemoteGatewayConfig`
+  --> src/ipc/remote.rs:11:5
+   |
+11 |     RemoteGatewayConfig, RemoteGatewayState, RemoteNetworkMode, RemoteRestartPolicy,
+   |     ^^^^^^^^^^^^^^^^^^^
+12 |     REMOTE_GATEWAY_PORT,
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `run_blocking`
+ --> src/ipc/remote_file.rs:1:18
+  |
+1 | use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+  |                  ^^^^^^^^^^^^
+
+warning: unused import: `DaemonAttachment`
+ --> src/ipc/terminal.rs:2:29
+  |
+2 | use crate::daemon::client::{DaemonAttachment, DaemonClient};
+  |                             ^^^^^^^^^^^^^^^^
+
+warning: unused import: `DaemonStreamMessage`
+ --> src/ipc/terminal.rs:3:31
+  |
+3 | use crate::daemon::protocol::{DaemonStreamMessage, TerminalStartup};
+  |                               ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `run_blocking`
+ --> src/ipc/terminal.rs:4:18
+  |
+4 | use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+  |                  ^^^^^^^^^^^^
+
+warning: unused import: `WorkspaceRegistry`
+ --> src/ipc/terminal.rs:6:23
+  |
+6 | use crate::worktree::{WorkspaceRegistry, WorktreeError, WorktreeIdentity};
+  |                       ^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Engine as _` and `engine::general_purpose::STANDARD`
+ --> src/ipc/terminal.rs:7:14
+  |
+7 | use base64::{engine::general_purpose::STANDARD, Engine as _};
+  |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^
+
+warning: unused imports: `DaemonClient` and `DaemonRequest`
+ --> src/ipc/worktree.rs:2:16
+  |
+2 |     protocol::{DaemonRequest, DaemonResponse},
+  |                ^^^^^^^^^^^^^
+3 |     DaemonClient,
+  |     ^^^^^^^^^^^^
+
+warning: unused import: `run_blocking`
+ --> src/ipc/worktree.rs:5:18
+  |
+5 | use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+  |                  ^^^^^^^^^^^^
+
+warning: unused imports: `BranchDeletionPreview`, `DirtyState`, `ExternalWorktree`, and `Worktree`
+  --> src/ipc/worktree.rs:12:5
+   |
+12 |     BranchDeletionPreview, DirtyState, ExternalWorktree, WorkspaceRegistry, Worktree,
+   |     ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^  ^^^^^^^^^^^^^^^^                     ^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+  --> src/ipc/worktree.rs:16:5
+   |
+16 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `crate::ipc::run_blocking`
+  --> src/worktree/rescan.rs:20:5
+   |
+20 | use crate::ipc::run_blocking;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+  --> src/worktree/rescan.rs:30:5
+   |
+30 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+warning: function `macos_monitor_chords` is never used
+   --> src/lib.rs:359:4
+    |
+359 | fn macos_monitor_chords(
+    |    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `macos_guest_chord_action` is never used
+   --> src/lib.rs:682:4
+    |
+682 | fn macos_guest_chord_action(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `macos_focused_browser_guest` is never used
+   --> src/lib.rs:703:4
+    |
+703 | fn macos_focused_browser_guest(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `macos_first_responder_has_marked_text` is never used
+   --> src/lib.rs:732:4
+    |
+732 | fn macos_first_responder_has_marked_text(event: &objc2_app_kit::NSEvent) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `unsupported_error` is never used
+  --> src/browser/hard_reload.rs:56:4
+   |
+56 | fn unsupported_error() -> IpcError {
+   |    ^^^^^^^^^^^^^^^^^
+
+warning: function `agent_reads_clipboard_itself` is never used
+    --> src/clipboard_image.rs:1054:10
+     |
+1054 | async fn agent_reads_clipboard_itself<D, DF>(session_id: Option<String>, detect: &D) -> Result<bool, IpcError>
+     |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `paste_image_for_session` is never used
+    --> src/clipboard_image.rs:1068:10
+     |
+1068 | async fn paste_image_for_session<D, DF, U, UF>(
+     |          ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `changed_during_paste` is never used
+    --> src/clipboard_image.rs:1120:4
+     |
+1120 | fn changed_during_paste() -> IpcError {
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `paste_client` is never used
+    --> src/daemon/client.rs:1617:19
+     |
+1566 | impl DaemonClient {
+     | ----------------- method in this implementation
+...
+1617 |     pub(crate) fn paste_client(&self) -> Self {
+     |                   ^^^^^^^^^^^^
+
+warning: method `takeover_wait` is never used
+    --> src/hub_runtime.rs:1354:8
+     |
+1343 | trait LeaseGate: Send + Sync {
+     |       --------- method in this trait
+...
+1354 |     fn takeover_wait(&self) -> std::time::Duration {
+     |        ^^^^^^^^^^^^^
+
+warning: function `takeover_wait` is never used
+    --> src/hub_runtime.rs:1701:4
+     |
+1701 | fn takeover_wait() -> std::time::Duration {
+     |    ^^^^^^^^^^^^^
+
+warning: function `history_store` is never used
+   --> src/ipc/agent_history.rs:169:4
+    |
+169 | fn history_store() -> Result<&'static Mutex<History>, IpcError> {
+    |    ^^^^^^^^^^^^^
+
+warning: constant `BROWSER_CLI_TOKEN_BYTES` is never used
+    --> src/ipc/browser_cli.rs:1448:7
+     |
+1448 | const BROWSER_CLI_TOKEN_BYTES: usize = 32;
+     |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `generate_browser_cli_token` is never used
+    --> src/ipc/browser_cli.rs:1463:4
+     |
+1463 | fn generate_browser_cli_token() -> String {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tokens_match` is never used
+    --> src/ipc/browser_cli.rs:1472:4
+     |
+1472 | fn tokens_match(expected: &str, provided: &str) -> bool {
+     |    ^^^^^^^^^^^^
+
+warning: function `write_token_file` is never used
+    --> src/ipc/browser_cli.rs:1485:4
+     |
+1485 | fn write_token_file(path: &Path, token: &str) -> Result<(), BrowserError> {
+     |    ^^^^^^^^^^^^^^^^
+
+warning: function `endpoint_lock_path` is never used
+    --> src/ipc/browser_cli.rs:1673:4
+     |
+1673 | fn endpoint_lock_path(endpoint_path: &Path) -> PathBuf {
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `claim_browser_cli_endpoint` is never used
+    --> src/ipc/browser_cli.rs:1685:4
+     |
+1685 | fn claim_browser_cli_endpoint(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MAX_REQUEST_BYTES` is never used
+    --> src/ipc/browser_cli.rs:1957:7
+     |
+1957 | const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+     |       ^^^^^^^^^^^^^^^^^
+
+warning: function `remote_browser_error_to_ipc` is never used
+    --> src/ipc/browser_cli.rs:2020:4
+     |
+2020 | fn remote_browser_error_to_ipc(e: crate::remote::browser_backend::RemoteBrowserError) -> IpcError {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `ipc_error_code_string` is never used
+    --> src/ipc/browser_cli.rs:2058:4
+     |
+2058 | fn ipc_error_code_string(code: IpcErrorCode) -> String {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `point_click_decode_error_to_ipc` is never used
+    --> src/ipc/browser_cli.rs:3077:4
+     |
+3077 | fn point_click_decode_error_to_ipc(err: crate::browser::remote_input::ActionDecodeError) -> IpcError {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `SINK_FILES` is never used
+  --> src/ipc/debug.rs:27:8
+   |
+27 | static SINK_FILES: Mutex<Option<HashMap<std::path::PathBuf, (std::fs::File, u64)>>> =
+   |        ^^^^^^^^^^
+
+warning: constant `SWITCH_DEBUG_FILE` is never used
+   --> src/ipc/debug.rs:183:7
+    |
+183 | const SWITCH_DEBUG_FILE: &str = "ferryx-switch-debug.jsonl";
+    |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `SWITCH_DEBUG_RENDER_FILE` is never used
+   --> src/ipc/debug.rs:186:7
+    |
+186 | const SWITCH_DEBUG_RENDER_FILE: &str = "ferryx-switch-debug-render.jsonl";
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `switch_debug_file_for_event` is never used
+   --> src/ipc/debug.rs:188:4
+    |
+188 | fn switch_debug_file_for_event(event: &str) -> &'static str {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `switch_debug_path` is never used
+   --> src/ipc/debug.rs:196:4
+    |
+196 | fn switch_debug_path(root: &std::path::Path, file_name: &str) -> std::path::PathBuf {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `log_native_switch_debug` is never used
+   --> src/ipc/debug.rs:388:15
+    |
+388 | pub(crate) fn log_native_switch_debug(entry: Value) {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `append_switch_debug_entry` is never used
+   --> src/ipc/debug.rs:454:4
+    |
+454 | fn append_switch_debug_entry(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `daemon_client` is never used
+  --> src/ipc/remote.rs:62:19
+   |
+37 | impl RemoteGatewayManager {
+   | ------------------------- method in this implementation
+...
+62 |     pub(crate) fn daemon_client(&self) -> Option<&Arc<DaemonClient>> {
+   |                   ^^^^^^^^^^^^^
+
+warning: function `set_device_permission` is never used
+   --> src/ipc/remote.rs:526:21
+    |
+526 | pub(crate) async fn set_device_permission(
+    |                     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `remote_terminal_tab_label` is never used
+   --> src/ipc/remote.rs:578:4
+    |
+578 | fn remote_terminal_tab_label(label: String) -> String {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `sanitize_activity_state` is never used
+   --> src/ipc/remote.rs:595:4
+    |
+595 | fn sanitize_activity_state(state: Option<String>) -> Option<String> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `sanitize_agent_type` is never used
+   --> src/ipc/remote.rs:605:4
+    |
+605 | fn sanitize_agent_type(agent_type: Option<String>) -> Option<String> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `sanitize_worktree_text` is never used
+   --> src/ipc/remote.rs:628:4
+    |
+628 | fn sanitize_worktree_text(value: Option<String>) -> Option<String> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `sanitize_session_id` is never used
+   --> src/ipc/remote.rs:647:4
+    |
+647 | fn sanitize_session_id(value: Option<String>) -> Option<String> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `get_local_ip` is never used
+   --> src/ipc/remote.rs:763:4
+    |
+763 | fn get_local_ip() -> Option<String> {
+    |    ^^^^^^^^^^^^
+
+warning: constant `REMOTE_READ_NOISE_ALLOWANCE` is never used
+  --> src/ipc/remote_file.rs:15:7
+   |
+15 | const REMOTE_READ_NOISE_ALLOWANCE: usize = 64 * 1024;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `REMOTE_FETCH_DEADLINE` is never used
+  --> src/ipc/remote_file.rs:18:7
+   |
+18 | const REMOTE_FETCH_DEADLINE: Duration = Duration::from_secs(120);
+   |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `remote_input_needs_no_base` is never used
+  --> src/ipc/remote_file.rs:35:4
+   |
+35 | fn remote_input_needs_no_base(input: &str, windows: bool) -> bool {
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `remote_fetch_base` is never used
+  --> src/ipc/remote_file.rs:54:15
+   |
+54 | pub(crate) fn remote_fetch_base<'a>(
+   |               ^^^^^^^^^^^^^^^^^
+
+warning: function `decode_windows_payload` is never used
+   --> src/ipc/remote_file.rs:311:4
+    |
+311 | fn decode_windows_payload(bytes: &[u8]) -> Result<Vec<u8>, IpcError> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `strip_read_marker` is never used
+   --> src/ipc/remote_file.rs:537:4
+    |
+537 | fn strip_read_marker(bytes: &[u8]) -> Result<Vec<u8>, IpcError> {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: static `SSH_STORE_LOCK` is never used
+  --> src/ipc/ssh.rs:17:8
+   |
+17 | static SSH_STORE_LOCK: Mutex<()> = Mutex::new(());
+   |        ^^^^^^^^^^^^^^
+
+warning: static `SSH_TAILSCALE_SYNC` is never used
+  --> src/ipc/ssh.rs:22:8
+   |
+22 | static SSH_TAILSCALE_SYNC: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+   |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `lock_ssh_store` is never used
+  --> src/ipc/ssh.rs:29:4
+   |
+29 | fn lock_ssh_store() -> std::sync::MutexGuard<'static, ()> {
+   |    ^^^^^^^^^^^^^^
+
+warning: function `expand_tilde_path` is never used
+   --> src/ipc/ssh.rs:225:15
+    |
+225 | pub(crate) fn expand_tilde_path(raw: &str, home: Option<&Path>) -> PathBuf {
+    |               ^^^^^^^^^^^^^^^^^
+
+warning: function `read_ssh_config_file` is never used
+   --> src/ipc/ssh.rs:247:4
+    |
+247 | fn read_ssh_config_file(path: &Path) -> Result<SystemSshConfigResult, IpcError> {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `load_store` is never used
+   --> src/ipc/ssh.rs:303:4
+    |
+303 | fn load_store(path: &PathBuf) -> Result<SshHostStore, IpcError> {
+    |    ^^^^^^^^^^
+
+warning: function `save_store` is never used
+   --> src/ipc/ssh.rs:319:4
+    |
+319 | fn save_store(path: &PathBuf, store: &SshHostStore) -> Result<(), IpcError> {
+    |    ^^^^^^^^^^
+
+warning: function `import_config_into_store` is never used
+   --> src/ipc/ssh.rs:381:4
+    |
+381 | fn import_config_into_store(path: &PathBuf, config_text: &str) -> Result<Vec<SshHost>, IpcError> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `clear_password_in_daemon` is never used
+   --> src/ipc/ssh.rs:553:10
+    |
+553 | async fn clear_password_in_daemon(
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SSH_NODE_INSTALL_FAILED` is never used
+   --> src/ipc/ssh.rs:623:18
+    |
+623 | pub(crate) const SSH_NODE_INSTALL_FAILED: &str = "SSH_NODE_INSTALL_FAILED";
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `NODE_INSTALL_TIMEOUT` is never used
+   --> src/ipc/ssh.rs:624:7
+    |
+624 | const NODE_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+    |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `NODE_INSTALL_STDERR_TAIL_BYTES` is never used
+   --> src/ipc/ssh.rs:625:7
+    |
+625 | const NODE_INSTALL_STDERR_TAIL_BYTES: usize = 2000;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `NODE_INSTALL_DOWNLOAD_EXIT` is never used
+   --> src/ipc/ssh.rs:627:7
+    |
+627 | const NODE_INSTALL_DOWNLOAD_EXIT: i64 = 97;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SSH_TRANSPORT_EXIT` is never used
+   --> src/ipc/ssh.rs:629:7
+    |
+629 | const SSH_TRANSPORT_EXIT: i64 = 255;
+    |       ^^^^^^^^^^^^^^^^^^
+
+warning: constant `NODE_INSTALL_KEY_REDACTION` is never used
+   --> src/ipc/ssh.rs:630:7
+    |
+630 | const NODE_INSTALL_KEY_REDACTION: &str = "[REDACTED]";
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `node_install_error` is never used
+   --> src/ipc/ssh.rs:659:4
+    |
+659 | fn node_install_error(stage: &str, exit_code: Option<i64>, stderr_tail: String) -> IpcError {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_install_origin` is never used
+   --> src/ipc/ssh.rs:672:15
+    |
+672 | pub(crate) fn validate_install_origin(origin: &str) -> Result<String, IpcError> {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `node_install_stdin` is never used
+   --> src/ipc/ssh.rs:703:15
+    |
+703 | pub(crate) fn node_install_stdin(install_key: &str) -> Result<Vec<u8>, IpcError> {
+    |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `node_install_command` is never used
+   --> src/ipc/ssh.rs:720:15
+    |
+720 | pub(crate) fn node_install_command(origin: &str) -> String {
+    |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `node_install_stderr_tail` is never used
+   --> src/ipc/ssh.rs:735:15
+    |
+735 | pub(crate) fn node_install_stderr_tail(stderr: &str, install_key: &str) -> String {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `node_install_failure` is never used
+   --> src/ipc/ssh.rs:749:15
+    |
+749 | pub(crate) fn node_install_failure(error: IpcError, install_key: &str) -> IpcError {
+    |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `parse_node_install_report` is never used
+   --> src/ipc/ssh.rs:771:15
+    |
+771 | pub(crate) fn parse_node_install_report(stdout: &[u8]) -> Result<SshNodeInstallReport, IpcError> {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `sync_tailscale_peers` is never used
+    --> src/ipc/ssh.rs:1019:10
+     |
+1019 | async fn sync_tailscale_peers(path: PathBuf, peers: Vec<crate::remote::discovery::tailscale::TailscaleSshPeer>) -> Result<SshTailscaleSyn...
+     |          ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `sync_tailscale_peers_with` is never used
+    --> src/ipc/ssh.rs:1024:10
+     |
+1024 | async fn sync_tailscale_peers_with<F, Fut>(path: PathBuf, peers: Vec<crate::remote::discovery::tailscale::TailscaleSshPeer>, config_hosts...
+     |          ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `system_ssh_config_for_sync` is never used
+    --> src/ipc/ssh.rs:1072:4
+     |
+1072 | fn system_ssh_config_for_sync() -> Vec<SshHost> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `sync_tailscale_target` is never used
+    --> src/ipc/ssh.rs:1080:10
+     |
+1080 | async fn sync_tailscale_target(host: SshHost, os: Option<String>) -> Result<SshTargetSummary, IpcError> {
+     |          ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `sync_tailscale_target_with` is never used
+    --> src/ipc/ssh.rs:1097:10
+     |
+1097 | async fn sync_tailscale_target_with<D, DFut, P, PFut>(
+     |          ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `merge_tailscale_peers` is never used
+    --> src/ipc/ssh.rs:1121:4
+     |
+1121 | fn merge_tailscale_peers(store: &mut SshHostStore, peers: &[crate::remote::discovery::tailscale::TailscaleSshPeer], config_hosts: &[SshHo...
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tailnet_host_matches` is never used
+    --> src/ipc/ssh.rs:1152:4
+     |
+1152 | fn tailnet_host_matches(host: &SshHost, peer: &crate::remote::discovery::tailscale::TailscaleSshPeer) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BATCH_FLUSH_INTERVAL` is never used
+  --> src/ipc/terminal.rs:22:7
+   |
+22 | const BATCH_FLUSH_INTERVAL: Duration = Duration::from_millis(10);
+   |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BATCH_MAX_BYTES` is never used
+  --> src/ipc/terminal.rs:23:7
+   |
+23 | const BATCH_MAX_BYTES: usize = 32 * 1024;
+   |       ^^^^^^^^^^^^^^^
+
+warning: constant `TERMINAL_OUTPUT_FRAME_VERSION` is never used
+  --> src/ipc/terminal.rs:25:7
+   |
+25 | const TERMINAL_OUTPUT_FRAME_VERSION: u8 = 1;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TERMINAL_OUTPUT_FRAME_VERSION_V2` is never used
+  --> src/ipc/terminal.rs:26:7
+   |
+26 | const TERMINAL_OUTPUT_FRAME_VERSION_V2: u8 = 2;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TERMINAL_OUTPUT_FRAME_FIXED_BYTES` is never used
+  --> src/ipc/terminal.rs:27:7
+   |
+27 | const TERMINAL_OUTPUT_FRAME_FIXED_BYTES: usize = 20;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TERMINAL_OUTPUT_FRAME_HAS_SEQUENCE` is never used
+  --> src/ipc/terminal.rs:28:7
+   |
+28 | const TERMINAL_OUTPUT_FRAME_HAS_SEQUENCE: u8 = 1 << 0;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TERMINAL_OUTPUT_FRAME_HAS_DAEMON_EPOCH` is never used
+  --> src/ipc/terminal.rs:29:7
+   |
+29 | const TERMINAL_OUTPUT_FRAME_HAS_DAEMON_EPOCH: u8 = 1 << 1;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TERMINAL_OUTPUT_FRAME_HAS_GAP` is never used
+  --> src/ipc/terminal.rs:30:7
+   |
+30 | const TERMINAL_OUTPUT_FRAME_HAS_GAP: u8 = 1 << 2;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TERMINAL_OUTPUT_FRAME_GAP_BYTES` is never used
+  --> src/ipc/terminal.rs:31:7
+   |
+31 | const TERMINAL_OUTPUT_FRAME_GAP_BYTES: usize = 32;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_usable_terminal_cwd` is never used
+  --> src/ipc/terminal.rs:80:15
+   |
+80 | pub(crate) fn is_usable_terminal_cwd(path: &Path) -> bool {
+   |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `select_requested_cwd` is never used
+  --> src/ipc/terminal.rs:88:15
+   |
+88 | pub(crate) fn select_requested_cwd(requested: Option<PathBuf>) -> Option<PathBuf> {
+   |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `require_agent_launch` is never used
+   --> src/ipc/terminal.rs:103:4
+    |
+103 | fn require_agent_launch(supported: bool) -> Result<(), IpcError> {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `qa_pinned_shell` is never used
+   --> src/ipc/terminal.rs:120:4
+    |
+120 | fn qa_pinned_shell() -> Option<String> {
+    |    ^^^^^^^^^^^^^^^
+
+warning: function `resolve_spawn_cwd` is never used
+   --> src/ipc/terminal.rs:129:4
+    |
+129 | fn resolve_spawn_cwd(
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: field `token` is never read
+   --> src/ipc/terminal.rs:170:5
+    |
+169 | struct PumpHandle {
+    |        ---------- field in this struct
+170 |     token: PumpToken,
+    |     ^^^^^
+
+warning: function `encode_terminal_output_frame` is never used
+   --> src/ipc/terminal.rs:707:4
+    |
+707 | fn encode_terminal_output_frame(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `effective_paired_repo_root` is never used
+   --> src/ipc/terminal.rs:914:15
+    |
+914 | pub(crate) fn effective_paired_repo_root(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `paired_resume_startup` is never used
+   --> src/ipc/terminal.rs:944:4
+    |
+944 | fn paired_resume_startup(startup: Option<&TerminalStartup>) -> crate::remote::machine_protocol::Startup {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `resolve_paired_spawn_target` is never used
+   --> src/ipc/terminal.rs:961:15
+    |
+961 | pub(crate) fn resolve_paired_spawn_target(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_retryable_paired_transport_error` is never used
+    --> src/ipc/terminal.rs:1021:15
+     |
+1021 | pub(crate) fn is_retryable_paired_transport_error(code: &str) -> bool {
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `should_reconcile_create_error` is never used
+    --> src/ipc/terminal.rs:1031:15
+     |
+1031 | pub(crate) fn should_reconcile_create_error(ambiguous: bool, code: &str) -> bool {
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_stage_deadline` is never used
+    --> src/ipc/terminal.rs:1867:4
+     |
+1867 | fn split_stage_deadline(remaining_ms: u64, cap: u64) -> Result<tokio::time::Instant, IpcError> {
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `inherited_split_cwd` is never used
+    --> src/ipc/terminal.rs:1878:4
+     |
+1878 | fn inherited_split_cwd(
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_wire_epoch` is never used
+    --> src/ipc/terminal.rs:1888:4
+     |
+1888 | fn split_wire_epoch(operation: crate::daemon::protocol::SplitOperationResult)
+     |    ^^^^^^^^^^^^^^^^
+
+warning: function `hub_attach_retry_deadline` is never used
+    --> src/ipc/terminal.rs:5100:4
+     |
+5100 | fn hub_attach_retry_deadline() -> std::time::Duration {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `worktree_response` is never used
+  --> src/ipc/worktree.rs:22:15
+   |
+22 | pub(crate) fn worktree_response(response: DaemonResponse) -> Result<DaemonResponse, IpcError> {
+   |               ^^^^^^^^^^^^^^^^^
+
+warning: function `kitty_storage_in_use` is never used
+  --> src/native_terminal/images.rs:84:15
+   |
+84 | pub(crate) fn kitty_storage_in_use(terminal: GhosttyTerminal) -> Result<bool, NativeTerminalError> {
+   |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MIN_ANIMATION_FRAME_MS` is never used
+  --> src/native_terminal/terminal.rs:59:7
+   |
+59 | const MIN_ANIMATION_FRAME_MS: u64 = 8;
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `clamp_animation_deadline` is never used
+  --> src/native_terminal/terminal.rs:64:4
+   |
+64 | fn clamp_animation_deadline(
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `animation_epoch` is never read
+   --> src/native_terminal/terminal.rs:147:5
+    |
+139 | pub struct NativeTerminal {
+    |            -------------- field in this struct
+...
+147 |     animation_epoch: std::time::Instant,
+    |     ^^^^^^^^^^^^^^^
+
+warning: multiple methods are never used
+   --> src/native_terminal/terminal.rs:325:19
+    |
+167 | impl NativeTerminal {
+    | ------------------- methods in this implementation
+...
+325 |     pub(crate) fn synchronized_output_deadline(&self) -> Option<tokio::time::Instant> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+365 |     pub(crate) fn advance_animations(&self) -> Result<bool, NativeTerminalError> {
+    |                   ^^^^^^^^^^^^^^^^^^
+...
+380 |     pub(crate) fn animation_deadline(&self) -> Option<tokio::time::Instant> {
+    |                   ^^^^^^^^^^^^^^^^^^
+...
+386 |     pub(crate) fn clear_due_animation_deadline(&self, now: tokio::time::Instant) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+394 |     pub(crate) fn forget_animation_deadline(&self) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+398 |     pub(crate) fn expire_synchronized_output(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+412 |     pub(crate) fn finish_synchronized_output(&mut self) -> Result<(), NativeTerminalError> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `HISTOGRAM_CAPACITY` is never used
+ --> src/terminal/metrics.rs:6:7
+  |
+6 | const HISTOGRAM_CAPACITY: usize = 4096;
+  |       ^^^^^^^^^^^^^^^^^^
+
+warning: constant `DUMP_INTERVAL` is never used
+ --> src/terminal/metrics.rs:7:7
+  |
+7 | const DUMP_INTERVAL: Duration = Duration::from_secs(5);
+  |       ^^^^^^^^^^^^^
+
+warning: struct `LatencyHistogram` is never constructed
+  --> src/terminal/metrics.rs:15:8
+   |
+15 | struct LatencyHistogram {
+   |        ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `record`, `should_dump`, and `snapshot_and_mark_dumped` are never used
+  --> src/terminal/metrics.rs:21:8
+   |
+20 | impl LatencyHistogram {
+   | --------------------- associated items in this implementation
+21 |     fn new() -> Self {
+   |        ^^^
+...
+28 |     fn record(&mut self, value_ms: f64) {
+   |        ^^^^^^
+...
+35 |     fn should_dump(&self) -> bool {
+   |        ^^^^^^^^^^^
+...
+39 |     fn snapshot_and_mark_dumped(&mut self) -> (usize, f64, f64, f64) {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `READ_TO_CHANNEL_SEND` is never used
+  --> src/terminal/metrics.rs:54:8
+   |
+54 | static READ_TO_CHANNEL_SEND: OnceLock<Mutex<LatencyHistogram>> = OnceLock::new();
+   |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `note_batch_read_timestamp` is never used
+   --> src/terminal/metrics.rs:112:15
+    |
+112 | pub(crate) fn note_batch_read_timestamp(session_id: &str, read_unix_micros: Option<u64>) {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `record_channel_send_for_session` is never used
+   --> src/terminal/metrics.rs:128:15
+    |
+128 | pub(crate) fn record_channel_send_for_session(session_id: &str) {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `record_read_to_channel_send` is never used
+   --> src/terminal/metrics.rs:148:4
+    |
+148 | fn record_read_to_channel_send(read_unix_micros: Option<u64>) {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `percentile` is never used
+   --> src/terminal/metrics.rs:182:4
+    |
+182 | fn percentile(sorted: &[f64], percentile: f64) -> f64 {
+    |    ^^^^^^^^^^
+
+warning: method `resolve_deletion_worktree` is never used
+   --> src/worktree/registry.rs:232:19
+    |
+ 13 | impl WorkspaceRegistry {
+    | ---------------------- method in this implementation
+...
+232 |     pub(crate) fn resolve_deletion_worktree(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `WORKSPACE_SCAN_TIMEOUT` is never used
+   --> src/worktree/rescan.rs:559:7
+    |
+559 | const WORKSPACE_SCAN_TIMEOUT: Duration = Duration::from_secs(30);
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Entry`
+ --> src/ipc/agent_history.rs:1:37
+  |
+1 | use crate::agent_history::history::{Entry, History, HistoryError, Message, Page};
+  |                                     ^^^^^
+
+warning: unused import: `run_blocking`
+ --> src/ipc/cli_install.rs:5:18
+  |
+5 | use crate::ipc::{run_blocking, IpcError};
+  |                  ^^^^^^^^^^^^
+
+warning: `ferryx` (lib) generated 141 warnings (run `cargo fix --lib -p ferryx` to apply 27 suggestions)
+error[E0432]: unresolved imports `ferryx_lib::ipc::cmd_project_initial`, `ferryx_lib::ipc::cmd_project_refs`, `ferryx_lib::ipc::cmd_project_register`
+ --> tests/rorca_native_contract.rs:5:5
+  |
+5 |     cmd_project_initial, cmd_project_refs, cmd_project_register, derive_workspace_id,
+  |     ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^ no `cmd_project_register` in `ipc`
+  |     |                    |
+  |     |                    no `cmd_project_refs` in `ipc`
+  |     no `cmd_project_initial` in `ipc`
+
+error[E0432]: unresolved import `tauri`
+  --> tests/rorca_native_contract.rs:17:5
+   |
+17 | use tauri::Manager;
+   |     ^^^^^ use of unresolved module or unlinked crate `tauri`
+   |
+   = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/rorca_native_contract.rs:233:15
+    |
+233 |     let app = tauri::test::mock_builder()
+    |               ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/rorca_native_contract.rs:236:16
+    |
+236 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/rorca_native_contract.rs:236:42
+    |
+236 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                                          ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/rorca_native_contract.rs:294:15
+    |
+294 |     let app = tauri::test::mock_builder()
+    |               ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/rorca_native_contract.rs:297:16
+    |
+297 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/rorca_native_contract.rs:297:42
+    |
+297 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                                          ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/rorca_native_contract.rs:327:15
+    |
+327 |     let app = tauri::test::mock_builder()
+    |               ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/rorca_native_contract.rs:330:16
+    |
+330 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/rorca_native_contract.rs:330:42
+    |
+330 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                                          ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/rorca_native_contract.rs:393:15
+    |
+393 |     let app = tauri::test::mock_builder()
+    |               ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/rorca_native_contract.rs:395:16
+    |
+395 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/rorca_native_contract.rs:395:42
+    |
+395 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                                          ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/rorca_native_contract.rs:436:15
+    |
+436 |     let app = tauri::test::mock_builder()
+    |               ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/rorca_native_contract.rs:439:16
+    |
+439 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/rorca_native_contract.rs:439:42
+    |
+439 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                                          ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/rorca_native_contract.rs:606:15
+    |
+606 |     let app = tauri::test::mock_builder()
+    |               ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/rorca_native_contract.rs:609:16
+    |
+609 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/rorca_native_contract.rs:609:42
+    |
+609 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                                          ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0282]: type annotations needed
+   --> tests/rorca_native_contract.rs:241:22
+    |
+241 |       let registered = cmd_project_register(
+    |  ______________________^
+242 | |         daemon_state,
+243 | |         registry_state.clone(),
+244 | |         RegisterProjectRequest {
+...   |
+249 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/rorca_native_contract.rs:259:20
+    |
+259 |       let branches = cmd_project_refs(
+    |  ____________________^
+260 | |         registry_state,
+261 | |         ProjectBranchesRequest {
+262 | |             workspace_id: "project-a".into(),
+...   |
+265 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/rorca_native_contract.rs:306:17
+    |
+306 |       let first = cmd_project_register(
+    |  _________________^
+307 | |         daemon_state.clone(),
+308 | |         registry_state.clone(),
+309 | |         request.clone(),
+310 | |     )
+311 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/rorca_native_contract.rs:313:20
+    |
+313 |       let repeated = cmd_project_register(daemon_state, registry_state, request)
+    |  ____________________^
+314 | |         .await
+    | |______________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/rorca_native_contract.rs:335:19
+    |
+335 |       let initial = cmd_project_initial(daemon_state.clone(), registry_state.clone())
+    |  ___________________^
+336 | |         .await
+    | |______________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/rorca_native_contract.rs:363:20
+    |
+363 |       let repeated = cmd_project_initial(daemon_state, registry_state.clone())
+    |  ____________________^
+364 | |         .await
+    | |______________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/rorca_native_contract.rs:403:5
+    |
+403 | /     cmd_project_refs(
+404 | |         registry_state.clone(),
+405 | |         ProjectBranchesRequest {
+406 | |             workspace_id: initial.workspace_id.clone(),
+...   |
+409 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/rorca_native_contract.rs:412:17
+    |
+412 |       let error = cmd_project_refs(
+    |  _________________^
+413 | |         registry_state.clone(),
+414 | |         ProjectBranchesRequest {
+415 | |             workspace_id: LEGACY_DEFAULT_WORKSPACE_ID.into(),
+...   |
+418 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/rorca_native_contract.rs:444:17
+    |
+444 |       let first = cmd_project_register(
+    |  _________________^
+445 | |         daemon_state.clone(),
+446 | |         registry_state.clone(),
+447 | |         RegisterProjectRequest {
+...   |
+452 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/rorca_native_contract.rs:462:25
+    |
+462 |           let duplicate = cmd_project_register(
+    |  _________________________^
+463 | |             daemon_state.clone(),
+464 | |             registry_state.clone(),
+465 | |             RegisterProjectRequest {
+...   |
+470 | |         .await
+    | |______________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/rorca_native_contract.rs:488:17
+    |
+488 |       let other = cmd_project_register(
+    |  _________________^
+489 | |         daemon_state,
+490 | |         registry_state.clone(),
+491 | |         RegisterProjectRequest {
+...   |
+496 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/rorca_native_contract.rs:503:17
+    |
+503 |       let third = cmd_project_register(
+    |  _________________^
+504 | |         app.state::<Arc<DaemonClient>>(),
+505 | |         registry_state.clone(),
+506 | |         RegisterProjectRequest {
+...   |
+511 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/rorca_native_contract.rs:615:22
+    |
+615 |       let registered = cmd_project_register(
+    |  ______________________^
+616 | |         daemon_state,
+617 | |         registry_state.clone(),
+618 | |         RegisterProjectRequest {
+...   |
+623 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/rorca_native_contract.rs:629:20
+    |
+629 |       let branches = cmd_project_refs(
+    |  ____________________^
+630 | |         registry_state.clone(),
+631 | |         ProjectBranchesRequest {
+632 | |             workspace_id: "plain-project".into(),
+...   |
+635 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/rorca_native_contract.rs:640:17
+    |
+640 |       let error = cmd_project_refs(
+    |  _________________^
+641 | |         registry_state,
+642 | |         ProjectBranchesRequest {
+643 | |             workspace_id: "missing-project".into(),
+...   |
+646 | |     .await
+    | |__________^ cannot infer type
+
+Some errors have detailed explanations: E0282, E0432, E0433.
+For more information about an error, try `rustc --explain E0282`.
+error: could not compile `ferryx` (test "rorca_native_contract") due to 35 previous errors
+warning: build failed, waiting for other jobs to finish...
+error[E0432]: unresolved imports `ferryx_lib::ipc::cmd_terminal_close`, `ferryx_lib::ipc::cmd_terminal_spawn`, `ferryx_lib::ipc::cmd_worktree_create`, `ferryx_lib::ipc::cmd_worktree_delete`, `ferryx_lib::ipc::cmd_worktree_status`
+ --> tests/ipc_hardening_contract.rs:4:5
+  |
+4 |     cmd_terminal_close, cmd_terminal_spawn, cmd_worktree_create, cmd_worktree_delete,
+  |     ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^ no `cmd_worktree_delete` in `ipc`
+  |     |                   |                   |
+  |     |                   |                   no `cmd_worktree_create` in `ipc`
+  |     |                   no `cmd_terminal_spawn` in `ipc`
+  |     no `cmd_terminal_close` in `ipc`
+5 |     cmd_worktree_status, CreateWorktreeRequest, DeleteWorktreeRequest, IpcErrorCode,
+  |     ^^^^^^^^^^^^^^^^^^^ no `cmd_worktree_status` in `ipc`
+
+error[E0432]: unresolved import `tauri`
+  --> tests/ipc_hardening_contract.rs:12:5
+   |
+12 | use tauri::{Listener, Manager};
+   |     ^^^^^ use of unresolved module or unlinked crate `tauri`
+   |
+   = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+  --> tests/ipc_hardening_contract.rs:68:15
+   |
+68 |     let app = tauri::test::mock_builder()
+   |               ^^^^^ use of unresolved module or unlinked crate `tauri`
+   |
+   = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+  --> tests/ipc_hardening_contract.rs:71:16
+   |
+71 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+   |                ^^^^^ use of unresolved module or unlinked crate `tauri`
+   |
+   = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+  --> tests/ipc_hardening_contract.rs:71:42
+   |
+71 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+   |                                          ^^^^^ use of unresolved module or unlinked crate `tauri`
+   |
+   = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/ipc_hardening_contract.rs:199:15
+    |
+199 |     let app = tauri::test::mock_builder()
+    |               ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/ipc_hardening_contract.rs:202:16
+    |
+202 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/ipc_hardening_contract.rs:202:42
+    |
+202 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                                          ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/ipc_hardening_contract.rs:278:15
+    |
+278 |     let app = tauri::test::mock_builder()
+    |               ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/ipc_hardening_contract.rs:281:16
+    |
+281 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/ipc_hardening_contract.rs:281:42
+    |
+281 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                                          ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/ipc_hardening_contract.rs:357:15
+    |
+357 |     let app = tauri::test::mock_builder()
+    |               ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/ipc_hardening_contract.rs:360:16
+    |
+360 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/ipc_hardening_contract.rs:360:42
+    |
+360 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                                          ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/ipc_hardening_contract.rs:434:15
+    |
+434 |     let app = tauri::test::mock_builder()
+    |               ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/ipc_hardening_contract.rs:437:16
+    |
+437 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/ipc_hardening_contract.rs:437:42
+    |
+437 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                                          ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/ipc_hardening_contract.rs:509:15
+    |
+509 |     let app = tauri::test::mock_builder()
+    |               ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/ipc_hardening_contract.rs:512:16
+    |
+512 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/ipc_hardening_contract.rs:512:42
+    |
+512 |         .build(tauri::test::mock_context(tauri::test::noop_assets()))
+    |                                          ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0282]: type annotations needed
+  --> tests/ipc_hardening_contract.rs:85:19
+   |
+85 |       let created = cmd_worktree_create(
+   |  ___________________^
+86 | |         app.handle().clone(),
+87 | |         app.state::<WorkspaceRegistry>(),
+88 | |         CreateWorktreeRequest {
+...  |
+94 | |     .await
+   | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/ipc_hardening_contract.rs:109:19
+    |
+109 |       let spawned = cmd_terminal_spawn(
+    |  ___________________^
+110 | |         app.handle().clone(),
+111 | |         app.state::<Arc<DaemonClient>>(),
+112 | |         app.state::<WorkspaceRegistry>(),
+...   |
+129 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/ipc_hardening_contract.rs:152:5
+    |
+152 | /     cmd_terminal_close(app.state::<Arc<DaemonClient>>(), spawned.session_id)
+153 | |         .await
+    | |______________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/ipc_hardening_contract.rs:156:5
+    |
+156 | /     cmd_worktree_delete(
+157 | |         app.handle().clone(),
+158 | |         app.state::<WorkspaceRegistry>(),
+159 | |         DeleteWorktreeRequest {
+...   |
+165 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/ipc_hardening_contract.rs:213:21
+    |
+213 |       let created_a = cmd_worktree_create(
+    |  _____________________^
+214 | |         app.handle().clone(),
+215 | |         app.state::<WorkspaceRegistry>(),
+216 | |         CreateWorktreeRequest {
+...   |
+222 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/ipc_hardening_contract.rs:224:21
+    |
+224 |       let created_b = cmd_worktree_create(
+    |  _____________________^
+225 | |         app.handle().clone(),
+226 | |         app.state::<WorkspaceRegistry>(),
+227 | |         CreateWorktreeRequest {
+...   |
+233 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/ipc_hardening_contract.rs:241:15
+    |
+241 |       let err = cmd_worktree_delete(
+    |  _______________^
+242 | |         app.handle().clone(),
+243 | |         app.state::<WorkspaceRegistry>(),
+244 | |         DeleteWorktreeRequest {
+...   |
+250 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/ipc_hardening_contract.rs:288:19
+    |
+288 |       let created = cmd_worktree_create(
+    |  ___________________^
+289 | |         app.handle().clone(),
+290 | |         app.state::<WorkspaceRegistry>(),
+291 | |         CreateWorktreeRequest {
+...   |
+297 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/ipc_hardening_contract.rs:300:19
+    |
+300 |       let initial = cmd_worktree_status(
+    |  ___________________^
+301 | |         app.handle().clone(),
+302 | |         app.state::<WorkspaceRegistry>(),
+303 | |         WorktreeStatusRequest {
+...   |
+308 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/ipc_hardening_contract.rs:320:17
+    |
+320 |       let dirty = cmd_worktree_status(
+    |  _________________^
+321 | |         app.handle().clone(),
+322 | |         app.state::<WorkspaceRegistry>(),
+323 | |         WorktreeStatusRequest {
+...   |
+328 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/ipc_hardening_contract.rs:367:19
+    |
+367 |       let created = cmd_worktree_create(
+    |  ___________________^
+368 | |         app.handle().clone(),
+369 | |         app.state::<WorkspaceRegistry>(),
+370 | |         CreateWorktreeRequest {
+...   |
+376 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/ipc_hardening_contract.rs:381:19
+    |
+381 |       let initial = cmd_worktree_status(
+    |  ___________________^
+382 | |         app.handle().clone(),
+383 | |         app.state::<WorkspaceRegistry>(),
+384 | |         WorktreeStatusRequest {
+...   |
+389 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/ipc_hardening_contract.rs:401:17
+    |
+401 |       let clean = cmd_worktree_status(
+    |  _________________^
+402 | |         app.handle().clone(),
+403 | |         app.state::<WorkspaceRegistry>(),
+404 | |         WorktreeStatusRequest {
+...   |
+409 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/ipc_hardening_contract.rs:444:19
+    |
+444 |       let created = cmd_worktree_create(
+    |  ___________________^
+445 | |         app.handle().clone(),
+446 | |         app.state::<WorkspaceRegistry>(),
+447 | |         CreateWorktreeRequest {
+...   |
+453 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/ipc_hardening_contract.rs:457:19
+    |
+457 |       let initial = cmd_worktree_status(
+    |  ___________________^
+458 | |         app.handle().clone(),
+459 | |         app.state::<WorkspaceRegistry>(),
+460 | |         WorktreeStatusRequest {
+...   |
+465 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/ipc_hardening_contract.rs:476:21
+    |
+476 |       let unchanged = cmd_worktree_status(
+    |  _____________________^
+477 | |         app.handle().clone(),
+478 | |         app.state::<WorkspaceRegistry>(),
+479 | |         WorktreeStatusRequest {
+...   |
+484 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/ipc_hardening_contract.rs:519:19
+    |
+519 |       let created = cmd_worktree_create(
+    |  ___________________^
+520 | |         app.handle().clone(),
+521 | |         app.state::<WorkspaceRegistry>(),
+522 | |         CreateWorktreeRequest {
+...   |
+528 | |     .await
+    | |__________^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> tests/ipc_hardening_contract.rs:532:15
+    |
+532 |       let err = cmd_worktree_delete(
+    |  _______________^
+533 | |         app.handle().clone(),
+534 | |         app.state::<WorkspaceRegistry>(),
+535 | |         DeleteWorktreeRequest {
+...   |
+541 | |     .await
+    | |__________^ cannot infer type
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+  --> tests/ipc_hardening_contract.rs:75:53
+   |
+75 |     app.listen(WORKTREE_CHANGED_EVENT, move |event: tauri::Event| {
+   |                                                     ^^^^^ use of unresolved module or unlinked crate `tauri`
+   |
+   = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/ipc_hardening_contract.rs:313:53
+    |
+313 |     app.listen(WORKTREE_CHANGED_EVENT, move |event: tauri::Event| {
+    |                                                     ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/ipc_hardening_contract.rs:394:53
+    |
+394 |     app.listen(WORKTREE_CHANGED_EVENT, move |event: tauri::Event| {
+    |                                                     ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+   --> tests/ipc_hardening_contract.rs:470:53
+    |
+470 |     app.listen(WORKTREE_CHANGED_EVENT, move |event: tauri::Event| {
+    |                                                     ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error: could not compile `ferryx` (test "ipc_hardening_contract") due to 42 previous errors
+warning: function `macos_guest_chord_action` is never used
+   --> src/lib.rs:682:4
+    |
+682 | fn macos_guest_chord_action(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `DEFAULT_SPAWN_COLS` is never used
+   --> src/ipc/terminal.rs:539:7
+    |
+539 | const DEFAULT_SPAWN_COLS: u16 = 80;
+    |       ^^^^^^^^^^^^^^^^^^
+
+warning: constant `DEFAULT_SPAWN_ROWS` is never used
+   --> src/ipc/terminal.rs:541:7
+    |
+541 | const DEFAULT_SPAWN_ROWS: u16 = 24;
+    |       ^^^^^^^^^^^^^^^^^^
+
+warning: function `spawn_dimension` is never used
+   --> src/ipc/terminal.rs:544:4
+    |
+544 | fn spawn_dimension(value: Option<u16>, default: u16, max: u16) -> u16 {
+    |    ^^^^^^^^^^^^^^^
+
+warning: methods `clear_due_animation_deadline` and `forget_animation_deadline` are never used
+   --> src/native_terminal/terminal.rs:386:19
+    |
+167 | impl NativeTerminal {
+    | ------------------- methods in this implementation
+...
+386 |     pub(crate) fn clear_due_animation_deadline(&self, now: tokio::time::Instant) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+394 |     pub(crate) fn forget_animation_deadline(&self) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `disconnect_and_revoke` is never used
+  --> src/remote/../../tests/support/machine_input_cancellation.rs:96:21
+   |
+96 | pub(crate) async fn disconnect_and_revoke() {
+   |                     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `set_snapshot_post_build_hook` is never used
+    --> src/remote/state.rs:1303:19
+     |
+ 884 | impl RemoteGatewayState {
+     | ----------------------- method in this implementation
+...
+1303 |     pub(crate) fn set_snapshot_post_build_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 98 warnings (89 duplicates) (run `cargo fix --lib -p ferryx --tests` to apply 2 suggestions)
