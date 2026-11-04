@@ -1,0 +1,30 @@
+Todo 21 implementation receipt
+
+Implementation-first instruction honored: no build, test, QA, mutation, or remote
+gate was executed. Acceptance remains pending integration verification.
+
+Acceptance commands (RUN@linux):
+cargo test --manifest-path src-tauri/Cargo.toml --lib daemon::onboarding
+bun run --cwd ui test -- onboarding
+
+QA: RUN@mac (maho-mac) isolated data dir: open app, complete 3 steps, quit GUI,
+kill nothing, relaunch -> wizard resumes at step 4 (screenshot); repeat with
+FERRYX_QA_NO_DAEMON=1 -> resumes from file.
+Corrupt onboarding.json -> wizard starts at first unsatisfied step, file rewritten,
+no crash.
+
+Notes:
+- Protocol remains v5. Additive onboardingStateV1 is mirrored in the owner fixture.
+- Mutating OnboardingSet uses the existing owner/admin request gate.
+- File writes use tempfile replacement; corrupt state is replaced with defaults.
+- Migration uses an atomic read-if-absent under the daemon store mutex.
+- Handover decision carries onboarding; successor persists adoption. Every daemon
+  get reads its file, including after Windows idle restart.
+- Enrollment uses the existing EnrollmentStep and account code issuer. A successful
+  code issue completes that step; merely skipping it does not.
+- Skill install extends the existing integration IPC with optional detected agents;
+  absent agents preserves old callers' behavior. Existing installer edit-preservation
+  and config-directory checks remain in force.
+- Fixed an inherited exhaustive request-name match omission for the four layout
+  variants in daemon/client.rs, encountered while adding onboarding variants.
+- Worktree retained for integration handoff; no push, merge, or branch switch.
