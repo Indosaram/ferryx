@@ -816,6 +816,22 @@ mod detached {
         store.panes(PaneAction::Zoom { session: "a".into() }, &live).unwrap();
         assert!(store.get_scoped("second", Some("workspace")).unwrap().layout.tabs[0].expanded_node_id.is_some());
     }
+
+    #[test]
+    fn split_attach_and_detach_collapse_only_the_target_leaf() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::new(root.path().into());
+        let live = BTreeSet::from(["a".into(), "b".into()]);
+        store.panes(PaneAction::Attach { session: "a".into(), window: Some("main".into()), split: None }, &live).unwrap();
+        store.panes(PaneAction::Attach { session: "b".into(), window: Some("main".into()), split: Some(Direction::Vertical) }, &live).unwrap();
+        let before = store.get("main").unwrap();
+        assert!(matches!(before.layout.tabs[0].pane_tree, Node::Split { dir: Direction::Vertical, .. }));
+        assert!(store.panes(PaneAction::Attach { session: "a".into(), window: None, split: None }, &live).is_err());
+        assert_eq!(store.panes(PaneAction::Detach { session: "b".into() }, &live).unwrap(), BTreeSet::from(["b".into()]));
+        let after = store.get("main").unwrap();
+        assert!(matches!(&after.layout.tabs[0].pane_tree, Node::Leaf { content: Content::Terminal { backend_session_id }, .. } if backend_session_id == "a"));
+        assert!(after.revision > before.revision);
+    }
 }
 
 #[cfg(test)]
