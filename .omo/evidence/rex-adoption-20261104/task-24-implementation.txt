@@ -1,0 +1,47 @@
+Todo 24 implementation handoff (implement-first; no build/test/QA execution).
+
+Implemented luauApiV1 owner namespace, bind/on/split/send/read/notify/exec,
+after/every/log/layout intents; owner-only control envelope; localized desktop
+Settings section, live reload/log view, explicit shortcut override precedence.
+Existing durable script ledger and callback execution fence are retained.
+
+New tests:
+- src-tauri/src/script/api_tests.rs: host calls, bad argument rejection, events,
+  binding defaults and overrides, fake-clock durable recurring timer behavior.
+- ui/src/components/settings/Scripting.test.tsx: enable/reload/log/errors and
+  registered chord forwarding with explicit precedence.
+
+Deferred acceptance (exact todo commands):
+cargo test --manifest-path src-tauri/Cargo.toml --lib script::api
+bun run --cwd ui test -- Scripting
+bun scripts/gen-llms-txt.mjs --check
+
+Deferred QA (exact todo scenarios):
+HAPPY: RUN@mac (maho-mac) debug app isolated data: init.luau binds cmd+shift+a
+to split right and send "echo luau\n"; press keys via computer-use -> new pane
+shows luau (screenshot).
+FAILURE: ferryx.exec("sh -c rm") (string not array) -> error BAD_ARGUMENT,
+nothing executed.
+
+Generator ran with --catalog /dev/stdin, using the shipped catalogue lines plus
+the existing script log catalogue entry; did not build/invoke ferryx-cli.
+Integration must validate generated catalogue equality against a newly built CLI.
+
+server.rs/protocol.rs changed only to connect the desktop to the daemon-owned
+VM and advertise the capability; protocol version remains 5. Mutating session
+and layout effects reuse normal owner daemon requests/pane gate. No new
+handover state: source rebuilds bindings/subscriptions; enable and ledger persist.
+
+Inspection risks for combined integration verification:
+- New mlua serialize feature needs Cargo.lock resolution on a verification host.
+- exec context is the invoking key/event session; timers capture registration
+  context. Initialization and layout-only callbacks have no session context.
+- Initialization effects are at-most-once; a deduplicated host call returns nil,
+  so scripts should register callbacks rather than rely on initialization split
+  return values across reloads.
+- Native terminal shortcut interception, layout scope behavior, notification
+  presentation and Windows named-pipe owner classification need real-surface QA.
+- Script event lag is logged, not replayed; event callbacks are live-only.
+
+No cargo, rustc, builds, tests, mutation runs, QA, paid VM or remote gate ran.
+Worktree retained at the explicitly assigned path for the parent integration.
