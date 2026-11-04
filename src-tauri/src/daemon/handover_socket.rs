@@ -1105,6 +1105,7 @@ mod tests {
             transport_owner: false,
             retained_state: None,
             screen_seed: None,
+            scrollback_lines: None,
             history_incomplete: false,
         };
 
