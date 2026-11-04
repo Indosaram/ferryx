@@ -457,6 +457,31 @@ pub(super) fn persist(path: &Path, value: &Layout) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ui_reducer_golden_fixtures() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let output = std::process::Command::new("bun").arg("ui/scripts/gen-layout-fixtures.ts")
+            .current_dir(root).output().expect("Bun is required to generate UI reducer fixtures");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let cases: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+        for case in cases {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("session_state.json"), serde_json::to_vec(&case["session"]).unwrap()).unwrap();
+            let mut store = Store::new(dir.path().into());
+            let intent: Intent = serde_json::from_value(case["intent"].clone()).unwrap();
+            let view = store.apply("main", 0, intent).unwrap();
+            fn project(node: &Node) -> serde_json::Value {
+                match node {
+                    Node::Leaf { content, .. } => serde_json::json!({"type":"leaf","content":content}),
+                    Node::Split { dir, ratio, a, b } => serde_json::json!({"type":"split","dir":dir,"ratio":ratio,"a":project(a),"b":project(b)}),
+                }
+            }
+            let actual: Vec<_> = view.layout.tabs.iter().map(|tab| serde_json::json!({
+                "tabId":tab.tab_id,"label":tab.label,"pinned":tab.pinned,"paneTree":project(&tab.pane_tree),
+            })).collect();
+            assert_eq!(serde_json::json!(actual), case["expected"], "intent: {}", case["intent"]);
+        }
+    }
     fn add(id: &str) -> Intent {
         Intent::AddTabWithSession { tab_id: id.into(), label: id.into(), content: Content::Terminal { backend_session_id: format!("pty-{id}") }, activate: true }
     }
