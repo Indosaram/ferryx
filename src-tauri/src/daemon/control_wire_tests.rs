@@ -1010,3 +1010,136 @@ async fn a_supervisor_mutation_from_an_unidentified_peer_is_forbidden() {
         }
     }
 }
+
+/// Windows peer identification on a real loopback connection (supervisor_peer_win): the test
+/// process itself (the desktop app's position) may change the supervisor; a process started
+/// inside a pane the way panes are started is refused, by its parent chain and, with the pane
+/// pids withheld, by the pane job alone.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_loopback_peers_are_told_apart_by_their_owning_process() {
+    use crate::daemon::supervisor_peer::{PaneSet, PeerOrigin};
+    use crate::daemon::supervisor_peer_win::{classify, sys};
+
+    let server = Arc::new(DaemonServer::new());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let identify_accepted = |stream: &tokio::net::TcpStream| {
+        let (peer, local) = (stream.peer_addr().unwrap(), stream.local_addr().unwrap());
+        sys::identify(peer, local)
+    };
+
+    // (a) The test process connects: its own pid owns the connection and it is not refused.
+    let (own_client, accepted) = tokio::join!(
+        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+        listener.accept()
+    );
+    let _own_client = own_client.unwrap();
+    let own_stream = accepted.unwrap().0;
+    let own = identify_accepted(&own_stream);
+    assert!(
+        matches!(own, PeerOrigin::Process(p) if p.pid == std::process::id()),
+        "the test process owns its connection: {own:?}"
+    );
+    assert_eq!(server.supervisor_peer_refusal(own).await, None, "the desktop app's position is allowed");
+    if let DaemonResponse::Error { code, message, .. } = peer_exchange(&server, own).await {
+        assert_ne!(code.as_deref(), Some("FORBIDDEN"), "{message}");
+    }
+
+    // (b) A process inside a pane connects.
+    let root = tempfile::tempdir().unwrap();
+    let mut command = portable_pty::CommandBuilder::new(
+        std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into()),
+    );
+    let script = format!(
+        "$c=[Net.Sockets.TcpClient]::new('127.0.0.1',{port}); Start-Sleep -Seconds 120"
+    );
+    command.args(["/D", "/C", "powershell", "-NoProfile", "-NonInteractive", "-Command", &script]);
+    let (pane_id, _pump) = server
+        .terminal_service
+        .spawn_resolved_with_id(
+            uuid::Uuid::new_v4().to_string(),
+            command,
+            80,
+            24,
+            crate::terminal::pty::ResolvedSpawnContext {
+                root: root.path().to_owned(),
+                cwd: root.path().to_owned(),
+                managed_workspace_id: None,
+            },
+        )
+        .expect("spawn a pane");
+    let pane_pid = server.terminal_service.get_session(&pane_id).unwrap().pid().expect("pane pid");
+    let (snapshot, mut output) = server
+        .terminal_service
+        .output_hub()
+        .observe_for_test(&pane_id)
+        .expect("observe the pane");
+    // ConPTY asks for the cursor position before it lets the pane run; answer it while waiting
+    // for the pane's connection.
+    if snapshot.windows(4).any(|w| w == b"\x1b[6n") {
+        server.terminal_service.write_input(&pane_id, b"\x1b[1;1R").unwrap();
+    }
+    let pane_stream = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        let mut open = true;
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => break accepted.unwrap().0,
+                chunk = output.recv(), if open => match chunk {
+                    Ok(chunk) if chunk.windows(4).any(|w| w == b"\x1b[6n") => {
+                        server.terminal_service.write_input(&pane_id, b"\x1b[1;1R").unwrap();
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => open = false,
+                },
+            }
+        }
+    })
+    .await
+    .expect("the pane process connected");
+    let pane_origin = identify_accepted(&pane_stream);
+    let PeerOrigin::Process(pane_peer) = pane_origin else {
+        panic!("the pane connection's owner was not resolved: {pane_origin:?}");
+    };
+    assert_ne!(pane_peer.pid, std::process::id());
+    assert_ne!(pane_peer.pid, pane_pid, "the connecting process is a descendant of the pane child");
+
+    let refusal = server.supervisor_peer_refusal(pane_origin).await;
+    assert!(refusal.as_deref().is_some_and(|why| why.contains("Ferryx pane")), "{refusal:?}");
+    match peer_exchange(&server, pane_origin).await {
+        DaemonResponse::Error { code, .. } => assert_eq!(code.as_deref(), Some("FORBIDDEN")),
+        other => panic!("a pane process changed the supervisor: {other:?}"),
+    }
+    // The pane job alone refuses it, as for a pane descendant whose parent chain is gone.
+    let job_only = tokio::task::spawn_blocking(move || {
+        let table = sys::SystemWinProcs::snapshot().expect("process snapshot");
+        classify(pane_origin, &PaneSet::default(), &table)
+    })
+    .await
+    .unwrap();
+    assert!(job_only.as_deref().is_some_and(|why| why.contains("pane job")), "{job_only:?}");
+
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", &pane_peer.pid.to_string()])
+        .output();
+    let _ = server.terminal_service.close_session(&pane_id).await;
+}
+
+/// One owner-gated request served as from a connection whose peer is `origin`.
+#[cfg(windows)]
+async fn peer_exchange(
+    server: &Arc<DaemonServer>,
+    origin: crate::daemon::supervisor_peer::PeerOrigin,
+) -> DaemonResponse {
+    let (client, server_side) = tokio::io::duplex(64 * 1024);
+    let handler = Arc::clone(server);
+    let serving = tokio::spawn(async move { handler.handle_client_with_origin(server_side, origin).await });
+    let (read_half, mut write_half) = tokio::io::split(client);
+    let request = DaemonRequest::SupervisorGlobalPause { paused: false };
+    write_half.write_all(request_line(server, &request).as_bytes()).await.unwrap();
+    let mut line = String::new();
+    BufReader::new(read_half).read_line(&mut line).await.unwrap();
+    drop(write_half);
+    serving.abort();
+    serde_json::from_str(line.trim()).unwrap()
+}

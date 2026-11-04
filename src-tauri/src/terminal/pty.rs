@@ -682,6 +682,10 @@ impl PtyManager {
             .slave
             .spawn_command(cmd)
             .map_err(|e| PtyError::SpawnError(format!("Failed to spawn command: {e}")))?;
+        // Every pane child joins the pane job, so the daemon can refuse its descendants
+        // supervisor changes (daemon::supervisor_peer_win).
+        #[cfg(windows)]
+        crate::daemon::supervisor_peer_win::sys::adopt_pane(&*child);
 
         drop(pair.slave);
 

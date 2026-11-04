@@ -6439,7 +6439,9 @@ impl DaemonServer {
                     tokio::spawn(async move {
                         #[cfg(unix)]
                         server.handle_unix_client(stream).await;
-                        #[cfg(not(unix))]
+                        #[cfg(windows)]
+                        server.handle_tcp_client(stream).await;
+                        #[cfg(not(any(unix, windows)))]
                         server.handle_client(stream).await;
                     });
                 }
@@ -6497,6 +6499,23 @@ impl DaemonServer {
         self.handle_client_with_origin(stream, origin).await
     }
 
+    /// Serves one loopback connection whose owning process the kernel's TCP table names, so the
+    /// desktop app may change the supervisor and a pane process may not (`supervisor_peer_win`).
+    /// An owner that cannot be resolved stays `TokenAuthenticated`, refused as before.
+    #[cfg(windows)]
+    pub async fn handle_tcp_client(self: Arc<Self>, stream: tokio::net::TcpStream) {
+        let addresses = stream.peer_addr().ok().zip(stream.local_addr().ok());
+        let origin = match addresses {
+            Some((peer, listening)) => tokio::task::spawn_blocking(move || {
+                super::supervisor_peer_win::sys::identify(peer, listening)
+            })
+            .await
+            .unwrap_or(super::supervisor_peer::PeerOrigin::TokenAuthenticated),
+            None => super::supervisor_peer::PeerOrigin::TokenAuthenticated,
+        };
+        self.handle_client_with_origin(stream, origin).await
+    }
+
     /// Why this connection's peer may not change the supervisor, or `None`. The process-table
     /// reads run on a blocking thread, never on a Tokio worker.
     async fn supervisor_peer_refusal(
@@ -6523,9 +6542,20 @@ impl DaemonServer {
             .chain(self.test_pane_pids.lock().iter().copied())
             .collect();
         tokio::task::spawn_blocking(move || {
-            let table = super::supervisor_peer::SystemProcs;
-            let panes = super::supervisor_peer::PaneSet::of(pane_pids, &table);
-            super::supervisor_peer::refusal(origin, &panes, &table)
+            #[cfg(windows)]
+            {
+                let Some(table) = super::supervisor_peer_win::sys::SystemWinProcs::snapshot() else {
+                    return Some("the process table could not be read; this connection may not change the supervisor".into());
+                };
+                let panes = super::supervisor_peer::PaneSet::of(pane_pids, &table);
+                super::supervisor_peer_win::classify(origin, &panes, &table)
+            }
+            #[cfg(not(windows))]
+            {
+                let table = super::supervisor_peer::SystemProcs;
+                let panes = super::supervisor_peer::PaneSet::of(pane_pids, &table);
+                super::supervisor_peer::refusal(origin, &panes, &table)
+            }
         })
         .await
         .unwrap_or_else(|error| Some(format!("the peer check failed: {error}")))

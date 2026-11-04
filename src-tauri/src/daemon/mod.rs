@@ -58,6 +58,7 @@ pub mod workspace_service;
 #[cfg(test)]
 pub mod recovery_consistency_tests;
 pub mod supervisor_peer;
+pub mod supervisor_peer_win;
 
 /// Shared headless authority supplied only by the session-owning daemon.
 pub struct MachineServices {
