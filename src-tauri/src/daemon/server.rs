@@ -1975,8 +1975,9 @@ fn translate_herdr_report(line: &str) -> Option<AgentStateReport> {
 /// `{"type":"supervisorReport","sessionId":…,"eventId":…,"body":…}`. The session id is the
 /// reporting pane's own (`FERRYX_SESSION_ID`), the same trust an `agentState` line has on this
 /// owner-only socket; the hub accepts it only for the open goal bound to that session.
+/// On the loopback TCP ingress (Windows) the line also carries this boot's `token`, checked
+/// before this parser runs.
 /// (`sessionId`, `eventId`, `body`), or `None` for any other line.
-#[cfg(unix)]
 fn supervisor_report_line(line: &str) -> Option<(String, String, String)> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1986,6 +1987,8 @@ fn supervisor_report_line(line: &str) -> Option<(String, String, String)> {
         session_id: String,
         event_id: String,
         body: String,
+        #[serde(default, rename = "token")]
+        _token: Option<String>,
     }
     let wire: Wire = serde_json::from_str(line.trim()).ok()?;
     (wire.kind == "supervisorReport").then_some((wire.session_id, wire.event_id, wire.body))
@@ -2459,6 +2462,33 @@ mod agent_state_transport_tests {
             None
         );
         assert_eq!(transport_token_from_line("not json"), None);
+    }
+
+    /// A worker report parses on both ingresses: bare on the unix socket, and on the loopback
+    /// TCP ingress (Windows) with the boot token beside it, which was refused before.
+    #[test]
+    fn a_supervisor_report_line_parses_with_or_without_the_transport_token() {
+        let report = Some(("s-1".to_string(), "e-1".to_string(), "# Report\nlast line".to_string()));
+        assert_eq!(
+            supervisor_report_line(
+                r#"{"type":"supervisorReport","sessionId":"s-1","eventId":"e-1","body":"# Report\nlast line"}"#
+            ),
+            report
+        );
+        let with_token = r#"{"type":"supervisorReport","sessionId":"s-1","eventId":"e-1","body":"# Report\nlast line","token":"abc"}"#;
+        assert_eq!(supervisor_report_line(with_token), report);
+        assert_eq!(transport_token_from_line(with_token).as_deref(), Some("abc"));
+        assert_eq!(
+            supervisor_report_line(r#"{"type":"agentState","sessionId":"s-1","eventId":"e-1","body":"b"}"#),
+            None
+        );
+        assert_eq!(
+            supervisor_report_line(
+                r#"{"type":"supervisorReport","sessionId":"s-1","eventId":"e-1","body":"b","extra":1}"#
+            ),
+            None
+        );
+        assert_eq!(supervisor_report_line(r#"{"type":"agentState","sessionId":"s","state":"idle","token":"abc"}"#), None);
     }
 
     /// The envelope crush's `internal/herdr` client sends, as measured on omarchy.
@@ -5140,7 +5170,8 @@ impl DaemonServer {
                 let server = Arc::clone(&server);
                 while clients.try_join_next().is_some() {}
                 clients.spawn(async move {
-                    let mut reader = BufReader::new(stream);
+                    let (read_half, mut write_half) = stream.into_split();
+                    let mut reader = BufReader::new(read_half);
                     let mut line = String::new();
                     while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                         let presented = transport_token_from_line(&line);
@@ -5151,7 +5182,16 @@ impl DaemonServer {
                             line.clear();
                             continue;
                         }
-                        if let Some(report) = Self::parse_agent_state_report(&line) {
+                        if let Some(report) = supervisor_report_line(&line) {
+                            // The unix ingress's worker report, answered the same way.
+                            let outcome = crate::hub_runtime::supervisor_worker_report(report).await;
+                            let mut reply = outcome.to_string();
+                            reply.push('\n');
+                            if let Err(error) = write_half.write_all(reply.as_bytes()).await {
+                                tracing::debug!(%error, "supervisor report client left before its reply");
+                            }
+                            crate::hub_runtime::announce_worker_report(&server.remote_state, &outcome);
+                        } else if let Some(report) = Self::parse_agent_state_report(&line) {
                             server
                                 .ingest_agent_state_report(&states, &sessions, epoch, report)
                                 .await;
