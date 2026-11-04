@@ -275,6 +275,21 @@ describe('all-local run', () => {
     expect(configProblems(config).join()).toContain('must be https://');
   });
 
+  test('a worktree whose daemon socket path would pass the unix limit is refused', () => {
+    const long = local();
+    long.hosts.macos.worktree = `/Users/someone/code/ferryx-wt/${'w'.repeat(40)}`;
+    expect(configProblems(long).join()).toContain('hosts.macos.worktree');
+    expect(configProblems(long).join()).toContain('over the darwin limit 103');
+    const linux = full();
+    linux.sessionHost.worktree = `/home/indo/${'w'.repeat(80)}`;
+    expect(configProblems(linux).join()).toContain('over the linux limit 107');
+    const win = local();
+    win.lanes = ['windows'];
+    win.hosts = { windows: { ...win.hosts.macos, hostId: 'maho-win', platform: 'win32', worktree: `C:\\${'w'.repeat(120)}` } };
+    win.sessionHost = { ...win.sessionHost, hostId: 'maho-win-session', platform: 'win32', worktree: `C:\\${'w'.repeat(120)}` };
+    expect(configProblems(win)).toEqual([]);
+  });
+
   test('unknown, duplicate or empty lanes are refused', () => {
     for (const lanes of [[], ['macos', 'macos'], ['linux']]) {
       const config = local();

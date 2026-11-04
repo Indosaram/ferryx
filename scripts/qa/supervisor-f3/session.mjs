@@ -14,7 +14,7 @@
 // serve config is back to its snapshot.
 import { randomUUID } from 'node:crypto';
 import { rpcProcess } from '../fixtures/native-configured-adapters.mjs';
-import { acceptedReply, configureGateway, gatewayPortFor, relayListenPort, remotePath, rpcCommand, sameServeConfig, serveAddedProblems } from './seams.mjs';
+import { SESSION_PROFILE_SUFFIX, acceptedReply, configureGateway, gatewayPortFor, relayListenPort, remotePath, rpcCommand, sameServeConfig, serveAddedProblems } from './seams.mjs';
 import { LaneBlocked, StepFailed, latch, mutex, stopExact, until } from './steps.mjs';
 
 export function startSession({ config, run, lane }) {
@@ -26,7 +26,7 @@ export function startSession({ config, run, lane }) {
   const relayRoot = remotePath(host, host.worktree, '.native-qa', `${run.runId}-relay`);
   // Its own profile name, so a session host that is also a desktop of the run (all-local) never
   // collides with that desktop's `.native-qa/<runId>` profile in a shared worktree.
-  const sessionRunId = `${run.runId}-session`;
+  const sessionRunId = `${run.runId}${SESSION_PROFILE_SUFFIX}`;
   const originUrl = new URL(config.relayOrigin);
   const origin = originUrl.origin;
   const tokens = new Map([...['macos', 'windows'].filter((name) => run.lanes.includes(name)).map((name) => [config.hosts[name].hostId, name]), [host.hostId, 'session']]

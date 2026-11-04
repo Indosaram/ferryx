@@ -107,7 +107,9 @@ async function main() {
   mkdirSync(evidenceDir, { recursive: true });
   const controller = new AbortController();
   process.on('SIGINT', () => controller.abort(new Error('interrupted')));
-  const runId = `f3-${new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)}-${randomUUID().slice(0, 6)}`;
+  // Short: the isolated daemon's socket lives under <worktree>/.native-qa/<runId>[-s] and a
+  // unix socket path is capped at 103 bytes on macOS (see socketPathProblems).
+  const runId = `f3-${new Date().toISOString().replace(/[^0-9]/g, '').slice(4, 12)}-${randomUUID().slice(0, 4)}`;
   const run = { runId, revision: opts.revision, evidenceDir, signal: controller.signal, mahordExecutable: config.mahordExecutable, tesseract: config.tesseract, sshExecutable: config.sshExecutable,
     lanes: selectedLanes(config), smoke: opts.smoke === true };
   const lanes = Object.fromEntries(LANES.map((name) => [name, newLane(name, evidenceDir)]));

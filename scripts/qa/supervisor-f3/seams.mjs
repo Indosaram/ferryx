@@ -215,7 +215,25 @@ export function configProblems(config) {
   } else if (front?.kind !== 'loopback') {
     problems.push('sessionHost.relayFront.kind must be tailscale-serve, tls or loopback');
   }
-  return problems;
+  return [...problems, ...socketPathProblems(config)];
+}
+
+/** The session daemon's profile is `.native-qa/<runId><suffix>`, apart from a desktop's. */
+export const SESSION_PROFILE_SUFFIX = '-s';
+/** The longest run id run.mjs makes: `f3-MMDDhhmm-xxxx`. */
+const RUN_ID_MAX = 'f3-00000000-0000'.length;
+const SUN_PATH_MAX = { darwin: 103, linux: 107 };
+
+/**
+ * Hosts whose isolated daemon socket (`<worktree>/.native-qa/<runId>[-s]/runtime/daemon.sock`)
+ * would exceed the platform's unix socket path limit, so the daemon could never bind.
+ */
+export function socketPathProblems(config) {
+  const hosts = [['sessionHost', config.sessionHost, SESSION_PROFILE_SUFFIX], ...['macos', 'windows'].filter((name) => runLanes(config).includes(name)).map((name) => [`hosts.${name}`, config.hosts[name], ''])];
+  return hosts.filter(([, host]) => SUN_PATH_MAX[host.platform])
+    .map(([key, host, suffix]) => [key, host, Buffer.byteLength(`${host.worktree}/.native-qa/${'x'.repeat(RUN_ID_MAX)}${suffix}/runtime/daemon.sock`)])
+    .filter(([, host, bytes]) => bytes > SUN_PATH_MAX[host.platform])
+    .map(([key, host, bytes]) => `${key}.worktree ${host.worktree} makes the daemon socket path ${bytes} bytes, over the ${host.platform} limit ${SUN_PATH_MAX[host.platform]}; use a shorter worktree path`);
 }
 
 /** The port the relay process itself listens on. */
