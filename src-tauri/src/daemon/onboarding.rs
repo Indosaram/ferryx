@@ -13,10 +13,12 @@ pub struct State {
     pub version: u8,
     pub completed_steps: Vec<String>,
     pub dismissed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<u64>,
 }
 
 impl Default for State {
-    fn default() -> Self { Self { version: 1, completed_steps: vec![], dismissed: false } }
+    fn default() -> Self { Self { version: 1, completed_steps: vec![], dismissed: false, updated_at: None } }
 }
 
 impl State {
