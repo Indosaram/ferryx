@@ -2,6 +2,7 @@
 import { createLayoutState, layoutReducer, type LayoutAction } from "../src/state/layout";
 import type { LayoutState, PaneContent, WorkspaceTab } from "../src/lib/types";
 import type { PaneNode } from "../src/state/paneTree";
+import { workspaceReducer, type WorkspaceAction, type WorkspaceState } from "../src/state/workspaceStore";
 
 const terminal = (id: string): WorkspaceTab => ({ id, kind: "terminal", label: id, sessionId: `pty-${id}` });
 const initial = () => {
@@ -10,7 +11,22 @@ const initial = () => {
   return state;
 };
 const withFile = () => createLayoutState([{ kind: "file", id: "file", label: "file", path: "old", backendSessionId: "pty-file", line: null, col: null, workspaceId: null, previewId: "preview-file" }], "file");
-function project(state: LayoutState) {
+const withBrowser = () => createLayoutState([{ kind: "browser", id: "browser", label: "browser", browserId: "browser-instance", url: "https://old.example" }], "browser");
+function project(state: LayoutState, before: LayoutState) {
+  // Keep existing group identities; only newly allocated opaque ids are canonicalized.
+  const groupIds = new Map(Object.keys(before.tabGroups ?? {}).map((id, index) => [id, `g${index}`]));
+  const groupId = (id: string) => {
+    if (!groupIds.has(id)) groupIds.set(id, `g${groupIds.size}`);
+    return groupIds.get(id)!;
+  };
+  const groups = (node: NonNullable<LayoutState["tabGroupLayout"]>): unknown => node.type === "split"
+    ? { type: "split", dir: node.direction, ratio: node.ratio, a: groups(node.first), b: groups(node.second) }
+    : { type: "group", groupId: groupId(node.groupId), tabIds: state.tabGroups![node.groupId].tabIds, activeTabId: state.tabGroups![node.groupId].activeTabId ?? null };
+  const location = (node: PaneNode, id: string | null | undefined, path = ""): string | null => {
+    if (!id) return null;
+    return node.type === "leaf" ? (node.leafId === id ? path : null)
+      : location(node.first, id, `${path}a`) ?? location(node.second, id, `${path}b`);
+  };
   const tree = (node: PaneNode, content: Record<string, PaneContent>): unknown => node.type === "split"
     ? { type: "split", dir: node.direction, ratio: node.ratio, a: tree(node.first, content), b: tree(node.second, content) }
     : { type: "leaf", content: content[node.leafId]?.kind === "browser"
@@ -18,12 +34,16 @@ function project(state: LayoutState) {
         : content[node.leafId]?.kind === "file"
           ? (() => { const file = content[node.leafId] as Extract<PaneContent, { kind: "file" }>; return { kind: "file", path: file.path, line: file.line, col: file.col }; })()
           : { kind: "terminal", backendSessionId: (content[node.leafId] as Extract<PaneContent, { kind: "terminal" }>)?.sessionId ?? "" } };
-  return state.tabs.map((tab) => ({ tabId: tab.id, label: "customLabel" in tab ? tab.customLabel ?? tab.label : tab.label, pinned: tab.pinned ?? false,
-    paneTree: tree(state.layoutsByTabId[tab.id].root, state.layoutsByTabId[tab.id].contentsByLeafId ?? {}) }));
+  const tabGroupLayout = groups(state.tabGroupLayout!);
+  return { tabs: state.tabs.map((tab) => {
+    const pane = state.layoutsByTabId[tab.id];
+    return { tabId: tab.id, label: "customLabel" in tab ? tab.customLabel ?? tab.label : tab.label, pinned: tab.pinned ?? false,
+      paneTree: tree(pane.root, pane.contentsByLeafId ?? {}), activePane: location(pane.root, pane.activeLeafId), expandedPane: location(pane.root, pane.expandedLeafId) };
+  }), activeTabId: state.activeTabId, focusedGroupId: groupId(state.focusedGroupId!), tabGroupLayout };
 }
 // createLayoutState uses the stable initial group identity.
 const group = initial().focusedGroupId!;
-const pairs: { action: LayoutAction; intent: Record<string, unknown>; prepare?: (state: LayoutState) => LayoutState }[] = [
+const pairs: { action: LayoutAction | Extract<WorkspaceAction, { type: "UPDATE_BROWSER_TAB" | "MOVE_TAB_TO_PANE_SPLIT" }>; intent: Record<string, unknown>; prepare?: (state: LayoutState) => LayoutState }[] = [
   { action: { type: "ADD_TAB", tab: terminal("three"), activate: true }, intent: { type: "ADD_TAB_WITH_SESSION", tabId: "three", label: "three", content: { kind: "terminal", backendSessionId: "pty-three" }, activate: true } },
   { action: { type: "CLOSE_TAB", tabId: "two" }, intent: { type: "CLOSE_TAB", tabId: "two" } },
   { action: { type: "REORDER_TAB", tabId: "two", targetIndex: 0 }, intent: { type: "REORDER_TAB", tabId: "two", targetIndex: 0 } },
@@ -47,11 +67,18 @@ const pairs: { action: LayoutAction; intent: Record<string, unknown>; prepare?: 
     action: { type: "EQUALIZE_TAB_GROUP_RUN", path: "" }, intent: { type: "EQUALIZE_TAB_GROUP_RUN", path: "" } },
   { prepare: withFile, action: { type: "UPDATE_FILE_TAB", tabId: "file", path: "new", line: 10, col: 3 },
     intent: { type: "UPDATE_FILE_TAB", tabId: "file", nodeId: 1, path: "new", line: 10, col: 3 } },
+  { prepare: withBrowser, action: { type: "UPDATE_BROWSER_TAB", tabId: "browser", browserId: "browser-instance", updates: { url: "https://new.example" } },
+    intent: { type: "UPDATE_BROWSER_TAB", tabId: "browser", nodeId: 1, url: "https://new.example" } },
+  { action: { type: "MOVE_TAB_TO_PANE_SPLIT", sourceTabId: "two", targetTabId: "one", targetLeafId: "second", direction: "vertical" },
+    intent: { type: "MOVE_TAB_TO_PANE_SPLIT", sourceTabId: "two", targetTabId: "one", targetNodeId: 2, dir: "vertical", first: false } },
 ];
 const cases = pairs.map(({ action, intent, prepare }) => {
   const before = prepare ? prepare(initial()) : initial();
   // Each tab's historical initial visual id can repeat; migration remaps by traversal.
   const sessions = Object.fromEntries(["one", "two", "second", "third"].map((id) => [`pty-${id}`, { backendSessionId: `pty-${id}` }]));
-  return { intent, session: { layout: before, terminalSessions: sessions }, expected: project(layoutReducer(before, action)) };
+  const workspace: WorkspaceState = { layout: before, worktrees: [], activeWorktreePath: null, sessions: {}, unreadTabIds: {}, unreadWorktreePaths: {} };
+  const after = action.type === "UPDATE_BROWSER_TAB" || action.type === "MOVE_TAB_TO_PANE_SPLIT"
+    ? workspaceReducer(workspace, action).layout : layoutReducer(before, action);
+  return { intent, session: { layout: before, terminalSessions: sessions }, expected: project(after, before) };
 });
 console.log(JSON.stringify(cases));
