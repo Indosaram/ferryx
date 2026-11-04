@@ -2021,6 +2021,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::layout::cmd_layout_get,
         ipc::layout::cmd_panes,
         ipc::layout::cmd_layout_apply,
+        ipc::layout::cmd_plugins,
+        ipc::layout::cmd_plugin_view,
         ipc::supervisor::cmd_supervisor_goal,
         ipc::supervisor::cmd_supervisor_request,
         ipc::supervisor::cmd_supervisor_adopt_archived,
