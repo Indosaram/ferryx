@@ -51,6 +51,8 @@ pub struct Layout {
     pub tab_group_layout: TabGroupLayout,
     pub active_tab_id: Option<String>,
     pub focused_group_id: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parked_layouts: BTreeMap<String, Layout>,
     next_node_id: u64,
 }
 
@@ -58,7 +60,7 @@ impl Default for Layout {
     fn default() -> Self {
         Self { revision: 0, tabs: vec![], tab_group_layout: TabGroupLayout::Group {
             group_id: "main".into(), tab_ids: vec![], active_tab_id: None,
-        }, active_tab_id: None, focused_group_id: "main".into(), next_node_id: 1 }
+        }, active_tab_id: None, focused_group_id: "main".into(), parked_layouts: BTreeMap::new(), next_node_id: 1 }
     }
 }
 
