@@ -2471,11 +2471,11 @@ mod agent_state_transport_tests {
         let report = Some(("s-1".to_string(), "e-1".to_string(), "# Report\nlast line".to_string()));
         assert_eq!(
             supervisor_report_line(
-                r#"{"type":"supervisorReport","sessionId":"s-1","eventId":"e-1","body":"# Report\nlast line"}"#
+                r##"{"type":"supervisorReport","sessionId":"s-1","eventId":"e-1","body":"# Report\nlast line"}"##
             ),
             report
         );
-        let with_token = r#"{"type":"supervisorReport","sessionId":"s-1","eventId":"e-1","body":"# Report\nlast line","token":"abc"}"#;
+        let with_token = r##"{"type":"supervisorReport","sessionId":"s-1","eventId":"e-1","body":"# Report\nlast line","token":"abc"}"##;
         assert_eq!(supervisor_report_line(with_token), report);
         assert_eq!(transport_token_from_line(with_token).as_deref(), Some("abc"));
         assert_eq!(
