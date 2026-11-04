@@ -147,6 +147,25 @@ describe("ImportBrowserDataDialog", () => {
     expect((await screen.findByRole("alert")).textContent).toBe("Another import is running.");
   });
 
+  it("clears the last import's results when the source or file changes", async () => {
+    api.runBrowserImport.mockResolvedValue({
+      results: [{ type: "history", imported: 2, skipped: 0, notes: [], error: null }],
+    });
+    dialog.open.mockResolvedValue("/tmp/vault.json");
+    renderDialog();
+
+    await screen.findByRole("option", { name: "Chrome" });
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    expect(await screen.findByText("History: 2 imported")).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("Import from"), { target: { value: "password-file" } });
+    await waitFor(() => expect(screen.queryByText("History: 2 imported")).toBeNull());
+    fireEvent.change(screen.getByLabelText("File format"), { target: { value: "bitwardenJson" } });
+    fireEvent.click(screen.getByRole("button", { name: "Choose file…" }));
+    expect(await screen.findByText("/tmp/vault.json")).toBeTruthy();
+    expect(screen.queryByRole("list", { name: "Import results" })).toBeNull();
+  });
+
   it("says when no browsers were found and still offers export files", async () => {
     api.listBrowserImportSources.mockResolvedValue([]);
     renderDialog();
