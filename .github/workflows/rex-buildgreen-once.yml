@@ -44,6 +44,7 @@ jobs:
       - name: Compile matrix
         run: |
           set +e
+          failed=0
           for mode in default headless clippy test; do
             case "$mode" in
               default) args=(check --all-targets);;
@@ -56,8 +57,11 @@ jobs:
             else
               cargo "${args[@]}" --manifest-path src-tauri/Cargo.toml --locked > /tmp/buildgreen-logs/$mode.log 2>&1
             fi
-            echo "$mode EXIT=$?" | tee -a /tmp/buildgreen-logs/exits.log
+            code=$?
+            echo "$mode EXIT=$code" | tee -a /tmp/buildgreen-logs/exits.log
+            if [ "$code" != 0 ]; then failed=1; fi
           done
+          exit "$failed"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
