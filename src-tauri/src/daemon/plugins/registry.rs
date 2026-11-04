@@ -82,6 +82,7 @@ impl Registry {
         if !approvals.enabled(&manifest) { return Err("plugin is not enabled".into()); }
         let name = manifest.name.clone();
         let observer_name = name.clone();
+        let task_name = name.clone();
         let (stop, stopped) = watch::channel(false);
         let (events, mut observed) = tokio::sync::mpsc::unbounded_channel();
         let task = tokio::spawn(async move {
@@ -90,6 +91,7 @@ impl Registry {
             });
             let result = runtime::supervise(manifest, &approvals, grants, stopped, events, dispatch).await;
             observer.await.map_err(|e| e.to_string())?;
+            if let Err(error) = &result { tracing::error!(plugin = %task_name, %error, "plugin supervisor stopped"); }
             result
         });
         running.insert(name, Running { stop, task });
@@ -107,7 +109,10 @@ impl Registry {
 
     pub async fn stop_all(&self) -> Result<(), String> {
         let names: Vec<_> = self.running.lock().await.keys().cloned().collect();
-        for name in names { self.stop(&name).await?; }
-        Ok(())
+        let mut errors = Vec::new();
+        for name in names {
+            if let Err(error) = self.stop(&name).await { errors.push(format!("{name}: {error}")); }
+        }
+        if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
     }
 }
