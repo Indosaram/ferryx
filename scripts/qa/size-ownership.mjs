@@ -56,7 +56,7 @@ try {
   const sessionId = spawned.sessionId;
   await client.call({ type: 'resize', sessionId, cols: 120, rows: 40 });
   await client.call({ type: 'remoteConfigure', config: { mode: 'localNetwork', port: 0, allowControl: true } });
-  const { status } = await client.call({ type: 'remoteStatus' });
+  const { status } = await client.call({ type: 'remoteGetStatus' });
   base = `http://127.0.0.1:${status.port}`;
   await client.call({ type: 'remoteSetActiveSelection', selection: { sessionId } });
   const events = await connect();
