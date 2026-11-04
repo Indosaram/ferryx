@@ -3,7 +3,7 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useS
 
 import { STARTUP_TIMEOUT_MS } from "./lib/startupTimeout";
 import { withTimeout } from "./lib/withTimeout";
-import { layoutSync } from "./lib/layoutSync";
+import { layoutSync, rehydrateWorkspace } from "./lib/layoutSync";
 
 import { CommandPalette } from "./components/CommandPalette";
 import { DeepLinkBridge } from "./components/DeepLinkBridge";
@@ -3554,6 +3554,11 @@ function WorkspaceApp({
     adoptionBusyRef.current = true;
     setPendingAdoptions((queue) => queue.slice(1));
     void (async () => {
+      if (layoutSync.enabled) {
+        await layoutSync.refresh();
+        restoreWorkspace(rehydrateWorkspace(stateRef.current));
+        return;
+      }
       const live = await listTerminalSessions();
       const plan = planOrphanAdoption(head.backendSessionIds, stateRef.current, live, head.attemptGenerations);
       switchDebug("window.adopt.plan", {
@@ -3585,7 +3590,7 @@ function WorkspaceApp({
         adoptionBusyRef.current = false;
         bumpAdoptionTick((tick) => tick + 1);
       });
-  }, [pendingAdoptions, adoptionTick, activeProject.workspaceId, state.workspaceId, workspaceRestoreStatus, handleSelectProject]);
+  }, [pendingAdoptions, adoptionTick, activeProject.workspaceId, state.workspaceId, workspaceRestoreStatus, handleSelectProject, restoreWorkspace]);
 
   // "Move to Window": the backend flips ownership and tells the target to adopt; only after it
   // answers does this window drop the tab. The daemon session is never closed here.
@@ -3599,11 +3604,11 @@ function WorkspaceApp({
       targetLabel,
       backendSessionIds: plan.backendSessionIds,
       workspaceId: stateRef.current.workspaceId ?? activeProjectRef.current.workspaceId,
+      layoutIntent: layoutSync.enabled ? tabTransferIntent(stateRef.current, tabId, targetLabel ?? "") : undefined,
+      layoutRevision: layoutSync.revision ?? undefined,
     })
       .then(async (outcome) => {
-        if (layoutSync.enabled && movedEverySession(outcome, plan.backendSessionIds)) {
-          await layoutSync.send(() => tabTransferIntent(stateRef.current, tabId, outcome.targetLabel), () => {});
-        }
+        if (layoutSync.enabled) await layoutSync.refresh();
         releaseTabsForMove([tabId]);
         if (!movedEverySession(outcome, plan.backendSessionIds)) {
           toast.warning("Some terminals in this tab belong to another window and stayed there.");
