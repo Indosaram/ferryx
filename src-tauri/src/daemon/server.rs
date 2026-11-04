@@ -6288,6 +6288,12 @@ impl DaemonServer {
             }
         }
 
+        let script_registry = crate::ipc::run_blocking(|| {
+            crate::script::store::Shared::load(&crate::script::store::root()
+                .map_err(crate::ipc::IpcError::internal)?)
+                .map_err(crate::ipc::IpcError::internal)
+        }).await.map_err(|error| error.to_string())?;
+        self.handover_manager.set_script(Arc::clone(&script_registry));
         if handover_from.is_none() {
             self.session_service.restore_size_ownership().await?;
             self.restore_remote_sessions_at(self.remote_sessions_path.clone())
@@ -6312,6 +6318,8 @@ impl DaemonServer {
                     .map_err(crate::ipc::IpcError::internal)?;
                 manager.adopt_recorded_onboarding(&grants_legacy)
                     .map_err(crate::ipc::IpcError::internal)?;
+                manager.adopt_recorded_script(&grants_legacy)
+                    .map_err(crate::ipc::IpcError::internal)?;
                 manager.adopt_recorded_layouts(&grants_legacy)
                     .map_err(crate::ipc::IpcError::internal)?;
                 manager
@@ -6329,6 +6337,7 @@ impl DaemonServer {
         // client released by that signal can spawn a pane immediately, and the pane reads its
         // agent-state endpoint from disk as it spawns, so a listener started afterwards leaves
         // that pane with no endpoint for its whole lifetime.
+        let _script_runtime = crate::script::start(script_registry).await?;
         let agent_state_ingress = self.spawn_agent_state_listener();
         self.spawn_foreground_observer();
         self.spawn_paired_host_probe(crate::paired_host::client::PROBE_INTERVAL);
@@ -8189,6 +8198,7 @@ impl DaemonServer {
                     capabilities.push("sizeOwnershipV1".into());
                     capabilities.push("daemonLayoutV1".into());
                     capabilities.push(super::onboarding::CAPABILITY.into());
+                    capabilities.push(crate::script::CAPABILITY.into());
                     capabilities.push("detachedPanesV1".into());
                     capabilities.push("terminalOscEffectsV1".into());
                     capabilities.push("foregroundCommandV1".into());
