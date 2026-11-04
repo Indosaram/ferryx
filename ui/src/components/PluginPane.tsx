@@ -15,8 +15,8 @@ export function PluginPane({ plugin, view, visible }: { plugin: string; view: st
         if (!disposed) { setDocument(html); setError(null); }
       } catch (cause) { if (!disposed) { setDocument(""); setError(String(cause)); } }
     };
-    void listen<{ plugin: string; view: string }>("PluginViewChanged", ({ payload }) => {
-      if (payload.plugin === plugin && payload.view === view) void refresh();
+    void listen<{ plugin: string; view?: string }>("PluginViewChanged", ({ payload }) => {
+      if (payload.plugin === plugin && (payload.view === undefined || payload.view === view)) void refresh();
     }).then((stop) => {
       if (disposed) { stop(); return; }
       unlisten = stop;
