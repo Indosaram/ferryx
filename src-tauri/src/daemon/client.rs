@@ -728,6 +728,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::ClearSession => "clearSession",
         DaemonRequest::RemoteGetStatus => "remoteGetStatus",
         DaemonRequest::GetCapabilities => "getCapabilities",
+        DaemonRequest::SetTerminalOsc52Write { .. } => "setTerminalOsc52Write",
         DaemonRequest::ResourceUsage => "resourceUsage",
         DaemonRequest::AgentPromptGet { .. } => "agentPromptGet",
         DaemonRequest::AgentPromptAnswer { .. } => "agentPromptAnswer",
