@@ -24,6 +24,7 @@ pub const CLI_GROUPS: &[&str] = &[
     "pair",
     "direct-trust",
     "remote",
+    "integrations",
     "api",
 ];
 
@@ -106,6 +107,8 @@ const GENERATION: Flag = required!("--generation");
 const REF: Flag = required!("--ref");
 const PIN: Arg = arg!("pin", "string");
 const ACCESS: Flag = value!("--access");
+/// An agent id from `integrations status`, or `--all` for every agent with that kind of target.
+const AGENT_OR_ALL: Arg = arg!("agent", "agent-id|--all");
 
 const DAEMON_JSON_EXIT_CODES: &[(&str, &str)] = &[
     ("0", "ok"),
@@ -439,6 +442,24 @@ pub const CATALOG: &[Command] = &[
         exit_codes: OK_OR_FAILURE,
     },
     Command {
+        name: "integrations",
+        summary: "Show and manage the Ferryx hooks, skill and extension installed into each coding agent",
+        output: "json (status without --json prints text)",
+        subcommands: &[
+            sub!("status", &[], &[JSON]),
+            sub!("skill install", &[AGENT_OR_ALL], &[]),
+            sub!("skill status", &[arg!("agent", "agent-id")], &[]),
+            sub!("skill uninstall", &[AGENT_OR_ALL], &[]),
+            sub!("hooks install", &[AGENT_OR_ALL], &[]),
+            sub!("hooks uninstall", &[AGENT_OR_ALL], &[]),
+        ],
+        exit_codes: &[
+            ("0", "ok"),
+            ("1", "an install or removal failed for at least one agent"),
+            ("2", "usage error or unknown agent (UNKNOWN_AGENT on stderr)"),
+        ],
+    },
+    Command {
         name: "api",
         summary: "Describe the ferryx-cli command groups as JSON",
         output: "json",
@@ -570,6 +591,22 @@ mod tests {
             .unwrap()
             .contains(&json!({ "name": "--until", "takesValue": true, "required": true })));
         assert_eq!(entry["exitCodes"].as_object().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn describe_integrations_lists_every_verb() {
+        let entry = describe_json("integrations").unwrap();
+        let names: Vec<&str> = entry["subcommands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|sub| sub["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            ["status", "skill install", "skill status", "skill uninstall", "hooks install", "hooks uninstall"]
+        );
+        assert!(entry["exitCodes"]["2"].as_str().unwrap().contains("UNKNOWN_AGENT"));
     }
 
     #[test]

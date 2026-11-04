@@ -14,9 +14,10 @@
 //! copy whose path changes on every update; an install replaces an older generation's entry, and a
 //! removal deletes it. A group the user edited in any other way is no longer ours and survives both.
 //!
-//! Alongside the hooks, claude and codex get the Ferryx agent skill (`SKILL.md`, see
-//! [`SKILL_FILES`]). It is Ferryx's while its frontmatter says `ferryx-managed: true`; a skill file
-//! without that line belongs to the user and is never overwritten or deleted.
+//! Alongside the hooks, every agent that loads user skills gets the Ferryx agent skill (`SKILL.md`,
+//! see [`SKILL_FILES`]), including omp, which runs no command hooks ([`SKILL_ONLY_AGENTS`]). It is
+//! Ferryx's while its frontmatter says `ferryx-managed: true`; a skill file without that line
+//! belongs to the user and is never overwritten or deleted.
 
 use serde_json::{Map, Value};
 use std::ffi::OsString;
@@ -88,12 +89,76 @@ pub const HOOK_FILES: [(&str, &str, &str, HookShape); 7] = [
 pub(crate) const SKILL_SOURCE: &str = include_str!("../../resources/agent-skills/ferryx/SKILL.md");
 
 /// Each skill-reading agent and where its user skill lives, `/`-separated and relative to HOME:
-/// claude reads `~/.claude/skills`, codex reads the shared user skill directory `~/.agents/skills`.
-/// The skill is installed only where that agent's own config directory exists.
-pub const SKILL_FILES: [(&str, &str); 2] = [
+/// - claude reads `~/.claude/skills`, codex the shared user skill directory `~/.agents/skills`;
+/// - grok reads `~/.grok/skills`;
+/// - antigravity (agy) reads `~/.gemini/config/skills`, the global location its documentation
+///   (antigravity.google/docs/skills) names for the CLI, the app and the IDE alike. The agy CLI
+///   also reads `~/.gemini/skills`, which Gemini CLI shares; the config path keeps it agy's own;
+/// - cursor-agent reads `~/.cursor/skills` (cursor.com/docs/context/skills);
+/// - omp scans `~/.omp/agent/skills` for user skills (oh-my-pi `discovery/builtin.ts`).
+///
+/// The skill is installed only where that agent's own config directory exists. An agent missing
+/// here has no skill mechanism Ferryx writes to; `ferryx-cli integrations` reports it unsupported.
+pub const SKILL_FILES: [(&str, &str); 6] = [
     ("claude", ".claude/skills/ferryx/SKILL.md"),
     ("codex", ".agents/skills/ferryx/SKILL.md"),
+    ("grok", ".grok/skills/ferryx/SKILL.md"),
+    ("antigravity", ".gemini/config/skills/ferryx/SKILL.md"),
+    ("cursor", ".cursor/skills/ferryx/SKILL.md"),
+    ("omp", ".omp/agent/skills/ferryx/SKILL.md"),
 ];
+
+/// Skill-reading agents that run no command hooks, each with the config directory that gates its
+/// skill install. omp reports its state through the extension instead (`agent_extension.rs`).
+pub const SKILL_ONLY_AGENTS: [(&str, &str); 1] = [("omp", ".omp")];
+
+/// Where one agent's Ferryx skill goes, and the config directory that must exist first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillTarget {
+    pub agent: &'static str,
+    pub agent_dir: PathBuf,
+    pub file: PathBuf,
+}
+
+impl SkillTarget {
+    /// See [`install_skill_into`]. Blocking: performs disk I/O.
+    pub fn install(&self) -> std::io::Result<bool> {
+        install_skill_at(&self.agent_dir, &self.file)
+    }
+
+    /// See [`remove_skill_from`]. Blocking: performs disk I/O.
+    pub fn remove(&self) -> std::io::Result<bool> {
+        remove_skill_at(&self.file)
+    }
+}
+
+fn home_relative(home: &Path, rel: &str) -> PathBuf {
+    rel.split('/').fold(home.to_path_buf(), |path, part| path.join(part))
+}
+
+pub(crate) fn home_dir(get_env: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    get_env("HOME")
+        .filter(|value| !value.is_empty())
+        .or_else(|| get_env("USERPROFILE").filter(|value| !value.is_empty()))
+        .map(PathBuf::from)
+}
+
+/// Every agent's skill target: the hook agents that read a skill, then the skill-only agents.
+pub fn skill_targets() -> Vec<SkillTarget> {
+    skill_targets_with_env(|key| std::env::var_os(key))
+}
+
+pub(crate) fn skill_targets_with_env(get_env: impl Fn(&str) -> Option<OsString>) -> Vec<SkillTarget> {
+    let Some(home) = home_dir(&get_env) else { return Vec::new() };
+    let from_hooks = hook_targets_with_env(&get_env).into_iter().filter_map(|target| {
+        Some(SkillTarget { agent: target.agent, file: target.skill?, agent_dir: target.agent_dir })
+    });
+    let skill_only = SKILL_ONLY_AGENTS.iter().filter_map(|(agent, dir)| {
+        let (_, rel) = SKILL_FILES.iter().find(|(name, _)| name == agent)?;
+        Some(SkillTarget { agent: *agent, agent_dir: home_relative(&home, dir), file: home_relative(&home, rel) })
+    });
+    from_hooks.chain(skill_only).collect()
+}
 
 /// Whether a skill file is Ferryx's: its YAML frontmatter carries `ferryx-managed: true`.
 pub(crate) fn is_ferryx_skill(text: &str) -> bool {
@@ -112,11 +177,7 @@ pub fn hook_targets() -> Vec<HookFileTarget> {
 }
 
 pub(crate) fn hook_targets_with_env(get_env: impl Fn(&str) -> Option<OsString>) -> Vec<HookFileTarget> {
-    let Some(home) = get_env("HOME")
-        .filter(|value| !value.is_empty())
-        .or_else(|| get_env("USERPROFILE").filter(|value| !value.is_empty()))
-        .map(PathBuf::from)
-    else {
+    let Some(home) = home_dir(&get_env) else {
         return Vec::new();
     };
     let config_home = get_env("XDG_CONFIG_HOME")
@@ -134,7 +195,7 @@ pub(crate) fn hook_targets_with_env(get_env: impl Fn(&str) -> Option<OsString>) 
             let skill = SKILL_FILES
                 .iter()
                 .find(|(name, _)| name == agent)
-                .map(|(_, rel)| rel.split('/').fold(home.clone(), |path, part| path.join(part)));
+                .map(|(_, rel)| home_relative(&home, rel));
             Some(HookFileTarget {
                 agent,
                 file: agent_dir.join(file),
@@ -198,6 +259,11 @@ fn unquote_executable(quoted: &str) -> Option<String> {
 /// The event a Ferryx-installed command reports for `agent`, or `None` when the command is not one
 /// Ferryx writes.
 fn ferryx_command_event<'a>(command: &'a str, agent: &str) -> Option<&'a str> {
+    ferryx_command_parts(command, agent).map(|(_, event)| event)
+}
+
+/// The executable and the event of a Ferryx-installed command for `agent`.
+fn ferryx_command_parts<'a>(command: &'a str, agent: &str) -> Option<(String, &'a str)> {
     let marker = format!(" {AGENT_HOOK_SUBCOMMAND} {agent} ");
     let split = command.rfind(&marker)?;
     let event = &command[split + marker.len()..];
@@ -220,7 +286,7 @@ fn ferryx_command_event<'a>(command: &'a str, agent: &str) -> Option<&'a str> {
             | "ferryx-remote-helper"
             | "ferryx-remote-helper.exe"
     )
-    .then_some(event)
+    .then_some((exe, event))
 }
 
 /// The command of a matcher group that has exactly the shape Ferryx writes and nothing more.
@@ -724,18 +790,143 @@ pub fn remove_hooks_from(target: &HookFileTarget) -> std::io::Result<usize> {
     Ok(removed)
 }
 
+#[cfg(test)]
 pub(crate) fn install_hook_targets(targets: &[HookFileTarget], exe: &Path) {
+    install_hook_targets_where(targets, exe, |_| true, |_| true);
+}
+
+/// [`install_hook_targets`] for only the agents whose hooks and skill the owner left on: an agent
+/// for which `hooks_on` (or `skills_on`) is false keeps whatever it has, untouched.
+pub(crate) fn install_hook_targets_where(
+    targets: &[HookFileTarget],
+    exe: &Path,
+    hooks_on: impl Fn(&str) -> bool,
+    skills_on: impl Fn(&str) -> bool,
+) {
     for target in targets {
-        match install_hooks_into(target, exe) {
-            Ok(true) => tracing::info!(agent = target.agent, file = %target.file.display(), "Installed Ferryx agent hooks"),
-            Ok(false) => {}
-            Err(error) => tracing::warn!(agent = target.agent, file = %target.file.display(), %error, "Failed to install Ferryx agent hooks"),
+        if hooks_on(target.agent) {
+            match install_hooks_into(target, exe) {
+                Ok(true) => tracing::info!(agent = target.agent, file = %target.file.display(), "Installed Ferryx agent hooks"),
+                Ok(false) => {}
+                Err(error) => tracing::warn!(agent = target.agent, file = %target.file.display(), %error, "Failed to install Ferryx agent hooks"),
+            }
         }
-        match install_skill_into(target) {
-            Ok(true) => tracing::info!(agent = target.agent, "Installed the Ferryx agent skill"),
-            Ok(false) => {}
-            Err(error) => tracing::warn!(agent = target.agent, %error, "Failed to install the Ferryx agent skill"),
+        if skills_on(target.agent) {
+            match install_skill_into(target) {
+                Ok(true) => tracing::info!(agent = target.agent, "Installed the Ferryx agent skill"),
+                Ok(false) => {}
+                Err(error) => tracing::warn!(agent = target.agent, %error, "Failed to install the Ferryx agent skill"),
+            }
         }
+    }
+}
+
+/// What a hook target holds now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HookStatus {
+    /// At least one Ferryx entry is in the agent's hook config.
+    pub installed: bool,
+    /// Ferryx entries are there but would not all report: the executable they name is gone, they
+    /// name more than one executable, or an install from that executable would change them (an
+    /// event missing or no longer reported).
+    pub stale: bool,
+}
+
+fn collect_ferryx_executables(value: &Value, agent: &str, out: &mut Vec<String>) {
+    match value {
+        Value::String(text) => {
+            if let Some((exe, _)) = ferryx_command_parts(text, agent) {
+                if !out.contains(&exe) {
+                    out.push(exe);
+                }
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|item| collect_ferryx_executables(item, agent, out)),
+        Value::Object(map) => map.values().for_each(|item| collect_ferryx_executables(item, agent, out)),
+        _ => {}
+    }
+}
+
+/// Reads `target`'s hook config without writing anything. Blocking: performs disk I/O.
+pub fn hook_status(target: &HookFileTarget) -> std::io::Result<HookStatus> {
+    if target.shape == HookShape::EventScripts {
+        let mut bodies = Vec::new();
+        let mut exes: Vec<String> = Vec::new();
+        let mut missing = false;
+        for event in target.events {
+            let path = target.file.join(script_file_name(event));
+            match std::fs::read_to_string(&path) {
+                Ok(body) if ferryx_script_event(&body, target.agent).is_some() => {
+                    let last = body.trim_end_matches('\n').lines().next_back().unwrap_or_default();
+                    let command = last.strip_prefix("exec ").or_else(|| last.strip_prefix("& ")).unwrap_or(last);
+                    if let Some((exe, _)) = ferryx_command_parts(command, target.agent) {
+                        if !exes.contains(&exe) {
+                            exes.push(exe);
+                        }
+                    }
+                    bodies.push((*event, body));
+                }
+                // The user's own script for this event: an install leaves it alone.
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => missing = true,
+                Err(error) => return Err(error),
+            }
+        }
+        let installed = !bodies.is_empty();
+        let stale = installed
+            && match exes.as_slice() {
+                [exe] => {
+                    missing
+                        || !Path::new(exe).is_file()
+                        || bodies.iter().any(|(event, body)| *body != hook_script(Path::new(exe), target.agent, event))
+                }
+                _ => true,
+            };
+        return Ok(HookStatus { installed, stale });
+    }
+    let path = resolve_write_path(&target.file)?;
+    let Some(original) = read_settings(&path)? else {
+        return Ok(HookStatus { installed: false, stale: false });
+    };
+    let strip = strip_for(target.shape).expect("event scripts handled above");
+    let present = strip(&mut original.clone(), target.agent).map_err(invalid)?;
+    if present == 0 {
+        return Ok(HookStatus { installed: false, stale: false });
+    }
+    let mut exes = Vec::new();
+    collect_ferryx_executables(&original, target.agent, &mut exes);
+    let [exe] = exes.as_slice() else {
+        return Ok(HookStatus { installed: true, stale: true });
+    };
+    let merge = merge_for(target.shape).expect("event scripts handled above");
+    let mut merged = original.clone();
+    merge(&mut merged, target.agent, target.events, &Reporter::local(Path::new(exe))).map_err(invalid)?;
+    Ok(HookStatus { installed: true, stale: merged != original || !Path::new(exe).is_file() })
+}
+
+/// What sits at a skill path: nothing, a managed Ferryx skill, or a file that is the user's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillState {
+    Absent,
+    Managed,
+    /// A file without the managed marker, or a link or directory under the skill's name: the
+    /// user's, never written or deleted.
+    UserEdited,
+}
+
+/// Blocking: performs disk I/O.
+pub fn skill_state(path: &Path) -> std::io::Result<SkillState> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            Ok(if is_ferryx_skill(&std::fs::read_to_string(path)?) {
+                SkillState::Managed
+            } else {
+                SkillState::UserEdited
+            })
+        }
+        Ok(_) => Ok(SkillState::UserEdited),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(SkillState::Absent),
+        Err(error) => Err(error),
     }
 }
 
@@ -745,7 +936,11 @@ pub(crate) fn install_hook_targets(targets: &[HookFileTarget], exe: &Path) {
 /// Blocking: performs disk I/O.
 pub fn install_skill_into(target: &HookFileTarget) -> std::io::Result<bool> {
     let Some(path) = &target.skill else { return Ok(false) };
-    if !target.agent_dir.is_dir() {
+    install_skill_at(&target.agent_dir, path)
+}
+
+fn install_skill_at(agent_dir: &Path, path: &Path) -> std::io::Result<bool> {
+    if !agent_dir.is_dir() {
         return Ok(false);
     }
     match std::fs::symlink_metadata(path) {
@@ -788,6 +983,10 @@ fn write_skill_file(path: &Path) -> std::io::Result<()> {
 /// directory when that is left empty. Returns whether the file went. Blocking: performs disk I/O.
 pub fn remove_skill_from(target: &HookFileTarget) -> std::io::Result<bool> {
     let Some(path) = &target.skill else { return Ok(false) };
+    remove_skill_at(path)
+}
+
+fn remove_skill_at(path: &Path) -> std::io::Result<bool> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => {}
         Ok(_) => return Ok(false),
@@ -1433,16 +1632,32 @@ mod tests {
     }
 
     #[test]
-    fn skill_paths_are_claudes_and_the_shared_agents_dir_only() {
+    fn skill_paths_follow_each_agents_user_skill_directory() {
         let home = temp_home();
         for target in targets(home.path()) {
             let expected = match target.agent {
                 "claude" => Some(home.path().join(".claude/skills/ferryx/SKILL.md")),
                 "codex" => Some(home.path().join(".agents/skills/ferryx/SKILL.md")),
+                "grok" => Some(home.path().join(".grok/skills/ferryx/SKILL.md")),
+                "antigravity" => Some(home.path().join(".gemini/config/skills/ferryx/SKILL.md")),
+                "cursor" => Some(home.path().join(".cursor/skills/ferryx/SKILL.md")),
                 _ => None,
             };
             assert_eq!(target.skill, expected, "{}", target.agent);
         }
+        // omp runs no hooks, so its skill target stands alone, gated on `~/.omp`.
+        let h = home.path().as_os_str().to_os_string();
+        let skills = skill_targets_with_env(move |key| (key == "HOME").then(|| h.clone()));
+        let omp = skills.iter().find(|skill| skill.agent == "omp").unwrap();
+        assert_eq!(omp.agent_dir, home.path().join(".omp"));
+        assert_eq!(omp.file, home.path().join(".omp/agent/skills/ferryx/SKILL.md"));
+        assert_eq!(skills.len(), SKILL_FILES.len(), "one target per skill path");
+        assert!(!omp.install().unwrap(), "no ~/.omp, no skill");
+        std::fs::create_dir_all(&omp.agent_dir).unwrap();
+        assert!(omp.install().unwrap());
+        assert!(!omp.install().unwrap(), "a second install is a no-op");
+        assert!(omp.remove().unwrap());
+        assert!(!omp.file.exists());
         assert!(is_ferryx_skill(SKILL_SOURCE), "the shipped skill carries the marker");
         let mut lines = SKILL_SOURCE.lines().map(str::trim_end);
         assert_eq!(lines.next(), Some("---"));
