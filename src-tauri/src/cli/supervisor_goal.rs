@@ -859,7 +859,13 @@ mod tests {
         };
         let parsed = parse_setup_cli(&with(paired, true)).unwrap();
         assert!(parsed.remote && parsed.host == paired);
-        assert!(!parse_setup_cli(&with(paired, false)).unwrap().remote, "without --remote the local path runs (HOST_NOT_LOCAL)");
+        // Without --remote the dir is a path on this machine, so it is spelled natively here.
+        let mut local_form = with(paired, false);
+        if cfg!(windows) {
+            let at = local_form.iter().position(|w| w == "/r/.git").unwrap();
+            local_form[at] = r"C:\r\.git".into();
+        }
+        assert!(!parse_setup_cli(&local_form).unwrap().remote, "without --remote the local path runs (HOST_NOT_LOCAL)");
         assert!(parse_setup_cli(&with("local", true)).is_err(), "--remote with host local is a usage error");
         let mut twice = with(paired, true);
         twice.push("--remote".into());
