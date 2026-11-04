@@ -218,7 +218,7 @@ const linux = {
     return this.windowId ? run("xdotool", ["windowactivate", "--sync", this.windowId]) : { ok: false, stderr: "no window" };
   },
   keyName(key) {
-    return { Tab: "Tab", Enter: "Return", Escape: "Escape", Space: "space", End: "End", ",": "comma", "=": "equal", "[": "bracketleft" }[key] ?? key;
+    return { Tab: "Tab", Enter: "Return", Escape: "Escape", Space: "space", End: "End", Home: "Home", Down: "Down", ",": "comma", "=": "equal", "[": "bracketleft" }[key] ?? key;
   },
   key({ key, mods = [] }) {
     return run("xdotool", ["key", "--clearmodifiers", [...mods.map((mod) => (mod === "mod" ? "ctrl" : mod)), this.keyName(key)].join("+")]);
@@ -263,7 +263,7 @@ const linux = {
 };
 
 // ---------------------------------------------------------------- platform: macOS
-const macKeyCodes = { Tab: 48, Enter: 36, Escape: 53, Space: 49, End: 119 };
+const macKeyCodes = { Tab: 48, Enter: 36, Escape: 53, Space: 49, End: 119, Home: 115, Down: 125 };
 const mac = {
   pid: null,
   pixelScale: null,
@@ -360,7 +360,7 @@ const mac = {
 
 // ---------------------------------------------------------------- platform: Windows
 const winHelper = join(out, "win-input.ps1");
-const winVk = { Tab: 0x09, Enter: 0x0d, Escape: 0x1b, Space: 0x20, End: 0x23, ",": 0xbc, "=": 0xbb, "[": 0xdb, mod: 0x11, ctrl: 0x11, shift: 0x10, alt: 0x12 };
+const winVk = { Tab: 0x09, Enter: 0x0d, Escape: 0x1b, Space: 0x20, End: 0x23, Home: 0x24, Down: 0x28, ",": 0xbc, "=": 0xbb, "[": 0xdb, mod: 0x11, ctrl: 0x11, shift: 0x10, alt: 0x12 };
 const win = {
   pid: null,
   hwnd: null,
@@ -1511,6 +1511,78 @@ function primaryButtonBelow(path, title) {
   }
   return null;
 }
+/**
+ * A light filled button (the primary: Allow, Import) and the bordered dark button directly left
+ * of it (Block, Cancel/Done) inside `region` of the screenshot, found from pixels: tesseract misses
+ * both labels on many frames (run 41772321882: Allow on every OS, Block on macOS, the dialog's
+ * Import on macOS). Columns whose longest vertical run of light pixels (min channel > 200) is
+ * 16-60 px are grouped (gaps up to 3 px); groups 36-220 px wide are pills, and the bottom-most
+ * (then rightmost) one is the primary. The secondary is the run of border-coloured pixels
+ * (grey differs from the background by 6-70) on the primary's top rows, ending within 24 px
+ * left of it and at least 30 px long.
+ */
+function pillButtons(path, { x0, x1, y0, y1 }) {
+  const image = decodePng(path);
+  if (!image) return null;
+  const left0 = Math.max(0, Math.round(x0)), right0 = Math.min(image.width - 1, Math.round(x1));
+  const top0 = Math.max(0, Math.round(y0)), bottom0 = Math.min(image.height - 1, Math.round(y1));
+  if (left0 > right0 || top0 > bottom0) return null;
+  const light = (x, y) => Math.min(...image.rgb(x, y)) > 200;
+  const grey = (x, y) => image.rgb(x, y).reduce((sum, value) => sum + value, 0) / 3;
+  const groups = [];
+  let group = null;
+  for (let x = left0; x <= right0; x += 1) {
+    // Longest vertical run of light pixels in this column.
+    let best = { length: 0, top: 0, bottom: 0 };
+    let start = -1;
+    for (let y = top0; y <= bottom0 + 1; y += 1) {
+      if (y <= bottom0 && light(x, y)) {
+        if (start < 0) start = y;
+        continue;
+      }
+      if (start >= 0 && y - start > best.length) best = { length: y - start, top: start, bottom: y - 1 };
+      start = -1;
+    }
+    if (best.length < 16 || best.length > 60) continue;
+    if (group && x - group.right <= 4) {
+      group.right = x;
+      group.top = Math.min(group.top, best.top);
+      group.bottom = Math.max(group.bottom, best.bottom);
+    } else {
+      group = { left: x, right: x, top: best.top, bottom: best.bottom };
+      groups.push(group);
+    }
+  }
+  const pills = groups.filter((pill) => pill.right - pill.left + 1 >= 36 && pill.right - pill.left + 1 <= 220);
+  pills.sort((a, b) => b.bottom - a.bottom || b.right - a.right);
+  const pill = pills[0];
+  if (!pill) return null;
+  const middleY = Math.round((pill.top + pill.bottom) / 2);
+  const primary = { x: Math.round((pill.left + pill.right) / 2), y: middleY, left: pill.left, right: pill.right, top: pill.top, bottom: pill.bottom };
+  const bg = grey(Math.max(0, pill.left - 3), middleY);
+  const border = (x, y) => {
+    const diff = Math.abs(grey(x, y) - bg);
+    return diff >= 6 && diff <= 70;
+  };
+  let secondary = null;
+  for (let y = Math.max(0, pill.top - 4); y <= Math.min(image.height - 1, pill.top + 4) && !secondary; y += 1) {
+    let xStart = -1, count = 0;
+    for (let x = pill.left - 2; x >= 0; x -= 1) {
+      if (xStart < 0) {
+        if (pill.left - x > 24) break;
+        if (border(x, y)) {
+          xStart = x;
+          count = 1;
+        }
+        continue;
+      }
+      if (!border(x, y)) break;
+      count += 1;
+    }
+    if (count >= 30) secondary = { x: Math.round((xStart - count + 1 + xStart) / 2), y: middleY };
+  }
+  return { primary, secondary };
+}
 async function clickCardButton(label, timeout = 20000) {
   const hit = await until(() => {
     const path = probeShot();
@@ -1650,23 +1722,71 @@ async function seedChromeProfile(record) {
     const added = run("security", ["add-generic-password", "-U", "-A", "-s", "Chrome Safe Storage", "-a", "Chrome", "-w", chromeKeychainPassword]);
     record.keychain_item = added.ok ? "created with an allow-all ACL" : added.stderr;
   }
+  // Linux: Chrome does not flush history/cookies on a signal, so quit it cleanly over CDP.
+  const debugPort = platform === "linux" ? await freePort() : null;
+  const chromePages = async () => {
+    try {
+      const response = await fetch(`http://127.0.0.1:${debugPort}/json/list`);
+      return (await response.json()).filter((entry) => entry.type === "page").map((entry) => entry.url);
+    } catch {
+      return null;
+    }
+  };
   const args = ["--no-first-run", "--no-default-browser-check", "--disable-sync", `${base}/seed?n=1`, `${base}/seed?n=2`];
-  if (platform === "linux") args.unshift(`--user-data-dir=${chromeUserData}`, "--password-store=basic");
+  if (platform === "linux") args.unshift(`--user-data-dir=${chromeUserData}`, "--password-store=basic", `--remote-debugging-port=${debugPort}`);
   if (platform === "darwin") args.unshift("--use-mock-keychain");
   const chrome = spawn(chromeExe, args, { stdio: "ignore", detached: platform !== "win32" });
   record.chrome_pid = chrome.pid;
-  await sleep(12000);
+  if (platform === "linux") {
+    await until(async () => {
+      const pages = await chromePages();
+      return pages && ["/seed?n=1", "/seed?n=2"].every((part) => pages.some((url) => url.includes(part))) ? pages : null;
+    }, 30000);
+    await sleep(3000);
+  } else await sleep(12000);
   // A clean quit flushes cookies and history to disk.
-  if (platform === "darwin") run("osascript", ["-e", 'tell application "Google Chrome" to quit']);
-  else if (platform === "win32") run("taskkill", ["/PID", String(chrome.pid), "/T"]);
-  else {
-    // The wrapper script execs into /opt/google/chrome/chrome; its whole group gets the signal.
+  let quit = null;
+  if (platform === "linux") {
     try {
-      process.kill(-chrome.pid, "SIGTERM");
-    } catch {}
-    run("pkill", ["-TERM", "-f", "--", `--user-data-dir=${chromeUserData}`]);
+      record.chrome_pages = await chromePages();
+      const version = await (await fetch(`http://127.0.0.1:${debugPort}/json/version`)).json();
+      const socket = new WebSocket(version.webSocketDebuggerUrl);
+      const answered = await new Promise((done, fail) => {
+        const timer = setTimeout(() => done(false), 5000);
+        socket.addEventListener("open", () => socket.send(JSON.stringify({ id: 1, method: "Browser.close" })));
+        socket.addEventListener("message", () => {
+          clearTimeout(timer);
+          done(true);
+        });
+        socket.addEventListener("close", () => {
+          clearTimeout(timer);
+          done(true);
+        });
+        socket.addEventListener("error", () => {
+          clearTimeout(timer);
+          fail(new Error("CDP socket error"));
+        });
+      });
+      if (answered) record.chrome_quit_via = "cdp";
+      else record.chrome_cdp_quit_error = "no Browser.close reply within 5 s";
+    } catch (error) {
+      record.chrome_cdp_quit_error = String(error);
+    }
+    quit = await until(() => !chromeRunning(), 20000);
   }
-  const quit = await until(() => !chromeRunning(), 40000);
+  if (!quit) {
+    if (platform === "darwin") run("osascript", ["-e", 'tell application "Google Chrome" to quit']);
+    else if (platform === "win32") run("taskkill", ["/PID", String(chrome.pid), "/T"]);
+    else {
+      record.chrome_quit_via = "sigterm";
+      // The wrapper script execs into /opt/google/chrome/chrome; its whole group gets the signal.
+      try {
+        process.kill(-chrome.pid, "SIGTERM");
+      } catch {}
+      run("pkill", ["-TERM", "-f", "--", `--user-data-dir=${chromeUserData}`]);
+    }
+    quit = await until(() => !chromeRunning(), 40000);
+  }
   if (!quit) {
     record.chrome_force_killed = true;
     if (platform === "win32") run("taskkill", ["/IM", "chrome.exe", "/T", "/F"]);
@@ -1924,13 +2044,21 @@ await section("media", async (record) => {
     await cdp.evaluate("document.title='media:idle'; window.askMedia(); true", { awaitPromise: false });
     const prompt = await seePhrase(["wants to use"], answer ? 15000 : 6000);
     let clicked = null;
-    if (prompt && answer) clicked = await clickWord(answer, { timeout: 6000, minY: prompt.y - 40, maxY: prompt.y + 40 });
+    if (prompt && answer) {
+      // Pixels first: OCR misses the light Allow pill and often the dark Block button.
+      const path = probeShot();
+      const buttons = pillButtons(path, { x0: prompt.right ?? prompt.x, x1: 1e9, y0: prompt.y - 16, y1: prompt.y + 16 });
+      const target = answer === "Allow" ? buttons?.primary : buttons?.secondary;
+      clicked = target
+        ? { ...host.click(target.x, target.y), at: [target.x, target.y], via: "pixels" }
+        : { ...(await clickWord(answer, { timeout: 6000, minY: prompt.y - 40, maxY: prompt.y + 40 })), via: "ocr" };
+    }
     const result = await until(async () => {
       const value = await title();
       return value !== "media:asking" && value !== "media:idle" ? value : null;
     }, 15000, 500);
     const shot = screenshot(`media-${label}`);
-    const entry = { label, prompt: Boolean(prompt), clicked: clicked ? { ok: clicked.ok, at: clicked.at, stderr: clicked.stderr } : null, title: result, store: permissionEntries().map((item) => `${item.kind}:${item.decision}`), screenshot: shot.file };
+    const entry = { label, prompt: Boolean(prompt), clicked: clicked ? { ok: clicked.ok, at: clicked.at, stderr: clicked.stderr, via: clicked.via } : null, title: result, store: permissionEntries().map((item) => `${item.kind}:${item.decision}`), screenshot: shot.file };
     record.attempts.push(entry);
     writeSummary();
     return entry;
@@ -2008,6 +2136,14 @@ await section("download", async (record) => {
   record.checks.paused_by_click = pause.ok && Boolean(paused);
   await step("download-paused", "Pause clicked on the shelf row (icon left of Cancel); the row reads Paused", [["paused", () => ({ ok: Boolean(paused), via: paused })]], { any: ["Paused"] });
   await sleep(2500);
+  // The socket buffers drain after a pause: wait until the server count stops growing.
+  let settled = served.big;
+  await until(async () => {
+    const now = served.big;
+    const still = now === settled;
+    settled = now;
+    return still || null;
+  }, 20000, 2000);
   const samples = [];
   for (let index = 0; index < 6; index += 1) {
     samples.push({ server: served.big, disk: partialSize(BIG_NAME) });
@@ -2055,9 +2191,28 @@ await section("import", async (record) => {
     const group = await settingsBrowserGroup("Import");
     const button = await until(() => findPhrase(ocr(probeShot()) ?? [], "Import browser")[0] ?? null, 8000);
     if (!button) return { ok: false, group };
-    host.click(button.x, button.y);
-    const dialog = await seePhrase(["Import from", "Into Ferryx profile"], 10000);
-    return { ok: Boolean(dialog), group: group.ok };
+    // The first click can only activate the window (Windows, run 41772321882): retry up to 3 times.
+    let dialog = null;
+    let clicks = 0;
+    while (!dialog && clicks < 3) {
+      host.click(button.x, button.y);
+      clicks += 1;
+      dialog = await seePhrase(["Import from", "Into Ferryx profile"], 6000);
+    }
+    return { ok: Boolean(dialog), group: group.ok, clicks };
+  };
+  // The dialog's buttons, from pixels below its "Into Ferryx profile" / "Import from" label.
+  const dialogButtons = () => {
+    const path = probeShot();
+    const words = ocr(path) ?? [];
+    const anchor = findPhrase(words, "Into Ferryx")[0] ?? findPhrase(words, "Import from")[0];
+    if (!anchor) return null;
+    return pillButtons(path, { x0: anchor.left - 60, x1: anchor.left + 600, y0: anchor.top, y1: anchor.top + 420 });
+  };
+  const clickDialogButton = async (which, word) => {
+    const found = await until(() => dialogButtons()?.[which] ?? null, 8000, 700);
+    if (found) return { ...host.click(found.x, found.y), at: [found.x, found.y], via: "pixels" };
+    return { ...(await clickWord(word, { timeout: 4000, pick: "last" })), via: "ocr" };
   };
   const results = async () => until(() => {
     const words = ocr(probeShot()) ?? [];
@@ -2076,11 +2231,11 @@ await section("import", async (record) => {
   const words = ocr(probeShot()) ?? [];
   record.checks.source_detected = first.ok && Boolean(findPhrase(words, "Google Chrome")[0]);
   await step("import-dialog-chrome", "Import dialog opened from Settings > Browser > Import; source 'Google Chrome'", [["dialog", () => ({ ok: record.checks.source_detected, ...first })]], { any: ["Chrome"] });
-  const importButton = await clickWord("Import", { timeout: 6000, pick: "last" });
+  const importButton = await clickDialogButton("primary", "Import");
   const resultWords = await results();
   record.chrome_results = lines(resultWords);
   await step("import-chrome-results", "Import clicked; per-type result lines", [["import", () => ({ ok: Boolean(resultWords), clicked: importButton.ok, lines: record.chrome_results })]], { any: ["imported"] });
-  await clickWord("Done", { timeout: 5000 });
+  await clickDialogButton("secondary", "Done");
   await sleep(1000);
 
   const bookmarks = JSON.stringify(readJson(join(dirs.data, "browser", "bookmarks.json")) ?? "");
@@ -2118,7 +2273,7 @@ await section("import", async (record) => {
   if (platform === "win32") record.checks.v20_cookie_decrypted = record.checks.v20_cookie_seen && record.checks.cookies_imported;
   await closeChromiumTabs();
 
-  const passwordFile = async (format, path, label) => {
+  const passwordFile = async (format, path, label, index) => {
     const opened = await openDialog();
     // The source select: click it and pick the last option with the keyboard.
     const select = await until(() => findPhrase(ocr(probeShot()) ?? [], "Google Chrome")[0] ?? null, 6000);
@@ -2129,15 +2284,33 @@ await section("import", async (record) => {
     await sleep(800);
     const chooser = await until(() => findPhrase(ocr(probeShot()) ?? [], "File format")[0] ?? null, 6000);
     let formatPicked = false;
+    let formatVia = null;
     if (chooser) {
       const value = (ocr(probeShot()) ?? []).find((word) => word.top > chooser.top + 8 && word.top < chooser.top + 50 && Math.abs(word.left - chooser.left) < 40);
       if (value) {
-        host.click(value.left + 20, value.top + Math.round(value.height / 2));
-        await sleep(600);
-        host.type(format);
+        const openValue = async () => {
+          host.click(value.left + 20, value.top + Math.round(value.height / 2));
+          await sleep(600);
+        };
+        // `index` is the format's position in PASSWORD_FILE_FORMATS (ui/src/lib/browserImport.ts).
+        await openValue();
+        host.key({ key: "Home" });
+        for (let press = 0; press < index; press += 1) {
+          host.key({ key: "Down" });
+          await sleep(100);
+        }
         host.key({ key: "Enter" });
         await sleep(800);
         formatPicked = Boolean(findPhrase(ocr(probeShot()) ?? [], format)[0]);
+        if (formatPicked) formatVia = "keys";
+        else {
+          await openValue();
+          host.type(format);
+          host.key({ key: "Enter" });
+          await sleep(800);
+          formatPicked = Boolean(findPhrase(ocr(probeShot()) ?? [], format)[0]);
+          if (formatPicked) formatVia = "typed";
+        }
       }
     }
     const choose = await clickWord("Choose", { timeout: 6000 });
@@ -2162,18 +2335,18 @@ await section("import", async (record) => {
     }
     await sleep(2500);
     const chosen = Boolean(findWord(ocr(probeShot()) ?? [], "", { match: (word) => word.text.includes(basename(path)) }));
-    const imported = await clickWord("Import", { timeout: 6000, pick: "last" });
+    const imported = await clickDialogButton("primary", "Import");
     const done = await results();
-    const outcome = { dialog: opened.ok, format_picked: formatPicked, choose: choose.ok, file_shown: chosen, import_clicked: imported.ok, lines: lines(done) };
+    const outcome = { dialog: opened.ok, format_picked: formatPicked, format_via: formatVia, choose: choose.ok, file_shown: chosen, import_clicked: imported.ok, lines: lines(done) };
     await step(`import-${label}`, `Import a ${format} file through the dialog's file picker`, [["import", () => ({ ok: Boolean(done), ...outcome })]], { any: ["imported"] });
-    await clickWord("Done", { timeout: 5000 });
+    await clickDialogButton("secondary", "Done");
     host.key({ key: "Escape" });
     await sleep(1000);
     return outcome;
   };
-  record.bitwarden_json = await passwordFile("Bitwarden JSON", bitwardenJson, "bitwarden-json");
+  record.bitwarden_json = await passwordFile("Bitwarden JSON", bitwardenJson, "bitwarden-json", 2);
   record.checks.bitwarden_json_imported = vaultOrigins().includes("https://bw.ferryx.test");
-  record.bitwarden_csv = await passwordFile("Bitwarden CSV", bitwardenCsv, "bitwarden-csv");
+  record.bitwarden_csv = await passwordFile("Bitwarden CSV", bitwardenCsv, "bitwarden-csv", 3);
   record.checks.bitwarden_csv_imported = vaultOrigins().includes("https://bwcsv.ferryx.test");
 });
 

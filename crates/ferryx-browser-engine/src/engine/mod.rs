@@ -88,7 +88,9 @@ pub fn run(main_args: &MainArgs, cmd_line: &CommandLine, sandbox_info: *mut u8) 
     #[cfg(target_os = "macos")]
     let _delegate = mac_app::setup_delegate();
     run_message_loop();
+    eprintln!("ferryx-engine: message loop ended");
     shutdown();
+    eprintln!("ferryx-engine: shut down");
 }
 
 /// Which pane a browser window belongs to.
@@ -579,9 +581,13 @@ fn quit() {
         .chain(POPUPS.with_borrow_mut(|popups| popups.drain().map(|(_, pane)| pane.view).collect::<Vec<_>>()))
         .chain(extensions::take_view())
         .collect();
+    eprintln!("ferryx-engine: quit: {} live browsers, closing {} views", LIVE_BROWSERS.get(), views.len());
     for view in views {
-        if let Some(host) = view.browser().and_then(|browser| browser.host()) {
-            host.close_browser(1);
+        match view.browser().and_then(|browser| browser.host()) {
+            Some(host) => {
+                host.close_browser(1);
+            }
+            None => eprintln!("ferryx-engine: quit: a view has no browser to close"),
         }
     }
     if LIVE_BROWSERS.get() == 0 {
@@ -597,6 +603,7 @@ fn read_commands() {
             post_task(ThreadId::UI, Some(&mut task));
         }
     }
+    eprintln!("ferryx-engine: stdin closed; quitting");
     let mut task = Quit::new();
     post_task(ThreadId::UI, Some(&mut task));
 }
@@ -980,6 +987,9 @@ wrap_life_span_handler! {
 
         fn on_before_close(&self, browser: Option<&mut Browser>) {
             LIVE_BROWSERS.set(LIVE_BROWSERS.get().saturating_sub(1));
+            if QUITTING.get() {
+                eprintln!("ferryx-engine: quit: browser closed, {} left", LIVE_BROWSERS.get());
+            }
             if let Some(browser) = browser {
                 vault::detach(browser);
                 STRAYS.with_borrow_mut(|strays| strays.retain(|candidate| candidate.is_same(Some(browser)) == 0));
