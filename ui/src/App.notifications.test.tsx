@@ -19,7 +19,7 @@ if (typeof window === "undefined") {
   globalThis.removeEventListener = dom.window.removeEventListener.bind(dom.window);
 }
 
-const { act, cleanup, fireEvent, render, renderHook } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, renderHook, waitFor } = await import("@testing-library/react");
 const { afterEach, beforeEach, describe, expect, it, vi } = await import("vitest");
 await import("./test/setup");
 
@@ -237,6 +237,7 @@ const markTabUnread = vi.fn();
 const markWorktreeUnread = vi.fn();
 const markSessionActivitySeen = vi.fn();
 const dispatchWorkspaceAction = vi.fn();
+const adoptBackendSession = vi.fn();
 // The real store memoizes this callback. Recreating it per render would restart
 // restoration whenever the subscribed restore status changes.
 const restoreWorkspace = vi.fn();
@@ -454,6 +455,8 @@ describe("App notification coordinator wiring", () => {
     markWorktreeUnread.mockReset();
     markSessionActivitySeen.mockReset();
     dispatchWorkspaceAction.mockReset();
+    adoptBackendSession.mockReset();
+    adoptBackendSession.mockResolvedValue("tab-adopted");
     restoreWorkspace.mockReset();
     native.onNotificationActivated.mockClear();
     native.takeNotificationActivations.mockClear();
@@ -515,6 +518,7 @@ describe("App notification coordinator wiring", () => {
         };
       },
       dispatchWorkspaceAction,
+      adoptBackendSession,
     } as any));
   });
 
@@ -890,6 +894,33 @@ describe("App notification coordinator wiring", () => {
         expect(paneFlashSessions()).toEqual([]);
       },
     );
+
+    // A session an agent or the supervisor started on this computer has no pane yet: its row
+    // attaches it as the active tab by backend id (nothing is spawned), instead of a dead end.
+    it("attaches a local daemon session that no pane shows as the active tab", async () => {
+      native.listTerminalSessions.mockResolvedValue([{ sessionId: "backend-new", worktreePath: null, running: true }]);
+      const info = vi.spyOn(toast, "info");
+      await act(async () => { render(<App />); });
+      await act(async () => { sidebarProps.onFocusSupervisorSession!("local:backend-new"); });
+      await waitFor(() => expect(adoptBackendSession).toHaveBeenCalledTimes(1));
+      expect(adoptBackendSession).toHaveBeenCalledWith(
+        expect.objectContaining({ path: expect.any(String) }),
+        expect.objectContaining({ sessionId: "backend-new" }),
+        undefined,
+        { activate: true },
+      );
+      expect(info).not.toHaveBeenCalledWith("That session is not open on this computer");
+      info.mockRestore();
+    });
+
+    it("keeps the dead end for another computer's session that no pane shows", async () => {
+      const info = vi.spyOn(toast, "info");
+      await act(async () => { render(<App />); });
+      await act(async () => { sidebarProps.onFocusSupervisorSession!("mac:backend-elsewhere"); });
+      expect(info).toHaveBeenCalledWith("That session is not open on this computer");
+      expect(adoptBackendSession).not.toHaveBeenCalled();
+      info.mockRestore();
+    });
 
     it("focuses a cross-project row after the target workspace mounts", async () => {
       seedTwoProjects();

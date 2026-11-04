@@ -174,7 +174,7 @@ import { groupProjects } from "./lib/projectGrouping";
 import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
 import { isStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON, setSessionRebindHandler } from "./lib/sessionLifecycle";
 import { flashPane } from "./lib/paneFlash";
-import { findSessionByBackendId } from "./components/supervisorPanel/findSession";
+import { findSessionByBackendId, localBackendSessionId } from "./components/supervisorPanel/findSession";
 import { getAgentReconnectAffordance } from "./lib/agentResumeAffordance";
 import { persistActiveProjectId, persistProjects, persistSidebarOpen } from "./lib/appShellPersistence";
 import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
@@ -2667,13 +2667,23 @@ function WorkspaceApp({
   );
 
   // A Supervisor panel row names a session by `<hostId>:<backendSessionId>`; focus the pane that
-  // runs it through the same path a notification uses (no unmount, no new surface).
+  // runs it through the same path a notification uses (no unmount, no new surface). A session of
+  // this computer that no pane shows yet (an agent or the supervisor started it) is attached as an
+  // active tab through the window-adoption queue: nothing is spawned or closed.
   const handleFocusSupervisorSession = useCallback((sessionRef: string) => {
     const target = findSessionByBackendId(sessionRef, [
       [activeProjectRef.current.workspaceId, stateRef.current],
       ...listWorkspaceSnapshots(),
     ]);
     if (!target) {
+      const backendSessionId = localBackendSessionId(sessionRef);
+      if (backendSessionId) {
+        setPendingAdoptions((queue) => [
+          ...queue,
+          { backendSessionIds: [backendSessionId], activate: true, attemptGenerations: {}, attempts: 0 },
+        ]);
+        return;
+      }
       toast.info("That session is not open on this computer");
       return;
     }
