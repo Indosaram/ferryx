@@ -12,6 +12,7 @@ import {
 } from "./tauri";
 
 export type TerminalSettings = {
+  osc52Write?: boolean;
   fontFamily: string | null;
   macosOptionAsAlt: boolean | null;
   fontSize: number | null;
@@ -41,6 +42,7 @@ export type ResolvedTerminalSettings = EffectiveTerminalSettings;
 export { TERMINAL_SETTINGS_STORAGE_KEY };
 export const TERMINAL_BACKGROUND_STORAGE_KEY = "ferryx.terminal.background";
 export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
+  osc52Write: false,
   fontFamily: null,
   macosOptionAsAlt: null,
   fontSize: null,
@@ -199,6 +201,7 @@ async function syncNativeOverrides(settings: TerminalSettings): Promise<void> {
     // The default is "unset": let the native side keep Ghostty's own scrollback-limit.
     scrollback: settings.scrollback === DEFAULT_TERMINAL_SETTINGS.scrollback ? null : settings.scrollback,
     scrollbackCompression: settings.scrollbackCompression,
+    osc52Write: settings.osc52Write === true,
   };
   const serialized = JSON.stringify(payload);
   if (pushedOverrides === serialized) return;
@@ -296,6 +299,7 @@ export function useTerminalSettings(remote?: RemotePreferenceTarget) {
 
 function normalizeTerminalSettings(settings: Partial<TerminalSettings>): TerminalSettings {
   return {
+    osc52Write: settings.osc52Write === true,
     fontFamily: normalizeOptionalFontFamily(settings.fontFamily),
     macosOptionAsAlt: typeof settings.macosOptionAsAlt === "boolean" ? settings.macosOptionAsAlt : null,
     fontSize: typeof settings.fontSize === "number" && Number.isFinite(settings.fontSize)
