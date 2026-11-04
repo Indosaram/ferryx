@@ -7758,10 +7758,15 @@ impl DaemonServer {
                     Err(error) => daemon_error(error),
                 },
                 Ok(DaemonRequest::PluginSetEnabled { name, enabled }) => {
+                    let changed_name = name.clone();
                     match self.plugins.approve(name, enabled).await {
                         Ok(()) => match self.start_plugins().await {
                             Ok(()) => match self.plugins.list().await {
-                                Ok(plugins) => DaemonResponse::PluginsOk { plugins },
+                                Ok(plugins) => {
+                                    let _ = self.remote_event_tx.send(DaemonRemoteEvent { event: "PluginViewChanged".into(),
+                                        payload: serde_json::json!({"plugin":changed_name}) });
+                                    DaemonResponse::PluginsOk { plugins }
+                                },
                                 Err(error) => daemon_error(error),
                             },
                             Err(error) => daemon_error(error),
