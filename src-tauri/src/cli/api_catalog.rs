@@ -24,8 +24,8 @@ pub const CLI_GROUPS: &[&str] = &[
     "pair",
     "direct-trust",
     "remote",
-    "grants",
     "panes",
+    "grants",
     "integrations",
     "api",
 ];
