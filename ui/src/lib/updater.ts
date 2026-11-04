@@ -6,6 +6,24 @@ import { UPDATE_CHANNEL_STORAGE_KEY } from "./storageKeys";
 
 export type UpdateFailure = "cancelled" | "stalled";
 
+/**
+ * Why the signed update manifest refused an update (`UPDATE_*` codes in ipc/updater.rs). None of
+ * them downloads anything.
+ */
+export type UpdateRefusal = "UPDATE_HALTED" | "UPDATE_BELOW_FLOOR" | "UPDATE_MANIFEST_UNVERIFIED";
+
+const UPDATE_REFUSAL_TEXT: Record<UpdateRefusal, string> = {
+  UPDATE_HALTED: "Updates are paused by the release operator",
+  UPDATE_BELOW_FLOOR: "The offered version is below the minimum supported version",
+  UPDATE_MANIFEST_UNVERIFIED: "The update manifest signature could not be verified",
+};
+
+function refusalOf(error: unknown): UpdateRefusal | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const { code } = error as { code?: unknown };
+  return typeof code === "string" && code in UPDATE_REFUSAL_TEXT ? (code as UpdateRefusal) : undefined;
+}
+
 /** Release channel the in-app updater follows. Stable is the default. */
 export type UpdateChannel = "stable" | "beta";
 
@@ -62,6 +80,8 @@ export type UpdateStatus = {
   releaseNotes?: string;
   downloadProgress?: number;
   error?: string;
+  /** Structured reason code when the signed manifest refused the update. */
+  refusal?: UpdateRefusal;
   /** Why the last download of this offer ended without installing; the offer stays retryable. */
   lastFailure?: UpdateFailure;
   /** A cancel was requested; the download ends when the backend acknowledges it. */
@@ -102,6 +122,15 @@ function setStatus(next: UpdateStatus): void {
 }
 
 function describe(error: unknown): string {
+  const refusal = refusalOf(error);
+  if (refusal) {
+    // A halt carries the operator's reason in `details.haltReason`.
+    const { details } = error as { details?: { haltReason?: unknown } | null };
+    const reason = refusal === "UPDATE_HALTED" ? details?.haltReason : undefined;
+    return typeof reason === "string" && reason !== ""
+      ? `${UPDATE_REFUSAL_TEXT[refusal]} (${refusal}): ${reason}`
+      : `${UPDATE_REFUSAL_TEXT[refusal]} (${refusal})`;
+  }
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
   // Backend IPC failures arrive as structured `{ code, message, details }` objects.
@@ -181,7 +210,8 @@ export async function checkForUpdate(): Promise<void> {
     });
   } catch (error) {
     pendingUpdate = null;
-    setStatus({ state: "error", error: describe(error) });
+    const refusal = refusalOf(error);
+    setStatus({ state: "error", error: describe(error), ...(refusal ? { refusal } : {}) });
   }
 }
 
@@ -297,7 +327,8 @@ export async function downloadAndInstallUpdate(): Promise<void> {
     download.settled = true;
     stopCancelRetry(download);
     activeDownload = null;
-    setStatus({ state: "error", version, releaseNotes, error: describe(error) });
+    const refusal = refusalOf(error);
+    setStatus({ state: "error", version, releaseNotes, error: describe(error), ...(refusal ? { refusal } : {}) });
     return;
   }
 

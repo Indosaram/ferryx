@@ -26,9 +26,11 @@ import { writeHomebrewPackages } from "./release-packaging.mjs";
 import {
   attachReleaseProvenance,
   generateSboms,
+  MANIFEST_NAME,
   PROVENANCE_ASSET_NAMES,
   PROVENANCE_NAME,
   verifyChecksums,
+  verifyManifest,
 } from "./release-provenance.mjs";
 import { assertReleaseTag } from "./release-tag-policy.mjs";
 import { parseReleaseTag, toAppVersion, toMsixVersion } from "./sync-version.mjs";
@@ -500,6 +502,7 @@ export async function buildRelease({
 export function assembleReleaseRun({
   runDir,
   pubkey = null,
+  updatePolicy = null,
   env = process.env,
   minisignBin,
   sbomGenerator = generateSboms,
@@ -520,7 +523,7 @@ export function assembleReleaseRun({
   const artifactsDir = join(resolvedRunDir, "artifacts");
   const outDir = join(resolvedRunDir, "publish");
 
-  const result = assembleRelease({ planPath, receiptsDir, artifactsDir, outDir, publicKey: pubkey });
+  const result = assembleRelease({ planPath, receiptsDir, artifactsDir, outDir, publicKey: pubkey, updatePolicy });
   try {
     writeHomebrewPackages({ sumsPath: join(outDir, "SHA256SUMS.txt"), outDir, tag: plan.tag, repo: plan.repo });
     attachReleaseProvenance({
@@ -547,6 +550,8 @@ export function assembleReleaseRun({
     receiptsDigest: directoryDigest(receiptsDir),
     artifactsDigest: directoryDigest(artifactsDir),
     publishDigest: directoryDigest(outDir),
+    // Recorded so `verify` re-derives the same latest.json.
+    ...(updatePolicy ? { updatePolicy } : {}),
   }, null, 2) + "\n", { flag: "wx" });
   return result;
 }
@@ -599,6 +604,9 @@ export async function verifyReleaseRun({ runDir, pubkey = null }) {
 
   // Signed SHA256SUMS must verify against the updater key and cover every published file.
   verifyChecksums({ dir: publishDir, publicKey: pubkey || state.updaterPublicKey });
+  // The client refuses a manifest whose own signature does not verify.
+  verifyManifest({ manifestPath: join(publishDir, MANIFEST_NAME), publicKey: pubkey || state.updaterPublicKey });
+  const { updatePolicy = null } = JSON.parse(readFileSync(join(resolvedRunDir, "assembly-state.json"), "utf8"));
   const provenance = JSON.parse(readFileSync(join(publishDir, PROVENANCE_NAME), "utf8"));
   if (provenance.commitSha !== plan.commitSha || provenance.tag !== plan.tag) {
     throw new Error(`${PROVENANCE_NAME} does not match the release plan commit/tag`);
@@ -614,6 +622,7 @@ export async function verifyReleaseRun({ runDir, pubkey = null }) {
       artifactsDir: join(resolvedRunDir, "artifacts"),
       outDir: tempPublish,
       publicKey: pubkey,
+      updatePolicy,
     });
     writeHomebrewPackages({
       sumsPath: join(tempPublish, "SHA256SUMS.txt"),
@@ -909,7 +918,7 @@ Subcommands:
   prepare --config <json> --tag <date> --commit <sha-or-ref> --out <new-run-dir> [--nsis-migration]
   preflight --config <json> [--plan <path>]
   build --config <json> --run <dir> --host macbook|omaki|maho-win [--approve-notarization]
-  assemble --run <dir> [--pubkey <fixture-key>]
+  assemble --run <dir> [--pubkey <fixture-key>] [--minimum-version <semver>] [--halt [--halt-reason <text>]]
   verify --run <dir> [--pubkey <fixture-key>]
   survival-gate --run <dir> [--survival-waiver "<reason>"]
   publish --run <dir> --approve-publish [--survival-waiver "<reason>"]
@@ -960,7 +969,12 @@ Subcommands:
       case "assemble": {
         const runDir = options.get("run");
         const pubkey = options.get("pubkey") || null;
-        const result = assembleReleaseRun({ runDir, pubkey });
+        const updatePolicy = {
+          minimumVersion: options.get("minimum-version") || null,
+          halt: flags.has("halt"),
+          haltReason: options.get("halt-reason") || null,
+        };
+        const result = assembleReleaseRun({ runDir, pubkey, updatePolicy });
         console.log(`Release assembled successfully with ${result.files.length} files`);
         if (result.storeSubmission) console.log(result.storeSubmission);
         break;

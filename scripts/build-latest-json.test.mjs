@@ -16,8 +16,9 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { assembleRelease } from "./build-latest-json.mjs";
+import { assembleRelease, normalizeUpdatePolicy } from "./build-latest-json.mjs";
 import { verifyMinisign } from "./lib/minisign-verify.mjs";
+import { verifyManifest } from "./release-provenance.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "build-latest-json.mjs");
@@ -796,4 +797,98 @@ test("archive layout is checked against staged bytes rather than a mutable sourc
   } finally {
     fixture.cleanup();
   }
+});
+
+test("latest.json omits the update policy fields unless they are requested", () => {
+  const fixture = createSyntheticReleaseFixture();
+  const outDir = join(fixture.rootDir, "policy-default-out");
+  try {
+    const res = assembleRelease({
+      planPath: fixture.planPath,
+      receiptsDir: fixture.receiptsDir,
+      artifactsDir: fixture.artifactsDir,
+      outDir,
+      publicKey: fixture.keys.publicKeyWrapped,
+    });
+    for (const field of ["minimumVersion", "halt", "haltReason"]) {
+      assert.equal(field in res.manifest, false, `${field} present without a request`);
+    }
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("halt, haltReason and minimumVersion flags land in latest.json and the signed bytes verify", () => {
+  const fixture = createSyntheticReleaseFixture();
+  const outDir = join(fixture.rootDir, "policy-cli-out");
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        SCRIPT,
+        "--plan", fixture.planPath,
+        "--receipts-dir", fixture.receiptsDir,
+        "--artifacts-dir", fixture.artifactsDir,
+        "--out-dir", outDir,
+        "--pubkey", fixture.keys.publicKeyWrapped,
+        "--minimum-version", "2026.900.0",
+        "--halt",
+        "--halt-reason", "bad build",
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, `stderr: ${result.stderr}`);
+    const manifestPath = join(outDir, "latest.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    assert.equal(manifest.minimumVersion, "2026.900.0");
+    assert.equal(manifest.halt, true);
+    assert.equal(manifest.haltReason, "bad build");
+
+    // The whole manifest is what gets signed (latest.json.minisig): its own bytes verify and a
+    // single flipped byte does not.
+    const bytes = readFileSync(manifestPath);
+    writeFileSync(`${manifestPath}.minisig`, fixture.keys.signPayload(bytes));
+    verifyManifest({ manifestPath, publicKey: fixture.keys.publicKeyWrapped });
+    bytes[bytes.indexOf("true")] = "f".charCodeAt(0);
+    writeFileSync(manifestPath, bytes);
+    assert.throws(
+      () => verifyManifest({ manifestPath, publicKey: fixture.keys.publicKeyWrapped }),
+      /latest\.json\.minisig verification failed/,
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("invalid update policy values fail closed before any output exists", () => {
+  const cases = [
+    [{ minimumVersion: "not-a-version" }, /minimumVersion must be a semver version/],
+    [{ minimumVersion: 2 }, /minimumVersion must be a semver version/],
+    [{ halt: "yes" }, /halt must be a boolean/],
+    [{ haltReason: "why" }, /haltReason requires halt/],
+    [{ halt: true, haltReason: " " }, /haltReason must be a non-empty string/],
+  ];
+  for (const [policy, pattern] of cases) {
+    assert.throws(() => normalizeUpdatePolicy(policy), pattern);
+    const fixture = createSyntheticReleaseFixture();
+    const outDir = join(fixture.rootDir, "policy-invalid-out");
+    try {
+      assert.throws(
+        () =>
+          assembleRelease({
+            planPath: fixture.planPath,
+            receiptsDir: fixture.receiptsDir,
+            artifactsDir: fixture.artifactsDir,
+            outDir,
+            publicKey: fixture.keys.publicKeyWrapped,
+            updatePolicy: policy,
+          }),
+        pattern,
+      );
+      assert.equal(existsSync(outDir), false);
+    } finally {
+      fixture.cleanup();
+    }
+  }
+  assert.deepEqual(normalizeUpdatePolicy({ minimumVersion: "v1.2.3", halt: false }), { minimumVersion: "v1.2.3" });
 });
