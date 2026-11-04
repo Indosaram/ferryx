@@ -2,4 +2,4 @@ name = "clock"
 version = "0.1.0"
 # Replace these with the absolute bun and clock.ts paths on the owner's machine.
 command = ["/absolute/path/to/bun", "run", "/absolute/path/to/clock.ts"]
-capabilities = ["getCapabilities"]
+capabilities = ["getCapabilities", "render"]
