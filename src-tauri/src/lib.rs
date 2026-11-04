@@ -1562,6 +1562,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                     {
                         registry.note_focused(window.label());
                     }
+                    #[cfg(target_os = "windows")]
+                    crate::ipc::browser::forward_frame_focus(window);
                 }
                 tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
                     crate::ipc::window::note_window_geometry_changed(window);
