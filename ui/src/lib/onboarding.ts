@@ -48,6 +48,7 @@ export type OnboardingState = {
   version: 1;
   completedSteps: OnboardingStepId[];
   dismissed: boolean;
+  updatedAt?: number;
 };
 
 export type PermissionKey = "fullDiskAccess" | "accessibility" | "notifications";
@@ -124,6 +125,8 @@ export function loadOnboardingState(
           version: 1,
           completedSteps: filteredSteps,
           dismissed: Boolean(parsed.dismissed),
+          ...(Number.isSafeInteger(parsed.updatedAt) && parsed.updatedAt >= 0
+            ? { updatedAt: parsed.updatedAt } : {}),
         };
       } else {
         isAbsent = true;
@@ -164,11 +167,15 @@ export function saveOnboardingState(
 ): void {
   if (!storage) return;
   try {
-    storage.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(state));
+    const saved = { ...state, updatedAt: state.updatedAt ?? Math.floor(Date.now() / 1000) };
+    storage.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(saved));
+    if (storage === browserStorage()) {
+      window.dispatchEvent(new Event("ferryx:onboarding-changed"));
+    }
     if (storage === browserStorage() && typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
       persistence = persistence.then(async () => {
         const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("cmd_onboarding_set", { state });
+        await invoke("cmd_onboarding_set", { state: daemonState(state) });
       }).catch((error) => {
         console.error("Could not persist onboarding", error);
         window.dispatchEvent(new CustomEvent("ferryx:onboarding-persistence-error", { detail: error }));
@@ -181,13 +188,18 @@ export function saveOnboardingState(
 
 let persistence: Promise<void> = Promise.resolve();
 
+function daemonState(state: OnboardingState): OnboardingState {
+  return { version: 1, completedSteps: state.completedSteps, dismissed: state.dismissed };
+}
+
 /** Hydrate before opening; localStorage is only a cache on desktop. */
 export async function hydrateOnboardingState(): Promise<OnboardingState> {
   const cache = loadOnboardingState();
   if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return cache;
   await persistence;
   const { invoke } = await import("@tauri-apps/api/core");
-  const state = await invoke<OnboardingState>("cmd_onboarding_get", { cache });
+  const state = await invoke<OnboardingState>("cmd_onboarding_get", { cache: daemonState(cache) });
+  if (cache.updatedAt !== undefined) state.updatedAt = cache.updatedAt;
   browserStorage()?.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(state));
   return state;
 }
@@ -205,6 +217,7 @@ export function markOnboardingStepsCompleted(
   const next: OnboardingState = {
     ...current,
     completedSteps,
+    updatedAt: Math.floor(Date.now() / 1000),
   };
   saveOnboardingState(next, storage);
   return next;
@@ -217,6 +230,7 @@ export function dismissOnboarding(
   const next: OnboardingState = {
     ...current,
     dismissed: true,
+    updatedAt: Math.floor(Date.now() / 1000),
   };
   saveOnboardingState(next, storage);
   return next;
