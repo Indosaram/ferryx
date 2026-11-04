@@ -14,6 +14,7 @@ import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BrowserTab, TerminalSession, TerminalTab, Worktree } from "../lib/types";
+import { hydrateLayout, layoutSync, type DaemonLayout } from "../lib/layoutSync";
 import { useWorkspaceRuntime, type WorkspaceRuntimeServices } from "./workspaceRuntime";
 import {
   clearHmrWorkspaceState,
@@ -196,6 +197,44 @@ function buildTestWorkspaceState(workspaceId = "ws-1"): WorkspaceState {
 }
 
 describe("HMR session retention boundary", () => {
+  it("rehydrates daemon revisions while retaining sessions and browser surface handles", async () => {
+    const state = buildTestWorkspaceState("daemon-hmr");
+    state.workspaceId = "daemon-hmr";
+    const saved: DaemonLayout = {
+      revision: 41, activeTabId: "tab-browser-main", focusedGroupId: "main",
+      tabGroupLayout: { type: "group", groupId: "main", tabIds: ["tab-term-main", "tab-browser-main"], activeTabId: "tab-browser-main" },
+      tabs: [
+        { tabId: "tab-term-main", label: "terminal", pinned: false, activeNodeId: 1, expandedNodeId: null,
+          paneTree: { type: "leaf", nodeId: 1, content: { kind: "terminal", backendSessionId: "backend-main-1" } } },
+        { tabId: "tab-browser-main", label: "browser", pinned: false, activeNodeId: 2, expandedNodeId: null,
+          paneTree: { type: "leaf", nodeId: 2, content: { kind: "browser", url: "http://localhost:5173" } } },
+      ],
+    };
+    // Populate the same surface-bearing content a mounted browser has registered.
+    state.layout.layoutsByTabId["tab-browser-main"] = {
+      root: { type: "leaf", leafId: "browser-surface" }, activeLeafId: "browser-surface", expandedLeafId: null,
+      sessionIdsByLeafId: { "browser-surface": "" },
+      contentsByLeafId: { "browser-surface": { kind: "browser", browser: { browserId: "browser-dev-1", url: "http://localhost:5173" } } },
+    };
+    const refresh = vi.spyOn(layoutSync, "refresh").mockImplementation(async () => true);
+    const current = vi.spyOn(layoutSync, "current").mockReturnValue({ revision: 41, layout: saved });
+    const enabled = vi.spyOn(layoutSync, "enabled", "get").mockReturnValue(true);
+    try {
+      state.layout = hydrateLayout(layoutSync.current()!, state);
+      setHmrWorkspaceState("daemon-hmr", state);
+      const recovered = getHmrWorkspaceState("daemon-hmr")!;
+      expect(recovered.sessions).toBe(state.sessions);
+      expect(recovered.layout.layoutsByTabId["tab-term-main"].activeLeafId).toBe("leaf-1");
+      const browser = recovered.layout.layoutsByTabId["tab-browser-main"];
+      expect(browser.activeLeafId).toBe("browser-surface");
+      expect(browser.contentsByLeafId?.["browser-surface"]).toMatchObject({ browser: { browserId: "browser-dev-1" } });
+      expect(recovered.layout.tabs.map((tab) => tab.id)).toEqual(saved.tabs.map((tab) => tab.tabId));
+    } finally {
+      enabled.mockRestore(); current.mockRestore(); refresh.mockRestore();
+      clearHmrWorkspaceState("daemon-hmr");
+    }
+  });
+
   beforeEach(() => {
     clearHmrWorkspaceState?.();
   });
