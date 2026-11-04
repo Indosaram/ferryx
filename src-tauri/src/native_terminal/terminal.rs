@@ -261,7 +261,7 @@ impl NativeTerminal {
     }
 
     pub(crate) fn osc_cwd(&self) -> Option<String> {
-        super::osc_effects::cwd(self.handle)
+        self.context.osc_effects.lock().cwd.clone().or_else(|| super::osc_effects::cwd(self.handle))
     }
 
     /// Drops every program status event while `muted` (for seed and gap replay). The support
