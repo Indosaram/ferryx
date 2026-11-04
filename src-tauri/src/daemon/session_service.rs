@@ -3330,6 +3330,7 @@ impl DaemonSessionService {
                 daemon_epoch: None,
                 session: DaemonSessionDetails {
                     session_id: session_id.into(),
+                    size_owner: Some(self.size_owner(session_id)),
                     workspace_id: Some(d.config.project_id),
                     worktree: meta.as_ref().and_then(|m| m.worktree.clone()),
                     cwd: Some(
@@ -3391,6 +3392,7 @@ impl DaemonSessionService {
                     daemon_epoch: None,
                     session: DaemonSessionDetails {
                         session_id: session_id.into(),
+                        size_owner: Some(self.size_owner(session_id)),
                         workspace_id: None,
                         worktree: None,
                         cwd: None,
@@ -3481,6 +3483,7 @@ impl DaemonSessionService {
             daemon_epoch: None,
             session: DaemonSessionDetails {
                 session_id: session_id.to_string(),
+                size_owner: Some(self.size_owner(session_id)),
                 workspace_id,
                 worktree,
                 cwd,
