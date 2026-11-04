@@ -594,8 +594,8 @@ mod platform {
     #[cfg(target_os = "linux")]
     fn process_command(pid: u32) -> Option<String> {
         let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-        let argv0 = bytes.split(|byte| *byte == 0).next()?;
-        basename(std::str::from_utf8(argv0).ok()?)
+        let argv = crate::terminal::manual_ssh::parse_cmdline(&bytes)?;
+        argv_command(&argv)
     }
 
     #[cfg(target_os = "macos")]
@@ -609,7 +609,7 @@ mod platform {
         if result != 0 { return None; }
         bytes.truncate(len);
         let (_, argv) = crate::terminal::manual_ssh::parse_procargs2(&bytes)?;
-        basename(argv.first()?)
+        argv_command(&argv)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
