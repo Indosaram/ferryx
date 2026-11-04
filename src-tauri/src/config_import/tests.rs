@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn ghostty_maps_font_theme_cursor() {
+pub(super) fn ghostty_maps_font_theme_cursor() {
     let p = parse("ghostty", br##"
 font-family = JetBrains Mono
 font-size = 15
