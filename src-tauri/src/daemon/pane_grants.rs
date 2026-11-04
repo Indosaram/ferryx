@@ -156,6 +156,9 @@ pub fn gate_for(request: &DaemonRequest) -> Option<Gate> {
             PaneGrantAction::Add { .. } | PaneGrantAction::Remove { .. } => Some(Gate::OwnerOnly),
         },
         DaemonRequest::SetAgentIntegration { .. }
+        | DaemonRequest::PluginSetEnabled { .. }
+        | DaemonRequest::PluginAttach { .. }
+        | DaemonRequest::PluginRender { .. }
         | DaemonRequest::Panes { request: crate::daemon::layout::PaneAction::Detach { .. } | crate::daemon::layout::PaneAction::Attach { .. } | crate::daemon::layout::PaneAction::Zoom { .. } | crate::daemon::layout::PaneAction::Swap { .. } }
         | DaemonRequest::LayoutApply { .. }
         | DaemonRequest::PairedTerminalDetach { .. }
