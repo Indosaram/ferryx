@@ -296,7 +296,7 @@ export function rehydrateWorkspace(state: WorkspaceState, view = layoutSync.curr
     if (node.content.kind === "disconnectedTerminal") {
       const id = foreignSessionId(node.content.machineId, node.content.backendSessionId);
       sessions[id] = { id, backendSessionId: null, workspaceId: state.workspaceId ?? "", cwd: "", worktree: null,
-        lifecycle: "failed", processState: "exited", remoteConnectionState: "disconnected",
+        lifecycle: "failed", processState: "standby", remoteConnectionState: "disconnected",
         backendUnavailableReason: "remote_session_gone" };
       return;
     }
