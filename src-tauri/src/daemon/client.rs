@@ -810,6 +810,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::SupervisorGlobalPause { .. } => "supervisorGlobalPause",
         DaemonRequest::SupervisorSettings { .. } => "supervisorSettings",
         DaemonRequest::SupervisorActionUndo { .. } => "supervisorActionUndo",
+        DaemonRequest::SupervisorHubStart => "supervisorHubStart",
         DaemonRequest::GetAgentIntegration => "getAgentIntegration",
         DaemonRequest::SetAgentIntegration { .. } => "setAgentIntegration",
         DaemonRequest::SupervisorDispatch { .. } => "supervisorDispatch",

@@ -7979,4 +7979,48 @@ mod tests {
         follower.abort();
         set_lease_gate(None);
     }
+
+    /// The desktop's Turn on where there is no control socket (Windows): `SupervisorHubStart`
+    /// over the daemon wire starts the stopped hub in process, from a connection whose peer is
+    /// not identified (a pane could send it too), because a start widens nothing. A second
+    /// start reports it already ran.
+    #[tokio::test]
+    async fn the_daemon_wire_hub_start_starts_the_stopped_hub_from_an_unidentified_peer() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        set_lease_gate(None);
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::control::mark_stopped(&pool).await.unwrap();
+        let effects = CountingEffects::new();
+        let (launch, _) = test_launch(pool.clone(), HubConfig::default(), &effects);
+        let running = Arc::new(tokio::sync::Mutex::new(None));
+        publish_hub(&launch, &running);
+        let server = Arc::clone(&launch.server);
+        let exchange = || async {
+            let (client, server_side) = tokio::io::duplex(64 * 1024);
+            let serving = tokio::spawn(Arc::clone(&server).handle_client(server_side));
+            let mut frame = json!({"type": "supervisorHubStart"});
+            if let Some(token) = server.transport_token() {
+                frame["token"] = json!(token);
+            }
+            let (read_half, mut write_half) = tokio::io::split(client);
+            write_half.write_all(format!("{frame}\n").as_bytes()).await.unwrap();
+            let mut line = String::new();
+            tokio::io::BufReader::new(read_half).read_line(&mut line).await.unwrap();
+            serving.abort();
+            serde_json::from_str::<DaemonResponse>(line.trim()).unwrap()
+        };
+
+        match exchange().await {
+            DaemonResponse::SupervisorControlOk { result } => assert_eq!(result, json!({"started": true})),
+            other => panic!("the first start answered {other:?}"),
+        }
+        assert_eq!(effects.counts().2, 1, "one generation runs");
+        assert!(running.lock().await.is_some());
+        assert!(!ferryx_hub::control::is_stopped(&pool).await.unwrap(), "the owner's stop is cleared");
+        match exchange().await {
+            DaemonResponse::SupervisorControlOk { result } => assert_eq!(result, json!({"started": false})),
+            other => panic!("the second start answered {other:?}"),
+        }
+        assert_eq!(effects.counts().2, 1, "an already running hub is not started again");
+    }
 }

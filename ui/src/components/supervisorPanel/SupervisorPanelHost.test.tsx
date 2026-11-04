@@ -136,6 +136,26 @@ describe("SupervisorPanelHost", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("no desktop command");
   });
 
+  it("keeps a Turn on notice above the panel once the hub runs", async () => {
+    const load = vi.fn<() => Promise<PanelSnapshot>>()
+      .mockResolvedValueOnce(emptyPanelSnapshot())
+      .mockResolvedValue(panelSnapshotFixture);
+    renderHost(emptyPanelSnapshot(), {}, {
+      load,
+      actionsFor: ({ onChanged }) =>
+        actionsMock({
+          turnOn: vi.fn(async () => {
+            onChanged();
+            return { ok: true, notice: "Turn on Agent control in Settings." } as const;
+          }),
+        }),
+    });
+    const turnOn = await screen.findByRole("button", { name: "Turn on" });
+    await act(async () => fireEvent.click(turnOn));
+    expect(await screen.findByTestId("supervisor-panel-surface")).toBeInTheDocument();
+    expect(screen.getByTestId("supervisor-panel-error")).toHaveTextContent("Turn on Agent control in Settings.");
+  });
+
   it("applies panel events after the first load", async () => {
     const { handlers } = renderHost(panelSnapshotFixture);
     await screen.findAllByTestId("decision-card");

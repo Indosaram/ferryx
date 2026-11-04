@@ -8038,6 +8038,29 @@ impl DaemonServer {
                         },
                     }
                 }
+                Ok(DaemonRequest::SupervisorHubStart) => {
+                    use crate::hub_runtime::HubStartError;
+                    match crate::hub_runtime::start_supervisor(self.remote_state(), "desktop").await {
+                        Ok(started) => DaemonResponse::SupervisorControlOk {
+                            result: serde_json::json!({ "started": started }),
+                        },
+                        Err(error) => {
+                            let (code, details) = match &error {
+                                HubStartError::Unavailable => ("SUPERVISOR_UNAVAILABLE", None),
+                                HubStartError::HandedOver => ("INVALID_STATE", None),
+                                HubStartError::Storage(_) => ("INTERNAL_ERROR", None),
+                                HubStartError::Standby { holder_machine_id, holder_label } => (
+                                    "SUPERVISOR_STANDBY",
+                                    Some(serde_json::json!({
+                                        "holderMachineId": holder_machine_id,
+                                        "holderLabel": holder_label,
+                                    })),
+                                ),
+                            };
+                            DaemonResponse::Error { message: error.to_string(), code: Some(code.into()), details }
+                        }
+                    }
+                }
                 Ok(DaemonRequest::SupervisorSetPaused { lane_key, paused }) => {
                     let gate = crate::hub_runtime::PauseGate { peer_refusal: pause_peer_refusal.clone() };
                     match crate::hub_runtime::set_lane_paused_gated(self.remote_state(), &lane_key, paused, "desktop", gate).await {

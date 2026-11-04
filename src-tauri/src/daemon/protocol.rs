@@ -1255,6 +1255,12 @@ pub enum DaemonRequest {
     SupervisorActionUndo {
         id: i64,
     },
+    /// Start the stopped hub in this daemon, as `ferryx hub start` does on the unix control
+    /// socket: the desktop's Turn on where there is no control socket (Windows). It only starts
+    /// what the owner already configured and widens nothing, so it is not owner-gated, like the
+    /// control socket. Answered `SupervisorControlOk {result: {started}}`. An older daemon
+    /// answers an untyped "Malformed request" and the desktop keeps its control-socket path.
+    SupervisorHubStart,
     /// The remote desktop host's settings and live state. Gated by `remoteDesktopV1`.
     RemoteDesktopHostGet,
     /// Turns the remote desktop host on or off and sets its input/clipboard policy.
@@ -2483,6 +2489,12 @@ mod tests {
             "an absent switch is omitted on the wire"
         );
         assert!(!DaemonRequest::SupervisorSnapshot.is_owner_supervisor_control());
+
+        let start: DaemonRequest =
+            serde_json::from_value(serde_json::json!({"type":"supervisorHubStart"})).unwrap();
+        assert!(matches!(start, DaemonRequest::SupervisorHubStart));
+        assert_eq!(serde_json::to_value(&start).unwrap(), serde_json::json!({"type":"supervisorHubStart"}));
+        assert!(!start.is_owner_supervisor_control(), "starting the hub widens nothing, like control.sock");
 
         let ok = DaemonResponse::SupervisorControlOk { result: serde_json::json!({"paused": true}) };
         let text = serde_json::to_string(&ok).unwrap();

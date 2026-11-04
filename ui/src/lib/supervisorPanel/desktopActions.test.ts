@@ -5,7 +5,8 @@ const mocks = vi.hoisted(() => ({ answer: vi.fn(), enable: vi.fn(), start: vi.fn
 vi.mock("../tauri", () => ({
   converseSupervisor: vi.fn(),
   enableAgentControlOwner: mocks.enable,
-  isStructuredIpcError: () => false,
+  isStructuredIpcError: (error: unknown) =>
+    !!error && typeof error === "object" && typeof (error as { code?: unknown }).code === "string",
   setSupervisorPanelPaused: vi.fn(),
   startSupervisor: mocks.start,
   stopSupervisedSession: vi.fn(),
@@ -15,7 +16,7 @@ vi.mock("../tauri", () => ({
 
 vi.mock("../supervisor", () => ({ setSupervisorLanePaused: vi.fn() }));
 
-import { desktopPanelActions } from "./desktopActions";
+import { AGENT_CONTROL_NOT_ENABLED_NOTICE, desktopPanelActions } from "./desktopActions";
 import type { PanelDecisionTarget } from "./actions";
 
 function actions() {
@@ -44,5 +45,32 @@ describe("desktop supervisor panel IPC", () => {
     expect(mocks.enable).toHaveBeenCalledOnce();
     expect(mocks.start).toHaveBeenCalledOnce();
     expect(mocks.enable.mock.invocationCallOrder[0]).toBeLessThan(mocks.start.mock.invocationCallOrder[0]);
+  });
+
+  it("still starts the hub when this computer refuses agent control to a token-only peer", async () => {
+    const forbidden = { code: "FORBIDDEN", message: "this connection proved only the transport token", details: {} };
+    mocks.enable.mockRejectedValue(forbidden);
+    mocks.start.mockResolvedValue(true);
+    const onChanged = vi.fn();
+    const result = await desktopPanelActions({ openSession: vi.fn(), onChanged }).turnOn();
+    expect(result).toEqual({ ok: true, notice: AGENT_CONTROL_NOT_ENABLED_NOTICE });
+    expect(mocks.start).toHaveBeenCalledOnce();
+    expect(onChanged).toHaveBeenCalledOnce();
+  });
+
+  it("stops at any other agent control failure without starting the hub", async () => {
+    mocks.enable.mockRejectedValue({ code: "IO_ERROR", message: "disk full", details: {} });
+    await expect(actions().turnOn()).resolves.toEqual({ ok: false, stale: false, message: "disk full" });
+    expect(mocks.start).not.toHaveBeenCalled();
+  });
+
+  it("reports a refused hub start even after agent control was refused", async () => {
+    mocks.enable.mockRejectedValue({ code: "FORBIDDEN", message: "token only", details: {} });
+    mocks.start.mockRejectedValue({ code: "SUPERVISOR_UNAVAILABLE", message: "the supervisor hub is not open", details: {} });
+    await expect(actions().turnOn()).resolves.toEqual({
+      ok: false,
+      stale: false,
+      message: "the supervisor hub is not open",
+    });
   });
 });

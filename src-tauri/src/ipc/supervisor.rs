@@ -498,12 +498,35 @@ pub async fn cmd_supervisor_action_undo(
     control_result(daemon_client.send_request(DaemonRequest::SupervisorActionUndo { id }).await?)
 }
 
-/// The setup card's "start the supervisor": sends `start` on the local hub control socket, as
-/// `ferryx hub start` does. The daemon is never restarted, so live PTY sessions stay up. Returns
-/// whether this call started the hub (`false` when it already ran). Without a unix control
-/// socket (Windows) it is refused as `UNSUPPORTED`.
+/// The daemon's answer to `SupervisorHubStart`: whether this call started the hub, or `None`
+/// from an older daemon that does not know the request (an untyped error).
+fn hub_start_from(response: DaemonResponse) -> Result<Option<bool>, IpcError> {
+    match response {
+        DaemonResponse::SupervisorControlOk { result } => Ok(Some(result["started"].as_bool().unwrap_or(false))),
+        DaemonResponse::Error { code: None, .. } => Ok(None),
+        DaemonResponse::Error { message, code, details } => {
+            let mut error = failure(message, code);
+            if details.is_some() {
+                error.details = details;
+            }
+            Err(error)
+        }
+        _ => Err(IpcError::internal("Unexpected daemon hub start response")),
+    }
+}
+
+/// The setup card's "start the supervisor", as `ferryx hub start` does; the daemon is never
+/// restarted, so live PTY sessions stay up. Returns whether this call started the hub (`false`
+/// when it already ran). Unix sends `start` on the local hub control socket. Without one
+/// (Windows) the daemon starts it in process (`SupervisorHubStart`); an older daemon that does
+/// not know that request falls back to the control socket, which refuses as `UNSUPPORTED`.
 #[tauri::command]
-pub async fn cmd_supervisor_start() -> Result<bool, IpcError> {
+pub async fn cmd_supervisor_start(daemon_client: tauri::State<'_, Arc<DaemonClient>>) -> Result<bool, IpcError> {
+    if cfg!(not(unix)) {
+        if let Some(started) = hub_start_from(daemon_client.send_request(DaemonRequest::SupervisorHubStart).await?)? {
+            return Ok(started);
+        }
+    }
     super::run_blocking(|| {
         crate::hub_runtime::start_hub_over_control_socket()
             .map_err(|error| IpcError::new(IpcErrorCode::from_code_str(error.code()), error.to_string()))
@@ -617,6 +640,23 @@ mod tests {
         assert_eq!(setup_from(DaemonResponse::SupervisorSetupOk { value: value.clone() }).unwrap(), value);
         let older = setup_from(DaemonResponse::Error { message: "unknown".into(), code: None, details: None }).unwrap_err();
         assert_eq!(older.code, IpcErrorCode::DaemonUpgradeRequired);
+    }
+
+    #[test]
+    fn a_hub_start_answer_is_whether_it_started_and_an_untyped_error_is_an_older_daemon() {
+        let ok = |started| DaemonResponse::SupervisorControlOk { result: serde_json::json!({ "started": started }) };
+        assert_eq!(hub_start_from(ok(true)).unwrap(), Some(true));
+        assert_eq!(hub_start_from(ok(false)).unwrap(), Some(false));
+        let older = DaemonResponse::Error { message: "Malformed request: unknown variant".into(), code: None, details: None };
+        assert_eq!(hub_start_from(older).unwrap(), None, "an older daemon keeps the control-socket path");
+        let standby = DaemonResponse::Error {
+            message: "another machine runs the supervisor".into(),
+            code: Some("SUPERVISOR_STANDBY".into()),
+            details: Some(serde_json::json!({"holderMachineId": "mach-b", "holderLabel": "Laptop B"})),
+        };
+        let error = hub_start_from(standby).unwrap_err();
+        assert_eq!(error.code, IpcErrorCode::Custom("SUPERVISOR_STANDBY".into()));
+        assert_eq!(error.details, Some(serde_json::json!({"holderMachineId": "mach-b", "holderLabel": "Laptop B"})));
     }
 
     #[test]
