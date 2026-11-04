@@ -2127,6 +2127,7 @@ mod tests {
         assert!(!AgentStateOrigin::ManualReset.claims_activity());
         // It travels on the wire, unlike the self-reported default.
         let frame = DaemonStreamMessage::AgentState {
+            foreground_command: None,
             session_id: "s".into(),
             state: "idle".into(),
             agent: Some("kimi".into()),
@@ -2769,6 +2770,7 @@ mod tests {
     fn agent_state_stream_serializes_authoritative_provider_session() {
         // Given: a provider-authored session reference on an agent state frame.
         let message = DaemonStreamMessage::AgentState {
+            foreground_command: None,
             session_id: Cow::Borrowed("pty-1"),
             state: Cow::Borrowed("working"),
             agent: Some(Cow::Borrowed("omo")),
@@ -2808,6 +2810,7 @@ mod tests {
         ));
 
         let live = DaemonStreamMessage::AgentState {
+            foreground_command: None,
             session_id: Cow::Borrowed("pty-1"),
             state: Cow::Borrowed("blocked"),
             agent: None,
@@ -2850,6 +2853,7 @@ mod tests {
         // A self-reported frame stays byte-identical so old peers keep parsing it.
         assert_eq!(
             encode_daemon_stream_frame(&DaemonStreamMessage::AgentState {
+                foreground_command: None,
                 session_id: Cow::Borrowed("pty-1"),
                 state: Cow::Borrowed("idle"),
                 agent: None,
@@ -2868,6 +2872,7 @@ mod tests {
         // A process-evidence release must be distinguishable from an agent's own idle report,
         // otherwise a consumer cannot tell "agent left" from "agent is between turns".
         let release = encode_daemon_stream_frame(&DaemonStreamMessage::AgentState {
+            foreground_command: None,
             session_id: Cow::Borrowed("pty-1"),
             state: Cow::Borrowed("idle"),
             agent: None,
@@ -2895,6 +2900,7 @@ mod tests {
 
     fn protocol_frame(state: &'static str) -> DaemonStreamMessage<'static> {
         DaemonStreamMessage::AgentState {
+            foreground_command: None,
             session_id: Cow::Borrowed("pty-1"),
             state: Cow::Borrowed(state),
             agent: Some(Cow::Borrowed("claude")),
@@ -2926,6 +2932,7 @@ mod tests {
         }
         // Without the new fields the frame is byte-identical to the pre-change encoding.
         let plain = DaemonStreamMessage::AgentState {
+            foreground_command: None,
             session_id: Cow::Borrowed("pty-1"),
             state: Cow::Borrowed("idle"),
             agent: None,
@@ -3421,6 +3428,8 @@ mod tests {
         let desc_resp = DaemonResponse::DescribeSessionOk {
             daemon_epoch: None,
             session: DaemonSessionDetails {
+                foreground_command: None,
+                agent: None,
                 session_id: "session-99".to_string(),
                 size_owner: None,
                 workspace_id: Some("default".to_string()),
