@@ -1,8 +1,14 @@
-use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+use crate::ipc::{IpcError, IpcErrorCode};
+#[cfg(any(feature = "desktop", test))]
+use crate::ipc::{run_blocking};
+#[cfg(any(feature = "desktop", test))]
 use crate::ssh::config::parse_ssh_config;
 use crate::ssh::SshHost;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
+#[cfg(any(feature = "desktop", test))]
+use std::path::{Path};
+#[cfg(any(feature = "desktop", test))]
 use std::sync::Mutex;
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Manager, Runtime};

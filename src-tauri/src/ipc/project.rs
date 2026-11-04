@@ -1,8 +1,14 @@
+#[cfg(any(feature = "desktop", test))]
 use crate::daemon::DaemonClient;
-use crate::ipc::{run_blocking, IpcError};
-use crate::worktree::{run_git, WorkspaceRegistry, WorktreeError, WorktreeManager};
+use crate::ipc::{IpcError};
+#[cfg(any(feature = "desktop", test))]
+use crate::ipc::{run_blocking};
+use crate::worktree::{WorkspaceRegistry, WorktreeError, WorktreeManager};
+#[cfg(any(feature = "desktop", test))]
+use crate::worktree::{run_git};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+#[cfg(any(feature = "desktop", test))]
 use std::sync::Arc;
 #[cfg(feature = "desktop")]
 use tauri::State;

@@ -7,6 +7,7 @@
 //! hard-reload request with a structured `Unsupported` rather than silently degrading to the
 //! cached soft reload.
 
+#[cfg(any(feature = "desktop", test))]
 use crate::ipc::error::{IpcError, IpcErrorCode};
 
 /// Which native cache-bypassing reload this build can reach.

@@ -1,3 +1,4 @@
+#[cfg(any(feature = "desktop", test))]
 use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

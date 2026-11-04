@@ -1,11 +1,9 @@
 //! Renderer-facing sanitized inventory API; credentials are daemon-owned.
-use crate::{
-    daemon::client::DaemonClient,
-    paired_host::{
-        inventory::{HostView, MigrationReceipt},
-        service::{InventoryChangeEvent, MigrationRequest, PairRequest, RedeemGrantRequest, Result},
-    },
-};
+use crate::{daemon::client::DaemonClient, paired_host::{
+        inventory::{HostView, MigrationReceipt}, service::{InventoryChangeEvent, Result}, }};
+#[cfg(any(feature = "desktop", test))]
+use crate::{MigrationRequest, PairRequest, RedeemGrantRequest};
+#[cfg(any(feature = "desktop", test))]
 use std::sync::Arc;
 #[cfg(feature = "desktop")]
 use tauri::{Emitter, State};

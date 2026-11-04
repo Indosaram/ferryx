@@ -1,4 +1,6 @@
-use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+use crate::ipc::{IpcError, IpcErrorCode};
+#[cfg(any(feature = "desktop", test))]
+use crate::ipc::{run_blocking};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};

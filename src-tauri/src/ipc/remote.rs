@@ -1,16 +1,17 @@
 // allow: SIZE_OK — IPC remote gateway command handlers and forwarding bridge within constrained write scope
 use crate::daemon::client::DaemonClient;
+#[cfg(any(feature = "desktop", test))]
 use crate::ipc::IpcError;
-use crate::remote::auth::{DeviceInfo, DevicePermission, PairingWindowStatus};
-use crate::remote::protocol::{
-    RemoteActiveDesktopSelection, RemoteSessionAttention, RemoteTerminalTabInfo,
-    RemoteWorktreeAttention,
-};
+use crate::remote::auth::{PairingWindowStatus};
+#[cfg(any(feature = "desktop", test))]
+use crate::remote::auth::{DeviceInfo, DevicePermission};
+use crate::remote::protocol::{RemoteSessionAttention, RemoteTerminalTabInfo, RemoteWorktreeAttention};
+#[cfg(any(feature = "desktop", test))]
+use crate::remote::protocol::{RemoteActiveDesktopSelection};
 use crate::remote::server::{start_remote_server, RemoteServerHandle};
-use crate::remote::state::{
-    RemoteGatewayConfig, RemoteGatewayState, RemoteNetworkMode, RemoteRestartPolicy,
-    REMOTE_GATEWAY_PORT,
-};
+use crate::remote::state::{RemoteGatewayState, RemoteNetworkMode, RemoteRestartPolicy};
+#[cfg(any(feature = "desktop", test))]
+use crate::remote::state::{RemoteGatewayConfig, REMOTE_GATEWAY_PORT};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

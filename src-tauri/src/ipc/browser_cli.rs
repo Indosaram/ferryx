@@ -1,9 +1,8 @@
-use crate::browser::{
-    BrowserAutomationRequest, BrowserAutomationSnapshot, BrowserConsoleEntry, BrowserCookieEntry,
-    BrowserDialogHandleRequest, BrowserDownloadRequest, BrowserError, BrowserManager,
-    BrowserSessionCreatedPayload, BrowserSessionSummary, BrowserWaitCondition,
-    CreateBrowserRequest,
-};
+use crate::browser::{BrowserAutomationRequest, BrowserAutomationSnapshot, BrowserConsoleEntry, BrowserCookieEntry, BrowserError, BrowserSessionSummary, BrowserWaitCondition};
+#[cfg(any(feature = "desktop", test))]
+use crate::browser::{BrowserDialogHandleRequest, BrowserDownloadRequest, BrowserManager, BrowserSessionCreatedPayload};
+#[cfg(any(feature = "desktop", test))]
+use crate::browser::{CreateBrowserRequest};
 #[cfg(feature = "desktop")]
 use crate::ipc::browser::{
     browser_automation_act, browser_automation_snapshot, browser_download_with_session,
@@ -17,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+#[cfg(any(feature = "desktop", test))]
 use std::sync::Arc;
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter, Manager};

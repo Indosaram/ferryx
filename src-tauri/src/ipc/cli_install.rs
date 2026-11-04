@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(any(feature = "desktop", test))]
 use crate::ipc::{run_blocking, IpcError};
 
 #[derive(Debug, thiserror::Error)]
