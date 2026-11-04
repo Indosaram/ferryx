@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { routeDeepLink, type DeepLinkActions, type DeepLinkRoute } from "../lib/deepLinks";
+import { Dialog, DialogContent, DialogTitle, DialogDescription } from "./ui/dialog";
 
 export function DeepLinkBridge({ actions }: { actions: Omit<DeepLinkActions, "confirm"> }) {
   const actionsRef = useRef(actions);
@@ -31,16 +32,17 @@ export function DeepLinkBridge({ actions }: { actions: Omit<DeepLinkActions, "co
     };
     // Listen before draining so cold-start and warm links cannot fall between the two.
     const subscription = listen("deep_link_received", drain);
-    void subscription.then((unlisten) => {
-      if (disposed) unlisten();
-      else drain();
+    void subscription.then(() => {
+      if (!disposed) drain();
     }).catch((error: unknown) => {
       if (!disposed) actionsRef.current.toast(`Could not listen for Ferryx links: ${String(error)}`);
     });
     return () => {
       disposed = true;
       resolveRef.current?.(false);
-      void subscription.then((unlisten) => unlisten()).catch(() => undefined);
+      void subscription.then((unlisten) => unlisten()).catch((error: unknown) => {
+        console.error("Could not release deep-link listener", error);
+      });
     };
   }, []);
   const answer = (accepted: boolean) => {
@@ -49,25 +51,18 @@ export function DeepLinkBridge({ actions }: { actions: Omit<DeepLinkActions, "co
     setPending(null);
     resolve?.(accepted);
   };
-  useEffect(() => {
-    if (!pending) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") { event.preventDefault(); answer(false); }
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [pending]);
+
   if (!pending) return null;
   const destination = pending.kind === "settings" ? `Settings / ${pending.section}`
     : pending.kind === "onboarding" ? `Onboarding / ${pending.step}` : `Workspace / ${pending.workspaceId}`;
-  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-    <section role="dialog" aria-modal="true" aria-labelledby="deep-link-title" className="max-w-md rounded-xl border border-border bg-card p-4 text-foreground shadow-xl">
-      <h2 id="deep-link-title">Open Ferryx link?</h2>
-      <p className="my-4 break-all">{destination}</p>
+  return <Dialog open onOpenChange={(open) => { if (!open) answer(false); }}>
+    <DialogContent>
+      <DialogTitle>Open Ferryx link?</DialogTitle>
+      <DialogDescription className="break-all">{destination}</DialogDescription>
       <div className="flex justify-end gap-4">
-        <button type="button" autoFocus onClick={() => answer(false)}>Cancel</button>
+        <button type="button" onClick={() => answer(false)}>Cancel</button>
         <button type="button" onClick={() => answer(true)}>Open</button>
       </div>
-    </section>
-  </div>;
+    </DialogContent>
+  </Dialog>;
 }
