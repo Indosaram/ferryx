@@ -26,6 +26,7 @@ pub(crate) struct AgentState {
 #[derive(Clone, Debug)]
 pub(crate) struct AgentStateUpdate {
     pub state: AgentState,
+    pub foreground_command: Option<String>,
     pub is_snapshot: bool,
 }
 
@@ -37,6 +38,7 @@ pub(crate) struct AgentStateSubscription {
 
 pub(crate) struct AgentStateHub {
     retained: Mutex<HashMap<String, AgentState>>,
+    commands: Mutex<HashMap<String, String>>,
     /// Revision of the newest OSC 7501 summary seen per session. Locked only while `retained`
     /// is held, so the revision check and the state it guards change together.
     protocol_revisions: Mutex<HashMap<String, u64>>,
@@ -53,6 +55,7 @@ impl AgentStateHub {
     fn new(capacity: usize) -> Self {
         Self {
             retained: Mutex::new(HashMap::new()),
+            commands: Mutex::new(HashMap::new()),
             protocol_revisions: Mutex::new(HashMap::new()),
             tx: broadcast::channel(capacity).0,
         }
@@ -62,6 +65,7 @@ impl AgentStateHub {
         let mut retained = self.retained.lock();
         retained.insert(state.session_id.clone(), state.clone());
         let _ = self.tx.send(AgentStateUpdate {
+            foreground_command: self.foreground_command(&state.session_id),
             state,
             is_snapshot: false,
         });
@@ -98,6 +102,7 @@ impl AgentStateHub {
         }
         retained.insert(state.session_id.clone(), state.clone());
         let _ = self.tx.send(AgentStateUpdate {
+            foreground_command: self.foreground_command(&state.session_id),
             state,
             is_snapshot: false,
         });
@@ -191,6 +196,7 @@ impl AgentStateHub {
         }
         retained.insert(session_id.to_string(), state.clone());
         let _ = self.tx.send(AgentStateUpdate {
+            foreground_command: self.foreground_command(&state.session_id),
             state,
             is_snapshot: false,
         });
@@ -215,6 +221,7 @@ impl AgentStateHub {
             "agent activity released");
         retained.insert(session_id.to_string(), state.clone());
         let _ = self.tx.send(AgentStateUpdate {
+            foreground_command: self.foreground_command(&state.session_id),
             state,
             is_snapshot: false,
         });
@@ -238,6 +245,7 @@ impl AgentStateHub {
             "agent activity released");
         retained.insert(session_id.to_string(), state.clone());
         let _ = self.tx.send(AgentStateUpdate {
+            foreground_command: self.foreground_command(&state.session_id),
             state,
             is_snapshot: false,
         });
@@ -268,6 +276,7 @@ impl AgentStateHub {
         );
         retained.insert(session_id.to_string(), state.clone());
         let _ = self.tx.send(AgentStateUpdate {
+            foreground_command: self.foreground_command(&state.session_id),
             state,
             is_snapshot: false,
         });
@@ -282,6 +291,7 @@ impl AgentStateHub {
         }
         retained.insert(state.session_id.clone(), state.clone());
         let _ = self.tx.send(AgentStateUpdate {
+            foreground_command: self.foreground_command(&state.session_id),
             state,
             is_snapshot: true,
         });
@@ -305,9 +315,30 @@ impl AgentStateHub {
         self.retained.lock().get(session_id).cloned()
     }
 
+    pub(crate) fn foreground_command(&self, session_id: &str) -> Option<String> {
+        self.commands.lock().get(session_id).cloned()
+    }
+
+    pub(crate) fn publish_foreground_command(&self, session_id: &str, command: Option<String>) {
+        let mut retained = self.retained.lock();
+        let mut commands = self.commands.lock();
+        if commands.get(session_id) == command.as_ref() { return; }
+        match &command {
+            Some(name) => { commands.insert(session_id.to_string(), name.clone()); }
+            None => { commands.remove(session_id); }
+        }
+        let state = retained.entry(session_id.to_string()).or_insert_with(|| AgentState {
+            session_id: session_id.to_string(), state: "idle".to_string(), agent: None,
+            provider_session: None, detail: None, origin: AgentStateOrigin::ProcessObserved,
+            outcome: None, kind: None,
+        }).clone();
+        let _ = self.tx.send(AgentStateUpdate { state, foreground_command: command, is_snapshot: false });
+    }
+
     pub fn remove(&self, session_id: &str) {
         let mut retained = self.retained.lock();
         retained.remove(session_id);
+        self.commands.lock().remove(session_id);
         self.protocol_revisions.lock().remove(session_id);
     }
 }
@@ -327,6 +358,9 @@ pub(crate) fn holds_live_provider(
 }
 
 impl AgentStateSubscription {
+    pub(crate) fn foreground_command(&self, session_id: &str) -> Option<String> {
+        self.hub.foreground_command(session_id)
+    }
     pub fn resynchronize(&mut self, session_id: &str) -> Option<AgentState> {
         let fresh = self.hub.subscribe(session_id);
         self.receiver = fresh.receiver;
@@ -338,6 +372,26 @@ impl AgentStateSubscription {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_changes_publish_without_replacing_activity_and_are_removed_with_session() {
+        let hub = Arc::new(AgentStateHub::default());
+        let original = state("s", "blocked");
+        hub.publish_canonical(original.clone());
+        let mut subscription = hub.subscribe("s");
+        hub.publish_foreground_command("s", Some("sleep".into()));
+        let update = subscription.receiver.try_recv().unwrap();
+        assert_eq!(update.state, original);
+        assert_eq!(update.foreground_command.as_deref(), Some("sleep"));
+        hub.publish_foreground_command("s", Some("sleep".into()));
+        assert!(matches!(subscription.receiver.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        hub.publish_foreground_command("s", None);
+        assert_eq!(subscription.receiver.try_recv().unwrap().foreground_command, None);
+        hub.publish_foreground_command("s", Some("bash".into()));
+        hub.remove("s");
+        assert_eq!(hub.foreground_command("s"), None);
+        assert_eq!(hub.current("s"), None);
+    }
 
     fn state(session_id: &str, value: &str) -> AgentState {
         AgentState {
