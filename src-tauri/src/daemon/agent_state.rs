@@ -65,6 +65,7 @@ impl AgentStateHub {
         let mut retained = self.retained.lock();
         retained.insert(state.session_id.clone(), state.clone());
         let _ = self.tx.send(AgentStateUpdate {
+            foreground_command: self.foreground_command(&state.session_id),
             state,
             is_snapshot: false,
         });
@@ -101,6 +102,7 @@ impl AgentStateHub {
         }
         retained.insert(state.session_id.clone(), state.clone());
         let _ = self.tx.send(AgentStateUpdate {
+            foreground_command: self.foreground_command(&state.session_id),
             state,
             is_snapshot: false,
         });
@@ -194,6 +196,7 @@ impl AgentStateHub {
         }
         retained.insert(session_id.to_string(), state.clone());
         let _ = self.tx.send(AgentStateUpdate {
+            foreground_command: self.foreground_command(&state.session_id),
             state,
             is_snapshot: false,
         });
@@ -218,6 +221,7 @@ impl AgentStateHub {
             "agent activity released");
         retained.insert(session_id.to_string(), state.clone());
         let _ = self.tx.send(AgentStateUpdate {
+            foreground_command: self.foreground_command(&state.session_id),
             state,
             is_snapshot: false,
         });
@@ -241,6 +245,7 @@ impl AgentStateHub {
             "agent activity released");
         retained.insert(session_id.to_string(), state.clone());
         let _ = self.tx.send(AgentStateUpdate {
+            foreground_command: self.foreground_command(&state.session_id),
             state,
             is_snapshot: false,
         });
@@ -271,6 +276,7 @@ impl AgentStateHub {
         );
         retained.insert(session_id.to_string(), state.clone());
         let _ = self.tx.send(AgentStateUpdate {
+            foreground_command: self.foreground_command(&state.session_id),
             state,
             is_snapshot: false,
         });
@@ -285,6 +291,7 @@ impl AgentStateHub {
         }
         retained.insert(state.session_id.clone(), state.clone());
         let _ = self.tx.send(AgentStateUpdate {
+            foreground_command: self.foreground_command(&state.session_id),
             state,
             is_snapshot: true,
         });
