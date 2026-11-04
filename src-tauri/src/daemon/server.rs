@@ -7969,6 +7969,7 @@ impl DaemonServer {
                     capabilities.push(crate::daemon::pane_grants::PANE_GRANTS_CAPABILITY.into());
                     capabilities.push("screenHashV1".into());
                     capabilities.push("scrollbackBudgetV1".into());
+                    capabilities.push("sizeOwnershipV1".into());
                     #[cfg(feature = "remote-desktop")]
                     capabilities.push(crate::daemon::protocol::REMOTE_DESKTOP_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
