@@ -3143,7 +3143,7 @@ async fn handle_terminal_socket(
                                     if session_backend
                                         .resize_owned(&session_id_clone, &size_client, cols, rows, can_control, false)
                                         .await
-                                        .is_ok()
+                                        .is_ok_and(|applied| applied)
                                     {
                                         resized.store(true, std::sync::atomic::Ordering::Release);
                                     }
@@ -3708,14 +3708,16 @@ async fn handle_terminal_grid_socket(
                                     if session_backend
                                         .resize_owned(&session_id_clone, &size_client, cols, rows, can_control, false)
                                         .await
-                                        .is_ok()
+                                        .is_ok_and(|applied| applied)
                                     {
                                         resized.store(true, std::sync::atomic::Ordering::Release);
                                     }
-                                    if !enqueue_grid_operation(&recv_mirror, &recv_tx, |mirror| {
-                                        mirror.resize(cols, rows)
-                                    }) {
-                                        break;
+                                    // Non-owner preferences must not resize even the mirror.
+                                    let details = session_backend.describe_session(&session_id_clone).await;
+                                    if let Ok(details) = details {
+                                        if !enqueue_grid_operation(&recv_mirror, &recv_tx, |mirror| mirror.resize(details.cols, details.rows)) {
+                                            break;
+                                        }
                                     }
                                 }
                             }
