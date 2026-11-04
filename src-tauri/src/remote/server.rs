@@ -4288,7 +4288,9 @@ async fn get_capabilities(
         "accessScope": device.access_scope,
         "permission": device.permission,
         "capabilities": if state.machine_services.is_some() && device.access_scope == DeviceAccessScope::Machine && device.permission == DevicePermission::Control {
-            let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "pairedPasteUploadV1", "pairedPasteUploadV2", crate::paired_host::file_read::PAIRED_FILE_READ_CAPABILITY];
+            let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "pairedPasteUploadV1", "pairedPasteUploadV2", crate::paired_host::file_read::PAIRED_FILE_READ_CAPABILITY, crate::paired_host::file_write::PAIRED_FILE_WRITE_CAPABILITY];
+            capabilities.push(crate::paired_host::file_tree::PAIRED_FILE_LIST_CAPABILITY);
+            capabilities.push(crate::paired_host::file_tree::PAIRED_FILE_MKDIR_CAPABILITY);
             capabilities.push(super::repo_discovery::REPO_DISCOVERY_CAPABILITY);
             capabilities.push(super::resources_api::RESOURCE_USAGE_CAPABILITY);
             if state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok() && services.workspaces.journal.session_revision().is_ok()) {
@@ -4915,6 +4917,109 @@ async fn file_read_boundary(
     }
 }
 
+/// Writes one byte range of a regular host file for an authenticated machine peer.
+/// Admission matches paste-upload: the peer already holds control of this host.
+async fn file_write_boundary(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+) -> Result<Response, Refusal> {
+    let admission = super::workspace_api::admit(
+        state.clone(),
+        headers.clone(),
+        true,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+    .await?;
+    let body = project_body(request, &admission).await?;
+    let req: super::machine_protocol::FileWriteRequest = super::machine_protocol::decode_json(
+        &body,
+        super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+    )
+    .map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+    let outcome = crate::ipc::run_blocking(move || {
+        Ok(crate::paired_host::file_write::serve_host_write(&req, home.as_deref()))
+    })
+    .await
+    .map_err(|_| machine_error(StatusCode::INTERNAL_SERVER_ERROR, "MACHINE_SERVICE_UNAVAILABLE"))?;
+    match outcome {
+        Ok(result) => Ok(([(header::CACHE_CONTROL, "no-store")], Json(result)).into_response()),
+        Err(error) => Err(machine_error(
+            StatusCode::from_u16(error.status()).unwrap_or(StatusCode::BAD_REQUEST),
+            error.code(),
+        ).into()),
+    }
+}
+
+/// Lists one page of a host directory for an authenticated machine peer.
+async fn file_list_boundary(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+) -> Result<Response, Refusal> {
+    let admission = super::workspace_api::admit(
+        state.clone(),
+        headers.clone(),
+        true,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+    .await?;
+    let body = project_body(request, &admission).await?;
+    let req: super::machine_protocol::FileListRequest = super::machine_protocol::decode_json(
+        &body,
+        super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+    )
+    .map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+    let outcome = crate::ipc::run_blocking(move || {
+        Ok(crate::paired_host::file_tree::serve_host_list(&req, home.as_deref()))
+    })
+    .await
+    .map_err(|_| machine_error(StatusCode::INTERNAL_SERVER_ERROR, "MACHINE_SERVICE_UNAVAILABLE"))?;
+    match outcome {
+        Ok(result) => Ok(([(header::CACHE_CONTROL, "no-store")], Json(result)).into_response()),
+        Err(error) => Err(machine_error(
+            StatusCode::from_u16(error.status()).unwrap_or(StatusCode::BAD_REQUEST),
+            error.code(),
+        ).into()),
+    }
+}
+
+/// Creates one host directory for an authenticated machine peer.
+async fn file_mkdir_boundary(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+) -> Result<Response, Refusal> {
+    let admission = super::workspace_api::admit(
+        state.clone(),
+        headers.clone(),
+        true,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+    .await?;
+    let body = project_body(request, &admission).await?;
+    let req: super::machine_protocol::FileMkdirRequest = super::machine_protocol::decode_json(
+        &body,
+        super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+    )
+    .map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+    let outcome = crate::ipc::run_blocking(move || {
+        Ok(crate::paired_host::file_tree::serve_host_mkdir(&req, home.as_deref()))
+    })
+    .await
+    .map_err(|_| machine_error(StatusCode::INTERNAL_SERVER_ERROR, "MACHINE_SERVICE_UNAVAILABLE"))?;
+    match outcome {
+        Ok(result) => Ok(([(header::CACHE_CONTROL, "no-store")], Json(result)).into_response()),
+        Err(error) => Err(machine_error(
+            StatusCode::from_u16(error.status()).unwrap_or(StatusCode::BAD_REQUEST),
+            error.code(),
+        ).into()),
+    }
+}
+
 /// A session whose shell runs on an SSH remote or another paired host printed paths of
 /// THAT machine, not of this host: serving them would hand the paired desktop a
 /// different file under the same name. Session-less requests and host-local PTYs pass;
@@ -5114,6 +5219,7 @@ mod file_read_session_base_tests {
             path: path.into(),
             offset: 0,
             length: 16,
+            copy: false,
         }
     }
 
@@ -8246,6 +8352,24 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route(
             "/api/v1/workspace/file-read",
             post(file_read_boundary).layer(axum::extract::DefaultBodyLimit::max(
+                super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+            )),
+        )
+        .route(
+            "/api/v1/workspace/file-write",
+            post(file_write_boundary).layer(axum::extract::DefaultBodyLimit::max(
+                super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+            )),
+        )
+        .route(
+            "/api/v1/workspace/file-list",
+            post(file_list_boundary).layer(axum::extract::DefaultBodyLimit::max(
+                super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+            )),
+        )
+        .route(
+            "/api/v1/workspace/file-mkdir",
+            post(file_mkdir_boundary).layer(axum::extract::DefaultBodyLimit::max(
                 super::machine_protocol::MACHINE_JSON_MAX_BYTES,
             )),
         )

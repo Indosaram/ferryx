@@ -3565,9 +3565,9 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("GET", ["terminal", "preferences"])
             | ("GET", ["browser", "sessions" | "identify"])
             | ("POST", ["workspace", "select" | "selection"])
-            // Paired desktop machine reads/uploads; each paste-upload chunk is 32 KiB raw,
-            // which stays under the 64 KiB forwarded-body bound once base64 + JSON wrapped.
-            | ("POST", ["workspace", "file-read" | "paste-upload"])
+            // Paired desktop machine reads/uploads. Paste-upload and file-write chunks are
+            // 32 KiB raw, which stays under the 64 KiB forwarded-body bound once base64 + JSON wrapped.
+            | ("POST", ["workspace", "file-read" | "paste-upload" | "file-write" | "file-list" | "file-mkdir"])
             | ("POST", ["pair", "exchange"])
             | ("POST", ["direct", "offer"])
             | ("GET", ["push", "vapid-public-key"])
@@ -6070,7 +6070,13 @@ mod tests {
         // direct adapter is up; a refusal here surfaces as a bodyless 403.
         assert!(allowed_http_route(&Method::POST, "workspace/file-read"));
         assert!(allowed_http_route(&Method::POST, "workspace/paste-upload"));
+        assert!(allowed_http_route(&Method::POST, "workspace/file-write"));
+        assert!(allowed_http_route(&Method::POST, "workspace/file-list"));
+        assert!(allowed_http_route(&Method::POST, "workspace/file-mkdir"));
         assert!(!allowed_http_route(&Method::GET, "workspace/file-read"));
+        assert!(!allowed_http_route(&Method::GET, "workspace/file-write"));
+        assert!(!allowed_http_route(&Method::GET, "workspace/file-list"));
+        assert!(!allowed_http_route(&Method::DELETE, "workspace/file-mkdir"));
         assert!(!allowed_http_route(&Method::DELETE, "workspace/paste-upload"));
         assert!(!allowed_http_route(&Method::POST, "workspace/file-read/extra"));
         assert!(!allowed_http_route(&Method::POST, "workspace/../file-read"));

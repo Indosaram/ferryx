@@ -2514,6 +2514,9 @@ impl DaemonClient {
             | Operation::Session { .. }
             | Operation::DagStream { .. }
             | Operation::FileRead { .. }
+            | Operation::FileWrite { .. }
+            | Operation::FileList { .. }
+            | Operation::FileMkdir { .. }
             | Operation::Resources
             | Operation::Operation { .. } => None,
             // Idempotent: a holder's fence push raises a maximum and never types anything.

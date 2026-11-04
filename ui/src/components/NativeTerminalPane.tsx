@@ -2861,6 +2861,12 @@ export function NativeTerminalPane({
           })
             .then((result) => {
               toast.dismiss(toastId);
+              switchDebug("terminal.surface.drop.upload", {
+                backendSessionId: targetSessionId,
+                uploadId,
+                outcome: result ? "uploaded" : "empty",
+                fileCount: result ? result.files.length : 0,
+              });
               if (!result) {
                 return;
               }
@@ -2875,6 +2881,15 @@ export function NativeTerminalPane({
             })
             .catch((error: unknown) => {
               toast.dismiss(toastId);
+              switchDebug("terminal.surface.drop.upload", {
+                backendSessionId: targetSessionId,
+                uploadId,
+                outcome:
+                  isStructuredIpcError(error) && error.code === "UPLOAD_CANCELLED"
+                    ? "cancelled"
+                    : "failed",
+                message: extractIpcErrorMessage(error, "unknown error"),
+              });
               if (isStructuredIpcError(error) && error.code === "UPLOAD_CANCELLED") {
                 return;
               }
@@ -2885,6 +2900,19 @@ export function NativeTerminalPane({
         } else {
           sendPaste(paths.map(quoteShellPath).join(" ") + " ");
         }
+      } else {
+        // A drop inside the window but outside this pane's rect is the one failure this handler
+        // can see and hide: the native layer forwarded it, and nothing pastes.
+        switchDebug("terminal.surface.drop.missed", {
+          backendSessionId: targetSessionId,
+          position: { x: logicalX, y: logicalY },
+          rect: {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+          },
+        });
       }
     };
 

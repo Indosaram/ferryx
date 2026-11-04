@@ -839,6 +839,7 @@ fn file_read_routes_to_its_own_capability_without_journal() {
             path: "shot.png".into(),
             offset: 0,
             length: m::FILE_READ_CHUNK_MAX_BYTES,
+            copy: false,
         },
     };
     assert!(!operation.is_mutation());
@@ -862,6 +863,77 @@ fn file_read_routes_to_its_own_capability_without_journal() {
     };
     assert!(!mutation.route().unwrap().idempotent);
     assert!(Operation::Capabilities.route().unwrap().idempotent);
+}
+
+#[test]
+fn file_write_routes_to_its_own_capability_without_journal() {
+    let operation = Operation::FileWrite {
+        request: m::FileWriteRequest {
+            request_id: "3941b9de-b16d-4d9a-ae0a-118f90fd91f4".into(),
+            path: "/tmp/note.txt".into(),
+            upload_id: "8f5c1c2a-0d3e-4b6a-9c7d-1e2f3a4b5c6d".into(),
+            offset: 0,
+            total_bytes: 1,
+            data: "aQ==".into(),
+        },
+    };
+    assert!(!operation.is_mutation());
+    let route = operation.route().expect("route succeeds");
+    assert_eq!(route.capability, Some("pairedFileWriteV1"));
+    assert_eq!(route.segments, vec!["workspace", "file-write"]);
+    assert_eq!(route.method, Method::POST);
+    assert_eq!(route.request_id, None);
+    assert!(route.idempotent);
+    let body = route.body.as_ref().expect("body");
+    assert!(body.len() < m::MACHINE_JSON_MAX_BYTES);
+    let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
+    assert_eq!(parsed["path"], "/tmp/note.txt");
+}
+
+#[test]
+fn file_list_and_mkdir_route_without_a_journal() {
+    let list = Operation::FileList {
+        request: m::FileListRequest {
+            request_id: "3941b9de-b16d-4d9a-ae0a-118f90fd91f4".into(),
+            path: "/tmp/notes".into(),
+            cursor: None,
+        },
+    };
+    assert!(!list.is_mutation());
+    let route = list.route().expect("route succeeds");
+    assert_eq!(route.capability, Some("pairedFileListV1"));
+    assert_eq!(route.segments, vec!["workspace", "file-list"]);
+    assert!(route.idempotent);
+    let mkdir = Operation::FileMkdir {
+        request: m::FileMkdirRequest {
+            request_id: "3941b9de-b16d-4d9a-ae0a-118f90fd91f4".into(),
+            path: "/tmp/notes".into(),
+        },
+    };
+    let route = mkdir.route().expect("route succeeds");
+    assert_eq!(route.capability, Some("pairedFileMkdirV1"));
+    assert_eq!(route.segments, vec!["workspace", "file-mkdir"]);
+    assert!(route.idempotent);
+    assert!(route.body.as_ref().unwrap().len() < m::MACHINE_JSON_MAX_BYTES);
+}
+
+#[test]
+fn copy_error_codes_survive_the_remote_error_projection() {
+    for code in ["NOT_DIRECTORY", "STAGING_LOST"] {
+        let body = serde_json::to_vec(&m::ErrorEnvelope {
+            error: m::MachineError {
+                code: code.into(),
+                message: code.into(),
+                retryable: false,
+                request_id: "3941b9de-b16d-4d9a-ae0a-118f90fd91f4".into(),
+                details: serde_json::Map::new(),
+            },
+        })
+        .unwrap();
+        let error = map_operation_http_error(reqwest::StatusCode::BAD_REQUEST, None, None, &body);
+        assert_eq!(error.code, code);
+        assert_eq!(error.machine_error.unwrap().code, code);
+    }
 }
 
 
@@ -1745,6 +1817,7 @@ async fn file_read_over_lost_direct_retries_once_over_relay() {
                         path: "f".into(),
                         offset: 0,
                         length: 3,
+                        copy: false,
                     },
                 },
             ),

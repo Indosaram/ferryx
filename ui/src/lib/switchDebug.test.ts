@@ -54,6 +54,11 @@ describe("switchDebug", () => {
     expect(isReleasePersistedInputEvent("terminal.surface.input.dispatch")).toBe(true);
     expect(isReleasePersistedInputEvent("terminal.render.vt_consumed")).toBe(true);
     expect(isReleasePersistedInputEvent("terminal.surface.presentation.receipt")).toBe(true);
+    // A drop that reaches the native destination but produces no paste is invisible in a release
+    // build unless these survive; they are the only record of the drop path.
+    expect(isReleasePersistedInputEvent("terminal.surface.drop.event")).toBe(true);
+    expect(isReleasePersistedInputEvent("terminal.surface.drop.missed")).toBe(true);
+    expect(isReleasePersistedInputEvent("terminal.surface.drop.upload")).toBe(true);
     expect(isReleasePersistedInputEvent("project.select")).toBe(false);
     expect(isReleasePersistedInputEvent("worktree.select.requested")).toBe(true);
     expect(isReleasePersistedInputEvent("workspace.store.swap")).toBe(true);

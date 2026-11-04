@@ -81,6 +81,18 @@ pub enum Operation {
     FileRead {
         request: m::FileReadRequest,
     },
+    /// Writes one byte range of a host file. Offset writes are idempotent and are not journaled.
+    FileWrite {
+        request: m::FileWriteRequest,
+    },
+    /// One page of a directory. Idempotent and never journaled.
+    FileList {
+        request: m::FileListRequest,
+    },
+    /// Creates one directory. Idempotent and never journaled.
+    FileMkdir {
+        request: m::FileMkdirRequest,
+    },
     /// Capability probe for DAG streaming. The stream itself is a socket, opened by
     /// [`MachineClient::attach_dag`], not an HTTP result.
     DagStream {
@@ -137,6 +149,9 @@ pub enum OperationResult {
     Operation(m::Operation),
     PasteUploadChunk(m::PasteUploadChunkResult),
     FileRead(m::FileReadResult),
+    FileWrite(m::FileWriteResult),
+    FileList(m::FileListResult),
+    FileMkdir(m::FileMkdirResult),
     AgentControl(serde_json::Value),
     Resources(crate::daemon::resource_usage::HostResourceSnapshot),
     /// The holder's answer to a supervisor request or observation.
@@ -290,6 +305,8 @@ fn project_remote_error(error: m::MachineError) -> m::MachineError {
         | "METHOD_NOT_ALLOWED"
         | "UNSUPPORTED"
         | "FORBIDDEN"
+        | "NOT_DIRECTORY"
+        | "STAGING_LOST"
         | "INVENTORY_INCOMPLETE" => error.code.as_str(),
         _ => "PAIRED_HOST_REMOTE_ERROR",
     };
@@ -537,6 +554,18 @@ impl Operation {
                 r.capability = Some(super::file_read::PAIRED_FILE_READ_CAPABILITY);
                 r.response_limit = m::FILE_READ_JSON_MAX_BYTES;
             }
+            Self::FileWrite { .. } => {
+                path = "workspace/file-write";
+                r.capability = Some(super::file_write::PAIRED_FILE_WRITE_CAPABILITY);
+            }
+            Self::FileList { .. } => {
+                path = "workspace/file-list";
+                r.capability = Some(super::file_tree::PAIRED_FILE_LIST_CAPABILITY);
+            }
+            Self::FileMkdir { .. } => {
+                path = "workspace/file-mkdir";
+                r.capability = Some(super::file_tree::PAIRED_FILE_MKDIR_CAPABILITY);
+            }
             Self::DagStream { .. } => {
                 path = "capabilities";
                 r.capability = Some(crate::remote::dag_api::DAG_STREAM_CAPABILITY);
@@ -668,6 +697,27 @@ impl Operation {
                         .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
                 );
             }
+            Self::FileWrite { request } => {
+                r.method = Method::POST;
+                r.body = Some(
+                    serde_json::to_vec(request)
+                        .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
+                );
+            }
+            Self::FileList { request } => {
+                r.method = Method::POST;
+                r.body = Some(
+                    serde_json::to_vec(request)
+                        .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
+                );
+            }
+            Self::FileMkdir { request } => {
+                r.method = Method::POST;
+                r.body = Some(
+                    serde_json::to_vec(request)
+                        .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
+                );
+            }
             Self::SupervisorRequest { envelope: body }
             | Self::SupervisorObserve { observation: body } => {
                 r.method = Method::POST;
@@ -699,7 +749,14 @@ impl Operation {
         {
             return Err(ClientError::local("PAYLOAD_TOO_LARGE"));
         }
-        r.idempotent = r.method == Method::GET || matches!(self, Self::FileRead { .. });
+        r.idempotent = r.method == Method::GET
+            || matches!(
+                self,
+                Self::FileRead { .. }
+                    | Self::FileWrite { .. }
+                    | Self::FileList { .. }
+                    | Self::FileMkdir { .. }
+            );
         if r.segments
             .iter()
             .any(|s| s.is_empty() || s == "." || s == ".." || s.chars().any(char::is_control))
@@ -840,7 +897,7 @@ fn sanitize_relay_stage(raw: &str) -> Option<&'static str> {
     }
 }
 
-fn map_operation_http_error(
+pub(crate) fn map_operation_http_error(
     status: reqwest::StatusCode,
     content_type: Option<&reqwest::header::HeaderValue>,
     relay_stage: Option<&str>,
@@ -2134,6 +2191,9 @@ fn map_result(host: &HostView, operation: &Operation, bytes: &[u8]) -> Result<Op
         }
         Operation::PasteUploadChunk { .. } => OperationResult::PasteUploadChunk(decode(bytes)?),
         Operation::FileRead { .. } => OperationResult::FileRead(decode(bytes)?),
+        Operation::FileWrite { .. } => OperationResult::FileWrite(decode(bytes)?),
+        Operation::FileList { .. } => OperationResult::FileList(decode(bytes)?),
+        Operation::FileMkdir { .. } => OperationResult::FileMkdir(decode(bytes)?),
         // The capability probe returns this host's advertised capabilities; the stream
         // is opened separately over a socket.
         Operation::DagStream { .. } => OperationResult::Capabilities(decode(bytes)?),

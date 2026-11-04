@@ -24,6 +24,7 @@ pub const CLI_GROUPS: &[&str] = &[
     "pair",
     "direct-trust",
     "remote",
+    "file",
     "api",
 ];
 
@@ -437,6 +438,13 @@ pub const CATALOG: &[Command] = &[
             sub!("pair approve", &[PIN], &[]),
         ],
         exit_codes: OK_OR_FAILURE,
+    },
+    Command {
+        name: "file",
+        summary: "Copy one file to or from a paired host over the relay",
+        output: "json",
+        subcommands: &[sub!("cp", &[arg!("src", "path"), arg!("dst", "path")], &[JSON])],
+        exit_codes: DAEMON_JSON_EXIT_CODES,
     },
     Command {
         name: "api",

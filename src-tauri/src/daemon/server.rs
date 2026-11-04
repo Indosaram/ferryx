@@ -7960,6 +7960,9 @@ impl DaemonServer {
                         capabilities.push("pairedHostE2EV1".into());
                     }
                     capabilities.push(crate::paired_host::file_read::PAIRED_FILE_READ_PROXY_CAPABILITY.into());
+                    capabilities.push(crate::paired_host::file_write::PAIRED_FILE_WRITE_PROXY_CAPABILITY.into());
+                    capabilities.push(crate::paired_host::file_tree::PAIRED_FILE_LIST_PROXY_CAPABILITY.into());
+                    capabilities.push(crate::paired_host::file_tree::PAIRED_FILE_MKDIR_PROXY_CAPABILITY.into());
                     #[cfg(unix)]
                     capabilities.push("sessionOwnershipTransferV1".into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY.into());

@@ -265,6 +265,19 @@ jobs:
       - name: Test Frontend UI
         run: bun run --cwd ui test
 
+      # The navbar geometry suite drives a real Chrome, and playwright is not a declared
+      # dependency of this workspace (site/ imports it from ui/node_modules when present).
+      # Install it into a scratch prefix and point the probe at that module, so the gate runs
+      # the real layout measurement instead of failing on an unresolvable import.
+      - name: Install Playwright Chrome for landing-site geometry
+        run: |
+          mkdir -p "$RUNNER_TEMP/pw"
+          cd "$RUNNER_TEMP/pw"
+          printf '{ "name": "pw-scratch", "private": true }\n' > package.json
+          bun add playwright@1.55.1
+          bunx playwright install --with-deps chrome
+          echo "PLAYWRIGHT_MODULE=$RUNNER_TEMP/pw/node_modules/playwright/index.mjs" >> "$GITHUB_ENV"
+
       - name: Test Landing Site
         run: bun test --cwd site
 

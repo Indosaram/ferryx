@@ -124,6 +124,9 @@ pub fn serve_host_read(
     }
     let path = resolve_host_path(&request.path, request.cwd.as_deref(), home, session_base)?;
     let resolved_path = path.to_str().ok_or(HostReadError::InvalidPath)?.to_string();
+    if request.copy && std::fs::symlink_metadata(&path).map_err(io_error)?.file_type().is_symlink() {
+        return Err(HostReadError::NotRegularFile);
+    }
     // Refuse FIFOs, devices and directories before open(): opening a FIFO for read blocks
     // until a writer appears, which would pin this blocking worker forever.
     if !std::fs::metadata(&path).map_err(io_error)?.is_file() {
@@ -136,16 +139,29 @@ pub fn serve_host_read(
         // Closes the stat/open race: a path swapped to a FIFO still opens without blocking,
         // and the fstat below refuses it. Regular files ignore O_NONBLOCK.
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NONBLOCK);
+        // A copy also refuses a path swapped to a symlink after the check above.
+        options.custom_flags(libc::O_NONBLOCK | if request.copy { libc::O_NOFOLLOW } else { 0 });
     }
-    let mut file = options.open(&path).map_err(io_error)?;
+    #[cfg(windows)]
+    if request.copy {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT: open a link itself, so the fstat below refuses it.
+        options.custom_flags(0x0020_0000);
+    }
+    let mut file = options.open(&path).map_err(|error| {
+        #[cfg(unix)]
+        if request.copy && error.raw_os_error() == Some(libc::ELOOP) {
+            return HostReadError::NotRegularFile;
+        }
+        io_error(error)
+    })?;
     let meta = file.metadata().map_err(io_error)?;
     if !meta.is_file() {
         return Err(HostReadError::NotRegularFile);
     }
     let total_bytes = meta.len();
     let version = content_version(&meta);
-    if total_bytes > crate::ipc::remote_file::REMOTE_FILE_MAX_BYTES as u64 {
+    if !request.copy && total_bytes > crate::ipc::remote_file::REMOTE_FILE_MAX_BYTES as u64 {
         return Err(HostReadError::TooLarge);
     }
     if request.offset > total_bytes {
@@ -362,6 +378,7 @@ pub async fn fetch_paired_file(
                 path: path.clone(),
                 offset,
                 length: m::FILE_READ_CHUNK_MAX_BYTES,
+                copy: false,
             };
             let operation = OperationRequest {
                 host_id: host.host_id.clone(),
@@ -546,6 +563,7 @@ mod tests {
             path: path.into(),
             offset,
             length,
+            copy: false,
         }
     }
 
@@ -645,6 +663,23 @@ mod tests {
         big.set_len(crate::ipc::remote_file::REMOTE_FILE_MAX_BYTES as u64 + 1).unwrap();
         let err = serve_host_read(&req("big", Some(root), 0, 4), None, None).unwrap_err();
         assert_eq!((err, err.code(), err.status()), (HostReadError::TooLarge, "PAYLOAD_TOO_LARGE", 413));
+        let mut whole = req("big", Some(root), 0, 4);
+        whole.copy = true;
+        let page = serve_host_read(&whole, None, None).unwrap();
+        assert_eq!(page.total_bytes, crate::ipc::remote_file::REMOTE_FILE_MAX_BYTES as u64 + 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_reads_refuse_a_final_symlink_that_viewer_reads_follow() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        std::fs::write(dir.path().join("secret"), b"secret").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("secret"), dir.path().join("link")).unwrap();
+        assert!(serve_host_read(&req("link", Some(root), 0, 4), None, None).is_ok());
+        let mut copy = req("link", Some(root), 0, 4);
+        copy.copy = true;
+        assert_eq!(serve_host_read(&copy, None, None).unwrap_err(), HostReadError::NotRegularFile);
     }
 
     #[cfg(unix)]
