@@ -1,4 +1,7 @@
-use crate::daemon::{protocol::{DaemonRequest, DaemonResponse}};
+#[cfg(feature = "desktop")]
+use crate::daemon::protocol::DaemonRequest;
+#[cfg(any(feature = "desktop", test))]
+use crate::daemon::protocol::DaemonResponse;
 #[cfg(feature = "desktop")]
 use crate::daemon::{DaemonClient};
 use crate::ipc::{IpcError, IpcErrorCode};

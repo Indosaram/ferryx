@@ -190,6 +190,7 @@ pub(crate) fn is_plausible_session_cwd_text(value: &str) -> bool {
 }
 
 struct PumpHandle {
+    #[cfg(feature = "desktop")]
     token: PumpToken,
     task: tokio::task::JoinHandle<()>,
     stream_task: tokio::task::JoinHandle<()>,
