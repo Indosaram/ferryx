@@ -99,12 +99,13 @@ impl Registry {
     }
 
     pub async fn stop(&self, name: &str) -> Result<(), String> {
-        if let Some(running) = self.running.lock().await.remove(name) {
+        let mut supervisors = self.running.lock().await;
+        let result = if let Some(running) = supervisors.remove(name) {
             let _ = running.stop.send(true);
-            running.task.await.map_err(|e| e.to_string())??;
-        }
+            running.task.await.map_err(|e| e.to_string()).and_then(|result| result)
+        } else { Ok(()) };
         self.views.write().retain(|(plugin, _), _| plugin != name);
-        Ok(())
+        result
     }
 
     pub async fn stop_all(&self) -> Result<(), String> {
