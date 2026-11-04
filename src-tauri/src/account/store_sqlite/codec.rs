@@ -3,7 +3,7 @@ use rusqlite::{params, Connection, Transaction};
 use crate::account::store::{
     AccountStore, BillingStateRecord, DeviceAuthRecord, EnrollmentCodeRecord, GrantRecord,
     LoginCodeRecord, MachineRecord, MachineRequestRecord, OrgInviteRecord, OrgMemberRecord, OrgRecord, PaymentEventRecord,
-    SessionRecord, SubscriptionRecord, SupervisorLeaseRecord, UserRecord,
+    OnboardingRecord, SessionRecord, SubscriptionRecord, SupervisorLeaseRecord, UserRecord,
 };
 
 /// Column list shared by every `supervisor_leases` read; matches [`supervisor_lease_from_row`].
@@ -43,6 +43,26 @@ pub fn table_exists(conn: &Connection, table: &str) -> Result<bool, String> {
 
 pub fn load_store_from_connection(conn: &Connection) -> Result<AccountStore, String> {
     let mut store = AccountStore::default();
+
+    if table_exists(conn, "account_onboarding")? {
+        let mut stmt = conn.prepare(
+            "SELECT user_id, completed_steps, dismissed, updated_at FROM account_onboarding",
+        ).map_err(|e| format!("Prepare onboarding read: {e}"))?;
+        let rows = stmt.query_map([], |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+            row.get::<_, bool>(2)?, row.get::<_, u64>(3)?,
+        ))).map_err(|e| format!("Read onboarding: {e}"))?;
+        for row in rows {
+            let (user, steps, dismissed, updated_at) = row
+                .map_err(|e| format!("Read onboarding row: {e}"))?;
+            store.onboarding.insert(user, OnboardingRecord {
+                completed_steps: serde_json::from_str(&steps)
+                    .map_err(|e| format!("Decode onboarding steps: {e}"))?,
+                dismissed,
+                updated_at,
+            });
+        }
+    }
 
     {
         let mut stmt = conn
@@ -1132,6 +1152,20 @@ pub fn save_store_to_transaction(tx: &Transaction, store: &AccountStore) -> Resu
                 .map_err(|e| {
                     format!("Failed to upsert machine_request {}: {e}", request.request_id)
                 })?;
+        }
+    }
+
+    if table_exists(tx, "account_onboarding")? {
+        tx.execute("DELETE FROM account_onboarding", [])
+            .map_err(|e| format!("Clear onboarding: {e}"))?;
+        for (user, progress) in &store.onboarding {
+            tx.execute(
+                "INSERT INTO account_onboarding (user_id, completed_steps, dismissed, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![user, serde_json::to_string(&progress.completed_steps)
+                    .map_err(|e| format!("Encode onboarding steps: {e}"))?,
+                    progress.dismissed, progress.updated_at],
+            ).map_err(|e| format!("Save onboarding: {e}"))?;
         }
     }
 
