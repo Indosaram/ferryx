@@ -1,0 +1,476 @@
+   Compiling ferryx v2026.1101.1 (/Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/src-tauri)
+error[E0282]: type annotations needed for `std::result::Result<serde_json::Value, _>`
+   --> src/script/mod.rs:111:21
+    |
+111 |                 let result = (|| {
+    |                     ^^^^^^
+...
+137 |                     let message = error.clone();
+    |                                   ----- type must be known at this point
+    |
+help: consider giving `result` an explicit type, where the placeholders `_` are specified
+    |
+111 |                 let result: std::result::Result<_, E> = (|| {
+    |                           +++++++++++++++++++++++++++
+
+error[E0277]: the trait bound `tauri::WebviewWindow: CommandArg<'_, R>` is not satisfied
+    --> src/ipc/layout.rs:108:1
+     |
+ 108 |   #[tauri::command]
+     |   ^^^^^^^^^^^^^^^^^ the trait `_::_serde::Deserialize<'_>` is not implemented for `tauri::WebviewWindow`
+     |
+    ::: src/lib.rs:1835:71
+     |
+1835 |       let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+     |  _______________________________________________________________________-
+1836 | |         deep_link::cmd_deep_link_take_pending,
+1837 | |         cmd_native_qa_enabled,
+1838 | |         cmd_shortcuts_set_native_table,
+...    |
+2103 | |         dag_discover_watch_roots,
+2104 | |     ]);
+     | |_____- in this macro invocation
+     |
+     = help: the following other types implement trait `_::_serde::Deserialize<'de>`:
+               `&'a [u8]` implements `_::_serde::Deserialize<'de>`
+               `&'a bstr::bstr::BStr` implements `_::_serde::Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `_::_serde::Deserialize<'de>`
+               `&'a std::path::Path` implements `_::_serde::Deserialize<'de>`
+               `&'a str` implements `_::_serde::Deserialize<'de>`
+               `&'p jsonptr::pointer::Pointer` implements `_::_serde::Deserialize<'de>`
+               `()` implements `_::_serde::Deserialize<'de>`
+               `(T,)` implements `_::_serde::Deserialize<'de>`
+             and 1590 others
+     = note: required for `tauri::WebviewWindow` to implement `CommandArg<'_, R>`
+     = note: the full name for the type has been written to '/Users/I552267/code/ferryx-wt/.target/debug/deps/ferryx_lib-fbd9eb91dd4205bf.long-type-13257337919853423443.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+     = note: this error originates in the macro `ipc::layout::__cmd__cmd_layout_get` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `AppHandle: CommandArg<'_, R>` is not satisfied
+    --> src/ipc/layout.rs:129:1
+     |
+ 129 |   #[tauri::command]
+     |   ^^^^^^^^^^^^^^^^^ the trait `_::_serde::Deserialize<'_>` is not implemented for `AppHandle`
+     |
+    ::: src/lib.rs:1835:71
+     |
+1835 |       let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+     |  _______________________________________________________________________-
+1836 | |         deep_link::cmd_deep_link_take_pending,
+1837 | |         cmd_native_qa_enabled,
+1838 | |         cmd_shortcuts_set_native_table,
+...    |
+2103 | |         dag_discover_watch_roots,
+2104 | |     ]);
+     | |_____- in this macro invocation
+     |
+     = help: the following other types implement trait `_::_serde::Deserialize<'de>`:
+               `&'a [u8]` implements `_::_serde::Deserialize<'de>`
+               `&'a bstr::bstr::BStr` implements `_::_serde::Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `_::_serde::Deserialize<'de>`
+               `&'a std::path::Path` implements `_::_serde::Deserialize<'de>`
+               `&'a str` implements `_::_serde::Deserialize<'de>`
+               `&'p jsonptr::pointer::Pointer` implements `_::_serde::Deserialize<'de>`
+               `()` implements `_::_serde::Deserialize<'de>`
+               `(T,)` implements `_::_serde::Deserialize<'de>`
+             and 1590 others
+     = note: required for `AppHandle` to implement `CommandArg<'_, R>`
+     = note: the full name for the type has been written to '/Users/I552267/code/ferryx-wt/.target/debug/deps/ferryx_lib-fbd9eb91dd4205bf.long-type-13257337919853423443.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+     = note: this error originates in the macro `ipc::layout::__cmd__cmd_layout_import` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `tauri::WebviewWindow: CommandArg<'_, R>` is not satisfied
+    --> src/ipc/layout.rs:129:1
+     |
+ 129 |   #[tauri::command]
+     |   ^^^^^^^^^^^^^^^^^ the trait `_::_serde::Deserialize<'_>` is not implemented for `tauri::WebviewWindow`
+     |
+    ::: src/lib.rs:1835:71
+     |
+1835 |       let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+     |  _______________________________________________________________________-
+1836 | |         deep_link::cmd_deep_link_take_pending,
+1837 | |         cmd_native_qa_enabled,
+1838 | |         cmd_shortcuts_set_native_table,
+...    |
+2103 | |         dag_discover_watch_roots,
+2104 | |     ]);
+     | |_____- in this macro invocation
+     |
+     = help: the following other types implement trait `_::_serde::Deserialize<'de>`:
+               `&'a [u8]` implements `_::_serde::Deserialize<'de>`
+               `&'a bstr::bstr::BStr` implements `_::_serde::Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `_::_serde::Deserialize<'de>`
+               `&'a std::path::Path` implements `_::_serde::Deserialize<'de>`
+               `&'a str` implements `_::_serde::Deserialize<'de>`
+               `&'p jsonptr::pointer::Pointer` implements `_::_serde::Deserialize<'de>`
+               `()` implements `_::_serde::Deserialize<'de>`
+               `(T,)` implements `_::_serde::Deserialize<'de>`
+             and 1590 others
+     = note: required for `tauri::WebviewWindow` to implement `CommandArg<'_, R>`
+     = note: the full name for the type has been written to '/Users/I552267/code/ferryx-wt/.target/debug/deps/ferryx_lib-fbd9eb91dd4205bf.long-type-13257337919853423443.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+     = note: this error originates in the macro `ipc::layout::__cmd__cmd_layout_import` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `tauri::WebviewWindow: CommandArg<'_, R>` is not satisfied
+    --> src/ipc/layout.rs:62:1
+     |
+  62 |   #[tauri::command]
+     |   ^^^^^^^^^^^^^^^^^ the trait `_::_serde::Deserialize<'_>` is not implemented for `tauri::WebviewWindow`
+     |
+    ::: src/lib.rs:1835:71
+     |
+1835 |       let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+     |  _______________________________________________________________________-
+1836 | |         deep_link::cmd_deep_link_take_pending,
+1837 | |         cmd_native_qa_enabled,
+1838 | |         cmd_shortcuts_set_native_table,
+...    |
+2103 | |         dag_discover_watch_roots,
+2104 | |     ]);
+     | |_____- in this macro invocation
+     |
+     = help: the following other types implement trait `_::_serde::Deserialize<'de>`:
+               `&'a [u8]` implements `_::_serde::Deserialize<'de>`
+               `&'a bstr::bstr::BStr` implements `_::_serde::Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `_::_serde::Deserialize<'de>`
+               `&'a std::path::Path` implements `_::_serde::Deserialize<'de>`
+               `&'a str` implements `_::_serde::Deserialize<'de>`
+               `&'p jsonptr::pointer::Pointer` implements `_::_serde::Deserialize<'de>`
+               `()` implements `_::_serde::Deserialize<'de>`
+               `(T,)` implements `_::_serde::Deserialize<'de>`
+             and 1590 others
+     = note: required for `tauri::WebviewWindow` to implement `CommandArg<'_, R>`
+     = note: the full name for the type has been written to '/Users/I552267/code/ferryx-wt/.target/debug/deps/ferryx_lib-fbd9eb91dd4205bf.long-type-13257337919853423443.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+     = note: this error originates in the macro `ipc::layout::__cmd__cmd_panes` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `tauri::WebviewWindow: CommandArg<'_, R>` is not satisfied
+    --> src/ipc/layout.rs:145:1
+     |
+ 145 |   #[tauri::command]
+     |   ^^^^^^^^^^^^^^^^^ the trait `_::_serde::Deserialize<'_>` is not implemented for `tauri::WebviewWindow`
+     |
+    ::: src/lib.rs:1835:71
+     |
+1835 |       let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+     |  _______________________________________________________________________-
+1836 | |         deep_link::cmd_deep_link_take_pending,
+1837 | |         cmd_native_qa_enabled,
+1838 | |         cmd_shortcuts_set_native_table,
+...    |
+2103 | |         dag_discover_watch_roots,
+2104 | |     ]);
+     | |_____- in this macro invocation
+     |
+     = help: the following other types implement trait `_::_serde::Deserialize<'de>`:
+               `&'a [u8]` implements `_::_serde::Deserialize<'de>`
+               `&'a bstr::bstr::BStr` implements `_::_serde::Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `_::_serde::Deserialize<'de>`
+               `&'a std::path::Path` implements `_::_serde::Deserialize<'de>`
+               `&'a str` implements `_::_serde::Deserialize<'de>`
+               `&'p jsonptr::pointer::Pointer` implements `_::_serde::Deserialize<'de>`
+               `()` implements `_::_serde::Deserialize<'de>`
+               `(T,)` implements `_::_serde::Deserialize<'de>`
+             and 1590 others
+     = note: required for `tauri::WebviewWindow` to implement `CommandArg<'_, R>`
+     = note: the full name for the type has been written to '/Users/I552267/code/ferryx-wt/.target/debug/deps/ferryx_lib-fbd9eb91dd4205bf.long-type-13257337919853423443.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+     = note: this error originates in the macro `ipc::layout::__cmd__cmd_layout_apply` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0502]: cannot borrow `next` as immutable because it is also borrowed as mutable
+   --> src/daemon/pane_grants.rs:264:21
+    |
+262 |         match next.iter_mut().find(|known| known.from == grant.from && known.to == grant.to) {
+    |               ---- mutable borrow occurs here
+263 |             Some(known) => known.ops.extend(grant.ops),
+264 |             None if next.len() >= MAX_GRANTS => return Err(format!("at most {MAX_GRANTS} pane grants are kept")),
+    |                     ^^^^                   - mutable borrow later used here
+    |                     |
+    |                     immutable borrow occurs here
+
+error[E0277]: `?` couldn't convert the error to `ipc::error::IpcError`
+    --> src/terminal/foreground.rs:1474:42
+     |
+1474 |             let dir = tempfile::tempdir()?;
+     |                       -------------------^ the trait `std::convert::From<std::io::Error>` is not implemented for `ipc::error::IpcError`
+     |                       |
+     |                       this can't be annotated with `?` because it has type `Result<_, std::io::Error>`
+     |
+note: `ipc::error::IpcError` needs to implement `From<std::io::Error>`
+    --> src/ipc/error.rs:267:1
+     |
+ 267 | pub struct IpcError {
+     | ^^^^^^^^^^^^^^^^^^^
+     = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+     = help: the following other types implement trait `std::convert::From<T>`:
+               `ipc::error::IpcError` implements `std::convert::From<browser::security::BrowserError>`
+               `ipc::error::IpcError` implements `std::convert::From<cli_install::CliInstallError>`
+               `ipc::error::IpcError` implements `std::convert::From<native_terminal::error::NativeTerminalError>`
+               `ipc::error::IpcError` implements `std::convert::From<terminal::PtyError>`
+               `ipc::error::IpcError` implements `std::convert::From<terminal::service::PasteChunkError>`
+               `ipc::error::IpcError` implements `std::convert::From<worktree::changes::GitChangeError>`
+               `ipc::error::IpcError` implements `std::convert::From<worktree::model::WorktreeError>`
+
+error[E0277]: `?` couldn't convert the error to `ipc::error::IpcError`
+    --> src/terminal/foreground.rs:1476:86
+     |
+1476 |             std::fs::write(&script, "#!/bin/sh\nprintf 'NAME_READY>'\nread answer\n")?;
+     |             -------------------------------------------------------------------------^ the trait `std::convert::From<std::io::Error>` is not implemented for `ipc::error::IpcError`
+     |             |
+     |             this can't be annotated with `?` because it has type `Result<_, std::io::Error>`
+     |
+note: `ipc::error::IpcError` needs to implement `From<std::io::Error>`
+    --> src/ipc/error.rs:267:1
+     |
+ 267 | pub struct IpcError {
+     | ^^^^^^^^^^^^^^^^^^^
+     = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+     = help: the following other types implement trait `std::convert::From<T>`:
+               `ipc::error::IpcError` implements `std::convert::From<browser::security::BrowserError>`
+               `ipc::error::IpcError` implements `std::convert::From<cli_install::CliInstallError>`
+               `ipc::error::IpcError` implements `std::convert::From<native_terminal::error::NativeTerminalError>`
+               `ipc::error::IpcError` implements `std::convert::From<terminal::PtyError>`
+               `ipc::error::IpcError` implements `std::convert::From<terminal::service::PasteChunkError>`
+               `ipc::error::IpcError` implements `std::convert::From<worktree::changes::GitChangeError>`
+               `ipc::error::IpcError` implements `std::convert::From<worktree::model::WorktreeError>`
+
+error[E0277]: `?` couldn't convert the error to `ipc::error::IpcError`
+    --> src/terminal/foreground.rs:1477:86
+     |
+1477 |             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+     |             -------------------------------------------------------------------------^ the trait `std::convert::From<std::io::Error>` is not implemented for `ipc::error::IpcError`
+     |             |
+     |             this can't be annotated with `?` because it has type `Result<_, std::io::Error>`
+     |
+note: `ipc::error::IpcError` needs to implement `From<std::io::Error>`
+    --> src/ipc/error.rs:267:1
+     |
+ 267 | pub struct IpcError {
+     | ^^^^^^^^^^^^^^^^^^^
+     = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+     = help: the following other types implement trait `std::convert::From<T>`:
+               `ipc::error::IpcError` implements `std::convert::From<browser::security::BrowserError>`
+               `ipc::error::IpcError` implements `std::convert::From<cli_install::CliInstallError>`
+               `ipc::error::IpcError` implements `std::convert::From<native_terminal::error::NativeTerminalError>`
+               `ipc::error::IpcError` implements `std::convert::From<terminal::PtyError>`
+               `ipc::error::IpcError` implements `std::convert::From<terminal::service::PasteChunkError>`
+               `ipc::error::IpcError` implements `std::convert::From<worktree::changes::GitChangeError>`
+               `ipc::error::IpcError` implements `std::convert::From<worktree::model::WorktreeError>`
+
+error[E0277]: `?` couldn't convert the error to `ipc::error::IpcError`
+    --> src/terminal/foreground.rs:1487:42
+     |
+1487 |             Ok(capture_process_snapshot()?.foreground_command(&session))
+     |                --------------------------^ the trait `std::convert::From<std::io::Error>` is not implemented for `ipc::error::IpcError`
+     |                |
+     |                this can't be annotated with `?` because it has type `Result<_, std::io::Error>`
+     |
+note: `ipc::error::IpcError` needs to implement `From<std::io::Error>`
+    --> src/ipc/error.rs:267:1
+     |
+ 267 | pub struct IpcError {
+     | ^^^^^^^^^^^^^^^^^^^
+     = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+     = help: the following other types implement trait `std::convert::From<T>`:
+               `ipc::error::IpcError` implements `std::convert::From<browser::security::BrowserError>`
+               `ipc::error::IpcError` implements `std::convert::From<cli_install::CliInstallError>`
+               `ipc::error::IpcError` implements `std::convert::From<native_terminal::error::NativeTerminalError>`
+               `ipc::error::IpcError` implements `std::convert::From<terminal::PtyError>`
+               `ipc::error::IpcError` implements `std::convert::From<terminal::service::PasteChunkError>`
+               `ipc::error::IpcError` implements `std::convert::From<worktree::changes::GitChangeError>`
+               `ipc::error::IpcError` implements `std::convert::From<worktree::model::WorktreeError>`
+
+error[E0277]: `?` couldn't convert the error to `ipc::error::IpcError`
+    --> src/terminal/foreground.rs:1511:42
+     |
+1511 |             Ok(capture_process_snapshot()?.foreground_command(&session))
+     |                --------------------------^ the trait `std::convert::From<std::io::Error>` is not implemented for `ipc::error::IpcError`
+     |                |
+     |                this can't be annotated with `?` because it has type `Result<_, std::io::Error>`
+     |
+note: `ipc::error::IpcError` needs to implement `From<std::io::Error>`
+    --> src/ipc/error.rs:267:1
+     |
+ 267 | pub struct IpcError {
+     | ^^^^^^^^^^^^^^^^^^^
+     = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+     = help: the following other types implement trait `std::convert::From<T>`:
+               `ipc::error::IpcError` implements `std::convert::From<browser::security::BrowserError>`
+               `ipc::error::IpcError` implements `std::convert::From<cli_install::CliInstallError>`
+               `ipc::error::IpcError` implements `std::convert::From<native_terminal::error::NativeTerminalError>`
+               `ipc::error::IpcError` implements `std::convert::From<terminal::PtyError>`
+               `ipc::error::IpcError` implements `std::convert::From<terminal::service::PasteChunkError>`
+               `ipc::error::IpcError` implements `std::convert::From<worktree::changes::GitChangeError>`
+               `ipc::error::IpcError` implements `std::convert::From<worktree::model::WorktreeError>`
+
+error[E0277]: the trait bound `tauri::WebviewWindow: CommandArg<'_, R>` is not satisfied
+    --> src/ipc/layout.rs:108:1
+     |
+ 108 |   #[tauri::command]
+     |   ^^^^^^^^^^^^^^^^^ the trait `_::_serde::Deserialize<'_>` is not implemented for `tauri::WebviewWindow`
+     |
+    ::: src/lib.rs:1835:71
+     |
+1835 |       let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+     |  _______________________________________________________________________-
+1836 | |         deep_link::cmd_deep_link_take_pending,
+1837 | |         cmd_native_qa_enabled,
+1838 | |         cmd_shortcuts_set_native_table,
+...    |
+2103 | |         dag_discover_watch_roots,
+2104 | |     ]);
+     | |_____- in this macro invocation
+     |
+     = help: the following other types implement trait `_::_serde::Deserialize<'de>`:
+               `&'a [u8]` implements `_::_serde::Deserialize<'de>`
+               `&'a bstr::bstr::BStr` implements `_::_serde::Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `_::_serde::Deserialize<'de>`
+               `&'a std::path::Path` implements `_::_serde::Deserialize<'de>`
+               `&'a str` implements `_::_serde::Deserialize<'de>`
+               `&'p jsonptr::pointer::Pointer` implements `_::_serde::Deserialize<'de>`
+               `()` implements `_::_serde::Deserialize<'de>`
+               `(T,)` implements `_::_serde::Deserialize<'de>`
+             and 1590 others
+     = note: required for `tauri::WebviewWindow` to implement `CommandArg<'_, R>`
+     = note: the full name for the type has been written to '/Users/I552267/code/ferryx-wt/.target/debug/deps/ferryx_lib-149a09414a8f8fef.long-type-5918865132955245682.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+     = note: this error originates in the macro `ipc::layout::__cmd__cmd_layout_get` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `tauri::AppHandle: CommandArg<'_, R>` is not satisfied
+    --> src/ipc/layout.rs:129:1
+     |
+ 129 |   #[tauri::command]
+     |   ^^^^^^^^^^^^^^^^^ the trait `_::_serde::Deserialize<'_>` is not implemented for `tauri::AppHandle`
+     |
+    ::: src/lib.rs:1835:71
+     |
+1835 |       let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+     |  _______________________________________________________________________-
+1836 | |         deep_link::cmd_deep_link_take_pending,
+1837 | |         cmd_native_qa_enabled,
+1838 | |         cmd_shortcuts_set_native_table,
+...    |
+2103 | |         dag_discover_watch_roots,
+2104 | |     ]);
+     | |_____- in this macro invocation
+     |
+     = help: the following other types implement trait `_::_serde::Deserialize<'de>`:
+               `&'a [u8]` implements `_::_serde::Deserialize<'de>`
+               `&'a bstr::bstr::BStr` implements `_::_serde::Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `_::_serde::Deserialize<'de>`
+               `&'a std::path::Path` implements `_::_serde::Deserialize<'de>`
+               `&'a str` implements `_::_serde::Deserialize<'de>`
+               `&'p jsonptr::pointer::Pointer` implements `_::_serde::Deserialize<'de>`
+               `()` implements `_::_serde::Deserialize<'de>`
+               `(T,)` implements `_::_serde::Deserialize<'de>`
+             and 1590 others
+     = note: required for `tauri::AppHandle` to implement `CommandArg<'_, R>`
+     = note: the full name for the type has been written to '/Users/I552267/code/ferryx-wt/.target/debug/deps/ferryx_lib-149a09414a8f8fef.long-type-5918865132955245682.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+     = note: this error originates in the macro `ipc::layout::__cmd__cmd_layout_import` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `tauri::WebviewWindow: CommandArg<'_, R>` is not satisfied
+    --> src/ipc/layout.rs:129:1
+     |
+ 129 |   #[tauri::command]
+     |   ^^^^^^^^^^^^^^^^^ the trait `_::_serde::Deserialize<'_>` is not implemented for `tauri::WebviewWindow`
+     |
+    ::: src/lib.rs:1835:71
+     |
+1835 |       let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+     |  _______________________________________________________________________-
+1836 | |         deep_link::cmd_deep_link_take_pending,
+1837 | |         cmd_native_qa_enabled,
+1838 | |         cmd_shortcuts_set_native_table,
+...    |
+2103 | |         dag_discover_watch_roots,
+2104 | |     ]);
+     | |_____- in this macro invocation
+     |
+     = help: the following other types implement trait `_::_serde::Deserialize<'de>`:
+               `&'a [u8]` implements `_::_serde::Deserialize<'de>`
+               `&'a bstr::bstr::BStr` implements `_::_serde::Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `_::_serde::Deserialize<'de>`
+               `&'a std::path::Path` implements `_::_serde::Deserialize<'de>`
+               `&'a str` implements `_::_serde::Deserialize<'de>`
+               `&'p jsonptr::pointer::Pointer` implements `_::_serde::Deserialize<'de>`
+               `()` implements `_::_serde::Deserialize<'de>`
+               `(T,)` implements `_::_serde::Deserialize<'de>`
+             and 1590 others
+     = note: required for `tauri::WebviewWindow` to implement `CommandArg<'_, R>`
+     = note: the full name for the type has been written to '/Users/I552267/code/ferryx-wt/.target/debug/deps/ferryx_lib-149a09414a8f8fef.long-type-5918865132955245682.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+     = note: this error originates in the macro `ipc::layout::__cmd__cmd_layout_import` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `tauri::WebviewWindow: CommandArg<'_, R>` is not satisfied
+    --> src/ipc/layout.rs:62:1
+     |
+  62 |   #[tauri::command]
+     |   ^^^^^^^^^^^^^^^^^ the trait `_::_serde::Deserialize<'_>` is not implemented for `tauri::WebviewWindow`
+     |
+    ::: src/lib.rs:1835:71
+     |
+1835 |       let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+     |  _______________________________________________________________________-
+1836 | |         deep_link::cmd_deep_link_take_pending,
+1837 | |         cmd_native_qa_enabled,
+1838 | |         cmd_shortcuts_set_native_table,
+...    |
+2103 | |         dag_discover_watch_roots,
+2104 | |     ]);
+     | |_____- in this macro invocation
+     |
+     = help: the following other types implement trait `_::_serde::Deserialize<'de>`:
+               `&'a [u8]` implements `_::_serde::Deserialize<'de>`
+               `&'a bstr::bstr::BStr` implements `_::_serde::Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `_::_serde::Deserialize<'de>`
+               `&'a std::path::Path` implements `_::_serde::Deserialize<'de>`
+               `&'a str` implements `_::_serde::Deserialize<'de>`
+               `&'p jsonptr::pointer::Pointer` implements `_::_serde::Deserialize<'de>`
+               `()` implements `_::_serde::Deserialize<'de>`
+               `(T,)` implements `_::_serde::Deserialize<'de>`
+             and 1590 others
+     = note: required for `tauri::WebviewWindow` to implement `CommandArg<'_, R>`
+     = note: the full name for the type has been written to '/Users/I552267/code/ferryx-wt/.target/debug/deps/ferryx_lib-149a09414a8f8fef.long-type-5918865132955245682.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+     = note: this error originates in the macro `ipc::layout::__cmd__cmd_panes` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `tauri::WebviewWindow: CommandArg<'_, R>` is not satisfied
+    --> src/ipc/layout.rs:145:1
+     |
+ 145 |   #[tauri::command]
+     |   ^^^^^^^^^^^^^^^^^ the trait `_::_serde::Deserialize<'_>` is not implemented for `tauri::WebviewWindow`
+     |
+    ::: src/lib.rs:1835:71
+     |
+1835 |       let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+     |  _______________________________________________________________________-
+1836 | |         deep_link::cmd_deep_link_take_pending,
+1837 | |         cmd_native_qa_enabled,
+1838 | |         cmd_shortcuts_set_native_table,
+...    |
+2103 | |         dag_discover_watch_roots,
+2104 | |     ]);
+     | |_____- in this macro invocation
+     |
+     = help: the following other types implement trait `_::_serde::Deserialize<'de>`:
+               `&'a [u8]` implements `_::_serde::Deserialize<'de>`
+               `&'a bstr::bstr::BStr` implements `_::_serde::Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `_::_serde::Deserialize<'de>`
+               `&'a std::path::Path` implements `_::_serde::Deserialize<'de>`
+               `&'a str` implements `_::_serde::Deserialize<'de>`
+               `&'p jsonptr::pointer::Pointer` implements `_::_serde::Deserialize<'de>`
+               `()` implements `_::_serde::Deserialize<'de>`
+               `(T,)` implements `_::_serde::Deserialize<'de>`
+             and 1590 others
+     = note: required for `tauri::WebviewWindow` to implement `CommandArg<'_, R>`
+     = note: the full name for the type has been written to '/Users/I552267/code/ferryx-wt/.target/debug/deps/ferryx_lib-149a09414a8f8fef.long-type-5918865132955245682.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+     = note: this error originates in the macro `ipc::layout::__cmd__cmd_layout_apply` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+Some errors have detailed explanations: E0277, E0282, E0502.
+For more information about an error, try `rustc --explain E0277`.
+error: could not compile `ferryx` (lib) due to 7 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `ferryx` (lib test) due to 12 previous errors

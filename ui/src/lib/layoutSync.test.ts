@@ -16,7 +16,7 @@ function daemon(revision = 1): DaemonLayout {
 }
 function workspace(): WorkspaceState {
   return { workspaceId: "sync-test", activeWorktreePath: "/repo", worktrees: [],
-    sessions: { front: { id: "front", cwd: "/repo", workspaceId: "sync-test", backendSessionId: "backend", lifecycle: "working" } },
+    sessions: { front: { id: "front", cwd: "/repo", workspaceId: "sync-test", backendSessionId: "backend", lifecycle: "working", worktree: null } },
     layout: createLayoutState([{ id: "tab", label: "local", sessionId: "front" }]),
     worktreeLayouts: {}, unreadTabIds: {}, unreadWorktreePaths: {}, activityBySessionId: {} };
 }

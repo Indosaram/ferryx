@@ -1,0 +1,601 @@
+   Compiling ferryx v2026.1101.1 (/Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/src-tauri)
+    Checking image v0.25.10
+    Checking objc2-user-notifications v0.3.2
+    Checking objc2-web-kit v0.3.2
+    Checking dispatch2 v0.3.1
+    Checking x25519-dalek v2.0.1
+    Checking objc2-quartz-core v0.3.2
+    Checking objc2-app-kit v0.3.2
+    Checking tower-http v0.7.1
+    Checking objc2-core-graphics v0.3.2
+    Checking objc2-core-text v0.3.2
+    Checking cbc v0.1.2
+    Checking pbkdf2 v0.12.2
+    Checking md-5 v0.10.6
+    Checking rusty-fork v0.3.1
+    Checking tokio-test v0.4.5
+    Checking proptest v1.12.0
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+  --> src/config_import/mod.rs:65:3
+   |
+65 | #[tauri::command]
+   |   ^^^^^ use of unresolved module or unlinked crate `tauri`
+
+error[E0433]: failed to resolve: could not find `omo_client` in `meta`
+   --> src/hub_runtime/seed.rs:162:23
+    |
+162 |     ferryx_hub::meta::omo_client::workspace_root_from(configured_root, Some(home))
+    |                       ^^^^^^^^^^ could not find `omo_client` in `meta`
+    |
+note: found an item that was configured out
+   --> /Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/crates/ferryx-hub/src/meta/mod.rs:7:9
+    |
+  6 | #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
+    |          ------------------------------------------------ the item is gated here
+  7 | pub mod omo_client;
+    |         ^^^^^^^^^^
+
+warning: unused import: `crate::browser::security::BrowserError`
+  --> src/browser/bridge/mod.rs:66:5
+   |
+66 | use crate::browser::security::BrowserError;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Entry`, `Message`, and `Page`
+ --> src/ipc/agent_history.rs:1:37
+  |
+1 | use crate::agent_history::history::{Entry, History, HistoryError, Message, Page};
+  |                                     ^^^^^                         ^^^^^^^  ^^^^
+
+warning: unused import: `run_blocking`
+ --> src/ipc/agent_history.rs:2:18
+  |
+2 | use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+  |                  ^^^^^^^^^^^^
+
+warning: unused imports: `BrowserDialogHandleRequest`, `BrowserDownloadRequest`, `BrowserManager`, `BrowserSessionCreatedPayload`, and `CreateBrowserRequest`
+ --> src/ipc/browser_cli.rs:3:5
+  |
+3 |     BrowserDialogHandleRequest, BrowserDownloadRequest, BrowserError, BrowserManager,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^                ^^^^^^^^^^^^^^
+4 |     BrowserSessionCreatedPayload, BrowserSessionSummary, BrowserWaitCondition,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+5 |     CreateBrowserRequest,
+  |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+  --> src/ipc/browser_cli.rs:20:5
+   |
+20 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused imports: `IpcError` and `run_blocking`
+ --> src/ipc/cli_install.rs:5:18
+  |
+5 | use crate::ipc::{run_blocking, IpcError};
+  |                  ^^^^^^^^^^^^  ^^^^^^^^
+
+warning: unused import: `run_blocking`
+ --> src/ipc/debug.rs:1:18
+  |
+1 | use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+  |                  ^^^^^^^^^^^^
+
+warning: unused imports: `HostView`, `InventoryChangeEvent`, `MigrationReceipt`, `MigrationRequest`, `PairRequest`, and `RedeemGrantRequest`
+ --> src/ipc/paired_host.rs:5:21
+  |
+5 |         inventory::{HostView, MigrationReceipt},
+  |                     ^^^^^^^^  ^^^^^^^^^^^^^^^^
+6 |         service::{InventoryChangeEvent, MigrationRequest, PairRequest, RedeemGrantRequest, Result},
+  |                   ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> src/ipc/paired_host.rs:9:5
+  |
+9 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `crate::daemon::DaemonClient`
+ --> src/ipc/project.rs:1:5
+  |
+1 | use crate::daemon::DaemonClient;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `run_blocking`
+ --> src/ipc/project.rs:2:18
+  |
+2 | use crate::ipc::{run_blocking, IpcError};
+  |                  ^^^^^^^^^^^^
+
+warning: unused import: `run_git`
+ --> src/ipc/project.rs:3:23
+  |
+3 | use crate::worktree::{run_git, WorkspaceRegistry, WorktreeError, WorktreeManager};
+  |                       ^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> src/ipc/project.rs:6:5
+  |
+6 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `RemoteActiveDesktopSelection`
+ --> src/ipc/remote.rs:6:5
+  |
+6 |     RemoteActiveDesktopSelection, RemoteSessionAttention, RemoteTerminalTabInfo,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `REMOTE_GATEWAY_PORT` and `RemoteGatewayConfig`
+  --> src/ipc/remote.rs:11:5
+   |
+11 |     RemoteGatewayConfig, RemoteGatewayState, RemoteNetworkMode, RemoteRestartPolicy,
+   |     ^^^^^^^^^^^^^^^^^^^
+12 |     REMOTE_GATEWAY_PORT,
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `run_blocking`
+ --> src/ipc/remote_file.rs:1:18
+  |
+1 | use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+  |                  ^^^^^^^^^^^^
+
+warning: unused import: `DaemonAttachment`
+ --> src/ipc/terminal.rs:2:29
+  |
+2 | use crate::daemon::client::{DaemonAttachment, DaemonClient};
+  |                             ^^^^^^^^^^^^^^^^
+
+warning: unused import: `DaemonStreamMessage`
+ --> src/ipc/terminal.rs:3:31
+  |
+3 | use crate::daemon::protocol::{DaemonStreamMessage, TerminalStartup};
+  |                               ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `run_blocking`
+ --> src/ipc/terminal.rs:4:18
+  |
+4 | use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+  |                  ^^^^^^^^^^^^
+
+warning: unused import: `WorkspaceRegistry`
+ --> src/ipc/terminal.rs:6:23
+  |
+6 | use crate::worktree::{WorkspaceRegistry, WorktreeError, WorktreeIdentity};
+  |                       ^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Engine as _` and `engine::general_purpose::STANDARD`
+ --> src/ipc/terminal.rs:7:14
+  |
+7 | use base64::{engine::general_purpose::STANDARD, Engine as _};
+  |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^
+
+warning: unused imports: `DaemonClient` and `DaemonRequest`
+ --> src/ipc/worktree.rs:2:16
+  |
+2 |     protocol::{DaemonRequest, DaemonResponse},
+  |                ^^^^^^^^^^^^^
+3 |     DaemonClient,
+  |     ^^^^^^^^^^^^
+
+warning: unused import: `run_blocking`
+ --> src/ipc/worktree.rs:5:18
+  |
+5 | use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+  |                  ^^^^^^^^^^^^
+
+warning: unused imports: `BranchDeletionPreview`, `DirtyState`, `ExternalWorktree`, and `Worktree`
+  --> src/ipc/worktree.rs:12:5
+   |
+12 |     BranchDeletionPreview, DirtyState, ExternalWorktree, WorkspaceRegistry, Worktree,
+   |     ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^  ^^^^^^^^^^^^^^^^                     ^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+  --> src/ipc/worktree.rs:16:5
+   |
+16 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `crate::ipc::run_blocking`
+  --> src/worktree/rescan.rs:20:5
+   |
+20 | use crate::ipc::run_blocking;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+  --> src/worktree/rescan.rs:30:5
+   |
+30 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+error[E0432]: unresolved import `crate::native_terminal::surface_host`
+  --> src/ipc/agents_reset_event_tests.rs:8:29
+   |
+ 8 | use crate::native_terminal::surface_host::{
+   |                             ^^^^^^^^^^^^ could not find `surface_host` in `native_terminal`
+   |
+note: found an item that was configured out
+  --> src/native_terminal/mod.rs:52:9
+   |
+51 | #[cfg(feature = "native-terminal")]
+   |       --------------------------- the item is gated behind the `native-terminal` feature
+52 | pub mod surface_host;
+   |         ^^^^^^^^^^^^
+
+error[E0432]: unresolved import `crate::ipc::browser`
+  --> src/browser/tests.rs:2:17
+   |
+ 2 | use crate::ipc::browser::cmd_browser_set_bounds;
+   |                 ^^^^^^^ could not find `browser` in `ipc`
+   |
+note: found an item that was configured out
+  --> src/ipc/mod.rs:18:9
+   |
+17 | #[cfg(feature = "desktop")]
+   |       ------------------- the item is gated behind the `desktop` feature
+18 | pub mod browser;
+   |         ^^^^^^^
+
+error[E0432]: unresolved import `tauri`
+ --> src/browser/tests.rs:4:5
+  |
+4 | use tauri::Manager;
+  |     ^^^^^ use of unresolved module or unlinked crate `tauri`
+  |
+  = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `crate::ipc::project_remote`
+  --> src/daemon/remote_ssh_tests.rs:4:17
+   |
+ 4 | use crate::ipc::project_remote::{register_remote_project, RegisterRemoteProjectRequest};
+   |                 ^^^^^^^^^^^^^^ could not find `project_remote` in `ipc`
+   |
+note: found an item that was configured out
+  --> src/ipc/mod.rs:61:9
+   |
+60 | #[cfg(feature = "desktop")]
+   |       ------------------- the item is gated behind the `desktop` feature
+61 | pub mod project_remote;
+   |         ^^^^^^^^^^^^^^
+
+error[E0432]: unresolved import `crate::ipc::cmd_agent_state_reset`
+  --> src/ipc/agents_reset_event_tests.rs:7:18
+   |
+ 7 | use crate::ipc::{cmd_agent_state_reset, run_blocking, IpcErrorCode};
+   |                  ^^^^^^^^^^^^^^^^^^^^^ no `cmd_agent_state_reset` in `ipc`
+   |
+note: found an item that was configured out
+  --> src/ipc/agents.rs:43:14
+   |
+41 | #[cfg(feature = "desktop")]
+   |       ------------------- the item is gated behind the `desktop` feature
+42 | #[tauri::command]
+43 | pub async fn cmd_agent_state_reset<R: tauri::Runtime>(
+   |              ^^^^^^^^^^^^^^^^^^^^^
+
+error[E0432]: unresolved import `tauri`
+  --> src/ipc/agents_reset_event_tests.rs:12:5
+   |
+12 | use tauri::{Listener, Manager};
+   |     ^^^^^ use of unresolved module or unlinked crate `tauri`
+   |
+   = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `tauri`
+    --> src/ipc/browser_cli.rs:6072:13
+     |
+6072 |         use tauri::Manager;
+     |             ^^^^^ use of unresolved module or unlinked crate `tauri`
+     |
+     = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `crate::ipc::worktree_disk`
+   --> src/ipc/worktree.rs:702:21
+    |
+702 |     use crate::ipc::worktree_disk::WorktreeDiskScans;
+    |                     ^^^^^^^^^^^^^ could not find `worktree_disk` in `ipc`
+    |
+note: found an item that was configured out
+   --> src/ipc/mod.rs:90:9
+    |
+ 89 | #[cfg(feature = "desktop")]
+    |       ------------------- the item is gated behind the `desktop` feature
+ 90 | pub mod worktree_disk;
+    |         ^^^^^^^^^^^^^
+
+error[E0432]: unresolved import `tauri`
+   --> src/ipc/worktree.rs:704:9
+    |
+704 |     use tauri::{Listener, Manager};
+    |         ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `super::worktree_disk`
+ --> src/ipc/worktree_disk_tests.rs:1:12
+  |
+1 | use super::worktree_disk::*;
+  |            ^^^^^^^^^^^^^ could not find `worktree_disk` in `super`
+
+error[E0432]: unresolved import `crate::WorkspaceRegistry`
+  --> src/remote/browser_lifecycle_tests.rs:17:5
+   |
+17 | use crate::WorkspaceRegistry;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^ no `WorkspaceRegistry` in the root
+   |
+note: found an item that was configured out
+  --> src/lib.rs:79:15
+   |
+78 | #[cfg(feature = "desktop")]
+   |       ------------------- the item is gated behind the `desktop` feature
+79 | use worktree::WorkspaceRegistry;
+   |               ^^^^^^^^^^^^^^^^^
+help: consider importing this struct through its public re-export instead
+   |
+17 | use crate::worktree::WorkspaceRegistry;
+   |            ++++++++++
+
+error[E0432]: unresolved import `tauri`
+    --> src/ipc/browser_cli.rs:4139:13
+     |
+4139 |         use tauri::Listener;
+     |             ^^^^^ use of unresolved module or unlinked crate `tauri`
+     |
+     = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `tauri`
+    --> src/ipc/browser_cli.rs:5546:13
+     |
+5546 |         use tauri::Manager;
+     |             ^^^^^ use of unresolved module or unlinked crate `tauri`
+     |
+     = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `tauri`
+    --> src/ipc/browser_cli.rs:5592:13
+     |
+5592 |         use tauri::Manager;
+     |             ^^^^^ use of unresolved module or unlinked crate `tauri`
+     |
+     = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `tauri`
+    --> src/ipc/browser_cli.rs:5661:13
+     |
+5661 |         use tauri::Manager;
+     |             ^^^^^ use of unresolved module or unlinked crate `tauri`
+     |
+     = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `tauri`
+    --> src/ipc/browser_cli.rs:5743:13
+     |
+5743 |         use tauri::Manager;
+     |             ^^^^^ use of unresolved module or unlinked crate `tauri`
+     |
+     = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `tauri`
+    --> src/ipc/browser_cli.rs:6215:13
+     |
+6215 |         use tauri::Listener;
+     |             ^^^^^ use of unresolved module or unlinked crate `tauri`
+     |
+     = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `crate::ipc::browser`
+   --> src/ipc/file_link_tests.rs:448:21
+    |
+448 |     use crate::ipc::browser::open_file_path_request;
+    |                     ^^^^^^^ could not find `browser` in `ipc`
+    |
+note: found an item that was configured out
+   --> src/ipc/mod.rs:18:9
+    |
+ 17 | #[cfg(feature = "desktop")]
+    |       ------------------- the item is gated behind the `desktop` feature
+ 18 | pub mod browser;
+    |         ^^^^^^^
+
+error[E0432]: unresolved import `crate::ipc::browser`
+   --> src/ipc/file_link_tests.rs:512:21
+    |
+512 |     use crate::ipc::browser::open_file_path_request;
+    |                     ^^^^^^^ could not find `browser` in `ipc`
+    |
+note: found an item that was configured out
+   --> src/ipc/mod.rs:18:9
+    |
+ 17 | #[cfg(feature = "desktop")]
+    |       ------------------- the item is gated behind the `desktop` feature
+ 18 | pub mod browser;
+    |         ^^^^^^^
+
+error[E0432]: unresolved imports `crate::ipc::cmd_terminal_close`, `crate::ipc::cmd_terminal_spawn`
+    --> src/ipc/file_link_tests.rs:513:22
+     |
+ 513 |     use crate::ipc::{cmd_terminal_close, cmd_terminal_spawn, SpawnTerminalRequest};
+     |                      ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^ no `cmd_terminal_spawn` in `ipc`
+     |                      |
+     |                      no `cmd_terminal_close` in `ipc`
+     |
+note: found an item that was configured out
+    --> src/ipc/terminal.rs:5610:14
+     |
+5608 | #[cfg(feature = "desktop")]
+     |       ------------------- the item is gated behind the `desktop` feature
+5609 | #[tauri::command]
+5610 | pub async fn cmd_terminal_close(
+     |              ^^^^^^^^^^^^^^^^^^
+note: found an item that was configured out
+    --> src/ipc/terminal.rs:4238:14
+     |
+4236 | #[cfg(feature = "desktop")]
+     |       ------------------- the item is gated behind the `desktop` feature
+4237 | #[tauri::command]
+4238 | pub async fn cmd_terminal_spawn<R: Runtime>(
+     |              ^^^^^^^^^^^^^^^^^^
+
+error[E0432]: unresolved import `tauri`
+   --> src/ipc/file_link_tests.rs:516:9
+    |
+516 |     use tauri::Manager;
+    |         ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `tauri`
+    --> src/ipc/terminal.rs:5779:13
+     |
+5779 |         use tauri::Manager;
+     |             ^^^^^ use of unresolved module or unlinked crate `tauri`
+     |
+     = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `tauri`
+    --> src/ipc/terminal.rs:6023:13
+     |
+6023 |         use tauri::Manager;
+     |             ^^^^^ use of unresolved module or unlinked crate `tauri`
+     |
+     = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `tauri`
+    --> src/ipc/terminal.rs:6239:13
+     |
+6239 |         use tauri::Listener;
+     |             ^^^^^ use of unresolved module or unlinked crate `tauri`
+     |
+     = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `tauri`
+    --> src/ipc/terminal.rs:6295:13
+     |
+6295 |         use tauri::Manager;
+     |             ^^^^^ use of unresolved module or unlinked crate `tauri`
+     |
+     = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `tauri`
+    --> src/remote/tests.rs:1255:9
+     |
+1255 |     use tauri::Manager;
+     |         ^^^^^ use of unresolved module or unlinked crate `tauri`
+     |
+     = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `tauri`
+  --> src/remote/browser_lifecycle_tests.rs:47:9
+   |
+47 |     use tauri::Manager;
+   |         ^^^^^ use of unresolved module or unlinked crate `tauri`
+   |
+   = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `tauri`
+   --> src/remote/browser_lifecycle_tests.rs:641:9
+    |
+641 |     use tauri::Manager;
+    |         ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `tauri`
+   --> src/remote/browser_lifecycle_tests.rs:731:9
+    |
+731 |     use tauri::Listener;
+    |         ^^^^^ use of unresolved module or unlinked crate `tauri`
+    |
+    = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `tauri`
+ --> src/ipc/worktree_disk_tests.rs:5:5
+  |
+5 | use tauri::{Listener, Manager};
+  |     ^^^^^ use of unresolved module or unlinked crate `tauri`
+  |
+  = help: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tauri`
+  --> src/ipc/worktree_disk_tests.rs:20:25
+   |
+20 |         .invoke_handler(tauri::generate_handler![
+   |                         ^^^^^ use of unresolved module or unlinked crate `tauri`
+
+warning: unused import: `Entry`
+ --> src/ipc/agent_history.rs:1:37
+  |
+1 | use crate::agent_history::history::{Entry, History, HistoryError, Message, Page};
+  |                                     ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `BrowserDialogHandleRequest`, `BrowserDownloadRequest`, `BrowserSessionCreatedPayload`, and `CreateBrowserRequest`
+ --> src/ipc/browser_cli.rs:3:5
+  |
+3 |     BrowserDialogHandleRequest, BrowserDownloadRequest, BrowserError, BrowserManager,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+4 |     BrowserSessionCreatedPayload, BrowserSessionSummary, BrowserWaitCondition,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+5 |     CreateBrowserRequest,
+  |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `run_blocking`
+ --> src/ipc/cli_install.rs:5:18
+  |
+5 | use crate::ipc::{run_blocking, IpcError};
+  |                  ^^^^^^^^^^^^
+
+warning: unused import: `DaemonRequest`
+ --> src/ipc/worktree.rs:2:16
+  |
+2 |     protocol::{DaemonRequest, DaemonResponse},
+  |                ^^^^^^^^^^^^^
+
+warning: unused imports: `BranchDeletionPreview`, `DirtyState`, and `ExternalWorktree`
+  --> src/ipc/worktree.rs:12:5
+   |
+12 |     BranchDeletionPreview, DirtyState, ExternalWorktree, WorkspaceRegistry, Worktree,
+   |     ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+    --> src/lib.rs:3203:9
+     |
+3203 |     use super::*;
+     |         ^^^^^^^^
+
+Some errors have detailed explanations: E0432, E0433.
+For more information about an error, try `rustc --explain E0432`.
+warning: `ferryx` (lib test) generated 20 warnings (14 duplicates)
+error: could not compile `ferryx` (lib test) due to 32 previous errors; 20 warnings emitted
+warning: build failed, waiting for other jobs to finish...
+error[E0282]: type annotations needed for `std::result::Result<serde_json::Value, _>`
+   --> src/script/mod.rs:111:21
+    |
+111 |                 let result = (|| {
+    |                     ^^^^^^
+...
+137 |                     let message = error.clone();
+    |                                   ----- type must be known at this point
+    |
+help: consider giving `result` an explicit type, where the placeholders `_` are specified
+    |
+111 |                 let result: std::result::Result<_, E> = (|| {
+    |                           +++++++++++++++++++++++++++
+
+error[E0502]: cannot borrow `next` as immutable because it is also borrowed as mutable
+   --> src/daemon/pane_grants.rs:264:21
+    |
+262 |         match next.iter_mut().find(|known| known.from == grant.from && known.to == grant.to) {
+    |               ---- mutable borrow occurs here
+263 |             Some(known) => known.ops.extend(grant.ops),
+264 |             None if next.len() >= MAX_GRANTS => return Err(format!("at most {MAX_GRANTS} pane grants are kept")),
+    |                     ^^^^                   - mutable borrow later used here
+    |                     |
+    |                     immutable borrow occurs here
+
+Some errors have detailed explanations: E0282, E0433, E0502.
+For more information about an error, try `rustc --explain E0282`.
+warning: `ferryx` (lib) generated 27 warnings
+error: could not compile `ferryx` (lib) due to 4 previous errors; 27 warnings emitted

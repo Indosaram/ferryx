@@ -93,6 +93,7 @@ async fn input_is_cancelled_when_full_queue_precedes_close() {
     scenario(Cancellation::SaturatedQueue).await;
 }
 
+#[cfg(feature = "desktop")]
 pub(crate) async fn disconnect_and_revoke() {
     scenario(Cancellation::Disconnect).await;
     scenario(Cancellation::Revoke).await;

@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 #[cfg(feature = "desktop")]
 use tauri::Manager;
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "native-terminal"))]
 #[path = "agents_reset_event_tests.rs"]
 mod reset_event_tests;
 

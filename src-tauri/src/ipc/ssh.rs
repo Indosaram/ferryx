@@ -1,8 +1,14 @@
-use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+use crate::ipc::{IpcError, IpcErrorCode};
+#[cfg(any(feature = "desktop", test))]
+use crate::ipc::{run_blocking};
+#[cfg(any(feature = "desktop", test))]
 use crate::ssh::config::parse_ssh_config;
 use crate::ssh::SshHost;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
+#[cfg(any(feature = "desktop", test))]
+use std::path::{Path};
+#[cfg(any(feature = "desktop", test))]
 use std::sync::Mutex;
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Manager, Runtime};
@@ -14,11 +20,13 @@ use tauri::{AppHandle, Manager, Runtime};
 /// snapshot and the second `save_store` would silently discard the first
 /// command's change. The store is a single process-wide file, so one global
 /// lock is the whole fix.
+#[cfg(any(feature = "desktop", test))]
 static SSH_STORE_LOCK: Mutex<()> = Mutex::new(());
 // Credential mutations and probes must not race a replacement password in the
 // other process. This lock spans the GUI/daemon transaction, not network I/O on
 // the credential store's synchronous mutex.
 static SSH_CREDENTIAL_TRANSACTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+#[cfg(feature = "desktop")]
 static SSH_TAILSCALE_SYNC: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Acquires the store lock, recovering from a poisoned mutex.
@@ -26,6 +34,7 @@ static SSH_TAILSCALE_SYNC: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_ne
 /// A panic in one command must not permanently disable SSH host editing: the
 /// guarded data lives on disk, not in the mutex, so the poison flag carries no
 /// corrupted in-memory state to protect.
+#[cfg(any(feature = "desktop", test))]
 fn lock_ssh_store() -> std::sync::MutexGuard<'static, ()> {
     SSH_STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -222,6 +231,7 @@ pub fn system_ssh_config_path<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf>
     resolve_home_dir(app).map(|home| home.join(".ssh").join("config"))
 }
 
+#[cfg(any(feature = "desktop", test))]
 pub(crate) fn expand_tilde_path(raw: &str, home: Option<&Path>) -> PathBuf {
     if raw == "~" {
         home.map(Path::to_path_buf)
@@ -244,6 +254,7 @@ pub(crate) fn expand_tilde_path(raw: &str, home: Option<&Path>) -> PathBuf {
     }
 }
 
+#[cfg(any(feature = "desktop", test))]
 fn read_ssh_config_file(path: &Path) -> Result<SystemSshConfigResult, IpcError> {
     let path_str = path.to_string_lossy().into_owned();
     if !path.is_file() {
@@ -300,6 +311,7 @@ pub async fn cmd_ssh_read_system_config<R: Runtime>(
     .await
 }
 
+#[cfg(any(feature = "desktop", test))]
 fn load_store(path: &PathBuf) -> Result<SshHostStore, IpcError> {
     match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
@@ -316,6 +328,7 @@ fn load_store(path: &PathBuf) -> Result<SshHostStore, IpcError> {
     }
 }
 
+#[cfg(any(feature = "desktop", test))]
 fn save_store(path: &PathBuf, store: &SshHostStore) -> Result<(), IpcError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -378,6 +391,7 @@ pub async fn cmd_ssh_import_config<R: Runtime>(
     run_blocking(move || import_config_into_store(&path, &config_text)).await
 }
 
+#[cfg(any(feature = "desktop", test))]
 fn import_config_into_store(path: &PathBuf, config_text: &str) -> Result<Vec<SshHost>, IpcError> {
     let _guard = lock_ssh_store();
     let mut store = load_store(path)?;
@@ -550,6 +564,7 @@ pub async fn cmd_ssh_clear_password(
     clear_password_in_daemon(&daemon_client, host).await
 }
 
+#[cfg(feature = "desktop")]
 async fn clear_password_in_daemon(
     daemon_client: &crate::daemon::client::DaemonClient,
     host: SshHost,
@@ -620,13 +635,19 @@ pub async fn cmd_ssh_remove_integration<R: Runtime>(
 }
 
 /// Wire code for every failure after the SSH install of a Ferryx node has started.
+#[cfg(any(feature = "desktop", test))]
 pub(crate) const SSH_NODE_INSTALL_FAILED: &str = "SSH_NODE_INSTALL_FAILED";
+#[cfg(feature = "desktop")]
 const NODE_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+#[cfg(any(feature = "desktop", test))]
 const NODE_INSTALL_STDERR_TAIL_BYTES: usize = 2000;
 /// Remote exit status the install command uses when install.sh could not be downloaded.
+#[cfg(any(feature = "desktop", test))]
 const NODE_INSTALL_DOWNLOAD_EXIT: i64 = 97;
 /// ssh(1) exits 255 when the connection itself failed.
+#[cfg(any(feature = "desktop", test))]
 const SSH_TRANSPORT_EXIT: i64 = 255;
+#[cfg(any(feature = "desktop", test))]
 const NODE_INSTALL_KEY_REDACTION: &str = "[REDACTED]";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -656,6 +677,7 @@ pub struct SshNodeInstallReport {
     pub service: SshNodeService,
 }
 
+#[cfg(any(feature = "desktop", test))]
 fn node_install_error(stage: &str, exit_code: Option<i64>, stderr_tail: String) -> IpcError {
     IpcError::new(
         IpcErrorCode::Custom(SSH_NODE_INSTALL_FAILED.to_string()),
@@ -669,6 +691,7 @@ fn node_install_error(stage: &str, exit_code: Option<i64>, stderr_tail: String) 
 }
 
 /// Accepts an https origin, or http only for a loopback host. Returns it without a trailing slash.
+#[cfg(any(feature = "desktop", test))]
 pub(crate) fn validate_install_origin(origin: &str) -> Result<String, IpcError> {
     let invalid = |reason: &str| {
         IpcError::new(
@@ -700,6 +723,7 @@ pub(crate) fn validate_install_origin(origin: &str) -> Result<String, IpcError> 
 }
 
 /// The ssh stdin payload: the install key followed by one newline. The key never enters argv.
+#[cfg(any(feature = "desktop", test))]
 pub(crate) fn node_install_stdin(install_key: &str) -> Result<Vec<u8>, IpcError> {
     if install_key.is_empty() || install_key.chars().any(char::is_control) {
         return Err(IpcError::new(
@@ -717,6 +741,7 @@ pub(crate) fn node_install_stdin(install_key: &str) -> Result<Vec<u8>, IpcError>
 /// Remote POSIX command for a validated origin. install.sh is downloaded to a temp file (curl,
 /// else wget) rather than piped into `sh -s`: a piped script would occupy sh's stdin, and
 /// `--key-stdin` must read the key line from the ssh stdin instead.
+#[cfg(any(feature = "desktop", test))]
 pub(crate) fn node_install_command(origin: &str) -> String {
     let script_url = crate::ssh::direct::quote_posix(&format!("{origin}/install.sh"));
     let origin = crate::ssh::direct::quote_posix(origin);
@@ -732,6 +757,7 @@ pub(crate) fn node_install_command(origin: &str) -> String {
 }
 
 /// Redacts the key, then keeps the last [`NODE_INSTALL_STDERR_TAIL_BYTES`] bytes on a char boundary.
+#[cfg(any(feature = "desktop", test))]
 pub(crate) fn node_install_stderr_tail(stderr: &str, install_key: &str) -> String {
     let redacted = if install_key.is_empty() {
         stderr.to_string()
@@ -746,6 +772,7 @@ pub(crate) fn node_install_stderr_tail(stderr: &str, install_key: &str) -> Strin
 }
 
 /// Maps a structured `bounded_output_with_stdin` error to `SSH_NODE_INSTALL_FAILED`.
+#[cfg(any(feature = "desktop", test))]
 pub(crate) fn node_install_failure(error: IpcError, install_key: &str) -> IpcError {
     let details = error.details.as_ref();
     let exit_code = details
@@ -768,6 +795,7 @@ pub(crate) fn node_install_failure(error: IpcError, install_key: &str) -> IpcErr
 }
 
 /// Parses the last stdout line that is a JSON object into the report.
+#[cfg(any(feature = "desktop", test))]
 pub(crate) fn parse_node_install_report(stdout: &[u8]) -> Result<SshNodeInstallReport, IpcError> {
     let text = std::str::from_utf8(stdout)
         .map_err(|_| node_install_error("parse", Some(0), String::new()))?;
@@ -1016,11 +1044,13 @@ pub async fn cmd_ssh_sync_tailscale<R: Runtime>(app: AppHandle<R>) -> Result<Ssh
     }
 }
 
+#[cfg(feature = "desktop")]
 async fn sync_tailscale_peers(path: PathBuf, peers: Vec<crate::remote::discovery::tailscale::TailscaleSshPeer>) -> Result<SshTailscaleSyncResult, IpcError> {
     let config_hosts = run_blocking(|| Ok(system_ssh_config_for_sync())).await?;
     sync_tailscale_peers_with(path, peers, config_hosts, sync_tailscale_target).await
 }
 
+#[cfg(any(feature = "desktop", test))]
 async fn sync_tailscale_peers_with<F, Fut>(path: PathBuf, peers: Vec<crate::remote::discovery::tailscale::TailscaleSshPeer>, config_hosts: Vec<SshHost>, provision: F) -> Result<SshTailscaleSyncResult, IpcError>
 where
     F: Fn(SshHost, Option<String>) -> Fut + Clone,
@@ -1069,6 +1099,7 @@ where
     Ok(SshTailscaleSyncResult { hosts, targets, discovery_error: None })
 }
 
+#[cfg(feature = "desktop")]
 fn system_ssh_config_for_sync() -> Vec<SshHost> {
     let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else { return Vec::new(); };
     let path = PathBuf::from(home).join(".ssh/config");
@@ -1077,6 +1108,7 @@ fn system_ssh_config_for_sync() -> Vec<SshHost> {
         .unwrap_or_default()
 }
 
+#[cfg(feature = "desktop")]
 async fn sync_tailscale_target(host: SshHost, os: Option<String>) -> Result<SshTargetSummary, IpcError> {
     let platform = match os.as_deref().map(str::to_ascii_lowercase).as_deref() {
         Some("windows") => Some(crate::ssh::runtime::RemotePlatform::Windows),
@@ -1094,6 +1126,7 @@ async fn sync_tailscale_target(host: SshHost, os: Option<String>) -> Result<SshT
         }).await
 }
 
+#[cfg(any(feature = "desktop", test))]
 async fn sync_tailscale_target_with<D, DFut, P, PFut>(
     host: SshHost,
     detect: D,
@@ -1118,6 +1151,7 @@ where
     Ok(SshTargetSummary { host, reachable: true, last_error: None, environment: Some(environment), helper, diagnostic: None, checked_at: now_millis() })
 }
 
+#[cfg(any(feature = "desktop", test))]
 fn merge_tailscale_peers(store: &mut SshHostStore, peers: &[crate::remote::discovery::tailscale::TailscaleSshPeer], config_hosts: &[SshHost]) {
     for peer in peers {
         let id = format!("tailscale:{}", peer.node_id);
@@ -1149,6 +1183,7 @@ fn merge_tailscale_peers(store: &mut SshHostStore, peers: &[crate::remote::disco
     }
 }
 
+#[cfg(any(feature = "desktop", test))]
 fn tailnet_host_matches(host: &SshHost, peer: &crate::remote::discovery::tailscale::TailscaleSshPeer) -> bool {
     let direct = [Some(peer.ipv4.as_str()), Some(peer.hostname.as_str()), peer.dns_name.as_deref()];
     if direct.iter().flatten().any(|name| host.hostname.eq_ignore_ascii_case(name)) { return true; }

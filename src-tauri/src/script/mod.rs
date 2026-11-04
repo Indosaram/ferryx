@@ -108,7 +108,7 @@ fn worker(registry: Registry, host: &tokio::runtime::Handle, receive: mpsc::Rece
         match receive.recv_timeout(wait) {
             Ok(Request::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
             Ok(Request::Control(action, reply)) => {
-                let result = (|| {
+                let result: Result<serde_json::Value, String> = (|| {
                     match action {
                         control::Action::SetEnabled { enabled } => {
                             blocking(host, move || control::set_enabled(enabled))?;

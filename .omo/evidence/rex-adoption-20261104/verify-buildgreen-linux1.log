@@ -1,0 +1,103 @@
+compile	UI and SDK	﻿2026-11-04T19:43:41.2871780Z ##[group]Run set -o pipefail
+compile	UI and SDK	2026-11-04T19:43:41.2872208Z [36;1mset -o pipefail[0m
+compile	UI and SDK	2026-11-04T19:43:41.2872659Z [36;1mbun install --cwd ui 2>&1 | tee /tmp/buildgreen-logs/ui-install.log[0m
+compile	UI and SDK	2026-11-04T19:43:41.2873227Z [36;1mbun run --cwd ui build 2>&1 | tee /tmp/buildgreen-logs/ui-build.log[0m
+compile	UI and SDK	2026-11-04T19:43:41.2873835Z [36;1mbun run --cwd ui typecheck:test 2>&1 | tee /tmp/buildgreen-logs/ui-typecheck.log[0m
+compile	UI and SDK	2026-11-04T19:43:41.2874569Z [36;1mbun scripts/fetch-ffmpeg.mjs 2>&1 | tee /tmp/buildgreen-logs/ffmpeg.log[0m
+compile	UI and SDK	2026-11-04T19:43:41.2889715Z shell: /usr/bin/bash -e {0}
+compile	UI and SDK	2026-11-04T19:43:41.2889997Z env:
+compile	UI and SDK	2026-11-04T19:43:41.2890218Z   CARGO_INCREMENTAL: 0
+compile	UI and SDK	2026-11-04T19:43:41.2890450Z   CARGO_PROFILE_DEV_DEBUG: 0
+compile	UI and SDK	2026-11-04T19:43:41.2890849Z   CARGO_PROFILE_TEST_DEBUG: 0
+compile	UI and SDK	2026-11-04T19:43:41.2891099Z   CARGO_BUILD_JOBS: 2
+compile	UI and SDK	2026-11-04T19:43:41.2891329Z   CMAKE_POLICY_VERSION_MINIMUM: 3.5
+compile	UI and SDK	2026-11-04T19:43:41.2891672Z   ZIG_GLOBAL_CACHE_DIR: /home/runner/work/ferryx/ferryx/.zig-cache
+compile	UI and SDK	2026-11-04T19:43:41.2892129Z   ZIG_LOCAL_CACHE_DIR: /home/runner/work/ferryx/ferryx/.zig-cache
+compile	UI and SDK	2026-11-04T19:43:41.2892607Z   CARGO_HOME: /home/runner/.cargo
+compile	UI and SDK	2026-11-04T19:43:41.2892865Z   CARGO_TERM_COLOR: always
+compile	UI and SDK	2026-11-04T19:43:41.2893104Z ##[endgroup]
+compile	UI and SDK	2026-11-04T19:43:41.2972282Z bun install v1.4.4 (38afee6c8)
+compile	UI and SDK	2026-11-04T19:43:42.9778389Z 
+compile	UI and SDK	2026-11-04T19:43:42.9779108Z + @testing-library/jest-dom@6.10.0
+compile	UI and SDK	2026-11-04T19:43:42.9779551Z + @testing-library/react@16.3.3
+compile	UI and SDK	2026-11-04T19:43:42.9780024Z + @types/jsdom@21.1.7
+compile	UI and SDK	2026-11-04T19:43:42.9780415Z + @types/node@22.20.1
+compile	UI and SDK	2026-11-04T19:43:42.9780914Z + @types/qrcode@1.5.6
+compile	UI and SDK	2026-11-04T19:43:42.9781195Z + @types/react@18.3.31
+compile	UI and SDK	2026-11-04T19:43:42.9781579Z + @types/react-dom@18.3.7
+compile	UI and SDK	2026-11-04T19:43:42.9781987Z + @vitejs/plugin-react@4.7.0
+compile	UI and SDK	2026-11-04T19:43:42.9782390Z + @vitest/coverage-v8@4.1.12
+compile	UI and SDK	2026-11-04T19:43:42.9782773Z + autoprefixer@10.5.5
+compile	UI and SDK	2026-11-04T19:43:42.9783123Z + axe-core@4.14.0
+compile	UI and SDK	2026-11-04T19:43:42.9783462Z + bun-types@1.4.2
+compile	UI and SDK	2026-11-04T19:43:42.9783788Z + eslint@10.11.0
+compile	UI and SDK	2026-11-04T19:43:42.9784205Z + eslint-plugin-react-hooks@7.1.1
+compile	UI and SDK	2026-11-04T19:43:42.9784620Z + jsdom@26.1.0
+compile	UI and SDK	2026-11-04T19:43:42.9784953Z + postcss@8.5.28
+compile	UI and SDK	2026-11-04T19:43:42.9785281Z + react-doctor@0.9.14
+compile	UI and SDK	2026-11-04T19:43:42.9785632Z + react-grab@0.2.0
+compile	UI and SDK	2026-11-04T19:43:42.9785958Z + react-scan@0.5.7
+compile	UI and SDK	2026-11-04T19:43:42.9786288Z + tailwindcss@3.4.19
+compile	UI and SDK	2026-11-04T19:43:42.9786633Z + typescript@5.9.3
+compile	UI and SDK	2026-11-04T19:43:42.9786980Z + typescript-eslint@8.71.2
+compile	UI and SDK	2026-11-04T19:43:42.9787344Z + vite@6.4.3
+compile	UI and SDK	2026-11-04T19:43:42.9787593Z + vitest@4.1.12
+compile	UI and SDK	2026-11-04T19:43:42.9787873Z + @dnd-kit/core@6.3.1
+compile	UI and SDK	2026-11-04T19:43:42.9788158Z + @dnd-kit/sortable@10.0.0
+compile	UI and SDK	2026-11-04T19:43:42.9788444Z + @dnd-kit/utilities@3.2.2
+compile	UI and SDK	2026-11-04T19:43:42.9788719Z + @noble/ciphers@2.4.0
+compile	UI and SDK	2026-11-04T19:43:42.9788998Z + @noble/hashes@2.4.0
+compile	UI and SDK	2026-11-04T19:43:42.9789267Z + @radix-ui/react-dialog@1.3.1
+compile	UI and SDK	2026-11-04T19:43:42.9789589Z + @radix-ui/react-dropdown-menu@2.2.1
+compile	UI and SDK	2026-11-04T19:43:42.9789928Z + @radix-ui/react-label@2.1.15
+compile	UI and SDK	2026-11-04T19:43:42.9790252Z + @radix-ui/react-progress@1.1.16
+compile	UI and SDK	2026-11-04T19:43:42.9790597Z + @radix-ui/react-select@2.3.7
+compile	UI and SDK	2026-11-04T19:43:42.9791082Z + @radix-ui/react-separator@1.1.15
+compile	UI and SDK	2026-11-04T19:43:42.9791428Z + @radix-ui/react-slider@1.4.7
+compile	UI and SDK	2026-11-04T19:43:42.9791730Z + @radix-ui/react-slot@1.3.3
+compile	UI and SDK	2026-11-04T19:43:42.9792058Z + @radix-ui/react-switch@1.3.7
+compile	UI and SDK	2026-11-04T19:43:42.9792386Z + @tauri-apps/api@2.11.1
+compile	UI and SDK	2026-11-04T19:43:42.9792709Z + @tauri-apps/plugin-dialog@2.7.3
+compile	UI and SDK	2026-11-04T19:43:42.9793048Z + @tauri-apps/plugin-opener@2.7.2
+compile	UI and SDK	2026-11-04T19:43:42.9793502Z + @tauri-apps/plugin-process@2.3.1
+compile	UI and SDK	2026-11-04T19:43:42.9793859Z + @tauri-apps/plugin-updater@2.11.0
+compile	UI and SDK	2026-11-04T19:43:42.9794228Z + class-variance-authority@0.7.1
+compile	UI and SDK	2026-11-04T19:43:42.9794545Z + clsx@2.1.1
+compile	UI and SDK	2026-11-04T19:43:42.9794800Z + highlight.js@11.11.1
+compile	UI and SDK	2026-11-04T19:43:42.9795074Z + i18next@25.10.10
+compile	UI and SDK	2026-11-04T19:43:42.9795343Z + lucide-react@0.475.0
+compile	UI and SDK	2026-11-04T19:43:42.9795621Z + qrcode@1.5.4
+compile	UI and SDK	2026-11-04T19:43:42.9795867Z + react@18.3.1
+compile	UI and SDK	2026-11-04T19:43:42.9796126Z + react-dom@18.3.1
+compile	UI and SDK	2026-11-04T19:43:42.9796767Z + react-i18next@16.6.6
+compile	UI and SDK	2026-11-04T19:43:42.9797062Z + react-markdown@10.1.0
+compile	UI and SDK	2026-11-04T19:43:42.9797346Z + remark-gfm@4.0.1
+compile	UI and SDK	2026-11-04T19:43:42.9797613Z + sonner@2.0.8
+compile	UI and SDK	2026-11-04T19:43:42.9797872Z + tailwind-merge@3.6.0
+compile	UI and SDK	2026-11-04T19:43:42.9798202Z + tailwindcss-animate@1.0.7
+compile	UI and SDK	2026-11-04T19:43:42.9798414Z 
+compile	UI and SDK	2026-11-04T19:43:42.9798590Z 641 packages installed [1.68s]
+compile	UI and SDK	2026-11-04T19:43:42.9848790Z $ bun ../scripts/gen-search-index.mjs && bun --bun tsc && bun --bun vite build
+compile	UI and SDK	2026-11-04T19:43:59.1824617Z src/components/SettingsDialog.tsx(18,10): error TS2300: Duplicate identifier 'useTranslation'.
+compile	UI and SDK	2026-11-04T19:43:59.1825649Z src/components/SettingsDialog.tsx(31,10): error TS2300: Duplicate identifier 'useTranslation'.
+compile	UI and SDK	2026-11-04T19:43:59.1828632Z src/components/onboarding/IntroStep.tsx(6,7): error TS2739: Type '{ features: { title: string; description: string; }; agents: { title: string; description: string; }; cli: { title: string; description: string; }; project: { title: string; description: string; }; supervisor: { ...; }; try: { ...; }; phone: { ...; }; }' is missing the following properties from type 'Record<OverviewStepId, { title: string; description: string; }>': import, enroll, skills
+compile	UI and SDK	2026-11-04T19:43:59.1831188Z src/lib/layoutSync.ts(160,18): error TS2322: Type 'string | undefined' is not assignable to type 'string'.
+compile	UI and SDK	2026-11-04T19:43:59.1831897Z   Type 'undefined' is not assignable to type 'string'.
+compile	UI and SDK	2026-11-04T19:43:59.1833556Z src/lib/layoutSync.ts(212,22): error TS2345: Argument of type '{ kind?: "terminal" | undefined; id: string; label: string; sessionId: string; pinned?: boolean | undefined; customLabel?: string | undefined; } | { kind: "browser"; id: string; label: string; ... 15 more ...; scrollY?: number | undefined; } | ... 27 more ... | { ...; }' is not assignable to parameter of type 'WorkspaceTab'.
+compile	UI and SDK	2026-11-04T19:43:59.1836031Z   Type '{ kind: "terminal" | "browser"; id: string; label: string; sessionId: string; pinned?: boolean; customLabel?: string; browserId: string; url: string; title?: string | null; loading?: boolean; ... 10 more ...; scrollY?: number; }' is not assignable to type 'WorkspaceTab'.
+compile	UI and SDK	2026-11-04T19:43:59.1837480Z src/lib/layoutSync.ts(236,43): error TS2538: Type 'null' cannot be used as an index type.
+compile	UI and SDK	2026-11-04T19:43:59.1838238Z src/lib/layoutSync.ts(236,115): error TS2538: Type 'null' cannot be used as an index type.
+compile	UI and SDK	2026-11-04T19:43:59.1839097Z src/lib/layoutSync.ts(251,40): error TS2345: Argument of type 'string | null' is not assignable to parameter of type 'string'.
+compile	UI and SDK	2026-11-04T19:43:59.1839839Z   Type 'null' is not assignable to type 'string'.
+compile	UI and SDK	2026-11-04T19:43:59.1840547Z src/lib/layoutSync.ts(268,83): error TS2345: Argument of type 'string | null' is not assignable to parameter of type 'string'.
+compile	UI and SDK	2026-11-04T19:43:59.1841446Z   Type 'null' is not assignable to type 'string'.
+compile	UI and SDK	2026-11-04T19:43:59.1842163Z src/lib/layoutSync.ts(274,83): error TS2345: Argument of type 'string | null' is not assignable to parameter of type 'string'.
+compile	UI and SDK	2026-11-04T19:43:59.1842879Z   Type 'null' is not assignable to type 'string'.
+compile	UI and SDK	2026-11-04T19:43:59.1843913Z src/lib/sessionPersistence.ts(252,74): error TS2339: Property 'sessionId' does not exist on type 'TerminalPaneContent | { readonly kind: "plugin"; readonly plugin: string; readonly view: string; }'.
+compile	UI and SDK	2026-11-04T19:43:59.1845243Z   Property 'sessionId' does not exist on type '{ readonly kind: "plugin"; readonly plugin: string; readonly view: string; }'.
+compile	UI and SDK	2026-11-04T19:43:59.1846529Z src/lib/sessionPersistence.ts(253,50): error TS2339: Property 'sessionId' does not exist on type 'TerminalPaneContent | { readonly kind: "plugin"; readonly plugin: string; readonly view: string; }'.
+compile	UI and SDK	2026-11-04T19:43:59.1847934Z   Property 'sessionId' does not exist on type '{ readonly kind: "plugin"; readonly plugin: string; readonly view: string; }'.
+compile	UI and SDK	2026-11-04T19:43:59.1849239Z src/lib/sessionPersistence.ts(1139,39): error TS2339: Property 'sessionId' does not exist on type 'TerminalPaneContent | { readonly kind: "plugin"; readonly plugin: string; readonly view: string; }'.
+compile	UI and SDK	2026-11-04T19:43:59.1851374Z   Property 'sessionId' does not exist on type '{ readonly kind: "plugin"; readonly plugin: string; readonly view: string; }'.
+compile	UI and SDK	2026-11-04T19:43:59.5431025Z error: "tsc" exited with code 2
+compile	UI and SDK	2026-11-04T19:43:59.5454217Z ##[error]Process completed with exit code 2.

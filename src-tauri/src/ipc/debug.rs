@@ -1,4 +1,7 @@
-use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+#[cfg(any(feature = "desktop", test))]
+use crate::ipc::{IpcError, IpcErrorCode};
+#[cfg(feature = "desktop")]
+use crate::ipc::{run_blocking};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -24,6 +27,7 @@ static DEBUG_SINK_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static DEBUG_SINK_DROPS: AtomicU64 = AtomicU64::new(0);
 /// Open append handles plus bytes written, keyed by log path. Holding the lock also serializes
 /// rotation. Tracking the size in memory avoids a `metadata` call per entry.
+#[cfg(any(feature = "desktop", test))]
 static SINK_FILES: Mutex<Option<HashMap<std::path::PathBuf, (std::fs::File, u64)>>> =
     Mutex::new(None);
 
@@ -180,11 +184,14 @@ pub fn is_release_persisted_navigation_event(event: &str) -> bool {
         || (event.starts_with("workspace.") && event != "workspace.render")
 }
 
+#[cfg(any(feature = "desktop", test))]
 const SWITCH_DEBUG_FILE: &str = "ferryx-switch-debug.jsonl";
 /// Per-chunk render receipts get their own file so their volume cannot rotate the rare
 /// lifecycle events out of the main log within minutes.
+#[cfg(any(feature = "desktop", test))]
 const SWITCH_DEBUG_RENDER_FILE: &str = "ferryx-switch-debug-render.jsonl";
 
+#[cfg(any(feature = "desktop", test))]
 fn switch_debug_file_for_event(event: &str) -> &'static str {
     if event == "terminal.render.vt_consumed" {
         SWITCH_DEBUG_RENDER_FILE
@@ -193,6 +200,7 @@ fn switch_debug_file_for_event(event: &str) -> &'static str {
     }
 }
 
+#[cfg(any(feature = "desktop", test))]
 fn switch_debug_path(root: &std::path::Path, file_name: &str) -> std::path::PathBuf {
     root.join(file_name)
 }
@@ -385,6 +393,7 @@ pub fn sanitize_switch_debug_details(_event: &str, details: &Value) -> Value {
     sanitize_value(details)
 }
 
+#[cfg(feature = "desktop")]
 pub(crate) fn log_native_switch_debug(entry: Value) {
     let event = entry.get("event").and_then(Value::as_str).unwrap_or("").to_string();
     if !should_persist_event(&event) {
@@ -451,6 +460,7 @@ pub(crate) fn log_native_switch_debug(entry: Value) {
     std::thread::spawn(persist);
 }
 
+#[cfg(any(feature = "desktop", test))]
 fn append_switch_debug_entry(
     root: &std::path::Path,
     file_name: &str,

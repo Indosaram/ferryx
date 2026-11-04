@@ -1,0 +1,62 @@
+createSession unavailable on host; using fallback shell 38a4203c-f3f2-400d-929c-5395e3cb7beb
+From https://github.com/Indosaram/ferryx
+ * branch              ci/rex-buildgreen-3 -> FETCH_HEAD
+ * [new branch]        ci/rex-buildgreen-3 -> origin/ci/rex-buildgreen-3
+Previous HEAD position was 69321917 build: resolve merged Luau and desktop plugin dependencies
+HEAD is now at 7991e280 build: reconcile onboarding and layout TypeScript integration
+M	ui/public/llms.txt
+M	ui/public/search.json
+$ bun ../scripts/gen-search-index.mjs && bun --bun tsc && bun --bun vite build
+vite v6.4.3 building for production...
+transforming...
+✓ 2525 modules transformed.
+rendering chunks...
+[plugin vite:reporter] 
+(!) /Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/ui/src/lib/windowIdentity.ts is dynamically imported by /Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/ui/src/main.tsx but also statically imported by /Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/ui/src/App.tsx, /Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/ui/src/components/NativeTerminalPane.tsx, /Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/ui/src/lib/appShellPersistence.ts, /Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/ui/src/lib/layoutSync.ts, /Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/ui/src/lib/nativeMenu.ts, /Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/ui/src/lib/notificationCenter/notificationCenterPersistence.ts, /Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/ui/src/lib/notificationForwarding.ts, /Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/ui/src/lib/notificationLeader.ts, /Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/ui/src/lib/tauri.ts, /Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/ui/src/state/workspaceStore.ts, dynamic import will not move module into another chunk.
+
+computing gzip size...
+dist/index.html                                     2.29 kB │ gzip:   0.99 kB
+dist/assets/crush-DHElXcRZ.png                      5.46 kB
+dist/assets/droid-BhrKLgQ8.svg                      6.30 kB │ gzip:   2.94 kB
+dist/assets/antigravity-DgAQAdn3.svg                7.63 kB │ gzip:   1.74 kB
+dist/assets/gjc-CmlXGg4z.png                       22.73 kB
+dist/assets/geist-variable-CrgPqtmy.woff2          69.44 kB
+dist/assets/ferryx-icon-OXRkkUvz.png              805.82 kB
+dist/assets/RemoteApp-BP-13D3e.css                  1.20 kB │ gzip:   0.36 kB
+dist/assets/App-B-Hmda5q.css                        1.49 kB │ gzip:   0.53 kB
+dist/assets/index-3TmU5q-u.css                    116.62 kB │ gzip:  20.54 kB
+dist/assets/arrow-down-lt4IvuFf.js                  0.34 kB │ gzip:   0.27 kB
+dist/assets/nativeShortcutTable-DUyQkmsc.js         0.80 kB │ gzip:   0.42 kB
+dist/assets/advancedFeatures-Bl0RPsOJ.js            1.14 kB │ gzip:   0.60 kB
+dist/assets/sliders-horizontal-C_piyNuG.js          1.34 kB │ gzip:   0.50 kB
+dist/assets/onboardingSync-T6wuNBSE.js              1.55 kB │ gzip:   0.79 kB
+dist/assets/pairedHostRoute-BC-zBshY.js             1.60 kB │ gzip:   0.83 kB
+dist/assets/pairedHostReachability-BBAN_F2Z.js      1.85 kB │ gzip:   0.92 kB
+dist/assets/WhatsNewDialog-CvWzhqyC.js              2.78 kB │ gzip:   1.13 kB
+dist/assets/shortcutOverrides-C4Rxy380.js           3.04 kB │ gzip:   1.23 kB
+dist/assets/onboarding-Cbvz3GnZ.js                  4.07 kB │ gzip:   1.68 kB
+dist/assets/tailscaleDiscovery-n4XbrIA2.js          5.88 kB │ gzip:   2.28 kB
+dist/assets/pairedHostInventory-BENcMfT3.js        15.17 kB │ gzip:   5.20 kB
+dist/assets/SystemResourcesDialog-CWDGjydf.js      15.58 kB │ gzip:   5.45 kB
+dist/assets/browserProtocol-NpLYH7GS.js            16.47 kB │ gzip:   4.16 kB
+dist/assets/MobileChatWorkspace-Vv6oMjDt.js        27.19 kB │ gzip:   7.83 kB
+dist/assets/RemoteTerminal-DeAbdt3l.js             56.65 kB │ gzip:  18.76 kB
+dist/assets/RemoteBrowserWorkspace-C5MeGmDI.js     56.71 kB │ gzip:  16.52 kB
+dist/assets/WelcomeWizard-CTJamf5Y.js              68.85 kB │ gzip:  23.41 kB
+dist/assets/accountSession-Bpkcxhyf.js             72.78 kB │ gzip:  24.17 kB
+dist/assets/RemoteAccessSection-0WZiWTnr.js        83.15 kB │ gzip:  27.03 kB
+dist/assets/SettingsDialog-BHsmDjlm.js            230.68 kB │ gzip:  62.90 kB
+dist/assets/index-CLEzrV4N.js                     241.12 kB │ gzip:  75.57 kB
+dist/assets/RemoteApp--XnO6mdb.js                 910.31 kB │ gzip: 277.65 kB
+dist/assets/App-Bc1JbLfF.js                     1,109.79 kB │ gzip: 326.55 kB
+
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 11.26s
+$ bun --bun tsc --noEmit -p tsconfig.test.json
+src/lib/layoutSync.test.ts(19,17): error TS2741: Property 'worktree' is missing in type '{ id: string; cwd: string; workspaceId: string; backendSessionId: string; lifecycle: "working"; }' but required in type 'TerminalSession'.
+error: "tsc" exited with code 2
+
+__RELAY_EXIT=2

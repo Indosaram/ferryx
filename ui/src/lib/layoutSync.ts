@@ -156,7 +156,7 @@ export function hydrateLayout(view: LayoutView, state: WorkspaceState, scope = l
         const tuple = JSON.parse(key) as [string, string, string];
         return id === node.nodeId && tuple[0] === scope && tuple[1] === tab.tabId;
       });
-      let leaf = identities.leaves[key] ?? (migrated ? (JSON.parse(migrated[0]) as string[])[2] : undefined);
+      let leaf: string | undefined = identities.leaves[key] ?? (migrated ? (JSON.parse(migrated[0]) as string[])[2] : undefined);
       if (!leaf) leaf = Object.keys(previous?.sessionIdsByLeafId ?? {}).find((id) => {
         if (used.has(id)) return false;
         const content = previous?.contentsByLeafId?.[id];
@@ -209,7 +209,7 @@ export function hydrateLayout(view: LayoutView, state: WorkspaceState, scope = l
     else if (primary.kind === "remoteDesktop") frontend = { ...base, kind: "remoteDesktop", hostId: primary.hostId, sessionId: "" };
     else if (primary.kind === "file" || primary.kind === "changes") frontend = { ...primary, ...base };
     else frontend = oldTab ?? { ...base, sessionId: "" };
-    result.tabs.push({ ...oldTab, ...frontend });
+    result.tabs.push(frontend);
     result.layoutsByTabId[tab.tabId] = { root, activeLeafId, expandedLeafId: tab.expandedNodeId === null ? null : leafFor(tab.expandedNodeId),
       contentsByLeafId: contents, sessionIdsByLeafId: sessions };
   }
@@ -229,10 +229,14 @@ export function intentForAction(sync: LayoutSync, action: WorkspaceAction, befor
 
 function unscopedIntentForAction(sync: LayoutSync, action: WorkspaceAction, before: WorkspaceState, after: WorkspaceState): LayoutIntent | null {
   const scope = layoutScope(before);
-  const node = (tab: string, leaf: string) => sync.nodeId(scope, tab, leaf);
+  const node = (tab: string, leaf: string | null) => {
+    if (leaf === null) throw new Error("Layout has no active pane");
+    return sync.nodeId(scope, tab, leaf);
+  };
   const content = (tab: string, leaf?: string): DaemonContent => {
     const panes = after.layout.layoutsByTabId[tab];
     const id = leaf ?? panes.activeLeafId;
+    if (id === null) throw new Error("Layout has no active pane");
     const pane = panes.contentsByLeafId?.[id] ?? { kind: "terminal" as const, sessionId: panes.sessionIdsByLeafId[id] };
     return daemonContent(pane, after);
   };

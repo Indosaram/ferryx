@@ -1,24 +1,29 @@
-use crate::daemon::{
-    protocol::{DaemonRequest, DaemonResponse},
-    DaemonClient,
-};
-use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+#[cfg(feature = "desktop")]
+use crate::daemon::protocol::DaemonRequest;
+#[cfg(any(feature = "desktop", test))]
+use crate::daemon::protocol::DaemonResponse;
+#[cfg(feature = "desktop")]
+use crate::daemon::{DaemonClient};
+use crate::ipc::{IpcError, IpcErrorCode};
+#[cfg(feature = "desktop")]
+use crate::ipc::{run_blocking};
 use crate::worktree::changes::{GitChangeError, GitDiffScope};
 #[cfg(feature = "desktop")]
 use crate::worktree::changes::{
     git_changes_status, git_commit, git_diff, git_push, git_stage, git_unstage, GitPushResult,
 };
-use crate::worktree::{
-    BranchDeletionPreview, DirtyState, ExternalWorktree, WorkspaceRegistry, Worktree,
-    WorktreeIdentity,
-};
+use crate::worktree::{WorkspaceRegistry, WorktreeIdentity};
+#[cfg(feature = "desktop")]
+use crate::worktree::{BranchDeletionPreview, DirtyState, ExternalWorktree, Worktree};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "desktop")]
 use std::sync::Arc;
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 pub const WORKTREE_CHANGED_EVENT: &str = "worktree_changed";
 
+#[cfg(any(feature = "desktop", test))]
 pub(crate) fn worktree_response(response: DaemonResponse) -> Result<DaemonResponse, IpcError> {
     match response {
         DaemonResponse::WorktreeError { error } => Err(error),
@@ -696,7 +701,7 @@ mod git_change_error_tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "desktop"))]
 mod deletion_repair_tests {
     use super::*;
     use crate::ipc::worktree_disk::WorktreeDiskScans;

@@ -1,0 +1,4 @@
+default EXIT=101
+headless EXIT=101
+clippy EXIT=101
+test EXIT=101

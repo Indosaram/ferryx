@@ -1,9 +1,8 @@
-use crate::browser::{
-    BrowserAutomationRequest, BrowserAutomationSnapshot, BrowserConsoleEntry, BrowserCookieEntry,
-    BrowserDialogHandleRequest, BrowserDownloadRequest, BrowserError, BrowserManager,
-    BrowserSessionCreatedPayload, BrowserSessionSummary, BrowserWaitCondition,
-    CreateBrowserRequest,
-};
+use crate::browser::{BrowserAutomationRequest, BrowserAutomationSnapshot, BrowserConsoleEntry, BrowserCookieEntry, BrowserError, BrowserSessionSummary, BrowserWaitCondition};
+#[cfg(feature = "desktop")]
+use crate::browser::{BrowserDialogHandleRequest, BrowserDownloadRequest, BrowserManager, BrowserSessionCreatedPayload};
+#[cfg(feature = "desktop")]
+use crate::browser::{CreateBrowserRequest};
 #[cfg(feature = "desktop")]
 use crate::ipc::browser::{
     browser_automation_act, browser_automation_snapshot, browser_download_with_session,
@@ -17,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "desktop")]
 use std::sync::Arc;
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter, Manager};
@@ -1445,6 +1445,7 @@ pub struct BrowserCliEnvelope {
 pub const BROWSER_CLI_UNAUTHORIZED: &str = "BROWSER_CLI_UNAUTHORIZED";
 
 /// Length of the hex-encoded capability token (32 bytes of entropy).
+#[cfg(feature = "desktop")]
 const BROWSER_CLI_TOKEN_BYTES: usize = 32;
 
 /// Capability file that carries the token for the current server instance. It
@@ -1460,6 +1461,7 @@ fn token_path_for(endpoint_path: &Path) -> PathBuf {
     })
 }
 
+#[cfg(feature = "desktop")]
 fn generate_browser_cli_token() -> String {
     use rand::RngCore;
     let mut bytes = [0u8; BROWSER_CLI_TOKEN_BYTES];
@@ -1469,6 +1471,7 @@ fn generate_browser_cli_token() -> String {
 
 /// Compares two tokens without leaking their matching prefix length through
 /// timing. Length is public information here, so an early length check is safe.
+#[cfg(feature = "desktop")]
 fn tokens_match(expected: &str, provided: &str) -> bool {
     let expected = expected.as_bytes();
     let provided = provided.as_bytes();
@@ -1482,6 +1485,7 @@ fn tokens_match(expected: &str, provided: &str) -> bool {
     difference == 0
 }
 
+#[cfg(feature = "desktop")]
 fn write_token_file(path: &Path, token: &str) -> Result<(), BrowserError> {
     match fs::symlink_metadata(path) {
         Ok(_) => fs::remove_file(path).map_err(|error| {
@@ -1670,6 +1674,7 @@ pub enum BrowserCliServerStart {
 }
 
 /// Lock file guarding one browser CLI endpoint (`browser.sock.lock` / `browser.port.lock`).
+#[cfg(feature = "desktop")]
 fn endpoint_lock_path(endpoint_path: &Path) -> PathBuf {
     endpoint_path.with_file_name(match endpoint_path.file_name().and_then(|n| n.to_str()) {
         Some(name) => format!("{name}.lock"),
@@ -1682,6 +1687,7 @@ fn endpoint_lock_path(endpoint_path: &Path) -> PathBuf {
 /// concurrent start can never delete a live peer's socket or replace its token. The lock is
 /// released by the OS when the holder exits, which lets the next start replace a stale endpoint.
 /// `Ok(None)` means a live peer holds it.
+#[cfg(feature = "desktop")]
 fn claim_browser_cli_endpoint(
     endpoint_path: &Path,
 ) -> Result<Option<crate::daemon::server::DaemonLockFile>, BrowserError> {
@@ -1846,7 +1852,7 @@ fn start_browser_cli_server_at_path<R: tauri::Runtime>(
     Ok(BrowserCliServerStart::Serving)
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), feature = "desktop"))]
 pub fn start_browser_cli_server<R: tauri::Runtime>(
     app: AppHandle<R>,
     manager: Arc<BrowserManager>,
@@ -1854,7 +1860,7 @@ pub fn start_browser_cli_server<R: tauri::Runtime>(
     start_browser_cli_server_at_path(app, manager, &browser_cli_socket_path())
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), feature = "desktop"))]
 fn start_browser_cli_server_at_path<R: tauri::Runtime>(
     app: AppHandle<R>,
     manager: Arc<BrowserManager>,
@@ -1954,6 +1960,7 @@ fn log_connection_result(result: Result<(), BrowserError>) {
 /// Upper bound for a single CLI request line (1 MiB). A connection whose line
 /// exceeds this is rejected with `BROWSER_CLI_REQUEST_TOO_LARGE` instead of
 /// being buffered without bound.
+#[cfg(feature = "desktop")]
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
 /// How long the server waits for a connection's request line before closing it, so idle
@@ -2017,6 +2024,7 @@ async fn read_limited_line<R: tokio::io::AsyncRead + Unpin>(
 ///
 /// Classification is by variant only: message text can carry page-controlled
 /// strings and must never choose the IPC code.
+#[cfg(feature = "desktop")]
 fn remote_browser_error_to_ipc(e: crate::remote::browser_backend::RemoteBrowserError) -> IpcError {
     use crate::remote::browser_backend::RemoteBrowserError;
     match e {
@@ -2055,6 +2063,7 @@ fn remote_browser_error_to_ipc(e: crate::remote::browser_backend::RemoteBrowserE
     }
 }
 
+#[cfg(feature = "desktop")]
 fn ipc_error_code_string(code: IpcErrorCode) -> String {
     serde_json::to_value(&code)
         .ok()
@@ -3074,6 +3083,7 @@ async fn send_browser_cli_request_at_path(
 }
 
 /// Maps a decoded click failure onto the IPC surface by variant only.
+#[cfg(feature = "desktop")]
 fn point_click_decode_error_to_ipc(err: crate::browser::remote_input::ActionDecodeError) -> IpcError {
     use crate::browser::remote_input::ActionDecodeError;
     match err {
@@ -3091,7 +3101,7 @@ fn point_click_decode_error_to_ipc(err: crate::browser::remote_input::ActionDeco
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 mod tests {
     use super::*;
     use crate::browser::{BrowserProfileId, BrowserSessionSummary, CreateBrowserRequest};

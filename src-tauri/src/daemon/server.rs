@@ -3986,7 +3986,7 @@ impl DaemonServer {
         }));
         terminal_service.output_hub().set_osc_effect_sink(Arc::new(move |session_id, kind| {
             if matches!(kind, crate::native_terminal::osc_effects::OscEffect::Clipboard { .. })
-                && !osc_terminal.upgrade().is_some_and(|service| service.get_session(session_id).is_some()) {
+                && osc_terminal.upgrade().is_none_or(|service| service.get_session(session_id).is_none()) {
                 return;
             }
             if osc_tx.receiver_count() == 0 {
@@ -8016,7 +8016,7 @@ impl DaemonServer {
                             DaemonResponse::LayoutOk { view }
                         },
                         Ok(Err(super::layout::ApplyError::Conflict(layout))) => DaemonResponse::LayoutConflict {
-                            code: "LAYOUT_CONFLICT".into(), revision: layout.revision, layout,
+                            code: "LAYOUT_CONFLICT".into(), revision: layout.revision, layout: *layout,
                         },
                         Ok(Err(super::layout::ApplyError::Invalid(error))) if error == "SESSION_NOT_FOUND" => daemon_session_not_found("unknown", "layout_attach"),
                         Ok(Err(super::layout::ApplyError::Invalid(error))) => daemon_error(error),
@@ -10557,7 +10557,7 @@ impl DaemonServer {
 #[path = "ssh_survival_tests.rs"]
 mod ssh_survival_tests;
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "desktop"))]
 #[path = "remote_ssh_tests.rs"]
 mod remote_ssh_tests;
 

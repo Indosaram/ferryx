@@ -1,8 +1,15 @@
-use crate::agent_history::history::{Entry, History, HistoryError, Message, Page};
-use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+use crate::agent_history::history::{HistoryError};
+#[cfg(any(feature = "desktop", test))]
+use crate::agent_history::history::{Message, Page};
+#[cfg(feature = "desktop")]
+use crate::agent_history::history::{Entry, History};
+use crate::ipc::{IpcError, IpcErrorCode};
+#[cfg(feature = "desktop")]
+use crate::ipc::{run_blocking};
 use crate::scoped_contracts::CanonicalProvider;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "desktop")]
 use std::sync::{Mutex, OnceLock};
 
 /// On-disk store root per provider, one entry for every `CanonicalProvider`, resolved against this
@@ -166,6 +173,7 @@ pub fn map_history_error(error: HistoryError) -> IpcError {
     }
 }
 
+#[cfg(feature = "desktop")]
 fn history_store() -> Result<&'static Mutex<History>, IpcError> {
     static STORE: OnceLock<Option<Mutex<History>>> = OnceLock::new();
     let store_opt = STORE.get_or_init(|| {

@@ -8672,6 +8672,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "desktop")]
     fn browser_cookie_header_from_session_cookies() {
         // Row 12 security fix (audit D-6). RED mutation: make
         // `cookie_header_from_cookies` skip cookies whose `http_only()` is

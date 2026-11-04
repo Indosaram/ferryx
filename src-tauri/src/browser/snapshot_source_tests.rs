@@ -335,7 +335,7 @@ async fn test_coordinator_late_callback_quarantine_and_permit_release() {
     );
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), feature = "desktop"))]
 #[tokio::test]
 async fn test_unsupported_platform_source_completes_coordinator_with_error() {
     let app = tauri::test::mock_builder()

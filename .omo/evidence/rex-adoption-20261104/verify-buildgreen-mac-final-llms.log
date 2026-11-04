@@ -1,0 +1,2 @@
+gen-llms-txt: wrote 17 commands to docs/llms.txt
+gen-llms-txt: docs/llms.txt is up to date (17 commands)

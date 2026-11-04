@@ -1300,6 +1300,7 @@ impl RemoteGatewayState {
     }
 
     #[cfg(all(test, unix))]
+    #[cfg(feature = "desktop")]
     pub(crate) fn set_snapshot_post_build_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
         *self.snapshot_post_build_hook.write() = hook;
     }

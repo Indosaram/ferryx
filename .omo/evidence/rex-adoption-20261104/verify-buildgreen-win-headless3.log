@@ -1,0 +1,12 @@
+From https://github.com/Indosaram/ferryx
+ * branch              ci/rex-buildgreen-26 -> FETCH_HEAD
+ * [new branch]        ci/rex-buildgreen-26 -> origin/ci/rex-buildgreen-26
+Previous HEAD position was 0927336e build: remove final headless diagnostics without lint suppression
+HEAD is now at e1a89034 build: retain unsupported reload error helper for Windows fixtures
+M	src-tauri/gen/schemas/acl-manifests.json
+M	src-tauri/gen/schemas/capabilities.json
+M	src-tauri/gen/schemas/desktop-schema.json
+M	src-tauri/gen/schemas/windows-schema.json
+M	ui/public/llms.txt
+M	ui/public/search.json
+    Blocking waiting for file lock on build directory

@@ -17,6 +17,7 @@
 //! worktrees of OTHER checkouts outside the root are intentionally not part
 //! of a workspace, consistent with the path jail.
 
+#[cfg(feature = "desktop")]
 use crate::ipc::run_blocking;
 #[cfg(feature = "desktop")]
 use crate::ipc::worktree::emit_worktree_changed;
@@ -27,6 +28,7 @@ use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+#[cfg(any(feature = "desktop", test))]
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -556,6 +558,7 @@ where
 /// every other workspace's sweep (and from withholding already-detected
 /// events). Generous relative to git subprocess cost; overflow is absorbed
 /// by `MissedTickBehavior::Delay`.
+#[cfg(feature = "desktop")]
 const WORKSPACE_SCAN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(feature = "desktop")]

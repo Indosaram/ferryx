@@ -60,8 +60,8 @@ pub enum LayoutReply {
 }
 
 #[tauri::command]
-pub async fn cmd_panes(
-    window: WebviewWindow,
+pub async fn cmd_panes<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
     manager: State<'_, Arc<RemoteGatewayManager>>,
     request: crate::daemon::layout::PaneAction,
     scope: Option<String>,
@@ -106,8 +106,8 @@ fn reply(response: DaemonResponse) -> Result<LayoutReply, IpcError> {
 }
 
 #[tauri::command]
-pub async fn cmd_layout_get(
-    window: WebviewWindow,
+pub async fn cmd_layout_get<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
     manager: State<'_, Arc<RemoteGatewayManager>>,
     scope: Option<String>,
 ) -> Result<LayoutReply, IpcError> {
@@ -127,9 +127,9 @@ pub async fn cmd_layout_get(
 }
 
 #[tauri::command]
-pub async fn cmd_layout_import(
-    app: tauri::AppHandle,
-    window: WebviewWindow,
+pub async fn cmd_layout_import<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    window: WebviewWindow<R>,
     manager: State<'_, Arc<RemoteGatewayManager>>,
     machine_id: String,
     revision: u64,
@@ -143,8 +143,8 @@ pub async fn cmd_layout_import(
 }
 
 #[tauri::command]
-pub async fn cmd_layout_apply(
-    window: WebviewWindow,
+pub async fn cmd_layout_apply<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
     manager: State<'_, Arc<RemoteGatewayManager>>,
     base_revision: u64,
     intent: Intent,

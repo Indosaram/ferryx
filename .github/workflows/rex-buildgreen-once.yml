@@ -1,0 +1,71 @@
+name: Rex buildgreen Linux
+on:
+  push:
+    branches: ['ci/rex-buildgreen-*']
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_BUILD_JOBS: '2'
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+          use-cache: false
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: System dependencies
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev clang libclang-dev libpipewire-0.3-dev libspa-0.2-dev libdbus-1-dev libva-dev libdrm-dev libgbm-dev libegl-dev libgl-dev libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev libx11-dev libxext-dev libxrandr-dev libxfixes-dev libxtst-dev libxi-dev libevdev-dev libudev-dev
+      - name: Resolve dependencies
+        run: |
+          mkdir -p /tmp/buildgreen-logs
+          cargo metadata --manifest-path src-tauri/Cargo.toml --format-version 1 > /tmp/buildgreen-logs/metadata.json 2> /tmp/buildgreen-logs/metadata.log
+      - name: UI and SDK
+        run: |
+          set -o pipefail
+          bun install --cwd ui 2>&1 | tee /tmp/buildgreen-logs/ui-install.log
+          bun run --cwd ui build 2>&1 | tee /tmp/buildgreen-logs/ui-build.log
+          bun run --cwd ui typecheck:test 2>&1 | tee /tmp/buildgreen-logs/ui-typecheck.log
+          bun scripts/fetch-ffmpeg.mjs 2>&1 | tee /tmp/buildgreen-logs/ffmpeg.log
+      - name: Compile matrix
+        run: |
+          set +e
+          failed=0
+          for mode in default headless clippy test; do
+            case "$mode" in
+              default) args=(check --all-targets);;
+              headless) args=(check --no-default-features --all-targets);;
+              clippy) args=(clippy --all-targets);;
+              test) args=(test --lib --no-run);;
+            esac
+            if [ "$mode" = clippy ]; then
+              cargo "${args[@]}" --manifest-path src-tauri/Cargo.toml --locked -- -D warnings > /tmp/buildgreen-logs/$mode.log 2>&1
+            else
+              cargo "${args[@]}" --manifest-path src-tauri/Cargo.toml --locked > /tmp/buildgreen-logs/$mode.log 2>&1
+            fi
+            code=$?
+            echo "$mode EXIT=$code" | tee -a /tmp/buildgreen-logs/exits.log
+            if [ "$code" != 0 ]; then failed=1; fi
+          done
+          exit "$failed"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: buildgreen-linux
+          path: |
+            /tmp/buildgreen-logs
+            src-tauri/Cargo.lock

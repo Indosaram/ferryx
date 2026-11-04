@@ -254,6 +254,7 @@ impl DaemonServer {
         self.handover_manager.run_retirement_action();
     }
 
+    #[cfg(any(windows, test))]
     async fn handle_control_connection<S>(self: Arc<Self>, stream: S, expected_token: Option<&str>)
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,

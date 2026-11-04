@@ -63,6 +63,7 @@ use macos as platform;
 use windows as platform;
 
 use crate::browser::manager::BrowserManager;
+#[cfg(feature = "desktop")]
 use crate::browser::security::BrowserError;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

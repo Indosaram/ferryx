@@ -7,6 +7,8 @@
 //! - Deterministic terminal grid dimension calculations (cols, rows) for given cell sizes (e.g. 10x20 px)
 //! - Viewport/sub-rectangle positioning preserving non-zero origins
 
+#![cfg(feature = "native-terminal")]
+
 use ferryx_lib::native_terminal::composition::{
     CellMetrics, LogicalBounds, PhysicalBounds, SurfaceCompositionLayout,
 };

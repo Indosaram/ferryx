@@ -1,0 +1,2 @@
+ffmpeg-lgpl-9.0.2-x86_64-unknown-linux-gnu.tar.gz: sha256 matches pin
+installed FFmpeg SDK ffmpeg-sdk-9.0.2-1 (x86_64-unknown-linux-gnu) into /home/runner/work/ferryx/ferryx/src-tauri/resources/ffmpeg/sdk

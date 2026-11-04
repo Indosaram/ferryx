@@ -1,0 +1,17 @@
+createSession unavailable on host; using fallback shell 38a4203c-f3f2-400d-929c-5395e3cb7beb
+From https://github.com/Indosaram/ferryx
+ * branch              ci/rex-buildgreen-1 -> FETCH_HEAD
+ * [new branch]        ci/rex-buildgreen-1 -> origin/ci/rex-buildgreen-1
+Preparing worktree (detached HEAD 48407192)
+Updating files:  45% (3326/7286)Updating files:  46% (3352/7286)Updating files:  47% (3425/7286)Updating files:  48% (3498/7286)Updating files:  49% (3571/7286)Updating files:  50% (3643/7286)Updating files:  51% (3716/7286)Updating files:  52% (3789/7286)Updating files:  53% (3862/7286)Updating files:  54% (3935/7286)Updating files:  55% (4008/7286)Updating files:  56% (4081/7286)Updating files:  57% (4154/7286)Updating files:  58% (4226/7286)Updating files:  59% (4299/7286)Updating files:  60% (4372/7286)Updating files:  61% (4445/7286)Updating files:  62% (4518/7286)Updating files:  63% (4591/7286)Updating files:  64% (4664/7286)Updating files:  65% (4736/7286)Updating files:  66% (4809/7286)Updating files:  67% (4882/7286)Updating files:  68% (4955/7286)Updating files:  69% (5028/7286)Updating files:  70% (5101/7286)Updating files:  70% (5169/7286)Updating files:  71% (5174/7286)Updating files:  72% (5246/7286)Updating files:  73% (5319/7286)Updating files:  74% (5392/7286)Updating files:  75% (5465/7286)Updating files:  76% (5538/7286)Updating files:  77% (5611/7286)Updating files:  78% (5684/7286)Updating files:  79% (5756/7286)Updating files:  80% (5829/7286)Updating files:  81% (5902/7286)Updating files:  82% (5975/7286)Updating files:  83% (6048/7286)Updating files:  84% (6121/7286)Updating files:  85% (6194/7286)Updating files:  86% (6266/7286)Updating files:  87% (6339/7286)Updating files:  88% (6412/7286)Updating files:  89% (6485/7286)Updating files:  90% (6558/7286)Updating files:  91% (6631/7286)Updating files:  92% (6704/7286)Updating files:  93% (6776/7286)Updating files:  94% (6849/7286)Updating files:  95% (6922/7286)Updating files:  96% (6995/7286)Updating files:  97% (7068/7286)Updating files:  98% (7141/7286)Updating files:  99% (7214/7286)Updating files: 100% (7286/7286)Updating files: 100% (7286/7286), done.
+HEAD is now at 48407192 build: add temporary remote Linux compile gate
+Cloning into '/Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/src-tauri/vendor/ghostty'...
+fatal: transport 'file' not allowed
+fatal: clone of '/Users/I552267/code/ferryx/src-tauri/vendor/ghostty' into submodule path '/Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/src-tauri/vendor/ghostty' failed
+Failed to clone 'src-tauri/vendor/ghostty'. Retry scheduled
+Cloning into '/Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/src-tauri/vendor/ghostty'...
+fatal: transport 'file' not allowed
+fatal: clone of '/Users/I552267/code/ferryx/src-tauri/vendor/ghostty' into submodule path '/Users/I552267/code/ferryx-wt/rex-buildgreen-20261104/src-tauri/vendor/ghostty' failed
+Failed to clone 'src-tauri/vendor/ghostty' a second time, aborting
+
+__RELAY_EXIT=1

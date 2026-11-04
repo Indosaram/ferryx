@@ -1051,6 +1051,7 @@ pub async fn cmd_local_paste_clipboard_image<R: tauri::Runtime>(
 /// paste chord, and only then turns the image into an attachment; a pasted file path stays plain
 /// text to it. A manually typed SSH session still needs the upload, because the agent behind it
 /// can only read the remote host's clipboard.
+#[cfg(any(feature = "desktop", test))]
 async fn agent_reads_clipboard_itself<D, DF>(session_id: Option<String>, detect: &D) -> Result<bool, IpcError>
 where
     D: Fn(String) -> DF,
@@ -1065,6 +1066,7 @@ where
 /// Routes a paste to the destination that can read it. A detected manual SSH must be the same
 /// process before and after the transfer, so an ssh that exits or is replaced mid-upload never
 /// inserts a path from the wrong host. Detection failures never degrade to a local save.
+#[cfg(any(feature = "desktop", test))]
 async fn paste_image_for_session<D, DF, U, UF>(
     image: ClipboardImage,
     session_id: Option<String>,
@@ -1117,6 +1119,7 @@ where
     })
 }
 
+#[cfg(any(feature = "desktop", test))]
 fn changed_during_paste() -> IpcError {
     IpcError::new(
         crate::ipc::error::IpcErrorCode::Unsupported,

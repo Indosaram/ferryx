@@ -1471,10 +1471,10 @@ mod tests {
     async fn script_name_does_not_leak_password_argument() {
         let (dir, script) = crate::ipc::run_blocking(|| {
             use std::os::unix::fs::PermissionsExt;
-            let dir = tempfile::tempdir()?;
+            let dir = tempfile::tempdir().map_err(|e| crate::ipc::error::IpcError::internal(e.to_string()))?;
             let script = dir.path().join("long-runner");
-            std::fs::write(&script, "#!/bin/sh\nprintf 'NAME_READY>'\nread answer\n")?;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+            std::fs::write(&script, "#!/bin/sh\nprintf 'NAME_READY>'\nread answer\n").map_err(|e| crate::ipc::error::IpcError::internal(e.to_string()))?;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).map_err(|e| crate::ipc::error::IpcError::internal(e.to_string()))?;
             Ok((dir, script))
         }).await.unwrap();
         let manager = crate::terminal::PtyManager::new();
@@ -1484,7 +1484,7 @@ mod tests {
         output_until(&mut output, "NAME_READY>").await;
         let session = manager.get_session(&id).unwrap();
         let name = crate::ipc::run_blocking(move || {
-            Ok(capture_process_snapshot()?.foreground_command(&session))
+            Ok(capture_process_snapshot().map_err(|e| crate::ipc::error::IpcError::internal(e.to_string()))?.foreground_command(&session))
         }).await.unwrap();
         manager.close_session(&id).await.unwrap();
         assert_eq!(name.as_deref(), Some("long-runner"));
@@ -1508,7 +1508,7 @@ mod tests {
         let (id, output) = manager.spawn(command, 80, 24).unwrap();
         let session = manager.get_session(&id).unwrap();
         let name = crate::ipc::run_blocking(move || {
-            Ok(capture_process_snapshot()?.foreground_command(&session))
+            Ok(capture_process_snapshot().map_err(|e| crate::ipc::error::IpcError::internal(e.to_string()))?.foreground_command(&session))
         }).await.unwrap();
         manager.close_session(&id).await.unwrap();
         drop(output);

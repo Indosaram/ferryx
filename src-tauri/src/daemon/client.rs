@@ -1614,6 +1614,7 @@ impl DaemonClient {
 
     /// A paste owns its connection slots until its final chunk completes. Key input
     /// must not wait for that chunk's reply on the ordinary per-session socket.
+    #[cfg(any(feature = "desktop", test))]
     pub(crate) fn paste_client(&self) -> Self {
         Self {
             local_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -8310,6 +8311,8 @@ mod local_split_transport_tests {
 
         async fn accept(&self, capable: bool) -> ActiveConnection {
             let (stream, _) = self.listener.accept().await.unwrap();
+            #[cfg(windows)]
+            let stream = crate::daemon::windows_pipe::Stream::from(stream);
             let (reader, writer) = stream.into_split();
             let mut connection = ActiveConnection {
                 reader: BufReader::new(reader),
@@ -8513,6 +8516,8 @@ mod local_split_transport_tests {
             let peer = async {
                 let mut connection = if handshake_stall {
                     let (stream, _) = fixture.listener.accept().await.unwrap();
+                    #[cfg(windows)]
+                    let stream = crate::daemon::windows_pipe::Stream::from(stream);
                     let (reader, writer) = stream.into_split();
                     let mut connection = ActiveConnection {
                         reader: BufReader::new(reader),

@@ -259,9 +259,10 @@ impl PaneGrants {
         grant.validate()?;
         let mut grants = self.grants.write();
         let mut next = grants.clone();
+        let at_capacity = next.len() >= MAX_GRANTS;
         match next.iter_mut().find(|known| known.from == grant.from && known.to == grant.to) {
             Some(known) => known.ops.extend(grant.ops),
-            None if next.len() >= MAX_GRANTS => return Err(format!("at most {MAX_GRANTS} pane grants are kept")),
+            None if at_capacity => return Err(format!("at most {MAX_GRANTS} pane grants are kept")),
             None => next.push(grant),
         }
         self.save(&next)?;
@@ -550,7 +551,8 @@ mod tests {
         let configure = DaemonRequest::RemoteConfigure { config: Default::default() };
         let upgrade = DaemonRequest::UpgradeBinary { new_binary_path: None };
         let pairing = DaemonRequest::RemoteCreatePairingCode { permission: None };
-        let table: Vec<(&str, DaemonRequest, Result<(), &str>, Result<(), &str>)> = vec![
+        type RegressionCase<'a> = (&'a str, DaemonRequest, Result<(), &'a str>, Result<(), &'a str>);
+        let table: Vec<RegressionCase<'_>> = vec![
             ("agents list", agents(AgentControlOp::List), Ok(()), Ok(())),
             ("agents read b", agents(AgentControlOp::Read { session_id: "b".into() }), Ok(()), Ok(())),
             ("agents events", agents(AgentControlOp::Events { after: 0 }), Ok(()), Ok(())),

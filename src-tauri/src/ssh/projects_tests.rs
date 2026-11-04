@@ -175,6 +175,7 @@ fn unregister_revokes_stored_routing_and_reveal_is_explicitly_unsupported() {
 }
 
 #[tokio::test]
+#[cfg(feature = "desktop")]
 async fn connection_failure_does_not_register_or_fall_back_to_existing_local_directory() {
     let (dir, path, mut host) = fixture();
     let socket = tokio::net::TcpSocket::new_v4().unwrap();

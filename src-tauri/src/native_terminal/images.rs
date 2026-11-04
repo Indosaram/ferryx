@@ -81,6 +81,7 @@ fn check(result: i32) -> Result<(), NativeTerminalError> {
 /// Whether the terminal's Kitty storage has ever held an image. The storage generation is 0
 /// until a program first sends, places or deletes an image, so a terminal that never used Kitty
 /// graphics answers `false` without touching the storage.
+#[cfg(any(feature = "native-terminal", test))]
 pub(crate) fn kitty_storage_in_use(terminal: GhosttyTerminal) -> Result<bool, NativeTerminalError> {
     let mut graphics: Graphics = std::ptr::null_mut();
     // SAFETY: The caller holds the live terminal exclusively; the out pointer has the exact

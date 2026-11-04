@@ -1,4 +1,4 @@
-#![cfg(desktop)]
+#![cfg(feature = "desktop")]
 
 use serde_json::json;
 use std::io::{Read, Write};

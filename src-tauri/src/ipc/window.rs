@@ -640,15 +640,15 @@ pub fn apply_move<R: Runtime>(
 pub async fn cmd_window_move_sessions<R: Runtime>(
     app: AppHandle<R>,
     window: Window<R>,
-    registry: State<'_, WindowRegistry>,
-    pending: State<'_, PendingWindowAdoptions>,
     target_label: Option<String>,
     backend_session_ids: Vec<String>,
     workspace_id: Option<String>,
     layout_intent: Option<crate::daemon::layout::Intent>,
     layout_revision: Option<u64>,
-    manager: State<'_, std::sync::Arc<super::remote::RemoteGatewayManager>>,
 ) -> Result<WindowMoveOutcome, IpcError> {
+    let registry = app.state::<WindowRegistry>();
+    let pending = app.state::<PendingWindowAdoptions>();
+    let manager = app.state::<std::sync::Arc<super::remote::RemoteGatewayManager>>();
     let plan = plan_move(
         &registry,
         window.label(),
