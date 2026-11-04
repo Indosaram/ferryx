@@ -219,6 +219,22 @@ pub fn is_running(profile: &str) -> bool {
     ENGINES.lock().contains_key(profile)
 }
 
+/// A debug build appends these whitespace-separated Chromium switches to the engine command
+/// line (QA: `--remote-debugging-port` for a CDP virtual authenticator,
+/// `--use-fake-device-for-media-stream`); release builds ignore it.
+pub const DEBUG_ENGINE_ARGS_ENV: &str = "FERRYX_ENGINE_EXTRA_ARGS";
+
+/// The Chromium switches in a [`DEBUG_ENGINE_ARGS_ENV`] value: its whitespace-separated
+/// tokens that start with `--`; anything else is dropped.
+fn debug_engine_args(value: Option<&str>) -> Vec<String> {
+    value
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter(|token| token.starts_with("--"))
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Starts the profile's engine when it is not running, without opening a tab.
 /// Blocking: run it through `run_blocking`.
 pub fn ensure_running(launch: &EngineLaunch<'_>, profile: &str, sink: EventSink) -> Result<(), BrowserError> {
@@ -240,6 +256,9 @@ pub fn ensure_running(launch: &EngineLaunch<'_>, profile: &str, sink: EventSink)
         command.env("FERRYX_CEF_CACHE", cache_dir);
     }
     platform::configure(&mut command, launch.parent);
+    if cfg!(debug_assertions) {
+        command.args(debug_engine_args(std::env::var(DEBUG_ENGINE_ARGS_ENV).ok().as_deref()));
+    }
     start(command, profile, launch.parent, sink).map_err(failed)
 }
 
@@ -600,6 +619,17 @@ mod tests {
         assert!(!set_visible("no-such-tab", true));
         assert!(!close("no-such-tab"));
         assert!(matches!(navigate("no-such-tab", "https://a.test/"), Err(BrowserError::NotFound(_))));
+    }
+
+    #[test]
+    fn debug_engine_args_keep_only_switches() {
+        let value = " --remote-debugging-port=9222  stray\t--use-fake-device-for-media-stream -x ";
+        assert_eq!(
+            debug_engine_args(Some(value)),
+            ["--remote-debugging-port=9222", "--use-fake-device-for-media-stream"]
+        );
+        assert!(debug_engine_args(None).is_empty());
+        assert!(debug_engine_args(Some("  \t ")).is_empty());
     }
 
     #[test]
