@@ -403,6 +403,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const awayMark = (await log('away')).length;
       await clickRow('away', 'before-away-click');
       await typeText(probe);
+      await frame('after-away-click-and-type', step);
       const awayEntries = await until('the probe in the away pane', () => log('away', awayMark), (list) => typedInto(list, probe), { deadlineMs: 30_000 });
       step.artifact('fixture-log', 'away.agent.jsonl', (await log('away')).map((e) => JSON.stringify(e)).join('\n'));
       const focusBefore = await log('focus');
@@ -432,7 +433,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       step.assert('rules-line-before', beforeLine !== null && !/every 5 min/.test(beforeLine), { line: beforeLine, rule: globalRetryRule(beforeView) });
       const box = locate(beforeRead, 'Tell the supervisor');
       if (!box) throw new StepFailed('COMPOSER_NOT_FOUND', 'the composer placeholder is not on screen');
-      await sendComposer(step, instruction, 'retry every 5 min');
+      await sendComposer(step, instruction, '5 min');
       const stored = await until('the 300 s retry rule', () => panel(null), (v) => globalRetryRule(v)?.params?.thenEverySecs === 300, { deadlineMs: 120_000 });
       step.artifact('panel-read', 'rules-after.panel.json', stored);
       step.artifact('transcript-read', 'rules.transcript.json', await transcript(null));
