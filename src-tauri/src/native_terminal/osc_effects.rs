@@ -188,6 +188,10 @@ mod tests {
         #[serde(default)]
         replay: bool,
         cwd: Option<String>,
+        #[serde(rename = "windowsInput")]
+        windows_input: Option<String>,
+        #[serde(rename = "windowsCwd")]
+        windows_cwd: Option<String>,
         events: Vec<OscEffect>,
     }
 
@@ -198,14 +202,14 @@ mod tests {
             let mut mirror = ScreenMirror::new(80, 24).unwrap();
             assert!(mirror.enable_program_status());
             mirror.set_osc52_write(case.enabled && !case.remote);
-            if case.replay { mirror.feed_replay(case.input.as_bytes()); }
-            else { mirror.feed(case.input.as_bytes()); }
+            let (input, cwd) = if cfg!(windows) {
+                (case.windows_input.as_deref().unwrap_or(&case.input), case.windows_cwd.as_ref().or(case.cwd.as_ref()))
+            } else { (case.input.as_str(), case.cwd.as_ref()) };
+            if case.replay { mirror.feed_replay(input.as_bytes()); }
+            else { mirror.feed(input.as_bytes()); }
             assert_eq!(mirror.take_osc_effects(), case.events, "{}", case.name);
-            if let Some(cwd) = case.cwd {
-                #[cfg(not(windows))]
+            if let Some(cwd) = cwd {
                 assert_eq!(mirror.osc_cwd().as_deref(), Some(cwd.as_str()), "{}", case.name);
-                #[cfg(windows)]
-                let _ = cwd;
             }
         }
     }
