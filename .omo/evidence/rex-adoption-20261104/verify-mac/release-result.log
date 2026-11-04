@@ -1,0 +1,91 @@
+createSession unavailable on host; using fallback shell 38a4203c-f3f2-400d-929c-5395e3cb7beb
+RELEASE FAILURE
+   Compiling bstr v1.13.1
+   Compiling notify-types v2.1.0
+   Compiling serial2 v0.2.38
+   Compiling hostname v0.4.2
+   Compiling fsevent-sys v4.1.0
+   Compiling thread_local v1.1.10
+   Compiling shell-words v1.1.1
+   Compiling downcast-rs v1.2.1
+   Compiling nu-ansi-term v0.50.3
+   Compiling smol_str v0.2.2
+   Compiling minisign-verify v0.2.5
+   Compiling cursor-icon v1.2.0
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling fallible-iterator v0.3.0
+   Compiling rusqlite v0.32.1
+   Compiling tracing-subscriber v0.3.23
+   Compiling portable-pty v0.9.0 (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/src-tauri/vendor/portable-pty)
+   Compiling notify v8.2.0
+   Compiling mlua v0.12.2
+   Compiling rcgen v0.14.10
+error: failed to run custom build command for `ferryx v2026.1101.1 (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/src-tauri)`
+
+Caused by:
+  process didn't exit successfully: `/Users/I552267/code/ferryx-wt/.target/release/build/ferryx-5c17b72edf604fc9/build-script-build` (exit status: 1)
+  --- stdout
+  cargo::rustc-env=FERRYX_BUILD_TARGET=aarch64-apple-darwin
+  cargo::rustc-check-cfg=cfg(a10_wire_red)
+  cargo:rerun-if-env-changed=FFMPEG_DIR
+  cargo:rustc-link-arg-bins=-Wl,-rpath,@executable_path/../Frameworks
+  cargo:rustc-link-arg-bins=-Wl,-rpath,@executable_path/../../../../Frameworks
+  cargo:rustc-link-arg-bins=-Wl,-rpath,@executable_path/../../../ffmpeg
+
+  --- stderr
+
+  [helper asset freshness error] 
+  [helper-freshness-gate ERROR] stale bundled helper assets detected: manifest sourceFingerprint '3abee5f47f6a90c6db3778605d496ab87bd6250ad8cf38fc566dd01101eff413' does not match current repository helper source fingerprint '424c02c8304ca0ee67ec25c7be04364d58491d60a6ffe5da89ccc7fbc7339c68'. Rebuild and stage remote helpers before release packaging.
+  + actual - expected
+
+  + '3abee5f47f6a90c6db3778605d496ab87bd6250ad8cf38fc566dd01101eff413'
+  - '424c02c8304ca0ee67ec25c7be04364d58491d60a6ffe5da89ccc7fbc7339c68'
+
+
+
+
+warning: build failed, waiting for other jobs to finish...
+DYLD
+account::billing::entitlement::entitlement_tests::a_free_account_can_enroll_three_machines_and_is_refused_on_the_fourth: test
+account::billing::entitlement::entitlement_tests::an_expired_pro_account_over_the_free_limit_keeps_its_machines_and_only_blocks_enrollment: test
+account::billing::entitlement::entitlement_tests::test_active_and_on_trial_status_aware_ends_at_expiry: test
+account::billing::entitlement::entitlement_tests::test_boundary_machines_used_equals_limit_blocks_enroll_new: test
+DISK
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s5   460Gi   405Gi    25Gi    95%    4.7M  258M    2%   /System/Volumes/Data
+TEST FOREGROUND
+terminal::foreground::platform::tests::a_detached_writer_on_the_pane_terminal_keeps_the_shell_accompanied: test
+terminal::foreground::platform::tests::the_shell_is_alone_only_without_a_child_or_a_foreground_companion: test
+terminal::foreground::tests::a_new_agent_after_a_release_is_reported_as_fresh_evidence: test
+terminal::foreground::tests::a_release_reports_the_newest_revision_its_evidence_covers: test
+terminal::foreground::tests::a_report_attributed_to_the_shell_after_its_child_exited_is_released_by_a_lone_shell: test
+terminal::foreground::tests::a_report_from_the_shell_itself_or_a_settled_record_is_not_released: test
+terminal::foreground::tests::a_report_without_attribution_is_released_only_by_a_lone_shell_without_a_group: test
+terminal::foreground::tests::a_reporter_never_sampled_as_an_agent_has_no_release_edge: test
+terminal::foreground::tests::a_reporter_still_in_the_foreground_keeps_its_records: test
+terminal::foreground::tests::a_shell_builtin_report_without_an_intervening_child_is_not_released: test
+terminal::foreground::tests::a_stale_lone_shell_listing_never_releases_a_report_published_after_it: test
+terminal::foreground::tests::a_transient_record_that_changed_no_summary_stays_pending: test
+terminal::foreground::tests::a_windows_reporter_without_a_group_is_released_by_a_lone_shell: test
+terminal::foreground::tests::agent_exit_through_an_unrelated_command_still_releases: test
+terminal::foreground::tests::agent_identity_covers_every_supported_agent_name: test
+terminal::foreground::tests::agent_identity_handles_windows_shaped_commands: test
+terminal::foreground::tests::agent_identity_ignores_windows_name_casing: test
+terminal::foreground::tests::agent_identity_reads_a_quoted_spaced_windows_command_line: test
+terminal::foreground::tests::agent_identity_reads_measured_launch_command_lines: test
+terminal::foreground::tests::agent_identity_reads_measured_parity_launch_argv: test
+terminal::foreground::tests::agent_identity_reads_unquoted_command_lines_and_bare_binaries: test
+terminal::foreground::tests::agent_identity_uses_executable_or_interpreter_entry_point: test
+terminal::foreground::tests::executable_names_strip_the_suffix_whatever_its_casing: test
+terminal::foreground::tests::foreground_agent_carries_the_name_discovery_uses: test
+terminal::foreground::tests::foreground_command_of_real_pty: test
+terminal::foreground::tests::foreground_name_never_contains_arguments: test
+terminal::foreground::tests::generic_entry_points_resolve_to_their_package_agent: test
+terminal::foreground::tests::one_tick_snapshot_classifies_every_session: test
+terminal::foreground::tests::real_pty_agent_exit_releases_without_further_agent_output: test
+terminal::foreground::tests::reporter_groups_keep_the_newest_change_when_published_out_of_order: test
+terminal::foreground::tests::script_name_does_not_leak_password_argument: test
+terminal::foreground::tests::the_shell_regaining_the_foreground_from_a_reporter_releases_once: test
+terminal::foreground::tests::unknown_and_unrelated_processes_do_not_release: test
+
+__RELAY_EXIT=0

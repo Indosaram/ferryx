@@ -1,0 +1,18 @@
+createSession unavailable on host; using fallback shell 38a4203c-f3f2-400d-929c-5395e3cb7beb
+test-list EXIT=0
+EXITS
+ui-install EXIT=0
+ui-build EXIT=0
+ffmpeg EXIT=0
+metadata EXIT=0
+full-lib EXIT=101
+cli-build EXIT=0
+handover EXIT=101
+hooks EXIT=0
+RELEASE
+   Compiling hashbrown v0.14.5
+   Compiling atoi v2.0.0
+   Compiling derive_builder_core v0.9.0
+   Compiling strum_macros v0.17.1
+
+__RELAY_EXIT=0

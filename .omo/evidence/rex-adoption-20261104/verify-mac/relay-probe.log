@@ -1,0 +1,35 @@
+createSession unavailable on host; using fallback shell 38a4203c-f3f2-400d-929c-5395e3cb7beb
+CQFQ4P2LXK
+uid=501(I552267) gid=20(staff) groups=20(staff),12(everyone),61(localaccounts),79(_appserverusr),80(admin),81(_appserveradm),98(_lpadmin),33(_appstore),100(_lpoperator),204(_developer),250(_analyticsusers),395(com.apple.access_ftp),398(com.apple.access_screensharing),399(com.apple.access_ssh),400(com.apple.access_remote_ae),701(com.apple.sharepoint.group.1)
+ROOT
+/Users/I552267/code/ferryx
+/Users/I552267/code/ferryx                                     a1019e93 [main]
+/Users/I552267/code/ferryx-wt/bc-agent-20261101                c69660e1 (detached HEAD)
+/Users/I552267/code/ferryx-wt/bc-audit-20261101                c69660e1 (detached HEAD)
+/Users/I552267/code/ferryx-wt/bc-default-20261101              c69660e1 (detached HEAD)
+/Users/I552267/code/ferryx-wt/bc-import-20261101               c69660e1 (detached HEAD)
+/Users/I552267/code/ferryx-wt/bc-library-20261101              c69660e1 (detached HEAD)
+/Users/I552267/code/ferryx-wt/bc-linux-20261101                c69660e1 (detached HEAD)
+/Users/I552267/code/ferryx-wt/bc-perms-20261101                c69660e1 (detached HEAD)
+/Users/I552267/code/ferryx-wt/bc-release-20261101              c69660e1 (detached HEAD)
+/Users/I552267/code/ferryx-wt/bc-system-20261101               c69660e1 (detached HEAD)
+/Users/I552267/code/ferryx-wt/bc-ui-20261101                   c69660e1 (detached HEAD)
+/Users/I552267/code/ferryx-wt/bc-vault-20261101                c69660e1 (detached HEAD)
+/Users/I552267/code/ferryx-wt/browser-gate-20261101            04a2048e (detached HEAD)
+/Users/I552267/code/ferryx-wt/ghostty-1-4-20261028             91f1f3ad (detached HEAD)
+/Users/I552267/code/ferryx-wt/ghostty-1-4-base-verify-20261029 bb694a60 (detached HEAD)
+/Users/I552267/code/ferryx-wt/host-relayfix-20261101           f782729a (detached HEAD)
+/Users/I552267/code/ferryx-wt/pane-recovery-20261025           af0c88ef (detached HEAD)
+/Users/I552267/code/ferryx-wt/pty-daemon-base-20261025         4650fd7e (detached HEAD)
+/Users/I552267/code/ferryx-wt/pty-exit-status-20261025         4650fd7e (detached HEAD)
+/Users/I552267/code/ferryx-wt/ssh-recovery-20261026            9089c608 (detached HEAD)
+/Users/I552267/code/ferryx-wt/tpi-w1-hostkey-20261027          94c4a3f5 (detached HEAD)
+/Users/I552267/code/ferryx-wt/tpi-w1-relay-20261027            94c4a3f5 (detached HEAD)
+/Users/I552267/code/ferryx-wt/tpi-w5-stage-20261027            94c4a3f5 (detached HEAD)
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s5   460Gi   384Gi    47Gi    90%    4.6M  493M    1%   /System/Volumes/Data
+/Users/I552267/.cargo/bin/cargo
+/Users/I552267/.local/bin/bun
+/opt/homebrew/bin/zig
+
+__RELAY_EXIT=0

@@ -1,0 +1,55 @@
+createSession unavailable on host; using fallback shell 38a4203c-f3f2-400d-929c-5395e3cb7beb
+ACCEPTANCE
+ui-install EXIT=0
+ui-build EXIT=0
+ffmpeg EXIT=0
+metadata EXIT=0
+full-lib EXIT=101
+cli-build EXIT=0
+HANDOVER
+test a_successor_that_receives_fewer_sessions_than_owned_aborts_and_the_predecessor_keeps_them ... ok
+test test_v5_ownership_transfer_is_the_default_without_the_flag ... ok
+test test_v5_zero_session_loss_and_immediate_predecessor_exit ... ok
+test layout_survives_handover ... FAILED
+test a_candidate_whose_request_expires_mid_transfer_aborts_and_exits_zero ... ok
+test a_session_exported_to_a_slow_successor_survives_and_returns_on_abort ... ok
+HASH
+82 |   const before = await Promise.all(sessions.map(sessionId => client.call({ type: 'describeScreenHash', sessionId })));
+83 |   // Owner publication follows authority adoption. Queue filesystem events before upgrading.
+84 |   const stopWatching = new AbortController();
+85 |   const watcher = watch(runtime, { signal: AbortSignal.any([signal, stopWatching.signal]) });
+86 |   const replacement = (async () => {
+87 |     for await (const { filename } of watcher) {
+                            ^
+AbortError: The operation was aborted
+ code: "ABORT_ERR"
+
+      at next (node:fs/promises:65:48)
+      at async <anonymous> (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/scripts/qa/screen-hash-handover.mjs:87:24)
+31 |   const lines = createInterface({ input: socket });
+32 |   const send = async (request) => {
+33 |     const reply = once(lines, 'line', { signal });
+34 |     socket.write(`${JSON.stringify(request)}\n`);
+35 |     const answer = JSON.parse((await reply)[0]);
+36 |     if (answer.type === 'error') throw new Error(JSON.stringify(answer));
+                                                ^
+error: {"type":"error","message":"Failed to prepare handover: Failed to bind legacy UDS socket at /var/folders/4n/zmf346td0739p04w6llfcl0r0000gn/T/ferryx-screen-hash-Bn788J/rt/legacy-69812-1793828943416.sock: path must be shorter than SUN_LEN"}
+      at <anonymous> (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/scripts/qa/screen-hash-handover.mjs:36:44)
+
+Bun v1.4.2 (macOS arm64)
+DETACH
+43 |   await new Promise((resolveReady, reject) => {
+44 |     const signal = timeout();
+45 |     const abort = () => reject(new Error('daemon readiness timeout'));
+46 |     signal.addEventListener('abort', abort, { once: true });
+47 |     child.once('error', reject);
+48 |     child.once('exit', code => reject(new Error(`daemon exited ${code}`)));
+                                               ^
+error: daemon exited 0
+      at <anonymous> (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/scripts/qa/detach-attach.mjs:48:43)
+      at emit (node:events:103:22)
+      at #handleOnExit (node:child_process:570:14)
+
+Bun v1.4.2 (macOS arm64)
+
+__RELAY_EXIT=0

@@ -1,0 +1,19 @@
+createSession unavailable on host; using fallback shell 38a4203c-f3f2-400d-929c-5395e3cb7beb
+BASE
+   Compiling lock_api v0.4.14
+   Compiling parking_lot v0.12.5
+   Compiling spin v0.9.9
+   Compiling serde_json v1.0.151
+   Compiling rustls v0.23.43
+   Compiling lazy_static v1.5.0
+   Compiling tokio v1.53.1
+   Compiling symphonia-core v0.5.5
+FOREGROUND
+
+running 1 test
+test terminal::foreground::tests::foreground_command_of_real_pty ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5806 filtered out; finished in 0.72s
+
+
+__RELAY_EXIT=0

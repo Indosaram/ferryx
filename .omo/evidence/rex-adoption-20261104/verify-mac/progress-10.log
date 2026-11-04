@@ -1,0 +1,43 @@
+createSession unavailable on host; using fallback shell 38a4203c-f3f2-400d-929c-5395e3cb7beb
+EXITS
+ui-install EXIT=0
+ui-build EXIT=0
+ffmpeg EXIT=0
+metadata EXIT=0
+full-lib EXIT=101
+cli-build EXIT=0
+handover EXIT=101
+SHORT DETACH
+18 | const sockets = [];
+19 | const timeout = () => AbortSignal.timeout(90_000);
+20 | async function launch(legacy) {
+21 |   const controller = new AbortController();
+22 |   const events = legacy ? watch(env.FERRYX_RUNTIME_DIR, { signal: controller.signal }) : null;
+23 |   const changed = events?.next();
+                               ^
+TypeError: events?.next is not a function. (In 'events?.next()', 'events?.next' is undefined)
+      at launch (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/scripts/qa/detach-attach.mjs:23:27)
+      at /Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/scripts/qa/detach-attach.mjs:136:9
+
+Bun v1.4.2 (macOS arm64)
+SHORT HASH
+100 |     client.close();
+101 |     for (let i = 0; i < sessions.length; i++) {
+102 |       const after = await next.call({ type: 'describeScreenHash', sessionId: sessions[i] });
+103 |       const field = before[i].vtVersion === after.vtVersion ? 'hash' : 'textHash';
+104 |       if (!before[i][field] || before[i][field] !== after[field] || after.retainedLines !== 10_000) {
+105 |         throw new Error(`hash mismatch: ${JSON.stringify({ before: before[i], after })}`);
+                        ^
+error: hash mismatch: {"before":{"type":"describeScreenHashOk","hash":"c3b02596336df94cbf40b7ac526f17b6de41af5fc4e322314e8e2cacfb998347","textHash":"c0b7e5efb370d58e5ab457b112f9ca31a8a433345997e33068975fad0743e236","vtVersion":"83fb95624b0439ee660c2679b43b38c8b63769cd","retainedLines":9912},"after":{"type":"describeScreenHashOk","hash":"c3b02596336df94cbf40b7ac526f17b6de41af5fc4e322314e8e2cacfb998347","textHash":"c0b7e5efb370d58e5ab457b112f9ca31a8a433345997e33068975fad0743e236","vtVersion":"83fb95624b0439ee660c2679b43b38c8b63769cd","retainedLines":9912}}
+      at handover (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/scripts/qa/screen-hash-handover.mjs:105:19)
+
+Bun v1.4.2 (macOS arm64)
+RELEASE
+tail: /tmp/rex-verify-mac-20261104/release.log: No such file or directory
+QA OWNED PROCESSES
+23167     1 zsh /Users/I552267/.cache/rex-mahomac-relay/rex-verify-mac-driver.zsh
+71490 71267 /Users/I552267/.rustup/toolchains/1.92.0-aarch64-apple-darwin/bin/rustc --crate-name ferryx_hub --edition=2021 /Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/crates/ferryx-hub/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --cfg feature="default" --check-cfg cfg(docsrs,test) --check-cfg cfg(feature, values("default", "hub-discord", "hub-slack", "hub-voice")) -C metadata=f30274de4bf41ac0 -C extra-filename=-578f22ba50497548 --out-dir /Users/I552267/code/ferryx-wt/.target/debug/deps -C incremental=/Users/I552267/code/ferryx-wt/.target/debug/incremental -L dependency=/Users/I552267/code/ferryx-wt/.target/debug/deps --extern async_trait=/Users/I552267/code/ferryx-wt/.target/debug/deps/libasync_trait-64278be19a42b5d5.dylib --extern axum=/Users/I552267/code/ferryx-wt/.target/debug/deps/libaxum-3f68d6bed1d4954f.rmeta --extern chrono=/Users/I552267/code/ferryx-wt/.target/debug/deps/libchrono-4538bf5c8db9b00b.rmeta --extern chrono_tz=/Users/I552267/code/ferryx-wt/.target/debug/deps/libchrono_tz-74e02dbb15a0164e.rmeta --extern cron=/Users/I552267/code/ferryx-wt/.target/debug/deps/libcron-305a37b2ad140367.rmeta --extern libc=/Users/I552267/code/ferryx-wt/.target/debug/deps/liblibc-e7009e86dfa866b8.rmeta --extern plist=/Users/I552267/code/ferryx-wt/.target/debug/deps/libplist-0d9b3e756c7d5e1e.rmeta --extern regex=/Users/I552267/code/ferryx-wt/.target/debug/deps/libregex-568f98faeabe2cf5.rmeta --extern resvg=/Users/I552267/code/ferryx-wt/.target/debug/deps/libresvg-4c5b8a930cb22d84.rmeta --extern serde=/Users/I552267/code/ferryx-wt/.target/debug/deps/libserde-0d81afee281a8fb9.rmeta --extern serde_json=/Users/I552267/code/ferryx-wt/.target/debug/deps/libserde_json-2bbe203d9ba4668e.rmeta --extern serde_yaml=/Users/I552267/code/ferryx-wt/.target/debug/deps/libserde_yaml-273c0b60d673a60d.rmeta --extern sha2=/Users/I552267/code/ferryx-wt/.target/debug/deps/libsha2-bf76a3dd243d6136.rmeta --extern sqlx=/Users/I552267/code/ferryx-wt/.target/debug/deps/libsqlx-dbee7ad2da2b30de.rmeta --extern tar=/Users/I552267/code/ferryx-wt/.target/debug/deps/libtar-2d7329866543071d.rmeta --extern thiserror=/Users/I552267/code/ferryx-wt/.target/debug/deps/libthiserror-e2de1c768e4234c0.rmeta --extern tokio=/Users/I552267/code/ferryx-wt/.target/debug/deps/libtokio-cd707f04713bc36e.rmeta --extern tracing=/Users/I552267/code/ferryx-wt/.target/debug/deps/libtracing-87ebe5e29644df71.rmeta --extern url=/Users/I552267/code/ferryx-wt/.target/debug/deps/liburl-f0a20b778cb7e5ba.rmeta --extern usvg=/Users/I552267/code/ferryx-wt/.target/debug/deps/libusvg-4c61e267472008e8.rmeta --extern uuid=/Users/I552267/code/ferryx-wt/.target/debug/deps/libuuid-8b0c7d24cf70e089.rmeta --extern zstd=/Users/I552267/code/ferryx-wt/.target/debug/deps/libzstd-cdee59e6bb581b31.rmeta -L native=/Users/I552267/code/ferryx-wt/.target/debug/build/ring-cbf9f95b4ac01eb9/out -L native=/Users/I552267/code/ferryx-wt/.target/debug/build/libsqlite3-sys-1393b0eea456d943/out -L native=/Users/I552267/code/ferryx-wt/.target/debug/build/zstd-sys-e50db6bd3daccf5e/out
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s5   460Gi   402Gi    28Gi    94%    4.7M  295M    2%   /System/Volumes/Data
+
+__RELAY_EXIT=0

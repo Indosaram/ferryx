@@ -1,0 +1,16 @@
+createSession unavailable on host; using fallback shell 38a4203c-f3f2-400d-929c-5395e3cb7beb
+EXITS
+ui-install EXIT=0
+LATEST
+tail: /tmp/rex-verify-mac-20261104/full-lib.log: No such file or directory
+PROCESS
+23167 zsh /Users/I552267/.cache/rex-mahomac-relay/rex-verify-mac-driver.zsh
+23430 /usr/bin/awk /[c]argo|[r]ustc|rex-verify-mac-driver/ {print}
+GUI_TOOLS
+/usr/bin/osascript
+/usr/sbin/screencapture
+/opt/homebrew/bin/cliclick
+SDK CACHE
+pin.json
+
+__RELAY_EXIT=0

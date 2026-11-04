@@ -1,0 +1,31 @@
+   Compiling tokio v1.53.1
+   Compiling ferryx v2026.1101.1 (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/src-tauri)
+   Compiling portable-pty v0.9.0 (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/src-tauri/vendor/portable-pty)
+   Compiling rusty-fork v0.3.1
+   Compiling proptest v1.12.0
+   Compiling tokio-rustls v0.26.4
+   Compiling tokio-stream v0.1.19
+   Compiling hyper v1.11.0
+   Compiling tower v0.5.3
+   Compiling sqlx-core v0.8.6
+   Compiling hyper-util v0.1.20
+   Compiling tokio-tungstenite v0.29.0
+   Compiling tower-http v0.6.11
+   Compiling tokio-util v0.7.19
+   Compiling axum v0.8.9
+   Compiling hyper-rustls v0.27.9
+   Compiling sqlx-sqlite v0.8.6
+   Compiling reqwest v0.12.28
+   Compiling sqlx v0.8.6
+   Compiling ferryx-hub v0.1.0 (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/crates/ferryx-hub)
+   Compiling quinn v0.11.11
+   Compiling tokio-test v0.4.5
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 19s
+     Running tests/ferryx_cli_agent_hook.rs (/Users/I552267/code/ferryx-wt/.target/debug/deps/ferryx_cli_agent_hook-57356686c5121abc)
+
+running 2 tests
+test ferryx_cli_agent_hook_without_arguments_prints_nothing_and_exits_zero ... ok
+test ferryx_cli_agent_hook_sends_one_report_and_exits_zero ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.64s
+

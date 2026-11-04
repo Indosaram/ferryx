@@ -1,0 +1,24 @@
+createSession unavailable on host; using fallback shell 38a4203c-f3f2-400d-929c-5395e3cb7beb
+EXITS
+ui-install EXIT=0
+ui-build EXIT=0
+ffmpeg EXIT=0
+metadata EXIT=0
+full-lib EXIT=101
+cli-build EXIT=0
+handover EXIT=101
+hooks EXIT=0
+RELEASE
+   Compiling httpdate v1.0.3
+   Compiling bindgen v0.73.2
+   Compiling hyper v1.11.0
+   Compiling openssl-sys v0.9.117
+   Compiling audiopus_sys v0.2.2
+   Compiling serialize-to-javascript v0.1.2
+   Compiling objc2-core-audio v0.3.2
+FOREGROUND
+dyld[76629]: Library not loaded: @rpath/libghostty-vt.dylib
+  Referenced from: <E3E4170F-11A9-316B-A897-1F15DE15554E> /Users/I552267/code/ferryx-wt/.target/debug/deps/ferryx_lib-e661397823158427
+  Reason: tried: '/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/src-tauri/resources/ffmpeg/sdk/lib/libghostty-vt.dylib' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/src-tauri/resources/ffmpeg/sdk/lib/libghostty-vt.dylib' (no such file), '/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/src-tauri/resources/ffmpeg/sdk/lib/libghostty-vt.dylib' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/src-tauri/resources/ffmpeg/sdk/lib/libghostty-vt.dylib' (no such file)
+
+__RELAY_EXIT=0

@@ -1,0 +1,15 @@
+    Blocking waiting for file lock on build directory
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 25s
+     Running unittests src/lib.rs (/Users/I552267/code/ferryx-wt/.target/debug/deps/ferryx_lib-e661397823158427)
+
+running 1 test
+QA cmd_updater_check halt: code="UPDATE_HALTED"
+QA cmd_updater_check floor: code="UPDATE_BELOW_FLOOR"
+QA cmd_updater_check unsigned: code="UPDATE_MANIFEST_UNVERIFIED"
+[[33mWARNING[0m] The updater endpoint "http://127.0.0.1:51997/latest.json" doesn't use `https` protocol. This is allowed in development but will fail in release builds.
+[[33mWARNING[0m] if this is a desired behavior, you can enable `dangerousInsecureTransportProtocol` in the plugin configuration
+QA cmd_updater_check downgrade: offer=None
+test ipc::updater::tests::qa_cmd_updater_check_reports_reason_codes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5806 filtered out; finished in 0.16s
+

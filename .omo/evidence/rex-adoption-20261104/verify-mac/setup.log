@@ -1,0 +1,59 @@
+createSession unavailable on host; using fallback shell 38a4203c-f3f2-400d-929c-5395e3cb7beb
+From https://github.com/Indosaram/ferryx
+ * branch              ci/rex-verify-mac-20261104 -> FETCH_HEAD
+ * [new branch]        ci/rex-verify-mac-20261104 -> origin/ci/rex-verify-mac-20261104
+Preparing worktree (detached HEAD 35c98468)
+Updating files:  44% (3264/7367)Updating files:  45% (3316/7367)Updating files:  46% (3389/7367)Updating files:  47% (3463/7367)Updating files:  48% (3537/7367)Updating files:  49% (3610/7367)Updating files:  50% (3684/7367)Updating files:  51% (3758/7367)Updating files:  52% (3831/7367)Updating files:  53% (3905/7367)Updating files:  54% (3979/7367)Updating files:  55% (4052/7367)Updating files:  56% (4126/7367)Updating files:  57% (4200/7367)Updating files:  58% (4273/7367)Updating files:  59% (4347/7367)Updating files:  60% (4421/7367)Updating files:  61% (4494/7367)Updating files:  62% (4568/7367)Updating files:  63% (4642/7367)Updating files:  64% (4715/7367)Updating files:  65% (4789/7367)Updating files:  66% (4863/7367)Updating files:  67% (4936/7367)Updating files:  68% (5010/7367)Updating files:  68% (5036/7367)Updating files:  69% (5084/7367)Updating files:  70% (5157/7367)Updating files:  71% (5231/7367)Updating files:  72% (5305/7367)Updating files:  73% (5378/7367)Updating files:  74% (5452/7367)Updating files:  75% (5526/7367)Updating files:  76% (5599/7367)Updating files:  77% (5673/7367)Updating files:  78% (5747/7367)Updating files:  79% (5820/7367)Updating files:  80% (5894/7367)Updating files:  81% (5968/7367)Updating files:  82% (6041/7367)Updating files:  83% (6115/7367)Updating files:  84% (6189/7367)Updating files:  85% (6262/7367)Updating files:  86% (6336/7367)Updating files:  87% (6410/7367)Updating files:  88% (6483/7367)Updating files:  89% (6557/7367)Updating files:  90% (6631/7367)Updating files:  91% (6704/7367)Updating files:  92% (6778/7367)Updating files:  93% (6852/7367)Updating files:  94% (6925/7367)Updating files:  95% (6999/7367)Updating files:  96% (7073/7367)Updating files:  97% (7146/7367)Updating files:  98% (7220/7367)Updating files:  99% (7294/7367)Updating files: 100% (7367/7367)Updating files: 100% (7367/7367), done.
+HEAD is now at 35c98468 merge rex/buildgreen into rex integration
+Cloning into '/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/src-tauri/vendor/ghostty'...
+Submodule path 'src-tauri/vendor/ghostty': checked out '83fb95624b0439ee660c2679b43b38c8b63769cd'
+CACHES
+/Users/I552267/.cache/rex-mahomac-relay/cmd-51d343cb.zsh:1: no matches found: /Users/I552267/.cache/rex-buildgreen*
+/tmp/rex-buildgreen-headless-json.gz
+/tmp/rex-buildgreen-headless-json2.gz
+/tmp/rex-buildgreen-headless-json3.gz
+/tmp/rex-buildgreen-headless-json4.gz
+/tmp/rex-buildgreen-headless-json5.gz
+/tmp/rex-buildgreen-headless-json6.gz
+/tmp/rex-buildgreen-mac-final-logs.tar.gz
+/tmp/rex-buildgreen-search.gz
+
+/tmp/rex-buildgreen-logs:
+cli-build.log
+clippy.log
+default.log
+driver-final.log
+driver.log
+driver2.log
+driver3.log
+driver4.log
+driver5.log
+driver6.log
+exits.log
+ffmpeg.log
+headless-final.log
+headless-json.log
+headless-json.stderr
+headless-json2.log
+headless-json2.stderr
+headless-json3.log
+headless-json3.stderr
+headless-json4.log
+headless-json4.stderr
+headless-json5.log
+headless-json5.stderr
+headless-json6.log
+headless-json6.stderr
+headless-latest.log
+headless-latest2.log
+headless-latest3.log
+headless-latest4.log
+headless-latest5.log
+headless.log
+llms.log
+metadata.json
+test.log
+ui-typecheck.log
+35c984684b60c40dd6d29cd8703270fe86c30580
+
+__RELAY_EXIT=0

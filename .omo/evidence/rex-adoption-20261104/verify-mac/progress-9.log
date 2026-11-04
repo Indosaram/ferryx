@@ -1,0 +1,36 @@
+createSession unavailable on host; using fallback shell 38a4203c-f3f2-400d-929c-5395e3cb7beb
+ACCEPTANCE
+ui-install EXIT=0
+ui-build EXIT=0
+ffmpeg EXIT=0
+metadata EXIT=0
+full-lib EXIT=101
+cli-build EXIT=0
+QA
+layout-qa EXIT=0
+detach-qa EXIT=1
+hash-qa EXIT=1
+v5-qa EXIT=0
+llms EXIT=0
+DONE
+LAST QA
+{"root":"/tmp/rex-mac-layout-Oj2n2Y","pid":69326}
+LAYOUT_QA_OK revision=4
+LAYOUT_EXIT=0
+ISOLATED_DAEMON_CLEANED
+HANDOVER
+test grants_survive_handover ... ok
+test a_v5_successor_adopts_the_public_socket_and_locks_without_a_gap ... FAILED
+test a_multi_session_v5_handover_preserves_every_session_id ... ok
+test detached_survives_handover ... ok
+test an_upgrade_binary_request_hands_every_session_to_the_new_daemon ... ok
+test a_successor_that_receives_fewer_sessions_than_offered_aborts_and_the_predecessor_keeps_them ... ok
+test a_successor_that_receives_fewer_sessions_than_owned_aborts_and_the_predecessor_keeps_them ... ok
+test test_v5_ownership_transfer_is_the_default_without_the_flag ... ok
+test test_v5_zero_session_loss_and_immediate_predecessor_exit ... ok
+test layout_survives_handover ... FAILED
+test a_candidate_whose_request_expires_mid_transfer_aborts_and_exits_zero ... ok
+test a_session_exported_to_a_slow_successor_survives_and_returns_on_abort ... ok
+RELEASE
+
+__RELAY_EXIT=1

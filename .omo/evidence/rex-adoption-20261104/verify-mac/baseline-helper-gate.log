@@ -1,0 +1,9 @@
+createSession unavailable on host; using fallback shell 38a4203c-f3f2-400d-929c-5395e3cb7beb
+BASE_HELPER_GATE_EXIT=0
+[helper-freshness-gate] Bundled helper assets verified match source fingerprint 3abee5f47f6a90c6db3778605d496ab87bd6250ad8cf38fc566dd01101eff413.
+BASE BUILD
+   Compiling symphonia-bundle-flac v0.5.5
+   Compiling symphonia-codec-vorbis v0.5.5
+   Compiling tokio-stream v0.1.19
+
+__RELAY_EXIT=0

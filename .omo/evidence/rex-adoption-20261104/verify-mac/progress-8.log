@@ -1,0 +1,31 @@
+createSession unavailable on host; using fallback shell 38a4203c-f3f2-400d-929c-5395e3cb7beb
+EXITS
+ui-install EXIT=0
+ui-build EXIT=0
+ffmpeg EXIT=0
+metadata EXIT=0
+test worktree::tests::registry_resolves_only_registered_workspace_identity ... ok
+test worktree::tests::external_worktrees_lists_only_live_checkouts_outside_the_root ... ok
+test worktree::tests::worktree_manager_rejects_filesystem_root ... ok
+test worktree::tests::multiple_worktrees_remain_isolated ... ok
+test worktree::tests::resolve_worktree_by_path_and_identity ... ok
+test worktree::tests::worktree_manager_resolves_nested_git_directory_to_canonical_root ... ok
+test worktree::tests::worktree_creation_survives_an_unwritable_exclude ... ok
+test worktree::tests::safe_delete_clean_worktree ... ok
+test terminal::pty::tests::a_concurrent_close_covers_a_close_that_spends_its_whole_fence ... FAILED
+test worktree::tests::safe_branch_delete_removes_merged_branch ... ok
+test worktree::git::local_budget_tests::git_hook_descendant_containment ... ok
+test ssh::bridge::tests::ssh_bridge_transport_supervisor_entry has been running for over 60 seconds
+test daemon::layout::tests::size_bound ... ok
+test ssh::password::tests::askpass_cli_process_serves_password_when_credentials_match has been running for over 60 seconds
+test ipc::tests::test_p11_start_cleanup_reaper_schedules_background_resolution ... ok
+PROCESS
+  748 119.7 06-16:44:40 /usr/libexec/syspolicyd
+41496  97.2       01:54 /Users/I552267/.rustup/toolchains/1.92.0-aarch64-apple-darwin/bin/rustc
+82280  96.4 04-05:47:53 /Users/I552267/.local/bin/bun
+58345  86.0       00:49 /Applications/Microsoft Defender.app/Contents/MacOS/wdavdaemon_unprivileged.app/Contents/MacOS/wdavdaemon_unprivileged
+  655  43.4 06-16:44:41 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s5   460Gi   392Gi    38Gi    92%    4.7M  401M    1%   /System/Volumes/Data
+
+__RELAY_EXIT=0
