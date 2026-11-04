@@ -2268,8 +2268,9 @@ async fn machine_terminal_upgrade(
             // No task is detached, no input survives this scope, and failed
             // upgrades also drop the captured lease without closing the PTY.
             drop(lease);
-            if resized.load(std::sync::atomic::Ordering::Acquire) {
-                let _ = state.session_backend.restore_desktop_geometry(&session_id).await;
+            let client = format!("phone:machine:{session_id}:{generation}");
+            if let Err(error) = state.session_backend.detach_size(&session_id, &client).await {
+                tracing::warn!(%error, "machine size owner detach failed");
             }
         });
     Ok(([(header::CACHE_CONTROL, "no-store")], response).into_response())
@@ -2814,9 +2815,9 @@ async fn handle_machine_terminal_socket(
                                     .map_err(|error| error.to_string())
                             }
                             Ok(MachineTerminalControl::Resize {
-                                generation: supplied,
-                                cols,
-                                rows,
+                                generation: supplied, cols, rows,
+                            } | MachineTerminalControl::TakeSize {
+                                generation: supplied, cols, rows,
                             }) if supplied.0 == generation
                                 && cols > 0
                                 && rows > 0
@@ -2825,10 +2826,10 @@ async fn handle_machine_terminal_socket(
                                 && (recv_mirror.is_none()
                                     || (cols <= REMOTE_GRID_MAX_COLS && rows <= REMOTE_GRID_MAX_ROWS)) =>
                             {
-                                state
-                                    .session_backend
-                                    .resize(&target.session_id, cols, rows)
-                                    .await?;
+                                let client = format!("phone:machine:{}:{generation}", target.session_id);
+                                let take = text.contains("\"takeSize\"");
+                                let applied = state.session_backend.resize_owned(&target.session_id, &client, cols, rows, true, take).await?;
+                                if !applied { return Ok(()); }
                                 resized.store(true, std::sync::atomic::Ordering::Release);
                                 if let Some(mirror) = &recv_mirror {
                                     {
