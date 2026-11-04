@@ -4,10 +4,13 @@
 // the built candidate against its manifest, makes the isolated `.native-qa/<runId>` profile and
 // launches the candidate daemon with exact-PID receipts; host-helper.mjs (--rpc) reports the
 // machine and checkout identity and speaks the daemon protocol over that profile's endpoint.
-// Every GUI action and every screenshot goes through MahoRD (connectNativeMahord): the GUI is
-// launched through the OS launcher by MahoRD exactly as native-configured-adapters.mjs does,
-// clicks land on points located by OCR of the real frame, and every assertion that names
-// on-screen text is checked against tesseract output of that frame.
+// Every GUI action and every screenshot goes through MahoRD (connectNativeMahord). Windows
+// launches the GUI through the Run dialog typed by MahoRD, as native-configured-adapters.mjs
+// does; macOS opens a run-owned launcher bundle through LaunchServices (host-helper
+// `open-gui-bundle`), because an SSH session has no window server and macOS has no typeable run
+// prompt. Either way the native agent's `--launch-gui` spawns the candidate with the isolated env
+// and writes the exact-pid receipts. Clicks land on points located by OCR of the real frame, and
+// every assertion that names on-screen text is checked against tesseract output of that frame.
 //
 // Unavailable host = LaneBlocked HOST_UNAVAILABLE (the SSH identity probe failed) or
 // MAHORD_UNAVAILABLE (MahoRD connect failed), never a skip. Anything after a reachable host
@@ -19,16 +22,7 @@ import { join } from 'node:path';
 import { connectNativeMahord, rpcProcess } from '../fixtures/native-configured-adapters.mjs';
 import { LaneBlocked, StepFailed, markNotRun, runStep, stopExact, until } from './steps.mjs';
 import { scenariosForLane } from './contract.mjs';
-import { acceptedReply, configureGateway, decisionsNamingNonce, gatewayPortFor, globalRetryRule, namesNonce, rowFocusVerdict, rulesLineText, typedInto, uniqueSession } from './seams.mjs';
-
-const quote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
-const psq = (value) => `'${String(value).replaceAll("'", "''")}'`;
-
-function remoteNode(host, script) {
-  return host.platform === 'win32'
-    ? `powershell.exe -NoProfile -NonInteractive -Command "& ${psq(host.bun)} ${psq(script)} --rpc"`
-    : `${quote(host.bun)} ${quote(script)} --rpc`;
-}
+import { acceptedReply, configureGateway, decisionsNamingNonce, gatewayPortFor, globalRetryRule, namesNonce, rowFocusVerdict, rpcCommand, rulesLineText, typedInto, uniqueSession } from './seams.mjs';
 
 /** OCR words with boxes (tesseract TSV) of one PNG on the control host. */
 async function ocr(tesseract, pngPath) {
@@ -69,7 +63,7 @@ function locate(read, phrase, { below = -1 } = {}) {
 export async function runDesktopLane(lane, { host, run, shared, signal }) {
   const ids = scenariosForLane(lane.name);
   let agent; let helper; let mahord; let setup; let daemon; let gui;
-  const ssh = (script, onEvent) => rpcProcess(run.sshExecutable ?? 'ssh', ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', host.sshDestination, remoteNode(host, script)], { signal, onEvent });
+  const ssh = (script, onEvent) => rpcProcess(...rpcCommand(host, script, run.sshExecutable), { signal, onEvent });
   try {
     // 0. Host reachability: only an unanswered identity probe makes the host unavailable.
     try {
@@ -120,7 +114,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     lane.write('relay', 'gateway.json', await configureGateway({ call: exchange, port: gatewayPort, relayOrigin: shared.relayOrigin }));
 
     // 2. GUI through MahoRD only (the same launcher path native-configured-adapters uses).
-    gui = await launchGui({ agent, mahord, setup, host, run, lane });
+    gui = await launchGui({ agent, helper, mahord, setup, host, run, lane });
     // A frame: real MahoRD pixels plus their OCR. Attached to a step only when `step` is given,
     // so a polled frame attaches exactly the frame its assertion read (see `keep`).
     const frame = async (name, step) => {
@@ -144,7 +138,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     shared.desktops[lane.name] = { lane, frame, panel, transcript, call, mahord, setup, helper, wrappers, gui };
 
     // F3-D1: the shared decision card is on screen. The card's session lives on the session
-    // host (`run.sessionHost`); both desktops show the fleet's card.
+    // host's daemon; both desktops show the fleet's card.
     await runStep(lane, 'F3-D1', async (step) => {
       step.artifact('gui-receipt', 'gui-launch.json', gui);
       const card = await shared.decisionCard();
@@ -328,8 +322,6 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
   } finally {
     markNotRun(lane, ids, lane.receipt.blocked ? `${lane.receipt.blocked.code}` : 'lane stopped before this step');
     shared.desktopDone(lane.name);
-    // The session host's resources stay up until every lane that reads them has settled.
-    await shared.cleanupGate(lane.name);
     await cleanupLane({ lane, agent, helper, mahord, setup, gui, daemon });
   }
 }
@@ -362,16 +354,20 @@ async function cleanupLane({ lane, agent, helper, mahord, setup, gui, daemon }) 
   agent?.close(); helper?.close();
 }
 
-async function launchGui({ agent, mahord, setup, host, run, lane }) {
+async function launchGui({ agent, helper, mahord, setup, host, run, lane }) {
   const { specPath, launcherShortPath } = await agent.call('provision-gui-launch', { setup, worktreeRoot: host.worktreeRoot, hostId: host.hostId, runId: run.runId, operationId: `f3-${run.runId}` });
   const receipt = agent.call('await-gui-launch', { profile: setup.profile, timeoutMs: 180_000 });
-  // Handled now so a failed MahoRD launch step cannot leave it rejecting unobserved; awaited below.
+  // Handled now so a failed launch step cannot leave it rejecting unobserved; awaited below.
   receipt.catch(() => {});
-  const command = host.platform === 'win32' ? launcherShortPath : `${quote(host.bun)} ${quote(host.remoteAgent)} --launch-gui ${quote(specPath)}`;
-  await mahord.hotkey(host.platform === 'win32' ? ['Meta', 'r'] : host.launchTerminalHotkey, AbortSignal.timeout(30_000));
-  if (host.platform === 'win32') await mahord.hotkey(['Control', 'a'], AbortSignal.timeout(30_000));
-  await mahord.type(command, AbortSignal.timeout(60_000));
-  await mahord.key('Enter', AbortSignal.timeout(30_000));
+  if (host.platform === 'win32') {
+    await mahord.hotkey(['Meta', 'r'], AbortSignal.timeout(30_000));
+    await mahord.hotkey(['Control', 'a'], AbortSignal.timeout(30_000));
+    await mahord.type(launcherShortPath, AbortSignal.timeout(60_000));
+    await mahord.key('Enter', AbortSignal.timeout(30_000));
+  } else {
+    const opened = await helper.call('open-gui-bundle', { profile: setup.profile, bundleId: `dev.ferryx.qa.${run.runId}`, agent: host.remoteAgent, specPath });
+    lane.write('gui-receipt', 'gui-bundle.json', opened);
+  }
   const gui = await receipt;
   lane.write('gui-receipt', 'gui-launch.json', gui);
   if (gui.role !== 'gui' || gui.status !== 'spawned' || gui.executable !== setup.binary || !gui.processStart) throw new StepFailed('GUI_LAUNCH', JSON.stringify(gui));

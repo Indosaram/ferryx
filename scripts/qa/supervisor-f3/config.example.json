@@ -1,9 +1,31 @@
 {
-  "$comment": "F3 real-surface acceptance config. Copy outside the repo, fill every value, never commit secrets. Paths are on the named host; mahordExecutable, tesseract and sshExecutable are on the control host. relayOrigin must be https:// with a DNS name the relay certificate covers (iOS Web Push needs a secure context) and must reach the Windows relay from the phone, macOS and the control host.",
+  "$comment": "F3 real-surface acceptance config. Copy outside the repo, fill every value, never commit secrets. Paths are on the named host; mahordExecutable, tesseract and sshExecutable are on the control host. sessionHost runs the relay and the fixture daemon (the agent sessions); relayOrigin must be https:// with a DNS name the session host's certificate covers (iOS Web Push needs a secure context) and must reach that relay from the phone, both desktops and the control host. With relayFront tailscale-serve, relayOrigin's port is publicPort and the relay listens on backendPort.",
   "ownerEmail": "owner@example.invalid",
   "mahordExecutable": "/Users/indo/.cargo/bin/maho-client",
   "tesseract": "/opt/homebrew/bin/tesseract",
   "sshExecutable": "ssh",
+  "relayOrigin": "https://indo.taila0cef2.ts.net:47930",
+  "sessionHost": {
+    "hostId": "omarchy",
+    "platform": "linux",
+    "sshDestination": "omarchy",
+    "bun": "/usr/local/bin/bun",
+    "worktreeRoot": "/home/indo/code/ferryx-wt",
+    "worktree": "/home/indo/code/ferryx-wt/supv-f3-final",
+    "hostHelper": "/home/indo/code/ferryx-wt/supv-f3-final/scripts/qa/supervisor-f3/host-helper.mjs",
+    "remoteAgent": "/home/indo/code/ferryx-wt/supv-f3-final/scripts/qa/fixtures/native-remote-agent.mjs",
+    "binary": "/home/indo/code/ferryx-wt/supv-f3-final/src-tauri/target/debug/ferryx-cli",
+    "cli": "/home/indo/code/ferryx-wt/supv-f3-final/src-tauri/target/debug/ferryx-cli",
+    "relay": "/home/indo/code/ferryx-wt/supv-f3-final/src-tauri/target/debug/ferryx-relay",
+    "uiDist": "/home/indo/code/ferryx-wt/supv-f3-final/ui/dist",
+    "buildManifest": "/home/indo/code/ferryx-wt/supv-f3-final/scripts/qa/fixtures/candidate-manifest.json",
+    "relayFront": {
+      "kind": "tailscale-serve",
+      "publicPort": 47930,
+      "backendPort": 47931
+    },
+    "$relayFront": "tailscale-serve: the run adds `tailscale serve --https=<publicPort> http://127.0.0.1:<backendPort>` and turns it off at cleanup, proving the serve config equals its pre-run snapshot. Or {\"kind\":\"tls\",\"cert\":\"<PEM>\",\"key\":\"<PEM>\"}: the relay serves that certificate itself on relayOrigin's port. binary is the headless daemon (ferryx-cli --daemon, built with --no-default-features --features local-split-qa); the manifest hashes it and uiDist."
+  },
   "hosts": {
     "windows": {
       "hostId": "maho-win",
@@ -19,13 +41,10 @@
       "remoteAgent": "C:\\Users\\sook\\ferryx-wt\\supv-f3-final\\scripts\\qa\\fixtures\\native-remote-agent.mjs",
       "binary": "C:\\Users\\sook\\ferryx-wt\\supv-f3-final\\src-tauri\\target\\debug\\ferryx.exe",
       "cli": "C:\\Users\\sook\\ferryx-wt\\supv-f3-final\\src-tauri\\target\\debug\\ferryx-cli.exe",
-      "relay": "C:\\Users\\sook\\ferryx-wt\\supv-f3-final\\src-tauri\\target\\debug\\ferryx-relay.exe",
       "uiDist": "C:\\Users\\sook\\ferryx-wt\\supv-f3-final\\ui\\dist",
       "buildManifest": "C:\\Users\\sook\\ferryx-wt\\supv-f3-final\\scripts\\qa\\fixtures\\candidate-manifest.json",
       "exportLabel": "Export transcript",
       "viewerLabel": "Open in Viewer",
-      "relayTlsCert": "<path on maho-win to a PEM certificate for the relayOrigin host name>",
-      "relayTlsKey": "<path on maho-win to its PEM private key>",
       "viewerMarker": "<text only the Viewer surface shows, e.g. its window title>"
     },
     "macos": {
@@ -34,10 +53,6 @@
       "sshDestination": "maho-mac",
       "mahordAddress": "<maho-mac tailnet address>",
       "pairingId": "<maho-mac MahoRD pairing id>",
-      "launchTerminalHotkey": [
-        "<modifier>",
-        "<key>"
-      ],
       "bun": "/Users/<user>/.bun/bin/bun",
       "worktreeRoot": "/Users/<user>/ferryx-wt",
       "worktree": "/Users/<user>/ferryx-wt/supv-f3-final",
@@ -45,13 +60,11 @@
       "remoteAgent": "/Users/<user>/ferryx-wt/supv-f3-final/scripts/qa/fixtures/native-remote-agent.mjs",
       "binary": "/Users/<user>/ferryx-wt/supv-f3-final/src-tauri/target/debug/ferryx",
       "cli": "/Users/<user>/ferryx-wt/supv-f3-final/src-tauri/target/debug/ferryx-cli",
-      "relay": "/Users/<user>/ferryx-wt/supv-f3-final/src-tauri/target/debug/ferryx-relay",
       "uiDist": "/Users/<user>/ferryx-wt/supv-f3-final/ui/dist",
       "buildManifest": "/Users/<user>/ferryx-wt/supv-f3-final/scripts/qa/fixtures/candidate-manifest.json",
       "exportLabel": "Export transcript",
       "viewerLabel": "Open in Viewer",
-      "viewerMarker": "<text only the Viewer surface shows, e.g. its window title>",
-      "$launchTerminalHotkey": "The MahoRD hotkey that opens a shell prompt on maho-mac which accepts a typed command and Enter (for example a Terminal.app global shortcut the owner configured). Not Spotlight: Spotlight does not run typed commands."
+      "viewerMarker": "<text only the Viewer surface shows, e.g. its window title>"
     }
   },
   "iphone": {
@@ -60,6 +73,5 @@
     "model": null,
     "osVersion": null,
     "pushPermissionWaitMs": 300000
-  },
-  "relayOrigin": "https://<maho-win tailnet DNS name>:47930"
+  }
 }

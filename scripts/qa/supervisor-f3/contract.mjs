@@ -14,9 +14,12 @@
 //    belongs to `blocked`, never `pass`; a lane that ran and failed is never hidden behind it;
 //  - every cleanup entry of every lane, blocked or not, must prove the resource is gone; a
 //    run-spawned pid reported-not-killed (or any other outcome) fails the run;
-//  - the control host's checkout must be the run revision and clean, with script hashes recorded.
+//  - the control host's checkout must be the run revision and clean, with script hashes recorded;
+//  - the session host (`run.session`: relay, fixture daemon and panes) must be at the run
+//    revision with a matching build stamp unless it was blocked, and its cleanup (daemon, relay,
+//    profile, relay root, the run's serve endpoint) must prove every resource gone.
 
-export const RUN_SCHEMA = 'ferryx-supervisor-f3.run/2';
+export const RUN_SCHEMA = 'ferryx-supervisor-f3.run/3';
 export const LANE_SCHEMA = 'ferryx-supervisor-f3.lane/2';
 export const EXIT = Object.freeze({ PASS: 0, FAIL: 1, BLOCKED: 2, USAGE: 5, INTERRUPTED: 130 });
 export const LANES = Object.freeze(['macos', 'windows', 'iphone']);
@@ -143,6 +146,9 @@ export function validateRun(run, extraErrors = []) {
   for (const name of LANES) {
     for (const leak of cleanupLeaks(run?.lanes?.[name])) errors.push(`${name} cleanup leak: ${JSON.stringify(leak).slice(0, 400)}`);
   }
+  const session = laneDefect(run?.session, run?.revision);
+  if (session) errors.push(`session host: ${session}`);
+  for (const leak of cleanupLeaks(run?.session)) errors.push(`session host cleanup leak: ${JSON.stringify(leak).slice(0, 400)}`);
   const scenarios = SCENARIOS.map((scenario) => scenarioVerdict(run, scenario));
   const verdict = errors.length > 0 ? 'fail'
     : scenarios.every((entry) => entry.status === 'pass') ? 'pass'

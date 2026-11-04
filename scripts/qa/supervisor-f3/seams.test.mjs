@@ -1,10 +1,12 @@
 // Self-tests of the F3 harness seams. Pure: no host, device, daemon or network.
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import {
-  PRODUCTION_GATEWAY_PORT, acceptedReply, configureGateway, decisionsNamingNonce, gatewayBound, gatewayPortFor,
-  globalRetryRule, namesNonce, pageToScreen, rowFocusVerdict, rulesLineText, typedInto, uniqueSession, webContextFrom, webPageChannel,
+  PRODUCTION_GATEWAY_PORT, acceptedReply, configProblems, configureGateway, decisionsNamingNonce, gatewayBound, gatewayPortFor,
+  globalRetryRule, guiBundleFiles, namesNonce, pageToScreen, relayListenPort, remotePath, rowFocusVerdict, rpcCommand, rulesLineText,
+  sameServeConfig, serveAddedProblems, typedInto, uniqueSession, webContextFrom, webPageChannel,
 } from './seams.mjs';
-import { SCENARIOS, validateRun } from './contract.mjs';
+import { LANE_SCHEMA, RUN_SCHEMA, SCENARIOS, validateRun } from './contract.mjs';
 
 const code = (fn) => { try { fn(); } catch (error) { return error.code; } return null; };
 const codeAsync = async (fn) => { try { await fn(); } catch (error) { return error.code; } return null; };
@@ -171,7 +173,134 @@ describe('contract', () => {
   });
 
   test('a run with no D5-D7 steps is not a pass', () => {
-    const verdict = validateRun({ schema: 'ferryx-supervisor-f3.run/2', revision: 'a'.repeat(40), lanes: {}, cross: [] });
+    const verdict = validateRun({ schema: RUN_SCHEMA, revision: 'a'.repeat(40), lanes: {}, cross: [] });
     for (const id of ['F3-D5', 'F3-D6', 'F3-D7']) expect(verdict.scenarios.find((s) => s.id === id).status).not.toBe('pass');
+  });
+});
+
+describe('session host config', () => {
+  const example = () => JSON.parse(readFileSync(new URL('./config.example.json', import.meta.url), 'utf8'));
+
+  test('the shipped example is a Linux session host behind tailscale serve and passes the checks', () => {
+    const config = example();
+    expect(configProblems(config)).toEqual([]);
+    expect(config.sessionHost.platform).toBe('linux');
+    expect(relayListenPort(config)).toBe(config.sessionHost.relayFront.backendPort);
+    expect(config.hosts.macos.launchTerminalHotkey).toBeUndefined();
+  });
+
+  test('the relay origin port must be the serve port, and the backend another port', () => {
+    const config = example();
+    config.relayOrigin = 'https://indo.taila0cef2.ts.net:47931';
+    expect(configProblems(config).join()).toContain('is not sessionHost.relayFront.publicPort');
+    const same = example();
+    same.sessionHost.relayFront.backendPort = same.sessionHost.relayFront.publicPort;
+    expect(configProblems(same).join()).toContain('distinct publicPort and backendPort');
+  });
+
+  test('a missing session host, a desktop hostId reused or an unknown front is refused', () => {
+    const none = example();
+    delete none.sessionHost;
+    expect(configProblems(none).join()).toContain('sessionHost.hostId');
+    const reused = example();
+    reused.sessionHost.hostId = reused.hosts.windows.hostId;
+    expect(configProblems(reused).join()).toContain('must differ from the desktop hostIds');
+    const front = example();
+    front.sessionHost.relayFront = { kind: 'plain' };
+    expect(configProblems(front).join()).toContain('tailscale-serve or tls');
+  });
+
+  test('an IP or plain-HTTP origin is refused; a self-served PEM listens on the origin port', () => {
+    const ip = example();
+    ip.relayOrigin = 'https://100.91.254.71:47930';
+    expect(configProblems(ip).join()).toContain('must be https:// with a DNS name');
+    const tls = example();
+    tls.sessionHost.relayFront = { kind: 'tls', cert: '/c.pem', key: '/k.pem' };
+    tls.relayOrigin = 'https://relay.example.ts.net:47950';
+    expect(configProblems(tls)).toEqual([]);
+    expect(relayListenPort(tls)).toBe(47950);
+  });
+
+  test('helpers start over ssh per platform, or as a local child for the control host itself', () => {
+    const linux = { platform: 'linux', sshDestination: 'omarchy', bun: '/usr/local/bin/bun' };
+    expect(rpcCommand(linux, '/h/x.mjs')).toEqual(['ssh', ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', 'omarchy', "'/usr/local/bin/bun' '/h/x.mjs' --rpc"]]);
+    expect(rpcCommand({ ...linux, sshDestination: 'local' }, '/h/x.mjs')).toEqual(['/usr/local/bin/bun', ['/h/x.mjs', '--rpc']]);
+    const win = { platform: 'win32', sshDestination: 'maho-win', bun: 'C:\\b\\bun.exe' };
+    expect(rpcCommand(win, 'C:\\h\\x.mjs', '/usr/bin/ssh')[1].at(-1)).toBe(`powershell.exe -NoProfile -NonInteractive -Command "& 'C:\\b\\bun.exe' 'C:\\h\\x.mjs' --rpc"`);
+    expect(remotePath(linux, '/w', '.native-qa', 'r')).toBe('/w/.native-qa/r');
+    expect(remotePath(win, 'C:\\w', 'r')).toBe('C:\\w\\r');
+  });
+});
+
+describe('tailscale serve endpoint', () => {
+  const owner = { TCP: { 443: { HTTPS: true }, 8443: { HTTPS: true } }, Web: {
+    'indo.ts.net:443': { Handlers: { '/': { Proxy: 'http://127.0.0.1:8088' } } },
+    'indo.ts.net:8443': { Handlers: { '/': { Proxy: 'http://127.0.0.1:8099' } } } } };
+  const withRun = (base = owner) => ({ TCP: { ...base.TCP, 47930: { HTTPS: true } },
+    Web: { ...base.Web, 'indo.ts.net:47930': { Handlers: { '/': { Proxy: 'http://127.0.0.1:47931' } } } } });
+  const want = { hostName: 'indo.ts.net', port: 47930, backend: 47931 };
+
+  test('only the run endpoint was added, proxying to the loopback relay', () => {
+    expect(serveAddedProblems(owner, withRun(), want)).toEqual([]);
+    expect(serveAddedProblems({}, withRun({ TCP: {}, Web: {} }), want)).toEqual([]);
+  });
+
+  test('a changed owner entry, a wrong backend or a pre-existing port is reported', () => {
+    const changed = withRun();
+    changed.Web['indo.ts.net:443'].Handlers['/'].Proxy = 'http://127.0.0.1:9999';
+    expect(serveAddedProblems(owner, changed, want).join()).toContain('Web entries other than indo.ts.net:47930 changed');
+    expect(serveAddedProblems(owner, withRun(), { ...want, backend: 47932 }).join()).toContain('not http://127.0.0.1:47932');
+    expect(serveAddedProblems(withRun(), withRun(), want).join()).toContain('TCP.47930 existed before this run');
+  });
+
+  test('teardown is proven only by the exact snapshot', () => {
+    const reordered = { Web: owner.Web, TCP: { 8443: { HTTPS: true }, 443: { HTTPS: true } } };
+    expect(sameServeConfig(owner, reordered)).toBe(true);
+    expect(sameServeConfig(owner, withRun())).toBe(false);
+  });
+});
+
+describe('macOS GUI launcher bundle', () => {
+  const args = { bundleId: 'dev.ferryx.qa.f3-20261104-abc123', bun: '/Users/u/.local/bin/bun', agent: "/Users/u/wt/it's/native-remote-agent.mjs",
+    specPath: '/Users/u/wt/.native-qa/r/gui-launch-spec.json', logPath: '/Users/u/wt/.native-qa/r/evidence/l.log' };
+
+  test('the bundle runs the native agent launcher on the spec, quoted, with bun on PATH', () => {
+    const files = guiBundleFiles(args);
+    expect(Object.keys(files).sort()).toEqual(['Contents/Info.plist', 'Contents/MacOS/f3-launch']);
+    const script = files['Contents/MacOS/f3-launch'];
+    expect(script.startsWith('#!/bin/sh\n')).toBe(true);
+    expect(script).toContain("exec '/Users/u/.local/bin/bun' '/Users/u/wt/it'\\''s/native-remote-agent.mjs' --launch-gui '/Users/u/wt/.native-qa/r/gui-launch-spec.json'");
+    expect(script).toContain(':/Users/u/.local/bin');
+    expect(files['Contents/Info.plist']).toContain('<key>CFBundleExecutable</key><string>f3-launch</string>');
+    expect(files['Contents/Info.plist']).toContain(`<string>${args.bundleId}</string>`);
+    expect(files['Contents/Info.plist']).toContain('<key>LSUIElement</key><true/>');
+  });
+
+  test('a relative path or an unsafe bundle id is refused', () => {
+    expect(code(() => guiBundleFiles({ ...args, specPath: 'spec.json' }))).toBe('GUI_BUNDLE');
+    expect(code(() => guiBundleFiles({ ...args, bundleId: 'dev.ferryx/<x>' }))).toBe('GUI_BUNDLE');
+  });
+});
+
+describe('session host in the verdict', () => {
+  const rev = 'b'.repeat(40);
+  const session = (extra = {}) => ({ schema: LANE_SCHEMA, lane: 'session', blocked: null, failure: null, machine: { id: 'm' },
+    candidate: { headRevision: rev, clean: true, stamp: `${rev}+e3b0` }, steps: [], cleanup: [], ...extra });
+  const run = (s) => ({ schema: RUN_SCHEMA, revision: rev, control: { hostname: 'c', head: rev, clean: true, scripts: [{ path: 'a', sha256: 'c'.repeat(64) }] },
+    session: s, lanes: {}, cross: [] });
+
+  test('a failed session host, a wrong stamp or a leaked serve endpoint fails the run', () => {
+    expect(validateRun(run(session())).errors).toEqual([]);
+    expect(validateRun(run(session({ failure: { code: 'SERVE_ENDPOINT' } }))).errors.join()).toContain('session host: lane failed: SERVE_ENDPOINT');
+    expect(validateRun(run(session({ candidate: { headRevision: rev, clean: true, stamp: 'x+y' } }))).errors.join()).toContain('session host: candidate build stamp');
+    const leak = session({ cleanup: [{ resource: 'serve-endpoint', port: 47930, action: 'reported-not-killed' }] });
+    expect(validateRun(run(leak)).verdict).toBe('fail');
+    expect(validateRun(run(null)).errors.join()).toContain('session host: lane receipt missing');
+  });
+
+  test('a blocked session host blocks, never passes', () => {
+    const verdict = validateRun(run(session({ blocked: { code: 'HOST_UNAVAILABLE' } })));
+    expect(verdict.errors).toEqual([]);
+    expect(verdict.verdict).not.toBe('pass');
   });
 });

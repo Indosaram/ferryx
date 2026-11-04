@@ -1,16 +1,19 @@
 #!/usr/bin/env node
-// F3 host helper: runs on a desktop host (macOS or Windows) under `ssh -T <host> node
+// F3 host helper: runs on a desktop host (macOS or Windows) or the session host (Linux, macOS
+// or Windows) under `ssh -T <host> node
 // <checkout>/scripts/qa/supervisor-f3/host-helper.mjs --rpc`, next to the existing
 // scripts/qa/fixtures/native-remote-agent.mjs that prepares the isolated profile and launches
 // the candidate daemon and GUI. JSONL RPC: {id, method, args} in, {id, result|error} out.
 //
 // It does only what that agent does not: report the machine and checkout identity, speak the
 // daemon protocol over the isolated profile's own endpoint, write the fixture pane wrappers,
-// spawn the relay / CLI children this run owns, read files under the isolated profile, and list
-// files that appeared in the profile's Downloads directory. Never a GUI action (MahoRD does
-// those from the control host). Every path is refused outside the profile it was given; every
-// child it kills is a ChildProcess handle it spawned itself.
-import { execFileSync, spawn } from 'node:child_process';
+// spawn the relay / CLI children this run owns, read files under the isolated profile, list
+// files that appeared in the profile's Downloads directory, add and remove the run's own
+// `tailscale serve` endpoint, and on macOS open the run-owned launcher bundle (LaunchServices
+// puts it in the logged-in Aqua session). Never a GUI input (MahoRD does those from the control
+// host). Every path is refused outside the profile it was given; every child it kills is a
+// ChildProcess handle it spawned itself; it removes only the serve port it added itself.
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
@@ -18,12 +21,16 @@ import { hostname, platform, release } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { guiBundleFiles } from './seams.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CHECKOUT = resolve(HERE, '..', '..', '..');
 const DAEMON_PROTOCOL_VERSION = 5;
 const WIN = process.platform === 'win32';
+const MAC = process.platform === 'darwin';
 const owned = new Map();
+// `tailscale serve` HTTPS ports this helper process added; only these may be turned off.
+const servePorts = new Set();
 // Directories this helper process created a child under; only these may be removed.
 const ownedDirs = new Set();
 const fail = (code, message) => Object.assign(new Error(message), { code });
@@ -43,6 +50,7 @@ function machineId() {
     const out = execFileSync('reg', ['query', 'HKLM\\SOFTWARE\\Microsoft\\Cryptography', '/v', 'MachineGuid'], { encoding: 'utf8' });
     return /MachineGuid\s+REG_SZ\s+(\S+)/.exec(out)?.[1] ?? null;
   }
+  if (!MAC) return readFileSync('/etc/machine-id', 'utf8').trim() || null;
   const out = execFileSync('ioreg', ['-rd1', '-c', 'IOPlatformExpertDevice'], { encoding: 'utf8' });
   return /"IOPlatformUUID" = "([^"]+)"/.exec(out)?.[1] ?? null;
 }
@@ -107,7 +115,7 @@ function writeWrappers({ profile }) {
   const wrappers = {};
   // `focus` and `away` are per desktop (F3-D6): two instrumented panes whose titles name the
   // host, so each desktop's rows are unique; both run the fixture's `focus` mode.
-  const host = WIN ? 'win' : 'mac';
+  const host = WIN ? 'win' : MAC ? 'mac' : 'lnx';
   for (const [key, mode, title] of [['decision', 'decision', 'f3decision'], ['held', 'held', 'f3push'], ['upstream', 'upstream', 'f3upstream'],
     ['focus', 'focus', `f3focus${host}`], ['away', 'focus', `f3away${host}`]]) {
     const file = join(bin, `f3-${key}${WIN ? '.cmd' : ''}`);
@@ -220,9 +228,67 @@ function freePort() {
   });
 }
 
+const run = (executable, args) => new Promise((resolveRun, reject) => {
+  execFile(executable, args, { encoding: 'utf8', timeout: 60_000, windowsHide: true }, (error, stdout, stderr) => {
+    if (error) reject(fail('COMMAND_FAILED', `${executable} ${args.join(' ')}: ${error.message} ${stderr}`.trim()));
+    else resolveRun(stdout);
+  });
+});
+const portArg = (value) => {
+  if (!Number.isSafeInteger(value) || value < 1024 || value > 65535) throw fail('SERVE_REFUSED', `port ${value} is not in 1024..65535`);
+  return value;
+};
+
+/** `tailscale serve status --json` of this node (an empty config prints nothing). */
+async function serveStatus() {
+  const out = (await run('tailscale', ['serve', 'status', '--json'])).trim();
+  return out ? JSON.parse(out) : {};
+}
+
+/** Adds HTTPS :publicPort -> http://127.0.0.1:backendPort, refusing a port already served. */
+async function serveAdd({ publicPort, backendPort }) {
+  portArg(publicPort); portArg(backendPort);
+  const before = await serveStatus();
+  if (before.TCP?.[String(publicPort)]) throw fail('SERVE_REFUSED', `:${publicPort} is already served; not this run's`);
+  await run('tailscale', ['serve', '--bg', '--yes', `--https=${publicPort}`, `http://127.0.0.1:${backendPort}`]);
+  servePorts.add(publicPort);
+  return { before, after: await serveStatus() };
+}
+
+/** Turns off a port this helper added; any other port is refused. */
+async function serveRemove({ publicPort }) {
+  if (!servePorts.has(publicPort)) throw fail('SERVE_REFUSED', `:${publicPort} was not added by this helper`);
+  await run('tailscale', ['serve', '--yes', `--https=${publicPort}`, 'off']);
+  servePorts.delete(publicPort);
+  return { after: await serveStatus() };
+}
+
+/**
+ * macOS: writes the run-owned launcher bundle into the profile and opens it as a new instance.
+ * Over SSH a process is in the Background session and gets no window server; LaunchServices
+ * starts the bundle in the logged-in Aqua session, and its executable runs the native agent's
+ * `--launch-gui <spec>`, which records the exact-pid launch and exit receipts.
+ */
+async function openGuiBundle({ profile, bundleId, agent, specPath }) {
+  if (!MAC) throw fail('GUI_BUNDLE', 'the launcher bundle is macOS only');
+  const bundle = join(profile, 'F3Launch.app');
+  requireProfile(profile, specPath);
+  if (existsSync(bundle)) throw fail('GUI_BUNDLE', `${bundle} already exists`);
+  const files = guiBundleFiles({ bundleId, bun: process.execPath, agent, specPath, logPath: join(profile, 'evidence', 'gui-bundle-launcher.log') });
+  for (const [rel, body] of Object.entries(files)) {
+    const path = join(bundle, rel);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, body, { mode: rel.startsWith('Contents/MacOS/') ? 0o755 : 0o644 });
+  }
+  chmodSync(join(bundle, 'Contents', 'MacOS', 'f3-launch'), 0o755);
+  await run('/usr/bin/open', ['-n', bundle]);
+  return { bundle, bundleId, opened: true };
+}
+
 const METHODS = {
   identity, daemon, 'write-wrappers': writeWrappers, 'spawn-owned': spawnOwned, 'await-exit': awaitExit,
   cleanup, 'read-b64': readB64, 'list-files': listFiles, 'remove-owned-dir': removeOwnedDir, 'free-port': freePort,
+  'serve-status': serveStatus, 'serve-add': serveAdd, 'serve-remove': serveRemove, 'open-gui-bundle': openGuiBundle,
 };
 
 if (process.argv.includes('--rpc')) {
@@ -238,5 +304,10 @@ if (process.argv.includes('--rpc')) {
         (error) => out({ id: request.id, error: { code: error.code ?? 'HELPER_ERROR', message: error.message } }),
       );
     })
-    .on('close', () => { void cleanup().finally(() => process.exit(0)); });
+    .on('close', () => {
+      // The runner's handle went away: end the run-owned children and turn off the serve ports
+      // this helper added, so a lost control host never leaves the endpoint behind.
+      const ports = [...servePorts].map((publicPort) => serveRemove({ publicPort }).catch(() => {}));
+      void Promise.all([cleanup(), ...ports]).finally(() => process.exit(0));
+    });
 }

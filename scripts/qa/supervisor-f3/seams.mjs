@@ -156,6 +156,131 @@ export function rulesLineText(ocrText) {
   return lines.slice(start, end + 1).join(' ').replace(/\s*\bChange\b\s*$/, '').replace(/\s+/g, ' ').trim();
 }
 
+const REQUIRED_DESKTOP = ['hostId', 'platform', 'sshDestination', 'bun', 'hostHelper', 'remoteAgent', 'worktreeRoot', 'worktree', 'binary', 'cli', 'uiDist', 'buildManifest', 'mahordAddress', 'pairingId', 'viewerMarker'];
+const REQUIRED_SESSION_HOST = ['hostId', 'platform', 'sshDestination', 'bun', 'hostHelper', 'remoteAgent', 'worktreeRoot', 'worktree', 'binary', 'cli', 'relay', 'uiDist', 'buildManifest'];
+const isPort = (value) => Number.isSafeInteger(value) && value >= 1024 && value <= 65535;
+
+/**
+ * Every problem of an F3 config, empty when it can run. The session host (relay, fixture daemon,
+ * fixture panes) is its own block: Linux behind `tailscale serve` (`relayFront.kind`
+ * `tailscale-serve`: public HTTPS port -> loopback relay port) or any host serving an operator
+ * PEM itself (`tls`). Its hostId names its machine token, so it must differ from the desktops'.
+ */
+export function configProblems(config) {
+  const missing = [];
+  for (const name of ['macos', 'windows']) for (const key of REQUIRED_DESKTOP) if (config?.hosts?.[name]?.[key] === undefined) missing.push(`hosts.${name}.${key}`);
+  for (const key of REQUIRED_SESSION_HOST) if (config?.sessionHost?.[key] === undefined) missing.push(`sessionHost.${key}`);
+  for (const key of ['serial', 'driverEndpoint']) if (!config?.iphone?.[key]) missing.push(`iphone.${key}`);
+  for (const key of ['mahordExecutable', 'tesseract', 'ownerEmail', 'relayOrigin']) if (!config?.[key]) missing.push(key);
+  if (missing.length) return [`missing ${missing.join(', ')}`];
+  const problems = [];
+  let origin;
+  try { origin = new URL(config.relayOrigin); } catch { return [`relayOrigin ${config.relayOrigin} is not a URL`]; }
+  // iOS Web Push needs a secure context: the phone loads the relay over HTTPS with a name the
+  // certificate covers, never plain HTTP to a tailnet address.
+  if (origin.protocol !== 'https:' || /^\d+\.\d+\.\d+\.\d+$/.test(origin.hostname) || origin.hostname === 'localhost') {
+    problems.push(`relayOrigin ${config.relayOrigin} must be https:// with a DNS name the relay certificate covers (iOS push needs a secure context)`);
+  }
+  const originPort = Number(origin.port || 443);
+  const host = config.sessionHost;
+  if (['macos', 'windows'].some((name) => config.hosts[name].hostId === host.hostId)) problems.push(`sessionHost.hostId ${host.hostId} must differ from the desktop hostIds`);
+  if (!['linux', 'darwin', 'win32'].includes(host.platform)) problems.push(`sessionHost.platform ${host.platform} is not linux, darwin or win32`);
+  const front = host.relayFront;
+  if (front?.kind === 'tailscale-serve') {
+    if (!isPort(front.publicPort) || !isPort(front.backendPort) || front.publicPort === front.backendPort) problems.push('sessionHost.relayFront needs distinct publicPort and backendPort in 1024..65535');
+    if (front.publicPort !== originPort) problems.push(`relayOrigin port ${originPort} is not sessionHost.relayFront.publicPort ${front.publicPort}`);
+    if (host.platform === 'win32') problems.push('sessionHost.relayFront tailscale-serve is supported on linux and darwin session hosts only');
+  } else if (front?.kind === 'tls') {
+    if (!front.cert || !front.key) problems.push('sessionHost.relayFront tls needs cert and key (PEM paths on the session host)');
+  } else {
+    problems.push('sessionHost.relayFront.kind must be tailscale-serve or tls');
+  }
+  return problems;
+}
+
+/** The port the relay process itself listens on. */
+export const relayListenPort = (config) => {
+  const front = config.sessionHost.relayFront;
+  return front.kind === 'tailscale-serve' ? front.backendPort : Number(new URL(config.relayOrigin).port || 443);
+};
+
+/** A path on `host`, joined with that host's separator. */
+export const remotePath = (host, ...parts) => parts.join(host.platform === 'win32' ? '\\' : '/');
+
+const shq = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
+const psq = (value) => `'${String(value).replaceAll("'", "''")}'`;
+
+/**
+ * The [executable, argv] that starts `script --rpc` on `host` under its bun: over SSH, or as a
+ * direct child when the host is the control host itself (`sshDestination: "local"`).
+ */
+export function rpcCommand(host, script, sshExecutable = 'ssh') {
+  if (host.sshDestination === 'local') return [host.bun, [script, '--rpc']];
+  const remote = host.platform === 'win32'
+    ? `powershell.exe -NoProfile -NonInteractive -Command "& ${psq(host.bun)} ${psq(script)} --rpc"`
+    : `${shq(host.bun)} ${shq(script)} --rpc`;
+  return [sshExecutable, ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', host.sshDestination, remote]];
+}
+
+const canonical = (value) => JSON.stringify(value, (_, v) => (v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v));
+
+/**
+ * Problems of a `tailscale serve status --json` change, empty when `after` is exactly `before`
+ * plus this run's endpoint: TCP[port] with HTTPS and Web["<hostName>:<port>"] proxying `/` to
+ * the loopback backend. Every other entry (the owner's :443, :8443, ...) must be byte-identical.
+ */
+export function serveAddedProblems(before, after, { hostName, port, backend }) {
+  const problems = [];
+  const key = `${hostName}:${port}`;
+  for (const section of ['TCP', 'Web']) {
+    const added = section === 'TCP' ? String(port) : key;
+    const was = { ...(before?.[section] ?? {}) };
+    const now = { ...(after?.[section] ?? {}) };
+    if (added in was) problems.push(`${section}.${added} existed before this run`);
+    delete now[added];
+    if (canonical(was) !== canonical(now)) problems.push(`${section} entries other than ${added} changed`);
+  }
+  if (after?.TCP?.[String(port)]?.HTTPS !== true) problems.push(`TCP.${port} is not HTTPS`);
+  const proxy = after?.Web?.[key]?.Handlers?.['/']?.Proxy;
+  if (proxy !== `http://127.0.0.1:${backend}`) problems.push(`Web.${key} / proxies ${proxy}, not http://127.0.0.1:${backend}`);
+  const rest = (value) => canonical(Object.fromEntries(Object.entries(value ?? {}).filter(([k]) => k !== 'TCP' && k !== 'Web')));
+  if (rest(before) !== rest(after)) problems.push('serve settings other than TCP and Web changed');
+  return problems;
+}
+
+/** Whether two serve status documents are the same config (teardown restored the snapshot). */
+export const sameServeConfig = (a, b) => canonical(a ?? {}) === canonical(b ?? {});
+
+const xml = (value) => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+
+/**
+ * The files of the run-owned macOS launcher bundle (relative path -> body). LaunchServices
+ * (`open -n`) starts it in the logged-in Aqua session, which an SSH session cannot reach; its
+ * executable replaces itself with `bun native-remote-agent.mjs --launch-gui <spec>`, which
+ * checks the candidate hash and isolated env, spawns the GUI and writes the exact-pid launch and
+ * exit receipts. LSUIElement keeps the launcher itself out of the Dock.
+ */
+export function guiBundleFiles({ bundleId, bun, agent, specPath, logPath }) {
+  if (!/^[A-Za-z0-9.-]+$/.test(bundleId ?? '')) throw new StepFailed('GUI_BUNDLE', `bundle id ${bundleId} is not [A-Za-z0-9.-]`);
+  for (const [name, value] of Object.entries({ bun, agent, specPath, logPath })) {
+    if (typeof value !== 'string' || !value.startsWith('/')) throw new StepFailed('GUI_BUNDLE', `${name} ${value} is not an absolute path`);
+  }
+  const plist = ['<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0"><dict>',
+    '<key>CFBundleExecutable</key><string>f3-launch</string>',
+    `<key>CFBundleIdentifier</key><string>${xml(bundleId)}</string>`,
+    '<key>CFBundleName</key><string>F3Launch</string>',
+    '<key>CFBundlePackageType</key><string>APPL</string>',
+    '<key>LSUIElement</key><true/>',
+    '</dict></plist>', ''].join('\n');
+  const bunDir = bun.slice(0, bun.lastIndexOf('/'));
+  const script = ['#!/bin/sh',
+    `PATH=${shq(`/usr/bin:/bin:/usr/sbin:/sbin:${bunDir}`)}; export PATH`,
+    `exec ${shq(bun)} ${shq(agent)} --launch-gui ${shq(specPath)} >> ${shq(logPath)} 2>&1`, ''].join('\n');
+  return { 'Contents/Info.plist': plist, 'Contents/MacOS/f3-launch': script };
+}
+
 /** The Safari web area's frame in the accessibility tree (points), or null. */
 export const webViewFrame = (nodes) => nodes.find((n) => n.cls === 'XCUIElementTypeWebView' && n.w > 0 && n.h > 0)?.bounds ?? null;
 
