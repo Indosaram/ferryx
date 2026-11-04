@@ -16,6 +16,10 @@ pub mod direct_api;
 pub mod direct_lease;
 pub mod discovery;
 pub(crate) mod filesystem;
+#[cfg(feature = "iroh-direct")]
+pub mod iroh_direct;
+#[cfg(feature = "iroh-direct")]
+pub mod iroh_probe;
 pub mod machine_agent_state;
 pub mod machine_events;
 pub mod machine_operation_journal;
