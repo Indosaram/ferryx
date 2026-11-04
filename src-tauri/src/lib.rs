@@ -41,6 +41,7 @@ mod rollout_tests;
 pub(crate) mod test_support;
 pub mod agent_history;
 pub mod scoped_contracts;
+pub mod script;
 pub mod session;
 pub mod session_names;
 #[cfg(all(feature = "desktop", any(target_os = "macos", test)))]
