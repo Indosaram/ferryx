@@ -2121,28 +2121,15 @@ async fn ws_terminal_handler(
     }
 
     let size_client = format!("phone:{}:{}", device.id, uuid::Uuid::new_v4());
-    let mut initial_resized = false;
     let attachment = while_device_authorized(&mut revocation, async {
-        if let Some((cols, rows)) =
-            requested_geometry.filter(|_| device.permission == DevicePermission::Control)
-        {
-            if state.session_backend.recovery(&session_id).await?.is_none()
-                && state.session_backend.resize_owned(&session_id, &size_client, cols, rows, true, false).await == Ok(true)
-            {
-                initial_resized = true;
-            }
-        }
-        state
-            .session_backend
-            .attach_with_sequence(&session_id, None)
-            .await
+        state.session_backend.attach_with_sequence(&session_id, None).await
     })
     .await
     .ok_or((StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?
     .map_err(|_| (StatusCode::NOT_FOUND, "Session not found".into()))?;
 
     Ok(ws.on_upgrade(move |socket| async move {
-        let resized = Arc::new(std::sync::atomic::AtomicBool::new(initial_resized));
+        let resized = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let _ = while_device_authorized(
             &mut revocation,
             handle_terminal_socket(
@@ -2958,6 +2945,13 @@ async fn handle_terminal_socket(
         Err(_) => return,
     };
     let is_ssh = recovery.is_some();
+    if !is_ssh {
+        if let Some((cols, rows)) = requested_geometry {
+            if let Err(error) = state.session_backend.resize_owned(&session_id, &size_client, cols, rows, device.permission == DevicePermission::Control, false).await {
+                tracing::warn!(%error, "initial size claim failed");
+            }
+        }
+    }
     if let Some(stream) = recovery.as_mut() {
         let Some(status) = stream.next().await else {
             return;
