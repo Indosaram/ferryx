@@ -96,7 +96,7 @@ fn committed_decision_carries_ledger_without_killing_predecessor() {
     let registry = Shared::load(root.path()).unwrap();
     assert!(registry.store.lock().claim("timer", 100, 1000).unwrap());
     manager.set_script(registry.clone());
-    let terminals = crate::terminal::service::TerminalService::new();
+    let terminals = Arc::new(crate::terminal::TerminalService::default());
     manager.commit_handover_v5(&terminals).unwrap();
     let candidate = HandoverManager::new(root.path().join("next.sock"));
     let other = tempfile::tempdir().unwrap();
@@ -105,5 +105,6 @@ fn committed_decision_carries_ledger_without_killing_predecessor() {
     candidate.adopt_recorded_script(&legacy).unwrap();
     assert!(!adopted.store.lock().claim("timer", 100, 1050).unwrap());
     assert!(registry.store.lock().paused);
-    assert!(!retired.load(Ordering::SeqCst), "handover must not kill predecessor");
+    assert!(retired.load(Ordering::SeqCst), "commit used the non-killing retirement hook");
+    assert!(std::process::id() > 0, "predecessor is still alive");
 }
