@@ -236,8 +236,8 @@ describe('tailscale serve endpoint', () => {
   const owner = { TCP: { 443: { HTTPS: true }, 8443: { HTTPS: true } }, Web: {
     'indo.ts.net:443': { Handlers: { '/': { Proxy: 'http://127.0.0.1:8088' } } },
     'indo.ts.net:8443': { Handlers: { '/': { Proxy: 'http://127.0.0.1:8099' } } } } };
-  const withRun = (base = owner) => ({ TCP: { ...base.TCP, 47930: { HTTPS: true } },
-    Web: { ...base.Web, 'indo.ts.net:47930': { Handlers: { '/': { Proxy: 'http://127.0.0.1:47931' } } } } });
+  const withRun = (base = owner) => ({ TCP: { ...structuredClone(base.TCP), 47930: { HTTPS: true } },
+    Web: { ...structuredClone(base.Web), 'indo.ts.net:47930': { Handlers: { '/': { Proxy: 'http://127.0.0.1:47931' } } } } });
   const want = { hostName: 'indo.ts.net', port: 47930, backend: 47931 };
 
   test('only the run endpoint was added, proxying to the loopback relay', () => {
