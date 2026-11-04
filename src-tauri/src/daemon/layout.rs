@@ -433,6 +433,14 @@ impl Store {
         if next.tab_group_layout.group_mut(&next.focused_group_id).is_none() {
             next.focused_group_id = next.tab_group_layout.first_group();
         }
+        fn ordered(group: &TabGroupLayout, ids: &mut Vec<String>) {
+            match group {
+                TabGroupLayout::Group { tab_ids, .. } => ids.extend(tab_ids.iter().cloned()),
+                TabGroupLayout::Split { a, b, .. } => { ordered(a, ids); ordered(b, ids); }
+            }
+        }
+        let mut ids = Vec::new(); ordered(&next.tab_group_layout, &mut ids);
+        next.tabs.sort_by_key(|tab| ids.iter().position(|id| id == &tab.tab_id).unwrap_or(usize::MAX));
         next.revision = next.revision.checked_add(1).ok_or_else(|| ApplyError::Invalid("Revision exhausted".into()))?;
         if self.layouts.len() > 32 { return Err(ApplyError::Invalid("Window limit exceeded".into())); }
         let mut count = 0;
