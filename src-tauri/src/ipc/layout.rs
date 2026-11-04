@@ -20,12 +20,29 @@ pub async fn cmd_panes(
     window: WebviewWindow,
     manager: State<'_, Arc<RemoteGatewayManager>>,
     request: crate::daemon::layout::PaneAction,
+    scope: Option<String>,
 ) -> Result<crate::daemon::layout::DetachedRegistry, IpcError> {
     let request = match request {
         crate::daemon::layout::PaneAction::Attach { session, window: None, split } => crate::daemon::layout::PaneAction::Attach { session, window: Some(window.label().into()), split },
         request => request,
     };
     let client = manager.daemon_client().ok_or_else(|| IpcError::internal("Layout daemon unavailable"))?;
+    if let (Some(scope), crate::daemon::layout::PaneAction::Attach { session, split, .. }) = (scope, &request) {
+        let current = client.send_request(DaemonRequest::LayoutGet { window: window.label().into() }).await?;
+        let DaemonResponse::LayoutOk { view } = current else { return Err(IpcError::internal("Layout unavailable")); };
+        match client.send_request(DaemonRequest::LayoutApply {
+            window: window.label().into(), base_revision: view.revision,
+            intent: Intent::Scoped { scope, intent: Box::new(Intent::AttachDetached { backend_session_id: session.clone(), target: crate::daemon::layout::AttachTarget { split: *split, ..Default::default() } }) },
+        }).await? {
+            DaemonResponse::LayoutOk { .. } => {},
+            DaemonResponse::Error { message, .. } => return Err(IpcError::internal(message)),
+            response => return Err(IpcError::internal(format!("Attach rejected: {response:?}"))),
+        }
+        return match client.send_request(DaemonRequest::Panes { request: crate::daemon::layout::PaneAction::List }).await? {
+            DaemonResponse::PanesOk { detached } => Ok(detached),
+            _ => Err(IpcError::internal("Inventory unavailable")),
+        };
+    }
     match client.send_request(DaemonRequest::Panes { request }).await? {
         DaemonResponse::PanesOk { detached } => Ok(detached),
         DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
