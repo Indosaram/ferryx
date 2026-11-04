@@ -65,7 +65,7 @@ import {
   subscribeWindowStateChanges,
 } from "./lib/notificationLeader";
 import { planOrphanAdoption } from "./state/orphanAdoption";
-import { movedEverySession, planTabMove } from "./state/windowMove";
+import { movedEverySession, planTabMove, tabTransferIntent } from "./state/windowMove";
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
 import { setLocalSplitPersistence } from "./lib/localSplitLifecycle";
 import { isMacShortcutPlatform, resolvedShortcuts, useShortcuts } from "./lib/shortcuts";
@@ -3600,7 +3600,10 @@ function WorkspaceApp({
       backendSessionIds: plan.backendSessionIds,
       workspaceId: stateRef.current.workspaceId ?? activeProjectRef.current.workspaceId,
     })
-      .then((outcome) => {
+      .then(async (outcome) => {
+        if (layoutSync.enabled && movedEverySession(outcome, plan.backendSessionIds)) {
+          await layoutSync.send(() => tabTransferIntent(stateRef.current, tabId, outcome.targetLabel), () => {});
+        }
         releaseTabsForMove([tabId]);
         if (!movedEverySession(outcome, plan.backendSessionIds)) {
           toast.warning("Some terminals in this tab belong to another window and stayed there.");
