@@ -515,7 +515,7 @@ impl LegacyPeer {
                     line.push('\n');
                     match serde_json::from_str::<DaemonStreamMessage<'_>>(line.trim()) {
                         Ok(DaemonStreamMessage::AgentState { session_id, state, agent, provider_session, detail, is_snapshot, origin, state_source, outcome, kind, foreground_command }) => {
-                            agent_state_hub.publish_foreground_command(&session_id, foreground_command.map(|name| name.into_owned()));
+                            let command_session_id = session_id.to_string();
                             agent_state_hub.publish_legacy(AgentState {
                                 session_id: session_id.into_owned(), state: state.into_owned(),
                                 agent: agent.map(|value| value.into_owned()), provider_session,
@@ -524,6 +524,7 @@ impl LegacyPeer {
                                 outcome,
                                 kind,
                             }, is_snapshot);
+                            agent_state_hub.publish_foreground_command(&command_session_id, foreground_command.map(|name| name.into_owned()));
                         }
                         Ok(DaemonStreamMessage::Exit { .. }) => {
                             agent_state_hub.remove(session_id);
