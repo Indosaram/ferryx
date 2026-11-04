@@ -4,6 +4,7 @@
 // else (older WebViews, reduced motion, jsdom) the change applies synchronously, as before.
 import { flushSync } from "react-dom";
 
+import { prefersReducedMotion } from "../../lib/usePrefersReducedMotion";
 import "./phoneTransition.css";
 
 export type PhoneTransitionDirection = "push" | "pop";
@@ -27,10 +28,6 @@ declare global {
 }
 
 let transitionSeq = 0;
-
-function prefersReducedMotion(): boolean {
-  return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-}
 
 export function runPhoneTransition(direction: PhoneTransitionDirection, update: () => void): void {
   const doc = typeof document === "undefined" ? null : (document as unknown as ViewTransitionDocument);

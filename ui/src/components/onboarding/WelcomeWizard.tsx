@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Check, X } from "lucide-react";
 
 import type { ResolvedAgent } from "../../lib/agentsSettings";
+import { useTranslation } from "../../i18n";
 import { cn } from "../../lib/cn";
 import type { OnboardingStepId } from "../../lib/onboarding";
 import type { SetupProject } from "../../lib/supervisorSetupModel";
@@ -42,29 +43,8 @@ export type WelcomeWizardProps = {
   onTryWorktreeCreated?: (worktree: Worktree, launch?: WorktreeAgentLaunch) => void | Promise<void>;
 };
 
-const STEP_TITLES: Record<OnboardingStepId, string> = {
-  account: "Sign in",
-  intro: "Welcome",
-  features: "Features",
-  agents: "Agents",
-  cli: "Command line",
-  project: "First project",
-  supervisor: "Supervisor",
-  try: "First worktree",
-  phone: "Phone",
-};
-
-const STEP_HEADINGS: Record<OnboardingStepId, string> = {
-  account: "Sign in to Ferryx",
-  intro: "Set up Ferryx",
-  features: "What Ferryx does",
-  agents: "Choose your default agent",
-  cli: "Install the command-line tool",
-  project: "Open your first project",
-  supervisor: "Let the supervisor run your work",
-  try: "Try your first worktree",
-  phone: "Connect your phone",
-};
+/** The product name is not translated; it is passed into copy as a value. */
+const PRODUCT_NAME = "Ferryx";
 
 function clampStepIndex(index: number, total: number): number {
   if (total <= 0) return 0;
@@ -93,6 +73,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
     defaultAgentId = null,
     onTryWorktreeCreated,
   } = props;
+  const { t } = useTranslation();
 
   const [stepIndex, setStepIndex] = useState(() =>
     clampStepIndex(initialStepIndex, steps.length),
@@ -179,29 +160,6 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
     }
   };
 
-  const getLedeText = (step: OnboardingStepId): string => {
-    switch (step) {
-      case "account":
-        return "Optional. Sign in with your email and this computer is linked to your account, so you can open its worktrees from your phone.";
-      case "intro":
-        return "A short tour and setup. Signing in comes last and is optional.";
-      case "features":
-        return "The parts you'll use every day.";
-      case "agents":
-        return "New agent tabs start with this one. You can switch per tab, or change it later in Settings > Agents.";
-      case "cli":
-        return "Optional. Use ferryx from any terminal. You can also install it later in Settings > General.";
-      case "project":
-        return "Start with a folder on this computer, or pair another machine.";
-      case "supervisor":
-        return "Optional. Turn it on once and it picks up requests, runs them in your projects, and checks in when it needs you.";
-      case "try":
-        return "Optional. A worktree is an isolated checkout of your project with its own branch and agent tab.";
-      case "phone":
-        return "Optional. Pair your phone to follow and answer agents away from your desk.";
-    }
-  };
-
   const renderStepContent = () => {
     switch (currentStep) {
       case "account":
@@ -279,19 +237,19 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
         ref={panelRef}
         role="dialog"
         aria-modal="true"
-        aria-label="Welcome to Ferryx"
+        aria-label={t("onboarding.wizard.title")}
         onKeyDown={handleKeyDown}
         className="flex w-full max-w-3xl max-h-[min(40rem,90vh)] overflow-hidden rounded-lg border border-border bg-card shadow-lg sm:grid sm:grid-cols-[13rem_1fr] sm:grid-rows-[minmax(0,1fr)]"
       >
         <div className="hidden sm:flex min-h-0 flex-col border-r border-border bg-background/40 p-4">
           <div className="flex items-center gap-1.5 mb-4">
             <span className="text-[13px] font-semibold text-foreground">
-              Ferryx
+              {PRODUCT_NAME}
             </span>
-            <span className="text-[11px] text-muted-foreground">Setup</span>
+            <span className="text-[11px] text-muted-foreground">{t("onboarding.wizard.railLabel")}</span>
           </div>
 
-          <ol aria-label="Setup steps" className="space-y-1">
+          <ol aria-label={t("onboarding.wizard.stepsLabel")} className="space-y-1">
             {steps.map((stepId, index) => {
               const isCurrent = index === currentStepIndex;
               const isDone =
@@ -328,14 +286,14 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
                       </span>
                     )}
                   </span>
-                  <span className="truncate">{STEP_TITLES[stepId] ?? stepId}</span>
+                  <span className="truncate">{t(`onboarding.step.${stepId}.title`)}</span>
                 </li>
               );
             })}
           </ol>
 
           <p className="mt-auto pt-4 text-[11px] text-muted-foreground">
-            You can reopen this from Settings &gt; Permissions.
+            {t("onboarding.wizard.reopenHint")}
           </p>
         </div>
 
@@ -344,13 +302,13 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
             <div className="min-w-0 flex-1">
               <div className="flex items-center justify-between gap-2 sm:justify-start">
                 <span className="sm:hidden text-[12px] font-medium text-muted-foreground">
-                  {STEP_TITLES[currentStep]}
+                  {t(`onboarding.step.${currentStep}.title`)}
                 </span>
                 <span
                   data-testid="onboarding-step-indicator"
                   className="text-[11px] font-medium text-muted-foreground"
                 >
-                  Step {currentStepIndex + 1} of {steps.length}
+                  {t("onboarding.wizard.stepIndicator", { step: currentStepIndex + 1, total: steps.length })}
                 </span>
               </div>
 
@@ -360,15 +318,15 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
                 tabIndex={-1}
                 className="mt-1 text-[17px] font-semibold tracking-tight text-foreground outline-none"
               >
-                {STEP_HEADINGS[currentStep]}
+                {t(`onboarding.step.${currentStep}.heading`)}
               </h2>
               <p className="mt-1 max-w-[52ch] text-[13px] leading-relaxed text-muted-foreground">
-                {getLedeText(currentStep)}
+                {t(`onboarding.step.${currentStep}.lede`)}
               </p>
             </div>
 
             <IconButton
-              label="Remind me later"
+              label={t("onboarding.wizard.remindLater")}
               data-testid="onboarding-remind-later"
               onClick={onRemindLater}
               size="sm"
@@ -393,7 +351,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
               onClick={onSkip}
               className="text-muted-foreground hover:text-foreground"
             >
-              Skip setup
+              {t("onboarding.wizard.skipSetup")}
             </Button>
 
             <div className="flex items-center gap-2">
@@ -405,7 +363,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
                   disabled={tryBusy}
                   onClick={handleBack}
                 >
-                  Back
+                  {t("onboarding.wizard.back")}
                 </Button>
               ) : null}
 
@@ -417,7 +375,11 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
                   onClick={handleFinish}
                   className="min-w-24"
                 >
-                  {finishingWithoutAccount ? "Finish without signing in" : skippingOptional ? "Skip" : "Done"}
+                  {finishingWithoutAccount
+                    ? t("onboarding.wizard.finishWithoutAccount")
+                    : skippingOptional
+                      ? t("onboarding.wizard.skipStep")
+                      : t("onboarding.wizard.done")}
                 </Button>
               ) : (
                 <Button
@@ -427,7 +389,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
                   onClick={handleNext}
                   className="min-w-24"
                 >
-                  {skippingOptional ? "Skip" : "Continue"}
+                  {skippingOptional ? t("onboarding.wizard.skipStep") : t("onboarding.wizard.next")}
                 </Button>
               )}
             </div>

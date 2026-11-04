@@ -266,7 +266,12 @@ const ChatQaHarness: React.FC = () => {
   const seeded = useMemo(() => buildMessages(STATE), []);
   const [messages, setMessages] = useState<MobileChatMessageProps[]>(seeded);
   const [isRunning, setIsRunning] = useState(STATE === "running");
-  const [pickerOpen, setPickerOpen] = useState(STATE === "drawer-open");
+  // Opened after mount, as a tap opens it: StrictMode replays mount effects, and the drawer's
+  // history entry (useOverlayHistory) pushed and popped by that replay would close it again.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  useEffect(() => {
+    if (STATE === "drawer-open") setPickerOpen(true);
+  }, []);
   const [switcherOpen, setSwitcherOpen] = useState(STATE === "switcher-open");
   const [menuOpen, setMenuOpen] = useState(STATE === "menu-open");
   const [viewMode, setViewMode] = useState<"chat" | "terminal">(

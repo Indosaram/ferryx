@@ -7,6 +7,8 @@ import {
   type RefObject,
 } from "react";
 
+import { prefersReducedMotion } from "../lib/usePrefersReducedMotion";
+
 /**
  * Swipe-to-dismiss for the phone overlays (bottom sheet, left drawer). Pointer events only, so
  * one path serves touch and mouse. A gesture stays pending until it moves past the slop along the
@@ -38,14 +40,6 @@ const NO_DRAG_SELECTOR = 'input, textarea, select, [contenteditable="true"], [da
 
 /** Native events already claimed by an inner overlay, so a nested one never drags its parent too. */
 const claimed = new WeakSet<Event>();
-
-export function prefersReducedMotion(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    typeof window.matchMedia === "function" &&
-    window.matchMedia("(prefers-reduced-motion: reduce)")?.matches === true
-  );
-}
 
 export type UseDragDismissOptions = {
   axis: DragDismissAxis;
