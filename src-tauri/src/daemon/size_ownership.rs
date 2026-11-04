@@ -4,17 +4,20 @@ pub type ClientId = String;
 pub const DESKTOP: &str = "desktop";
 
 /// Preferences are per attachment. Losing ownership never implicitly retakes it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SizeOwnership {
     pub owner: ClientId,
     pub applied: (u16, u16),
     pub desktop: (u16, u16),
+    #[serde(default)]
+    pub generation: u64,
     preferred: HashMap<ClientId, (u16, u16)>,
 }
 
 impl SizeOwnership {
     pub fn new(size: (u16, u16)) -> Self {
-        Self { owner: DESKTOP.into(), applied: size, desktop: size, preferred: HashMap::new() }
+        Self { owner: DESKTOP.into(), applied: size, desktop: size, generation: 0, preferred: HashMap::new() }
     }
 
     pub fn desktop_resize(&mut self, size: (u16, u16)) {
@@ -42,9 +45,52 @@ impl SizeOwnership {
     }
 }
 
+pub type SizeOwnershipSnapshot = HashMap<String, SizeOwnership>;
+pub type SizeOwnershipRegistry = std::sync::Arc<parking_lot::Mutex<SizeOwnershipSnapshot>>;
+
+pub fn persist(path: &std::path::Path, snapshot: &SizeOwnershipSnapshot) -> Result<(), String> {
+    use std::io::Write;
+    let bytes = serde_json::to_vec(snapshot).map_err(|error| error.to_string())?;
+    let parent = path.parent().ok_or("Size ownership path has no parent")?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+    file.write_all(&bytes).and_then(|_| file.as_file().sync_all()).map_err(|error| error.to_string())?;
+    file.persist(path).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub fn restore(path: &std::path::Path) -> Result<SizeOwnershipSnapshot, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    serde_json::from_slice(&bytes).map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn size_ownership_restore_after_persisted_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("size-ownership.json");
+        let mut state = SizeOwnership::new((120, 40));
+        state.remote_resize("phone-a", (60, 30), true, false);
+        state.remote_resize("phone-b", (70, 35), true, false);
+        state.remote_resize("phone-a", (61, 31), true, true);
+        state.generation = 17;
+        let before = HashMap::from([("pty-1".into(), state)]);
+        persist(&path, &before).unwrap();
+        let mut restored = restore(&path).unwrap();
+        assert_eq!(restored, before);
+        let state = restored.get_mut("pty-1").unwrap();
+        assert!(!state.remote_resize("phone-b", (71, 36), true, false));
+        assert!(state.detach("phone-a"));
+        assert_eq!(state.applied, (120, 40));
+        assert_eq!(state.generation, 17);
+    }
 
     #[test]
     fn phone_detach_restores_desktop() {
