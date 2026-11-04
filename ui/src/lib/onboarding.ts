@@ -236,7 +236,9 @@ export function resetOnboarding(
   } catch {
     void 0;
   }
-  saveOnboardingState({ version: 1, completedSteps: [], dismissed: false }, storage);
+  if (storage === browserStorage() && typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+    saveOnboardingState({ version: 1, completedSteps: [], dismissed: false }, storage);
+  }
 }
 
 export function visiblePermissionKeys(
