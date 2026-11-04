@@ -15,14 +15,14 @@
 // ChildProcess handle it spawned itself; it removes only the serve port it added itself.
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
 import { homedir, hostname, platform, release } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { activationScript, engineFiles, guiBundleFiles, inputSourceScript, parseEnvBlock, stubReply, windowBoundsScript, windowsEnvScript } from './seams.mjs';
+import { activationScript, engineFiles, guiBundleFiles, inputSourceScript, qaProjectSeed, parseEnvBlock, stubReply, windowBoundsScript, windowsEnvScript } from './seams.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CHECKOUT = resolve(HERE, '..', '..', '..');
@@ -404,7 +404,32 @@ async function guiBounds({ pid, executable }) {
   return JSON.parse((await run('/usr/bin/osascript', ['-l', 'JavaScript', '-e', windowBoundsScript(pid, executable)])).trim());
 }
 
+function prepareProject({ profile, binary, uiDist }) {
+  requireProfile(profile);
+  const repo = join(profile, 'repo');
+  mkdirSync(repo, { recursive: true });
+  execFileSync('git', ['init', '-q', repo]);
+  writeFileSync(join(repo, 'README.md'), 'F3 isolated fixture repository\n');
+  execFileSync('git', ['-C', repo, '-c', 'user.name=F3 QA', '-c', 'user.email=f3@localhost', 'add', '.']);
+  execFileSync('git', ['-C', repo, '-c', 'user.name=F3 QA', '-c', 'user.email=f3@localhost', 'commit', '-qm', 'Initialize fixture']);
+  const staged = join(profile, 'frontend');
+  cpSync(uiDist, staged, { recursive: true });
+  const index = join(staged, 'index.html');
+  writeFileSync(index, readFileSync(index, 'utf8').replace('<head>', `<head>${qaProjectSeed(repo)}`));
+  let guiBinary = binary;
+  if (MAC) {
+    const bundle = join(profile, 'Candidate.app');
+    guiBinary = join(bundle, 'Contents', 'MacOS', 'ferryx');
+    mkdirSync(dirname(guiBinary), { recursive: true });
+    copyFileSync(binary, guiBinary);
+    const id = `dev.ferryx.f3.${profile.split('/').pop()}`;
+    writeFileSync(join(bundle, 'Contents', 'Info.plist'), `<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>${id}</string><key>CFBundleExecutable</key><string>ferryx</string><key>CFBundleName</key><string>${id}</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>`);
+  }
+  return { repo, uiDist: staged, binary: guiBinary };
+}
+
 const METHODS = {
+  'prepare-project': prepareProject,
   identity, daemon, 'write-wrappers': writeWrappers, 'spawn-owned': spawnOwned, 'await-exit': awaitExit,
   cleanup, 'read-b64': readB64, 'list-files': listFiles, 'remove-owned-dir': removeOwnedDir, 'free-port': freePort,
   'serve-status': serveStatus, 'serve-add': serveAdd, 'serve-remove': serveRemove, 'open-gui-bundle': openGuiBundle, 'process-isolation': processIsolation, 'activate-gui': activateGui, 'gui-bounds': guiBounds,

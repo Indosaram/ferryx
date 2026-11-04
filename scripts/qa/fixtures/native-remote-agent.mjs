@@ -1100,6 +1100,10 @@ async function dispatch(method, args, signal) {
       if (!profiles.has(args.profile)) throw fail('Unknown frontend profile');
       const entry = frontendProfiles.get(args.profile);
       if (entry.resource) throw fail('Frontend setup already requested');
+      if (args.uiDist) {
+        if (!inside(args.profile, args.uiDist)) throw fail('Frontend override must be inside the isolated profile');
+        entry.uiDist = args.uiDist;
+      }
       entry.resource = createRemoteFrontend();
       return entry.resource.start({ ...entry, frontend: args.frontend, signal });
     }

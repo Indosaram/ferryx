@@ -24,7 +24,7 @@ import { connectNativeMahord, rpcProcess } from '../fixtures/native-configured-a
 import { FRONTEND_DEV_URL } from '../../lib/qa-scenarios/frontend-server.mjs';
 import { LaneBlocked, StepFailed, markNotRun, runStep, stopExact, until } from './steps.mjs';
 import { scenariosForLane } from './contract.mjs';
-import { acceptedReply, configureGateway, framePoint, panelReadRequest, ocrShows, reportGoalRequest, decisionsNamingNonce, gatewayPortFor, hubEnv, isolationProblems, globalRetryRule, namesNonce, rowFocusVerdict, rpcCommand, rulesLineText, typedInto, uniqueSession, windowRect } from './seams.mjs';
+import { acceptedReply, configureGateway, framePoint, panelReadRequest, compactOcrShows, workspaceProblem, ocrShows, reportGoalRequest, decisionsNamingNonce, gatewayPortFor, hubEnv, isolationProblems, globalRetryRule, namesNonce, rowFocusVerdict, rpcCommand, rulesLineText, typedInto, uniqueSession, windowRect } from './seams.mjs';
 import { ocrImage } from './png.mjs';
 
 /**
@@ -114,6 +114,11 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     lane.receipt.candidate.binarySha256 = setup.binarySha256;
     lane.receipt.candidate.uiSha256 = setup.uiSha256;
     if (typeof setup.candidate !== 'string' || !setup.candidate.startsWith(`${run.revision}+`)) throw new StepFailed('CANDIDATE_STAMP', `${host.hostId} candidate stamp ${setup.candidate} is not ${run.revision}+<patch>`);
+    const project = await helper.call('prepare-project', { profile: setup.profile, binary: setup.binary, uiDist: host.uiDist });
+    setup.repo = project.repo;
+    setup.guiBinary = project.binary;
+    setup.frontendDist = project.uiDist;
+    lane.write('diagnostic', 'project-setup.json', project);
     const wrappers = await helper.call('write-wrappers', { profile: setup.profile });
     // The isolated daemon's gateway gets a run-owned free port: production on this host may
     // already own 43821, and a refused bind must stop the lane, never be stepped over.
@@ -141,13 +146,13 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     const call = async (label, frames, deadlineMs) => acceptedReply(label, await exchange(label, frames, deadlineMs));
     const enrolled = await shared.enroll({ host, helper, profile: setup.profile, env, cli: host.cli });
     lane.write('account', 'enroll.json', enrolled);
-    acceptedReply('register', await exchange('register', [{ type: 'registerWorkspace', workspaceId: 'f3', repoRoot: setup.worktree }]), 'registerWorkspaceOk');
+    acceptedReply('register', await exchange('register', [{ type: 'registerWorkspace', workspaceId: 'f3', repoRoot: setup.repo }]), 'registerWorkspaceOk');
     acceptedReply('agent-control', await exchange('agent-control', [{ type: 'agentControlSettingsSet', enabled: true, excludedDeviceIds: [] }]), 'agentControlSettingsOk');
     lane.write('relay', 'gateway.json', await configureGateway({ call: exchange, port: gatewayPort, relayOrigin: shared.relayOrigin }));
     // The supervisor's owner: the app's own setup (the "Turn on the supervisor" action) run on
     // this daemon, which provisions the local account as the one owner and maps the worktree.
     // Without an owner every composer message is refused UNAUTHORIZED.
-    lane.write('supervisor', 'setup.json', await call('supervisor-setup', [{ type: 'supervisorSetup', request: { action: 'run', importMemory: false, projects: [{ name: 'f3', path: setup.worktree }] } }]));
+    lane.write('supervisor', 'setup.json', await call('supervisor-setup', [{ type: 'supervisorSetup', request: { action: 'run', importMemory: false, projects: [{ name: 'f3', path: setup.repo }] } }]));
     if (typing && host.mhcBin) {
       const ready = await until('the supervisor engine ready', async () => (await exchange('engine-status', [{ type: 'supervisorEngine', request: { action: 'status' } }])).at(-1),
         (r) => r?.type === 'supervisorEngineOk' && r.snapshot?.engine?.state === 'ready', { deadlineMs: 180_000, gapMs: 2_000 });
@@ -211,7 +216,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     // front before the raise. A frame counts only when the cropped run window shows this run's
     // own text (`marker`: the worktree name its cards and rows carry, or the Viewer marker);
     // otherwise it is taken again, and after the attempts the step fails GUI_NOT_FRONT.
-    const runMarker = setup.worktree.split(/[\\/]/).pop();
+    const runMarker = 'f3';
     // OCR reads a middle dot as '-' and 1 as i: text is compared with those folded (seams ocrShows).
     const shows = ocrShows;
     let frameSize;
@@ -226,6 +231,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
         const shot = step ? step.artifact('screenshot', `${name}.png`, bytes) : lane.write('screenshot', `frames/${name}-${Date.now()}.png`, bytes);
         const read = await ocr(run.tesseract, join(run.evidenceDir, shot.path), rect);
         if (step) step.artifact('ocr', `${name}.ocr.tsv`, read.tsv);
+        if (workspaceProblem(read.text)) throw new StepFailed('HARNESS_WORKSPACE_UNAVAILABLE', read.text.slice(0, 1800));
         if (host.platform !== 'darwin' || !marker || shows(read.text, marker)) return { shot, read, bytes };
         if (attempt >= 5) throw new StepFailed('GUI_NOT_FRONT', `frame ${name}: the run window text "${marker}" is not in the cropped frame after ${attempt} captures (a stale or covered frame)`);
         await new Promise((resolveWait) => { setTimeout(resolveWait, 1_000); });
@@ -255,7 +261,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const seen = await visible(step, 'composer-visible', (r) => locate(r, 'Tell the supervisor') !== null, { scroll: true });
       await click(locate(seen.read, 'Tell the supervisor'));
       await typeText(text);
-      await visible(step, 'composer-after-type', (r) => shows(r.text, token));
+      await visible(step, 'composer-after-type', (r) => compactOcrShows(r.text, token));
       await mahord.key('Enter', signal);
       await frame('composer-after-enter', step);
     };
@@ -511,8 +517,8 @@ async function cleanupLane({ lane, agent, helper, mahord, setup, gui, daemon }) 
 async function launchGui({ agent, helper, mahord, setup, host, run, lane }) {
   // The candidate is a debug build: its webview loads the frozen devUrl, which this run serves
   // from the checked ui/dist (closed with the profile or with the agent).
-  lane.write('gui-receipt', 'frontend.json', await agent.call('start-frontend', { profile: setup.profile, frontend: { mode: 'debug', url: FRONTEND_DEV_URL } }));
-  const { specPath, launcherShortPath } = await agent.call('provision-gui-launch', { setup, worktreeRoot: host.worktreeRoot, hostId: host.hostId, runId: run.runId, operationId: `f3-${run.runId}` });
+  lane.write('gui-receipt', 'frontend.json', await agent.call('start-frontend', { profile: setup.profile, uiDist: setup.frontendDist, frontend: { mode: 'debug', url: FRONTEND_DEV_URL } }));
+  const { specPath, launcherShortPath } = await agent.call('provision-gui-launch', { setup: { ...setup, binary: setup.guiBinary }, worktreeRoot: host.worktreeRoot, hostId: host.hostId, runId: run.runId, operationId: `f3-${run.runId}` });
   const receipt = agent.call('await-gui-launch', { profile: setup.profile, timeoutMs: 180_000 });
   // Handled now so a failed launch step cannot leave it rejecting unobserved; awaited below.
   receipt.catch(() => {});
@@ -532,7 +538,7 @@ async function launchGui({ agent, helper, mahord, setup, host, run, lane }) {
   }
   const gui = await receipt;
   lane.write('gui-receipt', 'gui-launch.json', gui);
-  if (gui.role !== 'gui' || gui.status !== 'spawned' || gui.executable !== setup.binary || !gui.processStart) throw new StepFailed('GUI_LAUNCH', JSON.stringify(gui));
+  if (gui.role !== 'gui' || gui.status !== 'spawned' || gui.executable !== setup.guiBinary || !gui.processStart) throw new StepFailed('GUI_LAUNCH', JSON.stringify(gui));
   return gui;
 }
 

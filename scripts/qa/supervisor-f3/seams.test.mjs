@@ -6,7 +6,7 @@ import {
   PRODUCTION_GATEWAY_PORT, acceptedReply, configProblems, configureGateway, decisionsNamingNonce, gatewayBound, gatewayPortFor,
   activationScript, globalRetryRule, guiBundleFiles, hubEnv, isolationProblems, namesNonce, newRunId, parseEnvBlock, untypeableShortNames, windowsEnvScript, pageToScreen, relayListenPort, remotePath, rowFocusVerdict, rpcCommand, rulesLineText,
   runLanes, sameServeConfig, serveAddedProblems, typedInto, uniqueSession, webContextFrom, webPageChannel, windowBoundsScript, windowRect,
-  ENGINE_MODEL, ENGINE_PROVIDER, engineFiles, ocrShows, inputSourceScript, reportGoalRequest, stubReply, framePoint, panelReadRequest,
+  ENGINE_MODEL, ENGINE_PROVIDER, engineFiles, ocrShows, inputSourceScript, reportGoalRequest, stubReply, framePoint, panelReadRequest, compactOcrShows, workspaceProblem, qaProjectSeed,
 } from './seams.mjs';
 import { LANE_SCHEMA, RUN_SCHEMA, SCENARIOS, validateRun } from './contract.mjs';
 
@@ -14,6 +14,20 @@ const code = (fn) => { try { fn(); } catch (error) { return error.code; } return
 const codeAsync = async (fn) => { try { await fn(); } catch (error) { return error.code; } return null; };
 
 describe('real surface input and reads', () => {
+  test('compact OCR tolerates split token glyphs but rejects a different nonce', () => {
+    expect(compactOcrShows('F3 check f3tok 1653 3d48:', 'f3tok16533d48')).toBe(true);
+    expect(compactOcrShows('f3tok16533d49', 'f3tok16533d48')).toBe(false);
+    expect(workspaceProblem('Workspace unavailable (INVALID_REPO_ROOT)')).toBe(true);
+    expect(workspaceProblem('f3 ready')).toBe(false);
+  });
+  test('QA project seed writes only the requested project and active id', () => {
+    const values = new Map();
+    const localStorage = { clear: () => values.clear(), setItem: (k, v) => values.set(k, v) };
+    const script = qaProjectSeed('/qa/repo').replace(/^<script>|<\/script>$/g, '');
+    Function('localStorage', 'location', script)(localStorage, { hostname: '127.0.0.1' });
+    expect(JSON.parse(values.get('ferryx.projects'))).toEqual([{ workspaceId: 'f3', repoRoot: '/qa/repo', gitRoot: '/qa/repo' }]);
+    expect(values.get('ferryx.active-project')).toBe('f3');
+  });
   test('pixel points become top-left normalized coordinates independently of host logical size', () => {
     expect(framePoint({ x: 1028, y: 664 }, 2056, 1328)).toEqual({ x: 0.5, y: 0.5, normalized: true });
     expect(framePoint({ x: 514, y: 332 }, 2056, 1328)).toEqual({ x: 0.25, y: 0.25, normalized: true });

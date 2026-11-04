@@ -450,6 +450,15 @@ export const ocrShows = (text, phrase) => {
 };
 
 /** The Reply text the stub provider gives the F3 owner prompt: it names the prompt's token. */
+export const compactOcrShows = (text, phrase) => {
+  const key = (value) => dotless(value).toLowerCase().replace(/[il|!]/g, '1').replace(/o/g, '0').replace(/[^a-z0-9]/g, '');
+  return key(text).includes(key(phrase));
+};
+
+export const workspaceProblem = (text) => /workspace unavailable|couldn.t open this project|invalid.repo.root/i.test(text);
+
+export const qaProjectSeed = (repo) => `<script>if(location.hostname==='127.0.0.1'){localStorage.clear();localStorage.setItem('ferryx.projects',${JSON.stringify(JSON.stringify([{ workspaceId: 'f3', repoRoot: repo, gitRoot: repo }]))});localStorage.setItem('ferryx.active-project','f3');}</script>`;
+
 export const framePoint = (point, width, height) => ({ x: point.x / width, y: point.y / height, normalized: true });
 
 export const panelReadRequest = (view) => ({ type: 'supervisorReadV1', request: { view, ...(view === 'transcript' ? { cursor: 0 } : {}) } });
