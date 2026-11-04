@@ -88,9 +88,7 @@ pub fn run(main_args: &MainArgs, cmd_line: &CommandLine, sandbox_info: *mut u8) 
     #[cfg(target_os = "macos")]
     let _delegate = mac_app::setup_delegate();
     run_message_loop();
-    eprintln!("ferryx-engine: message loop ended");
     shutdown();
-    eprintln!("ferryx-engine: shut down");
 }
 
 /// Which pane a browser window belongs to.
@@ -545,7 +543,7 @@ fn omnibox_offset(width: i32) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{focus_step, omnibox_offset, FocusStep};
+    use super::{browser_switches, focus_step, omnibox_offset, FocusStep};
 
     #[test]
     fn focus_waits_for_the_keyboard_focus_an_active_window_lacks() {
@@ -570,6 +568,19 @@ mod tests {
         }
         assert_eq!(omnibox_offset(352), Some(176));
     }
+
+    #[test]
+    fn remote_debugging_drops_the_switch_that_keeps_the_engine_alive() {
+        // With remote debugging, no-startup-window makes Chrome keep the engine running after its
+        // last tab closed (CI run 41786025622: every quit hung until Ferryx killed the engine).
+        assert!(!browser_switches(true).contains(&"no-startup-window"));
+        assert!(browser_switches(false).contains(&"no-startup-window"));
+        for remote_debugging in [false, true] {
+            let switches = browser_switches(remote_debugging);
+            assert!(switches.contains(&"disable-session-crashed-bubble"));
+            assert!(switches.contains(&"hide-crash-restore-bubble"));
+        }
+    }
 }
 
 /// Ferryx closed stdin (it quit or dropped this engine): close every browser, then quit.
@@ -581,13 +592,9 @@ fn quit() {
         .chain(POPUPS.with_borrow_mut(|popups| popups.drain().map(|(_, pane)| pane.view).collect::<Vec<_>>()))
         .chain(extensions::take_view())
         .collect();
-    eprintln!("ferryx-engine: quit: {} live browsers, closing {} views", LIVE_BROWSERS.get(), views.len());
     for view in views {
-        match view.browser().and_then(|browser| browser.host()) {
-            Some(host) => {
-                host.close_browser(1);
-            }
-            None => eprintln!("ferryx-engine: quit: a view has no browser to close"),
+        if let Some(host) = view.browser().and_then(|browser| browser.host()) {
+            host.close_browser(1);
         }
     }
     if LIVE_BROWSERS.get() == 0 {
@@ -603,7 +610,6 @@ fn read_commands() {
             post_task(ThreadId::UI, Some(&mut task));
         }
     }
-    eprintln!("ferryx-engine: stdin closed; quitting");
     let mut task = Quit::new();
     post_task(ThreadId::UI, Some(&mut task));
 }
@@ -645,6 +651,19 @@ wrap_task! {
     }
 }
 
+/// Switches the browser process gets. `no-startup-window` is left out when remote debugging is
+/// on (a debug build's FERRYX_ENGINE_EXTRA_ARGS): together they make Chrome hold a keep-alive
+/// that only a DevTools `Browser.close` releases, and CEF's quit waits for every keep-alive, so
+/// the engine outlived its last tab. CEF never runs Chrome's startup browser creator, so no
+/// startup window opens either way.
+fn browser_switches(remote_debugging: bool) -> &'static [&'static str] {
+    if remote_debugging {
+        &["disable-session-crashed-bubble", "hide-crash-restore-bubble"]
+    } else {
+        &["no-startup-window", "disable-session-crashed-bubble", "hide-crash-restore-bubble"]
+    }
+}
+
 wrap_app! {
     struct EngineApp;
 
@@ -658,8 +677,11 @@ wrap_app! {
             // (after a crash or kill) would add stray windows on top of Ferryx's tabs.
             let browser_process = process_type.is_none_or(|kind| kind.to_string().is_empty());
             if let (true, Some(command_line)) = (browser_process, command_line) {
-                for switch in ["no-startup-window", "disable-session-crashed-bubble", "hide-crash-restore-bubble"] {
-                    command_line.append_switch(Some(&CefString::from(switch)));
+                let remote_debugging = ["remote-debugging-port", "remote-debugging-pipe"]
+                    .iter()
+                    .any(|name| command_line.has_switch(Some(&CefString::from(*name))) == 1);
+                for switch in browser_switches(remote_debugging) {
+                    command_line.append_switch(Some(&CefString::from(*switch)));
                 }
                 // Linux: the pane windows are reparented into Ferryx's X window, so Chromium
                 // must use X11 (XWayland in a Wayland session), never its Wayland backend.
@@ -987,9 +1009,6 @@ wrap_life_span_handler! {
 
         fn on_before_close(&self, browser: Option<&mut Browser>) {
             LIVE_BROWSERS.set(LIVE_BROWSERS.get().saturating_sub(1));
-            if QUITTING.get() {
-                eprintln!("ferryx-engine: quit: browser closed, {} left", LIVE_BROWSERS.get());
-            }
             if let Some(browser) = browser {
                 vault::detach(browser);
                 STRAYS.with_borrow_mut(|strays| strays.retain(|candidate| candidate.is_same(Some(browser)) == 0));
