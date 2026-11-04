@@ -8699,33 +8699,42 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::AgentControl { request, host_id, supervisor_fence, supervisor_account }) => {
                     match crate::agent_control::fence::SupervisorFence::from_wire(supervisor_fence, supervisor_account) {
-                    Err(refusal) => crate::remote::server::agent_control_service::fence_response(&refusal),
-                    // A recovery card is answered by this daemon's scheduler wherever its
-                    // session lives: it is not a prompt in any pane.
-                    Ok(fence) => if let Some(handled) =
-                        crate::remote::server::agent_control_service::recovery_card_answer(&request).await
-                    {
-                        match handled {
-                            Ok(result) => DaemonResponse::AgentControlOk { result },
-                            Err(error) => crate::remote::server::agent_control_service::error_response(error),
+                        Err(refusal) => crate::remote::server::agent_control_service::fence_response(&refusal),
+                        Ok(fence) => {
+                            // A recovery card is answered by this daemon's scheduler wherever its
+                            // session lives: it is not a prompt in any pane.
+                            if let Some(handled) =
+                                crate::remote::server::agent_control_service::recovery_card_answer(&request).await
+                            {
+                                match handled {
+                                    Ok(result) => DaemonResponse::AgentControlOk { result },
+                                    Err(error) => crate::remote::server::agent_control_service::error_response(error),
+                                }
+                            } else {
+                                match host_id {
+                                    None => {
+                                        crate::remote::server::agent_control_service::handle_fenced(
+                                            &self.remote_state,
+                                            request,
+                                            fence,
+                                        )
+                                        .await
+                                    }
+                                    // One execute, on the caller's request id. A lost answer stays
+                                    // outcome-unknown and is not issued again.
+                                    Some(host_id) => {
+                                        crate::remote::server::agent_control_service::forward_daemon(
+                                            &self.remote_state,
+                                            &self.paired_hosts,
+                                            host_id,
+                                            request,
+                                            fence,
+                                        )
+                                        .await
+                                    }
+                                }
+                            }
                         }
-                    } else {
-                    match host_id {
-                        None => crate::remote::server::agent_control_service::handle_fenced(&self.remote_state, request, fence).await,
-                        // One execute, on the caller's request id. A lost answer stays outcome-unknown
-                        // and is not issued again.
-                        Some(host_id) => {
-                            crate::remote::server::agent_control_service::forward_daemon(
-                                &self.remote_state,
-                                &self.paired_hosts,
-                                host_id,
-                                request,
-                                fence,
-                            )
-                            .await
-                        }
-                    },
-                    }
                     }
                 }
                 Err(e) => daemon_error(format!("Malformed request: {e}"),),
