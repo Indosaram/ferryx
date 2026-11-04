@@ -153,6 +153,16 @@ impl Node {
 }
 
 impl TabGroupLayout {
+    fn prune(self) -> Option<Self> {
+        match self {
+            Self::Group { ref tab_ids, .. } if tab_ids.is_empty() => None,
+            Self::Split { dir, ratio, a, b } => match (a.prune(), b.prune()) {
+                (Some(a), Some(b)) => Some(Self::Split { dir, ratio, a: Box::new(a), b: Box::new(b) }),
+                (a, b) => a.or(b),
+            },
+            node => Some(node),
+        }
+    }
     fn group_mut(&mut self, id: &str) -> Option<&mut Self> {
         match self {
             Self::Group { group_id, .. } if group_id == id => Some(self),
@@ -350,6 +360,7 @@ impl Store {
         let path = self.path(window)?;
         let mut migration_map = BTreeMap::new();
         if !self.layouts.contains_key(window) {
+            if self.layouts.len() >= 32 { return Err("Window limit exceeded".into()); }
             let saved = match std::fs::read(&path) {
                 Ok(bytes) => match serde_json::from_slice::<Layout>(&bytes) {
                     Ok(layout) => Some(layout),
@@ -382,6 +393,10 @@ impl Store {
         if base != current.revision && (base > current.revision || !commutes) { return Err(ApplyError::Conflict(current)); }
         let mut next = current;
         next.apply(intent).map_err(ApplyError::Invalid)?;
+        next.tab_group_layout = next.tab_group_layout.clone().prune().unwrap_or_else(|| Layout::default().tab_group_layout);
+        if next.tab_group_layout.group_mut(&next.focused_group_id).is_none() {
+            next.focused_group_id = next.tab_group_layout.first_group();
+        }
         next.revision = next.revision.checked_add(1).ok_or_else(|| ApplyError::Invalid("Revision exhausted".into()))?;
         if self.layouts.len() > 32 { return Err(ApplyError::Invalid("Window limit exceeded".into())); }
         let mut count = 0;
