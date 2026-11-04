@@ -2120,13 +2120,14 @@ async fn ws_terminal_handler(
         ));
     }
 
+    let size_client = format!("phone:{}:{}", device.id, uuid::Uuid::new_v4());
     let mut initial_resized = false;
     let attachment = while_device_authorized(&mut revocation, async {
         if let Some((cols, rows)) =
             requested_geometry.filter(|_| device.permission == DevicePermission::Control)
         {
             if state.session_backend.recovery(&session_id).await?.is_none()
-                && state.session_backend.resize(&session_id, cols, rows).await.is_ok()
+                && state.session_backend.resize_owned(&session_id, &size_client, cols, rows, true, false).await == Ok(true)
             {
                 initial_resized = true;
             }
@@ -2152,11 +2153,12 @@ async fn ws_terminal_handler(
                 render_grid,
                 requested_geometry,
                 Arc::clone(&resized),
+                size_client.clone(),
             ),
         )
         .await;
-        if resized.load(std::sync::atomic::Ordering::Acquire) {
-            let _ = state.session_backend.restore_desktop_geometry(&session_id).await;
+        if let Err(error) = state.session_backend.detach_size(&session_id, &size_client).await {
+            tracing::warn!(%session_id, %error, "size owner detach failed");
         }
     }))
 }
@@ -2946,6 +2948,7 @@ async fn handle_terminal_socket(
     render_grid: bool,
     requested_geometry: Option<(u16, u16)>,
     resized: Arc<std::sync::atomic::AtomicBool>,
+    size_client: String,
 ) {
     let GatewaySocketContext { device, state } = context;
     let recovery_state = Arc::new(parking_lot::RwLock::new(None));
@@ -2962,7 +2965,7 @@ async fn handle_terminal_socket(
             if let Some((cols, rows)) = requested_geometry {
                 if state
                     .session_backend
-                    .resize_generation(&session_id, status.generation, cols, rows)
+                    .resize_owned(&session_id, &size_client, cols, rows, true, false)
                     .await
                     .is_ok()
                 {
@@ -2984,6 +2987,7 @@ async fn handle_terminal_socket(
             recovery,
             recovery_state,
             resized,
+            size_client,
         )
         .await;
         return;
@@ -3086,15 +3090,24 @@ async fn handle_terminal_socket(
                 }
                 Message::Text(text) => {
                     if let Ok(ctrl) = serde_json::from_str::<ClientControlMessage>(&text) {
+                        if let ClientControlMessage::TakeSize { cols, rows } = ctrl {
+                            if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
+                                if let Err(error) = session_backend.resize_owned(&session_id_clone, &size_client, cols, rows, can_control, true).await {
+                                    tracing::warn!(%error, "take size failed");
+                                }
+                            }
+                            continue;
+                        }
                         if is_ssh {
                             if can_control && matches!(ctrl, ClientControlMessage::RemoteWrite { .. }) {
                                 agent_control_service::note_raw_write(&input_marks, &session_id_clone);
                             }
-                            let ok = ssh_control(
+                            let ok = ssh_owned_control(
                                 &session_backend,
                                 &session_id_clone,
                                 &ctrl,
                                 can_control,
+                                &size_client,
                             )
                             .await;
                             if ok && matches!(ctrl, ClientControlMessage::RemoteResize { .. }) {
@@ -3120,6 +3133,7 @@ async fn handle_terminal_socket(
                                 }
                             }
                             ClientControlMessage::RemoteWrite { .. }
+                            | ClientControlMessage::TakeSize { .. }
                             | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
                                 if !can_control {
@@ -3127,7 +3141,7 @@ async fn handle_terminal_socket(
                                 }
                                 if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
                                     if session_backend
-                                        .resize(&session_id_clone, cols, rows)
+                                        .resize_owned(&session_id_clone, &size_client, cols, rows, can_control, false)
                                         .await
                                         .is_ok()
                                     {
@@ -3189,6 +3203,20 @@ async fn next_recovery(stream: &mut Option<RecoveryStream>) -> Option<RemoteReco
         Some(stream) => stream.next().await,
         None => std::future::pending().await,
     }
+}
+
+async fn ssh_owned_control(backend: &Arc<dyn RemoteSessionBackend>, id: &str, control: &ClientControlMessage, can_control: bool, client: &str) -> bool {
+    if let ClientControlMessage::RemoteResize { generation, cols, rows } = control {
+        if !can_control { return false; }
+        let Ok(generation) = generation.parse::<u64>() else { return false; };
+        let Some((cols, rows)) = validated_grid_geometry(*cols, *rows) else { return false; };
+        // An ownership decision must not turn stale input into a current-generation resize.
+        let Ok(Some(mut recovery)) = backend.recovery(id).await else { return false; };
+        let Some(status) = recovery.next().await else { return false; };
+        if status.generation != generation { return false; }
+        return backend.resize_owned(id, client, cols, rows, true, false).await == Ok(true);
+    }
+    ssh_control(backend, id, control, can_control).await
 }
 
 /// SSH input always carries the generation chosen by the client, never one sampled
@@ -3277,6 +3305,7 @@ async fn handle_terminal_grid_socket(
     mut recovery: Option<RecoveryStream>,
     recovery_state: Arc<parking_lot::RwLock<Option<RemoteRecoveryStatus>>>,
     resized: Arc<std::sync::atomic::AtomicBool>,
+    size_client: String,
 ) {
     let GatewaySocketContext { device, state } = context;
     let is_ssh = recovery_state.read().is_some();
@@ -3614,15 +3643,24 @@ async fn handle_terminal_grid_socket(
                 }
                 Message::Text(text) => {
                     if let Ok(ctrl) = serde_json::from_str::<ClientControlMessage>(&text) {
+                        if let ClientControlMessage::TakeSize { cols, rows } = ctrl {
+                            if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
+                                if let Err(error) = session_backend.resize_owned(&session_id_clone, &size_client, cols, rows, can_control, true).await {
+                                    tracing::warn!(%error, "take size failed");
+                                }
+                            }
+                            continue;
+                        }
                         if is_ssh {
                             if can_control && matches!(ctrl, ClientControlMessage::RemoteWrite { .. }) {
                                 agent_control_service::note_raw_write(&input_marks, &session_id_clone);
                             }
-                            let ok = ssh_control(
+                            let ok = ssh_owned_control(
                                 &session_backend,
                                 &session_id_clone,
                                 &ctrl,
                                 can_control,
+                                &size_client,
                             )
                             .await;
                             if let ClientControlMessage::RemoteResize { cols, rows, .. } = ctrl {
@@ -3660,6 +3698,7 @@ async fn handle_terminal_grid_socket(
                                 }
                             }
                             ClientControlMessage::RemoteWrite { .. }
+                            | ClientControlMessage::TakeSize { .. }
                             | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
                                 if !can_control {
@@ -3667,7 +3706,7 @@ async fn handle_terminal_grid_socket(
                                 }
                                 if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
                                     if session_backend
-                                        .resize(&session_id_clone, cols, rows)
+                                        .resize_owned(&session_id_clone, &size_client, cols, rows, can_control, false)
                                         .await
                                         .is_ok()
                                     {
