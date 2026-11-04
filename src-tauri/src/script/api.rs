@@ -30,17 +30,17 @@ impl Api {
         let api = Rc::new(Self { bindings: RefCell::new(BTreeMap::new()), events: RefCell::new(BTreeMap::new()), session: Rc::new(RefCell::new(None)) });
         let ferryx: Table = lua.globals().get("ferryx")?;
         ferryx.set("version", CAPABILITY)?;
-        let bindings = api.clone();
+        let bindings = Rc::downgrade(&api);
         ferryx.set("bind", lua.create_function(move |_, (keys, callback, options): (String, Function, Option<Table>)| {
             let keys = chord(&keys).map_err(mlua::Error::runtime)?;
             let overrides = options.map(|o| o.get::<Option<bool>>("override")).transpose()?.flatten().unwrap_or(false);
-            bindings.bindings.borrow_mut().insert(keys, (overrides, callback));
+            bindings.upgrade().ok_or_else(|| mlua::Error::runtime("Script unloaded"))?.bindings.borrow_mut().insert(keys, (overrides, callback));
             Ok(())
         })?)?;
-        let events = api.clone();
+        let events = Rc::downgrade(&api);
         ferryx.set("on", lua.create_function(move |_, (event, callback): (String, Function)| {
             if !["agent.state", "agent.done", "session.exit", "layout.changed"].contains(&event.as_str()) { return Err(bad()); }
-            events.events.borrow_mut().entry(event).or_default().push(callback);
+            events.upgrade().ok_or_else(|| mlua::Error::runtime("Script unloaded"))?.events.borrow_mut().entry(event).or_default().push(callback);
             Ok(())
         })?)?;
         for name in ["split", "send", "read", "notify", "exec", "layout"] {
