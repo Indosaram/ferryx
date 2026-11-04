@@ -69,7 +69,10 @@ const summary = {
   passkeys: { checks: falseChecks(["cdp_connected", "virtual_authenticator_added", "create_resolved", "get_resolved", "one_credential_listed"]) },
   media: { checks: falseChecks(["prompt_shown", "block_denies", "block_remembered", "reset_clears", "prompt_after_reset", "allow_grants", "allow_remembered", "prompt_after_second_reset"]) },
   download: { checks: falseChecks(["download_started", "paused_by_click", "size_stable_while_paused", "resumed_by_click", "completed", "sha256_matches", ...(platform === "linux" ? ["disk_full_reported"] : [])]) },
-  import: { checks: falseChecks(["chrome_profile_seeded", "source_detected", "bookmarks_imported", "history_imported", "cookies_imported", "passwords_imported", "bitwarden_json_imported", "bitwarden_csv_imported", ...(platform === "win32" ? ["v20_cookie_seen", "v20_cookie_decrypted"] : [])]) },
+  // Windows: Chrome's elevation service only decrypts app-bound (v20) cookies for Chrome itself
+  // (DecryptData returns kValidationDidNotPass for ferryx.exe), so the import reports the cookie
+  // as needing sign-in and applies nothing instead of importing it.
+  import: { checks: falseChecks(["chrome_profile_seeded", "source_detected", "bookmarks_imported", "history_imported", ...(platform === "win32" ? [] : ["cookies_imported"]), "passwords_imported", "bitwarden_json_imported", "bitwarden_csv_imported", ...(platform === "win32" ? ["v20_cookie_seen", "v20_cookie_reported", "v20_cookie_not_applied"] : [])]) },
   steps: [],
 };
 if (platform !== "linux") summary.download.disk_full = "linux only (tmpfs)";
@@ -1730,8 +1733,19 @@ async function seedChromeProfile(record) {
   record.chrome_version = run(chromeExe, ["--version"]).stdout || (platform === "win32" ? run("powershell.exe", ["-NoProfile", "-Command", `(Get-Item '${chromeExe}').VersionInfo.ProductVersion`]).stdout : null);
   record.user_data_dir = chromeUserData;
   if (platform === "darwin") {
-    const added = run("security", ["add-generic-password", "-U", "-A", "-s", "Chrome Safe Storage", "-a", "Chrome", "-w", chromeKeychainPassword]);
-    record.keychain_item = added.ok ? "created with an allow-all ACL" : added.stderr;
+    // A keychain of our own with a known password, first in the search list: macOS 15 still
+    // prompts for an -A item until its partition list allows unsigned callers, and setting that
+    // needs the keychain's password (run 41804862351: the import waited on the prompt).
+    const keychain = join(isolation, "ferryx-qa.keychain-db");
+    const password = "ferryx-qa-keychain";
+    run("security", ["create-keychain", "-p", password, keychain]);
+    run("security", ["unlock-keychain", "-p", password, keychain]);
+    run("security", ["set-keychain-settings", keychain]);
+    const searchList = run("security", ["list-keychains", "-d", "user"]).stdout.split(/\s+/).map((entry) => entry.replace(/^"|"$/g, "")).filter(Boolean);
+    run("security", ["list-keychains", "-d", "user", "-s", keychain, ...searchList.filter((entry) => entry !== keychain)]);
+    const added = run("security", ["add-generic-password", "-U", "-A", "-s", "Chrome Safe Storage", "-a", "Chrome", "-w", chromeKeychainPassword, keychain]);
+    const partition = run("security", ["set-generic-password-partition-list", "-S", "apple-tool:,apple:,unsigned:", "-s", "Chrome Safe Storage", "-a", "Chrome", "-k", password, keychain]);
+    record.keychain_item = added.ok ? (partition.ok ? "created with an allow-all ACL and partition list" : `partition list: ${partition.stderr}`) : added.stderr;
   }
   // Linux: Chrome does not flush history/cookies on a signal, so quit it cleanly over CDP.
   const debugPort = platform === "linux" ? await freePort() : null;
@@ -2253,6 +2267,8 @@ await section("import", async (record) => {
   const importButton = await clickDialogButton("primary", "Import");
   const resultWords = await results();
   record.chrome_results = lines(resultWords);
+  // The cookie result's note line ("1 cookie needs sign-in again").
+  record.chrome_needs_sign_in = (resultWords ?? []).some((word) => word.text === "needs") && (resultWords ?? []).some((word) => /^sign-?in/i.test(word.text));
   await step("import-chrome-results", "Import clicked; per-type result lines", [["import", () => ({ ok: Boolean(resultWords), clicked: importButton.ok, lines: record.chrome_results })]], { any: ["imported"] });
   await clickDialogButton("secondary", "Done");
   await sleep(1000);
@@ -2288,8 +2304,10 @@ await section("import", async (record) => {
     }, 20000, 3000);
   }
   record.cookie_echo = echo;
-  record.checks.cookies_imported = record.cookie_tsv || echo === "cookie:present";
-  if (platform === "win32") record.checks.v20_cookie_decrypted = record.checks.v20_cookie_seen && record.checks.cookies_imported;
+  if (platform === "win32") {
+    record.checks.v20_cookie_reported = record.checks.v20_cookie_seen && record.chrome_needs_sign_in;
+    record.checks.v20_cookie_not_applied = record.checks.v20_cookie_seen && !record.cookie_tsv && echo !== "cookie:present";
+  } else record.checks.cookies_imported = record.cookie_tsv || echo === "cookie:present";
   await closeChromiumTabs();
 
   const passwordFile = async (format, path, label, index) => {
@@ -2375,7 +2393,7 @@ summary.finished_at = new Date().toISOString();
 writeSummary();
 await stopApp();
 server.stop(true);
-if (platform === "darwin") run("security", ["delete-generic-password", "-s", "Chrome Safe Storage", "-a", "Chrome"]);
+if (platform === "darwin") run("security", ["delete-keychain", join(isolation, "ferryx-qa.keychain-db")]);
 writeSummary();
 console.log(JSON.stringify(Object.fromEntries(["agent_cards", "passkeys", "media", "download", "import"].map((name) => [name, summary[name].checks]))));
 process.exit(0);

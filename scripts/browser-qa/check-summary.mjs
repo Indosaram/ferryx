@@ -20,11 +20,14 @@ export const CDP_REQUIRED = {
   passkeys: ["cdp_connected", "virtual_authenticator_added", "create_resolved", "get_resolved", "one_credential_listed"],
   media: ["prompt_shown", "block_denies", "block_remembered", "reset_clears", "prompt_after_reset", "allow_grants", "allow_remembered", "prompt_after_second_reset"],
   download: ["download_started", "paused_by_click", "size_stable_while_paused", "resumed_by_click", "completed", "sha256_matches"],
-  import: ["chrome_profile_seeded", "source_detected", "bookmarks_imported", "history_imported", "cookies_imported", "passwords_imported", "bitwarden_json_imported", "bitwarden_csv_imported"],
+  import: ["chrome_profile_seeded", "source_detected", "bookmarks_imported", "history_imported", "passwords_imported", "bitwarden_json_imported", "bitwarden_csv_imported"],
 };
+// Windows cannot decrypt Chrome's app-bound (v20) cookies (its elevation service rejects any
+// caller but Chrome): the import must report the cookie as needing sign-in and apply nothing.
 const CDP_REQUIRED_BY_PLATFORM = {
-  linux: { download: ["disk_full_reported"] },
-  win32: { import: ["v20_cookie_seen", "v20_cookie_decrypted"] },
+  linux: { download: ["disk_full_reported"], import: ["cookies_imported"] },
+  darwin: { import: ["cookies_imported"] },
+  win32: { import: ["v20_cookie_seen", "v20_cookie_reported", "v20_cookie_not_applied"] },
 };
 
 /** Every summary.json at or below `dir`. */

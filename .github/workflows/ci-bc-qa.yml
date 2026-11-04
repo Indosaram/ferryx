@@ -767,6 +767,8 @@ jobs:
           sudo mkdir -p /mnt/ferryx-full
           sudo mount -t tmpfs -o size=5m,uid=$(id -u),gid=$(id -g),mode=0755 tmpfs /mnt/ferryx-full
           df -h /mnt/ferryx-full
+          # The password vault needs a Secret Service (gnome-keyring, unlocked below).
+          sudo apt-get install -y --no-install-recommends gnome-keyring
           (google-chrome --version || true)
           export DISPLAY=:97
           Xvfb :97 -screen 0 1920x1080x24 -nolisten tcp > "$out/xvfb.log" 2>&1 &
@@ -774,6 +776,11 @@ jobs:
           dbus-run-session -- bash -c '
             openbox > "$1/openbox.log" 2>&1 &
             sleep 2
+            # The password vault keeps its key in the Secret Service: a login keyring unlocked
+            # with a throwaway password, as the UI audit does (run 41804862351: vault unavailable).
+            eval "$(printf "ferryx-qa-keyring" | gnome-keyring-daemon --unlock --components=secrets)"
+            export GNOME_KEYRING_CONTROL SSH_AUTH_SOCK
+            echo "gnome-keyring: ${GNOME_KEYRING_CONTROL:-not started}" > "$1/keyring.log"
             bun scripts/browser-qa/gha-cdp-audit.mjs --binary src-tauri/target/debug/ferryx --out "$1" --engine-dir "$FERRYX_UI_AUDIT_ENGINE_DIR" --disk-full-dir /mnt/ferryx-full
           ' bash "$out" || echo "cdp driver exited non-zero: $?"
 
