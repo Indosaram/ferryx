@@ -22,6 +22,16 @@ it("lists detached backend IDs and attaches without closing a session", async ()
   expect(screen.queryByText("cat")).toBeNull();
 });
 
+it("attaches into the desktop's active workspace scope", async () => {
+  mocks.invoke.mockResolvedValueOnce(["cat"]).mockResolvedValueOnce([]);
+  const scope = JSON.stringify(["workspace", "/repo"]);
+  await act(async () => { render(<Detached scope={scope} />); });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Attach cat" })); });
+  expect(mocks.invoke).toHaveBeenLastCalledWith("cmd_panes", {
+    request: { action: "attach", session: "cat", window: null, split: null }, scope,
+  });
+});
+
 it("refreshes on the exact revision event and shows attachment failures", async () => {
   let changed: (() => void) | undefined;
   mocks.listen.mockImplementation(async (_event, callback) => { changed = callback; return () => {}; });
