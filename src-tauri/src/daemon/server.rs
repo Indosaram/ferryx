@@ -6497,6 +6497,29 @@ impl DaemonServer {
     }
 
     /// Serves `PaneGrant`; the gate above already refused Add/Remove from anyone but the owner.
+    async fn handle_panes(&self, request: super::layout::PaneAction) -> DaemonResponse {
+        let live = self.session_router.list_sessions().await.into_iter().collect();
+        let layouts = Arc::clone(&self.layouts);
+        let mutates = request.mutates();
+        let result = crate::ipc::run_blocking(move || {
+            layouts.lock().panes(request, &live).map_err(crate::ipc::IpcError::internal)
+        }).await;
+        match result {
+            Ok(detached) => {
+                if mutates {
+                    for (window, layout) in &self.layouts.lock().layouts {
+                        let _ = self.remote_event_tx.send(DaemonRemoteEvent {
+                            event: "LayoutChanged".into(), payload: serde_json::json!({"window": window, "revision": layout.revision}),
+                        });
+                    }
+                }
+                DaemonResponse::PanesOk { detached }
+            },
+            Err(error) if error.to_string().contains("SESSION_NOT_FOUND") => daemon_session_not_found("unknown", "panes"),
+            Err(error) => daemon_error(error.to_string()),
+        }
+    }
+
     async fn handle_pane_grant(
         &self,
         request: super::pane_grants::PaneGrantAction,
@@ -7630,6 +7653,7 @@ impl DaemonServer {
                         Err(e) => daemon_error(e.to_string()),
                     }
                 }
+                Ok(DaemonRequest::Panes { request }) => self.handle_panes(request).await,
                 Ok(DaemonRequest::LayoutGetScoped { window, scope }) => {
                     let layouts = Arc::clone(&self.layouts);
                     match crate::ipc::run_blocking(move || layouts.lock().get_scoped(&window, Some(&scope)).map_err(crate::ipc::IpcError::internal)).await {
@@ -7750,9 +7774,11 @@ impl DaemonServer {
                         Err(error) => DaemonResponse::PairedHostOperationError { error },
                     }
                 }
-                Ok(DaemonRequest::PairedTerminalDetach { session_id }) => match self.terminal_service.paired().detach(&session_id).await {
-                    Ok(()) => DaemonResponse::CloseOk,
-                    Err(message) => daemon_error(message),
+                Ok(DaemonRequest::PairedTerminalDetach { session_id }) => {
+                    match self.handle_panes(super::layout::PaneAction::Detach { session: session_id }).await {
+                        DaemonResponse::PanesOk { .. } => DaemonResponse::CloseOk,
+                        response => response,
+                    }
                 },
                 Ok(DaemonRequest::RetryPairedSession { backend_session_id, daemon_epoch, incarnation }) => {
                     match self.terminal_service.paired().retry_owned(&backend_session_id, &daemon_epoch, &incarnation).await {
@@ -8042,6 +8068,7 @@ impl DaemonServer {
                     capabilities.push("scrollbackBudgetV1".into());
                     capabilities.push("sizeOwnershipV1".into());
                     capabilities.push("daemonLayoutV1".into());
+                    capabilities.push("detachedPanesV1".into());
                     #[cfg(feature = "local-split-qa")]
                     capabilities.push("sizeOwnershipQaV1".into());
                     #[cfg(feature = "remote-desktop")]
