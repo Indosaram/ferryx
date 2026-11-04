@@ -153,7 +153,7 @@ mod tests {
             &super::super::supervisor_peer::SystemProcs).unwrap();
         let grants = super::super::pane_grants::PaneGrants::load(None);
         let gate = super::super::pane_grants::gate_for(&super::super::protocol::DaemonRequest::Write {
-            session_id: "pane-b".into(), data: "x".into(),
+            session_id: "pane-b".into(), data: b"x".to_vec(),
         }).unwrap();
         assert_eq!(super::super::pane_grants::decide(&class, &gate, &grants, |_| None)
             .unwrap_err().reason, super::super::pane_grants::PANE_GRANT_REQUIRED);
