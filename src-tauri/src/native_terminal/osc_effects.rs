@@ -130,3 +130,31 @@ pub(super) fn unregister(handle: NonNull<GhosttyTerminalImpl>) {
         unsafe { ghostty_terminal_set(handle.as_ptr(), option, std::ptr::null()); }
     }
 }
+
+/// Read parser-owned pwd even after a muted seed replay. Ghostty's VT formatter includes
+/// pwd in handover seeds, so cwd does not require a second daemon state ledger.
+pub(super) fn cwd(handle: NonNull<GhosttyTerminalImpl>) -> Option<String> {
+    let mut raw = GhosttyString { ptr: std::ptr::null(), len: 0 };
+    let result = unsafe {
+        ghostty_terminal_get(handle.as_ptr(), GHOSTTY_TERMINAL_DATA_PWD, &mut raw as *mut _ as *mut c_void)
+    };
+    if result != GHOSTTY_SUCCESS { return None; }
+    let text = unsafe { copy_string(raw) };
+    parse_cwd(&text)
+}
+
+pub fn parse_cwd(text: &str) -> Option<String> {
+    let path = if text.starts_with("file://") {
+        let uri = url::Url::parse(text).ok()?;
+        if uri.query().is_some() || uri.fragment().is_some() { return None; }
+        percent_encoding::percent_decode_str(uri.path()).decode_utf8().ok()?.into_owned()
+    } else {
+        text.to_string()
+    };
+    if path.is_empty() || path.chars().any(char::is_control) { return None; }
+    // file://host is a shell assertion, not a network resource to open. Preserve the
+    // local path; on Windows file:///C:/... is reported without the URI's leading slash.
+    #[cfg(windows)]
+    let path = if path.as_bytes().get(2) == Some(&b':') { path[1..].to_string() } else { path };
+    std::path::Path::new(&path).is_absolute().then_some(path)
+}
