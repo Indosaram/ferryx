@@ -215,7 +215,7 @@ export function intentForAction(sync: LayoutSync, action: WorkspaceAction, befor
       label: action.tab.label, activate: action.activate !== false, content: content(action.tab.id) };
     case "CLOSE_TAB": case "ACTIVATE_TAB": case "REORDER_TAB": case "RENAME_TAB":
     case "SET_TAB_PINNED": case "SET_PANE_RATIO": case "SET_TAB_GROUP_RATIO":
-    case "EQUALIZE_TAB_GROUP_RUN": case "EQUALIZE_PANE_RUN": case "EQUALIZE_PANES":
+    case "EQUALIZE_TAB_GROUP_RUN": case "EQUALIZE_PANE_RUN":
       return { ...action };
     case "SPLIT_PANE": return { type: action.type, tabId: action.tabId,
       targetNodeId: node(action.tabId, action.targetLeafId ?? before.layout.layoutsByTabId[action.tabId].activeLeafId),
@@ -229,7 +229,7 @@ export function intentForAction(sync: LayoutSync, action: WorkspaceAction, befor
     case "DETACH_PANE_TO_TAB": return { type: action.type, sourceTabId: action.sourceTabId,
       nodeId: node(action.sourceTabId, action.leafId), tabId: action.newTab.id, label: action.newTab.label,
       targetGroupId: action.targetGroupId ?? before.layout.focusedGroupId ?? "main" };
-    case "CLOSE_PANE": case "FOCUS_PANE": case "TOGGLE_PANE_EXPANDED":
+    case "CLOSE_PANE": case "FOCUS_PANE":
       return { type: action.type, tabId: action.tabId, nodeId: node(action.tabId, action.leafId) };
     case "SWAP_PANES": return { type: action.type, tabId: action.tabId,
       sourceNodeId: node(action.tabId, action.sourceLeafId), targetNodeId: node(action.tabId, action.targetLeafId) };
