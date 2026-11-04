@@ -7976,6 +7976,8 @@ impl DaemonServer {
                     capabilities.push("screenHashV1".into());
                     capabilities.push("scrollbackBudgetV1".into());
                     capabilities.push("sizeOwnershipV1".into());
+                    #[cfg(feature = "local-split-qa")]
+                    capabilities.push("sizeOwnershipQaV1".into());
                     #[cfg(feature = "remote-desktop")]
                     capabilities.push(crate::daemon::protocol::REMOTE_DESKTOP_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
