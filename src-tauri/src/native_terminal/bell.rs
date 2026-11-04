@@ -26,6 +26,8 @@ pub struct PtyWriteRecord {
 
 /// Shared thread-safe event context attached via GHOSTTY_TERMINAL_OPT_USERDATA.
 pub struct TerminalContext {
+    pub(super) osc_effects: Mutex<super::osc_effects::Effects>,
+    pub(super) osc52_write: AtomicBool,
     pub bell_counter: AtomicU64,
     pub title_updated: AtomicBool,
     pub pty_writes_suppressed: AtomicBool,
