@@ -316,8 +316,14 @@ impl Layout {
                 self.active_tab_id = Some(target_tab_id);
             },
             DetachPaneToTab { source_tab_id, node_id, tab_id, label, target_group_id } => {
+                let insertion = match self.tab_group_layout.group_mut(&target_group_id) {
+                    Some(TabGroupLayout::Group { tab_ids, .. }) => tab_ids.iter().position(|id| id == &source_tab_id).map(|index| index + 1).unwrap_or(tab_ids.len()),
+                    _ => return Err("Unknown group".into()),
+                };
                 let pane_tree = self.remove_pane(&source_tab_id, node_id)?;
-                self.add(Tab { tab_id, label, pinned: false, pane_tree, active_node_id: node_id, expanded_node_id: None }, &target_group_id, true)?;
+                self.add(Tab { tab_id: tab_id.clone(), label, pinned: false, pane_tree, active_node_id: node_id, expanded_node_id: None }, &target_group_id, true)?;
+                self.tab_group_layout.remove_tab(&tab_id);
+                self.tab_group_layout.insert(&target_group_id, tab_id, insertion)?;
             },
             ClosePane { tab_id, node_id } => { self.remove_pane(&tab_id, node_id)?; },
             ActivateTab { tab_id } => {
