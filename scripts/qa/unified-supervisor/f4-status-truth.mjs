@@ -292,8 +292,11 @@ async function teardown(daemon) {
   receipt.aliveAfter = alive(record.pid);
   for (const pid of [...new Set(paneRecords(daemon.logDir).map((r) => r.pid))]) {
     const state = procState(pid);
-    const live = alive(pid);
-    const argv = live ? argvOf(pid) : null;
+    const sampledLive = alive(pid);
+    const argv = sampledLive ? argvOf(pid) : null;
+    // A cmdline that emptied (or a process that vanished) between the two reads is a pane that
+    // was already exiting.
+    const live = sampledLive && Boolean(argv);
     const ours = live && Boolean(argv?.includes(daemon.entry));
     if (ours) { try { process.kill(pid, 'SIGTERM'); } catch { /* raced its exit */ } }
     receipt.panes.push({ pid, aliveAtTeardown: live, procState: state, exiting: state !== null && exiting(pid), signalled: ours, argv });
