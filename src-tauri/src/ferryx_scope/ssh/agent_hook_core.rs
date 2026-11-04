@@ -258,11 +258,18 @@ pub fn blocked_detail(payload: &Value) -> Option<String> {
 /// Where the report goes. TCP wins when both halves are present, as in the extension.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Endpoint {
+    #[cfg(windows)]
+    Pipe { path: String, fallback: Option<Box<Endpoint>> },
     Tcp { port: u16, token: String },
     Socket(String),
 }
 
 pub fn endpoint(env: &impl Fn(&str) -> Option<String>) -> Option<Endpoint> {
+    #[cfg(windows)]
+    if let Some(path) = env("FERRYX_AGENT_STATE_PIPE").filter(|path| !path.is_empty()) {
+        let fallback = endpoint(&|key| if key == "FERRYX_AGENT_STATE_PIPE" { None } else { env(key) });
+        return Some(Endpoint::Pipe { path, fallback: fallback.map(Box::new) });
+    }
     let port = env("FERRYX_AGENT_STATE_PORT")
         .and_then(|port| port.trim().parse::<u16>().ok())
         .filter(|port| *port > 0);
@@ -318,7 +325,14 @@ pub fn prepare(
             report.insert("detail".into(), Value::from(detail));
         }
     }
-    if let Endpoint::Tcp { token, .. } = &endpoint {
+    #[cfg(windows)]
+    let token_endpoint = match &endpoint {
+        Endpoint::Pipe { fallback, .. } => fallback.as_deref().unwrap_or(&endpoint),
+        other => other,
+    };
+    #[cfg(not(windows))]
+    let token_endpoint = &endpoint;
+    if let Endpoint::Tcp { token, .. } = token_endpoint {
         report.insert("token".into(), Value::from(token.as_str()));
     }
     let mut line = serde_json::to_string(&Value::Object(report)).ok()?;
@@ -328,14 +342,17 @@ pub fn prepare(
 
 pub fn send(endpoint: &Endpoint, line: &str) -> std::io::Result<()> {
     match endpoint {
-        Endpoint::Tcp { port, .. } => {
-            #[cfg(windows)]
-            if let Some(path) = std::env::var_os("FERRYX_AGENT_STATE_PIPE") {
-                // Fall back only before sending: a partial write must not duplicate a report.
-                if let Ok(mut pipe) = std::fs::OpenOptions::new().write(true).open(path) {
-                    return pipe.write_all(line.as_bytes());
-                }
+        #[cfg(windows)]
+        Endpoint::Pipe { path, fallback } => {
+            match std::fs::OpenOptions::new().write(true).open(path) {
+                Ok(mut pipe) => pipe.write_all(line.as_bytes()),
+                Err(error) => match fallback {
+                    Some(endpoint) => send(endpoint, line),
+                    None => Err(error),
+                },
             }
+        }
+        Endpoint::Tcp { port, .. } => {
             let address = std::net::SocketAddr::from(([127, 0, 0, 1], *port));
             let mut stream = std::net::TcpStream::connect_timeout(&address, SEND_TIMEOUT)?;
             stream.set_write_timeout(Some(SEND_TIMEOUT))?;
