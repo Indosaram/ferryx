@@ -24,7 +24,7 @@ import { connectNativeMahord, rpcProcess } from '../fixtures/native-configured-a
 import { FRONTEND_DEV_URL } from '../../lib/qa-scenarios/frontend-server.mjs';
 import { LaneBlocked, StepFailed, markNotRun, runStep, stopExact, until } from './steps.mjs';
 import { scenariosForLane } from './contract.mjs';
-import { acceptedReply, configureGateway, reportGoalRequest, decisionsNamingNonce, gatewayPortFor, hubEnv, isolationProblems, globalRetryRule, namesNonce, rowFocusVerdict, rpcCommand, rulesLineText, typedInto, uniqueSession, windowRect } from './seams.mjs';
+import { acceptedReply, configureGateway, ocrShows, reportGoalRequest, decisionsNamingNonce, gatewayPortFor, hubEnv, isolationProblems, globalRetryRule, namesNonce, rowFocusVerdict, rpcCommand, rulesLineText, typedInto, uniqueSession, windowRect } from './seams.mjs';
 import { ocrImage } from './png.mjs';
 
 /**
@@ -212,6 +212,8 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     // own text (`marker`: the worktree name its cards and rows carry, or the Viewer marker);
     // otherwise it is taken again, and after the attempts the step fails GUI_NOT_FRONT.
     const runMarker = setup.worktree.split(/[\\/]/).pop();
+    // OCR reads a middle dot as '-' and 1 as i: text is compared with those folded (seams ocrShows).
+    const shows = ocrShows;
     const frame = async (name, step, { marker = runMarker } = {}) => {
       for (let attempt = 1; ; attempt += 1) {
         await raise();
@@ -220,7 +222,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
         const shot = step ? step.artifact('screenshot', `${name}.png`, bytes) : lane.write('screenshot', `frames/${name}-${Date.now()}.png`, bytes);
         const read = await ocr(run.tesseract, join(run.evidenceDir, shot.path), rect);
         if (step) step.artifact('ocr', `${name}.ocr.tsv`, read.tsv);
-        if (host.platform !== 'darwin' || !marker || read.text.includes(marker)) return { shot, read, bytes };
+        if (host.platform !== 'darwin' || !marker || shows(read.text, marker)) return { shot, read, bytes };
         if (attempt >= 5) throw new StepFailed('GUI_NOT_FRONT', `frame ${name}: the run window text "${marker}" is not in the cropped frame after ${attempt} captures (a stale or covered frame)`);
         await new Promise((resolveWait) => { setTimeout(resolveWait, 1_000); });
       }
@@ -270,12 +272,12 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const rows = await until('prompt and reply in the transcript', () => transcript(null), (page) => pairOf(page, prompt) !== null, { deadlineMs: 180_000 });
       step.artifact('transcript-read', 'transcript.json', rows);
       const pair = pairOf(rows, prompt);
-      const after = keep(step, 'after-prompt', await until('prompt and reply on screen', () => frame('after-prompt'), ({ read: r }) => r.text.includes(token) && r.text.includes(firstWords(pair.reply.text)), { deadlineMs: 60_000 }));
+      const after = keep(step, 'after-prompt', await until('prompt and reply on screen', () => frame('after-prompt'), ({ read: r }) => shows(r.text, token) && shows(r.text, firstWords(pair.reply.text)), { deadlineMs: 60_000 }));
       shared.record('F3-D2', lane.name, { owner: pair.owner.text, reply: pair.reply.text });
       step.assert('prompt-row-stored', pair.owner.text === prompt, pair);
       step.assert('reply-row-stored', pair.reply.text.length > 0, pair);
-      step.assert('prompt-on-screen', after.read.text.includes(token), { token, text: after.read.text.slice(0, 2000) });
-      step.assert('reply-on-screen', after.read.text.includes(firstWords(pair.reply.text)), { reply: pair.reply.text, text: after.read.text.slice(0, 2000) });
+      step.assert('prompt-on-screen', shows(after.read.text, token), { token, text: after.read.text.slice(0, 2000) });
+      step.assert('reply-on-screen', shows(after.read.text, firstWords(pair.reply.text)), { reply: pair.reply.text, text: after.read.text.slice(0, 2000) });
       await frame('reply-final', step);
     });
 
@@ -289,7 +291,14 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       if (!button) throw new StepFailed('PRODUCT_GAP_EXPORT_CONTROL', `no "${host.exportLabel ?? 'Export transcript'}" control on the supervisor panel`);
       await mahord.click({ x: button.x, y: button.y }, signal);
       const done = (f) => f.file && !before.has(f.name) && f.bytes > 0 && !/\.(crdownload|part|partial|download|tmp)$/i.test(f.name);
-      const files = await until('a finished new file in Downloads', () => helper.call('list-files', { profile: setup.profile, dir: downloads }), (list) => list.filter(done).length === 1, { deadlineMs: 60_000 });
+      // The panel says where the export went ("Saved <path>") or why it failed, under the
+      // Conversation header (TranscriptSection.tsx transcript-export-status); that frame is kept.
+      const files = await until('a finished new file in Downloads', () => helper.call('list-files', { profile: setup.profile, dir: downloads }), (list) => list.filter(done).length === 1, { deadlineMs: 60_000 })
+        .catch(async (error) => {
+          const seen = keep(step, 'export-status', await frame('export-status'));
+          const status = seen.read.text.split('\n').find((line) => /\b(Saved|not saved|Export|Downloaded|failed|cancelled)\b/i.test(line) && !/^\s*Conversation\b/.test(line)) ?? null;
+          throw new StepFailed(error.code ?? 'DEADLINE', `${error.message}; panel status after the click: ${JSON.stringify(status)}; Downloads ${downloads}`);
+        });
       const fresh = files.find(done);
       const file = await helper.call('read-b64', { profile: setup.profile, path: fresh.path });
       const bytes = Buffer.from(file.base64, 'base64');
@@ -318,17 +327,23 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const rows = await until('the long report in the transcript', () => transcript(null), (page) => JSON.stringify(page ?? {}).includes(heading), { deadlineMs: 120_000 });
       step.artifact('transcript-read', 'report.transcript.json', rows);
       const { read } = await frame('before-viewer', step);
-      step.assert('report-not-open-before-viewer', !read.text.includes(end) && !read.text.includes(host.viewerMarker), { text: read.text.slice(0, 1500) });
+      // The panel's report row shows the first lines and the last line (reportExcerpt), so the
+      // proof the report is not open yet is a middle section only the Viewer shows, and no Viewer.
+      const middle = 'Migration check 9 for';
+      step.assert('report-not-open-before-viewer', !shows(read.text, middle) && !shows(read.text, host.viewerMarker), { middle, text: read.text.slice(0, 1500) });
       const open = locate(read, host.viewerLabel ?? 'Open in Viewer');
       if (!open) throw new StepFailed('PRODUCT_GAP_VIEWER_CONTROL', `no "${host.viewerLabel ?? 'Open in Viewer'}" control next to the report`);
       await mahord.click({ x: open.x, y: open.y }, signal);
-      const head = keep(step, 'viewer-head', await until('report heading in Viewer', () => frame('viewer-head', undefined, { marker: host.viewerMarker }), ({ read: r }) => r.text.includes(heading) && r.text.includes(host.viewerMarker), { deadlineMs: 60_000 }));
-      step.assert('viewer-shows-report-heading', head.read.text.includes(heading), { heading, text: head.read.text.slice(0, 1500) });
-      step.assert('viewer-marker-shown', head.read.text.includes(host.viewerMarker), { marker: host.viewerMarker });
+      const head = keep(step, 'viewer-head', await until('report heading in Viewer', () => frame('viewer-head', undefined, { marker: host.viewerMarker }), ({ read: r }) => shows(r.text, heading) && shows(r.text, host.viewerMarker), { deadlineMs: 60_000 }));
+      step.assert('viewer-shows-report-heading', shows(head.read.text, heading), { heading, text: head.read.text.slice(0, 1500) });
+      step.assert('viewer-marker-shown', shows(head.read.text, host.viewerMarker), { marker: host.viewerMarker });
       await mahord.hotkey(host.platform === 'darwin' ? ['Meta', 'ArrowDown'] : ['Control', 'End'], signal);
-      const tail = keep(step, 'viewer-tail', await until('report end in Viewer', () => frame('viewer-tail', undefined, { marker: host.viewerMarker }), ({ read: r }) => r.text.includes(end) && r.text.includes(host.viewerMarker), { deadlineMs: 60_000 }));
-      step.assert('viewer-shows-report-end', tail.read.text.includes(end) && tail.read.text.includes(host.viewerMarker), { end, marker: host.viewerMarker, text: tail.read.text.slice(0, 1500) });
+      const tail = keep(step, 'viewer-tail', await until('report end in Viewer', () => frame('viewer-tail', undefined, { marker: host.viewerMarker }), ({ read: r }) => shows(r.text, end) && shows(r.text, host.viewerMarker), { deadlineMs: 60_000 }));
+      step.assert('viewer-shows-report-end', shows(tail.read.text, end) && shows(tail.read.text, host.viewerMarker), { end, marker: host.viewerMarker, text: tail.read.text.slice(0, 1500) });
     });
+    // The Viewer is a modal over the panel; later steps read the panel, so it is closed (Escape,
+    // ReportViewer.tsx onKeyDown) whatever D4's outcome.
+    await mahord.key('Escape', signal).catch(() => {});
 
     // F3-D6: one session row, clicked through MahoRD, focuses that session's terminal. Two of
     // this desktop's own instrumented panes (unique titles on this computer), spawned by this

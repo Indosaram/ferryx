@@ -6,7 +6,7 @@ import {
   PRODUCTION_GATEWAY_PORT, acceptedReply, configProblems, configureGateway, decisionsNamingNonce, gatewayBound, gatewayPortFor,
   activationScript, globalRetryRule, guiBundleFiles, hubEnv, isolationProblems, namesNonce, newRunId, parseEnvBlock, untypeableShortNames, windowsEnvScript, pageToScreen, relayListenPort, remotePath, rowFocusVerdict, rpcCommand, rulesLineText,
   runLanes, sameServeConfig, serveAddedProblems, typedInto, uniqueSession, webContextFrom, webPageChannel, windowBoundsScript, windowRect,
-  ENGINE_MODEL, ENGINE_PROVIDER, engineFiles, inputSourceScript, reportGoalRequest, stubReply,
+  ENGINE_MODEL, ENGINE_PROVIDER, engineFiles, ocrShows, inputSourceScript, reportGoalRequest, stubReply,
 } from './seams.mjs';
 import { LANE_SCHEMA, RUN_SCHEMA, SCENARIOS, validateRun } from './contract.mjs';
 
@@ -509,5 +509,14 @@ describe('supervisor engine, owner and typing seams', () => {
   test('an input source is selected by its exact id only', () => {
     expect(inputSourceScript('com.apple.keylayout.ABC')).toContain('"com.apple.keylayout.ABC"');
     expect(code(() => inputSourceScript('x"; evil'))).toBe('INPUT_SOURCE');
+  });
+});
+
+describe('OCR text matching', () => {
+  test('the Viewer title matches with its middle dot read as a hyphen, and 1 read as i', () => {
+    expect(ocrShows('Viewer - Supervisor report Rendered Markdown', 'Viewer \u00b7 Supervisor')).toBe(true);
+    expect(ocrShows('F3 long report maci326cf22', 'F3 long report mac1326cf22')).toBe(true);
+    expect(ocrShows('Section 19 Migration check 19 for x', 'Migration check 9 for')).toBe(false);
+    expect(ocrShows('Conversation Export transcript', 'supv-f3-mac-3428ce97')).toBe(false);
   });
 });

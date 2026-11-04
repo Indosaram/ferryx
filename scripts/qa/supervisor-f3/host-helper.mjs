@@ -194,7 +194,9 @@ async function startEngineStub({ profile, mhcBin }) {
       let json = null;
       try { json = JSON.parse(body); } catch { /* recorded raw length only */ }
       const texts = (json?.messages ?? []).map((m) => (typeof m?.content === 'string' ? m.content : Array.isArray(m?.content) ? m.content.map((p) => p?.text ?? '').join('') : ''));
-      const reply = stubReply(texts.at(-1) ?? '') ?? JSON.stringify({ gaps: [], decision: { decision: 'complete' } });
+      // mhc wraps the owner's message in its own turn context, so the token is searched in every
+      // message; assessments carry no F3 token and get "complete".
+      const reply = stubReply(texts.join('\n')) ?? JSON.stringify({ gaps: [], decision: { decision: 'complete' } });
       writeFileSync(requests, `${JSON.stringify({ at: new Date().toISOString(), path: request.url, model: json?.model ?? null, bytes: body.length, reply })}\n`, { flag: 'a' });
       if (request.method === 'GET' && request.url?.replace(/\?.*$/, '').endsWith('/models')) {
         response.writeHead(200, { 'content-type': 'application/json' });

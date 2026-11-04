@@ -437,6 +437,18 @@ export function engineFiles({ baseUrl, mhcBin }) {
   };
 }
 
+/** `text` with middle dots, hyphens and dashes removed and spaces collapsed (OCR reads '·' as '-'). */
+export const dotless = (text) => String(text ?? '').replace(/[\u00b7\u2022\u2013\u2014.\-]/g, ' ').replace(/\s+/g, ' ').trim();
+
+/**
+ * Whether OCR `text` shows `phrase`: compared without dots and dashes, case-folded, with the
+ * glyphs tesseract confuses on this panel folded together (1/i/l/I/|/!, 0/o).
+ */
+export const ocrShows = (text, phrase) => {
+  const key = (value) => dotless(value).toLowerCase().replace(/[il|!]/g, '1').replace(/o/g, '0');
+  return key(text).includes(key(phrase));
+};
+
 /** The Reply text the stub provider gives the F3 owner prompt: it names the prompt's token. */
 export const stubReply = (promptText) => {
   const token = /\bf3tok[a-z0-9]+\b/.exec(promptText)?.[0];
