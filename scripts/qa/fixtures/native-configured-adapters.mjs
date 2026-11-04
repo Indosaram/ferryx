@@ -446,7 +446,8 @@ export async function connectNativeMahord({ executable, address, pairingId, nudg
   }
   return {
     child: rpc.child,
-    click: (point, callSignal) => call('remote_mouse_click', { ...point, button: 'left', count: 1, normalized: false }, callSignal),
+    click: (point, callSignal) => call('remote_mouse_click', { ...point, button: 'left', count: 1, normalized: point.normalized ?? false }, callSignal),
+    scroll: (args, callSignal) => call('remote_mouse_scroll', args, callSignal),
     type: (text, callSignal) => call('remote_type_text', { text, delay_ms: 0 }, callSignal),
     key: (key, callSignal) => call('remote_key_press', { key }, callSignal),
     hotkey: (keys, callSignal) => call('remote_hotkey', { keys }, callSignal),

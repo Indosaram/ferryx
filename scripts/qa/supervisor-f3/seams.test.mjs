@@ -6,12 +6,23 @@ import {
   PRODUCTION_GATEWAY_PORT, acceptedReply, configProblems, configureGateway, decisionsNamingNonce, gatewayBound, gatewayPortFor,
   activationScript, globalRetryRule, guiBundleFiles, hubEnv, isolationProblems, namesNonce, newRunId, parseEnvBlock, untypeableShortNames, windowsEnvScript, pageToScreen, relayListenPort, remotePath, rowFocusVerdict, rpcCommand, rulesLineText,
   runLanes, sameServeConfig, serveAddedProblems, typedInto, uniqueSession, webContextFrom, webPageChannel, windowBoundsScript, windowRect,
-  ENGINE_MODEL, ENGINE_PROVIDER, engineFiles, ocrShows, inputSourceScript, reportGoalRequest, stubReply,
+  ENGINE_MODEL, ENGINE_PROVIDER, engineFiles, ocrShows, inputSourceScript, reportGoalRequest, stubReply, framePoint, panelReadRequest,
 } from './seams.mjs';
 import { LANE_SCHEMA, RUN_SCHEMA, SCENARIOS, validateRun } from './contract.mjs';
 
 const code = (fn) => { try { fn(); } catch (error) { return error.code; } return null; };
 const codeAsync = async (fn) => { try { await fn(); } catch (error) { return error.code; } return null; };
+
+describe('real surface input and reads', () => {
+  test('pixel points become top-left normalized coordinates independently of host logical size', () => {
+    expect(framePoint({ x: 1028, y: 664 }, 2056, 1328)).toEqual({ x: 0.5, y: 0.5, normalized: true });
+    expect(framePoint({ x: 514, y: 332 }, 2056, 1328)).toEqual({ x: 0.25, y: 0.25, normalized: true });
+  });
+  test('transcript is the app transcript, not a session-specific conversation', () => {
+    expect(panelReadRequest('transcript')).toEqual({ type: 'supervisorReadV1', request: { view: 'transcript', cursor: 0 } });
+    expect(panelReadRequest('panel')).toEqual({ type: 'supervisorReadV1', request: { view: 'panel' } });
+  });
+});
 
 describe('daemon replies', () => {
   test('a structured error, a protocol mismatch, no reply or another type stops the lane', () => {

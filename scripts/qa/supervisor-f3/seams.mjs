@@ -450,6 +450,10 @@ export const ocrShows = (text, phrase) => {
 };
 
 /** The Reply text the stub provider gives the F3 owner prompt: it names the prompt's token. */
+export const framePoint = (point, width, height) => ({ x: point.x / width, y: point.y / height, normalized: true });
+
+export const panelReadRequest = (view) => ({ type: 'supervisorReadV1', request: { view, ...(view === 'transcript' ? { cursor: 0 } : {}) } });
+
 export const stubReply = (promptText) => {
   const token = /\bf3tok[a-z0-9]+\b/.exec(promptText)?.[0];
   return token ? `Reply for ${token} is ready` : null;
