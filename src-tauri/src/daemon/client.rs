@@ -8515,6 +8515,8 @@ mod local_split_transport_tests {
             let peer = async {
                 let mut connection = if handshake_stall {
                     let (stream, _) = fixture.listener.accept().await.unwrap();
+                    #[cfg(windows)]
+                    let stream = crate::daemon::windows_pipe::Stream::from(stream);
                     let (reader, writer) = stream.into_split();
                     let mut connection = ActiveConnection {
                         reader: BufReader::new(reader),
