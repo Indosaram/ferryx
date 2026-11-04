@@ -346,7 +346,7 @@ export function initialWizardStepIndex(
   ctx: OnboardingContext
 ): number {
   const pending = pendingOnboardingSteps(state, ctx);
-  const target = pending.find((step) => step !== "features") ?? pending[0];
+  const target = pending.find((step) => step !== "features" && step !== "import") ?? pending[0];
   if (!target) return 0;
   return Math.max(0, steps.indexOf(target));
 }
@@ -367,6 +367,7 @@ export function shouldAutoOpenOnboarding(
       // force the wizard open (already-onboarded users get the supervisor setup banner instead).
       (step) =>
         step !== "features" &&
+        step !== "import" &&
         step !== "cli" &&
         step !== "try" &&
         step !== "account" &&
