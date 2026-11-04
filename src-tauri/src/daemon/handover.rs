@@ -869,6 +869,22 @@ mod spawn_owner_tests {
     }
 
     #[test]
+    fn plugins_approval_survives_handover_without_killing_predecessor() {
+        use super::super::plugins::{Approvals, Manifest};
+        let (_root, manager, terminals, legacy) = committing_fixture();
+        let plugin = Manifest { name: "clock".into(), version: "1".into(),
+            command: vec!["/absolute/clock".into()], capabilities: ["render".into()].into() };
+        manager.set_plugin_approvals(Arc::new(Mutex::new(Approvals { manifests: vec![plugin.clone()] })));
+        manager.commit_handover_v5(&terminals).unwrap();
+        let successor = HandoverManager::new(legacy.with_file_name("successor.sock"));
+        let approvals = Arc::new(Mutex::new(Approvals::default()));
+        successor.set_plugin_approvals(approvals.clone());
+        successor.adopt_recorded_plugins(&legacy).unwrap();
+        assert!(approvals.lock().enabled(&plugin));
+        assert!(manager.is_draining(), "predecessor remains available after its decision");
+    }
+
+    #[test]
     fn layout_uses_the_committed_decision_not_shared_disk() {
         use super::super::layout::{Content, Intent, Store};
         let (root, manager, terminals, legacy) = committing_fixture();
