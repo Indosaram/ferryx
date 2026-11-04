@@ -27,6 +27,7 @@ pub const CLI_GROUPS: &[&str] = &[
     "panes",
     "grants",
     "integrations",
+    "script",
     "api",
 ];
 
@@ -484,6 +485,13 @@ pub const CATALOG: &[Command] = &[
             ("1", "an install or removal failed for at least one agent"),
             ("2", "usage error or unknown agent (UNKNOWN_AGENT on stderr)"),
         ],
+    },
+    Command {
+        name: "script",
+        summary: "Read the owner Luau script log",
+        output: "text",
+        subcommands: &[sub!("log", &[], &[])],
+        exit_codes: &[("0", "ok"), ("1", "log read failed"), ("2", "usage error")],
     },
     Command {
         name: "api",
