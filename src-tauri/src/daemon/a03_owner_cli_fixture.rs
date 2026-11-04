@@ -268,6 +268,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push("sizeOwnershipV1");
             capabilities.push("daemonLayoutV1");
             capabilities.push("detachedPanesV1");
+            capabilities.push("terminalOscEffectsV1");
             #[cfg(feature = "local-split-qa")]
             capabilities.push("sizeOwnershipQaV1");
             #[cfg(feature = "remote-desktop")]
