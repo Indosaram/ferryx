@@ -8,8 +8,6 @@ use crate::daemon::protocol::DaemonSessionDetails;
 use crate::ipc::error::IpcErrorCode;
 
 fn details(workspace_id: Option<&str>, cwd: Option<&str>) -> DaemonSessionDetails {
-    foreground_command: None,
-    agent: None,
     DaemonSessionDetails {
         foreground_command: None,
         agent: None,
