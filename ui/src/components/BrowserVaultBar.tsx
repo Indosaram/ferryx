@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { KeyRound, X } from "lucide-react";
 
 import { describeBrowserError, isVaultUnavailable } from "../lib/browserErrorText";
+import { extractBrowserErrorCode } from "../lib/browserTauri";
 import {
   dismissVaultPrompt,
   fillVaultItem,
@@ -19,7 +20,7 @@ function isWebUrl(url: string): boolean {
 }
 
 /** Offers to save a submitted password and to fill a saved login for the current page. */
-export function BrowserVaultBar({ browserId, url }: { browserId: string; url: string }) {
+export function BrowserVaultBar({ browserId, url, loading }: { browserId: string; url: string; loading: boolean }) {
   const [prompt, setPrompt] = useState<VaultSavePrompt | null>(null);
   const [promptError, setPromptError] = useState<string | null>(null);
   const [matches, setMatches] = useState<VaultItemSummary[]>([]);
@@ -55,22 +56,30 @@ export function BrowserVaultBar({ browserId, url }: { browserId: string; url: st
     const seq = ++matchSeq.current;
     setMatches([]);
     setFillError(null);
-    if (!isWebUrl(url)) return;
+    if (loading || !isWebUrl(url)) return;
     void vaultMatchesForBrowser(browserId).then(
       (next) => {
         if (seq === matchSeq.current) setMatches(next ?? []);
       },
       (failure: unknown) => {
         // The lookup runs on every page load without the user asking: no keyring simply means
-        // no fill offer (Settings > Passwords explains why), never an error in the page.
-        if (seq !== matchSeq.current || isVaultUnavailable(failure)) return;
+        // no fill offer (Settings > Passwords explains why), never an error in the page. A tab
+        // that is not open yet (restore) likewise gets no offer and no error; the lookup runs
+        // again when its page finishes loading.
+        if (
+          seq !== matchSeq.current ||
+          isVaultUnavailable(failure) ||
+          extractBrowserErrorCode(failure) === "BROWSER_NOT_FOUND"
+        ) {
+          return;
+        }
         setFillError(describeBrowserError(failure));
       },
     );
     return () => {
       matchSeq.current += 1;
     };
-  }, [browserId, url]);
+  }, [browserId, url, loading]);
 
   const acceptPrompt = (current: VaultSavePrompt) => {
     setPromptError(null);
