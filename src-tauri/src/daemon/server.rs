@@ -3966,6 +3966,10 @@ impl DaemonServer {
         let remote_event_tx = broadcast::channel::<DaemonRemoteEvent>(64).0;
         let osc_tx = remote_event_tx.clone();
         let osc_terminal = Arc::downgrade(&terminal_service);
+        let local_terminal = osc_terminal.clone();
+        terminal_service.output_hub().set_osc_local_session(Arc::new(move |session_id| {
+            local_terminal.upgrade().is_some_and(|service| service.get_session(session_id).is_some())
+        }));
         terminal_service.output_hub().set_osc_effect_sink(Arc::new(move |session_id, kind| {
             if matches!(kind, crate::native_terminal::osc_effects::OscEffect::Clipboard { .. })
                 && !osc_terminal.upgrade().is_some_and(|service| service.get_session(session_id).is_some()) {
