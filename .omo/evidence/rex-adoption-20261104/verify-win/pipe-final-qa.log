@@ -1,0 +1,16 @@
+{"request":{"type":"handshake","version":5},"response":{"type":"handshakeOk","version":5,"pid":22324,"epoch":1793830993082,"binaryPath":"C:\\Users\\sook\\ferryx-wt\\rex-verify-win-20261104\\.qa\\pipe\\bin\\ferryx-cli.exe","binaryMtimeMs":1793830898714,"daemonVersion":"2026.1101.1","capabilities":["localSplitLifecycleV1","control-v1"],"admissionTimeUnixMs":1793830993530}}
+{"request":{"type":"registerWorkspace","workspaceId":"qa-win","repoRoot":"C:\\Users\\sook\\ferryx-wt\\rex-verify-win-20261104"},"response":{"type":"error","message":"the parent chain of process 11476 changed while it was checked (process 932 exited); retry","code":"FORBIDDEN"}}
+PIPE_ONLY_PORT_FILE_ABSENT {"ok":true,"sessions":[]}
+
+13 |  await call({type:'handshake',version:5});
+14 |  const registered=await call({type:'registerWorkspace',workspaceId:'qa-win',repoRoot:root});
+15 |  if(registered.type==='error') {
+16 |   renameSync(qa+'\\\\rt\\\\daemon.port',qa+'\\\\rt\\\\daemon.port.hidden');
+17 |   console.log('PIPE_ONLY_PORT_FILE_ABSENT '+execFileSync(qa+'\\\\bin\\\\ferryx-cli.exe',['agents','list','--json'],{encoding:'utf8',env:{...process.env,HOME:qa+'\\\\home',USERPROFILE:qa+'\\\\home',FERRYX_RUNTIME_DIR:qa+'\\\\rt',FERRYX_DATA_DIR:qa+'\\\\data'}}));
+18 |   throw new Error('OWNER_REGISTER_WORKSPACE_REFUSED: '+registered.message);
+                 ^
+error: OWNER_REGISTER_WORKSPACE_REFUSED: the parent chain of process 11476 changed while it was checked (process 932 exited); retry
+      at C:\Users\sook\ferryx-wt\.tmp-out\rex-win-pipe-qa.mjs:18:13
+
+Bun v1.4.3 (Windows x64)
+EXIT=1

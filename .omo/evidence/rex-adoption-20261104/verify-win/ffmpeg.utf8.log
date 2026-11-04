@@ -1,0 +1,2 @@
+FFMPEG_DIR is set (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\src-tauri\resources\ffmpeg\sdk); cargo links that FFmpeg, nothing to fetch
+EXIT=0

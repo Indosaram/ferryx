@@ -1,0 +1,253 @@
+--- Test 1: Missing mandatory -ExePath parameter fails ---
+RESULT: FAIL - Expected error matching 'Cannot process command|missing mandatory parameter|MissingMandatoryParameter|Ex
+ePath', but caught: 'C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\repo\scripts
+\build-msix.ps1 : 필'
+
+--- Test 2: Non-existent -ExePath fails ---
+RESULT: PASS
+
+--- Test 3: Version quad with non-zero 4th component is rejected ---
+RESULT: PASS
+
+--- Test 4: Invalid calendar date tag is rejected ---
+RESULT: PASS
+
+--- Test 5: Binary version mismatch against expected app version fails ---
+RESULT: PASS
+
+--- Test 6: Pre-existing output package fails closed and preserves existing file bytes ---
+RESULT: PASS
+
+--- Test 7: Omitted -SkipSigning without -CertThumbprint fails ---
+RESULT: PASS
+
+--- Test 8: Unavailable certificate thumbprint fails ---
+RESULT: PASS
+
+--- Test 9: MakeAppx failure exit code is detected and reported ---
+RESULT: PASS
+
+--- Test 10: Small valid fixture packs MSIX and validates packaged manifest identity ---
+=======================================================
+ Ferryx MSIX Packaging Tool
+=======================================================
+Exe Path       : C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\ferryx.exe
+Target Version : v2026.09.08.1
+Publisher      : CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36
+Package Name   : ProjectMaho.Ferryx
+Output Dir     : C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\pack_out
+Skip Signing   : True
+=======================================================
+[1/6] App Version: 2026.908.1, MSIX Quad Version: 2026.908.1.0
+[2/6] Binary version verified successfully against 2026.908.1
+[3/6] Found Windows SDK MakeAppx: C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\makeappx.exe
+Store packaging mode (-SkipSigning): package created unsigned for Microsoft Store ingestion.
+Copying assets from: C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\icons
+[4/6] Generated AppxManifest.xml with version 2026.908.1.0
+[5/6] Packing MSIX package to: C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\pack_out\Ferryx_2026.908.1_x64.msix
+Microsoft (R) MakeAppx Tool
+
+Copyright (C) 2013 Microsoft.  All rights reserved.
+
+
+
+The path (/p) parameter is: "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\pack_out\Ferryx_2026.908.1_x64.msix"
+
+The content directory (/d) parameter is: "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d"
+
+Enumerating files from directory "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d"
+
+Packing 18 file(s) in "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d" (content directory) to "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\pack_out\Ferryx_2026.908.1_x64.msix" (output file name).
+
+Memory limit defaulting to 16973283328 bytes.
+
+Using "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d\AppxManifest.xml" as the manifest for the package.
+
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d\ui\dist\index.html" as a payload file.  Its path in the package will be "ui\dist\index.html".
+
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d\ui\dist\assets\app.js" as a payload file.  Its path in the package will be "ui\dist\assets\app.js".
+
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d\helpers\x86_64-pc-windows-msvc\ferryx-remote-helper.exe" as a payload file.  Its path in the package will be "helpers\x86_64-pc-windows-msvc\ferryx-remote-helper.exe".
+
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d\helpers\x86_64-unknown-linux-gnu\ferryx-remote-helper" as a payload file.  Its path in the package will be "helpers\x86_64-unknown-linux-gnu\ferryx-remote-helper".
+
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d\helpers\aarch64-unknown-linux-gnu\ferryx-remote-helper" as a payload file.  Its path in the package will be "helpers\aarch64-unknown-linux-gnu\ferryx-remote-helper".
+
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d\helpers\manifest.json" as a payload file.  Its path in the package will be "helpers\manifest.json".
+
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d\mhc\x86_64-pc-windows-msvc\fetch.json" as a payload file.  Its path in the package will be "mhc\x86_64-pc-windows-msvc\fetch.json".
+
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d\mhc\x86_64-pc-windows-msvc\mhc\mhc.exe" as a payload file.  Its path in the package will be "mhc\x86_64-pc-windows-msvc\mhc\mhc.exe".
+
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d\mhc\x86_64-pc-windows-msvc\mhc\skills\SKILL.md" as a payload file.  Its path in the package will be "mhc\x86_64-pc-windows-msvc\mhc\skills\SKILL.md".
+
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d\mhc\x86_64-pc-windows-msvc\bun\bun.exe" as a payload file.  Its path in the package will be "mhc\x86_64-pc-windows-msvc\bun\bun.exe".
+
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d\ferryx.exe" as a payload file.  Its path in the package will be "ferryx.exe".
+
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d\Assets\StoreLogo.png" as a payload file.  Its path in the package will be "Assets\StoreLogo.png".
+
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d\Assets\Square150x150Logo.png" as a payload file.  Its path in the package will be "Assets\Square150x150Logo.png".
+
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d\Assets\Square310x310Logo.png" as a payload file.  Its path in the package will be "Assets\Square310x310Logo.png".
+
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d\Assets\Square44x44Logo.png" as a payload file.  Its path in the package will be "Assets\Square44x44Logo.png".
+
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d\Assets\Square71x71Logo.png" as a payload file.  Its path in the package will be "Assets\Square71x71Logo.png".
+
+Processing "\\?\C:\Users\sook\AppData\Local\Temp\ferryx-msix-staging-d7a5012d110c43dfa5d8a6bd1667020d\msix.marker" as a payload file.  Its path in the package will be "msix.marker".
+
+Package creation succeeded.
+
+[6/6] Validating packaged MSIX manifest from archive...
+Packaged manifest verified: Name='ProjectMaho.Ferryx', Version='2026.908.1.0', Publisher='CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36', ProcessorArchitecture='x64'
+=======================================================
+ MSIX BUILD SUCCESSFUL: C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\pack_out\Ferryx_2026.908.1_x64.msix
+=======================================================
+MSIX successfully validated: ProjectMaho.Ferryx 2026.908.1.0 CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36 x64
+RESULT: PASS
+
+--- Test 11: Packaged manifest with wrong Publisher fails closed ---
+RESULT: PASS
+
+--- Test 12: Packaged manifest with wrong ProcessorArchitecture (arm64) fails closed ---
+RESULT: PASS
+
+--- Test 13: Missing required resource fails before packaging: ui/dist/index.html ---
+=======================================================
+ Ferryx MSIX Packaging Tool
+=======================================================
+Exe Path       : C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\ferryx.exe
+Target Version : 2026.908.1
+Publisher      : CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36
+Package Name   : ProjectMaho.Ferryx
+Output Dir     : C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\6e7932c352e14506
+937012abcf3cf2e5
+Skip Signing   : True
+=======================================================
+[1/6] App Version: 2026.908.1, MSIX Quad Version: 2026.908.1.0
+[2/6] Binary version verified successfully against 2026.908.1
+[3/6] Found Windows SDK MakeAppx: C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\makeappx.exe
+Store packaging mode (-SkipSigning): package created unsigned for Microsoft Store ingestion.
+RESULT: PASS
+
+--- Test 14: Missing required resource fails before packaging: src-tauri/resources/helpers/manifest.json ---
+=======================================================
+ Ferryx MSIX Packaging Tool
+=======================================================
+Exe Path       : C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\ferryx.exe
+Target Version : 2026.908.1
+Publisher      : CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36
+Package Name   : ProjectMaho.Ferryx
+Output Dir     : C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\7e64c0065a114e6e
+bf24d30610a4b72b
+Skip Signing   : True
+=======================================================
+[1/6] App Version: 2026.908.1, MSIX Quad Version: 2026.908.1.0
+[2/6] Binary version verified successfully against 2026.908.1
+[3/6] Found Windows SDK MakeAppx: C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\makeappx.exe
+Store packaging mode (-SkipSigning): package created unsigned for Microsoft Store ingestion.
+RESULT: PASS
+
+--- Test 15: Missing required resource fails before packaging: src-tauri/resources/helpers/x86_64-pc-windows-msvc/ferry
+x-remote-helper.exe ---
+=======================================================
+ Ferryx MSIX Packaging Tool
+=======================================================
+Exe Path       : C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\ferryx.exe
+Target Version : 2026.908.1
+Publisher      : CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36
+Package Name   : ProjectMaho.Ferryx
+Output Dir     : C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\614590420080450b
+811c128e970d70a4
+Skip Signing   : True
+=======================================================
+[1/6] App Version: 2026.908.1, MSIX Quad Version: 2026.908.1.0
+[2/6] Binary version verified successfully against 2026.908.1
+[3/6] Found Windows SDK MakeAppx: C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\makeappx.exe
+Store packaging mode (-SkipSigning): package created unsigned for Microsoft Store ingestion.
+RESULT: PASS
+
+--- Test 16: Missing required resource fails before packaging: src-tauri/resources/mhc/payload/x86_64-pc-windows-msvc/f
+etch.json ---
+=======================================================
+ Ferryx MSIX Packaging Tool
+=======================================================
+Exe Path       : C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\ferryx.exe
+Target Version : 2026.908.1
+Publisher      : CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36
+Package Name   : ProjectMaho.Ferryx
+Output Dir     : C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\b94e331518094c56
+ad7226189b757788
+Skip Signing   : True
+=======================================================
+[1/6] App Version: 2026.908.1, MSIX Quad Version: 2026.908.1.0
+[2/6] Binary version verified successfully against 2026.908.1
+[3/6] Found Windows SDK MakeAppx: C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\makeappx.exe
+Store packaging mode (-SkipSigning): package created unsigned for Microsoft Store ingestion.
+RESULT: PASS
+
+--- Test 17: Missing required resource fails before packaging: src-tauri/resources/mhc/payload/x86_64-pc-windows-msvc/m
+hc/mhc.exe ---
+=======================================================
+ Ferryx MSIX Packaging Tool
+=======================================================
+Exe Path       : C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\ferryx.exe
+Target Version : 2026.908.1
+Publisher      : CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36
+Package Name   : ProjectMaho.Ferryx
+Output Dir     : C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\e07dbe91197e4d25
+8eef57cd9d11230a
+Skip Signing   : True
+=======================================================
+[1/6] App Version: 2026.908.1, MSIX Quad Version: 2026.908.1.0
+[2/6] Binary version verified successfully against 2026.908.1
+[3/6] Found Windows SDK MakeAppx: C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\makeappx.exe
+Store packaging mode (-SkipSigning): package created unsigned for Microsoft Store ingestion.
+RESULT: PASS
+
+--- Test 18: Missing required resource fails before packaging: src-tauri/resources/mhc/payload/x86_64-pc-windows-msvc/b
+un/bun.exe ---
+=======================================================
+ Ferryx MSIX Packaging Tool
+=======================================================
+Exe Path       : C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\ferryx.exe
+Target Version : 2026.908.1
+Publisher      : CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36
+Package Name   : ProjectMaho.Ferryx
+Output Dir     : C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\d07f52583fdc46da
+ab1a73d08fececb9
+Skip Signing   : True
+=======================================================
+[1/6] App Version: 2026.908.1, MSIX Quad Version: 2026.908.1.0
+[2/6] Binary version verified successfully against 2026.908.1
+[3/6] Found Windows SDK MakeAppx: C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\makeappx.exe
+Store packaging mode (-SkipSigning): package created unsigned for Microsoft Store ingestion.
+RESULT: PASS
+
+--- Test 19: Corrupt helper bytes fail before packaging ---
+=======================================================
+ Ferryx MSIX Packaging Tool
+=======================================================
+Exe Path       : C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\ferryx.exe
+Target Version : 2026.908.1
+Publisher      : CN=68073D7F-44F8-47BF-8B3E-B17FBDC44F36
+Package Name   : ProjectMaho.Ferryx
+Output Dir     : C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82\corrupt-helper
+Skip Signing   : True
+=======================================================
+[1/6] App Version: 2026.908.1, MSIX Quad Version: 2026.908.1.0
+[2/6] Binary version verified successfully against 2026.908.1
+[3/6] Found Windows SDK MakeAppx: C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\makeappx.exe
+Store packaging mode (-SkipSigning): package created unsigned for Microsoft Store ingestion.
+RESULT: PASS
+
+Fixture scratch removed: C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea4b72a747c28a98456e82
+=======================================================
+Test Run Summary: Total=19, Passed=18, Failed=1
+=======================================================
+Failed Tests:
+ - Missing mandatory -ExePath parameter fails : Expected error matching 'Cannot process command|missing mandatory param
+eter|MissingMandatoryParameter|ExePath', but caught: 'C:\Users\sook\AppData\Local\Temp\ferryx-test-scratch-15b258e2c3ea
+4b72a747c28a98456e82\repo\scripts\build-msix.ps1 : 필'
+EXIT=1

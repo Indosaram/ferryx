@@ -1,0 +1,22 @@
+cargo :    Compiling ffmpeg-sys-next v9.0.1
+위치 C:\Users\sook\ferryx-wt\.tmp-out\rex-win-build.ps1:21 문자:16
++ ...  lib-test { cargo test --manifest-path src-tauri/Cargo.toml --lib --l ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling ffmpeg-sys-next v9.0.1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling ferryx-rd-proto v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\crates\ferryx-rd\ferryx-rd-proto)
+   Compiling ferryx-rd-render v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\crates\ferryx-rd\ferryx-rd-render
+)
+   Compiling ferryx v2026.1101.1 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\src-tauri)
+   Compiling portable-pty v0.9.0 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\src-tauri\vendor\portable-pty)
+   Compiling ferryx-hub v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\crates\ferryx-hub)
+   Compiling ferryx-browser-engine-protocol v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\crates\browser-engi
+ne-protocol)
+error: failed to run custom build command for `ffmpeg-sys-next v9.0.1`
+
+Caused by:
+  process didn't exit successfully: `C:\Users\sook\ferryx-wt\.target\debug\build\ffmpeg-sys-next-81c6b03bc929e213\build
+-script-build` (exit code: 101)
+warning: build failed, waiting for other jobs to finish...
+EXIT=101

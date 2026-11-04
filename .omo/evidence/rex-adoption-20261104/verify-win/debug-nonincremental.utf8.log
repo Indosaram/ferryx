@@ -1,0 +1,22 @@
+cargo :    Compiling ferryx-rd-proto v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\crates\ferryx-rd\ferryx-rd
+-proto)
+위치 C:\Users\sook\ferryx-wt\.tmp-out\rex-win-debug-nonincremental.ps1:12 문자:1
++ cargo build --manifest-path src-tauri/Cargo.toml --locked --bin ferry ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling fe...erryx-rd-proto):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling ferryx-rd-render v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\crates\ferryx-rd\ferryx-rd-render
+)
+   Compiling ferryx v2026.1101.1 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\src-tauri)
+   Compiling portable-pty v0.9.0 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\src-tauri\vendor\portable-pty)
+   Compiling ferryx-hub v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\crates\ferryx-hub)
+   Compiling ferryx-browser-engine-protocol v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\crates\browser-engi
+ne-protocol)
+   Compiling ferryx-rd-net v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\crates\ferryx-rd\ferryx-rd-net)
+   Compiling ferryx-rd-decode v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\crates\ferryx-rd\ferryx-rd-decode
+)
+   Compiling ferryx-rd-app v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\crates\ferryx-rd\ferryx-rd-app)
+   Compiling ferryx-rd-host v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\crates\ferryx-rd\ferryx-rd-host)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5m 36s
+EXIT=0

@@ -1,0 +1,428 @@
+
+running 46 tests
+ferryx_lib-a3aa23b3b5f5f1b3.exe : 
+위치 C:\Users\sook\ferryx-wt\.tmp-out\rex-win-baseline-focused.ps1:11 문자:1
++ & $test --nocapture @failed *> "$logs\baseline-matching-failures.log"
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+thread 'cli::supervisor_goal::tests::setup_remote_form_maps_a_paired_host_lexically' (21620) panicked at src\cli\superv
+isor_goal.rs:838:59:
+called `Result::unwrap()` on an `Err` value: UsageError("--git-common-dir must be an absolute path")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'cli::supervisor_goal::tests::the_setup_cli_needs_every_flag_once_and_an_absolute_dir' (21500) panicked at src\c
+li\supervisor_goal.rs:729:43:
+called `Result::unwrap()` on an `Err` value: UsageError("--git-common-dir must be an absolute path")
+test cli::supervisor_goal::tests::the_setup_cli_needs_every_flag_once_and_an_absolute_dir ... FAILED
+test cli::supervisor_goal::tests::setup_remote_form_maps_a_paired_host_lexically ... FAILED
+
+thread 'native_terminal::platform::windows::pointer_tests::presented_terminal_yields_cross_thread_pointer_hit_testing_t
+o_input' (24872) panicked at src\native_terminal\platform\windows_pointer_tests.rs:328:5:
+presented_terminal_yields_cross_thread_pointer_hit_testing_to_input requires an interactive Windows user desktop sessio
+n (WinSta0); got session_id=0 input_desktop_is_null=true
+test native_terminal::platform::windows::pointer_tests::presented_terminal_yields_cross_thread_pointer_hit_testing_to_input ... FAILED
+
+thread 'ipc::file_preview::file_preview_tests::not_a_directory_is_a_missing_file_not_a_permission_problem' (30176) pani
+cked at src\ipc\file_preview_tests.rs:1811:5:
+assertion `left == right` failed
+  left: "PermissionDenied"
+ right: "MissingFile"
+test ipc::file_preview::file_preview_tests::not_a_directory_is_a_missing_file_not_a_permission_problem ... FAILED
+
+thread 'paired_host::file_read::tests::resolve_host_path_expands_home' (27036) panicked at src\paired_host\file_read.rs
+:583:67:
+called `Result::unwrap()` on an `Err` value: InvalidPath
+
+thread 'paired_host::file_read::tests::resolve_host_path_joins_relative_onto_cwd_then_session' (26436) panicked at src\
+paired_host\file_read.rs:597:91:
+called `Result::unwrap()` on an `Err` value: InvalidPath
+test paired_host::file_read::tests::resolve_host_path_expands_home ... FAILED
+test paired_host::file_read::tests::resolve_host_path_joins_relative_onto_cwd_then_session ... FAILED
+
+thread 'agent_history::tests::grok_rejoins_message_chunks_from_the_update_stream' (22236) panicked at src\ferryx_scope\
+history\tests.rs:214:5:
+assertion `left == right` failed: a reply split across chunks must still be searchable
+  left: 0
+ right: 1
+
+thread 'agent_history::tests::senpi_family_lists_reads_and_targets_resume_for_omo_pi_omp_gjc' (29604) panicked at src\f
+erryx_scope\history\tests.rs:102:9:
+assertion `left == right` failed: omo session must be searchable by its message text
+  left: 0
+ right: 1
+
+thread 'paired_host::file_read::tests::resolve_host_path_keeps_absolute_and_normalizes_dot_dot' (33376) panicked at src
+\paired_host\file_read.rs:613:79:
+called `Result::unwrap()` on an `Err` value: InvalidPath
+test paired_host::file_read::tests::resolve_host_path_keeps_absolute_and_normalizes_dot_dot ... FAILED
+
+thread 'agent_history::tests::cline_reads_the_sibling_messages_document_and_unwraps_user_input' (27296) panicked at src
+\ferryx_scope\history\tests.rs:231:5:
+assertion `left == right` failed: the messages document must not be listed as a second conversation
+  left: 0
+ right: 1
+
+thread 'agent_history::tests::droid_lists_sessions_with_turns_and_reports_read_as_unsettled' (31720) panicked at src\fe
+rryx_scope\history\tests.rs:144:5:
+assertion `left == right` failed: a session_start-only file is hidden, as droid's own find hides it
+  left: 0
+ right: 1
+
+thread 'remote::reference_chat::prompt_codex::tests::a_free_form_answer_line_holding_text_takes_no_custom_answer' (2532
+4) panicked at src\remote\reference_chat\prompt_codex.rs:1974:9:
+assertion `left != right` failed: the fixture holds the placeholder line
+  left: "\r\n??Queued follow-up inputs\r\n  Any notes?\r\n  Type your answer\r\n  enter submit   ctrl+] skip   alt+??ma
+in prompt\r\n"
+ right: "\r\n??Queued follow-up inputs\r\n  Any notes?\r\n  Type your answer\r\n  enter submit   ctrl+] skip   alt+??ma
+in prompt\r\n"
+test remote::reference_chat::prompt_codex::tests::a_free_form_answer_line_holding_text_takes_no_custom_answer ... FAILED
+
+thread 'agent_history::tests::older_message_search_and_exact_identity' (18208) panicked at src\ferryx_scope\history\tes
+ts.rs:37:5:
+assertion `left == right` failed
+  left: Some("\\\\?\\C:\\Users\\sook\\AppData\\Local\\Temp\\.tmpp3d7jo\\logs\\older.jsonl")
+ right: Some("C:\\Users\\sook\\AppData\\Local\\Temp\\.tmpp3d7jo\\logs\\older.jsonl")
+
+thread 'daemon::agent_extension::p09_tests::disabled_integration_skips_the_hook_install' (17000) panicked at src\daemon
+\agent_extension.rs:884:17:
+claude SessionStart: {
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-t8-hook-gate-Dh03Xf\\bin\\ferryx\" agent-hook c
+laude SessionStart"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-t8-hook-gate-Dh03Xf\\bin\\ferryx\" agent-hook c
+laude UserPromptSubmit"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-t8-hook-gate-Dh03Xf\\bin\\ferryx\" agent-hook c
+laude PreToolUse"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-t8-hook-gate-Dh03Xf\\bin\\ferryx\" agent-hook c
+laude PostToolUse"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-t8-hook-gate-Dh03Xf\\bin\\ferryx\" agent-hook c
+laude PermissionRequest"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-t8-hook-gate-Dh03Xf\\bin\\ferryx\" agent-hook c
+laude Stop"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+test ipc::debug::pane_liveness_diagnostics_tests::pane_liveness_diagnostics_entry_size_bound ... ok
+test agent_history::tests::senpi_family_lists_reads_and_targets_resume_for_omo_pi_omp_gjc ... FAILED
+test agent_history::tests::droid_lists_sessions_with_turns_and_reports_read_as_unsettled ... FAILED
+test agent_history::tests::grok_rejoins_message_chunks_from_the_update_stream ... FAILED
+test agent_history::tests::cline_reads_the_sibling_messages_document_and_unwraps_user_input ... FAILED
+test agent_history::tests::older_message_search_and_exact_identity ... FAILED
+test daemon::agent_extension::p09_tests::disabled_integration_skips_the_hook_install ... FAILED
+test remote::reference_chat::prompt_codex::tests::the_prompt_id_names_the_content_and_not_the_cursor ... FAILED
+test remote::server::file_read_session_base_tests::live_shell_cwd_wins_over_the_desktop_supplied_cwd ... FAILED
+test agent_history::tests::antigravity_lists_from_the_summary_index_and_reads_the_transcript ... FAILED
+test agent_history::tests::antigravity_reads_planner_responses_as_assistant_and_tool_records ... FAILED
+test ssh::bridge::tests::ssh_bridge_dag_subscription_accepts_closed_frame_with_same_sequence ... FAILED
+test ssh::bridge::tests::ssh_bridge_dag_frame_ordering_requires_contiguity_or_resync ... FAILED
+test ssh::bridge::tests::ssh_bridge_dag_subscription_drop_releases_helper_and_keeps_pty_alive ... FAILED
+test ssh::bridge::tests::ssh_bridge_dag_subscription_rejects_unregistered_project ... FAILED
+test remote::repo_discovery::tests::registrations_join_by_canonical_root ... FAILED
+test ssh::bridge::tests::ssh_bridge_handshake_mismatch_returns_connection_closed ... FAILED
+test ssh::bridge::tests::ssh_bridge_dag_subscription_released_after_eof_during_blocked_next ... FAILED
+test ssh::bridge::tests::ssh_bridge_dag_subscription_streams_inventory_updates_and_cancels ... FAILED
+test remote::repo_discovery::tests::walk_applies_depth_ignore_symlink_and_nesting_rules ... FAILED
+            "type": "command",
+            "command": "\"C:\\Users\\sook\\AppData\\Local\\Temp\\ferryx-t8-hook-gate-Dh03Xf\\bin\\ferryx\" agent-hook c
+laude SessionEnd"
+          }
+        ]
+      }
+    ]
+  }
+}
+
+
+thread 'agent_history::tests::antigravity_lists_from_the_summary_index_and_reads_the_transcript' (30396) panicked at sr
+c\ferryx_scope\history\tests.rs:253:5:
+assertion `left == right` failed: the workspace_uris file URI must resolve to the cwd
+  left: 0
+ right: 1
+
+thread 'remote::reference_chat::prompt_codex::tests::the_prompt_id_names_the_content_and_not_the_cursor' (21256) panick
+ed at src\remote\reference_chat\prompt_codex.rs:2396:59:
+the moved menu parses
+
+thread 'remote::server::file_read_session_base_tests::live_shell_cwd_wins_over_the_desktop_supplied_cwd' (22304) panick
+ed at src\remote\server.rs:5145:9:
+assertion `left == right` failed
+  left: None
+ right: Some("/wt/sub/dir")
+
+thread 'agent_history::tests::antigravity_reads_planner_responses_as_assistant_and_tool_records' (32828) panicked at sr
+c\ferryx_scope\history\tests.rs:327:5:
+assertion `left == right` failed: assistant prose must be searchable
+  left: 0
+ right: 1
+
+thread 'remote::repo_discovery::tests::registrations_join_by_canonical_root' (8956) panicked at src\remote\repo_discove
+ry_tests.rs:186:9:
+assertion `left == right` failed
+  left: Some("project-alpha")
+ right: None
+
+thread 'ssh::bridge::tests::ssh_bridge_dag_frame_ordering_requires_contiguity_or_resync' (29792) panicked at src\ssh\br
+idge_tests.rs:30:5:
+ferryx-remote-helper debug binary must exist at C:\Users\sook\ferryx-wt\rex-verify-win-baseline-20261104\src-tauri\../r
+emote-helper/target/debug/ferryx-remote-helper.exe
+
+thread 'ssh::bridge::tests::ssh_bridge_dag_subscription_accepts_closed_frame_with_same_sequence' (25236) panicked at sr
+c\ssh\bridge_tests.rs:30:5:
+ferryx-remote-helper debug binary must exist at C:\Users\sook\ferryx-wt\rex-verify-win-baseline-20261104\src-tauri\../r
+emote-helper/target/debug/ferryx-remote-helper.exe
+
+thread 'remote::repo_discovery::tests::hidden_repositories_need_include_hidden' (7836) panicked at src\remote\repo_disc
+overy_tests.rs:22:18:
+called `Option::unwrap()` on a `None` value
+
+thread 'ssh::bridge::tests::ssh_bridge_dag_subscription_drop_releases_helper_and_keeps_pty_alive' (14736) panicked at s
+rc\ssh\bridge_tests.rs:30:5:
+ferryx-remote-helper debug binary must exist at C:\Users\sook\ferryx-wt\rex-verify-win-baseline-20261104\src-tauri\../r
+emote-helper/target/debug/ferryx-remote-helper.exe
+
+thread 'ssh::bridge::tests::ssh_bridge_dag_subscription_rejects_unregistered_project' (22968) panicked at src\ssh\bridg
+e_tests.rs:30:5:
+ferryx-remote-helper debug binary must exist at C:\Users\sook\ferryx-wt\rex-verify-win-baseline-20261104\src-tauri\../r
+emote-helper/target/debug/ferryx-remote-helper.exe
+
+thread 'remote::repo_discovery::tests::walk_applies_depth_ignore_symlink_and_nesting_rules' (4484) panicked at src\remo
+te\repo_discovery_tests.rs:22:18:
+called `Option::unwrap()` on a `None` value
+
+thread 'remote::repo_discovery::tests::root_that_is_a_repository_returns_only_itself' (15492) panicked at src\remote\re
+po_discovery_tests.rs:147:5:
+assertion `left == right` failed
+  left: "C:\\Users\\sook\\AppData\\Local\\Temp\\.tmp655xmT\\alpha"
+ right: "\\\\?\\C:\\Users\\sook\\AppData\\Local\\Temp\\.tmp655xmT\\alpha"
+
+thread 'ssh::bridge::tests::ssh_bridge_handshake_mismatch_returns_connection_closed' (26844) panicked at src\ssh\bridge
+_tests.rs:30:5:
+ferryx-remote-helper debug binary must exist at C:\Users\sook\ferryx-wt\rex-verify-win-baseline-20261104\src-tauri\../r
+emote-helper/target/debug/ferryx-remote-helper.exe
+
+thread 'ssh::bridge::tests::ssh_bridge_dag_subscription_released_after_eof_during_blocked_next' (27484) panicked at src
+\ssh\bridge_tests.rs:30:5:
+ferryx-remote-helper debug binary must exist at C:\Users\sook\ferryx-wt\rex-verify-win-baseline-20261104\src-tauri\../r
+emote-helper/target/debug/ferryx-remote-helper.exe
+
+thread 'ssh::bridge::tests::ssh_bridge_dag_subscription_streams_inventory_updates_and_cancels' (19072) panicked at src\
+ssh\bridge_tests.rs:30:5:
+ferryx-remote-helper debug binary must exist at C:\Users\sook\ferryx-wt\rex-verify-win-baseline-20261104\src-tauri\../r
+emote-helper/target/debug/ferryx-remote-helper.exe
+
+thread 'ssh::bridge::tests::ssh_bridge_handshake_verifies_host_and_epoch' (30600) panicked at src\ssh\bridge_tests.rs:3
+0:5:
+ferryx-remote-helper debug binary must exist at C:\Users\sook\ferryx-wt\rex-verify-win-baseline-20261104\src-tauri\../r
+emote-helper/target/debug/ferryx-remote-helper.exe
+
+thread 'ssh::bridge::tests::ssh_bridge_independent_read_does_not_block_control' (6208) panicked at src\ssh\bridge_tests
+.rs:30:5:
+ferryx-remote-helper debug binary must exist at C:\Users\sook\ferryx-wt\rex-verify-win-baseline-20261104\src-tauri\../r
+emote-helper/target/debug/ferryx-remote-helper.exe
+
+thread 'ssh::bridge::tests::ssh_bridge_lifecycle_poison_on_timeout_cancel_and_eof_reaping' (26668) panicked at src\ssh\
+bridge_tests.rs:30:5:
+ferryx-remote-helper debug binary must exist at C:\Users\sook\ferryx-wt\rex-verify-win-baseline-20261104\src-tauri\../r
+emote-helper/target/debug/ferryx-remote-helper.exe
+
+thread 'ssh::bridge::tests::ssh_bridge_target_expired_fails_explicitly_never_spawns' (1740) panicked at src\ssh\bridge_
+tests.rs:30:5:
+ferryx-remote-helper debug binary must exist at C:\Users\sook\ferryx-wt\rex-verify-win-baseline-20261104\src-tauri\../r
+emote-helper/target/debug/ferryx-remote-helper.exe
+test ssh::bridge::tests::ssh_bridge_independent_read_does_not_block_control ... FAILED
+test ssh::bridge::tests::ssh_bridge_handshake_verifies_host_and_epoch ... FAILED
+test ssh::bridge::tests::ssh_bridge_lifecycle_poison_on_timeout_cancel_and_eof_reaping ... FAILED
+test ssh::bridge::tests::ssh_bridge_target_expired_fails_explicitly_never_spawns ... FAILED
+
+thread 'ssh::bridge::tests::ssh_bridge_target_mismatch_on_describe_or_read_is_rejected' (28024) panicked at src\ssh\bri
+dge_tests.rs:30:5:
+ferryx-remote-helper debug binary must exist at C:\Users\sook\ferryx-wt\rex-verify-win-baseline-20261104\src-tauri\../r
+emote-helper/target/debug/ferryx-remote-helper.exe
+test ssh::bridge::tests::ssh_bridge_target_mismatch_on_describe_or_read_is_rejected ... FAILED
+test remote::repo_discovery::tests::hidden_repositories_need_include_hidden ... FAILED
+test remote::repo_discovery::tests::root_that_is_a_repository_returns_only_itself ... FAILED
+
+thread 'ssh::bridge::tests::test_ssh_bridge_dag_inventory_and_poll' (20664) panicked at src\ssh\bridge_tests.rs:30:5:
+ferryx-remote-helper debug binary must exist at C:\Users\sook\ferryx-wt\rex-verify-win-baseline-20261104\src-tauri\../r
+emote-helper/target/debug/ferryx-remote-helper.exe
+
+thread 'ssh::bridge::tests::ssh_bridge_single_attempt_write_does_not_queue' (23432) panicked at src\ssh\bridge_tests.rs
+:30:5:
+ferryx-remote-helper debug binary must exist at C:\Users\sook\ferryx-wt\rex-verify-win-baseline-20261104\src-tauri\../r
+emote-helper/target/debug/ferryx-remote-helper.exe
+
+thread 'ssh::bridge::tests::ssh_bridge_spawn_retry_requires_matching_client_request_id' (23580) panicked at src\ssh\bri
+dge_tests.rs:30:5:
+ferryx-remote-helper debug binary must exist at C:\Users\sook\ferryx-wt\rex-verify-win-baseline-20261104\src-tauri\../r
+emote-helper/target/debug/ferryx-remote-helper.exe
+test ssh::bridge::tests::test_ssh_bridge_dag_inventory_and_poll ... FAILED
+test ssh::bridge::tests::ssh_bridge_single_attempt_write_does_not_queue ... FAILED
+test ssh::bridge::tests::ssh_bridge_spawn_retry_requires_matching_client_request_id ... FAILED
+
+thread 'remote::repo_discovery::tests::http_route_lists_repositories_and_capability_needs_machine_control' (28456) pani
+cked at src\remote\repo_discovery_tests.rs:309:9:
+assertion `left == right` failed
+  left: "C:\\Users\\sook\\AppData\\Local\\Temp\\.tmpiW1ybl"
+ right: "\\\\?\\C:\\Users\\sook\\AppData\\Local\\Temp\\.tmpiW1ybl"
+test remote::repo_discovery::tests::http_route_lists_repositories_and_capability_needs_machine_control ... FAILED
+
+thread 'ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection' (2444) panicked at src\ssh\bridge_tests.rs:30:
+5:
+ferryx-remote-helper debug binary must exist at C:\Users\sook\ferryx-wt\rex-verify-win-baseline-20261104\src-tauri\../r
+emote-helper/target/debug/ferryx-remote-helper.exe
+test ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection ... FAILED
+
+thread 'remote::server::tests::test_machine_terminal_client_close_acknowledges_and_preserves_pty' (18456) panicked at s
+rc\remote\..\..\tests\support\machine_input_fixture.rs:101:55:
+called `Result::unwrap()` on an `Err` value: reqwest::Error { kind: Status(409, None), url: "http://127.0.0.1:59051/api
+/v1/sessions" }
+test remote::server::tests::test_machine_terminal_client_close_acknowledges_and_preserves_pty ... FAILED
+
+thread 'remote::reference_chat::route_tests::a_stage_for_an_ssh_remote_pane_is_refused_and_writes_nothing_locally' (213
+28) panicked at src\remote\reference_chat\route_tests.rs:3465:5:
+an SSH-remote pane's file was staged on this gateway's disk: {"ok":true,"data":{"receipt":{"hostId":"local","attachment
+Id":"94ed411e-8179-48a0-a0de-817348675a5d","sha256":"7fa6931a112c5639298e1b64068105379d8c58a5a900722a040ac1f36ec588e0",
+"sizeBytes":11,"mediaType":"text/plain"},"displayName":"remote.txt","mentionText":"@.ferryx-reference-chat-files/94ed41
+1e-8179-48a0-a0de-817348675a5d/remote.txt "},"requestId":"5ab31087-4d16-4e17-bd10-88a70d199fa4"}
+
+thread 'remote::reference_chat::route_tests::staged_preview_keeps_original_bytes_after_parent_replacement' (27900) pani
+cked at src\remote\reference_chat\route_tests.rs:1468:43:
+rename parent while handle is retained: Os { code: 5, kind: PermissionDenied, message: "?≪꽭?ㅺ? 嫄곕??섏뿀?듬땲??" }
+test remote::reference_chat::route_tests::staged_preview_keeps_original_bytes_after_parent_replacement ... FAILED
+
+thread 'remote::reference_chat::route_tests::a_stale_staging_dir_in_a_cwd_the_pane_left_is_swept' (25216) panicked at s
+rc\remote\reference_chat\route_tests.rs:3495:10:
+open staged dir: Os { code: 5, kind: PermissionDenied, message: "?≪꽭?ㅺ? 嫄곕??섏뿀?듬땲??" }
+test remote::reference_chat::route_tests::a_stale_staging_dir_in_a_cwd_the_pane_left_is_swept ... FAILED
+test daemon::session_service::machine_tests::desktop_inventory_isolated_parent ... ok
+   Compiling bindgen v0.73.2
+   Compiling ferryx v2026.1101.1 (C:\Users\sook\ferryx-wt\rex-verify-win-baseline-20261104\src-tauri)
+   Compiling ffmpeg-sys-next v9.0.1
+error: failed to run custom build command for `ffmpeg-sys-next v9.0.1`
+
+Caused by:
+  process didn't exit successfully: `C:\Users\sook\ferryx-wt\.target\debug\build\ffmpeg-sys-next-81c6b03bc929e213\build
+-script-build` (exit code: 1)
+  --- stdout
+  cargo:rerun-if-env-changed=FFMPEG_DIR
+  Could not find ffmpeg with vcpkg: Could not find Vcpkg tree: No vcpkg installation found. Set the VCPKG_ROOT environm
+ent variable or run 'vcpkg integrate install'
+  cargo:rerun-if-env-changed=LIBAVUTIL_NO_PKG_CONFIG
+  cargo:rerun-if-env-changed=PKG_CONFIG_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG
+  cargo:rerun-if-env-changed=PKG_CONFIG
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_PATH
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_LIBDIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_SYSROOT_DIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_PATH
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_LIBDIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_SYSROOT_DIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
+
+  --- stderr
+  error: FFmpeg not found.
+
+  FFmpeg libraries could not be found using any of the following methods:
+    1. FFMPEG_DIR environment variable (not set)
+    2. vcpkg package manager (ffmpeg package not found)
+    3. pkg-config (libavutil not found: Could not run `PKG_CONFIG_ALLOW_SYSTEM_LIBS=1 PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1 
+pkg-config --libs --cflags libavutil`
+  The pkg-config command could not be found.
+
+  Most likely, you need to install a pkg-config package for your OS.
+
+  If you've already installed it, ensure the pkg-config command is one of the
+  directories in the PATH environment variable.
+
+  If you did not expect this build to link to a pre-installed system library,
+  then check documentation of the ffmpeg-sys-next crate for an option to
+  build the library from source, or disable features or dependencies
+  that require pkg-config.)
+
+  To fix this, please do one of the following:
+    - Set FFMPEG_DIR to point to your FFmpeg installation directory
+    - Install FFmpeg via vcpkg: vcpkg install ffmpeg
+    - Install FFmpeg and ensure pkg-config can find it
+    - Enable the 'build' feature to compile FFmpeg from source
+
+thread 'ssh::password::tests::askpass_cli_process_serves_password_when_credentials_match' (17376) panicked at src\test_
+support.rs:27:5:
+cargo build --bin ferryx-cli failed: exit code: 101
+test ssh::password::tests::askpass_cli_process_serves_password_when_credentials_match ... FAILED
+test remote::reference_chat::route_tests::a_stage_for_an_ssh_remote_pane_is_refused_and_writes_nothing_locally has been running for over 60 seconds
+EXIT=-1

@@ -1,0 +1,38 @@
+cargo :    Compiling tokio v1.53.1
+위치 C:\Users\sook\ferryx-wt\.tmp-out\rex-win-build.ps1:23 문자:13
++ Run debug { cargo build --manifest-path src-tauri/Cargo.toml --locked ...
++             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling tokio v1.53.1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling ffmpeg-sys-next v9.0.1
+   Compiling ferryx v2026.1101.1 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\src-tauri)
+error: failed to run custom build command for `ffmpeg-sys-next v9.0.1`
+
+Caused by:
+  process didn't exit successfully: `C:\Users\sook\ferryx-wt\.target\debug\build\ffmpeg-sys-next-81c6b03bc929e213\build
+-script-build` (exit code: 101)
+warning: build failed, waiting for other jobs to finish...
+error: failed to run custom build command for `ferryx v2026.1101.1 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\src
+-tauri)`
+
+Caused by:
+  process didn't exit successfully: `C:\Users\sook\ferryx-wt\.target\debug\build\ferryx-260afc86d85f6aa2\build-script-b
+uild` (exit code: 1)
+  --- stdout
+  cargo::rustc-env=FERRYX_BUILD_TARGET=x86_64-pc-windows-msvc
+  cargo::rustc-check-cfg=cfg(a10_wire_red)
+  cargo:rerun-if-env-changed=FFMPEG_DIR
+  cargo:rerun-if-changed=C:\Users\sook\ferryx-wt\rex-verify-win-20261104\src-tauri\resources\ffmpeg\sdk\bin
+  cargo:rustc-link-arg-tests=/MANIFEST:EMBED
+  cargo:rustc-link-arg-tests=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0
+' publicKeyToken='6595b64144ccf1df' language='*' processorArchitecture='*'
+
+  --- stderr
+
+  [ghostty build error] Ghostty source at 'C:\Users\sook\ferryx-wt\rex-verify-win-20261104\src-tauri\vendor/ghostty' ap
+pears uninitialized (missing build.zig). \
+  Run 'git submodule update --init --recursive' to populate the submodule at commit 83fb95624b0439ee660c2679b43b38c8b63
+769cd.
+
+EXIT=101

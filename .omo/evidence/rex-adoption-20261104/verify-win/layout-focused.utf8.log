@@ -1,0 +1,134 @@
+
+running 41 tests
+test daemon::handover::spawn_owner_tests::control_retire_when_idle_waits_for_a_parked_spawn ... ok
+test daemon::handover::spawn_owner_tests::control_shutdown_with_wrong_count_restores_active ... ok
+test daemon::handover::spawn_owner_tests::control_retirement_waits_for_in_flight_request ... ok
+test daemon::handover::spawn_owner_tests::control_retire_and_shutdown_on_draining_daemon_change_nothing ... ok
+test daemon::handover::spawn_owner_tests::control_shutdown_stale_count_on_retiring_daemon_stays_retiring ... ok
+test daemon::handover::spawn_owner_tests::control_shutdown_while_a_spawn_is_parked_answers_spawn_in_flight ... ok
+test daemon::handover::spawn_owner_tests::control_shutdown_first_makes_the_next_spawn_daemon_retiring ... ok
+test daemon::handover::spawn_owner_tests::only_a_missing_record_after_a_failed_decision_write_resumes_renewing ... ok
+test daemon::handover::spawn_owner_tests::local_split_reliability_handover_prepared_owner_and_abort ... ok
+test daemon::handover::spawn_owner_tests::generated_legacy_socket_paths_are_unique_and_parseable_for_predecessor_pid ... ok
+test daemon::handover::spawn_owner_tests::commit_waits_for_a_barrier_parked_request_before_writing_the_decision ... ok
+test daemon::handover::spawn_owner_tests::decision_write_failure_reopens_the_gate_and_keeps_serving ... ok
+test daemon::handover::spawn_owner_tests::an_abort_decision_leaves_the_lease_client_renewing ... ok
+test daemon::handover::spawn_owner_tests::a_failed_decision_write_resumes_renewing_and_an_abort_hands_nothing_over ... ok
+test daemon::handover::spawn_owner_tests::the_commit_decision_hands_the_supervisor_lease_to_the_successor ... ok
+test daemon::handover::spawn_owner_tests::an_abort_record_carries_no_pane_grants ... ok
+test daemon::handover::spawn_owner_tests::committed_handover_ends_every_gated_accept_loop ... ok
+test daemon::handover::spawn_owner_tests::size_ownership_survives_committed_handover ... ok
+ferryx_lib-ea620c3a1cf0c11a.exe : 
+위치 C:\Users\sook\ferryx-wt\.tmp-out\rex-win-focused.ps1:6 문자:1
++ & $test --nocapture daemon::layout:: daemon::layout_migration:: daemo ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+thread 'daemon::handover::spawn_owner_tests::plugins_approval_survives_handover_without_killing_predecessor' (29504) pa
+nicked at src\daemon\handover.rs:884:9:
+predecessor remains available after its decision
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test daemon::handover::spawn_owner_tests::only_a_retired_record_hands_over_its_supervisor_lease ... ok
+test daemon::handover::spawn_owner_tests::plugins_approval_survives_handover_without_killing_predecessor ... FAILED
+test daemon::handover::spawn_owner_tests::pane_grants_survive_handover_in_the_decision_record ... ok
+test daemon::layout::tests::replacement_and_collinear_seams_match_ui ... ok
+test daemon::layout::tests::pane_ownership_roundtrips ... ok
+
+thread 'daemon::layout::detached::parked_scopes_and_other_windows_are_attached' (10312) panicked at src\daemon\layout.r
+s:964:260:
+called `Result::unwrap()` on an `Err` value: Invalid("Not an app window label: \"second\"")
+test daemon::layout::detached::parked_scopes_and_other_windows_are_attached ... FAILED
+
+thread 'daemon::layout::tests::scoped_transfer_survives_restart_and_handover' (22188) panicked at src\daemon\layout.rs:
+1070:152:
+called `Result::unwrap()` on an `Err` value: Invalid("Not an app window label: \"second\"")
+test daemon::layout::tests::scoped_transfer_survives_restart_and_handover ... FAILED
+test daemon::layout::tests::invalid_intent_is_transactional ... ok
+test daemon::layout::tests::conflict_rebase_and_idle_restart ... ok
+test daemon::layout_migration::tests::active_checkout_and_nested_surface_metadata_are_migrated ... ok
+test daemon::layout_migration::tests::historical_visual_ids_are_scoped_by_workspace_worktree_and_tab ... ok
+test daemon::layout::detached::split_attach_and_detach_collapse_only_the_target_leaf ... ok
+test daemon::layout::tests::content_updates_tab_transplant_and_expansion ... ok
+test daemon::layout::detached::restart_and_handover_roundtrip ... ok
+
+thread 'daemon::handover::spawn_owner_tests::layout_uses_the_committed_decision_not_shared_disk' (28052) panicked at sr
+c\daemon\handover.rs:911:9:
+predecessor remains alive after layout handover
+test daemon::handover::spawn_owner_tests::layout_uses_the_committed_decision_not_shared_disk ... FAILED
+test daemon::layout::foreign_snapshot::foreign_disk_and_adopt_never_replace_local_tree ... ok
+test daemon::layout::foreign_snapshot::offers_and_placeholders_survive_restart_and_handover ... ok
+test daemon::layout::foreign_snapshot::newer_foreign_revision_is_offer_only_and_import_adds_window ... ok
+test daemon::layout::tests::split_move_close_preserves_backend_identity ... ok
+
+thread 'daemon::layout_migration::tests::parked_workspace_and_worktree_layouts_survive_migration_and_restart' (19876) p
+anicked at src\daemon\layout_migration.rs:234:13:
+assertion `left == right` failed
+  left: Layout { machine_id: "758de4b5-e326-4039-88d2-3f33d1dd280a", revision: 1, tabs: [], tab_group_layout: Group { g
+roup_id: "main", tab_ids: [], active_tab_id: None }, active_tab_id: None, focused_group_id: "main", scope: None, parked
+_layouts: {}, detached_registry: {}, foreign_offers: {"a366fa36-cd27-4f51-a405-4d5730bff01f": Layout { machine_id: "a36
+6fa36-cd27-4f51-a405-4d5730bff01f", revision: 0, tabs: [Tab { tab_id: "one", label: "", pinned: false, pane_tree: Leaf 
+{ node_id: 1, content: Terminal { backend_session_id: "" } }, active_node_id: 1, expanded_node_id: Some(1) }, Tab { tab
+_id: "two", label: "", pinned: false, pane_tree: Leaf { node_id: 2, content: Terminal { backend_session_id: "" } }, act
+ive_node_id: 2, expanded_node_id: Some(2) }], tab_group_layout: Group { group_id: "main", tab_ids: ["one", "two"], acti
+ve_tab_id: Some("one") }, active_tab_id: Some("one"), focused_group_id: "main", scope: Some("[\"w\",null]"), parked_lay
+outs: {"[\"other\",null]": Layout { machine_id: "", revision: 0, tabs: [Tab { tab_id: "one", label: "", pinned: false, 
+pane_tree: Leaf { node_id: 1, content: Terminal { backend_session_id: "" } }, active_node_id: 1, expanded_node_id: Some
+(1) }, Tab { tab_id: "two", label: "", pinned: false, pane_tree: Leaf { node_id: 2, content: Terminal { backend_session
+_id: "" } }, active_node_id: 2, expanded_node_id: Some(2) }], tab_group_layout: Group { group_id: "main", tab_ids: ["on
+e", "two"], active_tab_id: Some("one") }, active_tab_id: Some("one"), focused_group_id: "main", scope: Some("[\"other\"
+,null]"), parked_layouts: {"[\"other\",\"/other\"]": Layout { machine_id: "", revision: 0, tabs: [Tab { tab_id: "one", 
+label: "", pinned: false, pane_tree: Leaf { node_id: 1, content: Terminal { backend_session_id: "" } }, active_node_id:
+ 1, expanded_node_id: Some(1) }, Tab { tab_id: "two", label: "", pinned: false, pane_tree: Leaf { node_id: 2, content: 
+Terminal { backend_session_id: "" } }, active_node_id: 2, expanded_node_id: Some(2) }], tab_group_layout: Group { group
+_id: "main", tab_ids: ["one", "two"], active_tab_id: Some("one") }, active_tab_id: Some("one"), focused_group_id: "main
+", scope: Some("[\"other\",\"/other\"]"), parked_layouts: {}, detached_registry: {}, foreign_offers: {}, next_node_id: 
+3 }}, detached_registry: {}, foreign_offers: {}, next_node_id: 3 }, "[\"w\",\"/parked\"]": Layout { machine_id: "", rev
+ision: 0, tabs: [Tab { tab_id: "one", label: "", pinned: false, pane_tree: Leaf { node_id: 1, content: Terminal { backe
+nd_session_id: "" } }, active_node_id: 1, expanded_node_id: Some(1) }, Tab { tab_id: "two", label: "", pinned: false, p
+ane_tree: Leaf { node_id: 2, content: Terminal { backend_session_id: "" } }, active_node_id: 2, expanded_node_id: Some(
+2) }], tab_group_layout: Group { group_id: "main", tab_ids: ["one", "two"], active_tab_id: Some("one") }, active_tab_id
+: Some("one"), focused_group_id: "main", scope: Some("[\"w\",\"/parked\"]"), parked_layouts: {}, detached_registry: {},
+ foreign_offers: {}, next_node_id: 3 }}, detached_registry: {}, foreign_offers: {}, next_node_id: 3 }}, next_node_id: 1
+ }
+ right: Layout { machine_id: "a366fa36-cd27-4f51-a405-4d5730bff01f", revision: 0, tabs: [Tab { tab_id: "one", label: ""
+, pinned: false, pane_tree: Leaf { node_id: 1, content: Terminal { backend_session_id: "" } }, active_node_id: 1, expan
+ded_node_id: Some(1) }, Tab { tab_id: "two", label: "", pinned: false, pane_tree: Leaf { node_id: 2, content: Terminal 
+{ backend_session_id: "" } }, active_node_id: 2, expanded_node_id: Some(2) }], tab_group_layout: Group { group_id: "mai
+n", tab_ids: ["one", "two"], active_tab_id: Some("one") }, active_tab_id: Some("one"), focused_group_id: "main", scope:
+ Some("[\"w\",null]"), parked_layouts: {"[\"other\",null]": Layout { machine_id: "", revision: 0, tabs: [Tab { tab_id: 
+"one", label: "", pinned: false, pane_tree: Leaf { node_id: 1, content: Terminal { backend_session_id: "" } }, active_n
+ode_id: 1, expanded_node_id: Some(1) }, Tab { tab_id: "two", label: "", pinned: false, pane_tree: Leaf { node_id: 2, co
+ntent: Terminal { backend_session_id: "" } }, active_node_id: 2, expanded_node_id: Some(2) }], tab_group_layout: Group 
+{ group_id: "main", tab_ids: ["one", "two"], active_tab_id: Some("one") }, active_tab_id: Some("one"), focused_group_id
+: "main", scope: Some("[\"other\",null]"), parked_layouts: {"[\"other\",\"/other\"]": Layout { machine_id: "", revision
+: 0, tabs: [Tab { tab_id: "one", label: "", pinned: false, pane_tree: Leaf { node_id: 1, content: Terminal { backend_se
+ssion_id: "" } }, active_node_id: 1, expanded_node_id: Some(1) }, Tab { tab_id: "two", label: "", pinned: false, pane_t
+ree: Leaf { node_id: 2, content: Terminal { backend_session_id: "" } }, active_node_id: 2, expanded_node_id: Some(2) }]
+, tab_group_layout: Group { group_id: "main", tab_ids: ["one", "two"], active_tab_id: Some("one") }, active_tab_id: Som
+e("one"), focused_group_id: "main", scope: Some("[\"other\",\"/other\"]"), parked_layouts: {}, detached_registry: {}, f
+oreign_offers: {}, next_node_id: 3 }}, detached_registry: {}, foreign_offers: {}, next_node_id: 3 }, "[\"w\",\"/parked\
+"]": Layout { machine_id: "", revision: 0, tabs: [Tab { tab_id: "one", label: "", pinned: false, pane_tree: Leaf { node
+_id: 1, content: Terminal { backend_session_id: "" } }, active_node_id: 1, expanded_node_id: Some(1) }, Tab { tab_id: "
+two", label: "", pinned: false, pane_tree: Leaf { node_id: 2, content: Terminal { backend_session_id: "" } }, active_no
+de_id: 2, expanded_node_id: Some(2) }], tab_group_layout: Group { group_id: "main", tab_ids: ["one", "two"], active_tab
+_id: Some("one") }, active_tab_id: Some("one"), focused_group_id: "main", scope: Some("[\"w\",\"/parked\"]"), parked_la
+youts: {}, detached_registry: {}, foreign_offers: {}, next_node_id: 3 }}, detached_registry: {}, foreign_offers: {}, ne
+xt_node_id: 3 }
+test daemon::layout_migration::tests::parked_workspace_and_worktree_layouts_survive_migration_and_restart ... FAILED
+test daemon::layout_migration::tests::three_saved_session_shapes_and_corruption_recovery ... ok
+test daemon::layout::tests::ui_reducer_golden_fixtures ... ok
+test daemon::layout::tests::size_bound ... ok
+
+failures:
+
+failures:
+    daemon::handover::spawn_owner_tests::layout_uses_the_committed_decision_not_shared_disk
+    daemon::handover::spawn_owner_tests::plugins_approval_survives_handover_without_killing_predecessor
+    daemon::layout::detached::parked_scopes_and_other_windows_are_attached
+    daemon::layout::tests::scoped_transfer_survives_restart_and_handover
+    daemon::layout_migration::tests::parked_workspace_and_worktree_layouts_survive_migration_and_restart
+
+test result: FAILED. 36 passed; 5 failed; 0 ignored; 0 measured; 5089 filtered out; finished in 31.69s
+
+EXIT=101

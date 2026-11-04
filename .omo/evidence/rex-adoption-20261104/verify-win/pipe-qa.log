@@ -1,0 +1,12 @@
+error: connect ENOENT \\.\pipe\ferryx-S-1-5-21-3510490687-4041447508-1362901398-1002-daemon-dev
+   errno: -4058,
+ syscall: "connect",
+    port: undefined,
+ address: "\\\\.\\pipe\\ferryx-S-1-5-21-3510490687-4041447508-1362901398-1002-daemon-dev",
+    code: "ENOENT"
+
+      at afterConnect (node:net:1917:39)
+      at connectError (node:net:808:21)
+
+Bun v1.4.3 (Windows x64)
+EXIT=1

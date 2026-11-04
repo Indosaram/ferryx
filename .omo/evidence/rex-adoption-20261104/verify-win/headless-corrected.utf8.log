@@ -1,0 +1,21 @@
+cargo :    Compiling ferryx-hub v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\crates\ferryx-hub)
+위치 C:\Users\sook\ferryx-wt\.tmp-out\rex-win-corrected.ps1:17 문자:26
++ ... corrected { cargo build --manifest-path src-tauri/Cargo.toml --no-def ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling fe...tes\ferryx-hub):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling ferryx v2026.1101.1 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\src-tauri)
+   Compiling zip v4.6.1
+   Compiling notify-rust v4.18.0
+   Compiling cookie v0.18.2
+   Compiling image v0.25.10
+   Compiling x25519-dalek v2.0.1
+   Compiling tower-http v0.7.1
+   Compiling cbc v0.1.2
+   Compiling tempfile v3.27.0
+   Compiling windows-sys v0.59.0
+   Compiling pbkdf2 v0.12.2
+   Compiling md-5 v0.10.6
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4m 35s
+EXIT=0
