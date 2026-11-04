@@ -6565,10 +6565,12 @@ impl DaemonServer {
             if !status.enabled { continue; }
             let service = Arc::clone(&self.session_service);
             let views = Arc::clone(&self.plugins.views);
+            let events = self.remote_event_tx.clone();
             let name = status.manifest.name.clone();
             self.plugins.start(status.manifest, Arc::clone(&self.pane_grants), move |request| {
                 let service = Arc::clone(&service);
                 let views = Arc::clone(&views);
+                let events = events.clone();
                 let name = name.clone();
                 async move {
                     match request {
@@ -6580,7 +6582,9 @@ impl DaemonServer {
                         },
                         DaemonRequest::PluginRender { view, html } => {
                             let document = super::plugins::block_document(&name, &html)?;
-                            views.write().insert((name, view), document);
+                            views.write().insert((name.clone(), view.clone()), document);
+                            let _ = events.send(DaemonRemoteEvent { event: "PluginViewChanged".into(),
+                                payload: serde_json::json!({"plugin":name,"view":view}) });
                             Ok(serde_json::json!({"type":"renderOk"}))
                         },
                         _ => Err("unsupported plugin request".into()),
