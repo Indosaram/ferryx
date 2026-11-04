@@ -34,24 +34,64 @@ pub fn migrate(primary: &Path, window: &str) -> Result<(Layout, BTreeMap<String,
 }
 
 fn convert(session: &Value) -> Result<(Layout, BTreeMap<String, u64>), String> {
-    let workspace = session["workspaces"].get(text(session, "activeWorkspaceId"))
-        .or_else(|| session["workspaces"].as_object().and_then(|map| map.values().next()))
-        .unwrap_or(session);
-    let saved = workspace.get("layout").unwrap_or(workspace);
-    let mut layout = Layout::default();
     let mut mapping = BTreeMap::new();
+    let mut layouts = BTreeMap::new();
+    let mut active_key = None;
+    if let Some(workspaces) = session["workspaces"].as_object() {
+        for (id, workspace) in workspaces {
+            let key = scope_key(id, None);
+            if id == text(session, "activeWorkspaceId") || active_key.is_none() { active_key = Some(key.clone()); }
+            layouts.insert(key, convert_workspace(workspace, id, &mut mapping)?);
+        }
+    } else {
+        let key = scope_key("", None);
+        active_key = Some(key.clone());
+        layouts.insert(key, convert_workspace(session, "", &mut mapping)?);
+    }
+    let mut layout = active_key.and_then(|key| layouts.remove(&key)).unwrap_or_default();
+    layout.parked_layouts.extend(layouts);
+    Ok((layout, mapping))
+}
+
+// JSON tuples remain unambiguous when paths and historical ids contain separators.
+fn scope_key(workspace: &str, worktree: Option<&str>) -> String {
+    serde_json::json!([workspace, worktree]).to_string()
+}
+fn identity_key(scope: &str, tab: &str, visual: &str) -> String {
+    serde_json::json!([scope, tab, visual]).to_string()
+}
+
+fn convert_workspace(workspace: &Value, id: &str, mapping: &mut BTreeMap<String, u64>) -> Result<Layout, String> {
+    let saved = workspace.get("layout").unwrap_or(workspace);
+    let mut layout = convert_saved(saved, workspace, &scope_key(id, None), mapping)?;
+    for field in ["layoutByWorktree", "worktreeLayouts"] {
+        if let Some(parked) = workspace[field].as_object() {
+            for (path, saved) in parked {
+                let key = scope_key(id, Some(path));
+                let imported = convert_saved(saved, workspace, &key, mapping)?;
+                layout.parked_layouts.insert(key, imported);
+            }
+        }
+    }
+    Ok(layout)
+}
+
+fn convert_saved(saved: &Value, workspace: &Value, scope: &str, mapping: &mut BTreeMap<String, u64>) -> Result<Layout, String> {
+    let mut layout = Layout::default();
     if let Some(tabs) = saved["tabs"].as_array() {
         for tab in tabs {
             let id = text(tab, "id").to_owned();
             if id.is_empty() || layout.tabs.iter().any(|other| other.tab_id == id) { return Err("Invalid legacy tab identity".into()); }
             let state = saved["layoutsByTabId"].get(&id).or_else(|| tab.get("terminal")).unwrap_or(tab);
             let tree = state.get("root").or_else(|| state.get("paneTree"));
+            let mut tab_mapping = BTreeMap::new();
             let pane_tree = match tree {
-                Some(tree) => convert_node(tree, state, workspace, tab, &mut layout, &mut mapping)?,
+                Some(tree) => convert_node(tree, state, workspace, tab, &mut layout, &mut tab_mapping)?,
                 None => { let content = content(state, workspace, tab, "")?; layout.mint(content) },
             };
-            let active = mapping.get(text(state, "activeLeafId")).copied().filter(|id| contains(&pane_tree, *id)).unwrap_or_else(|| first(&pane_tree));
-            let expanded = mapping.get(text(state, "expandedLeafId")).copied().filter(|id| contains(&pane_tree, *id));
+            let active = tab_mapping.get(text(state, "activeLeafId")).copied().filter(|id| contains(&pane_tree, *id)).unwrap_or_else(|| first(&pane_tree));
+            let expanded = tab_mapping.get(text(state, "expandedLeafId")).copied().filter(|id| contains(&pane_tree, *id));
+            mapping.extend(tab_mapping.into_iter().map(|(visual, node)| (identity_key(scope, &id, &visual), node)));
             layout.tabs.push(Tab { tab_id: id, label: text(tab, "label").into(), pinned: tab["pinned"].as_bool().unwrap_or(false), pane_tree, active_node_id: active, expanded_node_id: expanded });
         }
     }
@@ -62,7 +102,7 @@ fn convert(session: &Value) -> Result<(Layout, BTreeMap<String, u64>), String> {
         TabGroupLayout::Group { group_id: "main".into(), tab_ids: layout.tabs.iter().map(|tab| tab.tab_id.clone()).collect(), active_tab_id: layout.active_tab_id.clone() }
     };
     layout.focused_group_id = saved["focusedGroupId"].as_str().unwrap_or("main").into();
-    Ok((layout, mapping))
+    Ok(layout)
 }
 
 fn first(node: &Node) -> u64 { match node { Node::Leaf { node_id, .. } => *node_id, Node::Split { a, .. } => first(a) } }
@@ -119,6 +159,58 @@ mod tests {
     use super::*;
     use super::super::layout::Store;
 
+    fn repeated_ids() -> Value {
+        serde_json::json!({"tabs":[{"id":"one"},{"id":"two"}],"layoutsByTabId":{
+            "one":{"root":{"type":"leaf","leafId":"repeated"},"activeLeafId":"repeated","expandedLeafId":"repeated"},
+            "two":{"root":{"type":"leaf","leafId":"repeated"},"activeLeafId":"repeated","expandedLeafId":"repeated"}
+        }})
+    }
+
+    #[test]
+    fn historical_visual_ids_are_scoped_by_workspace_worktree_and_tab() {
+        let session = serde_json::json!({"activeWorkspaceId":"w","workspaces":{
+            "w":{"layout":repeated_ids(),"worktreeLayouts":{"/parked":repeated_ids()}},
+            "other":{"layout":repeated_ids()}
+        }});
+        let (layout, mapping) = convert(&session).unwrap();
+        assert_eq!(mapping.len(), 6);
+        for (scope, saved) in [
+            (scope_key("w", None), &layout),
+            (scope_key("w", Some("/parked")), &layout.parked_layouts[&scope_key("w", Some("/parked"))]),
+            (scope_key("other", None), &layout.parked_layouts[&scope_key("other", None)]),
+        ] {
+            for (index, tab) in saved.tabs.iter().enumerate() {
+                let node = index as u64 + 1;
+                assert_eq!(mapping[&identity_key(&scope, &tab.tab_id, "repeated")], node);
+                assert_eq!(tab.active_node_id, node);
+                assert_eq!(tab.expanded_node_id, Some(node));
+            }
+        }
+        assert_ne!(identity_key("a", "b/c", "d"), identity_key("a", "b", "c/d"));
+    }
+
+    #[test]
+    fn parked_workspace_and_worktree_layouts_survive_migration_and_restart() {
+        for field in ["worktreeLayouts", "layoutByWorktree"] {
+            let root = tempfile::tempdir().unwrap();
+            let mut workspace = serde_json::json!({"layout":repeated_ids()});
+            workspace[field] = serde_json::json!({"/parked":repeated_ids()});
+            let session = serde_json::json!({"activeWorkspaceId":"w","workspaces":{
+                "w":workspace,"other":{"layout":repeated_ids(),"worktreeLayouts":{"/other":repeated_ids()}}
+            }});
+            std::fs::write(root.path().join("session_state.json"), serde_json::to_vec(&session).unwrap()).unwrap();
+            let view = Store::new(root.path().into()).get("main").unwrap();
+            assert_eq!(view.layout.parked_layouts.len(), 2);
+            let other = &view.layout.parked_layouts[&scope_key("other", None)];
+            assert_eq!(other.parked_layouts[&scope_key("other", Some("/other"))].tabs.len(), 2);
+            assert_eq!(view.layout.parked_layouts[&scope_key("w", Some("/parked"))].tabs.len(), 2);
+            assert_eq!(Store::new(root.path().into()).get("main").unwrap().layout, view.layout);
+            let mut successor = Store::new(root.path().join("successor"));
+            successor.adopt(BTreeMap::from([("main".into(), view.layout.clone())])).unwrap();
+            assert_eq!(successor.get("main").unwrap().layout, view.layout);
+        }
+    }
+
     #[test]
     fn three_saved_session_shapes_and_corruption_recovery() {
         let fixtures = [
@@ -134,7 +226,7 @@ mod tests {
             std::fs::write(&source, &bytes).unwrap();
             let mut store = Store::new(root.path().into());
             let view = store.get("main").unwrap();
-            assert_eq!(view.migration_map["visual"], 1);
+            assert_eq!(view.migration_map[&identity_key(&scope_key("w", None), "t", "visual")], 1);
             assert!(store.get("main").unwrap().migration_map.is_empty());
             let persisted = std::fs::read_to_string(root.path().join("layout/main.json")).unwrap();
             assert!(!persisted.contains("visual"));
