@@ -1814,7 +1814,6 @@ type AgentStateIngressReport = (
 /// Agents whose built-in herdr reporter Ferryx accepts on the agent-state socket. Every pane gets
 /// `HERDR_ENV`, so any herdr-aware agent may report there; only an agent named here, and measured
 /// to send the `pane.report_agent` envelope, is turned into state. crush: `internal/herdr/client.go`.
-#[cfg(any(unix, test))]
 const HERDR_REPORTING_AGENTS: &[&str] = &["crush"];
 
 /// Translates one herdr `pane.report_agent` request into Ferryx's agent-state report.
@@ -1823,7 +1822,6 @@ const HERDR_REPORTING_AGENTS: &[&str] = &["crush"];
 /// non-empty `agent_session_id` is the provider session the agent resumes with. `pane.release_agent`
 /// carries no state and is not translated: publishing `idle` on release would replace the retained
 /// provider session, and the foreground watcher already releases a pane whose agent exited.
-#[cfg(any(unix, test))]
 fn translate_herdr_report(line: &str) -> Option<AgentStateReport> {
     let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     if value.get("method")?.as_str()? != "pane.report_agent" {
@@ -1863,7 +1861,6 @@ fn translate_herdr_report(line: &str) -> Option<AgentStateReport> {
 /// reporting pane's own (`FERRYX_SESSION_ID`), the same trust an `agentState` line has on this
 /// owner-only socket; the hub accepts it only for the open goal bound to that session.
 /// (`sessionId`, `eventId`, `body`), or `None` for any other line.
-#[cfg(unix)]
 fn supervisor_report_line(line: &str) -> Option<(String, String, String)> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1881,7 +1878,6 @@ fn supervisor_report_line(line: &str) -> Option<(String, String, String)> {
 /// The reply line a herdr client reads, and discards, after each request it sends. Any `pane.*`
 /// request is answered, including ones Ferryx does not translate, so the client never waits out
 /// its timeout. Lines without a `method` are Ferryx's own reports, which expect no reply.
-#[cfg(any(unix, test))]
 fn herdr_response_line(line: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     if !value.get("method")?.as_str()?.starts_with("pane.") {
@@ -4517,7 +4513,6 @@ impl DaemonServer {
     }
 
     /// Parses one herdr `pane.report_agent` line from a known herdr-reporting agent.
-    #[cfg(any(unix, test))]
     fn parse_herdr_report(line: &str) -> Option<AgentStateIngressReport> {
         translate_herdr_report(line).and_then(Self::admit_agent_state_report)
     }
@@ -4955,15 +4950,14 @@ impl DaemonServer {
     ///
     /// herdr lines carry no token. They are accepted only here, where the 0600 socket is the
     /// ownership boundary, and never on the loopback TCP ingress, which needs this boot's token.
-    #[cfg(unix)]
-    async fn serve_agent_state_connection(
+    async fn serve_agent_state_connection<S>(
         self: Arc<Self>,
         states: Arc<AgentStateHub>,
         sessions: Arc<DaemonSessionService>,
         epoch: crate::scoped_contracts::Epoch,
-        stream: tokio::net::UnixStream,
-    ) {
-        let (read_half, mut write_half) = stream.into_split();
+        stream: S,
+    ) where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin {
+        let (read_half, mut write_half) = tokio::io::split(stream);
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
         while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
@@ -6284,6 +6278,8 @@ impl DaemonServer {
         // daemon locks. A committed HandoverCandidate binds it here too: without it the next GUI
         // would see a pre-plan daemon and could never upgrade it again.
         self.bind_control_endpoint().await?;
+        #[cfg(windows)]
+        self.bind_windows_pipes()?;
 
         // Every start adopts every route in the manifest, handover or not (todo 8): routes are
         // direct, so a successor talks to each generation that still owns sessions over that
@@ -6418,6 +6414,48 @@ impl DaemonServer {
             }
         }
 
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn bind_windows_pipes(self: &Arc<Self>) -> Result<(), String> {
+        use super::windows_pipe::{identity, Listener};
+        let mut daemon = Listener::bind("daemon").map_err(|e| e.to_string())?;
+        let mut agent = Listener::bind("agent-state").map_err(|e| e.to_string())?;
+        let server = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                match daemon.accept().await {
+                    Ok(stream) => {
+                        let server = Arc::clone(&server);
+                        tokio::spawn(async move {
+                            let (origin, ancestry) = identity(&stream).await;
+                            // Unknown pipe identities must never inherit the TCP exemption.
+                            if !matches!(origin, super::supervisor_peer::PeerOrigin::Process(_)) { return; }
+                            server.handle_client_with_origin(stream, origin, ancestry).await;
+                        });
+                    }
+                    Err(error) => { tracing::error!(%error, "Daemon pipe accept failed"); break; }
+                }
+            }
+        });
+        let server = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                match agent.accept().await {
+                    Ok(stream) => {
+                        let server = Arc::clone(&server);
+                        tokio::spawn(async move {
+                            server.clone().serve_agent_state_connection(
+                                Arc::clone(&server.agent_states), server.session_service.clone(),
+                                crate::scoped_contracts::Epoch(server.epoch), stream,
+                            ).await;
+                        });
+                    }
+                    Err(error) => { tracing::error!(%error, "Agent state pipe accept failed"); break; }
+                }
+            }
+        });
         Ok(())
     }
 
@@ -6703,7 +6741,7 @@ impl DaemonServer {
         // Set once the connection has presented this boot's transport token. Unix inherits the
         // socket's ownership boundary and never needs the check.
         #[cfg(not(unix))]
-        let mut transport_authenticated = false;
+        let mut transport_authenticated = matches!(origin, super::supervisor_peer::PeerOrigin::Process(_));
         #[cfg(not(unix))]
         const TRANSPORT_REJECTION: &str =
             "Daemon connection rejected: transport token missing or invalid";
@@ -8303,6 +8341,8 @@ impl DaemonServer {
                     capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_LAUNCH_CAPABILITY.into());
                     capabilities.push(crate::daemon::pane_grants::PANE_GRANTS_CAPABILITY.into());
+                    #[cfg(windows)]
+                    capabilities.push("windowsOwnerPipesV1".into());
                     capabilities.push("screenHashV1".into());
                     capabilities.push("scrollbackBudgetV1".into());
                     capabilities.push("sizeOwnershipV1".into());

@@ -1089,6 +1089,7 @@ mod platform {
     }
 
     fn probe_endpoint_once() -> Option<Seen> {
+        if let Some(seen) = probe_pipe() { return Some(seen); }
         let port: u16 = std::fs::read_to_string(crate::daemon::server::get_socket_path())
             .ok()?
             .trim()
@@ -1115,6 +1116,31 @@ mod platform {
             Ok(DaemonResponse::ProtocolMismatch { .. }) => Some(Seen::OtherVersion),
             _ => None,
         }
+    }
+
+    /// Waits for `pid` to exit. `Ok(None)` when it is already gone or its code is unreadable.
+    fn probe_pipe() -> Option<Seen> {
+        // The watchdog is synchronous; use its own reactor and bound the entire exchange.
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
+        runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+                let stream = crate::daemon::windows_pipe::connect("daemon").ok()?;
+                let (read, mut write) = tokio::io::split(stream);
+                let mut line = serde_json::to_string(&DaemonRequest::Handshake {
+                    version: DAEMON_PROTOCOL_VERSION, token: None,
+                }).ok()?;
+                line.push('\n');
+                write.write_all(line.as_bytes()).await.ok()?;
+                let mut reply = String::new();
+                tokio::io::BufReader::new(read).read_line(&mut reply).await.ok()?;
+                match serde_json::from_str::<DaemonResponse>(&reply) {
+                    Ok(DaemonResponse::HandshakeOk { pid, .. }) => Some(Seen::Owner(pid)),
+                    Ok(DaemonResponse::ProtocolMismatch { .. }) => Some(Seen::OtherVersion),
+                    _ => None,
+                }
+            }).await.ok().flatten()
+        })
     }
 
     /// Waits for `pid` to exit. `Ok(None)` when it is already gone or its code is unreadable.

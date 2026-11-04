@@ -258,11 +258,22 @@ pub fn blocked_detail(payload: &Value) -> Option<String> {
 /// Where the report goes. TCP wins when both halves are present, as in the extension.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Endpoint {
+    #[cfg(windows)]
+    Pipe { path: String, fallback: Option<Box<Endpoint>> },
     Tcp { port: u16, token: String },
     Socket(String),
 }
 
 pub fn endpoint(env: &impl Fn(&str) -> Option<String>) -> Option<Endpoint> {
+    #[cfg(windows)]
+    if let Some(path) = env("FERRYX_AGENT_STATE_PIPE").filter(|path| !path.is_empty()) {
+        let fallback = legacy_endpoint(env);
+        return Some(Endpoint::Pipe { path, fallback: fallback.map(Box::new) });
+    }
+    legacy_endpoint(env)
+}
+
+fn legacy_endpoint(env: &impl Fn(&str) -> Option<String>) -> Option<Endpoint> {
     let port = env("FERRYX_AGENT_STATE_PORT")
         .and_then(|port| port.trim().parse::<u16>().ok())
         .filter(|port| *port > 0);
@@ -318,7 +329,14 @@ pub fn prepare(
             report.insert("detail".into(), Value::from(detail));
         }
     }
-    if let Endpoint::Tcp { token, .. } = &endpoint {
+    #[cfg(windows)]
+    let token_endpoint = match &endpoint {
+        Endpoint::Pipe { fallback, .. } => fallback.as_deref().unwrap_or(&endpoint),
+        other => other,
+    };
+    #[cfg(not(windows))]
+    let token_endpoint = &endpoint;
+    if let Endpoint::Tcp { token, .. } = token_endpoint {
         report.insert("token".into(), Value::from(token.as_str()));
     }
     let mut line = serde_json::to_string(&Value::Object(report)).ok()?;
@@ -328,6 +346,16 @@ pub fn prepare(
 
 pub fn send(endpoint: &Endpoint, line: &str) -> std::io::Result<()> {
     match endpoint {
+        #[cfg(windows)]
+        Endpoint::Pipe { path, fallback } => {
+            match std::fs::OpenOptions::new().write(true).open(path) {
+                Ok(mut pipe) => pipe.write_all(line.as_bytes()),
+                Err(error) => match fallback {
+                    Some(endpoint) => send(endpoint, line),
+                    None => Err(error),
+                },
+            }
+        }
         Endpoint::Tcp { port, .. } => {
             let address = std::net::SocketAddr::from(([127, 0, 0, 1], *port));
             let mut stream = std::net::TcpStream::connect_timeout(&address, SEND_TIMEOUT)?;

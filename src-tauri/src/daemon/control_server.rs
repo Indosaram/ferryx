@@ -187,6 +187,27 @@ impl DaemonServer {
             });
         }
 
+        #[cfg(windows)]
+        {
+            let mut listener = crate::daemon::windows_pipe::Listener::bind("control")
+                .map_err(|error| format!("Failed to bind control pipe: {error}"))?;
+            let server = Arc::clone(self);
+            tokio::spawn(async move {
+                loop {
+                    match listener.accept().await {
+                        Ok(stream) => {
+                            let server = Arc::clone(&server);
+                            tokio::spawn(async move {
+                                let (origin, ancestry) = crate::daemon::windows_pipe::identity(&stream).await;
+                                if !matches!(origin, crate::daemon::supervisor_peer::PeerOrigin::Process(_)) { return; }
+                                server.handle_control_connection_with_origin(stream, None, origin, ancestry).await;
+                            });
+                        }
+                        Err(error) => { tracing::error!(%error, "Control pipe accept failed"); break; }
+                    }
+                }
+            });
+        }
         tracing::info!("daemon control-v1 endpoint bound");
         Ok(())
     }

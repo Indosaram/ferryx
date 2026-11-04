@@ -17,6 +17,28 @@ mod tests {
     use crate::ssh::helper_runtime::agent_hook_core::fixtures::{fixture, EXPECTED};
 
     const CLAUDE_ID: &str = "d49fdc31-682a-40b4-811a-eea8a17f6cf9";
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pipe_endpoint_precedes_tcp_and_retains_fallback_credential() {
+        let env = |key: &str| match key {
+            "FERRYX_AGENT_STATE_PIPE" => Some(r"\\.\pipe\test-agent-state".into()),
+            "FERRYX_AGENT_STATE_PORT" => Some("4123".into()),
+            "FERRYX_AGENT_STATE_TOKEN" => Some("secret".into()),
+            "FERRYX_SESSION_ID" => Some("pane-a".into()),
+            _ => None,
+        };
+        let (reached, line) = prepare("claude", "Stop", b"{}", &env).unwrap();
+        assert_eq!(reached, Endpoint::Pipe {
+            path: r"\\.\pipe\test-agent-state".into(),
+            fallback: Some(Box::new(Endpoint::Tcp { port: 4123, token: "secret".into() })),
+        });
+        let report: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(report["token"], "secret");
+        assert!(matches!(endpoint(&|key| if key == "FERRYX_AGENT_STATE_PIPE" {
+            Some(r"\\.\pipe\only".into())
+        } else { None }), Some(Endpoint::Pipe { fallback: None, .. })));
+    }
     const CLAUDE_TRANSCRIPT: &str = "/Users/indo/.claude/projects/-private-tmp-parity-claude-59r7/d49fdc31-682a-40b4-811a-eea8a17f6cf9.jsonl";
     const CODEX_ID: &str = "01a1626f-f0db-75d0-b73c-2372a21d4cae";
     const CODEX_TRANSCRIPT: &str = "/Users/indo/.codex/sessions/2026/10/22/rollout-2026-10-22T16-07-46-01a1626f-f0db-75d0-b73c-2372a21d4cae.jsonl";

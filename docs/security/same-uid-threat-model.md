@@ -20,7 +20,7 @@ The daemon reads the connecting process from the kernel when it accepts a connec
 The owner's own shell inside a Ferryx terminal is a pane too. Owner actions are made from
 **Settings > Pane access** in the desktop app, or from a terminal outside Ferryx.
 
-## What is enforced (macOS, Linux)
+## What is enforced (macOS, Linux, Windows named pipes)
 
 `src-tauri/src/daemon/pane_grants.rs` applies one policy to every mutating request, before the
 request's handler runs:
@@ -53,13 +53,35 @@ the same grants. An unreadable file fails closed: no grants apply.
 Supervisor mutations keep their own, stricter gate (`supervisor_peer::refusal`): a pane may
 never mutate the supervisor, with or without grants.
 
+## Windows transport migration
+
+Windows serves three owner-only named pipes alongside the existing loopback TCP listeners:
+`\\.\pipe\ferryx-<user sid>-daemon`, `-agent-state`, and `-control` (each with `-dev`
+in debug builds). A protected DACL `D:P(A;;GA;;;<owner sid>)` permits only the owner's
+token; remote clients are rejected. The first instance reserves the name exclusively and a
+replacement is created before releasing each connected instance. Failure to reserve a name
+fails startup rather than silently downgrading security.
+
+Data and control pipe peers are identified with `GetNamedPipeClientProcessId`, with process
+creation time binding their pid. Toolhelp parent snapshots support pane-descendant classification.
+They use the same grants and control-v1 refusal rules as Unix peers. Missing process identity
+closes the pipe connection. Clients prefer pipes and fall back to TCP before sending; a failed
+write is not replayed. Panes receive `FERRYX_AGENT_STATE_PIPE` alongside the compatibility port
+and token. Agent-state pipes have the same owner boundary as Unix agent-state sockets, not a
+new per-pane report authorization scheme.
+
+There is no Windows live handover. Dual-listen starts on the next idle restart under
+`FERRYX_DAEMON_IDLE_UPGRADE`; updating the installed binary never replaces a busy daemon.
+No new persisted transport state is introduced. Existing grants are restored from their store.
+
 ## What is not enforced
 
-- **Windows (until todo 12).** Loopback TCP carries no peer process, and the transport token is
+- **Windows legacy TCP (one compatibility release).** Loopback TCP carries no peer process, and the transport token is
   a file every pane process can read. A `TokenAuthenticated` connection therefore keeps the
   behaviour from before grants existed for every newly gated request, and only grant changes are
-  refused. Supervisor mutations stay refused for token peers, as before. Todo 12 moves Windows
-  to owner-only named pipes that identify the peer process, and then lifts this exemption.
+  refused. Supervisor mutations stay refused for token peers, as before. This exemption does
+  not apply to pipe peers. TCP is deliberately not removed in this migration, so an explicitly
+  selected legacy TCP connection is still a same-uid bypass for the newly gated requests.
 - **File access.** A pane process can read and write every file the owner can, including
   `pane-grants.json`, the daemon's data directory and the socket's runtime directory. Grants
   protect the daemon's request surface, not the filesystem. A pane that edits
