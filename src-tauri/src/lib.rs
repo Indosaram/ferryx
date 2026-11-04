@@ -1313,6 +1313,31 @@ fn start_remote_event_bridge<R: tauri::Runtime>(
                 Ok(mut events) => {
                     let _ = app.emit("desktop_local_projects_resync", ());
                     while let Some(event) = events.recv().await {
+                        if event.event == "TerminalOscEffect" {
+                            match serde_json::from_value::<native_terminal::osc_effects::OscEffect>(event.payload["kind"].clone()) {
+                                Ok(native_terminal::osc_effects::OscEffect::Notify { title, body }) => {
+                                    let request = notification::DispatchNotificationRequest {
+                                        source: notification::NotificationSource::TerminalOsc,
+                                        terminal_title: Some(title),
+                                        agent_label: Some(body),
+                                        ..Default::default()
+                                    };
+                                    if let Err(error) = ipc::notifications::cmd_notification_dispatch(app.clone(), request).await {
+                                        tracing::warn!(%error, "terminal OSC notification failed");
+                                    }
+                                },
+                                Ok(native_terminal::osc_effects::OscEffect::Clipboard { text }) => {
+                                    #[cfg(feature = "native-terminal")]
+                                    if let Err(error) = ipc::native_terminal::cmd_clipboard_write_text(app.clone(), text).await {
+                                        tracing::warn!(%error, "terminal OSC clipboard write failed");
+                                    }
+                                    #[cfg(not(feature = "native-terminal"))]
+                                    { let _ = text; }
+                                },
+                                Err(error) => tracing::warn!(%error, "invalid terminal OSC effect"),
+                            }
+                            continue;
+                        }
                         if let Err(error) = app.emit(event.event.as_str(), event.payload) {
                             tracing::debug!("Failed to relay remote event: {error}");
                         }
