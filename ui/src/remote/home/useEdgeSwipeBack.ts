@@ -4,6 +4,8 @@
 // edge gesture: a plain Safari tab has its own back swipe, and the two would fight.
 import { useEffect, useRef, useState } from "react";
 
+import { prefersReducedMotion } from "../../lib/usePrefersReducedMotion";
+
 /** A drag counts only when it starts at or left of this clientX. */
 export const EDGE_SWIPE_START_MAX_X = 24;
 /** Horizontal travel that commits the back. */
@@ -67,10 +69,6 @@ function insideModal(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest('[aria-modal="true"]') !== null;
 }
 
-function reducedMotion(): boolean {
-  return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-}
-
 function installEdgeSwipe(element: HTMLElement, back: () => void): () => void {
   let drag: Drag | null = null;
   let pointerId: number | undefined;
@@ -86,7 +84,7 @@ function installEdgeSwipe(element: HTMLElement, back: () => void): () => void {
   };
 
   const springBack = () => {
-    if (!element.style.transform || reducedMotion()) {
+    if (!element.style.transform || prefersReducedMotion()) {
       element.style.transition = "";
       element.style.transform = "";
       return;

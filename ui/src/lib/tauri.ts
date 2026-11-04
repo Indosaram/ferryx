@@ -10,6 +10,7 @@ import { switchDebug } from "./switchDebug";
 import { shortcutContext, traceShortcutAction } from "./shortcutDiagnostics";
 import { getDurableNativeBinding } from "./nativeTerminalLifecycle";
 import { currentWindowLabel } from "./windowIdentity";
+import { colors } from "../tokens";
 
 /**
  * Listens for an event the backend routes to one window with `emit_to(label)` (session-owner and
@@ -342,27 +343,7 @@ export async function getTerminalPreferences(remote?: RemotePreferenceTarget): P
       macosOptionAsAlt: false,
       cursorStyle: "block",
       theme: {
-        background: "#0a0a0a",
-        foreground: "#d4d4d4",
-        cursor: "#e5e5e5",
-        cursorAccent: "#0a0a0a",
-        selectionBackground: "#52525299",
-        black: "#171717",
-        red: "#f87171",
-        green: "#86efac",
-        yellow: "#fde68a",
-        blue: "#93c5fd",
-        magenta: "#d8b4fe",
-        cyan: "#67e8f9",
-        white: "#e5e5e5",
-        brightBlack: "#737373",
-        brightRed: "#fca5a5",
-        brightGreen: "#bbf7d0",
-        brightYellow: "#fef08a",
-        brightBlue: "#bfdbfe",
-        brightMagenta: "#e9d5ff",
-        brightCyan: "#a5f3fc",
-        brightWhite: "#fafafa",
+        ...colors.terminalPalettes.remoteFallback,
         extendedAnsi: [],
       },
       source: "defaults",

@@ -9,6 +9,8 @@ import {
 } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
 
+import { usePrefersReducedMotion } from "../lib/usePrefersReducedMotion";
+
 export type DockModifierState = "off" | "oneshot" | "locked";
 
 export type DockModifierName = "ctrl" | "alt" | "shift";
@@ -104,6 +106,7 @@ export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({
   keyboardOpen = false,
 }) => {
   const [isExpanded, setIsExpanded] = useState(false);
+  const reducedMotion = usePrefersReducedMotion();
   const [ownModifiers, setOwnModifiers] = useState<DockModifiers>(NO_DOCK_MODIFIERS);
   const lastTapRef = useRef<Record<DockModifierName, number>>({ ctrl: 0, alt: 0, shift: 0 });
   const modifiers = controlledModifiers ?? ownModifiers;
@@ -115,7 +118,7 @@ export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({
 
   const vibrate = () => {
     if (!("vibrate" in navigator)) return;
-    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    if (reducedMotion) return;
     try {
       navigator.vibrate(15);
     } catch {

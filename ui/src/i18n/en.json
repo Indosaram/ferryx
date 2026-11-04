@@ -1,0 +1,65 @@
+{
+  "onboarding": {
+    "wizard": {
+      "title": "Welcome to Ferryx",
+      "railLabel": "Setup",
+      "stepsLabel": "Setup steps",
+      "reopenHint": "You can reopen this from Settings > Permissions.",
+      "stepIndicator": "Step {{step}} of {{total}}",
+      "remindLater": "Remind me later",
+      "skipSetup": "Skip setup",
+      "back": "Back",
+      "next": "Continue",
+      "skipStep": "Skip",
+      "done": "Done",
+      "finishWithoutAccount": "Finish without signing in"
+    },
+    "step": {
+      "account": {
+        "title": "Sign in",
+        "heading": "Sign in to Ferryx",
+        "lede": "Optional. Sign in with your email and this computer is linked to your account, so you can open its worktrees from your phone."
+      },
+      "intro": {
+        "title": "Welcome",
+        "heading": "Set up Ferryx",
+        "lede": "A short tour and setup. Signing in comes last and is optional."
+      },
+      "features": {
+        "title": "Features",
+        "heading": "What Ferryx does",
+        "lede": "The parts you'll use every day."
+      },
+      "agents": {
+        "title": "Agents",
+        "heading": "Choose your default agent",
+        "lede": "New agent tabs start with this one. You can switch per tab, or change it later in Settings > Agents."
+      },
+      "cli": {
+        "title": "Command line",
+        "heading": "Install the command-line tool",
+        "lede": "Optional. Use ferryx from any terminal. You can also install it later in Settings > General."
+      },
+      "project": {
+        "title": "First project",
+        "heading": "Open your first project",
+        "lede": "Start with a folder on this computer, or pair another machine."
+      },
+      "supervisor": {
+        "title": "Supervisor",
+        "heading": "Let the supervisor run your work",
+        "lede": "Optional. Turn it on once and it picks up requests, runs them in your projects, and checks in when it needs you."
+      },
+      "try": {
+        "title": "First worktree",
+        "heading": "Try your first worktree",
+        "lede": "Optional. A worktree is an isolated checkout of your project with its own branch and agent tab."
+      },
+      "phone": {
+        "title": "Phone",
+        "heading": "Connect your phone",
+        "lede": "Optional. Pair your phone to follow and answer agents away from your desk."
+      }
+    }
+  }
+}

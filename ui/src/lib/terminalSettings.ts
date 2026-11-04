@@ -2,6 +2,7 @@ import { DEFAULT_TERMINAL_FONT_STACK } from "./tauri";
 import type { RemotePreferenceTarget } from "./remoteClient";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { colors } from "../tokens";
 import { getMigratedItem, TERMINAL_SETTINGS_STORAGE_KEY } from "./storageKeys";
 import {
   applyTerminalOverrides,
@@ -62,27 +63,7 @@ const SCROLLBACK_MIN = 1_000;
 const SCROLLBACK_MAX = 100_000;
 
 export const DEFAULT_TERMINAL_THEME: TerminalThemeColors = {
-  background: "#282c34",
-  foreground: "#ffffff",
-  cursor: "#ffffff",
-  cursorAccent: "#282c34",
-  selectionBackground: "#52525299",
-  black: "#1d1f21",
-  red: "#cc6666",
-  green: "#b5bd68",
-  yellow: "#f0c674",
-  blue: "#81a2be",
-  magenta: "#b294bb",
-  cyan: "#8abeb7",
-  white: "#c5c8c6",
-  brightBlack: "#666666",
-  brightRed: "#d54e53",
-  brightGreen: "#b9ca4a",
-  brightYellow: "#e7c547",
-  brightBlue: "#7aa6da",
-  brightMagenta: "#c397d8",
-  brightCyan: "#70c0b1",
-  brightWhite: "#eaeaea",
+  ...colors.terminalPalettes.default,
   extendedAnsi: [],
 };
 

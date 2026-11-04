@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowDown, ChevronLeft, Terminal as TerminalIcon } from "lucide-react";
 import { cn } from "../../lib/cn";
+import { usePrefersReducedMotion } from "../../lib/usePrefersReducedMotion";
 import {
   ActivityIndicator,
   ActivityState,
@@ -102,13 +103,6 @@ export interface MobileChatWorkspaceProps {
 /** One distance from the bottom decides both following the stream and offering the pill. */
 const FOLLOW_THRESHOLD_PX = 80;
 
-function prefersReducedMotion(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true
-  );
-}
-
 /**
  * Starters built from what the client already knows about the pane. A pane with no detected agent
  * (a plain shell) gets none: there is nobody to ask, and a canned prompt would be typed into a
@@ -196,6 +190,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const reducedMotion = usePrefersReducedMotion();
   const composerRef = useRef<MobileChatComposerHandle | null>(null);
   const bindComposer = useCallback(
     (handle: MobileChatComposerHandle | null) => {
@@ -248,11 +243,11 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   const scrollToBottom = useCallback((smooth = false) => {
     if (messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({
-        behavior: smooth && !prefersReducedMotion() ? "smooth" : "auto",
+        behavior: smooth && !reducedMotion ? "smooth" : "auto",
         block: "end",
       });
     }
-  }, []);
+  }, [reducedMotion]);
 
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
