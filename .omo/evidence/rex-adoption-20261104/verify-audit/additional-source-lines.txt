@@ -1,0 +1,22 @@
+src-tauri/src/remote/relay_server.rs:4268:         header::ACCESS_CONTROL_ALLOW_ORIGIN,
+src-tauri/src/remote/relay_server.rs:4455:     crate::remote::security_headers::harden(
+src-tauri/src/remote/relay_server.rs:4889: pub const AUTH_FAILED: &str = "AUTH_FAILED";
+src-tauri/src/remote/relay_server.rs:5076:                     reason: AUTH_FAILED.into(),
+src-tauri/src/remote/relay_server.rs:10018:         assert_eq!(close.reason.as_str(), AUTH_FAILED);
+src-tauri/src/remote/relay_server.rs:10051:         assert_eq!(close.reason.as_str(), AUTH_FAILED);
+src-tauri/src/remote/server.rs:8274:     crate::remote::security_headers::harden(router, Arc::new(GatewaySurfacePolicy(state)))
+src-tauri/src/daemon/control_server.rs:450:         match self.classify_peer(origin, ancestry).await {
+src-tauri/src/daemon/control_server.rs:453:                 .admin_allowed(&class, |session| self.session_workspace(session)),
+src-tauri/src/ipc/updater.rs:580:     if let Ok(endpoint) = std::env::var("FERRYX_UPDATER_ENDPOINT") {
+src-tauri/src/ipc/updater.rs:625:                 format!("FERRYX_UPDATER_ENDPOINT is not a URL: {error}"),
+src-tauri/src/ipc/updater.rs:702: /// the signed-manifest policy and the debug-only `FERRYX_UPDATER_ENDPOINT` override cover the
+src-tauri/src/ipc/updater.rs:890:             std::env::set_var("FERRYX_STORE_BUILD", "1");
+src-tauri/src/ipc/updater.rs:1372:     /// QA entry: the real `cmd_updater_check` command with the debug `FERRYX_UPDATER_ENDPOINT`
+src-tauri/src/ipc/updater.rs:1393:                 std::env::set_var("FERRYX_UPDATER_ENDPOINT", format!("{}/latest.json", server.base));
+src-tauri/src/ipc/updater.rs:1395:                 std::env::remove_var("FERRYX_UPDATER_ENDPOINT");
+src-tauri/src/daemon/server.rs:6058:                                     legacy_peer.send_request(&DaemonRequest::AbortHandover).await
+src-tauri/src/daemon/server.rs:6098:                             legacy_peer.send_request(&DaemonRequest::AbortHandover).await
+src-tauri/src/daemon/server.rs:6848:                             | Ok(DaemonRequest::AbortHandover)
+src-tauri/src/daemon/server.rs:7373:                 Ok(DaemonRequest::CancelSpawnOperation { client_request_id, origin_epoch, expires_at_unix_ms: _ }) => {
+src-tauri/src/daemon/server.rs:8807:                 Ok(DaemonRequest::RemoteSetWindowFocused { focused }) => {
+src-tauri/src/daemon/server.rs:9101:                 Ok(DaemonRequest::AbortHandover) => {

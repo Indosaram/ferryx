@@ -1,0 +1,38 @@
+{
+  "kind": "static source review assertions, NOT runtime QA",
+  "checks": [
+    {
+      "assertion": "remote terminal writes and resizes are explicitly pane-gated",
+      "passed": false,
+      "location": "src-tauri/src/daemon/pane_grants.rs:195",
+      "observed": "RemoteWrite/RemoteResize absent; wildcard returns None"
+    },
+    {
+      "assertion": "unidentified process transport does not bypass mutation gates",
+      "passed": false,
+      "location": "src-tauri/src/daemon/server.rs:6647",
+      "observed": "Unknown shares compatibility bypass with TokenAuthenticated"
+    },
+    {
+      "assertion": "plugin processes are registered for socket-level classification",
+      "passed": false,
+      "location": "src-tauri/src/daemon/plugins/runtime.rs:37-49",
+      "observed": "spawned child pid only sent to lifecycle observer; no pane registry insertion"
+    },
+    {
+      "assertion": "F1 literal no leafId in daemon",
+      "passed": false,
+      "location": "src-tauri/src/daemon/layout_migration.rs:120",
+      "observed": [
+        "src-tauri/src/daemon/layout_migration.rs:120: let visual = text(tree, \"leafId\");",
+        "src-tauri/src/daemon/layout_migration.rs:171: \"one\":{\"root\":{\"type\":\"leaf\",\"leafId\":\"repeated\"},\"activeLeafId\":\"repeated\",\"expandedLeafId\":\"repeated\"},",
+        "src-tauri/src/daemon/layout_migration.rs:172: \"two\":{\"root\":{\"type\":\"leaf\",\"leafId\":\"repeated\"},\"activeLeafId\":\"repeated\",\"expandedLeafId\":\"repeated\"}",
+        "src-tauri/src/daemon/layout_migration.rs:241: serde_json::json!({\"tabs\":[{\"id\":\"t\",\"label\":\"old\",\"sessionId\":\"s\",\"paneTree\":{\"type\":\"leaf\",\"leafId\":\"visual\"},\"sessionIdsByLeafId\":{\"visual\":\"s\"}}]}),",
+        "src-tauri/src/daemon/layout_migration.rs:242: serde_json::json!({\"tabs\":[{\"id\":\"t\",\"label\":\"terminal\",\"terminal\":{\"primarySessionId\":\"s\",\"paneTree\":{\"type\":\"leaf\",\"leafId\":\"visual\"},\"sessionIdsByLeafId\":{\"visual\":\"s\"}}}]}),",
+        "src-tauri/src/daemon/layout_migration.rs:243: serde_json::json!({\"tabs\":[{\"id\":\"t\",\"label\":\"mixed\"}],\"activeTabId\":\"t\",\"layoutsByTabId\":{\"t\":{\"root\":{\"type\":\"split\",\"direction\":\"vertical\",\"ratio\":0.4,\"first\":{\"type\":\"leaf\",\"leafId\":\"visual\"},\"second\":{\"type\":\"leaf\",\"leafId\":\"browser\"}},\"activeLeafId\":\"visual\",\"contentsByLeafId\":{\"visual\":{\"kind\":\"terminal\",\"sessionId\":\"s\"},\"browser\":{\"kind\":\"browser\",\"browser\":{\"url\":\"https://example.org\"}}}}},\"tabGroups\":[{\"id\":\"g\",\"tabIds\":[\"t\"],\"activeTabId\":\"t\"}],\"tabGroupLayout\":{\"type\":\"group\",\"groupId\":\"g\"},\"focusedGroupId\":\"g\"}),",
+        "src-tauri/src/daemon/layout_migration.rs:257: assert!(!persisted.contains(\"leafId\"));"
+      ]
+    }
+  ]
+}
+EXIT=1
