@@ -10,6 +10,7 @@ import type { TerminalSectionProps } from "./types";
 import { isMacShortcutPlatform } from "../../lib/shortcuts";
 import { loadFileLinkEditor, parseFileLinkEditor, saveFileLinkEditor } from "../../lib/fileLinkSettings";
 import { getSystemPermissionsStatus } from "../../lib/tauri";
+import { PluginsSection } from "./PluginsSection";
 
 type ShellPreset = { value: string; label: string };
 
@@ -382,6 +383,7 @@ export function TerminalSection({
           />
         </div>}
       </div>
+      <PluginsSection />
     </section>
   );
 }
