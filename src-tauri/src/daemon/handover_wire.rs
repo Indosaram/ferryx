@@ -622,7 +622,7 @@ mod tests {
     fn handover_v1_fixture_round_trips_value_for_value() {
         use crate::daemon::handover_socket::{
             AuthorityMetadata, SessionTransferMetadata, KIND_AUTHORITY, KIND_AUTHORITY_ACK,
-            KIND_SESSION, KIND_SESSION_ACK, KIND_TRANSFER_DONE,
+            KIND_SESSION, KIND_SESSION_ACK, KIND_TRANSFER_DONE, KIND_SESSION_CONT,
         };
         let fixture = handover_v1_fixture();
         assert_eq!(fixture["framing_version"], HANDOVER_FRAMING_VERSION);
@@ -662,11 +662,16 @@ mod tests {
                 KIND_SESSION_ACK | KIND_TRANSFER_DONE | KIND_AUTHORITY_ACK => {
                     assert_eq!(frame["payload"], Value::Null);
                 }
+                KIND_SESSION_CONT => {
+                    assert_eq!(frame["payload"]["part"], 0);
+                    assert_eq!(frame["payload"]["parts"], 1);
+                    assert_eq!(frame["payload"]["data"], "e30=");
+                }
                 other => panic!("fixture frame kind {other:#x} is not a handover-v1 kind"),
             }
             kinds.push(kind);
         }
-        for kind in [KIND_SESSION, KIND_SESSION_ACK, KIND_TRANSFER_DONE, KIND_AUTHORITY, KIND_AUTHORITY_ACK] {
+        for kind in [KIND_SESSION, KIND_SESSION_ACK, KIND_TRANSFER_DONE, KIND_AUTHORITY, KIND_AUTHORITY_ACK, KIND_SESSION_CONT] {
             assert!(kinds.contains(&kind), "fixture covers kind {kind:#x}");
         }
     }
