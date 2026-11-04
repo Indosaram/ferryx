@@ -231,14 +231,17 @@ fn write_download_with(
 /// app transcript is saved to the Downloads folder; the reply is the saved path.
 #[tauri::command]
 pub async fn cmd_supervisor_transcript_export(file_name: String, text: String) -> Result<String, IpcError> {
-    let downloads = export_dir(
-        qa_isolated_home(std::env::var("FERRYX_QA_ISOLATED").ok().as_deref(), ferryx_hub::hub_env::home()),
-        dirs::download_dir(),
-        ferryx_hub::hub_env::home(),
-    )
-    .ok_or_else(|| IpcError::new(IpcErrorCode::IoError, "the transcript was not saved: this account has no Downloads folder"))?;
-    let path = write_download(&downloads, &file_name, &text)?;
-    Ok(path.to_string_lossy().into_owned())
+    super::run_blocking(move || {
+        let downloads = export_dir(
+            qa_isolated_home(std::env::var("FERRYX_QA_ISOLATED").ok().as_deref(), ferryx_hub::hub_env::home()),
+            dirs::download_dir(),
+            ferryx_hub::hub_env::home(),
+        )
+        .ok_or_else(|| IpcError::new(IpcErrorCode::IoError, "the transcript was not saved: this account has no Downloads folder"))?;
+        let path = write_download(&downloads, &file_name, &text)?;
+        Ok(path.to_string_lossy().into_owned())
+    })
+    .await
 }
 
 /// The isolated QA profile's home (`HOME`/`USERPROFILE` point into it), only in a

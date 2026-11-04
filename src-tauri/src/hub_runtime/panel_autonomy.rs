@@ -23,29 +23,62 @@ use super::HubLaunch;
 use crate::agent_control::AgentControlOp;
 use crate::remote::state::RemoteGatewayState;
 
-/// The one autonomy service of this daemon, installed when the hub opens.
-static AUTONOMY: std::sync::OnceLock<Arc<Autonomy>> = std::sync::OnceLock::new();
+/// The autonomy service of one opened hub and everything built over its stores: the recovery
+/// scheduler, the engine's session tools and the paired-host fleet. Held in the swappable
+/// [`super::PANEL_AUTONOMY`] slot, so a promotion that reopens the hub replaces it with one over
+/// the new hub's pool, and closing the old pool takes it down first.
+#[derive(Clone)]
+pub(crate) struct Installed {
+    hub: Arc<ferryx_hub::Hub>,
+    autonomy: Arc<Autonomy>,
+    recovery: Arc<RecoveryScheduler>,
+    session_tools: Arc<ferryx_hub::meta::mhc_supervisor::SessionTools>,
+    remote_fleet: Option<Arc<RemoteFleetSource>>,
+}
 
-/// The engine's session tools, built once with the real adapters.
-static SESSION_TOOLS: std::sync::OnceLock<Arc<ferryx_hub::meta::mhc_supervisor::SessionTools>> =
-    std::sync::OnceLock::new();
+fn current() -> Option<Installed> {
+    super::slot_get(&super::PANEL_AUTONOMY)
+}
+
+/// Takes the autonomy service down, before its hub's pool is closed.
+pub(super) fn uninstall() {
+    super::slot_set(&super::PANEL_AUTONOMY, None);
+}
 
 /// The session tools to hand the engine's work handler (`SlackWorkTools::with_sessions`).
 pub fn session_tools() -> Option<Arc<ferryx_hub::meta::mhc_supervisor::SessionTools>> {
-    SESSION_TOOLS.get().cloned()
+    current().map(|installed| installed.session_tools)
 }
 
 /// The installed autonomy service, if the hub is open in this daemon.
 pub fn installed() -> Option<Arc<Autonomy>> {
-    AUTONOMY.get().cloned()
+    current().map(|installed| installed.autonomy)
 }
 
-/// The one recovery scheduler of this daemon, installed with the autonomy service.
-static RECOVERY: std::sync::OnceLock<Arc<RecoveryScheduler>> = std::sync::OnceLock::new();
+/// The autonomy service opened over `hub`, if that is the one installed.
+pub(super) fn installed_for(hub: &Arc<ferryx_hub::Hub>) -> Option<Arc<Autonomy>> {
+    current()
+        .filter(|installed| Arc::ptr_eq(&installed.hub, hub))
+        .map(|installed| installed.autonomy)
+}
 
 /// The installed recovery scheduler, if the hub is open in this daemon.
 pub fn recovery() -> Option<Arc<RecoveryScheduler>> {
-    RECOVERY.get().cloned()
+    current().map(|installed| installed.recovery)
+}
+
+/// The stores the panel reads: the installed autonomy service's, or none.
+pub(super) fn panel_sources() -> ferryx_hub::fleet::PanelSources {
+    current().map_or_else(Default::default, |installed| ferryx_hub::fleet::PanelSources {
+        log: Some(installed.autonomy.action_log()),
+        rules: Some(installed.autonomy.rule_store()),
+        escalations: Some(installed.autonomy.escalation_source()),
+    })
+}
+
+/// The standing rules `supervisor_converse` writes rule changes to.
+pub(super) fn rule_store() -> Option<Arc<dyn ferryx_hub::supervisor::panel_contract::RuleStore>> {
+    current().map(|installed| installed.autonomy.rule_store())
 }
 
 /// Builds the recovery scheduler over the autonomy service's own stores, pause gate and
@@ -233,7 +266,7 @@ fn local_host_ids() -> Vec<String> {
 /// the owner socket); a non-owner never reaches it.
 pub async fn fleet_sessions(state: &Arc<RemoteGatewayState>) -> Vec<FleetSession> {
     let mut sessions = super::local_fleet_sessions(state).await;
-    if let Some(source) = REMOTE_FLEET.get() {
+    if let Some(source) = current().and_then(|installed| installed.remote_fleet) {
         match ferryx_hub::meta::mhc_supervisor::FleetSource::list(source.as_ref()).await {
             Ok(remote) => sessions.extend(remote),
             Err(error) => tracing::warn!(%error, "the paired-host fleet was not read"),
@@ -241,8 +274,6 @@ pub async fn fleet_sessions(state: &Arc<RemoteGatewayState>) -> Vec<FleetSession
     }
     sessions
 }
-
-static REMOTE_FLEET: std::sync::OnceLock<Arc<RemoteFleetSource>> = std::sync::OnceLock::new();
 
 /// The engine's `FleetSource`: this computer plus the paired hosts.
 struct FullFleet {
@@ -256,12 +287,14 @@ impl ferryx_hub::meta::mhc_supervisor::FleetSource for FullFleet {
     }
 }
 
-/// Opens the stores, installs the panel sources, the rule store, the pause flag and builds the
-/// engine's session tools. Called once per daemon, when the hub opens; a second call keeps the first.
+/// Opens the stores over `launch.hub`, sets the pause flag and builds the recovery scheduler and
+/// the engine's session tools. Called when a hub opens (start, and a promotion that reopened it);
+/// a second call for the same hub keeps the first, one for another hub replaces it.
 pub(super) async fn install(launch: &HubLaunch) {
-    if AUTONOMY.get().is_some() {
+    if current().is_some_and(|installed| Arc::ptr_eq(&installed.hub, &launch.hub)) {
         return;
     }
+    uninstall();
     let state = Arc::clone(launch.server.remote_state());
     let pool = launch.hub.pool.clone();
     let bridge: Arc<dyn ferryx_hub::agent_control::AgentControl> = launch.bridge.clone();
@@ -284,13 +317,6 @@ pub(super) async fn install(launch: &HubLaunch) {
         pool.clone(),
         Arc::new(PairedDirectory { client: launch.bridge.client.clone() }),
     ));
-    let _ = REMOTE_FLEET.set(remote);
-    super::install_panel_sources(ferryx_hub::fleet::PanelSources {
-        log: Some(autonomy.action_log()),
-        rules: Some(autonomy.rule_store()),
-        escalations: Some(autonomy.escalation_source()),
-    });
-    super::install_rule_store(autonomy.rule_store());
     super::set_panel_paused(ferryx_hub::control::is_paused(&pool).await.unwrap_or(false));
     let scheduler = build_recovery(
         &autonomy,
@@ -298,7 +324,6 @@ pub(super) async fn install(launch: &HubLaunch) {
         Arc::new(FullFleet { state: Arc::clone(&state) }),
         Arc::new(SystemClock),
     );
-    let _ = RECOVERY.set(scheduler);
     let tools = Arc::new(
         ferryx_hub::meta::mhc_supervisor::SessionTools::new(
             Arc::new(AgentSessionControl::new(control)),
@@ -306,8 +331,16 @@ pub(super) async fn install(launch: &HubLaunch) {
         )
         .with_gate(autonomy.gate()),
     );
-    let _ = SESSION_TOOLS.set(tools);
-    let _ = AUTONOMY.set(autonomy);
+    super::slot_set(
+        &super::PANEL_AUTONOMY,
+        Some(Installed {
+            hub: Arc::clone(&launch.hub),
+            autonomy,
+            recovery: scheduler,
+            session_tools: tools,
+            remote_fleet: Some(remote),
+        }),
+    );
 }
 
 /// One pane observation: read the session in the fleet shape and let autonomy answer or
@@ -577,42 +610,47 @@ pub(crate) mod tests {
     /// Epoch ms the fake clock starts at.
     const START_MS: i64 = 1_800_000_000_000;
 
-    static CARD_INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-    static CARDS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-
-    /// An open recovery card (its prompt id) of the process-wide installed scheduler: four
-    /// sessions on another computer stalled, were restarted once and stalled again, so each
-    /// has a card. Every call hands out a card no other test holds.
+    /// An open recovery card (its prompt id) of a scheduler installed for the calling test
+    /// only (the slot is per test thread): four sessions on another computer stalled, were
+    /// restarted once and stalled again, so each has a card.
     pub(crate) async fn take_recovery_card() -> String {
-        CARD_INIT
-            .get_or_init(|| async {
-                let pool = ferryx_hub::storage::memory().await.unwrap();
-                let autonomy = Autonomy::open(pool, Arc::new(NoControl), Arc::new(Silent)).await.unwrap();
-                let stalled = |n: u32| {
-                    let mut s = outage_session();
-                    s.session_ref = SessionRef::new("mac-2", &format!("card{n}"));
-                    s.state_source = "provider".into();
-                    s.state_since_ms = Some(START_MS - 600_000);
-                    s.screen_changed_at_ms = Some(START_MS - 600_000);
-                    s
-                };
-                let clock = Arc::new(FakeClock::new(START_MS));
-                let scheduler = build_recovery(
-                    &autonomy,
-                    Arc::new(ScriptedControl::default()),
-                    Arc::new(FixedFleet { sessions: (1..=4).map(stalled).collect() }),
-                    clock.clone(),
-                );
-                scheduler.tick().await;
-                clock.advance(400_000);
-                scheduler.tick().await;
-                let cards = autonomy.escalation_source().pending().await.unwrap();
-                assert_eq!(cards.len(), 4, "{cards:?}");
-                *CARDS.lock().unwrap() = cards.into_iter().map(|c| c.prompt.prompt_id).collect();
-                RECOVERY.set(scheduler).ok().expect("one installed scheduler per test process");
-            })
-            .await;
-        CARDS.lock().unwrap().pop().expect("a recovery card per test")
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let autonomy = Autonomy::open(pool.clone(), Arc::new(NoControl), Arc::new(Silent)).await.unwrap();
+        let stalled = |n: u32| {
+            let mut s = outage_session();
+            s.session_ref = SessionRef::new("mac-2", &format!("card{n}"));
+            s.state_source = "provider".into();
+            s.state_since_ms = Some(START_MS - 600_000);
+            s.screen_changed_at_ms = Some(START_MS - 600_000);
+            s
+        };
+        let clock = Arc::new(FakeClock::new(START_MS));
+        let scheduler = build_recovery(
+            &autonomy,
+            Arc::new(ScriptedControl::default()),
+            Arc::new(FixedFleet { sessions: (1..=4).map(stalled).collect() }),
+            clock.clone(),
+        );
+        scheduler.tick().await;
+        clock.advance(400_000);
+        scheduler.tick().await;
+        let cards = autonomy.escalation_source().pending().await.unwrap();
+        assert_eq!(cards.len(), 4, "{cards:?}");
+        let hub = ferryx_hub::Hub::with_policy(
+            pool,
+            Arc::new(ferryx_hub::agent_control::RecordingControl::default()),
+            ferryx_hub::HubConfig::default(),
+            ferryx_hub::sessions::watch::NotifyPolicy::default(),
+        );
+        let session_tools = Arc::new(ferryx_hub::meta::mhc_supervisor::SessionTools::new(
+            Arc::new(NoControl),
+            Arc::new(FixedFleet { sessions: Vec::new() }),
+        ));
+        super::super::slot_set(
+            &super::super::PANEL_AUTONOMY,
+            Some(Installed { hub, autonomy, recovery: scheduler, session_tools, remote_fleet: None }),
+        );
+        cards[0].prompt.prompt_id.clone()
     }
 
     /// Only a pass that left the lane running is a resume; a stop of any kind is not.

@@ -1058,6 +1058,12 @@ hub_slot! {
     SUPERVISOR_VIEW: SupervisorView
 }
 
+hub_slot! {
+    /// The autonomy service over the current hub's stores (with its recovery scheduler, session
+    /// tools and paired-host fleet). Swapped with the hub: see [`panel_autonomy::install`].
+    PANEL_AUTONOMY: panel_autonomy::Installed
+}
+
 /// The current hub and running slot, `None` until this daemon opened the hub.
 fn supervisor_view() -> Option<SupervisorView> {
     slot_get(&SUPERVISOR_VIEW)
@@ -2323,6 +2329,8 @@ async fn close_for_staged_swap(
         return Ok(false);
     }
     seal_staged_database(incoming.clone()).await?;
+    // Nothing may keep using the stores of the pool about to close.
+    panel_autonomy::uninstall();
     // Resolves once every connection of the old pool is closed, so the swap can rename the file.
     ferryx_hub::storage::close_fully(pool).await;
     Ok(true)
@@ -2352,6 +2360,7 @@ async fn promote_generation() -> Option<Generation> {
                 }
                 launch.hub = hub;
                 publish_hub(&launch, &running);
+                panel_autonomy::install(&launch).await;
                 tracing::info!(path = %database.display(), "hub reopened on the staged database");
             }
             Err(error) => {
@@ -3297,11 +3306,35 @@ fn undo_belongs_to_autonomy(kind: &str) -> bool {
     kind == ferryx_hub::supervisor::autonomy::RESTORE_DECISION
 }
 
+/// The one hub an undo acts on: its pool and the autonomy service opened over that same hub,
+/// both resolved before anything is read. A standby, a daemon without a hub, or a hub whose
+/// autonomy service is not open is `SUPERVISOR_UNAVAILABLE`. The routes' test hub is a hub with
+/// no autonomy service: only its rule undo runs.
+fn undo_hub(
+    state: &RemoteGatewayState,
+) -> Result<
+    (ferryx_hub::goals::SqlitePool, Option<Arc<ferryx_hub::supervisor::autonomy::Autonomy>>),
+    SupervisorControlError,
+> {
+    if standby_refusal().is_some() {
+        return Err(SupervisorControlError::Unavailable);
+    }
+    #[cfg(test)]
+    if let Some((pool, _)) = state.supervisor_test_hub.read().clone() {
+        return Ok((pool, None));
+    }
+    let _ = state;
+    let (hub, _) = supervisor_view().ok_or(SupervisorControlError::Unavailable)?;
+    let autonomy = panel_autonomy::installed_for(&hub).ok_or(SupervisorControlError::Unavailable)?;
+    Ok((hub.pool.clone(), Some(autonomy)))
+}
+
 /// The panel's Undo on one action-log line: runs the entry's undo handle. `restoreDecision`
 /// goes to the installed autonomy service (it reopens the decision card); every other kind goes
 /// through the T2 action log and rule store (`restoreRule`). Both clear the handle once, so a
 /// second undo is `NOT_FOUND`. A handle nobody can reverse is `UNSUPPORTED`; a spent or missing
-/// one is `NOT_FOUND`; a `restoreDecision` without autonomy installed is `SUPERVISOR_UNAVAILABLE`.
+/// one is `NOT_FOUND`; a hub without its autonomy service is `SUPERVISOR_UNAVAILABLE`, checked
+/// before the log is read (see [`undo_hub`]).
 pub async fn undo_supervisor_action(
     state: &RemoteGatewayState,
     id: i64,
@@ -3309,7 +3342,7 @@ pub async fn undo_supervisor_action(
     use ferryx_hub::supervisor::panel_contract::ActionLog;
     use ferryx_hub::supervisor::undo::{ActionUndo, LoggedUndo};
     use ferryx_hub::supervisor::{activity::SqliteActionLog, rules::SqliteRuleStore};
-    let pool = control_pool(state).await?;
+    let (pool, autonomy) = undo_hub(state)?;
     let log = SqliteActionLog::new(pool.clone());
     let decision = log
         .list_today(0)
@@ -3320,7 +3353,7 @@ pub async fn undo_supervisor_action(
         .and_then(|entry| entry.undo)
         .is_some_and(|handle| undo_belongs_to_autonomy(&handle.kind));
     if decision {
-        let autonomy = panel_autonomy::installed().ok_or(SupervisorControlError::Unavailable)?;
+        let autonomy = autonomy.ok_or(SupervisorControlError::Unavailable)?;
         autonomy.undo(id).await.map_err(SupervisorControlError::Undo)?;
         crate::remote::server::agent_control_service::publish_supervisor_changed(
             state,
@@ -3699,17 +3732,8 @@ fn app_conversation(
     })
 }
 
-/// The persisted standing rules, once the daemon's hub open path installs them.
-static RULE_STORE: std::sync::OnceLock<Arc<dyn ferryx_hub::supervisor::panel_contract::RuleStore>> =
-    std::sync::OnceLock::new();
-
-/// Installs the standing-rule store `supervisor_converse` writes rule changes to. Nothing in
-/// this branch calls it: `SqliteRuleStore` lives in the task 4 branch, so until the integration
-/// owner installs it a rule change is refused, never faked.
-pub fn install_rule_store(store: Arc<dyn ferryx_hub::supervisor::panel_contract::RuleStore>) {
-    let _ = RULE_STORE.set(store);
-}
-
+/// The standing-rule store `supervisor_converse` writes rule changes to: the current hub's,
+/// once its autonomy service is installed. Without one a rule change is refused, never faked.
 fn rule_store(
     state: &RemoteGatewayState,
 ) -> Option<Arc<dyn ferryx_hub::supervisor::panel_contract::RuleStore>> {
@@ -3718,7 +3742,7 @@ fn rule_store(
         return Some(store);
     }
     let _ = state;
-    RULE_STORE.get().cloned()
+    panel_autonomy::rule_store()
 }
 
 /// One owner message from the panel composer and the supervisor's reply, both stored in the app
@@ -3887,11 +3911,6 @@ pub async fn local_fleet_session(
     ferryx_hub::fleet::merge_sessions(&labels, &[one], unix_ms()).pop()
 }
 
-/// What the panel reads besides the fleet. Each store is installed by the worker that owns it;
-/// until then its section is empty.
-static PANEL_SOURCES: parking_lot::RwLock<ferryx_hub::fleet::PanelSources> =
-    parking_lot::RwLock::new(ferryx_hub::fleet::PanelSources { log: None, rules: None, escalations: None });
-
 /// The supervisor pause flag the panel reports. The pause route sets it.
 static PANEL_PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -3946,11 +3965,6 @@ pub fn publish_panel_rules(rules: &[ferryx_hub::supervisor::panel_contract::Stan
     let _ = PANEL_EVENTS.send(json!({ "type": PANEL_RULES_EVENT, "rules": rules }));
 }
 
-/// Installs the stores the panel reads (replaces the previous ones).
-pub fn install_panel_sources(sources: ferryx_hub::fleet::PanelSources) {
-    *PANEL_SOURCES.write() = sources;
-}
-
 /// Sets the supervisor pause flag the panel reports.
 pub fn set_panel_paused(paused: bool) {
     PANEL_PAUSED.store(paused, std::sync::atomic::Ordering::Release);
@@ -3974,7 +3988,8 @@ async fn hub_running(state: &RemoteGatewayState) -> bool {
 /// setup (`setupRequired`); the fleet still lists this computer's sessions.
 pub async fn supervisor_panel(state: &Arc<RemoteGatewayState>) -> ferryx_hub::supervisor::panel_contract::PanelSnapshot {
     let sessions = panel_autonomy::fleet_sessions(state).await;
-    let sources = PANEL_SOURCES.read().clone();
+    // What the panel reads besides the fleet: the current hub's stores, or empty sections.
+    let sources = panel_autonomy::panel_sources();
     // The pause the owner set is the hub's persisted flag; the in-process one only covers a
     // daemon whose hub is not open.
     let paused = match supervisor_service(state).await {
@@ -7544,6 +7559,67 @@ mod tests {
             .expect("spawned");
         assert!(running.lock().await.is_some(), "regaining the lease runs a generation again");
         follower.abort();
+    }
+
+    /// After a promotion reopens the hub on a staged database, the supervisor's autonomy, its
+    /// undo and its standing rules act on the reopened hub, not the closed standby pool: the
+    /// pause flag reads as set by the owner (not "unreadable, so paused"), the rules list, and
+    /// an autonomous answer's undo reaches autonomy over the new hub's log.
+    #[tokio::test]
+    async fn after_a_promotion_autonomy_undo_and_rules_act_on_the_reopened_hub() {
+        use ferryx_hub::supervisor::activity::SqliteActionLog;
+        use ferryx_hub::supervisor::panel_contract::{ActionEntry, ActionKind, ActionLog, SessionRef, UndoHandle};
+        use ferryx_hub::supervisor::undo::UndoError;
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("hub.sqlite");
+        let local = ferryx_hub::storage::connect(&database).await.unwrap();
+        let imported = ferryx_hub::storage::connect(&staged_database(&database).unwrap()).await.unwrap();
+        // Stopped, so the promotion reopens the hub and runs no generation.
+        ferryx_hub::control::mark_stopped(&imported).await.unwrap();
+        ferryx_hub::storage::close_fully(&imported).await;
+        let config = HubConfig { database_path: Some(database.clone()), ..HubConfig::default() };
+        let effects = CountingEffects::new();
+        let (launch, _) = test_launch(local.clone(), config, &effects);
+        let state = Arc::clone(launch.server.remote_state());
+        panel_autonomy::install(&launch).await;
+        publish_hub(&launch, &Arc::new(tokio::sync::Mutex::new(None)));
+
+        assert!(promote_generation().await.is_none(), "the imported hub is stopped");
+
+        assert!(local.is_closed(), "the standby's pool was closed for the swap");
+        let (hub, _) = supervisor_view().unwrap();
+        assert!(!hub.pool.is_closed());
+        let autonomy = panel_autonomy::installed().expect("autonomy over the reopened hub");
+        assert!(!autonomy.gate().paused().await, "the pause flag is read from an open hub");
+        assert!(panel_autonomy::recovery().is_some());
+        let rules = rule_store(&state).expect("the reopened hub's rules");
+        assert_eq!(rules.list().await.unwrap().len(), 4, "the default rules of the reopened hub");
+        let stored = SqliteActionLog::new(hub.pool.clone())
+            .upsert_incident(ActionEntry {
+                id: 0,
+                incident_key: "answer-1".into(),
+                session_ref: Some(SessionRef::new("local", "s-1")),
+                kind: ActionKind::Answered,
+                summary: "Answered npm".into(),
+                basis: "you chose npm before".into(),
+                evidence: Vec::new(),
+                undo: Some(UndoHandle {
+                    kind: ferryx_hub::supervisor::autonomy::RESTORE_DECISION.into(),
+                    payload: json!({ "sessionRef": "local:s-1", "promptId": "p1", "screenRevision": "rev-1", "optionIndex": 0 }),
+                }),
+                live: false,
+                created_at_ms: 10,
+                updated_at_ms: 10,
+            })
+            .await
+            .unwrap();
+        // Autonomy over the reopened hub finds the entry; no answer of its own is on record, so
+        // the screen moved on (STALE), not a storage failure on a closed pool.
+        match undo_supervisor_action(&state, stored.id).await {
+            Err(SupervisorControlError::Undo(UndoError::Stale(id))) => assert_eq!(id, stored.id),
+            other => panic!("undo after a promotion answered {other:?}"),
+        }
+        hub.pool.close().await;
     }
 
     /// Promotion with a staged database: the hub reopens on it before the first generation,

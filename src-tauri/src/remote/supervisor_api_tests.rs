@@ -1051,8 +1051,9 @@ async fn a_decision_undo_goes_to_autonomy_not_the_rule_store() {
         .await
         .unwrap();
 
-    // The gateway tests never install the autonomy service, so the decision handle is routed to
-    // it and refused as unavailable: not the rule store's 422 UNSUPPORTED.
+    // The routes' test hub never opened an autonomy service (autonomy belongs to one hub), so
+    // the decision handle is routed to autonomy and refused as unavailable: not the rule
+    // store's 422 UNSUPPORTED.
     let path = format!("/api/v1/supervisor/actions/{}/undo", stored.id);
     let (status, _, body) = gateway.post_to(&path, &token, "").await;
     assert_eq!(status, 503, "{body}");
