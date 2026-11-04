@@ -1,0 +1,162 @@
+name: ci-bc-int
+on:
+  push:
+    branches: ['ci/bc-int-full']
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+jobs:
+  gate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    steps:
+      - name: Free disk (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift /usr/local/share/powershell /usr/local/share/chromium
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h /
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev clang libclang-dev libpipewire-0.3-dev libspa-0.2-dev libdbus-1-dev libva-dev libdrm-dev libgbm-dev libegl-dev libgl-dev libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev libx11-dev libxext-dev libxrandr-dev libxfixes-dev libxtst-dev libxi-dev libevdev-dev libudev-dev
+      - name: Windows OpenSSL perl
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe" >> "$GITHUB_ENV"
+      - name: git identity
+        shell: bash
+        run: |
+          git config --global user.name ferryx-ci
+          git config --global user.email ferryx-ci@users.noreply.github.com
+      - name: Install JS deps
+        shell: bash
+        run: |
+          bun install --frozen-lockfile || bun install
+          bun install --cwd ui --frozen-lockfile || bun install --cwd ui
+      - name: UI build
+        run: bun run --cwd ui build
+      - name: UI typecheck (tests)
+        if: runner.os == 'Linux'
+        run: bun run --cwd ui typecheck:test
+      - name: UI tests (scoped)
+        if: runner.os == 'Linux'
+        run: "bun run --cwd ui test -- Browser browser shortcuts Settings settings App.test TerminalSplitView DefaultBrowserGroup ImportBrowserDataDialog SiteSettingsGroup designTokens"
+      - name: Fetch FFmpeg SDK (remote-desktop)
+        if: always()
+        run: bun scripts/fetch-ffmpeg.mjs
+      - name: Clippy src-tauri -D warnings
+        id: clippy
+        if: always()
+        shell: bash
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --lib --tests -- -D warnings
+      - name: Protocol crate test
+        if: always()
+        shell: bash
+        run: cargo test --manifest-path crates/browser-engine-protocol/Cargo.toml
+      - name: Engine release script test
+        if: always()
+        shell: bash
+        run: bun test scripts/browser-engine/release-engine.test.mjs
+      - name: Verify multi-window policy
+        if: always()
+        shell: bash
+        run: bun scripts/multi-window-policy.mjs
+      - name: Import crate clippy+test
+        if: always()
+        shell: bash
+        run: cargo clippy --manifest-path crates/ferryx-browser-import/Cargo.toml --all-targets -- -D warnings && cargo test --manifest-path crates/ferryx-browser-import/Cargo.toml
+      - name: Engine crate clippy+test (Linux)
+        if: always() && runner.os == 'Linux'
+        timeout-minutes: 45
+        shell: bash
+        env:
+          CEF_PATH: ${{ github.workspace }}/../cef-sdk
+        run: cargo clippy --manifest-path crates/ferryx-browser-engine/Cargo.toml --all-targets -- -D warnings && cargo test --manifest-path crates/ferryx-browser-engine/Cargo.toml
+      - name: wry delegate class test (macOS)
+        if: always() && runner.os == 'macOS' && steps.clippy.outcome == 'success'
+        shell: bash
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test wry_delegate_classes_macos
+      - name: Full src-tauri lib tests
+        if: always() && steps.clippy.outcome == 'success'
+        timeout-minutes: 60
+        shell: bash
+        run: |
+          cargo build --manifest-path remote-helper/Cargo.toml
+          # test_support::ferryx_cli_binary() builds ferryx-cli (plus its feature-peer example)
+          # with a nested cargo the first time a CLI test runs. Left to the suite, that build
+          # relinks the crate graph for 3-10 minutes on Windows WHILE the timing-bounded ssh
+          # and ConPTY tests run. Building the exact same command here makes the nested call a
+          # no-op freshness check.
+          cargo build --manifest-path src-tauri/Cargo.toml --bin ferryx-cli --example remote_grid_frame_dump
+          cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=2 --skip native_terminal::renderer:: --skip remote::tests::test_remote_server_health_and_lifecycle --skip remote::tests::test_headless_handover_workspace_state_selects_live_session_without_desktop_selection --skip daemon::client::tests::test_client_workspace_registration_and_remote_apis --skip terminal::tests::test_spawn_startup_command_omo --skip remote::server::machine_input_cancellation_tests:: --skip remote::tests::security::sockets::a10_pending_machine_input_is_dropped_on_disconnect_and_revoke --skip terminal::tests::a_wedged_pty_does_not_block_the_async_runtime_thread --skip ssh::direct::tests::failed_probe_distinguishes_non_utf8_and_empty_stderr --skip remote::server::p19_insecure_direct_tests:: --skip daemon::server::remote_ssh_tests:: --skip ssh::helper_setup::tests::posix_upload_script_never_kills_live_daemon_and_defers_upgrade --skip ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection
+      # Runs AFTER the full lib step on purpose: a running sshd plus the ~/.ssh key/known_hosts
+      # state measurably slowed and failed timing-bounded ssh helper tests in the full suite
+      # (A/B 41665302606 vs 41665307023). The loopback test is skipped there and run alone below.
+      # ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection requires, on Windows, that
+      # `ssh 127.0.0.1` already works for the current user with the default key, BatchMode=yes and
+      # StrictHostKeyChecking=yes (loopback_ssh_available / sample_host: no user, port or identity).
+      - name: Windows loopback sshd (install + start)
+        if: always() && runner.os == 'Windows' && steps.clippy.outcome == 'success'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) {
+            Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Out-Null
+          }
+          Start-Service sshd
+          Get-Service sshd | Format-Table -AutoSize Name, Status
+      - name: Windows loopback sshd (key, authorization, known_hosts)
+        if: always() && runner.os == 'Windows' && steps.clippy.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          [ -f ~/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/id_ed25519
+          # The runner user is an administrator, so sshd reads administrators_authorized_keys,
+          # which it accepts only when Administrators and SYSTEM alone may access it.
+          cp ~/.ssh/id_ed25519.pub /c/ProgramData/ssh/administrators_authorized_keys
+          MSYS2_ARG_CONV_EXCL='*' icacls 'C:\ProgramData\ssh\administrators_authorized_keys' /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F'
+          ssh-keyscan -t ed25519 127.0.0.1 >> ~/.ssh/known_hosts
+          ssh -n -o BatchMode=yes -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o ConnectTimeout=5 127.0.0.1 echo ok
+      - name: Live loopback OpenSSH bridge test
+        if: always() && steps.clippy.outcome == 'success'
+        timeout-minutes: 15
+        shell: bash
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection --exact
+      - name: Full UI tests
+        if: runner.os == 'Linux' && always()
+        run: bun run --cwd ui test
+      - name: Rust tests (scoped)
+        shell: bash
+        if: always() && steps.clippy.outcome == 'success'
+        run: "cargo test --manifest-path src-tauri/Cargo.toml --lib -- browser:: ipc::browser ipc::default_browser ipc::browser_vault ipc::browser_import ipc::browser_system ipc::browser_extensions automation_snapshot cli:: --test-threads=2"
+      - name: Upload resolved Cargo.lock
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-lock-${{ matrix.os }}
+          path: src-tauri/Cargo.lock
+
