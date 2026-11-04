@@ -11,7 +11,8 @@ export function SkillsStep({ agents, onInstalled }: {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const detected = agents.filter((agent) => agent.available && !agent.custom);
+  const supported = ["claude", "codex", "grok", "antigravity", "cursor-agent", "omp"];
+  const detected = agents.filter((agent) => agent.available && !agent.custom && supported.includes(agent.name));
   return <div className="space-y-3">
     <p>{detected.map((agent) => agent.name).join(", ") || t("onboarding.step.skills.none")}</p>
     {error ? <p role="alert">{error}</p> : null}
