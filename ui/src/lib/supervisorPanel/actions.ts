@@ -21,8 +21,7 @@ export function parseConverseReply(value: unknown): SupervisorReply | null {
 }
 
 export type PanelActionResult =
-  /** `notice`: done, with something the owner still has to know (shown once, not an error). */
-  | { readonly ok: true; readonly reply?: SupervisorReply; readonly notice?: string }
+  | { readonly ok: true; readonly reply?: SupervisorReply }
   /** `stale`: the thing acted on changed (409 / REQUEST_CONFLICT); nothing was done. */
   | { readonly ok: false; readonly stale: boolean; readonly message: string };
 

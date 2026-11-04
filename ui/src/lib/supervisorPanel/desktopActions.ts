@@ -14,10 +14,6 @@ import { setSupervisorLanePaused } from "../supervisor";
 import { extractIpcErrorMessage } from "../sshHosts";
 import { parseConverseReply, STALE_DECISION_MESSAGE, type PanelActionResult, type PanelActions } from "./actions";
 
-/** Turn on started the supervisor, but this computer refused to switch agent control on. */
-export const AGENT_CONTROL_NOT_ENABLED_NOTICE =
-  "The supervisor is on, but this computer didn't let the app switch on agent control, so it can't answer or retry in your sessions yet. Turn on Agent control in Settings > Remote > Access to This Machine.";
-
 /** Tauri rejects an unregistered command with a string naming it. */
 function missingCommand(error: unknown): string | null {
   const text = typeof error === "string" ? error : error instanceof Error ? error.message : "";
@@ -89,21 +85,14 @@ export function desktopPanelActions(input: {
       ),
     stop: async (sessionRef) => changed(await run(() => stopSupervisedSession(sessionRef), "Couldn't stop that session.")),
     undo: async (actionId) => changed(await run(() => undoSupervisorAction(actionId), "Couldn't undo that.")),
-    turnOn: async () => {
-      // Where the daemon cannot tell this app from a terminal pane (a token-only Windows
-      // connection), it refuses widening agent control with FORBIDDEN. Starting the hub widens
-      // nothing, so it still runs; the owner is told how to allow agent control instead.
-      let notice: string | undefined;
-      try {
-        await enableAgentControlOwner();
-      } catch (error) {
-        if (!(isStructuredIpcError(error) && error.code === "FORBIDDEN")) {
-          return failure(error, "Couldn't turn the supervisor on.");
-        }
-        notice = AGENT_CONTROL_NOT_ENABLED_NOTICE;
-      }
-      const result = await run(() => startSupervisor(), "Couldn't turn the supervisor on.");
-      return changed(result.ok && notice ? { ok: true, notice } : result);
-    },
+    // Agent control and the hub start share the daemon's owner gate: a connection it cannot
+    // tell from a terminal pane is refused FORBIDDEN with the reason, and nothing is started.
+    turnOn: async () =>
+      changed(
+        await run(async () => {
+          await enableAgentControlOwner();
+          await startSupervisor();
+        }, "Couldn't turn the supervisor on."),
+      ),
   };
 }

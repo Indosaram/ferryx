@@ -122,12 +122,7 @@ function Decision({
   );
 }
 
-function SetupSection({
-  actions,
-  touch,
-  computerLabel,
-  onNotice,
-}: Pick<PanelSurfaceProps, 'actions' | 'touch' | 'computerLabel'> & { onNotice: (notice: string) => void }) {
+function SetupSection({ actions, touch, computerLabel }: Pick<PanelSurfaceProps, 'actions' | 'touch' | 'computerLabel'>) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const turnOn = async () => {
@@ -137,8 +132,6 @@ function SetupSection({
     const result = await actions.turnOn();
     setPending(false);
     if (!result.ok) setError(result.message);
-    // The card goes away once the hub runs; the panel keeps the notice above its sections.
-    else if (result.notice) onNotice(result.notice);
   };
   return (
     <SetupCard
@@ -169,7 +162,7 @@ export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, c
   );
 
   if (view.setupRequired) {
-    return <SetupSection actions={actions} touch={touch} computerLabel={computerLabel} onNotice={setActionError} />;
+    return <SetupSection actions={actions} touch={touch} computerLabel={computerLabel} />;
   }
 
   const report = async (call: Promise<PanelActionResult>) => {
