@@ -1318,6 +1318,13 @@ impl TerminalOutputHub {
         Some(rows.into_screen())
     }
 
+    pub fn script_text(&self, session_id: &str, lines: usize) -> Option<String> {
+        let session = self.sessions.read().get(session_id).cloned()?;
+        let hub = session.read();
+        let screen = hub.screen.as_ref()?.lock();
+        screen.script_text(lines)
+    }
+
     pub fn subscribe(&self, session_id: &str) -> Option<(Vec<u8>, broadcast::Receiver<Vec<u8>>)> {
         let session_hub = {
             let sessions = self.sessions.read();
