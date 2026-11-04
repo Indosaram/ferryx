@@ -39,6 +39,7 @@ pub enum NotificationSource {
     AgentTaskComplete,
     #[serde(alias = "terminal-bell")]
     TerminalBell,
+    TerminalOsc,
     #[default]
     Test,
 }
@@ -429,6 +430,10 @@ pub fn format_notification(request: &DispatchNotificationRequest) -> Notificatio
             };
             (title, body)
         }
+        NotificationSource::TerminalOsc => (
+            terminal.unwrap_or_else(|| "Terminal".to_string()),
+            agent.unwrap_or_default(),
+        ),
         NotificationSource::Test => (
             "Ferryx notifications are working".to_string(),
             "Test notification".to_string(),
