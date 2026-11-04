@@ -8,7 +8,7 @@ export type DeepLinkRoute =
 
 const sections: readonly string[] = [
   "general", "appearance", "terminal", "shortcuts", "agents", "browser",
-  "notifications", "remote", "ssh", "permissions", "pane-access",
+  "notifications", "remote", "ssh", "permissions", "paneAccess", "plan",
 ];
 
 export function parseDeepLink(raw: string): DeepLinkRoute | null {
