@@ -8,6 +8,12 @@ mod wezterm;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+#[test]
+fn ghostty_maps_font_theme_cursor() {
+    tests::ghostty_maps_font_theme_cursor();
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
