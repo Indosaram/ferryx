@@ -76,6 +76,7 @@ const SIDEBAR_KEYBOARD_STEP = 16;
 const noop = () => undefined;
 
 type SidebarProps = {
+  detachedScope?: string;
   open?: boolean;
   isMac?: boolean;
   projects?: RegisteredProject[];
@@ -127,6 +128,7 @@ export type SidebarAttention = {
  * set), resize, drag-and-drop and the native menus, and feeds the view a SidebarModel.
  */
 export function Sidebar({
+  detachedScope,
   open = true,
   isMac = isMacShortcutPlatform(),
   projects = [],
@@ -532,7 +534,7 @@ export function Sidebar({
           renderRow={renderRow}
           reorder={reorder}
         />
-        <Detached />
+        <Detached scope={detachedScope} />
 
         <div
           role="separator"
