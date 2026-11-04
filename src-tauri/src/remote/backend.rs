@@ -114,8 +114,12 @@ pub struct RemotePairedRecoveryOutcome {
 
 /// Object-safe abstraction for session routing across local and legacy daemon backends.
 pub trait RemoteSessionBackend: Send + Sync {
-    fn resize_owned<'a>(&'a self, _id: &'a str, _client: &'a str, _cols: u16, _rows: u16, _control: bool, _take: bool) -> BoxFuture<'a, Result<bool, String>> {
-        Box::pin(async { Err("Size ownership unsupported".into()) })
+    fn resize_owned<'a>(&'a self, id: &'a str, _client: &'a str, cols: u16, rows: u16, control: bool, _take: bool) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            if !control { return Ok(false); }
+            self.resize(id, cols, rows).await?;
+            Ok(true)
+        })
     }
     fn detach_size<'a>(&'a self, _id: &'a str, _client: &'a str) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async { Ok(()) })
