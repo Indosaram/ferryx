@@ -21,6 +21,7 @@ import { getEventCoordinates } from "@dnd-kit/utilities";
 import { Columns2, Copy, Rows2, X } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { clearPaneFlash, usePaneFlashToken } from "../lib/paneFlash";
+import { SizeOwner } from "./SizeOwner";
 
 import type { ActivitySummary, TerminalActivity } from "../lib/activity";
 import type { BrowserReloadOptions } from "../lib/browserTauri";
@@ -1241,6 +1242,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
       }}
     >
       <PaneEdgeDropZones tabId={tab.id} leafId={leafId} />
+      {content.kind === "terminal" && session?.backendSessionId ? <SizeOwner sessionId={session.backendSessionId} /> : null}
       {flashToken !== null && flashSessionId ? (
         <div
           key={flashToken}

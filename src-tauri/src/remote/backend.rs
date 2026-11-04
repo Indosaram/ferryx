@@ -114,6 +114,23 @@ pub struct RemotePairedRecoveryOutcome {
 
 /// Object-safe abstraction for session routing across local and legacy daemon backends.
 pub trait RemoteSessionBackend: Send + Sync {
+    fn resize_owned_generation<'a>(&'a self, id: &'a str, _client: &'a str, generation: u64, cols: u16, rows: u16, control: bool) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            if !control { return Ok(false); }
+            self.resize_generation(id, generation, cols, rows).await?;
+            Ok(true)
+        })
+    }
+    fn resize_owned<'a>(&'a self, id: &'a str, _client: &'a str, cols: u16, rows: u16, control: bool, _take: bool) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            if !control { return Ok(false); }
+            self.resize(id, cols, rows).await?;
+            Ok(true)
+        })
+    }
+    fn detach_size<'a>(&'a self, _id: &'a str, _client: &'a str) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
     fn acknowledge_agent_outcome<'a>(
         &'a self,
         _session_id: &'a str,
@@ -193,6 +210,15 @@ pub trait RemoteSessionBackend: Send + Sync {
 /// The router retains Local/SSH/legacy transport and generation validation;
 /// the shared service supplies authoritative metadata to HTTP and IPC alike.
 impl RemoteSessionBackend for crate::daemon::session_service::DaemonSessionService {
+    fn resize_owned_generation<'a>(&'a self, id: &'a str, client: &'a str, generation: u64, cols: u16, rows: u16, control: bool) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(self.resize_remote_owner_generation(id, client, cols, rows, control, false, Some(generation)))
+    }
+    fn resize_owned<'a>(&'a self, id: &'a str, client: &'a str, cols: u16, rows: u16, control: bool, take: bool) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(self.resize_remote_owner(id, client, cols, rows, control, take))
+    }
+    fn detach_size<'a>(&'a self, id: &'a str, client: &'a str) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(self.detach_size_owner(id, client))
+    }
     fn acknowledge_agent_outcome<'a>(
         &'a self,
         session_id: &'a str,

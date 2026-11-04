@@ -404,7 +404,7 @@ pub struct DaemonSessionService {
     pub(super) ssh_store_path: PathBuf,
     pub(super) session_metadata: Arc<RwLock<HashMap<String, StoredSessionMeta>>>,
     pub(super) provider_session_claims: Arc<Mutex<HashMap<ProviderSessionClaimKey, String>>>,
-    pub(super) desktop_geometries: Arc<Mutex<HashMap<String, (u16, u16)>>>,
+    pub(super) size_ownerships: Arc<Mutex<HashMap<String, super::size_ownership::SizeOwnership>>>,
     pub(super) agent_states: Arc<AgentStateHub>,
     /// Installed once the gateway's observer exists. Sessions spawned before that are caught by
     /// `watch_live` at install time.
@@ -720,14 +720,101 @@ impl DaemonSessionService {
     }
 
     pub fn record_desktop_geometry(&self, session_id: &str, cols: u16, rows: u16) {
-        self.desktop_geometries
-            .lock()
-            .insert(session_id.to_string(), (cols, rows));
+        let mut states = self.size_ownerships.lock();
+        let state = states.entry(session_id.into()).or_insert_with(|| super::size_ownership::SizeOwnership::new((cols, rows)));
+        let changed = state.owner != super::size_ownership::DESKTOP;
+        state.desktop_resize((cols, rows));
+        if changed { self.publish_size_owner(session_id, state); }
     }
 
     pub fn desktop_geometry(&self, session_id: &str) -> Option<(u16, u16)> {
-        self.desktop_geometries.lock().get(session_id).copied()
+        self.size_ownerships.lock().get(session_id).map(|state| state.desktop)
     }
+
+    pub(crate) fn prefer_desktop_geometry(&self, id: &str, cols: u16, rows: u16) -> bool {
+        let mut states = self.size_ownerships.lock();
+        let state = states.entry(id.into()).or_insert_with(|| super::size_ownership::SizeOwnership::new((cols, rows)));
+        state.desktop = (cols, rows);
+        state.owner == super::size_ownership::DESKTOP
+    }
+
+    fn publish_size_owner(&self, id: &str, state: &super::size_ownership::SizeOwnership) {
+        let _ = self.remote_event_tx.send(DaemonRemoteEvent {
+            event: "SizeOwnerChanged".into(),
+            payload: serde_json::json!({"sessionId": id, "owner": state.owner, "cols": state.applied.0, "rows": state.applied.1, "desktopCols": state.desktop.0, "desktopRows": state.desktop.1}),
+        });
+    }
+
+    pub fn size_owner(&self, id: &str) -> String {
+        self.size_ownerships.lock().get(id)
+            .map(|state| state.owner.clone()).unwrap_or_else(|| super::size_ownership::DESKTOP.into())
+    }
+
+    pub(crate) async fn resize_remote_owner(&self, id: &str, client: &str, cols: u16, rows: u16, control: bool, take: bool) -> Result<bool, String> {
+        self.resize_remote_owner_generation(id, client, cols, rows, control, take, None).await
+    }
+
+    pub(crate) async fn resize_remote_owner_generation(&self, id: &str, client: &str, cols: u16, rows: u16, control: bool, take: bool, supplied: Option<u64>) -> Result<bool, String> {
+        if !control { return Ok(false); }
+        self.validate_session_ssh_target(id).await.map_err(|e| e.to_string())?;
+        // Admission and operation submission are synchronous under the same lock: queued
+        // runtime operations cannot be submitted in the opposite ownership order.
+        let pending = {
+            let mut states = self.size_ownerships.lock();
+            let initial = self.terminal_service.get_session(id).map(|s| s.get_size())
+                .or_else(|| self.terminal_service.remote().details(id).map(|d| (d.descriptor.cols, d.descriptor.rows)))
+                .unwrap_or((80, 24));
+            let state = states.entry(id.into()).or_insert_with(|| super::size_ownership::SizeOwnership::new(initial));
+            let previous = state.clone();
+            if !state.remote_resize(client, (cols, rows), control, take) { return Ok(false); }
+            let generation = supplied.unwrap_or_else(|| self.terminal_service.remote().details(id).map(|d| d.generation).unwrap_or(0));
+            match self.terminal_service.resize_operation(id, generation, cols, rows) {
+                Ok(pending) => {
+                    state.generation = generation;
+                    if previous.owner != state.owner { self.publish_size_owner(id, state); }
+                    pending
+                }
+                Err(error) => { *state = previous; return Err(error.to_string()); }
+            }
+        };
+        pending.await.map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
+    pub(crate) async fn detach_size_owner(&self, id: &str, client: &str) -> Result<(), String> {
+        let pending = {
+            let mut states = self.size_ownerships.lock();
+            let Some(state) = states.get_mut(id) else { return Ok(()); };
+            let previous = state.clone();
+            if !state.detach(client) { return Ok(()); }
+            let (cols, rows) = state.applied;
+            let generation = self.terminal_service.remote().details(id).map(|d| d.generation).unwrap_or(0);
+            let pending = match self.terminal_service.resize_operation(id, generation, cols, rows) {
+                Ok(pending) => pending,
+                Err(error) => { *state = previous; return Err(error.to_string()); }
+            };
+            self.publish_size_owner(id, state);
+            pending
+        };
+        pending.await.map_err(|e| e.to_string())
+    }
+    pub(crate) async fn persist_size_ownership(&self) -> Result<(), String> {
+        let path = self.remote_sessions_path.with_file_name("size-ownership.json");
+        let snapshot = self.size_ownerships.lock().clone();
+        crate::ipc::run_blocking(move || {
+            super::size_ownership::persist(&path, &snapshot).map_err(crate::ipc::IpcError::internal)
+        }).await.map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn restore_size_ownership(&self) -> Result<(), String> {
+        let path = self.remote_sessions_path.with_file_name("size-ownership.json");
+        let snapshot = crate::ipc::run_blocking(move || {
+            super::size_ownership::restore(&path).map_err(crate::ipc::IpcError::internal)
+        }).await.map_err(|error| error.to_string())?;
+        *self.size_ownerships.lock() = snapshot;
+        Ok(())
+    }
+
     pub fn session_activity_state(&self, session_id: &str) -> Option<String> {
         let current = self.agent_states.current(session_id)?;
         match current.state.trim().to_ascii_lowercase().as_str() {
@@ -1435,11 +1522,16 @@ impl DaemonSessionService {
             .details(id)
             .map(|d| d.generation)
             .unwrap_or(0);
-        self.terminal_service
-            .resize_operation(id, generation, cols, rows)
-            .map_err(|e| e.to_string())?
-            .await
-            .map_err(|e| e.to_string())
+        let pending = {
+            let mut states = self.size_ownerships.lock();
+            let state = states.entry(id.into()).or_insert_with(|| super::size_ownership::SizeOwnership::new((cols, rows)));
+            let changed = state.owner != super::size_ownership::DESKTOP;
+            let pending = self.terminal_service.resize_operation(id, generation, cols, rows).map_err(|e| e.to_string())?;
+            state.desktop_resize((cols, rows));
+            if changed { self.publish_size_owner(id, state); }
+            pending
+        };
+        pending.await.map_err(|e| e.to_string())
     }
 
     pub(super) async fn persist_remote_sessions_at(&self, path: PathBuf) -> Result<(), String> {
@@ -2478,7 +2570,7 @@ impl DaemonSessionService {
         let agent_states = Arc::clone(&self.agent_states);
         let agent_watch = self.agent_watch.lock().clone();
         let cleanup_watch = agent_watch.clone();
-        let desktop_geometries = Arc::clone(&self.desktop_geometries);
+        let size_ownerships = Arc::clone(&self.size_ownerships);
         let handover_manager = self.handover_manager.clone();
         let machine_lifecycles = self.machine_lifecycles.clone();
         let client_request_id = client_request_id.to_string();
@@ -2851,7 +2943,7 @@ impl DaemonSessionService {
                 let cleanup_cache = Arc::clone(&spawn_idempotency_cache);
                 let cleanup_metadata = Arc::clone(&session_metadata);
                 let cleanup_claims = Arc::clone(&provider_session_claims);
-                let cleanup_desktop_geometries = Arc::clone(&desktop_geometries);
+                let cleanup_size_ownerships = Arc::clone(&size_ownerships);
                 let cleanup_agent_states = Arc::clone(&agent_states);
                 let cleanup_watch = cleanup_watch.clone();
                 let handover_manager = handover_manager.clone();
@@ -3029,7 +3121,7 @@ impl DaemonSessionService {
                                 .retain(|key, owner| key != &claim || owner != &cleanup_session_id);
                         }
                     }
-                    cleanup_desktop_geometries
+                    cleanup_size_ownerships
                         .lock()
                         .remove(&cleanup_session_id);
                     if let Some(manager) = handover_manager.upgrade() {
@@ -3150,7 +3242,7 @@ impl DaemonSessionService {
 
     pub(super) fn release_session_ownership(&self, session_id: &str) {
         self.session_router.remove_workspace(session_id);
-        self.desktop_geometries.lock().remove(session_id);
+        self.size_ownerships.lock().remove(session_id);
         self.spawn_idempotency_cache
             .lock()
             .retain(|_, entry| entry.session_id != session_id);
@@ -3276,6 +3368,7 @@ impl DaemonSessionService {
                 daemon_epoch: None,
                 session: DaemonSessionDetails {
                     session_id: session_id.into(),
+                    size_owner: Some(self.size_owner(session_id)),
                     workspace_id: Some(d.config.project_id),
                     worktree: meta.as_ref().and_then(|m| m.worktree.clone()),
                     cwd: Some(
@@ -3337,6 +3430,7 @@ impl DaemonSessionService {
                     daemon_epoch: None,
                     session: DaemonSessionDetails {
                         session_id: session_id.into(),
+                        size_owner: Some(self.size_owner(session_id)),
                         workspace_id: None,
                         worktree: None,
                         cwd: None,
@@ -3427,6 +3521,7 @@ impl DaemonSessionService {
             daemon_epoch: None,
             session: DaemonSessionDetails {
                 session_id: session_id.to_string(),
+                size_owner: Some(self.size_owner(session_id)),
                 workspace_id,
                 worktree,
                 cwd,
@@ -3483,6 +3578,75 @@ mod tests {
     use crate::scoped_contracts::Epoch;
     use crate::terminal::output_hub::TerminalOutputHub;
     use crate::terminal::paired_daemon::{Descriptor, Proxy};
+
+    #[tokio::test]
+    async fn size_ownership_service_restores_persisted_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.json");
+        let auth = root.path().join("auth.json");
+        let expected = {
+            let predecessor = DaemonServer::new_with_paths(Some(config.clone()), Some(auth.clone()));
+            let service = predecessor.session_service();
+            let mut state = super::super::size_ownership::SizeOwnership::new((120, 40));
+            state.remote_resize("phone-a", (60, 30), true, false);
+            state.remote_resize("phone-b", (70, 35), true, false);
+            state.generation = 11;
+            service.size_ownerships.lock().insert("retained-session".into(), state);
+            service.persist_size_ownership().await.unwrap();
+            let snapshot = service.size_ownerships.lock().clone();
+            snapshot
+        };
+        let successor = DaemonServer::new_with_paths(Some(config), Some(auth));
+        let service = successor.session_service();
+        assert!(service.size_ownerships.lock().is_empty());
+        service.restore_size_ownership().await.unwrap();
+        assert_eq!(*service.size_ownerships.lock(), expected);
+        let mut restored = service.size_ownerships.lock();
+        let state = restored.get_mut("retained-session").unwrap();
+        assert!(!state.remote_resize("phone-a", (61, 31), true, false));
+        assert!(state.detach("phone-b"));
+        assert_eq!(state.applied, (120, 40));
+        assert_eq!(state.generation, 11);
+    }
+
+    #[tokio::test]
+    async fn size_ownership_real_pty_resize_detach_and_competing_clients() {
+        use futures_util::FutureExt;
+        use std::panic::AssertUnwindSafe;
+        let server = DaemonServer::new();
+        let service = server.session_service();
+        let (id, _) = service.terminal_service.spawn_shell(120, 40).unwrap();
+        let result = AssertUnwindSafe(async {
+            tokio::time::timeout(std::time::Duration::from_secs(20), async {
+                let pty = service.terminal_service.get_session(&id).unwrap();
+                service.record_desktop_geometry(&id, 120, 40);
+                assert!(!service.resize_remote_owner(&id, "viewer", 10, 10, false, true).await.unwrap());
+                assert_eq!(pty.get_size(), (120, 40));
+                assert!(service.resize_remote_owner(&id, "phone", 60, 30, true, false).await.unwrap());
+                assert_eq!(pty.get_size(), (60, 30));
+                assert_eq!(service.size_owner(&id), "phone");
+                assert!(!service.prefer_desktop_geometry(&id, 130, 45));
+                service.detach_size_owner(&id, "phone").await.unwrap();
+                assert_eq!(pty.get_size(), (130, 45));
+                assert_eq!(service.size_owner(&id), "desktop");
+                service.resize_remote_owner(&id, "a", 60, 30, true, false).await.unwrap();
+                service.resize_remote_owner(&id, "b", 70, 35, true, false).await.unwrap();
+                service.resize_remote_owner(&id, "a", 60, 30, true, true).await.unwrap();
+                for _ in 0..100 {
+                    assert!(!service.resize_remote_owner(&id, "b", 70, 35, true, false).await.unwrap());
+                    assert!(service.resize_remote_owner(&id, "a", 60, 30, true, false).await.unwrap());
+                    assert_eq!(pty.get_size(), (60, 30));
+                }
+                service.resize_session(&id, 120, 40).await.unwrap();
+                assert!(!service.resize_remote_owner(&id, "a", 60, 30, true, false).await.unwrap());
+                assert_eq!(pty.get_size(), (120, 40));
+                let DaemonResponse::DescribeSessionOk { session, .. } = service.handle_describe_session(&id) else { panic!("describe") };
+                assert_eq!(session.size_owner.as_deref(), Some("desktop"));
+            }).await.unwrap();
+        }).catch_unwind().await;
+        service.terminal_service.close_session(&id).await.unwrap();
+        if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    }
 
     #[tokio::test]
     async fn local_split_reliability_conflicting_fingerprint_reuse_is_rejected_without_creating_a_session() {

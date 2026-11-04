@@ -4272,6 +4272,7 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
                                 session: DaemonSessionDetails {
                                     session_id,
                                     workspace_id: Some("mock-ws".into()),
+                                    size_owner: None,
                                     worktree: None,
                                     cwd: Some("/mock/path".into()),
                                     cols: 80,
@@ -4609,6 +4610,7 @@ async fn test_headless_handover_workspace_state_selects_live_session_without_des
                                 session: DaemonSessionDetails {
                                     session_id,
                                     workspace_id: Some("mock-handover-ws".into()),
+                                    size_owner: None,
                                     worktree: None,
                                     cwd: Some("/mock/handover".into()),
                                     cols: 80,

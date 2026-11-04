@@ -4020,10 +4020,11 @@ impl DaemonServer {
                 .unwrap_or_else(daemon_ssh_store_path),
             session_metadata: Arc::new(RwLock::new(HashMap::new())),
             provider_session_claims: Arc::new(Mutex::new(HashMap::new())),
-            desktop_geometries: Arc::new(Mutex::new(HashMap::new())),
+            size_ownerships: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
             test_shell_command: parking_lot::Mutex::new(None),
         });
+        handover_manager.set_size_ownership(Arc::clone(&session_service.size_ownerships));
         // OSC 7501 summaries from every mirror this daemon answers for become Protocol states.
         let protocol_reporters =
             Arc::new(crate::terminal::foreground::ProtocolReporters::default());
@@ -5295,6 +5296,9 @@ impl DaemonServer {
         // Only an owner (it still holds the daemon locks) published the files on disk; a
         // draining predecessor handed its locks and listeners to the successor and leaves them.
         if self.handover_manager.holds_lock_files() {
+            if let Err(error) = self.session_service.persist_size_ownership().await {
+                tracing::error!(%error, "Failed to checkpoint size ownership while shutting down");
+            }
             let artifacts = self.published_endpoints.lock().clone();
             let removed =
                 crate::ipc::run_blocking(move || Ok(remove_owned_endpoint_artifacts(&artifacts))).await;
@@ -6216,6 +6220,7 @@ impl DaemonServer {
         }
 
         if handover_from.is_none() {
+            self.session_service.restore_size_ownership().await?;
             self.restore_remote_sessions_at(self.remote_sessions_path.clone())
                 .await?;
         } else if let Some(legacy) = handover_from.clone() {
@@ -6234,6 +6239,8 @@ impl DaemonServer {
             // The predecessor's cross-pane grants ride the same record (rex todo 5).
             let manager = Arc::clone(&self.handover_manager);
             if let Err(error) = crate::ipc::run_blocking(move || {
+                manager.adopt_recorded_size_ownership(&grants_legacy)
+                    .map_err(crate::ipc::IpcError::internal)?;
                 manager
                     .adopt_recorded_pane_grants(&grants_legacy)
                     .map_err(crate::ipc::IpcError::internal)
@@ -7285,6 +7292,7 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::Resize { session_id, cols, rows }) if self.serves_paired_here(&session_id) => {
+                    self.record_desktop_geometry(&session_id, cols, rows);
                     match self.terminal_service.resize_operation(&session_id, 0, cols, rows) {
                         Ok(pending) => match pending.await {
                             Ok(()) => DaemonResponse::ResizeOk,
@@ -7374,6 +7382,11 @@ impl DaemonServer {
                         bytes_written: outcome.bytes_written,
                         settled: outcome.settled,
                     }
+                }
+                Ok(DaemonRequest::Resize { ref session_id, cols, rows })
+                    if !self.remote_state.desktop_window_focus_suppresses_push()
+                        && !self.session_service.prefer_desktop_geometry(session_id, cols, rows) => {
+                    DaemonResponse::ResizeOk
                 }
                 Ok(DaemonRequest::Resize {
                     session_id,
@@ -7969,6 +7982,9 @@ impl DaemonServer {
                     capabilities.push(crate::daemon::pane_grants::PANE_GRANTS_CAPABILITY.into());
                     capabilities.push("screenHashV1".into());
                     capabilities.push("scrollbackBudgetV1".into());
+                    capabilities.push("sizeOwnershipV1".into());
+                    #[cfg(feature = "local-split-qa")]
+                    capabilities.push("sizeOwnershipQaV1".into());
                     #[cfg(feature = "remote-desktop")]
                     capabilities.push(crate::daemon::protocol::REMOTE_DESKTOP_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
@@ -9449,6 +9465,10 @@ impl DaemonServer {
                         return DaemonResponse::UpgradeUnsupported;
                     }
                 };
+                if let Err(error) = self.session_service.persist_size_ownership().await {
+                    tracing::error!(%error, "Idle daemon restart aborted: ownership checkpoint failed");
+                    return DaemonResponse::UpgradeUnsupported;
+                }
                 // The successor waits for our instance lock, so it must be running before we
                 // release it. No session is live here, so the exit cannot cost a terminal.
                 let mut successor = std::process::Command::new(&exe);
@@ -9507,7 +9527,12 @@ impl DaemonServer {
         &self,
         mut config: RemoteGatewayConfig,
     ) -> Result<(), String> {
-        config.port = REMOTE_GATEWAY_PORT;
+        // An isolated QA daemon must never contend with the owner's live gateway.
+        #[cfg(feature = "local-split-qa")]
+        let isolated = active_transport_qa_profile();
+        #[cfg(not(feature = "local-split-qa"))]
+        let isolated = false;
+        if !isolated { config.port = REMOTE_GATEWAY_PORT; }
         refresh_cors_saved_host_origins(self.paired_hosts.clone(), Arc::clone(&self.remote_state))
             .await;
         self.configure_gateway(config).await
@@ -14092,7 +14117,7 @@ mod instance_lock_deadline_tests {
         // 5. restore without a record is a no-op.
         server
             .session_service
-            .desktop_geometries
+            .size_ownerships
             .lock()
             .remove(&session_id);
         assert_eq!(server.session_service.desktop_geometry(&session_id), None);

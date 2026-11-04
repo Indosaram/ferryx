@@ -482,6 +482,34 @@ mod tests {
     }
 
     #[test]
+    fn size_ownership_roundtrip_through_handover_wire() {
+        use crate::daemon::handover_transaction::HandoverTransaction;
+        use crate::daemon::size_ownership::SizeOwnership;
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut transaction = HandoverTransaction::new_simple(&id, &id, 1, 2, 3, 4, "size-test");
+        let mut state = SizeOwnership::new((120, 40));
+        state.remote_resize("phone-a", (60, 30), true, false);
+        state.remote_resize("phone-b", (70, 35), true, false);
+        state.remote_resize("phone-a", (61, 31), true, true);
+        state.generation = 42;
+        transaction.size_ownership = Some(std::collections::HashMap::from([("pty-1".into(), state)]));
+        let (sender, receiver) = socketpair();
+        let frame = HandoverFrame::new(7, id, 1, serde_json::to_value(&transaction).unwrap());
+        send_frame(sender.as_raw_fd(), &frame).unwrap();
+        let received = recv_frame(receiver.as_raw_fd()).unwrap();
+        let restored: HandoverTransaction = serde_json::from_value(received.payload).unwrap();
+        assert_eq!(restored, transaction);
+        let mut state = restored.size_ownership.unwrap().remove("pty-1").unwrap();
+        assert!(!state.remote_resize("phone-b", (71, 36), true, false));
+        assert!(state.detach("phone-a"));
+        assert_eq!(state.applied, (120, 40));
+        assert_eq!(state.generation, 42);
+        let mut old = serde_json::to_value(transaction).unwrap();
+        old.as_object_mut().unwrap().remove("sizeOwnership");
+        assert!(serde_json::from_value::<HandoverTransaction>(old).unwrap().size_ownership.is_none());
+    }
+
+    #[test]
     fn roundtrip_zero_fds() {
         let (sender, receiver) = socketpair();
         let frame = sample_frame(Vec::new());

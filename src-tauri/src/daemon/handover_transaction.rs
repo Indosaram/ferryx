@@ -521,6 +521,9 @@ pub struct HandoverTransaction {
     /// the same optional, older-peer-compatible encoding as `supervisor_lease`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_grants: Option<Vec<crate::daemon::pane_grants::PaneGrant>>,
+    /// Additive state: a handover-v1 record without ownership keeps desktop defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_ownership: Option<crate::daemon::size_ownership::SizeOwnershipSnapshot>,
 }
 
 /// The predecessor's held supervisor lease at handover commit: the machine identity and fence
@@ -572,6 +575,7 @@ impl HandoverTransaction {
             result: None,
             supervisor_lease: None,
             pane_grants: None,
+            size_ownership: None,
         }
     }
 

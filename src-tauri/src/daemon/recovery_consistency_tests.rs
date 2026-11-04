@@ -81,6 +81,7 @@ mod tests {
     #[test]
     fn recovery_consistency_inv4_paired_actor_absence_is_not_process_exit() {
         let paired_details = DaemonSessionDetails {
+            size_owner: None,
             session_id: "paired-session-proxy".into(),
             workspace_id: None,
             worktree: None,
@@ -121,6 +122,7 @@ mod tests {
     #[test]
     fn recovery_consistency_inv2_matching_incarnation_affirmative_exit() {
         let exited_details = DaemonSessionDetails {
+            size_owner: None,
             session_id: "local-session-1".into(),
             workspace_id: Some("ws-local".into()),
             worktree: None,
@@ -158,6 +160,7 @@ mod tests {
     #[test]
     fn recovery_consistency_inv3_mismatched_incarnation_blocks() {
         let live_details = DaemonSessionDetails {
+            size_owner: None,
             session_id: "session-conflict".into(),
             workspace_id: None,
             worktree: None,

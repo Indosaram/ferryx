@@ -848,6 +848,27 @@ mod spawn_owner_tests {
     }
 
     #[test]
+    fn size_ownership_survives_committed_handover() {
+        use super::super::size_ownership::SizeOwnership;
+        let (_root, manager, terminals, legacy) = committing_fixture();
+        let mut state = SizeOwnership::new((120, 40));
+        state.remote_resize("phone", (60, 30), true, false);
+        state.generation = 9;
+        let registry = Arc::new(Mutex::new(std::collections::HashMap::from([("pty-1".into(), state)])));
+        manager.set_size_ownership(registry.clone());
+        manager.commit_handover_v5(&terminals).unwrap();
+        let successor = HandoverManager::new(legacy.with_file_name("successor.sock"));
+        let adopted = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        successor.set_size_ownership(adopted.clone());
+        successor.adopt_recorded_size_ownership(&legacy).unwrap();
+        assert_eq!(*adopted.lock(), *registry.lock());
+        let mut adopted = adopted.lock();
+        let state = adopted.get_mut("pty-1").unwrap();
+        assert!(state.detach("phone"));
+        assert_eq!(state.applied, (120, 40));
+    }
+
+    #[test]
     fn an_abort_record_carries_no_pane_grants() {
         use super::super::pane_grants::{GrantOp, PaneGrant, PaneGrants};
         let (_root, manager, _terminals, legacy) = committing_fixture();
@@ -1252,6 +1273,7 @@ pub struct HandoverManager {
     handed_supervisor_lease: Mutex<Option<super::handover_transaction::SupervisorLeaseTransfer>>,
     /// This daemon's cross-pane grants, written into the commit decision record.
     pane_grants: RwLock<Option<Arc<super::pane_grants::PaneGrants>>>,
+    size_ownership: RwLock<Option<super::size_ownership::SizeOwnershipRegistry>>,
 }
 
 impl HandoverManager {
@@ -1305,6 +1327,23 @@ impl HandoverManager {
         *self.pane_grants.write() = grants;
     }
 
+    pub fn set_size_ownership(&self, registry: super::size_ownership::SizeOwnershipRegistry) {
+        *self.size_ownership.write() = Some(registry);
+    }
+
+    pub fn adopt_recorded_size_ownership(&self, legacy: &std::path::Path) -> Result<(), String> {
+        use super::handover_transaction::{HandoverState, HandoverTransaction};
+        let bytes = fs::read(legacy.with_extension("transaction")).map_err(|error| error.to_string())?;
+        let transaction: HandoverTransaction = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        if transaction.transfer_id != legacy.to_string_lossy() || transaction.state != HandoverState::Retired {
+            return Err("Size ownership adoption requires a committed predecessor".into());
+        }
+        if let (Some(snapshot), Some(registry)) = (transaction.size_ownership, self.size_ownership.read().clone()) {
+            *registry.lock() = snapshot;
+        }
+        Ok(())
+    }
+
     /// The cross-pane grants a predecessor wrote into its committed (Retired) decision record
     /// beside `legacy`; `None` without a record, without grants, or for an abort decision.
     pub fn recorded_pane_grants(legacy: &std::path::Path) -> Option<Vec<super::pane_grants::PaneGrant>> {
@@ -1351,6 +1390,9 @@ impl HandoverManager {
         // after) and hands its lease to the successor in the same durable record.
         let lease = if committed { self.supervisor_lease.read().clone() } else { None };
         transaction.supervisor_lease = lease.as_ref().and_then(|lease| lease.freeze_for_handover());
+        transaction.size_ownership = if committed {
+            self.size_ownership.read().as_ref().map(|registry| registry.lock().clone())
+        } else { None };
         transaction.pane_grants = if committed {
             self.pane_grants.read().as_ref().map(|grants| grants.list())
         } else {
@@ -1462,6 +1504,7 @@ impl HandoverManager {
             supervisor_lease: RwLock::new(None),
             handed_supervisor_lease: Mutex::new(None),
             pane_grants: RwLock::new(None),
+            size_ownership: RwLock::new(None),
         }
     }
 

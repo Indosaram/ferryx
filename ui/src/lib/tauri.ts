@@ -220,6 +220,7 @@ export type RecoveryAuthorityEvidence = {
 };
 
 export type TerminalDescribeResult = {
+  sizeOwner?: string | null;
   sessionId: string;
   incarnation?: string | null;
   workspaceId?: string | null;
