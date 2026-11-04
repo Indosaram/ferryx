@@ -2,7 +2,7 @@
 import { createLayoutState, layoutReducer, type LayoutAction } from "../src/state/layout";
 import type { LayoutState, WorkspaceTab } from "../src/lib/types";
 
-const terminal = (id: string): WorkspaceTab => ({ id, kind: "terminal", label: id, sessionId: `pty-${id}`, worktreePath: "/repo" });
+const terminal = (id: string): WorkspaceTab => ({ id, kind: "terminal", label: id, sessionId: `pty-${id}` });
 const initial = () => {
   let state = createLayoutState([terminal("one"), terminal("two")], "one");
   state = layoutReducer(state, { type: "SPLIT_PANE", tabId: "one", targetLeafId: "leaf-init", newLeafId: "second", sessionId: "pty-second", direction: "horizontal" });
@@ -17,6 +17,7 @@ function project(state: LayoutState) {
   return state.tabs.map((tab) => ({ tabId: tab.id, label: tab.label, pinned: tab.pinned ?? false,
     paneTree: tree(state.layoutsByTabId[tab.id].root, state.layoutsByTabId[tab.id].contentsByLeafId ?? {}) }));
 }
+// createLayoutState uses the stable initial group identity.
 const group = initial().focusedGroupId!;
 const pairs: { action: LayoutAction; intent: Record<string, unknown> }[] = [
   { action: { type: "ADD_TAB", tab: terminal("three"), activate: true }, intent: { type: "ADD_TAB_WITH_SESSION", tabId: "three", label: "three", content: { kind: "terminal", backendSessionId: "pty-three" }, activate: true } },
