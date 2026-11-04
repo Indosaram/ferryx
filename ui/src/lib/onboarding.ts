@@ -9,6 +9,8 @@ export type OnboardingStepId =
   | "intro"
   | "features"
   | "agents"
+  | "enroll"
+  | "skills"
   | "cli"
   | "project"
   | "supervisor"
@@ -30,6 +32,8 @@ export const ONBOARDING_STEP_ORDER: readonly OnboardingStepId[] = [
   "intro",
   "features",
   "agents",
+  "enroll",
+  "skills",
   "cli",
   "project",
   "supervisor",
@@ -55,6 +59,8 @@ export type OnboardingContext = {
   projectCount: number;
   /** True once this computer is enrolled to the signed-in Ferryx account. */
   accountLinked?: boolean;
+  enrollmentReady?: boolean;
+  skillsReady?: boolean;
   /** Paired remote devices, when known; unknown never nags. */
   pairedDeviceCount?: number | null;
   /** True once supervisor setup is finished; null or absent (unknown, older daemon) never nags. */
@@ -159,9 +165,31 @@ export function saveOnboardingState(
   if (!storage) return;
   try {
     storage.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(state));
+    if (storage === browserStorage() && typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+      persistence = persistence.then(async () => {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("cmd_onboarding_set", { state });
+      }).catch((error) => {
+        console.error("Could not persist onboarding", error);
+        window.dispatchEvent(new CustomEvent("ferryx:onboarding-persistence-error", { detail: error }));
+      });
+    }
   } catch {
     void 0;
   }
+}
+
+let persistence: Promise<void> = Promise.resolve();
+
+/** Hydrate before opening; localStorage is only a cache on desktop. */
+export async function hydrateOnboardingState(): Promise<OnboardingState> {
+  const cache = loadOnboardingState();
+  if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return cache;
+  await persistence;
+  const { invoke } = await import("@tauri-apps/api/core");
+  const state = await invoke<OnboardingState>("cmd_onboarding_get", { cache });
+  browserStorage()?.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(state));
+  return state;
 }
 
 export function markOnboardingStepsCompleted(
@@ -208,6 +236,9 @@ export function resetOnboarding(
   } catch {
     void 0;
   }
+  if (storage === browserStorage() && typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+    saveOnboardingState({ version: 1, completedSteps: [], dismissed: false }, storage);
+  }
 }
 
 export function visiblePermissionKeys(
@@ -235,6 +266,10 @@ export function isOnboardingStepSatisfied(
   ctx: OnboardingContext
 ): boolean {
   switch (step) {
+    case "enroll":
+      return ctx.enrollmentReady !== false;
+    case "skills":
+      return ctx.skillsReady !== false;
     case "account":
       return ctx.accountLinked === true;
     case "intro":
@@ -325,7 +360,7 @@ export function shouldAutoOpenOnboarding(
         step !== "try" &&
         step !== "account" &&
         step !== "phone" &&
-        step !== "supervisor"
+        step !== "supervisor" && step !== "enroll" && step !== "skills"
     )
   );
 }
