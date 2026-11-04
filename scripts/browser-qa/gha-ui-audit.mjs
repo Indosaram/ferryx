@@ -41,6 +41,15 @@ import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { inflateSync } from "node:zlib";
+import {
+  dailyChromium,
+  dailyFixtures,
+  dailyRestart,
+  dailyWebviewAfter,
+  dailyWebviewBefore,
+  outsideSessionFiles,
+  statOrNull,
+} from "./daily-scenarios.mjs";
 
 const argv = process.argv.slice(2);
 const option = (name) => {
@@ -172,16 +181,18 @@ if (engineZip) {
   summary.engine.signing_key = "throwaway ed25519 generated for this run (debug-build override)";
   served.set("/__engine-key", { privateKey, zipBytes });
 }
-const server = Bun.serve({
-  port: 0,
-  hostname: "127.0.0.1",
-  fetch(request) {
-    const entry = served.get(new URL(request.url).pathname);
-    if (!entry || entry.privateKey) return new Response("not found", { status: 404 });
-    return new Response(entry.body, { headers: { "Content-Type": entry.type, ...(entry.headers ?? {}) } });
-  },
-});
+const serveFixture = (request) => {
+  const entry = served.get(new URL(request.url).pathname);
+  if (!entry || entry.privateKey) return new Response("not found", { status: 404 });
+  const body = entry.dynamic ? entry.dynamic(request) : entry.body;
+  return new Response(body, { headers: { "Content-Type": entry.type, ...(entry.headers ?? {}) } });
+};
+const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: serveFixture });
+// A second origin (another port) for per-site zoom and the cross-origin login iframe.
+const serverB = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: serveFixture });
 const fixtureBase = `http://127.0.0.1:${server.port}`;
+const siteB = `http://127.0.0.1:${serverB.port}`;
+for (const [path, entry] of dailyFixtures({ siteB })) served.set(path, entry);
 if (engineZip) {
   const { privateKey, zipBytes } = served.get("/__engine-key");
   const manifest = Buffer.from(JSON.stringify({
@@ -213,7 +224,7 @@ const linux = {
     return this.windowId ? run("xdotool", ["windowactivate", "--sync", this.windowId]) : { ok: false, stderr: "no window" };
   },
   keyName(key) {
-    return { Tab: "Tab", Enter: "Return", Escape: "Escape", Space: "space", ",": "comma", "=": "equal", "[": "bracketleft" }[key] ?? key;
+    return { Tab: "Tab", Enter: "Return", Escape: "Escape", Space: "space", ",": "comma", "=": "equal", "[": "bracketleft", Down: "Down", BackSpace: "BackSpace", F4: "F4" }[key] ?? key;
   },
   key({ key, mods = [] }) {
     return run("xdotool", ["key", "--clearmodifiers", [...mods.map((mod) => (mod === "mod" ? "ctrl" : mod)), this.keyName(key)].join("+")]);
@@ -223,6 +234,9 @@ const linux = {
   },
   click(x, y) {
     return run("xdotool", ["mousemove", "--sync", String(x), String(y), "click", "1"]);
+  },
+  rightClick(x, y) {
+    return run("xdotool", ["mousemove", "--sync", String(x), String(y), "click", "3"]);
   },
   // Left button press, move with the button held, release: a real pointer drag for dnd-kit.
   mouseDown(x, y) {
@@ -258,7 +272,7 @@ const linux = {
 };
 
 // ---------------------------------------------------------------- platform: macOS
-const macKeyCodes = { Tab: 48, Enter: 36, Escape: 53, Space: 49 };
+const macKeyCodes = { Tab: 48, Enter: 36, Escape: 53, Space: 49, Down: 125, BackSpace: 51 };
 const mac = {
   pid: null,
   pixelScale: null,
@@ -284,7 +298,7 @@ const mac = {
     const result = this.osa(`tell application "System Events" to ${action}`);
     if (result.ok) return result;
     const cliMods = mods.map((mod) => ({ mod: "cmd", shift: "shift", alt: "alt", ctrl: "ctrl" })[mod]);
-    const named = { Tab: "tab", Enter: "return", Escape: "esc", Space: "space" }[key];
+    const named = { Tab: "tab", Enter: "return", Escape: "esc", Space: "space", Down: "arrow-down", BackSpace: "delete" }[key];
     const fallback = run("cliclick", [...(cliMods.length ? [`kd:${cliMods.join(",")}`] : []), named ? `kp:${named}` : `t:${key}`, ...(cliMods.length ? [`ku:${cliMods.join(",")}`] : [])]);
     return { ...fallback, stderr: `osascript: ${result.stderr}; cliclick: ${fallback.stderr}` };
   },
@@ -295,6 +309,10 @@ const mac = {
   click(x, y) {
     const scale = this.scale();
     return run("cliclick", [`c:${Math.round(x / scale)},${Math.round(y / scale)}`]);
+  },
+  rightClick(x, y) {
+    const scale = this.scale();
+    return run("cliclick", [`rc:${Math.round(x / scale)},${Math.round(y / scale)}`]);
   },
   // cliclick dd/dm/du: button down, drag-move with the button held, button up (points, like click).
   cliMouse(command, x, y) {
@@ -355,7 +373,7 @@ const mac = {
 
 // ---------------------------------------------------------------- platform: Windows
 const winHelper = join(out, "win-input.ps1");
-const winVk = { Tab: 0x09, Enter: 0x0d, Escape: 0x1b, Space: 0x20, ",": 0xbc, "=": 0xbb, "[": 0xdb, mod: 0x11, ctrl: 0x11, shift: 0x10, alt: 0x12 };
+const winVk = { Tab: 0x09, Enter: 0x0d, Escape: 0x1b, Space: 0x20, ",": 0xbc, "=": 0xbb, "[": 0xdb, mod: 0x11, ctrl: 0x11, shift: 0x10, alt: 0x12, Down: 0x28, BackSpace: 0x08, F4: 0x73 };
 const win = {
   pid: null,
   hwnd: null,
@@ -379,6 +397,9 @@ const win = {
   },
   click(x, y) {
     return this.ps("click", ["-Hwnd", this.hwnd, "-Width", String(x), "-Height", String(y)]);
+  },
+  rightClick(x, y) {
+    return this.ps("rclick", ["-Width", String(x), "-Height", String(y)]);
   },
   // Each call is a separate helper process, so moves are slower than on the other hosts; the
   // button state lives in the OS, so it stays held between calls.
@@ -518,6 +539,9 @@ switch ($Action) {
   "keys" { [void][FxInput]::Focus($handle); $n = [FxInput]::Chord([uint16[]]($Codes -split "," | ForEach-Object { [uint16]$_ })); if ($n -eq 0) { exit 4 } }
   "type" { [void][FxInput]::Focus($handle); $n = [FxInput]::Type($Text); if ($n -eq 0) { exit 4 } }
   "click" { $n = [FxInput]::Click($Width, $Height); if ($n -eq 0) { exit 4 } }
+  "rclick" { [void][FxInput]::SetCursorPos($Width, $Height); $n = [FxInput]::Button($Width, $Height, 0x0008) + [FxInput]::Button($Width, $Height, 0x0010); if ($n -eq 0) { exit 4 } }
+  "typeraw" { $n = [FxInput]::Type($Text); if ($n -eq 0) { exit 4 } }
+  "keysraw" { $n = [FxInput]::Chord([uint16[]]($Codes -split "," | ForEach-Object { [uint16]$_ })); if ($n -eq 0) { exit 4 } }
   "down" { $n = [FxInput]::Button($Width, $Height, 0x0002); if ($n -eq 0) { exit 4 } }
   "move" { $n = [FxInput]::Button($Width, $Height, 0x0001); if ($n -eq 0) { exit 4 } }
   "up" { $n = [FxInput]::Button($Width, $Height, 0x0004); if ($n -eq 0) { exit 4 } }
@@ -889,6 +913,9 @@ writeFileSync(agentAuthority, JSON.stringify({ settings: { requirePairing: false
 summary.agent_access = { requirePairing: false, file: agentAuthority };
 
 let app = null;
+// Session files outside the isolation dirs, before the app ever ran (G1: nothing is written there).
+const startedAtMs = Date.now();
+const outsideBefore = Object.fromEntries(outsideSessionFiles(platform).map((path) => [path, statOrNull(path)]));
 /** Starts the app with the isolated env; its exit is recorded unless the harness restarted it. */
 function launchApp(logName) {
   const log = openSync(join(out, logName), "w");
@@ -1669,6 +1696,78 @@ await step(
 await step("settings-open", "Click the sidebar, Mod+, opens Settings (retried once after re-focusing the app)", [focus, chromeFocus, ["open Settings", openSettings], dismissStoreToast], {
   any: ["General", "Appearance"],
 });
+
+// ---------------------------------------------------------------- daily browser (F4 gaps)
+/**
+ * Quit like a user (macOS Mod+Q, else Alt+F4 on the Ferryx window), falling back to the signal
+ * the extension restart uses when the app is still running after 20s; then relaunch on the same
+ * dirs and wait for the window.
+ */
+async function quitAndRelaunch(logName) {
+  const old = app;
+  app = null;
+  const exited = new Promise((done) => old.once("exit", done));
+  host.focus();
+  await sleep(500);
+  if (platform === "darwin") host.key({ key: "q", mods: ["mod"] });
+  else host.key({ key: "F4", mods: ["alt"] });
+  let quitVia = platform === "darwin" ? "Mod+Q" : "Alt+F4";
+  let stopped = await Promise.race([exited.then(() => true), sleep(20000).then(() => false)]);
+  if (!stopped) {
+    quitVia = "fallback-kill";
+    if (platform === "win32") run("taskkill", ["/PID", String(old.pid), "/F"]);
+    else old.kill("SIGTERM");
+    stopped = await Promise.race([exited.then(() => true), sleep(20000).then(() => false)]);
+  }
+  const deadline = Date.now() + 30000;
+  while (enginePids().length && Date.now() < deadline) await sleep(1000);
+  for (const pid of enginePids()) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {}
+  }
+  app = launchApp(logName);
+  const window = await waitForWindow();
+  await clickText("Skip", { timeout: 4000 });
+  return { ok: stopped && window.found, quit_via: quitVia, exited: stopped, window, pid: app.pid };
+}
+const daily = {
+  summary,
+  state: {},
+  platform,
+  out,
+  dirs,
+  fixtureBase,
+  siteB,
+  host,
+  win,
+  run,
+  ocr,
+  probeShot,
+  decodePng,
+  step,
+  cli,
+  cliAsync,
+  sessions,
+  typeUrl,
+  clickAddressBar,
+  openSettings,
+  clickNav,
+  scrollSettingsTo,
+  quitAndRelaunch,
+  startedAtMs,
+  outsideBefore,
+  closeDialogs: () => (platform === "win32" ? win.closeDialogs() : { ok: true }),
+  chromeFocusClick: () => chromeFocus[1](),
+};
+// Settings is open: these run on the page, so close it first; they need the system webview.
+await step("daily-settings-closed", "Escape closes Settings before the daily-browser scenarios", [focus, key("Escape", { key: "Escape" }), 1500]);
+await dailyWebviewBefore(daily);
+await dailyRestart(daily);
+await dailyWebviewAfter(daily);
+await step("daily-settings-reopen", "Reopen Settings after the daily-browser scenarios", [focus, chromeFocus, ["open Settings", openSettings], dismissStoreToast], {
+  any: ["General", "Appearance"],
+});
 await step(
   "settings-enable-advanced",
   "Click the switch on General > 'Advanced features' (row found by label, switch by its pixels); Browser/Notifications appear in the nav",
@@ -2020,6 +2119,9 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
     // agent-chromium navigated this tab to /agent.html, so its page/title read "agentqa" now.
     { any: ["~agentqa", "~ferryxqa", "fixture:"] },
   );
+  // Daily browser on Chromium tabs (upload/drag-in, PDF viewer, named profile separation),
+  // while the engine is still alive (engine-kill below closes its tabs).
+  await dailyChromium(daily);
   await step(
     "engine-kill",
     "SIGKILL the engine; its tabs must close instead of leaving a blank pane",
@@ -2498,6 +2600,7 @@ async function teardown() {
   }
   await sleep(1500);
   server.stop(true);
+  serverB.stop(true);
   writeSummary();
   const dragMask = summary.drag_mask;
   console.log(JSON.stringify({
@@ -2505,6 +2608,7 @@ async function teardown() {
     totals: summary.totals,
     ui_checks: summary.ui_checks,
     engine: summary.engine.checks ?? summary.engine.skipped,
+    daily: Object.fromEntries(Object.entries(summary.daily ?? {}).map(([name, record]) => [name, record.checks])),
     agent: Object.fromEntries(Object.entries(summary.agent).map(([engine, record]) => [engine, { ok: record.ok ?? false, checks: record.checks }])),
     ...(dragMask
       ? {

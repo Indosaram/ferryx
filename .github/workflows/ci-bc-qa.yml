@@ -97,7 +97,8 @@ jobs:
             cmake ninja-build pkg-config xvfb xdotool x11-utils openbox imagemagick \
             dbus-x11 mesa-vulkan-drivers libvulkan1 fonts-dejavu-core tesseract-ocr \
             libnss3 libatk-bridge2.0-0 libxkbcommon0 libxcomposite1 libxdamage1 \
-            libcups2 libpango-1.0-0 libasound2t64
+            libcups2 libpango-1.0-0 libasound2t64 \
+            gnome-keyring libsecret-tools python3-gi gir1.2-gtk-3.0
 
       - name: Free disk (Linux)
         if: matrix.os_name == 'linux'
@@ -272,6 +273,11 @@ jobs:
           dbus-run-session -- bash -c '
             openbox > "$1/openbox.log" 2>&1 &
             sleep 2
+            # The password vault keeps its key in the Secret Service: a login keyring unlocked
+            # with a throwaway password, as on a desktop session.
+            eval "$(printf "ferryx-qa-keyring" | gnome-keyring-daemon --unlock --components=secrets)"
+            export GNOME_KEYRING_CONTROL SSH_AUTH_SOCK
+            echo "gnome-keyring: ${GNOME_KEYRING_CONTROL:-not started}" > "$1/keyring.log"
             bun scripts/browser-qa/gha-ui-audit.mjs --binary src-tauri/target/debug/ferryx --out "$1"
           ' bash "$out" || echo "audit driver exited non-zero: $?"
 

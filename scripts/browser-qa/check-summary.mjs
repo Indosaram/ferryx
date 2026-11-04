@@ -9,8 +9,12 @@
 // A dir without a summary.json fails too. Prints one line per check and exits 1 on any failure.
 // A full UI-audit summary must also have run its engine and extension sections: an engine
 // marked `skipped` or a missing `extension` fails, so a dropped engine bundle cannot pass.
+// It must also carry every daily-browser gap its platform runs (summary.daily.<gap>.checks,
+// scripts/browser-qa/daily-scenarios.mjs), so a scenario that never started cannot pass.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
+
+import { expectedDailyGaps } from "./daily-scenarios.mjs";
 
 /** Every summary.json at or below `dir`. */
 function summaries(dir) {
@@ -46,6 +50,10 @@ export function missingCoverage(summary) {
   const missing = [];
   if (!summary.engine || summary.engine.skipped) missing.push(`engine skipped: ${summary.engine?.skipped ?? "no engine section"}`);
   if (!summary.extension) missing.push("extension scenario did not run (extension is null)");
+  for (const gap of expectedDailyGaps(summary.platform)) {
+    const record = summary.daily?.[gap];
+    if (!record?.checks || !Object.keys(record.checks).length) missing.push(`daily ${gap} did not run`);
+  }
   return missing;
 }
 

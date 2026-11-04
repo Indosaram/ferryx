@@ -1,0 +1,1021 @@
+// Daily-browser scenarios for gha-ui-audit.mjs (F4 gaps G1 G2 G3 G6 G8 G9 G11 G13), driven with
+// real OS input like the rest of the audit. gha-ui-audit.mjs builds a context `ctx` from its own
+// helpers and calls these functions at fixed points of the full flow:
+//   dailyWebviewBefore(ctx)  system-webview tabs, before the Chromium engine is installed
+//   dailyRestart(ctx)        quit like a user (Mod+Q / Alt+F4), relaunch on the same dirs
+//   dailyWebviewAfter(ctx)   what must have survived the restart, then private mode
+//   dailyChromium(ctx)       Chromium-engine tabs: upload/drag-in, PDF, named profile separation
+// Every check starts false and turns true only from an observed effect: `ferryx browser list`
+// fields, the app's data files (history.sqlite, bookmarks.json, vault.json, browser-site-zoom.json),
+// the OS keystore, D-Bus traffic, a written file, or OCR of the screen. Results go to
+// summary.daily.<gap>.checks; check-summary.mjs fails the job on a false or missing gap.
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+/** The gaps each platform must report (G6 notifications and G9 print run on Linux and Windows). */
+export function expectedDailyGaps(platform) {
+  const all = ["g1", "g2", "g3", "g8", "g11", "g13"];
+  return platform === "darwin" ? all : [...all, "g6", "g9"];
+}
+
+// ---------------------------------------------------------------- fixtures
+/** A valid 2-page PDF (Helvetica 48pt), xref offsets computed. */
+export function makePdf() {
+  const page = (text) => `BT /F1 48 Tf 60 600 Td (${text}) Tj ET`;
+  const streams = [page("FERRYXPDF ONE"), page("FERRYXPDF TWO")];
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 6 0 R >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 7 0 R >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ...streams.map((stream) => `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`),
+  ];
+  let body = "%PDF-1.4\n";
+  const offsets = [];
+  objects.forEach((object, index) => {
+    offsets.push(body.length);
+    body += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+  const xref = body.length;
+  body += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (const offset of offsets) body += `${String(offset).padStart(10, "0")} 00000 n \n`;
+  body += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(body, "latin1");
+}
+
+const page = (title, heading, extra = "") => `<!doctype html><html><head><title>${title}</title><style>
+body{margin:0;background:#fff;color:#000;font:bold 44px sans-serif}h1{font-size:64px;margin:40px}p{margin:20px 40px}
+</style></head><body><h1>${heading}</h1>${extra}</body></html>`;
+
+/**
+ * Fixture routes added to the audit's fixture server(s). `siteB` is the other server's origin
+ * (a different port: another site for per-site zoom and a cross-origin iframe).
+ */
+export function dailyFixtures({ siteB }) {
+  const login = `<!doctype html><html><head><title>qa-login</title><style>
+body{margin:0;background:#fff;font:bold 36px sans-serif}form{margin:40px}input{display:block;font:36px sans-serif;margin:16px 0;width:520px}
+button{font:bold 40px sans-serif;margin-top:16px}</style></head><body>
+<form method="post" action="/login.html"><input id=u name=username autocomplete=username placeholder=USERNAME>
+<input id=p name=password type=password autocomplete=current-password placeholder=PASSWORD><button id=go type=submit>LOGIN</button></form>
+<p id=s>LOGINPAGE</p>
+<script>addEventListener('message',(e)=>{if(e.data&&e.data.type==='report')e.source.postMessage({type:'state',u:u.value,p:p.value},'*')})</script>
+</body></html>`;
+  const frame = `<!doctype html><html><head><title>frame:wait</title></head><body style="font:bold 36px sans-serif">
+<p>FRAMEHOST</p><iframe id=f src="${siteB}/login.html" style="width:900px;height:420px;border:4px solid #000"></iframe>
+<script>addEventListener('message',(e)=>{if(e.data&&e.data.type==='state')document.title='frame:'+e.data.u+'|'+e.data.p});
+setInterval(()=>{try{f.contentWindow.postMessage({type:'report'},'*')}catch(_){}} ,500)</script></body></html>`;
+  const notify = `<!doctype html><title>perm:idle</title><style>html,body{margin:0;height:100%}
+button{position:fixed;inset:0;width:100%;height:100%;font:bold 48px sans-serif;background:#fff;color:#000;border:0}</style>
+<button id=n type=button>NOTIFYME</button>
+<script>n.addEventListener('click',()=>{document.title='perm:asking';Notification.requestPermission().then((p)=>{document.title='perm:'+p;
+if(p==='granted'){new Notification('ferryx-qa',{body:'ferryx qa body'});document.title='perm:granted:shown'}})})</script>`;
+  const upload = `<!doctype html><title>upload-idle</title><style>html,body{margin:0;height:100%;font:bold 44px sans-serif}
+#pick{position:fixed;left:0;right:0;top:0;height:45%;display:flex;align-items:center;justify-content:center;background:#ffd400}
+#f{position:absolute;inset:0;opacity:0;width:100%;height:100%;cursor:pointer}
+#drop{position:fixed;left:0;right:0;bottom:0;height:50%;display:flex;align-items:center;justify-content:center;background:#9fe2bf}</style>
+<label id=pick>UPLOADPICK<input id=f type=file></label><div id=drop>DROPZONE</div>
+<script>f.addEventListener('change',()=>{const x=f.files[0];document.title=x?'picked:'+x.name+':'+x.size:'picked:none'});
+for(const t of ['dragenter','dragover'])drop.addEventListener(t,(e)=>{e.preventDefault();drop.textContent='DROPHOVER'});
+drop.addEventListener('drop',(e)=>{e.preventDefault();const x=e.dataTransfer.files[0];document.title=x?'dropped:'+x.name+':'+x.size:'dropped:none';drop.textContent='DROPPED'})</script>`;
+  const cookies = (request) => {
+    const header = request.headers.get("cookie") ?? "";
+    return page(`cookies:${header || "none"}`, "COOKIES", `<p>COOKIES:${header || "none"}</p>`);
+  };
+  return new Map([
+    ["/qa/a.html", { body: page("QA Alpha Page", "ALPHAPAGE"), type: "text/html" }],
+    ["/qa/b.html", { body: page("QA Bravo Page", "BRAVOPAGE"), type: "text/html" }],
+    ["/qa/c.html", { body: page("QA Charlie Page", "CHARLIEPAGE"), type: "text/html" }],
+    ["/qa/second.html", { body: page("QA Second Tab", "SECONDTAB"), type: "text/html" }],
+    ["/login.html", { body: login, type: "text/html" }],
+    ["/login-frame.html", { body: frame, type: "text/html" }],
+    ["/secret.html", { body: page("qa-secret", "SECRETPAGE"), type: "text/html", headers: { "Set-Cookie": "qa_secret=1; Path=/" } }],
+    ["/set-work.html", { body: page("qa-work-set", "WORKSET"), type: "text/html", headers: { "Set-Cookie": "qa_work=1; Path=/" } }],
+    ["/cookies.html", { dynamic: cookies, type: "text/html", headers: { "Cache-Control": "no-store" } }],
+    ["/notify.html", { body: notify, type: "text/html" }],
+    ["/upload.html", { body: upload, type: "text/html" }],
+    ["/print.html", { body: page("qa-print", "PRINTPAGE"), type: "text/html" }],
+    ["/doc.pdf", { body: makePdf(), type: "application/pdf" }],
+  ]);
+}
+
+// ---------------------------------------------------------------- shared helpers
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+
+/** Starts summary.daily[gap] with every named check false. */
+function gap(ctx, name, checks) {
+  ctx.summary.daily ??= {};
+  const record = ctx.summary.daily[name] ?? { checks: {} };
+  for (const check of checks) record.checks[check] ??= false;
+  ctx.summary.daily[name] = record;
+  return record;
+}
+
+/** Polls `probe` until it returns a truthy value, bounded; returns the last value. */
+async function until(probe, timeout = 15000, every = 1000) {
+  const deadline = Date.now() + timeout;
+  let value = await probe();
+  while (!value && Date.now() < deadline) {
+    await sleep(every);
+    value = await probe();
+  }
+  return value;
+}
+
+function readJson(path) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+async function historyRows(ctx) {
+  const path = join(ctx.dirs.data, "browser", "history.sqlite");
+  if (!existsSync(path)) return [];
+  const { Database } = await import("bun:sqlite");
+  const db = new Database(path, { readonly: true });
+  try {
+    return db.query("SELECT url, title, last_visited_at AS at FROM urls").all();
+  } catch {
+    return [];
+  } finally {
+    db.close();
+  }
+}
+
+const bookmarksFile = (ctx) => readJson(join(ctx.dirs.data, "browser", "bookmarks.json")) ?? { folders: [], bookmarks: [] };
+
+/** All OCR words on screen now. */
+const screenWords = (ctx) => ctx.ocr(ctx.probeShot()) ?? [];
+const wordSeen = (words, test) => words.some((word) => test(ctx_norm(word.text)));
+function ctx_norm(text) {
+  return text.toLowerCase().replace(/[^a-z0-9:%./|_-]/g, "");
+}
+const has = (words, needle) => wordSeen(words, (text) => text.includes(needle.toLowerCase()));
+
+/** Waits until OCR reads a word containing one of `needles`; returns the needle seen or null. */
+async function waitWords(ctx, needles, timeout = 15000) {
+  const seen = await until(() => {
+    const words = screenWords(ctx);
+    return needles.find((needle) => has(words, needle)) ?? null;
+  }, timeout);
+  return seen ?? null;
+}
+
+/** The listed tab, refreshed. */
+function tab(ctx, browserId) {
+  return ctx.sessions().list.find((entry) => entry.browserId === browserId) ?? null;
+}
+
+/** Navigates through the real address bar (click, select all, type, Enter) and waits for OCR text. */
+async function visit(ctx, url, expect, timeout = 20000) {
+  for (const [, action] of ctx.typeUrl(url)) await action();
+  return expect ? waitWords(ctx, [].concat(expect), timeout) : null;
+}
+
+/** Focus the app chrome (not the page) and send an app shortcut to the active browser tab. */
+async function shortcut(ctx, spec) {
+  ctx.host.focus();
+  await ctx.chromeFocusClick();
+  await sleep(300);
+  return ctx.host.key(spec);
+}
+
+/**
+ * The browser toolbar's icon buttons right of the "NNN%" zoom label, left to right, as pixel
+ * column runs on the label's line: [Zoom in, History, Focus, Sync, DevTools, Select, Print, PDF, ...].
+ */
+function toolbarIcons(ctx) {
+  const path = ctx.probeShot();
+  const words = ctx.ocr(path) ?? [];
+  const label = words.filter((word) => /^\d{2,3}%$/.test(word.text)).sort((a, b) => a.top - b.top)[0];
+  if (!label) return { icons: [], label: null };
+  const image = ctx.decodePng(path);
+  const y = label.top + Math.round(label.height / 2);
+  const counts = new Map();
+  for (let x = 0; x < image.width; x += 3) {
+    const key = image.rgb(x, y + 14).map((value) => value >> 3).join(",");
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const background = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0].split(",").map((value) => (Number(value) << 3) + 4);
+  const differs = (x, yy) => image.rgb(x, yy).reduce((sum, value, index) => sum + Math.abs(value - background[index]), 0) > 60;
+  const runs = [];
+  let start = -1, last = -99;
+  for (let x = label.left + label.width + 4; x < image.width; x += 1) {
+    let hit = false;
+    for (let dy = -6; dy <= 6 && !hit; dy += 2) hit = differs(x, Math.min(image.height - 1, Math.max(0, y + dy)));
+    if (!hit) continue;
+    if (start < 0 || x - last > 5) {
+      if (start >= 0) runs.push([start, last]);
+      start = x;
+    }
+    last = x;
+  }
+  if (start >= 0) runs.push([start, last]);
+  // Icons are 14px glyphs; a separator line is 1px, a wider run is not an icon.
+  const icons = runs.filter(([a, b]) => b - a >= 6 && b - a <= 22).map(([a, b]) => ({ x: Math.round((a + b) / 2), y }));
+  return { icons, label: { x: label.left, y } };
+}
+
+/** Clicks the toolbar icon at `index` (0 = Zoom in); `verify` decides, else the next run is tried. */
+async function clickToolbarIcon(ctx, index, verify, { spread = 1 } = {}) {
+  const { icons, label } = toolbarIcons(ctx);
+  const tried = [];
+  for (const offset of [0, ...Array.from({ length: spread }, (_, i) => [i + 1, -(i + 1)]).flat()]) {
+    const icon = icons[index + offset];
+    if (!icon) continue;
+    ctx.host.click(icon.x, icon.y);
+    tried.push([icon.x, icon.y]);
+    await sleep(1500);
+    if (await verify()) return { ok: true, at: [icon.x, icon.y], tried, icons: icons.length, label };
+    ctx.host.key({ key: "Escape" });
+    await sleep(600);
+  }
+  return { ok: false, tried, icons: icons.length, label };
+}
+
+/** Clicks the OCR word matching `test` (topmost or as picked); returns its centre or null. */
+async function clickWord(ctx, test, { timeout = 8000, pick = "first", dx = 0 } = {}) {
+  const hit = await until(() => {
+    const words = screenWords(ctx).filter((word) => test(word.text));
+    if (!words.length) return null;
+    const sorted = pick === "rightmost" ? words.sort((a, b) => b.left - a.left)
+      : pick === "bottom" ? words.sort((a, b) => b.top - a.top) : words.sort((a, b) => a.top - b.top || a.left - b.left);
+    return sorted[0];
+  }, timeout, 800);
+  if (!hit) return null;
+  const at = [hit.left + Math.round(hit.width / 2) + dx, hit.top + Math.round(hit.height / 2)];
+  ctx.host.click(...at);
+  return at;
+}
+
+/** Runs one real-input check body inside an audit step and records it. */
+async function run(ctx, name, description, body) {
+  let outcome = null;
+  await ctx.step(name, description, [[name, async () => {
+    try {
+      outcome = (await body()) ?? { ok: true };
+    } catch (error) {
+      outcome = { ok: false, stderr: String(error?.stack ?? error).slice(0, 1500) };
+    }
+    return outcome;
+  }]]);
+  return outcome;
+}
+
+/** The OS file manager / dialog helpers need a file with known bytes. */
+function fixtureFile(ctx) {
+  const path = join(ctx.out, "upload-fixture.txt");
+  if (!existsSync(path)) writeFileSync(path, "ferryx qa upload fixture\n");
+  return { path, name: "upload-fixture.txt", size: statSync(path).size };
+}
+
+/** Types `path` into the platform's native open-file dialog (which has just opened) and confirms. */
+async function answerOpenDialog(ctx, path) {
+  await sleep(2500);
+  if (ctx.platform === "linux") {
+    ctx.host.key({ key: "l", mods: ["ctrl"] });
+    await sleep(500);
+    ctx.host.type(path);
+    await sleep(400);
+    ctx.host.key({ key: "Enter" });
+  } else if (ctx.platform === "win32") {
+    // The common file dialog focuses its File name box; SendInput types into the foreground.
+    ctx.win.ps("typeraw", ["-Text", path]);
+    await sleep(400);
+    ctx.win.ps("keysraw", ["-Codes", "13"]);
+  } else {
+    ctx.host.key({ key: "g", mods: ["mod", "shift"] });
+    await sleep(1200);
+    ctx.host.type(path);
+    await sleep(600);
+    ctx.host.key({ key: "Enter" });
+    await sleep(1200);
+    ctx.host.key({ key: "Enter" });
+  }
+}
+
+/** Real drag of a file from an OS file source onto screen point `to`. */
+async function dragFileTo(ctx, file, to) {
+  const record = { from: null, helper: null };
+  let helper = null;
+  try {
+    if (ctx.platform === "linux") {
+      const script = join(ctx.out, "drag-source.py");
+      writeFileSync(script, `import sys, gi
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk, Gdk
+uri = 'file://' + sys.argv[1]
+w = Gtk.Window(title='QA DRAG SOURCE'); w.set_default_size(260, 140); w.move(40, 40)
+b = Gtk.EventBox(); l = Gtk.Label(); l.set_markup('<span size="xx-large" weight="bold">DRAGME</span>'); b.add(l); w.add(b)
+b.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, [], Gdk.DragAction.COPY); b.drag_source_add_uri_targets()
+b.connect('drag-data-get', lambda wd, ctx, data, info, t: data.set_uris([uri]))
+w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
+`);
+      helper = spawn("python3", [script, file.path], { stdio: "ignore", env: process.env });
+      const window = await until(() => ctx.run("xdotool", ["search", "--name", "QA DRAG SOURCE"]).stdout.split(/\s+/).filter(Boolean)[0], 15000, 500);
+      record.helper = window ?? null;
+      if (!window) return { ...record, ok: false, stderr: "drag source window did not appear" };
+      ctx.run("xdotool", ["windowactivate", "--sync", window]);
+      await sleep(800);
+      const from = await until(() => {
+        const hit = screenWords(ctx).find((word) => /DRAGME/i.test(word.text));
+        return hit ? [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)] : null;
+      }, 8000, 700);
+      record.from = from;
+      if (!from) return { ...record, ok: false, stderr: "DRAGME not read on screen" };
+    } else if (ctx.platform === "win32") {
+      ctx.run("explorer.exe", [`/select,${file.path}`]);
+      await sleep(4000);
+      const from = await until(() => {
+        const hit = screenWords(ctx).find((word) => /upload-fixture/i.test(word.text));
+        return hit ? [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)] : null;
+      }, 10000, 800);
+      record.from = from;
+      if (!from) return { ...record, ok: false, stderr: "the file name was not read in Explorer" };
+    } else {
+      ctx.run("open", ["-R", file.path]);
+      await sleep(3500);
+      const from = await until(() => {
+        const hit = screenWords(ctx).find((word) => /upload-fixture/i.test(word.text));
+        return hit ? [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)] : null;
+      }, 10000, 800);
+      record.from = from;
+      if (!from) return { ...record, ok: false, stderr: "the file name was not read in Finder" };
+    }
+    const [x0, y0] = record.from;
+    ctx.host.mouseDown(x0, y0);
+    await sleep(300);
+    const steps = 20;
+    for (let index = 1; index <= steps; index += 1) {
+      ctx.host.mouseMove(Math.round(x0 + ((to[0] - x0) * index) / steps), Math.round(y0 + ((to[1] - y0) * index) / steps));
+      await sleep(80);
+    }
+    await sleep(500);
+    ctx.host.mouseUp(to[0], to[1]);
+    return { ...record, ok: true };
+  } finally {
+    helper?.kill();
+  }
+}
+
+/** The OS-native print UI words read on screen. */
+const PRINT_WORDS = {
+  linux: ["printer", "copies", "pagesetup", "printtofile", "range"],
+  win32: ["destination", "copies", "layout", "microsoftprinttopdf", "saveaspdf", "pages"],
+  darwin: ["printer", "copies", "pdf"],
+};
+function printUiSeen(ctx) {
+  const words = screenWords(ctx).map((word) => ctx_norm(word.text));
+  const wanted = PRINT_WORDS[ctx.platform];
+  return wanted.filter((needle) => words.some((word) => word.includes(needle)));
+}
+
+// ---------------------------------------------------------------- before the restart (webview)
+export async function dailyWebviewBefore(ctx) {
+  const { fixtureBase, siteB } = ctx;
+  const g1 = gap(ctx, "g1", ["tabs_restored", "back_1", "back_2", "session_file_isolated", "no_session_outside_isolation"]);
+  const g2 = gap(ctx, "g2", ["bookmark_star", "bookmark_bar_shows", "omnibox_mix", "omnibox_accept", "history_search", "history_delete", "history_clear_range", "folder_created", "folder_move", "folder_survives_restart", "folder_on_bar_after_restart"]);
+  const g3 = gap(ctx, "g3", ["save_prompt_shown", "saved", "keystore_item", "fill_offer_after_restart", "autofilled_after_restart", "cross_origin_iframe_empty"]);
+  const g13 = gap(ctx, "g13", ["zoom_set", "zoom_other_site_default", "zoom_site_restored", "zoom_persisted_file", "zoom_survives_restart", "pdf_webview_text", "pdf_webview_pages", "pdf_chromium_text", "pdf_chromium_pages"]);
+  const g8 = gap(ctx, "g8", ["upload_picker", "drag_in", "upload_picker_chromium", "drag_in_chromium"]);
+  ctx.state.daily = {};
+  const daily = ctx.state.daily;
+
+  // G1: tab A walks a -> b -> c; tab B is a second tab.
+  await run(ctx, "daily-g1-tabs", "Tab A: /qa/a, /qa/b, /qa/c through the address bar; Mod+Shift+B opens tab B on /qa/second", async () => {
+    ctx.host.focus();
+    const list = ctx.sessions().list;
+    daily.tabA = (list.find((entry) => entry.engine === "system") ?? list.at(-1))?.browserId ?? null;
+    const seen = [];
+    for (const [path, word] of [["/qa/a.html", "ALPHAPAGE"], ["/qa/b.html", "BRAVOPAGE"], ["/qa/c.html", "CHARLIEPAGE"]]) {
+      seen.push(await visit(ctx, `${fixtureBase}${path}`, word));
+    }
+    await shortcut(ctx, { key: "b", mods: ["mod", "shift"] });
+    const tabB = await until(() => ctx.sessions().list.find((entry) => entry.browserId !== daily.tabA)?.browserId, 20000);
+    daily.tabB = tabB ?? null;
+    await sleep(3000);
+    seen.push(await visit(ctx, `${fixtureBase}/qa/second.html`, "SECONDTAB"));
+    return { ok: seen.every(Boolean) && Boolean(tabB), seen, tabA: daily.tabA, tabB };
+  });
+
+  // G2: bookmark (Mod+D), bar item, omnibox mix, history page, folders.
+  await run(ctx, "daily-g2-bookmark", "Tab B: load /qa/b, Mod+D bookmarks it; the bookmark bar shows 'QA Bravo Page'", async () => {
+    await visit(ctx, `${fixtureBase}/qa/b.html`, "BRAVOPAGE");
+    await shortcut(ctx, { key: "d", mods: ["mod"] });
+    const saved = await until(() => bookmarksFile(ctx).bookmarks.find((entry) => entry.url.endsWith("/qa/b.html")), 10000);
+    g2.checks.bookmark_star = Boolean(saved);
+    g2.bookmark = saved ?? null;
+    const bar = await waitWords(ctx, ["bravo"], 10000);
+    g2.checks.bookmark_bar_shows = Boolean(bar);
+    return { ok: g2.checks.bookmark_star && g2.checks.bookmark_bar_shows };
+  });
+  await run(ctx, "daily-g2-omnibox", "Address bar: type 'QA'; suggestions hold an open-tab row, a bookmark and a history entry; Down+Enter opens one", async () => {
+    const before = tab(ctx, daily.tabB)?.url ?? null;
+    await ctx.clickAddressBar();
+    ctx.host.key({ key: "a", mods: ["mod"] });
+    ctx.host.type("QA");
+    await sleep(2000);
+    const words = screenWords(ctx);
+    const rows = { tab: has(words, "switch"), bookmark: has(words, "bravo"), history: has(words, "alpha") };
+    g2.omnibox_rows = rows;
+    g2.checks.omnibox_mix = rows.tab && rows.bookmark && rows.history;
+    ctx.host.key({ key: "Down" });
+    await sleep(300);
+    ctx.host.key({ key: "Enter" });
+    const after = await until(() => {
+      const url = tab(ctx, daily.tabB)?.url ?? null;
+      return url && url !== before && /\/qa\//.test(url) ? url : null;
+    }, 10000);
+    // An open-tab row switches tabs instead of navigating: either outcome is an accepted row.
+    const switched = !after && ctx.sessions().list.some((entry) => entry.browserId === daily.tabA);
+    g2.omnibox_after = after;
+    g2.checks.omnibox_accept = Boolean(after) || (switched && rows.tab && (await waitWords(ctx, ["charlie"], 5000)) !== null);
+    return { ok: g2.checks.omnibox_mix && g2.checks.omnibox_accept, rows, after };
+  });
+  await run(ctx, "daily-g2-history", "History menu > Show all history: search 'Alpha', delete that row, clear the last hour", async () => {
+    ctx.host.focus();
+    await ctx.chromeFocusClick();
+    // Make sure tab B is active again (the omnibox may have switched to tab A).
+    await clickWord(ctx, (text) => /second|bravo/i.test(text), { timeout: 3000 });
+    const opened = await clickToolbarIcon(ctx, 1, async () => (await waitWords(ctx, ["showall", "recent"], 2500)) !== null);
+    g2.history_menu = opened;
+    if (!opened.ok) return { ok: false, stderr: "History menu did not open", opened };
+    // "Show all history": OCR reads it as separate words.
+    const all = await clickWord(ctx, (text) => /^all$/i.test(text) || /showall/i.test(text), { timeout: 5000 });
+    const page = await waitWords(ctx, ["clearbrowsing", "browsing"], 8000);
+    if (!all || !page) return { ok: false, stderr: "history page did not open" };
+    const search = await clickWord(ctx, (text) => /^search$/i.test(text), { timeout: 5000, pick: "first" });
+    ctx.host.type("Alpha");
+    await sleep(2000);
+    let words = screenWords(ctx);
+    g2.checks.history_search = Boolean(search) && has(words, "alpha") && !has(words, "bravo");
+    // The row's trash is the last control on the row line, right of its url text.
+    const row = words.filter((word) => /alpha/i.test(word.text)).sort((a, b) => b.top - a.top)[0];
+    let deleted = false;
+    if (row) {
+      const image = ctx.decodePng(ctx.probeShot());
+      const y = row.top + Math.round(row.height / 2);
+      let trash = null;
+      for (let x = image.width - 40; x > row.left + 200; x -= 1) {
+        const [r, g, b] = image.rgb(x, y);
+        const [r2, g2b, b2] = image.rgb(Math.max(0, x - 30), y);
+        if (Math.abs(r - r2) + Math.abs(g - g2b) + Math.abs(b - b2) > 90) { trash = x; break; }
+      }
+      if (trash) {
+        ctx.host.click(trash - 4, y);
+        deleted = Boolean(await until(async () => !(await historyRows(ctx)).some((entry) => entry.url.endsWith("/qa/a.html")), 8000));
+      }
+      g2.trash_at = trash;
+    }
+    g2.checks.history_delete = deleted;
+    // Clear the search, then "Clear browsing data" (range: Last hour).
+    ctx.host.click(...(search ?? [0, 0]));
+    ctx.host.key({ key: "a", mods: ["mod"] });
+    ctx.host.key({ key: "BackSpace" });
+    await sleep(1000);
+    const clear = await clickWord(ctx, (text) => /^clear$/i.test(text), { timeout: 5000, pick: "rightmost" });
+    const empty = await until(async () => (await historyRows(ctx)).length === 0, 8000);
+    words = screenWords(ctx);
+    g2.history_empty_text = has(words, "nobrowsing") || has(words, "history.");
+    g2.checks.history_clear_range = Boolean(clear) && Boolean(empty);
+    g2.rows_after_clear = (await historyRows(ctx)).length;
+    return { ok: g2.checks.history_search && g2.checks.history_delete && g2.checks.history_clear_range };
+  });
+  await run(ctx, "daily-g2-folder", "Library > bookmarks: New folder 'QAFolder', move 'QA Bravo Page' into it", async () => {
+    const tabBtn = await clickWord(ctx, (text) => /^bookmarks$/i.test(text), { timeout: 5000 });
+    await sleep(1000);
+    const newFolder = await clickWord(ctx, (text) => /^folder$/i.test(text), { timeout: 5000, pick: "first" });
+    await sleep(800);
+    ctx.host.type("QAFolder");
+    ctx.host.key({ key: "Enter" });
+    const folder = await until(() => bookmarksFile(ctx).folders.find((entry) => entry.name === "QAFolder"), 8000);
+    g2.checks.folder_created = Boolean(folder);
+    if (!folder) return { ok: false, stderr: "folder not created", tabBtn, newFolder };
+    await sleep(1500);
+    // The bravo row's "Move to…" select: focus it with a click, then pick the folder by typing.
+    const words = screenWords(ctx);
+    const row = words.find((word) => /bravo/i.test(word.text));
+    const move = row ? words.filter((word) => /^move/i.test(word.text) && Math.abs(word.top - row.top) < 14)[0] : null;
+    if (move) {
+      ctx.host.click(move.left + Math.round(move.width / 2), move.top + Math.round(move.height / 2));
+      await sleep(1200);
+      const option = await clickWord(ctx, (text) => /qafolder/i.test(text), { timeout: 4000, pick: "bottom" });
+      if (!option) {
+        ctx.host.type("  QAF");
+        ctx.host.key({ key: "Enter" });
+      }
+    }
+    const moved = await until(() => {
+      const tree = bookmarksFile(ctx);
+      const target = tree.folders.find((entry) => entry.name === "QAFolder");
+      return target && tree.bookmarks.find((entry) => entry.url.endsWith("/qa/b.html") && entry.parentId === target.id);
+    }, 8000);
+    g2.checks.folder_move = Boolean(moved);
+    g2.move_at = move ? [move.left, move.top] : null;
+    ctx.host.key({ key: "Escape" });
+    await clickWord(ctx, (text) => /^history$/i.test(text), { timeout: 1500 });
+    return { ok: g2.checks.folder_created && g2.checks.folder_move };
+  });
+  // Close the library panel (its close X sits right of the tab list; Escape from the page works too).
+  await run(ctx, "daily-library-close", "Close the library panel", async () => {
+    const { icons } = toolbarIcons(ctx);
+    if (!icons.length) {
+      // Library open: click the X at the panel's top right, found as the rightmost word-free control.
+      const words = screenWords(ctx);
+      const tabs = words.find((word) => /^downloads$/i.test(word.text));
+      if (tabs) {
+        const image = ctx.decodePng(ctx.probeShot());
+        const y = tabs.top + Math.round(tabs.height / 2);
+        for (let x = image.width - 30; x > tabs.left + 100; x -= 1) {
+          const [r, g, b] = image.rgb(x, y);
+          if (r + g + b > 450 || r + g + b < 120) {
+            const near = image.rgb(x - 12, y);
+            if (Math.abs(near[0] - r) > 60) { ctx.host.click(x - 4, y); break; }
+          }
+        }
+      }
+    }
+    await sleep(1000);
+    const back = await waitWords(ctx, ["bravopage", "secondtab", "charliepage", "%"], 6000);
+    return { ok: Boolean(back) };
+  });
+
+  // G3: login save prompt, vault file, OS keystore.
+  await run(ctx, "daily-g3-save", "Tab B /login.html: type user+password, click LOGIN, click Save in the password bar", async () => {
+    await visit(ctx, `${fixtureBase}/login.html`, "LOGINPAGE");
+    const user = await clickWord(ctx, (text) => /^USERNAME$/i.test(text), { timeout: 8000 });
+    ctx.host.type("qauser");
+    const pass = await clickWord(ctx, (text) => /^PASSWORD$/i.test(text), { timeout: 8000 });
+    ctx.host.type("qa-pass-123");
+    const login = await clickWord(ctx, (text) => /^LOGIN$/i.test(text), { timeout: 8000 });
+    const prompt = await until(() => {
+      const words = screenWords(ctx);
+      const save = words.filter((word) => word.text === "Save");
+      const not = words.find((word) => /^now$/i.test(word.text) || /^not$/i.test(word.text));
+      return has(words, "password") && save.length ? { save, not } : null;
+    }, 15000);
+    g3.checks.save_prompt_shown = Boolean(prompt);
+    if (!prompt) return { ok: false, stderr: "no save prompt", user, pass, login };
+    // The Save button: the rightmost "Save" left of "Not now" (the sentence starts with "Save" too).
+    const buttons = prompt.save.filter((word) => !prompt.not || word.left < prompt.not.left).sort((a, b) => b.left - a.left);
+    const button = buttons[0];
+    ctx.host.click(button.left + Math.round(button.width / 2), button.top + Math.round(button.height / 2));
+    const vault = await until(() => (readJson(join(ctx.dirs.data, "browser-vault", "vault.json"))?.items?.length ?? 0) > 0, 10000);
+    g3.checks.saved = Boolean(vault);
+    // The key's OS keystore item.
+    let keystore = null;
+    if (ctx.platform === "linux") {
+      const result = ctx.run("secret-tool", ["search", "service", "com.ferryx.app.browser-vault"]);
+      keystore = { status: result.status, out: result.stdout.split("\n").filter((line) => !/^secret\s*=/.test(line)).join("\n").slice(0, 600), err: result.stderr.slice(0, 300) };
+      g3.checks.keystore_item = result.ok && /com\.ferryx\.app\.browser-vault/.test(result.stdout);
+    } else if (ctx.platform === "darwin") {
+      const result = ctx.run("security", ["find-generic-password", "-s", "com.ferryx.app.browser-vault"]);
+      keystore = { status: result.status, out: result.stdout.slice(0, 600), err: result.stderr.slice(0, 300) };
+      g3.checks.keystore_item = result.ok;
+    } else {
+      const dir = join(ctx.dirs.data, "browser-vault");
+      const blobs = existsSync(dir) ? readdirSync(dir).filter((name) => /^key-.*\.dpapi$/.test(name)) : [];
+      keystore = { dpapi: blobs };
+      g3.checks.keystore_item = blobs.length > 0;
+    }
+    g3.keystore = keystore;
+    return { ok: g3.checks.save_prompt_shown && g3.checks.saved && g3.checks.keystore_item, keystore };
+  });
+
+  // G13: per-site zoom on the webview.
+  await run(ctx, "daily-g13-zoom", "Site A zoomed in twice (125%); site B stays 100%; back on A it is 125% again", async () => {
+    await visit(ctx, `${fixtureBase}/example.html`, ["domain", "illustrative"]);
+    await shortcut(ctx, { key: "=", mods: ["mod"] });
+    await sleep(500);
+    await shortcut(ctx, { key: "=", mods: ["mod"] });
+    const set = await until(() => tab(ctx, daily.tabB)?.zoomFactor === 1.25, 8000);
+    g13.checks.zoom_set = Boolean(set);
+    await visit(ctx, `${siteB}/example.html`, ["domain", "illustrative"]);
+    const other = await until(() => tab(ctx, daily.tabB)?.zoomFactor === 1, 8000);
+    g13.checks.zoom_other_site_default = Boolean(other) && /:\d+\/example/.test(tab(ctx, daily.tabB)?.url ?? "");
+    await visit(ctx, `${fixtureBase}/example.html`, ["domain", "illustrative"]);
+    const back = await until(() => tab(ctx, daily.tabB)?.zoomFactor === 1.25, 8000);
+    g13.checks.zoom_site_restored = Boolean(back);
+    const file = readJson(join(ctx.dirs.data, "browser-site-zoom.json"));
+    const key = new URL(fixtureBase).host;
+    g13.zoom_file = file;
+    g13.checks.zoom_persisted_file = JSON.stringify(file ?? {}).includes(`"${key}":1.25`);
+    g13.zoom_label = screenWords(ctx).map((word) => word.text).find((text) => /^\d{2,3}%$/.test(text)) ?? null;
+    return { ok: g13.checks.zoom_set && g13.checks.zoom_other_site_default && g13.checks.zoom_site_restored && g13.checks.zoom_persisted_file };
+  });
+  await run(ctx, "daily-g13-pdf-webview", "Webview tab: load /doc.pdf; page 1 text renders, page 2 after wheel", async () => {
+    await visit(ctx, `${fixtureBase}/doc.pdf`, null);
+    const one = await waitWords(ctx, ["ferryxpdf"], 30000);
+    g13.checks.pdf_webview_text = Boolean(one);
+    let two = await waitWords(ctx, ["two", "/2", "of2"], 2000);
+    for (let index = 0; !two && index < 8; index += 1) {
+      const words = screenWords(ctx);
+      const anchor = words.find((word) => /ferryxpdf/i.test(word.text)) ?? { left: 700, top: 500, width: 0, height: 0 };
+      ctx.host.wheel(anchor.left + 40, anchor.top + 40, 6);
+      await sleep(1200);
+      two = await waitWords(ctx, ["two", "/2", "of2"], 1500);
+    }
+    g13.checks.pdf_webview_pages = Boolean(two);
+    g13.pdf_webview = { one, two, url: tab(ctx, daily.tabB)?.url, title: tab(ctx, daily.tabB)?.title };
+    return { ok: g13.checks.pdf_webview_text && g13.checks.pdf_webview_pages };
+  });
+
+  // G8 on the webview: native file chooser, then a real file drag from the OS.
+  const file = fixtureFile(ctx);
+  await run(ctx, "daily-g8-upload", "Webview /upload.html: click UPLOADPICK, type the path in the native dialog; then drag the file from the OS onto DROPZONE", async () => {
+    await visit(ctx, `${fixtureBase}/upload.html`, "UPLOADPICK");
+    await clickWord(ctx, (text) => /UPLOADPICK/i.test(text), { timeout: 8000 });
+    await answerOpenDialog(ctx, file.path);
+    const picked = await until(() => tab(ctx, daily.tabB)?.title === `picked:${file.name}:${file.size}`, 12000);
+    g8.checks.upload_picker = Boolean(picked);
+    g8.picker_title = tab(ctx, daily.tabB)?.title ?? null;
+    if (!picked) ctx.closeDialogs();
+    ctx.host.focus();
+    const zone = await until(() => {
+      const hit = screenWords(ctx).find((word) => /DROPZONE/i.test(word.text));
+      return hit ? [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)] : null;
+    }, 8000);
+    g8.drop_zone = zone;
+    if (!zone) return { ok: false, stderr: "DROPZONE not visible" };
+    g8.drag = await dragFileTo(ctx, file, zone);
+    const dropped = await until(() => tab(ctx, daily.tabB)?.title === `dropped:${file.name}:${file.size}`, 8000);
+    g8.checks.drag_in = Boolean(dropped);
+    g8.drop_title = tab(ctx, daily.tabB)?.title ?? null;
+    ctx.host.focus();
+    return { ok: g8.checks.upload_picker && g8.checks.drag_in };
+  });
+
+  if (ctx.platform !== "darwin") {
+    const g6 = gap(ctx, "g6", ["prompt_allowed", "os_notification"]);
+    await run(ctx, "daily-g6-notification", "Webview /notify.html: click NOTIFYME, Allow in Ferryx's prompt; the OS shows the 'ferryx-qa' notification", async () => {
+      let monitor = null;
+      const log = join(ctx.out, "dbus-notify.log");
+      if (ctx.platform === "linux") {
+        writeFileSync(log, "");
+        monitor = spawn("sh", ["-c", `exec dbus-monitor --session "interface='org.freedesktop.Notifications',member='Notify'" > '${log}' 2>&1`], { stdio: "ignore", env: process.env });
+        await sleep(1000);
+      }
+      try {
+        await visit(ctx, `${fixtureBase}/notify.html`, "NOTIFYME");
+        await clickWord(ctx, (text) => /NOTIFYME/i.test(text), { timeout: 8000 });
+        await waitWords(ctx, ["wants"], 10000);
+        const allow = await clickWord(ctx, (text) => /^Allow$/.test(text), { timeout: 5000, pick: "rightmost" });
+        const granted = await until(() => /^perm:granted/.test(tab(ctx, daily.tabB)?.title ?? ""), 10000);
+        g6.checks.prompt_allowed = Boolean(allow) && Boolean(granted);
+        g6.title = tab(ctx, daily.tabB)?.title ?? null;
+        if (ctx.platform === "linux") {
+          const seen = await until(() => readFileSync(log, "utf8").includes("ferryx-qa"), 10000);
+          g6.dbus = readFileSync(log, "utf8").split("\n").filter((line) => /string "/.test(line)).slice(0, 12);
+          g6.checks.os_notification = Boolean(seen);
+        } else {
+          const history = ctx.run("powershell.exe", ["-NoProfile", "-Command",
+            "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime] > $null; " +
+            "foreach ($id in @('com.ferryx.app', (Get-StartApps | Where-Object { $_.Name -like '*erryx*' } | Select-Object -ExpandProperty AppID))) { if ($id) { try { [Windows.UI.Notifications.ToastNotificationManager]::History.GetHistory($id) | ForEach-Object { $_.Content.GetXml() } } catch {} } }"], { timeout: 30000 });
+          const onScreen = await waitWords(ctx, ["ferryx-qa", "ferryxqa"], 10000);
+          g6.toast_history = history.stdout.slice(0, 600);
+          g6.toast_on_screen = onScreen;
+          g6.checks.os_notification = /ferryx-qa/.test(history.stdout) || Boolean(onScreen);
+        }
+      } finally {
+        monitor?.kill();
+      }
+      return { ok: g6.checks.prompt_allowed && g6.checks.os_notification };
+    });
+
+    const g9 = gap(ctx, "g9", ["print_dialog", "print_cancelled", "pdf_saved"]);
+    await run(ctx, "daily-g9-print", "Webview /print.html: Mod+P opens the OS print UI; cancel; Save as PDF writes a %PDF file", async () => {
+      await visit(ctx, `${fixtureBase}/print.html`, "PRINTPAGE");
+      await shortcut(ctx, { key: "p", mods: ["mod"] });
+      let seen = await until(() => (printUiSeen(ctx).length >= 2 ? printUiSeen(ctx) : null), 20000);
+      g9.print_words = seen;
+      g9.checks.print_dialog = Boolean(seen);
+      if (seen) {
+        const cancel = await clickWord(ctx, (text) => /^Cancel$/.test(text), { timeout: 4000, pick: "bottom" });
+        if (!cancel) ctx.host.key({ key: "Escape" });
+        const gone = await until(() => printUiSeen(ctx).length < 2, 10000);
+        g9.checks.print_cancelled = Boolean(gone);
+      }
+      // Save as PDF: the toolbar's PDF button opens the same OS print UI on a webview tab.
+      const pdfPath = join(ctx.out, "qa-print.pdf");
+      ctx.host.focus();
+      const opened = await clickToolbarIcon(ctx, 7, async () => printUiSeen(ctx).length >= 2, { spread: 1 });
+      g9.pdf_button = opened;
+      if (!opened.ok) {
+        await shortcut(ctx, { key: "p", mods: ["mod"] });
+        await until(() => printUiSeen(ctx).length >= 2, 15000);
+      }
+      if (ctx.platform === "linux") {
+        // GTK print dialog: the "Print to File" printer, the output name, then Print.
+        await clickWord(ctx, (text) => /^File$/i.test(text), { timeout: 5000 });
+        await sleep(1000);
+        const nameLabel = await until(() => screenWords(ctx).find((word) => /^Name:?$/.test(word.text)), 5000);
+        if (nameLabel) {
+          ctx.host.click(nameLabel.left + nameLabel.width + 120, nameLabel.top + Math.round(nameLabel.height / 2));
+          ctx.host.key({ key: "a", mods: ["ctrl"] });
+          ctx.host.type(pdfPath);
+        }
+        await clickWord(ctx, (text) => /^Print$/.test(text), { timeout: 5000, pick: "bottom" });
+      } else {
+        // WebView2 print preview: Destination -> Save as PDF, then Save, then the Save As dialog.
+        const words = screenWords(ctx);
+        if (!has(words, "saveaspdf") && !has(words, "microsoftprinttopdf")) {
+          const dest = words.find((word) => /^Destination$/.test(word.text));
+          if (dest) {
+            ctx.host.click(dest.left + 260, dest.top + Math.round(dest.height / 2) + 34);
+            await sleep(1500);
+            await clickWord(ctx, (text) => /^PDF$/i.test(text), { timeout: 5000 });
+          }
+        }
+        await sleep(1500);
+        const save = await clickWord(ctx, (text) => /^(Save|Print)$/.test(text), { timeout: 6000, pick: "bottom" });
+        g9.save_click = save;
+        await sleep(3000);
+        ctx.win.ps("typeraw", ["-Text", pdfPath]);
+        await sleep(500);
+        ctx.win.ps("keysraw", ["-Codes", "13"]);
+      }
+      const written = await until(() => existsSync(pdfPath) && readFileSync(pdfPath).subarray(0, 4).toString() === "%PDF", 25000);
+      g9.checks.pdf_saved = Boolean(written);
+      g9.pdf = { path: pdfPath, exists: existsSync(pdfPath), size: existsSync(pdfPath) ? statSync(pdfPath).size : 0 };
+      if (!written) {
+        ctx.host.key({ key: "Escape" });
+        ctx.closeDialogs();
+      }
+      ctx.host.focus();
+      return { ok: g9.checks.print_dialog && g9.checks.print_cancelled && g9.checks.pdf_saved };
+    });
+  }
+
+  // Back to a plain page so the restart restores a simple tab B.
+  await run(ctx, "daily-tab-b-settle", "Tab B back on /qa/second before the restart", async () => ({ ok: Boolean(await visit(ctx, `${fixtureBase}/qa/second.html`, "SECONDTAB")) }));
+  daily.beforeRestart = ctx.sessions().list.map((entry) => ({ browserId: entry.browserId, url: entry.url }));
+  g1.before_restart = daily.beforeRestart;
+  return { g1, g2, g3, g13, g8 };
+}
+
+/** Session files outside the isolation dirs that a run must leave untouched. */
+export function outsideSessionFiles(platform) {
+  const home = homedir();
+  const roots = platform === "darwin"
+    ? [join(home, "Library", "Application Support", "com.ferryx.app")]
+    : platform === "win32"
+      ? [join(process.env.APPDATA ?? join(home, "AppData", "Roaming"), "com.ferryx.app"), join(process.env.LOCALAPPDATA ?? join(home, "AppData", "Local"), "com.ferryx.app")]
+      : [join(process.env.XDG_DATA_HOME ?? join(home, ".local", "share"), "com.ferryx.app")];
+  return roots.flatMap((root) => [join(root, "session_state.json"), join(root, "dev", "session_state.json")]);
+}
+export const statOrNull = (path) => (existsSync(path) ? statSync(path).mtimeMs : null);
+
+// ---------------------------------------------------------------- restart
+export async function dailyRestart(ctx) {
+  const g1 = ctx.summary.daily.g1;
+  return run(ctx, "daily-restart", "Quit like a user (macOS Mod+Q, else Alt+F4), relaunch on the same data dirs", async () => {
+    const quit = await ctx.quitAndRelaunch("app-daily-restart.log");
+    g1.quit = quit;
+    const sessionFile = join(ctx.dirs.session, "session_state.json");
+    g1.session_file = { path: sessionFile, exists: existsSync(sessionFile), mtime: statOrNull(sessionFile) };
+    g1.checks.session_file_isolated = existsSync(sessionFile) && statSync(sessionFile).mtimeMs >= ctx.startedAtMs;
+    const outside = outsideSessionFiles(ctx.platform).map((path) => ({ path, before: ctx.outsideBefore[path] ?? null, after: statOrNull(path) }));
+    g1.outside_session_files = outside;
+    g1.checks.no_session_outside_isolation = outside.every((entry) => entry.before === entry.after);
+    return { ok: quit.ok, ...quit };
+  });
+}
+
+// ---------------------------------------------------------------- after the restart (webview)
+export async function dailyWebviewAfter(ctx) {
+  const { fixtureBase } = ctx;
+  const { g1, g2, g3, g13 } = ctx.summary.daily;
+  const daily = ctx.state.daily;
+  const g11 = gap(ctx, "g11", ["private_tab_opened", "private_cookie_not_shared", "private_not_in_history", "work_tab_opened", "work_cookie_not_in_default", "work_cookie_kept", "work_profile_dir", "no_private_profile_dir"]);
+
+  await run(ctx, "daily-g1-restored", "After the restart: both tabs are listed with their URLs; tab A's Back goes c -> b -> a", async () => {
+    const want = (daily.beforeRestart ?? []).map((entry) => entry.url).filter((url) => /\/qa\//.test(url)).sort();
+    const restored = await until(() => {
+      const urls = ctx.sessions().list.map((entry) => entry.url).sort();
+      return want.length >= 2 && want.every((url) => urls.includes(url)) ? urls : null;
+    }, 45000);
+    g1.after_restart = ctx.sessions().list.map((entry) => ({ browserId: entry.browserId, url: entry.url, engine: entry.engine }));
+    g1.checks.tabs_restored = Boolean(restored);
+    // Activate the tab showing /qa/c (tab bar title "QA Charlie Page").
+    ctx.host.focus();
+    await clickWord(ctx, (text) => /charlie/i.test(text), { timeout: 10000 });
+    await sleep(1500);
+    const tabA = ctx.sessions().list.find((entry) => entry.url.endsWith("/qa/c.html"));
+    daily.tabA = tabA?.browserId ?? daily.tabA;
+    await shortcut(ctx, { key: "[", mods: ["mod"] });
+    const back1 = await until(() => tab(ctx, daily.tabA)?.url?.endsWith("/qa/b.html"), 10000);
+    g1.checks.back_1 = Boolean(back1) && Boolean(await waitWords(ctx, ["bravopage"], 8000));
+    await shortcut(ctx, { key: "[", mods: ["mod"] });
+    const back2 = await until(() => tab(ctx, daily.tabA)?.url?.endsWith("/qa/a.html"), 10000);
+    g1.checks.back_2 = Boolean(back2) && Boolean(await waitWords(ctx, ["alphapage"], 8000));
+    g1.tab_a_url = tab(ctx, daily.tabA)?.url ?? null;
+    return { ok: g1.checks.tabs_restored && g1.checks.back_1 && g1.checks.back_2 };
+  });
+
+  await run(ctx, "daily-g2-after", "After the restart: QAFolder still holds the bookmark and shows on the bookmark bar", async () => {
+    const tree = bookmarksFile(ctx);
+    const folder = tree.folders.find((entry) => entry.name === "QAFolder");
+    g2.checks.folder_survives_restart = Boolean(folder) && tree.bookmarks.some((entry) => entry.parentId === folder.id && entry.url.endsWith("/qa/b.html"));
+    g2.checks.folder_on_bar_after_restart = Boolean(await waitWords(ctx, ["qafolder"], 10000));
+    return { ok: g2.checks.folder_survives_restart && g2.checks.folder_on_bar_after_restart };
+  });
+
+  await run(ctx, "daily-g3-after", "After the restart: /login.html offers 'Fill saved login'; clicking qauser fills both fields; the cross-origin iframe stays empty", async () => {
+    await clickWord(ctx, (text) => /second/i.test(text), { timeout: 6000 });
+    daily.tabB = ctx.sessions().list.find((entry) => entry.url.endsWith("/qa/second.html"))?.browserId ?? daily.tabB;
+    await visit(ctx, `${fixtureBase}/login.html`, "LOGINPAGE");
+    const offer = await waitWords(ctx, ["fillsaved", "saved"], 15000);
+    g3.checks.fill_offer_after_restart = Boolean(offer);
+    const button = await clickWord(ctx, (text) => /^qauser$/i.test(text), { timeout: 6000, pick: "first" });
+    const filled = await until(async () => {
+      const result = await ctx.cliAsync("eval", "--browser-id", daily.tabB, "--script", "JSON.stringify([document.getElementById('u').value, document.getElementById('p').value])");
+      return result.ok && result.stdout.includes('"qauser"') && result.stdout.includes('"qa-pass-123"') ? result.stdout : null;
+    }, 8000);
+    g3.checks.autofilled_after_restart = Boolean(button) && Boolean(filled);
+    await visit(ctx, `${fixtureBase}/login-frame.html`, "FRAMEHOST");
+    await sleep(2500);
+    // Even if a fill is offered here, it must not reach the cross-origin frame.
+    await clickWord(ctx, (text) => /^qauser$/i.test(text), { timeout: 2500 });
+    await sleep(3000);
+    const title = tab(ctx, daily.tabB)?.title ?? null;
+    g3.frame_title = title;
+    g3.checks.cross_origin_iframe_empty = title === "frame:|";
+    return { ok: g3.checks.fill_offer_after_restart && g3.checks.autofilled_after_restart && g3.checks.cross_origin_iframe_empty };
+  });
+
+  await run(ctx, "daily-g13-after", "After the restart: site A opens at 125%; Mod+0 resets", async () => {
+    await visit(ctx, `${fixtureBase}/example.html`, ["domain", "illustrative"]);
+    const kept = await until(() => tab(ctx, daily.tabB)?.zoomFactor === 1.25, 10000);
+    g13.checks.zoom_survives_restart = Boolean(kept);
+    await shortcut(ctx, { key: "0", mods: ["mod"] });
+    return { ok: Boolean(kept) };
+  });
+
+  await run(ctx, "daily-g11-private", "Tab context menu > Duplicate browser tab > Private; /secret sets a cookie there; the default tab does not get it and history has no /secret", async () => {
+    await visit(ctx, `${fixtureBase}/qa/second.html`, "SECONDTAB");
+    const before = new Set(ctx.sessions().list.map((entry) => entry.browserId));
+    const title = await until(() => screenWords(ctx).filter((word) => /second/i.test(word.text)).sort((a, b) => a.top - b.top)[0], 8000);
+    if (!title) return { ok: false, stderr: "tab title not read" };
+    ctx.host.rightClick(title.left + Math.round(title.width / 2), title.top + Math.round(title.height / 2));
+    await sleep(1200);
+    await clickWord(ctx, (text) => /^Duplicate$/.test(text), { timeout: 5000 });
+    await sleep(1000);
+    await clickWord(ctx, (text) => /^Private$/.test(text), { timeout: 5000, pick: "rightmost" });
+    const privateTab = await until(() => ctx.sessions().list.find((entry) => !before.has(entry.browserId) && entry.profileId === "private"), 15000);
+    g11.checks.private_tab_opened = Boolean(privateTab);
+    g11.private_tab = privateTab ?? null;
+    if (!privateTab) return { ok: false, stderr: "no private tab listed" };
+    await sleep(2000);
+    await visit(ctx, `${fixtureBase}/secret.html`, "SECRETPAGE");
+    const atSecret = await until(() => tab(ctx, privateTab.browserId)?.url?.endsWith("/secret.html"), 8000);
+    // Back to the default tab B and read the cookies the server receives there.
+    await clickWord(ctx, (text) => /second/i.test(text), { timeout: 6000 });
+    await sleep(1200);
+    const defaultTab = ctx.sessions().list.find((entry) => entry.profileId !== "private" && entry.url.endsWith("/qa/second.html"));
+    await visit(ctx, `${fixtureBase}/cookies.html`, "COOKIES");
+    const cookieTitle = await until(() => {
+      const value = tab(ctx, defaultTab?.browserId ?? daily.tabB)?.title ?? "";
+      return value.startsWith("cookies:") ? value : null;
+    }, 8000);
+    g11.default_cookie_title = cookieTitle;
+    g11.checks.private_cookie_not_shared = Boolean(atSecret) && Boolean(cookieTitle) && !cookieTitle.includes("qa_secret");
+    const rows = await historyRows(ctx);
+    g11.checks.private_not_in_history = Boolean(atSecret) && !rows.some((entry) => entry.url.includes("/secret.html")) && rows.some((entry) => entry.url.includes("/cookies.html"));
+    ctx.cli("close", "--browser-id", privateTab.browserId);
+    return { ok: g11.checks.private_tab_opened && g11.checks.private_cookie_not_shared && g11.checks.private_not_in_history };
+  });
+}
+
+// ---------------------------------------------------------------- Chromium engine tabs
+export async function dailyChromium(ctx) {
+  const { fixtureBase } = ctx;
+  const { g8, g13, g11 } = ctx.summary.daily;
+  const file = fixtureFile(ctx);
+  const chromiumNavigate = async (browserId, url) => {
+    ctx.host.focus();
+    ctx.host.key({ key: "l", mods: ["mod"] });
+    await sleep(800);
+    ctx.host.type(url);
+    ctx.host.key({ key: "Enter" });
+    const arrived = await until(() => tab(ctx, browserId)?.url?.startsWith(url.split("#")[0]), 10000);
+    if (!arrived) {
+      // The typed URL did not land (focus): the CLI navigates, the page interaction stays real.
+      await ctx.cliAsync("navigate", "--browser-id", browserId, "--url", url);
+      return { typed: false };
+    }
+    return { typed: true };
+  };
+  const newChromiumTab = async () => {
+    const before = new Set(ctx.sessions().list.map((entry) => entry.browserId));
+    await shortcut(ctx, { key: "b", mods: ["mod", "shift"] });
+    const created = await until(() => ctx.sessions().list.find((entry) => !before.has(entry.browserId) && entry.engine === "chromium"), 30000);
+    await sleep(3000);
+    return created ?? null;
+  };
+
+  await run(ctx, "daily-g8-chromium", "Chromium tab /upload.html: native file chooser and an OS file drag onto DROPZONE", async () => {
+    const created = await newChromiumTab();
+    if (!created) return { ok: false, stderr: "no chromium tab" };
+    g8.chromium_tab = created.browserId;
+    g8.chromium_nav = await chromiumNavigate(created.browserId, `${fixtureBase}/upload.html`);
+    await waitWords(ctx, ["uploadpick"], 15000);
+    await clickWord(ctx, (text) => /UPLOADPICK/i.test(text), { timeout: 8000 });
+    await answerOpenDialog(ctx, file.path);
+    const picked = await until(() => tab(ctx, created.browserId)?.title === `picked:${file.name}:${file.size}`, 12000);
+    g8.checks.upload_picker_chromium = Boolean(picked);
+    g8.chromium_picker_title = tab(ctx, created.browserId)?.title ?? null;
+    if (!picked) ctx.closeDialogs();
+    const zone = await until(() => {
+      const hit = screenWords(ctx).find((word) => /DROPZONE/i.test(word.text));
+      return hit ? [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)] : null;
+    }, 8000);
+    if (zone) g8.chromium_drag = await dragFileTo(ctx, file, zone);
+    const dropped = await until(() => tab(ctx, created.browserId)?.title === `dropped:${file.name}:${file.size}`, 8000);
+    g8.checks.drag_in_chromium = Boolean(dropped);
+    g8.chromium_drop_title = tab(ctx, created.browserId)?.title ?? null;
+    ctx.host.focus();
+    return { ok: g8.checks.upload_picker_chromium && g8.checks.drag_in_chromium };
+  });
+
+  await run(ctx, "daily-g13-pdf-chromium", "Chromium tab: /doc.pdf renders in the PDF viewer, with 2 pages", async () => {
+    const browserId = g8.chromium_tab;
+    if (!browserId) return { ok: false, stderr: "no chromium tab" };
+    await chromiumNavigate(browserId, `${fixtureBase}/doc.pdf`);
+    const one = await waitWords(ctx, ["ferryxpdf"], 30000);
+    g13.checks.pdf_chromium_text = Boolean(one);
+    let two = await waitWords(ctx, ["/2", "of2", "two"], 3000);
+    for (let index = 0; !two && index < 8; index += 1) {
+      const anchor = screenWords(ctx).find((word) => /ferryxpdf/i.test(word.text)) ?? { left: 700, top: 500, width: 0, height: 0 };
+      ctx.host.wheel(anchor.left + 40, anchor.top + 40, 6);
+      await sleep(1200);
+      two = await waitWords(ctx, ["/2", "of2", "two"], 1500);
+    }
+    g13.checks.pdf_chromium_pages = Boolean(two);
+    g13.pdf_chromium = { one, two, title: tab(ctx, browserId)?.title ?? null };
+    return { ok: g13.checks.pdf_chromium_text && g13.checks.pdf_chromium_pages };
+  });
+
+  await run(ctx, "daily-g11-profiles", "Settings > Session & Cookies: add profile 'work'; a work Chromium tab keeps its cookie; the default profile never sees it", async () => {
+    const opened = await ctx.openSettings();
+    await ctx.clickNav("Browser");
+    await sleep(1500);
+    const scrolled = await ctx.scrollSettingsTo("Session & Cookies");
+    const input = await clickWord(ctx, (text) => /^Profile$/.test(text), { timeout: 6000, pick: "rightmost" });
+    ctx.host.type("work");
+    await sleep(300);
+    const add = await clickWord(ctx, (text) => /^Add$/.test(text), { timeout: 5000, pick: "rightmost" });
+    await sleep(1500);
+    g11.settings = { opened: opened.ok, scrolled: scrolled.ok, input, add };
+    ctx.host.key({ key: "Escape" });
+    await sleep(1500);
+    // Duplicate the Chromium tab into the "work" profile from its tab context menu.
+    const before = new Set(ctx.sessions().list.map((entry) => entry.browserId));
+    const title = await until(() => screenWords(ctx).filter((word) => /ferryxpdf|doc\.pdf|upload/i.test(word.text)).sort((a, b) => a.top - b.top)[0], 8000);
+    if (title) {
+      ctx.host.rightClick(title.left + Math.round(title.width / 2), title.top + Math.round(title.height / 2));
+      await sleep(1200);
+      await clickWord(ctx, (text) => /^Duplicate$/.test(text), { timeout: 5000 });
+      await sleep(1000);
+      await clickWord(ctx, (text) => /^work$/i.test(text), { timeout: 5000, pick: "rightmost" });
+    }
+    const workTab = await until(() => ctx.sessions().list.find((entry) => !before.has(entry.browserId) && entry.profileId === "work"), 30000);
+    g11.work_tab = workTab ?? null;
+    g11.checks.work_tab_opened = Boolean(workTab) && workTab.engine === "chromium";
+    if (!workTab) return { ok: false, stderr: "no work tab", ...g11.settings };
+    await sleep(3000);
+    await chromiumNavigate(workTab.browserId, `${fixtureBase}/set-work.html`);
+    await waitWords(ctx, ["workset"], 15000);
+    await chromiumNavigate(workTab.browserId, `${fixtureBase}/cookies.html`);
+    const workCookies = await until(() => {
+      const value = tab(ctx, workTab.browserId)?.title ?? "";
+      return value.startsWith("cookies:") ? value : null;
+    }, 10000);
+    g11.work_cookie_title = workCookies;
+    g11.checks.work_cookie_kept = Boolean(workCookies) && workCookies.includes("qa_work");
+    const defaultTab = await newChromiumTab();
+    if (defaultTab) {
+      await chromiumNavigate(defaultTab.browserId, `${fixtureBase}/cookies.html`);
+      const defaultCookies = await until(() => {
+        const value = tab(ctx, defaultTab.browserId)?.title ?? "";
+        return value.startsWith("cookies:") ? value : null;
+      }, 10000);
+      g11.default_chromium_cookie_title = defaultCookies;
+      g11.checks.work_cookie_not_in_default = defaultTab.profileId !== "work" && Boolean(defaultCookies) && !defaultCookies.includes("qa_work");
+      ctx.cli("close", "--browser-id", defaultTab.browserId);
+    }
+    const cef = join(ctx.dirs.data, "browser-cef");
+    g11.cef_dirs = existsSync(cef) ? readdirSync(cef) : [];
+    g11.checks.work_profile_dir = existsSync(join(cef, "work"));
+    g11.checks.no_private_profile_dir = !existsSync(join(cef, "private"));
+    ctx.cli("close", "--browser-id", workTab.browserId);
+    if (g8.chromium_tab) ctx.cli("close", "--browser-id", g8.chromium_tab);
+    return { ok: Object.values(g11.checks).every(Boolean) };
+  });
+}
+
+/** Ensures `dir` exists (output subfolders). */
+export const ensureDir = (dir) => (mkdirSync(dir, { recursive: true }), dir);
