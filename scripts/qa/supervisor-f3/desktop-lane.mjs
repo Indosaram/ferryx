@@ -20,6 +20,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { connectNativeMahord, rpcProcess } from '../fixtures/native-configured-adapters.mjs';
+import { FRONTEND_DEV_URL } from '../../lib/qa-scenarios/frontend-server.mjs';
 import { LaneBlocked, StepFailed, markNotRun, runStep, stopExact, until } from './steps.mjs';
 import { scenariosForLane } from './contract.mjs';
 import { acceptedReply, configureGateway, decisionsNamingNonce, gatewayPortFor, hubEnv, isolationProblems, globalRetryRule, namesNonce, rowFocusVerdict, rpcCommand, rulesLineText, typedInto, uniqueSession } from './seams.mjs';
@@ -115,6 +116,10 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     acceptedReply('register', await exchange('register', [{ type: 'registerWorkspace', workspaceId: 'f3', repoRoot: setup.worktree }]), 'registerWorkspaceOk');
     acceptedReply('agent-control', await exchange('agent-control', [{ type: 'agentControlSettingsSet', enabled: true, excludedDeviceIds: [] }]), 'agentControlSettingsOk');
     lane.write('relay', 'gateway.json', await configureGateway({ call: exchange, port: gatewayPort, relayOrigin: shared.relayOrigin }));
+    if (shared.panesOnDesktop && lane.name === (run.lanes.includes('windows') ? 'windows' : 'macos')) {
+      shared.hostPanes({ call, helper, setup, wrappers });
+      await shared.spawnPanes();
+    }
 
     // 2. GUI through MahoRD only (the same launcher path native-configured-adapters uses).
     gui = await launchGui({ agent, helper, mahord, setup, host, run, lane });
@@ -391,6 +396,9 @@ async function cleanupLane({ lane, agent, helper, mahord, setup, gui, daemon }) 
 }
 
 async function launchGui({ agent, helper, mahord, setup, host, run, lane }) {
+  // The candidate is a debug build: its webview loads the frozen devUrl, which this run serves
+  // from the checked ui/dist (closed with the profile or with the agent).
+  lane.write('gui-receipt', 'frontend.json', await agent.call('start-frontend', { profile: setup.profile, frontend: { mode: 'debug', url: FRONTEND_DEV_URL } }));
   const { specPath, launcherShortPath } = await agent.call('provision-gui-launch', { setup, worktreeRoot: host.worktreeRoot, hostId: host.hostId, runId: run.runId, operationId: `f3-${run.runId}` });
   const receipt = agent.call('await-gui-launch', { profile: setup.profile, timeoutMs: 180_000 });
   // Handled now so a failed launch step cannot leave it rejecting unobserved; awaited below.

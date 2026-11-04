@@ -345,7 +345,9 @@ export const parseEnvBlock = (base64) => Buffer.from(String(base64).trim(), 'bas
  * forces it on against a database inside the run's own profile, as the unified-supervisor
  * harness does, and turns quiet hours off so no reply is deferred.
  */
-export const hubEnv = (host, profile) => ({ FERRYX_HUB: 'on', FERRYX_HUB_DB: remotePath(host, profile, 'data', 'hub', 'hub.sqlite'), FERRYX_HUB_QUIET_HOURS: 'off' });
+// The inbox watchers stay off: they spawn the owner's `imsg`/`zele` from PATH and poll a remote
+// kakao endpoint (ferryx-hub inbox_watch.rs inbox_enabled), which no F3 scenario drives.
+export const hubEnv = (host, profile) => ({ FERRYX_HUB: 'on', FERRYX_HUB_DB: remotePath(host, profile, 'data', 'hub', 'hub.sqlite'), FERRYX_HUB_QUIET_HOURS: 'off', OMON_INBOX_ENABLED: '0' });
 
 /**
  * The JXA that raises exactly one run-owned macOS GUI: the process with this pid, and only when

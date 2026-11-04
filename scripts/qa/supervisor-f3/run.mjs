@@ -76,7 +76,7 @@ async function runLanes({ config, run, lanes, session, shared, signal }) {
     Object.assign(session.receipt, { machine: who.machine, candidate: who.candidate });
     session.write('identity', 'identity.json', who);
     await shared.start();
-    await shared.spawnPanes();
+    if (!shared.panesOnDesktop) await shared.spawnPanes();
   } catch (error) {
     if (error instanceof LaneBlocked) session.receipt.blocked = { code: error.code, detail: error.detail, at: new Date().toISOString() };
     else session.receipt.failure = { code: error.code ?? 'SESSION_HOST', detail: String(error.detail ?? error.stack ?? error).slice(0, 4000) };

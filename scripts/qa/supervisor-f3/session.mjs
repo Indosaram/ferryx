@@ -147,7 +147,13 @@ export function startSession({ config, run, lane }) {
     return { login, approved: approved.status, exit: exit.exit };
   };
   shared.signInPhone = (trigger) => signIn(trigger);
-  const session = () => handle;
+  // All-local (loopback relay): a panel shows decision cards from its own daemon's panes only
+  // (the escalations are the local autonomy's, hub_runtime/panel_autonomy.rs observe), so the
+  // fixture panes live on the desktop lane's daemon, which hands itself over with hostPanes.
+  let paneHost = null;
+  shared.panesOnDesktop = front.kind === 'loopback';
+  shared.hostPanes = (desktop) => { paneHost = desktop; };
+  const session = () => paneHost ?? handle;
   shared.spawnPanes = async () => {
     const s = session();
     const panes = {};

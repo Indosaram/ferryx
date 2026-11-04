@@ -367,7 +367,7 @@ describe('all-local run', () => {
   });
 
   test('every isolated daemon runs the hub on a database inside its own profile', () => {
-    expect(hubEnv({ platform: 'darwin' }, '/w/.native-qa/r')).toEqual({ FERRYX_HUB: 'on', FERRYX_HUB_DB: '/w/.native-qa/r/data/hub/hub.sqlite', FERRYX_HUB_QUIET_HOURS: 'off' });
+    expect(hubEnv({ platform: 'darwin' }, '/w/.native-qa/r')).toEqual({ FERRYX_HUB: 'on', FERRYX_HUB_DB: '/w/.native-qa/r/data/hub/hub.sqlite', FERRYX_HUB_QUIET_HOURS: 'off', OMON_INBOX_ENABLED: '0' });
     expect(hubEnv({ platform: 'win32' }, 'C:\\w\\.native-qa\\r').FERRYX_HUB_DB).toBe('C:\\w\\.native-qa\\r\\data\\hub\\hub.sqlite');
   });
 
