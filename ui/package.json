@@ -7,8 +7,8 @@
     "nwsapi": "2.2.24"
   },
   "scripts": {
-    "dev": "bun --bun vite",
-    "build": "bun --bun tsc && bun --bun vite build",
+    "dev": "bun ../scripts/gen-search-index.mjs && bun --bun vite",
+    "build": "bun ../scripts/gen-search-index.mjs && bun --bun tsc && bun --bun vite build",
     "test": "bun --bun vitest run --maxWorkers=1",
     "test:coverage": "bun --bun vitest run --maxWorkers=1 --coverage",
     "doctor": "bun --bun react-doctor",
