@@ -650,12 +650,25 @@ async fn answer_page_permission<R: Runtime>(
 /// Pushes the site's notification permission into a page that finished loading.
 pub fn push_page_permission<R: Runtime>(app: &AppHandle<R>, manager: &Arc<BrowserManager>, browser_id: &str, url: &str) {
     let state = page_permission_state(url, site_decider(manager, browser_id));
+    let Some(state) = page_load_push(state) else { return };
     let app = app.clone();
     let manager = Arc::clone(manager);
     let browser_id = browser_id.to_string();
     tauri::async_runtime::spawn(async move {
         answer_page_permission(&app, &manager, &browser_id, state).await;
     });
+}
+
+/// The state a page load pushes into the page's Notification shim, if any. A new document's
+/// shim already starts at 'default', and the shim resolves every waiting `requestPermission()`
+/// with whatever state it is handed. The load event can arrive after the page already asked
+/// (Windows CI run 41801115761: the page title read "perm:default" while Ferryx's prompt was
+/// still open), so pushing 'default' would answer the request before the user does. Only a
+/// remembered Allow or Block is pushed.
+fn page_load_push(
+    state: ferryx_browser_engine_protocol::PagePermission,
+) -> Option<ferryx_browser_engine_protocol::PagePermission> {
+    (state != ferryx_browser_engine_protocol::PagePermission::Default).then_some(state)
 }
 
 /// The tab's remembered site decisions (its profile's); a tab Ferryx does not know is denied.
@@ -753,6 +766,14 @@ mod tests {
         *SITE_ZOOM.lock() = previous;
         assert!(results.iter().all(Result::is_ok), "{results:?}");
         assert_eq!(SiteZoomStore::load(&path), store);
+    }
+
+    #[test]
+    fn a_page_load_never_answers_a_pending_request_with_default() {
+        use ferryx_browser_engine_protocol::PagePermission;
+        assert_eq!(page_load_push(PagePermission::Default), None);
+        assert_eq!(page_load_push(PagePermission::Granted), Some(PagePermission::Granted));
+        assert_eq!(page_load_push(PagePermission::Denied), Some(PagePermission::Denied));
     }
 
     #[test]

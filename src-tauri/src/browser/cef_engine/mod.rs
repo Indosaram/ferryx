@@ -301,11 +301,74 @@ fn start(mut command: Command, profile: &str, parent: isize, sink: EventSink) ->
     };
     let pid = child.id();
     ENGINES.lock().insert(profile.to_string(), Engine { child, stdin, parent, sink: Arc::clone(&sink) });
-    let profile = profile.to_string();
+    // The reader drops `reader_done` when it returns, which tells the exit watcher the engine's
+    // last events were delivered.
+    let (reader_done, reader_finished) = std::sync::mpsc::channel::<()>();
+    let reader_profile = profile.to_string();
     std::thread::Builder::new()
-        .name(format!("cef-engine-{profile}"))
-        .spawn(move || read_events(stdout, &profile, pid, &sink))?;
+        .name(format!("cef-engine-{reader_profile}"))
+        .spawn(move || {
+            let _reader_done = reader_done;
+            read_events(stdout, &reader_profile, pid, &sink);
+        })?;
+    let watched_profile = profile.to_string();
+    std::thread::Builder::new()
+        .name(format!("cef-engine-exit-{watched_profile}"))
+        .spawn(move || watch_exit(&watched_profile, pid, &reader_finished))?;
     Ok(())
+}
+
+/// How often the exit watcher looks at the engine process.
+const EXIT_POLL: Duration = Duration::from_millis(500);
+/// How long the exit watcher lets the reader deliver an exited engine's last events before it
+/// closes the tabs itself (the reader never finishes while a helper process holds stdout).
+const EXIT_DRAIN: Duration = Duration::from_secs(2);
+
+/// What the exit watcher found for one engine on one look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EngineWatch {
+    /// Still running: look again later.
+    Running,
+    /// The process exited while Ferryx still had it registered: its tabs must close.
+    Exited,
+    /// Ferryx no longer holds this engine (closed, replaced, or already reported gone).
+    Released,
+}
+
+/// Looks once at the engine of `profile` started as `pid`. A successor engine of the same
+/// profile (another pid) is not this watcher's business.
+fn check_engine(profile: &str, pid: u32) -> EngineWatch {
+    let mut engines = ENGINES.lock();
+    match engines.get_mut(profile) {
+        Some(engine) if engine.child.id() == pid => match engine.child.try_wait() {
+            Ok(None) => EngineWatch::Running,
+            // An error from try_wait means the child cannot be observed any more; treat it as
+            // gone rather than leave its tabs over a dead process.
+            Ok(Some(_)) | Err(_) => EngineWatch::Exited,
+        },
+        _ => EngineWatch::Released,
+    }
+}
+
+/// Waits for the engine main process to exit. The reader thread only sees the end of stdout,
+/// and a Chromium helper process (GPU, zygote, renderer) that outlives a killed engine keeps
+/// that pipe open (linux CI run 41801115761: four engine tabs stayed listed after SIGKILL), so
+/// the process exit itself has to close the tabs.
+fn watch_exit(profile: &str, pid: u32, reader_finished: &std::sync::mpsc::Receiver<()>) {
+    loop {
+        match check_engine(profile, pid) {
+            EngineWatch::Running => std::thread::sleep(EXIT_POLL),
+            EngineWatch::Exited => {
+                // Normally the reader reaches the end of stdout right away and reports the
+                // tabs closed after the engine's last events; then engine_gone below is a no-op.
+                let _ = reader_finished.recv_timeout(EXIT_DRAIN);
+                tracing::warn!(%profile, pid, "CEF engine process exited");
+                engine_gone(profile, pid);
+                return;
+            }
+            EngineWatch::Released => return,
+        }
+    }
 }
 
 fn read_events(stdout: std::process::ChildStdout, profile: &str, pid: u32, sink: &EventSink) {
@@ -785,6 +848,44 @@ mod tests {
         );
         assert!(!is_cef_tab("stand-in-tab"));
         assert!(!ENGINES.lock().contains_key(profile));
+    }
+
+    /// A killed engine whose helper process still holds its stdout (linux CI run 41801115761):
+    /// the reader never sees the end of the pipe, so the exit watcher closes the tab once the
+    /// engine main process is gone. The stand-in engine starts a background `sleep` that
+    /// inherits stdout and then exits on its own.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn an_exited_engine_closes_its_tabs_while_a_helper_holds_stdout() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30 & echo '@ferryx created helper-tab 9'; exit 0"]);
+        let (sender, receiver) = mpsc::channel();
+        let sender = Mutex::new(sender);
+        let sink: EventSink = Arc::new(move |profile: &str, event: Event| {
+            let _ = sender.lock().send((profile.to_string(), event));
+        });
+        let profile = "helper-holds-stdout-profile";
+        TABS.lock().insert("helper-tab".to_string(), Tab { profile: profile.to_string(), handle: None });
+        start(command, profile, 0, sink).expect("stand-in engine starts");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let mut events = Vec::new();
+        while !events.contains(&Event::Closed { tab: "helper-tab".into() }) {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let (from, event) = receiver.recv_timeout(left).expect("tab closed after the engine exited");
+            assert_eq!(from, profile);
+            events.push(event);
+        }
+        assert_eq!(events.first(), Some(&Event::Created { tab: "helper-tab".into(), handle: 9 }));
+        assert!(!is_cef_tab("helper-tab"));
+        assert!(!ENGINES.lock().contains_key(profile));
+    }
+
+    /// The exit watcher leaves an engine Ferryx no longer holds, or a successor with another
+    /// pid, alone.
+    #[test]
+    fn the_exit_watcher_ignores_engines_it_does_not_own() {
+        assert_eq!(check_engine("never-started-profile", 1), EngineWatch::Released);
     }
 
     /// Two tabs of one profile opening at once (a restored tab and a cold launch's inbound
