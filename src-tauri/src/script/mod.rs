@@ -59,8 +59,19 @@ fn worker(registry: Registry, host: &tokio::runtime::Handle, receive: mpsc::Rece
     let Some(source) = source else { return Ok(()); };
     let identity = format!("{:x}", Sha256::digest(source.as_bytes()));
     let log_host = host.clone();
-    let vm = vm::Vm::new(identity, std::rc::Rc::new(now), move |message| {
-        blocking(&log_host, move || append(store::root()?, message))
+    let log_registry = registry.clone();
+    let log_identity = identity.clone();
+    let sequence = std::cell::Cell::new(0_u64);
+    let vm = vm::Vm::new(identity, std::rc::Rc::new(now), move |message, startup| {
+        let id = format!("{log_identity}/init-log/{}", sequence.get());
+        sequence.set(sequence.get() + 1);
+        let registry = log_registry.clone();
+        blocking(&log_host, move || {
+            if !startup || registry.store.lock().claim(&id, u64::MAX, now())? {
+                append(store::root()?, message)?;
+            }
+            Ok(())
+        })
     }).map_err(|error| error.to_string())?;
     vm.load(&source).map_err(|error| error.to_string())?;
     loop {
