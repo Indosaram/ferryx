@@ -900,7 +900,10 @@ describe("App notification coordinator wiring", () => {
     it("attaches a local daemon session that no pane shows as the active tab", async () => {
       native.listTerminalSessions.mockResolvedValue([{ sessionId: "backend-new", worktreePath: null, running: true }]);
       const info = vi.spyOn(toast, "info");
+      // Adoption waits for the active project's restore, like a window-move adoption does.
+      seedTwoProjects();
       await act(async () => { render(<App />); });
+      await waitFor(() => expect(getWorkspaceRestoreStatus("default")).toBe("restored"));
       await act(async () => { sidebarProps.onFocusSupervisorSession!("local:backend-new"); });
       await waitFor(() => expect(adoptBackendSession).toHaveBeenCalledTimes(1));
       expect(adoptBackendSession).toHaveBeenCalledWith(
