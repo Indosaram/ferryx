@@ -133,6 +133,10 @@ fn worker(registry: Registry, host: &tokio::runtime::Handle, receive: mpsc::Rece
                     })?;
                     Ok(serde_json::json!({"enabled":enabled,"bindings":bindings,"log":log}))
                 })();
+                if let Err(error) = &result {
+                    let message = error.clone();
+                    blocking(host, move || append(store::root()?, message))?;
+                }
                 if reply.send(result).is_err() { tracing::debug!("Script caller disconnected"); }
             }
             Ok(Request::Event(name, value)) => {
