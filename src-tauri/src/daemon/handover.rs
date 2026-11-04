@@ -848,6 +848,27 @@ mod spawn_owner_tests {
     }
 
     #[test]
+    fn size_ownership_survives_committed_handover() {
+        use super::super::size_ownership::SizeOwnership;
+        let (_root, manager, terminals, legacy) = committing_fixture();
+        let mut state = SizeOwnership::new((120, 40));
+        state.remote_resize("phone", (60, 30), true, false);
+        state.generation = 9;
+        let registry = Arc::new(Mutex::new(std::collections::HashMap::from([("pty-1".into(), state)])));
+        manager.set_size_ownership(registry.clone());
+        manager.commit_handover_v5(&terminals).unwrap();
+        let successor = HandoverManager::new(legacy.with_file_name("successor.sock"));
+        let adopted = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        successor.set_size_ownership(adopted.clone());
+        successor.adopt_recorded_size_ownership(&legacy).unwrap();
+        assert_eq!(*adopted.lock(), *registry.lock());
+        let mut adopted = adopted.lock();
+        let state = adopted.get_mut("pty-1").unwrap();
+        assert!(state.detach("phone"));
+        assert_eq!(state.applied, (120, 40));
+    }
+
+    #[test]
     fn an_abort_record_carries_no_pane_grants() {
         use super::super::pane_grants::{GrantOp, PaneGrant, PaneGrants};
         let (_root, manager, _terminals, legacy) = committing_fixture();
