@@ -7630,6 +7630,13 @@ impl DaemonServer {
                         Err(e) => daemon_error(e.to_string()),
                     }
                 }
+                Ok(DaemonRequest::LayoutGetScoped { window, scope }) => {
+                    let layouts = Arc::clone(&self.layouts);
+                    match crate::ipc::run_blocking(move || layouts.lock().get_scoped(&window, Some(&scope)).map_err(crate::ipc::IpcError::internal)).await {
+                        Ok(view) => DaemonResponse::LayoutOk { view },
+                        Err(error) => daemon_error(error.to_string()),
+                    }
+                }
                 Ok(DaemonRequest::LayoutGet { window }) => {
                     let layouts = Arc::clone(&self.layouts);
                     match crate::ipc::run_blocking(move || layouts.lock().get(&window).map_err(crate::ipc::IpcError::internal)).await {
@@ -7640,9 +7647,25 @@ impl DaemonServer {
                 Ok(DaemonRequest::LayoutApply { window, base_revision, intent }) => {
                     let layouts = Arc::clone(&self.layouts);
                     let changed_window = window.clone();
+                    fn destination(intent: &super::layout::Intent) -> Option<String> {
+                        match intent {
+                            super::layout::Intent::TransferTab { target_window, .. } => Some(target_window.clone()),
+                            super::layout::Intent::Scoped { intent, .. } => destination(intent),
+                            _ => None,
+                        }
+                    }
+                    let target_window = destination(&intent);
                     let result = crate::ipc::run_blocking(move || Ok(layouts.lock().apply(&window, base_revision, intent))).await;
                     match result {
                         Ok(Ok(view)) => {
+                            if let Some(window) = target_window {
+                                let revision = self.layouts.lock().layouts.get(&window).map(|layout| layout.revision);
+                                if let Some(revision) = revision {
+                                    let _ = self.remote_event_tx.send(DaemonRemoteEvent {
+                                        event: "LayoutChanged".into(), payload: serde_json::json!({"window":window,"revision":revision}),
+                                    });
+                                }
+                            }
                             let _ = self.remote_event_tx.send(DaemonRemoteEvent {
                                 event: "LayoutChanged".into(),
                                 payload: serde_json::json!({"window": changed_window, "revision": view.revision}),
