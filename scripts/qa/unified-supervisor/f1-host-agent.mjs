@@ -611,7 +611,8 @@ async function attach() {
     connection.pipe(process.stdout);
     process.stdin.pipe(connection);
     process.stdin.on('end', () => connection.end());
-    connection.on('close', () => process.exit(0));
+    // Exit only once every relayed line has left this process's stdout.
+    connection.on('close', () => process.stdout.write('', () => process.exit(0)));
   });
 }
 

@@ -39,6 +39,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { AgentChannel, backoffDelay, RECONNECT_BUDGET_MS } from './f1-agent-link.mjs';
 import { HarnessError, isInside, POSIX } from './harness.mjs';
 
 export const F1_REQUIRED_ASSERTIONS = Object.freeze([
@@ -58,6 +59,10 @@ const GATEWAY_PORT = 43821;
 const PUSH_BATCH_WINDOW_MS = 30_000;
 const HUB_WORKSPACE = 'f1-hub';
 const TARGET_WORKSPACE = 'f1-target';
+// A detached target agent with no attached client for this long tears itself down (runner gone).
+// Longer than the reconnect budget, so a reconnecting runner always finds it.
+const AGENT_ORPHAN_MS = RECONNECT_BUDGET_MS + 5 * 60_000;
+const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 
 const now = () => Date.now();
 
@@ -77,25 +82,92 @@ export function relayTunnelReady(line, port) {
   return match !== null && Number(match[1]) === port;
 }
 
-// One f1-host-agent.mjs child (local or over ssh). RPC replies and pane events arrive as JSON
-// stdout lines in the run journal; every wait is ctx.waitFor on that journal.
-async function startAgent(ctx, id, executable, args, env) {
-  const handle = await ctx.spawn(id, executable, args, { stdin: 'pipe', graceMs: 20_000, env });
-  handle.child.stdin.on('error', () => { /* the exit event decides */ });
+// One ssh link to a target's detached agent. attempt 0 starts the agent (`--mode start`); every
+// later link re-attaches to the same agent and asks for the lines after `after`.
+export function agentLinkArgs(target, runId, { after, attempt }) {
+  return ['-T', '-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=15', '-o', 'ConnectTimeout=30', ...(target.sshOptions ?? []), target.ssh, target.bun,
+    join(target.repoDir, 'scripts', 'qa', 'unified-supervisor', 'f1-host-agent.mjs'), '--attach', '--mode', attempt === 0 ? 'start' : 'reattach',
+    '--data-root', target.dataRoot, '--run-id', runId, '--after', String(after), '--orphan-ms', String(AGENT_ORPHAN_MS)];
+}
+
+// One f1-host-agent.mjs over an AgentChannel. Each link is a recorded spawn `<id>-link<n>`; the
+// channel delivers every agent line once (by oseq) into the run journal as source <id>, so RPC
+// replies and pane events are journal waits whatever link carried them. Remote agents reconnect
+// after a drop (f1-agent-link.mjs; every drop/attempt/reconnect/loss lands in
+// f1/agent-links.jsonl); the hub computer's own stdio agent does not.
+async function startAgent(ctx, id, linkSpec, { reconnect }) {
+  const record = (entry) => {
+    ctx.evidence.appendJsonl('f1/agent-links.jsonl', entry);
+    ctx.journal.push({ source: 'agent-link', kind: entry.kind, channel: id, entry });
+  };
+  const connect = async ({ after, attempt, onLine }) => {
+    const { executable, args, env } = linkSpec({ after, attempt });
+    let markAttached;
+    const attachedSeen = new Promise((resolveAttached) => { markAttached = resolveAttached; });
+    const handle = await ctx.spawn(`${id}-link${attempt}`, executable, args, { stdin: 'pipe', graceMs: 20_000, env, onLine: (kind, raw, json) => {
+      if (kind !== 'stdout') return;
+      let value = json;
+      if (value === null) { try { value = JSON.parse(raw.trim()); } catch { return; } }
+      if (value?.event === 'agent-attached') { markAttached(value); return; }
+      onLine(value, raw);
+    } });
+    handle.child.stdin.on('error', () => { /* the exit event decides */ });
+    let attached = null;
+    if (reconnect) {
+      let timer;
+      try {
+        attached = await Promise.race([
+          attachedSeen,
+          handle.exited.then((exit) => { throw new HarnessError('AGENT_LINK_FAILED', `${id} link ${attempt} exited before attaching (code ${exit.code}, signal ${exit.signal})`); }),
+          new Promise((_, rejectTimeout) => { timer = setTimeout(() => rejectTimeout(new HarnessError('AGENT_LINK_FAILED', `${id} link ${attempt} did not attach within 90000ms`)), 90_000); }),
+        ]);
+      } catch (error) {
+        await ctx.terminate(handle, 'agent link did not attach').catch(() => null);
+        throw error;
+      } finally { clearTimeout(timer); }
+    }
+    const link = {
+      send: (line) => { try { handle.child.stdin.write(`${line}\n`); } catch { /* the exit event decides */ } },
+      // 'close' follows the last stdout line, so every line this link carried is delivered first.
+      closed: handle.closed.then(() => ({ link: attempt, pid: handle.pid, code: handle.exitInfo?.code ?? null, signal: handle.exitInfo?.signal ?? null })),
+      close: () => { try { handle.child.stdin.end(); } catch { /* gone */ } },
+    };
+    return { link, attached };
+  };
+  const channel = new AgentChannel({ id, connect, record, sleep, reconnect, deliver: (json, raw) => ctx.journal.push({ source: id, kind: 'stdout', line: raw, json }) });
+  const readyCursor = ctx.journal.cursor();
+  const opened = await channel.open();
+  if (opened) record({ channel: id, kind: 'attached', atMs: Date.now(), at: new Date().toISOString(), link: 0, attached: opened });
+  const ready = await ctx.waitFor(`${id} ready`, (e) => e.source === id && e.json?.event === 'agent-ready', { after: readyCursor, deadlineMs: 120_000 });
   let seq = 0;
-  const ready = await ctx.waitFor(`${id} ready`, (e) => e.source === id && e.json?.event === 'agent-ready', { deadlineMs: 120_000 });
   const rpc = async (op, payload = {}, deadlineMs = 120_000) => {
     seq += 1;
     const callId = seq;
     const cursor = ctx.journal.cursor();
+    const startedMs = now();
     ctx.evidence.appendJsonl('f1/rpc.jsonl', { agent: id, id: callId, op, payload, at: new Date().toISOString() });
-    handle.child.stdin.write(`${JSON.stringify({ id: callId, op, ...payload })}\n`);
-    const reply = await ctx.waitFor(`${id} ${op}`, (e) => e.source === id && e.json?.id === callId, { after: cursor, deadlineMs });
+    const lostError = (info) => new HarnessError('AGENT_LOST', `${id} ${op}: the agent channel was lost (${info?.reason ?? 'unknown'}); no reply can be observed`);
+    if (!channel.send(callId, JSON.stringify({ id: callId, op, ...payload }), { final: op === 'shutdown' })) throw lostError(channel.lostInfo);
+    const lost = channel.whenLost().then((info) => { throw lostError(info); });
+    lost.catch(() => { /* raced below */ });
+    let reply;
+    for (;;) {
+      try {
+        reply = await Promise.race([ctx.waitFor(`${id} ${op}`, (e) => e.source === id && e.json?.id === callId && 'ok' in e.json, { after: cursor, deadlineMs }), lost]);
+        break;
+      } catch (error) {
+        // A drop during the call pauses its clock: the wait is extended (bounded by the
+        // reconnect budget) only when the channel dropped after the call was sent.
+        const dropped = channel.events.some((e) => e.kind === 'dropped' && e.atMs >= startedMs);
+        if (error?.code !== 'DEADLINE_EXCEEDED' || !dropped || now() - startedMs > deadlineMs + channel.budgetMs) throw error;
+        ctx.evidence.appendJsonl('f1/rpc.jsonl', { agent: id, id: callId, op, waitExtendedAfterDrop: true, at: new Date().toISOString() });
+      }
+    }
     ctx.evidence.appendJsonl('f1/rpc.jsonl', { agent: id, id: callId, op, reply: reply.json, at: new Date().toISOString() });
     if (!reply.json.ok) throw new HarnessError(reply.json.error?.code ?? 'AGENT_ERROR', `${id} ${op}: ${reply.json.error?.message}`);
     return reply.json.result;
   };
-  return { id, handle, rpc, hostname: ready.json.hostname, agentPid: ready.json.pid };
+  return { id, channel, rpc, hostname: ready.json.hostname, agentPid: ready.json.pid };
 }
 
 const paneEvents = (ctx, agentId) => ctx.journal.events.filter((e) => e.source === agentId && e.json?.event === 'pane').map((e) => e.json.record);
@@ -147,19 +219,20 @@ export async function runF1Acceptance(ctx, deps) {
   const clause = (name, ok, detail) => { evidence.clauses.push({ clause: name, pass: ok === true, atMs: now(), detail }); return ctx.assert(name, ok === true, detail); };
   const writeEvidence = () => ctx.evidence.writeJson('f1/f1-evidence.json', { ...evidence, finishedAtMs: now() });
   const agents = [];
+  let tunnelsClosing = false;
   const pushSink = startPushSink(ctx);
   let socket = null;
   try {
     // 1. Fleet agents: the hub computer's own, then each target over ssh.
     const localRev = (await ctx.run('git-rev', deps.onPath('git') ?? '/usr/bin/git', ['-C', dirname(AGENT), 'rev-parse', 'HEAD'], { deadlineMs: 10_000 })).stdout.trim();
-    const hubAgent = await startAgent(ctx, 'agent-hub', process.execPath, [AGENT], ctx.productEnv());
+    const hubAgent = await startAgent(ctx, 'agent-hub', () => ({ executable: process.execPath, args: [AGENT], env: ctx.productEnv() }), { reconnect: false });
     agents.push(hubAgent);
     // ssh needs the operator's agent socket and known_hosts; it runs nothing but the agent script.
     const sshEnv = Object.fromEntries(Object.entries({ PATH: process.env.PATH, HOME: process.env.HOME, USER: process.env.USER, SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK })
       .filter(([, value]) => value !== undefined));
     for (const [index, target] of fleet.targets.entries()) {
-      const sshArgs = ['-T', '-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=15', ...(target.sshOptions ?? []), target.ssh, target.bun, join(target.repoDir, 'scripts', 'qa', 'unified-supervisor', 'f1-host-agent.mjs')];
-      agents.push(await startAgent(ctx, `agent-${index === 0 ? 'outage' : 'quota'}`, fleet.sshBin, sshArgs, sshEnv));
+      const linkSpec = (link) => ({ executable: fleet.sshBin, args: agentLinkArgs(target, ctx.runId, link), env: sshEnv });
+      agents.push(await startAgent(ctx, `agent-${index === 0 ? 'outage' : 'quota'}`, linkSpec, { reconnect: true }));
     }
     const [, outageAgent, quotaAgent] = agents;
     const inits = [];
@@ -192,6 +265,44 @@ export async function runF1Acceptance(ctx, deps) {
     //     on this computer (torn down by its own handle, reclaimable by --cleanup); the target's
     //     port is checked free first and nothing is stopped to free it.
     const tunnels = [];
+    const tunnelRecord = (entry) => {
+      const full = { atMs: now(), at: new Date().toISOString(), ...entry };
+      ctx.evidence.appendJsonl('f1/agent-links.jsonl', full);
+      ctx.journal.push({ source: 'agent-link', kind: entry.kind, channel: entry.channel, entry: full });
+    };
+    const openTunnel = async (id, args) => {
+      const tunnelCursor = ctx.journal.cursor();
+      const handle = await ctx.spawn(id, fleet.sshBin, args, { env: sshEnv, graceMs: 5_000 });
+      const opened = await ctx.waitFor(`${id} forward`, (e) => e.source === id && (e.kind === 'exit' || relayTunnelReady(e.line, relayPort)), { after: tunnelCursor, deadlineMs: 45_000 }).catch(() => null);
+      if (opened === null) await ctx.terminate(handle, 'relay tunnel forward not confirmed').catch(() => null);
+      return { handle, ok: opened !== null && opened.kind !== 'exit', exit: opened?.kind === 'exit' ? { code: opened.code, signal: opened.signal } : null };
+    };
+    // A dropped tunnel (target paused off the network) is re-opened with backoff inside the
+    // reconnect budget; every drop and its gap are evidence, and a tunnel not back within the
+    // budget fails relay-tunnels-held.
+    const keepTunnel = async (t) => {
+      for (;;) {
+        const exit = await t.handle.exited;
+        if (tunnelsClosing) return;
+        const drop = { droppedAtMs: now(), exit: { code: exit.code, signal: exit.signal }, attempts: 0, reconnectedAtMs: null };
+        t.drops.push(drop);
+        tunnelRecord({ channel: t.id, kind: 'dropped', pid: t.handle.pid, exit: drop.exit });
+        for (let attempt = 1; drop.reconnectedAtMs === null; attempt += 1) {
+          const delay = backoffDelay(attempt - 1);
+          if (now() + delay - drop.droppedAtMs > RECONNECT_BUDGET_MS) { t.lost = true; tunnelRecord({ channel: t.id, kind: 'lost', reason: 'reconnect budget spent', attempts: attempt - 1, sinceDropMs: now() - drop.droppedAtMs }); return; }
+          await sleep(delay);
+          if (tunnelsClosing) return;
+          drop.attempts = attempt;
+          tunnelRecord({ channel: t.id, kind: 'reconnect-attempt', attempt, afterMs: now() - drop.droppedAtMs });
+          try {
+            t.respawns += 1;
+            const reopened = await openTunnel(`${t.id}-r${t.respawns}`, t.args);
+            if (reopened.ok) { t.handle = reopened.handle; drop.reconnectedAtMs = now(); tunnelRecord({ channel: t.id, kind: 'reconnected', attempt, pid: reopened.handle.pid, gapMs: drop.reconnectedAtMs - drop.droppedAtMs }); }
+            else tunnelRecord({ channel: t.id, kind: 'reconnect-failed', attempt, exit: reopened.exit });
+          } catch (error) { tunnelRecord({ channel: t.id, kind: 'reconnect-failed', attempt, error: String(error?.message ?? error) }); }
+        }
+      }
+    };
     for (const [index, target] of fleet.targets.entries()) {
       const agent = agents[index + 1];
       evidence.hosts[agent.id].relayUrl = targetRelayUrl(target, fleet.relayHost, relayPort);
@@ -200,13 +311,13 @@ export async function runF1Acceptance(ctx, deps) {
       if (!before.free) throw new HarnessError('PREREQUISITE_MISSING', `${target.label}: 127.0.0.1:${relayPort} is in use there; the relay tunnel cannot bind it and nothing is stopped to free it`);
       const id = `tunnel-${agent.id.replace(/^agent-/, '')}`;
       const args = relayTunnelArgs(target, relayPort);
-      const tunnelCursor = ctx.journal.cursor();
-      const handle = await ctx.spawn(id, fleet.sshBin, args, { env: sshEnv, graceMs: 5_000 });
-      const opened = await ctx.waitFor(`${id} forward`, (e) => e.source === id && (e.kind === 'exit' || relayTunnelReady(e.line, relayPort)), { after: tunnelCursor, deadlineMs: 45_000 });
-      if (opened.kind === 'exit') throw new HarnessError('PREREQUISITE_MISSING', `${target.label}: the relay tunnel exited before its forward opened (code ${opened.code}, signal ${opened.signal})`);
+      const first = await openTunnel(id, args);
+      if (!first.ok) throw new HarnessError('PREREQUISITE_MISSING', `${target.label}: the relay tunnel did not open its forward (${JSON.stringify(first.exit ?? 'no confirmation within 45000ms')})`);
       const after = await agent.rpc('portFree', { port: relayPort });
-      tunnels.push({ label: target.label, handle, pid: handle.pid, port: relayPort, listenerOnTarget: after.free === false });
-      evidence.hosts[agent.id].relayTunnel = { pid: handle.pid, executable: fleet.sshBin, args, port: relayPort };
+      const tunnel = { id, label: target.label, handle: first.handle, pid: first.handle.pid, args, port: relayPort, listenerOnTarget: after.free === false, drops: [], respawns: 0, lost: false };
+      tunnels.push(tunnel);
+      void keepTunnel(tunnel);
+      evidence.hosts[agent.id].relayTunnel = { pid: first.handle.pid, executable: fleet.sshBin, args, port: relayPort };
     }
     if (tunnels.length > 0) clause('relay-tunnels-open', tunnels.every((t) => t.listenerOnTarget), { tunnels: tunnels.map(({ label, pid, port, listenerOnTarget }) => ({ label, pid, port, listenerOnTarget })) });
 
@@ -441,18 +552,23 @@ export async function runF1Acceptance(ctx, deps) {
     clause('approval-exactly-one-push', approvalPushes.length === 1 && pushSink.received.length === 1, { pushes: approvalPushes, windowMs: PUSH_BATCH_WINDOW_MS });
     evidence.pushes = { total: pushSink.received.length, duringRecovery: recoveryPushes.length, afterApproval: approvalPushes.length, received: pushSink.received.map(({ atMs, path, bytes, sha256 }) => ({ atMs, path, bytes, sha256 })) };
     evidence.decisionCards = { duringRecovery: recoveryCardFrames.length, total: cardFrames.length, panelAfterApproval: decisions.length };
-    // A tunnel that dropped mid-run cut its target off the relay: the run does not count.
-    if (tunnels.length > 0) clause('relay-tunnels-held', tunnels.every((t) => t.handle.exitInfo === null), { tunnels: tunnels.map((t) => ({ label: t.label, pid: t.pid, exit: t.handle.exitInfo })) });
+    // Every tunnel is up at the end and none stayed down past the reconnect budget. A drop that
+    // came back is listed with its gap; what the target missed meanwhile is judged by the
+    // product clauses above, never excused here.
+    if (tunnels.length > 0) clause('relay-tunnels-held', tunnels.every((t) => !t.lost && t.handle.exitInfo === null), { tunnels: tunnels.map((t) => ({ label: t.label, firstPid: t.pid, pid: t.handle.pid, exit: t.handle.exitInfo, lost: t.lost, drops: t.drops })) });
   } finally {
     // 9. Teardown by recorded identity: each agent stops the daemons it started; ssh/agent
     //    children are then terminated by the harness through their own handles.
     const receipts = [];
+    tunnelsClosing = true;
     try { socket?.close(); } catch { /* closed */ }
     for (const agent of [...agents].reverse()) {
       try { receipts.push({ agent: agent.id, ...(await agent.rpc('shutdown', {}, 60_000)) }); } catch (error) { receipts.push({ agent: agent.id, error: String(error?.message ?? error) }); }
     }
+    for (const agent of agents) agent.channel.close();
     pushSink.stop();
     evidence.teardown = receipts;
+    evidence.agentLinks = agents.map((agent) => ({ agent: agent.id, state: agent.channel.state, lastOseq: agent.channel.lastOseq, links: agent.channel.links, events: agent.channel.events }));
     if (!ctx.signal.aborted && agents.length > 0) {
       const clean = receipts.every((r) => !r.error && (r.daemons ?? []).every((d) => d.exited) && (r.panes ?? []).every((p) => !p.aliveAtTeardown || p.signalled));
       try { clause('fleet-teardown-clean', clean, { receipts }); } catch { /* recorded late; the run fails */ }

@@ -4,6 +4,7 @@
 import { mkdirSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { relayTunnelArgs, relayTunnelReady, targetRelayUrl } from './f1-acceptance.mjs';
+import { f1LinkUnitChecks } from './f1-link-units.mjs';
 import {
   aggregateExit, assertNotProduction, EXIT, familyOf, finalExitCode, identityVerdict, interpretDarwinPs, PLATFORM, probeProcess, redact, redactValue,
   settledOk, stampEpochMs,
@@ -179,6 +180,10 @@ export async function unitChecks(check, stateRoot) {
     ['not-ready-on-failure', !relayTunnelReady('Error: remote port forwarding failed for listen port 41234', 41234)],
   ].map(([label, ok]) => ({ label, ok }));
   check('f1-relay-tunnel-shape', relayTunnel.every((entry) => entry.ok), { relayTunnel, args });
+
+  // F1 agent link: byte-offset pane delivery, reconnect/resume after a simulated drop, and the
+  // real detached host agent surviving a dropped client and re-attaching (or orphan-reading).
+  await f1LinkUnitChecks(check, stateRoot);
 
   const selfStamp = (await probeProcess(process.pid)).startStamp ?? null;
   const epoch = stampEpochMs(selfStamp);

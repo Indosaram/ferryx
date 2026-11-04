@@ -64,7 +64,11 @@ export class AgentChannel {
       if (json.oseq <= this.lastOseq) return;
       this.lastOseq = json.oseq;
     }
-    if (json && json.id !== undefined && json.id !== null && 'ok' in json) this.pending.delete(json.id);
+    if (json && json.id !== undefined && json.id !== null && 'ok' in json) {
+      this.pending.delete(json.id);
+      // The reply to the final request (shutdown): the agent's exit that follows is not a drop.
+      if (json.id === this.finalId) this.closing = true;
+    }
     this.deliver(json, raw);
   }
 
@@ -115,8 +119,9 @@ export class AgentChannel {
     return new Promise((resolveLost) => this.lostWaiters.add(resolveLost));
   }
 
-  send(id, line) {
+  send(id, line, { final = false } = {}) {
     if (this.state === 'lost') return false;
+    if (final) this.finalId = id;
     this.pending.set(id, line);
     this.link?.send(line);
     return true;
