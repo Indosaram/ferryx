@@ -937,6 +937,34 @@ describe("App notification coordinator wiring", () => {
       info.mockRestore();
     });
 
+    it("does not open a local session inside an SSH project", async () => {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([
+        { workspaceId: "default", repoRoot: ".", gitRoot: null },
+        { workspaceId: "ssh:build:orca", repoRoot: "/srv/orca", target: { kind: "ssh", hostId: "build" } },
+      ]));
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "ssh:build:orca");
+      native.listTerminalSessions.mockResolvedValue([{ sessionId: "backend-new", worktreePath: null, running: true }]);
+      const info = vi.spyOn(toast, "info");
+      await act(async () => { render(<App />); });
+      await act(async () => { sidebarProps.onFocusSupervisorSession!("local:backend-new"); });
+      expect(info).toHaveBeenCalledWith("Open a project on this computer to show this session");
+      expect(adoptBackendSession).not.toHaveBeenCalled();
+      info.mockRestore();
+    });
+
+    it("says an exited session is no longer running, not that it was moved", async () => {
+      native.listTerminalSessions.mockResolvedValue([{ sessionId: "backend-new", worktreePath: null, running: false }]);
+      const warning = vi.spyOn(toast, "warning");
+      seedTwoProjects();
+      await act(async () => { render(<App />); });
+      await waitFor(() => expect(getWorkspaceRestoreStatus("default")).toBe("restored"));
+      await act(async () => { sidebarProps.onFocusSupervisorSession!("local:backend-new"); });
+      await waitFor(() => expect(warning).toHaveBeenCalledWith("That session is no longer running."));
+      expect(warning).not.toHaveBeenCalledWith("A terminal moved to this window is no longer running.");
+      expect(adoptBackendSession).not.toHaveBeenCalled();
+      warning.mockRestore();
+    });
+
     it("focuses a cross-project row after the target workspace mounts", async () => {
       seedTwoProjects();
       setWorkspaceSnapshot("other", parkedProjectSnapshot("sess-remote"));

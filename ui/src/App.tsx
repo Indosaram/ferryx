@@ -2678,6 +2678,13 @@ function WorkspaceApp({
     if (!target) {
       const backendSessionId = localBackendSessionId(sessionRef);
       if (backendSessionId) {
+        // A tab of an SSH or paired project runs on that host: a session of this computer opened
+        // there would be treated as a remote one.
+        const targetKind = activeProjectRef.current.target?.kind;
+        if (targetKind === "ssh" || targetKind === "pairedDaemon") {
+          toast.info("Open a project on this computer to show this session");
+          return;
+        }
         // A tab needs a worktree of an open project; without one the adoption would wait forever.
         if (stateRef.current.worktrees.length === 0) {
           toast.info("Open a project to show this session");
@@ -2685,7 +2692,7 @@ function WorkspaceApp({
         }
         setPendingAdoptions((queue) => [
           ...queue,
-          { backendSessionIds: [backendSessionId], activate: true, attemptGenerations: {}, attempts: 0 },
+          { backendSessionIds: [backendSessionId], activate: true, attemptGenerations: {}, attempts: 0, origin: "supervisor" },
         ]);
         return;
       }
@@ -3393,7 +3400,10 @@ function WorkspaceApp({
   // first and the boot-time queue drained once afterwards, so a request that arrived before this
   // window booted is applied exactly once. Each request waits for its workspace to be mounted,
   // then re-attaches by backendSessionId as a tab; nothing is spawned or closed.
-  const [pendingAdoptions, setPendingAdoptions] = useState<Array<WindowSessionsAdoptPayload & { attempts: number }>>([]);
+  // `origin: "supervisor"` marks a Supervisor panel row's request: nothing was moved between windows.
+  const [pendingAdoptions, setPendingAdoptions] = useState<
+    Array<WindowSessionsAdoptPayload & { attempts: number; origin?: "supervisor" }>
+  >([]);
   const adoptionBusyRef = useRef(false);
   const [adoptionTick, bumpAdoptionTick] = useState(0);
   useEffect(() => {
@@ -3453,7 +3463,13 @@ function WorkspaceApp({
         if (tabId === null) retry.push(entry.backend.sessionId);
         else activateNext = false;
       }
-      if (plan.missing.length > 0) toast.warning("A terminal moved to this window is no longer running.");
+      if (plan.missing.length > 0) {
+        toast.warning(
+          head.origin === "supervisor"
+            ? "That session is no longer running."
+            : "A terminal moved to this window is no longer running.",
+        );
+      }
       // The workspace changed while adopting: the backend already made this window the owner, so
       // try again once it settles rather than leave the session without a tab.
       if (retry.length > 0 && head.attempts < 3) {
