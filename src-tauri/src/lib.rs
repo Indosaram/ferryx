@@ -19,6 +19,8 @@ pub mod browser;
 pub mod cli;
 pub mod clipboard_image;
 pub mod daemon;
+#[cfg(feature = "desktop")]
+pub mod deep_link;
 pub mod hub_runtime;
 pub mod supervisor_checkpoint;
 pub mod supervisor_move;
@@ -1439,6 +1441,15 @@ thread_local! {
 
 #[cfg(feature = "desktop")]
 pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    // Register first so secondary launches exit before initializing other plugins.
+    let builder = if deep_link::single_instance_enabled() {
+        builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            deep_link::focus_primary_window(app);
+        }))
+    } else {
+        builder
+    };
+    let builder = builder.plugin(tauri_plugin_deep_link::init());
     let daemon_client = Arc::new(DaemonClient::new());
     let bridge_daemon_client = Arc::clone(&daemon_client);
     let remote_manager = Arc::new(ipc::remote::RemoteGatewayManager::from_daemon(Arc::clone(
@@ -1597,6 +1608,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             let _ = event;
         })
         .setup(move |app| {
+            deep_link::install(app);
             // Bridge-kind changes happen outside any webview callback (Windows upgrades from
             // the async CDP leak probe), so the manager publishes them as browser_state_changed.
             crate::ipc::browser::install_browser_state_emitter(
@@ -1782,6 +1794,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         { false }
     }
     let product_handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+        deep_link::cmd_deep_link_take_pending,
         cmd_native_qa_enabled,
         cmd_shortcuts_set_native_table,
         crate::ipc::account::cmd_account_enrollment_status,
