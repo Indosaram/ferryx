@@ -201,7 +201,7 @@ async function syncNativeOverrides(settings: TerminalSettings): Promise<void> {
     // The default is "unset": let the native side keep Ghostty's own scrollback-limit.
     scrollback: settings.scrollback === DEFAULT_TERMINAL_SETTINGS.scrollback ? null : settings.scrollback,
     scrollbackCompression: settings.scrollbackCompression,
-    osc52Write: settings.osc52Write === true,
+    ...(settings.osc52Write === true ? { osc52Write: true } : {}),
   };
   const serialized = JSON.stringify(payload);
   if (pushedOverrides === serialized) return;
