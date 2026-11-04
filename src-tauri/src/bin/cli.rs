@@ -27,6 +27,11 @@ fn main() {
         println!("{}", ferryx_lib::cli::cli_version_line());
         return;
     }
+    // Todo 26 spike probe; exists only in `iroh-direct` builds and is not a public group.
+    #[cfg(feature = "iroh-direct")]
+    if args.get(1).is_some_and(|arg| arg == "iroh-probe") {
+        std::process::exit(ferryx_lib::remote::iroh_probe::run_iroh_probe_cli(&args[2..]));
+    }
     // Only the groups named in CLI_GROUPS dispatch here; everything else falls through to
     // the launch-mode handling below.
     let group = args.get(1).map(String::as_str).filter(|arg| CLI_GROUPS.contains(arg));

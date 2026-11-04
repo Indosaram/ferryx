@@ -108,6 +108,10 @@ remote-desktop = [
     "dep:ferryx-rd-decode",
     "dep:ferryx-rd-app",
 ]
+# Todo 26 spike: direct remote attach over iroh with only the self-hosted relay
+# (docs/research/iroh-spike-gates.md). Off by default and never part of default, headless or
+# release builds until every frozen gate passes.
+iroh-direct = ["dep:iroh"]
 
 [dependencies]
 ferryx-hub = { path = "../crates/ferryx-hub" }
@@ -187,7 +191,11 @@ aes = "0.8.4"
 sha1 = "0.10.7"
 tempfile = "3.17"
 quinn = { version = "=0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
-rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std"] }
+# 0.23.46 is the floor of iroh 1.4 (feature `iroh-direct`); Cargo resolves optional dependencies
+# too, so the exact pin has to satisfy it in every build.
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std"] }
+# Todo 26 spike only (feature `iroh-direct`): ring crypto, no portmapper, no metrics, no n0 presets.
+iroh = { version = "=1.4.1", optional = true, default-features = false, features = ["tls-ring"] }
 rustls-pki-types = "=1.15.1"
 rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "ring"] }
 # Direct TLS termination for ferryx-relay (src/remote/relay_tls.rs). Both stay on ring; never
