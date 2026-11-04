@@ -25,6 +25,7 @@ pub const CLI_GROUPS: &[&str] = &[
     "direct-trust",
     "remote",
     "grants",
+    "panes",
     "integrations",
     "api",
 ];
@@ -441,6 +442,19 @@ pub const CATALOG: &[Command] = &[
             sub!("pair approve", &[PIN], &[]),
         ],
         exit_codes: OK_OR_FAILURE,
+    },
+    Command {
+        name: "panes",
+        summary: "List detached sessions or detach, attach, zoom and swap live panes",
+        output: "json array of detached backend session IDs",
+        subcommands: &[
+            sub!("list", &[], &[JSON]),
+            sub!("detach", &[arg!("session", "string")], &[JSON]),
+            sub!("attach", &[arg!("session", "string")], &[value!("--window"), value!("--split"), JSON]),
+            sub!("zoom", &[arg!("session", "string")], &[JSON]),
+            sub!("swap", &[arg!("a", "string"), arg!("b", "string")], &[JSON]),
+        ],
+        exit_codes: DAEMON_JSON_EXIT_CODES,
     },
     Command {
         name: "grants",
