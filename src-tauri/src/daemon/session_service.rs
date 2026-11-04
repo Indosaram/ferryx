@@ -3580,6 +3580,36 @@ mod tests {
     use crate::terminal::paired_daemon::{Descriptor, Proxy};
 
     #[tokio::test]
+    async fn size_ownership_service_restores_persisted_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.json");
+        let auth = root.path().join("auth.json");
+        let expected = {
+            let predecessor = DaemonServer::new_with_paths(Some(config.clone()), Some(auth.clone()));
+            let service = predecessor.session_service();
+            let mut state = super::super::size_ownership::SizeOwnership::new((120, 40));
+            state.remote_resize("phone-a", (60, 30), true, false);
+            state.remote_resize("phone-b", (70, 35), true, false);
+            state.generation = 11;
+            service.size_ownerships.lock().insert("retained-session".into(), state);
+            service.persist_size_ownership().await.unwrap();
+            let snapshot = service.size_ownerships.lock().clone();
+            snapshot
+        };
+        let successor = DaemonServer::new_with_paths(Some(config), Some(auth));
+        let service = successor.session_service();
+        assert!(service.size_ownerships.lock().is_empty());
+        service.restore_size_ownership().await.unwrap();
+        assert_eq!(*service.size_ownerships.lock(), expected);
+        let mut restored = service.size_ownerships.lock();
+        let state = restored.get_mut("retained-session").unwrap();
+        assert!(!state.remote_resize("phone-a", (61, 31), true, false));
+        assert!(state.detach("phone-b"));
+        assert_eq!(state.applied, (120, 40));
+        assert_eq!(state.generation, 11);
+    }
+
+    #[tokio::test]
     async fn size_ownership_real_pty_resize_detach_and_competing_clients() {
         use futures_util::FutureExt;
         use std::panic::AssertUnwindSafe;
