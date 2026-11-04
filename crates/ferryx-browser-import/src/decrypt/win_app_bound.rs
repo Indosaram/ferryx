@@ -351,6 +351,10 @@ mod review_tests {
         assert_eq!(first("Chrome"), "1BF5208B-295F-4992-B5F4-3A9BB6494838");
         assert_eq!(first("Edge"), "C9C2B807-7731-4F34-81B7-44FF7779522B");
         assert_eq!(first("Brave"), "BB19A0E5-00C6-4966-94B2-5AFEC6FED93A");
+        let slot = |name| get_browser_config(name).unwrap().vtable_slot;
+        assert_eq!(slot("Chrome"), 5);
+        assert_eq!(slot("Edge"), 8);
+        assert_eq!(slot("Brave"), 5);
         for name in ["Chrome", "Edge", "Brave"] {
             let config = get_browser_config(name).unwrap();
             assert!(windows_core_guid_ok(config.clsid));
