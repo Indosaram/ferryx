@@ -158,6 +158,7 @@ pub fn gate_for(request: &DaemonRequest) -> Option<Gate> {
         DaemonRequest::SetAgentIntegration { .. }
         | DaemonRequest::Panes { request: crate::daemon::layout::PaneAction::Detach { .. } | crate::daemon::layout::PaneAction::Attach { .. } | crate::daemon::layout::PaneAction::Zoom { .. } | crate::daemon::layout::PaneAction::Swap { .. } }
         | DaemonRequest::LayoutApply { .. }
+        | DaemonRequest::PairedTerminalDetach { .. }
         | DaemonRequest::RegisterWorkspace { .. }
         | DaemonRequest::UnregisterWorkspace { .. }
         | DaemonRequest::SaveSession { .. }
