@@ -103,3 +103,22 @@ fn import_rejects_oversized_and_invalid_inputs() {
     assert_eq!(p.settings, Settings::default());
     assert_eq!(p.skipped.len(), 3);
 }
+
+#[test]
+fn imported_settings_reach_native_terminal_overrides() {
+    use crate::terminal::{apply_terminal_preference_overrides, TerminalPreferenceOverrides, TerminalThemeColors};
+    let preview = parse("ghostty", b"font-family = Menlo\nfont-size = 16\nscrollback-limit-lines = 12000\ncursor-style = bar\nbackground = 123456").unwrap();
+    let theme = TerminalThemeColors { background: preview.settings.theme["background"].clone(), ..Default::default() };
+    let overrides = TerminalPreferenceOverrides {
+        font_family: preview.settings.font_family, font_size: preview.settings.font_size,
+        scrollback: preview.settings.scrollback, cursor_style: preview.settings.cursor_style,
+        theme: Some(theme), ..Default::default()
+    };
+    let base = crate::terminal::cached_terminal_preferences();
+    let effective = apply_terminal_preference_overrides(&base, &overrides);
+    assert_eq!(effective.font_family, "Menlo");
+    assert_eq!(effective.font_size, 16.0);
+    assert_eq!(effective.scrollback, 12000);
+    assert_eq!(effective.cursor_style, "bar");
+    assert_eq!(effective.theme.background, "#123456");
+}
