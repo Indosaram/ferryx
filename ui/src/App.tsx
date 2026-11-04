@@ -4489,6 +4489,7 @@ function WorkspaceApp({
       {isSidebarOpen ? (
         <Sidebar
           open={true}
+          detachedScope={JSON.stringify([state.workspaceId ?? "", state.activeWorktreePath ?? null])}
           projects={projects}
           activeProjectId={activeProject.workspaceId}
           worktrees={state.worktrees}

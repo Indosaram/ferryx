@@ -554,6 +554,44 @@ async fn ten_thousand_line_session_handover_preserves_screen_hash() {
     assert_eq!(text_hash, after_text);
 }
 
+#[tokio::test]
+async fn detached_survives_handover() {
+    use ferryx_lib::daemon::layout::{Content, Intent, PaneAction};
+    let mut daemons = PrivateDaemons::with_v5_flag(None);
+    let socket = daemons.socket();
+    let d1 = daemons.launch(None).await;
+    let predecessor_pid = daemons.pid(d1);
+    let mut client = TestDaemonClient::connect(&socket, predecessor_pid).await.unwrap();
+    let repo = daemons.repo();
+    client.register_workspace("detached", &repo).await.unwrap();
+    let session = client.spawn_with_shell("detached", "detached", 80, 24, Some("/bin/sh"), Some(&repo)).await.unwrap();
+    let mut attach = TestAttachStream::attach(&socket, predecessor_pid, &session, None).await.unwrap();
+    client.write_input(&session, b"stty -echo; printf 'V5_CHILD_PID=%s\\n' \"$$\"\n").await.unwrap();
+    let child_pid = attach.await_child_pid(Duration::from_secs(10)).await.unwrap();
+    let view = client.send_request(&DaemonRequest::LayoutGet { window: "main".into() }).await.unwrap();
+    let DaemonResponse::LayoutOk { view } = view else { panic!("{view:?}"); };
+    assert!(matches!(client.send_request(&DaemonRequest::LayoutApply {
+        window: "main".into(), base_revision: view.revision,
+        intent: Intent::AddTabWithSession { tab_id: "cat".into(), label: "cat".into(), content: Content::Terminal { backend_session_id: session.clone() }, activate: true },
+    }).await.unwrap(), DaemonResponse::LayoutOk { .. }));
+    assert!(matches!(client.send_request(&DaemonRequest::Panes { request: PaneAction::Detach { session: session.clone() } }).await.unwrap(), DaemonResponse::PanesOk { detached } if detached.contains(&session)));
+    let prepared = client.send_request(&DaemonRequest::PrepareHandover).await.unwrap();
+    let DaemonResponse::PrepareHandoverOk { legacy_socket_path, .. } = prepared else { panic!("{prepared:?}"); };
+    // Prepare does not kill the predecessor or the detached child.
+    assert!(process_is_alive(predecessor_pid));
+    assert!(process_is_alive(child_pid));
+    let d2 = daemons.launch(Some(Path::new(&legacy_socket_path))).await;
+    let successor_pid = daemons.pid(d2);
+    let mut successor = TestDaemonClient::connect(&socket, successor_pid).await.unwrap();
+    assert!(matches!(successor.send_request(&DaemonRequest::Panes { request: PaneAction::List }).await.unwrap(), DaemonResponse::PanesOk { detached } if detached.contains(&session)));
+    assert!(process_is_alive(child_pid));
+    let mut output = TestAttachStream::attach(&socket, successor_pid, &session, None).await.unwrap();
+    assert!(matches!(successor.send_request(&DaemonRequest::Panes { request: PaneAction::Attach { session: session.clone(), window: Some("main".into()), split: None } }).await.unwrap(), DaemonResponse::PanesOk { detached } if detached.is_empty()));
+    successor.write_input(&session, b"printf 'DETACHED_%s\\n' ALIVE\n").await.unwrap();
+    output.await_pattern_in_history_or_stream("DETACHED_ALIVE", Duration::from_secs(10)).await.unwrap();
+    assert!(process_is_alive(child_pid));
+}
+
 async fn run_v5_handover_case(v5_flag: Option<&'static str>) {
     let mut daemons = PrivateDaemons::with_v5_flag(v5_flag);
     let socket_path = daemons.socket();

@@ -4829,12 +4829,6 @@ impl DaemonClient {
     pub async fn detach_terminal(&self, session_id: &str) -> Result<(), IpcError> {
         self.remove_remote_connection_for_session(session_id);
         self.remove_local_connection_for_session(session_id);
-        if !session_id.starts_with("daemon-session:") {
-            return Err(IpcError::new(
-                IpcErrorCode::InvalidArgument,
-                "Detach is supported only for paired sessions",
-            ));
-        }
         self.paired_terminal_detach(session_id.to_string())
             .await
             .map_err(|e| IpcError::new(IpcErrorCode::InternalError, e.code))

@@ -770,6 +770,7 @@ pub struct RemoteGatewayState {
     pub terminal_service: Arc<TerminalService>,
     /// Session-owning daemon epoch, supplied by the daemon at construction.
     pub daemon_epoch: AtomicU64,
+    pub layouts: RwLock<Option<crate::daemon::layout::Registry>>,
     /// This gateway incarnation's reference-chat owner identity.
     ///
     /// Minted here, once per incarnation, and published beside `referenceHostId` on the
@@ -1085,6 +1086,7 @@ impl RemoteGatewayState {
             auth_manager,
             terminal_service,
             daemon_epoch: AtomicU64::new(0),
+            layouts: RwLock::new(None),
             reference_owner_id: uuid::Uuid::new_v4().to_string(),
             session_backend,
             workspace_registry,

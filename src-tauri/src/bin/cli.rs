@@ -51,6 +51,9 @@ fn main() {
     if group == Some("grants") {
         std::process::exit(ferryx_lib::cli::grants::run_grants_cli(&args));
     }
+    if group == Some("panes") {
+        std::process::exit(ferryx_lib::cli::panes::run(&args));
+    }
     // Owner actions refuse to run inside a Ferryx pane without an admin grant (rex todo 5); the
     // daemon refuses the same requests on its side.
     if matches!(group, Some("up" | "pair" | "remote")) {

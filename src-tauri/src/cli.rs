@@ -7,6 +7,7 @@ pub mod billing;
 pub mod direct_trust;
 pub mod grants;
 pub mod integrations;
+pub mod panes;
 pub mod supervisor_engine;
 pub mod supervisor_goal;
 pub mod supervisor_dispatch;

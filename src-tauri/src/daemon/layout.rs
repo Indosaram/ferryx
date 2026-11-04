@@ -1,6 +1,6 @@
 //! Daemon-owned window layouts. All methods doing disk I/O run on a blocking worker.
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -55,6 +55,8 @@ pub struct Layout {
     pub scope: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub parked_layouts: BTreeMap<String, Layout>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub detached_registry: DetachedRegistry,
     next_node_id: u64,
 }
 
@@ -62,13 +64,16 @@ impl Default for Layout {
     fn default() -> Self {
         Self { revision: 0, tabs: vec![], tab_group_layout: TabGroupLayout::Group {
             group_id: "main".into(), tab_ids: vec![], active_tab_id: None,
-        }, active_tab_id: None, focused_group_id: "main".into(), scope: None, parked_layouts: BTreeMap::new(), next_node_id: 1 }
+        }, active_tab_id: None, focused_group_id: "main".into(), scope: None, parked_layouts: BTreeMap::new(), detached_registry: BTreeSet::new(), next_node_id: 1 }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE", rename_all_fields = "camelCase")]
 pub enum Intent {
+    DetachPane { node_id: u64 },
+    AttachDetached { backend_session_id: String, target: AttachTarget },
+    ReplaceSession { node_id: u64, backend_session_id: String },
     Scoped { scope: String, intent: Box<Intent> },
     TransferTab { tab_id: String, target_window: String, #[serde(default)] target_scope: Option<String> },
     AddTabWithSession { tab_id: String, label: String, content: Content, activate: bool },
@@ -109,6 +114,30 @@ pub struct Seam {
     pub target_path: String,
     pub target: SeamMember,
     pub members: Vec<SeamMember>,
+}
+
+pub type DetachedRegistry = BTreeSet<String>;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachTarget {
+    #[serde(default)] pub tab_id: Option<String>,
+    #[serde(default)] pub node_id: Option<u64>,
+    #[serde(default)] pub split: Option<Direction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum PaneAction {
+    List,
+    Detach { session: String },
+    Attach { session: String, window: Option<String>, split: Option<Direction> },
+    Zoom { session: String },
+    Swap { a: String, b: String },
+}
+
+impl PaneAction {
+    pub fn mutates(&self) -> bool { !matches!(self, Self::List) }
 }
 
 pub type Snapshot = BTreeMap<String, Layout>;
@@ -338,6 +367,31 @@ impl Layout {
     fn apply(&mut self, intent: Intent) -> Result<(), String> {
         use Intent::*;
         match intent {
+            DetachPane { node_id } => {
+                let tab_id = self.tabs.iter().find(|tab| tab.pane_tree.contains(node_id)).ok_or("Unknown pane")?.tab_id.clone();
+                let removed = self.remove_pane(&tab_id, node_id)?;
+                if let Node::Leaf { content: Content::Terminal { backend_session_id }, .. } = removed {
+                    self.detached_registry.insert(backend_session_id);
+                } else { return Err("Not a terminal pane".into()); }
+            },
+            AttachDetached { backend_session_id, target } => {
+                self.detached_registry.remove(&backend_session_id);
+                let content = Content::Terminal { backend_session_id: backend_session_id.clone() };
+                if let Some(dir) = target.split {
+                    let tab_id = target.tab_id.or_else(|| self.active_tab_id.clone()).ok_or("No target tab")?;
+                    let target_node_id = target.node_id.unwrap_or(self.tab(&tab_id)?.active_node_id);
+                    self.apply(SplitPane { tab_id, target_node_id, dir, first: false, content })?;
+                } else {
+                    self.apply(AddTabWithSession { tab_id: format!("attached-{}-{}", backend_session_id, self.next_node_id), label: backend_session_id, content, activate: true })?;
+                }
+            },
+            ReplaceSession { node_id, backend_session_id } => {
+                let tab = self.tabs.iter_mut().find(|tab| tab.pane_tree.contains(node_id)).ok_or("Unknown pane")?;
+                match tab.pane_tree.find_mut(node_id) {
+                    Some(Node::Leaf { content: content @ Content::Terminal { .. }, .. }) => *content = Content::Terminal { backend_session_id },
+                    _ => return Err("Not a terminal pane".into()),
+                }
+            },
             TransferTab { .. } => return Err("Transfer must be applied by the store".into()),
             Scoped { scope, intent } => {
                 if self.scope.as_deref() == Some(&scope) { return self.apply(*intent); }
@@ -502,6 +556,87 @@ pub(super) fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, 
 }
 
 impl Store {
+    pub fn load_all(&mut self) -> Result<(), String> {
+        match std::fs::read_dir(self.root.join("layout")) {
+            Ok(entries) => for entry in entries {
+                let path = entry.map_err(|error| error.to_string())?.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                    let window = path.file_stem().and_then(|s| s.to_str()).ok_or("Invalid layout filename")?;
+                    self.get(window)?;
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error.to_string()),
+        }
+        Ok(())
+    }
+
+    pub fn detached(&mut self, live: &BTreeSet<String>) -> Result<DetachedRegistry, String> {
+        self.load_all()?;
+        let attached: BTreeSet<_> = self.locations().into_iter().map(|entry| entry.4).collect();
+        Ok(live.difference(&attached).cloned().collect())
+    }
+
+    fn locations(&self) -> Vec<(String, Option<String>, String, u64, String)> {
+        fn node(root: &Node, window: &str, scope: &Option<String>, tab: &str, out: &mut Vec<(String, Option<String>, String, u64, String)>) {
+            match root {
+                Node::Leaf { node_id, content: Content::Terminal { backend_session_id } } => out.push((window.into(), scope.clone(), tab.into(), *node_id, backend_session_id.clone())),
+                Node::Split { a, b, .. } => { node(a, window, scope, tab, out); node(b, window, scope, tab, out); },
+                _ => {},
+            }
+        }
+        fn layout(value: &Layout, window: &str, out: &mut Vec<(String, Option<String>, String, u64, String)>) {
+            for tab in &value.tabs { node(&tab.pane_tree, window, &value.scope, &tab.tab_id, out); }
+            for parked in value.parked_layouts.values() { layout(parked, window, out); }
+        }
+        let mut out = Vec::new();
+        for (window, value) in &self.layouts { layout(value, window, &mut out); }
+        out
+    }
+
+    pub fn panes(&mut self, action: PaneAction, live: &BTreeSet<String>) -> Result<DetachedRegistry, String> {
+        self.load_all()?;
+        let locate = |store: &Self, session: &str| store.locations().into_iter().filter(|entry| entry.4 == session).collect::<Vec<_>>();
+        let apply = |store: &mut Self, location: &(String, Option<String>, String, u64, String), intent| {
+            let revision = store.get(&location.0)?.revision;
+            let intent = match &location.1 { Some(scope) => Intent::Scoped { scope: scope.clone(), intent: Box::new(intent) }, None => intent };
+            store.apply(&location.0, revision, intent).map_err(|error| format!("{error:?}"))?;
+            Ok::<_, String>(())
+        };
+        match action {
+            PaneAction::List => {},
+            PaneAction::Detach { session } => {
+                if !live.contains(&session) { return Err("SESSION_NOT_FOUND".into()); }
+                for location in locate(self, &session) { apply(self, &location, Intent::DetachPane { node_id: location.3 })?; }
+            },
+            PaneAction::Attach { session, window, split } => {
+                if !live.contains(&session) { return Err("SESSION_NOT_FOUND".into()); }
+                if !self.detached(live)?.contains(&session) { return Err("SESSION_ALREADY_ATTACHED".into()); }
+                let window = window.or_else(|| self.layouts.keys().next().cloned()).unwrap_or_else(|| "main".into());
+                let revision = self.get(&window)?.revision;
+                self.apply(&window, revision, Intent::AttachDetached { backend_session_id: session, target: AttachTarget { split, ..AttachTarget::default() } }).map_err(|error| format!("{error:?}"))?;
+            },
+            PaneAction::Zoom { session } => {
+                let location = locate(self, &session).into_iter().next().ok_or("SESSION_NOT_FOUND")?;
+                apply(self, &location, Intent::TogglePaneExpanded { tab_id: location.2.clone(), node_id: location.3 })?;
+            },
+            PaneAction::Swap { a, b } => {
+                let source = locate(self, &a).into_iter().next().ok_or("SESSION_NOT_FOUND")?;
+                let target = locate(self, &b).into_iter().next().ok_or("SESSION_NOT_FOUND")?;
+                apply(self, &source, Intent::ReplaceSession { node_id: source.3, backend_session_id: b })?;
+                apply(self, &target, Intent::ReplaceSession { node_id: target.3, backend_session_id: a })?;
+            },
+        }
+        let detached = self.detached(live)?;
+        // The cache lives in the existing durable/handover-carried layout snapshot.
+        for (window, layout) in &mut self.layouts {
+            layout.detached_registry = detached.clone();
+            let path = self.root.join("layout").join(format!("{window}.json"));
+            persist(&path, layout)?;
+        }
+        Ok(detached)
+    }
+
     pub fn get_scoped(&mut self, window: &str, scope: Option<&str>) -> Result<View, String> {
         let mut view = self.get(window)?;
         if let Some(scope) = scope {
@@ -645,6 +780,58 @@ pub(super) fn persist(path: &Path, value: &Layout) -> Result<(), String> {
     #[cfg(unix)]
     std::fs::File::open(parent).and_then(|dir| dir.sync_all()).map_err(|error| error.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod detached {
+    use super::*;
+    #[test]
+    fn restart_and_handover_roundtrip() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::new(root.path().into());
+        let live = BTreeSet::from(["cat".into()]);
+        store.apply("main", 0, Intent::AddTabWithSession { tab_id: "cat-tab".into(), label: "cat".into(), content: Content::Terminal { backend_session_id: "cat".into() }, activate: true }).unwrap();
+        assert!(store.detached(&live).unwrap().is_empty());
+        assert_eq!(store.panes(PaneAction::Detach { session: "cat".into() }, &live).unwrap(), live);
+        let snapshot = store.layouts.clone();
+        let mut restored = Store::new(root.path().into());
+        assert_eq!(restored.detached(&live).unwrap(), live);
+        restored.adopt(snapshot).unwrap();
+        assert_eq!(restored.get("main").unwrap().layout.detached_registry, live);
+        assert!(restored.panes(PaneAction::Attach { session: "cat".into(), window: Some("main".into()), split: None }, &live).unwrap().is_empty());
+        assert_eq!(restored.locations().len(), 1);
+        assert!(restored.panes(PaneAction::Attach { session: "missing".into(), window: None, split: None }, &live).unwrap_err().contains("SESSION_NOT_FOUND"));
+    }
+    #[test]
+    fn parked_scopes_and_other_windows_are_attached() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::new(root.path().into());
+        let live = BTreeSet::from(["a".into(), "b".into(), "orphan".into()]);
+        for (window, session) in [("main", "a"), ("second", "b")] {
+            store.apply(window, 0, Intent::Scoped { scope: "workspace".into(), intent: Box::new(Intent::AddTabWithSession { tab_id: session.into(), label: session.into(), content: Content::Terminal { backend_session_id: session.into() }, activate: true }) }).unwrap();
+        }
+        assert_eq!(store.detached(&live).unwrap(), BTreeSet::from(["orphan".into()]));
+        store.panes(PaneAction::Swap { a: "a".into(), b: "b".into() }, &live).unwrap();
+        assert_eq!(store.locations().iter().find(|entry| entry.0 == "main").unwrap().4, "b");
+        store.panes(PaneAction::Zoom { session: "a".into() }, &live).unwrap();
+        assert!(store.get_scoped("second", Some("workspace")).unwrap().layout.tabs[0].expanded_node_id.is_some());
+    }
+
+    #[test]
+    fn split_attach_and_detach_collapse_only_the_target_leaf() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::new(root.path().into());
+        let live = BTreeSet::from(["a".into(), "b".into()]);
+        store.panes(PaneAction::Attach { session: "a".into(), window: Some("main".into()), split: None }, &live).unwrap();
+        store.panes(PaneAction::Attach { session: "b".into(), window: Some("main".into()), split: Some(Direction::Vertical) }, &live).unwrap();
+        let before = store.get("main").unwrap();
+        assert!(matches!(before.layout.tabs[0].pane_tree, Node::Split { dir: Direction::Vertical, .. }));
+        assert!(store.panes(PaneAction::Attach { session: "a".into(), window: None, split: None }, &live).is_err());
+        assert_eq!(store.panes(PaneAction::Detach { session: "b".into() }, &live).unwrap(), BTreeSet::from(["b".into()]));
+        let after = store.get("main").unwrap();
+        assert!(matches!(&after.layout.tabs[0].pane_tree, Node::Leaf { content: Content::Terminal { backend_session_id }, .. } if backend_session_id == "a"));
+        assert!(after.revision > before.revision);
+    }
 }
 
 #[cfg(test)]
