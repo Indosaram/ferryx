@@ -73,7 +73,9 @@ export class LayoutSync {
   constructor(private readonly io: LayoutTransport = transport) {}
   get enabled(): boolean { return this.view !== null; }
   get revision(): number | null { return this.view?.revision ?? null; }
+  get busy(): boolean { return this.queued > 0; }
   async refresh(): Promise<boolean> {
+    await this.pending;
     const reply = await this.io.get();
     if (reply.type === "unsupported") { this.view = null; return false; }
     this.accept(reply);
@@ -92,7 +94,7 @@ export class LayoutSync {
     const run = this.pending.then(async () => {
       if (!this.view || generation !== this.generation) return;
       const wire = intent();
-      if (!wire) return;
+      if (!wire) { reconciled(this.queued === 1); return; }
       const reply = await this.io.apply(this.view.revision, wire);
       if (reply.type === "unsupported") throw new Error("Daemon layout capability disappeared");
       if (reply.type === "conflict") this.generation++;
