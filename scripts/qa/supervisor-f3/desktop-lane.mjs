@@ -119,7 +119,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     setup.guiBinary = project.binary;
     setup.frontendDist = project.uiDist;
     lane.write('diagnostic', 'project-setup.json', project);
-    const wrappers = await helper.call('write-wrappers', { profile: setup.profile });
+    const wrappers = await helper.call('write-wrappers', { profile: setup.profile, repo: setup.repo });
     // The isolated daemon's gateway gets a run-owned free port: production on this host may
     // already own 43821, and a refused bind must stop the lane, never be stepped over.
     const gatewayPort = gatewayPortFor(host.hostId, await helper.call('free-port', {}));
@@ -216,7 +216,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     // front before the raise. A frame counts only when the cropped run window shows this run's
     // own text (`marker`: the worktree name its cards and rows carry, or the Viewer marker);
     // otherwise it is taken again, and after the attempts the step fails GUI_NOT_FRONT.
-    const runMarker = 'f3';
+    const runMarker = 'Supervisor';
     // OCR reads a middle dot as '-' and 1 as i: text is compared with those folded (seams ocrShows).
     const shows = ocrShows;
     let frameSize;
@@ -444,7 +444,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       step.artifact('panel-read', 'rules-after.panel.json', stored);
       step.artifact('transcript-read', 'rules.transcript.json', await transcript(null));
       step.assert('rule-stored-every-300s', globalRetryRule(stored)?.params?.thenEverySecs === 300, { rule: globalRetryRule(stored) });
-      const after = keep(step, 'rules-after', await until('the changed rules line on screen', () => frame('rules-after'), ({ read: r }) => /every 5 min/.test(rulesLineText(r.text) ?? ''), { deadlineMs: 60_000 }));
+      const after = await visible(step, 'rules-after', (r) => /every 5 min/.test(rulesLineText(r.text) ?? ''), { scroll: true });
       const afterLine = rulesLineText(after.read.text);
       step.assert('rules-line-changed-on-screen', afterLine !== beforeLine && /every 5 min/.test(afterLine ?? ''), { before: beforeLine, after: afterLine });
     });

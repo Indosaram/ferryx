@@ -106,7 +106,7 @@ function daemon({ profile, frames, deadlineMs = 30_000 }) {
 }
 
 /** One wrapper per fixture mode, so a spawn's `shell` names exactly one fixture agent. */
-function writeWrappers({ profile }) {
+function writeWrappers({ profile, repo }) {
   requireProfile(profile);
   const agent = join(HERE, 'fixture-agent.mjs');
   const logs = join(profile, 'evidence', 'f3-agents');
@@ -131,7 +131,7 @@ function writeWrappers({ profile }) {
   // runs in its own directory inside the profile (and so inside the registered worktree, removed
   // with the profile): one row on this computer carries its title.
   for (const key of ['focus', 'away']) {
-    const cwd = join(profile, 'panes', wrappers[key].title);
+    const cwd = join(repo ?? profile, 'panes', wrappers[key].title);
     mkdirSync(cwd, { recursive: true });
     wrappers[key].cwd = resolve(cwd);
   }
