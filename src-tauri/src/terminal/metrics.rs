@@ -1,7 +1,9 @@
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::sync::OnceLock;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(feature = "desktop")]
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "desktop")]
 const HISTOGRAM_CAPACITY: usize = 4096;
