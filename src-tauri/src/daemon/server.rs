@@ -9760,6 +9760,10 @@ impl DaemonServer {
                 }
                 // The successor waits for our instance lock, so it must be running before we
                 // release it. No session is live here, so the exit cannot cost a terminal.
+                if let Err(error) = self.plugins.stop_all().await {
+                    tracing::error!(%error, "Idle daemon restart aborted: plugin teardown failed");
+                    return DaemonResponse::UpgradeUnsupported;
+                }
                 let mut successor = std::process::Command::new(&exe);
                 successor
                     .arg("--daemon")
@@ -9784,6 +9788,9 @@ impl DaemonServer {
                     }
                     Err(error) => {
                         tracing::warn!(%error, live_sessions, "Idle daemon restart failed to spawn a successor");
+                        if let Err(error) = self.start_plugins().await {
+                            tracing::error!(%error, "Failed to resume plugins after idle restart failure");
+                        }
                         DaemonResponse::UpgradeUnsupported
                     }
                 }
