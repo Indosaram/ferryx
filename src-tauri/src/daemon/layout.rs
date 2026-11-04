@@ -219,8 +219,19 @@ impl TabGroupLayout {
             "first" | "a" => a.at(tail), "second" | "b" => b.at(tail), _ => None,
         }, _ => None }
     }
-    fn equalize(&mut self) {
-        if let Self::Split { ratio, a, b, .. } = self { *ratio = 0.5; a.equalize(); b.equalize(); }
+    fn equalize_run(&mut self, path: &str) -> Result<(), String> {
+        fn to_node(group: &TabGroupLayout) -> Node {
+            match group {
+                TabGroupLayout::Group { .. } => Node::Leaf { node_id: 0, content: Content::Dag },
+                TabGroupLayout::Split { dir, ratio, a, b } => Node::Split { dir: *dir, ratio: *ratio, a: Box::new(to_node(a)), b: Box::new(to_node(b)) },
+            }
+        }
+        fn copy(group: &mut TabGroupLayout, node: &Node) {
+            if let (TabGroupLayout::Split { ratio, a, b, .. }, Node::Split { ratio: value, a: first, b: second, .. }) = (group, node) {
+                *ratio = *value; copy(a, first); copy(b, second);
+            }
+        }
+        let mut node = to_node(self); node.equalize_run(path)?; copy(self, &node); Ok(())
     }
 }
 
@@ -340,7 +351,7 @@ impl Layout {
                 if let TabGroupLayout::Split { ratio, .. } = self.tab_group_layout.at(&path).ok_or("Unknown split")? { *ratio = ratio_value(value); }
                 else { return Err("Not a split".into()); }
             },
-            EqualizeTabGroupRun { path } => self.tab_group_layout.at(&path).ok_or("Unknown split")?.equalize(),
+            EqualizeTabGroupRun { path } => self.tab_group_layout.equalize_run(&path)?,
             EqualizePaneRun { tab_id, path } => self.tab(&tab_id)?.pane_tree.equalize_run(&path)?,
             EqualizePanes { tab_id } => self.tab(&tab_id)?.pane_tree.equalize(),
             SwapPanes { tab_id, source_node_id, target_node_id } => {
