@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { describeTerminal, listenToThisWindow, resizeTerminal } from "../lib/tauri";
 
-export type SizeOwnerState = { sessionId: string; owner: string; cols: number; rows: number };
+export type SizeOwnerState = { sessionId: string; owner: string; cols: number; rows: number; desktopCols?: number; desktopRows?: number };
 
 export function isPhoneSizeOwner(owner: string | null | undefined): boolean {
   return owner != null && owner !== "desktop";
@@ -35,7 +35,7 @@ export function SizeOwner({ sessionId }: { sessionId: string }) {
     <span>Sized by phone</span>
     <button type="button" onClick={() => {
       // A local resize is an explicit desktop claim, even when dimensions match.
-      void resizeTerminal({ sessionId, cols: state.cols, rows: state.rows })
+      void resizeTerminal({ sessionId, cols: state.desktopCols ?? state.cols, rows: state.desktopRows ?? state.rows })
         .catch((cause: unknown) => setError(String(cause)));
     }}>Take back</button>
     {error ? <span role="alert">{error}</span> : null}
