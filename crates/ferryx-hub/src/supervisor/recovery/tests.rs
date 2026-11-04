@@ -394,6 +394,34 @@ async fn a_429_waits_for_the_reset_and_never_rereads_old_output() {
 }
 
 #[tokio::test]
+async fn a_session_that_starts_after_the_first_pass_already_at_its_429_resumes_at_the_reset() {
+    // F1: the hub is watching; a new session hits its limit before the next pass lists it.
+    let rig = rig(Vec::new(), "");
+    rig.world.up.store(true, Ordering::SeqCst);
+    rig.sched.tick().await;
+    let late = session("naver", "q1", "claude", "idle", "provider", T0 + 5_000);
+    rig.world.push(&late.session_ref, "Working on quota-1 (turn 1)");
+    rig.world.push(
+        &late.session_ref,
+        "API Error: 429 Too Many Requests - Usage limit reached. Try again in 3 minutes",
+    );
+    rig.fleet.0.lock().unwrap().push(late);
+    rig.step(15_000).await;
+    rig.step(2 * MIN).await;
+    assert!(rig.world.ops().is_empty(), "still before the reset");
+    rig.step(MIN).await;
+    assert_eq!(rig.world.ops(), vec!["send naver:q1 continue".to_owned()]);
+    rig.step(61_000).await;
+    rig.step(31_000).await;
+    assert_eq!(rig.world.ops().len(), 1, "resumed once");
+    let rows = rig.rows();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].kind, ActionKind::Resumed);
+    assert!(!rows[0].live);
+    assert!(rig.opened().is_empty());
+}
+
+#[tokio::test]
 async fn a_repeated_stall_cancels_and_resumes_once_then_escalates_once() {
     let stalled = session("mac-2", "s1", "claude", "working", "provider", T0 - 10 * MIN);
     let rig = rig(vec![stalled], "thinking...");

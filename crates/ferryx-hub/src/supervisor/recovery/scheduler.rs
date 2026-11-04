@@ -159,6 +159,11 @@ struct State {
     restored: bool,
     /// Fault generation per scope; bumped when an incident closes.
     gens: HashMap<String, u32>,
+    /// When the first pass ran: a session first seen later whose screen changed after this
+    /// drew its output under supervision, so that output is news, not old scrollback.
+    watching_since: Option<i64>,
+    /// Every session ever observed; a returning one never replays its scrollback.
+    known: HashSet<SessionRef>,
 }
 
 struct GoalWait {

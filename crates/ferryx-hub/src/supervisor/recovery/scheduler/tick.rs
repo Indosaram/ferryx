@@ -109,6 +109,10 @@ impl RecoveryScheduler {
         if !self.restore(&mut st, now).await {
             return;
         }
+        // The first pass only sets baselines: nothing it reads was drawn while we watched,
+        // whatever a remote host's clock says.
+        let since = st.watching_since.unwrap_or(i64::MAX);
+        st.watching_since.get_or_insert(now);
         st.present = fleet.iter().map(|s| s.session_ref.clone()).collect();
         let mut obs: HashMap<SessionRef, Obs> = HashMap::new();
         for session in fleet {
@@ -144,8 +148,18 @@ impl RecoveryScheduler {
                 continue;
             };
             // A session seen for the first time (startup, or back after its baseline was
-            // lost) only sets the baseline: old scrollback is never news (H2).
-            let base = st.base.get(&session.session_ref).cloned();
+            // lost) only sets the baseline: old scrollback is never news (H2). A session first
+            // seen after the first pass whose screen changed since then drew its tail while
+            // we watched: a 429 it hit between two passes is news (F1).
+            let mut base = st.base.get(&session.session_ref).cloned();
+            if base.is_none()
+                && !st.known.contains(&session.session_ref)
+                && session.screen_changed_at_ms.is_some_and(|at| at > since)
+            {
+                base = Some(String::new());
+                st.base.insert(session.session_ref.clone(), String::new());
+            }
+            st.known.insert(session.session_ref.clone());
             let (seen, progress) = match base {
                 Some(base) => {
                     let fresh = fresh_lines(&base, &tail);
