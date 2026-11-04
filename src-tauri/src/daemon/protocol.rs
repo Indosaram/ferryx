@@ -931,6 +931,9 @@ pub enum DaemonRequest {
     },
     LoadSession,
     LayoutGet { window: String },
+    LayoutOffer { window: String, snapshot: crate::daemon::layout::Layout },
+    #[serde(rename_all = "camelCase")]
+    LayoutImport { window: String, machine_id: String, revision: u64 },
     Panes { request: crate::daemon::layout::PaneAction },
     LayoutGetScoped { window: String, scope: String },
     #[serde(rename_all = "camelCase")]
@@ -1707,6 +1710,7 @@ pub enum DaemonResponse {
     OnboardingOk { state: Option<crate::daemon::onboarding::State> },
     SaveSessionOk,
     LayoutOk { view: crate::daemon::layout::View },
+    LayoutImported { window: String, view: crate::daemon::layout::View },
     PanesOk { detached: crate::daemon::layout::DetachedRegistry },
     PluginsOk { plugins: Vec<crate::daemon::plugins::registry::Status> },
     ScriptOk { value: serde_json::Value },

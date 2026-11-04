@@ -313,7 +313,7 @@ pub fn note_window_destroyed<R: Runtime>(window: &Window<R>) {
 
 /// Builds a secondary app window with the `main` window's attributes and runs the per-window
 /// setup. `bounds` places it; without them it opens centered at the default size.
-async fn build_app_window<R: Runtime>(
+pub(super) async fn build_app_window<R: Runtime>(
     app: &AppHandle<R>,
     label: &str,
     bounds: Option<WindowBounds>,

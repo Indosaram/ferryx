@@ -25,6 +25,19 @@ function ready(layout: DaemonLayout): LayoutReply {
 }
 
 describe("daemon layout revisions", () => {
+  it("keeps foreign session ids disconnected even when a local backend id matches", () => {
+    const state = workspace();
+    const saved = daemon();
+    saved.tabs[0].paneTree = { type: "leaf", nodeId: 700,
+      content: { kind: "disconnectedTerminal", machineId: "other-host", backendSessionId: "backend" } };
+    saved.tabs[0].activeNodeId = 700;
+    const after = rehydrateWorkspace(state, { revision: 1, layout: saved });
+    expect(after.sessions.front).toBe(state.sessions.front);
+    const id = Object.values(after.layout.layoutsByTabId.tab.sessionIdsByLeafId)[0];
+    expect(id).not.toBe("front");
+    expect(after.sessions[id]).toMatchObject({ backendSessionId: null, lifecycle: "failed",
+      remoteConnectionState: "disconnected", backendUnavailableReason: "remote_session_gone" });
+  });
   it("restores plugin identity without creating or closing terminal sessions", () => {
     const state = workspace();
     const saved = daemon();

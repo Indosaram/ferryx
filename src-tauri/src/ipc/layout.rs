@@ -127,6 +127,22 @@ pub async fn cmd_layout_get(
 }
 
 #[tauri::command]
+pub async fn cmd_layout_import(
+    app: tauri::AppHandle,
+    window: WebviewWindow,
+    manager: State<'_, Arc<RemoteGatewayManager>>,
+    machine_id: String,
+    revision: u64,
+) -> Result<String, IpcError> {
+    let client = manager.daemon_client().ok_or_else(|| IpcError::internal("Daemon unavailable"))?;
+    match client.send_request(DaemonRequest::LayoutImport { window: window.label().into(), machine_id, revision }).await? {
+        DaemonResponse::LayoutImported { window, .. } => super::window::build_app_window(&app, &window, None).await,
+        DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
+        response => Err(IpcError::internal(format!("Unexpected layout import response: {response:?}"))),
+    }
+}
+
+#[tauri::command]
 pub async fn cmd_layout_apply(
     window: WebviewWindow,
     manager: State<'_, Arc<RemoteGatewayManager>>,

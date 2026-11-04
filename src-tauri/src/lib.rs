@@ -2036,6 +2036,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::onboarding::cmd_onboarding_get,
         ipc::onboarding::cmd_onboarding_set,
         ipc::layout::cmd_layout_get,
+        ipc::layout::cmd_layout_import,
         ipc::layout::cmd_panes,
         ipc::layout::cmd_layout_apply,
         ipc::layout::cmd_plugins,
