@@ -30,6 +30,7 @@ fn reply(response: DaemonResponse) -> Result<LayoutReply, IpcError> {
 pub async fn cmd_layout_get(
     window: WebviewWindow,
     manager: State<'_, Arc<RemoteGatewayManager>>,
+    scope: Option<String>,
 ) -> Result<LayoutReply, IpcError> {
     let Some(client) = manager.daemon_client() else { return Ok(LayoutReply::Unsupported); };
     match client.send_request(DaemonRequest::GetCapabilities).await? {
@@ -39,7 +40,11 @@ pub async fn cmd_layout_get(
         DaemonResponse::Error { code: None, .. } => return Ok(LayoutReply::Unsupported),
         response => return reply(response),
     }
-    reply(client.send_request(DaemonRequest::LayoutGet { window: window.label().into() }).await?)
+    let request = match scope {
+        Some(scope) => DaemonRequest::LayoutGetScoped { window: window.label().into(), scope },
+        None => DaemonRequest::LayoutGet { window: window.label().into() },
+    };
+    reply(client.send_request(request).await?)
 }
 
 #[tauri::command]
