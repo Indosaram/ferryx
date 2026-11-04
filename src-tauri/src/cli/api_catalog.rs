@@ -450,7 +450,7 @@ pub const CATALOG: &[Command] = &[
         subcommands: &[
             sub!("list", &[], &[JSON]),
             sub!("detach", &[arg!("session", "string")], &[JSON]),
-            sub!("attach", &[arg!("session", "string")], &[value!("--window"), value!("--split"), JSON]),
+            sub!("attach", &[opt_arg!("session", "string")], &[value!("--window"), value!("--split"), value!("--plugin"), JSON]),
             sub!("zoom", &[arg!("session", "string")], &[JSON]),
             sub!("swap", &[arg!("a", "string"), arg!("b", "string")], &[JSON]),
         ],
@@ -539,6 +539,15 @@ pub fn describe_json(name: &str) -> Result<Value, String> {
         "output": command.output,
         "subcommands": subcommands,
         "exitCodes": exit_codes,
+        "pluginRequests": if name == "panes" { json!({
+            "encoding":"json-lines", "maxLineBytes":65536,
+            "requests":[
+                {"type":"getCapabilities", "capability":"getCapabilities", "properties":{}},
+                {"type":"listSessions", "capability":"listSessions", "properties":{}},
+                {"type":"write", "capability":"write", "properties":{"sessionId":"string", "data":"base64"}, "grant":"write"},
+                {"type":"pluginRender", "capability":"render", "properties":{"view":"string", "html":"string"}}
+            ]
+        }) } else { Value::Null },
     }))
 }
 
