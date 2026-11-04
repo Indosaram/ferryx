@@ -100,7 +100,7 @@ impl Context {
         let name = name.to_ascii_lowercase();
         self.agents
             .iter()
-            .find(|agent| agent.id == name || agent.aliases.iter().any(|alias| *alias == name))
+            .find(|agent| agent.id == name || agent.aliases.contains(&name))
             .map(|agent| agent.id.as_str())
     }
 

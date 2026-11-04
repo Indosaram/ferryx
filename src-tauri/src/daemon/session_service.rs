@@ -751,10 +751,11 @@ impl DaemonSessionService {
     }
 
     pub(crate) async fn resize_remote_owner(&self, id: &str, client: &str, cols: u16, rows: u16, control: bool, take: bool) -> Result<bool, String> {
-        self.resize_remote_owner_generation(id, client, cols, rows, control, take, None).await
+        self.resize_remote_owner_generation(id, client, (cols, rows), control, take, None).await
     }
 
-    pub(crate) async fn resize_remote_owner_generation(&self, id: &str, client: &str, cols: u16, rows: u16, control: bool, take: bool, supplied: Option<u64>) -> Result<bool, String> {
+    pub(crate) async fn resize_remote_owner_generation(&self, id: &str, client: &str, size: (u16, u16), control: bool, take: bool, supplied: Option<u64>) -> Result<bool, String> {
+        let (cols, rows) = size;
         if !control { return Ok(false); }
         self.validate_session_ssh_target(id).await.map_err(|e| e.to_string())?;
         // Admission and operation submission are synchronous under the same lock: queued

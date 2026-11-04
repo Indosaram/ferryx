@@ -155,7 +155,7 @@ pub(crate) fn skill_targets_with_env(get_env: impl Fn(&str) -> Option<OsString>)
     });
     let skill_only = SKILL_ONLY_AGENTS.iter().filter_map(|(agent, dir)| {
         let (_, rel) = SKILL_FILES.iter().find(|(name, _)| name == agent)?;
-        Some(SkillTarget { agent: *agent, agent_dir: home_relative(&home, dir), file: home_relative(&home, rel) })
+        Some(SkillTarget { agent, agent_dir: home_relative(&home, dir), file: home_relative(&home, rel) })
     });
     from_hooks.chain(skill_only).collect()
 }

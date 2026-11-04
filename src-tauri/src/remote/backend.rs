@@ -211,7 +211,7 @@ pub trait RemoteSessionBackend: Send + Sync {
 /// the shared service supplies authoritative metadata to HTTP and IPC alike.
 impl RemoteSessionBackend for crate::daemon::session_service::DaemonSessionService {
     fn resize_owned_generation<'a>(&'a self, id: &'a str, client: &'a str, generation: u64, cols: u16, rows: u16, control: bool) -> BoxFuture<'a, Result<bool, String>> {
-        Box::pin(self.resize_remote_owner_generation(id, client, cols, rows, control, false, Some(generation)))
+        Box::pin(self.resize_remote_owner_generation(id, client, (cols, rows), control, false, Some(generation)))
     }
     fn resize_owned<'a>(&'a self, id: &'a str, client: &'a str, cols: u16, rows: u16, control: bool, take: bool) -> BoxFuture<'a, Result<bool, String>> {
         Box::pin(self.resize_remote_owner(id, client, cols, rows, control, take))

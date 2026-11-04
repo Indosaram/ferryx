@@ -165,7 +165,7 @@ pub struct View {
 }
 
 #[derive(Debug)]
-pub enum ApplyError { Conflict(Layout), Invalid(String) }
+pub enum ApplyError { Conflict(Box<Layout>), Invalid(String) }
 
 fn ratio(value: f64) -> f64 { if value.is_finite() { value.clamp(0.1, 0.9) } else { 0.5 } }
 
@@ -757,7 +757,7 @@ impl Store {
             Intent::ActivateTab { tab_id } => current.tabs.iter().any(|tab| tab.tab_id == *tab_id),
             _ => false,
         };
-        if base != current.revision && (base > current.revision || !commutes) { return Err(ApplyError::Conflict(current)); }
+        if base != current.revision && (base > current.revision || !commutes) { return Err(ApplyError::Conflict(Box::new(current))); }
         let mut next = current;
         next.apply(intent).map_err(ApplyError::Invalid)?;
         next.tab_group_layout = next.tab_group_layout.clone().prune().unwrap_or_else(|| Layout::default().tab_group_layout);
@@ -799,7 +799,7 @@ impl Store {
     fn transfer(&mut self, window: &str, base: u64, scope: Option<&str>, tab_id: &str, target_window: &str, target_scope: Option<&str>) -> Result<View, ApplyError> {
         if window == target_window { return Err(ApplyError::Invalid("Transfer requires another window".into())); }
         let before = self.get(window).map_err(ApplyError::Invalid)?;
-        if before.revision != base { return Err(ApplyError::Conflict(before.layout)); }
+        if before.revision != base { return Err(ApplyError::Conflict(Box::new(before.layout))); }
         let source = self.get_scoped(window, scope).map_err(ApplyError::Invalid)?;
         let tab = source.layout.tabs.iter().find(|tab| tab.tab_id == tab_id).ok_or_else(|| ApplyError::Invalid("Unknown tab".into()))?.clone();
         let target = self.get(target_window).map_err(ApplyError::Invalid)?;
@@ -1109,7 +1109,7 @@ mod tests {
         let mut store = Store::new(root.path().into());
         let first = store.apply("main", 0, add("one")).unwrap();
         assert_eq!(first.revision, 1);
-        assert!(matches!(store.apply("main", 0, Intent::CloseTab { tab_id: "one".into(), replacement: None }), Err(ApplyError::Conflict(layout)) if layout == first.layout));
+        assert!(matches!(store.apply("main", 0, Intent::CloseTab { tab_id: "one".into(), replacement: None }), Err(ApplyError::Conflict(layout)) if *layout == first.layout));
         let focused = store.apply("main", 0, Intent::FocusPane { tab_id: "one".into(), node_id: 1 }).unwrap();
         assert_eq!(focused.revision, 2);
         let mut restarted = Store::new(root.path().into());
