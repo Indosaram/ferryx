@@ -2158,6 +2158,7 @@ mod tests {
     use crate::daemon::client::DaemonClient;
     use crate::remote::auth::DevicePermission;
     use std::ffi::OsString;
+    use std::sync::Arc;
     use tokio::sync::Mutex;
 
     static FERRYX_DATA_DIR_LOCK: Mutex<()> = Mutex::const_new(());
