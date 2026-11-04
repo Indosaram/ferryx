@@ -71,6 +71,14 @@ required-features = ["desktop"]
 name = "native_terminal_renderer_contract"
 required-features = ["native-terminal"]
 
+[[test]]
+name = "native_terminal_surface_host_contract"
+required-features = ["desktop"]
+
+[[test]]
+name = "remote_project_public_contract"
+required-features = ["desktop"]
+
 [build-dependencies]
 # `codegen` generates the app context in build.rs (see build.rs) instead of in generate_context!.
 tauri-build = { version = "2", features = ["codegen"] }
