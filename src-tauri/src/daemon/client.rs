@@ -3012,6 +3012,10 @@ impl DaemonClient {
     }
 
     async fn try_connect_existing_socket(&self) -> Result<DaemonStream, std::io::Error> {
+        #[cfg(windows)]
+        if self.socket_path == get_socket_path() {
+            if let Ok(stream) = DaemonStream::pipe("daemon") { return Ok(stream); }
+        }
         if fs::symlink_metadata(&self.socket_path).is_ok()
             && Self::validate_existing_socket_path(&self.socket_path).is_ok()
         {
@@ -5288,7 +5292,7 @@ mod local_control_isolation_tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap());
         let (client, accepted) = tokio::join!(client, listener.accept());
-        (client.unwrap(), accepted.unwrap().0)
+        (client.unwrap().into(), accepted.unwrap().0.into())
     }
 
     #[tokio::test]
@@ -8082,7 +8086,7 @@ mod local_split_transport_tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap());
         let (client, accepted) = tokio::join!(client, listener.accept());
-        (client.unwrap(), accepted.unwrap().0)
+        (client.unwrap().into(), accepted.unwrap().0.into())
     }
 
     use std::pin::Pin;
