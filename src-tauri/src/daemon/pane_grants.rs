@@ -155,6 +155,7 @@ pub fn gate_for(request: &DaemonRequest) -> Option<Gate> {
             PaneGrantAction::List | PaneGrantAction::CheckAdmin => None,
             PaneGrantAction::Add { .. } | PaneGrantAction::Remove { .. } => Some(Gate::OwnerOnly),
         },
+        DaemonRequest::Script { .. } => Some(Gate::OwnerOnly),
         DaemonRequest::SetAgentIntegration { .. }
         | DaemonRequest::OnboardingSet { .. }
         | DaemonRequest::PluginSetEnabled { .. }
