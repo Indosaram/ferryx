@@ -17,11 +17,12 @@ import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
+import { createServer as createHttpServer } from 'node:http';
 import { homedir, hostname, platform, release } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { activationScript, guiBundleFiles, parseEnvBlock, windowBoundsScript, windowsEnvScript } from './seams.mjs';
+import { activationScript, engineFiles, guiBundleFiles, inputSourceScript, parseEnvBlock, stubReply, windowBoundsScript, windowsEnvScript } from './seams.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CHECKOUT = resolve(HERE, '..', '..', '..');
@@ -172,8 +173,76 @@ async function awaitExit({ key, deadlineMs = 120_000 }) {
   return { ...describe(entry), exit, output: entry.output.slice(-8000) };
 }
 
+/**
+ * The isolated desktop daemon's mhc engine: a loopback OpenAI-compatible stub provider (this
+ * helper serves it until cleanup; nothing reaches a real model) plus the agent dir and hub env
+ * file under the profile. Returns the env the daemon starts with. The stub answers the F3 owner
+ * prompt with a Reply naming its token, and every other turn (assessments) with "complete".
+ */
+let engineStub = null;
+async function startEngineStub({ profile, mhcBin }) {
+  requireProfile(profile);
+  if (engineStub) throw fail('SPAWN_REFUSED', 'engine stub already running');
+  if (!isAbsolute(mhcBin ?? '') || !existsSync(mhcBin)) throw fail('ENGINE_REFUSED', `mhc ${mhcBin} is not an absolute existing path`);
+  const requests = join(profile, 'evidence', 'f3-provider-requests.jsonl');
+  mkdirSync(dirname(requests), { recursive: true });
+  const server = createHttpServer((request, response) => {
+    let body = '';
+    request.setEncoding('utf8');
+    request.on('data', (chunk) => { body += chunk; });
+    request.on('end', () => {
+      let json = null;
+      try { json = JSON.parse(body); } catch { /* recorded raw length only */ }
+      const texts = (json?.messages ?? []).map((m) => (typeof m?.content === 'string' ? m.content : Array.isArray(m?.content) ? m.content.map((p) => p?.text ?? '').join('') : ''));
+      const reply = stubReply(texts.at(-1) ?? '') ?? JSON.stringify({ gaps: [], decision: { decision: 'complete' } });
+      writeFileSync(requests, `${JSON.stringify({ at: new Date().toISOString(), path: request.url, model: json?.model ?? null, bytes: body.length, reply })}\n`, { flag: 'a' });
+      if (request.method === 'GET' && request.url?.replace(/\?.*$/, '').endsWith('/models')) {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ object: 'list', data: [{ id: json?.model ?? 'qa-supervisor-1', object: 'model', owned_by: 'qa' }] }));
+        return;
+      }
+      if (!request.url?.endsWith('/chat/completions')) { response.writeHead(404); response.end('{}'); return; }
+      const chunk = (delta, finish = null) => `data: ${JSON.stringify({ id: 'f3', object: 'chat.completion.chunk', created: 0, model: json?.model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+      response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+      response.write(chunk({ role: 'assistant', content: reply }));
+      response.write(chunk({}, 'stop'));
+      response.write(`data: ${JSON.stringify({ id: 'f3', object: 'chat.completion.chunk', created: 0, model: json?.model, choices: [], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\n`);
+      response.end('data: [DONE]\n\n');
+    });
+  });
+  await new Promise((resolveListen, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolveListen); });
+  engineStub = server;
+  const baseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+  const files = engineFiles({ baseUrl, mhcBin });
+  const agentDir = join(profile, 'home', '.omo', 'agent');
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(join(agentDir, 'models.json'), `${JSON.stringify(files.models, null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(join(agentDir, 'mcp.json'), `${JSON.stringify(files.mcp, null, 2)}\n`, { mode: 0o600 });
+  const envFile = join(profile, 'data', 'hub-f3.env');
+  mkdirSync(dirname(envFile), { recursive: true });
+  writeFileSync(envFile, files.envFile, { mode: 0o600 });
+  const tracker = await freePort();
+  return { baseUrl, requests, env: { FERRYX_HUB_ENV_FILE: envFile, FERRYX_HUB_TRACKER_ADDR: `127.0.0.1:${tracker.port}`, MAHO_CODING_AGENT_DIR: agentDir,
+    MAHO_MEMORY_HOME: join(profile, 'data', 'mhc-memory'), ...files.offline } };
+}
+
+/** Selects keyboard input source `id` (macOS); returns the previous one so the lane can restore it. */
+async function inputSource({ id }) {
+  if (!MAC) return { previous: null, current: null, reason: 'macOS only' };
+  const seen = JSON.parse((await run('/usr/bin/osascript', ['-l', 'JavaScript', '-e', inputSourceScript(id)])).trim());
+  if (seen.current !== id) throw fail('INPUT_SOURCE', `input source ${id} not selected: ${JSON.stringify(seen)}`);
+  return seen;
+}
+
 async function cleanup() {
   const receipts = [];
+  if (engineStub) {
+    const server = engineStub;
+    engineStub = null;
+    server.closeAllConnections?.();
+    await new Promise((resolveClose) => server.close(() => resolveClose()));
+    receipts.push({ resource: 'engine-stub', action: 'killed' });
+  }
   for (const entry of owned.values()) {
     if (entry.exit) { receipts.push({ resource: entry.key, key: entry.key, pid: entry.pid, action: 'already-exited', exit: entry.exit }); continue; }
     entry.child.kill();
@@ -337,6 +406,7 @@ const METHODS = {
   identity, daemon, 'write-wrappers': writeWrappers, 'spawn-owned': spawnOwned, 'await-exit': awaitExit,
   cleanup, 'read-b64': readB64, 'list-files': listFiles, 'remove-owned-dir': removeOwnedDir, 'free-port': freePort,
   'serve-status': serveStatus, 'serve-add': serveAdd, 'serve-remove': serveRemove, 'open-gui-bundle': openGuiBundle, 'process-isolation': processIsolation, 'activate-gui': activateGui, 'gui-bounds': guiBounds,
+  'engine-stub': startEngineStub, 'input-source': inputSource,
 };
 
 if (process.argv.includes('--rpc')) {

@@ -38,6 +38,7 @@
       "cli": "/Users/<user>/code/ferryx-wt/supv-f3-mac-<rev8>/.qa/f3-bin/gui/ferryx-cli",
       "uiDist": "/Users/<user>/code/ferryx-wt/supv-f3-mac-<rev8>/ui/dist",
       "buildManifest": "/Users/<user>/code/ferryx-wt/supv-f3-mac-<rev8>/.qa/f3-bin/gui/candidate-manifest.json",
+      "mhcBin": "/Users/<user>/.local/bin/mhc",
       "exportLabel": "Export transcript",
       "viewerLabel": "Open in Viewer",
       "viewerMarker": "<text only the Viewer surface shows, e.g. its window title>"

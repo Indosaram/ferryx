@@ -400,6 +400,60 @@ export function windowBoundsScript(pid, executable) {
   ].join('\n');
 }
 
+/**
+ * The JXA that selects keyboard input source `id` (e.g. com.apple.keylayout.ABC) and returns the
+ * one selected before plus the one selected after. MahoRD types ASCII as key codes, so an input
+ * method (Korean 2-Set) would compose them into other text; the lane selects ABC while it types
+ * and selects the previous source again afterwards.
+ */
+export function inputSourceScript(id) {
+  if (typeof id !== 'string' || !/^[A-Za-z0-9.]+$/.test(id)) throw new StepFailed('INPUT_SOURCE', `not an input source id: ${id}`);
+  return [
+    "ObjC.import('Carbon');",
+    'const idOf = (s) => ObjC.unwrap(ObjC.castRefToObject($.TISGetInputSourceProperty(s, $.kTISPropertyInputSourceID)));',
+    'const previous = idOf($.TISCopyCurrentKeyboardInputSource());',
+    'const list = ObjC.castRefToObject($.TISCreateInputSourceList($(), false));',
+    'let found = null;',
+    `for (let i = 0; i < list.count; i += 1) if (idOf(list.objectAtIndex(i)) === ${JSON.stringify(id)}) found = list.objectAtIndex(i);`,
+    'const status = found ? $.TISSelectInputSource(found) : null;',
+    'JSON.stringify({ previous, current: idOf($.TISCopyCurrentKeyboardInputSource()), status, found: Boolean(found) });',
+  ].join('\n');
+}
+
+/**
+ * The mhc engine the isolated desktop daemon runs (FERRYX_HUB_ENV_FILE): the supervisor on, with
+ * the loopback stub provider only (no real model or network). `agentDir` gets models.json and
+ * mcp.json (built-in remote MCP servers off); the env keys keep the engine offline.
+ */
+export const ENGINE_PROVIDER = 'qa-stub';
+export const ENGINE_MODEL = 'qa-supervisor-1';
+export function engineFiles({ baseUrl, mhcBin }) {
+  return {
+    models: { providers: { [ENGINE_PROVIDER]: { api: 'openai-completions', baseUrl, apiKey: 'qa-loopback-fixture',
+      models: [{ id: ENGINE_MODEL, contextWindow: 200_000, maxTokens: 8192 }] } } },
+    mcp: { mcpServers: { context7: { enabled: false }, grep_app: { enabled: false } } },
+    envFile: ['FERRYX_HUB_MHC_SUPERVISOR=1', `FERRYX_HUB_MHC_BIN=${mhcBin}`, `FERRYX_HUB_MHC_PROVIDER=${ENGINE_PROVIDER}`, `FERRYX_HUB_MHC_MODEL=${ENGINE_MODEL}`, ''].join('\n'),
+    offline: { DO_NOT_TRACK: '1', OMO_DISABLE_POSTHOG: '1', MAHO_OFFLINE: '1', MAHO_SKIP_VERSION_CHECK: '1' },
+  };
+}
+
+/** The Reply text the stub provider gives the F3 owner prompt: it names the prompt's token. */
+export const stubReply = (promptText) => {
+  const token = /\bf3tok[a-z0-9]+\b/.exec(promptText)?.[0];
+  return token ? `Reply for ${token} is ready` : null;
+};
+
+/**
+ * The owner request that binds the F3 report pane to a goal (`supervisorDispatch` submit with
+ * the pane): a worker report is stored only for a pane an open goal is bound to
+ * (ferryx-hub lanes/dispatch.rs report_from_worker, NotBound).
+ */
+export const reportGoalRequest = (runId, sessionId) => ({
+  type: 'supervisorDispatch',
+  request: { action: 'submit', messageId: `f3-report-goal-${runId}`, body: 'Review the F3 migration and report back.', hostId: 'local', sessionId,
+    work: { title: 'Review the F3 migration', instruction: 'Review the migration and send one report.', requirements: [{ id: 'r1', text: 'one report is sent', verifier: 'the report is in the transcript' }], operations: [] } },
+});
+
 /** The frame-pixel rectangle of window `bounds` (screen points) in a frame `frameWidth` pixels wide. */
 export function windowRect(bounds, screen, frameWidth) {
   if (!bounds || !screen?.width) return null;

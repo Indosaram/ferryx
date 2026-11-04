@@ -24,7 +24,7 @@ import { connectNativeMahord, rpcProcess } from '../fixtures/native-configured-a
 import { FRONTEND_DEV_URL } from '../../lib/qa-scenarios/frontend-server.mjs';
 import { LaneBlocked, StepFailed, markNotRun, runStep, stopExact, until } from './steps.mjs';
 import { scenariosForLane } from './contract.mjs';
-import { acceptedReply, configureGateway, decisionsNamingNonce, gatewayPortFor, hubEnv, isolationProblems, globalRetryRule, namesNonce, rowFocusVerdict, rpcCommand, rulesLineText, typedInto, uniqueSession, windowRect } from './seams.mjs';
+import { acceptedReply, configureGateway, reportGoalRequest, decisionsNamingNonce, gatewayPortFor, hubEnv, isolationProblems, globalRetryRule, namesNonce, rowFocusVerdict, rpcCommand, rulesLineText, typedInto, uniqueSession, windowRect } from './seams.mjs';
 import { ocrImage } from './png.mjs';
 
 /**
@@ -120,6 +120,15 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     const gatewayPort = gatewayPortFor(host.hostId, await helper.call('free-port', {}));
     const env = { ...setup.env, ...hubEnv(host, setup.profile), FERRYX_RELAY_URL: shared.relayOrigin, FERRYX_MACHINE_TOKEN: shared.machineToken(host.hostId), FERRYX_ACCOUNT_ORIGIN: shared.relayOrigin,
       FERRYX_QA_GATEWAY_PORT: String(gatewayPort) };
+    // The lane typing the owner prompt runs the supervisor engine (mhc) against a loopback stub
+    // provider: without an installed engine the composer's message is refused MHC_NOT_RUNNING
+    // and nothing is stored (hub_runtime.rs supervisor_converse).
+    const typing = lane.name === (run.lanes.includes('windows') ? 'windows' : 'macos');
+    if (typing && host.mhcBin) {
+      const engine = await helper.call('engine-stub', { profile: setup.profile, mhcBin: host.mhcBin });
+      lane.write('engine', 'engine-stub.json', engine);
+      Object.assign(env, engine.env);
+    }
     setup.env = env;
     daemon = await agent.call('spawn-daemon', { setup, runId: run.runId, operationId: `f3-${run.runId}`, hostId: host.hostId, timeoutMs: 120_000 });
     lane.write('gui-receipt', 'daemon-launch.json', daemon);
@@ -135,6 +144,15 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     acceptedReply('register', await exchange('register', [{ type: 'registerWorkspace', workspaceId: 'f3', repoRoot: setup.worktree }]), 'registerWorkspaceOk');
     acceptedReply('agent-control', await exchange('agent-control', [{ type: 'agentControlSettingsSet', enabled: true, excludedDeviceIds: [] }]), 'agentControlSettingsOk');
     lane.write('relay', 'gateway.json', await configureGateway({ call: exchange, port: gatewayPort, relayOrigin: shared.relayOrigin }));
+    // The supervisor's owner: the app's own setup (the "Turn on the supervisor" action) run on
+    // this daemon, which provisions the local account as the one owner and maps the worktree.
+    // Without an owner every composer message is refused UNAUTHORIZED.
+    lane.write('supervisor', 'setup.json', await call('supervisor-setup', [{ type: 'supervisorSetup', request: { action: 'run', importMemory: false, projects: [{ name: 'f3', path: setup.worktree }] } }]));
+    if (typing && host.mhcBin) {
+      const ready = await until('the supervisor engine ready', async () => (await exchange('engine-status', [{ type: 'supervisorEngine', request: { action: 'status' } }])).at(-1),
+        (r) => r?.type === 'supervisorEngineOk' && r.snapshot?.engine?.state === 'ready', { deadlineMs: 180_000, gapMs: 2_000 });
+      lane.write('supervisor', 'engine-status.json', ready);
+    }
     if (shared.panesOnDesktop && lane.name === (run.lanes.includes('windows') ? 'windows' : 'macos')) {
       shared.hostPanes({ call, helper, setup, wrappers });
       await shared.spawnPanes();
@@ -159,6 +177,17 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const raised = await helper.call('activate-gui', { pid: gui.pid, executable: gui.executable });
       if (raised.activated !== true) throw new StepFailed('GUI_NOT_FRONT', `run-owned GUI pid ${gui.pid} was not raised: ${JSON.stringify(raised)}`);
     };
+    // macOS: MahoRD types ASCII as key codes, which an input method (e.g. Korean 2-Set) composes
+    // into other characters; ABC is selected while the lane types, then the owner's source again.
+    const typeText = async (text, enter = false) => {
+      const switched = host.platform === 'darwin' ? await helper.call('input-source', { id: 'com.apple.keylayout.ABC' }) : null;
+      try {
+        await mahord.type(text, signal);
+        if (enter) await mahord.key('Enter', signal);
+      } finally {
+        if (switched?.previous && switched.previous !== 'com.apple.keylayout.ABC') await helper.call('input-source', { id: switched.previous });
+      }
+    };
     if (run.smoke) {
       // Transport smoke: one real frame and its OCR, then the lane stops and cleans up.
       await raise();
@@ -178,13 +207,23 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       if (!seen.bounds || seen.frontPid !== gui.pid) throw new StepFailed('GUI_NOT_FRONT', `run-owned GUI pid ${gui.pid} not frontmost with a window at capture: ${JSON.stringify(seen)}`);
       return windowRect(seen.bounds, seen.screen, frameWidth);
     };
-    const frame = async (name, step) => {
-      await raise();
-      const bytes = await mahord.screenshot(signal);
-      const shot = step ? step.artifact('screenshot', `${name}.png`, bytes) : lane.write('screenshot', `frames/${name}-${Date.now()}.png`, bytes);
-      const read = await ocr(run.tesseract, join(run.evidenceDir, shot.path), await windowOf(bytes.readUInt32BE(16)));
-      if (step) step.artifact('ocr', `${name}.ocr.tsv`, read.tsv);
-      return { shot, read, bytes };
+    // MahoRD returns its latest streamed frame, which can still show the windows that were in
+    // front before the raise. A frame counts only when the cropped run window shows this run's
+    // own text (`marker`: the worktree name its cards and rows carry, or the Viewer marker);
+    // otherwise it is taken again, and after the attempts the step fails GUI_NOT_FRONT.
+    const runMarker = setup.worktree.split(/[\\/]/).pop();
+    const frame = async (name, step, { marker = runMarker } = {}) => {
+      for (let attempt = 1; ; attempt += 1) {
+        await raise();
+        const bytes = await mahord.screenshot(signal);
+        const rect = await windowOf(bytes.readUInt32BE(16));
+        const shot = step ? step.artifact('screenshot', `${name}.png`, bytes) : lane.write('screenshot', `frames/${name}-${Date.now()}.png`, bytes);
+        const read = await ocr(run.tesseract, join(run.evidenceDir, shot.path), rect);
+        if (step) step.artifact('ocr', `${name}.ocr.tsv`, read.tsv);
+        if (host.platform !== 'darwin' || !marker || read.text.includes(marker)) return { shot, read, bytes };
+        if (attempt >= 5) throw new StepFailed('GUI_NOT_FRONT', `frame ${name}: the run window text "${marker}" is not in the cropped frame after ${attempt} captures (a stale or covered frame)`);
+        await new Promise((resolveWait) => { setTimeout(resolveWait, 1_000); });
+      }
     };
     const keep = (step, name, seen) => { step.artifact('screenshot', `${name}.png`, seen.bytes); step.artifact('ocr', `${name}.ocr.tsv`, seen.read.tsv); return seen; };
     const panel = async (step, name) => {
@@ -226,8 +265,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
         const box = locate(read, 'Tell the supervisor');
         if (!box) throw new StepFailed('COMPOSER_NOT_FOUND', 'the composer placeholder is not on screen');
         await mahord.click({ x: box.x, y: box.y }, signal);
-        await mahord.type(prompt, signal);
-        await mahord.key('Enter', signal);
+        await typeText(prompt, true);
       }
       const rows = await until('prompt and reply in the transcript', () => transcript(null), (page) => pairOf(page, prompt) !== null, { deadlineMs: 180_000 });
       step.artifact('transcript-read', 'transcript.json', rows);
@@ -271,6 +309,11 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const token = `${lane.name.slice(0, 3)}${run.runId.replace(/[^a-z0-9]/g, '').slice(-8)}`;
       const heading = `F3 long report ${token}`;
       const end = `End of report ${token}`;
+      // A worker report is stored only for a pane an open goal is bound to: the owner's request
+      // binds the reporting pane first (supervisorDispatch submit with that pane).
+      const admitted = await call('report-goal', [reportGoalRequest(run.runId, shared.reportPane())]);
+      step.artifact('transcript-read', 'report-goal.admission.json', admitted);
+      if (admitted.result?.outcome !== 'admitted') throw new StepFailed('REPORT_GOAL_NOT_ADMITTED', JSON.stringify(admitted).slice(0, 1500));
       await shared.sendLongReport(token);
       const rows = await until('the long report in the transcript', () => transcript(null), (page) => JSON.stringify(page ?? {}).includes(heading), { deadlineMs: 120_000 });
       step.artifact('transcript-read', 'report.transcript.json', rows);
@@ -279,11 +322,11 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const open = locate(read, host.viewerLabel ?? 'Open in Viewer');
       if (!open) throw new StepFailed('PRODUCT_GAP_VIEWER_CONTROL', `no "${host.viewerLabel ?? 'Open in Viewer'}" control next to the report`);
       await mahord.click({ x: open.x, y: open.y }, signal);
-      const head = keep(step, 'viewer-head', await until('report heading in Viewer', () => frame('viewer-head'), ({ read: r }) => r.text.includes(heading) && r.text.includes(host.viewerMarker), { deadlineMs: 60_000 }));
+      const head = keep(step, 'viewer-head', await until('report heading in Viewer', () => frame('viewer-head', undefined, { marker: host.viewerMarker }), ({ read: r }) => r.text.includes(heading) && r.text.includes(host.viewerMarker), { deadlineMs: 60_000 }));
       step.assert('viewer-shows-report-heading', head.read.text.includes(heading), { heading, text: head.read.text.slice(0, 1500) });
       step.assert('viewer-marker-shown', head.read.text.includes(host.viewerMarker), { marker: host.viewerMarker });
       await mahord.hotkey(host.platform === 'darwin' ? ['Meta', 'ArrowDown'] : ['Control', 'End'], signal);
-      const tail = keep(step, 'viewer-tail', await until('report end in Viewer', () => frame('viewer-tail'), ({ read: r }) => r.text.includes(end) && r.text.includes(host.viewerMarker), { deadlineMs: 60_000 }));
+      const tail = keep(step, 'viewer-tail', await until('report end in Viewer', () => frame('viewer-tail', undefined, { marker: host.viewerMarker }), ({ read: r }) => r.text.includes(end) && r.text.includes(host.viewerMarker), { deadlineMs: 60_000 }));
       step.assert('viewer-shows-report-end', tail.read.text.includes(end) && tail.read.text.includes(host.viewerMarker), { end, marker: host.viewerMarker, text: tail.read.text.slice(0, 1500) });
     });
 
@@ -326,7 +369,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       // Focus on `away`, proven by the probe arriving there in full before the focus row is clicked.
       const awayMark = (await log('away')).length;
       await clickRow('away', 'before-away-click');
-      await mahord.type(probe, signal);
+      await typeText(probe);
       const awayEntries = await until('the probe in the away pane', () => log('away', awayMark), (list) => typedInto(list, probe), { deadlineMs: 30_000 });
       step.artifact('fixture-log', 'away.agent.jsonl', (await log('away')).map((e) => JSON.stringify(e)).join('\n'));
       const focusBefore = await log('focus');
@@ -336,7 +379,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       // Every probe key was taken by `away`, so these entries were logged before the focus click.
       const focusMark = focusBefore.length;
       await clickRow('focus', 'before-row-click');
-      await mahord.type(token, signal);
+      await typeText(token);
       const entries = await until('typed token in the focus pane', () => log('focus', focusMark), (list) => typedInto(list, token), { deadlineMs: 30_000 });
       step.artifact('fixture-log', 'focus.agent.jsonl', (await log('focus')).map((e) => JSON.stringify(e)).join('\n'));
       const verdict = rowFocusVerdict({ away: await log('away', awayMark), focus: await log('focus'), probe, token });
@@ -357,8 +400,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const box = locate(beforeRead, 'Tell the supervisor');
       if (!box) throw new StepFailed('COMPOSER_NOT_FOUND', 'the composer placeholder is not on screen');
       await mahord.click({ x: box.x, y: box.y }, signal);
-      await mahord.type(instruction, signal);
-      await mahord.key('Enter', signal);
+      await typeText(instruction, true);
       const stored = await until('the 300 s retry rule', () => panel(null), (v) => globalRetryRule(v)?.params?.thenEverySecs === 300, { deadlineMs: 120_000 });
       step.artifact('panel-read', 'rules-after.panel.json', stored);
       step.artifact('transcript-read', 'rules.transcript.json', await transcript(null));

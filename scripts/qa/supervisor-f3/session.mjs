@@ -191,7 +191,10 @@ export function startSession({ config, run, lane }) {
   shared.phoneAnswersSettled = () => answered.open();
   const typeInto = (mode, text) => session().call(`write-${mode}`, [{ type: 'write', sessionId: shared.panes[mode], data: Buffer.from(`${text}\r`).toString('base64') }]);
   shared.releaseHeldDecision = () => typeInto('held', 'F3-DRAW');
-  shared.sendLongReport = (token) => typeInto('decision', `F3-REPORT:${token}`);
+  // The report comes from the upstream pane (it ignores other input and never goes idle, so the
+  // goal it is bound to for D4 is never typed into as an answer nor assessed complete).
+  shared.reportPane = () => shared.panes.upstream;
+  shared.sendLongReport = (token) => typeInto('upstream', `F3-REPORT:${token}`);
   // The session daemon's own push store: the subscription the iPhone's web app registered, read
   // before the push and again after it was delivered (a gone endpoint is dropped by push.rs).
   shared.pushSubscriptions = async () => {

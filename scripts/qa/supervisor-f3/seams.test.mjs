@@ -6,6 +6,7 @@ import {
   PRODUCTION_GATEWAY_PORT, acceptedReply, configProblems, configureGateway, decisionsNamingNonce, gatewayBound, gatewayPortFor,
   activationScript, globalRetryRule, guiBundleFiles, hubEnv, isolationProblems, namesNonce, newRunId, parseEnvBlock, untypeableShortNames, windowsEnvScript, pageToScreen, relayListenPort, remotePath, rowFocusVerdict, rpcCommand, rulesLineText,
   runLanes, sameServeConfig, serveAddedProblems, typedInto, uniqueSession, webContextFrom, webPageChannel, windowBoundsScript, windowRect,
+  ENGINE_MODEL, ENGINE_PROVIDER, engineFiles, inputSourceScript, reportGoalRequest, stubReply,
 } from './seams.mjs';
 import { LANE_SCHEMA, RUN_SCHEMA, SCENARIOS, validateRun } from './contract.mjs';
 
@@ -483,3 +484,30 @@ describe('frame OCR input', () => {
   });
 });
 
+
+describe('supervisor engine, owner and typing seams', () => {
+  test('the engine runs on the loopback stub only, offline, with the remote MCP servers off', () => {
+    const files = engineFiles({ baseUrl: 'http://127.0.0.1:5000/v1', mhcBin: '/u/.local/bin/mhc' });
+    expect(files.envFile.split('\n').filter(Boolean)).toEqual(['FERRYX_HUB_MHC_SUPERVISOR=1', 'FERRYX_HUB_MHC_BIN=/u/.local/bin/mhc', `FERRYX_HUB_MHC_PROVIDER=${ENGINE_PROVIDER}`, `FERRYX_HUB_MHC_MODEL=${ENGINE_MODEL}`]);
+    expect(files.models.providers[ENGINE_PROVIDER].baseUrl).toBe('http://127.0.0.1:5000/v1');
+    expect(files.mcp.mcpServers).toEqual({ context7: { enabled: false }, grep_app: { enabled: false } });
+    expect(files.offline).toMatchObject({ MAHO_OFFLINE: '1', DO_NOT_TRACK: '1' });
+  });
+
+  test('the stub replies to the owner prompt naming its token, and to nothing else', () => {
+    expect(stubReply('F3 check f3tokab12cd34: what is waiting on me?')).toBe('Reply for f3tokab12cd34 is ready');
+    expect(stubReply('assess the goal')).toBeNull();
+  });
+
+  test('the report goal binds exactly the given local pane', () => {
+    const frame = reportGoalRequest('f3-1104-ab', 'pane-7');
+    expect(frame.type).toBe('supervisorDispatch');
+    expect(frame.request).toMatchObject({ action: 'submit', hostId: 'local', sessionId: 'pane-7', messageId: 'f3-report-goal-f3-1104-ab' });
+    expect(frame.request.work.requirements).toHaveLength(1);
+  });
+
+  test('an input source is selected by its exact id only', () => {
+    expect(inputSourceScript('com.apple.keylayout.ABC')).toContain('"com.apple.keylayout.ABC"');
+    expect(code(() => inputSourceScript('x"; evil'))).toBe('INPUT_SOURCE');
+  });
+});
