@@ -33,6 +33,9 @@ fn main() {
     if group == Some("api") {
         std::process::exit(run_api_cli(&args));
     }
+    if group == Some("integrations") {
+        std::process::exit(ferryx_lib::cli::integrations::run_integrations_cli(&args));
+    }
     // Before the generic `supervisor` dispatch: `supervisor engine` has its own parser.
     if group == Some("supervisor") && args.get(2).is_some_and(|arg| arg == "engine") {
         std::process::exit(ferryx_lib::cli::supervisor_engine::run_supervisor_engine_cli(&args));
@@ -139,7 +142,7 @@ fn main() {
             }
         }
         LaunchMode::Gui => {
-            eprintln!("Ferryx CLI is running in headless mode.\nUsage: ferryx-cli <up [--key-stdin|--key-env] [--email <hint>] [--origin <url>] [--name <name>] [--no-service] [--json]|service <install|status|uninstall> [--json]|agents|supervisor goal <set|show|mode|approve|discard|accept-revision|reject-revision>|supervisor setup --owner <p> --project <name> --repo-identity <id> --host <id> --git-common-dir <dir>|mcp|hub migrate --from-omo <db>|account <enroll|login>|pair|remote|direct-trust|browser|api <list|describe <command>>|--daemon>");
+            eprintln!("Ferryx CLI is running in headless mode.\nUsage: ferryx-cli <up [--key-stdin|--key-env] [--email <hint>] [--origin <url>] [--name <name>] [--no-service] [--json]|service <install|status|uninstall> [--json]|agents|supervisor goal <set|show|mode|approve|discard|accept-revision|reject-revision>|supervisor setup --owner <p> --project <name> --repo-identity <id> --host <id> --git-common-dir <dir>|mcp|hub migrate --from-omo <db>|account <enroll|login>|pair|remote|direct-trust|browser|integrations <status [--json]|skill install|status|uninstall <agent|--all>|hooks install|uninstall <agent|--all>>|api <list|describe <command>>|--daemon>");
             std::process::exit(1);
         }
         LaunchMode::DaemonSupervisor => std::process::exit(run_daemon_supervisor(&args)),
