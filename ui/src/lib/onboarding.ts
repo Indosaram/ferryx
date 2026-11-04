@@ -236,6 +236,7 @@ export function resetOnboarding(
   } catch {
     void 0;
   }
+  saveOnboardingState({ version: 1, completedSteps: [], dismissed: false }, storage);
 }
 
 export function visiblePermissionKeys(
