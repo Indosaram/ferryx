@@ -144,7 +144,7 @@ pub fn apply_session_env(
 fn apply_agent_state_tcp_env(cmd: &mut CommandBuilder) {
     #[cfg(windows)]
     match crate::daemon::windows_pipe::name("agent-state") {
-        Ok(pipe) => cmd.env("FERRYX_AGENT_STATE_PIPE", pipe),
+        Ok(pipe) => { cmd.env("FERRYX_AGENT_STATE_PIPE", pipe); }
         Err(error) => tracing::warn!(%error, "Could not export agent-state pipe"),
     }
     let Ok(record) = std::fs::read_to_string(crate::daemon::get_agent_state_rendezvous_path()) else {
