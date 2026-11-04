@@ -33,6 +33,13 @@
     }
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "ferryx"
+        ]
+      }
+    },
     "updater": {
       "endpoints": [
         "https://github.com/Indosaram/ferryx/releases/latest/download/latest.json"
