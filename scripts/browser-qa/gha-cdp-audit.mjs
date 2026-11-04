@@ -2198,27 +2198,32 @@ await section("download", async (record) => {
 
 // ---------------------------------------------------------------- G12 import through Settings
 await section("import", async (record) => {
+  // Only the dialog has "Into Ferryx profile" (macOS OCR reads just "Into"); "Import from" also matches the
+  // settings page's "Import from Chrome" buttons (run 41797273819).
+  const dialogLabel = (words) => findPhrase(words, "Into Ferryx")[0] ?? (words ?? []).find((word) => word.text === "Into") ?? null;
+  const dialogOpen = async (timeout) => until(() => dialogLabel(ocr(probeShot()) ?? []), timeout, 700);
   const openDialog = async () => {
     const group = await settingsBrowserGroup("Import");
-    const button = await until(() => findPhrase(ocr(probeShot()) ?? [], "Import browser")[0] ?? null, 8000);
+    // The bottom-most hit: on Windows the profile rows above it also say "use Import browser data...".
+    const button = await until(() => findPhrase(ocr(probeShot()) ?? [], "Import browser").sort((a, b) => b.top - a.top)[0] ?? null, 8000);
     if (!button) return { ok: false, group };
     // The first click can only activate the window (Windows, run 41772321882): retry up to 3 times.
     let dialog = null;
     let clicks = 0;
     while (!dialog && clicks < 3) {
-      dialog = await seePhrase(["Import from", "Into Ferryx profile"], 1500);
+      dialog = await dialogOpen(1500);
       if (dialog) break;
       host.click(button.x, button.y);
       clicks += 1;
-      dialog = await seePhrase(["Import from", "Into Ferryx profile", "Into Ferryx"], 8000);
+      dialog = await dialogOpen(8000);
     }
     return { ok: Boolean(dialog), group: group.ok, clicks };
   };
-  // The dialog's buttons, from pixels below its "Into Ferryx profile" / "Import from" label.
+  // The dialog's buttons, from pixels below its "Into Ferryx profile" label.
   const dialogButtons = () => {
     const path = probeShot();
     const words = ocr(path) ?? [];
-    const anchor = findPhrase(words, "Into Ferryx")[0] ?? findPhrase(words, "Import from")[0];
+    const anchor = dialogLabel(words);
     if (!anchor) return null;
     // The buttons sit ~190 px below the label; deeper reaches the macOS Dock (run 41786025622).
     return pillButtons(path, { x0: anchor.left - 60, x1: anchor.left + 600, y0: anchor.top, y1: anchor.top + 250 });
