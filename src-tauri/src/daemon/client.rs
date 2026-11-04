@@ -1642,10 +1642,6 @@ impl DaemonClient {
             SplitDelivery::NotSent,
             async {
                 crate::ipc::run_blocking(move || {
-                    #[cfg(windows)]
-                    if path == get_socket_path() && super::windows_pipe::Stream::pipe("daemon").is_ok() {
-                        return Ok((None, path));
-                    }
                     Self::validate_existing_socket_path(&path)?;
                     let credential = read_transport_token_for(&path);
                     #[cfg(unix)]
@@ -2710,7 +2706,9 @@ impl DaemonClient {
 
     fn validate_existing_socket_path(path: &Path) -> Result<(), IpcError> {
         #[cfg(windows)]
-        if path == get_socket_path() && super::windows_pipe::Stream::pipe("daemon").is_ok() {
+        if path == get_socket_path() && !path.exists() {
+            // A pipe-only connection has no rendezvous file to validate. The pipe's protected
+            // DACL is its trust boundary; connect_socket will still fail if no pipe is present.
             return Ok(());
         }
         #[cfg(feature = "local-split-qa")]
