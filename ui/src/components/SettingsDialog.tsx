@@ -25,6 +25,8 @@ import { BrowserSection } from "./settings/BrowserSection";
 import { GeneralSection } from "./settings/GeneralSection";
 import { NotificationsSection } from "./settings/NotificationsSection";
 import { PaneAccessSection } from "./settings/PaneAccessSection";
+import { ScriptingSection } from "./settings/ScriptingSection";
+import { useTranslation } from "../i18n";
 import { PermissionsSection } from "./settings/PermissionsSection";
 import { PlanSection } from "./settings/PlanSection";
 import { RemoteSection } from "./settings/RemoteSection";
@@ -61,6 +63,7 @@ const VALID_SECTIONS: readonly SectionId[] = [
   "shortcuts",
   "agents",
   "paneAccess",
+  "scripting",
   "browser",
   "notifications",
   "remote",
@@ -94,6 +97,7 @@ function resolvePlanAuth(accountOrigin?: string): PlanAuth {
 }
 
 function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenMachineProject, onOpenRemoteDesktop, remoteContext, accountOrigin }: SettingsDialogBodyProps) {
+  const { t } = useTranslation();
   const { settings, localSettings, nativePreferences, updateSettings, refreshNativePreferences } = useTerminalSettings();
   const [planAuth, setPlanAuth] = useState<PlanAuth>(() => resolvePlanAuth(accountOrigin));
   const [planUnavailable, setPlanUnavailable] = useState(false);
@@ -196,6 +200,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
             <NavButton active={section === "shortcuts"} icon={<Keyboard />} label="Keyboard Shortcuts" onClick={() => setSection("shortcuts")} />
             <NavButton active={section === "agents"} icon={<Bot />} label="Agents" onClick={() => setSection("agents")} />
             <NavButton active={section === "paneAccess"} icon={<KeyRound />} label="Pane access" onClick={() => setSection("paneAccess")} />
+            {!remoteContext && <NavButton active={section === "scripting"} icon={<TerminalSquare />} label={t("scripting.title")} onClick={() => setSection("scripting")} />}
             {advancedFeatures ? (
               <>
                 <NavButton active={section === "browser"} icon={<Globe />} label="Browser" onClick={() => setSection("browser")} />
@@ -259,6 +264,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
           ) : null}
           {section === "agents" ? <AgentsSection /> : null}
           {section === "paneAccess" ? <PaneAccessSection /> : null}
+          {section === "scripting" && !remoteContext ? <ScriptingSection /> : null}
           {section === "browser" ? <BrowserSection /> : null}
           {section === "notifications" ? <NotificationsSection /> : null}
           {section === "permissions" ? <PermissionsSection /> : null}
