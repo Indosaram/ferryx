@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { initialGridFields, measureInitialGeometry, type InitialGeometryTarget, type InitialPtyGrid } from "../lib/initialPtyGeometry";
+import { intentForAction, layoutSync, onLayoutChanged, ownsDaemonRoot, rehydrateWorkspace } from "../lib/layoutSync";
+import { isDesktopRuntime } from "../lib/windowIdentity";
 
 import {
   activityStateToAgentState,
@@ -1002,6 +1004,15 @@ export function useWorkspaceStore({
         setWorkspaceSnapshot(owningWorkspaceId, nextState);
       }
       reactDispatch(contextualAction);
+      if (changed && layoutSync.enabled && ownsDaemonRoot(previous)) {
+        void layoutSync.send(() => intentForAction(layoutSync, action, previous, nextState), () => {
+          const current = stateRef.current;
+          const restored = rehydrateWorkspace(current);
+          stateRef.current = restored;
+          setWorkspaceSnapshot(restored.workspaceId ?? mountedWorkspaceIdRef.current, restored);
+          reactDispatch({ type: "RESTORE_WORKSPACE", state: restored });
+        }).catch((error) => console.error("Layout intent failed:", error));
+      }
       if (changed && (action.type === "SESSION_TITLE_ACTIVITY" || action.type === "SESSION_SCREEN_ACTIVITY")) {
         emitActivityChanges(previous, nextState);
       }
@@ -1035,8 +1046,36 @@ export function useWorkspaceStore({
     const next = workspaceReducer(snapshot, action.type === "MARK_TAB_UNREAD" ? { ...action, observed: false } : action);
     setWorkspaceSnapshot(owner, next);
     setHmrWorkspaceState(owner, next);
+    if (layoutSync.enabled && ownsDaemonRoot(snapshot)) {
+      void layoutSync.send(() => intentForAction(layoutSync, action, snapshot, next), () => {
+        const current = getWorkspaceSnapshot(owner);
+        if (current) setWorkspaceSnapshot(owner, rehydrateWorkspace(current));
+        bumpParkedActivity();
+      }).catch((error) => console.error("Parked layout intent failed:", error));
+    }
     bumpParkedActivity();
   }, [dispatch, bumpParkedActivity]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const refresh = async () => {
+      if (!await layoutSync.refresh() || disposed) return;
+      const restored = rehydrateWorkspace(stateRef.current);
+      stateRef.current = restored;
+      setWorkspaceSnapshot(restored.workspaceId ?? mountedWorkspaceIdRef.current, restored);
+      reactDispatch({ type: "RESTORE_WORKSPACE", state: restored });
+    };
+    // Subscribe before fetching so a revision cannot be lost in the startup gap.
+    void onLayoutChanged(() => { void refresh().catch((error) => console.error("Layout revision refresh failed:", error)); })
+      .then((stop) => {
+        if (disposed) { stop(); return; }
+        unlisten = stop;
+        return refresh();
+      }).catch((error) => console.error("Layout subscription failed:", error));
+    return () => { disposed = true; unlisten?.(); };
+  }, [workspaceId]);
 
   useLayoutEffect(() => {
     localRecoveryAdmissions.set(workspaceId, dispatch);
@@ -3241,7 +3280,7 @@ function initWorkspaceState({
       tabCount: hmrState.layout.tabs.length,
       sessionCount: Object.keys(hmrState.sessions).length,
     });
-    return { state: { ...hmrState, workspaceId }, recoveredFromHmr: true };
+    return { state: rehydrateWorkspace({ ...hmrState, workspaceId }), recoveredFromHmr: true };
   }
   const snapshot = getWorkspaceSnapshot(workspaceId);
   if (snapshot) {
@@ -3252,7 +3291,7 @@ function initWorkspaceState({
       tabCount: snapshot.layout.tabs.length,
       sessionCount: Object.keys(snapshot.sessions).length,
     });
-    return { state: { ...snapshot, workspaceId }, recoveredFromHmr: false };
+    return { state: rehydrateWorkspace({ ...snapshot, workspaceId }), recoveredFromHmr: false };
   }
   switchDebug("workspace.state.init", {
     workspaceId,
