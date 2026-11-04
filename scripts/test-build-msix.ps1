@@ -374,6 +374,9 @@ try {
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         [System.IO.File]::WriteAllText($templatePath, $manifestXml, $utf8NoBom)
 
+        # Exercise the shipped template, including its protocol registration, through staging.
+        $shippedTemplate = Join-Path $PSScriptRoot "../src-tauri/windows/msix/AppxManifest.xml"
+        [System.IO.File]::WriteAllText($templatePath, (Get-Content $shippedTemplate -Raw), $utf8NoBom)
         $packOutDir = Join-Path $scratchDir "pack_out"
         New-Item -ItemType Directory -Force -Path $packOutDir | Out-Null
 
@@ -435,6 +438,11 @@ try {
             $zip.Dispose()
         }
 
+        $namespaces = New-Object System.Xml.XmlNamespaceManager($xml.NameTable)
+        $namespaces.AddNamespace("app", "http://schemas.microsoft.com/appx/manifest/foundation/windows10")
+        $namespaces.AddNamespace("uap", "http://schemas.microsoft.com/appx/manifest/uap/windows10")
+        $protocol = $xml.SelectSingleNode("/app:Package/app:Applications/app:Application[@Id='Ferryx']/app:Extensions/uap:Extension[@Category='windows.protocol']/uap:Protocol[@Name='ferryx']", $namespaces)
+        if (-not $protocol) { throw "Staged and packaged Ferryx manifest lost ferryx protocol registration" }
         $id = $xml.Package.Identity
         if ($id.Name -ne "ProjectMaho.Ferryx") {
             throw "Expected Identity Name='ProjectMaho.Ferryx', got '$($id.Name)'"
