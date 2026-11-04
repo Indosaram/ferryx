@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { initialGridFields, measureInitialGeometry, type InitialGeometryTarget, type InitialPtyGrid } from "../lib/initialPtyGeometry";
-import { intentForAction, layoutSync, onLayoutChanged, ownsDaemonRoot, rehydrateWorkspace } from "../lib/layoutSync";
+import { intentForAction, isLayoutIntentAction, layoutSync, onLayoutChanged, ownsDaemonRoot, rehydrateWorkspace } from "../lib/layoutSync";
 import { isDesktopRuntime } from "../lib/windowIdentity";
 
 import {
@@ -1004,7 +1004,7 @@ export function useWorkspaceStore({
         setWorkspaceSnapshot(owningWorkspaceId, nextState);
       }
       reactDispatch(contextualAction);
-      if (nextState.layout !== previous.layout && layoutSync.enabled && ownsDaemonRoot(previous)) {
+      if (isLayoutIntentAction(action) && nextState.layout !== previous.layout && layoutSync.enabled && ownsDaemonRoot(previous)) {
         void layoutSync.send(() => intentForAction(layoutSync, action, previous, nextState), (publish) => {
           // Acknowledge minted node ids against the gesture's optimistic leaf ids
           // before a later gesture needs to address those nodes.
@@ -1050,7 +1050,7 @@ export function useWorkspaceStore({
     const next = workspaceReducer(snapshot, action.type === "MARK_TAB_UNREAD" ? { ...action, observed: false } : action);
     setWorkspaceSnapshot(owner, next);
     setHmrWorkspaceState(owner, next);
-    if (next.layout !== snapshot.layout && layoutSync.enabled && ownsDaemonRoot(snapshot)) {
+    if (isLayoutIntentAction(action) && next.layout !== snapshot.layout && layoutSync.enabled && ownsDaemonRoot(snapshot)) {
       void layoutSync.send(() => intentForAction(layoutSync, action, snapshot, next), (publish) => {
         rehydrateWorkspace(next);
         if (!publish) return;
