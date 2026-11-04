@@ -1004,8 +1004,12 @@ export function useWorkspaceStore({
         setWorkspaceSnapshot(owningWorkspaceId, nextState);
       }
       reactDispatch(contextualAction);
-      if (changed && layoutSync.enabled && ownsDaemonRoot(previous)) {
-        void layoutSync.send(() => intentForAction(layoutSync, action, previous, nextState), () => {
+      if (nextState.layout !== previous.layout && layoutSync.enabled && ownsDaemonRoot(previous)) {
+        void layoutSync.send(() => intentForAction(layoutSync, action, previous, nextState), (publish) => {
+          // Acknowledge minted node ids against the gesture's optimistic leaf ids
+          // before a later gesture needs to address those nodes.
+          rehydrateWorkspace(nextState);
+          if (!publish) return;
           const current = stateRef.current;
           const restored = rehydrateWorkspace(current);
           stateRef.current = restored;
@@ -1046,8 +1050,10 @@ export function useWorkspaceStore({
     const next = workspaceReducer(snapshot, action.type === "MARK_TAB_UNREAD" ? { ...action, observed: false } : action);
     setWorkspaceSnapshot(owner, next);
     setHmrWorkspaceState(owner, next);
-    if (layoutSync.enabled && ownsDaemonRoot(snapshot)) {
-      void layoutSync.send(() => intentForAction(layoutSync, action, snapshot, next), () => {
+    if (next.layout !== snapshot.layout && layoutSync.enabled && ownsDaemonRoot(snapshot)) {
+      void layoutSync.send(() => intentForAction(layoutSync, action, snapshot, next), (publish) => {
+        rehydrateWorkspace(next);
+        if (!publish) return;
         const current = getWorkspaceSnapshot(owner);
         if (current) setWorkspaceSnapshot(owner, rehydrateWorkspace(current));
         bumpParkedActivity();
