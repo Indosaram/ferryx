@@ -105,6 +105,25 @@ the input may be typed twice.
 | 4 | refused (`UNAUTHORIZED`, `FORBIDDEN`, `CONTROL_CONFLICT`, `REQUEST_CONFLICT`, `PROVIDER_OWNED`, `UNSUPPORTED`, `CAPTURE_UNSUPPORTED`) |
 | 5 | anything else, including an unknown outcome (`OPERATION_OUTCOME_UNKNOWN`, `TIMEOUT`, `INTERNAL`) |
 
+### Acting on another pane: grants
+
+A process inside a Ferryx pane may act on its own session (and spawn or manage worktrees in its
+own workspace) without asking. Acting on another pane (`agents send`, `answer`, `stop`, writing,
+closing, resizing, or spawning in another workspace) returns `FORBIDDEN` with reason
+`PANE_GRANT_REQUIRED` unless the owner granted it. Reading (`agents list`, `read`, `wait`,
+`events`) is never refused. Do not work around a refusal; ask the user to open
+**Settings > Pane access**, or to run this from a terminal outside Ferryx:
+
+```bash
+ferryx-cli grants add --from <your session or workspace> --to <target session|workspace|*> --ops write
+ferryx-cli grants list
+```
+
+Owner actions (`ferryx-cli up`, `pair`, `remote`, a daemon upgrade or shutdown) return
+`FORBIDDEN` with reason `OWNER_ACTION_REQUIRED` inside a pane unless the pane holds an `admin`
+grant on `*`. Only the owner may add or remove grants: `grants add` and `grants remove` from a
+pane are refused; `grants list` works anywhere.
+
 ## Report your own status: OSC 7501
 
 Ferryx displays the program status a program in a pane reports with the OSC 7501 escape
