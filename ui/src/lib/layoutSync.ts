@@ -180,7 +180,7 @@ export function hydrateLayout(view: LayoutView, state: WorkspaceState, scope = l
           kind: "file" as const, backendSessionId: "", workspaceId: state.workspaceId ?? null,
           previewId: `daemon-preview-${node.nodeId}` }),
           ...wire, path: wire.path, line: wire.line, col: wire.col }; break;
-        case "changes": content = { kind: "changes", workspaceId: state.workspaceId ?? "",
+        case "changes": content = { workspaceId: state.workspaceId ?? "",
           worktreePath: state.activeWorktreePath ?? "", worktree: null, ...wire }; break;
         default: content = wire;
       }
@@ -292,7 +292,7 @@ export function rehydrateWorkspace(state: WorkspaceState, view = layoutSync.curr
     }
   };
   const find = (layout: DaemonLayout, scope: string): DaemonLayout | undefined => {
-    if (layout.scope === scope || !layout.scope && scope === JSON.stringify([state.workspaceId ?? "", null])) return layout;
+    if (layout.scope === scope || !layout.scope) return layout;
     if (layout.parkedLayouts?.[scope]) return layout.parkedLayouts[scope];
     for (const parked of Object.values(layout.parkedLayouts ?? {})) { const found = find(parked, scope); if (found) return found; }
     return undefined;
