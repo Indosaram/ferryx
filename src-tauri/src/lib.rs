@@ -42,6 +42,7 @@ pub(crate) mod test_support;
 pub mod agent_history;
 pub mod scoped_contracts;
 pub mod script;
+pub mod config_import;
 pub mod session;
 pub mod session_names;
 #[cfg(all(feature = "desktop", any(target_os = "macos", test)))]
@@ -1883,6 +1884,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_terminal_grid_resize,
         cmd_terminal_grid_detach,
         cmd_terminal_preferences,
+        crate::config_import::cmd_config_import,
         cmd_terminal_apply_overrides,
         cmd_terminal_set_appearance,
         cmd_native_terminal_attach,

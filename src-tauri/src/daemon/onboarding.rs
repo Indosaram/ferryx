@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const CAPABILITY: &str = "onboardingStateV1";
-pub const STEPS: &[&str] = &["intro", "features", "agents", "enroll", "skills", "cli",
+pub const STEPS: &[&str] = &["intro", "features", "import", "agents", "enroll", "skills", "cli",
     "project", "supervisor", "try", "phone", "account"];
 pub type Registry = std::sync::Arc<parking_lot::Mutex<Store>>;
 
