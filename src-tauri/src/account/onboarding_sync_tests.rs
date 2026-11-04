@@ -51,6 +51,22 @@ async fn send(fx: &Fixture, method: &str, path: &str, token: Option<&str>, body:
 
 const PATH: &str = "/api/v1/account/onboarding";
 
+#[test]
+fn v3_upgrade_preserves_accounts_and_creates_progress_table_idempotently() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = super::store::store_sqlite::open_sqlite_connection(dir.path()).unwrap();
+    conn.execute_batch("DROP TABLE account_onboarding; PRAGMA user_version = 3;
+        INSERT INTO users(user_id, email, created_at) VALUES('existing','existing@test.local',1);")
+        .unwrap();
+    drop(conn);
+    for _ in 0..2 {
+        let conn = super::store::store_sqlite::open_sqlite_connection(dir.path()).unwrap();
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0)).unwrap(), 4);
+        assert_eq!(conn.query_row("SELECT count(*) FROM users WHERE user_id='existing'", [], |r| r.get::<_, u32>(0)).unwrap(), 1);
+        assert_eq!(conn.query_row("SELECT count(*) FROM account_onboarding", [], |r| r.get::<_, u32>(0)).unwrap(), 0);
+    }
+}
+
 #[tokio::test]
 async fn auth_required_and_machine_steps_rejected() {
     let fx = spawn().await;
