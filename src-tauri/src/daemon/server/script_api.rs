@@ -22,10 +22,8 @@ impl DaemonServer {
                 Ok(Value::Null)
             }
             "read" => {
-                let screen = self.terminal_service.output_hub().visible_screen_text(session).ok_or("SESSION_NOT_FOUND")?;
                 let count = value["lines"].as_u64().ok_or("BAD_ARGUMENT")? as usize;
-                let lines: Vec<_> = screen.text.lines().collect();
-                Ok(json!(lines[lines.len().saturating_sub(count)..].join("\n")))
+                Ok(json!(self.terminal_service.output_hub().script_text(session, count).ok_or("SESSION_NOT_FOUND")?))
             }
             "notify" => {
                 self.remote_event_tx.send(DaemonRemoteEvent { event: "ScriptNotification".into(), payload: value })
@@ -38,9 +36,7 @@ impl DaemonServer {
                     base_revision: value["revision"].as_u64().ok_or("BAD_ARGUMENT")?, intent }).await.map_err(|e| e.to_string())?)
             }
             "exec" => {
-                let cwd = match client.describe_session(session).await.map_err(|e| e.to_string())? {
-                    details => details.cwd.ok_or("Session has no local cwd")?,
-                };
+                let cwd = client.describe_session(session).await.map_err(|e| e.to_string())?.cwd.ok_or("Session has no local cwd")?;
                 let argv: Vec<String> = serde_json::from_value(value["argv"].clone()).map_err(|e| e.to_string())?;
                 crate::ipc::run_blocking(move || {
                     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(crate::ipc::IpcError::internal)?;
@@ -69,7 +65,11 @@ impl DaemonServer {
                 let intent = crate::daemon::layout::Intent::SplitPane { tab_id: target.2, target_node_id: target.3,
                     dir: if ["right", "left"].contains(&direction) { crate::daemon::layout::Direction::Horizontal } else { crate::daemon::layout::Direction::Vertical },
                     first: ["left", "up"].contains(&direction), content: crate::daemon::layout::Content::Terminal { backend_session_id: new_session.clone() } };
-                response(client.send_request(Q::LayoutApply { window: target.0, base_revision: target.1, intent }).await.map_err(|e| e.to_string())?)?;
+                let applied = client.send_request(Q::LayoutApply { window: target.0, base_revision: target.1, intent }).await.map_err(|e| e.to_string());
+                if !matches!(&applied, Ok(R::LayoutOk { .. })) {
+                    client.close_terminal(&new_session).await.map_err(|e| e.to_string())?;
+                    return Err(format!("Split layout rejected: {applied:?}"));
+                }
                 Ok(json!(new_session))
             }
             _ => Err("BAD_ARGUMENT".into()),
@@ -85,5 +85,9 @@ fn find(node: &crate::daemon::layout::Node, session: &str) -> Option<u64> {
     }
 }
 fn response(value: R) -> Result<Value, String> {
-    match value { R::Error { message, .. } => Err(message), other => serde_json::to_value(other).map_err(|e| e.to_string()) }
+    match value {
+        R::Error { message, .. } => Err(message),
+        R::LayoutConflict { .. } => Err("LAYOUT_CONFLICT".into()),
+        other => serde_json::to_value(other).map_err(|e| e.to_string()),
+    }
 }
