@@ -563,6 +563,19 @@ fn basename(argv0: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn argv_command(argv: &[String]) -> Option<String> {
+    let program = argv.first()?;
+    // execve of a shebang script substitutes the interpreter in argv0. Preserve
+    // the entry point's name, never inline code or the script's arguments.
+    if is_interpreter(executable_name(program)) {
+        if let Some(script) = argv.get(1).filter(|arg| !arg.starts_with('-')) {
+            return basename(script);
+        }
+    }
+    basename(program)
+}
+
 impl ProcessSnapshot {
     /// Derived metadata, rebuilt after handover/restart from the surviving PTY.
     pub(crate) fn foreground_command(&self, session: &PtySession) -> Option<String> {
