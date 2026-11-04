@@ -559,15 +559,12 @@ pub fn cmd_terminal_cell_metrics(scale_factor: f64) -> TerminalCellMetricsRespon
     terminal_cell_metrics_for_scale(scale_factor)
 }
 
-#[cfg(any(feature = "desktop", test))]
-#[cfg(any(feature = "desktop", test))]
+#[cfg(feature = "desktop")]
 const DEFAULT_SPAWN_COLS: u16 = 80;
-#[cfg(any(feature = "desktop", test))]
-#[cfg(any(feature = "desktop", test))]
+#[cfg(feature = "desktop")]
 const DEFAULT_SPAWN_ROWS: u16 = 24;
 
-#[cfg(any(feature = "desktop", test))]
-#[cfg(any(feature = "desktop", test))]
+#[cfg(feature = "desktop")]
 fn spawn_dimension(value: Option<u16>, default: u16, max: u16) -> u16 {
     match value {
         Some(value) if value > 0 && value <= max => value,
