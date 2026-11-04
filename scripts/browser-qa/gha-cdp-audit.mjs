@@ -1485,9 +1485,37 @@ const rawType = (text) => (platform === "win32" ? win.ps("rawtype", ["-Text", te
 const rawKey = (spec) => (platform === "win32" ? win.ps("rawkeys", ["-Codes", [...(spec.mods ?? []).map((mod) => winVk[mod]), winVk[spec.key] ?? spec.key.toUpperCase().charCodeAt(0)].join(",")]) : host.key(spec));
 
 /** The approval card's primary button (Allow/Approve): right of "Deny" on the same line. */
+/**
+ * The card's primary button by pixels: the first light filled pill (a run of >= 50 near-white
+ * pixels) below the card title. OCR misses the dark-on-light button label on some frames
+ * (macOS probes of run 41763956536 read the title on every frame and the button on none).
+ */
+function primaryButtonBelow(path, title) {
+  const image = decodePng(path);
+  if (!image) return null;
+  const light = (x, y) => Math.min(...image.rgb(x, y)) > 200;
+  const x0 = Math.max(0, title.left - 40), x1 = Math.min(image.width - 1, title.left + 480);
+  for (let y = title.top + 20; y < Math.min(image.height, title.top + 180); y += 1) {
+    let run = 0;
+    for (let x = x0; x <= x1; x += 1) {
+      run = light(x, y) ? run + 1 : 0;
+      if (run < 50) continue;
+      let right = x;
+      while (right + 1 <= x1 && light(right + 1, y)) right += 1;
+      const left = x - run + 1;
+      const middle = Math.round((left + right) / 2);
+      let bottom = y;
+      while (bottom + 1 < image.height && light(middle, bottom + 1)) bottom += 1;
+      return { at: [middle, Math.round((y + bottom) / 2)], via: "pixels below the card title", words: [] };
+    }
+  }
+  return null;
+}
 async function clickCardButton(label, timeout = 20000) {
   const hit = await until(() => {
-    const words = ocr(probeShot()) ?? [];
+    const path = probeShot();
+    const words = ocr(path) ?? [];
+    const title = findPhrase(words, "Let ferryxqa")[0] ?? findPhrase(words, "Allow \"ferryxqa\"")[0] ?? null;
     // The card's Deny has its primary button right of it on the same line; prefer that pair.
     const denies = words.filter((word) => word.text === "Deny").sort((a, b) => a.top - b.top);
     const paired = (word) => words.some((other) => other.text === label && Math.abs(other.top - word.top) <= 14 && other.left > word.left && other.left - word.left < 160);
@@ -1496,7 +1524,8 @@ async function clickCardButton(label, timeout = 20000) {
       // Windows OCR often drops the dark "Deny" button but reads the light primary one; cards
       // sit top-centre, so the topmost match is the card's.
       const alone = words.filter((word) => word.text === label).sort((a, b) => a.top - b.top)[0];
-      return alone ? { at: [alone.left + Math.round(alone.width / 2), alone.top + Math.round(alone.height / 2)], via: "ocr (no Deny)", words: [] } : null;
+      if (alone) return { at: [alone.left + Math.round(alone.width / 2), alone.top + Math.round(alone.height / 2)], via: "ocr (no Deny)", words: [] };
+      return title && label !== "Deny" ? primaryButtonBelow(path, title) : null;
     }
     const button = words.find((word) => word.text === label && Math.abs(word.top - deny.top) <= 14 && word.left > deny.left);
     const at = button
@@ -1584,7 +1613,7 @@ const chromeUserData = platform === "linux"
 const chromeKeychainPassword = "mock_password";
 const chromeRunning = () => (platform === "win32"
   ? run("tasklist", ["/FI", "IMAGENAME eq chrome.exe", "/NH"]).stdout.toLowerCase().includes("chrome.exe")
-  : run("pgrep", ["-f", platform === "darwin" ? "Google Chrome" : `--user-data-dir=${chromeUserData}`]).ok);
+  : run("pgrep", ["-f", "--", platform === "darwin" ? "Google Chrome" : `--user-data-dir=${chromeUserData}`]).ok);
 /** Copies a SQLite file (with -wal/-shm) and opens the copy read-only. */
 function openCopy(path) {
   const copy = join(dirs.tmp, `${basename(path)}-${randomBytes(3).toString("hex")}.sqlite`);
@@ -1635,13 +1664,13 @@ async function seedChromeProfile(record) {
     try {
       process.kill(-chrome.pid, "SIGTERM");
     } catch {}
-    run("pkill", ["-TERM", "-f", `--user-data-dir=${chromeUserData}`]);
+    run("pkill", ["-TERM", "-f", "--", `--user-data-dir=${chromeUserData}`]);
   }
   const quit = await until(() => !chromeRunning(), 40000);
   if (!quit) {
     record.chrome_force_killed = true;
     if (platform === "win32") run("taskkill", ["/IM", "chrome.exe", "/T", "/F"]);
-    else run("pkill", ["-9", "-f", platform === "darwin" ? "Google Chrome" : `--user-data-dir=${chromeUserData}`]);
+    else run("pkill", ["-9", "-f", "--", platform === "darwin" ? "Google Chrome" : `--user-data-dir=${chromeUserData}`]);
     await sleep(3000);
   }
   const profile = join(chromeUserData, "Default");
@@ -1668,6 +1697,8 @@ async function seedChromeProfile(record) {
     db.close();
   }
   const loginPath = join(profile, "Login Data");
+  // Who still holds Chrome's databases (expected: nobody), for a locked-database failure.
+  if (platform === "linux") record.db_holders = run("fuser", ["-v", loginPath, join(profile, "History")]).stderr.slice(0, 600);
   if (existsSync(loginPath)) {
     const db = new Database(loginPath);
     const columns = db.query("PRAGMA table_info(logins)").all();
