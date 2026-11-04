@@ -731,6 +731,13 @@ impl DaemonSessionService {
         self.desktop_geometries.lock().get(session_id).map(|state| state.desktop)
     }
 
+    pub(crate) fn prefer_desktop_geometry(&self, id: &str, cols: u16, rows: u16) -> bool {
+        let mut states = self.desktop_geometries.lock();
+        let state = states.entry(id.into()).or_insert_with(|| super::size_ownership::SizeOwnership::new((cols, rows)));
+        state.desktop = (cols, rows);
+        state.owner == super::size_ownership::DESKTOP
+    }
+
     fn publish_size_owner(&self, id: &str, state: &super::size_ownership::SizeOwnership) {
         let _ = self.remote_event_tx.send(DaemonRemoteEvent {
             event: "SizeOwnerChanged".into(),
