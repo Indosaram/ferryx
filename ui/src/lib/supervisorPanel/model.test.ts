@@ -490,6 +490,16 @@ describe("supervisor panel events", () => {
     expect(next.sessions.find((s) => s.sessionRef === "mac:wtlist")?.state).toBe("working");
   });
 
+  it("adds a row for a session the snapshot did not have", () => {
+    const next = applyPanelEvent(panelSnapshotFixture, {
+      type: "panel.session",
+      session: fleetSession({ sessionRef: "mac:late-arrival", state: "working" }),
+    });
+
+    expect(next.sessions).toHaveLength(panelSnapshotFixture.sessions.length + 1);
+    expect(next.sessions.find((s) => s.sessionRef === "mac:late-arrival")?.state).toBe("working");
+  });
+
   it("keeps a session's place and ignores an older report of it", () => {
     const refs = panelSnapshotFixture.sessions.map((s) => s.sessionRef);
     const target = panelSnapshotFixture.sessions[2];

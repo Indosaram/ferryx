@@ -177,6 +177,29 @@ fn publish_failed_session(server: &Arc<DaemonServer>, session_id: &str) {
 
 const PROMPT_MOVED_SESSIONS: usize = 256;
 
+/// Sends `session_id`'s fresh local fleet entry to the desktop as a `panel.session`
+/// `supervisor_panel_event`. A session that cannot be read (gone, or the read timed out) sends
+/// nothing; the panel re-reads on its next load.
+async fn relay_panel_session(
+    state: Arc<RemoteGatewayState>,
+    session_id: String,
+    desktop: broadcast::Sender<DaemonRemoteEvent>,
+) {
+    let read = tokio::time::timeout(
+        crate::remote::machine_events::PANEL_SESSION_READ,
+        crate::hub_runtime::local_fleet_session(&state, &session_id),
+    );
+    let Ok(Some(session)) = read.await else { return };
+    let _ = desktop.send(DaemonRemoteEvent {
+        event: SUPERVISOR_PANEL_EVENT.to_string(),
+        payload: serde_json::json!({
+            "type": "panel.session",
+            "sessionRef": session.session_ref,
+            "session": session,
+        }),
+    });
+}
+
 /// The desktop event name the UI's `onSupervisorPanelEvent` listens for.
 const SUPERVISOR_PANEL_EVENT: &str = "supervisor_panel_event";
 
@@ -4215,12 +4238,28 @@ impl DaemonServer {
                     }
                 }
             });
+            // A session's state transition (a new session included) reaches the desktop panel as
+            // `panel.session` with its fresh fleet entry, as owner machine sockets get it. It goes
+            // straight to the desktop, not the owner channel, which machine sockets also forward.
+            // The gateway is held weakly so this relay never keeps it alive.
+            let panel_state = Arc::downgrade(&remote_state);
+            let session_tx = remote_event_tx.clone();
             runtime.spawn(async move {
                 let mut filter = crate::agent_control::events::PromptChangeFilter::default();
                 let mut shown = std::collections::HashMap::<String, Option<String>>::new();
+                let mut panel = crate::remote::machine_events::PanelTransitions::default();
                 loop {
                     match observations.recv().await {
                         Ok(observation) => {
+                            if panel.moved(&observation) {
+                                if let Some(state) = panel_state.upgrade() {
+                                    tokio::spawn(relay_panel_session(
+                                        state,
+                                        observation.session_id.clone(),
+                                        session_tx.clone(),
+                                    ));
+                                }
+                            }
                             // The desktop re-reads a row's prompt on a push, so a repaint that keeps
                             // the same prompt occurrence sends none.
                             if !prompt_moved(&mut shown, &observation) {
@@ -4231,7 +4270,8 @@ impl DaemonServer {
                                 let _ = prompt_tx.send(event);
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        // Lost pushes: the next reading of every session is a transition again.
+                        Err(broadcast::error::RecvError::Lagged(_)) => panel.clear(),
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
@@ -10173,6 +10213,64 @@ mod protocol_release_tests {
             server.terminal_service.get_session(&id).is_some(),
             "Stop ends the work, not the PTY"
         );
+        server.terminal_service.close_session(&id).await.unwrap();
+        drop(directory);
+    }
+
+    /// F3: a session that first shows up after the desktop subscribed reaches the desktop as a
+    /// `panel.session` `supervisor_panel_event` carrying its fleet entry, so the panel grows the
+    /// row without a reload. The desktop receiver is subscribed before the pane exists.
+    #[tokio::test]
+    async fn a_session_observed_after_subscribe_reaches_the_desktop_panel() {
+        let directory = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap())).await.unwrap();
+        let server = Arc::new(DaemonServer::new());
+        let mut desktop = server.remote_event_tx.subscribe();
+        let mut command = portable_pty::CommandBuilder::new("/bin/bash");
+        command.args(["--noprofile", "--norc", "-i"]);
+        let (id, _lifecycle) = server
+            .terminal_service
+            .spawn_resolved_with_id(
+                uuid::Uuid::new_v4().to_string(),
+                command,
+                80,
+                24,
+                crate::terminal::pty::ResolvedSpawnContext {
+                    root: directory.path().to_owned(),
+                    cwd: directory.path().to_owned(),
+                    managed_workspace_id: None,
+                },
+            )
+            .unwrap();
+        server.remote_state.agent_events.publish(crate::agent_control::events::ObservationDraft {
+            session_id: id.clone(),
+            state: crate::agent_control::AgentControlState::Working,
+            state_source: crate::agent_control::AgentStateSource::Screen,
+            tier: crate::agent_control::AgentTier::Screen,
+            prompt_id: None,
+            kind: None,
+            screen_revision: Some("late-rev".into()),
+            workspace_id: None,
+        });
+        let wanted = format!("{}:{id}", crate::remote::reference_chat::files::reference_host_id());
+        let event = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match desktop.recv().await {
+                    Ok(event)
+                        if event.event == SUPERVISOR_PANEL_EVENT
+                            && event.payload["type"] == "panel.session"
+                            && event.payload["sessionRef"] == wanted.as_str() =>
+                    {
+                        return event;
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => panic!("the desktop stream closed"),
+                }
+            }
+        })
+        .await
+        .expect("a late session reaches the desktop panel as panel.session");
+        assert_eq!(event.payload["session"]["sessionRef"], wanted.as_str());
+
         server.terminal_service.close_session(&id).await.unwrap();
         drop(directory);
     }

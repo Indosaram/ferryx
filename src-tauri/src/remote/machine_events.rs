@@ -78,7 +78,7 @@ pub(crate) fn panel_resync_frame(
 const PANEL_WORK_QUEUE: usize = 64;
 
 /// How long the worker waits for one owner fleet read; under the two seconds a frame is due in.
-const PANEL_SESSION_READ: std::time::Duration = std::time::Duration::from_millis(1500);
+pub(crate) const PANEL_SESSION_READ: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// One transition after the owner read: `session` is the fleet entry, `failed` says the owner
 /// read did not produce one (an owner frame without `session` is invalid, so it is never sent).
@@ -123,7 +123,7 @@ async fn push_text(socket: &mut axum::extract::ws::WebSocket, text: String) -> b
 
 /// Remembers each session's last state and prompt so only a transition makes a frame.
 #[derive(Default)]
-struct PanelTransitions {
+pub(crate) struct PanelTransitions {
     seen: std::collections::HashMap<String, (crate::agent_control::AgentControlState, Option<String>)>,
 }
 
@@ -132,11 +132,11 @@ const PANEL_TRANSITIONS_MAX: usize = 1024;
 
 impl PanelTransitions {
     /// Forgets every remembered reading, so the next observation of each session is a transition.
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.seen.clear();
     }
 
-    fn moved(&mut self, observation: &crate::agent_control::events::AgentObservation) -> bool {
+    pub(crate) fn moved(&mut self, observation: &crate::agent_control::events::AgentObservation) -> bool {
         let reading = (observation.state, observation.prompt_id.clone());
         if self.seen.get(&observation.session_id) == Some(&reading) {
             return false;
