@@ -170,3 +170,78 @@ pub fn parse_cwd(text: &str) -> Option<String> {
     let path = if path.as_bytes().get(2) == Some(&b':') { path[1..].to_string() } else { path };
     std::path::Path::new(&path).is_absolute().then_some(path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::native_terminal::{NativeTerminal, TerminalEngine};
+    use crate::terminal::screen_mirror::ScreenMirror;
+
+    #[derive(Deserialize)]
+    struct Case {
+        name: String,
+        input: String,
+        #[serde(default)]
+        enabled: bool,
+        #[serde(default)]
+        remote: bool,
+        #[serde(default)]
+        replay: bool,
+        cwd: Option<String>,
+        events: Vec<OscEffect>,
+    }
+
+    #[test]
+    fn osc_expectation_table() {
+        let cases: Vec<Case> = serde_json::from_str(include_str!("../../tests/fixtures/osc_expectations.json")).unwrap();
+        for case in cases {
+            let mut mirror = ScreenMirror::new(80, 24).unwrap();
+            assert!(mirror.enable_program_status());
+            mirror.set_osc52_write(case.enabled && !case.remote);
+            if case.replay { mirror.feed_replay(case.input.as_bytes()); }
+            else { mirror.feed(case.input.as_bytes()); }
+            assert_eq!(mirror.take_osc_effects(), case.events, "{}", case.name);
+            if let Some(cwd) = case.cwd {
+                #[cfg(not(windows))]
+                assert_eq!(mirror.osc_cwd().as_deref(), Some(cwd.as_str()), "{}", case.name);
+                #[cfg(windows)]
+                let _ = cwd;
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_engine_does_not_handle_effects() {
+        let mut terminal = NativeTerminal::new(80, 24).unwrap();
+        terminal.feed(b"\x1b]777;notify;Build;done\x07").unwrap();
+        assert!(terminal.take_osc_effects().is_empty());
+    }
+
+    #[test]
+    fn notification_rate_limit_and_owned_copy() {
+        let mut terminal = NativeTerminal::new(80, 24).unwrap();
+        terminal.enable_osc_effects().unwrap();
+        let mut input = b"\x1b]777;notify;Build;done\x07".to_vec();
+        terminal.feed(&input).unwrap();
+        input.fill(b'x');
+        terminal.feed(b"\x1b]9;second\x07").unwrap();
+        assert_eq!(terminal.take_osc_effects(), vec![OscEffect::Notify { title: "Build".into(), body: "done".into() }]);
+    }
+
+    #[test]
+    fn sanitizes_controls_bidi_and_character_bound() {
+        assert_eq!(sanitize("a\u{202e}b\n\u{2066}c"), "abc");
+        assert_eq!(sanitize(&"\u{4e2d}".repeat(300)).chars().count(), 256);
+    }
+
+    #[test]
+    fn seed_replay_never_delivers_effects_but_preserves_pwd() {
+        let mut mirror = ScreenMirror::new(80, 24).unwrap();
+        mirror.feed_replay(b"\x1b]7;file:///tmp\x07");
+        let seed = mirror.seed().unwrap();
+        let mut restored = ScreenMirror::from_seed(&seed).unwrap();
+        assert!(restored.enable_program_status());
+        assert!(restored.take_osc_effects().is_empty());
+        assert_eq!(restored.osc_cwd(), mirror.osc_cwd());
+    }
+}
