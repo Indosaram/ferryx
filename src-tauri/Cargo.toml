@@ -50,6 +50,10 @@ required-features = ["desktop"]
 name = "ssh_password_fixture"
 required-features = ["desktop"]
 
+[[example]]
+name = "native_terminal_surface_host_qa"
+required-features = ["desktop"]
+
 [[test]]
 name = "native_terminal_macos_background"
 harness = false
