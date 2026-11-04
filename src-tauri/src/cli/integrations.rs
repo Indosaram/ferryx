@@ -428,6 +428,16 @@ mod tests {
     use super::*;
     use crate::daemon::agent_hook_install::{is_ferryx_skill, SKILL_SOURCE};
 
+    #[test]
+    fn session_status_text_contains_only_reported_session_fields() {
+        let value = json!({"agents": [], "integrationEnabled": true, "sessions": [
+            {"sessionId": "pane-1", "agent": "omo", "foregroundCommand": "sleep"},
+            {"sessionId": "pane-2", "agent": null, "foregroundCommand": null}
+        ]});
+        let rows: Vec<_> = status_text(&value).lines().skip(1).map(str::to_string).collect();
+        assert_eq!(rows, ["pane-1\tomo\tsleep", "pane-2\t-\t-"]);
+    }
+
     struct Home {
         dir: tempfile::TempDir,
     }
