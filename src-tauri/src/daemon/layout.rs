@@ -783,6 +783,42 @@ pub(super) fn persist(path: &Path, value: &Layout) -> Result<(), String> {
 }
 
 #[cfg(test)]
+mod detached {
+    use super::*;
+    #[test]
+    fn restart_and_handover_roundtrip() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::new(root.path().into());
+        let live = BTreeSet::from(["cat".into()]);
+        store.apply("main", 0, Intent::AddTabWithSession { tab_id: "cat-tab".into(), label: "cat".into(), content: Content::Terminal { backend_session_id: "cat".into() }, activate: true }).unwrap();
+        assert!(store.detached(&live).unwrap().is_empty());
+        assert_eq!(store.panes(PaneAction::Detach { session: "cat".into() }, &live).unwrap(), live);
+        let snapshot = store.layouts.clone();
+        let mut restored = Store::new(root.path().into());
+        assert_eq!(restored.detached(&live).unwrap(), live);
+        restored.adopt(snapshot).unwrap();
+        assert_eq!(restored.get("main").unwrap().layout.detached_registry, live);
+        assert!(restored.panes(PaneAction::Attach { session: "cat".into(), window: Some("main".into()), split: None }, &live).unwrap().is_empty());
+        assert_eq!(restored.locations().len(), 1);
+        assert!(restored.panes(PaneAction::Attach { session: "missing".into(), window: None, split: None }, &live).unwrap_err().contains("SESSION_NOT_FOUND"));
+    }
+    #[test]
+    fn parked_scopes_and_other_windows_are_attached() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::new(root.path().into());
+        let live = BTreeSet::from(["a".into(), "b".into(), "orphan".into()]);
+        for (window, session) in [("main", "a"), ("second", "b")] {
+            store.apply(window, 0, Intent::Scoped { scope: "workspace".into(), intent: Box::new(Intent::AddTabWithSession { tab_id: session.into(), label: session.into(), content: Content::Terminal { backend_session_id: session.into() }, activate: true }) }).unwrap();
+        }
+        assert_eq!(store.detached(&live).unwrap(), BTreeSet::from(["orphan".into()]));
+        store.panes(PaneAction::Swap { a: "a".into(), b: "b".into() }, &live).unwrap();
+        assert_eq!(store.locations().iter().find(|entry| entry.0 == "main").unwrap().4, "b");
+        store.panes(PaneAction::Zoom { session: "a".into() }, &live).unwrap();
+        assert!(store.get_scoped("second", Some("workspace")).unwrap().layout.tabs[0].expanded_node_id.is_some());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
