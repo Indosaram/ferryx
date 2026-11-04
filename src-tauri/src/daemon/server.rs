@@ -7285,6 +7285,7 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::Resize { session_id, cols, rows }) if self.serves_paired_here(&session_id) => {
+                    self.record_desktop_geometry(&session_id, cols, rows);
                     match self.terminal_service.resize_operation(&session_id, 0, cols, rows) {
                         Ok(pending) => match pending.await {
                             Ok(()) => DaemonResponse::ResizeOk,
@@ -7374,6 +7375,11 @@ impl DaemonServer {
                         bytes_written: outcome.bytes_written,
                         settled: outcome.settled,
                     }
+                }
+                Ok(DaemonRequest::Resize { ref session_id, cols, rows })
+                    if !self.remote_state.desktop_window_focus_suppresses_push()
+                        && !self.session_service.prefer_desktop_geometry(session_id, cols, rows) => {
+                    DaemonResponse::ResizeOk
                 }
                 Ok(DaemonRequest::Resize {
                     session_id,
