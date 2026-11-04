@@ -446,11 +446,9 @@ impl ScreenMirror {
         if let Err(error) = self.terminal.resize(cols, rows, CELL_WIDTH_PX, CELL_HEIGHT_PX) {
             tracing::warn!(%error, cols, rows, "screen mirror resize failed");
         }
-        if self.scrollback_lines != MIRROR_SCROLLBACK_LINES {
-            let limit = self.effective_scrollback_lines(cols);
-            if let Err(error) = self.terminal.set_scrollback_limit_lines(Some(limit)) {
-                tracing::warn!(%error, limit, "screen mirror scrollback limit rejected after resize");
-            }
+        let limit = self.effective_scrollback_lines(cols);
+        if let Err(error) = self.terminal.set_scrollback_limit_lines(Some(limit)) {
+            tracing::warn!(%error, limit, "screen mirror scrollback limit rejected after resize");
         }
         self.mark_activity();
     }
