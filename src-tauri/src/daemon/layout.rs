@@ -428,4 +428,59 @@ pub(super) fn persist(path: &Path, value: &Layout) -> Result<(), String> {
     std::fs::File::open(parent).and_then(|dir| dir.sync_all()).map_err(|error| error.to_string())?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn add(id: &str) -> Intent {
+        Intent::AddTabWithSession { tab_id: id.into(), label: id.into(), content: Content::Terminal { backend_session_id: format!("pty-{id}") }, activate: true }
+    }
+    #[test]
+    fn conflict_rebase_and_idle_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::new(root.path().into());
+        let first = store.apply("main", 0, add("one")).unwrap();
+        assert_eq!(first.revision, 1);
+        assert!(matches!(store.apply("main", 0, Intent::CloseTab { tab_id: "one".into() }), Err(ApplyError::Conflict(layout)) if layout == first.layout));
+        let focused = store.apply("main", 0, Intent::FocusPane { tab_id: "one".into(), node_id: 1 }).unwrap();
+        assert_eq!(focused.revision, 2);
+        let mut restarted = Store::new(root.path().into());
+        assert_eq!(restarted.get("main").unwrap().layout, focused.layout);
+        assert!(restarted.get("../escape").is_err());
+        assert!(restarted.apply("main", 99, Intent::ActivateTab { tab_id: "one".into() }).is_err());
+    }
+    #[test]
+    fn split_move_close_preserves_backend_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::new(root.path().into());
+        store.apply("main", 0, add("one")).unwrap();
+        store.apply("main", 1, Intent::SplitPane { tab_id: "one".into(), target_node_id: 1, dir: Direction::Horizontal, first: false, content: Content::Browser { url: "https://example.org".into() } }).unwrap();
+        store.apply("main", 2, Intent::DetachPaneToTab { source_tab_id: "one".into(), node_id: 2, tab_id: "two".into(), label: "two".into(), target_group_id: "main".into() }).unwrap();
+        let view = store.apply("main", 3, Intent::CloseTab { tab_id: "two".into() }).unwrap();
+        assert_eq!(view.revision, 4);
+        assert_eq!(view.layout.tabs[0].pane_tree, Node::Leaf { node_id: 1, content: Content::Terminal { backend_session_id: "pty-one".into() } });
+    }
+    #[test]
+    fn invalid_intent_is_transactional() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::new(root.path().into());
+        let before = store.apply("main", 0, add("one")).unwrap();
+        assert!(store.apply("main", 1, Intent::MoveTabToPaneSplit { source_tab_id: "one".into(), target_tab_id: "missing".into(), target_node_id: 9, dir: Direction::Vertical, first: true }).is_err());
+        assert_eq!(store.get("main").unwrap().layout, before.layout);
+        assert_eq!(Store::new(root.path().into()).get("main").unwrap().layout, before.layout);
+    }
+    #[test]
+    fn size_bound() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::new(root.path().into());
+        for index in 0..32 {
+            let window = format!("ws-{index}");
+            store.apply(&window, 0, add("one")).unwrap();
+            for revision in 1..256 {
+                store.apply(&window, revision, Intent::SplitPane { tab_id: "one".into(), target_node_id: revision, dir: Direction::Horizontal, first: false, content: Content::Terminal { backend_session_id: format!("pty-{index}-{revision}") } }).unwrap();
+            }
+            assert!(std::fs::metadata(root.path().join("layout").join(format!("{window}.json"))).unwrap().len() < 1024 * 1024);
+        }
+        assert!(store.get("ws-overflow").is_err());
+    }
 }
