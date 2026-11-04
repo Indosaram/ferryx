@@ -81,6 +81,7 @@ mod tests {
     #[test]
     fn pane_liveness_contract_split_operation_result_all_states() {
         let details = DaemonSessionDetails {
+            size_owner: None,
             session_id: "pty-1".to_string(),
             workspace_id: Some("ws-test".to_string()),
             worktree: None,
@@ -223,6 +224,7 @@ mod tests {
     #[test]
     fn pane_liveness_contract_incarnation_vs_owner_epoch() {
         let legacy_details = DaemonSessionDetails {
+            size_owner: None,
             session_id: "pty-legacy".to_string(),
             workspace_id: None,
             worktree: None,
