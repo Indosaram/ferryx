@@ -315,7 +315,7 @@ impl Layout {
     fn close(&mut self, id: &str) -> Result<Tab, String> {
         let index = self.tabs.iter().position(|tab| tab.tab_id == id).ok_or("Unknown tab")?;
         let tab = self.tabs.remove(index); self.tab_group_layout.remove_tab(id);
-        if self.active_tab_id.as_deref() == Some(id) { self.active_tab_id = self.tabs.first().map(|tab| tab.tab_id.clone()); }
+        if self.active_tab_id.as_deref() == Some(id) { self.active_tab_id = self.tabs.get(index.min(self.tabs.len().saturating_sub(1))).map(|tab| tab.tab_id.clone()); }
         Ok(tab)
     }
     fn add(&mut self, tab: Tab, group: &str, activate: bool) -> Result<(), String> {
@@ -616,6 +616,11 @@ impl Store {
             if !replace(&mut target_layout, scope, &destination) { target_layout.parked_layouts.insert(scope.into(), destination); }
         } else { target_layout = destination; }
         target_layout.revision = target.revision.checked_add(1).ok_or_else(|| ApplyError::Invalid("Revision exhausted".into()))?;
+        fn count(layout: &Layout) -> usize {
+            fn leaves(node: &Node) -> usize { match node { Node::Leaf { .. } => 1, Node::Split { a,b,.. } => leaves(a)+leaves(b) } }
+            layout.tabs.iter().map(|tab| leaves(&tab.pane_tree)).sum::<usize>() + layout.parked_layouts.values().map(count).sum::<usize>()
+        }
+        if count(&target_layout) > 256 { return Err(ApplyError::Invalid("Pane limit exceeded".into())); }
         // Persist the destination before removing the source: a crash cannot lose a subtree.
         persist(&self.path(target_window).map_err(ApplyError::Invalid)?, &target_layout).map_err(ApplyError::Invalid)?;
         self.layouts.insert(target_window.into(), target_layout);
