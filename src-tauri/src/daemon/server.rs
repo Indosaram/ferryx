@@ -4080,7 +4080,11 @@ impl DaemonServer {
             .unwrap_or_else(|| session_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf());
         let layouts = Arc::new(Mutex::new(super::layout::Store::with_session_path(layout_root.clone(), session_path)));
         handover_manager.set_layouts(Arc::clone(&layouts));
-        let onboarding = Arc::new(Mutex::new(super::onboarding::Store::new(layout_root.join("onboarding-daemon.json"))));
+        let onboarding_path = super::onboarding::path(true).unwrap_or_else(|error| {
+            tracing::warn!(%error, "Using daemon runtime directory for onboarding");
+            layout_root.join("onboarding-daemon.json")
+        });
+        let onboarding = Arc::new(Mutex::new(super::onboarding::Store::new(onboarding_path)));
         handover_manager.set_onboarding(Arc::clone(&onboarding));
         // OSC 7501 summaries from every mirror this daemon answers for become Protocol states.
         let protocol_reporters =
