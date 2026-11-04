@@ -127,3 +127,80 @@ impl tokio::io::AsyncWrite for Stream {
         std::pin::Pin::new(&mut *self.0).poll_shutdown(cx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn isolated_name() -> String {
+        format!(r"\\.\pipe\ferryx-test-{}-{}", std::process::id(), uuid::Uuid::new_v4())
+    }
+
+    #[tokio::test]
+    async fn pipe_identity_and_cross_pane_write_refusal() {
+        let name = isolated_name();
+        let mut listener = Listener { pending: create(&name, true).unwrap(), name: name.clone() };
+        assert!(create(&name, true).is_err(), "first instance cannot be squatted");
+        let mut client = ClientOptions::new().open(&name).unwrap();
+        let mut server = listener.accept().await.unwrap();
+        let (origin, mut ancestry) = identity(&server).await;
+        let pid = std::process::id();
+        assert!(matches!(origin, super::super::supervisor_peer::PeerOrigin::Process(peer) if peer.pid == pid));
+        let panes = super::super::supervisor_peer::PaneRegistry::default();
+        panes.insert("pane-a", pid, &super::super::supervisor_peer::SystemProcs);
+        let class = super::super::supervisor_peer::classify(origin, &mut ancestry, &panes,
+            &super::super::supervisor_peer::SystemProcs).unwrap();
+        let grants = super::super::pane_grants::PaneGrants::load(None);
+        let gate = super::super::pane_grants::gate_for(&super::super::protocol::DaemonRequest::Write {
+            session_id: "pane-b".into(), data: "x".into(),
+        }).unwrap();
+        assert_eq!(super::super::pane_grants::decide(&class, &gate, &grants, |_| None)
+            .unwrap_err().reason, super::super::pane_grants::PANE_GRANT_REQUIRED);
+        assert!(!grants.admin_allowed(&class, |_| None), "control lifetime operations refuse panes");
+        client.write_all(b"x").await.unwrap();
+        let mut byte = [0];
+        tokio::time::timeout(std::time::Duration::from_secs(5), server.read_exact(&mut byte)).await.unwrap().unwrap();
+        assert_eq!(byte, [b'x']);
+    }
+
+    #[tokio::test]
+    async fn tcp_compatibility_stream_still_works() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let connect = Stream::connect(listener.local_addr().unwrap());
+        let (client, accepted) = tokio::join!(connect, listener.accept());
+        let mut client = client.unwrap();
+        let mut server = accepted.unwrap().0;
+        client.write_all(b"legacy").await.unwrap();
+        let mut bytes = [0; 6];
+        tokio::time::timeout(std::time::Duration::from_secs(5), server.read_exact(&mut bytes)).await.unwrap().unwrap();
+        assert_eq!(&bytes, b"legacy");
+    }
+
+    #[tokio::test]
+    async fn pipe_rejects_owner_sid_marked_deny_only() {
+        use windows_sys::Win32::Security::{CreateRestrictedToken, GetTokenInformation,
+            ImpersonateLoggedOnUser, RevertToSelf, SID_AND_ATTRIBUTES, TOKEN_DUPLICATE, TOKEN_IMPERSONATE};
+        let name = isolated_name();
+        let _server = create(&name, true).unwrap();
+        std::thread::spawn(move || {
+            let mut token = std::ptr::null_mut();
+            assert_ne!(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE, &mut token) }, 0);
+            let mut len = 0;
+            unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut len) };
+            let mut buf = vec![0usize; (len as usize).div_ceil(std::mem::size_of::<usize>())];
+            assert_ne!(unsafe { GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) }, 0);
+            let user = unsafe { &*buf.as_ptr().cast::<TOKEN_USER>() };
+            let deny = SID_AND_ATTRIBUTES { Sid: user.User.Sid, Attributes: 0 };
+            let mut restricted = std::ptr::null_mut();
+            assert_ne!(unsafe { CreateRestrictedToken(token, 0, 1, &deny, 0, std::ptr::null(), 0, std::ptr::null(), &mut restricted) }, 0);
+            unsafe { CloseHandle(token) };
+            assert_ne!(unsafe { ImpersonateLoggedOnUser(restricted) }, 0);
+            let result = std::fs::OpenOptions::new().read(true).write(true).open(&name);
+            let reverted = unsafe { RevertToSelf() };
+            unsafe { CloseHandle(restricted) };
+            assert_ne!(reverted, 0);
+            assert_eq!(result.unwrap_err().raw_os_error(), Some(5), "ERROR_ACCESS_DENIED");
+        }).join().unwrap();
+    }
+}
