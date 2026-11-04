@@ -2288,6 +2288,7 @@ pub struct DaemonServer {
     pub(crate) pane_grants: Arc<crate::daemon::pane_grants::PaneGrants>,
     layouts: super::layout::Registry,
     plugins: Arc<super::plugins::registry::Registry>,
+    onboarding: super::onboarding::Registry,
     /// Bearer token every connection must present before a request is dispatched. Windows has no
     /// filesystem ownership boundary on the transport, so the published port alone cannot
     /// authenticate a client.
@@ -4078,12 +4079,18 @@ impl DaemonServer {
         let session_path = get_default_session_path();
         let layout_root = get_persistent_lock_path().and_then(|path| path.parent().map(Path::to_path_buf))
             .unwrap_or_else(|| session_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf());
-        let layouts = Arc::new(Mutex::new(super::layout::Store::with_session_path(layout_root, session_path)));
+        let layouts = Arc::new(Mutex::new(super::layout::Store::with_session_path(layout_root.clone(), session_path)));
         handover_manager.set_layouts(Arc::clone(&layouts));
         let plugins = Arc::new(super::plugins::registry::Registry::new(
             isolated_dir.clone().unwrap_or_else(|| get_default_session_path().parent()
                 .unwrap_or_else(|| Path::new(".")).to_path_buf()).join("plugin-approvals.json")));
         handover_manager.set_plugin_approvals(Arc::clone(&plugins.approvals));
+        let onboarding_path = super::onboarding::path(true).unwrap_or_else(|error| {
+            tracing::warn!(%error, "Using daemon runtime directory for onboarding");
+            layout_root.join("onboarding-daemon.json")
+        });
+        let onboarding = Arc::new(Mutex::new(super::onboarding::Store::new(onboarding_path)));
+        handover_manager.set_onboarding(Arc::clone(&onboarding));
         // OSC 7501 summaries from every mirror this daemon answers for become Protocol states.
         let protocol_reporters =
             Arc::new(crate::terminal::foreground::ProtocolReporters::default());
@@ -4257,6 +4264,7 @@ impl DaemonServer {
             paired_hosts,
             layouts,
             plugins,
+            onboarding,
             session_router,
             handover_manager,
             resource_sampler: Arc::new(crate::daemon::resource_usage::ResourceSampler::new()),
@@ -5242,16 +5250,21 @@ impl DaemonServer {
                                     error.to_string(),
                                 )),
                             };
-                            (id, observation)
+                            let command = snapshot.as_ref().ok()
+                                .and_then(|snapshot| snapshot.foreground_command(&session));
+                            (id, observation, command)
                         })
                         .collect::<Vec<_>>())
                 })
                 .await;
                 match observations {
                     Ok(observations) => {
-                        for (id, observation) in observations {
+                        for (id, observation, command) in observations {
                             match observation {
                                 Ok(observed) => {
+                                    if observed.is_some() {
+                                        server.agent_states.publish_foreground_command(&id, command);
+                                    }
                                     let observation = observed.map(|observed| observed.foreground);
                                     let alone_after = observed
                                         .filter(|observed| observed.shell_alone)
@@ -6306,6 +6319,8 @@ impl DaemonServer {
             let manager = Arc::clone(&self.handover_manager);
             if let Err(error) = crate::ipc::run_blocking(move || {
                 manager.adopt_recorded_size_ownership(&grants_legacy)
+                    .map_err(crate::ipc::IpcError::internal)?;
+                manager.adopt_recorded_onboarding(&grants_legacy)
                     .map_err(crate::ipc::IpcError::internal)?;
                 manager.adopt_recorded_layouts(&grants_legacy)
                     .map_err(crate::ipc::IpcError::internal)?;
@@ -7809,6 +7824,19 @@ impl DaemonServer {
                         Err(error) => daemon_error(error),
                     }
                 },
+                Ok(request @ (DaemonRequest::OnboardingGet | DaemonRequest::OnboardingSet { .. })) => {
+                    let registry = Arc::clone(&self.onboarding);
+                    match crate::ipc::run_blocking(move || {
+                        let store = registry.lock();
+                        match request {
+                            DaemonRequest::OnboardingSet { state, migrate } => store.set(state, migrate).map(Some),
+                            _ => store.get(),
+                        }.map_err(crate::ipc::IpcError::internal)
+                    }).await {
+                        Ok(state) => DaemonResponse::OnboardingOk { state },
+                        Err(error) => daemon_error(error.to_string()),
+                    }
+                }
                 Ok(DaemonRequest::LayoutGetScoped { window, scope }) => {
                     let layouts = Arc::clone(&self.layouts);
                     match crate::ipc::run_blocking(move || layouts.lock().get_scoped(&window, Some(&scope)).map_err(crate::ipc::IpcError::internal)).await {
@@ -8265,9 +8293,11 @@ impl DaemonServer {
                     capabilities.push("scrollbackBudgetV1".into());
                     capabilities.push("sizeOwnershipV1".into());
                     capabilities.push("daemonLayoutV1".into());
+                    capabilities.push(super::onboarding::CAPABILITY.into());
                     capabilities.push("detachedPanesV1".into());
                     capabilities.push("terminalOscEffectsV1".into());
                     capabilities.push("blockPluginsV1".into());
+                    capabilities.push("foregroundCommandV1".into());
                     #[cfg(feature = "local-split-qa")]
                     capabilities.push("sizeOwnershipQaV1".into());
                     #[cfg(feature = "remote-desktop")]
@@ -10107,6 +10137,9 @@ impl DaemonServer {
             .and_then(|subscription| subscription.snapshot.as_ref())
         {
             let msg = DaemonStreamMessage::AgentState {
+                foreground_command: agent_state_rx.as_ref()
+                    .and_then(|subscription| subscription.foreground_command(&session_id))
+                    .map(Cow::Owned),
                 session_id: Cow::Borrowed(&snapshot.session_id),
                 state: Cow::Borrowed(&snapshot.state),
                 agent: snapshot.agent.as_deref().map(Cow::Borrowed),
@@ -10170,6 +10203,7 @@ impl DaemonServer {
                             match report {
                                 Ok(report) if report.state.session_id == session_id => {
                                     let msg = DaemonStreamMessage::AgentState {
+                                        foreground_command: report.foreground_command.map(Cow::Owned),
                                         session_id: Cow::Borrowed(&session_id),
                                         state: Cow::Borrowed(&report.state.state),
                                         agent: report.state.agent.as_deref().map(Cow::Borrowed),
@@ -10198,6 +10232,7 @@ impl DaemonServer {
                                     if let Some(subscription) = agent_state_rx.as_mut() {
                                         if let Some(current) = subscription.resynchronize(&session_id) {
                                             let msg = DaemonStreamMessage::AgentState {
+                                                foreground_command: subscription.foreground_command(&session_id).map(Cow::Owned),
                                                 session_id: Cow::Borrowed(&session_id),
                                                 state: Cow::Borrowed(&current.state),
                                                 agent: current.agent.as_deref().map(Cow::Borrowed),

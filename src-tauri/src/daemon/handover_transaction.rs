@@ -529,6 +529,8 @@ pub struct HandoverTransaction {
     pub layouts: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_approvals: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarding: Option<crate::daemon::onboarding::State>,
 }
 
 /// The predecessor's held supervisor lease at handover commit: the machine identity and fence
@@ -583,6 +585,7 @@ impl HandoverTransaction {
             size_ownership: None,
             layouts: None,
             plugin_approvals: None,
+            onboarding: None,
         }
     }
 

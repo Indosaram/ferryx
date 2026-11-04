@@ -41,6 +41,7 @@ pub mod session_lifecycle;
 pub mod session_service;
 pub mod size_ownership;
 pub mod layout;
+pub mod onboarding;
 mod layout_migration;
 pub mod sidebar_snapshot;
 pub mod split_journal;

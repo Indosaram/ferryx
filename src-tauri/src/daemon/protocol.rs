@@ -399,6 +399,11 @@ pub struct RecoveryAuthorityEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DaemonSessionDetails {
+    /// Foreground argv0 basename only; never the full command line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_owner: Option<String>,
     pub session_id: String,
@@ -491,6 +496,8 @@ impl DaemonSessionDetails {
         Self {
             session_id,
             size_owner: None,
+            foreground_command: None,
+            agent: None,
             workspace_id,
             worktree,
             cwd,
@@ -928,6 +935,8 @@ pub enum DaemonRequest {
     LayoutGetScoped { window: String, scope: String },
     #[serde(rename_all = "camelCase")]
     LayoutApply { window: String, base_revision: u64, intent: crate::daemon::layout::Intent },
+    OnboardingGet,
+    OnboardingSet { state: crate::daemon::onboarding::State, #[serde(default)] migrate: bool },
     ClearSession,
     RemoteGetStatus,
     GetCapabilities,
@@ -1694,6 +1703,7 @@ pub enum DaemonResponse {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remote_generation: Option<u64>,
     },
+    OnboardingOk { state: Option<crate::daemon::onboarding::State> },
     SaveSessionOk,
     LayoutOk { view: crate::daemon::layout::View },
     PanesOk { detached: crate::daemon::layout::DetachedRegistry },
@@ -1820,6 +1830,8 @@ pub enum DaemonStreamMessage<'a> {
     #[serde(rename_all = "camelCase")]
     AgentState {
         session_id: Cow<'a, str>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        foreground_command: Option<Cow<'a, str>>,
         state: Cow<'a, str>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<Cow<'a, str>>,
@@ -2126,6 +2138,7 @@ mod tests {
         assert!(!AgentStateOrigin::ManualReset.claims_activity());
         // It travels on the wire, unlike the self-reported default.
         let frame = DaemonStreamMessage::AgentState {
+            foreground_command: None,
             session_id: "s".into(),
             state: "idle".into(),
             agent: Some("kimi".into()),
@@ -2768,6 +2781,7 @@ mod tests {
     fn agent_state_stream_serializes_authoritative_provider_session() {
         // Given: a provider-authored session reference on an agent state frame.
         let message = DaemonStreamMessage::AgentState {
+            foreground_command: None,
             session_id: Cow::Borrowed("pty-1"),
             state: Cow::Borrowed("working"),
             agent: Some(Cow::Borrowed("omo")),
@@ -2807,6 +2821,7 @@ mod tests {
         ));
 
         let live = DaemonStreamMessage::AgentState {
+            foreground_command: None,
             session_id: Cow::Borrowed("pty-1"),
             state: Cow::Borrowed("blocked"),
             agent: None,
@@ -2849,6 +2864,7 @@ mod tests {
         // A self-reported frame stays byte-identical so old peers keep parsing it.
         assert_eq!(
             encode_daemon_stream_frame(&DaemonStreamMessage::AgentState {
+                foreground_command: None,
                 session_id: Cow::Borrowed("pty-1"),
                 state: Cow::Borrowed("idle"),
                 agent: None,
@@ -2867,6 +2883,7 @@ mod tests {
         // A process-evidence release must be distinguishable from an agent's own idle report,
         // otherwise a consumer cannot tell "agent left" from "agent is between turns".
         let release = encode_daemon_stream_frame(&DaemonStreamMessage::AgentState {
+            foreground_command: None,
             session_id: Cow::Borrowed("pty-1"),
             state: Cow::Borrowed("idle"),
             agent: None,
@@ -2892,8 +2909,27 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn foreground_command_is_additive_stream_metadata() {
+        let mut frame = protocol_frame("working");
+        if let DaemonStreamMessage::AgentState { foreground_command, .. } = &mut frame {
+            *foreground_command = Some(Cow::Borrowed("sleep"));
+        }
+        let value = serde_json::to_value(&frame).unwrap();
+        assert_eq!(value["foregroundCommand"], "sleep");
+        let encoded = serde_json::to_string(&frame).unwrap();
+        let decoded: DaemonStreamMessage<'_> = serde_json::from_str(&encoded).unwrap();
+        assert!(matches!(decoded, DaemonStreamMessage::AgentState { foreground_command: Some(name), .. } if name == "sleep"));
+        let mut legacy = value;
+        legacy.as_object_mut().unwrap().remove("foregroundCommand");
+        let encoded = legacy.to_string();
+        let decoded: DaemonStreamMessage<'_> = serde_json::from_str(&encoded).unwrap();
+        assert!(matches!(decoded, DaemonStreamMessage::AgentState { foreground_command: None, .. }));
+    }
+
     fn protocol_frame(state: &'static str) -> DaemonStreamMessage<'static> {
         DaemonStreamMessage::AgentState {
+            foreground_command: None,
             session_id: Cow::Borrowed("pty-1"),
             state: Cow::Borrowed(state),
             agent: Some(Cow::Borrowed("claude")),
@@ -2925,6 +2961,7 @@ mod tests {
         }
         // Without the new fields the frame is byte-identical to the pre-change encoding.
         let plain = DaemonStreamMessage::AgentState {
+            foreground_command: None,
             session_id: Cow::Borrowed("pty-1"),
             state: Cow::Borrowed("idle"),
             agent: None,
@@ -3420,6 +3457,8 @@ mod tests {
         let desc_resp = DaemonResponse::DescribeSessionOk {
             daemon_epoch: None,
             session: DaemonSessionDetails {
+                foreground_command: None,
+                agent: None,
                 session_id: "session-99".to_string(),
                 size_owner: None,
                 workspace_id: Some("default".to_string()),

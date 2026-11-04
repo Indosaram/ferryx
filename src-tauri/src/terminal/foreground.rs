@@ -551,6 +551,38 @@ pub(crate) fn observe_with_snapshot(
     platform::observe_with_snapshot(session, snapshot)
 }
 
+/// A display name only: never return arguments, even when they contain credentials.
+#[cfg(any(windows, test))]
+fn command_basename(command: &str) -> Option<String> {
+    let token = command_tokens(command).first().copied()?;
+    basename(token.trim_matches('"'))
+}
+
+fn basename(argv0: &str) -> Option<String> {
+    let name = argv0.rsplit(['/', '\\']).next()?;
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn argv_command(argv: &[String]) -> Option<String> {
+    let program = argv.first()?;
+    // execve of a shebang script substitutes the interpreter in argv0. Preserve
+    // the entry point's name, never inline code or the script's arguments.
+    if is_interpreter(executable_name(program)) {
+        if let Some(script) = argv.get(1).filter(|arg| !arg.starts_with('-')) {
+            return basename(script);
+        }
+    }
+    basename(program)
+}
+
+impl ProcessSnapshot {
+    /// Derived metadata, rebuilt after handover/restart from the surviving PTY.
+    pub(crate) fn foreground_command(&self, session: &PtySession) -> Option<String> {
+        platform::foreground_command(session, self)
+    }
+}
+
 #[cfg(unix)]
 mod platform {
     use super::*;
@@ -562,6 +594,39 @@ mod platform {
         tty: Option<String>,
         command: String,
     }
+
+    pub(super) fn foreground_command(session: &PtySession, snapshot: &ProcessSnapshot) -> Option<String> {
+        let group = session.foreground_process_group().ok()??;
+        let process = snapshot.processes.iter()
+            .filter(|p| p.pgid == Some(group))
+            .min_by_key(|p| (p.pid != Some(group), p.pid))?;
+        let name = process.pid.and_then(process_command);
+        (session.foreground_process_group().ok()? == Some(group)).then_some(name).flatten()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn process_command(pid: u32) -> Option<String> {
+        let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let argv = crate::terminal::manual_ssh::parse_cmdline(&bytes)?;
+        argv_command(&argv)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn process_command(pid: u32) -> Option<String> {
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
+        let mut len: libc::size_t = 0;
+        let result = unsafe { libc::sysctl(mib.as_mut_ptr(), 3, std::ptr::null_mut(), &mut len, std::ptr::null_mut(), 0) };
+        if result != 0 || len == 0 { return None; }
+        let mut bytes = vec![0u8; len];
+        let result = unsafe { libc::sysctl(mib.as_mut_ptr(), 3, bytes.as_mut_ptr().cast(), &mut len, std::ptr::null_mut(), 0) };
+        if result != 0 { return None; }
+        bytes.truncate(len);
+        let (_, argv) = crate::terminal::manual_ssh::parse_procargs2(&bytes)?;
+        argv_command(&argv)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn process_command(_: u32) -> Option<String> { None }
 
     /// One `ps` listing for the whole tick. ps is available on both macOS and Linux. Do not
     /// assume /proc exists. Both name the controlling terminal by its path below `/dev`.
@@ -784,6 +849,25 @@ mod platform {
         /// Creation time as a UTC FILETIME, `None` when Windows did not report one.
         #[serde(rename = "Created")]
         created: Option<i64>,
+    }
+
+    pub(super) fn foreground_command(session: &PtySession, snapshot: &ProcessSnapshot) -> Option<String> {
+        let mut pid = session.pid()?;
+        // ConPTY has no foreground group. Siblings are ambiguous: report unknown.
+        let mut visited = Vec::new();
+        loop {
+            if visited.contains(&pid) { return None; }
+            visited.push(pid);
+            let mut children = snapshot.processes.iter().filter(|p| p.parent == pid);
+            match (children.next(), children.next()) {
+                (Some(child), None) => pid = child.pid,
+                (None, _) => break,
+                _ => return None,
+            }
+        }
+        let process = snapshot.processes.iter().find(|p| p.pid == pid)?;
+        process.command.as_deref().and_then(command_basename)
+            .or_else(|| command_basename(&process.name))
     }
 
     /// The `Win32_Process` columns [`Process`] reads. `CreationDate` goes out as a FILETIME so
@@ -1361,6 +1445,9 @@ mod platform {
 #[cfg(not(any(unix, windows)))]
 mod platform {
     use super::*;
+    pub(super) fn foreground_command(_: &PtySession, _: &ProcessSnapshot) -> Option<String> {
+        None
+    }
     pub(super) fn observe_with_snapshot(
         _: &PtySession,
         _: &ProcessSnapshot,
@@ -1372,6 +1459,64 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foreground_name_never_contains_arguments() {
+        assert_eq!(command_basename("/tmp/qa/long-runner --password=x").as_deref(), Some("long-runner"));
+        assert_eq!(command_basename(r#""C:\Program Files\timeout.exe" /t 30"#).as_deref(), Some("timeout.exe"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn script_name_does_not_leak_password_argument() {
+        let (dir, script) = crate::ipc::run_blocking(|| {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir()?;
+            let script = dir.path().join("long-runner");
+            std::fs::write(&script, "#!/bin/sh\nprintf 'NAME_READY>'\nread answer\n")?;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+            Ok((dir, script))
+        }).await.unwrap();
+        let manager = crate::terminal::PtyManager::new();
+        let mut command = portable_pty::CommandBuilder::new(script);
+        command.arg("--password=x");
+        let (id, mut output) = manager.spawn(command, 80, 24).unwrap();
+        output_until(&mut output, "NAME_READY>").await;
+        let session = manager.get_session(&id).unwrap();
+        let name = crate::ipc::run_blocking(move || {
+            Ok(capture_process_snapshot()?.foreground_command(&session))
+        }).await.unwrap();
+        manager.close_session(&id).await.unwrap();
+        assert_eq!(name.as_deref(), Some("long-runner"));
+        assert!(!serde_json::json!({"foregroundCommand": name}).to_string().contains("password"));
+        drop((output, dir));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn foreground_command_of_real_pty() {
+        use portable_pty::CommandBuilder;
+        let manager = crate::terminal::PtyManager::new();
+        #[cfg(unix)]
+        let mut command = CommandBuilder::new("sleep");
+        #[cfg(unix)]
+        command.arg("30");
+        #[cfg(windows)]
+        let mut command = CommandBuilder::new("timeout.exe");
+        #[cfg(windows)]
+        command.args(["/t", "30", "/nobreak"]);
+        let (id, output) = manager.spawn(command, 80, 24).unwrap();
+        let session = manager.get_session(&id).unwrap();
+        let name = crate::ipc::run_blocking(move || {
+            Ok(capture_process_snapshot()?.foreground_command(&session))
+        }).await.unwrap();
+        manager.close_session(&id).await.unwrap();
+        drop(output);
+        #[cfg(unix)]
+        assert_eq!(name.as_deref(), Some("sleep"));
+        #[cfg(windows)]
+        assert_eq!(name.as_deref(), Some("timeout.exe"));
+    }
 
     /// Waits for a marker the pane itself emits, so no assertion rests on a delay.
     #[cfg(unix)]

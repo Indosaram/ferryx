@@ -10847,6 +10847,7 @@ mod tests {
             .expect("attach");
 
         tx.send(DaemonStreamMessage::AgentState {
+            foreground_command: None,
             session_id: session_id.into(),
             state: "blocked".into(),
             agent: Some("omo".into()),
@@ -10941,6 +10942,7 @@ mod tests {
 
         for reported_state in ["working", "idle"] {
             tx.send(DaemonStreamMessage::AgentState {
+                foreground_command: None,
                 session_id: session_id.into(),
                 state: reported_state.into(),
                 agent: Some("omo".into()),
@@ -11045,6 +11047,7 @@ mod tests {
             ),
         ] {
             tx.send(DaemonStreamMessage::AgentState {
+                foreground_command: None,
                 session_id: session_id.into(),
                 state: reported_state.into(),
                 agent: Some("omo".into()),
@@ -11102,6 +11105,7 @@ mod tests {
         // A new agent is started in the same pane. The daemon sees its process first and says so;
         // that sighting carries no activity, so it must not emit a state of its own.
         tx.send(DaemonStreamMessage::AgentState {
+            foreground_command: None,
             session_id: session_id.into(),
             state: "idle".into(),
             agent: Some("omo".into()),
@@ -11181,6 +11185,7 @@ mod tests {
             .expect("attach");
 
         let report = |conversation: &'static str| DaemonStreamMessage::AgentState {
+            foreground_command: None,
             session_id: session_id.into(),
             state: "working".into(),
             agent: Some("omo".into()),

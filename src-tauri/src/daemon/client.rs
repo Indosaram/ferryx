@@ -725,6 +725,8 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::Attach { .. } => "attach",
         DaemonRequest::SaveSession { .. } => "saveSession",
         DaemonRequest::LoadSession => "loadSession",
+        DaemonRequest::OnboardingGet => "onboardingGet",
+        DaemonRequest::OnboardingSet { .. } => "onboardingSet",
         DaemonRequest::LayoutGet { .. } => "layoutGet",
         DaemonRequest::LayoutGetScoped { .. } => "layoutGetScoped",
         DaemonRequest::LayoutApply { .. } => "layoutApply",
@@ -3010,6 +3012,9 @@ impl DaemonClient {
     }
 
     async fn connect_or_spawn(&self) -> Result<DaemonStream, IpcError> {
+        if super::onboarding::qa_no_daemon() {
+            return Err(IpcError::internal("Daemon disabled for onboarding QA"));
+        }
         // Fast path: if daemon is already running, connect immediately without sleep or spawn lock.
         if let Ok(stream) = self.try_connect_existing_socket().await {
             return Ok(stream);

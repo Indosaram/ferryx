@@ -3,6 +3,7 @@
 //!
 //! - `status [--json]` lists every agent Ferryx detects panes of (the shipped detection manifests):
 //!   whether its config directory exists, its hook entries, its skill and its state extension.
+//!   `--sessions` also queries the daemon for session ids, agents and foreground command names.
 //! - `skill install|uninstall <agent|--all>` and `skill status <agent>` manage the Ferryx skill.
 //! - `hooks install|uninstall <agent|--all>` manage the hook entries.
 //!
@@ -31,7 +32,7 @@ use crate::daemon::agent_hook_install::{
     skill_targets_with_env, HookFileTarget, SkillState, SkillTarget,
 };
 
-pub const INTEGRATIONS_USAGE: &str = "usage: ferryx-cli integrations status [--json] | \
+pub const INTEGRATIONS_USAGE: &str = "usage: ferryx-cli integrations status [--sessions] [--json] | \
      integrations skill install|uninstall <agent|--all> | integrations skill status <agent> | \
      integrations hooks install|uninstall <agent|--all>";
 
@@ -139,6 +140,8 @@ pub fn run_with(ctx: &Context, words: &[&str]) -> (i32, Option<String>, Option<S
     match words {
         ["status"] => (0, Some(status_text(&status_json(ctx))), None),
         ["status", "--json"] => (0, Some(status_json(ctx).to_string()), None),
+        ["status", "--sessions"] => session_status(ctx, false),
+        ["status", "--sessions", "--json"] | ["status", "--json", "--sessions"] => session_status(ctx, true),
         ["skill", "status", name] => match ctx.resolve(name) {
             Some(agent) => (0, Some(json!({ "agent": agent, "skill": skill_json(ctx, agent) }).to_string()), None),
             None => unknown_agent(name),
@@ -151,6 +154,48 @@ pub fn run_with(ctx: &Context, words: &[&str]) -> (i32, Option<String>, Option<S
         }
         _ => usage(),
     }
+}
+
+fn session_status(ctx: &Context, json_output: bool) -> (i32, Option<String>, Option<String>) {
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(err) => return (EXIT_FAILURE, None, Some(error("INTERNAL", err.to_string()))),
+    };
+    let result = runtime.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), collect_sessions()).await
+    });
+    let sessions = match result {
+        Ok(Ok(sessions)) => sessions,
+        Ok(Err(message)) => return (EXIT_FAILURE, None, Some(error("DAEMON_UNAVAILABLE", message))),
+        Err(err) => return (EXIT_FAILURE, None, Some(error("TIMEOUT", err.to_string()))),
+    };
+    let mut status = status_json(ctx);
+    status["sessions"] = Value::Array(sessions);
+    (0, Some(if json_output { status.to_string() } else { status_text(&status) }), None)
+}
+
+async fn collect_sessions() -> Result<Vec<Value>, String> {
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse};
+    async fn request(request: DaemonRequest) -> Result<DaemonResponse, String> {
+        super::supervisor_goal::exchange_once("foregroundCommandV1", request, false)
+            .await.map_err(|(value, _)| value.to_string())
+    }
+    let mut ids = match request(DaemonRequest::ListSessions).await? {
+        DaemonResponse::ListSessionsOk { sessions, .. } => sessions,
+        response => return Err(format!("Unexpected session inventory: {response:?}")),
+    };
+    ids.sort();
+    let mut sessions = Vec::new();
+    for id in ids {
+        match request(DaemonRequest::DescribeSession { session_id: id }).await? {
+            DaemonResponse::DescribeSessionOk { session, .. } => sessions.push(json!({
+                "sessionId": session.session_id, "agent": session.agent,
+                "foregroundCommand": session.foreground_command,
+            })),
+            response => return Err(format!("Unable to describe session: {response:?}")),
+        }
+    }
+    Ok(sessions)
 }
 
 fn unknown_agent(name: &str) -> (i32, Option<String>, Option<String>) {
@@ -370,6 +415,12 @@ fn status_text(status: &Value) -> String {
         }
         lines.push(line);
     }
+    for session in status["sessions"].as_array().into_iter().flatten() {
+        lines.push(format!("{}\t{}\t{}",
+            session["sessionId"].as_str().unwrap_or_default(),
+            session["agent"].as_str().unwrap_or("-"),
+            session["foregroundCommand"].as_str().unwrap_or("-")));
+    }
     lines.join("\n")
 }
 
@@ -377,6 +428,16 @@ fn status_text(status: &Value) -> String {
 mod tests {
     use super::*;
     use crate::daemon::agent_hook_install::{is_ferryx_skill, SKILL_SOURCE};
+
+    #[test]
+    fn session_status_text_contains_only_reported_session_fields() {
+        let value = json!({"agents": [], "integrationEnabled": true, "sessions": [
+            {"sessionId": "pane-1", "agent": "omo", "foregroundCommand": "sleep"},
+            {"sessionId": "pane-2", "agent": null, "foregroundCommand": null}
+        ]});
+        let rows: Vec<_> = status_text(&value).lines().skip(1).map(str::to_string).collect();
+        assert_eq!(rows, ["pane-1\tomo\tsleep", "pane-2\t-\t-"]);
+    }
 
     struct Home {
         dir: tempfile::TempDir,

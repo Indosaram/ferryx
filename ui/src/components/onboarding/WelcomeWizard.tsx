@@ -20,6 +20,9 @@ import { IntroStep } from "./IntroStep";
 import { PhoneStep } from "./PhoneStep";
 import { SupervisorStep } from "./SupervisorStep";
 import { TryWorktreeStep } from "./TryWorktreeStep";
+import { SkillsStep } from "./SkillsStep";
+import { EnrollmentStep } from "../settings/remote/EnrollmentStep";
+import { getConfiguredAccountOrigin, getStoredAccountSessionToken, issueEnrollmentCode } from "../../remote/accountSession";
 
 export type WelcomeWizardProps = {
   steps: readonly OnboardingStepId[];
@@ -82,6 +85,9 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
     doneSteps.includes("account"),
   );
   const [phonePaired, setPhonePaired] = useState(false);
+  const [skillsInstalled, setSkillsInstalled] = useState(doneSteps.includes("skills"));
+  const accountOrigin = getConfiguredAccountOrigin();
+  const accountToken = getStoredAccountSessionToken(accountOrigin);
   const [supervisorReady, setSupervisorReady] = useState(false);
   // True while the try step creates its worktree; the footer waits for it.
   const [tryBusy, setTryBusy] = useState(false);
@@ -97,6 +103,8 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
   // Optional steps record themselves when their action succeeds (a paired phone, a created
   // worktree); leaving one before that is a skip and is not recorded as completed.
   const skippingOptional =
+    currentStep === "enroll" ||
+    (currentStep === "skills" && !skillsInstalled) ||
     (currentStep === "phone" && !phonePaired) ||
     (currentStep === "supervisor" && !supervisorReady) ||
     currentStep === "try";
@@ -162,6 +170,19 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
 
   const renderStepContent = () => {
     switch (currentStep) {
+      case "enroll":
+        return <EnrollmentStep accountOrigin={accountOrigin}
+          onIssueEnrollmentCode={accountToken ? async () => {
+            const { code } = await issueEnrollmentCode(accountOrigin, accountToken);
+            onStepCompleted("enroll");
+            return code;
+          } : undefined}
+          onBack={handleBack} onDone={handleNext} />;
+      case "skills":
+        return <SkillsStep agents={agents} onInstalled={() => {
+          setSkillsInstalled(true);
+          onStepCompleted("skills");
+        }} />;
       case "account":
         return (
           <AccountStep

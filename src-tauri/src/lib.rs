@@ -1657,7 +1657,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             // the daemon's lifetime to the supervisor before a terminal can ask for one. An alive
             // or unidentifiable owner is never reloaded or replaced (owner admission). A failure
             // is not fatal: the client falls back to spawning a detached daemon.
-            tauri::async_runtime::spawn_blocking(|| match crate::daemon::supervisor::ensure_if_absent() {
+            tauri::async_runtime::spawn_blocking(|| match if crate::daemon::onboarding::qa_no_daemon() { Ok(false) } else { crate::daemon::supervisor::ensure_if_absent() } {
                 Ok(started) => tracing::info!(
                     started,
                     supported = crate::daemon::supervisor::supported(),
@@ -2018,6 +2018,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::pane_grants::cmd_pane_grants_list,
         ipc::pane_grants::cmd_pane_grants_add,
         ipc::pane_grants::cmd_pane_grants_remove,
+        ipc::onboarding::cmd_onboarding_get,
+        ipc::onboarding::cmd_onboarding_set,
         ipc::layout::cmd_layout_get,
         ipc::layout::cmd_panes,
         ipc::layout::cmd_layout_apply,

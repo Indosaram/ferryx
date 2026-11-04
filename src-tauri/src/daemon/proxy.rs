@@ -426,6 +426,7 @@ impl LegacyPeer {
 
         if let Some(snapshot) = agent_states.snapshot.as_ref() {
             let message = DaemonStreamMessage::AgentState {
+                foreground_command: agent_states.foreground_command(session_id).map(Into::into),
                 session_id: snapshot.session_id.as_str().into(),
                 state: snapshot.state.as_str().into(),
                 agent: snapshot.agent.as_deref().map(Into::into),
@@ -470,6 +471,7 @@ impl LegacyPeer {
                 report = agent_states.receiver.recv() => match report {
                     Ok(report) if report.state.session_id == session_id => {
                         let message = DaemonStreamMessage::AgentState {
+                            foreground_command: report.foreground_command.map(Into::into),
                             session_id: report.state.session_id.as_str().into(),
                             state: report.state.state.as_str().into(),
                             agent: report.state.agent.as_deref().map(Into::into),
@@ -490,6 +492,7 @@ impl LegacyPeer {
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         if let Some(current) = agent_states.resynchronize(session_id) {
                             let message = DaemonStreamMessage::AgentState {
+                                foreground_command: agent_states.foreground_command(session_id).map(Into::into),
                                 session_id: current.session_id.as_str().into(), state: current.state.as_str().into(),
                                 agent: current.agent.as_deref().map(Into::into), provider_session: current.provider_session,
                                 detail: current.detail.as_deref().map(Into::into),
@@ -511,7 +514,8 @@ impl LegacyPeer {
                     let Some(mut line) = read.map_err(|error| error.to_string())? else { break; };
                     line.push('\n');
                     match serde_json::from_str::<DaemonStreamMessage<'_>>(line.trim()) {
-                        Ok(DaemonStreamMessage::AgentState { session_id, state, agent, provider_session, detail, is_snapshot, origin, state_source, outcome, kind }) => {
+                        Ok(DaemonStreamMessage::AgentState { session_id, state, agent, provider_session, detail, is_snapshot, origin, state_source, outcome, kind, foreground_command }) => {
+                            let command_session_id = session_id.to_string();
                             agent_state_hub.publish_legacy(AgentState {
                                 session_id: session_id.into_owned(), state: state.into_owned(),
                                 agent: agent.map(|value| value.into_owned()), provider_session,
@@ -520,6 +524,7 @@ impl LegacyPeer {
                                 outcome,
                                 kind,
                             }, is_snapshot);
+                            agent_state_hub.publish_foreground_command(&command_session_id, foreground_command.map(|name| name.into_owned()));
                         }
                         Ok(DaemonStreamMessage::Exit { .. }) => {
                             agent_state_hub.remove(session_id);

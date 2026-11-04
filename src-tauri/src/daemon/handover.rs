@@ -1312,6 +1312,7 @@ pub struct HandoverManager {
     size_ownership: RwLock<Option<super::size_ownership::SizeOwnershipRegistry>>,
     layouts: RwLock<Option<super::layout::Registry>>,
     plugin_approvals: RwLock<Option<Arc<Mutex<super::plugins::Approvals>>>>,
+    onboarding: RwLock<Option<super::onboarding::Registry>>,
 }
 
 impl HandoverManager {
@@ -1367,6 +1368,23 @@ impl HandoverManager {
 
     pub fn set_size_ownership(&self, registry: super::size_ownership::SizeOwnershipRegistry) {
         *self.size_ownership.write() = Some(registry);
+    }
+
+    pub fn set_onboarding(&self, registry: super::onboarding::Registry) {
+        *self.onboarding.write() = Some(registry);
+    }
+
+    pub fn adopt_recorded_onboarding(&self, legacy: &std::path::Path) -> Result<(), String> {
+        use super::handover_transaction::{HandoverState, HandoverTransaction};
+        let bytes = fs::read(legacy.with_extension("transaction")).map_err(|error| error.to_string())?;
+        let transaction: HandoverTransaction = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        if transaction.transfer_id != legacy.to_string_lossy() || transaction.state != HandoverState::Retired {
+            return Err("Onboarding adoption requires a committed predecessor".into());
+        }
+        if let (Some(state), Some(registry)) = (transaction.onboarding, self.onboarding.read().clone()) {
+            registry.lock().set(state, false)?;
+        }
+        Ok(())
     }
 
     pub fn set_layouts(&self, registry: super::layout::Registry) {
@@ -1465,6 +1483,9 @@ impl HandoverManager {
         transaction.supervisor_lease = lease.as_ref().and_then(|lease| lease.freeze_for_handover());
         transaction.size_ownership = if committed {
             self.size_ownership.read().as_ref().map(|registry| registry.lock().clone())
+        } else { None };
+        transaction.onboarding = if committed {
+            self.onboarding.read().as_ref().map(|registry| registry.lock().get()).transpose()?.flatten()
         } else { None };
         transaction.layouts = if committed {
             self.layouts.read().as_ref().map(|registry| serde_json::to_vec(&registry.lock().layouts))
@@ -1587,6 +1608,7 @@ impl HandoverManager {
             size_ownership: RwLock::new(None),
             layouts: RwLock::new(None),
             plugin_approvals: RwLock::new(None),
+            onboarding: RwLock::new(None),
         }
     }
 

@@ -23,6 +23,18 @@
       "finishWithoutAccount": "Finish without signing in"
     },
     "step": {
+      "enroll": {
+        "title": "Enroll",
+        "heading": "Add another machine",
+        "lede": "Issue a single-use enrollment code for another computer."
+      },
+      "skills": {
+        "title": "Skills",
+        "heading": "Give your agents Ferryx skills",
+        "lede": "Install managed skills for detected agents without replacing your edits.",
+        "none": "No supported agents detected.",
+        "install": "Install skills"
+      },
       "account": {
         "title": "Sign in",
         "heading": "Sign in to Ferryx",

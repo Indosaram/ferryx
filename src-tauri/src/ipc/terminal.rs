@@ -4853,6 +4853,8 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             session_id: proxy_session_id.clone(),
             epoch: host.generation.0,
             session: crate::daemon::protocol::DaemonSessionDetails {
+                foreground_command: None,
+                agent: None,
                 size_owner: None,
                 session_id: proxy_session_id,
                 workspace_id: Some(request.workspace_id.clone()),

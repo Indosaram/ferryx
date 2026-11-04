@@ -61,6 +61,7 @@ async fn reset_scenario(succeeds: bool) {
     )
     .expect("native attachment");
     let report = |state: &'static str, is_snapshot| DaemonStreamMessage::AgentState {
+        foreground_command: None,
         session_id: "reset-session".into(),
         state: state.into(),
         agent: Some("omo".into()),

@@ -10,6 +10,8 @@ pub mod pane_grants;
 #[cfg(feature = "desktop")]
 pub mod layout;
 #[cfg(feature = "desktop")]
+pub mod onboarding;
+#[cfg(feature = "desktop")]
 pub mod agent_integration;
 pub mod agents;
 #[cfg(feature = "desktop")]

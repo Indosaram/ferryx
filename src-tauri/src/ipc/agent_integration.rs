@@ -56,8 +56,23 @@ pub async fn cmd_agent_integration_get(
 pub async fn cmd_agent_integration_set(
     daemon_client: tauri::State<'_, Arc<DaemonClient>>,
     enabled: bool,
+    agents: Option<Vec<String>>,
 ) -> Result<AgentIntegrationStatus, IpcError> {
-    request(&daemon_client, DaemonRequest::SetAgentIntegration { enabled }).await
+    let status = request(&daemon_client, DaemonRequest::SetAgentIntegration { enabled }).await?;
+    if enabled {
+        if let Some(agents) = agents {
+            super::run_blocking(move || {
+                for target in crate::daemon::agent_hook_install::skill_targets() {
+                    let name = if target.agent == "cursor" { "cursor-agent" } else { target.agent };
+                    if agents.iter().any(|agent| agent == name) {
+                        target.install().map_err(|error| IpcError::internal(format!("{} skill: {error}", target.agent)))?;
+                    }
+                }
+                Ok(())
+            }).await?;
+        }
+    }
+    Ok(status)
 }
 
 #[tauri::command]
