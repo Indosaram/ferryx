@@ -2678,6 +2678,11 @@ function WorkspaceApp({
     if (!target) {
       const backendSessionId = localBackendSessionId(sessionRef);
       if (backendSessionId) {
+        // A tab needs a worktree of an open project; without one the adoption would wait forever.
+        if (stateRef.current.worktrees.length === 0) {
+          toast.info("Open a project to show this session");
+          return;
+        }
         setPendingAdoptions((queue) => [
           ...queue,
           { backendSessionIds: [backendSessionId], activate: true, attemptGenerations: {}, attempts: 0 },

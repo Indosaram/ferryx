@@ -925,6 +925,18 @@ describe("App notification coordinator wiring", () => {
       info.mockRestore();
     });
 
+    it("says a project must be open instead of waiting when no worktree can hold the tab", async () => {
+      seedTwoProjects();
+      setWorkspaceSnapshot("default", { ...parkedProjectSnapshot(null), workspaceId: "default", worktrees: [], activeWorktreePath: null });
+      native.listTerminalSessions.mockResolvedValue([{ sessionId: "backend-new", worktreePath: null, running: true }]);
+      const info = vi.spyOn(toast, "info");
+      await act(async () => { render(<App />); });
+      await act(async () => { sidebarProps.onFocusSupervisorSession!("local:backend-new"); });
+      expect(info).toHaveBeenCalledWith("Open a project to show this session");
+      expect(adoptBackendSession).not.toHaveBeenCalled();
+      info.mockRestore();
+    });
+
     it("focuses a cross-project row after the target workspace mounts", async () => {
       seedTwoProjects();
       setWorkspaceSnapshot("other", parkedProjectSnapshot("sess-remote"));
