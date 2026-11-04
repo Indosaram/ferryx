@@ -1747,6 +1747,32 @@ export const ACCOUNT_SUBSCRIPTION_ACTIVE = "SUBSCRIPTION_ACTIVE";
  * Failures throw AccountSessionError with the server's code: CONFIRMATION_MISMATCH (400),
  * SUBSCRIPTION_ACTIVE (409), UNAUTHORIZED (401), else DELETE_ACCOUNT_FAILED.
  */
+export type AccountOnboardingProgress = {
+  completedSteps: string[];
+  dismissed: boolean;
+  updatedAt: number;
+};
+
+export async function syncAccountOnboarding(
+  origin: string, sessionToken: string, progress?: AccountOnboardingProgress,
+): Promise<AccountOnboardingProgress> {
+  const res = await fetchWithTimeout(`${cleanOrigin(origin)}/api/v1/account/onboarding`, {
+    method: progress ? "PUT" : "GET",
+    headers: bearerJson(sessionToken),
+    ...(progress ? { body: JSON.stringify(progress) } : {}),
+  });
+  if (!res.ok) await throwAccountResponseError(res, "ONBOARDING_SYNC_FAILED", "Failed to sync onboarding");
+  const data = await readJsonObject(res, "Onboarding progress");
+  if (!Array.isArray(data.completedSteps) ||
+      !data.completedSteps.every((step: unknown) => typeof step === "string" &&
+        ["account", "intro", "features", "supervisor", "phone", "try"].includes(step)) ||
+      typeof data.dismissed !== "boolean" || typeof data.updatedAt !== "number" ||
+      !Number.isSafeInteger(data.updatedAt) || data.updatedAt < 0) {
+    throw new AccountSessionError("INVALID_RESPONSE", "Invalid onboarding progress", res.status);
+  }
+  return { completedSteps: data.completedSteps as string[], dismissed: data.dismissed, updatedAt: data.updatedAt };
+}
+
 export async function deleteAccount(origin: string, sessionToken: string, confirmEmail: string): Promise<void> {
   const res = await fetchWithTimeout(`${cleanOrigin(origin)}/api/account/v1/account/delete`, {
     method: "POST",
