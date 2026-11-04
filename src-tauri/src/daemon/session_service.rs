@@ -741,7 +741,7 @@ impl DaemonSessionService {
     fn publish_size_owner(&self, id: &str, state: &super::size_ownership::SizeOwnership) {
         let _ = self.remote_event_tx.send(DaemonRemoteEvent {
             event: "SizeOwnerChanged".into(),
-            payload: serde_json::json!({"sessionId": id, "owner": state.owner, "cols": state.applied.0, "rows": state.applied.1}),
+            payload: serde_json::json!({"sessionId": id, "owner": state.owner, "cols": state.applied.0, "rows": state.applied.1, "desktopCols": state.desktop.0, "desktopRows": state.desktop.1}),
         });
     }
 
