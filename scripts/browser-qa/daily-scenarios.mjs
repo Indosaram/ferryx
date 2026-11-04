@@ -186,28 +186,34 @@ async function shortcut(ctx, spec) {
 }
 
 /**
- * The browser toolbar's icon buttons right of the "NNN%" zoom label, left to right, as pixel
- * column runs on the label's line: [Zoom in, History, Focus, Sync, DevTools, Select, Print, PDF, ...].
+ * The address bar's own URL text: the topmost URL-looking word (the toolbar sits above the
+ * page, the omnibox rows and the library list), or null.
  */
-function toolbarIcons(ctx) {
-  const path = ctx.probeShot();
-  const words = ctx.ocr(path) ?? [];
-  const label = words.filter((word) => /^\d{2,3}%$/.test(word.text)).sort((a, b) => a.top - b.top)[0];
-  if (!label) return { icons: [], label: null };
-  const image = ctx.decodePng(path);
-  const y = label.top + Math.round(label.height / 2);
+const URL_WORD = /^(about:blank|https?:\/\/\S+|\S*127\.0\.0\.1\S*)$/i;
+function addressWord(words) {
+  return words.filter((word) => URL_WORD.test(word.text)).sort((a, b) => a.top - b.top || a.left - b.left)[0] ?? null;
+}
+
+/**
+ * Column runs on line `y` between x0 and x1 that differ from the line's background (the most
+ * common colour near x0), probing 6px above and below so 14px glyphs are not missed.
+ */
+function rowRuns(image, y, x0, x1) {
+  const clampY = (value) => Math.min(image.height - 1, Math.max(0, value));
+  const from = Math.max(0, x0), to = Math.min(image.width, x1);
   const counts = new Map();
-  for (let x = 0; x < image.width; x += 3) {
-    const key = image.rgb(x, y + 14).map((value) => value >> 3).join(",");
+  for (let x = from; x < Math.min(to, from + 700); x += 2) {
+    const key = image.rgb(x, clampY(y)).map((value) => value >> 3).join(",");
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
+  if (!counts.size) return [];
   const background = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0].split(",").map((value) => (Number(value) << 3) + 4);
   const differs = (x, yy) => image.rgb(x, yy).reduce((sum, value, index) => sum + Math.abs(value - background[index]), 0) > 60;
   const runs = [];
   let start = -1, last = -99;
-  for (let x = label.left + label.width + 4; x < image.width; x += 1) {
+  for (let x = from; x < to; x += 1) {
     let hit = false;
-    for (let dy = -6; dy <= 6 && !hit; dy += 2) hit = differs(x, Math.min(image.height - 1, Math.max(0, y + dy)));
+    for (let dy = -6; dy <= 6 && !hit; dy += 2) hit = differs(x, clampY(y + dy));
     if (!hit) continue;
     if (start < 0 || x - last > 5) {
       if (start >= 0) runs.push([start, last]);
@@ -216,9 +222,112 @@ function toolbarIcons(ctx) {
     last = x;
   }
   if (start >= 0) runs.push([start, last]);
+  return runs;
+}
+
+/**
+ * The browser toolbar's icon buttons right of the "NNN%" zoom readout, left to right:
+ * [Zoom in, History, Focus, Sync, DevTools, Select, Print, PDF, Extensions, External].
+ * OCR misses the small "100%" readout on every OS (run 41767162699: 0 icons, so "History menu
+ * did not open" and the PDF button was never clicked), so the row is anchored on the address
+ * bar's URL text, and the readout is the last run on that row clearly wider than an icon.
+ * Measured on linux probe-115 and macOS step 13: icons 10-13px wide, readout 22-23px, star 10px.
+ */
+function toolbarIcons(ctx) {
+  const path = ctx.probeShot();
+  const words = ctx.ocr(path) ?? [];
+  const url = addressWord(words);
+  const label = words.filter((word) => /^\d{2,3}%$/.test(word.text)).sort((a, b) => a.top - b.top)[0] ?? null;
+  const anchor = url ?? label;
+  if (!anchor) return { icons: [], label: null, via: "neither the address bar nor the zoom readout was read" };
+  const image = ctx.decodePng(path);
+  const y = anchor.top + Math.round(anchor.height / 2);
+  const runs = rowRuns(image, y, anchor.left + anchor.width + 4, image.width);
+  // A trailing run wider than any control is the window edge or the screen outside the window.
+  while (runs.length && runs.at(-1)[1] - runs.at(-1)[0] > 100) runs.pop();
+  const width = ([a, b]) => b - a;
+  let at = -1;
+  let via = "pixel row";
+  if (anchor === label) {
+    // The scan started right of the readout itself: every run is already a toolbar icon.
+    via = "ocr zoom readout (no url)";
+  } else if (label && Math.abs(label.top + label.height / 2 - y) < 12) {
+    at = runs.findIndex(([a, b]) => a <= label.left + label.width && b >= label.left);
+    if (at >= 0) via = "ocr zoom readout";
+  }
+  if (at < 0 && anchor !== label) {
+    const small = runs.map(width).filter((w) => w >= 6 && w <= 30).sort((a, b) => a - b);
+    const median = small[Math.floor(small.length / 2)] ?? 11;
+    at = runs.findLastIndex((run) => width(run) >= median * 1.6 && width(run) <= median * 4);
+  }
+  if (at < 0 && anchor !== label) return { icons: [], label: null, via: "zoom readout run not found", runs: runs.length, y };
   // Icons are 14px glyphs; a separator line is 1px, a wider run is not an icon.
-  const icons = runs.filter(([a, b]) => b - a >= 6 && b - a <= 22).map(([a, b]) => ({ x: Math.round((a + b) / 2), y }));
-  return { icons, label: { x: label.left, y } };
+  const icons = runs.slice(at + 1).filter((run) => width(run) >= 6 && width(run) <= 30).map(([a, b]) => ({ x: Math.round((a + b) / 2), y }));
+  return { icons, label: { x: at >= 0 ? runs[at][0] : label.left, y }, via };
+}
+
+/** The toolbar Back button: the third control left of the address box (Back, Forward, Reload). */
+function toolbarBack(ctx) {
+  const path = ctx.probeShot();
+  const url = addressWord(ctx.ocr(path) ?? []);
+  if (!url) return null;
+  const y = url.top + Math.round(url.height / 2);
+  // The box border sits ~10px left of its text; stop before it.
+  const icons = rowRuns(ctx.decodePng(path), y, Math.max(0, url.left - 160), url.left - 14).filter(([a, b]) => b - a >= 6 && b - a <= 30);
+  if (icons.length < 3) return null;
+  const [a, b] = icons.at(-3);
+  return { x: Math.round((a + b) / 2), y };
+}
+
+/**
+ * Ferryx's site-permission Allow button on the prompt line of the OCR word `wants`: the
+ * rightmost filled light button (Allow is white with dark text; Block and Remember are not
+ * filled). OCR read "Allow" as "atow" or not at all (run 41767162699 linux probes 109-142).
+ */
+function findAllowButton(ctx, wants) {
+  const image = ctx.decodePng(ctx.probeShot());
+  const y = wants.top + Math.round(wants.height / 2);
+  const y0 = Math.max(0, y - 10), y1 = Math.min(image.height - 1, y + 10);
+  const runs = [];
+  let current = null;
+  for (let x = wants.left + wants.width; x < image.width; x += 1) {
+    let bright = 0;
+    for (let yy = y0; yy <= y1; yy += 1) if (Math.min(...image.rgb(x, yy)) > 200) bright += 1;
+    // A filled button column is mostly bright; a text column has a few bright pixels only.
+    if (bright < 12) continue;
+    if (current && x - current[1] <= 2) current[1] = x;
+    else runs.push((current = [x, x]));
+  }
+  const button = runs.filter(([a, b]) => b - a >= 25 && b - a <= 140).at(-1);
+  return button ? [Math.round((button[0] + button[1]) / 2), y] : null;
+}
+
+/**
+ * Makes `browserId` the active browser tab. A tab-title click comes first (real input), but OCR
+ * often misses inactive tab titles (macOS run 41767162699 read "QA Charlie Page" as "ea lie P",
+ * so the click never happened and Mod+[ went to the other tab). The result is checked with
+ * `ferryx browser list` (only the active tab's webview is visible), and `ferryx browser tab
+ * switch` (which focuses the webview and selects its layout tab) is the fallback.
+ */
+async function activateTab(ctx, browserId, titleTest) {
+  const record = { clicked: null, via: "none" };
+  if (!browserId) return { ...record, ok: false };
+  const shown = () => {
+    const list = ctx.sessions().list;
+    return list.find((entry) => entry.browserId === browserId)?.visible === true
+      && list.filter((entry) => entry.browserId !== browserId).every((entry) => entry.visible === false);
+  };
+  if (titleTest) {
+    ctx.host.focus();
+    record.clicked = await clickWord(ctx, titleTest, { timeout: 5000 });
+    if (record.clicked && (await until(shown, 3000, 500))) return { ...record, ok: true, via: "tab title click" };
+  }
+  const result = ctx.cli("tab", "switch", "--browser-id", browserId);
+  record.cli = { ok: result.ok, stderr: result.stderr.slice(0, 300) };
+  const visible = await until(shown, 5000, 500);
+  await sleep(800);
+  if (visible) return { ...record, ok: true, via: "cli tab switch" };
+  return { ...record, ok: result.ok, via: result.ok ? "cli tab switch (visibility not confirmed)" : "none" };
 }
 
 /** Clicks the toolbar icon at `index` (0 = Zoom in); `verify` decides, else the next run is tried. */
@@ -326,13 +435,18 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
         const hit = screenWords(ctx).find((word) => /DRAGME/i.test(word.text));
         return hit ? [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)] : null;
       }, 8000, 700);
-      record.from = from;
-      if (!from) return { ...record, ok: false, stderr: "DRAGME not read on screen" };
+      // OCR missed the label (run 41767162699); the label fills the helper window, so its
+      // centre from xdotool is a press point on the drag source.
+      const geometry = from ? null : ctx.run("xdotool", ["getwindowgeometry", "--shell", window]).stdout;
+      const value = (name) => Number(new RegExp(`^${name}=(\\d+)`, "m").exec(geometry ?? "")?.[1] ?? NaN);
+      record.from = from ?? (Number.isFinite(value("X")) ? [value("X") + Math.round(value("WIDTH") / 2), value("Y") + Math.round(value("HEIGHT") / 2)] : null);
+      record.from_via = from ? "ocr" : record.from ? "window geometry" : null;
+      if (!record.from) return { ...record, ok: false, stderr: "DRAGME not read on screen" };
     } else if (ctx.platform === "win32") {
       ctx.run("explorer.exe", [`/select,${file.path}`]);
       await sleep(4000);
       const from = await until(() => {
-        const hit = screenWords(ctx).find((word) => /upload-fixture/i.test(word.text));
+        const hit = screenWords(ctx).find((word) => /upload-fixture|upload-?fix|fixture[.,]txt/i.test(word.text));
         return hit ? [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)] : null;
       }, 10000, 800);
       record.from = from;
@@ -341,7 +455,9 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
       ctx.run("open", ["-R", file.path]);
       await sleep(3500);
       const from = await until(() => {
-        const hit = screenWords(ctx).find((word) => /upload-fixture/i.test(word.text));
+        // Finder wraps the icon label over two lines ("upload-f" / "ixture.txt"; OCR read
+        // "uploa" and "ixture,txt" in macOS run 41767162699 probe 298): either half is the file.
+        const hit = screenWords(ctx).find((word) => /upload-fixture|^uploa|ixture[.,]txt/i.test(word.text));
         return hit ? [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)] : null;
       }, 10000, 800);
       record.from = from;
@@ -389,7 +505,14 @@ export async function dailyWebviewBefore(ctx) {
   // G1: tab A walks a -> b -> c; tab B is a second tab.
   await run(ctx, "daily-g1-tabs", "Tab A: /qa/a, /qa/b, /qa/c through the address bar; Mod+Shift+B opens tab B on /qa/second", async () => {
     ctx.host.focus();
-    const list = ctx.sessions().list;
+    let list = ctx.sessions().list;
+    if (!list.length) {
+      // No browser tab is open (Windows run 41767162699 showed "No open tabs"): open tab A first
+      // instead of typing URLs into nothing.
+      await shortcut(ctx, { key: "b", mods: ["mod", "shift"] });
+      list = (await until(() => (ctx.sessions().list.length ? ctx.sessions().list : null), 20000)) ?? [];
+      await sleep(3000);
+    }
     daily.tabA = (list.find((entry) => entry.engine === "system") ?? list.at(-1))?.browserId ?? null;
     const seen = [];
     for (const [path, word] of [["/qa/a.html", "ALPHAPAGE"], ["/qa/b.html", "BRAVOPAGE"], ["/qa/c.html", "CHARLIEPAGE"]]) {
@@ -415,13 +538,28 @@ export async function dailyWebviewBefore(ctx) {
     return { ok: g2.checks.bookmark_star && g2.checks.bookmark_bar_shows };
   });
   await run(ctx, "daily-g2-omnibox", "Address bar: type 'QA'; suggestions hold an open-tab row, a bookmark and a history entry; Down+Enter opens one", async () => {
+    // Tab B leaves /qa/b first: the first suggestion is the Bravo bookmark, and accepting it on
+    // /qa/b itself changes nothing (run 41767162699: omnibox_after null on linux and macOS).
+    await visit(ctx, `${fixtureBase}/qa/second.html`, "SECONDTAB");
     const before = tab(ctx, daily.tabB)?.url ?? null;
     await ctx.clickAddressBar();
     ctx.host.key({ key: "a", mods: ["mod"] });
     ctx.host.type("QA");
-    await sleep(2000);
-    const words = screenWords(ctx);
-    const rows = { tab: has(words, "switch"), bookmark: has(words, "bravo"), history: has(words, "alpha") };
+    await sleep(1500);
+    // The rows are small text: read a few frames and keep what any of them saw. The open-tab row
+    // reads "Switch to tab · url"; OCR has read it as "switch to tat" (macOS probe 149) or
+    // missed "switch". A bare "tab" is not enough (the tab bar shows "QA Second Tab"), so the
+    // fallback needs "to" directly followed by "tab"/"tat" on the same line.
+    const switchRow = (words) => has(words, "switch") || words.some((to) => ctx_norm(to.text) === "to"
+      && words.some((next) => /^ta[bt]/.test(ctx_norm(next.text)) && Math.abs(next.top - to.top) < 8 && next.left > to.left && next.left - (to.left + to.width) < 40));
+    const rows = { tab: false, bookmark: false, history: false };
+    for (let frame = 0; frame < 4 && !(rows.tab && rows.bookmark && rows.history); frame += 1) {
+      const words = screenWords(ctx);
+      rows.tab ||= switchRow(words);
+      rows.bookmark ||= has(words, "bravo");
+      rows.history ||= has(words, "alpha");
+      if (frame < 3) await sleep(700);
+    }
     g2.omnibox_rows = rows;
     g2.checks.omnibox_mix = rows.tab && rows.bookmark && rows.history;
     ctx.host.key({ key: "Down" });
@@ -438,10 +576,10 @@ export async function dailyWebviewBefore(ctx) {
     return { ok: g2.checks.omnibox_mix && g2.checks.omnibox_accept, rows, after };
   });
   await run(ctx, "daily-g2-history", "History menu > Show all history: search 'Alpha', delete that row, clear the last hour", async () => {
+    // Make sure tab B is active again (the omnibox may have switched to tab A).
+    g2.activate_b = await activateTab(ctx, daily.tabB, null);
     ctx.host.focus();
     await ctx.chromeFocusClick();
-    // Make sure tab B is active again (the omnibox may have switched to tab A).
-    await clickWord(ctx, (text) => /second|bravo/i.test(text), { timeout: 3000 });
     const opened = await clickToolbarIcon(ctx, 1, async () => (await waitWords(ctx, ["showall", "recent"], 2500)) !== null);
     g2.history_menu = opened;
     if (!opened.ok) return { ok: false, stderr: "History menu did not open", opened };
@@ -453,24 +591,27 @@ export async function dailyWebviewBefore(ctx) {
     ctx.host.type("Alpha");
     await sleep(2000);
     let words = screenWords(ctx);
-    g2.checks.history_search = Boolean(search) && has(words, "alpha") && !has(words, "bravo");
-    // The row's trash is the last control on the row line, right of its url text.
-    const row = words.filter((word) => /alpha/i.test(word.text)).sort((a, b) => b.top - a.top)[0];
+    // Only the list below the search box counts: the bookmark bar above it always shows
+    // "QA Bravo Page", so a whole-screen "no bravo" test could never pass.
+    const listTop = (search?.[1] ?? 0) + 12;
+    const listed = words.filter((word) => word.top > listTop);
+    g2.history_search_rows = listed.filter((word) => /alpha|bravo|charlie|second/i.test(word.text)).map((word) => word.text);
+    g2.checks.history_search = Boolean(search) && has(listed, "alpha") && !has(listed, "bravo");
+    // The row's trash is the last icon-sized control on the row line, right of its url text.
+    const row = listed.filter((word) => /alpha/i.test(word.text)).sort((a, b) => b.top - a.top)[0];
     let deleted = false;
     if (row) {
       const image = ctx.decodePng(ctx.probeShot());
       const y = row.top + Math.round(row.height / 2);
-      let trash = null;
-      for (let x = image.width - 40; x > row.left + 200; x -= 1) {
-        const [r, g, b] = image.rgb(x, y);
-        const [r2, g2b, b2] = image.rgb(Math.max(0, x - 30), y);
-        if (Math.abs(r - r2) + Math.abs(g - g2b) + Math.abs(b - b2) > 90) { trash = x; break; }
-      }
+      const runs = rowRuns(image, y, row.left + row.width + 4, image.width);
+      // Past the window's right edge the screen differs from the row in one wide run.
+      while (runs.length && runs.at(-1)[1] - runs.at(-1)[0] > 60) runs.pop();
+      const trash = runs.filter(([a, b]) => b - a >= 6 && b - a <= 30).at(-1);
+      g2.trash_at = trash ? [Math.round((trash[0] + trash[1]) / 2), y] : null;
       if (trash) {
-        ctx.host.click(trash - 4, y);
+        ctx.host.click(Math.round((trash[0] + trash[1]) / 2), y);
         deleted = Boolean(await until(async () => !(await historyRows(ctx)).some((entry) => entry.url.endsWith("/qa/a.html")), 8000));
       }
-      g2.trash_at = trash;
     }
     g2.checks.history_delete = deleted;
     // Clear the search, then "Clear browsing data" (range: Last hour).
@@ -487,7 +628,13 @@ export async function dailyWebviewBefore(ctx) {
     return { ok: g2.checks.history_search && g2.checks.history_delete && g2.checks.history_clear_range };
   });
   await run(ctx, "daily-g2-folder", "Library > bookmarks: New folder 'QAFolder', move 'QA Bravo Page' into it", async () => {
-    const tabBtn = await clickWord(ctx, (text) => /^bookmarks$/i.test(text), { timeout: 5000 });
+    let tabBtn = await clickWord(ctx, (text) => /^bookmarks$/i.test(text), { timeout: 5000 });
+    if (!tabBtn) {
+      // The history step did not leave the library open: History menu > Bookmarks manager.
+      const opened = await clickToolbarIcon(ctx, 1, async () => (await waitWords(ctx, ["showall", "recent"], 2500)) !== null);
+      g2.folder_menu = opened;
+      if (opened.ok) tabBtn = await clickWord(ctx, (text) => /^manager$/i.test(text) || /bookmarksmanager/i.test(text), { timeout: 5000 });
+    }
     await sleep(1000);
     const newFolder = await clickWord(ctx, (text) => /^folder$/i.test(text), { timeout: 5000, pick: "first" });
     await sleep(800);
@@ -523,26 +670,25 @@ export async function dailyWebviewBefore(ctx) {
   });
   // Close the library panel (its close X sits right of the tab list; Escape from the page works too).
   await run(ctx, "daily-library-close", "Close the library panel", async () => {
-    const { icons } = toolbarIcons(ctx);
-    if (!icons.length) {
-      // Library open: click the X at the panel's top right, found as the rightmost word-free control.
-      const words = screenWords(ctx);
-      const tabs = words.find((word) => /^downloads$/i.test(word.text));
-      if (tabs) {
-        const image = ctx.decodePng(ctx.probeShot());
-        const y = tabs.top + Math.round(tabs.height / 2);
-        for (let x = image.width - 30; x > tabs.left + 100; x -= 1) {
-          const [r, g, b] = image.rgb(x, y);
-          if (r + g + b > 450 || r + g + b < 120) {
-            const near = image.rgb(x - 12, y);
-            if (Math.abs(near[0] - r) > 60) { ctx.host.click(x - 4, y); break; }
-          }
-        }
+    // The library sits below the toolbar, so the toolbar stays visible while it is open; its tab
+    // row (History, Bookmarks, Downloads) is the signal, and its close X is the last control there.
+    const words = screenWords(ctx);
+    const tabs = words.find((word) => /^downloads$/i.test(word.text));
+    let closed = null;
+    if (tabs) {
+      const image = ctx.decodePng(ctx.probeShot());
+      const y = tabs.top + Math.round(tabs.height / 2);
+      const runs = rowRuns(image, y, tabs.left + tabs.width + 20, image.width);
+      while (runs.length && runs.at(-1)[1] - runs.at(-1)[0] > 60) runs.pop();
+      const close = runs.filter(([a, b]) => b - a >= 4 && b - a <= 30).at(-1);
+      if (close) {
+        closed = [Math.round((close[0] + close[1]) / 2), y];
+        ctx.host.click(...closed);
       }
     }
     await sleep(1000);
-    const back = await waitWords(ctx, ["bravopage", "secondtab", "charliepage", "%"], 6000);
-    return { ok: Boolean(back) };
+    const back = await waitWords(ctx, ["bravopage", "secondtab", "charliepage"], 6000);
+    return { ok: Boolean(back), library_open: Boolean(tabs), closed };
   });
 
   // G3: login save prompt, vault file, OS keystore.
@@ -674,7 +820,20 @@ export async function dailyWebviewBefore(ctx) {
         await visit(ctx, `${fixtureBase}/notify.html`, "NOTIFYME");
         await clickWord(ctx, (text) => /NOTIFYME/i.test(text), { timeout: 8000 });
         await waitWords(ctx, ["wants"], 10000);
-        const allow = await clickWord(ctx, (text) => /^Allow$/.test(text), { timeout: 5000, pick: "rightmost" });
+        // OCR reads the small "Allow" as "atow" or misses it (linux run 41767162699), so fuzzy
+        // spellings count, and the filled button right of "wants" on the prompt line is the fallback.
+        let allow = await clickWord(ctx, (text) => /^(allow|atow|alow|aliow|allo|aflow)$/i.test(text), { timeout: 4000, pick: "rightmost" });
+        g6.allow_via = allow ? "ocr" : null;
+        if (!allow) {
+          const wants = screenWords(ctx).find((word) => /^wants$/i.test(word.text));
+          const at = wants ? findAllowButton(ctx, wants) : null;
+          if (at) {
+            ctx.host.click(...at);
+            allow = at;
+            g6.allow_via = "filled button right of 'wants'";
+          }
+        }
+        g6.allow_at = allow;
         const granted = await until(() => /^perm:granted/.test(tab(ctx, daily.tabB)?.title ?? ""), 10000);
         g6.checks.prompt_allowed = Boolean(allow) && Boolean(granted);
         g6.title = tab(ctx, daily.tabB)?.title ?? null;
@@ -762,7 +921,14 @@ export async function dailyWebviewBefore(ctx) {
   }
 
   // Back to a plain page so the restart restores a simple tab B.
-  await run(ctx, "daily-tab-b-settle", "Tab B back on /qa/second before the restart", async () => ({ ok: Boolean(await visit(ctx, `${fixtureBase}/qa/second.html`, "SECONDTAB")) }));
+  await run(ctx, "daily-tab-b-settle", "Tab B back on /qa/second before the restart", async () => {
+    // A failed print or notification step can leave another tab or a dialog in front (linux run
+    // 41767162699: this step failed and tab B stayed on /notify.html across the restart).
+    ctx.closeDialogs();
+    ctx.host.key({ key: "Escape" });
+    const activate = await activateTab(ctx, daily.tabB, null);
+    return { ok: Boolean(await visit(ctx, `${fixtureBase}/qa/second.html`, "SECONDTAB")), activate };
+  });
   daily.beforeRestart = ctx.sessions().list.map((entry) => ({ browserId: entry.browserId, url: entry.url }));
   g1.before_restart = daily.beforeRestart;
   return { g1, g2, g3, g13, g8 };
@@ -804,27 +970,44 @@ export async function dailyWebviewAfter(ctx) {
   const g11 = gap(ctx, "g11", ["private_tab_opened", "private_cookie_not_shared", "private_not_in_history", "work_tab_opened", "work_cookie_not_in_default", "work_cookie_kept", "work_profile_dir", "no_private_profile_dir"]);
 
   await run(ctx, "daily-g1-restored", "After the restart: both tabs are listed with their URLs; tab A's Back goes c -> b -> a", async () => {
-    const want = (daily.beforeRestart ?? []).map((entry) => entry.url).filter((url) => /\/qa\//.test(url)).sort();
+    // Every tab listed before the quit must come back with the same id and URL. A /qa/ filter
+    // here dropped tab B whenever an earlier scenario left it elsewhere (linux run 41767162699:
+    // tab B on /notify.html, so `want` had one URL and tabs_restored failed with both restored).
+    const want = (daily.beforeRestart ?? []).filter((entry) => entry.url && entry.url !== "about:blank");
+    const tabsKnown = Boolean(daily.tabA) && want.some((entry) => entry.browserId === daily.tabA && entry.url.endsWith("/qa/c.html"));
     const restored = await until(() => {
-      const urls = ctx.sessions().list.map((entry) => entry.url).sort();
-      return want.length >= 2 && want.every((url) => urls.includes(url)) ? urls : null;
+      const list = ctx.sessions().list;
+      return want.length >= 2 && tabsKnown && want.every((entry) => list.some((now) => now.browserId === entry.browserId && now.url === entry.url)) ? list : null;
     }, 45000);
-    g1.after_restart = ctx.sessions().list.map((entry) => ({ browserId: entry.browserId, url: entry.url, engine: entry.engine }));
+    g1.after_restart = ctx.sessions().list.map((entry) => ({ browserId: entry.browserId, url: entry.url, engine: entry.engine, visible: entry.visible }));
     g1.checks.tabs_restored = Boolean(restored);
-    // Activate the tab showing /qa/c (tab bar title "QA Charlie Page").
-    ctx.host.focus();
-    await clickWord(ctx, (text) => /charlie/i.test(text), { timeout: 10000 });
-    await sleep(1500);
-    const tabA = ctx.sessions().list.find((entry) => entry.url.endsWith("/qa/c.html"));
-    daily.tabA = tabA?.browserId ?? daily.tabA;
-    await shortcut(ctx, { key: "[", mods: ["mod"] });
-    const back1 = await until(() => tab(ctx, daily.tabA)?.url?.endsWith("/qa/b.html"), 10000);
-    g1.checks.back_1 = Boolean(back1) && Boolean(await waitWords(ctx, ["bravopage"], 8000));
-    await shortcut(ctx, { key: "[", mods: ["mod"] });
-    const back2 = await until(() => tab(ctx, daily.tabA)?.url?.endsWith("/qa/a.html"), 10000);
-    g1.checks.back_2 = Boolean(back2) && Boolean(await waitWords(ctx, ["alphapage"], 8000));
+    // Activate tab A (on /qa/c, tab bar title "QA Charlie Page") and confirm it through the CLI.
+    daily.tabA = ctx.sessions().list.find((entry) => entry.browserId === daily.tabA)?.browserId
+      ?? ctx.sessions().list.find((entry) => entry.url.endsWith("/qa/c.html"))?.browserId ?? daily.tabA;
+    g1.activate_a = await activateTab(ctx, daily.tabA, (text) => /charlie/i.test(text));
+    await sleep(1000);
+    // Mod+[ is the browser.back app shortcut: it needs the app chrome focused, not the page.
+    const goBack = async (expectPath, word) => {
+      await shortcut(ctx, { key: "[", mods: ["mod"] });
+      let landed = await until(() => tab(ctx, daily.tabA)?.url?.endsWith(expectPath), 10000);
+      let via = "Mod+[";
+      if (!landed) {
+        // Shortcut lost (focus): the toolbar Back button is the same action through real input.
+        const back = toolbarBack(ctx);
+        if (back) {
+          ctx.host.click(back.x, back.y);
+          landed = await until(() => tab(ctx, daily.tabA)?.url?.endsWith(expectPath), 10000);
+          via = "toolbar Back";
+        }
+      }
+      return { ok: Boolean(landed) && Boolean(await waitWords(ctx, [word], 8000)), via, url: tab(ctx, daily.tabA)?.url ?? null };
+    };
+    g1.back_1 = await goBack("/qa/b.html", "bravopage");
+    g1.checks.back_1 = g1.back_1.ok;
+    g1.back_2 = await goBack("/qa/a.html", "alphapage");
+    g1.checks.back_2 = g1.back_2.ok;
     g1.tab_a_url = tab(ctx, daily.tabA)?.url ?? null;
-    return { ok: g1.checks.tabs_restored && g1.checks.back_1 && g1.checks.back_2 };
+    return { ok: g1.checks.tabs_restored && g1.checks.back_1 && g1.checks.back_2, activate: g1.activate_a };
   });
 
   await run(ctx, "daily-g2-after", "After the restart: QAFolder still holds the bookmark and shows on the bookmark bar", async () => {
@@ -836,7 +1019,7 @@ export async function dailyWebviewAfter(ctx) {
   });
 
   await run(ctx, "daily-g3-after", "After the restart: /login.html offers 'Fill saved login'; clicking qauser fills both fields; the cross-origin iframe stays empty", async () => {
-    await clickWord(ctx, (text) => /second/i.test(text), { timeout: 6000 });
+    await activateTab(ctx, daily.tabB, (text) => /second/i.test(text));
     daily.tabB = ctx.sessions().list.find((entry) => entry.url.endsWith("/qa/second.html"))?.browserId ?? daily.tabB;
     await visit(ctx, `${fixtureBase}/login.html`, "LOGINPAGE");
     const offer = await waitWords(ctx, ["fillsaved", "saved"], 15000);
@@ -883,10 +1066,14 @@ export async function dailyWebviewAfter(ctx) {
     await sleep(2000);
     await visit(ctx, `${fixtureBase}/secret.html`, "SECRETPAGE");
     const atSecret = await until(() => tab(ctx, privateTab.browserId)?.url?.endsWith("/secret.html"), 8000);
-    // Back to the default tab B and read the cookies the server receives there.
-    await clickWord(ctx, (text) => /second/i.test(text), { timeout: 6000 });
+    // Back to the default tab B and read the cookies the server receives there. The private
+    // duplicate has the same title ("QA Second Tab"), so a title click picked the private tab and
+    // /cookies loaded there (linux run 41767162699 probe 193: "cookies:qa_secret=1"); select the
+    // default tab by id instead.
+    const defaultTab = ctx.sessions().list.find((entry) => entry.profileId !== "private" && entry.url.endsWith("/qa/second.html"))
+      ?? ctx.sessions().list.find((entry) => entry.browserId === daily.tabB);
+    g11.activate_default = await activateTab(ctx, defaultTab?.browserId ?? daily.tabB, null);
     await sleep(1200);
-    const defaultTab = ctx.sessions().list.find((entry) => entry.profileId !== "private" && entry.url.endsWith("/qa/second.html"));
     await visit(ctx, `${fixtureBase}/cookies.html`, "COOKIES");
     const cookieTitle = await until(() => {
       const value = tab(ctx, defaultTab?.browserId ?? daily.tabB)?.title ?? "";
