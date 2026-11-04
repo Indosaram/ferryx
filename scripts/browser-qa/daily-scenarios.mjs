@@ -9,6 +9,7 @@
 // fields, the app's data files (history.sqlite, bookmarks.json, vault.json, browser-site-zoom.json),
 // the OS keystore, D-Bus traffic, a written file, or OCR of the screen. Results go to
 // summary.daily.<gap>.checks; check-summary.mjs fails the job on a false or missing gap.
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -103,7 +104,18 @@ drop.addEventListener('drop',(e)=>{e.preventDefault();const x=e.dataTransfer.fil
 }
 
 // ---------------------------------------------------------------- shared helpers
-const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+/**
+ * The audit step whose actions are running ({ name, expired }). A step that hits its time cap
+ * is abandoned, but its promise keeps running; once `expired` is set, its next sleep or OS input
+ * throws, so a late action cannot click, type or record into the steps that follow.
+ */
+export const stepScope = new AsyncLocalStorage();
+export class StepExpired extends Error {}
+export function assertStepLive() {
+  const scope = stepScope.getStore();
+  if (scope?.expired) throw new StepExpired(`step ${scope.name} ran past its time cap`);
+}
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms)).then(assertStepLive);
 
 /** Starts summary.daily[gap] with every named check false. */
 function gap(ctx, name, checks) {
@@ -122,6 +134,8 @@ async function until(probe, timeout = 15000, every = 1000) {
     await sleep(every);
     value = await probe();
   }
+  // A step abandoned at its cap must not act on (or record) what it saw after the cap.
+  assertStepLive();
   return value;
 }
 
@@ -677,11 +691,14 @@ async function run(ctx, name, description, body) {
     try {
       outcome = (await body()) ?? { ok: true };
     } catch (error) {
+      // Past the step's time cap the body is abandoned: let the step record step_timeout.
+      if (error instanceof StepExpired) throw error;
       outcome = { ok: false, stderr: String(error?.stack ?? error).slice(0, 1500) };
     }
     return outcome;
   }]]);
-  return outcome;
+  // A skipped (budget) or abandoned (cap) step has no outcome: report it as not ok.
+  return outcome ?? { ok: false, stderr: "step skipped or timed out" };
 }
 
 /** The OS file manager / dialog helpers need a file with known bytes. */
@@ -1045,10 +1062,24 @@ export async function dailyWebviewBefore(ctx) {
     if (move) {
       ctx.host.click(move.left + Math.round(move.width / 2), move.top + Math.round(move.height / 2));
       await sleep(1200);
+      // The open <select> list is a native popup on Windows: a click on its "QAFolder" option
+      // did nothing (Windows run 41824966041 probe 058: list open, bookmark still on the bar).
+      // The keyboard picks the option on every OS; the bookmarks file decides below.
       const option = await clickWord(ctx, (text) => /qafolder/i.test(text), { timeout: 4000, pick: "bottom" });
-      if (!option) {
-        ctx.host.type("  QAF");
+      const placed = option ? await until(() => {
+        const tree = bookmarksFile(ctx);
+        const target = tree.folders.find((entry) => entry.name === "QAFolder");
+        return target && tree.bookmarks.some((entry) => entry.url.endsWith("/qa/b.html") && entry.parentId === target.id);
+      }, 3000, 500) : false;
+      g2.move_option_click = Boolean(option);
+      if (!placed) {
+        // Typing works whether the popup is still open (Enter commits the match) or closed with
+        // the select focused (the typed match changes its value). A second click could close an
+        // open popup instead, so none is made.
+        ctx.host.type("QAF");
+        await sleep(300);
         ctx.host.key({ key: "Enter" });
+        g2.move_via = "keyboard";
       }
     }
     const moved = await until(() => {
@@ -1130,15 +1161,23 @@ export async function dailyWebviewBefore(ctx) {
     const prompt = await until(() => {
       const words = screenWords(ctx);
       const save = words.filter((word) => word.text === "Save");
-      const not = words.find((word) => /^now$/i.test(word.text) || /^not$/i.test(word.text));
+      const not = words.find((word) => /^not$/i.test(word.text)) ?? words.find((word) => /^now$/i.test(word.text));
       return has(words, "password") && save.length ? { save, not } : null;
     }, 15000);
     g3.checks.save_prompt_shown = Boolean(prompt);
     if (!prompt) return { ok: false, stderr: "no save prompt", page, typed: g3.typed };
     // The Save button: the rightmost "Save" left of "Not now" (the sentence starts with "Save" too).
+    // OCR often reads only the sentence's "Save" (Windows run 41824966041 probe 070: "Save" at
+    // x=356, "Not now" at x=1303, no button word), so the leftmost word then is the sentence and
+    // the button (x 1253-1277 there) is centred about 40px left of "Not" on the same line.
     const buttons = prompt.save.filter((word) => !prompt.not || word.left < prompt.not.left).sort((a, b) => b.left - a.left);
-    const button = buttons[0];
-    ctx.host.click(button.left + Math.round(button.width / 2), button.top + Math.round(button.height / 2));
+    const sentence = prompt.save.slice().sort((a, b) => a.left - b.left)[0];
+    const onlySentence = buttons.length === 1 && prompt.not && buttons[0] === sentence && prompt.not.left - buttons[0].left > 300;
+    const at = onlySentence
+      ? [prompt.not.left - 40, prompt.not.top + Math.round(prompt.not.height / 2)]
+      : [buttons[0].left + Math.round(buttons[0].width / 2), buttons[0].top + Math.round(buttons[0].height / 2)];
+    g3.save_click = { at, via: onlySentence ? "40px left of 'Not now'" : "ocr 'Save'" };
+    ctx.host.click(...at);
     const vault = await until(() => (readJson(join(ctx.dirs.data, "browser-vault", "vault.json"))?.items?.length ?? 0) > 0, 10000);
     g3.checks.saved = Boolean(vault);
     // The key's OS keystore item.
@@ -1321,9 +1360,19 @@ export async function dailyWebviewBefore(ctx) {
       ctx.host.focus();
       const opened = await clickToolbarIcon(ctx, 7, async () => printUiSeen(ctx).length >= 2, { spread: 1 });
       g9.pdf_button = opened;
+      let printUi = opened.ok;
       if (!opened.ok) {
         await shortcut(ctx, { key: "p", mods: ["mod"] });
-        await until(() => printUiSeen(ctx).length >= 2, 15000);
+        printUi = Boolean(await until(() => printUiSeen(ctx).length >= 2, 15000));
+      }
+      if (!printUi) {
+        // No print UI from the button or Mod+P: there is no dialog to answer. Without this
+        // return the Windows branch typed the PDF path blind into the foreground app and every
+        // wait below ran to its end (Windows run 41824966041: 278 s, no dialog in probes 113-128).
+        g9.pdf = { path: pdfPath, exists: false, size: 0, skipped: "print UI never opened" };
+        ctx.host.key({ key: "Escape" });
+        ctx.host.focus();
+        return { ok: false, stderr: "print UI never opened" };
       }
       if (ctx.platform === "linux") {
         // GTK print dialog: select the "Print to File" printer, then Print. GTK writes to its own
@@ -1456,6 +1505,16 @@ export async function dailyWebviewAfter(ctx) {
     g1.activate_a = await activateTab(ctx, daily.tabA, (text) => /charlie/i.test(text));
     await sleep(1000);
     // Mod+[ is the browser.back app shortcut: it needs the app chrome focused, not the page.
+    // The CLI reports the back target's URL before the page commits; the title and the painted
+    // page still showed the previous page with the loading bar up (linux evidence of
+    // st_01a1a6c7, Windows run 41824966041 back_1: url /qa/b.html, "bravopage" not read). So the
+    // tab's title (or loading === false on that URL) is awaited before the screen is read.
+    const TITLES = { "/qa/b.html": "QA Bravo Page", "/qa/a.html": "QA Alpha Page" };
+    const committed = (expectPath) => {
+      const entry = tab(ctx, daily.tabA);
+      if (!entry?.url?.endsWith(expectPath)) return false;
+      return entry.title === TITLES[expectPath] || entry.loading === false;
+    };
     const goBack = async (expectPath, word) => {
       await shortcut(ctx, { key: "[", mods: ["mod"] });
       let landed = await until(() => tab(ctx, daily.tabA)?.url?.endsWith(expectPath), 10000);
@@ -1469,7 +1528,11 @@ export async function dailyWebviewAfter(ctx) {
           via = "toolbar Back";
         }
       }
-      return { ok: Boolean(landed) && Boolean(await waitWords(ctx, [word], 8000)), via, url: tab(ctx, daily.tabA)?.url ?? null };
+      if (!landed) return { ok: false, via, url: tab(ctx, daily.tabA)?.url ?? null };
+      const done = Boolean(await until(() => committed(expectPath), 15000, 500));
+      const seen = await waitWords(ctx, [word], 20000);
+      const entry = tab(ctx, daily.tabA);
+      return { ok: Boolean(entry?.url?.endsWith(expectPath)) && Boolean(seen), via, committed: done, url: entry?.url ?? null, title: entry?.title ?? null };
     };
     g1.back_1 = await goBack("/qa/b.html", "bravopage");
     g1.checks.back_1 = g1.back_1.ok;
@@ -1497,11 +1560,12 @@ export async function dailyWebviewAfter(ctx) {
     const offer = await waitWords(ctx, ["fillsaved", "saved"], 15000);
     g3.checks.fill_offer_after_restart = Boolean(offer);
     // The fill button is the "qauser" on the offer bar's line, right of "saved"/"login".
-    const button = await clickWord(ctx, (text) => /^qauser$/i.test(text), { timeout: 6000, pick: "first" });
-    const filled = await until(async () => {
+    // No offer bar: nothing to click, so the fill waits are skipped (the check stays false).
+    const button = offer ? await clickWord(ctx, (text) => /^qauser$/i.test(text), { timeout: 6000, pick: "first" }) : null;
+    const filled = button ? await until(async () => {
       const fields = await loginFields(ctx, loginTab);
       return fields && fields[0] === "qauser" && fields[1] === "qa-pass-123" ? fields : null;
-    }, 8000);
+    }, 8000) : null;
     g3.filled_fields = filled ? [filled[0], filled[1].length] : await loginFields(ctx, loginTab);
     g3.checks.autofilled_after_restart = Boolean(button) && Boolean(filled);
     await visit(ctx, `${fixtureBase}/login-frame.html`, "FRAMEHOST");
@@ -1534,10 +1598,14 @@ export async function dailyWebviewAfter(ctx) {
     if (!title) return { ok: false, stderr: "tab title not read" };
     ctx.host.rightClick(title.left + Math.round(title.width / 2), title.top + Math.round(title.height / 2));
     await sleep(1200);
-    await clickWord(ctx, (text) => /^Duplicate$/.test(text), { timeout: 5000 });
+    const duplicate = await clickWord(ctx, (text) => /^Duplicate$/.test(text), { timeout: 5000 });
     await sleep(1000);
-    await clickWord(ctx, (text) => /^Private$/.test(text), { timeout: 5000, pick: "rightmost" });
-    const privateTab = await until(() => ctx.sessions().list.find((entry) => !before.has(entry.browserId) && entry.profileId === "private"), 15000);
+    const privateItem = duplicate ? await clickWord(ctx, (text) => /^Private$/.test(text), { timeout: 5000, pick: "rightmost" }) : null;
+    g11.private_menu = { duplicate, private: privateItem };
+    // No menu item was clicked: no tab can appear, so the wait is skipped.
+    const privateTab = privateItem
+      ? await until(() => ctx.sessions().list.find((entry) => !before.has(entry.browserId) && entry.profileId === "private"), 15000)
+      : null;
     g11.checks.private_tab_opened = Boolean(privateTab);
     g11.private_tab = privateTab ?? null;
     if (!privateTab) return { ok: false, stderr: "no private tab listed" };
@@ -1607,9 +1675,10 @@ export async function dailyChromium(ctx) {
     g8.chromium_tab = created.browserId;
     g8.chromium_nav = await chromiumNavigate(created.browserId, `${fixtureBase}/upload.html`);
     await waitWords(ctx, ["uploadpick"], 15000);
-    await clickWord(ctx, (text) => /UPLOADPICK/i.test(text), { timeout: 8000 });
-    g8.chromium_picker_answer = await answerOpenDialog(ctx, file.path);
-    const picked = await until(() => tab(ctx, created.browserId)?.title === `picked:${file.name}:${file.size}`, 12000);
+    const pick = await clickWord(ctx, (text) => /UPLOADPICK/i.test(text), { timeout: 8000 });
+    // No UPLOADPICK click, no dialog: typing the path would go into the page or the address bar.
+    g8.chromium_picker_answer = pick ? await answerOpenDialog(ctx, file.path) : { via: "none", stderr: "UPLOADPICK not clicked" };
+    const picked = pick ? await until(() => tab(ctx, created.browserId)?.title === `picked:${file.name}:${file.size}`, 12000) : null;
     g8.checks.upload_picker_chromium = Boolean(picked);
     g8.chromium_picker_title = tab(ctx, created.browserId)?.title ?? null;
     if (!picked) ctx.closeDialogs();
@@ -1619,7 +1688,7 @@ export async function dailyChromium(ctx) {
       return hit ? [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)] : null;
     }, 8000);
     if (zone) g8.chromium_drag = await dragFileTo(ctx, file, zone);
-    const dropped = await until(() => tab(ctx, created.browserId)?.title === `dropped:${file.name}:${file.size}`, 8000);
+    const dropped = g8.chromium_drag?.ok ? await until(() => tab(ctx, created.browserId)?.title === `dropped:${file.name}:${file.size}`, 8000) : null;
     g8.checks.drag_in_chromium = Boolean(dropped);
     g8.chromium_drop_title = tab(ctx, created.browserId)?.title ?? null;
     ctx.host.focus();
@@ -1705,11 +1774,17 @@ export async function dailyChromium(ctx) {
     if (title) {
       ctx.host.rightClick(title.left + Math.round(title.width / 2), title.top + Math.round(title.height / 2));
       await sleep(1200);
-      await clickWord(ctx, (text) => /^Duplicate$/.test(text), { timeout: 5000 });
+      const duplicate = await clickWord(ctx, (text) => /^Duplicate$/.test(text), { timeout: 5000 });
       await sleep(1000);
-      await clickWord(ctx, (text) => /^work$/i.test(text), { timeout: 5000, pick: "rightmost" });
+      g11.work_menu = { duplicate, work: duplicate ? await clickWord(ctx, (text) => /^work$/i.test(text), { timeout: 5000, pick: "rightmost" }) : null };
+      // Windows run 41824966041 screenshot 60: the Duplicate submenu listed only "Default
+      // (current)" and "Private" (the profile was never added), so no "work" item existed.
+      if (!g11.work_menu.work) ctx.host.key({ key: "Escape" });
     }
-    const workTab = await until(() => ctx.sessions().list.find((entry) => !before.has(entry.browserId) && entry.profileId === "work"), 30000);
+    // No "work" item was clicked: no work tab can appear, so the 30 s wait is skipped.
+    const workTab = g11.work_menu?.work
+      ? await until(() => ctx.sessions().list.find((entry) => !before.has(entry.browserId) && entry.profileId === "work"), 30000)
+      : null;
     g11.work_tab = workTab ?? null;
     g11.checks.work_tab_opened = Boolean(workTab) && workTab.engine === "chromium";
     if (!workTab) return { ok: false, stderr: "no work tab", ...g11.settings };

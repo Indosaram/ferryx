@@ -42,6 +42,7 @@ import { existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSy
 import { basename, join, resolve } from "node:path";
 import { inflateSync } from "node:zlib";
 import {
+  assertStepLive,
   dailyChromium,
   dailyFixtures,
   dailyRestart,
@@ -49,6 +50,8 @@ import {
   dailyWebviewBefore,
   outsideSessionFiles,
   statOrNull,
+  StepExpired,
+  stepScope,
 } from "./daily-scenarios.mjs";
 
 const argv = process.argv.slice(2);
@@ -61,6 +64,13 @@ const binary = resolve(option("binary") ?? "");
 const out = resolve(option("out") ?? "ui-audit");
 const scenario = option("scenario") ?? "full";
 if (!["full", "drag-mask"].includes(scenario)) throw new Error(`unknown --scenario ${scenario} (full | drag-mask)`);
+// Wall-clock budget for the whole audit. The CI step timeout (75 min) kills the driver before
+// teardown, which loses the totals (Windows run 41824966041 stopped in daily-g11-profiles), so
+// past the budget every later step is recorded as skipped and the run goes on to teardown.
+const budgetMinutes = Number(option("budget-minutes") ?? process.env.FERRYX_UI_AUDIT_BUDGET_MIN ?? 50);
+if (!(budgetMinutes > 0)) throw new Error(`--budget-minutes must be a positive number (got ${budgetMinutes})`);
+// Default cap for one step's actions; a step with a longer known wait passes its own.
+const STEP_CAP_MS = 240000;
 const shots = join(out, "screenshots");
 const ocrDir = join(out, "ocr");
 mkdirSync(shots, { recursive: true });
@@ -114,10 +124,11 @@ const summary = {
     : { skipped: scenario === "full" ? "FERRYX_UI_AUDIT_ENGINE_ZIP not set or missing" : `not part of the ${scenario} scenario` },
   drag_mask: dragEngineDir ? { engine_dir: dragEngineDir } : undefined,
   agent: {},
+  budget: { minutes: budgetMinutes, step_cap_ms: STEP_CAP_MS, exceeded_at: null, first_skipped_step: null },
   steps: [],
 };
 const writeSummary = () => writeFileSync(join(out, "summary.json"), JSON.stringify(summary, null, 2));
-const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms)).then(assertStepLive);
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: "utf8", timeout: options.timeout ?? 30000, maxBuffer: 64 * 1024 * 1024, ...options });
@@ -601,6 +612,15 @@ switch ($Action) {
 
 const host = { linux, darwin: mac, win32: win }[platform];
 if (!host) throw new Error(`unsupported platform ${platform}`);
+// OS input from a step that ran past its time cap throws instead of reaching the screen.
+for (const name of ["focus", "key", "type", "click", "rightClick", "mouseDown", "mouseMove", "mouseUp", "resize", "wheel"]) {
+  const original = host[name];
+  if (typeof original !== "function") continue;
+  host[name] = function guarded(...args) {
+    assertStepLive();
+    return original.apply(this, args);
+  };
+}
 
 // ---------------------------------------------------------------- OCR (tesseract)
 const tesseract = (() => {
@@ -1022,6 +1042,8 @@ async function cliAsyncWithin(timeoutMs, ...args) {
   const timer = setTimeout(() => child.kill(), timeoutMs);
   const [stdout, stderr, status] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
   clearTimeout(timer);
+  // The step that started this command may have been abandoned at its cap meanwhile.
+  assertStepLive();
   return { ok: status === 0, status, stdout: stdout.trim().slice(0, 4000), stderr: stderr.trim().slice(0, 2000) };
 }
 
@@ -1157,13 +1179,33 @@ function screenshot(name) {
 /**
  * actions: [label, fn] pairs (fn may be async and returns {ok, stderr}) or a number (sleep ms).
  * expect: { any: [words] } visible-text check on the final screenshot, or { none: [words] }.
+ * options.capMs: time cap for the actions (default STEP_CAP_MS); past it the step records
+ * "step_timeout" and the run moves on. Once the audit budget is spent, the step records
+ * "skipped_budget" without running its actions, screenshot or OCR.
  */
-async function step(name, description, actions, expect = null) {
+async function step(name, description, actions, expect = null, { capMs = STEP_CAP_MS } = {}) {
   const record = { name, description, started_at: new Date().toISOString(), actions: [], outcome: "ok" };
+  if (!summary.budget.exceeded_at && Date.now() - startedAtMs > budgetMinutes * 60000) {
+    summary.budget.exceeded_at = record.started_at;
+    summary.budget.first_skipped_step = name;
+    summary.notes.push(`Audit budget of ${budgetMinutes} min spent: '${name}' and every step after it were skipped (outcome skipped_budget); their checks stay false.`);
+  }
+  if (summary.budget.exceeded_at) {
+    record.outcome = "skipped_budget";
+    summary.steps.push(record);
+    writeSummary();
+    console.log(`[ui-audit] ${name}: ${record.outcome}`);
+    return record;
+  }
   if (summary.app_exit) {
     record.outcome = "skipped_app_exited";
   } else {
-    try {
+    // Actions push into their own list; a step abandoned at its cap keeps a promise that may
+    // settle later, and nothing it does after that may land in this record or the next ones.
+    const scope = { name, expired: false };
+    const actionLog = [];
+    let failed = false;
+    const body = stepScope.run(scope, async () => {
       for (const entry of actions) {
         if (typeof entry === "number") {
           await sleep(entry);
@@ -1171,16 +1213,37 @@ async function step(name, description, actions, expect = null) {
         }
         const [label, action] = entry;
         const result = await action();
+        assertStepLive();
         const { ok, status, stderr, ...rest } = result ?? { ok: false, stderr: "no result" };
         const detail = Object.fromEntries(Object.entries(rest).filter(([key]) => !["stdout"].includes(key)));
-        record.actions.push({ label, ok, ...(ok ? {} : { status, error: stderr }), ...detail });
-        if (!ok && !label.startsWith("optional")) record.outcome = "input_failed";
+        actionLog.push({ label, ok, ...(ok ? {} : { status, error: stderr }), ...detail });
+        if (!ok && !label.startsWith("optional")) failed = true;
         await sleep(350);
       }
+    });
+    let timer = null;
+    const cap = new Promise((done) => {
+      timer = setTimeout(() => done("timeout"), capMs);
+    });
+    try {
+      const settled = await Promise.race([body.then(() => "done"), cap]);
+      if (settled === "timeout") {
+        scope.expired = true;
+        record.outcome = "step_timeout";
+        record.error = `actions still running after ${capMs} ms; abandoned`;
+        // The abandoned body ends on its next sleep or input (StepExpired); nothing reads it.
+        body.catch(() => {});
+      } else if (failed) {
+        record.outcome = "input_failed";
+      }
     } catch (error) {
-      record.outcome = "harness_error";
+      record.outcome = error instanceof StepExpired ? "step_timeout" : "harness_error";
       record.error = String(error?.stack ?? error);
+    } finally {
+      clearTimeout(timer);
+      scope.expired = true;
     }
+    record.actions = actionLog.slice();
   }
   const shot = screenshot(name);
   record.screenshot = { file: shot.file, ok: shot.ok, sha256: shot.sha256, error: shot.error };
@@ -2045,6 +2108,8 @@ if (engineZip) {
       waitForText(["Remove", "Installed"], 90000),
     ],
     { any: ["Remove", "Installed"] },
+    // Download wait (240 s) plus the UI wait (90 s) plus opening Settings.
+    { capMs: 420000 },
   );
   summary.engine.checks.installed_from_settings = summary.steps.at(-1).actions.find((action) => action.label === "wait for ferryx_engine on disk")?.ok ?? false;
 }
@@ -2535,6 +2600,8 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
       12000,
     ],
     { any: ["added", "uBlock"] },
+    // The profile wait alone is up to 120 s, after the store page and Chrome's dialog.
+    { capMs: 360000 },
   );
   record.checks.installed_from_web_store = summary.steps.at(-1).actions.at(-1)?.ok ?? false;
   await step("extension-store-tab-closed", "Close the store tab (CLI) so its page cannot show through Settings", [
@@ -2689,6 +2756,8 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
       }],
     ],
     { none: ["uBlock"] },
+    // The CLI remove fallback waits up to 150 s on Chrome's dialog.
+    { capMs: 360000 },
   );
   // Removal checks only count once the extension was really installed: without it the row and
   // the profile data are absent anyway.
@@ -2730,7 +2799,9 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
     }],
     ["optional dismiss onboarding", () => clickText("Skip", { timeout: 4000 })],
   ]);
-  record.restarted = summary.steps.at(-1).actions.slice(0, 2).every((action) => action.ok);
+  // A skipped or abandoned restart step has no actions: that is not a restart.
+  const restartActions = summary.steps.at(-1).actions.slice(0, 2);
+  record.restarted = restartActions.length === 2 && restartActions.every((action) => action.ok);
   await step(
     "extension-after-restart",
     "After the restart, Settings > Browser > Extensions still has no uBlock Origin Lite row",
@@ -2815,6 +2886,7 @@ async function teardown() {
   console.log(JSON.stringify({
     scenario,
     totals: summary.totals,
+    budget: summary.budget,
     ui_checks: summary.ui_checks,
     engine: summary.engine.checks ?? summary.engine.skipped,
     daily: Object.fromEntries(Object.entries(summary.daily ?? {}).map(([name, record]) => [name, record.checks])),
