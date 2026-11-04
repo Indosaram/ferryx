@@ -455,6 +455,18 @@ mod tests {
     }
 
     #[test]
+    fn layout_intents_require_admin_but_reads_do_not() {
+        let grants = PaneGrants::default();
+        let request = DaemonRequest::LayoutApply { window: "main".into(), base_revision: 0,
+            intent: crate::daemon::layout::Intent::CloseTab { tab_id: "other-pane".into() } };
+        assert_eq!(check(&pane("a"), &request, &grants), Err(PANE_GRANT_REQUIRED));
+        assert_eq!(check(&PeerClass::Owner, &request, &grants), Ok(()));
+        assert_eq!(check(&pane("a"), &DaemonRequest::LayoutGet { window: "main".into() }, &grants), Ok(()));
+        grants.add(grant("a", "*", &[GrantOp::Admin])).unwrap();
+        assert_eq!(check(&pane("a"), &request, &grants), Ok(()));
+    }
+
+    #[test]
     fn workspace_grants_and_spawn_in_the_own_workspace() {
         let grants = PaneGrants::default();
         let spawn = |ws: &str| DaemonRequest::Spawn {
