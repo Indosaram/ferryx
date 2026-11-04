@@ -21,7 +21,7 @@ import { homedir, hostname, platform, release } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { activationScript, guiBundleFiles } from './seams.mjs';
+import { activationScript, guiBundleFiles, parseEnvBlock, windowsEnvScript } from './seams.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CHECKOUT = resolve(HERE, '..', '..', '..');
@@ -287,8 +287,8 @@ async function openGuiBundle({ profile, bundleId, agent, specPath }) {
 
 /**
  * What a live process this user owns shows of its isolation: its environment where the OS lets
- * another process read it (Linux /proc; macOS hides it, so `env` is null there; Windows has no
- * unprivileged read) and the paths it holds open (Linux /proc fds, macOS lsof). `ownerRoots` are
+ * another process read it (Linux /proc, Windows PEB; macOS hides it, so `env` is null there) and
+ * the paths it holds open (Linux /proc fds, macOS lsof; null on Windows). `ownerRoots` are
  * this user's real Ferryx dirs, which an isolated GUI must never hold.
  */
 async function processIsolation({ pid }) {
@@ -297,7 +297,12 @@ async function processIsolation({ pid }) {
   const ownerRoots = MAC ? [join(home, 'Library', 'Application Support', 'Ferryx'), join(home, '.ferryx')]
     : WIN ? [join(process.env.APPDATA ?? join(home, 'AppData', 'Roaming'), 'Ferryx'), join(home, '.ferryx')]
       : [join(home, '.local', 'share', 'ferryx'), join(home, '.ferryx')];
-  if (WIN) return { env: null, openPaths: [], ownerRoots, note: 'no unprivileged read of another process on Windows' };
+  if (WIN) {
+    // No unprivileged open-file list on Windows; the live environment block (same user) is read
+    // from the process itself, and every isolated key must hold the run's value.
+    const out = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', windowsEnvScript(pid)]);
+    return { env: parseEnvBlock(out), openPaths: null, ownerRoots };
+  }
   if (!MAC) {
     const fds = readdirSync(`/proc/${pid}/fd`).map((fd) => { try { return readlinkSync(`/proc/${pid}/fd/${fd}`); } catch { return null; } }).filter((p) => p?.startsWith('/'));
     return { env: readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').filter(Boolean), openPaths: fds, ownerRoots };

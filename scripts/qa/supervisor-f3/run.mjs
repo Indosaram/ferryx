@@ -25,7 +25,7 @@ import { join, resolve } from 'node:path';
 import { EXIT, LANES, RUN_SCHEMA, scenariosForLane } from './contract.mjs';
 import { runDesktopLane } from './desktop-lane.mjs';
 import { runIphoneLane } from './iphone-lane.mjs';
-import { configProblems, runLanes as selectedLanes } from './seams.mjs';
+import { configProblems, newRunId, runLanes as selectedLanes } from './seams.mjs';
 import { startSession } from './session.mjs';
 import { LaneBlocked, markNotRun, newLane } from './steps.mjs';
 import { controlIdentity, manifestFiles, verifyEvidence } from './verify.mjs';
@@ -107,9 +107,8 @@ async function main() {
   mkdirSync(evidenceDir, { recursive: true });
   const controller = new AbortController();
   process.on('SIGINT', () => controller.abort(new Error('interrupted')));
-  // Short: the isolated daemon's socket lives under <worktree>/.native-qa/<runId>[-s] and a
-  // unix socket path is capped at 103 bytes on macOS (see socketPathProblems).
-  const runId = `f3-${new Date().toISOString().replace(/[^0-9]/g, '').slice(4, 12)}-${randomUUID().slice(0, 4)}`;
+  // Short and typeable: see newRunId (unix socket limit, Windows 8.3 launcher path).
+  const runId = newRunId(new Date(), randomUUID());
   const run = { runId, revision: opts.revision, evidenceDir, signal: controller.signal, mahordExecutable: config.mahordExecutable, tesseract: config.tesseract, sshExecutable: config.sshExecutable,
     lanes: selectedLanes(config), smoke: opts.smoke === true };
   const lanes = Object.fromEntries(LANES.map((name) => [name, newLane(name, evidenceDir)]));

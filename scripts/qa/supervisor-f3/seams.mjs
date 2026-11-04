@@ -205,6 +205,10 @@ export function configProblems(config) {
     problems.push(`relayOrigin ${config.relayOrigin} must be https:// with a DNS name the relay certificate covers (iOS push needs a secure context)`);
   }
   if (desktops.some((name) => config.hosts[name].hostId === host.hostId)) problems.push(`sessionHost.hostId ${host.hostId} must differ from the desktop hostIds`);
+  for (const name of desktops.filter((n) => config.hosts[n].platform === 'win32')) {
+    const typed = untypeableShortNames(config.hosts[name].worktree);
+    if (typed.length) problems.push(`hosts.${name}.worktree ${config.hosts[name].worktree}: ${typed.join(', ')} would put '-' or '_' into the launcher's 8.3 path, which MahoRD cannot type into the Run dialog; use a name whose first 6 characters have neither`);
+  }
   if (!['linux', 'darwin', 'win32'].includes(host.platform)) problems.push(`sessionHost.platform ${host.platform} is not linux, darwin or win32`);
   if (front?.kind === 'tailscale-serve') {
     if (!isPort(front.publicPort) || !isPort(front.backendPort) || front.publicPort === front.backendPort) problems.push('sessionHost.relayFront needs distinct publicPort and backendPort in 1024..65535');
@@ -220,8 +224,26 @@ export function configProblems(config) {
 
 /** The session daemon's profile is `.native-qa/<runId><suffix>`, apart from a desktop's. */
 export const SESSION_PROFILE_SUFFIX = '-s';
-/** The longest run id run.mjs makes: `f3-MMDDhhmm-xxxx`. */
-const RUN_ID_MAX = 'f3-00000000-0000'.length;
+/**
+ * A run id: `f3MMDDhhmmxxxx` (UTC time, 4 hex). Short for the unix socket limit, and free of '-'
+ * and '_' in its first 6 characters, so its Windows 8.3 name (`F31104~1`) stays typeable: the
+ * Windows lane types the launcher's 8.3 path into the Run dialog and MahoRD drops '-' and '_'.
+ */
+export const newRunId = (now, hex) => `f3${now.toISOString().replace(/[^0-9]/g, '').slice(4, 12)}${hex.replace(/[^0-9a-f]/g, '').slice(0, 4)}`;
+/** The longest run id `newRunId` makes. */
+const RUN_ID_MAX = 'f3MMDDhhmmxxxx'.length;
+
+/**
+ * Path components whose Windows 8.3 short name would hold '-' or '_'. A component that is
+ * already a short name (<= 8 + 3 chars, one dot at most, not leading) keeps its own spelling;
+ * any other becomes its first 6 characters (dots and spaces dropped) plus `~N`.
+ */
+export function untypeableShortNames(path) {
+  return String(path).split(/[\\/]/).slice(1).filter(Boolean).filter((name) => {
+    const short = /^[^. ]{1,8}(\.[^. ]{1,3})?$/.test(name) ? name : name.replace(/[. ]/g, '').slice(0, 6);
+    return /[-_]/.test(short);
+  });
+}
 const SUN_PATH_MAX = { darwin: 103, linux: 107 };
 
 /**
@@ -246,27 +268,76 @@ export const relayListenPort = (config) => {
  * Problems of a live GUI process against the run's isolated profile, empty when it is proven
  * isolated. `env` (`KEY=VALUE` entries, null when the OS hides another process's environment,
  * as macOS does) must hold every expected key with exactly the run's value. `openPaths` (the
- * files the process holds open) must include one inside the profile's data, runtime or home
- * dir (the launcher's own log fds under evidence/ do not count) and none under the owner's
- * roots. A GUI that runs on the owner's HOME or data dir is never driven.
+ * files the process holds open; null where the OS gives no unprivileged list, as Windows does)
+ * must include one inside the profile's data, runtime or home dir (the launcher's own log fds
+ * under evidence/ do not count) and none under the owner's roots. At least one of the two must
+ * have been read. A GUI that runs on the owner's HOME or data dir is never driven.
  */
 export function isolationProblems({ env = null, openPaths = [] }, { expected, profile, ownerRoots = [] }) {
   const problems = [];
+  if (!Array.isArray(env) && !Array.isArray(openPaths)) return ['neither the environment nor the open files of the live GUI could be read'];
   if (Array.isArray(env)) {
     const seen = new Map();
     for (const entry of env) {
       const at = String(entry).indexOf('=');
       if (at > 0) seen.set(entry.slice(0, at), entry.slice(at + 1));
     }
-    for (const [key, value] of Object.entries(expected)) if (seen.get(key) !== value) problems.push(`${key} is ${JSON.stringify(seen.get(key) ?? null)}, not ${JSON.stringify(value)}`);
+    // Windows environment names are case-insensitive; an exact-case key wins when both exist.
+    const lookup = (key) => (seen.has(key) ? seen.get(key) : [...seen].find(([k]) => k.toUpperCase() === key.toUpperCase())?.[1]);
+    for (const [key, value] of Object.entries(expected)) if (lookup(key) !== value) problems.push(`${key} is ${JSON.stringify(lookup(key) ?? null)}, not ${JSON.stringify(value)}`);
   }
+  if (!Array.isArray(openPaths)) return problems;
   const under = (root, path) => path === root || path.startsWith(`${root}/`) || path.startsWith(`${root}\\`);
   const leaked = openPaths.filter((path) => ownerRoots.some((root) => under(root, path)));
   if (leaked.length) problems.push(`holds the owner's files open: ${leaked.slice(0, 5).join(', ')}`);
+  // Open files, where listed (macOS, Linux), must include one under the profile.
   const isolated = ['data', 'runtime', 'home'].map((name) => `${profile}/${name}`);
   if (!openPaths.some((path) => isolated.some((root) => under(root, path)))) problems.push(`holds nothing open under ${profile}/{data,runtime,home}`);
   return problems;
 }
+
+/**
+ * Windows: the PowerShell that reads one live process's environment block from its PEB (same
+ * user, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, no admin grant) and prints it as base64 of
+ * UTF-8, entries separated by NUL. x64 offsets: PEB.ProcessParameters 0x20,
+ * RTL_USER_PROCESS_PARAMETERS.Environment 0x80 and EnvironmentSize 0x3F0. Read-only.
+ */
+export function windowsEnvScript(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new StepFailed('GUI_NOT_ISOLATED', `not a pid: ${pid}`);
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    'Add-Type -TypeDefinition @"',
+    'using System; using System.Runtime.InteropServices; using System.Text;',
+    'public static class F3ProcEnv {',
+    '  [StructLayout(LayoutKind.Sequential)] struct Pbi { public IntPtr Exit; public IntPtr Peb; public IntPtr Affinity; public IntPtr Priority; public IntPtr Pid; public IntPtr Parent; }',
+    '  [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr h, int c, ref Pbi p, int l, out int r);',
+    '  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint a, bool i, int pid);',
+    '  [DllImport("kernel32.dll", SetLastError = true)] static extern bool ReadProcessMemory(IntPtr h, IntPtr a, byte[] b, IntPtr n, out IntPtr r);',
+    '  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);',
+    '  [DllImport("kernel32.dll")] static extern bool IsWow64Process(IntPtr h, out bool w);',
+    '  static byte[] Mem(IntPtr h, long at, int n) { var b = new byte[n]; IntPtr got; if (!ReadProcessMemory(h, new IntPtr(at), b, new IntPtr(n), out got) || got.ToInt64() != n) throw new Exception("ReadProcessMemory " + Marshal.GetLastWin32Error()); return b; }',
+    '  public static string Read(int pid) {',
+    '    IntPtr h = OpenProcess(0x0410, false, pid);',
+    '    if (h == IntPtr.Zero) throw new Exception("OpenProcess " + Marshal.GetLastWin32Error());',
+    '    try {',
+    '      bool wow; if (IsWow64Process(h, out wow) && wow) throw new Exception("32-bit process");',
+    '      var p = new Pbi(); int len; int st = NtQueryInformationProcess(h, 0, ref p, Marshal.SizeOf(p), out len);',
+    '      if (st != 0) throw new Exception("NtQueryInformationProcess " + st);',
+    '      long pp = BitConverter.ToInt64(Mem(h, p.Peb.ToInt64() + 0x20, 8), 0);',
+    '      long env = BitConverter.ToInt64(Mem(h, pp + 0x80, 8), 0);',
+    '      long size = BitConverter.ToInt64(Mem(h, pp + 0x3F0, 8), 0);',
+    '      if (size <= 0 || size > (1 << 24)) throw new Exception("environment size " + size);',
+    '      return Encoding.Unicode.GetString(Mem(h, env, (int)size));',
+    '    } finally { CloseHandle(h); }',
+    '  }',
+    '}',
+    '"@',
+    `[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([F3ProcEnv]::Read(${pid})))`,
+  ].join('\r\n');
+}
+
+/** `KEY=VALUE` entries of a `windowsEnvScript` answer (drive-cwd `=C:=...` entries dropped). */
+export const parseEnvBlock = (base64) => Buffer.from(String(base64).trim(), 'base64').toString('utf8').split('\0').filter((entry) => entry && !entry.startsWith('='));
 
 /**
  * The hub settings every isolated F3 daemon runs with. A fresh hub database fails closed to

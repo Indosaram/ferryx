@@ -141,7 +141,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const shot = lane.write('screenshot', 'smoke/first-frame.png', await mahord.screenshot(signal));
       const read = await ocr(run.tesseract, join(run.evidenceDir, shot.path));
       lane.write('ocr', 'smoke/first-frame.ocr.tsv', read.tsv);
-      lane.receipt.smoke = { guiPid: gui.pid, envRead: Array.isArray(live.env), openPathsUnderProfile: live.openPaths.filter((p) => p.startsWith(`${setup.profile}/`)).length, frame: shot, ocrWords: read.words.length };
+      lane.receipt.smoke = { guiPid: gui.pid, envRead: Array.isArray(live.env), openPathsUnderProfile: Array.isArray(live.openPaths) ? live.openPaths.filter((p) => p.startsWith(`${setup.profile}/`)).length : null, frame: shot, ocrWords: read.words.length };
       return;
     }
     // A frame: real MahoRD pixels plus their OCR. Attached to a step only when `step` is given,

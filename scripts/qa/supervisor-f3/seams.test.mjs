@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import {
   PRODUCTION_GATEWAY_PORT, acceptedReply, configProblems, configureGateway, decisionsNamingNonce, gatewayBound, gatewayPortFor,
-  activationScript, globalRetryRule, guiBundleFiles, hubEnv, isolationProblems, namesNonce, pageToScreen, relayListenPort, remotePath, rowFocusVerdict, rpcCommand, rulesLineText,
+  activationScript, globalRetryRule, guiBundleFiles, hubEnv, isolationProblems, namesNonce, newRunId, parseEnvBlock, untypeableShortNames, windowsEnvScript, pageToScreen, relayListenPort, remotePath, rowFocusVerdict, rpcCommand, rulesLineText,
   runLanes, sameServeConfig, serveAddedProblems, typedInto, uniqueSession, webContextFrom, webPageChannel,
 } from './seams.mjs';
 import { LANE_SCHEMA, RUN_SCHEMA, SCENARIOS, validateRun } from './contract.mjs';
@@ -252,6 +252,52 @@ describe('all-local run', () => {
     win.hosts = { windows: { ...win.hosts.macos, hostId: 'maho-win', platform: 'win32' } };
     win.sessionHost = { ...win.sessionHost, hostId: 'maho-win-session', platform: 'win32' };
     expect(configProblems(win)).toEqual([]);
+  });
+
+  const winLocal = () => JSON.parse(readFileSync(new URL('./config.win-local.example.json', import.meta.url), 'utf8'));
+
+  test('the shipped win-local example runs only the Windows lane on a loopback relay, all hosts local', () => {
+    const config = winLocal();
+    expect(configProblems(config)).toEqual([]);
+    expect(runLanes(config)).toEqual(['windows']);
+    expect(config.sessionHost.platform).toBe('win32');
+    expect(rpcCommand(config.hosts.windows, 'C:\\h\\x.mjs')).toEqual([config.hosts.windows.bun, ['C:\\h\\x.mjs', '--rpc']]);
+  });
+
+  test('a Windows worktree whose 8.3 launcher path would hold - or _ is refused', () => {
+    expect(untypeableShortNames('C:\\Users\\sook\\ferryx-wt\\f3winlocal-20261104')).toEqual([]);
+    expect(untypeableShortNames('C:\\Users\\sook\\ferryx-wt\\supv-f3-final')).toEqual(['supv-f3-final']);
+    expect(untypeableShortNames('C:\\Users\\sook\\ferryx-wt\\f3_win')).toEqual(['f3_win']);
+    expect(untypeableShortNames('C:\\a\\.native-qa')).toEqual([]);
+    const bad = winLocal();
+    bad.hosts.windows.worktree = 'C:\\Users\\sook\\ferryx-wt\\supv-f3-final';
+    expect(configProblems(bad).join()).toContain("hosts.windows.worktree");
+  });
+
+  test('a run id is short and its 8.3 name has no - or _', () => {
+    const id = newRunId(new Date('2026-11-04T09:15:00Z'), 'a1b2c3d4-0000');
+    expect(id).toBe('f311040915a1b2');
+    expect(id).toMatch(/^[a-z0-9]+$/);
+    expect(untypeableShortNames(`C:\\w\\.native-qa\\${id}`)).toEqual([]);
+    expect(untypeableShortNames(`C:\\w\\.native-qa\\${id}-s`)).toEqual([]);
+  });
+
+  test('the Windows live env read names one pid, reads only, and its answer parses to KEY=VALUE', () => {
+    const script = windowsEnvScript(4242);
+    expect(script).toContain('[F3ProcEnv]::Read(4242)');
+    expect(script).toContain('OpenProcess(0x0410');
+    expect(script).not.toMatch(/WriteProcessMemory|TerminateProcess|Stop-Process|taskkill/);
+    expect(code(() => windowsEnvScript(0))).toBe('GUI_NOT_ISOLATED');
+    const block = Buffer.from('=C:=C:\\w\0HOME=C:\\w\\.native-qa\\r\\home\0FERRYX_QA_ISOLATED=1\0\0', 'utf8').toString('base64');
+    expect(parseEnvBlock(`${block}\r\n`)).toEqual(['HOME=C:\\w\\.native-qa\\r\\home', 'FERRYX_QA_ISOLATED=1']);
+  });
+
+  test('a Windows GUI is proven isolated by its env alone; nothing read is never a pass', () => {
+    const want = { expected: { HOME: 'C:\\w\\.native-qa\\r\\home', FERRYX_QA_ISOLATED: '1' }, profile: 'C:\\w\\.native-qa\\r', ownerRoots: ['C:\\Users\\o\\AppData\\Roaming\\Ferryx'] };
+    expect(isolationProblems({ env: ['Home=C:\\w\\.native-qa\\r\\home', 'FERRYX_QA_ISOLATED=1'], openPaths: null }, want)).toEqual([]);
+    expect(isolationProblems({ env: ['HOME=C:\\Users\\o', 'FERRYX_QA_ISOLATED=1'], openPaths: null }, want).join()).toContain('HOME is');
+    expect(isolationProblems({ env: ['FERRYX_QA_ISOLATED=1'], openPaths: null }, want).join()).toContain('HOME is null');
+    expect(isolationProblems({ env: null, openPaths: null }, want).join()).toContain('could be read');
   });
 
   test('a loopback relay refuses the iPhone, a remote host, a non-loopback or https origin', () => {
