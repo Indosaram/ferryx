@@ -55,6 +55,22 @@ name = "native_terminal_macos_background"
 harness = false
 required-features = ["desktop"]
 
+[[test]]
+name = "ssh_project_identity_live"
+required-features = ["desktop"]
+
+[[test]]
+name = "ssh_windows_live"
+required-features = ["desktop"]
+
+[[test]]
+name = "native_terminal_wayland_subsurface_contract"
+required-features = ["desktop"]
+
+[[test]]
+name = "native_terminal_renderer_contract"
+required-features = ["native-terminal"]
+
 [build-dependencies]
 # `codegen` generates the app context in build.rs (see build.rs) instead of in generate_context!.
 tauri-build = { version = "2", features = ["codegen"] }
