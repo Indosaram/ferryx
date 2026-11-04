@@ -373,6 +373,26 @@ impl AgentStateSubscription {
 mod tests {
     use super::*;
 
+    #[test]
+    fn command_changes_publish_without_replacing_activity_and_are_removed_with_session() {
+        let hub = Arc::new(AgentStateHub::default());
+        let original = state("s", "blocked");
+        hub.publish_canonical(original.clone());
+        let mut subscription = hub.subscribe("s");
+        hub.publish_foreground_command("s", Some("sleep".into()));
+        let update = subscription.receiver.try_recv().unwrap();
+        assert_eq!(update.state, original);
+        assert_eq!(update.foreground_command.as_deref(), Some("sleep"));
+        hub.publish_foreground_command("s", Some("sleep".into()));
+        assert!(matches!(subscription.receiver.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        hub.publish_foreground_command("s", None);
+        assert_eq!(subscription.receiver.try_recv().unwrap().foreground_command, None);
+        hub.publish_foreground_command("s", Some("bash".into()));
+        hub.remove("s");
+        assert_eq!(hub.foreground_command("s"), None);
+        assert_eq!(hub.current("s"), None);
+    }
+
     fn state(session_id: &str, value: &str) -> AgentState {
         AgentState {
             session_id: session_id.to_string(),
