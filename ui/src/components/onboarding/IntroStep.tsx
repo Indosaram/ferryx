@@ -4,6 +4,18 @@ import { WizardRow, WizardRowList } from "./WizardPrimitives";
 type OverviewStepId = Exclude<OnboardingStepId, "intro" | "account">;
 
 const OVERVIEW_ROWS: Record<OverviewStepId, { title: string; description: string }> = {
+  import: {
+    title: "Import settings",
+    description: "Bring settings from another terminal.",
+  },
+  enroll: {
+    title: "Enroll this machine",
+    description: "Connect this computer to your account.",
+  },
+  skills: {
+    title: "Agent skills",
+    description: "Set up Ferryx skills for your coding agents.",
+  },
   features: {
     title: "Features tour",
     description: "A quick look at the parts you'll use every day.",

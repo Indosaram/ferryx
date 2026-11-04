@@ -28,7 +28,6 @@ import { GeneralSection } from "./settings/GeneralSection";
 import { NotificationsSection } from "./settings/NotificationsSection";
 import { PaneAccessSection } from "./settings/PaneAccessSection";
 import { ScriptingSection } from "./settings/ScriptingSection";
-import { useTranslation } from "../i18n";
 import { PermissionsSection } from "./settings/PermissionsSection";
 import { PlanSection } from "./settings/PlanSection";
 import { RemoteSection } from "./settings/RemoteSection";

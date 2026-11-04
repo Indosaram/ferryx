@@ -245,7 +245,7 @@ export function serializeWorkspaceState(
               runId: rawDag.runId ?? null,
             });
             sessionIdsByLeafId[leafId] = "";
-          } else if (content.kind === "file" || content.kind === "changes" || content.kind === "remoteDesktop") {
+          } else if (content.kind === "file" || content.kind === "changes" || content.kind === "remoteDesktop" || content.kind === "plugin") {
             contentsByLeafId[leafId] = content;
             sessionIdsByLeafId[leafId] = "";
           } else {
@@ -1132,7 +1132,7 @@ export function deserializeWorkspaceState(
               runId: rawDag.runId ?? null,
             });
             sessionIdsByLeafId[leafId] = "";
-          } else if (rawContent.kind === "file" || rawContent.kind === "changes" || rawContent.kind === "remoteDesktop") {
+          } else if (rawContent.kind === "file" || rawContent.kind === "changes" || rawContent.kind === "remoteDesktop" || rawContent.kind === "plugin") {
             contentsByLeafId[leafId] = rawContent;
             sessionIdsByLeafId[leafId] = "";
           } else {
