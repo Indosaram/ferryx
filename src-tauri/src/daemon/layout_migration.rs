@@ -63,7 +63,8 @@ fn identity_key(scope: &str, tab: &str, visual: &str) -> String {
 
 fn convert_workspace(workspace: &Value, id: &str, mapping: &mut BTreeMap<String, u64>) -> Result<Layout, String> {
     let saved = workspace.get("layout").unwrap_or(workspace);
-    let mut layout = convert_saved(saved, workspace, &scope_key(id, None), mapping)?;
+    let active_path = workspace["activeWorktreePath"].as_str().filter(|path| !path.is_empty());
+    let mut layout = convert_saved(saved, workspace, &scope_key(id, active_path), mapping)?;
     for field in ["layoutByWorktree", "worktreeLayouts"] {
         if let Some(parked) = workspace[field].as_object() {
             for (path, saved) in parked {
@@ -78,6 +79,7 @@ fn convert_workspace(workspace: &Value, id: &str, mapping: &mut BTreeMap<String,
 
 fn convert_saved(saved: &Value, workspace: &Value, scope: &str, mapping: &mut BTreeMap<String, u64>) -> Result<Layout, String> {
     let mut layout = Layout::default();
+    layout.scope = Some(scope.into());
     if let Some(tabs) = saved["tabs"].as_array() {
         for tab in tabs {
             let id = text(tab, "id").to_owned();
@@ -126,12 +128,13 @@ fn content(state: &Value, workspace: &Value, tab: &Value, visual: &str) -> Resul
     let kind = pane["kind"].as_str().or_else(|| tab["kind"].as_str()).unwrap_or("terminal");
     Ok(match kind {
         "file" => {
-            let file = pane.get("file").unwrap_or(pane);
-            Content::File { path: file["path"].as_str().or_else(|| tab["path"].as_str()).unwrap_or("").into(), line: file["line"].as_u64(), col: file["col"].as_u64() }
+            let fallback = tab.get("file").unwrap_or(tab);
+            let file = if pane.is_null() { fallback } else { pane.get("file").unwrap_or(pane) };
+            Content::File { path: file["path"].as_str().or_else(|| fallback["path"].as_str()).unwrap_or("").into(), line: file["line"].as_u64(), col: file["col"].as_u64(), ownership: metadata(file, fallback, &["backendSessionId", "workspaceId", "previewId", "remote"]) }
         },
-        "browser" => Content::Browser { url: pane["browser"]["url"].as_str().or_else(|| pane["url"].as_str()).or_else(|| tab["browser"]["url"].as_str()).unwrap_or("").into() },
+        "browser" => Content::Browser { url: pane["browser"]["url"].as_str().or_else(|| pane["url"].as_str()).or_else(|| tab["browser"]["url"].as_str()).or_else(|| tab["url"].as_str()).unwrap_or("").into(), identity: metadata(pane.get("browser").unwrap_or(pane), tab.get("browser").unwrap_or(tab), &["browserId", "workspaceId", "worktreePath", "profileId"]) },
         "dag" => Content::Dag,
-        "changes" => Content::Changes,
+        "changes" => Content::Changes { checkout: metadata(pane, tab.get("changes").unwrap_or(tab), &["workspaceId", "worktreePath", "worktree"]) },
         "remote-desktop" | "remoteDesktop" => Content::RemoteDesktop { host_id: text(pane, "hostId").into() },
         _ => {
             let frontend = pane["sessionId"].as_str().or_else(|| state["sessionIdsByLeafId"][visual].as_str())
@@ -141,6 +144,10 @@ fn content(state: &Value, workspace: &Value, tab: &Value, visual: &str) -> Resul
             Content::Terminal { backend_session_id: backend.into() }
         },
     })
+}
+
+fn metadata(pane: &Value, tab: &Value, fields: &[&str]) -> BTreeMap<String, Value> {
+    fields.iter().filter_map(|field| pane.get(*field).or_else(|| tab.get(*field)).map(|value| ((*field).into(), value.clone()))).collect()
 }
 
 fn convert_group(tree: &Value, groups: &Value) -> Result<TabGroupLayout, String> {
@@ -164,6 +171,23 @@ mod tests {
             "one":{"root":{"type":"leaf","leafId":"repeated"},"activeLeafId":"repeated","expandedLeafId":"repeated"},
             "two":{"root":{"type":"leaf","leafId":"repeated"},"activeLeafId":"repeated","expandedLeafId":"repeated"}
         }})
+    }
+
+    #[test]
+    fn active_checkout_and_nested_surface_metadata_are_migrated() {
+        let session = serde_json::json!({"activeWorkspaceId":"w","workspaces":{"w":{
+            "activeWorktreePath":"/checkout", "layout":{"tabs":[
+                {"id":"browser","kind":"browser","browser":{"browserId":"surface","url":"https://example.org","profileId":"profile"}},
+                {"id":"file","kind":"file","file":{"path":"/file","backendSessionId":"pty","workspaceId":"w","previewId":"preview"}},
+                {"id":"changes","kind":"changes","changes":{"workspaceId":"w","worktreePath":"/checkout","worktree":null}}
+            ]}
+        }}});
+        let (layout, _) = convert(&session).unwrap();
+        assert_eq!(layout.scope.as_deref(), Some(scope_key("w", Some("/checkout")).as_str()));
+        let json = serde_json::to_value(layout).unwrap();
+        assert_eq!(json["tabs"][0]["paneTree"]["content"]["browserId"], "surface");
+        assert_eq!(json["tabs"][1]["paneTree"]["content"]["previewId"], "preview");
+        assert_eq!(json["tabs"][2]["paneTree"]["content"]["worktreePath"], "/checkout");
     }
 
     #[test]

@@ -1993,6 +1993,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::pane_grants::cmd_pane_grants_list,
         ipc::pane_grants::cmd_pane_grants_add,
         ipc::pane_grants::cmd_pane_grants_remove,
+        ipc::layout::cmd_layout_get,
+        ipc::layout::cmd_layout_apply,
         ipc::supervisor::cmd_supervisor_goal,
         ipc::supervisor::cmd_supervisor_request,
         ipc::supervisor::cmd_supervisor_adopt_archived,

@@ -3,6 +3,7 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useS
 
 import { STARTUP_TIMEOUT_MS } from "./lib/startupTimeout";
 import { withTimeout } from "./lib/withTimeout";
+import { layoutSync, rehydrateWorkspace } from "./lib/layoutSync";
 
 import { CommandPalette } from "./components/CommandPalette";
 import { DeepLinkBridge } from "./components/DeepLinkBridge";
@@ -64,7 +65,7 @@ import {
   subscribeWindowStateChanges,
 } from "./lib/notificationLeader";
 import { planOrphanAdoption } from "./state/orphanAdoption";
-import { movedEverySession, planTabMove } from "./state/windowMove";
+import { movedEverySession, planTabMove, tabTransferIntent } from "./state/windowMove";
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
 import { setLocalSplitPersistence } from "./lib/localSplitLifecycle";
 import { isMacShortcutPlatform, resolvedShortcuts, useShortcuts } from "./lib/shortcuts";
@@ -516,6 +517,8 @@ export function App() {
         const storedBootstrap = loadProjectBootstrap();
         // loadSession is window-scoped by the backend: a secondary window reads only its own file.
         const savedSession = await loadSession().catch(() => null);
+        // Capability-gated: an older daemon retains the legacy restore path.
+        await layoutSync.refresh();
         const recovered = recoverProjectBootstrap(savedSession);
         const prepared = isPrimary
           ? canonicalizeProjectBootstrap(
@@ -1596,6 +1599,9 @@ function WorkspaceApp({
         if (!existing) {
           existing = await loadSession().catch(() => null);
         }
+        // Compatibility dual-write for the first daemonLayoutV1 release. Keep
+        // serializing current UI state so rollback also retains queued gestures.
+        // Removal is tracked in docs/releases/DAEMON_LAYOUT_COMPATIBILITY.md.
         const session = serializeWorkspaceState(
           workspaceId,
           repoRoot,
@@ -3548,6 +3554,11 @@ function WorkspaceApp({
     adoptionBusyRef.current = true;
     setPendingAdoptions((queue) => queue.slice(1));
     void (async () => {
+      if (layoutSync.enabled) {
+        await layoutSync.refresh();
+        restoreWorkspace(rehydrateWorkspace(stateRef.current));
+        return;
+      }
       const live = await listTerminalSessions();
       const plan = planOrphanAdoption(head.backendSessionIds, stateRef.current, live, head.attemptGenerations);
       switchDebug("window.adopt.plan", {
@@ -3579,7 +3590,7 @@ function WorkspaceApp({
         adoptionBusyRef.current = false;
         bumpAdoptionTick((tick) => tick + 1);
       });
-  }, [pendingAdoptions, adoptionTick, activeProject.workspaceId, state.workspaceId, workspaceRestoreStatus, handleSelectProject]);
+  }, [pendingAdoptions, adoptionTick, activeProject.workspaceId, state.workspaceId, workspaceRestoreStatus, handleSelectProject, restoreWorkspace]);
 
   // "Move to Window": the backend flips ownership and tells the target to adopt; only after it
   // answers does this window drop the tab. The daemon session is never closed here.
@@ -3593,8 +3604,11 @@ function WorkspaceApp({
       targetLabel,
       backendSessionIds: plan.backendSessionIds,
       workspaceId: stateRef.current.workspaceId ?? activeProjectRef.current.workspaceId,
+      layoutIntent: layoutSync.enabled ? tabTransferIntent(stateRef.current, tabId, targetLabel ?? "") : undefined,
+      layoutRevision: layoutSync.revision ?? undefined,
     })
-      .then((outcome) => {
+      .then(async (outcome) => {
+        if (layoutSync.enabled) await layoutSync.refresh();
         releaseTabsForMove([tabId]);
         if (!movedEverySession(outcome, plan.backendSessionIds)) {
           toast.warning("Some terminals in this tab belong to another window and stayed there.");

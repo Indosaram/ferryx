@@ -3,6 +3,13 @@ import { isPairedWorkspaceId, isRemoteWorkspaceId } from "../lib/remoteProject";
 import type { WindowMoveOutcome } from "../lib/tauri";
 import { isTerminalTab } from "../lib/types";
 import type { WorkspaceState } from "./workspaceStore";
+import { layoutScope, type LayoutIntent } from "../lib/layoutSync";
+
+export function tabTransferIntent(state: WorkspaceState, tabId: string, targetWindow: string): LayoutIntent {
+  return { type: "SCOPED", scope: layoutScope(state), intent: {
+    type: "TRANSFER_TAB", tabId, targetWindow, targetScope: layoutScope(state),
+  } };
+}
 
 export type TabMovePlan =
   | { ok: true; backendSessionIds: string[] }

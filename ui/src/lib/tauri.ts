@@ -1739,11 +1739,15 @@ export async function moveSessionsToWindow(request: {
   targetLabel: string | null;
   backendSessionIds: string[];
   workspaceId: string | null;
+  layoutIntent?: import("./layoutSync").LayoutIntent;
+  layoutRevision?: number;
 }): Promise<WindowMoveOutcome> {
   return invokeCommand<WindowMoveOutcome>('cmd_window_move_sessions', {
     targetLabel: request.targetLabel,
     backendSessionIds: request.backendSessionIds,
     workspaceId: request.workspaceId,
+    layoutIntent: request.layoutIntent,
+    layoutRevision: request.layoutRevision,
   });
 }
 

@@ -1,4 +1,6 @@
 import type { WorkspaceState } from "./workspaceStore";
+import { createLayoutState } from "./layout";
+import { layoutSync, rehydrateWorkspace } from "../lib/layoutSync";
 
 export type HmrWorkspaceStoreData = {
   workspaceStates?: Record<string, WorkspaceState>;
@@ -33,26 +35,32 @@ function getHmrRegistry(): Record<string, WorkspaceState> | null {
 export function getHmrWorkspaceState(workspaceId: string): WorkspaceState | null {
   const registry = getHmrRegistry();
   if (registry && registry[workspaceId]) {
-    return registry[workspaceId];
+    return rehydrateWorkspace(registry[workspaceId]);
   }
   if (typeof import.meta !== "undefined" && import.meta.hot?.data) {
     const hotData = import.meta.hot.data as HmrWorkspaceStoreData | undefined;
-    return hotData?.workspaceStates?.[workspaceId] ?? null;
+    const state = hotData?.workspaceStates?.[workspaceId];
+    return state ? rehydrateWorkspace(state) : null;
   }
   return null;
 }
 
 export function setHmrWorkspaceState(workspaceId: string, state: WorkspaceState): void {
+  // Runtime sessions remain live, but the HMR registry is not a second layout
+  // writer. Native/browser handles and node identities live in layoutSync.
+  const retained = layoutSync.enabled
+    ? { ...state, layout: createLayoutState(), worktreeLayouts: {} }
+    : state;
   const registry = getHmrRegistry();
   if (registry) {
-    registry[workspaceId] = state;
+    registry[workspaceId] = retained;
   }
   if (typeof import.meta !== "undefined" && import.meta.hot?.data) {
     const hotData = import.meta.hot.data as HmrWorkspaceStoreData;
     if (!hotData.workspaceStates) {
       hotData.workspaceStates = {};
     }
-    hotData.workspaceStates[workspaceId] = state;
+    hotData.workspaceStates[workspaceId] = retained;
   }
 }
 

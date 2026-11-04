@@ -458,10 +458,14 @@ mod tests {
     fn layout_intents_require_admin_but_reads_do_not() {
         let grants = PaneGrants::default();
         let request = DaemonRequest::LayoutApply { window: "main".into(), base_revision: 0,
-            intent: crate::daemon::layout::Intent::CloseTab { tab_id: "other-pane".into() } };
+            intent: crate::daemon::layout::Intent::CloseTab { tab_id: "other-pane".into(), replacement: None } };
         assert_eq!(check(&pane("a"), &request, &grants), Err(OWNER_ACTION_REQUIRED));
         assert_eq!(check(&PeerClass::Owner, &request, &grants), Ok(()));
         assert_eq!(check(&pane("a"), &DaemonRequest::LayoutGet { window: "main".into() }, &grants), Ok(()));
+        assert_eq!(check(&pane("a"), &DaemonRequest::LayoutGetScoped { window: "main".into(), scope: "scope".into() }, &grants), Ok(()));
+        let transfer = DaemonRequest::LayoutApply { window: "main".into(), base_revision: 0,
+            intent: crate::daemon::layout::Intent::Scoped { scope: "scope".into(), intent: Box::new(crate::daemon::layout::Intent::TransferTab { tab_id: "tab".into(), target_window: "second".into(), target_scope: None }) } };
+        assert_eq!(check(&pane("a"), &transfer, &grants), Err(OWNER_ACTION_REQUIRED));
         grants.add(grant("a", "*", &[GrantOp::Admin])).unwrap();
         assert_eq!(check(&pane("a"), &request, &grants), Ok(()));
     }
