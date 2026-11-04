@@ -4076,6 +4076,7 @@ impl DaemonServer {
                 .unwrap_or_else(|_| unreachable!("gateway not published yet"))
                 .with_machine_services(Arc::clone(&session_service)),
         );
+        *remote_state.layouts.write() = Some(Arc::clone(&layouts));
         remote_state.agent_observers.attach(
             session_service.agent_state_hub(),
             Arc::clone(&session_service.workspace_service.machine_events),
