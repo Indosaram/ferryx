@@ -92,3 +92,38 @@ pub async fn identity(pipe: &NamedPipeServer) -> (super::supervisor_peer::PeerOr
         (origin, ancestry)
     }).await.unwrap_or((super::supervisor_peer::PeerOrigin::Unknown, None))
 }
+
+/// Transport-neutral owned halves for the existing client connection pools.
+pub struct Stream(Box<dyn Transport>);
+trait Transport: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Transport for T {}
+impl From<tokio::net::TcpStream> for Stream {
+    fn from(stream: tokio::net::TcpStream) -> Self { Self(Box::new(stream)) }
+}
+impl Stream {
+    pub async fn connect(address: impl tokio::net::ToSocketAddrs) -> io::Result<Self> {
+        tokio::net::TcpStream::connect(address).await.map(Self::from)
+    }
+    pub fn pipe(channel: &str) -> io::Result<Self> {
+        connect(channel).map(|pipe| Self(Box::new(pipe)))
+    }
+    pub fn into_split(self) -> (tokio::io::ReadHalf<Self>, tokio::io::WriteHalf<Self>) {
+        tokio::io::split(self)
+    }
+}
+impl tokio::io::AsyncRead for Stream {
+    fn poll_read(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut *self.0).poll_read(cx, buf)
+    }
+}
+impl tokio::io::AsyncWrite for Stream {
+    fn poll_write(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &[u8]) -> std::task::Poll<io::Result<usize>> {
+        std::pin::Pin::new(&mut *self.0).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut *self.0).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut *self.0).poll_shutdown(cx)
+    }
+}
