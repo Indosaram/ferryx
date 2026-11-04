@@ -269,6 +269,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push("scrollbackBudgetV1");
             capabilities.push("sizeOwnershipV1");
             capabilities.push("daemonLayoutV1");
+            capabilities.push("foreignLayoutSnapshotsV1");
             capabilities.push(crate::daemon::onboarding::CAPABILITY);
             capabilities.push(crate::script::CAPABILITY);
             capabilities.push("detachedPanesV1");

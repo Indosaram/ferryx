@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Content {
     Terminal { backend_session_id: String },
+    DisconnectedTerminal { machine_id: String, backend_session_id: String },
     File { path: String, line: Option<u64>, col: Option<u64>, #[serde(default, flatten)] ownership: BTreeMap<String, serde_json::Value> },
     Browser { url: String, #[serde(default, flatten)] identity: BTreeMap<String, serde_json::Value> },
     Dag,
@@ -47,6 +48,8 @@ pub enum TabGroupLayout {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Layout {
+    #[serde(default)]
+    pub machine_id: String,
     pub revision: u64,
     pub tabs: Vec<Tab>,
     pub tab_group_layout: TabGroupLayout,
@@ -58,12 +61,14 @@ pub struct Layout {
     pub parked_layouts: BTreeMap<String, Layout>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub detached_registry: DetachedRegistry,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub foreign_offers: BTreeMap<String, Layout>,
     next_node_id: u64,
 }
 
 impl Default for Layout {
     fn default() -> Self {
-        Self { revision: 0, tabs: vec![], tab_group_layout: TabGroupLayout::Group {
+        Self { machine_id: String::new(), foreign_offers: BTreeMap::new(), revision: 0, tabs: vec![], tab_group_layout: TabGroupLayout::Group {
             group_id: "main".into(), tab_ids: vec![], active_tab_id: None,
         }, active_tab_id: None, focused_group_id: "main".into(), scope: None, parked_layouts: BTreeMap::new(), detached_registry: BTreeSet::new(), next_node_id: 1 }
     }
@@ -404,7 +409,7 @@ impl Layout {
                     None
                 }
                 if find(self, &scope).is_none() {
-                    self.parked_layouts.insert(scope.clone(), Layout { scope: Some(scope.clone()), ..Layout::default() });
+                    self.parked_layouts.insert(scope.clone(), Layout { machine_id: self.machine_id.clone(), scope: Some(scope.clone()), ..Layout::default() });
                 }
                 let target = find(self, &scope).ok_or("Unknown scope")?;
                 target.apply(*intent)?;
@@ -557,6 +562,57 @@ pub(super) fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, 
 }
 
 impl Store {
+    fn machine_id(&self) -> Result<String, String> {
+        crate::remote::auth::load_or_generate_machine_identity(&self.root).map(|identity| identity.machine_id)
+    }
+
+    /// Account sync and paired hosts offer trees; revision order is machine-local.
+    pub fn offer_snapshot(&mut self, window: &str, mut snapshot: Layout) -> Result<View, String> {
+        let machine = self.machine_id()?;
+        if snapshot.machine_id.is_empty() || snapshot.machine_id == machine {
+            return Err("A foreign snapshot requires another machine identity".into());
+        }
+        let mut current = self.get(window)?.layout;
+        snapshot.foreign_offers.clear();
+        current.foreign_offers.insert(snapshot.machine_id.clone(), snapshot);
+        current.revision = current.revision.checked_add(1).ok_or("Revision exhausted")?;
+        persist(&self.path(window)?, &current)?;
+        self.layouts.insert(window.into(), current);
+        self.get(window)
+    }
+
+    /// Explicit import only creates a fresh window. No terminal service is called.
+    pub fn import_snapshot(&mut self, window: &str, machine: &str, revision: u64) -> Result<(String, View), String> {
+        self.load_all()?;
+        if self.layouts.len() >= 32 { return Err("Window limit exceeded".into()); }
+        let current = self.get(window)?.layout;
+        let mut imported = current.foreign_offers.get(machine).ok_or("Unknown layout offer")?.clone();
+        if imported.revision != revision { return Err("Layout offer changed".into()); }
+        fn disconnect(layout: &mut Layout, machine: &str, local: &str) {
+            fn node(value: &mut Node, machine: &str) {
+                match value {
+                    Node::Leaf { content, .. } => if let Content::Terminal { backend_session_id } = content {
+                        *content = Content::DisconnectedTerminal { machine_id: machine.into(), backend_session_id: backend_session_id.clone() };
+                    },
+                    Node::Split { a, b, .. } => { node(a, machine); node(b, machine); },
+                }
+            }
+            layout.machine_id = local.into();
+            layout.revision = 0;
+            layout.foreign_offers.clear();
+            layout.detached_registry.clear();
+            for tab in &mut layout.tabs { node(&mut tab.pane_tree, machine); }
+            for parked in layout.parked_layouts.values_mut() { disconnect(parked, machine, local); }
+        }
+        // Session ids belong to their host, even when a local id happens to match.
+        disconnect(&mut imported, machine, &self.machine_id()?);
+        let target = format!("ws-{}", uuid::Uuid::new_v4().simple());
+        persist(&self.path(&target)?, &imported)?;
+        self.layouts.insert(target.clone(), imported);
+        let view = self.get(&target)?;
+        Ok((target, view))
+    }
+
     pub fn load_all(&mut self) -> Result<(), String> {
         match std::fs::read_dir(self.root.join("layout")) {
             Ok(entries) => for entry in entries {
@@ -668,13 +724,21 @@ impl Store {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(error) => return Err(error.to_string()),
             };
-            let layout = match saved {
+            let mut layout = match saved {
                 Some(layout) => layout,
                 None => {
                     let (layout, mapping) = super::layout_migration::migrate(&self.session_path, window)?;
                     migration_map = mapping; persist(&path, &layout)?; layout
                 },
             };
+            let machine = self.machine_id()?;
+            if !layout.machine_id.is_empty() && layout.machine_id != machine {
+                let foreign = layout;
+                layout = Layout::default();
+                layout.foreign_offers.insert(foreign.machine_id.clone(), foreign);
+            }
+            layout.machine_id = machine;
+            persist(&path, &layout)?;
             self.layouts.insert(window.into(), layout);
         }
         let layout = self.layouts.get(window).ok_or("Layout missing")?.clone();
@@ -709,6 +773,14 @@ impl Store {
         let mut ids = Vec::new(); ordered(&next.tab_group_layout, &mut ids);
         next.tabs.sort_by_key(|tab| ids.iter().position(|id| id == &tab.tab_id).unwrap_or(usize::MAX));
         next.revision = next.revision.checked_add(1).ok_or_else(|| ApplyError::Invalid("Revision exhausted".into()))?;
+        fn stamp(layout: &mut Layout, machine: &str, revision: u64) {
+            layout.machine_id = machine.into();
+            layout.revision = revision;
+            for parked in layout.parked_layouts.values_mut() { stamp(parked, machine, revision); }
+        }
+        let machine = next.machine_id.clone();
+        let revision = next.revision;
+        stamp(&mut next, &machine, revision);
         if self.layouts.len() > 32 { return Err(ApplyError::Invalid("Window limit exceeded".into())); }
         let mut count = 0;
         fn count_nodes(node: &Node, count: &mut usize) {
@@ -764,6 +836,13 @@ impl Store {
         self.apply(window, base, match scope { Some(scope) => Intent::Scoped { scope: scope.into(), intent: Box::new(close) }, None => close })
     }
     pub fn adopt(&mut self, snapshot: Snapshot) -> Result<(), String> {
+        let machine = self.machine_id()?;
+        if snapshot.values().any(|layout| !layout.machine_id.is_empty() && layout.machine_id != machine) {
+            for (window, layout) in snapshot {
+                if layout.machine_id != machine && !layout.machine_id.is_empty() { self.offer_snapshot(&window, layout)?; }
+            }
+            return Ok(());
+        }
         for (window, layout) in &snapshot { persist(&self.path(window)?, layout)?; }
         self.layouts = snapshot; Ok(())
     }
@@ -781,6 +860,79 @@ pub(super) fn persist(path: &Path, value: &Layout) -> Result<(), String> {
     #[cfg(unix)]
     std::fs::File::open(parent).and_then(|dir| dir.sync_all()).map_err(|error| error.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod foreign_snapshot {
+    use super::*;
+
+    fn populated(store: &mut Store) -> Layout {
+        store.apply("main", 0, Intent::AddTabWithSession {
+            tab_id: "tab".into(), label: "terminal".into(),
+            content: Content::Terminal { backend_session_id: "same-id".into() }, activate: true,
+        }).unwrap().layout
+    }
+
+    #[test]
+    fn newer_foreign_revision_is_offer_only_and_import_adds_window() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let mut source = Store::new(a.path().into());
+        let mut target = Store::new(b.path().into());
+        let mut foreign = populated(&mut source);
+        let local = populated(&mut target);
+        foreign.revision = 900;
+        let offered = target.offer_snapshot("main", foreign.clone()).unwrap();
+        assert_eq!(offered.layout.tabs, local.tabs);
+        assert_eq!(target.layouts.len(), 1);
+        assert_eq!(offered.layout.foreign_offers[&foreign.machine_id].revision, 900);
+        assert!(target.import_snapshot("main", &foreign.machine_id, 899).is_err());
+        let live = BTreeSet::from(["same-id".into(), "detached".into()]);
+        let before = target.detached(&live).unwrap();
+        let (window, imported) = target.import_snapshot("main", &foreign.machine_id, 900).unwrap();
+        assert_ne!(window, "main");
+        assert_eq!(target.layouts.len(), 2);
+        assert_eq!(target.get("main").unwrap().layout, offered.layout);
+        assert_eq!(target.detached(&live).unwrap(), before);
+        assert_eq!(imported.layout.tabs[0].pane_tree, Node::Leaf { node_id: 1,
+            content: Content::DisconnectedTerminal { machine_id: foreign.machine_id, backend_session_id: "same-id".into() } });
+    }
+
+    #[test]
+    fn offers_and_placeholders_survive_restart_and_handover() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let foreign = populated(&mut Store::new(a.path().into()));
+        let mut target = Store::new(b.path().into());
+        target.offer_snapshot("main", foreign.clone()).unwrap();
+        let (window, imported) = target.import_snapshot("main", &foreign.machine_id, foreign.revision).unwrap();
+        let snapshot = target.layouts.clone();
+        let mut restarted = Store::new(b.path().into());
+        restarted.load_all().unwrap();
+        assert_eq!(restarted.layouts, snapshot);
+        let mut successor = Store::new(b.path().into());
+        successor.adopt(snapshot.clone()).unwrap();
+        assert_eq!(successor.layouts, snapshot);
+        assert_eq!(successor.get(&window).unwrap().layout, imported.layout);
+    }
+
+    #[test]
+    fn foreign_disk_and_adopt_never_replace_local_tree() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let foreign = populated(&mut Store::new(a.path().into()));
+        persist(&b.path().join("layout/main.json"), &foreign).unwrap();
+        let mut target = Store::new(b.path().into());
+        let offered = target.get("main").unwrap().layout;
+        assert!(offered.tabs.is_empty());
+        assert_eq!(offered.foreign_offers[&foreign.machine_id], foreign);
+        target.apply("main", 0, Intent::AddTabWithSession { tab_id: "local".into(), label: "local".into(),
+            content: Content::Dag, activate: true }).unwrap();
+        let before = target.get("main").unwrap().layout.tabs;
+        target.adopt(BTreeMap::from([("main".into(), foreign)])).unwrap();
+        assert_eq!(target.get("main").unwrap().layout.tabs, before);
+
+    }
 }
 
 #[cfg(test)]

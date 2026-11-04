@@ -7889,6 +7889,26 @@ impl DaemonServer {
                         Err(error) => daemon_error(error.to_string()),
                     }
                 }
+                Ok(DaemonRequest::LayoutOffer { window, snapshot }) => {
+                    let layouts = Arc::clone(&self.layouts);
+                    let changed_window = window.clone();
+                    match crate::ipc::run_blocking(move || layouts.lock().offer_snapshot(&window, snapshot).map_err(crate::ipc::IpcError::internal)).await {
+                        Ok(view) => {
+                            let _ = self.remote_event_tx.send(DaemonRemoteEvent {
+                                event: "LayoutChanged".into(), payload: serde_json::json!({"window":changed_window,"revision":view.revision}),
+                            });
+                            DaemonResponse::LayoutOk { view }
+                        },
+                        Err(error) => daemon_error(error.to_string()),
+                    }
+                }
+                Ok(DaemonRequest::LayoutImport { window, machine_id, revision }) => {
+                    let layouts = Arc::clone(&self.layouts);
+                    match crate::ipc::run_blocking(move || layouts.lock().import_snapshot(&window, &machine_id, revision).map_err(crate::ipc::IpcError::internal)).await {
+                        Ok((window, view)) => DaemonResponse::LayoutImported { window, view },
+                        Err(error) => daemon_error(error.to_string()),
+                    }
+                }
                 Ok(DaemonRequest::LayoutGetScoped { window, scope }) => {
                     let layouts = Arc::clone(&self.layouts);
                     match crate::ipc::run_blocking(move || layouts.lock().get_scoped(&window, Some(&scope)).map_err(crate::ipc::IpcError::internal)).await {
@@ -8347,6 +8367,7 @@ impl DaemonServer {
                     capabilities.push("scrollbackBudgetV1".into());
                     capabilities.push("sizeOwnershipV1".into());
                     capabilities.push("daemonLayoutV1".into());
+                    capabilities.push("foreignLayoutSnapshotsV1".into());
                     capabilities.push(super::onboarding::CAPABILITY.into());
                     capabilities.push(crate::script::CAPABILITY.into());
                     capabilities.push("detachedPanesV1".into());
