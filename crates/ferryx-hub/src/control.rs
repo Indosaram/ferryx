@@ -4,6 +4,7 @@
 //! (refused unless the mhc engine is ready with every required capability), `rollback` moves
 //! it back without touching receipts or PTYs, and `intake` reports which one is open
 //! ([`crate::supervisor::cutover`]).
+use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::error::{HubError, Result};
@@ -329,11 +330,143 @@ pub struct LiveHub {
     pub slack: Option<crate::chat::slack::SocketModeStatus>,
     pub discord_configured: bool,
     pub version: String,
+    /// The supervisor lease as this daemon sees it; `None` from a caller without one.
+    pub lease: Option<LiveLease>,
+}
+
+/// This daemon's supervisor lease role, as reported on the wire.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LeaseRole {
+    /// Runs the hub (a leased holder, a provisional offline hub, or no lease client at all).
+    #[default]
+    Holder,
+    /// Another machine (or an unknown one) holds the lease; this hub stays off.
+    Standby,
+    /// The relay cannot arbitrate; the hub stays off.
+    Unleased,
+}
+
+/// Why a standby would not take the supervisor over now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PromotionBlock {
+    pub code: String,
+    pub message: String,
+}
+
+/// An open goal of this machine's archived supervisor the owner may adopt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptableGoal {
+    pub goal_id: String,
+    pub title: String,
+    pub supervisor_id: String,
+    pub from_machine: String,
+}
+
+/// A host the holder could not push its fence to (`host: None` is this machine's daemon).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnreachableHost {
+    pub host: Option<String>,
+    pub reason: String,
+}
+
+/// The supervisor lease fields of `status` (`supervisor_lease`) and of the snapshot's `hub`
+/// object, camelCase on the wire. Ids, labels and counts only: no token or secret.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveLease {
+    pub role: LeaseRole,
+    pub holder_machine_id: Option<String>,
+    pub holder_label: Option<String>,
+    pub holder_paired: bool,
+    /// The lease fence term this machine knows (0: none known, or an unleased hub).
+    pub fence: u64,
+    /// Seconds until this holder's grant runs out unless renewed (0: no expiring grant held).
+    pub lease_expires_in: u64,
+    /// Filled by the checkpoint replication code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
+    /// Filled by the checkpoint replication code (seconds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint_age: Option<u64>,
+    /// Filled by the auto-promotion code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub promotion_block_reason: Option<PromotionBlock>,
+    /// Filled by the archived-goal adoption code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adoptable: Option<Vec<AdoptableGoal>>,
+    pub observe_dropped: u64,
+    pub unmapped_hosts: Vec<String>,
+    pub unreachable_hosts: Vec<UnreachableHost>,
+    /// Account machines the relay has not seen speak the lease protocol (labels, or a count of
+    /// unnamed ones). Each would run a supervisor of its own beside the holder's.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub machines_without_lease: Vec<String>,
+    /// A standby that has known no holder for longer than the lease TTL.
+    #[serde(skip)]
+    pub no_holder_past_ttl: bool,
+    /// Why no relay can arbitrate this enrolled machine's lease (e.g. `RELAY_MODE_OFF`); the
+    /// hub holds standby (or runs provisionally) until one can.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_unavailable: Option<PromotionBlock>,
+}
+
+impl LiveLease {
+    fn standby(&self) -> bool {
+        self.role == LeaseRole::Standby
+    }
+
+    /// The plain-text hint `hub status` prints on standby, naming the holder.
+    fn status_hint(&self) -> Option<String> {
+        if !self.standby() {
+            return None;
+        }
+        let holder = match (&self.holder_label, &self.holder_machine_id) {
+            (Some(label), Some(id)) => format!("{label} ({id})"),
+            (Some(label), None) => label.clone(),
+            (None, Some(id)) => id.clone(),
+            (None, None) => "no known machine".to_owned(),
+        };
+        Some(format!(
+            "standby: the supervisor runs on {holder}; this machine's hub stays off while it holds the lease"
+        ))
+    }
+}
+
+/// Host ids an imported checkpoint could not scope to a machine (`unmapped:<id>`), sorted.
+pub async fn unmapped_hosts(pool: &sqlx::SqlitePool) -> Vec<String> {
+    use crate::checkpoint::{HOST_ID_TABLES, UNMAPPED_HOST_PREFIX};
+    let mut hosts = std::collections::BTreeSet::new();
+    for table in HOST_ID_TABLES {
+        let columns: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pragma_table_info(?) WHERE name = 'host_id'")
+                .bind(*table)
+                .fetch_one(pool)
+                .await
+                .unwrap_or(0);
+        if columns == 0 {
+            continue;
+        }
+        let found: Vec<String> = sqlx::query_scalar(&format!(
+            "SELECT DISTINCT host_id FROM {table} WHERE substr(host_id, 1, ?) = ?"
+        ))
+        .bind(UNMAPPED_HOST_PREFIX.len() as i64)
+        .bind(UNMAPPED_HOST_PREFIX)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+        hosts.extend(found);
+    }
+    hosts.into_iter().collect()
 }
 
 /// The `status` reply. Counts and states only: no tokens, message text, or watcher stderr.
 /// `healthy` is false when the hub is stopped, HTTP is not bound, a configured Slack app has
-/// no open socket, or an inbox watcher's last run failed; each reason is in `problems`.
+/// no open socket, or an inbox watcher's last run failed; each reason is in `problems`. A
+/// standby's stopped hub is healthy, unless it has known no holder for longer than the TTL.
+/// `warnings` are informational and never affect `healthy` (account machines without lease
+/// support: a sleeping peer or a restarted relay can list one that is fine).
 /// The supervisor engine is this process's as [`crate::supervisor::setup::EngineView::read`]
 /// sees it (the hub env file is read off the runtime threads); see [`status_report_with`].
 pub async fn status_report(pool: &sqlx::SqlitePool, live: &LiveHub) -> Value {
@@ -351,16 +484,28 @@ pub async fn status_report(pool: &sqlx::SqlitePool, live: &LiveHub) -> Value {
 /// no owner identity exists, or the automatic cutover is set while the unified intake is still
 /// closed. An engine that is merely on its way (absent right after enabling, starting, or
 /// waiting without a fault) is a normal start and leaves `healthy` alone. With the flag off
-/// (fresh and legacy installs) it never affects `healthy`.
+/// (fresh and legacy installs) it never affects `healthy`, nor on a standby, whose engine
+/// runs on the lease holder.
 pub async fn status_report_with(
     pool: &sqlx::SqlitePool,
     live: &LiveHub,
     engine: &crate::supervisor::setup::EngineView,
 ) -> Value {
     let mut problems = Vec::new();
+    let mut warnings = Vec::new();
     let stopped_flag = is_stopped(pool).await.unwrap_or(true);
-    if !live.running {
+    let standby = live.lease.as_ref().is_some_and(LiveLease::standby);
+    if !live.running && !standby {
         problems.push("hub tasks are not running".to_owned());
+    }
+    if standby && live.lease.as_ref().is_some_and(|lease| lease.no_holder_past_ttl) {
+        problems.push("no supervisor holds the lease".to_owned());
+    }
+    if let Some(lease) = live.lease.as_ref().filter(|lease| !lease.machines_without_lease.is_empty()) {
+        warnings.push(format!("machines without lease support: {}", lease.machines_without_lease.join(", ")));
+    }
+    if let Some(reason) = live.lease.as_ref().and_then(|lease| lease.lease_unavailable.as_ref()) {
+        problems.push(format!("lease unavailable: {}", reason.message));
     }
     if live.running && !live.http_bound {
         problems.push(format!("http {} is not bound", live.http_addr));
@@ -390,8 +535,9 @@ pub async fn status_report_with(
         .await
         .map(|mode| mode.as_str())
         .unwrap_or("actionable");
+    let status_hint = live.lease.as_ref().and_then(LiveLease::status_hint);
     let setup = crate::supervisor::setup::setup_status(pool, engine.clone()).await.ok();
-    if let Some(setup) = setup.as_ref().filter(|setup| setup.engine_enabled) {
+    if let Some(setup) = setup.as_ref().filter(|setup| setup.engine_enabled && !standby) {
         if setup.next_action == crate::supervisor::setup::NextAction::FixEngine {
             let why = setup.engine_fault.as_ref().map_or_else(
                 || setup.engine_state.clone(),
@@ -414,6 +560,7 @@ pub async fn status_report_with(
         "stopped_flag": stopped_flag,
         "healthy": problems.is_empty(),
         "problems": problems,
+        "warnings": warnings,
         "http": {"addr": live.http_addr, "bound": live.http_bound},
         "slack": {
             "configured": live.slack_configured,
@@ -441,6 +588,8 @@ pub async fn status_report_with(
             .iter()
             .map(|(source, status, updated_at)| json!({"source": source, "status": status, "updated_at": updated_at}))
             .collect::<Vec<_>>(),
+        "supervisor_lease": live.lease,
+        "status_hint": status_hint,
     })
 }
 
@@ -464,6 +613,27 @@ pub fn reply_healthy(reply: &str) -> bool {
             .ok()
             .and_then(|value| value.get("healthy").and_then(Value::as_bool))
             .unwrap_or(false)
+}
+
+/// The `status_hint` of a `status` reply, when it has one (a standby naming the holder).
+pub fn reply_status_hint(reply: &str) -> Option<String> {
+    serde_json::from_str::<Value>(reply.trim())
+        .ok()?
+        .get("status_hint")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// The informational `warnings` lines of a `status` reply; empty for any other reply.
+pub fn reply_warnings(reply: &str) -> Vec<String> {
+    serde_json::from_str::<Value>(reply.trim())
+        .ok()
+        .and_then(|value| {
+            value.get("warnings").and_then(Value::as_array).map(|lines| {
+                lines.iter().filter_map(Value::as_str).map(str::to_owned).collect()
+            })
+        })
+        .unwrap_or_default()
 }
 
 /// The reply to `cutover`, `rollback` or `intake`: the intake after the op and the steps it
@@ -787,6 +957,7 @@ mod tests {
             slack: Some(live_slack(true)),
             discord_configured: false,
             version: "test".into(),
+            lease: None,
         };
         let up = status_report(&pool, &live).await;
         assert_eq!(up["healthy"], true, "{up}");
@@ -917,6 +1088,154 @@ mod tests {
         assert!(is_stopped(&pool).await.unwrap());
         clear_stopped(&pool).await.unwrap();
         assert!(!is_stopped(&pool).await.unwrap());
+    }
+
+    fn standby_lease() -> LiveLease {
+        LiveLease {
+            role: LeaseRole::Standby,
+            holder_machine_id: Some("mach-b".into()),
+            holder_label: Some("Laptop B".into()),
+            holder_paired: true,
+            observe_dropped: 3,
+            ..LiveLease::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_standby_with_a_known_holder_is_healthy_and_names_it() {
+        let pool = crate::storage::memory().await.unwrap();
+        let live = LiveHub {
+            http_addr: "127.0.0.1:9119".into(),
+            lease: Some(standby_lease()),
+            ..LiveHub::default()
+        };
+
+        let report = status_report(&pool, &live).await;
+
+        assert_eq!(report["healthy"], true, "{report}");
+        assert_eq!(report["running"], false);
+        let lease = &report["supervisor_lease"];
+        assert_eq!(lease["role"], "standby");
+        assert_eq!(lease["holderMachineId"], "mach-b");
+        assert_eq!(lease["holderLabel"], "Laptop B");
+        assert_eq!(lease["holderPaired"], true);
+        assert_eq!(lease["observeDropped"], 3);
+        assert_eq!(lease["unmappedHosts"], json!([]));
+        assert_eq!(lease["unreachableHosts"], json!([]));
+        assert_eq!(lease["fence"], 0);
+        assert_eq!(lease["leaseExpiresIn"], 0);
+        for absent in ["checkpointId", "checkpointAge", "promotionBlockReason", "adoptable"] {
+            assert!(lease.get(absent).is_none(), "{absent} in {lease}");
+        }
+        let hint = reply_status_hint(&report.to_string()).expect("a standby hint");
+        assert!(hint.contains("Laptop B (mach-b)"), "{hint}");
+        assert!(reply_healthy(&report.to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_standby_without_a_holder_past_the_ttl_is_unhealthy() {
+        let pool = crate::storage::memory().await.unwrap();
+        let live = LiveHub {
+            lease: Some(LiveLease {
+                holder_machine_id: None,
+                holder_label: None,
+                no_holder_past_ttl: true,
+                ..standby_lease()
+            }),
+            ..LiveHub::default()
+        };
+
+        let report = status_report(&pool, &live).await;
+
+        assert_eq!(report["healthy"], false);
+        assert_eq!(report["problems"], json!(["no supervisor holds the lease"]));
+        assert!(report["status_hint"].as_str().unwrap().contains("no known machine"));
+    }
+
+    /// Account machines without lease support are a warning, never a problem: the line is in
+    /// `warnings` and the lease object while the status stays healthy (so `--check` passes);
+    /// none leaves the field off the wire.
+    #[tokio::test]
+    async fn machines_without_lease_support_are_a_warning_that_keeps_status_healthy() {
+        let pool = crate::storage::memory().await.unwrap();
+        let live = LiveHub {
+            lease: Some(LiveLease {
+                machines_without_lease: vec!["Desk".into(), "1 unpaired machine".into()],
+                ..standby_lease()
+            }),
+            ..LiveHub::default()
+        };
+
+        let report = status_report(&pool, &live).await;
+
+        assert_eq!(report["healthy"], true, "{report}");
+        assert_eq!(report["problems"], json!([]));
+        assert_eq!(report["warnings"], json!(["machines without lease support: Desk, 1 unpaired machine"]));
+        assert_eq!(reply_warnings(&report.to_string()), ["machines without lease support: Desk, 1 unpaired machine"]);
+        assert!(reply_healthy(&report.to_string()), "a warning never fails --check");
+        assert_eq!(report["supervisor_lease"]["machinesWithoutLease"], json!(["Desk", "1 unpaired machine"]));
+
+        let clean = status_report(&pool, &LiveHub { lease: Some(standby_lease()), ..LiveHub::default() }).await;
+        assert_eq!(clean["healthy"], true, "{clean}");
+        assert_eq!(clean["warnings"], json!([]));
+        assert!(clean["supervisor_lease"].get("machinesWithoutLease").is_none());
+    }
+
+    #[tokio::test]
+    async fn an_enrolled_machine_without_relay_mode_reports_the_lease_unavailable() {
+        let pool = crate::storage::memory().await.unwrap();
+        let live = LiveHub {
+            lease: Some(LiveLease {
+                holder_machine_id: None,
+                holder_label: None,
+                lease_unavailable: Some(PromotionBlock { code: "RELAY_MODE_OFF".into(), message: "relay mode off".into() }),
+                ..standby_lease()
+            }),
+            ..LiveHub::default()
+        };
+
+        let report = status_report(&pool, &live).await;
+
+        assert_eq!(report["healthy"], false);
+        assert_eq!(report["problems"], json!(["lease unavailable: relay mode off"]));
+        assert_eq!(report["supervisor_lease"]["leaseUnavailable"]["code"], "RELAY_MODE_OFF");
+    }
+
+    #[tokio::test]
+    async fn a_holder_reports_its_lease_and_no_hint() {
+        let pool = crate::storage::memory().await.unwrap();
+        let live = LiveHub {
+            lease: Some(LiveLease {
+                role: LeaseRole::Holder,
+                fence: 7,
+                lease_expires_in: 90,
+                unreachable_hosts: vec![UnreachableHost { host: Some("machine:mach-c".into()), reason: "timed out".into() }],
+                ..LiveLease::default()
+            }),
+            ..LiveHub::default()
+        };
+
+        let report = status_report(&pool, &live).await;
+
+        assert_eq!(report["problems"][0], "hub tasks are not running", "a stopped holder stays unhealthy");
+        let lease = &report["supervisor_lease"];
+        assert_eq!(lease["role"], "holder");
+        assert_eq!(lease["fence"], 7);
+        assert_eq!(lease["leaseExpiresIn"], 90);
+        assert_eq!(lease["unreachableHosts"], json!([{"host": "machine:mach-c", "reason": "timed out"}]));
+        assert!(report["status_hint"].is_null());
+        assert!(reply_status_hint(&report.to_string()).is_none());
+    }
+
+    #[tokio::test]
+    async fn unmapped_hosts_lists_each_unscoped_host_once() {
+        let pool = crate::storage::memory().await.unwrap();
+        sqlx::query("INSERT INTO fleet_inventory_cache(host_id, sessions, updated_at) VALUES('unmapped:stranger','[]','t'),('machine:mach-a','[]','t')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(unmapped_hosts(&pool).await, ["unmapped:stranger"]);
     }
 
     #[cfg(unix)]

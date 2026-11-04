@@ -16,6 +16,7 @@ mod admission;
 mod bound_session;
 mod completion;
 mod cutover;
+mod fence;
 mod memory;
 mod receipts;
 mod recovery;

@@ -35,6 +35,12 @@ fn token() -> Result<String> {
 
 /// A write method with a JSON body (`chat.postMessage`, `chat.update`).
 pub async fn post_json(method: &str, body: &Value) -> Result<Value> {
+    if !crate::holder::is_holder_now() {
+        return Err(HubError::message(format!(
+            "{}: slack {method} is held until this machine holds the supervisor lease",
+            crate::holder::SUPERVISOR_STANDBY
+        )));
+    }
     let token = token()?;
     let base = super::slack::api_base();
     let value: Value = client(&base)?

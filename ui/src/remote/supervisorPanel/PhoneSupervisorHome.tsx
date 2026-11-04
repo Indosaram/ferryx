@@ -34,6 +34,8 @@ export type PhoneSupervisorHomeProps = {
   readonly headerAction?: ReactNode;
   /** The session already open on this phone; tapping it returns to the Session screen. */
   readonly resume?: { readonly title: string; readonly subtitle: string; readonly onOpen: () => void } | null;
+  /** Supervisor lease cards (standby computers, lease warnings), shown above the panel. */
+  readonly lease?: ReactNode;
 };
 
 const ROW_BUTTON =
@@ -74,6 +76,7 @@ export function PhoneSupervisorHome(props: PhoneSupervisorHomeProps) {
         <div ref={scrollRef} className="relative flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-y-contain scrollbar-sleek">
           <PullToRefreshIndicator {...pull} />
           <div className={cn("flex w-full flex-col gap-5 px-4 pb-6", pullContent.className)} style={pullContent.style}>
+            {props.lease}
             {state.kind === "loading" ? (
               <p data-testid="phone-panel-loading" className="px-1 text-sm text-chat-foreground-secondary">
                 Checking your computers…

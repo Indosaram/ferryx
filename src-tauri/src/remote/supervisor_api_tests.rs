@@ -175,6 +175,12 @@ async fn a_machine_control_device_reads_the_snapshot_shape_without_a_hub() {
     assert_eq!(body["hub"]["available"], false);
     assert_eq!(body["hub"]["running"], false);
     assert!(body["hub"]["error"].is_null(), "{body}");
+    // No lease client in this daemon: it runs its own hub as an unleased holder.
+    assert_eq!(body["hub"]["role"], "holder", "{body}");
+    assert_eq!(body["hub"]["fence"], 0);
+    assert!(body["hub"]["holderPaired"].is_boolean());
+    assert_eq!(body["hub"]["unmappedHosts"], serde_json::json!([]));
+    assert_eq!(body["hub"]["unreachableHosts"], serde_json::json!([]));
     for list in ["lanes", "watched", "actions"] {
         assert!(body[list].is_array(), "{list} in {body}");
     }
@@ -220,6 +226,22 @@ async fn a_start_without_an_open_hub_is_supervisor_unavailable() {
 }
 
 #[tokio::test]
+async fn a_start_on_standby_is_409_supervisor_standby_naming_the_holder() {
+    let refused = start_refusal(&HubStartError::Standby {
+        holder_machine_id: Some("mach-b".into()),
+        holder_label: Some("Laptop B".into()),
+    });
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(refused.into_body(), 64 * 1024).await.expect("body"),
+    )
+    .expect("json");
+    assert_eq!(body["error"]["code"], SUPERVISOR_STANDBY_CODE);
+    assert_eq!(body["error"]["details"]["holderMachineId"], "mach-b");
+    assert_eq!(body["error"]["details"]["holderLabel"], "Laptop B");
+}
+
+#[tokio::test]
 async fn only_an_admitted_machine_control_device_may_start_the_hub() {
     let gateway = Gateway::start().await;
     let mirror = gateway.token(DevicePermission::Control, DeviceAccessScope::Mirror);
@@ -232,6 +254,106 @@ async fn only_an_admitted_machine_control_device_may_start_the_hub() {
         assert_eq!(status, 403, "{body}");
         assert_eq!(body["error"]["code"], "FORBIDDEN");
     }
+    gateway.stop().await;
+}
+
+/// A phone request, conversation, memory or pause on a standby is 409 SUPERVISOR_STANDBY with
+/// the holder in `details`, so the phone switches to it.
+#[tokio::test]
+async fn a_request_on_standby_is_409_supervisor_standby_naming_the_holder() {
+    let failure = ferryx_hub::holder::standby_failure(Some("mach-b"), Some("Laptop B"));
+    for refused in [
+        service_refusal(&failure),
+        pause_refusal(&LanePauseError::Supervisor(failure.clone())),
+    ] {
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(refused.into_body(), 64 * 1024).await.expect("body"),
+        )
+        .expect("json");
+        assert_eq!(body["error"]["code"], SUPERVISOR_STANDBY_CODE);
+        assert_eq!(body["error"]["details"]["holderMachineId"], "mach-b");
+        assert_eq!(body["error"]["details"]["holderLabel"], "Laptop B");
+    }
+}
+
+/// Over the real routes: with a hub open, a standby still answers a phone's request,
+/// conversation and memory read 409 SUPERVISOR_STANDBY naming the holder, never its own state.
+#[tokio::test]
+async fn on_standby_the_phone_routes_answer_409_with_the_holder() {
+    let gateway = Gateway::start().await;
+    let (pool, goal_id, project_id) = populate(&gateway).await;
+    let token = gateway.authorized_machine_token();
+    crate::hub_runtime::stand_by_for_test(Some(("mach-b", "Laptop B")));
+
+    let pause = serde_json::json!({"requestId": "qa-standby-1", "projectId": project_id, "goalId": goal_id,
+        "expectedRevision": 1, "action": "pause", "payload": {"reason": "phone"}});
+    let request = gateway.post_to("/api/v1/supervisor/request", &token, &pause.to_string()).await;
+    let conversation = gateway
+        .get(&format!("/api/v1/supervisor/conversation?projectId={project_id}"), &token)
+        .await;
+    let memory = gateway.get("/api/v1/supervisor/memory", &token).await;
+    crate::hub_runtime::stand_by_for_test(None);
+
+    for (route, (status, _, body)) in [("request", request), ("conversation", conversation), ("memory", memory)] {
+        assert_eq!(status, 409, "{route}: {body}");
+        assert_eq!(body["error"]["code"], SUPERVISOR_STANDBY_CODE, "{route}: {body}");
+        assert_eq!(body["error"]["details"]["holderMachineId"], "mach-b", "{route}");
+        assert_eq!(body["error"]["details"]["holderLabel"], "Laptop B", "{route}");
+    }
+    assert_eq!(goal_row(&pool, &goal_id).await, ("ready".into(), 1), "the standby changed nothing");
+    gateway.stop().await;
+}
+
+/// Observations need the agent-control grant: a view-only device (only a mirror device can
+/// be view-only), a mirror Control device and a machine device outside the policy are refused
+/// 403 before the hub is consulted; an admitted machine Control device reaches it (503 here,
+/// no hub open).
+#[tokio::test]
+async fn only_an_admitted_machine_control_device_may_send_observations() {
+    let gateway = Gateway::start().await;
+    let view = gateway.token(DevicePermission::View, DeviceAccessScope::Mirror);
+    let mirror = gateway.token(DevicePermission::Control, DeviceAccessScope::Mirror);
+    let outsider = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    let control = gateway.authorized_machine_token();
+    let observation = serde_json::json!({"kind": "keystrokes", "sessionId": "pane-1", "nowMs": 1}).to_string();
+
+    for token in [&view, &mirror, &outsider] {
+        let (status, _, body) = gateway.post_to("/api/v1/supervisor/observe", token, &observation).await;
+        assert_eq!(status, 403, "{body}");
+        assert_eq!(body["error"]["code"], "FORBIDDEN");
+    }
+    let (status, _, body) = gateway.post_to("/api/v1/supervisor/observe", &control, &observation).await;
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body["error"]["code"], SUPERVISOR_UNAVAILABLE_CODE);
+    gateway.stop().await;
+}
+
+/// An observation writes to the holder's hub, so the observe route is a mutating call: an
+/// admitted machine device that is view-only still reads the supervisor (a non-mutating
+/// call) but is refused 403 on observe and on pause, before the hub is consulted. With
+/// Control the same device reaches the hub (503 here, none open).
+#[tokio::test]
+async fn a_view_only_machine_device_reads_but_cannot_observe_or_pause() {
+    let gateway = Gateway::start().await;
+    let token = gateway.authorized_machine_token();
+    let device = gateway.state().auth_manager.validate_token(&token).expect("fixture device");
+    gateway.state().auth_manager.force_device_permission(&device.id, DevicePermission::View);
+    let observation = serde_json::json!({"kind": "keystrokes", "sessionId": "pane-1", "nowMs": 1}).to_string();
+
+    let (status, _, body) = gateway.get("/api/v1/supervisor", &token).await;
+    assert_eq!(status, 200, "a view-only device reads the snapshot: {body}");
+    let (status, _, body) = gateway.post_to("/api/v1/supervisor/observe", &token, &observation).await;
+    assert_eq!(status, 403, "observe is mutating: {body}");
+    assert_eq!(body["error"]["code"], "FORBIDDEN");
+    let (status, _, body) = gateway.post(&token, PAUSE).await;
+    assert_eq!(status, 403, "pause is mutating: {body}");
+    assert_eq!(body["error"]["code"], "FORBIDDEN");
+
+    gateway.state().auth_manager.force_device_permission(&device.id, DevicePermission::Control);
+    let (status, _, body) = gateway.post_to("/api/v1/supervisor/observe", &token, &observation).await;
+    assert_eq!(status, 503, "a Control device passes the grant check: {body}");
+    assert_eq!(body["error"]["code"], SUPERVISOR_UNAVAILABLE_CODE);
     gateway.stop().await;
 }
 
@@ -937,5 +1059,364 @@ async fn a_decision_undo_goes_to_autonomy_not_the_rule_store() {
     assert_eq!(body["error"]["code"], SUPERVISOR_UNAVAILABLE_CODE);
     let kept = log.list_today(0).await.unwrap().into_iter().find(|entry| entry.id == stored.id).unwrap();
     assert!(kept.undo.is_some(), "a refused undo keeps its handle");
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn the_checkpoint_and_move_routes_refuse_a_device_without_the_agent_control_grant() {
+    let gateway = Gateway::start().await;
+    let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    gateway.state().agent_control_policy.restrict_to(["another-device"]);
+
+    let (status, _, body) = gateway.get("/api/v1/supervisor/checkpoint", &token).await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"]["code"], "FORBIDDEN");
+    for (path, request) in [
+        ("/api/v1/supervisor/move", r#"{"force":false}"#),
+        ("/api/v1/supervisor/release-to", r#"{"targetMachineId":"mach-b"}"#),
+    ] {
+        let (status, _, body) = gateway.post_to(path, &token, request).await;
+        assert_eq!(status, 403, "{path}: {body}");
+        assert_eq!(body["error"]["code"], "FORBIDDEN");
+    }
+    let mirror = gateway.token(DevicePermission::Control, DeviceAccessScope::Mirror);
+    let (status, _, body) = gateway.get("/api/v1/supervisor/checkpoint", &mirror).await;
+    assert_eq!(status, 403, "{body}");
+    gateway.stop().await;
+}
+
+/// The checkpoint archive carries secrets: an admitted machine device that is view-only is
+/// refused 403, while the same device with Control passes the grant check.
+#[tokio::test]
+async fn a_view_only_machine_device_cannot_download_the_checkpoint() {
+    let gateway = Gateway::start().await;
+    let token = gateway.authorized_machine_token();
+    let device = gateway.state().auth_manager.validate_token(&token).expect("fixture device");
+    gateway.state().auth_manager.force_device_permission(&device.id, DevicePermission::View);
+
+    let (status, _, body) = gateway.get("/api/v1/supervisor/checkpoint", &token).await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"]["code"], "FORBIDDEN");
+
+    gateway.state().auth_manager.force_device_permission(&device.id, DevicePermission::Control);
+    let (status, _, _) = gateway.get("/api/v1/supervisor/checkpoint", &token).await;
+    assert_ne!(status, 403, "a Control device passes the grant check");
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn a_move_without_an_open_hub_is_unavailable() {
+    let gateway = Gateway::start().await;
+    let token = gateway.authorized_machine_token();
+
+    let (status, _, body) = gateway.post_to("/api/v1/supervisor/move", &token, r#"{"force":false}"#).await;
+
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body["error"]["code"], "SUPERVISOR_UNAVAILABLE");
+    let replace = r#"{"force":true,"replaceLocal":true}"#;
+    let (status, _, body) = gateway.post_to("/api/v1/supervisor/move", &token, replace).await;
+    assert_eq!((status, body["error"]["code"].as_str()), (503, Some("SUPERVISOR_UNAVAILABLE")), "replaceLocal is a move field");
+    let (status, _, body) = gateway.post_to("/api/v1/supervisor/move", &token, r#"{"forced":true}"#).await;
+    assert_eq!(status, 400, "{body}");
+    gateway.stop().await;
+}
+
+impl Gateway {
+    /// A device issued from an account grant the account vouched was requested by
+    /// `machine_id`, an enrolled machine of this account (a standby pairing to the holder).
+    fn machine_peer_token(&self, machine_id: &str) -> String {
+        let auth = &self.state().auth_manager;
+        let pairing = format!("peer-grant-{machine_id}");
+        auth.register_account_machine_capability(
+            &pairing,
+            DevicePermission::Control,
+            DeviceAccessScope::Machine,
+            None,
+            Some(machine_id.to_owned()),
+        )
+        .expect("machine peer grant");
+        auth.exchange_pairing_code_with_installation(&pairing, "standby", Some(machine_id))
+            .expect("token")
+            .0
+    }
+
+    /// A phone or the web app: a machine Control grant with no account-machine claim, carrying
+    /// the same installation id a machine would, so only the vouched marker differs.
+    fn phone_token(&self, installation_id: &str) -> String {
+        let auth = &self.state().auth_manager;
+        let pairing = format!("phone-grant-{installation_id}");
+        auth.register_scoped_pairing_capability_with_attach(
+            &pairing,
+            DevicePermission::Control,
+            DeviceAccessScope::Machine,
+            None,
+        )
+        .expect("phone grant");
+        auth.exchange_pairing_code_with_installation(&pairing, "phone", Some(installation_id))
+            .expect("token")
+            .0
+    }
+}
+
+/// With agent control off (a fresh install), a standby of the same account still reaches the
+/// holder's checkpoint and release-to: both pass the grant check (no hub here, so neither is
+/// 403). The same device stays refused on the phone routes, which follow the switch.
+#[tokio::test]
+async fn a_same_account_machine_peer_reaches_checkpoint_and_release_to_with_agent_control_off() {
+    let gateway = Gateway::start().await;
+    gateway.state().agent_control_policy.set_enabled(false);
+    let token = gateway.machine_peer_token("mach-standby");
+    let device = gateway.state().auth_manager.validate_token(&token).expect("peer device");
+    assert_eq!(device.account_machine_id.as_deref(), Some("mach-standby"));
+
+    let (status, _, body) = gateway.get("/api/v1/supervisor/checkpoint", &token).await;
+    assert_ne!(status, 403, "checkpoint: {body}");
+    assert_ne!(status, 401, "checkpoint: {body}");
+    let (status, _, body) = gateway
+        .post_to("/api/v1/supervisor/release-to", &token, r#"{"targetMachineId":"mach-standby"}"#)
+        .await;
+    assert_eq!(status, 503, "release-to passes the grant check: {body}");
+    assert_eq!(body["error"]["code"], SUPERVISOR_UNAVAILABLE_CODE);
+    let observation = serde_json::json!({"kind": "keystrokes", "sessionId": "pane-1", "nowMs": 1}).to_string();
+    let (status, _, body) = gateway.post_to("/api/v1/supervisor/observe", &token, &observation).await;
+    assert_eq!(status, 503, "observe passes the grant check: {body}");
+
+    // Phone routes are not machine-to-machine: the switch still governs them.
+    let (status, _, body) = gateway.get("/api/v1/supervisor", &token).await;
+    assert_eq!(status, 403, "snapshot follows the switch: {body}");
+    let (status, _, body) = gateway.post(&token, PAUSE).await;
+    assert_eq!(status, 403, "pause follows the switch: {body}");
+    gateway.stop().await;
+}
+
+/// A phone or web device with agent control off is refused on the machine-peer routes and on
+/// the snapshot, exactly as before: only the account-vouched marker exempts a device, never
+/// the machine scope or an installation id a client chose.
+#[tokio::test]
+async fn a_phone_device_with_agent_control_off_is_still_forbidden_on_checkpoint_release_to_and_snapshot() {
+    let gateway = Gateway::start().await;
+    gateway.state().agent_control_policy.set_enabled(false);
+    let token = gateway.phone_token("mach-standby");
+    let device = gateway.state().auth_manager.validate_token(&token).expect("phone device");
+    assert_eq!(device.account_machine_id, None);
+
+    let (status, _, body) = gateway.get("/api/v1/supervisor/checkpoint", &token).await;
+    assert_eq!(status, 403, "checkpoint: {body}");
+    assert_eq!(body["error"]["code"], "FORBIDDEN");
+    assert_eq!(body["error"]["details"]["refusal"], "agentControl", "the switch refusal is marked: {body}");
+    let (status, _, body) = gateway
+        .post_to("/api/v1/supervisor/release-to", &token, r#"{"targetMachineId":"mach-standby"}"#)
+        .await;
+    assert_eq!(status, 403, "release-to: {body}");
+    assert_eq!(body["error"]["code"], "FORBIDDEN");
+    assert_eq!(body["error"]["details"]["refusal"], "agentControl", "{body}");
+    let (status, _, body) = gateway.get("/api/v1/supervisor", &token).await;
+    assert_eq!(status, 403, "snapshot: {body}");
+    assert_eq!(body["error"]["code"], "FORBIDDEN");
+    gateway.stop().await;
+}
+
+/// The exemption covers the switch only: a view-only machine peer is still refused every
+/// mutation (checkpoint, release-to), and an owner's explicit exclusion still refuses a peer.
+#[tokio::test]
+async fn a_view_only_or_excluded_machine_peer_is_still_refused() {
+    let gateway = Gateway::start().await;
+    gateway.state().agent_control_policy.set_enabled(false);
+    let token = gateway.machine_peer_token("mach-standby");
+    let device = gateway.state().auth_manager.validate_token(&token).expect("peer device");
+    gateway.state().auth_manager.force_device_permission(&device.id, DevicePermission::View);
+
+    let (status, _, body) = gateway.get("/api/v1/supervisor/checkpoint", &token).await;
+    assert_eq!(status, 403, "a view-only peer cannot download the checkpoint: {body}");
+    assert!(body["error"]["details"]["refusal"].is_null(), "a permission refusal is not the switch: {body}");
+    let (status, _, body) = gateway
+        .post_to("/api/v1/supervisor/release-to", &token, r#"{"targetMachineId":"mach-standby"}"#)
+        .await;
+    assert_eq!(status, 403, "a view-only peer cannot move the supervisor: {body}");
+
+    gateway.state().auth_manager.force_device_permission(&device.id, DevicePermission::Control);
+    gateway.state().agent_control_policy.exclude([device.id.clone()]);
+    let (status, _, body) = gateway.get("/api/v1/supervisor/checkpoint", &token).await;
+    assert_eq!(status, 403, "an excluded peer is refused: {body}");
+    assert!(body["error"]["details"]["refusal"].is_null(), "an exclusion is never repaired around: {body}");
+    gateway.stop().await;
+}
+
+/// The agent-control refusal marker goes only to an unmarked grant refused by the switch: the
+/// same unmarked device (a phone, or a standby's pre-marker grant) gets no marker once it is
+/// view-only or excluded, so a standby never redeems around a permission refusal or an
+/// owner's exclusion.
+#[tokio::test]
+async fn an_unmarked_view_only_or_excluded_device_gets_no_agent_control_marker() {
+    let gateway = Gateway::start().await;
+    gateway.state().agent_control_policy.set_enabled(false);
+    let token = gateway.phone_token("mach-standby");
+    let device = gateway.state().auth_manager.validate_token(&token).expect("phone device");
+    assert_eq!(device.account_machine_id, None);
+
+    let (status, _, body) = gateway.get("/api/v1/supervisor/checkpoint", &token).await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"]["details"]["refusal"], "agentControl", "the switch refusal is marked: {body}");
+
+    gateway.state().auth_manager.force_device_permission(&device.id, DevicePermission::View);
+    let (status, _, body) = gateway.get("/api/v1/supervisor/checkpoint", &token).await;
+    assert_eq!(status, 403, "{body}");
+    assert!(body["error"]["details"]["refusal"].is_null(), "a view-only refusal is not marked: {body}");
+
+    gateway.state().auth_manager.force_device_permission(&device.id, DevicePermission::Control);
+    gateway.state().agent_control_policy.exclude([device.id.clone()]);
+    let (status, _, body) = gateway.get("/api/v1/supervisor/checkpoint", &token).await;
+    assert_eq!(status, 403, "{body}");
+    assert!(body["error"]["details"]["refusal"].is_null(), "an exclusion is not marked: {body}");
+    gateway.stop().await;
+}
+
+/// A hub directory holding another supervisor's archived hub (`hub.sqlite.pre-lease-*`) with
+/// one open goal, as a standby keeps it; returns (dir, archived supervisor id, goal id).
+async fn archived_hub() -> (tempfile::TempDir, String, String) {
+    use ferryx_hub::supervisor::request::{self, RequestContext};
+    let dir = tempfile::tempdir().expect("hub dir");
+    let pool = ferryx_hub::storage::connect(&dir.path().join("hub.sqlite")).await.expect("archived hub db");
+    let (identity, _, _) = ferryx_hub::supervisor::provision_owner(
+        &pool,
+        OWNER,
+        "qa-supervisor",
+        "github.com/example/qa",
+        "local",
+        "/qa/repo/.git",
+    )
+    .await
+    .expect("owner setup");
+    let context = RequestContext {
+        principal: OWNER.into(),
+        adapter: ferryx_hub::supervisor::ChannelProvider::Desktop,
+        channel_binding_id: None,
+        control: None,
+        memory: None,
+    };
+    let answer = request::handle(
+        &pool,
+        &context,
+        serde_json::json!({"requestId": "qa-archived-1", "action": "submit", "payload": {
+            "request": "Create result.txt containing READY.",
+            "work": {"title": "Write result.txt", "instruction": "Create result.txt containing READY.",
+                "requirements": [{"id": "r1", "text": "result.txt contains READY", "verifier": "verify.sh exits 0"}],
+                "operations": ["edit", "test"]}}}),
+    )
+    .await
+    .expect("archived goal");
+    assert_eq!(answer["outcome"], "admitted", "{answer}");
+    let goal_id = answer["receipt"]["goal_id"].as_str().expect("goal id").to_owned();
+    pool.close().await;
+    ferryx_hub::adoption::archive_before_replace(dir.path(), 1_800_000_000)
+        .expect("archive")
+        .expect("archived once");
+    (dir, identity.supervisor_id, goal_id)
+}
+
+/// The phone's Adopt action: the route exists and follows the move's grant rules, so a
+/// view-only device is refused 403 before anything is adopted.
+#[tokio::test]
+async fn adopt_archived_refuses_a_view_only_device() {
+    let gateway = Gateway::start().await;
+    let (dir, _, goal_id) = archived_hub().await;
+    *gateway.state().supervisor_test_hub_dir.write() = Some(dir.path().to_owned());
+    let token = gateway.authorized_machine_token();
+    let device = gateway.state().auth_manager.validate_token(&token).expect("fixture device");
+    gateway.state().auth_manager.force_device_permission(&device.id, DevicePermission::View);
+
+    let body = serde_json::json!({"goalIds": [goal_id]}).to_string();
+    let (status, _, body) = gateway.post_to("/api/v1/supervisor/adopt-archived", &token, &body).await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"]["code"], "FORBIDDEN");
+    assert!(ferryx_hub::adoption::adopted(dir.path()).expect("ledger").is_empty(), "nothing was adopted");
+    gateway.stop().await;
+}
+
+/// An owner Control device adopts a real archived goal through the real adoption code: the
+/// goal is submitted in process into the holder hub's request service (no daemon runs in this
+/// test, so a send over the daemon socket could not succeed), recorded in the ledger, and
+/// answered 200 `{adopted: [reports]}` as the CLI prints them. A goal that fails as a whole is
+/// reported beside the others; when every goal failed the typed refusal is the answer.
+#[tokio::test]
+async fn adopt_archived_submits_an_archived_goal_in_process_for_an_owner_control_device() {
+    let gateway = Gateway::start().await;
+    // The holder: the same owner under its own supervisor identity, with no goal yet.
+    let holder = ferryx_hub::storage::memory().await.expect("holder hub db");
+    let (holder_identity, _, _) = ferryx_hub::supervisor::provision_owner(
+        &holder,
+        OWNER,
+        "qa-supervisor",
+        "github.com/example/qa",
+        "local",
+        "/qa/repo/.git",
+    )
+    .await
+    .expect("holder owner setup");
+    *gateway.state().supervisor_test_hub.write() = Some((holder.clone(), OWNER.into()));
+    let (dir, archived_supervisor, goal_id) = archived_hub().await;
+    assert_ne!(holder_identity.supervisor_id, archived_supervisor, "two identities before adoption");
+    *gateway.state().supervisor_test_hub_dir.write() = Some(dir.path().to_owned());
+    let token = gateway.authorized_machine_token();
+    let path = "/api/v1/supervisor/adopt-archived";
+    let source = format!("archived:{archived_supervisor}:{goal_id}");
+
+    let (status, cache, body) = gateway.post_to(path, &token, r#"{"goalIds":[]}"#).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(cache.as_deref(), Some("no-store"));
+    let adopted = body["adopted"].as_array().expect("an adopted array");
+    assert_eq!(adopted.len(), 1, "every adoptable goal: {body}");
+    assert_eq!(adopted[0]["goalId"], goal_id.as_str());
+    assert_eq!(adopted[0]["sourceId"], source.as_str());
+    assert_eq!(adopted[0]["adopted"], true, "{body}");
+    let holder_goal = adopted[0]["answer"]["receipt"]["goal_id"].as_str().expect("holder goal").to_owned();
+    assert!(
+        ferryx_hub::supervisor::goal_of(&holder, &holder_goal).await.expect("holder read").is_some(),
+        "the goal was admitted into the holder hub in process"
+    );
+    let ledger = ferryx_hub::adoption::adopted(dir.path()).expect("ledger");
+    assert_eq!(ledger.len(), 1);
+    assert_eq!(ledger[0].source_id, source);
+
+    // An explicit id re-adopts (the holder dedupes); an unknown one fails beside it.
+    let both = serde_json::json!({"goalIds": [goal_id, "missing"]}).to_string();
+    let (status, _, body) = gateway.post_to(path, &token, &both).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["adopted"][0]["answer"]["receipt"]["goal_id"], holder_goal.as_str());
+    assert_eq!(body["adopted"][1]["goalId"], "missing");
+    assert_eq!(body["adopted"][1]["adopted"], false);
+    assert_eq!(body["adopted"][1]["error"]["code"], "NOT_FOUND");
+
+    let (status, _, body) = gateway.post_to(path, &token, r#"{"goalIds":["missing"]}"#).await;
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["error"]["code"], "NOT_FOUND");
+
+    let (status, _, body) = gateway.post_to(path, &token, r#"{"goalId":"g1"}"#).await;
+    assert_eq!(status, 400, "an unknown field is refused: {body}");
+    gateway.stop().await;
+}
+
+/// A send the holder side refuses is a typed error, never 200: on standby with no paired
+/// inventory the real send step answers SUPERVISOR_STANDBY for every goal, so the route
+/// answers 409 naming the holder, records nothing, and the goal stays adoptable.
+#[tokio::test]
+async fn adopt_archived_answers_a_refused_send_with_its_typed_error() {
+    let gateway = Gateway::start().await;
+    let (dir, _, goal_id) = archived_hub().await;
+    *gateway.state().supervisor_test_hub_dir.write() = Some(dir.path().to_owned());
+    let token = gateway.authorized_machine_token();
+
+    crate::hub_runtime::stand_by_for_test(Some(("mach-b", "Laptop B")));
+    let body = serde_json::json!({"goalIds": [goal_id]}).to_string();
+    let one = gateway.post_to("/api/v1/supervisor/adopt-archived", &token, &body).await;
+    let all = gateway.post_to("/api/v1/supervisor/adopt-archived", &token, "{}").await;
+    crate::hub_runtime::stand_by_for_test(None);
+
+    for (case, (status, _, body)) in [("one", one), ("all", all)] {
+        assert_eq!(status, 409, "{case}: {body}");
+        assert_eq!(body["error"]["code"], SUPERVISOR_STANDBY_CODE, "{case}: {body}");
+        assert_eq!(body["error"]["details"]["holderMachineId"], "mach-b", "{case}: {body}");
+    }
+    assert!(ferryx_hub::adoption::adopted(dir.path()).expect("ledger").is_empty(), "nothing recorded");
     gateway.stop().await;
 }

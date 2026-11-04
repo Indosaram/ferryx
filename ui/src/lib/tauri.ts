@@ -1960,6 +1960,7 @@ export async function getAccountEnrollmentStatus(): Promise<AccountEnrollmentSta
 export async function enrollThisMachine(
   origin: string,
   enrollmentCode: string,
+  sessionToken?: string,
 ): Promise<AccountEnrollmentStatus> {
   if (!isTauri()) {
     throw new Error("Linking this computer is available only in the desktop app");
@@ -1967,6 +1968,8 @@ export async function enrollThisMachine(
   return invokeCommand<AccountEnrollmentStatus>("cmd_account_enroll_this_machine", {
     origin,
     enrollmentCode,
+    // Saved owner-only by the daemon so it can pair to the supervisor lease holder itself.
+    sessionToken: sessionToken ?? null,
   });
 }
 

@@ -357,6 +357,51 @@ pub(crate) async fn handle(
     handle_as(state, op, "owner", None).await
 }
 
+/// The daemon-socket reply of a refused supervisor fence. Nothing ran.
+pub(crate) fn fence_response(
+    refusal: &crate::agent_control::fence::FenceRefusal,
+) -> crate::daemon::protocol::DaemonResponse {
+    crate::daemon::protocol::DaemonResponse::Error {
+        message: refusal.message(),
+        code: Some(refusal.code().to_string()),
+        details: None,
+    }
+}
+
+/// Ratchet a supervisor request's fence before it executes on this daemon. A request without
+/// a fence (manual, user, an older hub) is never fenced. A refusal is audited; nothing runs.
+async fn admit_fence(
+    state: &Arc<RemoteGatewayState>,
+    op: &AgentControlOp,
+    actor: &str,
+    fence: Option<&crate::agent_control::fence::SupervisorFence>,
+) -> Result<(), crate::agent_control::fence::FenceRefusal> {
+    let Some(fence) = fence else {
+        return Ok(());
+    };
+    let admitted = state.supervisor_fence.admit(fence).await;
+    if let Err(refusal) = &admitted {
+        record_audit(state, AuditRecord::for_op(actor, op, refusal.code()));
+    }
+    admitted
+}
+
+/// One owner-socket operation that may carry a supervisor fence: a stale fence is refused
+/// with `STALE_SUPERVISOR_FENCE` and the operation never runs; a higher one is stored first.
+pub(crate) async fn handle_fenced(
+    state: &Arc<RemoteGatewayState>,
+    op: AgentControlOp,
+    fence: Option<crate::agent_control::fence::SupervisorFence>,
+) -> crate::daemon::protocol::DaemonResponse {
+    if let Err(refusal) = admit_fence(state, &op, "owner", fence.as_ref()).await {
+        return fence_response(&refusal);
+    }
+    match handle(state, op).await {
+        Ok(result) => crate::daemon::protocol::DaemonResponse::AgentControlOk { result },
+        Err(error) => error_response(error),
+    }
+}
+
 /// Run one operation as `actor`, re-checking `authorize` inside every input transaction.
 ///
 /// Every call, including a refusal, is appended to the agent-control audit log with the device id.
@@ -896,8 +941,9 @@ pub(crate) async fn forward_daemon(
     hosts: &crate::paired_host::service::PairedHostService,
     host_id: String,
     op: AgentControlOp,
+    fence: Option<crate::agent_control::fence::SupervisorFence>,
 ) -> crate::daemon::protocol::DaemonResponse {
-    let failure = match forward_once(hosts, &host_id, op.clone()).await {
+    let failure = match forward_once(hosts, &host_id, op.clone(), fence).await {
         Ok(result) => {
             record_audit(state, AuditRecord::for_op("owner", &op, "OK"));
             return crate::daemon::protocol::DaemonResponse::AgentControlOk { result };
@@ -916,6 +962,7 @@ async fn forward_once(
     hosts: &crate::paired_host::service::PairedHostService,
     host_id: &str,
     op: AgentControlOp,
+    fence: Option<crate::agent_control::fence::SupervisorFence>,
 ) -> Result<serde_json::Value, ForwardFailure> {
     // A delivery to a host without causal receipts keeps its own code, so the supervisor holds
     // it as a missing capability instead of an untyped refusal.
@@ -934,7 +981,7 @@ async fn forward_once(
     let request = crate::paired_host::client::OperationRequest {
         host_id: host.host_id,
         generation: host.generation,
-        operation: crate::paired_host::client::Operation::AgentControl { op },
+        operation: crate::paired_host::client::Operation::AgentControl { op, fence },
     };
     // One round trip. MachineClient does not mint a new request id, and this function does not
     // call it again when the answer is ambiguous.
@@ -1001,6 +1048,89 @@ fn control_finish(result: Result<serde_json::Value, ScopeError>) -> Response {
     }
 }
 
+/// The machine error a refused supervisor fence answers with on the paired route.
+fn fence_refusal(refusal: &crate::agent_control::fence::FenceRefusal) -> Response {
+    let status = match refusal {
+        crate::agent_control::fence::FenceRefusal::Invalid(_) => StatusCode::BAD_REQUEST,
+        crate::agent_control::fence::FenceRefusal::NotPersisted(_)
+        | crate::agent_control::fence::FenceRefusal::Unreadable(_) => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        _ => StatusCode::CONFLICT,
+    };
+    machine_error_with_details(status, refusal.code(), &refusal.message(), serde_json::Map::new())
+}
+
+/// A paired send, answer or stop: a supervisor fence in the body is ratcheted before the
+/// operation runs; a body without one is a person's or an older hub's and is never fenced.
+async fn control_fenced(
+    state: &Arc<RemoteGatewayState>,
+    op: AgentControlOp,
+    actor: &str,
+    authorize: Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>,
+    fence: Option<u64>,
+    account: Option<String>,
+) -> Response {
+    let fence = match crate::agent_control::fence::SupervisorFence::from_wire(fence, account) {
+        Ok(fence) => fence,
+        Err(refusal) => return fence_refusal(&refusal),
+    };
+    if let Err(refusal) = admit_fence(state, &op, actor, fence.as_ref()).await {
+        return fence_refusal(&refusal);
+    }
+    control_finish(handle_as(state, op, actor, Some(authorize)).await)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct FenceBody {
+    account: String,
+    fence: u64,
+}
+
+/// `POST /api/v1/supervisor/fence`: a new lease holder raises this machine's fence for its
+/// account before its first dispatch, so the previous holder's lower fence is refused here
+/// from now on. A lower fence than the stored one is refused `STALE_SUPERVISOR_FENCE`.
+pub(crate) async fn http_supervisor_fence(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    body: Result<Json<FenceBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let device = match http_machine_peer(&state, &headers, true) {
+        Ok(device) => device,
+        Err(response) => return *response,
+    };
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => {
+            return reference_chat_error(
+                ScopeErrorCode::InvalidRequest,
+                "the fence body is not readable",
+            )
+        }
+    };
+    let fence = match crate::agent_control::fence::SupervisorFence::from_wire(
+        Some(body.fence),
+        Some(body.account),
+    ) {
+        Ok(Some(fence)) => fence,
+        Ok(None) => {
+            return reference_chat_error(ScopeErrorCode::InvalidRequest, "the fence is missing")
+        }
+        Err(refusal) => return fence_refusal(&refusal),
+    };
+    match state.supervisor_fence.admit_push(&fence).await {
+        Ok(()) => {
+            tracing::info!(device = %device.id, fence = fence.fence, "a supervisor lease holder raised this machine's fence");
+            control_json(serde_json::json!({
+                "account": fence.account,
+                "fence": state.supervisor_fence.max_for(&fence.account).await,
+            }))
+        }
+        Err(refusal) => fence_refusal(&refusal),
+    }
+}
+
 #[allow(clippy::result_large_err)]
 pub(crate) fn http_device(
     state: &RemoteGatewayState,
@@ -1018,6 +1148,51 @@ pub(crate) fn http_device(
         state.agent_control_policy.permits(&device.id),
     )
     .map_err(|error| reference_chat_refusal(&error))?;
+    Ok(device)
+}
+
+/// [`http_device`] for the same-account machine-to-machine supervisor routes only (checkpoint,
+/// release-to, observe, forwarded supervisor requests and fence pushes). A device the account
+/// service vouched is an enrolled machine of this account ([`DeviceInfo::account_machine_id`],
+/// set from the sealed grant offer) is not governed by the per-machine agent-control switch
+/// or its allowlist; scope, permission and an explicit exclusion still apply. Every other
+/// device, a phone or the web app included, follows [`http_device`] exactly. The refusal is
+/// boxed: a `Response` is large, and callers return it as `*response`.
+pub(crate) fn http_machine_peer(
+    state: &RemoteGatewayState,
+    headers: &HeaderMap,
+    mutation: bool,
+) -> Result<DeviceInfo, Box<Response>> {
+    let token = extract_token(headers).ok_or_else(|| {
+        Box::new(reference_chat_error(ScopeErrorCode::Unauthorized, "missing auth token"))
+    })?;
+    let device = state.auth_manager.validate_token(&token).map_err(|_| {
+        Box::new(reference_chat_error(ScopeErrorCode::Unauthorized, "invalid or revoked token"))
+    })?;
+    let allowed = if device.account_machine_id.is_some() {
+        !state.agent_control_policy.excludes(&device.id)
+    } else {
+        state.agent_control_policy.permits(&device.id)
+    };
+    // A grant without the account's same-machine mark refused only by the switch (or its
+    // allowlist) is marked with a fixed detail a standby keys its grant repair on, so neither
+    // the supervisor's own FORBIDDEN outcomes nor a permission refusal triggers it. An explicit
+    // exclusion is never marked: a fresh grant would be a new, unexcluded device.
+    let repairable = device.account_machine_id.is_none()
+        && !state.agent_control_policy.excludes(&device.id)
+        && authorize_agent_control(&device, mutation, true).is_ok();
+    authorize_agent_control(&device, mutation, allowed).map_err(|error| {
+        if repairable && !allowed {
+            let mut details = serde_json::Map::new();
+            details.insert(
+                crate::agent_control::policy::REFUSAL_DETAIL.into(),
+                crate::agent_control::policy::AGENT_CONTROL_REFUSAL.into(),
+            );
+            Box::new(machine_error_with_details(StatusCode::FORBIDDEN, "FORBIDDEN", &error.message, details))
+        } else {
+            Box::new(reference_chat_refusal(&error))
+        }
+    })?;
     Ok(device)
 }
 
@@ -1069,6 +1244,11 @@ pub(crate) struct SendBody {
     /// Present on a delivery: send, then wait up to this long for this request's turn start.
     #[serde(default)]
     observe_ms: Option<u64>,
+    /// A supervisor's lease fence and its account; absent on a person's send.
+    #[serde(default)]
+    supervisor_fence: Option<u64>,
+    #[serde(default)]
+    supervisor_account: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1079,6 +1259,10 @@ pub(crate) struct AnswerBody {
     answer: crate::remote::reference_chat::types::ReferencePromptAnswer,
     #[serde(default)]
     request_id: Option<String>,
+    #[serde(default)]
+    supervisor_fence: Option<u64>,
+    #[serde(default)]
+    supervisor_account: Option<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1086,6 +1270,10 @@ pub(crate) struct AnswerBody {
 pub(crate) struct StopBody {
     #[serde(default)]
     request_id: Option<String>,
+    #[serde(default)]
+    supervisor_fence: Option<u64>,
+    #[serde(default)]
+    supervisor_account: Option<String>,
 }
 
 fn query_error(rejection: QueryRejection) -> Response {
@@ -1198,15 +1386,15 @@ pub(crate) async fn http_send(
             request_id,
         },
     };
-    control_finish(
-        handle_as(
-            &state,
-            op,
-            &device.id,
-            Some(authorize),
-        )
-        .await,
+    control_fenced(
+        &state,
+        op,
+        &device.id,
+        authorize,
+        body.supervisor_fence,
+        body.supervisor_account,
     )
+    .await
 }
 
 pub(crate) async fn http_answer(
@@ -1229,21 +1417,21 @@ pub(crate) async fn http_answer(
         }
     };
     let authorize = http_reauthorize(&state, &headers);
-    control_finish(
-        handle_as(
-            &state,
-            AgentControlOp::Answer {
-                session_id,
-                prompt_id: body.prompt_id,
-                screen_revision: body.screen_revision,
-                answer: body.answer,
-                request_id: body.request_id,
-            },
-            &device.id,
-            Some(authorize),
-        )
-        .await,
+    control_fenced(
+        &state,
+        AgentControlOp::Answer {
+            session_id,
+            prompt_id: body.prompt_id,
+            screen_revision: body.screen_revision,
+            answer: body.answer,
+            request_id: body.request_id,
+        },
+        &device.id,
+        authorize,
+        body.supervisor_fence,
+        body.supervisor_account,
     )
+    .await
 }
 
 pub(crate) async fn http_stop(
@@ -1277,24 +1465,34 @@ async fn stop_session(
         session_id,
         request_id: body.request_id,
     };
-    control_ref_op(state, headers, device, host_id, op).await
+    control_ref_op(state, headers, device, host_id, op, body.supervisor_fence, body.supervisor_account).await
 }
 
 /// One op for one authorized device: in-process for a pane on this computer, else forwarded to
 /// the paired computer that owns it through the same paired-host forward the daemon's
-/// `AgentControl { host_id: Some(..) }` request uses.
+/// `AgentControl { host_id: Some(..) }` request uses. A supervisor fence in the body is
+/// ratcheted here before a local op runs, and carried to the paired computer, which ratchets it
+/// before its op runs; a body without one is a person's or an older hub's and is never fenced.
 async fn control_ref_op(
     state: &Arc<RemoteGatewayState>,
     headers: &HeaderMap,
     device: &DeviceInfo,
     host_id: Option<String>,
     op: AgentControlOp,
+    fence: Option<u64>,
+    account: Option<String>,
 ) -> Response {
     let authorize = http_reauthorize(state, headers);
-    control_finish(match host_id {
-        None => handle_as(state, op, &device.id, Some(authorize)).await,
-        Some(host_id) => forward_as(state, host_id, op, &device.id, authorize).await,
-    })
+    match host_id {
+        None => control_fenced(state, op, &device.id, authorize, fence, account).await,
+        Some(host_id) => {
+            let fence = match crate::agent_control::fence::SupervisorFence::from_wire(fence, account) {
+                Ok(fence) => fence,
+                Err(refusal) => return fence_refusal(&refusal),
+            };
+            control_finish(forward_as(state, host_id, op, &device.id, authorize, fence).await)
+        }
+    }
 }
 
 /// Forward one input op for a paired computer's pane, in-process, as one authorized device.
@@ -1311,6 +1509,7 @@ async fn forward_as(
     mut op: AgentControlOp,
     actor: &str,
     authorize: Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>,
+    fence: Option<crate::agent_control::fence::SupervisorFence>,
 ) -> Result<serde_json::Value, ScopeError> {
     match &mut op {
         AgentControlOp::Stop { request_id, .. } | AgentControlOp::Answer { request_id, .. } => {
@@ -1319,7 +1518,7 @@ async fn forward_as(
         _ => {}
     }
     let owner_answer = crate::hub_runtime::panel_autonomy::forwarded_owner_answer_of(&host_id, &op);
-    forward_with(state, host_id, op, actor, authorize, owner_answer).await
+    forward_with(state, host_id, op, actor, authorize, fence, owner_answer).await
 }
 
 /// The forward itself, with the owner answer to record already claimed (so it can be tested
@@ -1331,6 +1530,7 @@ async fn forward_with(
     op: AgentControlOp,
     actor: &str,
     authorize: Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>,
+    fence: Option<crate::agent_control::fence::SupervisorFence>,
     owner_answer: Option<crate::hub_runtime::panel_autonomy::PendingOwnerAnswer>,
 ) -> Result<serde_json::Value, ScopeError> {
     let result = match authorize() {
@@ -1340,7 +1540,7 @@ async fn forward_with(
                 ScopeErrorCode::InventoryIncomplete,
                 "this computer has no paired-host service",
             )),
-            Some(hosts) => forward_once(&hosts, &host_id, op.clone())
+            Some(hosts) => forward_once(&hosts, &host_id, op.clone(), fence)
                 .await
                 .map_err(|failure| reference_chat_scope(forward_scope_code(&failure.code), failure.message)),
         },
@@ -1498,7 +1698,7 @@ pub(crate) async fn http_decision_answer(
         Ok(target) => target,
         Err(error) => return reference_chat_refusal(&error),
     };
-    control_ref_op(&state, &headers, &device, host_id, decision_answer_op(session_id, body)).await
+    control_ref_op(&state, &headers, &device, host_id, decision_answer_op(session_id, body), None, None).await
 }
 
 #[cfg(test)]
@@ -1596,6 +1796,7 @@ mod tests {
             AgentControlOp::Stop { session_id: "pane-9".into(), request_id: None },
             "device-1",
             refuse,
+            None,
         )
         .await
         .expect_err("the second authorization check refuses");
@@ -1690,6 +1891,7 @@ mod tests {
             AgentControlOp::Stop { session_id: "s-1".into(), request_id: None },
             "device-1",
             allow(),
+            None,
         )
         .await
         .expect_err("an unreadable reply after delivery is not a success");
@@ -1824,7 +2026,7 @@ mod tests {
 
         let op = forwarded_tap();
         let pending = claim(&op).expect("the paired host's prompt is tracked");
-        let accepted = forward_with(&state, view.host_id.clone(), op.clone(), "device-1", allow(), Some(pending))
+        let accepted = forward_with(&state, view.host_id.clone(), op.clone(), "device-1", allow(), None, Some(pending))
             .await
             .expect("the paired host accepted the tap");
         assert_eq!(accepted["receipt"]["stage"], "accepted", "{accepted}");
@@ -1852,7 +2054,7 @@ mod tests {
                 *session_id = session.into();
             }
             let pending = claim(&refused).expect("tracked and unsettled");
-            let error = forward_with(&state, view.host_id.clone(), refused.clone(), "device-1", allow(), Some(pending))
+            let error = forward_with(&state, view.host_id.clone(), refused.clone(), "device-1", allow(), None, Some(pending))
                 .await
                 .expect_err("not accepted");
             assert_eq!(error.code, expected, "{session}: {}", error.message);
@@ -2319,6 +2521,8 @@ mod tests {
                 text: "echo hi".into(),
                 request_id: Some(request_id.into()),
                 observe_ms: None,
+                supervisor_fence: None,
+                supervisor_account: None,
             }))
         };
 
@@ -2349,6 +2553,152 @@ mod tests {
         .await;
         assert_eq!(accepted.status(), StatusCode::OK);
         assert!(!backend.writes.lock().expect("writes").is_empty(), "the enabled send typed its keys");
+    }
+
+    fn supervisor(account: &str, fence: u64) -> Option<crate::agent_control::fence::SupervisorFence> {
+        Some(crate::agent_control::fence::SupervisorFence {
+            account: account.into(),
+            fence,
+        })
+    }
+
+    fn send_op(session_id: &str, request_id: &str) -> AgentControlOp {
+        AgentControlOp::Send {
+            session_id: session_id.to_string(),
+            text: "echo hi".into(),
+            request_id: Some(request_id.into()),
+        }
+    }
+
+    fn error_code(response: &crate::daemon::protocol::DaemonResponse) -> Option<&str> {
+        match response {
+            crate::daemon::protocol::DaemonResponse::Error { code, .. } => code.as_deref(),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stale_supervisor_fence_is_refused_and_leaves_the_pane_untouched() {
+        let session_id = "agent-control-fence-stale";
+        let (backend, state) = pane(session_id, "$ ");
+
+        let newer = handle_fenced(&state, send_op(session_id, "fence-2"), supervisor("user-1", 2)).await;
+        assert!(
+            matches!(newer, crate::daemon::protocol::DaemonResponse::AgentControlOk { .. }),
+            "{newer:?}"
+        );
+        let typed = backend.write_attempts.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(typed > 0, "the current holder's send typed");
+
+        let stale = handle_fenced(&state, send_op(session_id, "fence-1"), supervisor("user-1", 1)).await;
+        assert_eq!(error_code(&stale), Some("STALE_SUPERVISOR_FENCE"), "{stale:?}");
+        assert_eq!(
+            backend.write_attempts.load(std::sync::atomic::Ordering::SeqCst),
+            typed,
+            "a stale supervisor typed nothing"
+        );
+        assert_eq!(state.supervisor_fence.max_for("user-1").await, 2);
+        let audit = state.agent_control_audit.recent();
+        assert_eq!(audit.last().expect("the refusal is audited").code, "STALE_SUPERVISOR_FENCE");
+    }
+
+    #[tokio::test]
+    async fn an_equal_fence_passes_and_a_request_without_one_is_never_fenced() {
+        let session_id = "agent-control-fence-manual";
+        let (backend, state) = pane(session_id, "$ ");
+        state.supervisor_fence.admit(&supervisor("user-1", 9).unwrap()).await.unwrap();
+
+        let same = handle_fenced(&state, send_op(session_id, "fence-9"), supervisor("user-1", 9)).await;
+        assert!(
+            matches!(same, crate::daemon::protocol::DaemonResponse::AgentControlOk { .. }),
+            "the holder's own fence is not stale: {same:?}"
+        );
+        let after_holder = backend.write_attempts.load(std::sync::atomic::Ordering::SeqCst);
+        // A person's or an older hub's request carries no fence: accepted after the max rose.
+        let manual = handle_fenced(&state, send_op(session_id, "manual-1"), None).await;
+        assert!(
+            matches!(manual, crate::daemon::protocol::DaemonResponse::AgentControlOk { .. }),
+            "{manual:?}"
+        );
+        assert!(backend.write_attempts.load(std::sync::atomic::Ordering::SeqCst) > after_holder);
+    }
+
+    #[tokio::test]
+    async fn a_paired_send_with_a_stale_fence_is_refused_before_typing() {
+        let session_id = "agent-control-fence-paired";
+        let (backend, state) = pane(session_id, "$ ");
+        state.set_agent_control(true, Vec::new()).expect("enable in memory");
+        let pin = state
+            .auth_manager
+            .create_scoped_pairing_code(
+                crate::remote::auth::DevicePermission::Control,
+                crate::remote::auth::DeviceAccessScope::Machine,
+            )
+            .expect("machine control pin");
+        let (token, _device) = state.auth_manager.exchange_pairing_code(&pin, "hub").expect("exchange");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().expect("header"),
+        );
+        let pushed = http_supervisor_fence(
+            State(Arc::clone(&state)),
+            headers.clone(),
+            Ok(Json(FenceBody {
+                account: "user-1".into(),
+                fence: 5,
+            })),
+        )
+        .await;
+        assert_eq!(pushed.status(), StatusCode::OK);
+
+        let refused = http_send(
+            State(Arc::clone(&state)),
+            headers.clone(),
+            AxumPath(session_id.to_string()),
+            Ok(Json(SendBody {
+                text: "echo hi".into(),
+                request_id: Some("paired-stale".into()),
+                observe_ms: None,
+                supervisor_fence: Some(4),
+                supervisor_account: Some("user-1".into()),
+            })),
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(refused.into_body(), 64 * 1024).await.expect("body"),
+        )
+        .expect("json");
+        assert_eq!(body["error"]["code"], "STALE_SUPERVISOR_FENCE", "{body}");
+        assert_eq!(backend.write_attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // A lower fence push is refused too: the old holder cannot lower the maximum.
+        let lowered = http_supervisor_fence(
+            State(Arc::clone(&state)),
+            headers.clone(),
+            Ok(Json(FenceBody {
+                account: "user-1".into(),
+                fence: 3,
+            })),
+        )
+        .await;
+        assert_eq!(lowered.status(), StatusCode::CONFLICT);
+
+        let manual = http_send(
+            State(Arc::clone(&state)),
+            headers,
+            AxumPath(session_id.to_string()),
+            Ok(Json(SendBody {
+                text: "echo hi".into(),
+                request_id: Some("paired-manual".into()),
+                observe_ms: None,
+                supervisor_fence: None,
+                supervisor_account: None,
+            })),
+        )
+        .await;
+        assert_eq!(manual.status(), StatusCode::OK, "a send without a fence is never fenced");
     }
 
     #[tokio::test]

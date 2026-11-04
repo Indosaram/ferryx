@@ -48,6 +48,7 @@ export function panelSessionTarget(
 }
 
 import type { SupervisorMachineView } from "../home/phoneHomeModel";
+import { isStandbyRole } from "../../lib/supervisorModel";
 import { emptyPanelSnapshot } from "../../lib/supervisorPanel/emptySnapshot";
 import type { PanelState } from "./usePhonePanel";
 
@@ -56,7 +57,8 @@ export const SEVERAL_HUB_HOSTS_MESSAGE = "More than one computer could run the s
 
 /**
  * Where "Turn on" goes. A pinned host already runs the supervisor. Otherwise the one reachable
- * machine whose hub is not running; none or several is named, never guessed.
+ * machine whose hub is not running and that is not on standby for another computer's
+ * supervisor; none or several is named, never guessed.
  */
 export type SetupHost =
   | { readonly kind: "host"; readonly machineId: string; readonly label: string }
@@ -71,7 +73,10 @@ export function pickSetupHost(
     const pinned = machines.find((machine) => machine.machineId === pinnedId);
     return { kind: "host", machineId: pinnedId, label: pinned?.label ?? "your computer" };
   }
-  const candidates = machines.filter((machine) => machine.state === "ok" && machine.snapshot !== null && !machine.snapshot.hub.running);
+  // A standby computer never runs a second supervisor: it can only move the one there is.
+  const candidates = machines.filter(
+    (machine) => machine.state === "ok" && machine.snapshot !== null && !machine.snapshot.hub.running && !isStandbyRole(machine.snapshot.hub.role),
+  );
   if (candidates.length === 1) return { kind: "host", machineId: candidates[0].machineId, label: candidates[0].label };
   return candidates.length === 0 ? { kind: "none" } : { kind: "several" };
 }

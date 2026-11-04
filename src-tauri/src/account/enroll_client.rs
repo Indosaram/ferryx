@@ -16,6 +16,81 @@ use crate::remote::machine_protocol::Platform;
 
 pub const ACCOUNT_ENROLLMENT_FILE: &str = "account-enrollment.json";
 
+/// The account session this machine signed in with (`ferryx account login`, or the desktop's
+/// link step), next to the enrollment record and readable by the owner only. The daemon reads
+/// it to pair itself to the supervisor lease holder when `FERRYX_ACCOUNT_SESSION_TOKEN` is unset.
+pub const ACCOUNT_SESSION_FILE: &str = "account-session.json";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredAccountSession {
+    pub account_origin: String,
+    pub session_token: String,
+}
+
+pub fn account_session_path() -> Option<PathBuf> {
+    canonical_remote_dir().map(|dir| dir.join(ACCOUNT_SESSION_FILE))
+}
+
+/// Writes the session owner-only: mode 0600 on Unix (by [`write_private_json`]), and on Windows
+/// an ACL granting only the current user, as the SSH helper's private files are restricted.
+pub fn save_account_session_at(path: &std::path::Path, account_origin: &str, session_token: &str) -> Result<(), String> {
+    save_account_session_restricted(path, account_origin, session_token, restrict_session_file)
+}
+
+/// The owner-only step after the write: nothing more on Unix ([`write_private_json`] created
+/// the file 0600), an owner-only ACL on Windows.
+fn restrict_session_file(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(windows)]
+    crate::ssh::helper_runtime::private_file(path)?;
+    #[cfg(not(windows))]
+    let _ = path;
+    Ok(())
+}
+
+/// [`save_account_session_at`] with the owner-only step `restrict`. If it fails the file is
+/// removed before the error is returned, so a 30-day bearer never stays on disk with
+/// inherited permissions.
+fn save_account_session_restricted(
+    path: &std::path::Path,
+    account_origin: &str,
+    session_token: &str,
+    restrict: impl FnOnce(&std::path::Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let record = StoredAccountSession {
+        account_origin: account_origin.trim_end_matches('/').to_string(),
+        session_token: session_token.trim().to_string(),
+    };
+    if record.session_token.is_empty() {
+        return Err("ACCOUNT_SESSION_EMPTY: no session token to save".into());
+    }
+    write_private_json(path, &record).map_err(|error| format!("ACCOUNT_SESSION_SAVE_FAILED: {error}"))?;
+    if let Err(error) = restrict(path) {
+        return match std::fs::remove_file(path) {
+            Ok(()) => Err(format!("ACCOUNT_SESSION_SAVE_FAILED: the file could not be made owner-only and was removed: {error}")),
+            Err(remove) => Err(format!(
+                "ACCOUNT_SESSION_SAVE_FAILED: the file could not be made owner-only ({error}) nor removed ({remove}): delete {}",
+                path.display()
+            )),
+        };
+    }
+    Ok(())
+}
+
+pub fn save_account_session(account_origin: &str, session_token: &str) -> Result<(), String> {
+    let path = account_session_path().ok_or("ACCOUNT_IDENTITY_DIR_UNRESOLVED: cannot resolve identity dir")?;
+    save_account_session_at(&path, account_origin, session_token)
+}
+
+pub fn load_account_session_at(path: &std::path::Path) -> Option<StoredAccountSession> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+pub fn load_account_session() -> Option<StoredAccountSession> {
+    load_account_session_at(&account_session_path()?)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountEnrollmentRecord {
@@ -255,6 +330,7 @@ pub async fn request_machine_grant(
         installation_id: installation_id.to_string(),
         grant_scope,
         attach_public_key: attach.public_key.clone(),
+        requester_machine: None,
     };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -317,10 +393,18 @@ pub async fn request_device_auth(
         .map_err(|e| EnrollError::local("ACCOUNT_BAD_RESPONSE", e.to_string())).map_err(Box::new)
 }
 
+/// An approved headless login: the enrollment code, and the account session the service minted
+/// with it (absent from an account service that predates it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceAuthApproval {
+    pub enrollment_code: String,
+    pub session_token: Option<String>,
+}
+
 pub async fn poll_device_auth(
     account_origin: &str,
     device_code: &str,
-) -> Result<Option<String>, Box<EnrollError>> {
+) -> Result<Option<DeviceAuthApproval>, Box<EnrollError>> {
     let origin = account_origin.trim_end_matches('/');
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -347,10 +431,95 @@ pub async fn poll_device_auth(
         let code = val["enrollmentCode"]
             .as_str()
             .ok_or_else(|| EnrollError::local("ACCOUNT_BAD_RESPONSE", "missing enrollmentCode"))?;
-        Ok(Some(code.to_string()))
+        let session_token = val["sessionToken"]
+            .as_str()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string);
+        Ok(Some(DeviceAuthApproval { enrollment_code: code.to_string(), session_token }))
     } else {
         Ok(None)
     }
+}
+
+/// What `ferryx account login` did with this machine's enrollment.
+#[derive(Debug)]
+pub struct LoginOutcome {
+    pub record: AccountEnrollmentRecord,
+    /// True when the machine was already enrolled to the approving owner at this origin and
+    /// its enrollment (and so its enrollment epoch) was kept as it was.
+    pub kept_enrollment: bool,
+    /// The result of saving the approval's account session; `None` when it carried none.
+    pub session_saved: Option<Result<(), String>>,
+}
+
+/// Finishes a headless login in the identity directory `dir`. A machine already enrolled at
+/// `origin` to the owner who approved the login keeps its enrollment untouched: re-enrolling
+/// would bump its enrollment epoch, which every paired client binds into the attach
+/// handshake, and so break every existing pairing to it. Only the account session is saved.
+/// A machine not enrolled there, or enrolled to another owner, is enrolled with `enroll`.
+/// Without a session in the approval (an older account service) ownership cannot be checked,
+/// so the machine is enrolled as before.
+pub async fn finish_login_at<F, Fut>(
+    dir: &std::path::Path,
+    origin: &str,
+    approval: &DeviceAuthApproval,
+    enroll: F,
+) -> Result<LoginOutcome, Box<EnrollError>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<AccountEnrollmentRecord, Box<EnrollError>>>,
+{
+    let origin = origin.trim_end_matches('/');
+    let existing = std::fs::read(dir.join(ACCOUNT_ENROLLMENT_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<AccountEnrollmentRecord>(&bytes).ok())
+        .filter(|record| record.account_origin.trim_end_matches('/') == origin);
+    let kept = match (existing, approval.session_token.as_deref()) {
+        (Some(record), Some(session)) => {
+            let same_owner = owner_has_machine(origin, session, &record.machine_record_id).await?;
+            same_owner.then_some(record)
+        }
+        _ => None,
+    };
+    let kept_enrollment = kept.is_some();
+    let record = match kept {
+        Some(record) => record,
+        None => enroll().await?,
+    };
+    let session_saved = approval
+        .session_token
+        .as_deref()
+        .map(|session| save_account_session_at(&dir.join(ACCOUNT_SESSION_FILE), origin, session));
+    Ok(LoginOutcome { record, kept_enrollment, session_saved })
+}
+
+/// Whether the owner of `session` has the machine record `machine_record_id` at `origin`
+/// (`GET /api/account/v1/machines` lists only the session owner's machines).
+async fn owner_has_machine(origin: &str, session: &str, machine_record_id: &str) -> Result<bool, Box<EnrollError>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|error| EnrollError::local("ACCOUNT_CLIENT_FAILED", error.to_string()))?;
+    let response = client
+        .get(format!("{origin}/api/account/v1/machines"))
+        .bearer_auth(session)
+        .send()
+        .await
+        .map_err(|error| EnrollError::local("ACCOUNT_UNREACHABLE", error.to_string()))?;
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| EnrollError::local("ACCOUNT_UNREACHABLE", error.to_string()))?;
+    if status != 200 {
+        return Err(EnrollError::remote(status, &body).into());
+    }
+    let machines: Vec<serde_json::Value> = serde_json::from_str(&body)
+        .map_err(|error| EnrollError::local("ACCOUNT_BAD_RESPONSE", error.to_string()))?;
+    Ok(machines
+        .iter()
+        .any(|machine| machine["machineRecordId"].as_str() == Some(machine_record_id)))
 }
 
 fn requested_display_name(display_name: Option<&str>) -> Option<String> {
@@ -389,7 +558,8 @@ pub enum MachineRequestPoll {
     Pending,
     /// The poll came faster than the interval; the caller must lengthen it.
     SlowDown,
-    Approved { enrollment_code: String },
+    /// `session_token`: the approving owner's account session, when the service sends one.
+    Approved { enrollment_code: String, session_token: Option<String> },
     Denied,
 }
 
@@ -478,6 +648,11 @@ pub fn parse_machine_request_poll(status: u16, body: &str) -> Result<MachineRequ
             .filter(|code| !code.is_empty())
             .map(|code| MachineRequestPoll::Approved {
                 enrollment_code: code.to_string(),
+                session_token: value["sessionToken"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|token| !token.is_empty())
+                    .map(str::to_owned),
             })
             .ok_or_else(|| EnrollError::local("ACCOUNT_BAD_RESPONSE", "approved poll had no enrollmentCode").into()),
         other => Err(EnrollError::local(
@@ -493,6 +668,27 @@ mod tests {
     use crate::remote::auth::{
         enrollment_code_hash, verify_account_enrollment, AuthManager, DevicePermission,
     };
+
+    /// F2 MINOR-3: when the owner-only step fails (on Windows: no USERNAME or icacls refused)
+    /// the written session is removed and the error returned; nothing is left behind.
+    #[test]
+    fn a_session_that_cannot_be_made_owner_only_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(ACCOUNT_SESSION_FILE);
+        let error = save_account_session_restricted(&path, "https://account.test", "secret", |written| {
+            assert!(written.exists(), "the step runs on the written file");
+            Err("REMOTE_PERMISSION_DENIED: cannot restrict runtime ACL".into())
+        })
+        .unwrap_err();
+        assert!(error.starts_with("ACCOUNT_SESSION_SAVE_FAILED"), "{error}");
+        assert!(error.contains("REMOTE_PERMISSION_DENIED"), "{error}");
+        assert!(!path.exists(), "the unrestricted session file was removed");
+        assert_eq!(load_account_session_at(&path), None);
+
+        save_account_session_restricted(&path, "https://account.test/", " secret ", |_| Ok(())).unwrap();
+        let saved = load_account_session_at(&path).unwrap();
+        assert_eq!((saved.account_origin.as_str(), saved.session_token.as_str()), ("https://account.test", "secret"));
+    }
 
     #[test]
     fn enrollment_leaves_existing_device_tokens_alone() {
@@ -630,7 +826,15 @@ mod tests {
         assert_eq!(
             parse_machine_request_poll(200, r#"{"status":"approved","enrollmentCode":"abc"}"#),
             Ok(MachineRequestPoll::Approved {
-                enrollment_code: "abc".into()
+                enrollment_code: "abc".into(),
+                session_token: None,
+            })
+        );
+        assert_eq!(
+            parse_machine_request_poll(200, r#"{"status":"approved","enrollmentCode":"abc","sessionToken":"s1"}"#),
+            Ok(MachineRequestPoll::Approved {
+                enrollment_code: "abc".into(),
+                session_token: Some("s1".into()),
             })
         );
         assert_eq!(

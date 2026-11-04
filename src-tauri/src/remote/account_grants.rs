@@ -77,7 +77,7 @@ impl GrantGate {
         verify_grant_signature(&self.account_public_key, &submission)?;
         let delivered = self
             .delivery
-            .deliver_grant_offer(&submission.machine_id, submission.envelope)
+            .deliver_grant_offer(&submission.machine_id, submission.envelope, Some(submission.signature))
             .await?;
         Ok(Json(serde_json::json!({
             "accepted": true,

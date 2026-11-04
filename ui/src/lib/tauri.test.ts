@@ -1125,8 +1125,24 @@ describe("account enrollment API", () => {
     expect(core.invoke).toHaveBeenCalledWith("cmd_account_enroll_this_machine", {
       origin: "https://relay.example.com",
       enrollmentCode: "code-123",
+      sessionToken: null,
     });
     expect(result).toEqual(status);
+  });
+
+  it("passes the account session to cmd_account_enroll_this_machine when given", async () => {
+    const status: AccountEnrollmentStatus = {
+      enrolled: true,
+      accountOrigin: "https://relay.example.com",
+      enrolledAt: 123456789,
+    };
+    core.invoke.mockResolvedValueOnce(status);
+    await enrollThisMachine("https://relay.example.com", "code-123", "tok");
+    expect(core.invoke).toHaveBeenCalledWith("cmd_account_enroll_this_machine", {
+      origin: "https://relay.example.com",
+      enrollmentCode: "code-123",
+      sessionToken: "tok",
+    });
   });
 });
 

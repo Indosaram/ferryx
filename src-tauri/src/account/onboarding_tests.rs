@@ -476,11 +476,17 @@ async fn machine_request_lookup_approve_poll_once_then_enroll() {
     assert_eq!(status, 200, "{polled}");
     assert_eq!(polled["status"], "approved");
     let code = polled["enrollmentCode"].as_str().unwrap().to_string();
+    // `ferryx-cli up` saves the approver's session with the code, so the daemon can pair to
+    // the supervisor holder without a user-exported session.
+    let session = polled["sessionToken"].as_str().expect("the approver's session comes with the code").to_string();
+    let (status, machines) = get(&fx, "/api/account/v1/machines", &session).await;
+    assert_eq!(status, 200, "the delivered session authenticates as the approver: {machines}");
 
     reset_poll_pacing(&fx);
     let (status, again) = poll(&fx, &device_code).await;
     assert_eq!(status, 400, "{again}");
     assert!(again.get("enrollmentCode").is_none(), "the code is delivered once");
+    assert!(again.get("sessionToken").is_none(), "the session is delivered once");
     let store = fx.state.load().unwrap();
     assert!(
         store.machine_requests.values().all(|r| r.enrollment_code.is_none()),
@@ -595,6 +601,7 @@ async fn denied_machine_request_polls_denied() {
     assert_eq!(status, 200, "{polled}");
     assert_eq!(polled["status"], "denied");
     assert!(polled.get("enrollmentCode").is_none());
+    assert!(polled.get("sessionToken").is_none(), "a denied machine gets no session");
 }
 
 #[tokio::test]
@@ -741,4 +748,88 @@ fn onboarding_records_round_trip_through_sqlite() {
     assert_eq!(loaded.enrollment_codes.get("bound-hash"), Some(&bound));
     assert_eq!(loaded.enrollment_codes.get("bound-hash").unwrap().kind, "code");
     assert_eq!(loaded.machine_requests.get("mreq_1"), Some(&request));
+}
+
+/// F4 MAJOR-B: `ferryx account login` on a machine already enrolled to the approving owner keeps
+/// the enrollment record byte for byte (its epoch binds every paired client's attach
+/// handshake) and only saves the session. An unenrolled machine, or one enrolled to another
+/// owner, is still enrolled.
+#[tokio::test]
+async fn login_keeps_an_enrollment_of_the_same_owner_and_enrolls_otherwise() {
+    use crate::account::enroll_client::{
+        finish_login_at, AccountEnrollmentRecord, DeviceAuthApproval, ACCOUNT_ENROLLMENT_FILE, ACCOUNT_SESSION_FILE,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let fx = spawn(DeploymentMode::SelfHost).await;
+    let owner = seed_user(&fx, "user-a", "a@test.local");
+    let stranger = seed_user(&fx, "user-b", "b@test.local");
+    seed_machine(&fx, "user-a", "mach-login", "pk");
+    let enrolled = AccountEnrollmentRecord {
+        account_id: "user-a".into(),
+        machine_record_id: "rec-mach-login".into(),
+        account_origin: fx.url.clone(),
+        relay_origin: ORIGIN.into(),
+        enrollment_epoch: "1".into(),
+        enrolled_at: 1,
+    };
+    let fresh = AccountEnrollmentRecord { enrollment_epoch: "2".into(), ..enrolled.clone() };
+    let approval = |session: &str| DeviceAuthApproval {
+        enrollment_code: "unused-code".into(),
+        session_token: Some(session.to_owned()),
+    };
+    let enrolls = AtomicUsize::new(0);
+    let enroll = || {
+        enrolls.fetch_add(1, Ordering::SeqCst);
+        let record = fresh.clone();
+        async move { Ok(record) }
+    };
+
+    // Already enrolled to the approving owner: kept byte for byte, session saved.
+    let dir = tempfile::tempdir().unwrap();
+    let record_path = dir.path().join(ACCOUNT_ENROLLMENT_FILE);
+    crate::remote::auth::write_private_json(&record_path, &enrolled).unwrap();
+    let before = std::fs::read(&record_path).unwrap();
+    let login = finish_login_at(dir.path(), &format!("{}/", fx.url), &approval(&owner), enroll).await.unwrap();
+    assert!(login.kept_enrollment);
+    assert_eq!(enrolls.load(Ordering::SeqCst), 0, "no re-enrollment");
+    assert_eq!(std::fs::read(&record_path).unwrap(), before, "the enrollment record is unchanged");
+    assert_eq!(login.record.enrollment_epoch, "1", "the epoch is unchanged");
+    assert!(matches!(login.session_saved, Some(Ok(()))));
+    let saved = crate::account::enroll_client::load_account_session_at(&dir.path().join(ACCOUNT_SESSION_FILE)).unwrap();
+    assert_eq!(saved.session_token, owner);
+
+    // Enrolled, but the login was approved by another owner: enrolled again.
+    let login = finish_login_at(dir.path(), &fx.url, &approval(&stranger), enroll).await.unwrap();
+    assert!(!login.kept_enrollment);
+    assert_eq!(enrolls.load(Ordering::SeqCst), 1);
+
+    // An older account service sends no session: ownership cannot be checked, so it enrolls.
+    let no_session = DeviceAuthApproval { enrollment_code: "unused-code".into(), session_token: None };
+    let login = finish_login_at(dir.path(), &fx.url, &no_session, enroll).await.unwrap();
+    assert!(!login.kept_enrollment);
+    assert!(login.session_saved.is_none());
+    assert_eq!(enrolls.load(Ordering::SeqCst), 2);
+
+    // The ownership check fails (the account refuses the session): the login fails closed,
+    // without re-enrolling and with the record untouched.
+    let error = finish_login_at(dir.path(), &fx.url, &approval("unknown-session"), enroll).await.unwrap_err();
+    assert_eq!(error.status, 401, "{error}");
+    assert_eq!(enrolls.load(Ordering::SeqCst), 2, "no re-enrollment on a failed check");
+    assert_eq!(std::fs::read(&record_path).unwrap(), before);
+
+    // Not enrolled: enrolled, and the session saved.
+    let empty = tempfile::tempdir().unwrap();
+    let login = finish_login_at(empty.path(), &fx.url, &approval(&owner), enroll).await.unwrap();
+    assert!(!login.kept_enrollment);
+    assert_eq!(enrolls.load(Ordering::SeqCst), 3);
+    assert_eq!(login.record.enrollment_epoch, "2");
+    assert!(empty.path().join(ACCOUNT_SESSION_FILE).is_file());
+
+    // Enrolled at another origin: enrolled at this one.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let other_origin = AccountEnrollmentRecord { account_origin: "https://other.test".into(), ..enrolled.clone() };
+    crate::remote::auth::write_private_json(&elsewhere.path().join(ACCOUNT_ENROLLMENT_FILE), &other_origin).unwrap();
+    let login = finish_login_at(elsewhere.path(), &fx.url, &approval(&owner), enroll).await.unwrap();
+    assert!(!login.kept_enrollment);
+    assert_eq!(enrolls.load(Ordering::SeqCst), 4);
 }

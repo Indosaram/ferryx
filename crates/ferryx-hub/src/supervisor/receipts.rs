@@ -478,6 +478,13 @@ pub async fn record_pty_settle(
     instance: &str,
     sequence: u64,
 ) -> Result<PtySettle, SupervisorError> {
+    // A settle is a supervisor write: only the lease holder records it; a standby leaves the
+    // dispatch as it is for the holder's own idle reading.
+    if !crate::holder::is_holder_now() {
+        return Err(SupervisorError::Standby {
+            goal_id: format!("on session {session_id}"),
+        });
+    }
     let live: Option<(String, i64, String)> = sqlx::query_as(
         "SELECT d.request_id, d.generation, d.run_id FROM supervisor_dispatches d
            JOIN supervisor_execution_bindings b

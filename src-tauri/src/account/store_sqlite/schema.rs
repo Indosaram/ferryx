@@ -4,10 +4,16 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use rusqlite::Connection;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// Schema version written by the original table set, before the onboarding migration.
 const BASE_SCHEMA_VERSION: u32 = 1;
+
+/// Schema version written by the onboarding migration (install keys, machine requests).
+const ONBOARDING_SCHEMA_VERSION: u32 = 2;
+
+/// Schema version written by the supervisor lease migration.
+const SUPERVISOR_LEASE_SCHEMA_VERSION: u32 = 3;
 
 /// Dedicated lock file that serializes database initialization inside an account dir.
 pub const INIT_LOCK_FILENAME: &str = "account-store.init.lock";
@@ -85,7 +91,10 @@ pub fn configure_connection(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-pub fn init_schema(conn: &mut Connection) -> Result<(), String> {
+/// Creates or upgrades the schema. `read_only` is true on a warm standby (`standby.readonly`):
+/// a replica restored from the primary must not be rewritten by this process, so the v3 step is
+/// skipped there and lease readers report the missing tables as `LEASE_UNSUPPORTED`.
+pub fn init_schema(conn: &mut Connection, read_only: bool) -> Result<(), String> {
     let user_version: u32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(|error| format!("Failed to query PRAGMA user_version: {error}"))?;
@@ -246,8 +255,14 @@ pub fn init_schema(conn: &mut Connection) -> Result<(), String> {
     let user_version: u32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(|error| format!("Failed to query PRAGMA user_version: {error}"))?;
-    if user_version < 2 {
+    let user_version = if user_version < ONBOARDING_SCHEMA_VERSION {
         migrate_to_v2(conn)?;
+        ONBOARDING_SCHEMA_VERSION
+    } else {
+        user_version
+    };
+    if user_version < SUPERVISOR_LEASE_SCHEMA_VERSION && !read_only {
+        migrate_to_v3(conn)?;
     }
 
     Ok(())
@@ -296,10 +311,55 @@ fn migrate_to_v2(conn: &mut Connection) -> Result<(), String> {
         "#,
     )
     .map_err(|error| format!("Failed to apply v2 onboarding migration: {error}"))?;
-    tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
-        .map_err(|error| format!("Failed to set user_version to {CURRENT_SCHEMA_VERSION}: {error}"))?;
+    tx.pragma_update(None, "user_version", ONBOARDING_SCHEMA_VERSION)
+        .map_err(|error| {
+            format!("Failed to set user_version to {ONBOARDING_SCHEMA_VERSION}: {error}")
+        })?;
     tx.commit()
         .map_err(|error| format!("Failed to commit v2 onboarding migration: {error}"))
+}
+
+/// Additive supervisor lease migration: the per-account lease row, the per-account fence
+/// high-water mark (never decreases) and the single-row relay epoch, seeded with 0. Lease rows
+/// are never deleted, only marked released; `account::supervisor_lease` owns every write.
+fn migrate_to_v3(conn: &mut Connection) -> Result<(), String> {
+    let tx = conn
+        .transaction()
+        .map_err(|error| format!("Failed to begin v3 migration transaction: {error}"))?;
+    tx.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS supervisor_leases (
+            user_id TEXT PRIMARY KEY,
+            holder_machine_id TEXT NOT NULL,
+            fence INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            checkpoint_id TEXT,
+            checkpoint_at INTEGER,
+            released INTEGER NOT NULL DEFAULT 0,
+            reserved_for TEXT,
+            reserved_fence INTEGER,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS supervisor_lease_fences (
+            user_id TEXT PRIMARY KEY,
+            last_fence INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS supervisor_relay_epoch (
+            epoch INTEGER NOT NULL
+        );
+        INSERT INTO supervisor_relay_epoch (epoch)
+            SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM supervisor_relay_epoch);
+        "#,
+    )
+    .map_err(|error| format!("Failed to apply v3 supervisor lease migration: {error}"))?;
+    tx.pragma_update(None, "user_version", SUPERVISOR_LEASE_SCHEMA_VERSION)
+        .map_err(|error| {
+            format!("Failed to set user_version to {SUPERVISOR_LEASE_SCHEMA_VERSION}: {error}")
+        })?;
+    tx.commit()
+        .map_err(|error| format!("Failed to commit v3 supervisor lease migration: {error}"))
 }
 
 #[cfg(test)]
@@ -457,6 +517,64 @@ mod tests {
             .query_row("SELECT count(*) FROM machine_requests", [], |row| row.get(0))
             .expect("machine_requests table exists");
         assert_eq!(requests, 0);
+    }
+
+    /// A v2 database (onboarding schema, no lease tables) must upgrade in place to v3: every
+    /// existing row survives, the lease tables exist and the relay epoch is seeded with 0.
+    #[test]
+    fn v2_database_upgrades_additively_to_v3() {
+        let dir = tempfile::tempdir().expect("temp");
+        let marker = dir.path().join(super::super::STANDBY_MARKER_FILENAME);
+        std::fs::write(&marker, b"").expect("standby marker");
+        {
+            // A read-only open stops at v2, which is exactly a v2 database.
+            let conn = crate::account::store::store_sqlite::open_sqlite_connection(dir.path())
+                .expect("open v2 replica");
+            let version: u32 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .expect("version");
+            assert_eq!(version, ONBOARDING_SCHEMA_VERSION);
+            conn.execute_batch(
+                r#"
+                INSERT INTO users (user_id, email, created_at) VALUES ('u1', 'u1@test.local', 1);
+                INSERT INTO machines (machine_record_id, user_id, machine_id, display_name,
+                    public_key, attach_public_key, relay_origin, platform, enrollment_epoch,
+                    enrolled_at, last_seen_at)
+                    VALUES ('rec-1', 'u1', 'mach-1', 'box', 'pk', 'apk', 'https://relay.test',
+                    'linux', 1, 2, 3);
+                INSERT INTO enrollment_codes (code_hash, user_id, account_origin, expires_at)
+                    VALUES ('code-hash', 'u1', 'https://relay.test', 4000000000);
+                "#,
+            )
+            .expect("seed v2 rows");
+        }
+        std::fs::remove_file(&marker).expect("promote: remove marker");
+
+        let conn = crate::account::store::store_sqlite::open_sqlite_connection(dir.path())
+            .expect("open upgrades the schema");
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        let count = |table: &str| -> i64 {
+            conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))
+                .expect("count rows")
+        };
+        assert_eq!(count("users"), 1);
+        assert_eq!(count("machines"), 1);
+        assert_eq!(count("enrollment_codes"), 1);
+        assert_eq!(count("supervisor_leases"), 0);
+        assert_eq!(count("supervisor_lease_fences"), 0);
+        let epoch: i64 = conn
+            .query_row("SELECT epoch FROM supervisor_relay_epoch", [], |row| row.get(0))
+            .expect("relay epoch row");
+        assert_eq!(epoch, 0);
+        drop(conn);
+
+        let store = crate::account::store::AccountStore::load(dir.path()).expect("load v3 store");
+        assert_eq!(store.users.len(), 1);
+        assert_eq!(store.machines.len(), 1);
+        assert!(store.supervisor_leases.is_empty());
     }
 
     /// Same-process regression: the production initialization lock must keep a contender out of

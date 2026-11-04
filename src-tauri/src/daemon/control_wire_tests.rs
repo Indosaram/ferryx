@@ -811,6 +811,8 @@ async fn a_recovery_card_tap_for_a_paired_host_session_is_answered_locally() {
             request_id: None,
         },
         host_id: Some("mac-2".into()),
+        supervisor_fence: None,
+        supervisor_account: None,
     };
     match unix_exchange(&server, request.clone()).await {
         DaemonResponse::AgentControlOk { result } => assert_eq!(result["recovery"], "answered"),

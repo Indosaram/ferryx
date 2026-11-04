@@ -2416,9 +2416,9 @@ pub fn run_account_cli(command: AccountCliCommand) -> Result<(), AccountCliError
                     }
                     eprint!(".");
                     match crate::account::enroll_client::poll_device_auth(&origin, &auth_resp.device_code).await {
-                        Ok(Some(code)) => {
+                        Ok(Some(approval)) => {
                             eprintln!("\nAuthorization approved!");
-                            break code;
+                            break approval;
                         }
                         Ok(None) => continue,
                         // A dropped connection or a server-side failure (5xx) while waiting is
@@ -2431,18 +2431,43 @@ pub fn run_account_cli(command: AccountCliCommand) -> Result<(), AccountCliError
                     }
                 };
 
-                eprintln!("Enrolling machine with account...");
-                let record = crate::account::enroll_client::enroll_machine(&origin, &enrollment_code)
-                    .await
-                    .map_err(|error| billing::from_enroll_error(&origin, &error))?;
+                let dir = crate::remote::auth::canonical_remote_dir().ok_or_else(|| {
+                    AccountCliError::local("ACCOUNT_IDENTITY_DIR_UNRESOLVED", "cannot resolve the identity directory")
+                })?;
+                // A machine already enrolled to this owner keeps its enrollment (and epoch, so
+                // its paired devices keep working); login then only saves the account session.
+                let login = crate::account::enroll_client::finish_login_at(&dir, &origin, &enrollment_code, || {
+                    eprintln!("Enrolling machine with account...");
+                    crate::account::enroll_client::enroll_machine(&origin, &enrollment_code.enrollment_code)
+                })
+                .await
+                .map_err(|error| billing::from_enroll_error(&origin, &error))?;
+                // Kept owner-only so the daemon can pair to the supervisor lease holder on its
+                // own; FERRYX_ACCOUNT_SESSION_TOKEN still wins when set.
+                if let Some(Err(error)) = &login.session_saved {
+                    eprintln!("warning: the account session was not saved: {error}");
+                }
+                let record = login.record;
                 println!("{}", record.account_id);
                 println!("{}", record.machine_record_id);
                 println!("{}", record.relay_origin);
                 println!("{}", record.enrollment_epoch);
-                eprintln!(
-                    "Enrolled successfully! The daemon keeps owning its identity and device tokens. \
-                     Existing paired devices and live terminals are unaffected."
-                );
+                if login.kept_enrollment {
+                    let session = match &login.session_saved {
+                        Some(Ok(())) => "the account session was saved".to_string(),
+                        Some(Err(error)) => format!("the account session was NOT saved ({error})"),
+                        None => "the account service sent no session to save".to_string(),
+                    };
+                    eprintln!(
+                        "Already enrolled with {origin}; the enrollment was kept and {session}. \
+                         Existing paired devices and live terminals are unaffected."
+                    );
+                } else {
+                    eprintln!(
+                        "Enrolled successfully! The daemon keeps owning its identity and device tokens. \
+                         Existing paired devices and live terminals are unaffected."
+                    );
+                }
                 Ok(record)
             })?;
             enable_relay_on_this_machine(
@@ -2728,11 +2753,13 @@ pub fn enrolled_to_origin(
     record.account_origin.trim_end_matches('/') == origin.trim_end_matches('/')
 }
 
+/// The approved enrollment code, and the approving owner's account session when the service
+/// sent one.
 async fn wait_for_machine_approval(
     origin: &str,
     email: Option<&str>,
     name: Option<&str>,
-) -> Result<String, UpCliError> {
+) -> Result<(String, Option<String>), UpCliError> {
     use crate::account::enroll_client::{create_machine_request, poll_machine_request, MachineRequestPoll};
 
     let request = create_machine_request(origin, email, name)
@@ -2748,9 +2775,9 @@ async fn wait_for_machine_approval(
         match poll_machine_request(origin, &request.device_code).await {
             Ok(MachineRequestPoll::Pending) => {}
             Ok(MachineRequestPoll::SlowDown) => interval = slowed_down_interval(interval),
-            Ok(MachineRequestPoll::Approved { enrollment_code }) => {
+            Ok(MachineRequestPoll::Approved { enrollment_code, session_token }) => {
                 eprintln!("Approved.");
-                return Ok(enrollment_code);
+                return Ok((enrollment_code, session_token));
             }
             Ok(MachineRequestPoll::Denied) => {
                 return Err(UpCliError::new(
@@ -3093,8 +3120,8 @@ pub fn run_up_cli(command: UpCliCommand) -> Result<UpSummary, UpCliError> {
         }
         None => runtime.block_on(async {
             // 3. A key enrolls directly; 4. otherwise the owner approves a machine request.
-            let enrollment_code = match key {
-                Some(key) => key,
+            let (enrollment_code, session) = match key {
+                Some(key) => (key, None),
                 None => {
                     wait_for_machine_approval(
                         &origin,
@@ -3104,13 +3131,22 @@ pub fn run_up_cli(command: UpCliCommand) -> Result<UpSummary, UpCliError> {
                     .await?
                 }
             };
-            crate::account::enroll_client::enroll_machine_named(
+            let record = crate::account::enroll_client::enroll_machine_named(
                 &origin,
                 &enrollment_code,
                 command.name.as_deref(),
             )
             .await
-            .map_err(|error| up_error_from_enroll(&origin, &error))
+            .map_err(|error| up_error_from_enroll(&origin, &error))?;
+            // Kept owner-only so the daemon can pair to the supervisor lease holder on its own
+            // (as `ferryx account login` does); FERRYX_ACCOUNT_SESSION_TOKEN still wins when set.
+            // An install key carries no session: such a machine needs `ferryx account login`.
+            if let Some(session) = session.as_deref() {
+                if let Err(error) = crate::account::enroll_client::save_account_session(&origin, session) {
+                    eprintln!("warning: the account session was not saved: {error}");
+                }
+            }
+            Ok::<_, UpCliError>(record)
         })?,
     };
 

@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..f8c9057
 --- /dev/null
 +++ b/lib/ferryx-report-gate.ts
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,171 @@
 +/**
 + * Client for the Ferryx hub control socket `report` / `report_status` operations
 + * (crates/ferryx-hub/src/control.rs). The hub owns owner-facing Slack delivery; a producer
@@ -88,6 +88,8 @@ index 0000000..f8c9057
 +  if (typeof value !== "object" || value === null || Array.isArray(value))
 +    throw new GateError("protocol", "Expected a hub reply object");
 +  const parsed = value as Readonly<Record<string, unknown>>;
++  if (parsed["status"] === "standby" || parsed["code"] === "SUPERVISOR_STANDBY")
++    throw new GateError("unavailable", "Hub supervisor is on standby; retry later");
 +  if (parsed["status"] === "failed") {
 +    const error = parsed["error"];
 +    throw new GateError("rejected", typeof error === "string" ? error : String(parsed["code"]));
@@ -1315,7 +1317,7 @@ new file mode 100644
 index 0000000..344607a
 --- /dev/null
 +++ b/tests/unit/report-outbox.test.ts
-@@ -0,0 +1,229 @@
+@@ -0,0 +1,235 @@
 +import { Database } from "bun:sqlite";
 +import { describe, expect, test } from "bun:test";
 +import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -1373,6 +1375,12 @@ index 0000000..344607a
 +    expect(await answer({ delivery: "superseded" }).mutate(7, "file:1", change)).toBe("superseded");
 +    expect(await answer({ blocked_by: "file:0" }).mutate(7, "file:1", change)).toBe("pending");
 +    await expect(answer({ progress: "in_flight", blocked_by: "file:0" }).mutate(7, "file:1", change)).rejects.toThrow(/progress/);
++  });
++
++  test("a supervisor standby refusal is unavailable, so the attachment is retried later", async () => {
++    const gate = new ReportGate(async () => ({ status: "standby", op: "report_mutate", code: "SUPERVISOR_STANDBY", error: "standby", holder: "m2" }));
++    const change = { kind: "attachment", path: "/r/card.png", name: "card.png", title: "card.png" };
++    await expect(gate.mutate(7, "file:1", change)).rejects.toMatchObject({ code: "unavailable" });
 +  });
 +
 +  test("a delivered status without channel and ts is a protocol error", async () => {

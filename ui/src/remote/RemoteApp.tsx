@@ -183,6 +183,7 @@ import {
   SEVERAL_HUB_HOSTS_MESSAGE,
 } from "./supervisorPanel/panelHost";
 import { WidePanel } from "./supervisorPanel/WidePanel";
+import { supervisorLeaseCards } from "./supervisorPanel/leaseCards";
 import { WorktreesHome } from "./home/WorktreesHome";
 import type { TunnelTransport, TunnelWebSocket } from "./attachTunnel";
 import { getOrCreateAttachKey } from "./accountAttach";
@@ -3120,8 +3121,12 @@ export const RemoteHostConnection: React.FC<{
     const result = await phoneSupervisor.startHub(setupHost.machineId);
     return result.kind === "ok" ? { ok: true } : { ok: false, stale: false, message: result.message };
   };
+  // The account supervisor lease: each computer on standby says where the supervisor runs and
+  // offers the move; the holder's own warnings (hosts it cannot reach, ...) show above the panel.
+  const panelLease = supervisorLeaseCards(phoneSupervisor, phoneHome);
   const panelBody = (
     <WidePanel
+      lease={panelLease}
       state={panelState}
       now={phoneSupervisor.now}
       computerLabel={panelComputerLabel}
@@ -5372,6 +5377,7 @@ export const RemoteHostConnection: React.FC<{
               ]),
             headerAction: <AccountButton onOpen={() => setAccountSheetOpen(true)} />,
             resume: phoneResume,
+            lease: panelLease,
           }}
           destination={phoneNav.destination}
           onSelectTab={phoneNav.selectTab}

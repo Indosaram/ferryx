@@ -801,6 +801,9 @@ pub struct RemoteGatewayState {
     agent_control_path: Option<PathBuf>,
     /// Bounded audit of agent-control calls, including the device id. Not the workspace journal.
     pub agent_control_audit: Arc<crate::agent_control::policy::AgentControlAudit>,
+    /// Highest supervisor lease fence seen per account (`supervisor-fence.json`, beside the
+    /// auth store); a fenced agent-control request below it is refused.
+    pub supervisor_fence: Arc<crate::agent_control::fence::FenceRatchet>,
     /// Phone push: VAPID keys and subscriptions keyed by paired device, beside the auth store.
     pub push: Arc<crate::remote::push::PushService>,
     /// Last desktop window-focus report from the GUI and when it arrived. Selection is not
@@ -889,6 +892,10 @@ pub struct RemoteGatewayState {
     /// The agent-stamp writer thread, kept so a test fixture can end it before its directory goes.
     #[cfg(test)]
     agent_stamp_writer: parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Test-only hub directory whose archive `POST /api/v1/supervisor/adopt-archived` adopts
+    /// from; production reads the daemon's hub directory.
+    #[cfg(test)]
+    pub(crate) supervisor_test_hub_dir: RwLock<Option<std::path::PathBuf>>,
 }
 
 impl RemoteGatewayState {
@@ -1059,6 +1066,11 @@ impl RemoteGatewayState {
         ));
         let agent_control_audit =
             Arc::new(crate::agent_control::policy::AgentControlAudit::default());
+        let supervisor_fence = Arc::new(crate::agent_control::fence::FenceRatchet::load(
+            identity_dir
+                .as_ref()
+                .map(|dir| dir.join(crate::agent_control::fence::SUPERVISOR_FENCE_FILE)),
+        ));
         let push = Arc::new(crate::remote::push::PushService::new(identity_dir.as_deref()));
         // A device pruned while the daemon was down (idle expiry, revocation journal) must not
         // keep receiving pushes after a restart.
@@ -1112,6 +1124,8 @@ impl RemoteGatewayState {
             supervisor_flights: Default::default(),
             #[cfg(test)]
             agent_stamp_writer: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            supervisor_test_hub_dir: RwLock::new(None),
             auth_manager,
             terminal_service,
             daemon_epoch: AtomicU64::new(0),
@@ -1124,6 +1138,7 @@ impl RemoteGatewayState {
             agent_control_policy,
             agent_control_path,
             agent_control_audit,
+            supervisor_fence,
             push,
             desktop_window_focus: RwLock::new(None),
             decision_gate: ferryx_hub::supervisor::push_policy::DecisionGate::default(),

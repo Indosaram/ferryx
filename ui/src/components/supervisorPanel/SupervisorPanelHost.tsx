@@ -8,8 +8,11 @@ import { applyPanelEvent } from '../../lib/supervisorPanel/model';
 import { legacyGoalsBySession } from '../../lib/supervisorPanel/legacyGoals';
 import { loadDesktopTranscriptPage, type TranscriptPageLoader } from '../../lib/supervisorPanel/transcript';
 import { useTranscript } from '../../lib/supervisorPanel/useTranscript';
-import { useSupervisor } from '../../lib/supervisor';
+import { adoptArchivedGoals, moveSupervisorHere, useSupervisor } from '../../lib/supervisor';
+import { isStandbyRole } from '../../lib/supervisorModel';
+import type { SupervisorCallResult, SupervisorMoveResult } from '../../lib/unifiedSupervisor';
 import { getSupervisorPanel, onSupervisorPanelEvent } from '../../lib/tauri';
+import { LeaseNotices, StandbyCard, type LeaseAdoptResult } from './LeaseStatus';
 import { PanelSurface } from './PanelSurface';
 
 export type SupervisorPanelHostProps = {
@@ -21,7 +24,15 @@ export type SupervisorPanelHostProps = {
   actionsFor?: (input: { openSession: (sessionRef: SessionRef) => void; onChanged: () => void }) => PanelActions;
   now?: () => number;
   loadTranscript?: TranscriptPageLoader;
+  /** The supervisor lease writes; the defaults are the daemon's move and adopt commands. */
+  moveHere?: (force: boolean) => Promise<SupervisorMoveResult>;
+  adoptArchived?: (goalIds: readonly string[]) => Promise<SupervisorCallResult>;
 };
+
+async function adoptResult(call: Promise<SupervisorCallResult>): Promise<LeaseAdoptResult> {
+  const result = await call;
+  return result.kind === 'ok' ? { kind: 'ok' } : { kind: 'error', message: result.message };
+}
 
 /**
  * The left sidebar's Supervisor: loads the panel snapshot, folds in panel.* events through the
@@ -35,6 +46,8 @@ export function SupervisorPanelHost({
   actionsFor = desktopPanelActions,
   now = Date.now,
   loadTranscript = loadDesktopTranscriptPage,
+  moveHere = moveSupervisorHere,
+  adoptArchived = adoptArchivedGoals,
 }: SupervisorPanelHostProps) {
   const [snapshot, setSnapshot] = useState<PanelSnapshot | null>(null);
   const [tick, setTick] = useState(() => now());
@@ -116,8 +129,20 @@ export function SupervisorPanelHost({
       data-testid="supervisor-panel"
       className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 pt-1 text-xs scrollbar-sleek"
     >
-      {snapshot ? (
-        <PanelSurface snapshot={snapshot} actions={actions} nowMs={tick} goals={goals} computerLabel="this computer" transcript={transcript} />
+      {isStandbyRole(hub.hub.role) ? (
+        // Another computer holds the account supervisor lease: this one never offers to turn a
+        // second supervisor on, only to move the one there is.
+        <StandbyCard
+          hub={hub.hub}
+          here="This computer"
+          moveHere={moveHere}
+          adoptArchived={(goalIds) => adoptResult(adoptArchived(goalIds))}
+        />
+      ) : snapshot ? (
+        <div className="flex flex-col gap-3">
+          <LeaseNotices hub={hub.hub} here="This computer" />
+          <PanelSurface snapshot={snapshot} actions={actions} nowMs={tick} goals={goals} computerLabel="this computer" transcript={transcript} />
+        </div>
       ) : (
         <p className="text-muted-foreground">Loading supervisor…</p>
       )}

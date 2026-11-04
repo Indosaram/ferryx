@@ -18,7 +18,7 @@ import { WizardRow, WizardRowList, WizardStatus } from "./WizardPrimitives";
 export type AccountStepDeps = {
   loadStatus: () => Promise<AccountEnrollmentStatus>;
   issueCode: (origin: string, token: string) => Promise<{ code: string }>;
-  enroll: (origin: string, code: string) => Promise<AccountEnrollmentStatus>;
+  enroll: (origin: string, code: string, sessionToken?: string) => Promise<AccountEnrollmentStatus>;
   readToken: (origin: string) => string | null;
 };
 
@@ -73,7 +73,7 @@ export function AccountStep({ origin, deps, onLinked }: AccountStepProps): JSX.E
       setPhase({ kind: "linking" });
       try {
         const { code } = await depsRef.current.issueCode(accountOrigin, token);
-        const status = await depsRef.current.enroll(accountOrigin, code);
+        const status = await depsRef.current.enroll(accountOrigin, code, token);
         if (!mountedRef.current) return;
         if (!status.enrolled) {
           setPhase({
