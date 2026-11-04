@@ -924,6 +924,7 @@ pub enum DaemonRequest {
     },
     LoadSession,
     LayoutGet { window: String },
+    LayoutGetScoped { window: String, scope: String },
     #[serde(rename_all = "camelCase")]
     LayoutApply { window: String, base_revision: u64, intent: crate::daemon::layout::Intent },
     ClearSession,
