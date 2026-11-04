@@ -247,6 +247,9 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
                 capabilities.push("pairedHostE2EV1");
             }
             capabilities.push(crate::paired_host::file_read::PAIRED_FILE_READ_PROXY_CAPABILITY);
+            capabilities.push(crate::paired_host::file_write::PAIRED_FILE_WRITE_PROXY_CAPABILITY);
+            capabilities.push(crate::paired_host::file_tree::PAIRED_FILE_LIST_PROXY_CAPABILITY);
+            capabilities.push(crate::paired_host::file_tree::PAIRED_FILE_MKDIR_PROXY_CAPABILITY);
             // Mirrors the daemon's GetCapabilities surface: handover advertises ownership transfer.
             #[cfg(unix)]
             capabilities.push("sessionOwnershipTransferV1");

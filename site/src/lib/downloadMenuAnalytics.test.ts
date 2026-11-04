@@ -37,7 +37,14 @@ async function mountMenu(variant: 'hero' | 'navbar' | 'compact') {
     `<!doctype html><html><head><template id="${CONSENT_TEMPLATE_ID}" data-measurement-id="${MEASUREMENT_ID}">` +
       consentMarkup({ privacyHref: '/privacy/' }) +
       `</template></head><body><div id="island"></div></body></html>`,
-    { url: 'https://ferryx.dev/', pretendToBeVisual: true },
+    {
+      url: 'https://ferryx.dev/',
+      pretendToBeVisual: true,
+      // Platform detection reads navigator, and the assertions below name macOS asset URLs, so pin
+      // a macOS user agent: this suite must not change verdict with the host that runs it.
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    },
   );
   const win = dom.window;
   const doc = win.document;
