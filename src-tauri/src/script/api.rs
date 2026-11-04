@@ -7,6 +7,7 @@ pub type Host = Rc<dyn Fn(&str, serde_json::Value) -> Result<serde_json::Value, 
 pub struct Api {
     pub bindings: RefCell<BTreeMap<String, (bool, Function)>>,
     events: RefCell<BTreeMap<String, Vec<Function>>>,
+    pub session: Rc<RefCell<Option<String>>>,
 }
 fn bad() -> mlua::Error { mlua::Error::runtime("BAD_ARGUMENT") }
 fn text(value: Value) -> mlua::Result<String> {
@@ -26,7 +27,7 @@ pub fn chord(keys: &str) -> Result<String, String> {
 }
 impl Api {
     pub fn install(lua: &Lua, host: Host) -> mlua::Result<Rc<Self>> {
-        let api = Rc::new(Self { bindings: RefCell::new(BTreeMap::new()), events: RefCell::new(BTreeMap::new()) });
+        let api = Rc::new(Self { bindings: RefCell::new(BTreeMap::new()), events: RefCell::new(BTreeMap::new()), session: Rc::new(RefCell::new(None)) });
         let ferryx: Table = lua.globals().get("ferryx")?;
         ferryx.set("version", CAPABILITY)?;
         let bindings = api.clone();
@@ -44,8 +45,12 @@ impl Api {
         })?)?;
         for name in ["split", "send", "read", "notify", "exec", "layout"] {
             let host = host.clone();
+            let session = api.session.clone();
             ferryx.set(name, lua.create_function(move |lua, args: mlua::MultiValue| {
-                let args = validate(lua, name, args)?;
+                let mut args = validate(lua, name, args)?;
+                if name == "exec" {
+                    args["session"] = session.borrow().clone().ok_or_else(|| mlua::Error::runtime("NO_SESSION_CONTEXT"))?.into();
+                }
                 let result = host(name, args).map_err(mlua::Error::runtime)?;
                 lua.to_value(&result)
             })?)?;
@@ -53,6 +58,7 @@ impl Api {
         Ok(api)
     }
     pub fn dispatch(&self, lua: &Lua, event: &str, value: &serde_json::Value) -> mlua::Result<()> {
+        *self.session.borrow_mut() = value["sessionId"].as_str().map(str::to_owned);
         let callbacks = self.events.borrow().get(event).cloned().unwrap_or_default();
         for callback in callbacks { callback.call::<()>(lua.to_value(value)?)?; }
         Ok(())
