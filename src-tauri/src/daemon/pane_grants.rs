@@ -156,6 +156,7 @@ pub fn gate_for(request: &DaemonRequest) -> Option<Gate> {
             PaneGrantAction::Add { .. } | PaneGrantAction::Remove { .. } => Some(Gate::OwnerOnly),
         },
         DaemonRequest::SetAgentIntegration { .. }
+        | DaemonRequest::LayoutApply { .. }
         | DaemonRequest::RegisterWorkspace { .. }
         | DaemonRequest::UnregisterWorkspace { .. }
         | DaemonRequest::SaveSession { .. }
