@@ -1,0 +1,35 @@
+Todo 12 implementation handoff (implement-first; verification deferred by owner).
+
+No compiler, build, test, QA, mutation run, GitHub Actions or remote verification was run.
+git diff --check rex/integration-20261104 completed without whitespace diagnostics.
+rex/integration-20261104 was merged into rex/t12, preserving both sides.
+git merge-tree --write-tree rex/integration-20261104 HEAD exited 0.
+
+Implemented: protected owner DACL, exclusive first instance, local-only named pipes,
+continuous replacement instances, daemon/control process identification, Windows parent
+snapshots plus creation times, concurrent legacy TCP listeners, pipe-first daemon/control/
+agent/supervisor/hook clients, pane pipe environment, platform capability and security docs.
+No persistent transport state; existing idle-upgrade/restart and grant restore remain intact.
+server.rs edits are explicitly required by todo 12 for dual listeners and pipe authentication.
+protocol.rs was not changed; protocol remains v5.
+
+Added Windows tests: restricted owner SID marked deny-only gets ERROR_ACCESS_DENIED;
+exclusive first instance and kernel peer identity; cross-pane policy refusal; TCP stream
+compatibility; real PowerShell pane descendant refused by data/control dispatch; pipe-only
+hook endpoint and preserved TCP fallback credential.
+
+Pending integration acceptance:
+RUN@win (maho-win): cargo test --manifest-path src-tauri/Cargo.toml --lib -- daemon::windows_pipe supervisor_peer control_wire_tests
+RUN@linux|mac: cargo test --manifest-path src-tauri/Cargo.toml --lib
+Also run the CLI hook test windows_pipe_endpoint_precedes_tcp_and_retains_fallback_credential.
+
+Pending QA (isolated runtime only): list the three pipes; agents list with daemon.port deleted;
+pane A sending to B returns FORBIDDEN PANE_GRANT_REQUIRED; retained old-client TCP path works.
+Capture runtime evidence as task-12-*.log|.txt. No runtime success is claimed here.
+
+Compatibility risk: legacy TCP intentionally retains its pre-existing same-uid exemption for
+newly gated requests during this release. Pipe identification fails closed. Busy/unavailable
+pipes cause connect-time TCP fallback; failed request writes are never replayed.
+Windows named pipes use per-SID/per-build names, not runtime-directory names, per the plan.
+Only one daemon per SID/build may reserve them, including an isolated QA daemon: do not run
+isolated pipe QA concurrently with a production daemon of the same build flavor.
