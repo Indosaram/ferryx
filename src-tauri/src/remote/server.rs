@@ -2793,7 +2793,9 @@ async fn handle_machine_terminal_socket(
                         res
                     }
                     Message::Text(text) if text.len() <= 16 * 1024 => {
-                        match serde_json::from_str::<MachineTerminalControl>(&text) {
+                        let parsed = serde_json::from_str::<MachineTerminalControl>(&text);
+                        let take = matches!(&parsed, Ok(MachineTerminalControl::TakeSize { .. }));
+                        match parsed {
                             Ok(MachineTerminalControl::AcknowledgeAgentOutcome {
                                 generation: supplied,
                             }) if supplied.0 == generation => {
@@ -2814,7 +2816,7 @@ async fn handle_machine_terminal_socket(
                                     || (cols <= REMOTE_GRID_MAX_COLS && rows <= REMOTE_GRID_MAX_ROWS)) =>
                             {
                                 let client = format!("phone:machine:{}:{generation}", target.session_id);
-                                let take = text.contains("\"takeSize\"");
+
                                 let applied = state.session_backend.resize_owned(&target.session_id, &client, cols, rows, true, take).await?;
                                 if !applied { return Ok(()); }
                                 resized.store(true, std::sync::atomic::Ordering::Release);
