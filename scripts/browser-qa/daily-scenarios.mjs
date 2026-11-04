@@ -171,9 +171,122 @@ function tab(ctx, browserId) {
   return ctx.sessions().list.find((entry) => entry.browserId === browserId) ?? null;
 }
 
-/** Navigates through the real address bar (click, select all, type, Enter) and waits for OCR text. */
+/**
+ * The tab that actually shows a URL whose path ends in `suffix`: the visible one first, else any.
+ * Reading a remembered id went wrong whenever a visit landed in another tab (linux run
+ * 41801115761: login-frame loaded in tab A, so tab B's title "perm:idle" was read as the frame).
+ */
+function tabAt(ctx, suffix) {
+  const list = ctx.sessions().list.filter((entry) => (entry.url ?? "").split(/[?#]/)[0].endsWith(suffix));
+  return list.find((entry) => entry.visible) ?? list[0] ?? null;
+}
+
+/**
+ * The value a page script returned through `ferryx browser eval`. Its stdout is a JSON string
+ * around the script's own JSON (run 41801115761: "\"[\\\"qauser\\\",11]\""), so a substring
+ * test for '"qauser"' never matched; decode while the value is still a string.
+ */
+function parseEval(stdout) {
+  let value = (stdout ?? "").trim();
+  for (let index = 0; index < 3 && typeof value === "string"; index += 1) {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      break;
+    }
+  }
+  return value;
+}
+
+/** The login fixture's two fields in tab `browserId` as [username, password], or null. */
+async function loginFields(ctx, browserId) {
+  if (!browserId) return null;
+  const result = await ctx.cliAsync("eval", "--browser-id", browserId, "--script", "JSON.stringify([document.getElementById('u').value, document.getElementById('p').value])");
+  const value = result.ok ? parseEval(result.stdout) : null;
+  return Array.isArray(value) ? value : null;
+}
+
+/**
+ * Closes the library panel (History / Bookmarks / Downloads) when it is open: its close X is the
+ * last control on its tab row; confirmed by reading the screen again, retried once. Windows run
+ * 41801115761 left the panel over the page from the history step to the PDF step (screenshots
+ * 13-17): the LOGINPAGE click found nothing, the typed login went nowhere (typed ["",0]) and the
+ * zoom and PDF visits were typed while the panel had the focus. This was the first divergence.
+ */
+async function closeLibrary(ctx) {
+  const record = { open: false, clicks: [] };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const path = ctx.probeShot();
+    const tabs = (ctx.ocr(path) ?? []).find((word) => /^downloads$/i.test(word.text));
+    if (!tabs) return { ...record, ok: true };
+    record.open = true;
+    if (attempt === 2) break;
+    const image = ctx.decodePng(path);
+    const y = tabs.top + Math.round(tabs.height / 2);
+    const runs = rowRuns(image, y, tabs.left + tabs.width + 20, image.width);
+    // Past the window's right edge the screen differs from the row in one wide run.
+    while (runs.length && runs.at(-1)[1] - runs.at(-1)[0] > 60) runs.pop();
+    const close = runs.filter(([a, b]) => b - a >= 4 && b - a <= 30).at(-1);
+    if (!close) break;
+    const at = [Math.round((close[0] + close[1]) / 2), y];
+    record.clicks.push(at);
+    ctx.host.click(...at);
+    await sleep(1000);
+  }
+  return { ...record, ok: false };
+}
+
+/**
+ * macOS: closes a native open panel (and its "Go to folder" sheet) left on screen. A leaked
+ * Chromium open panel covered the app for the rest of macOS run 41801115761 (probes 234-295), so
+ * Settings never opened for the profile scenario. Escape twice (the sheet, then the panel),
+ * confirmed by OCR, retried once.
+ */
+async function closeFilePanel(ctx) {
+  if (ctx.platform !== "darwin") return null;
+  const panelOpen = () => {
+    const words = screenWords(ctx);
+    return has(words, "cancel") && words.some((word) => /^(new|folder|recents|applications|go|to:|open)$/i.test(word.text));
+  };
+  const record = { open: false, escapes: 0 };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (!panelOpen()) return { ...record, ok: true };
+    record.open = true;
+    // Escape goes to the frontmost app, which owns the panel (the engine for a Chromium tab), so
+    // the Ferryx window is not focused first.
+    for (let press = 0; press < 2; press += 1) {
+      ctx.host.key({ key: "Escape" });
+      record.escapes += 1;
+      await sleep(800);
+    }
+  }
+  return { ...record, ok: !panelOpen() };
+}
+
+/** Closes the OS file-manager window a drag source opened, so it covers nothing later. */
+function closeFileManager(ctx) {
+  if (ctx.platform === "darwin") return ctx.run("osascript", ["-e", 'tell application "Finder" to close every window']).ok;
+  if (ctx.platform === "win32") {
+    // Explorer stayed open behind the app from G8 on (Windows run 41801115761 screenshots 20-22).
+    return ctx.run("powershell.exe", ["-NoProfile", "-Command",
+      "(New-Object -ComObject Shell.Application).Windows() | Where-Object { $_.LocationURL -like '*ui-audit*' } | ForEach-Object { $_.Quit() }"], { timeout: 20000 }).ok;
+  }
+  return null;
+}
+
+/**
+ * Navigates through the real address bar (click, select all, type, Enter), confirms through
+ * `ferryx browser list` that a visible tab reached the URL's path (retyped once otherwise), then
+ * waits for OCR text. Windows run 41801115761: the /doc.pdf visit never landed and the PDF check
+ * read example.html.
+ */
 async function visit(ctx, url, expect, timeout = 20000) {
-  for (const [, action] of ctx.typeUrl(url)) await action();
+  const path = new URL(url).pathname;
+  const landed = () => ctx.sessions().list.some((entry) => entry.visible !== false && (entry.url ?? "").split(/[?#]/)[0].endsWith(path));
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (const [, action] of ctx.typeUrl(url)) await action();
+    if (await until(landed, 8000)) break;
+  }
   return expect ? waitWords(ctx, [].concat(expect), timeout) : null;
 }
 
@@ -398,8 +511,13 @@ async function answerOpenDialog(ctx, path) {
     await sleep(400);
     ctx.win.ps("keysraw", ["-Codes", "13"]);
   } else {
+    // The Chromium panel's "Go to folder" sheet kept only "/" of the typed path (macOS run
+    // 41801115761 probe 234): it was still opening when typing started. Wait longer, and select
+    // the field's text so the whole path replaces whatever the sheet prefilled.
     ctx.host.key({ key: "g", mods: ["mod", "shift"] });
-    await sleep(1200);
+    await sleep(2500);
+    ctx.host.key({ key: "a", mods: ["mod"] });
+    await sleep(300);
     ctx.host.type(path);
     await sleep(600);
     ctx.host.key({ key: "Enter" });
@@ -460,12 +578,20 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
         const hit = screenWords(ctx).find((word) => /upload-fixture|^uploa|ixture[.,]txt/i.test(word.text));
         return hit ? [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)] : null;
       }, 10000, 800);
-      record.from = from;
-      if (!from) return { ...record, ok: false, stderr: "the file name was not read in Finder" };
+      // `open -R` selects the file, and OCR cannot read its white-on-blue label (macOS run
+      // 41801115761 probe 231): the selection highlight is a blue band 12-24px tall under the
+      // icon, so the press point is the icon centre above it.
+      record.from = from ?? finderSelection(ctx);
+      record.from_via = from ? "ocr" : record.from ? "selection highlight" : null;
+      if (!record.from) return { ...record, ok: false, stderr: "the file name was not read in Finder" };
     }
     const [x0, y0] = record.from;
     ctx.host.mouseDown(x0, y0);
     await sleep(300);
+    // A short first move past the OS drag threshold, held, so the source starts the drag before
+    // the long move.
+    ctx.host.mouseMove(x0 + 8, y0 + 8);
+    await sleep(400);
     const steps = 20;
     for (let index = 1; index <= steps; index += 1) {
       ctx.host.mouseMove(Math.round(x0 + ((to[0] - x0) * index) / steps), Math.round(y0 + ((to[1] - y0) * index) / steps));
@@ -476,7 +602,32 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
     return { ...record, ok: true };
   } finally {
     helper?.kill();
+    await sleep(1500);
+    record.file_manager_closed = closeFileManager(ctx);
   }
+}
+
+/** The Finder icon above the selected item's blue label highlight, or null. */
+function finderSelection(ctx) {
+  const image = ctx.decodePng(ctx.probeShot());
+  const blue = ([r, g, b]) => r < 40 && g >= 85 && g <= 125 && b >= 205;
+  const bands = [];
+  let band = null;
+  // The Dock (bottom 80px) has blue icons too.
+  for (let y = 0; y < image.height - 80; y += 1) {
+    let count = 0, a = Infinity, b = -1;
+    for (let x = 0; x < image.width; x += 1) {
+      if (!blue(image.rgb(x, y))) continue;
+      count += 1;
+      a = Math.min(a, x);
+      b = Math.max(b, x);
+    }
+    if (count < 20) continue;
+    if (band && y - band.y1 <= 2) Object.assign(band, { y1: y, x0: Math.min(band.x0, a), x1: Math.max(band.x1, b) });
+    else bands.push((band = { y0: y, y1: y, x0: a, x1: b }));
+  }
+  const label = bands.find((entry) => entry.y1 - entry.y0 >= 10 && entry.y1 - entry.y0 <= 26 && entry.x1 - entry.x0 >= 40 && entry.x1 - entry.x0 <= 240);
+  return label ? [Math.round((label.x0 + label.x1) / 2), Math.max(0, label.y0 - 38)] : null;
 }
 
 /** The OS-native print UI words read on screen. */
@@ -645,9 +796,13 @@ export async function dailyWebviewBefore(ctx) {
     if (!folder) return { ok: false, stderr: "folder not created", tabBtn, newFolder };
     await sleep(1500);
     // The bravo row's "Move to…" select: focus it with a click, then pick the folder by typing.
+    // "Bravo" is also on the tab bar and the bookmark bar above the library (Windows run
+    // 41801115761 probe 057: the first hit was the bar, so no "Move" matched and move_at was
+    // null); the row is the "Bravo" with a "Move" on its own line.
     const words = screenWords(ctx);
-    const row = words.find((word) => /bravo/i.test(word.text));
-    const move = row ? words.filter((word) => /^move/i.test(word.text) && Math.abs(word.top - row.top) < 14)[0] : null;
+    const sameLine = (a, b) => Math.abs(a.top + a.height / 2 - (b.top + b.height / 2)) < 10;
+    const row = words.filter((word) => /bravo/i.test(word.text)).find((word) => words.some((other) => /^move/i.test(other.text) && sameLine(other, word))) ?? null;
+    const move = row ? words.filter((word) => /^move/i.test(word.text) && sameLine(word, row))[0] : null;
     if (move) {
       ctx.host.click(move.left + Math.round(move.width / 2), move.top + Math.round(move.height / 2));
       await sleep(1200);
@@ -665,35 +820,27 @@ export async function dailyWebviewBefore(ctx) {
     g2.checks.folder_move = Boolean(moved);
     g2.move_at = move ? [move.left, move.top] : null;
     ctx.host.key({ key: "Escape" });
-    await clickWord(ctx, (text) => /^history$/i.test(text), { timeout: 1500 });
     return { ok: g2.checks.folder_created && g2.checks.folder_move };
   });
   // Close the library panel (its close X sits right of the tab list; Escape from the page works too).
   await run(ctx, "daily-library-close", "Close the library panel", async () => {
     // The library sits below the toolbar, so the toolbar stays visible while it is open; its tab
     // row (History, Bookmarks, Downloads) is the signal, and its close X is the last control there.
-    const words = screenWords(ctx);
-    const tabs = words.find((word) => /^downloads$/i.test(word.text));
-    let closed = null;
-    if (tabs) {
-      const image = ctx.decodePng(ctx.probeShot());
-      const y = tabs.top + Math.round(tabs.height / 2);
-      const runs = rowRuns(image, y, tabs.left + tabs.width + 20, image.width);
-      while (runs.length && runs.at(-1)[1] - runs.at(-1)[0] > 60) runs.pop();
-      const close = runs.filter(([a, b]) => b - a >= 4 && b - a <= 30).at(-1);
-      if (close) {
-        closed = [Math.round((close[0] + close[1]) / 2), y];
-        ctx.host.click(...closed);
-      }
-    }
-    await sleep(1000);
-    const back = await waitWords(ctx, ["bravopage", "secondtab", "charliepage"], 6000);
-    return { ok: Boolean(back), library_open: Boolean(tabs), closed };
+    // The step only passes once the panel is gone: the old version passed on any page word
+    // (Windows run 41801115761 screenshot 15 shows the panel still open after an "ok").
+    const closed = await closeLibrary(ctx);
+    const back = closed.ok ? await waitWords(ctx, ["bravopage", "secondtab", "charliepage"], 6000) : null;
+    return { ok: closed.ok && Boolean(back), ...closed };
   });
 
   // G3: login save prompt, vault file, OS keystore.
   await run(ctx, "daily-g3-save", "Tab B /login.html: click the page, Tab into USERNAME, type user, Tab, type password, Enter submits; click Save in the password bar", async () => {
+    g3.library_closed = await closeLibrary(ctx);
     await visit(ctx, `${fixtureBase}/login.html`, "LOGINPAGE");
+    // The tab that shows the login page, confirmed through the CLI (a remembered id can point
+    // at a tab the visit did not land in).
+    const loginTab = tabAt(ctx, "/login.html")?.browserId ?? daily.tabB;
+    g3.login_tab = loginTab;
     // Focus the page through its heading (big black text OCR reads reliably), not the grey
     // placeholders; the heading sits before the form, so Tab lands in USERNAME. Otherwise the
     // address bar keeps focus and the credentials end up in the URL.
@@ -705,8 +852,24 @@ export async function dailyWebviewBefore(ctx) {
     ctx.host.key({ key: "Tab" });
     await sleep(300);
     ctx.host.type("qa-pass-123");
-    const typed = await ctx.cliAsync("eval", "--browser-id", daily.tabB, "--script", "JSON.stringify([document.getElementById('u').value, document.getElementById('p').value.length])");
-    g3.typed = typed.ok ? typed.stdout.trim().slice(0, 200) : `eval failed: ${typed.stderr.slice(0, 200)}`;
+    const typedOk = (fields) => Array.isArray(fields) && fields[0] === "qauser" && fields[1] === "qa-pass-123";
+    let fields = await loginFields(ctx, loginTab);
+    g3.typed_via = "heading click + Tab";
+    if (!typedOk(fields)) {
+      // The keys went elsewhere (Windows run 41801115761: typed ["",0], the LOGINPAGE click hit
+      // nothing). Give the webview keyboard focus through the CLI, then click each field itself.
+      g3.focus_cli = (await ctx.cliAsync("focus", "--browser-id", loginTab)).ok;
+      for (const [placeholder, value] of [["USERNAME", "qauser"], ["PASSWORD", "qa-pass-123"]]) {
+        await clickWord(ctx, (text) => new RegExp(`^${placeholder}$`, "i").test(text), { timeout: 5000, pick: "bottom" });
+        await sleep(400);
+        ctx.host.key({ key: "a", mods: ["mod"] });
+        ctx.host.type(value);
+        await sleep(300);
+      }
+      fields = await loginFields(ctx, loginTab);
+      g3.typed_via = "cli focus + field clicks";
+    }
+    g3.typed = fields ? [fields[0], String(fields[1] ?? "").length] : null;
     // Enter in the password field: a trusted keydown for the capture script and an implicit submit.
     ctx.host.key({ key: "Enter" });
     const prompt = await until(() => {
@@ -728,7 +891,8 @@ export async function dailyWebviewBefore(ctx) {
     if (ctx.platform === "linux") {
       const result = ctx.run("secret-tool", ["search", "service", "com.ferryx.app.browser-vault"]);
       keystore = { status: result.status, out: result.stdout.split("\n").filter((line) => !/^secret\s*=/.test(line)).join("\n").slice(0, 600), err: result.stderr.slice(0, 300) };
-      g3.checks.keystore_item = result.ok && /com\.ferryx\.app\.browser-vault/.test(result.stdout);
+      // secret-tool prints the attributes (attribute.service = ...) on stderr, the label on stdout.
+      g3.checks.keystore_item = result.ok && /com\.ferryx\.app\.browser-vault/.test(`${result.stdout}\n${result.stderr}`);
     } else if (ctx.platform === "darwin") {
       const result = ctx.run("security", ["find-generic-password", "-s", "com.ferryx.app.browser-vault"]);
       keystore = { status: result.status, out: result.stdout.slice(0, 600), err: result.stderr.slice(0, 300) };
@@ -746,10 +910,22 @@ export async function dailyWebviewBefore(ctx) {
   // G13: per-site zoom on the webview.
   await run(ctx, "daily-g13-zoom", "Site A zoomed in twice (125%); site B stays 100%; back on A it is 125% again", async () => {
     await visit(ctx, `${fixtureBase}/example.html`, ["domain", "illustrative"]);
-    await shortcut(ctx, { key: "=", mods: ["mod"] });
-    await sleep(500);
-    await shortcut(ctx, { key: "=", mods: ["mod"] });
-    const set = await until(() => tab(ctx, daily.tabB)?.zoomFactor === 1.25, 8000);
+    daily.tabB = tabAt(ctx, "/example.html")?.browserId ?? daily.tabB;
+    // From 100%, one press at a time, each confirmed through the CLI before the next: two
+    // presses 500ms apart reached only 1.1 on Windows run 41801115761 (one press was lost).
+    await shortcut(ctx, { key: "0", mods: ["mod"] });
+    g13.zoom_reset = Boolean(await until(() => tab(ctx, daily.tabB)?.zoomFactor === 1, 6000, 500));
+    g13.zoom_steps = [];
+    for (let press = 0; press < 4 && tab(ctx, daily.tabB)?.zoomFactor !== 1.25; press += 1) {
+      const before = tab(ctx, daily.tabB)?.zoomFactor ?? null;
+      await shortcut(ctx, { key: "=", mods: ["mod"] });
+      const after = await until(() => {
+        const now = tab(ctx, daily.tabB)?.zoomFactor ?? null;
+        return now !== null && now !== before ? now : null;
+      }, 5000, 400);
+      g13.zoom_steps.push(after);
+    }
+    const set = await until(() => tab(ctx, daily.tabB)?.zoomFactor === 1.25, 4000);
     g13.checks.zoom_set = Boolean(set);
     await visit(ctx, `${siteB}/example.html`, ["domain", "illustrative"]);
     const other = await until(() => tab(ctx, daily.tabB)?.zoomFactor === 1, 8000);
@@ -777,7 +953,8 @@ export async function dailyWebviewBefore(ctx) {
       two = await waitWords(ctx, ["two", "/2", "of2"], 1500);
     }
     g13.checks.pdf_webview_pages = Boolean(two);
-    g13.pdf_webview = { one, two, url: tab(ctx, daily.tabB)?.url, title: tab(ctx, daily.tabB)?.title };
+    const pdfTab = tabAt(ctx, "/doc.pdf");
+    g13.pdf_webview = { one, two, url: pdfTab?.url ?? tab(ctx, daily.tabB)?.url, title: pdfTab?.title ?? tab(ctx, daily.tabB)?.title };
     return { ok: g13.checks.pdf_webview_text && g13.checks.pdf_webview_pages };
   });
 
@@ -791,6 +968,7 @@ export async function dailyWebviewBefore(ctx) {
     g8.checks.upload_picker = Boolean(picked);
     g8.picker_title = tab(ctx, daily.tabB)?.title ?? null;
     if (!picked) ctx.closeDialogs();
+    g8.panel_closed = await closeFilePanel(ctx);
     ctx.host.focus();
     const zone = await until(() => {
       const hit = screenWords(ctx).find((word) => /DROPZONE/i.test(word.text));
@@ -879,38 +1057,51 @@ export async function dailyWebviewBefore(ctx) {
         await until(() => printUiSeen(ctx).length >= 2, 15000);
       }
       if (ctx.platform === "linux") {
-        // GTK print dialog: the "Print to File" printer, the output name, then Print.
+        // GTK print dialog: select the "Print to File" printer, then Print. GTK writes to its own
+        // default output (the "File:" button showed "...-isolation/tmp/output.pdf" in linux run
+        // 41801115761 probe 109, and there was no "Name:" field), so that path counts too.
         await clickWord(ctx, (text) => /^File$/i.test(text), { timeout: 5000 });
         await sleep(1000);
-        const nameLabel = await until(() => screenWords(ctx).find((word) => /^Name:?$/.test(word.text)), 5000);
+        const nameLabel = await until(() => screenWords(ctx).find((word) => /^Name:?$/.test(word.text)), 3000);
         if (nameLabel) {
           ctx.host.click(nameLabel.left + nameLabel.width + 120, nameLabel.top + Math.round(nameLabel.height / 2));
           ctx.host.key({ key: "a", mods: ["ctrl"] });
           ctx.host.type(pdfPath);
         }
-        await clickWord(ctx, (text) => /^Print$/.test(text), { timeout: 5000, pick: "bottom" });
+        g9.print_click = await clickWord(ctx, (text) => /^Print$/.test(text), { timeout: 5000, pick: "bottom" });
       } else {
-        // WebView2 print preview: Destination -> Save as PDF, then Save, then the Save As dialog.
+        // WebView2 print preview: the printer is preset to "Microsoft Print to PDF" (Windows run
+        // 41801115761 probe 120). Its blue Print button is white-on-blue text OCR misses; it sits
+        // about 128px left of the bottom "Cancel". Then the "Save Print Output As" dialog.
         const words = screenWords(ctx);
-        if (!has(words, "saveaspdf") && !has(words, "microsoftprinttopdf")) {
-          const dest = words.find((word) => /^Destination$/.test(word.text));
+        if (!has(words, "saveaspdf") && !has(words, "microsoftprinttopdf") && !has(words, "printtopdf")) {
+          const dest = words.find((word) => /^(Destination|Printer)$/.test(word.text));
           if (dest) {
-            ctx.host.click(dest.left + 260, dest.top + Math.round(dest.height / 2) + 34);
+            ctx.host.click(dest.left + 120, dest.top + Math.round(dest.height / 2) + 36);
             await sleep(1500);
             await clickWord(ctx, (text) => /^PDF$/i.test(text), { timeout: 5000 });
           }
         }
         await sleep(1500);
-        const save = await clickWord(ctx, (text) => /^(Save|Print)$/.test(text), { timeout: 6000, pick: "bottom" });
-        g9.save_click = save;
-        await sleep(3000);
+        const cancel = await until(() => screenWords(ctx).filter((word) => /^Cancel$/.test(word.text)).sort((a, b) => b.top - a.top)[0], 6000);
+        if (cancel) {
+          const at = [cancel.left + Math.round(cancel.width / 2) - 128, cancel.top + Math.round(cancel.height / 2)];
+          ctx.host.click(...at);
+          g9.save_click = at;
+        } else {
+          g9.save_click = await clickWord(ctx, (text) => /^(Save|Print)$/.test(text), { timeout: 4000, pick: "bottom" });
+        }
+        g9.save_dialog = await waitWords(ctx, ["saveprint", "outputas", "filename"], 15000);
+        await sleep(1000);
         ctx.win.ps("typeraw", ["-Text", pdfPath]);
         await sleep(500);
         ctx.win.ps("keysraw", ["-Codes", "13"]);
       }
-      const written = await until(() => existsSync(pdfPath) && readFileSync(pdfPath).subarray(0, 4).toString() === "%PDF", 25000);
+      const candidates = [pdfPath, join(ctx.dirs.tmp, "output.pdf"), join(ctx.dirs.home, "output.pdf"), join(process.cwd(), "output.pdf")];
+      const isPdf = (path) => existsSync(path) && readFileSync(path).subarray(0, 4).toString() === "%PDF";
+      const written = await until(() => candidates.find(isPdf) ?? null, 25000);
       g9.checks.pdf_saved = Boolean(written);
-      g9.pdf = { path: pdfPath, exists: existsSync(pdfPath), size: existsSync(pdfPath) ? statSync(pdfPath).size : 0 };
+      g9.pdf = { path: written ?? pdfPath, exists: Boolean(written), size: written ? statSync(written).size : 0, looked_in: candidates };
       if (!written) {
         ctx.host.key({ key: "Escape" });
         ctx.closeDialogs();
@@ -923,11 +1114,20 @@ export async function dailyWebviewBefore(ctx) {
   // Back to a plain page so the restart restores a simple tab B.
   await run(ctx, "daily-tab-b-settle", "Tab B back on /qa/second before the restart", async () => {
     // A failed print or notification step can leave another tab or a dialog in front (linux run
-    // 41767162699: this step failed and tab B stayed on /notify.html across the restart).
+    // 41767162699: this step failed and tab B stayed on /notify.html across the restart). Linux
+    // run 41801115761 still showed the notification prompt here, and Windows had its Settings app
+    // in front of Ferryx (screenshot 22), so the typed URL went nowhere.
     ctx.closeDialogs();
     ctx.host.key({ key: "Escape" });
+    if (ctx.platform === "win32") ctx.run("powershell.exe", ["-NoProfile", "-Command", "Get-Process SystemSettings -ErrorAction SilentlyContinue | Stop-Process -Force"], { timeout: 20000 });
+    ctx.host.focus();
+    const wants = screenWords(ctx).find((word) => /^wants$/i.test(word.text));
+    const allowAt = wants ? findAllowButton(ctx, wants) : null;
+    if (allowAt) ctx.host.click(...allowAt);
     const activate = await activateTab(ctx, daily.tabB, null);
-    return { ok: Boolean(await visit(ctx, `${fixtureBase}/qa/second.html`, "SECONDTAB")), activate };
+    const shown = await visit(ctx, `${fixtureBase}/qa/second.html`, "SECONDTAB");
+    daily.tabB = tabAt(ctx, "/qa/second.html")?.browserId ?? daily.tabB;
+    return { ok: Boolean(shown), activate, prompt_answered: allowAt };
   });
   daily.beforeRestart = ctx.sessions().list.map((entry) => ({ browserId: entry.browserId, url: entry.url }));
   g1.before_restart = daily.beforeRestart;
@@ -1019,30 +1219,39 @@ export async function dailyWebviewAfter(ctx) {
   });
 
   await run(ctx, "daily-g3-after", "After the restart: /login.html offers 'Fill saved login'; clicking qauser fills both fields; the cross-origin iframe stays empty", async () => {
-    await activateTab(ctx, daily.tabB, (text) => /second/i.test(text));
-    daily.tabB = ctx.sessions().list.find((entry) => entry.url.endsWith("/qa/second.html"))?.browserId ?? daily.tabB;
+    g3.activate_b = await activateTab(ctx, daily.tabB, (text) => /second/i.test(text));
     await visit(ctx, `${fixtureBase}/login.html`, "LOGINPAGE");
+    // Read the tab that really shows the page. Linux run 41801115761 restored tab B on
+    // /notify.html, the visit landed in tab A, and tab B's "perm:idle" was read as the frame result.
+    const loginTab = tabAt(ctx, "/login.html")?.browserId ?? daily.tabB;
+    g3.after_tab = loginTab;
     const offer = await waitWords(ctx, ["fillsaved", "saved"], 15000);
     g3.checks.fill_offer_after_restart = Boolean(offer);
+    // The fill button is the "qauser" on the offer bar's line, right of "saved"/"login".
     const button = await clickWord(ctx, (text) => /^qauser$/i.test(text), { timeout: 6000, pick: "first" });
     const filled = await until(async () => {
-      const result = await ctx.cliAsync("eval", "--browser-id", daily.tabB, "--script", "JSON.stringify([document.getElementById('u').value, document.getElementById('p').value])");
-      return result.ok && result.stdout.includes('"qauser"') && result.stdout.includes('"qa-pass-123"') ? result.stdout : null;
+      const fields = await loginFields(ctx, loginTab);
+      return fields && fields[0] === "qauser" && fields[1] === "qa-pass-123" ? fields : null;
     }, 8000);
+    g3.filled_fields = filled ? [filled[0], filled[1].length] : await loginFields(ctx, loginTab);
     g3.checks.autofilled_after_restart = Boolean(button) && Boolean(filled);
     await visit(ctx, `${fixtureBase}/login-frame.html`, "FRAMEHOST");
+    const frameTab = tabAt(ctx, "/login-frame.html")?.browserId ?? loginTab;
+    g3.frame_tab = frameTab;
     await sleep(2500);
     // Even if a fill is offered here, it must not reach the cross-origin frame.
     await clickWord(ctx, (text) => /^qauser$/i.test(text), { timeout: 2500 });
     await sleep(3000);
-    const title = tab(ctx, daily.tabB)?.title ?? null;
+    const title = tab(ctx, frameTab)?.title ?? null;
     g3.frame_title = title;
     g3.checks.cross_origin_iframe_empty = title === "frame:|";
+    daily.tabB = frameTab;
     return { ok: g3.checks.fill_offer_after_restart && g3.checks.autofilled_after_restart && g3.checks.cross_origin_iframe_empty };
   });
 
   await run(ctx, "daily-g13-after", "After the restart: site A opens at 125%; Mod+0 resets", async () => {
     await visit(ctx, `${fixtureBase}/example.html`, ["domain", "illustrative"]);
+    daily.tabB = tabAt(ctx, "/example.html")?.browserId ?? daily.tabB;
     const kept = await until(() => tab(ctx, daily.tabB)?.zoomFactor === 1.25, 10000);
     g13.checks.zoom_survives_restart = Boolean(kept);
     await shortcut(ctx, { key: "0", mods: ["mod"] });
@@ -1127,6 +1336,7 @@ export async function dailyChromium(ctx) {
     g8.checks.upload_picker_chromium = Boolean(picked);
     g8.chromium_picker_title = tab(ctx, created.browserId)?.title ?? null;
     if (!picked) ctx.closeDialogs();
+    g8.chromium_panel_closed = await closeFilePanel(ctx);
     const zone = await until(() => {
       const hit = screenWords(ctx).find((word) => /DROPZONE/i.test(word.text));
       return hit ? [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)] : null;
@@ -1158,10 +1368,15 @@ export async function dailyChromium(ctx) {
   });
 
   await run(ctx, "daily-g11-profiles", "Settings > Session & Cookies: add profile 'work'; a work Chromium tab keeps its cookie; the default profile never sees it", async () => {
+    // A file panel left by the upload step covers Settings (macOS run 41801115761).
+    g11.panel_closed = await closeFilePanel(ctx);
+    ctx.host.focus();
     const opened = await ctx.openSettings();
     await ctx.clickNav("Browser");
     await sleep(1500);
-    const scrolled = await ctx.scrollSettingsTo("Session & Cookies");
+    let scrolled = await ctx.scrollSettingsTo("Session & Cookies");
+    // OCR can split or drop the "&"; the next group's heading is right below the profile input.
+    if (!scrolled.ok) scrolled = await ctx.scrollSettingsTo("Active Browser Tabs");
     const input = await clickWord(ctx, (text) => /^Profile$/.test(text), { timeout: 6000, pick: "rightmost" });
     ctx.host.type("work");
     await sleep(300);
