@@ -6358,6 +6358,26 @@ impl DaemonServer {
         // agent-state endpoint from disk as it spawns, so a listener started afterwards leaves
         // that pane with no endpoint for its whole lifetime.
         let _script_runtime = crate::script::start(script_registry, self.script_host()).await?;
+        let mut script_agents = self.agent_states.subscribe("");
+        tokio::spawn(async move {
+            loop {
+                match script_agents.receiver.recv().await {
+                    Ok(update) => {
+                        let value = serde_json::json!({"sessionId":update.state.session_id,"state":update.state.state,"agent":update.state.agent,"outcome":update.state.outcome});
+                        if let Err(error) = crate::script::control::event("agent.state".into(), value.clone()) {
+                            tracing::error!(%error, "Script agent-state delivery failed");
+                        }
+                        if update.state.outcome.is_some() {
+                            if let Err(error) = crate::script::control::event("agent.done".into(), value) {
+                                tracing::error!(%error, "Script agent-done delivery failed");
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(count)) => tracing::warn!(count, "Script agent stream lagged"),
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
         let mut script_events = self.remote_event_tx.subscribe();
         tokio::spawn(async move {
             loop {
@@ -6365,9 +6385,7 @@ impl DaemonServer {
                     Ok(event) => {
                         let name = match event.event.as_str() {
                             "LayoutChanged" => "layout.changed",
-                            "AgentStateChanged" => "agent.state",
-                            "AgentDone" => "agent.done",
-                            "SessionExit" => "session.exit",
+
                             _ => continue,
                         };
                         if let Err(error) = crate::script::control::event(name.into(), event.payload) {
