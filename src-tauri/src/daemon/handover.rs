@@ -869,6 +869,26 @@ mod spawn_owner_tests {
     }
 
     #[test]
+    fn layout_uses_the_committed_decision_not_shared_disk() {
+        use super::super::layout::{Content, Intent, Store};
+        let (root, manager, terminals, legacy) = committing_fixture();
+        let predecessor = Arc::new(Mutex::new(Store::new(root.path().join("old"))));
+        let expected = predecessor.lock().apply("main", 0, Intent::AddTabWithSession {
+            tab_id: "one".into(), label: "one".into(), activate: true,
+            content: Content::Terminal { backend_session_id: "pty-stable".into() },
+        }).unwrap().layout;
+        manager.set_layouts(predecessor);
+        manager.commit_handover_v5(&terminals).unwrap();
+        let successor = HandoverManager::new(legacy.with_file_name("successor.sock"));
+        let new_root = root.path().join("new");
+        let adopted = Arc::new(Mutex::new(Store::new(new_root.clone())));
+        successor.set_layouts(adopted.clone());
+        successor.adopt_recorded_layouts(&legacy).unwrap();
+        assert_eq!(adopted.lock().get("main").unwrap().layout, expected);
+        assert_eq!(Store::new(new_root).get("main").unwrap().layout, expected);
+    }
+
+    #[test]
     fn an_abort_record_carries_no_pane_grants() {
         use super::super::pane_grants::{GrantOp, PaneGrant, PaneGrants};
         let (_root, manager, _terminals, legacy) = committing_fixture();
