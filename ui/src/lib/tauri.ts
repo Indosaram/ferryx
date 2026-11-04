@@ -1446,6 +1446,30 @@ export async function setAgentControlSettings(request: {
   return invokeCommand<AgentControlSettings>("cmd_agent_control_set", request);
 }
 
+/** What a pane grant allows (rex todo 5). `admin` is granted on target `*` only. */
+export type PaneGrantOp = "write" | "control" | "spawn" | "admin";
+
+/** Panes whose session or workspace is `from` may perform `ops` on `to` (session, workspace or `*`). */
+export type PaneGrant = {
+  from: string;
+  to: string;
+  ops: PaneGrantOp[];
+};
+
+/** Null outside the desktop shell: grants are made only by the owner's desktop app. */
+export async function listPaneGrants(): Promise<PaneGrant[] | null> {
+  if (!isTauri()) return null;
+  return invokeCommand<PaneGrant[]>("cmd_pane_grants_list");
+}
+
+export async function addPaneGrant(grant: PaneGrant): Promise<PaneGrant[]> {
+  return invokeCommand<PaneGrant[]>("cmd_pane_grants_add", { from: grant.from, to: grant.to, ops: grant.ops });
+}
+
+export async function removePaneGrant(from: string, to: string): Promise<PaneGrant[]> {
+  return invokeCommand<PaneGrant[]>("cmd_pane_grants_remove", { from, to });
+}
+
 export type DirectAutoTrustStatus = {
   /** Automatic account-attested direct trust is in effect. */
   enabled: boolean;

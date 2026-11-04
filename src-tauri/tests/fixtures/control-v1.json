@@ -45,7 +45,8 @@
       "responses": [
         { "ok": true, "accepted": true },
         { "ok": false, "code": "UPGRADE_UNSUPPORTED" },
-        { "ok": false, "code": "HANDOVER_WIRE_UNSUPPORTED" }
+        { "ok": false, "code": "HANDOVER_WIRE_UNSUPPORTED" },
+        { "ok": false, "code": "FORBIDDEN" }
       ]
     },
     {
@@ -53,7 +54,8 @@
       "request": { "control": 1, "op": "RetireWhenIdle" },
       "responses": [
         { "ok": true, "live": 0 },
-        { "ok": true, "live": 2 }
+        { "ok": true, "live": 2 },
+        { "ok": false, "code": "FORBIDDEN" }
       ]
     },
     {
@@ -63,7 +65,8 @@
         { "ok": true, "live": 2 },
         { "ok": false, "code": "SPAWN_IN_FLIGHT" },
         { "ok": false, "code": "NOT_ACTIVE_OWNER" },
-        { "ok": false, "code": "COUNT_CHANGED", "live": 3 }
+        { "ok": false, "code": "COUNT_CHANGED", "live": 3 },
+        { "ok": false, "code": "FORBIDDEN" }
       ]
     }
   ],

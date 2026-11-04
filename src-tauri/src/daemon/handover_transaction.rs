@@ -517,6 +517,10 @@ pub struct HandoverTransaction {
     /// handed over", and an absent lease is not written, so older readers see the same record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supervisor_lease: Option<SupervisorLeaseTransfer>,
+    /// The cross-pane grants a committing predecessor hands its successor (rex todo 5), with
+    /// the same optional, older-peer-compatible encoding as `supervisor_lease`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_grants: Option<Vec<crate::daemon::pane_grants::PaneGrant>>,
 }
 
 /// The predecessor's held supervisor lease at handover commit: the machine identity and fence
@@ -567,6 +571,7 @@ impl HandoverTransaction {
             rollback_reason: None,
             result: None,
             supervisor_lease: None,
+            pane_grants: None,
         }
     }
 

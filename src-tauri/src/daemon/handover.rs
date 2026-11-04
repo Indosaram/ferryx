@@ -825,6 +825,39 @@ mod spawn_owner_tests {
         assert_eq!(successor.take_handed_supervisor_lease(), None, "taken once");
     }
 
+    /// Rex todo 5: the commit decision carries the cross-pane grants; the successor adopts them
+    /// into its own store, and an abort carries none.
+    #[test]
+    fn pane_grants_survive_handover_in_the_decision_record() {
+        use super::super::pane_grants::{GrantOp, PaneGrant, PaneGrants, PANE_GRANTS_FILE};
+        let (root, manager, terminals, legacy) = committing_fixture();
+        let grants = Arc::new(PaneGrants::load(None));
+        let grant = PaneGrant { from: "a".into(), to: "b".into(), ops: [GrantOp::Write].into_iter().collect() };
+        grants.add(grant.clone()).unwrap();
+        manager.set_pane_grants(Some(Arc::clone(&grants)));
+        manager.commit_handover_v5(&terminals).expect("commit");
+        assert_eq!(HandoverManager::recorded_pane_grants(&legacy), Some(vec![grant.clone()]));
+
+        let successor = HandoverManager::new(legacy.with_file_name("successor.sock"));
+        let store_path = root.path().join(PANE_GRANTS_FILE);
+        let successor_grants = Arc::new(PaneGrants::load(Some(store_path.clone())));
+        successor.set_pane_grants(Some(Arc::clone(&successor_grants)));
+        successor.adopt_recorded_pane_grants(&legacy).expect("adopt");
+        assert_eq!(successor_grants.list(), vec![grant.clone()]);
+        assert_eq!(PaneGrants::load(Some(store_path)).list(), vec![grant], "saved by the successor");
+    }
+
+    #[test]
+    fn an_abort_record_carries_no_pane_grants() {
+        use super::super::pane_grants::{GrantOp, PaneGrant, PaneGrants};
+        let (_root, manager, _terminals, legacy) = committing_fixture();
+        let grants = Arc::new(PaneGrants::load(None));
+        grants.add(PaneGrant { from: "a".into(), to: "b".into(), ops: [GrantOp::Write].into_iter().collect() }).unwrap();
+        manager.set_pane_grants(Some(grants));
+        manager.abort_handover().expect("abort");
+        assert_eq!(HandoverManager::recorded_pane_grants(&legacy), None);
+    }
+
     #[test]
     fn a_failed_decision_write_resumes_renewing_and_an_abort_hands_nothing_over() {
         let (_root, manager, terminals, legacy) = committing_fixture();
@@ -1217,6 +1250,8 @@ pub struct HandoverManager {
     supervisor_lease: RwLock<Option<Arc<dyn SupervisorLeaseHandover>>>,
     /// The lease a committed predecessor handed this successor, taken by its lease client.
     handed_supervisor_lease: Mutex<Option<super::handover_transaction::SupervisorLeaseTransfer>>,
+    /// This daemon's cross-pane grants, written into the commit decision record.
+    pane_grants: RwLock<Option<Arc<super::pane_grants::PaneGrants>>>,
 }
 
 impl HandoverManager {
@@ -1265,6 +1300,33 @@ impl HandoverManager {
         *self.handed_supervisor_lease.lock() = lease;
     }
 
+    /// Registers this daemon's grant store for the handover commit.
+    pub fn set_pane_grants(&self, grants: Option<Arc<super::pane_grants::PaneGrants>>) {
+        *self.pane_grants.write() = grants;
+    }
+
+    /// The cross-pane grants a predecessor wrote into its committed (Retired) decision record
+    /// beside `legacy`; `None` without a record, without grants, or for an abort decision.
+    pub fn recorded_pane_grants(legacy: &std::path::Path) -> Option<Vec<super::pane_grants::PaneGrant>> {
+        use super::handover_transaction::{HandoverState, HandoverTransaction};
+        let bytes = fs::read(legacy.with_extension("transaction")).ok()?;
+        let transaction: HandoverTransaction = serde_json::from_slice(&bytes).ok()?;
+        if transaction.transfer_id != legacy.to_string_lossy() || transaction.state != HandoverState::Retired {
+            return None;
+        }
+        transaction.pane_grants
+    }
+
+    /// Successor, after the commit was confirmed: replaces its grants with the predecessor's.
+    /// Blocking (one small file read and the grant store write).
+    pub fn adopt_recorded_pane_grants(&self, legacy: &std::path::Path) -> Result<(), String> {
+        let (Some(grants), Some(store)) = (Self::recorded_pane_grants(legacy), self.pane_grants.read().clone()) else {
+            return Ok(());
+        };
+        tracing::info!(count = grants.len(), "pane grants handed over by the predecessor");
+        store.replace(grants)
+    }
+
     /// The lease handed over by the predecessor, once.
     pub fn take_handed_supervisor_lease(&self) -> Option<super::handover_transaction::SupervisorLeaseTransfer> {
         self.handed_supervisor_lease.lock().take()
@@ -1289,6 +1351,11 @@ impl HandoverManager {
         // after) and hands its lease to the successor in the same durable record.
         let lease = if committed { self.supervisor_lease.read().clone() } else { None };
         transaction.supervisor_lease = lease.as_ref().and_then(|lease| lease.freeze_for_handover());
+        transaction.pane_grants = if committed {
+            self.pane_grants.read().as_ref().map(|grants| grants.list())
+        } else {
+            None
+        };
         let written = Self::write_decision(&legacy, &transaction);
         // Renewing resumes only when no decision reached the disk: a record that landed despite
         // the error is the commit, and the successor renews that lease.
@@ -1394,6 +1461,7 @@ impl HandoverManager {
             commit_callbacks: Arc::new(Mutex::new(Vec::new())),
             supervisor_lease: RwLock::new(None),
             handed_supervisor_lease: Mutex::new(None),
+            pane_grants: RwLock::new(None),
         }
     }
 

@@ -1225,6 +1225,11 @@ pub enum DaemonRequest {
         request_id: String,
         approve: bool,
     },
+    /// Lists or changes the cross-pane grants (`paneGrantsV1`). Add and Remove are accepted
+    /// only from the owner (a peer outside every Ferryx pane).
+    PaneGrant {
+        request: crate::daemon::pane_grants::PaneGrantAction,
+    },
 }
 
 /// One connected remote desktop viewer.
@@ -1581,6 +1586,13 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     AgentControlSettingsOk {
         settings: crate::agent_control::policy::AgentControlSettings,
+    },
+    /// The grants after a `PaneGrant` request; `admin` answers `CheckAdmin`.
+    #[serde(rename_all = "camelCase")]
+    PaneGrantsOk {
+        grants: Vec<crate::daemon::pane_grants::PaneGrant>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        admin: Option<bool>,
     },
     #[serde(rename_all = "camelCase")]
     AgentIntegrationOk {

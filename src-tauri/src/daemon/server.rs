@@ -2269,6 +2269,8 @@ pub struct DaemonServer {
     /// Whether panes get the agent-state endpoint and boot installs the extension. Shared with
     /// the PTY manager, so a change applies to the next pane without a restart.
     agent_integration: Arc<crate::daemon::agent_extension::AgentIntegration>,
+    /// Cross-pane grants (`pane-grants.json`, rex todo 5), carried by the handover record.
+    pub(crate) pane_grants: Arc<crate::daemon::pane_grants::PaneGrants>,
     /// Bearer token every connection must present before a request is dispatched. Windows has no
     /// filesystem ownership boundary on the transport, so the published port alone cannot
     /// authenticate a client.
@@ -3589,6 +3591,16 @@ fn daemon_error(message: impl ToString) -> DaemonResponse {
     }
 }
 
+/// A `FORBIDDEN` refusal; `reason` (`PANE_GRANT_REQUIRED`, `OWNER_ACTION_REQUIRED`) is also
+/// carried as `details.reason` so a client can branch without parsing the message.
+fn forbidden(message: String, reason: Option<&str>) -> DaemonResponse {
+    DaemonResponse::Error {
+        message,
+        code: Some(super::supervisor_peer::FORBIDDEN.into()),
+        details: reason.map(|reason| serde_json::json!({ "reason": reason })),
+    }
+}
+
 /// Sends TRANSFER_DONE to the handover candidate. A failure is logged and recorded in failures;
 /// returns whether the frame was sent.
 #[cfg(unix)]
@@ -3939,6 +3951,15 @@ impl DaemonServer {
         let handover_manager = Arc::new(crate::daemon::handover::HandoverManager::new(
             get_socket_path(),
         ));
+        // Beside the identity state, like supervisor-fence.json; a test server without paths
+        // keeps its grants in its private fixture dir.
+        let pane_grants = Arc::new(crate::daemon::pane_grants::PaneGrants::load(
+            isolated_dir
+                .clone()
+                .or_else(|| crate::remote::auth::canonical_identity_dir().ok())
+                .map(|dir| dir.join(crate::daemon::pane_grants::PANE_GRANTS_FILE)),
+        ));
+        handover_manager.set_pane_grants(Some(Arc::clone(&pane_grants)));
         let remote_event_tx = broadcast::channel::<DaemonRemoteEvent>(64).0;
         let catalog_path = isolated_dir
             .clone()
@@ -4187,6 +4208,7 @@ impl DaemonServer {
             agent_state_endpoint: Mutex::new(None),
             agent_state_ingress_unavailable: std::sync::atomic::AtomicBool::new(false),
             agent_integration,
+            pane_grants,
             #[cfg(not(unix))]
             transport_token: generate_transport_token(),
             published_endpoints: Mutex::new(Vec::new()),
@@ -6196,6 +6218,7 @@ impl DaemonServer {
         } else if let Some(legacy) = handover_from.clone() {
             // The committed predecessor wrote its supervisor lease into the decision record;
             // the lease client started with the hub renews it (plan todo 9).
+            let grants_legacy = legacy.clone();
             let manager = Arc::clone(&self.handover_manager);
             if let Err(error) = crate::ipc::run_blocking(move || {
                 manager.adopt_recorded_supervisor_lease(&legacy);
@@ -6204,6 +6227,17 @@ impl DaemonServer {
             .await
             {
                 tracing::warn!(%error, "Could not read the supervisor lease handed over at commit");
+            }
+            // The predecessor's cross-pane grants ride the same record (rex todo 5).
+            let manager = Arc::clone(&self.handover_manager);
+            if let Err(error) = crate::ipc::run_blocking(move || {
+                manager
+                    .adopt_recorded_pane_grants(&grants_legacy)
+                    .map_err(crate::ipc::IpcError::internal)
+            })
+            .await
+            {
+                tracing::warn!(%error, "Could not adopt the pane grants handed over at commit");
             }
         }
 
@@ -6362,6 +6396,123 @@ impl DaemonServer {
         refusal
     }
 
+    /// The class of this connection's peer for the pane-grant gate. Reads the process table on
+    /// a blocking thread; a peer that cannot be classified is refused (`Err`).
+    pub(crate) async fn classify_peer(
+        &self,
+        origin: super::supervisor_peer::PeerOrigin,
+        ancestry: &mut Option<super::supervisor_peer::Ancestry>,
+    ) -> Result<super::supervisor_peer::PeerClass, String> {
+        use super::supervisor_peer::{PeerClass, PeerOrigin};
+        match origin {
+            PeerOrigin::TokenAuthenticated => return Ok(PeerClass::TokenAuthenticated),
+            PeerOrigin::Unknown => return Ok(PeerClass::Unknown),
+            PeerOrigin::Process(_) => {}
+        }
+        let panes = Arc::clone(self.terminal_service.pty_manager().pane_registry());
+        let mut cached = ancestry.take();
+        let (class, cached) = tokio::task::spawn_blocking(move || {
+            let class = super::supervisor_peer::classify(
+                origin,
+                &mut cached,
+                &panes,
+                &super::supervisor_peer::SystemProcs,
+            );
+            (class, cached)
+        })
+        .await
+        .unwrap_or_else(|error| (Err(format!("the peer check failed: {error}")), None));
+        *ancestry = cached;
+        class
+    }
+
+    /// The workspace a live session was spawned in.
+    fn session_workspace(&self, session_id: &str) -> Option<String> {
+        self.session_metadata
+            .read()
+            .get(session_id)
+            .map(|meta| meta.workspace_id.clone())
+    }
+
+    /// The pane-grant gate (rex todo 5): `Some(FORBIDDEN)` when this connection's peer may not
+    /// send `request`. Runs before any handler, so a refused AgentControl never reaches the
+    /// supervisor fence ratchet. `known_owner` keeps an Owner verdict for the connection: a
+    /// process outside every pane cannot later descend from a pane spawned after it (a new
+    /// pane leads its own new session and pty), so typing from the desktop GUI pays the
+    /// process-table read once, not per Write.
+    async fn pane_grant_refusal(
+        &self,
+        request: &DaemonRequest,
+        origin: super::supervisor_peer::PeerOrigin,
+        ancestry: &mut Option<super::supervisor_peer::Ancestry>,
+        known_owner: &mut bool,
+    ) -> Option<DaemonResponse> {
+        use super::pane_grants::{decide, gate_for, Gate};
+        use super::supervisor_peer::{PeerClass, PeerOrigin};
+        let gate = gate_for(request)?;
+        if *known_owner {
+            return None;
+        }
+        // Unidentified peers keep today's behaviour for every gated request except grant
+        // changes; they need no process-table read.
+        if matches!(origin, PeerOrigin::TokenAuthenticated | PeerOrigin::Unknown) && gate != Gate::OwnerOnly {
+            return None;
+        }
+        let class = match self.classify_peer(origin, ancestry).await {
+            Ok(class) => class,
+            Err(message) => return Some(forbidden(message, None)),
+        };
+        if class == PeerClass::Owner {
+            *known_owner = true;
+            return None;
+        }
+        if let PeerClass::Pane { session_id, .. } = &class {
+            // Self-targeted requests skip the store lookup.
+            if matches!(&gate, Gate::Session { session_id: target, .. } if target == session_id) {
+                return None;
+            }
+        }
+        decide(&class, &gate, &self.pane_grants, |session| self.session_workspace(session))
+            .err()
+            .map(|refusal| forbidden(refusal.message, Some(refusal.reason)))
+    }
+
+    /// Serves `PaneGrant`; the gate above already refused Add/Remove from anyone but the owner.
+    async fn handle_pane_grant(
+        &self,
+        request: super::pane_grants::PaneGrantAction,
+        class: Option<super::supervisor_peer::PeerClass>,
+    ) -> DaemonResponse {
+        use super::pane_grants::PaneGrantAction;
+        let grants = Arc::clone(&self.pane_grants);
+        let admin = match (&request, class) {
+            (PaneGrantAction::CheckAdmin, Some(class)) => {
+                Some(grants.admin_allowed(&class, |session| self.session_workspace(session)))
+            }
+            (PaneGrantAction::CheckAdmin, None) => Some(false),
+            _ => None,
+        };
+        let outcome = crate::ipc::run_blocking(move || {
+            let changed = match request {
+                PaneGrantAction::Add { grant } => grants.add(grant),
+                PaneGrantAction::Remove { from, to } => grants.remove(&from, &to),
+                PaneGrantAction::List | PaneGrantAction::CheckAdmin => Ok(grants.list()),
+            };
+            changed.map_err(|message| {
+                crate::ipc::IpcError::new(crate::ipc::error::IpcErrorCode::InvalidRequest, message)
+            })
+        })
+        .await;
+        match outcome {
+            Ok(grants) => DaemonResponse::PaneGrantsOk { grants, admin },
+            Err(error) => DaemonResponse::Error {
+                message: error.message,
+                code: Some("INVALID_REQUEST".into()),
+                details: None,
+            },
+        }
+    }
+
     pub async fn handle_client_with_origin<S>(
         self: Arc<Self>,
         stream: S,
@@ -6378,6 +6529,7 @@ impl DaemonServer {
         let mut line = String::new();
         let mut abort_rx = self.handover_manager.subscribe_client_abort();
         let mut ancestry = ancestry;
+        let mut known_owner = false;
         // Set once the connection has presented this boot's transport token. Unix inherits the
         // socket's ownership boundary and never needs the check.
         #[cfg(not(unix))]
@@ -6477,6 +6629,22 @@ impl DaemonServer {
                     };
                     let pause_peer_refusal = if matches!(req.as_ref(), Ok(DaemonRequest::SupervisorSetPaused { .. })) {
                         self.supervisor_peer_refusal(origin, &mut ancestry).await
+                    } else {
+                        None
+                    };
+                    let peer_refusal = match (peer_refusal, req.as_ref()) {
+                        (Some(refusal), _) => Some(refusal),
+                        (None, Ok(request)) => {
+                            self.pane_grant_refusal(request, origin, &mut ancestry, &mut known_owner).await
+                        }
+                        (None, Err(_)) => None,
+                    };
+                    // CheckAdmin answers for the caller's own class.
+                    let mut grant_class = if matches!(
+                        req.as_ref(),
+                        Ok(DaemonRequest::PaneGrant { request: super::pane_grants::PaneGrantAction::CheckAdmin })
+                    ) {
+                        self.classify_peer(origin, &mut ancestry).await.ok()
                     } else {
                         None
                     };
@@ -7773,10 +7941,14 @@ impl DaemonServer {
                     capabilities.push(crate::hub_runtime::SUPERVISOR_ENGINE_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_LAUNCH_CAPABILITY.into());
+                    capabilities.push(crate::daemon::pane_grants::PANE_GRANTS_CAPABILITY.into());
                     #[cfg(feature = "remote-desktop")]
                     capabilities.push(crate::daemon::protocol::REMOTE_DESKTOP_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
                 },
+                Ok(DaemonRequest::PaneGrant { request }) => {
+                    self.handle_pane_grant(request, grant_class.take()).await
+                }
                 Ok(request @ (DaemonRequest::RemoteDesktopHostGet
                     | DaemonRequest::RemoteDesktopHostSet { .. }
                     | DaemonRequest::RemoteDesktopHostRespond { .. })) => {
