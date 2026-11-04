@@ -2898,6 +2898,24 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn foreground_command_is_additive_stream_metadata() {
+        let mut frame = protocol_frame("working");
+        if let DaemonStreamMessage::AgentState { foreground_command, .. } = &mut frame {
+            *foreground_command = Some(Cow::Borrowed("sleep"));
+        }
+        let value = serde_json::to_value(&frame).unwrap();
+        assert_eq!(value["foregroundCommand"], "sleep");
+        let encoded = serde_json::to_string(&frame).unwrap();
+        let decoded: DaemonStreamMessage<'_> = serde_json::from_str(&encoded).unwrap();
+        assert!(matches!(decoded, DaemonStreamMessage::AgentState { foreground_command: Some(name), .. } if name == "sleep"));
+        let mut legacy = value;
+        legacy.as_object_mut().unwrap().remove("foregroundCommand");
+        let encoded = legacy.to_string();
+        let decoded: DaemonStreamMessage<'_> = serde_json::from_str(&encoded).unwrap();
+        assert!(matches!(decoded, DaemonStreamMessage::AgentState { foreground_command: None, .. }));
+    }
+
     fn protocol_frame(state: &'static str) -> DaemonStreamMessage<'static> {
         DaemonStreamMessage::AgentState {
             foreground_command: None,
