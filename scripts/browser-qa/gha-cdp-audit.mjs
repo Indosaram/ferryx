@@ -1515,8 +1515,9 @@ function primaryButtonBelow(path, title) {
  * A light filled button (the primary: Allow, Import) and the bordered dark button directly left
  * of it (Block, Cancel/Done) inside `region` of the screenshot, found from pixels: tesseract misses
  * both labels on many frames (run 41772321882: Allow on every OS, Block on macOS, the dialog's
- * Import on macOS). Columns whose longest vertical run of light pixels (min channel > 200) is
- * 16-60 px are grouped (gaps up to 3 px); groups 36-220 px wide are pills, and the bottom-most
+ * Import on macOS). Each column's bottom-most light segment (light runs joined across gaps of up to
+ * 12 px, since the label's glyphs cross the pill; 16-60 px tall, at least half light) is kept; adjacent columns
+ * whose segments overlap vertically are grouped (gaps up to 3 px); groups 36-220 px wide are pills, and the bottom-most
  * (then rightmost) one is the primary. The secondary is the run of border-coloured pixels
  * (grey differs from the background by 6-70) on the primary's top rows, ending within 24 px
  * left of it and at least 30 px long.
@@ -1532,19 +1533,29 @@ function pillButtons(path, { x0, x1, y0, y1 }) {
   const groups = [];
   let group = null;
   for (let x = left0; x <= right0; x += 1) {
-    // Longest vertical run of light pixels in this column.
-    let best = { length: 0, top: 0, bottom: 0 };
-    let start = -1;
-    for (let y = top0; y <= bottom0 + 1; y += 1) {
-      if (y <= bottom0 && light(x, y)) {
-        if (start < 0) start = y;
+    // The column's bottom-most light segment: light runs joined across gaps of up to 12 px (the
+    // label's glyphs cross the pill), 16-60 px tall and at least half light.
+    let best = null;
+    let segment = null;
+    const closeSegment = () => {
+      if (!segment) return;
+      const length = segment.bottom - segment.top + 1;
+      if (length >= 16 && length <= 60 && segment.lit * 2 >= length) best = { length, top: segment.top, bottom: segment.bottom };
+      segment = null;
+    };
+    for (let y = top0; y <= bottom0; y += 1) {
+      if (!light(x, y)) {
+        if (segment && y - segment.bottom > 12) closeSegment();
         continue;
       }
-      if (start >= 0 && y - start > best.length) best = { length: y - start, top: start, bottom: y - 1 };
-      start = -1;
+      if (segment) {
+        segment.bottom = y;
+        segment.lit += 1;
+      } else segment = { top: y, bottom: y, lit: 1 };
     }
-    if (best.length < 16 || best.length > 60) continue;
-    if (group && x - group.right <= 4) {
+    closeSegment();
+    if (!best) continue;
+    if (group && x - group.right <= 4 && best.top <= group.bottom && best.bottom >= group.top) {
       group.right = x;
       group.top = Math.min(group.top, best.top);
       group.bottom = Math.max(group.bottom, best.bottom);
@@ -2137,7 +2148,7 @@ await section("download", async (record) => {
   await step("download-paused", "Pause clicked on the shelf row (icon left of Cancel); the row reads Paused", [["paused", () => ({ ok: Boolean(paused), via: paused })]], { any: ["Paused"] });
   await sleep(2500);
   // The socket buffers drain after a pause: wait until the server count stops growing.
-  let settled = served.big;
+  let settled = -1;
   await until(async () => {
     const now = served.big;
     const still = now === settled;
@@ -2195,9 +2206,11 @@ await section("import", async (record) => {
     let dialog = null;
     let clicks = 0;
     while (!dialog && clicks < 3) {
+      dialog = await seePhrase(["Import from", "Into Ferryx profile"], 1500);
+      if (dialog) break;
       host.click(button.x, button.y);
       clicks += 1;
-      dialog = await seePhrase(["Import from", "Into Ferryx profile"], 6000);
+      dialog = await seePhrase(["Import from", "Into Ferryx profile", "Into Ferryx"], 8000);
     }
     return { ok: Boolean(dialog), group: group.ok, clicks };
   };
@@ -2207,7 +2220,8 @@ await section("import", async (record) => {
     const words = ocr(path) ?? [];
     const anchor = findPhrase(words, "Into Ferryx")[0] ?? findPhrase(words, "Import from")[0];
     if (!anchor) return null;
-    return pillButtons(path, { x0: anchor.left - 60, x1: anchor.left + 600, y0: anchor.top, y1: anchor.top + 420 });
+    // The buttons sit ~190 px below the label; deeper reaches the macOS Dock (run 41786025622).
+    return pillButtons(path, { x0: anchor.left - 60, x1: anchor.left + 600, y0: anchor.top, y1: anchor.top + 250 });
   };
   const clickDialogButton = async (which, word) => {
     const found = await until(() => dialogButtons()?.[which] ?? null, 8000, 700);
@@ -2285,32 +2299,33 @@ await section("import", async (record) => {
     const chooser = await until(() => findPhrase(ocr(probeShot()) ?? [], "File format")[0] ?? null, 6000);
     let formatPicked = false;
     let formatVia = null;
-    if (chooser) {
-      const value = (ocr(probeShot()) ?? []).find((word) => word.top > chooser.top + 8 && word.top < chooser.top + 50 && Math.abs(word.left - chooser.left) < 40);
-      if (value) {
-        const openValue = async () => {
-          host.click(value.left + 20, value.top + Math.round(value.height / 2));
-          await sleep(600);
-        };
-        // `index` is the format's position in PASSWORD_FILE_FORMATS (ui/src/lib/browserImport.ts).
+    // macOS OCR misses the "File format" label but reads its default value (run 41786025622).
+    const value = chooser
+      ? (ocr(probeShot()) ?? []).find((word) => word.top > chooser.top + 8 && word.top < chooser.top + 50 && Math.abs(word.left - chooser.left) < 40)
+      : (ocr(probeShot()) ?? []).find((word) => word.text === "1Password");
+    if (value) {
+      const openValue = async () => {
+        host.click(value.left + 20, value.top + Math.round(value.height / 2));
+        await sleep(600);
+      };
+      // `index` is the format's position in PASSWORD_FILE_FORMATS (ui/src/lib/browserImport.ts).
+      await openValue();
+      host.key({ key: "Home" });
+      for (let press = 0; press < index; press += 1) {
+        host.key({ key: "Down" });
+        await sleep(100);
+      }
+      host.key({ key: "Enter" });
+      await sleep(800);
+      formatPicked = Boolean(findPhrase(ocr(probeShot()) ?? [], format)[0]);
+      if (formatPicked) formatVia = "keys";
+      else {
         await openValue();
-        host.key({ key: "Home" });
-        for (let press = 0; press < index; press += 1) {
-          host.key({ key: "Down" });
-          await sleep(100);
-        }
+        host.type(format);
         host.key({ key: "Enter" });
         await sleep(800);
         formatPicked = Boolean(findPhrase(ocr(probeShot()) ?? [], format)[0]);
-        if (formatPicked) formatVia = "keys";
-        else {
-          await openValue();
-          host.type(format);
-          host.key({ key: "Enter" });
-          await sleep(800);
-          formatPicked = Boolean(findPhrase(ocr(probeShot()) ?? [], format)[0]);
-          if (formatPicked) formatVia = "typed";
-        }
+        if (formatPicked) formatVia = "typed";
       }
     }
     const choose = await clickWord("Choose", { timeout: 6000 });
@@ -2337,7 +2352,7 @@ await section("import", async (record) => {
     const chosen = Boolean(findWord(ocr(probeShot()) ?? [], "", { match: (word) => word.text.includes(basename(path)) }));
     const imported = await clickDialogButton("primary", "Import");
     const done = await results();
-    const outcome = { dialog: opened.ok, format_picked: formatPicked, format_via: formatVia, choose: choose.ok, file_shown: chosen, import_clicked: imported.ok, lines: lines(done) };
+    const outcome = { dialog: opened.ok, format_picked: formatPicked, format_via: formatVia, format_anchor: chooser ? "label" : value ? "value" : null, choose: choose.ok, file_shown: chosen, import_clicked: imported.ok, lines: lines(done) };
     await step(`import-${label}`, `Import a ${format} file through the dialog's file picker`, [["import", () => ({ ok: Boolean(done), ...outcome })]], { any: ["imported"] });
     await clickDialogButton("secondary", "Done");
     host.key({ key: "Escape" });
