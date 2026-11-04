@@ -404,7 +404,7 @@ pub struct DaemonSessionService {
     pub(super) ssh_store_path: PathBuf,
     pub(super) session_metadata: Arc<RwLock<HashMap<String, StoredSessionMeta>>>,
     pub(super) provider_session_claims: Arc<Mutex<HashMap<ProviderSessionClaimKey, String>>>,
-    pub(super) desktop_geometries: Arc<Mutex<HashMap<String, (u16, u16)>>>,
+    pub(super) desktop_geometries: Arc<Mutex<HashMap<String, super::size_ownership::SizeOwnership>>>,
     pub(super) agent_states: Arc<AgentStateHub>,
     /// Installed once the gateway's observer exists. Sessions spawned before that are caught by
     /// `watch_live` at install time.
@@ -720,13 +720,67 @@ impl DaemonSessionService {
     }
 
     pub fn record_desktop_geometry(&self, session_id: &str, cols: u16, rows: u16) {
-        self.desktop_geometries
-            .lock()
-            .insert(session_id.to_string(), (cols, rows));
+        let mut states = self.desktop_geometries.lock();
+        let state = states.entry(session_id.into()).or_insert_with(|| super::size_ownership::SizeOwnership::new((cols, rows)));
+        let changed = state.owner != super::size_ownership::DESKTOP;
+        state.desktop_resize((cols, rows));
+        if changed { self.publish_size_owner(session_id, state); }
     }
 
     pub fn desktop_geometry(&self, session_id: &str) -> Option<(u16, u16)> {
-        self.desktop_geometries.lock().get(session_id).copied()
+        self.desktop_geometries.lock().get(session_id).map(|state| state.desktop)
+    }
+
+    fn publish_size_owner(&self, id: &str, state: &super::size_ownership::SizeOwnership) {
+        let _ = self.remote_event_tx.send(DaemonRemoteEvent {
+            event: "SizeOwnerChanged".into(),
+            payload: serde_json::json!({"sessionId": id, "owner": state.owner, "cols": state.applied.0, "rows": state.applied.1}),
+        });
+    }
+
+    pub fn size_owner(&self, id: &str) -> String {
+        self.desktop_geometries.lock().get(id)
+            .map(|state| state.owner.clone()).unwrap_or_else(|| super::size_ownership::DESKTOP.into())
+    }
+
+    pub(crate) async fn resize_remote_owner(&self, id: &str, client: &str, cols: u16, rows: u16, control: bool, take: bool) -> Result<bool, String> {
+        if !control { return Ok(false); }
+        self.validate_session_ssh_target(id).await.map_err(|e| e.to_string())?;
+        // Admission and operation submission are synchronous under the same lock: queued
+        // runtime operations cannot be submitted in the opposite ownership order.
+        let pending = {
+            let mut states = self.desktop_geometries.lock();
+            let initial = self.terminal_service.get_session(id).map(|s| s.get_size())
+                .or_else(|| self.terminal_service.remote().details(id).map(|d| (d.descriptor.cols, d.descriptor.rows)))
+                .unwrap_or((80, 24));
+            let state = states.entry(id.into()).or_insert_with(|| super::size_ownership::SizeOwnership::new(initial));
+            let previous = state.clone();
+            if !state.remote_resize(client, (cols, rows), control, take) { return Ok(false); }
+            let generation = self.terminal_service.remote().details(id).map(|d| d.generation).unwrap_or(0);
+            match self.terminal_service.resize_operation(id, generation, cols, rows) {
+                Ok(pending) => {
+                    if previous.owner != state.owner { self.publish_size_owner(id, state); }
+                    pending
+                }
+                Err(error) => { *state = previous; return Err(error.to_string()); }
+            }
+        };
+        pending.await.map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
+    pub(crate) async fn detach_size_owner(&self, id: &str, client: &str) -> Result<(), String> {
+        let pending = {
+            let mut states = self.desktop_geometries.lock();
+            let Some(state) = states.get_mut(id) else { return Ok(()); };
+            if !state.detach(client) { return Ok(()); }
+            let (cols, rows) = state.applied;
+            let generation = self.terminal_service.remote().details(id).map(|d| d.generation).unwrap_or(0);
+            let pending = self.terminal_service.resize_operation(id, generation, cols, rows).map_err(|e| e.to_string())?;
+            self.publish_size_owner(id, state);
+            pending
+        };
+        pending.await.map_err(|e| e.to_string())
     }
     pub fn session_activity_state(&self, session_id: &str) -> Option<String> {
         let current = self.agent_states.current(session_id)?;
