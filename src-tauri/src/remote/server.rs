@@ -2960,7 +2960,7 @@ async fn handle_terminal_socket(
             if let Some((cols, rows)) = requested_geometry {
                 if state
                     .session_backend
-                    .resize_owned(&session_id, &size_client, cols, rows, true, false)
+                    .resize_owned_generation(&session_id, &size_client, status.generation, cols, rows, true)
                     .await
                     .is_ok()
                 {
@@ -3205,11 +3205,7 @@ async fn ssh_owned_control(backend: &Arc<dyn RemoteSessionBackend>, id: &str, co
         if !can_control { return false; }
         let Ok(generation) = generation.parse::<u64>() else { return false; };
         let Some((cols, rows)) = validated_grid_geometry(*cols, *rows) else { return false; };
-        // An ownership decision must not turn stale input into a current-generation resize.
-        let Ok(Some(mut recovery)) = backend.recovery(id).await else { return false; };
-        let Some(status) = recovery.next().await else { return false; };
-        if status.generation != generation { return false; }
-        return backend.resize_owned(id, client, cols, rows, true, false).await == Ok(true);
+        return backend.resize_owned_generation(id, client, generation, cols, rows, true).await == Ok(true);
     }
     ssh_control(backend, id, control, can_control).await
 }
