@@ -15,7 +15,8 @@ export type DaemonContent =
   | ({ kind: "file"; path: string; line: number | null; col: number | null } & Partial<Extract<PaneContent, { kind: "file" }>>)
   | { kind: "browser"; url: string; browserId?: string; worktreePath?: string; profileId?: string }
   | { kind: "dag" } | ({ kind: "changes" } & Partial<Extract<PaneContent, { kind: "changes" }>>)
-  | { kind: "remoteDesktop"; hostId: string };
+  | { kind: "remoteDesktop"; hostId: string }
+  | { kind: "plugin"; plugin: string; view: string };
 export type DaemonNode =
   | { type: "leaf"; nodeId: number; content: DaemonContent }
   | { type: "split"; dir: Direction; ratio: number; a: DaemonNode; b: DaemonNode };
@@ -64,6 +65,7 @@ export function daemonContent(content: PaneContent, state: WorkspaceState): Daem
     case "changes": return { ...content };
     case "browser": return { kind: "browser", ...content.browser, browserId: content.browser?.browserId ?? content.browserId, url: content.browser?.url ?? content.url ?? "" };
     case "remoteDesktop": return { kind: "remoteDesktop", hostId: content.hostId };
+    case "plugin": return { ...content };
     default: return { kind: content.kind };
   }
 }
