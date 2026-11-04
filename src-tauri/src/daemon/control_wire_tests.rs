@@ -23,7 +23,7 @@ async fn windows_pipe_pane_descendant_cannot_write_other_pane_or_retire_owner() 
         let name = windows_pipe::name(&channel).unwrap();
         let short_name = name.strip_prefix(r"\\.\pipe\").unwrap();
         let request = if control {
-            serde_json::json!({"op":"RetireWhenIdle"})
+            crate::daemon::control::encode_request(&ControlRequest::RetireWhenIdle)
         } else {
             serde_json::to_value(DaemonRequest::Write { session_id: "pane-b".into(), data: b"x".to_vec() }).unwrap()
         };
