@@ -3525,8 +3525,8 @@ impl DaemonSessionService {
         DaemonResponse::DescribeSessionOk {
             daemon_epoch: None,
             session: DaemonSessionDetails {
-                foreground_command: None,
-                agent: None,
+                foreground_command: self.agent_states.foreground_command(session_id),
+                agent: self.agent_states.current(session_id).and_then(|state| state.agent),
                 session_id: session_id.to_string(),
                 size_owner: Some(self.size_owner(session_id)),
                 workspace_id,
