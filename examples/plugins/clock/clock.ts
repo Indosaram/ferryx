@@ -1,10 +1,15 @@
 // SDK stdio example. stdout is reserved for daemon requests; diagnostics use stderr.
-// A block-render adapter is not wired yet; do not emit HTML on the request stream.
+// Rendering is scriptless. The process publishes a fresh document every second.
 
 // Bun's stream decoder preserves JSON-lines across arbitrary input chunks.
 const decoder = new TextDecoder();
 let pending = "";
 console.log(JSON.stringify({ type: "getCapabilities" }));
+const render = () => console.log(JSON.stringify({ type: "pluginRender", view: "main",
+  html: `<main><h1>Clock</h1><time>${new Date().toISOString()}</time></main>` }));
+render();
+const timer = setInterval(render, 1000);
+try {
 for await (const chunk of Bun.stdin.stream()) {
   pending += decoder.decode(chunk, { stream: true });
   let end: number;
@@ -14,3 +19,4 @@ for await (const chunk of Bun.stdin.stream()) {
     console.error(`${new Date().toISOString()} clock: ${JSON.stringify(response)}`);
   }
 }
+} finally { clearInterval(timer); }
