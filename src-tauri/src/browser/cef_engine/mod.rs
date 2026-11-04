@@ -79,6 +79,27 @@ struct Tab {
 
 static ENGINES: LazyLock<Mutex<HashMap<String, Engine>>> = LazyLock::new(Default::default);
 static TABS: LazyLock<Mutex<HashMap<String, Tab>>> = LazyLock::new(Default::default);
+/// Engines told to quit (their last tab closed) and still exiting, per profile: the receiver
+/// gets a message once the process is gone. A new engine of that profile must not start
+/// before then: Chromium refuses a cache directory another live process still holds.
+static EXITING: LazyLock<Mutex<HashMap<String, std::sync::mpsc::Receiver<()>>>> = LazyLock::new(Default::default);
+/// How long a new engine waits for its profile's previous engine to exit.
+const PREVIOUS_ENGINE_EXIT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Waits, up to `timeout`, until the profile's previous engine (one told to quit) has exited.
+/// Returns false when it is still running after `timeout`. Blocking.
+fn wait_for_previous_engine(profile: &str, timeout: Duration) -> bool {
+    let Some(exited) = EXITING.lock().remove(profile) else {
+        return true;
+    };
+    match exited.recv_timeout(timeout) {
+        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => true,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            tracing::warn!(%profile, "the previous Chromium engine has not exited; starting a new one anyway");
+            false
+        }
+    }
+}
 
 /// A DevTools call waiting for its answer: the profile whose engine runs it, and the waiter.
 struct PendingDevtools {
@@ -248,6 +269,7 @@ pub fn ensure_running(launch: &EngineLaunch<'_>, profile: &str, sink: EventSink)
     if is_running(profile) {
         return Ok(());
     }
+    wait_for_previous_engine(profile, PREVIOUS_ENGINE_EXIT_TIMEOUT);
     let failed = |error: std::io::Error| BrowserError::CreateFailed(format!("CEF engine: {error}"));
     let mut command = Command::new(launch.engine_dir.join(ENGINE_EXE));
     command.current_dir(launch.engine_dir);
@@ -386,9 +408,14 @@ pub fn close(browser_id: &str) -> bool {
         // Dropping stdin tells the engine to quit; a thread waits for it so no zombie is left.
         if let Some(Engine { mut child, stdin, .. }) = ENGINES.lock().remove(&tab.profile) {
             drop(stdin);
+            let (exited, receiver) = std::sync::mpsc::channel();
+            EXITING.lock().insert(tab.profile.clone(), receiver);
             let _ = std::thread::Builder::new()
                 .name("cef-engine-exit".into())
-                .spawn(move || child.wait());
+                .spawn(move || {
+                    let _ = child.wait();
+                    let _ = exited.send(());
+                });
         }
     }
     true
@@ -630,6 +657,30 @@ mod tests {
         );
         assert!(debug_engine_args(None).is_empty());
         assert!(debug_engine_args(Some("  \t ")).is_empty());
+    }
+
+    /// A new engine waits for its profile's quitting engine: an exited one lets it start, one
+    /// still running holds it back until the timeout, and other profiles never wait.
+    #[test]
+    fn a_new_engine_waits_for_the_previous_one_of_its_profile() {
+        assert!(wait_for_previous_engine("exit-none", Duration::ZERO));
+
+        let (exited, receiver) = mpsc::channel();
+        EXITING.lock().insert("exit-done".into(), receiver);
+        exited.send(()).unwrap();
+        assert!(wait_for_previous_engine("exit-done", Duration::ZERO));
+        assert!(!EXITING.lock().contains_key("exit-done"));
+
+        let (still_running, receiver) = mpsc::channel::<()>();
+        EXITING.lock().insert("exit-pending".into(), receiver);
+        assert!(!wait_for_previous_engine("exit-pending", Duration::ZERO));
+        assert!(!EXITING.lock().contains_key("exit-pending"));
+        drop(still_running);
+
+        let (gone, receiver) = mpsc::channel::<()>();
+        EXITING.lock().insert("exit-dropped".into(), receiver);
+        drop(gone);
+        assert!(wait_for_previous_engine("exit-dropped", Duration::ZERO));
     }
 
     #[test]

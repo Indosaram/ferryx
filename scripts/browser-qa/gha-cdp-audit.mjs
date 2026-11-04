@@ -1488,8 +1488,16 @@ const rawKey = (spec) => (platform === "win32" ? win.ps("rawkeys", ["-Codes", [.
 async function clickCardButton(label, timeout = 20000) {
   const hit = await until(() => {
     const words = ocr(probeShot()) ?? [];
-    const deny = words.filter((word) => word.text === "Deny").sort((a, b) => a.top - b.top)[0];
-    if (!deny) return null;
+    // The card's Deny has its primary button right of it on the same line; prefer that pair.
+    const denies = words.filter((word) => word.text === "Deny").sort((a, b) => a.top - b.top);
+    const paired = (word) => words.some((other) => other.text === label && Math.abs(other.top - word.top) <= 14 && other.left > word.left && other.left - word.left < 160);
+    const deny = denies.find(paired) ?? denies[0];
+    if (!deny) {
+      // Windows OCR often drops the dark "Deny" button but reads the light primary one; cards
+      // sit top-centre, so the topmost match is the card's.
+      const alone = words.filter((word) => word.text === label).sort((a, b) => a.top - b.top)[0];
+      return alone ? { at: [alone.left + Math.round(alone.width / 2), alone.top + Math.round(alone.height / 2)], via: "ocr (no Deny)", words: [] } : null;
+    }
     const button = words.find((word) => word.text === label && Math.abs(word.top - deny.top) <= 14 && word.left > deny.left);
     const at = button
       ? [button.left + Math.round(button.width / 2), button.top + Math.round(button.height / 2)]
@@ -1570,10 +1578,13 @@ const chromeUserData = platform === "linux"
   : platform === "darwin"
     ? join(homedir(), "Library", "Application Support", "Google", "Chrome")
     : join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "Google", "Chrome", "User Data");
-const chromeKeychainPassword = randomBytes(12).toString("base64");
+// macOS: Chrome runs with --use-mock-keychain (its Safe Storage password is then "mock_password",
+// and it never asks for the login keychain); the real keychain item holds the same password with
+// an allow-all ACL, which is where Ferryx reads it.
+const chromeKeychainPassword = "mock_password";
 const chromeRunning = () => (platform === "win32"
   ? run("tasklist", ["/FI", "IMAGENAME eq chrome.exe", "/NH"]).stdout.toLowerCase().includes("chrome.exe")
-  : run("pgrep", ["-f", platform === "darwin" ? "Google Chrome" : chromeExe ?? "google-chrome"]).ok);
+  : run("pgrep", ["-f", platform === "darwin" ? "Google Chrome" : `--user-data-dir=${chromeUserData}`]).ok);
 /** Copies a SQLite file (with -wal/-shm) and opens the copy read-only. */
 function openCopy(path) {
   const copy = join(dirs.tmp, `${basename(path)}-${randomBytes(3).toString("hex")}.sqlite`);
@@ -1612,6 +1623,7 @@ async function seedChromeProfile(record) {
   }
   const args = ["--no-first-run", "--no-default-browser-check", "--disable-sync", `${base}/seed?n=1`, `${base}/seed?n=2`];
   if (platform === "linux") args.unshift(`--user-data-dir=${chromeUserData}`, "--password-store=basic");
+  if (platform === "darwin") args.unshift("--use-mock-keychain");
   const chrome = spawn(chromeExe, args, { stdio: "ignore", detached: platform !== "win32" });
   record.chrome_pid = chrome.pid;
   await sleep(12000);
@@ -1619,15 +1631,17 @@ async function seedChromeProfile(record) {
   if (platform === "darwin") run("osascript", ["-e", 'tell application "Google Chrome" to quit']);
   else if (platform === "win32") run("taskkill", ["/PID", String(chrome.pid), "/T"]);
   else {
+    // The wrapper script execs into /opt/google/chrome/chrome; its whole group gets the signal.
     try {
-      process.kill(chrome.pid, "SIGTERM");
+      process.kill(-chrome.pid, "SIGTERM");
     } catch {}
+    run("pkill", ["-TERM", "-f", `--user-data-dir=${chromeUserData}`]);
   }
   const quit = await until(() => !chromeRunning(), 40000);
   if (!quit) {
     record.chrome_force_killed = true;
     if (platform === "win32") run("taskkill", ["/IM", "chrome.exe", "/T", "/F"]);
-    else run("pkill", ["-9", "-f", platform === "darwin" ? "Google Chrome" : "chrome"]);
+    else run("pkill", ["-9", "-f", platform === "darwin" ? "Google Chrome" : `--user-data-dir=${chromeUserData}`]);
     await sleep(3000);
   }
   const profile = join(chromeUserData, "Default");
@@ -1820,6 +1834,8 @@ await section("passkeys", async (record) => {
   const cdp = await cdpAttach(`${base}/webauthn.html`);
   record.targets = (await cdpTargets()).map((entry) => `${entry.type} ${entry.url}`.slice(0, 120));
   record.checks.cdp_connected = Boolean(cdp);
+  record.engine_pids = enginePids();
+  record.cdp_version = await fetch(`http://127.0.0.1:${cdpPort}/json/version`).then((response) => response.json()).catch((error) => String(error));
   if (!cdp) throw new Error(`no CDP page target on port ${cdpPort}`);
   try {
     await cdp.send("WebAuthn.enable", { enableUI: false });
