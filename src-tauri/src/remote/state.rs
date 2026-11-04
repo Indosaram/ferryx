@@ -925,11 +925,15 @@ impl RemoteGatewayState {
     /// Ends the agent-stamp writer after it has written everything queued, and waits for it. The
     /// writer batches for `AGENT_STAMP_WRITE_WINDOW` and writes into the machine journal's
     /// directory, so dropping the gateway calls this, and a test that removes that directory
-    /// while the gateway lives calls it first. Publishes after it are not persisted.
+    /// while the gateway lives calls it first. Publishes after it are not persisted. Clearing the
+    /// sink disconnects the writer's queue, which wakes it at once (it does not wait out the
+    /// window), so the join waits for at most one journal write.
     pub(crate) fn finish_agent_stamp_writer(&self) {
         self.agent_events.clear_stamp_sink();
         if let Some(writer) = self.agent_stamp_writer.lock().take() {
-            let _ = writer.join();
+            if writer.join().is_err() {
+                tracing::error!("the agent stamp writer panicked; its last stamps were not written");
+            }
         }
     }
 
