@@ -22,7 +22,7 @@ import { join } from 'node:path';
 import { connectNativeMahord, rpcProcess } from '../fixtures/native-configured-adapters.mjs';
 import { LaneBlocked, StepFailed, markNotRun, runStep, stopExact, until } from './steps.mjs';
 import { scenariosForLane } from './contract.mjs';
-import { acceptedReply, configureGateway, decisionsNamingNonce, gatewayPortFor, isolationProblems, globalRetryRule, namesNonce, rowFocusVerdict, rpcCommand, rulesLineText, typedInto, uniqueSession } from './seams.mjs';
+import { acceptedReply, configureGateway, decisionsNamingNonce, gatewayPortFor, hubEnv, isolationProblems, globalRetryRule, namesNonce, rowFocusVerdict, rpcCommand, rulesLineText, typedInto, uniqueSession } from './seams.mjs';
 
 /** OCR words with boxes (tesseract TSV) of one PNG on the control host. */
 async function ocr(tesseract, pngPath) {
@@ -98,7 +98,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     // The isolated daemon's gateway gets a run-owned free port: production on this host may
     // already own 43821, and a refused bind must stop the lane, never be stepped over.
     const gatewayPort = gatewayPortFor(host.hostId, await helper.call('free-port', {}));
-    const env = { ...setup.env, FERRYX_RELAY_URL: shared.relayOrigin, FERRYX_MACHINE_TOKEN: shared.machineToken(host.hostId), FERRYX_ACCOUNT_ORIGIN: shared.relayOrigin,
+    const env = { ...setup.env, ...hubEnv(host, setup.profile), FERRYX_RELAY_URL: shared.relayOrigin, FERRYX_MACHINE_TOKEN: shared.machineToken(host.hostId), FERRYX_ACCOUNT_ORIGIN: shared.relayOrigin,
       FERRYX_QA_GATEWAY_PORT: String(gatewayPort) };
     setup.env = env;
     daemon = await agent.call('spawn-daemon', { setup, runId: run.runId, operationId: `f3-${run.runId}`, hostId: host.hostId, timeoutMs: 120_000 });
@@ -127,8 +127,17 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     const isolationIssues = isolationProblems(live, { ...isolation, ownerRoots: live.ownerRoots });
     lane.write('gui-receipt', 'gui-isolation.json', { pid: gui.pid, ...isolation, ownerRoots: live.ownerRoots, envRead: Array.isArray(live.env), openPaths: live.openPaths, problems: isolationIssues });
     if (isolationIssues.length) throw new StepFailed('GUI_NOT_ISOLATED', isolationIssues.join('; '));
+    // macOS: the run-owned GUI is started by a background launcher, so it never takes the front
+    // by itself and the owner's own windows can cover it. It is raised (by its exact pid) before
+    // every frame, so every OCR read and every click lands on the run's own window.
+    const raise = async () => {
+      if (host.platform !== 'darwin') return;
+      const raised = await helper.call('activate-gui', { pid: gui.pid });
+      if (raised.activated !== true) throw new StepFailed('GUI_NOT_FRONT', `run-owned GUI pid ${gui.pid} was not raised: ${JSON.stringify(raised)}`);
+    };
     if (run.smoke) {
       // Transport smoke: one real frame and its OCR, then the lane stops and cleans up.
+      await raise();
       const shot = lane.write('screenshot', 'smoke/first-frame.png', await mahord.screenshot(signal));
       const read = await ocr(run.tesseract, join(run.evidenceDir, shot.path));
       lane.write('ocr', 'smoke/first-frame.ocr.tsv', read.tsv);
@@ -138,6 +147,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     // A frame: real MahoRD pixels plus their OCR. Attached to a step only when `step` is given,
     // so a polled frame attaches exactly the frame its assertion read (see `keep`).
     const frame = async (name, step) => {
+      await raise();
       const bytes = await mahord.screenshot(signal);
       const shot = step ? step.artifact('screenshot', `${name}.png`, bytes) : lane.write('screenshot', `frames/${name}-${Date.now()}.png`, bytes);
       const read = await ocr(run.tesseract, join(run.evidenceDir, shot.path));
@@ -260,7 +270,11 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
         panes[key] = { title: pane.title, sessionId: spawned.sessionId };
       }
       const log = async (key, after = 0) => {
-        const file = await helper.call('read-b64', { profile: setup.profile, path: join(wrappers.logs, `agent-${panes[key].title}.jsonl`) });
+        // The row shows as soon as the pane exists; its fixture agent creates the log a moment
+        // later. A log not created yet holds no entries.
+        const name = `agent-${panes[key].title}.jsonl`;
+        if (!(await helper.call('list-files', { profile: setup.profile, dir: wrappers.logs })).some((f) => f.name === name)) return [];
+        const file = await helper.call('read-b64', { profile: setup.profile, path: join(wrappers.logs, name) });
         return Buffer.from(file.base64, 'base64').toString('utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line)).slice(after);
       };
       const both = (v) => ['away', 'focus'].every((key) => uniqueSession(v, panes[key].title) !== null);

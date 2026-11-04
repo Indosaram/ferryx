@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import {
   PRODUCTION_GATEWAY_PORT, acceptedReply, configProblems, configureGateway, decisionsNamingNonce, gatewayBound, gatewayPortFor,
-  globalRetryRule, guiBundleFiles, isolationProblems, namesNonce, pageToScreen, relayListenPort, remotePath, rowFocusVerdict, rpcCommand, rulesLineText,
+  globalRetryRule, guiBundleFiles, hubEnv, isolationProblems, namesNonce, pageToScreen, relayListenPort, remotePath, rowFocusVerdict, rpcCommand, rulesLineText,
   runLanes, sameServeConfig, serveAddedProblems, typedInto, uniqueSession, webContextFrom, webPageChannel,
 } from './seams.mjs';
 import { LANE_SCHEMA, RUN_SCHEMA, SCENARIOS, validateRun } from './contract.mjs';
@@ -308,6 +308,11 @@ describe('all-local run', () => {
     // The launcher's own log fds under evidence/ prove nothing about the GUI's env.
     expect(isolationProblems({ env: null, openPaths: ['/w/.native-qa/r/evidence/gui-stdout.log'] }, want).join()).toContain('holds nothing open under');
     expect(isolationProblems({ env: null, openPaths: ['/w/.native-qa/rx/data/a'] }, want).join()).toContain('holds nothing open under');
+  });
+
+  test('every isolated daemon runs the hub on a database inside its own profile', () => {
+    expect(hubEnv({ platform: 'darwin' }, '/w/.native-qa/r')).toEqual({ FERRYX_HUB: 'on', FERRYX_HUB_DB: '/w/.native-qa/r/data/hub/hub.sqlite', FERRYX_HUB_QUIET_HOURS: 'off' });
+    expect(hubEnv({ platform: 'win32' }, 'C:\\w\\.native-qa\\r').FERRYX_HUB_DB).toBe('C:\\w\\.native-qa\\r\\data\\hub\\hub.sqlite');
   });
 
   test('a smoke run never passes, and a lane left out blocks its scenarios', () => {

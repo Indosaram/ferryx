@@ -310,10 +310,23 @@ async function processIsolation({ pid }) {
   return { env: null, openPaths: out.split('\n').filter((line) => line.startsWith('n/')).map((line) => line.slice(1)), ownerRoots };
 }
 
+/**
+ * macOS: brings the run-owned GUI (exact pid) to the front through NSRunningApplication, which
+ * needs no accessibility grant. It only ever names the pid it is given.
+ */
+async function activateGui({ pid }) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw fail('PID_REFUSED', `not a pid: ${pid}`);
+  if (!MAC) return { activated: false, reason: 'macOS only' };
+  const script = `ObjC.import('AppKit'); const a = $.NSRunningApplication.runningApplicationWithProcessIdentifier(${pid});`
+    + " if (a.isNil()) 'absent'; else { a.unhide; String(a.activateWithOptions(3)) + ':' + String(a.active) }";
+  const out = (await run('/usr/bin/osascript', ['-l', 'JavaScript', '-e', script])).trim();
+  return { activated: out.startsWith('true'), out };
+}
+
 const METHODS = {
   identity, daemon, 'write-wrappers': writeWrappers, 'spawn-owned': spawnOwned, 'await-exit': awaitExit,
   cleanup, 'read-b64': readB64, 'list-files': listFiles, 'remove-owned-dir': removeOwnedDir, 'free-port': freePort,
-  'serve-status': serveStatus, 'serve-add': serveAdd, 'serve-remove': serveRemove, 'open-gui-bundle': openGuiBundle, 'process-isolation': processIsolation,
+  'serve-status': serveStatus, 'serve-add': serveAdd, 'serve-remove': serveRemove, 'open-gui-bundle': openGuiBundle, 'process-isolation': processIsolation, 'activate-gui': activateGui,
 };
 
 if (process.argv.includes('--rpc')) {

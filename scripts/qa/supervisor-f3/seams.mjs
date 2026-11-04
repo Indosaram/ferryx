@@ -268,6 +268,14 @@ export function isolationProblems({ env = null, openPaths = [] }, { expected, pr
   return problems;
 }
 
+/**
+ * The hub settings every isolated F3 daemon runs with. A fresh hub database fails closed to
+ * "stopped", which leaves the supervisor (decision cards, Replies, reports, rules) off; the run
+ * forces it on against a database inside the run's own profile, as the unified-supervisor
+ * harness does, and turns quiet hours off so no reply is deferred.
+ */
+export const hubEnv = (host, profile) => ({ FERRYX_HUB: 'on', FERRYX_HUB_DB: remotePath(host, profile, 'data', 'hub', 'hub.sqlite'), FERRYX_HUB_QUIET_HOURS: 'off' });
+
 /** A path on `host`, joined with that host's separator. */
 export const remotePath = (host, ...parts) => parts.join(host.platform === 'win32' ? '\\' : '/');
 

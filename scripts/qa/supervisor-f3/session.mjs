@@ -14,7 +14,7 @@
 // serve config is back to its snapshot.
 import { randomUUID } from 'node:crypto';
 import { rpcProcess } from '../fixtures/native-configured-adapters.mjs';
-import { SESSION_PROFILE_SUFFIX, acceptedReply, configureGateway, gatewayPortFor, relayListenPort, remotePath, rpcCommand, sameServeConfig, serveAddedProblems } from './seams.mjs';
+import { SESSION_PROFILE_SUFFIX, acceptedReply, configureGateway, gatewayPortFor, hubEnv, relayListenPort, remotePath, rpcCommand, sameServeConfig, serveAddedProblems } from './seams.mjs';
 import { LaneBlocked, StepFailed, latch, mutex, stopExact, until } from './steps.mjs';
 
 export function startSession({ config, run, lane }) {
@@ -103,7 +103,7 @@ export function startSession({ config, run, lane }) {
     if (typeof setup.candidate !== 'string' || !setup.candidate.startsWith(`${run.revision}+`)) throw new StepFailed('CANDIDATE_STAMP', `${host.hostId} candidate stamp ${setup.candidate} is not ${run.revision}+<patch>`);
     const wrappers = await helper.call('write-wrappers', { profile: setup.profile });
     const gatewayPort = gatewayPortFor(host.hostId, await helper.call('free-port', {}));
-    const env = { ...setup.env, FERRYX_RELAY_URL: origin, FERRYX_MACHINE_TOKEN: shared.machineToken(host.hostId), FERRYX_ACCOUNT_ORIGIN: origin, FERRYX_QA_GATEWAY_PORT: String(gatewayPort) };
+    const env = { ...setup.env, ...hubEnv(host, setup.profile), FERRYX_RELAY_URL: origin, FERRYX_MACHINE_TOKEN: shared.machineToken(host.hostId), FERRYX_ACCOUNT_ORIGIN: origin, FERRYX_QA_GATEWAY_PORT: String(gatewayPort) };
     setup.env = env;
     daemon = await agent.call('spawn-daemon', { setup, runId: sessionRunId, operationId: `f3-${run.runId}`, hostId: host.hostId, timeoutMs: 120_000 });
     lane.write('daemon', 'daemon-launch.json', daemon);
