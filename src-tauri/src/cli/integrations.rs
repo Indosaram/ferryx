@@ -3,6 +3,7 @@
 //!
 //! - `status [--json]` lists every agent Ferryx detects panes of (the shipped detection manifests):
 //!   whether its config directory exists, its hook entries, its skill and its state extension.
+//!   `--sessions` also queries the daemon for session ids, agents and foreground command names.
 //! - `skill install|uninstall <agent|--all>` and `skill status <agent>` manage the Ferryx skill.
 //! - `hooks install|uninstall <agent|--all>` manage the hook entries.
 //!
