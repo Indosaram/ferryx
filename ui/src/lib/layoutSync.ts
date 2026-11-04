@@ -172,8 +172,9 @@ export function hydrateLayout(view: LayoutView, state: WorkspaceState, scope = l
           browserId: old?.kind === "browser" ? old.browser?.browserId ?? old.browserId ?? "" : "",
           url: wire.url,
         }); break;
-        case "file": content = { kind: "file", backendSessionId: "", workspaceId: state.workspaceId ?? null,
-          previewId: `daemon-preview-${node.nodeId}`, ...(old?.kind === "file" ? old : {}),
+        case "file": content = { ...(old?.kind === "file" ? old : {
+          kind: "file" as const, backendSessionId: "", workspaceId: state.workspaceId ?? null,
+          previewId: `daemon-preview-${node.nodeId}` }),
           path: wire.path, line: wire.line, col: wire.col }; break;
         case "changes": content = old?.kind === "changes" ? old : { kind: "changes",
           workspaceId: state.workspaceId ?? "", worktreePath: state.activeWorktreePath ?? "", worktree: null }; break;
@@ -260,6 +261,13 @@ export function ownsDaemonRoot(state: WorkspaceState, view = layoutSync.current(
   if (!view) return false;
   const parked = view.layout.parkedLayouts ?? {};
   return !Object.prototype.hasOwnProperty.call(parked, layoutScope(state));
+}
+
+export function isLayoutIntentAction(action: WorkspaceAction): boolean {
+  return ["ADD_TAB_WITH_SESSION", "CLOSE_TAB", "ACTIVATE_TAB", "REORDER_TAB", "RENAME_TAB", "SET_TAB_PINNED",
+    "SET_PANE_RATIO", "SET_TAB_GROUP_RATIO", "EQUALIZE_TAB_GROUP_RUN", "EQUALIZE_PANE_RUN", "SPLIT_PANE",
+    "MOVE_TAB_TO_GROUP", "MOVE_TAB_TO_SPLIT", "MOVE_TAB_TO_PANE_SPLIT", "DETACH_PANE_TO_TAB", "CLOSE_PANE",
+    "FOCUS_PANE", "SWAP_PANES", "UPDATE_FILE_TAB", "UPDATE_BROWSER_TAB"].includes(action.type);
 }
 
 export function rehydrateWorkspace(state: WorkspaceState, view = layoutSync.current()): WorkspaceState {
