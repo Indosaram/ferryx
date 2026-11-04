@@ -924,6 +924,7 @@ pub enum DaemonRequest {
     },
     LoadSession,
     LayoutGet { window: String },
+    Panes { request: crate::daemon::layout::PaneAction },
     LayoutGetScoped { window: String, scope: String },
     #[serde(rename_all = "camelCase")]
     LayoutApply { window: String, base_revision: u64, intent: crate::daemon::layout::Intent },
@@ -1686,6 +1687,7 @@ pub enum DaemonResponse {
     },
     SaveSessionOk,
     LayoutOk { view: crate::daemon::layout::View },
+    PanesOk { detached: crate::daemon::layout::DetachedRegistry },
     #[serde(rename_all = "camelCase")]
     LayoutConflict { code: String, revision: u64, layout: crate::daemon::layout::Layout },
     #[serde(rename_all = "camelCase")]
