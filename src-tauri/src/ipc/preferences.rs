@@ -38,6 +38,8 @@ pub struct TerminalOverridesRequest {
     pub scrollback: Option<usize>,
     #[serde(default)]
     pub scrollback_compression: Option<bool>,
+    #[serde(default)]
+    pub osc52_write: bool,
 }
 
 impl From<TerminalOverridesRequest> for TerminalPreferenceOverrides {
@@ -142,6 +144,12 @@ pub async fn cmd_terminal_apply_overrides<R: Runtime>(
     state: State<'_, NativeTerminalSurfaceHostState>,
     overrides: TerminalOverridesRequest,
 ) -> Result<TerminalPreferences, IpcError> {
+    let response = daemon_client.send_request(crate::daemon::protocol::DaemonRequest::SetTerminalOsc52Write {
+        enabled: overrides.osc52_write,
+    }).await?;
+    if let crate::daemon::protocol::DaemonResponse::Error { message, .. } = response {
+        return Err(IpcError::internal(message));
+    }
     let effective = run_blocking(move || {
         Ok(set_terminal_preference_overrides(overrides.into())
             .as_ref()

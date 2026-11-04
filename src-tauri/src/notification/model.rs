@@ -39,6 +39,7 @@ pub enum NotificationSource {
     AgentTaskComplete,
     #[serde(alias = "terminal-bell")]
     TerminalBell,
+    TerminalOsc,
     #[default]
     Test,
 }
@@ -429,6 +430,10 @@ pub fn format_notification(request: &DispatchNotificationRequest) -> Notificatio
             };
             (title, body)
         }
+        NotificationSource::TerminalOsc => (
+            terminal.unwrap_or_else(|| "Terminal".to_string()),
+            agent.unwrap_or_default(),
+        ),
         NotificationSource::Test => (
             "Ferryx notifications are working".to_string(),
             "Test notification".to_string(),
@@ -572,5 +577,18 @@ mod target_tests {
             ..Default::default()
         };
         assert_eq!(format_notification(&request).target, None);
+    }
+
+    #[test]
+    fn terminal_osc_content_reaches_notification_service_model() {
+        let request = DispatchNotificationRequest {
+            source: NotificationSource::TerminalOsc,
+            terminal_title: Some("Build".into()),
+            agent_label: Some("done".into()),
+            ..Default::default()
+        };
+        let content = format_notification(&request);
+        assert_eq!((content.title.as_str(), content.body.as_str()), ("Build", "done"));
+        assert_eq!(serde_json::to_value(request.source).unwrap(), "terminalOsc");
     }
 }

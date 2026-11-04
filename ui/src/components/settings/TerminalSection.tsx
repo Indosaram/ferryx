@@ -37,6 +37,8 @@ export function TerminalSection({
   shell = null,
   scrollback = 50_000,
   scrollbackCompression = true,
+  osc52Write = false,
+  onOsc52Write,
   source,
   sourcePath,
   onFontFamily,
@@ -201,6 +203,15 @@ export function TerminalSection({
       </div>
 
       <div className="space-y-5">
+        <div className="flex items-center justify-between gap-4 py-3">
+          <div>
+            <Label htmlFor="terminal-osc52-write">Allow terminal clipboard writes</Label>
+            <p className="text-[11px] text-muted-foreground">
+              Local sessions only. Clipboard reads and remote writes are always denied.
+            </p>
+          </div>
+          <Switch id="terminal-osc52-write" checked={osc52Write} onCheckedChange={onOsc52Write} />
+        </div>
         <div>
           <Label htmlFor="terminal-file-editor" className="mb-1.5 block text-[11px] font-medium">
             File link editor

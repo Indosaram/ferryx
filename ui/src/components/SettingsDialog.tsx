@@ -224,6 +224,8 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
               shell={localSettings.shell}
               scrollback={localSettings.scrollback}
               scrollbackCompression={settings.scrollbackCompression}
+              osc52Write={localSettings.osc52Write === true}
+              onOsc52Write={(osc52Write) => updateSettings({ osc52Write })}
               source={terminalSource}
               sourcePath={nativePreferences.sourcePath}
               onFontFamily={(fontFamily) => updateSettings({ fontFamily })}

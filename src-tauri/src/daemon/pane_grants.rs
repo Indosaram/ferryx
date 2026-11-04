@@ -183,6 +183,7 @@ pub fn gate_for(request: &DaemonRequest) -> Option<Gate> {
         | DaemonRequest::RemoteDesktopHostSet { .. }
         | DaemonRequest::RemoteDesktopHostRespond { .. }
         | DaemonRequest::AgentControlSettingsSet { .. }
+        | DaemonRequest::SetTerminalOsc52Write { .. }
         | DaemonRequest::UploadClipboardImage { .. } => Some(Gate::Admin),
         _ => None,
     }

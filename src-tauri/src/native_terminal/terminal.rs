@@ -241,6 +241,29 @@ impl NativeTerminal {
         super::program_status::register(self.handle, &self.context, Box::new(sink))
     }
 
+    /// Only the daemon mirror opts into side effects, never a desktop surface.
+    pub(crate) fn enable_osc_effects(&mut self) -> Result<(), NativeTerminalError> {
+        super::osc_effects::register(self.handle)?;
+        self.context.osc_effects.lock().enabled = true;
+        Ok(())
+    }
+
+    pub(crate) fn mute_osc_effects(&self, muted: bool) {
+        self.context.osc_effects.lock().muted = muted;
+    }
+
+    pub(crate) fn set_osc52_write(&self, allowed: bool) {
+        self.context.osc52_write.store(allowed, Ordering::Release);
+    }
+
+    pub(crate) fn take_osc_effects(&self) -> Vec<super::osc_effects::OscEffect> {
+        std::mem::take(&mut self.context.osc_effects.lock().pending)
+    }
+
+    pub(crate) fn osc_cwd(&self) -> Option<String> {
+        self.context.osc_effects.lock().cwd.clone().or_else(|| super::osc_effects::cwd(self.handle))
+    }
+
     /// Drops every program status event while `muted` (for seed and gap replay). The support
     /// query reply is governed by `set_pty_writes_suppressed`, not by this flag.
     pub fn set_program_status_muted(&self, muted: bool) {

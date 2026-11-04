@@ -22,6 +22,8 @@ export interface TerminalSectionProps {
   shell?: string | null;
   scrollback?: number;
   scrollbackCompression?: boolean;
+  osc52Write?: boolean;
+  onOsc52Write?: (enabled: boolean) => void;
   source: string;
   sourcePath: string | null;
   onFontFamily: (fontFamily: string) => void;
