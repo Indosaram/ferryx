@@ -4026,8 +4026,10 @@ impl DaemonServer {
             test_shell_command: parking_lot::Mutex::new(None),
         });
         handover_manager.set_size_ownership(Arc::clone(&session_service.size_ownerships));
-        let layout_root = get_default_session_path().parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-        let layouts = Arc::new(Mutex::new(super::layout::Store::new(layout_root)));
+        let session_path = get_default_session_path();
+        let layout_root = get_persistent_lock_path().and_then(|path| path.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| session_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf());
+        let layouts = Arc::new(Mutex::new(super::layout::Store::with_session_path(layout_root, session_path)));
         handover_manager.set_layouts(Arc::clone(&layouts));
         // OSC 7501 summaries from every mirror this daemon answers for become Protocol states.
         let protocol_reporters =
