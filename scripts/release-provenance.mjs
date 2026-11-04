@@ -19,13 +19,16 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { parsePublicKey, verifyMinisign } from "./lib/minisign-verify.mjs";
 
 export const CHECKSUMS_NAME = "SHA256SUMS";
 export const CHECKSUMS_SIGNATURE_NAME = "SHA256SUMS.minisig";
+export const MANIFEST_NAME = "latest.json";
+/** Signature of the whole update manifest; the client refuses any manifest without it. */
+export const MANIFEST_SIGNATURE_NAME = "latest.json.minisig";
 export const RUST_SBOM_NAME = "ferryx-src-tauri.cdx.json";
 export const UI_SBOM_NAME = "ferryx-ui.cdx.json";
 export const PROVENANCE_NAME = "provenance.json";
@@ -34,6 +37,7 @@ export const PROVENANCE_ASSET_NAMES = Object.freeze([
   RUST_SBOM_NAME,
   UI_SBOM_NAME,
   PROVENANCE_NAME,
+  MANIFEST_SIGNATURE_NAME,
   CHECKSUMS_NAME,
   CHECKSUMS_SIGNATURE_NAME,
 ]);
@@ -104,25 +108,24 @@ export function signingKeyFromEnv(env = process.env) {
 }
 
 /**
- * Signs `SHA256SUMS` with minisign into `SHA256SUMS.minisig`, then verifies the signature
- * against `publicKey` so a wrong key fails closed.
+ * Signs `filePath` with minisign into `sigPath`, then verifies the signature against
+ * `publicKey` so a wrong key fails closed (the signature file is removed).
  */
-export function signChecksums({
-  dir,
+export function signFile({
+  filePath,
+  sigPath,
   secretKey,
   password = "",
   publicKey,
   trustedComment,
   minisignBin = process.env.MINISIGN_BIN || "minisign",
 }) {
-  if (!publicKey) throw new Error("signChecksums requires the updater public key");
-  const sumsPath = join(dir, CHECKSUMS_NAME);
-  const sigPath = join(dir, CHECKSUMS_SIGNATURE_NAME);
+  if (!publicKey) throw new Error("signing requires the updater public key");
   const keyDir = mkdtempSync(join(tmpdir(), "ferryx-sums-key-"));
   try {
     const keyPath = join(keyDir, "minisign.key");
     writeFileSync(keyPath, secretKey, { mode: 0o600 });
-    const args = ["-S", "-s", keyPath, "-m", sumsPath, "-x", sigPath];
+    const args = ["-S", "-s", keyPath, "-m", filePath, "-x", sigPath];
     if (trustedComment) args.push("-t", trustedComment);
     const res = spawnSync(minisignBin, args, { input: `${password}\n`, encoding: "utf8" });
     if (res.error) throw new Error(`Failed to run minisign (${minisignBin}): ${res.error.message}`);
@@ -134,13 +137,38 @@ export function signChecksums({
   }
   try {
     verifyMinisign({
-      data: readFileSync(sumsPath),
+      data: readFileSync(filePath),
       signature: readFileSync(sigPath, "utf8"),
       publicKey,
     });
   } catch (err) {
     rmSync(sigPath, { force: true });
-    throw new Error(`SHA256SUMS signature does not verify against the updater public key: ${err.message}`);
+    throw new Error(`${basename(filePath)} signature does not verify against the updater public key: ${err.message}`);
+  }
+}
+
+/** Signs `SHA256SUMS` into `SHA256SUMS.minisig`. */
+export function signChecksums({ dir, ...rest }) {
+  signFile({ filePath: join(dir, CHECKSUMS_NAME), sigPath: join(dir, CHECKSUMS_SIGNATURE_NAME), ...rest });
+}
+
+/**
+ * Signs the exact bytes of the update manifest into `<manifest>.minisig`. The client fetches
+ * both and enforces `halt` / `minimumVersion` only from a manifest that verifies.
+ */
+export function signManifest({ manifestPath, ...rest }) {
+  if (!existsSync(manifestPath)) throw new Error(`Update manifest not found: ${manifestPath}`);
+  signFile({ filePath: manifestPath, sigPath: `${manifestPath}.minisig`, ...rest });
+}
+
+/** Verifies `<manifest>.minisig` against `publicKey`. */
+export function verifyManifest({ manifestPath, publicKey }) {
+  const sigPath = `${manifestPath}.minisig`;
+  if (!existsSync(sigPath)) throw new Error(`${basename(sigPath)} not found`);
+  try {
+    verifyMinisign({ data: readFileSync(manifestPath), signature: readFileSync(sigPath, "utf8"), publicKey });
+  } catch (err) {
+    throw new Error(`${basename(sigPath)} verification failed: ${err.message}`);
   }
 }
 
@@ -308,6 +336,14 @@ export function attachReleaseProvenance({
     join(publishDir, PROVENANCE_NAME),
     JSON.stringify(buildProvenance({ plan, state, receipts, sbomTools }), null, 2) + "\n",
   );
+  signManifest({
+    manifestPath: join(publishDir, MANIFEST_NAME),
+    secretKey,
+    password,
+    publicKey,
+    trustedComment: `ferryx ${plan.tag} update manifest`,
+    minisignBin,
+  });
   writeChecksums(publishDir);
   signChecksums({
     dir: publishDir,
@@ -317,6 +353,7 @@ export function attachReleaseProvenance({
     trustedComment: `ferryx ${plan.tag} commit ${plan.commitSha}`,
     minisignBin,
   });
+  verifyManifest({ manifestPath: join(publishDir, MANIFEST_NAME), publicKey });
   return verifyChecksums({ dir: publishDir, publicKey });
 }
 
@@ -349,6 +386,14 @@ function main(argv) {
       console.log(`Wrote and signed ${CHECKSUMS_NAME} over ${files.length} files`);
       return;
     }
+    case "sign-manifest": {
+      const file = options.get("file");
+      if (!file) throw new Error("sign-manifest requires --file");
+      const { secretKey, password } = signingKeyFromEnv();
+      signManifest({ manifestPath: file, secretKey, password, publicKey, trustedComment: options.get("comment") });
+      console.log(`Signed ${file} into ${file}.minisig`);
+      return;
+    }
     case "verify": {
       if (!dir) throw new Error("verify requires --dir");
       const { files } = verifyChecksums({ dir, publicKey });
@@ -363,6 +408,8 @@ function main(argv) {
 
   seal --dir <assets> [--pubkey <key>] [--comment <text>]
       write SHA256SUMS and sign it (key from TAURI_SIGNING_PRIVATE_KEY[_PATH])
+  sign-manifest --file <latest.json> [--pubkey <key>] [--comment <text>]
+      sign an update manifest into <file>.minisig (same key)
   verify --dir <assets> [--pubkey <key>]
       verify SHA256SUMS.minisig and every listed checksum; exits 1 on any mismatch
   pubkey [--pubkey <key>]
