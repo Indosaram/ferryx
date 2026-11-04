@@ -1,4 +1,5 @@
 // RUN@linux: bun scripts/qa/size-ownership.mjs [--binary path/to/ferryx-cli]
+// The binary must include local-split-qa for an isolated ephemeral gateway port.
 import net from 'node:net';
 import { once } from 'node:events';
 import { createInterface } from 'node:readline';
@@ -50,6 +51,8 @@ try {
   for await (const line of stdout) { if (line === 'FERRYX_DAEMON_READY') { ready = true; break; } }
   assert(ready, 'daemon readiness');
   const client = await connect();
+  const { capabilities } = await client.call({ type: 'getCapabilities' });
+  assert(capabilities.includes('sizeOwnershipQaV1'), 'build with local-split-qa before configuring the isolated gateway');
   await client.call({ type: 'registerWorkspace', workspaceId: 'size-qa', repoRoot: process.cwd() });
   const spawned = await client.call({ type: 'spawn', workspaceId: 'size-qa', clientRequestId: 'size-qa',
     cols: 120, rows: 40, cwd: process.cwd(), shell: '/bin/sh' });
@@ -57,7 +60,8 @@ try {
   await client.call({ type: 'resize', sessionId, cols: 120, rows: 40 });
   await client.call({ type: 'remoteConfigure', config: { mode: 'localNetwork', port: 0, allowControl: true } });
   const { status } = await client.call({ type: 'remoteGetStatus' });
-  base = `http://127.0.0.1:${status.port}`;
+  assert(status.boundAddress, 'gateway bound address');
+  base = `http://127.0.0.1:${status.boundAddress.split(':').at(-1)}`;
   await client.call({ type: 'remoteSetActiveSelection', selection: { sessionId } });
   const events = await connect();
   await events.call({ type: 'subscribeRemoteEvents' });
