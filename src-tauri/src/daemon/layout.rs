@@ -354,6 +354,9 @@ impl Layout {
                 let target = find(self, &scope).ok_or("Unknown scope")?;
                 target.apply(*intent)?;
                 target.tab_group_layout = target.tab_group_layout.clone().prune().unwrap_or_else(|| Layout::default().tab_group_layout);
+                if target.tab_group_layout.group_mut(&target.focused_group_id).is_none() {
+                    target.focused_group_id = target.tab_group_layout.first_group();
+                }
             },
             AddTabWithSession { tab_id, label, content, activate } => {
                 let pane_tree = self.mint(content); let active_node_id = pane_tree.first();
@@ -449,7 +452,7 @@ impl Layout {
             SetPaneRatio { tab_id, path, ratio: value, isolated, seam } => {
                 let root = &mut self.tab(&tab_id)?.pane_tree;
                 if isolated { root.set_ratio(&path, value)?; }
-                else { root.apply_seam(seam.unwrap_or_else(|| root.resolve_seam(&path)), value)?; }
+                else { let seam = seam.unwrap_or_else(|| root.resolve_seam(&path)); root.apply_seam(seam, value)?; }
             },
             SetTabGroupRatio { path, ratio: value } => {
                 if let TabGroupLayout::Split { ratio, .. } = self.tab_group_layout.at(&path).ok_or("Unknown split")? { *ratio = ratio_value(value); }
@@ -649,7 +652,7 @@ mod tests {
             .current_dir(root).output().expect("Bun is required to generate UI reducer fixtures");
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         let cases: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
-        for required in ["UPDATE_BROWSER_TAB", "MOVE_TAB_TO_PANE_SPLIT"] {
+        for required in ["UPDATE_BROWSER_TAB", "MOVE_TAB_TO_PANE_SPLIT", "SET_PANE_RATIO", "CLOSE_TAB"] {
             assert!(cases.iter().any(|case| case["intent"]["type"] == required), "Missing golden: {required}");
         }
         for case in cases {
