@@ -174,7 +174,7 @@ export function saveOnboardingState(
     if (storage === browserStorage() && typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
       persistence = persistence.then(async () => {
         const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("cmd_onboarding_set", { state: daemonState(state) });
+        await invoke("cmd_onboarding_set", { state });
       }).catch((error) => {
         console.error("Could not persist onboarding", error);
         window.dispatchEvent(new CustomEvent("ferryx:onboarding-persistence-error", { detail: error }));
@@ -187,9 +187,6 @@ export function saveOnboardingState(
 
 let persistence: Promise<void> = Promise.resolve();
 
-function daemonState(state: OnboardingState): OnboardingState {
-  return { version: 1, completedSteps: state.completedSteps, dismissed: state.dismissed };
-}
 
 /** Hydrate before opening; localStorage is only a cache on desktop. */
 export async function hydrateOnboardingState(): Promise<OnboardingState> {
@@ -197,8 +194,7 @@ export async function hydrateOnboardingState(): Promise<OnboardingState> {
   if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return cache;
   await persistence;
   const { invoke } = await import("@tauri-apps/api/core");
-  const state = await invoke<OnboardingState>("cmd_onboarding_get", { cache: daemonState(cache) });
-  if (cache.updatedAt !== undefined) state.updatedAt = cache.updatedAt;
+  const state = await invoke<OnboardingState>("cmd_onboarding_get", { cache });
   browserStorage()?.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(state));
   return state;
 }
