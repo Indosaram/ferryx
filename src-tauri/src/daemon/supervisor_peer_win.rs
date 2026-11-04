@@ -17,8 +17,10 @@
 //! ([`classify`]).
 //!
 //! The job sets no limits, so it forbids `CREATE_BREAKAWAY_FROM_JOB`: a pane process cannot
-//! leave it (stricter than unix, where `setsid` plus giving up the terminal escapes). A process a pane child starts in the
-//! instant between its creation and its job assignment (portable-pty cannot create it suspended)
+//! leave it directly. A process started for it by a broker (explorer, Task Scheduler, WMI, an
+//! out-of-process COM server) is outside both the job and the parent chain and passes: the
+//! Windows counterpart of the unix `setsid` escape `supervisor_peer` accepts as a deliberate
+//! one. A process a pane child starts in the instant between its creation and its job assignment (portable-pty cannot create it suspended)
 //! is not in the job either; the parent chain still catches it while the pane child lives.
 //!
 //! Fail closed: no unique owning row, a pid that cannot be opened, a creation time that changed

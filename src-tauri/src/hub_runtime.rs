@@ -7981,11 +7981,13 @@ mod tests {
     }
 
     /// The desktop's Turn on where there is no control socket (Windows): `SupervisorHubStart`
-    /// over the daemon wire starts the stopped hub in process, from a connection whose peer is
-    /// not identified (a pane could send it too), because a start widens nothing. A second
-    /// start reports it already ran.
+    /// over the daemon wire starts the stopped hub in process for the owner's own process, and
+    /// a second start reports it already ran. Starting clears the owner's Stop, so a connection
+    /// whose process is not identified (a pane could be behind it) is refused and the hub stays
+    /// stopped.
     #[tokio::test]
-    async fn the_daemon_wire_hub_start_starts_the_stopped_hub_from_an_unidentified_peer() {
+    async fn the_daemon_wire_hub_start_starts_the_stopped_hub_for_the_owner_only() {
+        use crate::daemon::supervisor_peer::PeerOrigin;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
         set_lease_gate(None);
         let pool = ferryx_hub::storage::memory().await.unwrap();
@@ -7995,32 +7997,73 @@ mod tests {
         let running = Arc::new(tokio::sync::Mutex::new(None));
         publish_hub(&launch, &running);
         let server = Arc::clone(&launch.server);
-        let exchange = || async {
-            let (client, server_side) = tokio::io::duplex(64 * 1024);
-            let serving = tokio::spawn(Arc::clone(&server).handle_client(server_side));
-            let mut frame = json!({"type": "supervisorHubStart"});
-            if let Some(token) = server.transport_token() {
-                frame["token"] = json!(token);
+        let exchange = |origin: Option<PeerOrigin>| {
+            let server = Arc::clone(&server);
+            async move {
+                let (client, server_side) = tokio::io::duplex(64 * 1024);
+                let serving = tokio::spawn({
+                    let server = Arc::clone(&server);
+                    async move {
+                        match origin {
+                            Some(origin) => server.handle_client_with_origin(server_side, origin).await,
+                            None => server.handle_client(server_side).await,
+                        }
+                    }
+                });
+                let mut frame = json!({"type": "supervisorHubStart"});
+                if let Some(token) = server.transport_token() {
+                    frame["token"] = json!(token);
+                }
+                let (read_half, mut write_half) = tokio::io::split(client);
+                write_half.write_all(format!("{frame}\n").as_bytes()).await.unwrap();
+                let mut line = String::new();
+                tokio::io::BufReader::new(read_half).read_line(&mut line).await.unwrap();
+                serving.abort();
+                serde_json::from_str::<DaemonResponse>(line.trim()).unwrap()
             }
-            let (read_half, mut write_half) = tokio::io::split(client);
-            write_half.write_all(format!("{frame}\n").as_bytes()).await.unwrap();
-            let mut line = String::new();
-            tokio::io::BufReader::new(read_half).read_line(&mut line).await.unwrap();
-            serving.abort();
-            serde_json::from_str::<DaemonResponse>(line.trim()).unwrap()
         };
 
-        match exchange().await {
+        match exchange(None).await {
+            DaemonResponse::Error { code, .. } => assert_eq!(code.as_deref(), Some("FORBIDDEN")),
+            other => panic!("an unidentified peer's start answered {other:?}"),
+        }
+        assert_eq!(effects.counts().2, 0, "a refused start runs nothing");
+        assert!(ferryx_hub::control::is_stopped(&pool).await.unwrap(), "the owner's stop stands");
+
+        let owner = own_process_origin().await;
+        assert!(matches!(owner, PeerOrigin::Process(_)), "{owner:?}");
+        match exchange(Some(owner)).await {
             DaemonResponse::SupervisorControlOk { result } => assert_eq!(result, json!({"started": true})),
-            other => panic!("the first start answered {other:?}"),
+            other => panic!("the owner's first start answered {other:?}"),
         }
         assert_eq!(effects.counts().2, 1, "one generation runs");
         assert!(running.lock().await.is_some());
         assert!(!ferryx_hub::control::is_stopped(&pool).await.unwrap(), "the owner's stop is cleared");
-        match exchange().await {
+        match exchange(Some(owner)).await {
             DaemonResponse::SupervisorControlOk { result } => assert_eq!(result, json!({"started": false})),
-            other => panic!("the second start answered {other:?}"),
+            other => panic!("the owner's second start answered {other:?}"),
         }
         assert_eq!(effects.counts().2, 1, "an already running hub is not started again");
+    }
+
+    /// This test process as the daemon identifies a peer: the kernel's process table on unix,
+    /// the owner of a real loopback connection on Windows.
+    async fn own_process_origin() -> crate::daemon::supervisor_peer::PeerOrigin {
+        #[cfg(unix)]
+        {
+            crate::daemon::supervisor_peer::identify(Some(std::process::id()))
+        }
+        #[cfg(windows)]
+        {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (client, accepted) = tokio::join!(tokio::net::TcpStream::connect(address), listener.accept());
+            let _client = client.unwrap();
+            let stream = accepted.unwrap().0;
+            let (peer, local) = (stream.peer_addr().unwrap(), stream.local_addr().unwrap());
+            tokio::task::spawn_blocking(move || crate::daemon::supervisor_peer_win::sys::identify(peer, local))
+                .await
+                .unwrap()
+        }
     }
 }

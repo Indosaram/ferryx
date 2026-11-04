@@ -901,6 +901,7 @@ async fn a_supervisor_mutation_from_inside_a_worker_pane_is_forbidden() {
         DaemonRequest::SupervisorSettings { enabled: Some(true) },
         DaemonRequest::SupervisorActionUndo { id: 1 },
         DaemonRequest::AgentControlEnableOwner,
+        DaemonRequest::SupervisorHubStart,
     ] {
         match unix_exchange(&server, request.clone()).await {
             DaemonResponse::Error { code, message, .. } => {
@@ -1001,7 +1002,14 @@ async fn a_supervisor_mutation_from_outside_the_panes_reaches_the_service() {
 #[tokio::test]
 async fn a_supervisor_mutation_from_an_unidentified_peer_is_forbidden() {
     let server = Arc::new(DaemonServer::new());
-    for request in [pause_request(), dispatch_submit(), mcp_submit(), setup_run(), setup_adopt_all()] {
+    for request in [
+        pause_request(),
+        dispatch_submit(),
+        mcp_submit(),
+        setup_run(),
+        setup_adopt_all(),
+        DaemonRequest::SupervisorHubStart,
+    ] {
         match data_exchange(&server, request.clone()).await {
             DaemonResponse::Error { code, .. } => {
                 assert_eq!(code.as_deref(), Some("FORBIDDEN"), "{request:?}")
@@ -1070,6 +1078,7 @@ async fn windows_loopback_peers_are_told_apart_by_their_owning_process() {
         )
         .expect("spawn a pane");
     let pane_pid = server.terminal_service.get_session(&pane_id).unwrap().pid().expect("pane pid");
+    let mut guard = PaneGuard { pids: vec![pane_pid] };
     let (snapshot, mut output) = server
         .terminal_service
         .output_hub()
@@ -1101,6 +1110,7 @@ async fn windows_loopback_peers_are_told_apart_by_their_owning_process() {
     let PeerOrigin::Process(pane_peer) = pane_origin else {
         panic!("the pane connection's owner was not resolved: {pane_origin:?}");
     };
+    guard.pids.push(pane_peer.pid);
     assert_ne!(pane_peer.pid, std::process::id());
     assert_ne!(pane_peer.pid, pane_pid, "the connecting process is a descendant of the pane child");
 
@@ -1119,10 +1129,26 @@ async fn windows_loopback_peers_are_told_apart_by_their_owning_process() {
     .unwrap();
     assert!(job_only.as_deref().is_some_and(|why| why.contains("pane job")), "{job_only:?}");
 
-    let _ = std::process::Command::new("taskkill")
-        .args(["/F", "/PID", &pane_peer.pid.to_string()])
-        .output();
+    drop(guard);
     let _ = server.terminal_service.close_session(&pane_id).await;
+}
+
+/// Kills the pane's process trees when the loopback test ends, on success or on a failed
+/// assertion, so nothing it started outlives it.
+#[cfg(windows)]
+struct PaneGuard {
+    pids: Vec<u32>,
+}
+
+#[cfg(windows)]
+impl Drop for PaneGuard {
+    fn drop(&mut self) {
+        for pid in self.pids.iter().rev() {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .output();
+        }
+    }
 }
 
 /// One owner-gated request served as from a connection whose peer is `origin`.

@@ -1256,9 +1256,8 @@ pub enum DaemonRequest {
         id: i64,
     },
     /// Start the stopped hub in this daemon, as `ferryx hub start` does on the unix control
-    /// socket: the desktop's Turn on where there is no control socket (Windows). It only starts
-    /// what the owner already configured and widens nothing, so it is not owner-gated, like the
-    /// control socket. Answered `SupervisorControlOk {result: {started}}`. An older daemon
+    /// socket: the desktop's Turn on where there is no control socket (Windows). Starting clears
+    /// the owner's Stop, so it is owner-gated: a process inside a pane is refused. Answered `SupervisorControlOk {result: {started}}`. An older daemon
     /// answers an untyped "Malformed request" and the desktop keeps its control-socket path.
     SupervisorHubStart,
     /// The remote desktop host's settings and live state. Gated by `remoteDesktopV1`.
@@ -1362,11 +1361,12 @@ pub struct PairedDagBinding {
 impl DaemonRequest {
     /// A request that changes what the supervisor may do or undoes what it did. The daemon
     /// refuses it from a process running inside a Ferryx pane: a worker agent must not turn the
-    /// supervisor on, resume it, widen agent control or undo its log.
+    /// supervisor on, start its stopped hub, resume it, widen agent control or undo its log.
     pub fn is_owner_supervisor_control(&self) -> bool {
         match self {
             Self::SupervisorGlobalPause { .. }
             | Self::SupervisorActionUndo { .. }
+            | Self::SupervisorHubStart
             | Self::AgentControlEnableOwner => true,
             Self::SupervisorSettings { enabled } => enabled.is_some(),
             _ => false,
@@ -2494,7 +2494,7 @@ mod tests {
             serde_json::from_value(serde_json::json!({"type":"supervisorHubStart"})).unwrap();
         assert!(matches!(start, DaemonRequest::SupervisorHubStart));
         assert_eq!(serde_json::to_value(&start).unwrap(), serde_json::json!({"type":"supervisorHubStart"}));
-        assert!(!start.is_owner_supervisor_control(), "starting the hub widens nothing, like control.sock");
+        assert!(start.is_owner_supervisor_control(), "starting the hub undoes the owner's Stop");
 
         let ok = DaemonResponse::SupervisorControlOk { result: serde_json::json!({"paused": true}) };
         let text = serde_json::to_string(&ok).unwrap();
