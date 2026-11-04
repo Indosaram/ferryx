@@ -8,6 +8,7 @@ export type OnboardingStepId =
   | "account"
   | "intro"
   | "features"
+  | "import"
   | "agents"
   | "enroll"
   | "skills"
@@ -31,6 +32,7 @@ export const ONBOARDING_VERSION = 1;
 export const ONBOARDING_STEP_ORDER: readonly OnboardingStepId[] = [
   "intro",
   "features",
+  "import",
   "agents",
   "enroll",
   "skills",
@@ -287,6 +289,7 @@ export function isOnboardingStepSatisfied(
     case "cli":
       return ctx.cli === null || !ctx.cli.isSupported || ctx.cli.isInstalled;
     case "features":
+    case "import":
       // Informational step: only completedSteps marks it as done.
       return false;
     case "project":
