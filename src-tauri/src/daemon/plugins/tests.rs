@@ -93,6 +93,14 @@ fn plugin_content_round_trips_for_layout_recovery() {
     let content = crate::daemon::layout::Content::Plugin { plugin: "clock".into(), view: "main".into() };
     let bytes = serde_json::to_vec(&content).unwrap();
     assert_eq!(serde_json::from_slice::<crate::daemon::layout::Content>(&bytes).unwrap(), content);
+    let root = tempfile::tempdir().unwrap();
+    let mut store = crate::daemon::layout::Store::new(root.path().into());
+    store.apply("main", 0, crate::daemon::layout::Intent::AddTabWithSession {
+        tab_id: "clock-block".into(), label: "clock".into(), content: content.clone(), activate: true,
+    }).unwrap();
+    let restored = crate::daemon::layout::Store::new(root.path().into()).get("main").unwrap();
+    assert!(matches!(&restored.layout.tabs[0].pane_tree,
+        crate::daemon::layout::Node::Leaf { content: saved, .. } if saved == &content));
 }
 
 #[test]
