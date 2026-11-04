@@ -133,6 +133,7 @@ pub fn gate_for(request: &DaemonRequest) -> Option<Gate> {
         | DaemonRequest::Suspend { session_id }
         | DaemonRequest::Resume { session_id }
         | DaemonRequest::Resize { session_id, .. }
+        | DaemonRequest::SetScrollbackBudget { session_id, .. }
         | DaemonRequest::ResetAgentState { session_id } => session(session_id, GrantOp::Control),
         DaemonRequest::AgentControl { request, host_id, .. } => {
             let target = match request {

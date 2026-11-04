@@ -887,6 +887,15 @@ pub enum DaemonRequest {
         session_id: String,
     },
     #[serde(rename_all = "camelCase")]
+    DescribeScreenHash {
+        session_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetScrollbackBudget {
+        session_id: String,
+        lines: usize,
+    },
+    #[serde(rename_all = "camelCase")]
     DiscoverAgentSession {
         session_id: String,
         agent_type: String,
@@ -1154,6 +1163,8 @@ pub enum DaemonRequest {
     #[serde(rename_all = "camelCase")]
     TransferSessions {
         handover_socket_path: String,
+        #[serde(default)]
+        session_cont: bool,
     },
     #[serde(rename_all = "camelCase")]
     CommitHandover {
@@ -1577,6 +1588,14 @@ pub enum DaemonResponse {
     DiscoverAgentSessionOk {
         provider_session_id: Option<String>,
     },
+    #[serde(rename_all = "camelCase")]
+    DescribeScreenHashOk {
+        hash: String,
+        text_hash: String,
+        vt_version: String,
+        retained_lines: usize,
+    },
+    SetScrollbackBudgetOk,
     ResetAgentStateOk,
     AcknowledgeAgentOutcomeOk,
     #[serde(rename_all = "camelCase")]

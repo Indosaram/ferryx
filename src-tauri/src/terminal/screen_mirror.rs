@@ -14,25 +14,44 @@ use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
 use crate::native_terminal::{
-    CompressionScheduler, CompressionStep, NativeTerminal, NativeTerminalError, TerminalEngine,
+    CellSnapshot, CellWide, ColorRgb, CompressionScheduler, CompressionStep, NativeTerminal,
+    NativeTerminalError, ScrollViewport, TerminalEngine,
 };
 use crate::terminal::program_status::{ProgramStatusRecords, ProgramStatusSummary};
 use crate::terminal::program_status_ingest::{
     apply_event, next_revision, ProgramStatusChange, ProgramStatusIngest,
 };
 
-/// Rows of history the mirror keeps above the screen. Bounds both memory and the size of the
+/// Rows of history the mirror keeps above the screen unless the session opted into a larger
+/// budget ([`ScreenMirror::set_scrollback_lines`]). Bounds both memory and the size of the
 /// reconstruction that a full attach and a handover carry.
 pub(crate) const MIRROR_SCROLLBACK_LINES: usize = 2_000;
+/// Largest per-session scrollback a `SetScrollbackBudget` request may ask for.
+pub const MAX_MIRROR_SCROLLBACK_LINES: usize = 10_000;
+/// Estimated bytes one scrollback cell costs; the budget estimate is `lines * cols * 16`.
+const SCROLLBACK_BYTES_PER_CELL: usize = 16;
+/// Largest estimated scrollback memory one session may hold.
+pub const MAX_SCROLLBACK_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+/// Error code of a refused `SetScrollbackBudget` request.
+pub const SCROLLBACK_BUDGET_EXCEEDED: &str = "SCROLLBACK_BUDGET_EXCEEDED";
 /// The mirror never reports pixels; any non-zero cell size satisfies the parser.
 const CELL_WIDTH_PX: u32 = 8;
 const CELL_HEIGHT_PX: u32 = 16;
-/// Largest seed a handover carries. Beyond this the successor rebuilds from retained bytes, so the
-/// frame stays inside the handover payload limit next to the ring itself.
+/// Largest seed a handover carries to a successor that did not ask for continuation frames.
+/// Beyond this the successor rebuilds from retained bytes, so the frame stays inside the handover
+/// payload limit next to the ring itself.
 pub const MAX_HANDOVER_SEED_BYTES: usize = 1024 * 1024;
+/// Largest seed a handover carries to a successor that asked for continuation frames
+/// (`TransferSessions.session_cont`): the session frame is split into `KIND_SESSION_CONT` parts,
+/// so no single frame grows past the handover payload limit.
+pub const MAX_CONT_HANDOVER_SEED_BYTES: usize = 16 * 1024 * 1024;
+/// The libghostty-vt revision this build's mirror parses with. Grid hashes taken by builds with a
+/// different revision may legitimately differ; compare their text-only hashes instead.
+pub const VT_VERSION: &str = env!("FERRYX_GHOSTTY_VT_SHA");
 
 /// Visible text of the seam line `TerminalOutputHub::publish_gap` feeds into the mirror. Readers
 /// that classify the screen drop it: it is Ferryx's marker, not program output.
@@ -53,6 +72,99 @@ pub struct ScreenMirror {
     /// The revision of the newest program status update, 0 before any. Every record applied
     /// so far carries this revision or an older one.
     program_status_revision: u64,
+    /// Scrollback rows this session asked to keep; [`MIRROR_SCROLLBACK_LINES`] by default.
+    scrollback_lines: usize,
+}
+
+/// Why a scrollback budget was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScrollbackBudgetError {
+    /// More than [`MAX_MIRROR_SCROLLBACK_LINES`] lines, or `lines * cols * 16` bytes above
+    /// [`MAX_SCROLLBACK_BUDGET_BYTES`].
+    Exceeded { lines: usize, cols: u16 },
+    /// The parser refused the limit.
+    Rejected(String),
+}
+
+impl std::fmt::Display for ScrollbackBudgetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exceeded { lines, cols } => write!(
+                f,
+                "scrollback of {lines} lines at {cols} columns exceeds the per-session budget \
+                 ({MAX_MIRROR_SCROLLBACK_LINES} lines, {MAX_SCROLLBACK_BUDGET_BYTES} bytes)"
+            ),
+            Self::Rejected(reason) => write!(f, "scrollback limit rejected: {reason}"),
+        }
+    }
+}
+
+/// Estimated scrollback memory of `lines` rows at `cols` columns.
+pub fn scrollback_budget_bytes(lines: usize, cols: u16) -> usize {
+    lines
+        .saturating_mul(usize::from(cols.max(1)))
+        .saturating_mul(SCROLLBACK_BYTES_PER_CELL)
+}
+
+/// Checks a requested budget against the per-session limits.
+pub fn check_scrollback_budget(lines: usize, cols: u16) -> Result<(), ScrollbackBudgetError> {
+    if lines > MAX_MIRROR_SCROLLBACK_LINES
+        || scrollback_budget_bytes(lines, cols) > MAX_SCROLLBACK_BUDGET_BYTES
+    {
+        return Err(ScrollbackBudgetError::Exceeded { lines, cols });
+    }
+    Ok(())
+}
+
+/// SHA-256 digests of a mirror's grid, hex encoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenHash {
+    /// Size, every retained scrollback and screen cell (text, width, colours, attributes) and
+    /// the cursor.
+    pub hash: String,
+    /// Only the text of every retained row; stable across parser revisions.
+    pub text_hash: String,
+    /// Scrollback rows covered by the hashes: the newest `min(scrollback, budget)` rows.
+    pub retained_lines: usize,
+    pub scrollback_lines: usize,
+}
+
+fn hex(digest: &[u8]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn hash_color(hasher: &mut Sha256, color: Option<ColorRgb>) {
+    match color {
+        Some(color) => hasher.update([1, color.r, color.g, color.b]),
+        None => hasher.update([0]),
+    }
+}
+
+/// Attribute bits of one cell, the fields `remote::mirror` reads plus the rest of the SGR set.
+fn cell_attr_bits(cell: &CellSnapshot) -> u16 {
+    u16::from(cell.bold)
+        | (u16::from(cell.italic) << 1)
+        | (u16::from(cell.underline) << 2)
+        | (u16::from(cell.inverse) << 3)
+        | (u16::from(cell.faint) << 4)
+        | (u16::from(cell.blink) << 5)
+        | (u16::from(cell.invisible) << 6)
+        | (u16::from(cell.strikethrough) << 7)
+        | (u16::from(cell.overline) << 8)
+}
+
+fn hash_cell(hasher: &mut Sha256, cell: &CellSnapshot) {
+    hasher.update((cell.text.len() as u64).to_le_bytes());
+    hasher.update(cell.text.as_bytes());
+    hasher.update([match cell.wide {
+        CellWide::Narrow => 0u8,
+        CellWide::Wide => 1,
+        CellWide::SpacerTail => 2,
+        CellWide::SpacerHead => 3,
+    }]);
+    hash_color(hasher, cell.fg);
+    hash_color(hasher, cell.bg);
+    hasher.update(cell_attr_bits(cell).to_le_bytes());
 }
 
 /// A mirror's screen in transferable form: the size it was taken at and the VT bytes that
@@ -174,15 +286,55 @@ impl ScreenMirror {
             program_status: None,
             published_summary: None,
             program_status_revision: 0,
+            scrollback_lines: MIRROR_SCROLLBACK_LINES,
         })
     }
 
     /// Built from a seed. The seed is replayed before any opt-in, so it never produces program
     /// status reports or query replies.
     pub fn from_seed(seed: &ScreenSeed) -> Option<Self> {
+        Self::from_seed_with_scrollback(seed, MIRROR_SCROLLBACK_LINES)
+    }
+
+    /// [`Self::from_seed`] with the session's scrollback budget applied before the replay, so a
+    /// seed carrying more than the default history keeps all of it.
+    pub fn from_seed_with_scrollback(seed: &ScreenSeed, scrollback_lines: usize) -> Option<Self> {
         let mut mirror = Self::new(seed.cols, seed.rows)?;
+        if scrollback_lines != MIRROR_SCROLLBACK_LINES {
+            if let Err(error) = mirror.set_scrollback_lines(scrollback_lines) {
+                tracing::warn!(%error, "seed scrollback budget refused; keeping the default");
+            }
+        }
         mirror.feed_replay(&seed.bytes);
         Some(mirror)
+    }
+
+    /// Scrollback rows this mirror keeps.
+    pub fn scrollback_lines(&self) -> usize {
+        self.scrollback_lines
+    }
+
+    /// Sets the scrollback rows this mirror keeps, refusing budgets above
+    /// [`MAX_MIRROR_SCROLLBACK_LINES`] or above [`MAX_SCROLLBACK_BUDGET_BYTES`] at the current
+    /// width. Lowering the budget prunes history; raising it keeps future output only.
+    pub fn set_scrollback_lines(&mut self, lines: usize) -> Result<(), ScrollbackBudgetError> {
+        let cols = self
+            .terminal
+            .cols()
+            .map_err(|error| ScrollbackBudgetError::Rejected(error.to_string()))?;
+        check_scrollback_budget(lines, cols)?;
+        self.terminal
+            .set_scrollback_limit_lines(Some(lines))
+            .map_err(|error| ScrollbackBudgetError::Rejected(error.to_string()))?;
+        self.scrollback_lines = lines;
+        Ok(())
+    }
+
+    /// The parser limit for the current width: the session's budget, lowered when a resize made
+    /// `lines * cols * 16` exceed [`MAX_SCROLLBACK_BUDGET_BYTES`].
+    fn effective_scrollback_lines(&self, cols: u16) -> usize {
+        let per_line = scrollback_budget_bytes(1, cols);
+        self.scrollback_lines.min(MAX_SCROLLBACK_BUDGET_BYTES / per_line)
     }
 
     /// Makes this mirror the session's OSC 7501 consumer and support query replier. Only for
@@ -294,6 +446,10 @@ impl ScreenMirror {
         if let Err(error) = self.terminal.resize(cols, rows, CELL_WIDTH_PX, CELL_HEIGHT_PX) {
             tracing::warn!(%error, cols, rows, "screen mirror resize failed");
         }
+        let limit = self.effective_scrollback_lines(cols);
+        if let Err(error) = self.terminal.set_scrollback_limit_lines(Some(limit)) {
+            tracing::warn!(%error, limit, "screen mirror scrollback limit rejected after resize");
+        }
         self.mark_activity();
     }
 
@@ -330,6 +486,67 @@ impl ScreenMirror {
 
     pub fn is_alternate_screen(&self) -> bool {
         self.terminal.is_alternate_screen().unwrap_or(true)
+    }
+
+    /// Hashes the grid: SHA-256 over cols, rows, every cell of the newest
+    /// `min(scrollback, budget)` scrollback rows and of the screen (text, width, fg, bg,
+    /// attributes), and the cursor x, y and visibility. A second, text-only digest covers the row
+    /// text alone, for comparing grids across parser revisions.
+    ///
+    /// Walks the history by moving the viewport page by page and returns it to the bottom
+    /// afterwards; no cell changes, so idle compression is not re-armed.
+    pub fn grid_hash(&mut self) -> Option<ScreenHash> {
+        let result = self.hash_pages();
+        self.terminal.scroll_viewport(ScrollViewport::Bottom).ok()?;
+        result
+    }
+
+    fn hash_pages(&mut self) -> Option<ScreenHash> {
+        let (cols, rows) = self.terminal.dimensions().ok()?;
+        let scrollback = self.terminal.scrollback_rows().ok()?;
+        let cursor = self.terminal.cursor_state().ok()?;
+        let retained = scrollback.min(self.scrollback_lines);
+        let first = scrollback - retained;
+        let end = scrollback + usize::from(rows);
+
+        let mut hasher = Sha256::new();
+        hasher.update(cols.to_le_bytes());
+        hasher.update(rows.to_le_bytes());
+        let mut next = first;
+        while next < end {
+            self.terminal.scroll_viewport(ScrollViewport::Row(next)).ok()?;
+            let top = usize::try_from(self.terminal.scrollbar().ok()?.offset).ok()?;
+            if top > next || top + usize::from(rows) <= next {
+                tracing::warn!(next, top, "screen mirror viewport did not reach the hashed row");
+                return None;
+            }
+            let snapshot = self.terminal.render_snapshot().ok()?;
+            let page_end = end.min(top + usize::from(rows));
+            for row in next..page_end {
+                let cells = snapshot.grid.get(row - top)?;
+                hasher.update((cells.len() as u64).to_le_bytes());
+                for cell in cells {
+                    hash_cell(&mut hasher, cell);
+                }
+            }
+            next = page_end;
+        }
+        hasher.update(cursor.x.to_le_bytes());
+        hasher.update(cursor.y.to_le_bytes());
+        hasher.update([u8::from(cursor.visible)]);
+
+        let mut text_hasher = Sha256::new();
+        for row in first..end {
+            let text = self.terminal.screen_row_text(row).ok()?;
+            text_hasher.update((text.len() as u64).to_le_bytes());
+            text_hasher.update(text.as_bytes());
+        }
+        Some(ScreenHash {
+            hash: hex(&hasher.finalize()),
+            text_hash: hex(&text_hasher.finalize()),
+            retained_lines: retained,
+            scrollback_lines: self.scrollback_lines,
+        })
     }
 
     /// Copies the visible screen's rows plus a few scrollback rows above them (see
@@ -466,6 +683,38 @@ mod tests {
         let seed = mirror.seed().unwrap();
         let json = serde_json::to_string(&seed).unwrap();
         assert_eq!(serde_json::from_str::<ScreenSeed>(&json).unwrap(), seed);
+    }
+
+    #[test]
+    fn seed_round_trip_grid_hash_equal() {
+        let mut mirror = ScreenMirror::new(80, 24).unwrap();
+        mirror.feed(b"history\r\n\x1b[1;31mRED\x1b[0m\r\n");
+        let mut rebuilt = ScreenMirror::from_seed(&mirror.seed().unwrap()).unwrap();
+        assert_eq!(mirror.grid_hash(), rebuilt.grid_hash());
+    }
+
+    #[test]
+    fn grid_hash_differs_on_attribute_change() {
+        let mut plain = ScreenMirror::new(80, 24).unwrap();
+        let mut bold = ScreenMirror::new(80, 24).unwrap();
+        plain.feed(b"text");
+        bold.feed(b"\x1b[1mtext\x1b[0m");
+        let plain = plain.grid_hash().unwrap();
+        let bold = bold.grid_hash().unwrap();
+        assert_ne!(plain.hash, bold.hash);
+        assert_eq!(plain.text_hash, bold.text_hash);
+    }
+
+    #[test]
+    fn scrollback_budget_enforces_lines_and_memory() {
+        assert!(check_scrollback_budget(10_000, 80).is_ok());
+        assert!(check_scrollback_budget(100_000, 80).is_err());
+        assert!(check_scrollback_budget(10_000, 500).is_err());
+        let mut mirror = ScreenMirror::new(80, 24).unwrap();
+        assert_eq!(mirror.scrollback_lines(), 2_000);
+        mirror.set_scrollback_lines(10_000).unwrap();
+        assert!(mirror.set_scrollback_lines(100_000).is_err());
+        assert_eq!(mirror.scrollback_lines(), 10_000);
     }
 
     /// A seed taken by the previous libghostty-vt pin (6a508fd) crosses a rolling handover into

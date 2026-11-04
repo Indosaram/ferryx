@@ -5,6 +5,7 @@ use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixS
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 use super::handover_wire::{
     peer_credentials, recv_frame, send_frame, HandoverFrame, HandoverWireError, PeerCredentials,
@@ -14,6 +15,12 @@ use super::server::DaemonLockFiles;
 pub const KIND_SESSION: u16 = 0x0001;
 pub const KIND_SESSION_ACK: u16 = 0x0002;
 pub const KIND_TRANSFER_DONE: u16 = 0x0003;
+/// Additive (todo 7): one part of a session frame too large for a single frame. Sent only to a
+/// successor whose TransferSessions request set `session_cont`. A session travels as
+/// `parts` consecutive frames, each carrying `{part, parts, data}` where `data` is the base64 of
+/// the next slice of the serialized [`SessionTransferMetadata`]; the PTY master descriptor rides
+/// on the last part.
+pub const KIND_SESSION_CONT: u16 = 0x0004;
 pub const KIND_AUTHORITY: u16 = 0x0010;
 pub const KIND_AUTHORITY_ACK: u16 = 0x0011;
 /// Additive (todo 8): the candidate asks the predecessor for its authority descriptors over the
@@ -28,6 +35,8 @@ pub enum HandoverSocketError {
     UnexpectedMessageKind(u16),
     MissingRequiredDescriptor(&'static str),
     AdoptionFailed(String),
+    /// A continuation sequence was out of order, truncated or not decodable.
+    BadContinuation(String),
 }
 
 impl std::fmt::Display for HandoverSocketError {
@@ -43,6 +52,7 @@ impl std::fmt::Display for HandoverSocketError {
                 write!(f, "missing required descriptor for role: {role}")
             }
             Self::AdoptionFailed(reason) => write!(f, "descriptor adoption failed: {reason}"),
+            Self::BadContinuation(reason) => write!(f, "bad session continuation: {reason}"),
         }
     }
 }
@@ -567,8 +577,39 @@ pub fn send_session(
     export: crate::terminal::session::PtySessionExport,
     owner: Option<serde_json::Value>,
 ) -> Result<(), HandoverSocketError> {
+    send_session_negotiated(stream, transfer_id, frame_sequence, export, owner, false)
+}
+
+const SESSION_PART_BYTES: usize = 2 * 1024 * 1024;
+const MAX_SESSION_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Serialize, Deserialize)]
+struct SessionPart {
+    part: usize,
+    parts: usize,
+    data: String,
+}
+
+pub fn send_session_negotiated(
+    stream: &StdUnixStream,
+    transfer_id: &str,
+    frame_sequence: u64,
+    export: crate::terminal::session::PtySessionExport,
+    owner: Option<serde_json::Value>,
+    session_cont: bool,
+) -> Result<(), HandoverSocketError> {
     let session_id = export.session_id.clone();
-    let snapshot = export.snapshot();
+    let mut snapshot = export.snapshot();
+    if let Some(hub) = snapshot.hub_snapshot.as_mut() {
+        let limit = if session_cont {
+            crate::terminal::screen_mirror::MAX_CONT_HANDOVER_SEED_BYTES
+        } else {
+            crate::terminal::screen_mirror::MAX_HANDOVER_SEED_BYTES
+        };
+        if hub.screen_seed.as_ref().is_some_and(|seed| seed.bytes.len() > limit) {
+            hub.screen_seed = None;
+        }
+    }
     let meta = SessionTransferMetadata {
         session_id,
         hub_snapshot: None,
@@ -577,6 +618,30 @@ pub fn send_session(
     };
     let payload = serde_json::to_value(&meta)
         .map_err(HandoverWireError::InvalidPayload)?;
+    // Split already-serialized metadata: 2 MiB slices are below 3 MiB after base64.
+    let bytes = serde_json::to_vec(&payload).map_err(HandoverWireError::InvalidPayload)?;
+    if session_cont && bytes.len() > 3 * 1024 * 1024 {
+        if bytes.len() > MAX_SESSION_BYTES {
+            return Err(HandoverSocketError::BadContinuation("session exceeds 32 MiB".into()));
+        }
+        let parts = bytes.len().div_ceil(SESSION_PART_BYTES);
+        let mut master = Some(export.master_fd);
+        for (part, data) in bytes.chunks(SESSION_PART_BYTES).enumerate() {
+            let payload = serde_json::to_value(SessionPart {
+                part, parts, data: STANDARD.encode(data),
+            }).map_err(HandoverWireError::InvalidPayload)?;
+            let mut frame = HandoverFrame::new(
+                KIND_SESSION_CONT, transfer_id.to_string(), frame_sequence, payload,
+            );
+            if part + 1 == parts {
+                frame.fds.push(master.take().ok_or(
+                    HandoverSocketError::MissingRequiredDescriptor("pty_master_fd"),
+                )?);
+            }
+            send_frame(stream.as_raw_fd(), &frame)?;
+        }
+        return Ok(());
+    }
     let frame = HandoverFrame::new(KIND_SESSION, transfer_id.to_string(), frame_sequence, payload)
         .with_fds(vec![export.master_fd]);
     send_frame(stream.as_raw_fd(), &frame)?;
@@ -615,9 +680,46 @@ pub fn recv_session_with_owner(
     Option<(crate::terminal::session::PtySessionExport, Option<serde_json::Value>)>,
     HandoverSocketError,
 > {
-    let frame = recv_frame(stream.as_raw_fd())?;
+    let mut frame = recv_frame(stream.as_raw_fd())?;
     if frame.kind == KIND_TRANSFER_DONE {
         return Ok(None);
+    }
+    if frame.kind == KIND_SESSION_CONT {
+        let transfer_id = frame.transfer_id.clone();
+        let sequence = frame.frame_sequence;
+        let mut bytes = Vec::new();
+        let mut total = None;
+        for expected in 0..MAX_SESSION_BYTES.div_ceil(SESSION_PART_BYTES) {
+            let part: SessionPart = serde_json::from_value(frame.payload.clone())
+                .map_err(HandoverWireError::InvalidPayload)?;
+            if part.part != expected || part.parts == 0
+                || part.parts > MAX_SESSION_BYTES.div_ceil(SESSION_PART_BYTES)
+                || total.is_some_and(|count| count != part.parts)
+                || frame.transfer_id != transfer_id || frame.frame_sequence != sequence
+            {
+                return Err(HandoverSocketError::BadContinuation("invalid part sequence".into()));
+            }
+            total = Some(part.parts);
+            let data = STANDARD.decode(part.data)
+                .map_err(|error| HandoverSocketError::BadContinuation(error.to_string()))?;
+            if data.len() > SESSION_PART_BYTES || bytes.len() + data.len() > MAX_SESSION_BYTES {
+                return Err(HandoverSocketError::BadContinuation("session exceeds limit".into()));
+            }
+            bytes.extend_from_slice(&data);
+            if expected + 1 == part.parts {
+                frame.payload = serde_json::from_slice(&bytes)
+                    .map_err(HandoverWireError::InvalidPayload)?;
+                frame.kind = KIND_SESSION;
+                break;
+            }
+            if !frame.fds.is_empty() {
+                return Err(HandoverSocketError::BadContinuation("early descriptors".into()));
+            }
+            frame = recv_frame(stream.as_raw_fd())?;
+            if frame.kind != KIND_SESSION_CONT {
+                return Err(HandoverSocketError::UnexpectedMessageKind(frame.kind));
+            }
+        }
     }
     if frame.kind != KIND_SESSION {
         return Err(HandoverSocketError::UnexpectedMessageKind(frame.kind));
@@ -640,6 +742,86 @@ pub fn recv_session_with_owner(
 mod tests {
     use super::*;
     use std::os::unix::net::UnixStream;
+
+    fn large_export() -> crate::terminal::session::PtySessionExport {
+        let hub = crate::terminal::output_hub::TerminalOutputHub::default();
+        let _receiver = hub.register_session("large");
+        hub.record_resize("large", 300, 24).unwrap();
+        hub.set_scrollback_budget("large", 10_000).unwrap().unwrap();
+        let mut output = Vec::new();
+        for line in 0..12_000 {
+            output.extend_from_slice(format!("{line:05} {}\r\n", "x".repeat(290)).as_bytes());
+        }
+        hub.publish("large", output).unwrap();
+        let mut state = hub.export_session_state("large").unwrap();
+        state.screen_seed = hub.handover_screen_seed("large", 16 * 1024 * 1024);
+        assert!(state.screen_seed.as_ref().unwrap().bytes.len() > 1024 * 1024);
+        let snapshot = crate::terminal::session::PtySessionSnapshot {
+            session_id: "large".into(), incarnation: None, pid: None, pgid: None,
+            cols: 300, rows: 24, worktree_path: None,
+            state: crate::terminal::PtySessionState::Running,
+            hub_snapshot: Some(state), suspension_receipt: None,
+        };
+        crate::terminal::session::PtySessionExport::from_parts(
+            snapshot, File::open("/dev/null").unwrap().into(),
+        )
+    }
+
+    #[test]
+    fn ten_thousand_line_continuation_handover_hash_equal() {
+        let export = large_export();
+        let before = crate::terminal::output_hub::TerminalOutputHub::default();
+        before.import_session_state("large", export.hub_snapshot.clone().unwrap()).unwrap();
+        let hash = before.describe_screen_hash("large").unwrap();
+        assert_eq!(hash.retained_lines, 10_000);
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        receiver.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
+        let sending = std::thread::spawn(move || {
+            send_session_negotiated(&sender, "3f2b8c1e-0d4a-4b6e-9a51-7c2d8e9f0a1b", 1, export, None, true).unwrap();
+        });
+        let (received, _) = recv_session_with_owner(&receiver).unwrap().unwrap();
+        sending.join().unwrap();
+        let after = crate::terminal::output_hub::TerminalOutputHub::default();
+        after.import_session_state("large", received.hub_snapshot.unwrap()).unwrap();
+        assert_eq!(hash, after.describe_screen_hash("large").unwrap());
+    }
+
+    #[test]
+    fn old_successor_receives_no_continuation_and_oversize_seed_is_dropped() {
+        let request: crate::daemon::protocol::DaemonRequest = serde_json::from_value(
+            serde_json::json!({"type":"transferSessions", "handoverSocketPath":"unused"}),
+        ).unwrap();
+        assert!(matches!(request, crate::daemon::protocol::DaemonRequest::TransferSessions { session_cont: false, .. }));
+        let export = large_export();
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        receiver.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
+        let sending = std::thread::spawn(move || {
+            send_session(&sender, "3f2b8c1e-0d4a-4b6e-9a51-7c2d8e9f0a1b", 1, export, None).unwrap();
+        });
+        let frame = recv_frame(receiver.as_raw_fd()).unwrap();
+        assert_eq!(frame.kind, KIND_SESSION);
+        let meta: SessionTransferMetadata = serde_json::from_value(frame.payload).unwrap();
+        assert!(meta.session_snapshot.hub_snapshot.unwrap().screen_seed.is_none());
+        sending.join().unwrap();
+    }
+
+    #[test]
+    fn new_successor_with_v1_predecessor_keeps_authority() {
+        let fixture = AuthorityFixture::new();
+        let (candidate, predecessor) = UnixStream::pair().unwrap();
+        candidate.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+        let sources = fixture.sources();
+        // V1 sends no hello and no CONT, then waits for the existing authority request.
+        let serving = std::thread::spawn(move || {
+            send_transfer_done(&predecessor, "3f2b8c1e-0d4a-4b6e-9a51-7c2d8e9f0a1b", 1).unwrap();
+            serve_authority_request(&predecessor, sources).unwrap();
+        });
+        assert!(recv_session(&candidate).unwrap().is_none());
+        let authority = request_authority(&candidate, "3f2b8c1e-0d4a-4b6e-9a51-7c2d8e9f0a1b").unwrap();
+        validate_authority(&authority, &fixture.expected()).unwrap();
+        fixture.assert_authority_held("before commit with v1 predecessor");
+        serving.join().unwrap();
+    }
 
     #[test]
     fn test_authority_frame_roundtrip() {
@@ -1105,6 +1287,7 @@ mod tests {
             transport_owner: false,
             retained_state: None,
             screen_seed: None,
+            scrollback_lines: None,
             history_incomplete: false,
         };
 

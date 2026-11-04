@@ -159,6 +159,9 @@ pub struct SessionHubSnapshot {
     /// screen instead of re-deriving it from a ring that starts mid-stream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_seed: Option<super::screen_mirror::ScreenSeed>,
+    /// The session's opted-in mirror scrollback (`SetScrollbackBudget`); absent for the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrollback_lines: Option<usize>,
     /// [SessionHub::history_incomplete], carried so a successor does not mistake post-gap
     /// history for the whole screen.
     #[serde(default)]
@@ -788,6 +791,10 @@ impl SessionHub {
             screen_seed: self
                 .screen_seed()
                 .filter(|seed| seed.bytes.len() <= super::screen_mirror::MAX_HANDOVER_SEED_BYTES),
+            scrollback_lines: self.screen.as_ref().and_then(|screen| {
+                let lines = screen.lock().scrollback_lines();
+                (lines != super::screen_mirror::MIRROR_SCROLLBACK_LINES).then_some(lines)
+            }),
             history_incomplete: self.history_incomplete(),
         }
     }
@@ -1449,6 +1456,40 @@ impl TerminalOutputHub {
         self.transport_owners.read().contains(session_id)
     }
 
+    /// Sets the session's mirror scrollback (`SetScrollbackBudget`). `None` when the session or
+    /// its mirror does not exist.
+    pub fn set_scrollback_budget(
+        &self,
+        session_id: &str,
+        lines: usize,
+    ) -> Option<Result<(), super::screen_mirror::ScrollbackBudgetError>> {
+        let session_hub = self.sessions.read().get(session_id).cloned()?;
+        let hub = session_hub.read();
+        let result = hub.screen.as_ref()?.lock().set_scrollback_lines(lines);
+        Some(result)
+    }
+
+    /// The session mirror's grid hash (`DescribeScreenHash`). `None` when the session or its
+    /// mirror does not exist or the grid could not be read.
+    pub fn describe_screen_hash(&self, session_id: &str) -> Option<super::screen_mirror::ScreenHash> {
+        let session_hub = self.sessions.read().get(session_id).cloned()?;
+        let hub = session_hub.read();
+        let hash = hub.screen.as_ref()?.lock().grid_hash();
+        hash
+    }
+
+    /// The session's mirrored screen for a handover whose successor accepts seeds up to
+    /// `max_bytes` (continuation frames); same eligibility as the seed `export_state` carries.
+    pub fn handover_screen_seed(
+        &self,
+        session_id: &str,
+        max_bytes: usize,
+    ) -> Option<super::screen_mirror::ScreenSeed> {
+        let session_hub = self.sessions.read().get(session_id).cloned()?;
+        let hub = session_hub.read();
+        hub.screen_seed().filter(|seed| seed.bytes.len() <= max_bytes)
+    }
+
     pub fn session_sequence_range(&self, session_id: &str) -> Option<(Option<u64>, Option<u64>)> {
         let session_hub = {
             let sessions = self.sessions.read();
@@ -1508,10 +1549,15 @@ impl TerminalOutputHub {
         buffer.gap_floor = snapshot.gap_floor;
 
         let is_transport_owner = snapshot.transport_owner;
+        let scrollback_lines = snapshot
+            .scrollback_lines
+            .unwrap_or(super::screen_mirror::MIRROR_SCROLLBACK_LINES);
         // The predecessor's mirrored screen is the authoritative starting point; without one the
         // mirror is rebuilt from the retained bytes, as good as a raw replay and no worse.
         let screen = match snapshot.screen_seed.as_ref() {
-            Some(seed) => super::screen_mirror::ScreenMirror::from_seed(seed),
+            Some(seed) => {
+                super::screen_mirror::ScreenMirror::from_seed_with_scrollback(seed, scrollback_lines)
+            }
             None => {
                 let (cols, rows) = snapshot
                     .resize_ledger
@@ -1519,6 +1565,11 @@ impl TerminalOutputHub {
                     .map(|point| (point.cols, point.rows))
                     .unwrap_or((80, 24));
                 super::screen_mirror::ScreenMirror::new(cols, rows).map(|mut mirror| {
+                    if scrollback_lines != super::screen_mirror::MIRROR_SCROLLBACK_LINES {
+                        if let Err(error) = mirror.set_scrollback_lines(scrollback_lines) {
+                            tracing::warn!(%error, "transferred scrollback budget refused");
+                        }
+                    }
                     mirror.feed_replay(&buffer.retained.replay());
                     mirror
                 })
@@ -2532,6 +2583,7 @@ mod tests {
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
+          scrollback_lines: None,
           history_incomplete: false,
         };
         assert_eq!(
@@ -2556,6 +2608,7 @@ mod tests {
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
+          scrollback_lines: None,
           history_incomplete: false,
         };
         assert_eq!(
@@ -2580,6 +2633,7 @@ mod tests {
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
+          scrollback_lines: None,
           history_incomplete: false,
         };
         assert_eq!(
@@ -2612,6 +2666,7 @@ mod tests {
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
+          scrollback_lines: None,
           history_incomplete: false,
         };
         assert_eq!(
@@ -2635,6 +2690,7 @@ mod tests {
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
+          scrollback_lines: None,
           history_incomplete: false,
         };
         assert_eq!(
@@ -2665,6 +2721,7 @@ mod tests {
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
+          scrollback_lines: None,
           history_incomplete: false,
         };
         assert_eq!(
@@ -2689,6 +2746,7 @@ mod tests {
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
+          scrollback_lines: None,
           history_incomplete: false,
         };
         assert_eq!(
@@ -2714,6 +2772,7 @@ mod tests {
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
+          scrollback_lines: None,
           history_incomplete: false,
         };
         assert_eq!(
@@ -2739,6 +2798,7 @@ mod tests {
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
+          scrollback_lines: None,
           history_incomplete: false,
         };
         assert_eq!(
@@ -2757,6 +2817,7 @@ mod tests {
             transport_owner: false,
             retained_state: None,
             screen_seed: None,
+            scrollback_lines: None,
             history_incomplete: false,
         };
         assert_eq!(

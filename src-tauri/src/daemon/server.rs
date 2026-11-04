@@ -3768,6 +3768,8 @@ fn request_session_id(request: &DaemonRequest) -> Option<&str> {
         | DaemonRequest::Suspend { session_id, .. }
         | DaemonRequest::Resume { session_id, .. }
         | DaemonRequest::DescribeSession { session_id }
+        | DaemonRequest::DescribeScreenHash { session_id }
+        | DaemonRequest::SetScrollbackBudget { session_id, .. }
         | DaemonRequest::Attach { session_id, .. }
         | DaemonRequest::RemoteWrite { session_id, .. }
         | DaemonRequest::RemoteResize { session_id, .. } => Some(session_id.as_str()),
@@ -5501,6 +5503,7 @@ impl DaemonServer {
 
                 let transfer_outcome: Result<(usize, usize, usize, u64), String> = async {
                     let transfer_sessions = DaemonRequest::TransferSessions {
+                        session_cont: true,
                         handover_socket_path: handover_socket_path
                             .to_string_lossy()
                             .into_owned(),
@@ -7171,6 +7174,28 @@ impl DaemonServer {
                 Ok(DaemonRequest::DescribeSession { session_id }) => {
                     self.describe_session_identity(&session_id).await
                 }
+                Ok(DaemonRequest::DescribeScreenHash { session_id }) => {
+                    match self.terminal_service.output_hub().describe_screen_hash(&session_id) {
+                        Some(hash) => DaemonResponse::DescribeScreenHashOk {
+                            hash: hash.hash,
+                            text_hash: hash.text_hash,
+                            vt_version: crate::terminal::screen_mirror::VT_VERSION.into(),
+                            retained_lines: hash.retained_lines,
+                        },
+                        None => daemon_session_not_found(&session_id, "describe_screen_hash"),
+                    }
+                }
+                Ok(DaemonRequest::SetScrollbackBudget { session_id, lines }) => {
+                    match self.terminal_service.output_hub().set_scrollback_budget(&session_id, lines) {
+                        Some(Ok(())) => DaemonResponse::SetScrollbackBudgetOk,
+                        Some(Err(error)) => DaemonResponse::Error {
+                            code: Some(crate::terminal::screen_mirror::SCROLLBACK_BUDGET_EXCEEDED.into()),
+                            message: error.to_string(),
+                            details: None,
+                        },
+                        None => daemon_session_not_found(&session_id, "set_scrollback_budget"),
+                    }
+                }
                 Ok(DaemonRequest::DiscoverAgentSession {
                     session_id,
                     agent_type,
@@ -7942,6 +7967,8 @@ impl DaemonServer {
                     capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_LAUNCH_CAPABILITY.into());
                     capabilities.push(crate::daemon::pane_grants::PANE_GRANTS_CAPABILITY.into());
+                    capabilities.push("screenHashV1".into());
+                    capabilities.push("scrollbackBudgetV1".into());
                     #[cfg(feature = "remote-desktop")]
                     capabilities.push(crate::daemon::protocol::REMOTE_DESKTOP_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
@@ -8413,7 +8440,7 @@ impl DaemonServer {
                     }
                 }
                 #[cfg(unix)]
-                Ok(DaemonRequest::TransferSessions { handover_socket_path }) => {
+                Ok(DaemonRequest::TransferSessions { handover_socket_path, session_cont }) => {
                     {
                         crate::daemon::handover_request::note_transfer_started();
                         if let Err(e) = self.persist_remote_sessions_at(self.remote_sessions_path.clone()).await {
@@ -8434,7 +8461,14 @@ impl DaemonServer {
                                         // downstream can recover a session that was never sent. Name
                                         // every casualty instead of silently skipping it.
                                         match self.terminal_service.pty_manager().export_session(&session_id) {
-                                            Ok(export) => {
+                                            Ok(mut export) => {
+                                                if session_cont {
+                                                    if let Some(hub) = export.hub_snapshot.as_mut() {
+                                                        hub.screen_seed = self.terminal_service.output_hub()
+                                                            .handover_screen_seed(&session_id,
+                                                                crate::terminal::screen_mirror::MAX_CONT_HANDOVER_SEED_BYTES);
+                                                    }
+                                                }
                                                 self.handover_manager.note_transferred_local(&session_id);
                                                 // The successor can only take ownership of a session
                                                 // with the record that proves who owns it, so the
@@ -8452,7 +8486,7 @@ impl DaemonServer {
                                                         "No authoritative owner record for this session; the successor will refuse it"
                                                     );
                                                 }
-                                                match crate::daemon::handover_socket::send_session(&stream, &transfer_id, seq, export, owner) {
+                                                match crate::daemon::handover_socket::send_session_negotiated(&stream, &transfer_id, seq, export, owner, session_cont) {
                                                     Ok(()) => {
                                                         count += 1;
                                                         seq += 1;

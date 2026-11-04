@@ -106,6 +106,11 @@ fn main() {
         eprintln!("\n[ghostty build error] {err}\n");
         std::process::exit(1);
     }
+    // Grid hashes name the parser revision they were taken with (screen_mirror::VT_VERSION).
+    println!(
+        "cargo:rustc-env=FERRYX_GHOSTTY_VT_SHA={}",
+        build_ghostty::EXPECTED_GHOSTTY_SHA
+    );
 
     // tauri-build reads `DEP_TAURI_DEV`, which only exists when the `tauri` crate is linked, so
     // the desktop-free CLI build (`--no-default-features`) skips it entirely.

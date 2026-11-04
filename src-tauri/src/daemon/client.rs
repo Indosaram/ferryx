@@ -717,6 +717,8 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::ListSessions => "listSessions",
         DaemonRequest::DescribeLiveSessions => "describeLiveSessions",
         DaemonRequest::DescribeSession { .. } => "describeSession",
+        DaemonRequest::DescribeScreenHash { .. } => "describeScreenHash",
+        DaemonRequest::SetScrollbackBudget { .. } => "setScrollbackBudget",
         DaemonRequest::DiscoverAgentSession { .. } => "discoverAgentSession",
         DaemonRequest::ResetAgentState { .. } => "resetAgentState",
         DaemonRequest::AcknowledgeAgentOutcome { .. } => "acknowledgeAgentOutcome",
