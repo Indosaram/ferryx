@@ -161,7 +161,7 @@ pub mod sys {
     use std::net::SocketAddr;
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, MutexGuard};
     use windows_sys::Win32::Foundation::{
         GetLastError, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, FILETIME, HANDLE,
         INVALID_HANDLE_VALUE, NO_ERROR, STILL_ACTIVE,
@@ -174,7 +174,10 @@ pub mod sys {
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
     };
-    use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JobObjectBasicAccountingInformation,
+        QueryInformationJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    };
     use windows_sys::Win32::System::Threading::{
         GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
@@ -297,37 +300,69 @@ pub mod sys {
         (owning_pid(&tcp_rows(v6)?, peer, listening)? == pid).then_some(PeerProcess { pid, start })
     }
 
-    /// The job every pane child joins (no breakaway, so a pane's descendants stay in it).
-    static PANE_JOB: OnceLock<Option<OwnedHandle>> = OnceLock::new();
+    /// One job per pane child (no limits, so no breakaway: a pane's descendants stay in it). A
+    /// process that already runs in a job (the daemon inherits its launcher's job, and every pane
+    /// child inherits the daemon's) can only join an empty job, so one job shared by every pane
+    /// takes the first pane and refuses the next with ERROR_ACCESS_DENIED.
+    static PANE_JOBS: Mutex<Vec<OwnedHandle>> = Mutex::new(Vec::new());
     /// Set once a live pane could not be placed in the job: from then on no peer can be told
     /// apart from a pane descendant, so every gated request is refused.
     static ADOPTION_FAILED: AtomicBool = AtomicBool::new(false);
 
-    /// Places a newly spawned pane child in the pane job. A child that already exited is skipped.
+    fn pane_jobs() -> MutexGuard<'static, Vec<OwnedHandle>> {
+        PANE_JOBS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether `job` is known to hold no process. No process can join it again then, since only
+    /// its own processes start processes inside it. `false` when the count cannot be read.
+    fn job_is_empty(job: &OwnedHandle) -> bool {
+        // SAFETY: the struct is plain integers; all-zero is valid.
+        let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: `job` is a valid job handle; `info` is writable for the size passed and outlives
+        // the call; a null return-length pointer is allowed.
+        let ok = unsafe {
+            QueryInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectBasicAccountingInformation,
+                (&mut info as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        ok != 0 && info.ActiveProcesses == 0
+    }
+
+    /// Places a newly spawned pane child in a pane job of its own. A child that already exited is
+    /// skipped.
     pub fn adopt_pane(child: &dyn portable_pty::Child) {
         // The child owns its process handle and keeps it open while it is borrowed here.
         let Some(process) = child.as_raw_handle() else {
             ADOPTION_FAILED.store(true, Ordering::SeqCst);
             return;
         };
-        let job = PANE_JOB.get_or_init(|| {
+        // `None` when assigned; otherwise the OS error of the failed call.
+        let failure = {
             // SAFETY: null attributes and name create an unnamed job with default security; the
             // returned handle is null on failure and owned here otherwise.
             let job: HANDLE = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
             if job.is_null() {
-                return None;
-            }
-            // SAFETY: `job` is a fresh, valid job handle owned by nobody else. No limits are set,
-            // so the job forbids breakaway: a pane's descendants cannot leave it.
-            Some(unsafe { OwnedHandle::from_raw_handle(job) })
-        });
-        // `None` when assigned; otherwise the OS error of the failed call (0: no job exists).
-        let failure = match job.as_ref() {
-            // SAFETY: both handles are valid for the call; the caller keeps `process` open.
-            Some(job) => (unsafe { AssignProcessToJobObject(job.as_raw_handle(), process) } == 0)
                 // SAFETY: reads this thread's last-error value, set by the failed call just above.
-                .then(|| unsafe { GetLastError() }),
-            None => Some(0),
+                Some(unsafe { GetLastError() })
+            } else {
+                // SAFETY: `job` is a fresh, valid job handle owned by nobody else. No limits are
+                // set, so the job forbids breakaway: a pane's descendants cannot leave it.
+                let job = unsafe { OwnedHandle::from_raw_handle(job) };
+                // SAFETY: both handles are valid for the call; the caller keeps `process` open.
+                if unsafe { AssignProcessToJobObject(job.as_raw_handle(), process) } == 0 {
+                    // SAFETY: reads this thread's last-error value, set by the failed call above.
+                    Some(unsafe { GetLastError() })
+                } else {
+                    let mut jobs = pane_jobs();
+                    jobs.retain(|job| !job_is_empty(job));
+                    jobs.push(job);
+                    None
+                }
+            }
         };
         if let Some(os_error) = failure {
             if still_running(process) {
@@ -390,23 +425,28 @@ pub mod sys {
             if ADOPTION_FAILED.load(Ordering::SeqCst) {
                 return Err("a pane could not be placed in the pane job".into());
             }
-            let Some(job) = PANE_JOB.get() else {
+            let jobs = pane_jobs();
+            if jobs.is_empty() {
                 return Ok(false);
-            };
-            let job = job.as_ref().ok_or("the pane job could not be created")?;
+            }
             let process = open(peer.pid).map_err(|_| "the process could not be opened".to_string())?;
             if creation_time(&process) != Some(peer.start) {
                 return Err("its pid was reused".into());
             }
-            let mut inside = 0;
-            // SAFETY: both handles are valid for the call; `inside` is a valid out pointer.
-            let ok = unsafe {
-                IsProcessInJob(process.as_raw_handle(), job.as_raw_handle(), &mut inside)
-            };
-            if ok == 0 {
-                return Err("its job membership could not be read".into());
+            for job in jobs.iter() {
+                let mut inside = 0;
+                // SAFETY: both handles are valid for the call; `inside` is a valid out pointer.
+                let ok = unsafe {
+                    IsProcessInJob(process.as_raw_handle(), job.as_raw_handle(), &mut inside)
+                };
+                if ok == 0 {
+                    return Err("its job membership could not be read".into());
+                }
+                if inside != 0 {
+                    return Ok(true);
+                }
             }
-            Ok(inside != 0)
+            Ok(false)
         }
     }
 }

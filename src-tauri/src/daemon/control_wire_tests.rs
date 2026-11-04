@@ -1133,6 +1133,82 @@ async fn windows_loopback_peers_are_told_apart_by_their_owning_process() {
     let _ = server.terminal_service.close_session(&pane_id).await;
 }
 
+/// Every pane joins a pane job even when the daemon itself runs inside a job, as it does under
+/// most launchers (every pane child inherits that job). One job shared by all panes took only the
+/// first pane and then refused every supervisor change.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_every_pane_joins_a_pane_job_when_the_daemon_runs_in_a_job() {
+    use crate::daemon::supervisor_peer::{PeerProcess, ProcTable};
+    use crate::daemon::supervisor_peer_win::{sys, WinProcTable};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    // Run this test process inside a job, as a launcher would, unless it already is in one.
+    let mut in_job = 0;
+    // SAFETY: the current-process pseudo handle and a null job (meaning any job) are valid
+    // arguments; `in_job` is a valid out pointer.
+    assert_ne!(unsafe { IsProcessInJob(GetCurrentProcess(), std::ptr::null_mut(), &mut in_job) }, 0);
+    if in_job == 0 {
+        // SAFETY: null attributes and name create an unnamed job; null on failure.
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        assert!(!job.is_null(), "create a job");
+        // SAFETY: `job` is a fresh, valid job handle owned by nobody else.
+        let job = unsafe { OwnedHandle::from_raw_handle(job) };
+        // SAFETY: both handles are valid for the call. The process stays in the job after the
+        // handle closes.
+        assert_ne!(unsafe { AssignProcessToJobObject(job.as_raw_handle(), GetCurrentProcess()) }, 0);
+    }
+
+    let server = Arc::new(DaemonServer::new());
+    let root = tempfile::tempdir().unwrap();
+    let mut guard = PaneGuard { pids: Vec::new() };
+    let mut panes = Vec::new();
+    for _ in 0..2 {
+        let mut command = portable_pty::CommandBuilder::new(
+            std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into()),
+        );
+        command.args(["/D", "/C", "ping", "-n", "60", "127.0.0.1"]);
+        let (pane_id, pump) = server
+            .terminal_service
+            .spawn_resolved_with_id(
+                uuid::Uuid::new_v4().to_string(),
+                command,
+                80,
+                24,
+                crate::terminal::pty::ResolvedSpawnContext {
+                    root: root.path().to_owned(),
+                    cwd: root.path().to_owned(),
+                    managed_workspace_id: None,
+                },
+            )
+            .expect("spawn a pane");
+        let pid = server.terminal_service.get_session(&pane_id).unwrap().pid().expect("pane pid");
+        guard.pids.push(pid);
+        panes.push((pane_id, pid, pump));
+    }
+
+    let pids: Vec<u32> = panes.iter().map(|(_, pid, _)| *pid).collect();
+    let verdicts = tokio::task::spawn_blocking(move || {
+        let table = sys::SystemWinProcs::snapshot().expect("process snapshot");
+        pids.iter()
+            .map(|&pid| {
+                let start = table.info(pid).expect("pane process info").start;
+                table.in_pane_job(PeerProcess { pid, start })
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap();
+    assert_eq!(verdicts, vec![Ok(true), Ok(true)], "every pane is in a pane job");
+
+    drop(guard);
+    for (pane_id, _, _) in &panes {
+        let _ = server.terminal_service.close_session(pane_id).await;
+    }
+}
+
 /// Kills the pane's process trees when the loopback test ends, on success or on a failed
 /// assertion, so nothing it started outlives it.
 #[cfg(windows)]
