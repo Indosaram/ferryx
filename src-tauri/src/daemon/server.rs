@@ -5296,6 +5296,9 @@ impl DaemonServer {
         // Only an owner (it still holds the daemon locks) published the files on disk; a
         // draining predecessor handed its locks and listeners to the successor and leaves them.
         if self.handover_manager.holds_lock_files() {
+            if let Err(error) = self.session_service.persist_size_ownership().await {
+                tracing::error!(%error, "Failed to checkpoint size ownership while shutting down");
+            }
             let artifacts = self.published_endpoints.lock().clone();
             let removed =
                 crate::ipc::run_blocking(move || Ok(remove_owned_endpoint_artifacts(&artifacts))).await;
