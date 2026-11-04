@@ -890,7 +890,11 @@ async fn drive_screen_compression(hub: Weak<RwLock<SessionHub>>, activity: Arc<t
 }
 
 #[derive(Clone)]
+pub(crate) type OscEffectSink = Arc<dyn Fn(&str, crate::native_terminal::osc_effects::OscEffect) + Send + Sync>;
+
 pub struct TerminalOutputHub {
+    osc_effect_sink: Arc<RwLock<Option<OscEffectSink>>>,
+    osc52_write: Arc<std::sync::atomic::AtomicBool>,
     sessions: Arc<RwLock<HashMap<String, Arc<RwLock<SessionHub>>>>>,
     transport_owners: Arc<RwLock<std::collections::HashSet<String>>>,
     exits: Arc<parking_lot::Mutex<HashMap<String, ExitStatusSlot>>>,
@@ -928,7 +932,25 @@ impl TerminalOutputHub {
             capacity,
             retention,
             program_status_publisher: Arc::new(RwLock::new(None)),
+            osc_effect_sink: Arc::new(RwLock::new(None)),
+            osc52_write: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Installs where program status summary changes of opted-in sessions are published.
+    pub(crate) fn set_osc_effect_sink(&self, sink: OscEffectSink) {
+        *self.osc_effect_sink.write() = Some(sink);
+    }
+
+    pub(crate) fn set_osc52_write(&self, allowed: bool) {
+        self.osc52_write.store(allowed, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn osc_cwd(&self, session_id: &str) -> Option<String> {
+        let session = self.sessions.read().get(session_id).cloned()?;
+        let hub = session.read();
+        let screen = hub.screen.as_ref()?.lock();
+        screen.osc_cwd()
     }
 
     /// Installs where program status summary changes of opted-in sessions are published.
@@ -1179,8 +1201,13 @@ impl TerminalOutputHub {
             .push_with_read_timestamp(chunk_bytes, metrics_read_unix_micros)?;
         let ingest = hub.screen.as_ref().map(|screen| {
             let mut screen = screen.lock();
+            // Remote SSH and paired IDs never receive clipboard permission, regardless
+            // of their host's setting. Notifications still flow from SSH mirrors.
+            let remote = super::paired_runtime::Runtime::owns(session_id)
+                || session_id.starts_with("remote-");
+            screen.set_osc52_write(!remote && self.osc52_write.load(std::sync::atomic::Ordering::Acquire));
             screen.feed(&chunk.bytes);
-            screen.take_program_status()
+            (screen.take_program_status(), screen.take_osc_effects())
         });
         hub.replay_gap = None;
         if hub.history_incomplete && resets_whole_screen(&chunk.bytes) {
@@ -1202,7 +1229,10 @@ impl TerminalOutputHub {
             let _ = hub.raw_sender.send(chunk.bytes.to_vec());
         }
         drop(hub);
-        let ingest = ingest.unwrap_or_default();
+        let (ingest, effects) = ingest.unwrap_or_default();
+        if let Some(sink) = self.osc_effect_sink.read().clone() {
+            for effect in effects { sink(session_id, effect); }
+        }
         if let Some(revision) = ingest.transient_applied {
             let publisher = self.program_status_publisher.read().clone();
             if let Some(publisher) = publisher {
