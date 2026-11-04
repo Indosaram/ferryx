@@ -121,6 +121,23 @@ impl RecoveryScheduler {
                 }
             }
         }
+        // The retry fell due but its session cannot be observed (hung host, unreadable
+        // terminal), so it cannot be tried, nor can a resume already sent to it be judged.
+        // After a whole confirmation window (a one-pass blip is not an outage) that is a
+        // failed try on the backoff, so an outage that also hides the sessions still reaches
+        // the budget (N1). Nothing is sent blind: a pending resume stays pending.
+        let due = inc
+            .next_at_ms
+            .max(st.sent.get(&inc.primary).copied().unwrap_or(i64::MIN));
+        if !inc.succeeded
+            && inc.next_at_ms <= now
+            && !obs.contains_key(&inc.primary)
+            && now.saturating_sub(due) >= confirm
+        {
+            inc.failed_try_ms = Some(now);
+            inc.attempts += 1;
+            inc.next_at_ms = now + backoff_ms(rules, inc.attempts as usize);
+        }
         if inc.succeeded {
             for r in &faulted {
                 if inc.done.contains(r) || st.sent.contains_key(r) {

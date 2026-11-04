@@ -407,6 +407,104 @@ async fn an_outage_past_the_budget_escalates_once_with_a_recommendation() {
     assert!(rig.rows()[0].summary.contains("outlasted the retry budget"), "{:?}", rig.rows());
 }
 
+/// Marks every session of the rig stale (its host stopped answering) or fresh again.
+fn set_stale(rig: &Rig, stale: bool) {
+    for s in rig.fleet.0.lock().unwrap().iter_mut() {
+        s.stale = stale;
+    }
+}
+
+#[tokio::test]
+async fn an_outage_that_also_hides_the_sessions_escalates_once_past_the_budget() {
+    // N1: the host hangs right after the outage starts, so its sessions stay listed but are
+    // never observed and no retry can be sent. The retries that fall due still fail, so the
+    // incident escalates once after the deadline instead of staying live forever.
+    let rig = rig(four_claude_sessions(), BAD_GATEWAY);
+    rig.sched.tick().await;
+    rig.outbreak(BAD_GATEWAY);
+    rig.sched.tick().await;
+    set_stale(&rig, true);
+    let mut card_at = None;
+    for _ in 0..120 {
+        rig.step(30_000).await;
+        if card_at.is_none() && !rig.opened().is_empty() {
+            card_at = Some(rig.clock.0.load(Ordering::SeqCst));
+        }
+    }
+    let card_at = card_at.expect("a persistent unobservable outage escalates");
+    assert!(card_at >= T0 + BUDGET_MS, "not before the budget: +{} ms", card_at - T0);
+    assert!(card_at <= T0 + 30 * MIN, "at the first retry due past the budget: +{} ms", card_at - T0);
+    assert_eq!(rig.opened().len(), 1, "exactly one card: {:?}", rig.opened());
+    assert!(rig.world.ops().is_empty(), "nothing sent blind: {:?}", rig.world.ops());
+    let rows = rig.rows();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].kind, ActionKind::Escalated);
+    // "Keep retrying" starts a fresh budget: no card until a retry past the new deadline
+    // could not be tried either.
+    let card = rig.opened().remove(0);
+    rig.sched.answer_card(&card.prompt.prompt_id, 0).await.unwrap();
+    let answered_at = rig.clock.0.load(Ordering::SeqCst);
+    let mut second_at = None;
+    for _ in 0..120 {
+        rig.step(30_000).await;
+        if second_at.is_none() && rig.opened().len() > 1 {
+            second_at = Some(rig.clock.0.load(Ordering::SeqCst));
+        }
+    }
+    let second_at = second_at.expect("the outage outlasted the new budget too");
+    assert!(second_at >= answered_at + BUDGET_MS, "fresh budget: +{} ms", second_at - answered_at);
+    assert_eq!(rig.opened().len(), 2, "{:?}", rig.opened());
+    assert!(rig.world.ops().is_empty(), "{:?}", rig.world.ops());
+}
+
+#[tokio::test]
+async fn a_hidden_outage_that_ends_inside_the_budget_resumes_without_a_card() {
+    // The unobservable passes count as failed tries, but only one past the deadline
+    // escalates: a host that hangs and comes back inside the budget gets the next retry.
+    let rig = rig(four_claude_sessions(), BAD_GATEWAY);
+    rig.sched.tick().await;
+    rig.outbreak(BAD_GATEWAY);
+    rig.sched.tick().await;
+    set_stale(&rig, true);
+    outage_without_card(&rig, 18 * MIN).await;
+    assert!(rig.world.ops().is_empty(), "{:?}", rig.world.ops());
+    set_stale(&rig, false);
+    rig.world.up.store(true, Ordering::SeqCst);
+    let mut closed = false;
+    for _ in 0..40 {
+        rig.step(30_000).await;
+        assert!(rig.opened().is_empty(), "no card after the host came back");
+        if rig.rows().iter().any(|row| !row.live) {
+            closed = true;
+            break;
+        }
+    }
+    assert!(closed, "the incident closed: {:?}", rig.rows());
+    assert_eq!(rig.rows()[0].kind, ActionKind::Resumed, "{:?}", rig.rows());
+    for r in &rig.refs {
+        assert!(rig.world.sends_to(r) >= 1, "{r} was resumed");
+    }
+}
+
+#[tokio::test]
+async fn a_resume_that_can_never_be_judged_escalates_once_past_the_budget() {
+    // N1, the other shape: a resume was sent, then the terminal became unreadable for good,
+    // so the send is never judged and no further retry can be tried.
+    let rig = rig(vec![provider_working(T0)], BAD_GATEWAY);
+    rig.sched.tick().await;
+    rig.outbreak(BAD_GATEWAY);
+    rig.sched.tick().await;
+    rig.step(60_000).await;
+    let s1 = SessionRef::new("mac-2", "s1");
+    assert_eq!(rig.world.sends_to(&s1), 1, "{:?}", rig.world.ops());
+    rig.world.unreadable.lock().unwrap().insert(s1.clone());
+    for _ in 0..120 {
+        rig.step(30_000).await;
+    }
+    assert_eq!(rig.opened().len(), 1, "exactly one card: {:?}", rig.opened());
+    assert_eq!(rig.world.sends_to(&s1), 1, "nothing resent blind: {:?}", rig.world.ops());
+}
+
 #[tokio::test]
 async fn a_429_waits_for_the_reset_and_never_rereads_old_output() {
     let rig = rig(

@@ -118,8 +118,9 @@ struct Incident {
     budget_from_ms: i64,
     attempts: u32,
     next_at_ms: i64,
-    /// When the latest failed retry was started (sent, or tried and the send failed). The
-    /// budget escalates only once this is at or after its deadline.
+    /// When the latest failed retry was started (sent, tried and the send failed, or due but
+    /// impossible because its session could not be observed). The budget escalates only once
+    /// this is at or after its deadline.
     failed_try_ms: Option<i64>,
     succeeded: bool,
     closed: bool,
