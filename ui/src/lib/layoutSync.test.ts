@@ -27,7 +27,7 @@ describe("daemon layout revisions", () => {
   it("applies optimistically then replaces a conflict without closing a PTY", async () => {
     vi.mocked(closeTerminal).mockClear();
     const io: LayoutTransport = { get: vi.fn(async () => ready(daemon())),
-      apply: vi.fn(async () => ({ type: "conflict", code: "LAYOUT_CONFLICT", revision: 8, layout: daemon(8) })) };
+      apply: vi.fn(async (): Promise<LayoutReply> => ({ type: "conflict", code: "LAYOUT_CONFLICT", revision: 8, layout: daemon(8) })) };
     const sync = new LayoutSync(io);
     await sync.refresh();
     const before = workspace();
