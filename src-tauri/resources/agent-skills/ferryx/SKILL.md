@@ -22,6 +22,38 @@ This file is installed and updated by Ferryx. To keep your own edits, delete the
 
 Prefer these over guessing flags.
 
+## Check what Ferryx installed into your agent: `ferryx-cli integrations`
+
+```
+ferryx-cli integrations status [--json]
+ferryx-cli integrations skill install <agent|--all>
+ferryx-cli integrations skill status <agent>
+ferryx-cli integrations skill uninstall <agent|--all>
+ferryx-cli integrations hooks install <agent|--all>
+ferryx-cli integrations hooks uninstall <agent|--all>
+```
+
+- `status --json` lists every agent Ferryx detects panes of, with `id`, `detected` (its config
+  directory exists), `hookSupported`, `hookInstalled`, `hookStale` (the entries would not all
+  report: their executable is gone or an install would change them), `skill` (`installed`,
+  `user-edited`, `absent`, `unsupported` or `unreadable`) and `extensionInstalled`. Without
+  `--json` it prints a text summary.
+- `<agent>` is an `id` from `status`; `--all` acts on every agent that has that kind of target.
+  Each install or uninstall prints `{"action":...,"results":[{"agent","result","path"}]}`, where
+  `result` is `installed`, `removed`, `unchanged`, `user-edited`, `not-detected`, `unsupported`
+  or `failed`. Running a verb twice changes nothing the second time.
+- Nothing is written for an agent whose config directory is absent, and a skill or hook entry
+  you edited is never overwritten or removed. An uninstall also stops Ferryx from putting the
+  entries back when its daemon starts; an install undoes that.
+- Exit codes: 0 ok, 1 an install or removal failed for at least one agent, 2 usage error or
+  unknown agent (`UNKNOWN_AGENT` on stderr). Errors are one JSON object
+  `{"type":"error","code","message"}` on stderr.
+
+Agents with `hookSupported` report their state through hook entries that run
+`<ferryx-cli or ferryx> agent-hook <agent> <event>`. This works with only `ferryx-cli`
+installed, needs no desktop app, and is silent outside a Ferryx pane. Do not run `agent-hook`
+yourself or edit those entries; use `integrations hooks` instead.
+
 ## Supervise agent panes: `ferryx-cli agents`
 
 Every command prints exactly one JSON value on stdout. Success is `{"ok":true,...}`; failure is

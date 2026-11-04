@@ -463,12 +463,12 @@ pub const CATALOG: &[Command] = &[
         name: "api",
         summary: "Describe the ferryx-cli command groups as JSON",
         output: "json",
-        subcommands: &[sub!("list", &[], &[]), sub!("describe", &[arg!("name", "command-group")], &[])],
+        subcommands: &[sub!("list", &[], &[JSON]), sub!("describe", &[arg!("name", "command-group")], &[JSON])],
         exit_codes: &[("0", "ok"), ("2", "unknown command group or usage error")],
     },
 ];
 
-const API_USAGE: &str = "usage: ferryx-cli api list | ferryx-cli api describe <command>";
+const API_USAGE: &str = "usage: ferryx-cli api list [--json] | ferryx-cli api describe <command> [--json]";
 
 /// `{"commands":[{"name","summary"}]}`.
 pub fn list_json() -> Value {
@@ -517,8 +517,10 @@ pub fn describe_json(name: &str) -> Result<Value, String> {
 }
 
 /// Entry for `ferryx-cli api ...`; returns the process exit code.
+///
+/// `--json` is accepted for symmetry with the other groups; JSON is the only output format.
 pub fn run_api_cli(args: &[String]) -> i32 {
-    let words: Vec<&str> = args.iter().skip(2).map(String::as_str).collect();
+    let words: Vec<&str> = args.iter().skip(2).map(String::as_str).filter(|word| *word != "--json").collect();
     match words.as_slice() {
         ["list"] => {
             println!("{}", list_json());
@@ -615,5 +617,13 @@ mod tests {
         assert_eq!(run_api_cli(&argv(&["ferryx-cli", "api", "describe", "nope"])), 2);
         assert_eq!(run_api_cli(&argv(&["ferryx-cli", "api"])), 2);
         assert_eq!(run_api_cli(&argv(&["ferryx-cli", "api", "list"])), 0);
+    }
+
+    #[test]
+    fn api_accepts_json_flag() {
+        assert_eq!(run_api_cli(&argv(&["ferryx-cli", "api", "list", "--json"])), 0);
+        assert_eq!(run_api_cli(&argv(&["ferryx-cli", "api", "describe", "integrations", "--json"])), 0);
+        assert_eq!(run_api_cli(&argv(&["ferryx-cli", "api", "describe", "nope", "--json"])), 2);
+        assert_eq!(run_api_cli(&argv(&["ferryx-cli", "api", "--json"])), 2);
     }
 }

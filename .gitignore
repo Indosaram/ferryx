@@ -13,6 +13,8 @@ dist/
 ui/dist/
 ui/coverage/
 site/.astro/
+# Copied from docs/llms.txt by `bun scripts/gen-llms-txt.mjs --publish` in the site prebuild.
+site/public/llms.txt
 
 # OS
 .DS_Store
