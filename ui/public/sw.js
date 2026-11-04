@@ -2,14 +2,15 @@
 // The shell is network-first so a rebuilt client reaches an installed phone on its next load;
 // hashed files under /assets are immutable: cached on first fetch, then served cache-first, so
 // the shell the last online load used boots offline too.
-const CACHE_NAME = 'ferryx-remote-v3';
+const CACHE_NAME = 'ferryx-remote-v4';
 const ASSETS_TO_CACHE = [
   '/',
   '/index.html',
   '/manifest.webmanifest',
   '/ferryx-icon.png',
   '/icon-192.png',
-  '/badge-mono.png'
+  '/badge-mono.png',
+  '/polyfill-uuid.js'
 ];
 
 self.addEventListener('install', (event) => {
