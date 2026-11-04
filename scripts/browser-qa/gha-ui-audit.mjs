@@ -693,7 +693,14 @@ function ocrBands(path) {
   }
   return words;
 }
-function ocr(path) {
+/**
+ * Words on screen. `bands: true` adds the banded pass (ocrBands); only the step ui_check and the
+ * daily scenarios ask for it. Run 41801115761 ran it on every probe: per-step time grew up to
+ * 2-4x on Windows (daily-g11-private 69s -> 307s) and the Windows and Linux audits hit the 60 min
+ * step timeout before the engine and extension sections (Windows stopped at
+ * settings-browser-site-settings, Linux at extension-store-open).
+ */
+function ocr(path, { bands = false } = {}) {
   if (!tesseract || !path || !existsSync(path)) return null;
   const words = [];
   let anyPass = false;
@@ -715,7 +722,7 @@ function ocr(path) {
       });
     }
   }
-  if (anyPass) words.push(...ocrBands(path));
+  if (anyPass && bands) words.push(...ocrBands(path));
   return anyPass ? words : null;
 }
 
@@ -1180,7 +1187,7 @@ async function step(name, description, actions, expect = null) {
   if (!shot.ok && record.outcome === "ok") record.outcome = "screenshot_failed";
   if (expect) {
     const extra = record.actions.flatMap((action) => action.seen_text ?? []).map((text) => ({ text }));
-    const words = shot.path ? [...(ocr(shot.path) ?? []), ...extra] : null;
+    const words = shot.path ? [...(ocr(shot.path, { bands: true }) ?? []), ...extra] : null;
     if (!words) {
       record.ui_check = { result: "unavailable", expect };
     } else {
@@ -1252,21 +1259,44 @@ if (app) summary.window = await waitForWindow();
 const chromeFocus = [
   "optional click sidebar 'Projects' header (focus app chrome)",
   async () => {
-    const deadline = Date.now() + 3000;
-    do {
-      const words = ocr(probeShot());
-      if (!words) return { ok: false, stderr: "OCR unavailable" };
+    // Fallbacks, in order: the header row 30px below the "Filter worktrees" input (the header
+    // sits right under it), then Escape (twice on macOS: the "Go to folder" sheet, then the open
+    // panel under it) and a second look. On macOS run 41801115761 an open panel left by the
+    // Chromium upload scenario covered the app from daily-g8-chromium to extension-listed, so
+    // "Projects" was never read and Mod+Shift+B / Mod+, went to the panel.
+    const locate = (words) => {
       const afterFilter = (word) => words.some((prev) => /^filter$/i.test(prev.text) && Math.abs(prev.top - word.top) <= 8 && prev.left < word.left && word.left - (prev.left + prev.width) < 40);
-      const hit =
+      const header =
         findWord(words, "", { match: (word) => word.text === "Projects", pick: "leftmost" }) ??
         findWord(words, "", { match: (word) => word.text === "Worktrees" && !afterFilter(word), pick: "leftmost" });
-      if (hit) {
-        const result = host.click(hit.x, hit.y);
-        return { ...result, stderr: result.ok ? "" : result.stderr, at: [hit.x, hit.y] };
+      if (header) return { x: header.x, y: header.y, via: "label" };
+      const filter = findWord(words, "", { match: (word) => word.text === "Filter", pick: "leftmost" });
+      return filter ? { x: filter.x, y: filter.y + 30, via: "30px below 'Filter worktrees'" } : null;
+    };
+    const look = async (ms) => {
+      const deadline = Date.now() + ms;
+      do {
+        const words = ocr(probeShot());
+        if (!words) return { unavailable: true };
+        const hit = locate(words);
+        if (hit) return hit;
+        await sleep(1000);
+      } while (Date.now() < deadline);
+      return null;
+    };
+    let hit = await look(3000);
+    if (hit?.unavailable) return { ok: false, stderr: "OCR unavailable" };
+    let escaped = 0;
+    if (!hit) {
+      for (; escaped < (platform === "darwin" ? 2 : 1); escaped += 1) {
+        host.key({ key: "Escape" });
+        await sleep(700);
       }
-      await sleep(1000);
-    } while (Date.now() < deadline);
-    return { ok: false, stderr: "text not visible: Projects/Worktrees" };
+      hit = await look(2000);
+    }
+    if (!hit || hit.unavailable) return { ok: false, escaped, stderr: "text not visible: Projects/Worktrees/Filter (also after Escape)" };
+    const result = host.click(hit.x, hit.y);
+    return { ...result, stderr: result.ok ? "" : result.stderr, at: [hit.x, hit.y], via: hit.via, escaped };
   },
 ];
 const exactly = (label) => (word) => word.text === label;
@@ -1340,6 +1370,16 @@ function navTarget(words, name) {
     return hit ? { index, y: hit.y } : null;
   }).filter(Boolean);
   if (seen.length < 2) return null;
+  // Browser and Notifications are only in the nav with Advanced features on. When the labels
+  // read on both sides of `name` sit closer than the rows between them need, `name` is absent:
+  // on Windows run 41767162699 (Settings reopened) interpolating Browser's slot clicked "Agents"
+  // (probe-232) and the Chromium Engine group was then "absent at both ends".
+  const index = NAV_ORDER.indexOf(name);
+  const below = seen.filter((entry) => entry.index < index).at(-1);
+  const above = seen.find((entry) => entry.index > index);
+  const rows = seen.slice(1).map((entry, at) => (entry.index - seen[at].index === 1 ? entry.y - seen[at].y : null)).filter((gap) => gap > 0);
+  const row = rows.length ? Math.min(...rows) : null;
+  if (below && above && row && above.y - below.y < (above.index - below.index - 0.5) * row) return { absent: true };
   const pitch = (seen.at(-1).y - seen[0].y) / (seen.at(-1).index - seen[0].index);
   return { x: columnLeft + 24, y: Math.round(seen[0].y + (NAV_ORDER.indexOf(name) - seen[0].index) * pitch), how: `interpolated, pitch ${pitch.toFixed(1)}` };
 }
@@ -1347,6 +1387,7 @@ async function clickNav(name) {
   const deadline = Date.now() + 6000;
   do {
     const target = navTarget(ocr(probeShot()), name);
+    if (target?.absent) return { ok: false, absent: true, stderr: `'${name}' is not in the Settings nav (Advanced features off?)` };
     if (target) return { ...host.click(target.x, target.y), via: "ocr-click", at: [target.x, target.y], how: target.how };
     await sleep(800);
   } while (Date.now() < deadline);
@@ -1816,7 +1857,8 @@ const daily = {
   host,
   win,
   run,
-  ocr,
+  // The daily scenarios read inactive tab titles, toolbar and prompt text: banded OCR on.
+  ocr: (path) => ocr(path, { bands: true }),
   probeShot,
   decodePng,
   step,
@@ -1964,7 +2006,15 @@ if (engineZip) {
         const opened = await openSettings();
         if (!opened.ok) return opened;
         await sleep(500);
-        return { ...(await clickNav("Browser")), reopened: true };
+        const nav = await clickNav("Browser");
+        if (!nav.absent) return { ...nav, reopened: true };
+        // Settings came back with Advanced features off (no Browser in the nav): turn it on
+        // again from General, then open Browser.
+        await clickNav("General");
+        await sleep(800);
+        const advanced = await clickRowSwitch("Advanced");
+        await sleep(1500);
+        return { ...(await clickNav("Browser")), reopened: true, advanced_reenabled: advanced.ok };
       }],
       1500,
       // The Import step left the pane scrolled to the bottom; Chromium Engine sits above Extensions.
@@ -2009,16 +2059,32 @@ await step(
   { any: ["ferryx-qa.txt", "Save", "Download"] },
 );
 if (platform === "darwin") {
+  let mediaPageTitle = null;
   // WKWebView routes camera and microphone requests through Ferryx's own permission prompt.
   await step(
     "media-prompt",
     "Load the local media page and click its button (getUserMedia camera+microphone); Ferryx's prompt shows '<origin> wants to use camera and microphone' with Block and Allow",
-    [focus, ...typeUrl(`${fixtureBase}/media.html`), waitForText(["MEDIAREQUEST"]), ["click media request button", () => clickText("MEDIAREQUEST", { timeout: 15000 })], waitForText(["wants", "Allow", "Block"], 15000)],
+    [focus, ...typeUrl(`${fixtureBase}/media.html`), waitForText(["MEDIAREQUEST"]), ["click media request button", () => clickText("MEDIAREQUEST", { timeout: 15000 })], waitForText(["wants", "Allow", "Block"], 15000),
+      // The fixture writes getUserMedia's outcome into its title. Run 41801115761 read
+      // "media:OverconstrainedError" in the tab strip: WebKit rejected the request before asking
+      // for permission, as it does when the machine has no camera/microphone.
+      ["optional page title after the request (CLI)", () => {
+        const title = sessions().list.map((entry) => entry.title).find((text) => /^media:/.test(text ?? "")) ?? null;
+        mediaPageTitle = title;
+        return { ok: title === "media:asking" || title === "media:granted", title, stderr: title ? `page reports ${title}` : "no media tab listed" };
+      }]],
     { any: ["wants", "Allow", "Block"] },
   );
-  summary.media_prompt = summary.steps.at(-1).ui_check?.result ?? null;
+  // Evidence for the report, not a check: WebKit rejects getUserMedia with OverconstrainedError
+  // or NotFoundError before asking when the machine has no camera/microphone, so there is no
+  // prompt to see. That is "n/a", never a pass.
+  const noDevice = mediaPageTitle === "media:OverconstrainedError" || mediaPageTitle === "media:NotFoundError";
+  summary.media_prompt = noDevice
+    ? { result: "n/a", reason: "no capture device on the runner", page_title: mediaPageTitle }
+    : { result: summary.steps.at(-1).ui_check?.result ?? null, page_title: mediaPageTitle };
   await step("media-prompt-dismissed", "Block dismisses the media prompt so later steps are not covered", [
-    ["optional click Block", () => clickText("Block")],
+    // With no prompt on screen a "Block" elsewhere must not be clicked.
+    ["optional click Block", () => (noDevice ? { ok: true, skipped: "no prompt: no capture device" } : clickText("Block"))],
   ]);
 }
 await step(
@@ -2253,10 +2319,19 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
         return { ok: pids.length > 0, pids, stderr: pids.length ? "" : "no engine process" };
       }],
       8000,
-      ["optional tabs closed via CLI", () => {
-        const list = sessions().list;
+      ["optional tabs closed via CLI", async () => {
+        // Bounded wait for the close, then evidence for a product report: what still runs from
+        // the engine install dir (a process holding the engine's stdout keeps Ferryx's reader
+        // from seeing the engine's end).
+        const deadline = Date.now() + 20000;
+        let list = sessions().list;
+        while (browserId && list.some((entry) => entry.browserId === browserId) && Date.now() < deadline) {
+          await sleep(1000);
+          list = sessions().list;
+        }
         const gone = !browserId || !list.some((entry) => entry.browserId === browserId);
-        return { ok: gone, remaining: list.map((entry) => entry.browserId), stderr: gone ? "" : "engine tab still listed" };
+        const leftover = platform === "win32" ? [] : run("pgrep", ["-af", "browser-engine"]).stdout.split("\n").filter(Boolean).slice(0, 20);
+        return { ok: gone, remaining: list.map((entry) => `${entry.browserId}:${entry.engine}`), engine_dir_processes: leftover, stderr: gone ? "" : "engine tab still listed 28s after the kill" };
       }],
     ],
   );
@@ -2342,14 +2417,31 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
       chromeFocus,
       key("Mod+Shift+B", { key: "b", mods: ["mod", "shift"] }),
       ["navigate to the store page (CLI)", async () => {
-        const deadline = Date.now() + 30000;
-        while (Date.now() < deadline && !storeTab) {
-          storeTab = sessions().list.find((entry) => entry.engine === "chromium") ?? null;
-          if (!storeTab) await sleep(1000);
+        const findTab = async (ms) => {
+          const deadline = Date.now() + ms;
+          while (Date.now() < deadline && !storeTab) {
+            storeTab = sessions().list.find((entry) => entry.engine === "chromium") ?? null;
+            if (!storeTab) await sleep(1000);
+          }
+        };
+        await findTab(15000);
+        // Mod+Shift+B can miss the app (macOS run 41801115761: a native open panel had focus).
+        // `ferryx browser tab new` has no engine option, but with the engine installed every
+        // new tab that is not a popup opens on Chromium (create_browser_session, engine_dir).
+        let via = "Mod+Shift+B";
+        if (!storeTab) {
+          via = "ferryx browser tab new";
+          const before = new Set(sessions().list.map((entry) => entry.browserId));
+          const opened = await cliAsync("tab", "new", "--url", UBOL_URL);
+          await findTab(15000);
+          if (!storeTab) {
+            const added = sessions().list.filter((entry) => !before.has(entry.browserId));
+            return { ok: false, via, cli: opened.ok ? "ok" : opened.stderr, new_tabs: added.map((entry) => `${entry.browserId}:${entry.engine}`), stderr: "no chromium tab listed" };
+          }
+          return { ok: true, via, browser_id: storeTab.browserId };
         }
-        if (!storeTab) return { ok: false, stderr: "no chromium tab listed" };
         const navigated = await cliAsync("navigate", "--browser-id", storeTab.browserId, "--url", UBOL_URL);
-        return { ok: navigated.ok, browser_id: storeTab.browserId, stderr: navigated.stderr };
+        return { ok: navigated.ok, via, browser_id: storeTab.browserId, stderr: navigated.stderr };
       }],
       waitForText(["Chrome"], 45000),
     ],
