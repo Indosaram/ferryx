@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   ArrowLeft,
@@ -40,7 +40,6 @@ import {
   openBrowserDevtools,
   removeBrowserElementPicker,
   openExternalUrl,
-  setBrowserZoom,
   type BrowserEngineStatus,
   type BrowserDesignSnapshot,
   type BrowserReloadOptions,
@@ -51,7 +50,13 @@ import {
 } from "../lib/browserTauri";
 import { BrowserDesignFeedbackPopover } from "./BrowserDesignFeedbackPopover";
 import { openBrowserLibraryView } from "./BrowserLibraryPanel";
-import { printBrowser, saveBrowserPdf } from "../lib/browserSystem";
+import {
+  applyBrowserSiteZoom,
+  printBrowser,
+  saveBrowserPdf,
+  stepBrowserZoom,
+  type BrowserZoomDirection,
+} from "../lib/browserSystem";
 import {
   addBookmark,
   clearAllBrowserHistory,
@@ -68,16 +73,22 @@ import {
 } from "../lib/browserLibrary";
 import { requestSwitchToBrowserTab } from "../lib/browserLibrarySync";
 import { goBackInBrowserTab, goForwardInBrowserTab, useBrowserTabNavigation } from "../lib/browserTabNavigation";
-import { BROWSER_ZOOM_LEVELS, normalizeBrowserAddress, searchUrlFor, useBrowserSettings } from "../lib/browserSettings";
+import { isPrivateBrowserProfileId, normalizeBrowserAddress, searchUrlFor, useBrowserSettings } from "../lib/browserSettings";
 import { openSettingsSection } from "../lib/browserExtensions";
 import { isMacHost } from "../lib/platform";
 import { isHardReloadSupportedPlatform } from "../lib/shortcuts";
 import type { BrowserTab } from "../lib/types";
 
-// Keep the toolbar's zoom clamps in lockstep with the Settings-exposed zoom levels
-// (BROWSER_ZOOM_LEVELS percentages), so a zoom restored by the backend stays reachable.
-const BROWSER_ZOOM_MIN = Math.min(...BROWSER_ZOOM_LEVELS) / 100;
-const BROWSER_ZOOM_MAX = Math.max(...BROWSER_ZOOM_LEVELS) / 100;
+// Mirrors ZOOM_STEPS in src-tauri/src/browser/system.rs. Only the optimistic readout uses it;
+// the host does the real stepping and its answer replaces this guess.
+const HOST_ZOOM_STEPS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 3.0, 5.0];
+
+function guessZoomStep(current: number, direction: BrowserZoomDirection): number {
+  if (direction === "reset") return 1.0;
+  const from = Number.isFinite(current) ? current : 1.0;
+  if (direction === "in") return HOST_ZOOM_STEPS.find((step) => step > from + 1e-6) ?? HOST_ZOOM_STEPS[HOST_ZOOM_STEPS.length - 1];
+  return [...HOST_ZOOM_STEPS].reverse().find((step) => step < from - 1e-6) ?? HOST_ZOOM_STEPS[0];
+}
 
 /** Below this toolbar width the secondary actions move into the "More" row. */
 export const BROWSER_TOOLBAR_COMPACT_WIDTH = 720;
@@ -196,6 +207,16 @@ export function BrowserToolbar({
   const inputDirtyRef = useRef(false);
   const [historyQuery, setHistoryQuery] = useState("");
   const [zoomFactor, setZoomFactor] = useState(tab.zoomFactor ?? 1.0);
+  // The shown zoom, readable at shortcut time: two quick presses step from the first guess,
+  // not twice from the same render's value.
+  const zoomFactorRef = useRef(zoomFactor);
+  // Only the newest zoom request (step or site zoom) may set the readout; an older answer that
+  // arrives late would show a zoom the page no longer has.
+  const zoomRequestRef = useRef(0);
+  const showZoom = useCallback((zoom: number) => {
+    zoomFactorRef.current = zoom;
+    setZoomFactor(zoom);
+  }, []);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [omniboxOpen, setOmniboxOpen] = useState(false);
   const [selectedHistoryIndex, setSelectedHistoryIndex] = useState(-1);
@@ -312,8 +333,32 @@ export function BrowserToolbar({
   }, []);
 
   useEffect(() => {
-    setZoomFactor(tab.zoomFactor ?? 1.0);
-  }, [tab.browserId, tab.zoomFactor]);
+    showZoom(tab.zoomFactor ?? 1.0);
+  }, [showZoom, tab.browserId, tab.zoomFactor]);
+
+  // The host applies the site's remembered zoom when a page loads, but that change does not
+  // reach the tab's state event, so after a navigation the readout would keep the previous
+  // site's zoom. Asking the host to apply the site zoom answers the zoom the page now has.
+  const siteZoomTargetRef = useRef({ browserId: tab.browserId, url: tab.url });
+  useEffect(() => {
+    const previous = siteZoomTargetRef.current;
+    siteZoomTargetRef.current = { browserId: tab.browserId, url: tab.url };
+    // The first render and a toolbar reused for another tab take the zoom from tab state.
+    if (previous.browserId !== tab.browserId || previous.url === tab.url) return;
+    const request = ++zoomRequestRef.current;
+    const isPrivate = isPrivateBrowserProfileId(tab.profileId);
+    void applyBrowserSiteZoom(tab.browserId)
+      .then((applied) => {
+        if (request !== zoomRequestRef.current) return;
+        // No answer means the host left the zoom alone: a private tab keeps its zoom, any other
+        // tab is at 100% (no remembered zoom and nothing to change).
+        if (applied !== null) showZoom(applied);
+        else if (!isPrivate) showZoom(1.0);
+      })
+      .catch((error: unknown) => {
+        if (request === zoomRequestRef.current) setActionError(actionFailureMessage("Site zoom", error));
+      });
+  }, [showZoom, tab.browserId, tab.url, tab.profileId]);
 
   // History lives in the host store; any window's visit refreshes the recent list.
   const refreshRecentHistory = useRef(() => undefined as void);
@@ -652,33 +697,37 @@ export function BrowserToolbar({
       .catch((error: unknown) => setActionError(actionFailureMessage("Open in system browser", error)));
   };
 
-  const applyZoom = async (nextZoom: number) => {
+  const applyZoom = async (direction: BrowserZoomDirection) => {
     // The optimistic value must not outlive a rejected IPC: showing 110% while the page stays at
     // 100% is exactly the lie the zoom readout must never tell.
-    const previousZoom = zoomFactor;
+    const previousZoom = zoomFactorRef.current;
+    const request = ++zoomRequestRef.current;
     setOmniboxOpen(false);
-    setZoomFactor(nextZoom);
+    showZoom(guessZoomStep(previousZoom, direction));
     try {
-      const applied = await setBrowserZoom(tab.browserId, nextZoom);
-      // The backend answers the zoom it actually applied; show that rather than the request.
-      if (typeof applied === "number" && Number.isFinite(applied)) setZoomFactor(applied);
+      // The host steps from the zoom it holds for the tab, applies it on either engine and
+      // remembers it for the page's site; its answer is the zoom the page really has.
+      const applied = await stepBrowserZoom(tab.browserId, direction);
+      if (request !== zoomRequestRef.current) return;
+      if (typeof applied === "number" && Number.isFinite(applied)) showZoom(applied);
       setActionError(null);
     } catch (error) {
-      setZoomFactor(previousZoom);
+      if (request !== zoomRequestRef.current) return;
+      showZoom(previousZoom);
       setActionError(actionFailureMessage("Zoom", error));
     }
   };
 
   async function handleZoomIn() {
-    await applyZoom(Math.min(BROWSER_ZOOM_MAX, Math.round((zoomFactor + 0.1) * 10) / 10));
+    await applyZoom("in");
   }
 
   async function handleZoomOut() {
-    await applyZoom(Math.max(BROWSER_ZOOM_MIN, Math.round((zoomFactor - 0.1) * 10) / 10));
+    await applyZoom("out");
   }
 
   async function handleZoomReset() {
-    await applyZoom(1.0);
+    await applyZoom("reset");
   }
 
   const handleFocus = async () => {
@@ -698,7 +747,7 @@ export function BrowserToolbar({
         setInputUrl(state.url);
         setHistoryQuery("");
       }
-      setZoomFactor(state.zoomFactor);
+      showZoom(state.zoomFactor);
       setActionError(null);
     } catch (error) {
       setActionError(actionFailureMessage("Sync state", error));

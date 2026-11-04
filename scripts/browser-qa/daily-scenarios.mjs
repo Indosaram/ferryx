@@ -57,10 +57,11 @@ body{margin:0;background:#fff;color:#000;font:bold 44px sans-serif}h1{font-size:
 export function dailyFixtures({ siteB }) {
   const login = `<!doctype html><html><head><title>qa-login</title><style>
 body{margin:0;background:#fff;font:bold 36px sans-serif}form{margin:40px}input{display:block;font:36px sans-serif;margin:16px 0;width:520px}
+input::placeholder{color:#000;opacity:1}
 button{font:bold 40px sans-serif;margin-top:16px}</style></head><body>
+<p id=s>LOGINPAGE</p>
 <form method="post" action="/login.html"><input id=u name=username autocomplete=username placeholder=USERNAME>
 <input id=p name=password type=password autocomplete=current-password placeholder=PASSWORD><button id=go type=submit>LOGIN</button></form>
-<p id=s>LOGINPAGE</p>
 <script>addEventListener('message',(e)=>{if(e.data&&e.data.type==='report')e.source.postMessage({type:'state',u:u.value,p:p.value},'*')})</script>
 </body></html>`;
   const frame = `<!doctype html><html><head><title>frame:wait</title></head><body style="font:bold 36px sans-serif">
@@ -545,13 +546,23 @@ export async function dailyWebviewBefore(ctx) {
   });
 
   // G3: login save prompt, vault file, OS keystore.
-  await run(ctx, "daily-g3-save", "Tab B /login.html: type user+password, click LOGIN, click Save in the password bar", async () => {
+  await run(ctx, "daily-g3-save", "Tab B /login.html: click the page, Tab into USERNAME, type user, Tab, type password, Enter submits; click Save in the password bar", async () => {
     await visit(ctx, `${fixtureBase}/login.html`, "LOGINPAGE");
-    const user = await clickWord(ctx, (text) => /^USERNAME$/i.test(text), { timeout: 8000 });
+    // Focus the page through its heading (big black text OCR reads reliably), not the grey
+    // placeholders; the heading sits before the form, so Tab lands in USERNAME. Otherwise the
+    // address bar keeps focus and the credentials end up in the URL.
+    const page = await clickWord(ctx, (text) => /^LOGINPAGE$/i.test(text), { timeout: 8000, pick: "bottom" });
+    await sleep(500);
+    ctx.host.key({ key: "Tab" });
+    await sleep(300);
     ctx.host.type("qauser");
-    const pass = await clickWord(ctx, (text) => /^PASSWORD$/i.test(text), { timeout: 8000 });
+    ctx.host.key({ key: "Tab" });
+    await sleep(300);
     ctx.host.type("qa-pass-123");
-    const login = await clickWord(ctx, (text) => /^LOGIN$/i.test(text), { timeout: 8000 });
+    const typed = await ctx.cliAsync("eval", "--browser-id", daily.tabB, "--script", "JSON.stringify([document.getElementById('u').value, document.getElementById('p').value.length])");
+    g3.typed = typed.ok ? typed.stdout.trim().slice(0, 200) : `eval failed: ${typed.stderr.slice(0, 200)}`;
+    // Enter in the password field: a trusted keydown for the capture script and an implicit submit.
+    ctx.host.key({ key: "Enter" });
     const prompt = await until(() => {
       const words = screenWords(ctx);
       const save = words.filter((word) => word.text === "Save");
@@ -559,7 +570,7 @@ export async function dailyWebviewBefore(ctx) {
       return has(words, "password") && save.length ? { save, not } : null;
     }, 15000);
     g3.checks.save_prompt_shown = Boolean(prompt);
-    if (!prompt) return { ok: false, stderr: "no save prompt", user, pass, login };
+    if (!prompt) return { ok: false, stderr: "no save prompt", page, typed: g3.typed };
     // The Save button: the rightmost "Save" left of "Not now" (the sentence starts with "Save" too).
     const buttons = prompt.save.filter((word) => !prompt.not || word.left < prompt.not.left).sort((a, b) => b.left - a.left);
     const button = buttons[0];

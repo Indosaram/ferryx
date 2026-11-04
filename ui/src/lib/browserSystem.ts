@@ -32,6 +32,13 @@ export function stepBrowserZoom(browserId: string, direction: BrowserZoomDirecti
   return invoke<number>("cmd_browser_zoom_step", { browserId, direction });
 }
 
+/** Applies the remembered zoom of the tab's current site. Resolves the zoom the host applied,
+ * or null when it left the zoom alone (private tab, or no remembered zoom and already 100%). */
+export async function applyBrowserSiteZoom(browserId: string): Promise<number | null> {
+  const applied = await invoke<number | null>("cmd_browser_apply_site_zoom", { browserId });
+  return typeof applied === "number" && Number.isFinite(applied) ? applied : null;
+}
+
 export function printBrowser(browserId: string): Promise<void> {
   return invoke<void>("cmd_browser_print", { browserId });
 }

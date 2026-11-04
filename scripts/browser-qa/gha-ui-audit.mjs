@@ -642,6 +642,57 @@ function ocrVariants(path) {
   }
   return [{ file: path, factor: 1 }];
 }
+const bandDir = join(out, "ocr-bands");
+/**
+ * Banded OCR: horizontal bands of the frame (the window crop on Linux), 130px tall every 100px,
+ * grayscale, 300%, read by one tesseract call over a list file (its page_num is the band).
+ * Full-frame OCR misses inactive tab titles, the omnibox "Switch to tab" row and small
+ * toolbar/prompt text that bands read (measured on run 41767162699 linux probe-045, about 2s a
+ * frame). Needs ImageMagick; on Windows only the real "magick" (convert.exe there is a disk
+ * tool), otherwise the PowerShell upscale variants stay the only extra pass.
+ */
+function ocrBands(path) {
+  if (!imageMagick || (platform === "win32" && imageMagick !== "magick")) return [];
+  const box = platform === "linux" ? linux.geometry() : null;
+  let { width, height } = box ?? {};
+  if (!box) {
+    const header = readFileSync(path).subarray(0, 24);
+    width = header.readUInt32BE(16);
+    height = header.readUInt32BE(20);
+  }
+  mkdirSync(bandDir, { recursive: true });
+  const args = [path, ...(box ? ["-crop", `${box.width}x${box.height}+${box.x}+${box.y}`, "+repage"] : []), "-colorspace", "gray"];
+  const bands = [];
+  for (let y = 0; y < height; y += 100) {
+    const file = join(bandDir, `band-${bands.length}.png`);
+    args.push("(", "-clone", "0", "-crop", `${width}x130+0+${y}`, "+repage", "-resize", "300%", "-write", file, "+delete", ")");
+    bands.push({ file, y });
+  }
+  args.push("null:");
+  if (!run(imageMagick, args, { timeout: 60000 }).ok) return [];
+  const list = join(bandDir, "bands.txt");
+  writeFileSync(list, `${bands.map((band) => band.file).join("\n")}\n`);
+  const result = run(tesseract, [list, "-", "--psm", "11", "tsv"], { timeout: 120000 });
+  if (!result.ok) return [];
+  const lines = result.stdout.split(/\r?\n/);
+  const header = lines.shift()?.split("\t") ?? [];
+  const col = (name) => header.indexOf(name);
+  const words = [];
+  for (const cells of lines.map((line) => line.split("\t"))) {
+    if (cells.length < header.length || !cells[col("text")]?.trim() || Number(cells[col("conf")]) <= 0) continue;
+    const band = bands[Number(cells[col("page_num")]) - 1];
+    if (!band) continue;
+    words.push({
+      text: cells[col("text")].trim(),
+      left: Math.round(Number(cells[col("left")]) / 3) + (box?.x ?? 0),
+      top: Math.round(Number(cells[col("top")]) / 3) + band.y + (box?.y ?? 0),
+      width: Math.round(Number(cells[col("width")]) / 3),
+      height: Math.round(Number(cells[col("height")]) / 3),
+      band: true,
+    });
+  }
+  return words;
+}
 function ocr(path) {
   if (!tesseract || !path || !existsSync(path)) return null;
   const words = [];
@@ -664,6 +715,7 @@ function ocr(path) {
       });
     }
   }
+  if (anyPass) words.push(...ocrBands(path));
   return anyPass ? words : null;
 }
 
@@ -1190,10 +1242,32 @@ async function waitForWindow() {
 }
 if (app) summary.window = await waitForWindow();
 
-/** Click a sidebar label so keyboard focus leaves an embedded webview and app shortcuts reach the UI. */
+/**
+ * Click a non-interactive sidebar label so keyboard focus leaves an embedded webview and app
+ * shortcuts reach the UI. Target: the "Projects" section header (plain text). The old target,
+ * /^worktrees$/i, also matched the "Filter worktrees" placeholder: on Windows run 41767162699
+ * the click at (139,169) focused that input, Mod+Shift+B went nowhere and the next URL was typed
+ * into the filter. Fallback: the "Worktrees" tab, case-sensitive and not after "Filter".
+ */
 const chromeFocus = [
-  "optional click sidebar 'Worktrees' (focus app chrome)",
-  () => clickText("Worktrees", { timeout: 3000, match: (word) => /^worktrees$/i.test(word.text), pick: "leftmost" }),
+  "optional click sidebar 'Projects' header (focus app chrome)",
+  async () => {
+    const deadline = Date.now() + 3000;
+    do {
+      const words = ocr(probeShot());
+      if (!words) return { ok: false, stderr: "OCR unavailable" };
+      const afterFilter = (word) => words.some((prev) => /^filter$/i.test(prev.text) && Math.abs(prev.top - word.top) <= 8 && prev.left < word.left && word.left - (prev.left + prev.width) < 40);
+      const hit =
+        findWord(words, "", { match: (word) => word.text === "Projects", pick: "leftmost" }) ??
+        findWord(words, "", { match: (word) => word.text === "Worktrees" && !afterFilter(word), pick: "leftmost" });
+      if (hit) {
+        const result = host.click(hit.x, hit.y);
+        return { ...result, stderr: result.ok ? "" : result.stderr, at: [hit.x, hit.y] };
+      }
+      await sleep(1000);
+    } while (Date.now() < deadline);
+    return { ok: false, stderr: "text not visible: Projects/Worktrees" };
+  },
 ];
 const exactly = (label) => (word) => word.text === label;
 /** OCR the browser toolbar zoom label (e.g. "100%"). */
@@ -1413,7 +1487,7 @@ async function openSettings() {
   host.key({ key: ",", mods: ["mod"] });
   await sleep(1800);
   if (settingsVisible(ocr(probeShot()))) return { ok: true, attempts: 1 };
-  const focused = await clickText("Worktrees", { timeout: 3000, match: (word) => /^worktrees$/i.test(word.text), pick: "leftmost" });
+  const focused = await chromeFocus[1]();
   await sleep(400);
   host.key({ key: ",", mods: ["mod"] });
   await sleep(1800);
@@ -1834,6 +1908,48 @@ await step(
   { any: ["Bookmarks", "History", "Cookies", "Passwords", "Chrome", "Firefox", "Safari", "Edge", "Choose", "Cancel"] },
 );
 await step("settings-import-dialog-closed", "Escape closes the import dialog", [focus, key("Escape", { key: "Escape" }), 1000, closeStrayDialogs]);
+/** True once the install left anything in the engine root (part file, staging dir, pointer). */
+const engineInstallStarted = () => {
+  const root = join(dirs.data, "browser-engine");
+  return existsSync(root) && readdirSync(root).length > 0;
+};
+/**
+ * Click the Chromium Engine "Download" button: every "Download" word not followed on its line
+ * by "size" (the row label), deduped by position, rightmost first. When neither the engine dir
+ * nor "Downloading..."/"Installing..." shows up within 10s, the next candidate is clicked.
+ */
+async function clickEngineDownload() {
+  const deadline = Date.now() + 8000;
+  let candidates = [];
+  do {
+    const words = ocr(probeShot()) ?? [];
+    const isLabel = (word) => words.some((next) => /^size$/i.test(next.text) && Math.abs(next.top - word.top) <= 8 && next.left > word.left && next.left - (word.left + word.width) < 40);
+    const unique = new Map();
+    for (const word of words.filter((entry) => entry.text === "Download")) {
+      const keyed = `${Math.round(word.left / 12)}:${Math.round(word.top / 12)}`;
+      unique.set(keyed, { word, label: unique.get(keyed)?.label || isLabel(word) });
+    }
+    // Buttons first, then (a misread line can drop "size") the labels; rightmost first in each.
+    candidates = [...unique.values()].sort((a, b) => Number(a.label) - Number(b.label) || b.word.left - a.word.left);
+    if (candidates.length) break;
+    await sleep(1000);
+  } while (Date.now() < deadline);
+  if (!candidates.length) return { ok: false, stderr: "text not visible: Download" };
+  const tries = [];
+  for (const { word, label } of candidates.slice(0, 2)) {
+    const at = [word.left + Math.round(word.width / 2), word.top + Math.round(word.height / 2)];
+    const result = host.click(...at);
+    tries.push({ at, label, ok: result.ok });
+    const started = Date.now();
+    while (Date.now() - started < 10000) {
+      await sleep(1500);
+      if (engineInstallStarted()) return { ok: true, at, tries, started_via: "engine dir" };
+      if (findWord(ocr(probeShot()), "", { match: (entry) => /^(Downloading|Installing)/.test(entry.text) })) return { ok: true, at, tries, started_via: "progress text" };
+    }
+  }
+  // Report the first click; the wait below decides whether the install happened.
+  return { ok: true, at: tries[0].at, tries, started_via: null };
+}
 if (engineZip) {
   await step(
     "engine-install",
@@ -1853,8 +1969,9 @@ if (engineZip) {
       1500,
       // The Import step left the pane scrolled to the bottom; Chromium Engine sits above Extensions.
       ["scroll up to the Chromium Engine group", () => scrollSettingsTo("Chromium Engine", { direction: -1 })],
-      // Rightmost: the group also has a "Download size" row label on the left.
-      ["click Download", () => clickText("Download", { timeout: 8000, match: exactly("Download"), pick: "rightmost" })],
+      // The group has a "Download size" row label (left) and the "Download" button (right, next
+      // to "Not installed"); on linux run 41767162699 the rightmost-only pick landed on the label.
+      ["click Download", clickEngineDownload],
       3000,
       ["wait for ferryx_engine on disk", async () => {
         // The install unpacks into <root>/.staging-<uuid>/ (the executable is there before the

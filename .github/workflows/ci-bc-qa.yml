@@ -159,6 +159,11 @@ jobs:
       - name: Build Frontend UI
         run: bun run --cwd ui build
 
+      # This workflow runs no other vitest, so run the toolbar zoom tests here to catch regressions on every OS.
+      - name: Unit tests (browser toolbar)
+        shell: bash
+        run: bun run --cwd ui test src/components/BrowserToolbar.test.tsx
+
       # Branches with the default remote-desktop feature link the pinned FFmpeg SDK that
       # .cargo/config.toml points FFMPEG_DIR at; older trees have no fetch script.
       - name: Fetch FFmpeg SDK (remote-desktop, when the tree has it)
@@ -295,6 +300,10 @@ jobs:
           dbus-run-session -- bash -c '
             openbox > "$1/openbox.log" 2>&1 &
             sleep 2
+            # Unlock the keyring like the main audit does, or its unlock prompt covers the app and the fixture page never loads.
+            eval "$(printf "ferryx-qa-keyring" | gnome-keyring-daemon --unlock --components=secrets)"
+            export GNOME_KEYRING_CONTROL SSH_AUTH_SOCK
+            echo "gnome-keyring: ${GNOME_KEYRING_CONTROL:-not started}" > "$1/keyring.log"
             bun scripts/browser-qa/gha-ui-audit.mjs --binary src-tauri/target/debug/ferryx --out "$1" --scenario drag-mask
           ' bash "$out" || echo "drag-mask driver exited non-zero: $?"
 
