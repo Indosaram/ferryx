@@ -399,6 +399,8 @@ pub struct RecoveryAuthorityEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DaemonSessionDetails {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_owner: Option<String>,
     pub session_id: String,
     pub workspace_id: Option<String>,
     pub worktree: Option<WorktreeIdentity>,
@@ -488,6 +490,7 @@ impl DaemonSessionDetails {
         } = params;
         Self {
             session_id,
+            size_owner: None,
             workspace_id,
             worktree,
             cwd,
@@ -3398,6 +3401,7 @@ mod tests {
             daemon_epoch: None,
             session: DaemonSessionDetails {
                 session_id: "session-99".to_string(),
+                size_owner: None,
                 workspace_id: Some("default".to_string()),
                 worktree: None,
                 cwd: Some("/tmp/test-cwd".to_string()),
