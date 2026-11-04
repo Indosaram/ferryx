@@ -174,3 +174,5 @@ pub fn run_cli(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod api_tests;
