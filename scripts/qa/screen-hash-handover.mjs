@@ -30,12 +30,18 @@ async function connection() {
   const socket = net.createConnection(join(runtime, 'daemon.sock'));
   await once(socket, 'connect', { signal });
   const lines = createInterface({ input: socket });
-  const call = async (request) => {
+  const send = async (request) => {
     const reply = once(lines, 'line', { signal });
     socket.write(`${JSON.stringify(request)}\n`);
     const answer = JSON.parse((await reply)[0]);
     if (answer.type === 'error') throw new Error(JSON.stringify(answer));
     return answer;
+  };
+  let tail = Promise.resolve();
+  const call = (request) => {
+    const reply = tail.then(() => send(request));
+    tail = reply;
+    return reply;
   };
   const handshake = await call({ type: 'handshake', version: 5 });
   pids.add(handshake.pid);
@@ -106,7 +112,12 @@ async function handover(client, sessions) {
 
 let client;
 try {
-  for await (const line of output) { if (line === 'FERRYX_DAEMON_READY') break; }
+  let ready = false;
+  signal.addEventListener('abort', () => output.close(), { once: true });
+  for await (const line of output) {
+    if (line === 'FERRYX_DAEMON_READY') { ready = true; break; }
+  }
+  if (!ready) throw new Error('daemon exited or timed out before readiness');
   client = await connection();
   await client.call({ type: 'registerWorkspace', workspaceId: 'hash-qa', repoRoot: process.cwd() });
   const sessions = [await fill(client, 0)];
