@@ -19,6 +19,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 pub const WORKTREE_CHANGED_EVENT: &str = "worktree_changed";
 
+#[cfg(any(feature = "desktop", test))]
 pub(crate) fn worktree_response(response: DaemonResponse) -> Result<DaemonResponse, IpcError> {
     match response {
         DaemonResponse::WorktreeError { error } => Err(error),

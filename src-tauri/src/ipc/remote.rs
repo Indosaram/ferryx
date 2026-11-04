@@ -59,6 +59,7 @@ impl RemoteGatewayManager {
         }
     }
 
+    #[cfg(feature = "desktop")]
     pub(crate) fn daemon_client(&self) -> Option<&Arc<DaemonClient>> {
         match &self.inner {
             RemoteGatewayManagerInner::Daemon(client) => Some(client),
@@ -523,6 +524,7 @@ pub async fn cmd_remote_device_set_permission(
     set_device_permission(&manager, device_id, permission).await
 }
 
+#[cfg(any(feature = "desktop", test))]
 pub(crate) async fn set_device_permission(
     manager: &RemoteGatewayManager,
     device_id: String,
@@ -575,6 +577,7 @@ pub struct SetActiveDesktopSelectionRequest {
     pub terminal_tabs: Vec<RemoteTerminalTabInfo>,
 }
 
+#[cfg(feature = "desktop")]
 fn remote_terminal_tab_label(label: String) -> String {
     let trimmed = label.trim();
     if trimmed.is_empty()
@@ -592,6 +595,7 @@ fn remote_terminal_tab_label(label: String) -> String {
     }
 }
 
+#[cfg(feature = "desktop")]
 fn sanitize_activity_state(state: Option<String>) -> Option<String> {
     let s = state?;
     match s.trim().to_ascii_lowercase().as_str() {
@@ -602,6 +606,7 @@ fn sanitize_activity_state(state: Option<String>) -> Option<String> {
     }
 }
 
+#[cfg(feature = "desktop")]
 fn sanitize_agent_type(agent_type: Option<String>) -> Option<String> {
     let s = agent_type?;
     let trimmed = s.trim();
@@ -625,6 +630,7 @@ fn sanitize_agent_type(agent_type: Option<String>) -> Option<String> {
 
 /// Worktree slugs and branch labels legitimately contain `/` (`orca/<ws-id>/<slug>`), so this
 /// rejects only filesystem-path leaks instead of every separator.
+#[cfg(feature = "desktop")]
 fn sanitize_worktree_text(value: Option<String>) -> Option<String> {
     let s = value?;
     let trimmed = s.trim();
@@ -644,6 +650,7 @@ fn sanitize_worktree_text(value: Option<String>) -> Option<String> {
     }
 }
 
+#[cfg(feature = "desktop")]
 fn sanitize_session_id(value: Option<String>) -> Option<String> {
     let s = value?;
     let trimmed = s.trim();
@@ -760,6 +767,7 @@ pub async fn cmd_remote_set_window_focused(
     }
 }
 
+#[cfg(feature = "desktop")]
 fn get_local_ip() -> Option<String> {
     use std::net::UdpSocket;
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;

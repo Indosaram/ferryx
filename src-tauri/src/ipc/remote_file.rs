@@ -12,9 +12,11 @@ pub const REMOTE_FILE_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// login shell's startup files print first never becomes part of the file.
 const REMOTE_READ_MARKER: &[u8] = b"FERRYX-REMOTE-FILE:";
 /// Startup-file output tolerated in front of [`REMOTE_READ_MARKER`].
+#[cfg(feature = "desktop")]
 const REMOTE_READ_NOISE_ALLOWANCE: usize = 64 * 1024;
 /// One fetch may need a password prompt plus 8 MiB (11 MiB base64 on Windows)
 /// over a slow link.
+#[cfg(feature = "desktop")]
 const REMOTE_FETCH_DEADLINE: Duration = Duration::from_secs(120);
 /// Fetched copies older than this are pruned from the cache.
 const REMOTE_CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -32,6 +34,7 @@ fn invalid_remote_path(message: impl Into<String>) -> IpcError {
 /// (`~`, `~/...`, and on Windows `~\...`) or absolute. On Windows the rooted-but-not-
 /// absolute forms (`\foo`, `C:foo`) also count, so [`windows_remote_target_path`]
 /// refuses them as invalid paths rather than as a missing cwd.
+#[cfg(any(feature = "desktop", test))]
 fn remote_input_needs_no_base(input: &str, windows: bool) -> bool {
     if input == "~" || input.starts_with("~/") {
         return true;
@@ -51,6 +54,7 @@ fn remote_input_needs_no_base(input: &str, windows: bool) -> bool {
 /// fetch a different file that happens to share the name.
 ///
 /// [`RemotePlatform::validate_path`]: crate::ssh::runtime::RemotePlatform::validate_path
+#[cfg(any(feature = "desktop", test))]
 pub(crate) fn remote_fetch_base<'a>(
     input: &str,
     cwd: Option<&'a str>,
@@ -308,6 +312,7 @@ pub fn windows_remote_read_script(remote_path: &str) -> String {
     )
 }
 
+#[cfg(any(feature = "desktop", test))]
 fn decode_windows_payload(bytes: &[u8]) -> Result<Vec<u8>, IpcError> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
 
@@ -534,6 +539,7 @@ pub(crate) fn prune_remote_cache(
 }
 
 /// Drops whatever the remote login shell printed before [`REMOTE_READ_MARKER`].
+#[cfg(any(feature = "desktop", test))]
 fn strip_read_marker(bytes: &[u8]) -> Result<Vec<u8>, IpcError> {
     bytes
         .windows(REMOTE_READ_MARKER.len())

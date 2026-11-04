@@ -1351,6 +1351,7 @@ trait LeaseGate: Send + Sync {
         self.allows_hub()
     }
     /// What is left of the previous holder's lease (+5s) after a takeover; Slack waits it out.
+    #[cfg(any(feature = "desktop", test))]
     fn takeover_wait(&self) -> std::time::Duration {
         std::time::Duration::ZERO
     }
@@ -1698,6 +1699,7 @@ pub(crate) fn stand_down_now() {
 }
 
 /// The holder's Slack wait after a takeover, zero without a lease client.
+#[cfg(any(feature = "desktop", test))]
 fn takeover_wait() -> std::time::Duration {
     lease_gate().map_or(std::time::Duration::ZERO, |lease| lease.takeover_wait())
 }

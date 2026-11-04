@@ -166,6 +166,7 @@ pub fn map_history_error(error: HistoryError) -> IpcError {
     }
 }
 
+#[cfg(feature = "desktop")]
 fn history_store() -> Result<&'static Mutex<History>, IpcError> {
     static STORE: OnceLock<Option<Mutex<History>>> = OnceLock::new();
     let store_opt = STORE.get_or_init(|| {

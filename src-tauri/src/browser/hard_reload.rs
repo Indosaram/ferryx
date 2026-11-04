@@ -53,6 +53,7 @@ pub fn hard_reload<R: tauri::Runtime>(webview: &tauri::Webview<R>) -> Result<(),
     }
 }
 
+#[cfg(feature = "desktop")]
 fn unsupported_error() -> IpcError {
     IpcError::new(
         IpcErrorCode::Unsupported,

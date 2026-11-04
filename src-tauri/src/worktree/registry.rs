@@ -229,6 +229,7 @@ impl WorkspaceRegistry {
         }
     }
 
+    #[cfg(feature = "desktop")]
     pub(crate) fn resolve_deletion_worktree(
         &self,
         workspace_id: &str,

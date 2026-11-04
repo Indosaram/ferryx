@@ -19,15 +19,24 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 pub const TERMINAL_OUTPUT_EVENT: &str = "terminal_output";
 pub const TERMINAL_LIFECYCLE_EVENT: &str = "terminal_lifecycle";
 
+#[cfg(feature = "desktop")]
 const BATCH_FLUSH_INTERVAL: Duration = Duration::from_millis(10);
+#[cfg(feature = "desktop")]
 const BATCH_MAX_BYTES: usize = 32 * 1024;
 const CWD_CACHE_TTL: Duration = Duration::from_millis(500);
+#[cfg(feature = "desktop")]
 const TERMINAL_OUTPUT_FRAME_VERSION: u8 = 1;
+#[cfg(feature = "desktop")]
 const TERMINAL_OUTPUT_FRAME_VERSION_V2: u8 = 2;
+#[cfg(feature = "desktop")]
 const TERMINAL_OUTPUT_FRAME_FIXED_BYTES: usize = 20;
+#[cfg(feature = "desktop")]
 const TERMINAL_OUTPUT_FRAME_HAS_SEQUENCE: u8 = 1 << 0;
+#[cfg(feature = "desktop")]
 const TERMINAL_OUTPUT_FRAME_HAS_DAEMON_EPOCH: u8 = 1 << 1;
+#[cfg(feature = "desktop")]
 const TERMINAL_OUTPUT_FRAME_HAS_GAP: u8 = 1 << 2;
+#[cfg(feature = "desktop")]
 const TERMINAL_OUTPUT_FRAME_GAP_BYTES: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +86,7 @@ pub(crate) fn is_plausible_absolute_cwd(path: &Path) -> bool {
 
 /// [`is_plausible_absolute_cwd`] plus a filesystem check. Blocking: call it only from
 /// `run_blocking` contexts, never from the async request loop.
+#[cfg(feature = "desktop")]
 pub(crate) fn is_usable_terminal_cwd(path: &Path) -> bool {
     is_plausible_absolute_cwd(path) && path.is_dir()
 }
@@ -85,6 +95,7 @@ pub(crate) fn is_usable_terminal_cwd(path: &Path) -> bool {
 /// the frontend from stale state) can be a probe's captured error text rather than a path, and
 /// treating that as a cwd aborts the spawn after its pane already exists, which strands the pane on
 /// the "Shell exited" overlay. Returning `None` makes the caller fall back to the worktree root.
+#[cfg(feature = "desktop")]
 pub(crate) fn select_requested_cwd(requested: Option<PathBuf>) -> Option<PathBuf> {
     match requested {
         Some(cwd) if is_usable_terminal_cwd(&cwd) => Some(cwd),
@@ -100,6 +111,7 @@ pub(crate) fn select_requested_cwd(requested: Option<PathBuf>) -> Option<PathBuf
 }
 
 /// A daemon without the agent-launch capability gets a structured refusal, never the attempt.
+#[cfg(feature = "desktop")]
 fn require_agent_launch(supported: bool) -> Result<(), IpcError> {
     if supported {
         return Ok(());
@@ -117,6 +129,7 @@ fn require_agent_launch(supported: bool) -> Result<(), IpcError> {
 /// host user's stored shell preference reaches this process and can name a shell that is not
 /// installed. Pinning makes a QA run independent of that; a normal launch leaves this unset and
 /// the product default is unchanged.
+#[cfg(feature = "desktop")]
 fn qa_pinned_shell() -> Option<String> {
     std::env::var("FERRYX_QA_SHELL")
         .ok()
@@ -126,6 +139,7 @@ fn qa_pinned_shell() -> Option<String> {
 
 /// Resolves the cwd a spawn will use. A discarded requested cwd makes the pane spawn in the
 /// worktree root, while a requested cwd that exists but leaves the worktree still fails.
+#[cfg(feature = "desktop")]
 fn resolve_spawn_cwd(
     requested: Option<PathBuf>,
     worktree_root: PathBuf,
@@ -536,10 +550,13 @@ pub fn cmd_terminal_cell_metrics(scale_factor: f64) -> TerminalCellMetricsRespon
 }
 
 #[cfg(any(feature = "desktop", test))]
+#[cfg(any(feature = "desktop", test))]
 const DEFAULT_SPAWN_COLS: u16 = 80;
+#[cfg(any(feature = "desktop", test))]
 #[cfg(any(feature = "desktop", test))]
 const DEFAULT_SPAWN_ROWS: u16 = 24;
 
+#[cfg(any(feature = "desktop", test))]
 #[cfg(any(feature = "desktop", test))]
 fn spawn_dimension(value: Option<u16>, default: u16, max: u16) -> u16 {
     match value {
@@ -704,6 +721,7 @@ impl From<TerminalSignalRequest> for TerminalSignal {
     }
 }
 
+#[cfg(feature = "desktop")]
 fn encode_terminal_output_frame(
     session_id: &str,
     data: &[u8],
@@ -911,6 +929,7 @@ fn emit_terminal_exit<R: Runtime>(
     );
 }
 
+#[cfg(feature = "desktop")]
 pub(crate) fn effective_paired_repo_root(
     repo_root: &std::path::Path,
     target_cwd: Option<&std::path::Path>,
@@ -941,6 +960,7 @@ pub(crate) fn infer_worktree_slug(
     })
 }
 
+#[cfg(feature = "desktop")]
 fn paired_resume_startup(startup: Option<&TerminalStartup>) -> crate::remote::machine_protocol::Startup {
     match startup {
         Some(TerminalStartup::AgentResume { agent_type, provider_session }) => {
@@ -958,6 +978,7 @@ fn paired_resume_startup(startup: Option<&TerminalStartup>) -> crate::remote::ma
     }
 }
 
+#[cfg(feature = "desktop")]
 pub(crate) fn resolve_paired_spawn_target(
     remote_workspace_id: &str,
     effective_repo_root: &std::path::Path,
@@ -1018,6 +1039,7 @@ pub(crate) fn resolve_paired_spawn_target(
 /// Transport-level paired-op failures where the host may or may not have applied
 /// the request: the host journal dedups by request id, so resubmitting the same
 /// id is idempotent and a journal reconcile is safe to attempt.
+#[cfg(feature = "desktop")]
 pub(crate) fn is_retryable_paired_transport_error(code: &str) -> bool {
     matches!(
         code,
@@ -1028,6 +1050,7 @@ pub(crate) fn is_retryable_paired_transport_error(code: &str) -> bool {
 /// A create response that never arrived intact is not proof the request was
 /// rejected — the journal may still complete it. Such codes must flow into the
 /// bounded journal reconcile instead of failing the user action outright.
+#[cfg(feature = "desktop")]
 pub(crate) fn should_reconcile_create_error(ambiguous: bool, code: &str) -> bool {
     ambiguous
         || matches!(
@@ -1864,6 +1887,7 @@ fn upsert_pending_cleanups(record: CleanupRecord) {
     }
 }
 
+#[cfg(feature = "desktop")]
 fn split_stage_deadline(remaining_ms: u64, cap: u64) -> Result<tokio::time::Instant, IpcError> {
     let budget = crate::daemon::protocol::clip_stage_budget(remaining_ms, cap);
     if budget == 0 {
@@ -1875,6 +1899,7 @@ fn split_stage_deadline(remaining_ms: u64, cap: u64) -> Result<tokio::time::Inst
 /// The source pane's cwd is a hint, not a precondition: a source whose shell already exited
 /// (the daemon answers SESSION_NOT_FOUND) must not fail the split, it starts at the worktree
 /// root instead, as plain spawn does. Transport failures still fail the stage.
+#[cfg(feature = "desktop")]
 fn inherited_split_cwd(
     described: Result<crate::daemon::protocol::DaemonSessionDetails, IpcError>,
 ) -> Result<Option<PathBuf>, IpcError> {
@@ -1885,6 +1910,7 @@ fn inherited_split_cwd(
     }
 }
 
+#[cfg(feature = "desktop")]
 fn split_wire_epoch(operation: crate::daemon::protocol::SplitOperationResult)
     -> crate::daemon::protocol::SplitOperationResult<String>
 {
@@ -5097,6 +5123,7 @@ pub async fn cmd_terminal_spawn_batch<R: Runtime>(
     Ok(entries)
 }
 
+#[cfg(feature = "desktop")]
 fn hub_attach_retry_deadline() -> std::time::Duration {
     #[cfg(test)]
     {

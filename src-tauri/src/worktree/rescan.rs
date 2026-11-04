@@ -556,6 +556,7 @@ where
 /// every other workspace's sweep (and from withholding already-detected
 /// events). Generous relative to git subprocess cost; overflow is absorbed
 /// by `MissedTickBehavior::Delay`.
+#[cfg(feature = "desktop")]
 const WORKSPACE_SCAN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(feature = "desktop")]

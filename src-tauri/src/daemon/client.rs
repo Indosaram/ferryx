@@ -1614,6 +1614,7 @@ impl DaemonClient {
 
     /// A paste owns its connection slots until its final chunk completes. Key input
     /// must not wait for that chunk's reply on the ordinary per-session socket.
+    #[cfg(any(feature = "desktop", test))]
     pub(crate) fn paste_client(&self) -> Self {
         Self {
             local_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),

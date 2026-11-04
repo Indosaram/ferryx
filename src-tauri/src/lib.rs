@@ -356,6 +356,7 @@ fn cmd_shortcuts_set_native_table<R: tauri::Runtime>(
 /// physical key (keyCode), plus the typed character for Cmd+W and the 1..9 digits, which the
 /// legacy predicates also matched by character. A typed digit wins over the keyCode digit.
 #[cfg(target_os = "macos")]
+#[cfg(any(feature = "desktop", test))]
 fn macos_monitor_chords(
     flags: objc2_app_kit::NSEventModifierFlags,
     characters: Option<&str>,
@@ -679,6 +680,7 @@ impl NativeTerminalPasteLatch {
 /// Maps an AppKit chord to an app-chrome browser action through the single table in
 /// `browser::bridge::keys`, so the guest key source and the other platforms agree.
 #[cfg(target_os = "macos")]
+#[cfg(feature = "desktop")]
 fn macos_guest_chord_action(
     flags: objc2_app_kit::NSEventModifierFlags,
     key_code: u16,
@@ -700,6 +702,7 @@ fn macos_guest_chord_action(
 /// The browser whose guest WKWebView (registered by the platform bridge install) contains
 /// the event window's first responder. None when no guest has focus.
 #[cfg(target_os = "macos")]
+#[cfg(feature = "desktop")]
 fn macos_focused_browser_guest(
     manager: &browser::BrowserManager,
     event: &objc2_app_kit::NSEvent,
@@ -729,6 +732,7 @@ fn macos_focused_browser_guest(
 /// composing IME text. Probed dynamically through NSTextInputClient's hasMarkedText, so a
 /// responder that does not implement it counts as not composing.
 #[cfg(target_os = "macos")]
+#[cfg(feature = "desktop")]
 fn macos_first_responder_has_marked_text(event: &objc2_app_kit::NSEvent) -> bool {
     let Some(mtm) = objc2::MainThreadMarker::new() else {
         return false;
