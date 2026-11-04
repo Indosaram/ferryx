@@ -1,3 +1,5 @@
+#![cfg(feature = "desktop")]
+
 use ferryx_lib::ipc::project_remote::{register_remote_project, RegisterRemoteProjectRequest};
 use ferryx_lib::ipc::ssh::SshHostStore;
 use ferryx_lib::ssh::browse::{list_directories, ListDirectoriesRequest};
