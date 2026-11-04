@@ -3304,7 +3304,7 @@ function initWorkspaceState({
     source: "empty",
     initialWorktreeCount: initialWorktrees.length,
   });
-  return { state: createInitialState(initialWorktrees, workspaceId), recoveredFromHmr: false };
+  return { state: rehydrateWorkspace(createInitialState(initialWorktrees, workspaceId)), recoveredFromHmr: false };
 }
 
 function createInitialState(worktrees: Worktree[], workspaceId?: string): WorkspaceState {
@@ -3517,12 +3517,12 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       const nextLayout = nextWorktreeLayouts[action.path] ?? createLayoutState();
       delete nextWorktreeLayouts[action.path];
 
-      const selected = {
+      const selected = rehydrateWorkspace({
         ...state,
         activeWorktreePath: action.path,
         layout: nextLayout,
         worktreeLayouts: nextWorktreeLayouts,
-      };
+      });
       return nextLayout.activeTabId
         ? workspaceReducer(selected, { type: "ACTIVATE_TAB", tabId: nextLayout.activeTabId })
         : selected;
