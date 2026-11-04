@@ -42,23 +42,27 @@ async function channelChecks(check) {
   const connects = [];
   const delivered = [];
   const recorded = [];
+  const recordWaiters = [];
+  // Resolves on the channel's own record of `kind` (number `nth`): the signal that #attach
+  // finished (link set, pending re-sent), not merely that connect() was entered.
+  const recordedKind = (kind, nth = 1) => new Promise((resolveKind) => {
+    const waiter = () => { if (recorded.filter((entry) => entry.kind === kind).length >= nth) { resolveKind(); return true; } return false; };
+    if (!waiter()) recordWaiters.push(waiter);
+  });
   let refuse = 0;
-  let wake = null;
   const sleeps = [];
   const sleep = (ms) => { sleeps.push(ms); clock.ms += ms; return Promise.resolve(); };
   const channel = new AgentChannel({
-    id: 'agent-t', now: () => clock.ms, sleep, record: (entry) => recorded.push(entry), deliver: (json) => delivered.push(json),
+    id: 'agent-t', now: () => clock.ms, sleep, record: (entry) => { recorded.push(entry); for (const waiter of [...recordWaiters]) if (waiter()) recordWaiters.splice(recordWaiters.indexOf(waiter), 1); }, deliver: (json) => delivered.push(json),
     connect: async ({ after, attempt, onLine }) => {
       connects.push({ after, attempt });
       if (refuse > 0) { refuse -= 1; throw new Error('ssh: connect timed out'); }
       const link = fakeLink();
       link.onLine = onLine;
       links.push(link);
-      wake?.();
       return { link, attached: { serverAlive: true, after } };
     },
   });
-  const nextLink = (count) => new Promise((resolveLink) => { wake = () => { if (links.length >= count) resolveLink(links[count - 1]); }; wake(); });
   await channel.open();
   const first = links[0];
   first.onLine({ oseq: 1, event: 'agent-ready' });
@@ -68,7 +72,8 @@ async function channelChecks(check) {
   // Drop with request 2 unanswered; two refused reconnects, then the agent is reachable again.
   refuse = 2;
   first.drop({ code: 255, signal: null });
-  const second = await nextLink(2);
+  await recordedKind('reconnected');
+  const second = links[1];
   // The agent replays from oseq 2: the duplicate of oseq 2 is dropped, oseq 3 (a pane line
   // emitted while nothing was attached) and the reply to request 2 are delivered once.
   second.onLine({ oseq: 2, id: 1, ok: true, result: {} });
@@ -84,7 +89,7 @@ async function channelChecks(check) {
     ['backoff-grows', JSON.stringify(sleeps) === JSON.stringify([backoffDelay(0), backoffDelay(1), backoffDelay(2)])],
     ['answered-request-no-longer-pending', channel.pending.size === 0 && channel.state === 'up'],
   ].map(([label, ok]) => ({ label, ok }));
-  check('f1-agent-channel-resumes-after-drop', resumed.every((entry) => entry.ok), { resumed, connects, kinds, sleeps });
+  check('f1-agent-channel-resumes-after-drop', resumed.every((entry) => entry.ok), JSON.parse(JSON.stringify({ resumed, connects, kinds, sleeps, sent: second.sent })));
 
   // Budget: a target that never comes back is lost after the budget, never retried forever, and
   // the unanswered request is named. A lost channel refuses new requests.
