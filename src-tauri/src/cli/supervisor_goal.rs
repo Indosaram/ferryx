@@ -69,7 +69,12 @@ pub fn parse_setup_cli(args: &[String]) -> Result<SetupArgs, UsageError> {
     if let Some(extra) = rest.first() {
         return Err(UsageError(format!("unexpected argument {extra}\n{SETUP_USAGE}")));
     }
-    if !std::path::Path::new(&parsed.git_common_dir).is_absolute() {
+    let absolute = if parsed.remote {
+        remote_path_separators(&parsed.git_common_dir).is_some()
+    } else {
+        std::path::Path::new(&parsed.git_common_dir).is_absolute()
+    };
+    if !absolute {
         return Err(UsageError("--git-common-dir must be an absolute path".into()));
     }
     if parsed.remote && parsed.host == ferryx_hub::agent_control::LOCAL_HOST_ID {
@@ -189,8 +194,25 @@ fn rev_parse_config(git_dir: &Path, key: &str) -> Option<String> {
     (!text.is_empty()).then(|| text.to_owned())
 }
 
+/// The separators of `dir` when it is absolute on some host, judged by its spelling rather than
+/// by this machine: a paired host's path is POSIX (`/...`) or Windows (`C:\...` or `C:/...`)
+/// whatever this machine runs.
+fn remote_path_separators(dir: &str) -> Option<&'static [char]> {
+    const POSIX: &[char] = &['/'];
+    const WINDOWS: &[char] = &['/', '\\'];
+    let bytes = dir.as_bytes();
+    if dir.starts_with('/') {
+        Some(POSIX)
+    } else if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'/' | b'\\') {
+        Some(WINDOWS)
+    } else {
+        None
+    }
+}
+
 /// The git common dir `dir` names on paired host `host`, normalized lexically: it cannot be
-/// resolved from this machine. Absolute, trailing separators stripped, and refused with
+/// resolved from this machine. Absolute on that host (POSIX or Windows spelling, see
+/// [`remote_path_separators`]), trailing separators stripped, and refused with
 /// NOT_A_GIT_DIR when any component is empty, `.` or `..`, or the last one is not `.git` (the
 /// common dir itself, not a checkout root). `local` is resolved by [`canonical_git_common_dir`].
 pub fn remote_git_common_dir(host: &str, dir: &str) -> Result<String, (&'static str, String)> {
@@ -198,10 +220,9 @@ pub fn remote_git_common_dir(host: &str, dir: &str) -> Result<String, (&'static 
         return Err(("INVALID_REQUEST", "a remote mapping names a paired host, not local".into()));
     }
     let refuse = |why: &str| (NOT_A_GIT_DIR, format!("{dir} is not an absolute <repo>/.git path on host {host}: {why}"));
-    if !Path::new(dir).is_absolute() {
+    let Some(separators) = remote_path_separators(dir) else {
         return Err(refuse("it is not absolute"));
-    }
-    let separators: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
+    };
     let trimmed = dir.trim_end_matches(separators);
     let components: Vec<&str> = trimmed.split(separators).collect();
     // The first component is the root (empty on POSIX, the drive on Windows).
@@ -721,9 +742,10 @@ mod tests {
 
     #[test]
     fn the_setup_cli_needs_every_flag_once_and_an_absolute_dir() {
+        let dir = if cfg!(windows) { r"C:\work\qa\.git" } else { "/work/qa/.git" };
         let full = [
             "ferryx-cli", "supervisor", "setup", "--owner", "qa-owner", "--project", "qa-supervisor",
-            "--repo-identity", "qa:qa-supervisor", "--host", "local", "--git-common-dir", "/work/qa/.git", "--json",
+            "--repo-identity", "qa:qa-supervisor", "--host", "local", "--git-common-dir", dir, "--json",
         ];
         assert_eq!(
             parse_setup_cli(&argv(&full)).unwrap(),
@@ -732,7 +754,7 @@ mod tests {
                 project: "qa-supervisor".into(),
                 repo_identity: "qa:qa-supervisor".into(),
                 host: "local".into(),
-                git_common_dir: "/work/qa/.git".into(),
+                git_common_dir: dir.into(),
                 remote: false,
             }
         );
@@ -749,7 +771,7 @@ mod tests {
         let mut extra = argv(&full);
         extra.push("stray".into());
         assert!(parse_setup_cli(&extra).is_err(), "an unknown argument is refused");
-        let relative: Vec<String> = full.iter().map(|w| if *w == "/work/qa/.git" { "work/.git".to_owned() } else { (*w).to_owned() }).collect();
+        let relative: Vec<String> = full.iter().map(|w| if *w == dir { "work/.git".to_owned() } else { (*w).to_owned() }).collect();
         assert!(parse_setup_cli(&relative).is_err(), "a relative dir is refused");
         assert_eq!(setup_exit_code(ferryx_hub::supervisor::SETUP_CONFLICT), EXIT_REFUSED);
         assert_eq!(setup_exit_code("INVALID_REQUEST"), EXIT_INVALID);
@@ -851,6 +873,18 @@ mod tests {
         for refused in ["r/.git", "/r/../r/.git", "/r/./.git", "/r//.git", "/r", "/r/", "/r/.git/objects", "/.git.bak", "/"] {
             assert_eq!(remote_git_common_dir(paired, refused).unwrap_err().0, NOT_A_GIT_DIR, "{refused}");
         }
+        // A paired host's path is judged by its own spelling, whatever this machine runs.
+        assert_eq!(remote_git_common_dir(paired, r"C:\r\.git\").unwrap(), r"C:\r\.git");
+        assert_eq!(remote_git_common_dir(paired, "C:/r/.git").unwrap(), "C:/r/.git");
+        for refused in [r"C:r\.git", r"C:\r\..\.git", r"\r\.git", r"C:\r"] {
+            assert_eq!(remote_git_common_dir(paired, refused).unwrap_err().0, NOT_A_GIT_DIR, "{refused}");
+        }
+        let mut windows_remote = with(paired, true);
+        let at = windows_remote.iter().position(|w| w == "/r/.git").unwrap();
+        windows_remote[at] = r"D:\r\.git".into();
+        assert!(parse_setup_cli(&windows_remote).is_ok(), "a Windows paired host's path parses on any machine");
+        windows_remote[at] = "r/.git".into();
+        assert!(parse_setup_cli(&windows_remote).is_err(), "a relative remote dir is refused");
 
         let pool = ferryx_hub::storage::memory().await.unwrap();
         let first = remote_git_common_dir(paired, "/r/.git").unwrap();
