@@ -889,19 +889,26 @@ mod spawn_owner_tests {
         use super::super::layout::{Content, Intent, Store};
         let (root, manager, terminals, legacy) = committing_fixture();
         let predecessor = Arc::new(Mutex::new(Store::new(root.path().join("old"))));
-        let expected = predecessor.lock().apply("main", 0, Intent::AddTabWithSession {
+        predecessor.lock().apply("main", 0, Intent::AddTabWithSession {
             tab_id: "one".into(), label: "one".into(), activate: true,
             content: Content::Terminal { backend_session_id: "pty-stable".into() },
-        }).unwrap().layout;
+        }).unwrap();
+        let foreign_root = tempfile::tempdir().unwrap();
+        let foreign = Store::new(foreign_root.path().into()).get("main").unwrap().layout;
+        let expected = predecessor.lock().offer_snapshot("main", foreign).unwrap().layout;
         manager.set_layouts(predecessor);
         manager.commit_handover_v5(&terminals).unwrap();
         let successor = HandoverManager::new(legacy.with_file_name("successor.sock"));
         let new_root = root.path().join("new");
+        std::fs::create_dir_all(&new_root).unwrap();
+        // Different storage roots still represent the same host in this fixture.
+        std::fs::copy(root.path().join("old/identity.json"), new_root.join("identity.json")).unwrap();
         let adopted = Arc::new(Mutex::new(Store::new(new_root.clone())));
         successor.set_layouts(adopted.clone());
         successor.adopt_recorded_layouts(&legacy).unwrap();
         assert_eq!(adopted.lock().get("main").unwrap().layout, expected);
         assert_eq!(Store::new(new_root).get("main").unwrap().layout, expected);
+        assert!(manager.is_draining(), "predecessor remains alive after layout handover");
     }
 
     #[test]
