@@ -435,6 +435,7 @@ async fn read(
         Arc::new(tokio::sync::Notify::new()),
     );
     let cancelled = cancel.0.clone();
+    let layouts = state.layouts.read().clone();
     let task = tokio::spawn(async move {
         let check = || {
             if *admission.revoked.borrow() {
@@ -453,7 +454,21 @@ async fn read(
                 if let Some(workspace) = &workspace {
                     rows.sessions.retain(|row| &row.workspace_id == workspace);
                 }
-                json(200, with_session_names(rows))
+                let live = rows.sessions.iter().map(|row| row.target.session_id.clone()).collect();
+                let detached = match layouts {
+                    Some(layouts) => Some(crate::ipc::run_blocking(move || layouts.lock().detached(&live).map_err(crate::ipc::IpcError::internal)).await.map_err(|_| "MACHINE_SERVICE_UNAVAILABLE".to_string())?),
+                    None => None,
+                };
+                let mut value = with_session_names(rows);
+                if let (Some(detached), Some(rows)) = (detached, value["sessions"].as_array_mut()) {
+                    for row in rows {
+                        if let Some(session) = row["target"]["sessionId"].as_str() {
+                            let is_detached = detached.contains(session);
+                            row["detached"] = is_detached.into();
+                        }
+                    }
+                }
+                json(200, value)
             }
         };
         check()?;
