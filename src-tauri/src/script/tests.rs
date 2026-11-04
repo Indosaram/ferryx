@@ -27,6 +27,21 @@ fn memory_limit_is_enforced() {
 }
 
 #[test]
+fn callback_watchdog_interrupts_a_timer() {
+    let root = tempfile::tempdir().unwrap();
+    let registry = Shared::load(root.path()).unwrap();
+    let clock = Rc::new(Cell::new(0));
+    let timer_clock = clock.clone();
+    let vm = Vm::new("loop".into(), Rc::new(move || timer_clock.get()), |_, _| Ok(())).unwrap();
+    vm.load("ferryx.after(1, function() while true do end end)").unwrap();
+    clock.set(1);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let start = Instant::now();
+    assert!(vm.fire(&registry, runtime.handle()).unwrap_err().contains("SCRIPT_INTERRUPTED"));
+    assert!(start.elapsed() < Duration::from_millis(200));
+}
+
+#[test]
 fn sixty_fifth_timer_is_refused_and_failed_initialization_clears_timers() {
     let vm = vm();
     vm.load("for i = 1, 64 do ferryx.after(100, function() end) end").unwrap();
