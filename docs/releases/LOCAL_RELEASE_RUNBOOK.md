@@ -71,9 +71,41 @@ channel". Stable is the default.
 
 Endpoints are fixed in `src-tauri/src/ipc/updater.rs` (`STABLE_UPDATE_ENDPOINT`,
 `BETA_UPDATE_ENDPOINT`); the UI sends only the channel name. To ship a beta, assemble the release
-as usual, copy its signed `latest.json` to `latest-beta.json` in `$RUN/publish` before publishing,
+as usual, copy its signed `latest.json` to `latest-beta.json` and `latest.json.minisig` to
+`latest-beta.json.minisig` in `$RUN/publish` before publishing,
 and keep the stable `latest.json` pointing at the last stable build. Both manifests are signed with
 the same updater key, so a beta never bypasses signature verification.
+
+### Minimum-version floor and halt switch
+
+`assemble` signs the whole `latest.json` into `latest.json.minisig` with the updater key (the same
+key as `SHA256SUMS.minisig`). Before every check and download the app fetches both files, verifies
+the signature against `plugins.updater.pubkey`, and refuses with a structured code the UI shows:
+
+| Manifest | Client result |
+| --- | --- |
+| `"halt": true` (optional `"haltReason"`) | `UPDATE_HALTED`, nothing is downloaded |
+| `version` below `"minimumVersion"` | `UPDATE_BELOW_FLOOR` |
+| `latest.json.minisig` missing, malformed or not by the updater key | `UPDATE_MANIFEST_UNVERIFIED` |
+| `version` not above the installed version | no update (the plugin's default comparator; never a downgrade) |
+
+Store (MSIX) and deb/rpm installs never fetch the manifest; their updates stay with the Store or
+the package manager.
+
+Set the fields at assembly time:
+
+```bash
+bun scripts/release-local.mjs assemble --run "$RUN" --minimum-version 2026.1101.1
+bun scripts/release-local.mjs assemble --run "$RUN" --halt --halt-reason "regression in 2026.1104.1"
+```
+
+To halt updates for a release that is already out, edit the published `latest.json` (add
+`"halt": true` and a `"haltReason"`), re-sign it with
+`bun scripts/release-provenance.mjs sign-manifest --file latest.json` (signing key from
+`TAURI_SIGNING_PRIVATE_KEY[_PATH]`), and upload both files with
+`gh release upload "$TAG" latest.json latest.json.minisig --clobber`. Lift the halt the same way.
+For a beta, do the same for `latest-beta.json` and `latest-beta.json.minisig`. The endpoint
+choice is recorded in [`update-endpoint-decision.md`](update-endpoint-decision.md).
 
 ## One-time host configuration
 

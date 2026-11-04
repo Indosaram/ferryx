@@ -27,9 +27,66 @@ pub const PLUGIN_AGENTS: [(&str, &str, &str); 1] = [("opencode", "opencode", "pl
 /// The opt-out setting file, kept beside \`remote-config.json\` in the per-user remote data dir.
 pub const AGENT_INTEGRATION_FILE_NAME: &str = "agent-integration.json";
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PersistedAgentIntegration {
     enabled: bool,
+    /// Agents whose hooks the owner removed with `ferryx-cli integrations hooks uninstall`: the
+    /// boot install leaves them out until `hooks install` turns them back on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    disabled_hooks: Vec<String>,
+    /// The same for the agent skill (`integrations skill uninstall`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    disabled_skills: Vec<String>,
+}
+
+/// Which agents the owner turned off one by one, read from the setting file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentOptOuts {
+    pub hooks: Vec<String>,
+    pub skills: Vec<String>,
+}
+
+/// Whether an opt-out list is about an agent's hooks or its skill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptOutKind {
+    Hooks,
+    Skill,
+}
+
+fn read_persisted(path: &Path) -> Option<PersistedAgentIntegration> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+/// The per-agent opt-outs stored at `path`; an absent or unreadable file has none.
+/// Blocking: performs disk I/O.
+pub fn read_opt_outs(path: Option<&Path>) -> AgentOptOuts {
+    path.and_then(read_persisted).map_or_else(AgentOptOuts::default, |setting| AgentOptOuts {
+        hooks: setting.disabled_hooks,
+        skills: setting.disabled_skills,
+    })
+}
+
+/// Adds `agent` to (`disabled`) or drops it from one opt-out list at `path`, keeping the rest of
+/// the file. A file that cannot be parsed reads as enabled, matching [`AgentIntegration::load`].
+/// Blocking: performs disk I/O.
+pub fn set_agent_opt_out(path: &Path, kind: OptOutKind, agent: &str, disabled: bool) -> std::io::Result<()> {
+    let mut setting =
+        read_persisted(path).unwrap_or(PersistedAgentIntegration { enabled: true, ..Default::default() });
+    let list = match kind {
+        OptOutKind::Hooks => &mut setting.disabled_hooks,
+        OptOutKind::Skill => &mut setting.disabled_skills,
+    };
+    let listed = list.iter().any(|name| name == agent);
+    if listed == disabled {
+        return Ok(());
+    }
+    if disabled {
+        list.push(agent.to_owned());
+    } else {
+        list.retain(|name| name != agent);
+    }
+    crate::remote::auth::write_private_json(path, &setting)
 }
 
 /// Whether Ferryx installs its agent-state extension and exposes the agent-state endpoint to new
@@ -79,7 +136,10 @@ impl AgentIntegration {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(path) = self.path.as_deref() {
-            crate::remote::auth::write_private_json(path, &PersistedAgentIntegration { enabled })?;
+            // The per-agent opt-outs the CLI wrote stay as they are.
+            let mut setting = read_persisted(path).unwrap_or_default();
+            setting.enabled = enabled;
+            crate::remote::auth::write_private_json(path, &setting)?;
         }
         self.enabled.store(enabled, Ordering::Release);
         Ok(())
@@ -302,7 +362,66 @@ pub fn install_agent_state_extension_if_enabled(setting: &AgentIntegration) -> b
     // `agent-hook` reporter. Without a resolvable path only the hook install is skipped.
     let exe = std::env::current_exe().ok();
     let hooks = crate::daemon::agent_hook_install::hook_targets();
-    install_targets_if_enabled(setting, extension_dirs(), plugin_dirs(), &hooks, exe.as_deref())
+    let skills = crate::daemon::agent_hook_install::skill_targets();
+    install_all_if_enabled(setting, extension_dirs(), plugin_dirs(), &hooks, &skills, exe.as_deref())
+}
+
+/// The boot install with explicit targets: everything behind the global switch, minus the hooks
+/// and skills of agents the owner turned off one by one (read from the setting's own file).
+pub(crate) fn install_all_if_enabled(
+    setting: &AgentIntegration,
+    dirs: Vec<(&'static str, PathBuf)>,
+    plugins: Vec<(&'static str, PathBuf, PathBuf)>,
+    hooks: &[crate::daemon::agent_hook_install::HookFileTarget],
+    skills: &[crate::daemon::agent_hook_install::SkillTarget],
+    exe: Option<&Path>,
+) -> bool {
+    let opt_outs = read_opt_outs(setting.path());
+    let installed = install_targets_if_enabled(setting, dirs, plugins, hooks, exe, &opt_outs);
+    if installed {
+        install_skill_only_targets(skills, &opt_outs);
+    }
+    installed
+}
+
+/// Every agent-state extension or plugin file Ferryx may install: the agent, the directory whose
+/// existence gates the install, and the file itself.
+pub(crate) fn extension_files_with_env(
+    get_env: impl Fn(&str) -> Option<OsString>,
+) -> Vec<(&'static str, PathBuf, PathBuf)> {
+    let mut files: Vec<(&'static str, PathBuf, PathBuf)> = extension_dirs_with_env(&get_env)
+        .into_iter()
+        .map(|(agent, dir)| {
+            let file = dir.join(EXTENSION_FILE_NAME);
+            (agent, dir, file)
+        })
+        .collect();
+    files.extend(
+        plugin_dirs_with_env(&get_env)
+            .into_iter()
+            .map(|(agent, gate, dir)| (agent, gate, dir.join(PLUGIN_FILE_NAME))),
+    );
+    files
+}
+
+/// The skill of agents that run no hooks (omp), which the hook targets do not carry.
+fn install_skill_only_targets(
+    skills: &[crate::daemon::agent_hook_install::SkillTarget],
+    opt_outs: &AgentOptOuts,
+) {
+    let skill_only = crate::daemon::agent_hook_install::SKILL_ONLY_AGENTS;
+    for skill in skills {
+        if !skill_only.iter().any(|(agent, _)| *agent == skill.agent)
+            || opt_outs.skills.iter().any(|name| name == skill.agent)
+        {
+            continue;
+        }
+        match skill.install() {
+            Ok(true) => tracing::info!(agent = skill.agent, "Installed the Ferryx agent skill"),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(agent = skill.agent, %error, "Failed to install the Ferryx agent skill"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -310,17 +429,18 @@ fn install_into_dirs_if_enabled(
     setting: &AgentIntegration,
     dirs: Vec<(&'static str, PathBuf)>,
 ) -> bool {
-    install_targets_if_enabled(setting, dirs, Vec::new(), &[], None)
+    install_targets_if_enabled(setting, dirs, Vec::new(), &[], None, &AgentOptOuts::default())
 }
 
 /// Installs every kind of target behind the one setting: extension files, plugin files and merged
-/// hook entries.
+/// hook entries, leaving out the hooks and skills of agents the owner turned off one by one.
 fn install_targets_if_enabled(
     setting: &AgentIntegration,
     dirs: Vec<(&'static str, PathBuf)>,
     plugins: Vec<(&'static str, PathBuf, PathBuf)>,
     hooks: &[crate::daemon::agent_hook_install::HookFileTarget],
     exe: Option<&Path>,
+    opt_outs: &AgentOptOuts,
 ) -> bool {
     if !setting.enabled() {
         tracing::info!("Agent state integration is turned off; skipping the extension install");
@@ -329,7 +449,12 @@ fn install_targets_if_enabled(
     install_into_dirs(dirs);
     install_plugin_dirs(plugins);
     if let Some(exe) = exe {
-        crate::daemon::agent_hook_install::install_hook_targets(hooks, exe);
+        crate::daemon::agent_hook_install::install_hook_targets_where(
+            hooks,
+            exe,
+            |agent| !opt_outs.hooks.iter().any(|name| name == agent),
+            |agent| !opt_outs.skills.iter().any(|name| name == agent),
+        );
     }
     true
 }
@@ -382,6 +507,18 @@ pub fn remove_agent_state_extension() -> RemovalReport {
             })),
     );
     remove_hooks_into_report(&crate::daemon::agent_hook_install::hook_targets(), &mut report);
+    // omp's skill is the one a hook target does not carry.
+    for skill in crate::daemon::agent_hook_install::skill_targets() {
+        if !crate::daemon::agent_hook_install::SKILL_ONLY_AGENTS.iter().any(|(agent, _)| *agent == skill.agent) {
+            continue;
+        }
+        let display = skill.file.to_string_lossy().into_owned();
+        match skill.remove() {
+            Ok(false) => {}
+            Ok(true) => report.removed.push(display),
+            Err(error) => report.failed.push(RemovalFailure { path: display, error: error.to_string() }),
+        }
+    }
     report
 }
 
@@ -418,6 +555,11 @@ fn is_ferryx_payload(bytes: &[u8]) -> bool {
 
 fn is_ferryx_plugin(bytes: &[u8]) -> bool {
     PLUGIN_SOURCE.as_bytes() == bytes
+}
+
+/// Whether `bytes` are an extension or plugin payload Ferryx writes, for any agent.
+pub(crate) fn is_ferryx_extension_bytes(bytes: &[u8]) -> bool {
+    is_ferryx_payload(bytes) || is_ferryx_plugin(bytes)
 }
 
 #[cfg(test)]
@@ -866,13 +1008,21 @@ mod p09_tests {
             Vec::new(),
             plugins.clone(),
             &hooks,
-            Some(&exe)
+            Some(&exe),
+            &AgentOptOuts::default(),
         ));
         assert!(hooks.iter().all(|target| !target.file.exists()));
         assert!(plugins.iter().all(|(_, _, dir)| !dir.join(PLUGIN_FILE_NAME).exists()));
 
         let on = AgentIntegration::in_memory(true);
-        assert!(install_targets_if_enabled(&on, Vec::new(), plugins.clone(), &hooks, Some(&exe)));
+        assert!(install_targets_if_enabled(
+            &on,
+            Vec::new(),
+            plugins.clone(),
+            &hooks,
+            Some(&exe),
+            &AgentOptOuts::default(),
+        ));
         // Every agent's install, in whatever shape, has to end up naming the reporter command for
         // each of that agent's events.
         for target in &hooks {
@@ -1087,6 +1237,47 @@ mod p09_tests {
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved, serde_json::json!({ "enabled": false }));
         assert!(!AgentIntegration::load(Some(path)).enabled(), "the opt-out survives a restart");
+    }
+
+    /// `integrations hooks uninstall <agent>` records an opt-out; the next boot install then
+    /// leaves that agent's hooks (and, for `skill uninstall`, its skill) out, and keeps the rest.
+    #[test]
+    fn per_agent_opt_outs_survive_the_boot_install() {
+        let root = temp_root("opt-out");
+        let hooks = hook_targets_in(root.path());
+        let exe = root.path().join("bin").join("ferryx-cli");
+        let path = root.path().join("data").join(AGENT_INTEGRATION_FILE_NAME);
+        set_agent_opt_out(&path, OptOutKind::Hooks, "claude", true).unwrap();
+        set_agent_opt_out(&path, OptOutKind::Hooks, "claude", true).unwrap();
+        set_agent_opt_out(&path, OptOutKind::Skill, "codex", true).unwrap();
+        let opt_outs = read_opt_outs(Some(&path));
+        assert_eq!(opt_outs.hooks, vec!["claude".to_string()]);
+        assert_eq!(opt_outs.skills, vec!["codex".to_string()]);
+
+        // The global switch keeps the per-agent lists, and the lists keep the switch.
+        let setting = AgentIntegration::load(Some(path.clone()));
+        assert!(setting.enabled());
+        setting.set(true).unwrap();
+        assert_eq!(read_opt_outs(Some(&path)), opt_outs);
+
+        assert!(install_targets_if_enabled(&setting, Vec::new(), Vec::new(), &hooks, Some(&exe), &opt_outs));
+        for target in &hooks {
+            let written = installed_text(target);
+            let has_hooks = written.contains(&crate::daemon::agent_hook_install::hook_command(
+                &exe,
+                target.agent,
+                target.events[0],
+            ));
+            assert_eq!(has_hooks, target.agent != "claude", "{}: {written}", target.agent);
+            if let Some(skill) = &target.skill {
+                assert_eq!(skill.exists(), target.agent != "codex", "{}", target.agent);
+            }
+        }
+
+        set_agent_opt_out(&path, OptOutKind::Hooks, "claude", false).unwrap();
+        assert!(read_opt_outs(Some(&path)).hooks.is_empty());
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved, serde_json::json!({ "enabled": true, "disabledSkills": ["codex"] }));
     }
 
     #[test]

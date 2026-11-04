@@ -25,6 +25,7 @@ pub const CLI_GROUPS: &[&str] = &[
     "direct-trust",
     "remote",
     "grants",
+    "integrations",
     "api",
 ];
 
@@ -107,6 +108,8 @@ const GENERATION: Flag = required!("--generation");
 const REF: Flag = required!("--ref");
 const PIN: Arg = arg!("pin", "string");
 const ACCESS: Flag = value!("--access");
+/// An agent id from `integrations status`, or `--all` for every agent with that kind of target.
+const AGENT_OR_ALL: Arg = arg!("agent", "agent-id|--all");
 
 const DAEMON_JSON_EXIT_CODES: &[(&str, &str)] = &[
     ("0", "ok"),
@@ -451,15 +454,33 @@ pub const CATALOG: &[Command] = &[
         exit_codes: DAEMON_JSON_EXIT_CODES,
     },
     Command {
+        name: "integrations",
+        summary: "Show and manage the Ferryx hooks, skill and extension installed into each coding agent",
+        output: "json (status without --json prints text)",
+        subcommands: &[
+            sub!("status", &[], &[JSON]),
+            sub!("skill install", &[AGENT_OR_ALL], &[]),
+            sub!("skill status", &[arg!("agent", "agent-id")], &[]),
+            sub!("skill uninstall", &[AGENT_OR_ALL], &[]),
+            sub!("hooks install", &[AGENT_OR_ALL], &[]),
+            sub!("hooks uninstall", &[AGENT_OR_ALL], &[]),
+        ],
+        exit_codes: &[
+            ("0", "ok"),
+            ("1", "an install or removal failed for at least one agent"),
+            ("2", "usage error or unknown agent (UNKNOWN_AGENT on stderr)"),
+        ],
+    },
+    Command {
         name: "api",
         summary: "Describe the ferryx-cli command groups as JSON",
         output: "json",
-        subcommands: &[sub!("list", &[], &[]), sub!("describe", &[arg!("name", "command-group")], &[])],
+        subcommands: &[sub!("list", &[], &[JSON]), sub!("describe", &[arg!("name", "command-group")], &[JSON])],
         exit_codes: &[("0", "ok"), ("2", "unknown command group or usage error")],
     },
 ];
 
-const API_USAGE: &str = "usage: ferryx-cli api list | ferryx-cli api describe <command>";
+const API_USAGE: &str = "usage: ferryx-cli api list [--json] | ferryx-cli api describe <command> [--json]";
 
 /// `{"commands":[{"name","summary"}]}`.
 pub fn list_json() -> Value {
@@ -508,8 +529,10 @@ pub fn describe_json(name: &str) -> Result<Value, String> {
 }
 
 /// Entry for `ferryx-cli api ...`; returns the process exit code.
+///
+/// `--json` is accepted for symmetry with the other groups; JSON is the only output format.
 pub fn run_api_cli(args: &[String]) -> i32 {
-    let words: Vec<&str> = args.iter().skip(2).map(String::as_str).collect();
+    let words: Vec<&str> = args.iter().skip(2).map(String::as_str).filter(|word| *word != "--json").collect();
     match words.as_slice() {
         ["list"] => {
             println!("{}", list_json());
@@ -585,10 +608,34 @@ mod tests {
     }
 
     #[test]
+    fn describe_integrations_lists_every_verb() {
+        let entry = describe_json("integrations").unwrap();
+        let names: Vec<&str> = entry["subcommands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|sub| sub["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            ["status", "skill install", "skill status", "skill uninstall", "hooks install", "hooks uninstall"]
+        );
+        assert!(entry["exitCodes"]["2"].as_str().unwrap().contains("UNKNOWN_AGENT"));
+    }
+
+    #[test]
     fn describe_unknown_is_an_error_with_exit_2() {
         assert!(describe_json("nope").is_err());
         assert_eq!(run_api_cli(&argv(&["ferryx-cli", "api", "describe", "nope"])), 2);
         assert_eq!(run_api_cli(&argv(&["ferryx-cli", "api"])), 2);
         assert_eq!(run_api_cli(&argv(&["ferryx-cli", "api", "list"])), 0);
+    }
+
+    #[test]
+    fn api_accepts_json_flag() {
+        assert_eq!(run_api_cli(&argv(&["ferryx-cli", "api", "list", "--json"])), 0);
+        assert_eq!(run_api_cli(&argv(&["ferryx-cli", "api", "describe", "integrations", "--json"])), 0);
+        assert_eq!(run_api_cli(&argv(&["ferryx-cli", "api", "describe", "nope", "--json"])), 2);
+        assert_eq!(run_api_cli(&argv(&["ferryx-cli", "api", "--json"])), 2);
     }
 }

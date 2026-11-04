@@ -29,6 +29,44 @@ const EXPECTED_RECEIPT_FILENAMES = Object.freeze(
   new Set(["build-receipt-macbook.json", "build-receipt-omaki.json", "build-receipt-maho-win.json"]),
 );
 
+/** Options that take no value. */
+const BOOLEAN_FLAGS = new Set(["halt"]);
+
+const SEMVER = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+/**
+ * Validates the optional update policy the client enforces from the signed manifest:
+ * `minimumVersion` (semver floor the offered version must reach), `halt` (pause every update)
+ * and `haltReason` (shown to the user, only with `halt`).
+ *
+ * @param {{ minimumVersion?: string | null, halt?: boolean, haltReason?: string | null } | null | undefined} policy
+ * @returns {{ minimumVersion?: string, halt?: true, haltReason?: string }}
+ */
+export function normalizeUpdatePolicy(policy) {
+  if (policy === null || policy === undefined) return {};
+  if (typeof policy !== "object") throw new Error("updatePolicy must be an object");
+  const out = {};
+  const { minimumVersion = null, halt = false, haltReason = null } = policy;
+  if (minimumVersion !== null) {
+    if (typeof minimumVersion !== "string" || !SEMVER.test(minimumVersion)) {
+      throw new Error(`minimumVersion must be a semver version, got ${JSON.stringify(minimumVersion)}`);
+    }
+    out.minimumVersion = minimumVersion;
+  }
+  if (typeof halt !== "boolean") throw new Error("halt must be a boolean");
+  if (haltReason !== null) {
+    if (!halt) throw new Error("haltReason requires halt");
+    if (typeof haltReason !== "string" || haltReason.trim() === "") {
+      throw new Error("haltReason must be a non-empty string");
+    }
+  }
+  if (halt) {
+    out.halt = true;
+    if (haltReason !== null) out.haltReason = haltReason;
+  }
+  return out;
+}
+
 /**
  * Parses CLI arguments.
  */
@@ -37,6 +75,10 @@ function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     if (!token.startsWith("--")) continue;
+    if (BOOLEAN_FLAGS.has(token.slice(2))) {
+      args.set(token.slice(2), true);
+      continue;
+    }
     const next = argv[index + 1];
     if (next === undefined || next.startsWith("--")) {
       throw new Error(`option ${token} requires a value`);
@@ -80,6 +122,7 @@ function loadDefaultPublicKey() {
  * @param {string} options.artifactsDir
  * @param {string} options.outDir
  * @param {string} [options.publicKey]
+ * @param {{ minimumVersion?: string | null, halt?: boolean, haltReason?: string | null }} [options.updatePolicy]
  * @returns {{ outDir: string, plan: object, receipts: object[], manifest: object, files: string[] }}
  */
 export function assembleRelease(options) {
@@ -88,6 +131,7 @@ export function assembleRelease(options) {
   }
 
   const { planPath, receiptsDir, artifactsDir, outDir, publicKey, spawnProcess = spawnSync } = options;
+  const updatePolicy = normalizeUpdatePolicy(options.updatePolicy);
 
   if (!planPath || typeof planPath !== "string") {
     throw new Error("Missing required option: planPath");
@@ -310,7 +354,11 @@ export function assembleRelease(options) {
     notes: `Ferryx ${plan.appVersion}`,
     pub_date: new Date(pubDateEpoch).toISOString(),
     platforms,
+    ...updatePolicy,
   };
+  if (updatePolicy.minimumVersion && !SEMVER.test(plan.appVersion)) {
+    throw new Error(`appVersion ${plan.appVersion} is not semver; it cannot be compared to minimumVersion`);
+  }
 
   // 6. Staging and atomic output publication
   const parentDir = dirname(resolvedOutDir);
@@ -441,10 +489,15 @@ function main() {
   const artifactsDir = args.get("artifacts-dir");
   const outDir = args.get("out-dir") || args.get("out");
   const publicKey = args.get("pubkey");
+  const updatePolicy = {
+    minimumVersion: args.get("minimum-version") ?? null,
+    halt: args.get("halt") === true,
+    haltReason: args.get("halt-reason") ?? null,
+  };
 
   if (!planPath || !receiptsDir || !artifactsDir || !outDir) {
     process.stderr.write(
-      "usage: build-latest-json.mjs --plan <path> --receipts-dir <path> --artifacts-dir <path> --out-dir <path> [--pubkey <key>]\n",
+      "usage: build-latest-json.mjs --plan <path> --receipts-dir <path> --artifacts-dir <path> --out-dir <path> [--pubkey <key>] [--minimum-version <semver>] [--halt [--halt-reason <text>]]\n",
     );
     return 2;
   }
@@ -456,6 +509,7 @@ function main() {
       artifactsDir,
       outDir,
       publicKey,
+      updatePolicy,
     });
     process.stdout.write(
       `Successfully assembled release ${res.plan.tag} (${res.files.length} publish files staged in ${res.outDir})\n`,

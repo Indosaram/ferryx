@@ -218,6 +218,31 @@ describe("updater status machine", () => {
     expect(updater.getUpdateStatus()).toEqual({ state: "error", error: "endpoint returned 500" });
   });
 
+  it.each([
+    [
+      { code: "UPDATE_HALTED", message: "paused", details: { haltReason: "bad build" } },
+      "UPDATE_HALTED",
+      "Updates are paused by the release operator (UPDATE_HALTED): bad build",
+    ],
+    [
+      { code: "UPDATE_BELOW_FLOOR", message: "below", details: { offered: "1.0.0", minimumVersion: "2.0.0" } },
+      "UPDATE_BELOW_FLOOR",
+      "The offered version is below the minimum supported version (UPDATE_BELOW_FLOOR)",
+    ],
+    [
+      { code: "UPDATE_MANIFEST_UNVERIFIED", message: "bad sig", details: null },
+      "UPDATE_MANIFEST_UNVERIFIED",
+      "The update manifest signature could not be verified (UPDATE_MANIFEST_UNVERIFIED)",
+    ],
+  ])("shows the signed-manifest refusal %#", async (backendError, refusal, error) => {
+    check.mockRejectedValue(backendError);
+    const updater = await freshModule();
+
+    await updater.checkForUpdate();
+
+    expect(updater.getUpdateStatus()).toEqual({ state: "error", error, refusal });
+  });
+
   it("reports monotonic download progress and stages installation without automatic relaunch", async () => {
     check.mockResolvedValue(
       updateHandle([

@@ -15,12 +15,14 @@ import {
   CHECKSUMS_SIGNATURE_NAME,
   CYCLONEDX_NPM_PACKAGE,
   generateSboms,
+  MANIFEST_SIGNATURE_NAME,
   minisignPublicKeyLine,
   PROVENANCE_ASSET_NAMES,
   PROVENANCE_NAME,
   RUST_SBOM_NAME,
   UI_SBOM_NAME,
   verifyChecksums,
+  verifyManifest,
 } from "./release-provenance.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -128,6 +130,13 @@ test("fixture asset dir: SHA256SUMS passes shasum -c, minisig verifies with the 
     const verify = spawnSync(MINISIGN, ["-Vm", CHECKSUMS_NAME, "-P", key.pubLine], { cwd: dir, encoding: "utf8" });
     assert.equal(verify.status, 0, verify.stdout + verify.stderr);
     assert.match(verify.stdout, new RegExp(`ferryx ${p.tag} commit ${COMMIT}`));
+
+    // The whole update manifest is signed with the same key and covered by SHA256SUMS.
+    assert.ok(listed.includes(MANIFEST_SIGNATURE_NAME));
+    const manifestVerify = spawnSync(MINISIGN, ["-Vm", "latest.json", "-P", key.pubLine], { cwd: dir, encoding: "utf8" });
+    assert.equal(manifestVerify.status, 0, manifestVerify.stdout + manifestVerify.stderr);
+    writeFileSync(join(dir, "latest.json"), '{"halt":true}\n');
+    assert.throws(() => verifyManifest({ manifestPath: join(dir, "latest.json"), publicKey: key.publicKey }), /latest\.json\.minisig verification failed/);
 
     const provenance = JSON.parse(readFileSync(join(dir, PROVENANCE_NAME), "utf8"));
     assert.equal(provenance.commitSha, COMMIT);
