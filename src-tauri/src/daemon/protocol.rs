@@ -923,6 +923,9 @@ pub enum DaemonRequest {
         session: PersistedWorkspaceSession,
     },
     LoadSession,
+    LayoutGet { window: String },
+    #[serde(rename_all = "camelCase")]
+    LayoutApply { window: String, base_revision: u64, intent: crate::daemon::layout::Intent },
     ClearSession,
     RemoteGetStatus,
     GetCapabilities,
@@ -1681,6 +1684,9 @@ pub enum DaemonResponse {
         remote_generation: Option<u64>,
     },
     SaveSessionOk,
+    LayoutOk { view: crate::daemon::layout::View },
+    #[serde(rename_all = "camelCase")]
+    LayoutConflict { code: String, revision: u64, layout: crate::daemon::layout::Layout },
     #[serde(rename_all = "camelCase")]
     LoadSessionOk {
         session: Option<PersistedWorkspaceSession>,
