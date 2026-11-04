@@ -10,8 +10,8 @@ fn direction(value: &Value) -> Direction {
     if text(value, "direction") == "vertical" { Direction::Vertical } else { Direction::Horizontal }
 }
 
-pub fn migrate(root: &Path, window: &str) -> Result<(Layout, BTreeMap<String, u64>), String> {
-    let source = crate::session::session_path_for_window(&root.join("session_state.json"), window)
+pub fn migrate(primary: &Path, window: &str) -> Result<(Layout, BTreeMap<String, u64>), String> {
+    let source = crate::session::session_path_for_window(primary, window)
         .map_err(|error| error.to_string())?;
     let backup = source.with_file_name(format!("{}.pre-daemon-layout.json", source.file_stem().ok_or("Session file name missing")?.to_string_lossy()));
     let bytes = match std::fs::read(&backup) {
