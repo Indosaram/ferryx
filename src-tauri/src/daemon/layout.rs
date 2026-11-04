@@ -94,6 +94,7 @@ pub type Registry = std::sync::Arc<parking_lot::Mutex<Store>>;
 
 pub struct Store {
     root: PathBuf,
+    session_path: PathBuf,
     pub layouts: Snapshot,
 }
 
@@ -401,7 +402,8 @@ pub(super) fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, 
 }
 
 impl Store {
-    pub fn new(root: PathBuf) -> Self { Self { root, layouts: BTreeMap::new() } }
+    pub fn new(root: PathBuf) -> Self { Self::with_session_path(root.clone(), root.join("session_state.json")) }
+    pub fn with_session_path(root: PathBuf, session_path: PathBuf) -> Self { Self { root, session_path, layouts: BTreeMap::new() } }
     fn path(&self, window: &str) -> Result<PathBuf, String> {
         crate::session::session_path_for_window(&self.root.join("session_state.json"), window).map_err(|error| error.to_string())?;
         Ok(self.root.join("layout").join(format!("{window}.json")))
@@ -422,7 +424,7 @@ impl Store {
             let layout = match saved {
                 Some(layout) => layout,
                 None => {
-                    let (layout, mapping) = super::layout_migration::migrate(&self.root, window)?;
+                    let (layout, mapping) = super::layout_migration::migrate(&self.session_path, window)?;
                     migration_map = mapping; persist(&path, &layout)?; layout
                 },
             };
