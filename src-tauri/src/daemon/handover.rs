@@ -1344,7 +1344,7 @@ impl HandoverManager {
             return Err("Layout adoption requires a committed predecessor".into());
         }
         if let (Some(bytes), Some(registry)) = (transaction.layouts, self.layouts.read().clone()) {
-            let snapshot = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+            let snapshot = super::layout::decode(&bytes).map_err(|error| error.to_string())?;
             registry.lock().adopt(snapshot)?;
         }
         Ok(())
