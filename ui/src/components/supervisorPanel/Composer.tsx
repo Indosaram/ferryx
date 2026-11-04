@@ -167,7 +167,7 @@ export function Composer({ sessions, touch, onSend, seed }: ComposerProps) {
           aria-autocomplete="list"
           className={cn(
             'min-w-0 flex-1 resize-none bg-transparent py-1.5 leading-snug text-foreground outline-none placeholder:text-muted-foreground',
-            touch ? 'text-base' : 'text-[13px]',
+            touch ? 'min-h-11 text-base' : 'text-[13px]',
           )}
         />
         <button

@@ -971,6 +971,7 @@ describe("App notification coordinator wiring", () => {
         workspaceId: "default", workspaceLabel: "Project", sessionId: "sess-1", tabId: "tab-1",
         worktreePath: "/repo/main", worktreeLabel: "main", agentLabel: "Codex", terminalTitle: "Task", state: "done",
       }];
+      panel.load.mockResolvedValue({ ...panelSnapshotFixture, decisions: [] });
       const view = render(<App />);
       await act(async () => { await Promise.all(panel.load.mock.results.map((result) => result.value)); });
       await nativeFocusTrackingReady;
