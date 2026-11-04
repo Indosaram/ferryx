@@ -272,7 +272,9 @@ const sessionRowState = (html, title) => {
 const logLineChunk = (html, summary) => html.split('data-testid="action-log-line"').slice(1).find((chunk) => chunk.split('</li>')[0].includes(summary))?.split('</li>')[0] ?? null;
 
 // --- teardown by recorded pid -----------------------------------------------------------------
-const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; } };
+// A zombie (exited, not yet reaped by its new parent) is not alive.
+const zombie = (pid) => { try { return readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /s, '').startsWith('Z'); } catch { return false; } };
+const alive = (pid) => { try { process.kill(pid, 0); return !zombie(pid); } catch (error) { return error?.code === 'EPERM'; } };
 const argvOf = (pid) => { try { return readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').join(' '); } catch { return spawnSync('ps', ['-o', 'args=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim() || null; } };
 async function teardown(daemon) {
   try { daemon.socketWs?.close(); } catch { /* closed */ }
@@ -354,13 +356,21 @@ try {
   const killRow = killRender?.view.sessions.find((row) => String(row.sessionRef).endsWith(`:${killable.sessionId}`)) ?? null;
   const latency = failedFrame ? failedFrame.atMs - killAt : null;
   clause('failed-within-5s', latency !== null && latency <= FAILED_WITHIN_MS && fleetFailed?.health?.type === 'failed' && killRow?.glyph === 'failed'
-    && sessionRowState(killRender.html, killRow.title) === 'failed' && converse.body?.code !== undefined, {
+    && sessionRowState(killRender.html, killRow.title) === 'failed' && converse.body?.error?.code === 'MHC_NOT_RUNNING', {
     killAtMs: killAt, failedFrameAtMs: failedFrame?.atMs ?? null, latencyMs: latency, limitMs: FAILED_WITHIN_MS, failedFrame: failedFrame?.frame ?? null,
     fleetEntry: fleetFailed, panelRow: killRow, renderedRowState: killRender ? sessionRowState(killRender.html, killRow?.title ?? '\u0000') : null,
     noSupervisorText: { converseStatus: converse.status, converseBody: converse.body, note: 'no engine is installed: no supervisor text exists to consult' },
   });
 
   // Clause 3: the recovery scheduler's own claim, with no delivery event, renders Unverified.
+  // Once the incident is open the fixture stops drawing new errors, as Claude Code does at its
+  // prompt after an API error, so the scheduler's resume is judged on the resume's own output.
+  const opened = await hubDaemon.frame('recovery incident opened', (e) => e.frame?.type === 'panel.action' && e.frame.action?.live === true
+    && JSON.stringify(e.frame.action?.evidence ?? []).includes(upstream.sessionId), 3 * 60_000);
+  const upstreamArgv = argvOf(upstream.pid);
+  if (!upstreamArgv?.includes(hubDaemon.entry) || !upstreamArgv.includes('upstream')) throw fail('FIXTURE_FAILED', `pid ${upstream.pid} is not the upstream fixture: ${upstreamArgv}`);
+  process.kill(upstream.pid, 'SIGUSR2');
+  jsonl('kill.jsonl', { pid: upstream.pid, argv: upstreamArgv, signal: 'SIGUSR2', note: 'stop drawing errors; incident opened', incidentFrameAtMs: opened.atMs });
   const resumedFrame = await hubDaemon.frame('recovery claim closed', (e) => e.frame?.type === 'panel.action' && e.frame.action?.live === false
     && JSON.stringify(e.frame.action?.evidence ?? []).includes(upstream.sessionId), 6 * 60_000).catch(() => null);
   const upstreamInputs = paneRecords(hubDaemon.logDir).filter((r) => r.sessionId === upstream.sessionId && r.kind === 'input');
@@ -373,7 +383,7 @@ try {
   clause('unverified-claim', resumedFrame !== null && logEntry !== null && noDelivery && chunk !== null && chunk.includes('Unverified')
     && recoveryRender.view.log.all.find((line) => line.id === logEntry.id)?.unverified === true, {
     claimFrame: resumedFrame, logEntry, deliveryKinds: [...DELIVERY_KINDS], evidenceHasDeliveryEvent: logEntry ? !noDelivery : null,
-    renderedLogLine: chunk, resumeTypedByScheduler: upstreamInputs, allLogRows,
+    incidentOpenedFrame: opened, renderedLogLine: chunk, resumeTypedByScheduler: upstreamInputs, allLogRows,
   });
   // The control in the same render: a verified line (if any) carries no chip.
   const verified = (panelAfterRecovery.body?.log ?? []).filter((entry) => (entry.evidence ?? []).some((ref) => DELIVERY_KINDS.has(ref.kind)));

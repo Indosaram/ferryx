@@ -7,8 +7,9 @@
 // It never decides PASS.
 // Roles:
 //   killable:  reports working and draws one line, then waits; the driver SIGKILLs it mid-turn.
-//   upstream:  draws a distinct Claude-shaped 502 line every 5 s and reports idle, until a typed
-//              line (the supervisor's resume) arrives; then it draws completion output.
+//   upstream:  draws a distinct Claude-shaped 502 line every 5 s and reports idle, until the driver
+//              sends SIGUSR2 (the recovery incident is open), then sits at its prompt as Claude
+//              Code does after an API error; a typed line (the supervisor's resume) completes it.
 //   stoppable: reports working in raw mode; on Escape or Ctrl-C (the provider interrupt) it
 //              reports idle and stays alive at its prompt.
 import { appendFileSync, mkdirSync } from 'node:fs';
@@ -62,6 +63,7 @@ if (role === 'killable') {
   await report('idle');
   fail();
   const timer = setInterval(fail, 5_000);
+  process.on('SIGUSR2', () => { clearInterval(timer); record({ kind: 'errors-stopped', attempts: attempt }); });
   let buffer = '';
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', async (chunk) => {
