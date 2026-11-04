@@ -585,6 +585,17 @@ impl ScreenMirror {
         Some(VisibleRows { cols, rows, alt_screen, lines })
     }
 
+    /// Last retained plain-text rows, including scrollback, for the bounded owner API.
+    pub fn script_text(&self, lines: usize) -> Option<String> {
+        let (_, rows) = self.terminal.dimensions().ok()?;
+        let end = self.terminal.scrollback_rows().ok()? + usize::from(rows);
+        let mut text = Vec::new();
+        for row in end.saturating_sub(lines.min(10_000))..end {
+            text.push(self.terminal.screen_row_text(row).ok()?);
+        }
+        Some(text.join("\n"))
+    }
+
     /// The mirror's screen as a seed, or `None` when the parser cannot serialize it.
     ///
     /// The formatter reads every scrollback page, which restores compressed ones, so taking a

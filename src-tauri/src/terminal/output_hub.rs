@@ -1318,6 +1318,13 @@ impl TerminalOutputHub {
         Some(rows.into_screen())
     }
 
+    pub fn script_text(&self, session_id: &str, lines: usize) -> Option<String> {
+        let session = self.sessions.read().get(session_id).cloned()?;
+        let hub = session.read();
+        let screen = hub.screen.as_ref()?.lock();
+        screen.script_text(lines)
+    }
+
     pub fn subscribe(&self, session_id: &str) -> Option<(Vec<u8>, broadcast::Receiver<Vec<u8>>)> {
         let session_hub = {
             let sessions = self.sessions.read();
@@ -1453,6 +1460,9 @@ impl TerminalOutputHub {
     /// its first attach) keeps its output for that first attach, which then removes it; returns
     /// `false` in that case so the caller can bound the wait with `remove_ended_session`.
     pub fn end_session(&self, session_id: &str) -> bool {
+        if let Err(error) = crate::script::control::event("session.exit".into(), serde_json::json!({"sessionId":session_id})) {
+            tracing::debug!(%error, "Script exit subscriber unavailable");
+        }
         let Some(session_hub) = self.sessions.read().get(session_id).cloned() else {
             return true;
         };

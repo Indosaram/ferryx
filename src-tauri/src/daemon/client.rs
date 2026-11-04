@@ -743,6 +743,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::RemoteGetStatus => "remoteGetStatus",
         DaemonRequest::GetCapabilities => "getCapabilities",
         DaemonRequest::PluginsList => "pluginsList",
+        DaemonRequest::Script { .. } => "script",
         DaemonRequest::PluginSetEnabled { .. } => "pluginSetEnabled",
         DaemonRequest::PluginView { .. } => "pluginView",
         DaemonRequest::PluginRender { .. } => "pluginRender",

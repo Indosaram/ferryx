@@ -9,6 +9,7 @@ export type SectionId =
   | "shortcuts"
   | "agents"
   | "paneAccess"
+  | "scripting"
   | "browser"
   | "notifications"
   | "remote"

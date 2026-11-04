@@ -119,7 +119,7 @@ iroh-direct = ["dep:iroh"]
 
 [dependencies]
 plist = "1.10"
-mlua = { version = "0.12", features = ["luau"] }
+mlua = { version = "0.12", features = ["luau", "serialize"] }
 cpu-time = "1"
 ferryx-hub = { path = "../crates/ferryx-hub" }
 ferryx-rd-proto = { path = "../crates/ferryx-rd/ferryx-rd-proto", optional = true }

@@ -944,6 +944,7 @@ pub enum DaemonRequest {
     RemoteGetStatus,
     GetCapabilities,
     PluginsList,
+    Script { action: crate::script::control::Action },
     PluginSetEnabled { name: String, enabled: bool },
     PluginView { plugin: String, view: String },
     /// Accepted only over the plugin's own stdio; never a public owner request.
@@ -1712,6 +1713,7 @@ pub enum DaemonResponse {
     LayoutImported { window: String, view: crate::daemon::layout::View },
     PanesOk { detached: crate::daemon::layout::DetachedRegistry },
     PluginsOk { plugins: Vec<crate::daemon::plugins::registry::Status> },
+    ScriptOk { value: serde_json::Value },
     PluginViewOk { document: String },
     #[serde(rename_all = "camelCase")]
     LayoutConflict { code: String, revision: u64, layout: crate::daemon::layout::Layout },

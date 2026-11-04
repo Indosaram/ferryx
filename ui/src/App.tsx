@@ -2,6 +2,7 @@ import { Inbox, PanelLeft } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { STARTUP_TIMEOUT_MS } from "./lib/startupTimeout";
+import { useScripting } from "./lib/scripting";
 import { withTimeout } from "./lib/withTimeout";
 import { layoutSync, rehydrateWorkspace } from "./lib/layoutSync";
 
@@ -678,6 +679,7 @@ export function deriveFocusedTerminal(
     ? (activeLeafId && tabLayout?.sessionIdsByLeafId?.[activeLeafId]) || focusedTab.sessionId
     : null;
   const session = localSessionId ? state.sessions[localSessionId] : undefined;
+  useScripting(session?.backendSessionId ?? null);
 
   const sessionWorktreePath = session?.worktreePath ?? session?.cwd;
   const foundWorktree = sessionWorktreePath

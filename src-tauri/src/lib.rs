@@ -1315,6 +1315,18 @@ fn start_remote_event_bridge<R: tauri::Runtime>(
                 Ok(mut events) => {
                     let _ = app.emit("desktop_local_projects_resync", ());
                     while let Some(event) = events.recv().await {
+                        if event.event == "ScriptNotification" {
+                            let request = notification::DispatchNotificationRequest {
+                                source: notification::NotificationSource::TerminalOsc,
+                                terminal_title: event.payload["title"].as_str().map(str::to_owned),
+                                agent_label: event.payload["body"].as_str().map(str::to_owned),
+                                ..Default::default()
+                            };
+                            if let Err(error) = ipc::notifications::cmd_notification_dispatch(app.clone(), request).await {
+                                tracing::warn!(%error, "Script notification failed");
+                            }
+                            continue;
+                        }
                         if event.event == "TerminalOscEffect" {
                             match serde_json::from_value::<native_terminal::osc_effects::OscEffect>(event.payload["kind"].clone()) {
                                 Ok(native_terminal::osc_effects::OscEffect::Notify { title, body }) => {
@@ -2028,6 +2040,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::layout::cmd_panes,
         ipc::layout::cmd_layout_apply,
         ipc::layout::cmd_plugins,
+        ipc::layout::cmd_script,
         ipc::layout::cmd_plugin_view,
         ipc::supervisor::cmd_supervisor_goal,
         ipc::supervisor::cmd_supervisor_request,

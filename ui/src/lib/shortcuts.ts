@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { dispatchScriptKey } from "./scripting";
 import { classifyNavigatorPlatform, getRuntimeProcessPlatform } from "./platform";
 import { switchDebug } from "./switchDebug";
 import { shortcutChord, shortcutContext, traceShortcutAction } from "./shortcutDiagnostics";
@@ -679,6 +680,7 @@ export function useShortcuts(
         if (chord) switchDebug(`shortcut.hook.${stage}`, { registration, isMac, ...chord, ...details });
       };
       trace("receipt");
+      if (event.defaultPrevented || dispatchScriptKey(event, true)) return;
       // The Settings shortcut recorder captures raw chords; dispatching app actions while the
       // user records (e.g. Mod+, closing Settings, Mod+K opening the palette) would hijack it.
       if (event.target instanceof Element && event.target.closest("[data-shortcut-recorder]")) {
@@ -723,6 +725,7 @@ export function useShortcuts(
         return;
       }
       trace("unhandled");
+      dispatchScriptKey(event, false);
     };
 
     window.addEventListener("keydown", handleKeyDown, true);

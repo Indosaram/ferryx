@@ -27,6 +27,7 @@ const SKILL_URL =
   "https://github.com/Indosaram/ferryx/blob/main/src-tauri/resources/agent-skills/ferryx/SKILL.md";
 
 export const CLI_LINKS = [
+  ["Owner Luau scripting", "https://github.com/Indosaram/ferryx/blob/main/docs/scripting.md", "luauApiV1 functions, key bindings, sandbox, settings and handover behavior"],
   ["User guide", `${SITE}/docs/guide/`, "installing Ferryx, workspaces, panes, remote access and agents"],
   ["Technical architecture", `${SITE}/docs/architecture/`, "the daemon, the desktop app and how ferryx-cli reaches them"],
 ];
