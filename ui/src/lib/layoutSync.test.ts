@@ -79,4 +79,3 @@ describe("daemon layout revisions", () => {
     expect(io.apply).not.toHaveBeenCalled();
   });
 });
-
