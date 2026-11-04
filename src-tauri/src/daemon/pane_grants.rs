@@ -259,9 +259,10 @@ impl PaneGrants {
         grant.validate()?;
         let mut grants = self.grants.write();
         let mut next = grants.clone();
+        let at_capacity = next.len() >= MAX_GRANTS;
         match next.iter_mut().find(|known| known.from == grant.from && known.to == grant.to) {
             Some(known) => known.ops.extend(grant.ops),
-            None if next.len() >= MAX_GRANTS => return Err(format!("at most {MAX_GRANTS} pane grants are kept")),
+            None if at_capacity => return Err(format!("at most {MAX_GRANTS} pane grants are kept")),
             None => next.push(grant),
         }
         self.save(&next)?;
