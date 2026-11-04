@@ -386,6 +386,14 @@ impl Layout {
 
 fn ratio_value(value: f64) -> f64 { ratio(value) }
 
+pub(super) fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, serde_json::Error> {
+    let mut decoder = serde_json::Deserializer::from_slice(bytes);
+    decoder.disable_recursion_limit();
+    let value = T::deserialize(&mut decoder)?;
+    decoder.end()?;
+    Ok(value)
+}
+
 impl Store {
     pub fn new(root: PathBuf) -> Self { Self { root, layouts: BTreeMap::new() } }
     fn path(&self, window: &str) -> Result<PathBuf, String> {
@@ -398,7 +406,7 @@ impl Store {
         if !self.layouts.contains_key(window) {
             if self.layouts.len() >= 32 { return Err("Window limit exceeded".into()); }
             let saved = match std::fs::read(&path) {
-                Ok(bytes) => match serde_json::from_slice::<Layout>(&bytes) {
+                Ok(bytes) => match decode::<Layout>(&bytes) {
                     Ok(layout) => Some(layout),
                     Err(error) => { tracing::warn!(%error, %window, "Corrupt daemon layout; recovering saved session"); None },
                 },
@@ -549,6 +557,7 @@ mod tests {
                 store.apply(&window, revision, Intent::SplitPane { tab_id: "one".into(), target_node_id: revision, dir: Direction::Horizontal, first: false, content: Content::Terminal { backend_session_id: format!("pty-{index}-{revision}") } }).unwrap();
             }
             assert!(std::fs::metadata(root.path().join("layout").join(format!("{window}.json"))).unwrap().len() < 1024 * 1024);
+            assert_eq!(Store::new(root.path().into()).get(&window).unwrap().revision, 256);
         }
         assert!(store.get("ws-overflow").is_err());
     }
