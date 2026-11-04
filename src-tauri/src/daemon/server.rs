@@ -4020,7 +4020,7 @@ impl DaemonServer {
                 .unwrap_or_else(daemon_ssh_store_path),
             session_metadata: Arc::new(RwLock::new(HashMap::new())),
             provider_session_claims: Arc::new(Mutex::new(HashMap::new())),
-            desktop_geometries: Arc::new(Mutex::new(HashMap::new())),
+            size_ownerships: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
             test_shell_command: parking_lot::Mutex::new(None),
         });
@@ -14099,7 +14099,7 @@ mod instance_lock_deadline_tests {
         // 5. restore without a record is a no-op.
         server
             .session_service
-            .desktop_geometries
+            .size_ownerships
             .lock()
             .remove(&session_id);
         assert_eq!(server.session_service.desktop_geometry(&session_id), None);
