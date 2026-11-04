@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 pub mod agent_hook;
 pub mod api_catalog;
+pub mod file_cp;
 pub mod billing;
 pub mod direct_trust;
 pub mod supervisor_engine;
