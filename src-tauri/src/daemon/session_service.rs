@@ -1500,11 +1500,16 @@ impl DaemonSessionService {
             .details(id)
             .map(|d| d.generation)
             .unwrap_or(0);
-        self.terminal_service
-            .resize_operation(id, generation, cols, rows)
-            .map_err(|e| e.to_string())?
-            .await
-            .map_err(|e| e.to_string())
+        let pending = {
+            let mut states = self.desktop_geometries.lock();
+            let state = states.entry(id.into()).or_insert_with(|| super::size_ownership::SizeOwnership::new((cols, rows)));
+            let changed = state.owner != super::size_ownership::DESKTOP;
+            let pending = self.terminal_service.resize_operation(id, generation, cols, rows).map_err(|e| e.to_string())?;
+            state.desktop_resize((cols, rows));
+            if changed { self.publish_size_owner(id, state); }
+            pending
+        };
+        pending.await.map_err(|e| e.to_string())
     }
 
     pub(super) async fn persist_remote_sessions_at(&self, path: PathBuf) -> Result<(), String> {
