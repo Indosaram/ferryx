@@ -399,6 +399,11 @@ pub struct RecoveryAuthorityEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DaemonSessionDetails {
+    /// Foreground argv0 basename only; never the full command line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_owner: Option<String>,
     pub session_id: String,
@@ -491,6 +496,8 @@ impl DaemonSessionDetails {
         Self {
             session_id,
             size_owner: None,
+            foreground_command: None,
+            agent: None,
             workspace_id,
             worktree,
             cwd,
@@ -1812,6 +1819,8 @@ pub enum DaemonStreamMessage<'a> {
     #[serde(rename_all = "camelCase")]
     AgentState {
         session_id: Cow<'a, str>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        foreground_command: Option<Cow<'a, str>>,
         state: Cow<'a, str>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<Cow<'a, str>>,
