@@ -167,8 +167,7 @@ export function saveOnboardingState(
 ): void {
   if (!storage) return;
   try {
-    const saved = { ...state, updatedAt: state.updatedAt ?? Math.floor(Date.now() / 1000) };
-    storage.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(saved));
+    storage.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(state));
     if (storage === browserStorage()) {
       window.dispatchEvent(new Event("ferryx:onboarding-changed"));
     }
