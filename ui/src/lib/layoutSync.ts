@@ -6,6 +6,7 @@ import type { WorkspaceState } from "../state/workspaceStore";
 import type { LayoutState, PaneContent, TabGroupLayoutNode, WorkspaceTab } from "./types";
 import { createBrowserPaneContent } from "./types";
 import type { WorkspaceAction } from "../state/workspaceStore";
+import { currentWindowLabel } from "./windowIdentity";
 
 type Direction = "horizontal" | "vertical";
 export type DaemonContent =
@@ -68,6 +69,7 @@ export class LayoutSync {
   private view: LayoutView | null = null;
   private pending: Promise<void> = Promise.resolve();
   private generation = 0;
+  private queued = 0;
   constructor(private readonly io: LayoutTransport = transport) {}
   get enabled(): boolean { return this.view !== null; }
   get revision(): number | null { return this.view?.revision ?? null; }
@@ -84,8 +86,9 @@ export class LayoutSync {
   }
   /** Serialize writes. A conflict cancels queued stale gestures instead of replaying
    * them against a different tree (in particular, never replay a close). */
-  send(intent: () => LayoutIntent | null, reconciled: () => void): Promise<void> {
+  send(intent: () => LayoutIntent | null, reconciled: (publish: boolean) => void): Promise<void> {
     const generation = this.generation;
+    this.queued++;
     const run = this.pending.then(async () => {
       if (!this.view || generation !== this.generation) return;
       const wire = intent();
@@ -94,8 +97,8 @@ export class LayoutSync {
       if (reply.type === "unsupported") throw new Error("Daemon layout capability disappeared");
       if (reply.type === "conflict") this.generation++;
       this.accept(reply);
-      reconciled();
-    });
+      reconciled(reply.type === "conflict" || this.queued === 1);
+    }).finally(() => { this.queued--; });
     // Keep the queue usable, but return the error to the caller for reporting.
     this.pending = run.catch(() => {});
     return run;
@@ -112,7 +115,9 @@ export class LayoutSync {
 
 export const layoutSync = new LayoutSync();
 export function onLayoutChanged(refresh: () => void): Promise<() => void> {
-  return listen<{ window: string; revision: number }>("LayoutChanged", () => refresh());
+  return listen<{ window: string; revision: number }>("LayoutChanged", ({ payload }) => {
+    if (payload.window === currentWindowLabel()) refresh();
+  });
 }
 
 export function layoutScope(state: WorkspaceState): string {
@@ -252,7 +257,7 @@ export function intentForAction(sync: LayoutSync, action: WorkspaceAction, befor
 export function ownsDaemonRoot(state: WorkspaceState, view = layoutSync.current()): boolean {
   if (!view) return false;
   const parked = view.layout.parkedLayouts ?? {};
-  return !Object.hasOwn(parked, layoutScope(state));
+  return !Object.prototype.hasOwnProperty.call(parked, layoutScope(state));
 }
 
 export function rehydrateWorkspace(state: WorkspaceState, view = layoutSync.current()): WorkspaceState {
