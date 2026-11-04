@@ -17,6 +17,7 @@ import {
   type BrowserEnginePaths,
 } from "../../lib/browserExtensions";
 import { getHostPlatform } from "../../lib/platform";
+import { setChromiumEngineAvailable } from "../../lib/browserSettings";
 import { isStructuredIpcError } from "../../lib/tauri";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -123,6 +124,9 @@ export function BrowserEngineGroup() {
   }, []);
 
   const installedState = status?.state === "installed";
+  useEffect(() => {
+    if (status) setChromiumEngineAvailable(installedState);
+  }, [status, installedState]);
   useEffect(() => {
     if (!installedState) {
       setPaths(null);

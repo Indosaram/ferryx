@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { loadBrowserSettings, resolveSupportedBrowserProfileId } from "./browserSettings";
+import { loadBrowserSettings, resolveSupportedBrowserProfileId, setChromiumEngineAvailable } from "./browserSettings";
 import type {
   BrowserActOutcome,
   BrowserAutomationRequest,
@@ -469,6 +469,16 @@ export type BrowserEngineStatus =
 
 export async function getBrowserEngineStatus(): Promise<BrowserEngineStatus> {
   return invoke<BrowserEngineStatus>("cmd_browser_engine_status");
+}
+
+/** Feeds the installed-engine flag that gates named profiles on macOS; errors leave it unchanged. */
+export async function syncChromiumEngineAvailability(): Promise<void> {
+  try {
+    const status = await getBrowserEngineStatus();
+    setChromiumEngineAvailable(status?.state === "installed");
+  } catch {
+    // Status unavailable: keep the current flag (false until an engine is seen).
+  }
 }
 
 export async function installBrowserEngine(): Promise<BrowserEngineStatus> {

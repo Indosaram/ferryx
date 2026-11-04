@@ -498,6 +498,7 @@ export type BrowserSessionSummary = {
   title?: string | null;
   visible: boolean;
   engine?: BrowserEngine;
+  zoomFactor?: number;
 };
 
 export type BrowserAutomationElement = {

@@ -35,9 +35,9 @@ import { useApplyAppearanceSettings } from "./lib/appearanceSettings";
 import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots, isLocalDagProject, remoteProjectsWatchKey } from "./lib/dagWatchRoots";
 import { loadBrowserSettings, newBrowserTabUrl } from "./lib/browserSettings";
-import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, onInboundUrls, openExternalUrl, SIGN_IN_HANDOFF_EVENT, takeInboundUrls, trackSignInHandoff, type SignInHandoffDetail, popupOpenerLink, reportBrowserAdoption, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
+import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, navigateBrowser, syncChromiumEngineAvailability, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, onInboundUrls, openExternalUrl, SIGN_IN_HANDOFF_EVENT, takeInboundUrls, trackSignInHandoff, type SignInHandoffDetail, popupOpenerLink, reportBrowserAdoption, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
 import { printBrowser, stepBrowserZoom, useBrowserDownloadPreferencesSync } from "./lib/browserSystem";
-import { OPEN_BROWSER_URL_EVENT, OPEN_SETTINGS_EVENT, type OpenBrowserUrlDetail, type OpenSettingsDetail } from "./lib/browserExtensions";
+import { BROWSER_ENGINE_CHANGED_EVENT, OPEN_BROWSER_URL_EVENT, OPEN_SETTINGS_EVENT, type OpenBrowserUrlDetail, type OpenSettingsDetail } from "./lib/browserExtensions";
 import { listen } from "@tauri-apps/api/event";
 import { CLI_OPEN_FILE_EVENT, parseCliOpenFilePayload } from "./lib/cliOpenFile";
 import { registerBuiltInBrowserLinkOpener, registerWorktreePathOpener } from "./lib/linkRouting";
@@ -3126,6 +3126,13 @@ function WorkspaceApp({
     [reportRuntimeError],
   );
   useBrowserDownloadPreferencesSync(reportRuntimeError);
+  // Named browser profiles on macOS follow the installed Chromium engine.
+  useEffect(() => {
+    const sync = () => void syncChromiumEngineAvailability();
+    sync();
+    window.addEventListener(BROWSER_ENGINE_CHANGED_EVENT, sync);
+    return () => window.removeEventListener(BROWSER_ENGINE_CHANGED_EVENT, sync);
+  }, []);
 
   const handleClosePane = useCallback(
     (tabId: string, leafId: string) => {

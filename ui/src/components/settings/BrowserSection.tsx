@@ -528,7 +528,7 @@ export function BrowserSection() {
         description={`Default uses the normal browser store. Private is ephemeral. ${
           namedProfilesSupported
             ? "Named profiles use separate persistent data directories."
-            : "macOS WebKit does not expose persistent named data stores, so only Default and Private are available."
+            : "macOS WebKit does not expose persistent named data stores, so only Default and Private are available. Install the Chromium engine to use named profiles."
         }`}
         action={
           namedProfilesSupported ? (

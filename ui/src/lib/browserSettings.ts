@@ -97,9 +97,21 @@ export function isBuiltInBrowserProfileId(profileId: string): boolean {
   return BUILT_IN_BROWSER_PROFILE_IDS.has(profileId);
 }
 
+// macOS WebKit has no persistent named data stores; named profiles there need the Chromium engine.
+let chromiumEngineAvailable = false;
+
+/** Records whether the Chromium engine is installed; re-renders settings consumers on change. */
+export function setChromiumEngineAvailable(available: boolean): void {
+  if (chromiumEngineAvailable === available) return;
+  chromiumEngineAvailable = available;
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent<BrowserSettingsState>(BROWSER_SETTINGS_EVENT, { detail: loadBrowserSettings() }));
+  }
+}
+
 export function browserNamedProfilesSupported(): boolean {
   if (typeof navigator === "undefined") return true;
-  return classifyNavigatorPlatform(navigator) !== "macos";
+  return classifyNavigatorPlatform(navigator) !== "macos" || chromiumEngineAvailable;
 }
 
 export function supportedBrowserProfiles(
