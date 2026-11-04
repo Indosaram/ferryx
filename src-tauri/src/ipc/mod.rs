@@ -88,7 +88,7 @@ pub mod window;
 pub mod worktree;
 #[cfg(feature = "desktop")]
 pub mod worktree_disk;
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 mod worktree_disk_tests;
 
 pub(crate) async fn run_blocking<T, F>(operation: F) -> Result<T, error::IpcError>

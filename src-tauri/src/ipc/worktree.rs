@@ -696,7 +696,7 @@ mod git_change_error_tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "desktop"))]
 mod deletion_repair_tests {
     use super::*;
     use crate::ipc::worktree_disk::WorktreeDiskScans;

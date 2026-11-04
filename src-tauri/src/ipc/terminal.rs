@@ -5716,7 +5716,7 @@ pub(crate) fn map_client_error(
     IpcError::new(code, message).with_details(serde_json::Value::Object(details))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 mod tests {
     use super::*;
     use crate::ipc::IpcErrorCode;

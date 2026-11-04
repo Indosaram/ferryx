@@ -29,7 +29,7 @@ pub mod snapshot_source;
 #[cfg(test)]
 mod snapshot_source_tests;
 pub mod state_cookies;
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 pub mod tests;
 
 pub use cookies::{cookie_from_imported, parse_cookie_file, ImportedCookie};

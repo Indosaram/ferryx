@@ -3091,7 +3091,7 @@ fn point_click_decode_error_to_ipc(err: crate::browser::remote_input::ActionDeco
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 mod tests {
     use super::*;
     use crate::browser::{BrowserProfileId, BrowserSessionSummary, CreateBrowserRequest};

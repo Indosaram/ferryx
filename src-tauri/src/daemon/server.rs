@@ -10557,7 +10557,7 @@ impl DaemonServer {
 #[path = "ssh_survival_tests.rs"]
 mod ssh_survival_tests;
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "desktop"))]
 #[path = "remote_ssh_tests.rs"]
 mod remote_ssh_tests;
 

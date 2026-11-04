@@ -646,7 +646,7 @@ pub fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 #[path = "file_link_tests.rs"]
 mod file_link_tests;
 
