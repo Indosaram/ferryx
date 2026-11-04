@@ -11,12 +11,12 @@
 //! parent chain that reaches one, is refused. Windows does not reparent: an orphan keeps the pid
 //! of its exited parent, which may be reused. So a parent counts only while its creation time is
 //! not later than its child's ([`chain_parent`]), and a parent that is gone or unreadable ends
-//! the chain. What the unix session id does for a reparented pane process, the pane Job Object
-//! does here: every pane child is placed in one daemon-owned job right after it is created, and
-//! every process it starts afterwards is in that job whatever happens to its parents
-//! ([`classify`]).
+//! the chain. What the unix session id does for a reparented pane process, the pane Job Objects
+//! do here: every pane child is placed in a daemon-owned job of its own right after it is
+//! created, and every process it starts afterwards is in that job whatever happens to its
+//! parents ([`classify`]).
 //!
-//! The job sets no limits, so it forbids `CREATE_BREAKAWAY_FROM_JOB`: a pane process cannot
+//! A job sets no limits, so it forbids `CREATE_BREAKAWAY_FROM_JOB`: a pane process cannot
 //! leave it directly. A process started for it by a broker (explorer, Task Scheduler, WMI, an
 //! out-of-process COM server) is outside both the job and the parent chain and passes: the
 //! Windows counterpart of the unix `setsid` escape `supervisor_peer` accepts as a deliberate
@@ -124,7 +124,7 @@ pub fn chain_parent(ppid: u32, child_start: u64, parent_start: Option<u64>) -> u
 
 /// The process table the Windows rule needs on top of [`ProcTable`]: pane job membership.
 pub trait WinProcTable: ProcTable {
-    /// Whether `peer` (still the process created at `peer.start`) is in the pane job. `Err` when
+    /// Whether `peer` (still the process created at `peer.start`) is in a pane job. `Err` when
     /// that cannot be told, which refuses.
     fn in_pane_job(&self, peer: PeerProcess) -> Result<bool, String>;
 }
