@@ -20,7 +20,7 @@ function project(state: LayoutState) {
 }
 // createLayoutState uses the stable initial group identity.
 const group = initial().focusedGroupId!;
-const pairs: { action: LayoutAction; intent: Record<string, unknown> }[] = [
+const pairs: { action: LayoutAction; intent: Record<string, unknown>; prepare?: (state: LayoutState) => LayoutState }[] = [
   { action: { type: "ADD_TAB", tab: terminal("three"), activate: true }, intent: { type: "ADD_TAB_WITH_SESSION", tabId: "three", label: "three", content: { kind: "terminal", backendSessionId: "pty-three" }, activate: true } },
   { action: { type: "CLOSE_TAB", tabId: "two" }, intent: { type: "CLOSE_TAB", tabId: "two" } },
   { action: { type: "REORDER_TAB", tabId: "two", targetIndex: 0 }, intent: { type: "REORDER_TAB", tabId: "two", targetIndex: 0 } },
@@ -38,9 +38,13 @@ const pairs: { action: LayoutAction; intent: Record<string, unknown> }[] = [
   { action: { type: "EQUALIZE_PANES", tabId: "one" }, intent: { type: "EQUALIZE_PANES", tabId: "one" } },
   { action: { type: "SWAP_PANES", tabId: "one", sourceLeafId: "leaf-init", targetLeafId: "second" }, intent: { type: "SWAP_PANES", tabId: "one", sourceNodeId: 1, targetNodeId: 2 } },
   { action: { type: "TOGGLE_PANE_EXPANDED", tabId: "one", leafId: "second" }, intent: { type: "TOGGLE_PANE_EXPANDED", tabId: "one", nodeId: 2 } },
+  { prepare: (state) => layoutReducer(state, { type: "MOVE_TAB_TO_SPLIT", sourceTabId: "two", targetGroupId: group, direction: "vertical" }),
+    action: { type: "SET_TAB_GROUP_RATIO", path: "", ratio: 0.7 }, intent: { type: "SET_TAB_GROUP_RATIO", path: "", ratio: 0.7 } },
+  { prepare: (state) => layoutReducer(state, { type: "MOVE_TAB_TO_SPLIT", sourceTabId: "two", targetGroupId: group, direction: "vertical" }),
+    action: { type: "EQUALIZE_TAB_GROUP_RUN", path: "" }, intent: { type: "EQUALIZE_TAB_GROUP_RUN", path: "" } },
 ];
-const cases = pairs.map(({ action, intent }) => {
-  const before = initial();
+const cases = pairs.map(({ action, intent, prepare }) => {
+  const before = prepare ? prepare(initial()) : initial();
   // Each tab's historical initial visual id can repeat; migration remaps by traversal.
   const sessions = Object.fromEntries(["one", "two", "second", "third"].map((id) => [`pty-${id}`, { backendSessionId: `pty-${id}` }]));
   return { intent, session: { layout: before, terminalSessions: sessions }, expected: project(layoutReducer(before, action)) };
