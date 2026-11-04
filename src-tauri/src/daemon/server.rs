@@ -7891,10 +7891,11 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::LayoutOffer { window, snapshot }) => {
                     let layouts = Arc::clone(&self.layouts);
+                    let changed_window = window.clone();
                     match crate::ipc::run_blocking(move || layouts.lock().offer_snapshot(&window, snapshot).map_err(crate::ipc::IpcError::internal)).await {
                         Ok(view) => {
                             let _ = self.remote_event_tx.send(DaemonRemoteEvent {
-                                event: "LayoutChanged".into(), payload: serde_json::json!({"window":window,"revision":view.revision}),
+                                event: "LayoutChanged".into(), payload: serde_json::json!({"window":changed_window,"revision":view.revision}),
                             });
                             DaemonResponse::LayoutOk { view }
                         },
