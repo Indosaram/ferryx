@@ -5,6 +5,7 @@ import { STARTUP_TIMEOUT_MS } from "./lib/startupTimeout";
 import { withTimeout } from "./lib/withTimeout";
 
 import { CommandPalette } from "./components/CommandPalette";
+import { DeepLinkBridge } from "./components/DeepLinkBridge";
 import { EmptyWorkspaceView } from "./components/EmptyWorkspaceView";
 import { SshWorkspaceStatus } from "./components/SshWorkspaceStatus";
 import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog, type WorktreeAgentLaunch } from "./components/ProjectDialogs";
@@ -3620,6 +3621,8 @@ function WorkspaceApp({
         "remote",
         "ssh",
         "permissions",
+        "paneAccess",
+        "plan",
       ].includes(section)
         ? (section as SectionId)
         : undefined;
@@ -3676,7 +3679,7 @@ function WorkspaceApp({
 
   useEffect(() => {
     let cancelled = false;
-    const handleOpenOnboarding = async () => {
+    const handleOpenOnboarding = async (event: Event) => {
       const [permissions, cli, enrollment, devices, setup] = await Promise.all([
         getSystemPermissionsStatus().catch(() => null),
         getCliLauncherStatus().catch(() => null),
@@ -3698,8 +3701,10 @@ function WorkspaceApp({
         supervisorReady: setup.kind === "ok" ? setupFinished(setup.status) : null,
       };
       setOnboardingDoneSteps(satisfiedOnboardingSteps(loadOnboardingState(), ctx));
-      setOnboardingInitialStepIndex(0);
-      setOnboardingSteps(wizardSteps(ctx));
+      const steps = wizardSteps(ctx);
+      const requested = (event as CustomEvent<{ step?: OnboardingStepId }>).detail?.step;
+      setOnboardingInitialStepIndex(requested ? Math.max(0, steps.indexOf(requested)) : 0);
+      setOnboardingSteps(steps);
     };
     window.addEventListener(OPEN_ONBOARDING_EVENT, handleOpenOnboarding);
     return () => {
@@ -4662,6 +4667,16 @@ function WorkspaceApp({
           onClose={handleCloseCommandPalette}
         />
       ) : null}
+      {isNativeRuntime && isPrimary ? <DeepLinkBridge actions={{
+        hasWorkspace: (id) => projectsRef.current.some((project) => project.workspaceId === id),
+        settings: (section) => handleOpenSettings(section),
+        onboarding: (step) => window.dispatchEvent(new CustomEvent(OPEN_ONBOARDING_EVENT, { detail: { step } })),
+        workspace: (id) => {
+          const project = projectsRef.current.find((candidate) => candidate.workspaceId === id);
+          if (project) handleSelectProject(project);
+        },
+        toast: (message) => toast.info(message),
+      }} /> : null}
       {isSettingsOpen ? (
         <Suspense
           fallback={
