@@ -7,6 +7,7 @@ export type SectionId =
   | "terminal"
   | "shortcuts"
   | "agents"
+  | "paneAccess"
   | "browser"
   | "notifications"
   | "remote"

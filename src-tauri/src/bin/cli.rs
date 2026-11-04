@@ -48,6 +48,19 @@ fn main() {
     if group == Some("agents") {
         std::process::exit(ferryx_lib::agent_control::run_agents_cli(&args));
     }
+    if group == Some("grants") {
+        std::process::exit(ferryx_lib::cli::grants::run_grants_cli(&args));
+    }
+    // Owner actions refuse to run inside a Ferryx pane without an admin grant (rex todo 5); the
+    // daemon refuses the same requests on its side.
+    if matches!(group, Some("up" | "pair" | "remote")) {
+        if let Some(refusal) =
+            ferryx_lib::cli::grants::owner_action_refusal(std::env::var_os("FERRYX_SESSION_ID").as_deref())
+        {
+            eprintln!("{refusal}");
+            std::process::exit(4);
+        }
+    }
     if group == Some("supervisor") {
         std::process::exit(ferryx_lib::cli::supervisor_goal::run_supervisor_cli(&args));
     }
@@ -147,7 +160,7 @@ fn main() {
             }
         }
         LaunchMode::Gui => {
-            eprintln!("Ferryx CLI is running in headless mode.\nUsage: ferryx-cli <up [--key-stdin|--key-env] [--email <hint>] [--origin <url>] [--name <name>] [--no-service] [--json]|service <install|status|uninstall> [--json]|agents|supervisor goal <set|show|mode|approve|discard|accept-revision|reject-revision>|supervisor setup --owner <p> --project <name> --repo-identity <id> --host <id> --git-common-dir <dir>|mcp|hub migrate --from-omo <db>|account <enroll|login>|pair|remote|direct-trust|browser|integrations <status [--json]|skill install|status|uninstall <agent|--all>|hooks install|uninstall <agent|--all>>|api <list|describe <command>>|--daemon>");
+            eprintln!("Ferryx CLI is running in headless mode.\nUsage: ferryx-cli <up [--key-stdin|--key-env] [--email <hint>] [--origin <url>] [--name <name>] [--no-service] [--json]|service <install|status|uninstall> [--json]|agents|supervisor goal <set|show|mode|approve|discard|accept-revision|reject-revision>|supervisor setup --owner <p> --project <name> --repo-identity <id> --host <id> --git-common-dir <dir>|mcp|hub migrate --from-omo <db>|account <enroll|login>|pair|remote|grants <add|remove|list>|direct-trust|browser|integrations <status [--json]|skill install|status|uninstall <agent|--all>|hooks install|uninstall <agent|--all>>|api <list|describe <command>>|--daemon>");
             std::process::exit(1);
         }
         LaunchMode::DaemonSupervisor => std::process::exit(run_daemon_supervisor(&args)),

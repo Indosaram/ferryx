@@ -56,6 +56,9 @@ pub const CODE_SPAWN_IN_FLIGHT: &str = "SPAWN_IN_FLIGHT";
 pub const CODE_NOT_ACTIVE_OWNER: &str = "NOT_ACTIVE_OWNER";
 pub const CODE_COUNT_CHANGED: &str = "COUNT_CHANGED";
 pub const CODE_DAEMON_RETIRING: &str = "DAEMON_RETIRING";
+/// Shutdown, RetireWhenIdle or RequestUpgrade from a process inside a Ferryx pane that holds no
+/// `admin` grant. Additive (rex todo 5).
+pub const CODE_FORBIDDEN: &str = "FORBIDDEN";
 
 /// One decoded control request.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -113,7 +113,23 @@ impl DaemonServer {
                             manager.note_accept(AuthorityListenerRole::Control);
                             let server = Arc::clone(&server);
                             tokio::spawn(async move {
-                                server.handle_control_connection(stream, None).await;
+                                // Identified like the owner socket, so a Ferryx pane may not
+                                // stop, retire or upgrade the daemon (rex todo 5).
+                                use std::os::unix::io::AsRawFd;
+                                let pid = crate::daemon::supervisor_peer::peer_pid(stream.as_raw_fd());
+                                let (origin, ancestry) = tokio::task::spawn_blocking(move || {
+                                    let origin = crate::daemon::supervisor_peer::identify(pid);
+                                    let ancestry = crate::daemon::supervisor_peer::Ancestry::at_accept(
+                                        origin,
+                                        &crate::daemon::supervisor_peer::SystemProcs,
+                                    );
+                                    (origin, ancestry)
+                                })
+                                .await
+                                .unwrap_or((crate::daemon::supervisor_peer::PeerOrigin::Unknown, None));
+                                server
+                                    .handle_control_connection_with_origin(stream, None, origin, ancestry)
+                                    .await;
                             });
                         }
                         Err(error) => {
@@ -221,6 +237,37 @@ impl DaemonServer {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
+        // A transport without a peer pid (Windows loopback, in-process pairs) keeps today's
+        // behaviour until todo 12.
+        #[cfg(unix)]
+        let origin = crate::daemon::supervisor_peer::PeerOrigin::Unknown;
+        #[cfg(not(unix))]
+        let origin = crate::daemon::supervisor_peer::PeerOrigin::TokenAuthenticated;
+        self.handle_control_connection_with_origin(stream, expected_token, origin, None)
+            .await
+    }
+
+    /// Whether a control op changes the daemon's lifetime: refused from a Ferryx pane without
+    /// an `admin` grant (`FORBIDDEN`, additive to control-v1).
+    fn control_op_needs_owner(request: &ControlRequest) -> bool {
+        matches!(
+            request,
+            ControlRequest::Shutdown { .. }
+                | ControlRequest::RetireWhenIdle
+                | ControlRequest::RequestUpgrade { .. }
+        )
+    }
+
+    async fn handle_control_connection_with_origin<S>(
+        self: Arc<Self>,
+        stream: S,
+        expected_token: Option<&str>,
+        origin: crate::daemon::supervisor_peer::PeerOrigin,
+        ancestry: Option<crate::daemon::supervisor_peer::Ancestry>,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let mut ancestry = ancestry;
         let (read_half, mut write_half) = tokio::io::split(stream);
         let mut lines = BufReader::new(read_half).lines();
         let mut first_frame = true;
@@ -246,7 +293,20 @@ impl DaemonServer {
                 Ok(guard) => guard,
                 Err(_) => return,
             };
-            let (reply, after) = match control::decode_request(&line) {
+            let decoded = control::decode_request(&line);
+            let refused = match &decoded {
+                Ok(request) if Self::control_op_needs_owner(request) => {
+                    !self.control_peer_is_owner(origin, &mut ancestry).await
+                }
+                _ => false,
+            };
+            let (reply, after) = match decoded {
+                _ if refused => {
+                    (
+                        ControlReply::Failed(ControlFailure::code(control::CODE_FORBIDDEN)),
+                        AfterFlush::Nothing,
+                    )
+                }
                 // RequestUpgrade needs the async handover path (todo 8); every other op is decided
                 // synchronously below.
                 Ok(ControlRequest::RequestUpgrade {
@@ -356,6 +416,20 @@ impl DaemonServer {
                 ControlReply::Failed(ControlFailure::code(control::CODE_UNSUPPORTED_OP)),
                 AfterFlush::Nothing,
             ),
+        }
+    }
+
+    /// Owner, or a pane with an `admin` grant; unidentified transports keep today's behaviour.
+    async fn control_peer_is_owner(
+        &self,
+        origin: crate::daemon::supervisor_peer::PeerOrigin,
+        ancestry: &mut Option<crate::daemon::supervisor_peer::Ancestry>,
+    ) -> bool {
+        match self.classify_peer(origin, ancestry).await {
+            Ok(class) => self
+                .pane_grants
+                .admin_allowed(&class, |session| self.session_workspace(session)),
+            Err(_) => false,
         }
     }
 

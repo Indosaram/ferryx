@@ -957,3 +957,219 @@ async fn a_supervisor_mutation_from_an_unidentified_peer_is_forbidden() {
         }
     }
 }
+
+/// Registers this test process's parent as the pane `pane`, so every request this process sends
+/// over a real unix socket pair comes from inside that pane.
+#[cfg(unix)]
+fn enter_pane(server: &DaemonServer, pane: &str, workspace: &str) {
+    let parent = crate::daemon::supervisor_peer::proc_info(std::process::id())
+        .expect("own process")
+        .ppid;
+    server.terminal_service().pty_manager().pane_registry().insert(
+        pane,
+        parent,
+        &crate::daemon::supervisor_peer::SystemProcs,
+    );
+    let metadata = serde_json::from_value(serde_json::json!({
+        "client_request_id": "fixture", "workspace_id": workspace, "worktree": null,
+        "cwd": "/", "provider_claim": null,
+        "spawn_fingerprint": {"workspace_id": workspace, "worktree": null, "cwd": null,
+            "cols": 80, "rows": 24, "shell": null, "provider_claim": null, "startup": null}
+    }))
+    .expect("session metadata");
+    server.session_metadata.write().insert(pane.to_owned(), metadata);
+}
+
+#[cfg(unix)]
+fn write_to(session_id: &str) -> DaemonRequest {
+    DaemonRequest::Write { session_id: session_id.into(), data: b"echo hi\n".to_vec() }
+}
+
+#[cfg(unix)]
+fn grant_request(action: crate::daemon::pane_grants::PaneGrantAction) -> DaemonRequest {
+    DaemonRequest::PaneGrant { request: action }
+}
+
+#[cfg(unix)]
+fn grant(from: &str, to: &str, ops: &[crate::daemon::pane_grants::GrantOp]) -> crate::daemon::pane_grants::PaneGrant {
+    crate::daemon::pane_grants::PaneGrant { from: from.into(), to: to.into(), ops: ops.iter().copied().collect() }
+}
+
+#[cfg(unix)]
+fn assert_forbidden(response: DaemonResponse, reason: &str) {
+    match response {
+        DaemonResponse::Error { code, details, message } => {
+            assert_eq!(code.as_deref(), Some("FORBIDDEN"), "{message}");
+            assert_eq!(details.and_then(|details| details["reason"].as_str().map(str::to_owned)).as_deref(), Some(reason), "{message}");
+        }
+        other => panic!("expected FORBIDDEN {reason}, got {other:?}"),
+    }
+}
+
+#[cfg(unix)]
+fn assert_not_forbidden(response: DaemonResponse, what: &str) {
+    if let DaemonResponse::Error { code, message, .. } = &response {
+        assert_ne!(code.as_deref(), Some("FORBIDDEN"), "{what}: {message}");
+    }
+}
+
+/// Rex todo 5: pane A may type into itself, needs a grant for pane B, and the grant can only be
+/// made from outside the panes.
+#[cfg(unix)]
+#[tokio::test]
+async fn pane_to_pane_write_needs_a_grant() {
+    use crate::daemon::pane_grants::{GrantOp, PaneGrantAction, OWNER_ACTION_REQUIRED, PANE_GRANT_REQUIRED};
+    let server = Arc::new(DaemonServer::new());
+    enter_pane(&server, "pane-a", "ws-a");
+    assert_forbidden(unix_exchange(&server, write_to("pane-b")).await, PANE_GRANT_REQUIRED);
+    assert_not_forbidden(unix_exchange(&server, write_to("pane-a")).await, "own session");
+    // In-pane grants add is refused, and nothing was stored.
+    let add = grant_request(PaneGrantAction::Add { grant: grant("pane-a", "pane-b", &[GrantOp::Write]) });
+    assert_forbidden(unix_exchange(&server, add.clone()).await, OWNER_ACTION_REQUIRED);
+    assert!(server.pane_grants.list().is_empty());
+    // Reading the grants is allowed from a pane.
+    assert!(matches!(
+        unix_exchange(&server, grant_request(PaneGrantAction::List)).await,
+        DaemonResponse::PaneGrantsOk { .. }
+    ));
+    // The owner (outside every pane) adds the grant: the same write now reaches the handler.
+    server.terminal_service().pty_manager().pane_registry().remove("pane-a");
+    match unix_exchange(&server, add).await {
+        DaemonResponse::PaneGrantsOk { grants, .. } => assert_eq!(grants.len(), 1),
+        other => panic!("owner grants add answered {other:?}"),
+    }
+    enter_pane(&server, "pane-a", "ws-a");
+    assert_not_forbidden(unix_exchange(&server, write_to("pane-b")).await, "granted write");
+    // The grant covers writes only.
+    assert_forbidden(
+        unix_exchange(&server, DaemonRequest::Close { session_id: "pane-b".into() }).await,
+        PANE_GRANT_REQUIRED,
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn pane_spawn_is_allowed_in_its_own_workspace_only() {
+    use crate::daemon::pane_grants::PANE_GRANT_REQUIRED;
+    let server = Arc::new(DaemonServer::new());
+    enter_pane(&server, "pane-a", "ws-a");
+    let spawn = |workspace: &str| DaemonRequest::Spawn {
+        client_request_id: format!("req-{workspace}"),
+        workspace_id: workspace.into(),
+        worktree: None,
+        cwd: None,
+        cols: 80,
+        rows: 24,
+        shell: None,
+        startup: None,
+        local_split: None,
+        session_id: None,
+    };
+    assert_not_forbidden(unix_exchange(&server, spawn("ws-a")).await, "spawn in own workspace");
+    assert_forbidden(unix_exchange(&server, spawn("ws-b")).await, PANE_GRANT_REQUIRED);
+}
+
+/// Owner-wide actions from a pane need an admin grant.
+#[cfg(unix)]
+#[tokio::test]
+async fn pane_owner_actions_need_an_admin_grant() {
+    use crate::daemon::pane_grants::{GrantOp, PaneGrantAction, ANY_TARGET, OWNER_ACTION_REQUIRED};
+    let server = Arc::new(DaemonServer::new());
+    enter_pane(&server, "pane-a", "ws-a");
+    let configure = DaemonRequest::RemoteConfigure { config: Default::default() };
+    assert_forbidden(unix_exchange(&server, configure.clone()).await, OWNER_ACTION_REQUIRED);
+    assert_forbidden(
+        unix_exchange(&server, DaemonRequest::UpgradeBinary { new_binary_path: None }).await,
+        OWNER_ACTION_REQUIRED,
+    );
+    match unix_exchange(&server, grant_request(PaneGrantAction::CheckAdmin)).await {
+        DaemonResponse::PaneGrantsOk { admin, .. } => assert_eq!(admin, Some(false)),
+        other => panic!("check admin answered {other:?}"),
+    }
+    server.pane_grants.add(grant("pane-a", ANY_TARGET, &[GrantOp::Admin])).unwrap();
+    match unix_exchange(&server, grant_request(PaneGrantAction::CheckAdmin)).await {
+        DaemonResponse::PaneGrantsOk { admin, .. } => assert_eq!(admin, Some(true)),
+        other => panic!("check admin answered {other:?}"),
+    }
+    // A harmless owner action (revoking an unknown device) now reaches its handler.
+    assert_not_forbidden(
+        unix_exchange(&server, DaemonRequest::RemoteRevokeDevice { device_id: "no-such-device".into() }).await,
+        "owner action with admin grant",
+    );
+}
+
+/// A pane's forged supervisor fence never grants access and never ratchets the stored fence;
+/// the real supervisor's next send is admitted.
+#[cfg(unix)]
+#[tokio::test]
+async fn pane_forged_fence_is_refused_and_does_not_ratchet() {
+    use crate::daemon::pane_grants::PANE_GRANT_REQUIRED;
+    let server = Arc::new(DaemonServer::new());
+    enter_pane(&server, "pane-a", "ws-a");
+    let fenced_send = |fence: u64| DaemonRequest::AgentControl {
+        request: crate::agent_control::AgentControlOp::Send {
+            session_id: "pane-b".into(),
+            text: "rm -rf /".into(),
+            request_id: Some(format!("forged-{fence}")),
+        },
+        host_id: None,
+        supervisor_fence: Some(fence),
+        supervisor_account: Some("acct".into()),
+    };
+    assert_forbidden(unix_exchange(&server, fenced_send(999_999)).await, PANE_GRANT_REQUIRED);
+    assert_eq!(server.remote_state().supervisor_fence.max_for("acct").await, 0, "not ratcheted");
+    // The real supervisor runs outside the panes: its fence is admitted (and stored).
+    server.terminal_service().pty_manager().pane_registry().remove("pane-a");
+    assert_not_forbidden(unix_exchange(&server, fenced_send(5)).await, "supervisor send");
+    assert_eq!(server.remote_state().supervisor_fence.max_for("acct").await, 5);
+}
+
+/// One control request over a real unix socket pair, peer identified like the accept path.
+#[cfg(unix)]
+async fn control_unix(server: &Arc<DaemonServer>, request: ControlRequest) -> ControlReply {
+    let (client, server_side) = tokio::net::UnixStream::pair().unwrap();
+    let origin = crate::daemon::supervisor_peer::identify(Some(std::process::id()));
+    let ancestry = crate::daemon::supervisor_peer::Ancestry::at_accept(origin, &crate::daemon::supervisor_peer::SystemProcs);
+    let handler = Arc::clone(server);
+    tokio::spawn(async move {
+        handler.handle_control_connection_with_origin(server_side, None, origin, ancestry).await
+    });
+    let (read_half, mut write_half) = client.into_split();
+    write_half
+        .write_all(control::to_line(&control::encode_request(&request)).as_bytes())
+        .await
+        .unwrap();
+    let mut line = String::new();
+    tokio::time::timeout(std::time::Duration::from_secs(10), BufReader::new(read_half).read_line(&mut line))
+        .await
+        .expect("bounded reply")
+        .unwrap();
+    control::decode_reply(request.op(), &line).expect("control reply")
+}
+
+/// Shutdown, RetireWhenIdle and RequestUpgrade from a pane are FORBIDDEN (additive control-v1
+/// code); Hello and Inventory stay served; an admin grant lets them through.
+#[cfg(unix)]
+#[tokio::test]
+async fn control_shutdown_from_pane_refused() {
+    use crate::daemon::pane_grants::{GrantOp, ANY_TARGET};
+    let mut fixture = ControlFixture::new();
+    enter_pane(&fixture.server, "pane-a", "ws-a");
+    let forbidden = ControlReply::Failed(ControlFailure::code(control::CODE_FORBIDDEN));
+    for request in [
+        ControlRequest::Shutdown { confirm_live_sessions: 0 },
+        ControlRequest::RetireWhenIdle,
+        ControlRequest::RequestUpgrade { staged_executable: "/nonexistent/ferryx".into(), generation_key: None },
+    ] {
+        assert_eq!(control_unix(&fixture.server, request.clone()).await, forbidden, "{request:?}");
+    }
+    assert!(matches!(control_unix(&fixture.server, ControlRequest::Hello).await, ControlReply::Hello(_)));
+    assert!(fixture.exited.try_recv().is_err(), "a refused pane request never retires the daemon");
+    assert!(!fixture.marker().exists());
+    fixture.server.pane_grants.add(grant("pane-a", ANY_TARGET, &[GrantOp::Admin])).unwrap();
+    assert_eq!(
+        control_unix(&fixture.server, ControlRequest::RetireWhenIdle).await,
+        ControlReply::Live { live: 0 }
+    );
+    assert_eq!(fixture.await_exit().await, 0);
+}

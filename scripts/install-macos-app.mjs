@@ -301,7 +301,7 @@ export function main(argv = process.argv.slice(2), { exec = run, env = process.e
   console.log(strategy.reasons.length ? `Notes:\n  - ${strategy.reasons.join("\n  - ")}` : "");
   console.log(
     "Next steps:\n" +
-      `  1. Trigger handover over UDS: {"type":"upgradeBinary","newBinaryPath":"${options.dest}/Contents/MacOS/ferryx"}\n` +
+      `  1. From a terminal outside Ferryx (or a pane granted admin first), trigger handover over UDS: {"type":"upgradeBinary","newBinaryPath":"${options.dest}/Contents/MacOS/ferryx"}\n` +
       "  2. Then launch the GUI (open -a Ferryx). Never kill draining daemons; they retire when their sessions end.",
   );
 }

@@ -803,6 +803,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::AgentControl { .. } => "agentControl",
         DaemonRequest::AgentControlSettingsGet => "agentControlSettingsGet",
         DaemonRequest::AgentControlSettingsSet { .. } => "agentControlSettingsSet",
+        DaemonRequest::PaneGrant { .. } => "paneGrant",
         DaemonRequest::GetAgentIntegration => "getAgentIntegration",
         DaemonRequest::SetAgentIntegration { .. } => "setAgentIntegration",
         DaemonRequest::SupervisorDispatch { .. } => "supervisorDispatch",
