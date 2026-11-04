@@ -806,4 +806,6 @@ jobs:
 
       - name: Fail on false or missing CDP checks
         shell: bash
-        run: bun scripts/browser-qa/check-summary.mjs "$RUNNER_TEMP/cdp-audit"
+        run: |
+          bun test scripts/browser-qa/check-summary.test.mjs
+          bun scripts/browser-qa/check-summary.mjs "$RUNNER_TEMP/cdp-audit"
