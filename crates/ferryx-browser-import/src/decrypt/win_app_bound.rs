@@ -24,7 +24,8 @@ use windows::Win32::Foundation::{LocalFree, SysAllocStringByteLen, SysStringByte
 use windows::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
 #[cfg(windows)]
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_LOCAL_SERVER, COINIT_MULTITHREADED,
+    CoCreateInstance, CoInitializeEx, CoSetProxyBlanket, CLSCTX_LOCAL_SERVER, COINIT_MULTITHREADED,
+    EOAC_DYNAMIC_CLOAKING, RPC_C_AUTHN_LEVEL_PKT_PRIVACY, RPC_C_IMP_LEVEL_IMPERSONATE,
 };
 #[cfg(windows)]
 use zeroize::Zeroize;
@@ -178,34 +179,54 @@ impl WindowsAppBoundDecryptor {
     }
 }
 
-// Browser config containing CLSID and vtable slot offset for IElevator.
-#[cfg(windows)]
+// Browser config containing CLSID, the IElevator IIDs to query (in order) and the vtable slot
+// of DecryptData. The elevation service only registers proxies for its brand-specific IIDs:
+// on Chrome 156 (maho-win) the generic IElevator/IElevator2 IIDs answer E_NOINTERFACE through
+// COM, while IElevator2Chrome reaches DecryptData.
+#[cfg(any(windows, test))]
 struct BrowserComConfig {
     clsid: &'static str,
-    iid_v1: &'static str,
-    iid_v2: &'static str,
+    iids: &'static [&'static str],
     vtable_slot: usize,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn get_browser_config(browser_name: &str) -> Option<BrowserComConfig> {
     match browser_name {
         "Chrome" | "google-chrome" => Some(BrowserComConfig {
             clsid: "708860E0-F641-4611-8895-7D867DD3675B",
-            iid_v1: "A99222FE-D225-45C6-896B-D9A3B5EE5250",
-            iid_v2: "8F7B6792-784D-4047-845D-1782EFBEF205",
+            iids: &[
+                // IElevator2Chrome, IElevatorChrome, then the generic IElevator2 and IElevator.
+                "1BF5208B-295F-4992-B5F4-3A9BB6494838",
+                "463ABECF-410D-407F-8AF5-0DF35A005CC8",
+                "8F7B6792-784D-4047-845D-1782EFBEF205",
+                "A949CB4E-C4F9-44C4-B213-6BF8AA9AC69C",
+                "A99222FE-D225-45C6-896B-D9A3B5EE5250",
+            ],
             vtable_slot: 5,
         }),
         "Edge" | "microsoft-edge" => Some(BrowserComConfig {
             clsid: "1FCBE96C-1697-43AF-9140-2897C7C69767",
-            iid_v1: "A99222FE-D225-45C6-896B-D9A3B5EE5250",
-            iid_v2: "8F7B6792-784D-4047-845D-1782EFBEF205",
+            iids: &[
+                // IElevatorEdge, IElevator2Edge, then the generic IElevator2 and IElevator.
+                "C9C2B807-7731-4F34-81B7-44FF7779522B",
+                "05EB264E-4D60-4F34-ADB7-1F983E930A79",
+                "8F7B6792-784D-4047-845D-1782EFBEF205",
+                "A949CB4E-C4F9-44C4-B213-6BF8AA9AC69C",
+                "A99222FE-D225-45C6-896B-D9A3B5EE5250",
+            ],
             vtable_slot: 8,
         }),
         "Brave" | "brave-browser" => Some(BrowserComConfig {
             clsid: "576B31AF-6369-4B6B-8560-E4B203A97A8B",
-            iid_v1: "A99222FE-D225-45C6-896B-D9A3B5EE5250",
-            iid_v2: "8F7B6792-784D-4047-845D-1782EFBEF205",
+            iids: &[
+                // IElevator2Chromium, IElevatorChromium, then the generic IElevator2 and IElevator.
+                "BB19A0E5-00C6-4966-94B2-5AFEC6FED93A",
+                "B88C45B9-8825-4629-B83E-77CC67D9CEED",
+                "8F7B6792-784D-4047-845D-1782EFBEF205",
+                "A949CB4E-C4F9-44C4-B213-6BF8AA9AC69C",
+                "A99222FE-D225-45C6-896B-D9A3B5EE5250",
+            ],
             vtable_slot: 5,
         }),
         _ => None,
@@ -220,17 +241,18 @@ fn decrypt_via_com(browser_name: &str, encrypted_key: &[u8]) -> Result<Zeroizing
     unsafe {
         let guid = |text: &str| GUID::try_from(text).map_err(|e| format!("invalid GUID {text}: {e}"));
         let clsid = guid(config.clsid)?;
-        let iid_v2 = guid(config.iid_v2)?;
-        let iid_v1 = guid(config.iid_v1)?;
 
         let unknown: IUnknown = CoCreateInstance(&clsid, None, CLSCTX_LOCAL_SERVER)
             .map_err(|e| format!("CoCreateInstance failed: {}", e))?;
 
-        // Query for the IElevator interface (v2 first, then v1 fallback).
+        // Query the IElevator interfaces in order; the first one the service proxies wins.
         let mut elevator_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-        let mut hr = unknown.query(&iid_v2, &mut elevator_ptr);
-        if hr.is_err() {
-            hr = unknown.query(&iid_v1, &mut elevator_ptr);
+        let mut hr = windows::core::HRESULT(0);
+        for iid in config.iids {
+            hr = unknown.query(&guid(iid)?, &mut elevator_ptr);
+            if hr.is_ok() && !elevator_ptr.is_null() {
+                break;
+            }
         }
 
         if hr.is_err() || elevator_ptr.is_null() {
@@ -238,6 +260,23 @@ fn decrypt_via_com(browser_name: &str, encrypted_key: &[u8]) -> Result<Zeroizing
                 "QueryInterface for IElevator failed with HRESULT 0x{:08X}",
                 hr.0
             ));
+        }
+
+        // DecryptData impersonates the caller to undo the user-level DPAPI layer; without an
+        // impersonation blanket it fails with 0x8004A003 (could not decrypt with user context).
+        let elevator = IUnknown::from_raw_borrowed(&elevator_ptr).expect("non-null interface");
+        if let Err(error) = CoSetProxyBlanket(
+            elevator,
+            u32::MAX, // RPC_C_AUTHN_DEFAULT
+            u32::MAX, // RPC_C_AUTHZ_DEFAULT
+            None,
+            RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
+            RPC_C_IMP_LEVEL_IMPERSONATE,
+            None,
+            EOAC_DYNAMIC_CLOAKING,
+        ) {
+            let _ = IUnknown::from_raw(elevator_ptr);
+            return Err(format!("CoSetProxyBlanket on IElevator failed: {error}"));
         }
 
         let result = call_decrypt_data(elevator_ptr, config.vtable_slot, encrypted_key);
@@ -303,6 +342,27 @@ unsafe fn call_decrypt_data(
 #[cfg(test)]
 mod review_tests {
     use super::*;
+
+    /// Every browser asks for its brand-specific IElevator interface before the generic ones,
+    /// and each IID parses as a GUID.
+    #[test]
+    fn brand_elevator_iids_are_queried_first() {
+        let first = |name| get_browser_config(name).unwrap().iids[0];
+        assert_eq!(first("Chrome"), "1BF5208B-295F-4992-B5F4-3A9BB6494838");
+        assert_eq!(first("Edge"), "C9C2B807-7731-4F34-81B7-44FF7779522B");
+        assert_eq!(first("Brave"), "BB19A0E5-00C6-4966-94B2-5AFEC6FED93A");
+        for name in ["Chrome", "Edge", "Brave"] {
+            let config = get_browser_config(name).unwrap();
+            assert!(windows_core_guid_ok(config.clsid));
+            assert!(config.iids.iter().all(|iid| windows_core_guid_ok(iid)));
+        }
+    }
+
+    fn windows_core_guid_ok(text: &str) -> bool {
+        let parts: Vec<&str> = text.split('-').collect();
+        parts.iter().map(|p| p.len()).collect::<Vec<_>>() == [8, 4, 4, 4, 12]
+            && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_hexdigit()))
+    }
 
     #[test]
     fn review_invalid_windows_key_returns_error_without_panicking() {
