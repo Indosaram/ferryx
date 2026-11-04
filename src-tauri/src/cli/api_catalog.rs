@@ -445,8 +445,8 @@ pub const CATALOG: &[Command] = &[
     },
     Command {
         name: "panes",
-        summary: "List detached sessions or detach, attach, zoom and swap live panes",
-        output: "json array of detached backend session IDs",
+        summary: "List detached sessions, attach owner-enabled plugin blocks, or detach, attach, zoom and swap live panes",
+        output: "json array of detached backend session IDs; plugin attach returns a layout view",
         subcommands: &[
             sub!("list", &[], &[JSON]),
             sub!("detach", &[arg!("session", "string")], &[JSON]),
