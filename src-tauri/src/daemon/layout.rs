@@ -552,4 +552,24 @@ mod tests {
         }
         assert!(store.get("ws-overflow").is_err());
     }
+    #[test]
+    fn content_updates_tab_transplant_and_expansion() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::new(root.path().into());
+        store.apply("main", 0, add("one")).unwrap();
+        store.apply("main", 1, Intent::AddTabWithSession { tab_id: "file".into(), label: "file".into(),
+            content: Content::File { path: "old".into(), line: None, col: None }, activate: true }).unwrap();
+        store.apply("main", 2, Intent::UpdateFileTab { tab_id: "file".into(), node_id: 2, path: "new".into(), line: Some(10), col: Some(3) }).unwrap();
+        store.apply("main", 3, Intent::MoveTabToPaneSplit { source_tab_id: "file".into(), target_tab_id: "one".into(), target_node_id: 1, dir: Direction::Vertical, first: false }).unwrap();
+        store.apply("main", 4, Intent::SplitPane { tab_id: "one".into(), target_node_id: 1, dir: Direction::Horizontal, first: true,
+            content: Content::Browser { url: "old".into() } }).unwrap();
+        store.apply("main", 5, Intent::UpdateBrowserTab { tab_id: "one".into(), node_id: 3, url: "new".into() }).unwrap();
+        let expanded = store.apply("main", 6, Intent::TogglePaneExpanded { tab_id: "one".into(), node_id: 3 }).unwrap();
+        assert_eq!(expanded.layout.tabs[0].expanded_node_id, Some(3));
+        let collapsed = store.apply("main", 7, Intent::TogglePaneExpanded { tab_id: "one".into(), node_id: 3 }).unwrap();
+        let tab = &collapsed.layout.tabs[0];
+        assert_eq!(tab.expanded_node_id, None);
+        assert!(matches!(tab.pane_tree.clone().find_mut(2), Some(Node::Leaf { content: Content::File { path, line: Some(10), col: Some(3) }, .. }) if path == "new"));
+        assert!(matches!(tab.pane_tree.clone().find_mut(3), Some(Node::Leaf { content: Content::Browser { url }, .. }) if url == "new"));
+    }
 }
