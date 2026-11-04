@@ -266,6 +266,8 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push("screenHashV1");
             capabilities.push("scrollbackBudgetV1");
             capabilities.push("sizeOwnershipV1");
+            #[cfg(feature = "local-split-qa")]
+            capabilities.push("sizeOwnershipQaV1");
             #[cfg(feature = "remote-desktop")]
             capabilities.push(crate::daemon::protocol::REMOTE_DESKTOP_CAPABILITY);
             capabilities
