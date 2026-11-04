@@ -1274,6 +1274,7 @@ pub struct HandoverManager {
     /// This daemon's cross-pane grants, written into the commit decision record.
     pane_grants: RwLock<Option<Arc<super::pane_grants::PaneGrants>>>,
     size_ownership: RwLock<Option<super::size_ownership::SizeOwnershipRegistry>>,
+    layouts: RwLock<Option<super::layout::Registry>>,
 }
 
 impl HandoverManager {
@@ -1329,6 +1330,24 @@ impl HandoverManager {
 
     pub fn set_size_ownership(&self, registry: super::size_ownership::SizeOwnershipRegistry) {
         *self.size_ownership.write() = Some(registry);
+    }
+
+    pub fn set_layouts(&self, registry: super::layout::Registry) {
+        *self.layouts.write() = Some(registry);
+    }
+
+    pub fn adopt_recorded_layouts(&self, legacy: &std::path::Path) -> Result<(), String> {
+        use super::handover_transaction::{HandoverState, HandoverTransaction};
+        let bytes = fs::read(legacy.with_extension("transaction")).map_err(|error| error.to_string())?;
+        let transaction: HandoverTransaction = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        if transaction.transfer_id != legacy.to_string_lossy() || transaction.state != HandoverState::Retired {
+            return Err("Layout adoption requires a committed predecessor".into());
+        }
+        if let (Some(bytes), Some(registry)) = (transaction.layouts, self.layouts.read().clone()) {
+            let snapshot = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+            registry.lock().adopt(snapshot)?;
+        }
+        Ok(())
     }
 
     pub fn adopt_recorded_size_ownership(&self, legacy: &std::path::Path) -> Result<(), String> {
@@ -1392,6 +1411,10 @@ impl HandoverManager {
         transaction.supervisor_lease = lease.as_ref().and_then(|lease| lease.freeze_for_handover());
         transaction.size_ownership = if committed {
             self.size_ownership.read().as_ref().map(|registry| registry.lock().clone())
+        } else { None };
+        transaction.layouts = if committed {
+            self.layouts.read().as_ref().map(|registry| serde_json::to_vec(&registry.lock().layouts))
+                .transpose().map_err(|error| error.to_string())?
         } else { None };
         transaction.pane_grants = if committed {
             self.pane_grants.read().as_ref().map(|grants| grants.list())
@@ -1505,6 +1528,7 @@ impl HandoverManager {
             handed_supervisor_lease: Mutex::new(None),
             pane_grants: RwLock::new(None),
             size_ownership: RwLock::new(None),
+            layouts: RwLock::new(None),
         }
     }
 
