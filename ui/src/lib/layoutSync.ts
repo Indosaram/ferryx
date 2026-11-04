@@ -12,6 +12,7 @@ import { currentWindowLabel } from "./windowIdentity";
 type Direction = "horizontal" | "vertical";
 export type DaemonContent =
   | { kind: "terminal"; backendSessionId: string }
+  | { kind: "disconnectedTerminal"; machineId: string; backendSessionId: string }
   | ({ kind: "file"; path: string; line: number | null; col: number | null } & Partial<Extract<PaneContent, { kind: "file" }>>)
   | { kind: "browser"; url: string; browserId?: string; worktreePath?: string; profileId?: string }
   | { kind: "dag" } | ({ kind: "changes" } & Partial<Extract<PaneContent, { kind: "changes" }>>)
@@ -24,6 +25,8 @@ type DaemonGroup =
   | { type: "group"; groupId: string; tabIds: string[]; activeTabId: string | null }
   | { type: "split"; dir: Direction; ratio: number; a: DaemonGroup; b: DaemonGroup };
 export type DaemonLayout = {
+  machineId?: string;
+  foreignOffers?: Record<string, DaemonLayout>;
   scope?: string;
   revision: number;
   tabs: { tabId: string; label: string; pinned: boolean; paneTree: DaemonNode;
@@ -53,6 +56,7 @@ type Identities = { leaves: Record<string, string>; contents: Record<string, Pan
 const identityHost = globalThis as typeof globalThis & { __ferryxLayoutIdentities?: Identities };
 const identities = identityHost.__ferryxLayoutIdentities ??= { leaves: {}, contents: {} };
 const identityKey = (scope: string, tab: string, node: number) => JSON.stringify([scope, tab, node]);
+const foreignSessionId = (machine: string, backend: string) => `foreign:${JSON.stringify([machine, backend])}`;
 
 export function daemonContent(content: PaneContent, state: WorkspaceState): DaemonContent {
   switch (content.kind) {
@@ -167,6 +171,9 @@ export function hydrateLayout(view: LayoutView, state: WorkspaceState, scope = l
       const wire = node.content;
       let content: PaneContent;
       switch (wire.kind) {
+        case "disconnectedTerminal":
+          content = { kind: "terminal", sessionId: foreignSessionId(wire.machineId, wire.backendSessionId) };
+          break;
         case "terminal": {
           const session = Object.values(state.sessions).find((session) => session.backendSessionId === wire.backendSessionId);
           content = { kind: "terminal", sessionId: session?.id ?? wire.backendSessionId };
@@ -286,6 +293,13 @@ export function rehydrateWorkspace(state: WorkspaceState, view = layoutSync.curr
   const sessions = { ...state.sessions };
   const admit = (node: DaemonNode) => {
     if (node.type === "split") { admit(node.a); admit(node.b); return; }
+    if (node.content.kind === "disconnectedTerminal") {
+      const id = foreignSessionId(node.content.machineId, node.content.backendSessionId);
+      sessions[id] = { id, backendSessionId: null, workspaceId: state.workspaceId ?? "", cwd: "", worktree: null,
+        lifecycle: "failed", processState: "exited", remoteConnectionState: "disconnected",
+        backendUnavailableReason: "remote_session_gone" };
+      return;
+    }
     if (node.content.kind !== "terminal") return;
     const id = node.content.backendSessionId;
     if (!Object.values(sessions).some((session) => session.backendSessionId === id)) {
