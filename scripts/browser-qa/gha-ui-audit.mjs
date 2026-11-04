@@ -2041,12 +2041,15 @@ const engineInstallStarted = () => {
  * Click the Chromium Engine "Download" button: every "Download" word not followed on its line
  * by "size" (the row label), deduped by position, rightmost first. When neither the engine dir
  * nor "Downloading..."/"Installing..." shows up within 10s, the next candidate is clicked.
+ * The banded OCR pass is included: on linux run 41846200603 (probe-209) the full-frame variants
+ * read only the "Download size" label and never the small button text, so the label was clicked
+ * and no install started; the bands read the button at (1485, 525) on the same frame.
  */
 async function clickEngineDownload() {
   const deadline = Date.now() + 8000;
   let candidates = [];
   do {
-    const words = ocr(probeShot()) ?? [];
+    const words = ocr(probeShot(), { bands: true }) ?? [];
     const isLabel = (word) => words.some((next) => /^size$/i.test(next.text) && Math.abs(next.top - word.top) <= 8 && next.left > word.left && next.left - (word.left + word.width) < 40);
     const unique = new Map();
     for (const word of words.filter((entry) => entry.text === "Download")) {
