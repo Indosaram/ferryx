@@ -13,7 +13,7 @@ export function PluginPane({ plugin, view, visible }: { plugin: string; view: st
       try {
         const html = await invoke<string>("cmd_plugin_view", { plugin, view });
         if (!disposed) { setDocument(html); setError(null); }
-      } catch (cause) { if (!disposed) setError(String(cause)); }
+      } catch (cause) { if (!disposed) { setDocument(""); setError(String(cause)); } }
     };
     void listen<{ plugin: string; view: string }>("PluginViewChanged", ({ payload }) => {
       if (payload.plugin === plugin && payload.view === view) void refresh();
