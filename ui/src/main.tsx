@@ -58,6 +58,9 @@ async function boot() {
 
   if (isTauriApp) {
     void bootTrace("app.import.start");
+    const { startOnboardingSync } = await import("./lib/onboardingSync");
+    const stopOnboardingSync = startOnboardingSync();
+    import.meta.hot?.dispose(stopOnboardingSync);
     // Resolve the new-vs-existing install default before App can persist any workspace state.
     const { loadAdvancedFeatures } = await import("./lib/advancedFeatures");
     loadAdvancedFeatures();

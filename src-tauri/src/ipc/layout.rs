@@ -7,6 +7,37 @@ use serde::Serialize;
 use std::sync::Arc;
 use tauri::{State, WebviewWindow};
 
+#[tauri::command]
+pub async fn cmd_plugins(
+    manager: State<'_, Arc<RemoteGatewayManager>>,
+    name: Option<String>,
+    enabled: Option<bool>,
+) -> Result<Vec<crate::daemon::plugins::registry::Status>, IpcError> {
+    let client = manager.daemon_client().ok_or_else(|| IpcError::internal("Daemon unavailable"))?;
+    let request = match (name, enabled) {
+        (Some(name), Some(enabled)) => DaemonRequest::PluginSetEnabled { name, enabled },
+        (None, None) => DaemonRequest::PluginsList,
+        _ => return Err(IpcError::internal("Name and enabled must be supplied together")),
+    };
+    match client.send_request(request).await? {
+        DaemonResponse::PluginsOk { plugins } => Ok(plugins),
+        DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
+        response => Err(IpcError::internal(format!("Unexpected plugin response: {response:?}"))),
+    }
+}
+
+#[tauri::command]
+pub async fn cmd_plugin_view(
+    manager: State<'_, Arc<RemoteGatewayManager>>, plugin: String, view: String,
+) -> Result<String, IpcError> {
+    let client = manager.daemon_client().ok_or_else(|| IpcError::internal("Daemon unavailable"))?;
+    match client.send_request(DaemonRequest::PluginView { plugin, view }).await? {
+        DaemonResponse::PluginViewOk { document } => Ok(document),
+        DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
+        response => Err(IpcError::internal(format!("Unexpected view response: {response:?}"))),
+    }
+}
+
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum LayoutReply {

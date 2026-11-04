@@ -271,6 +271,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push(crate::script::CAPABILITY);
             capabilities.push("detachedPanesV1");
             capabilities.push("terminalOscEffectsV1");
+            capabilities.push("blockPluginsV1");
             capabilities.push("foregroundCommandV1");
             #[cfg(feature = "local-split-qa")]
             capabilities.push("sizeOwnershipQaV1");

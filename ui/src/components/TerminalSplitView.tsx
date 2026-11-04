@@ -20,6 +20,7 @@ import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { getEventCoordinates } from "@dnd-kit/utilities";
 import { Columns2, Copy, Rows2, X } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { PluginPane } from "./PluginPane";
 import { clearPaneFlash, usePaneFlashToken } from "../lib/paneFlash";
 import { SizeOwner } from "./SizeOwner";
 
@@ -1427,6 +1428,8 @@ const PaneLeafView = React.memo(function PaneLeafView({
                 />
               );
             }
+            case "plugin":
+              return <PluginPane plugin={content.plugin} view={content.view} visible={tabVisible && browserPanesVisible} />;
             case "browser": {
               const designFeedbackTargetsForTab = Object.values(sessions).map((candidateSession) => ({
                 sessionId: candidateSession.id,

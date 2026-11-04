@@ -124,6 +124,17 @@ Owner actions (`ferryx-cli up`, `pair`, `remote`, a daemon upgrade or shutdown) 
 grant on `*`. Only the owner may add or remove grants: `grants add` and `grants remove` from a
 pane are refused; `grants list` works anywhere.
 
+## Owner-enabled block plugins
+
+Install trusted executable manifests only in the owner's Ferryx configuration directory,
+then enable them explicitly in Settings > Terminal > Block plugins. Project-local plugins
+are never loaded. `ferryx-cli panes attach --plugin clock [--window <label>]` adds an enabled
+plugin block. `ferryx-cli api describe panes --json` publishes `pluginRequests`, the bounded
+JSON-lines stdio request subset and the required capabilities. Rendered HTML is isolated,
+scriptless and cannot access app IPC. Writes need both the manifest capability and an owner
+grant from `plugin:<name>` to the target session; ungranted writes return `FORBIDDEN` with
+`PANE_GRANT_REQUIRED`. Disabling a plugin revokes consent and reaps its process.
+
 ## Report your own status: OSC 7501
 
 Ferryx displays the program status a program in a pane reports with the OSC 7501 escape

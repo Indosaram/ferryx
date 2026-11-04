@@ -5,6 +5,7 @@ pub mod install_keys;
 pub mod machine_requests;
 pub mod mailer;
 pub mod offer_sink;
+pub mod onboarding_sync;
 pub mod origin;
 pub mod peer_record;
 pub mod service;
@@ -13,3 +14,6 @@ pub mod supervisor_lease;
 
 #[cfg(test)]
 mod onboarding_tests;
+
+#[cfg(test)]
+mod onboarding_sync_tests;

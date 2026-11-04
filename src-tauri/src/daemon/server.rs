@@ -2287,6 +2287,7 @@ pub struct DaemonServer {
     /// Cross-pane grants (`pane-grants.json`, rex todo 5), carried by the handover record.
     pub(crate) pane_grants: Arc<crate::daemon::pane_grants::PaneGrants>,
     layouts: super::layout::Registry,
+    plugins: Arc<super::plugins::registry::Registry>,
     onboarding: super::onboarding::Registry,
     /// Bearer token every connection must present before a request is dispatched. Windows has no
     /// filesystem ownership boundary on the transport, so the published port alone cannot
@@ -4080,6 +4081,10 @@ impl DaemonServer {
             .unwrap_or_else(|| session_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf());
         let layouts = Arc::new(Mutex::new(super::layout::Store::with_session_path(layout_root.clone(), session_path)));
         handover_manager.set_layouts(Arc::clone(&layouts));
+        let plugins = Arc::new(super::plugins::registry::Registry::new(
+            isolated_dir.clone().unwrap_or_else(|| get_default_session_path().parent()
+                .unwrap_or_else(|| Path::new(".")).to_path_buf()).join("plugin-approvals.json")));
+        handover_manager.set_plugin_approvals(Arc::clone(&plugins.approvals));
         let onboarding_path = super::onboarding::path(true).unwrap_or_else(|error| {
             tracing::warn!(%error, "Using daemon runtime directory for onboarding");
             layout_root.join("onboarding-daemon.json")
@@ -4258,6 +4263,7 @@ impl DaemonServer {
         Self {
             paired_hosts,
             layouts,
+            plugins,
             onboarding,
             session_router,
             handover_manager,
@@ -5355,6 +5361,9 @@ impl DaemonServer {
     /// 2026-10-07 incident had to be reconstructed from, and it could not be.
     pub async fn shutdown_gracefully(&self, reason: &str) {
         tracing::warn!(reason, "Daemon shutting down");
+        if let Err(error) = self.plugins.stop_all().await {
+            tracing::error!(%error, "Failed to stop plugins during shutdown");
+        }
         if let Err(message) = self
             .persist_remote_sessions_at(self.remote_sessions_path.clone())
             .await
@@ -6300,6 +6309,7 @@ impl DaemonServer {
                 .map_err(crate::ipc::IpcError::internal))
                 .await.map_err(|error| error.to_string())?;
         }
+        self.plugins.restore().await?;
         if handover_from.is_none() {
             self.session_service.restore_size_ownership().await?;
             self.restore_remote_sessions_at(self.remote_sessions_path.clone())
@@ -6327,6 +6337,8 @@ impl DaemonServer {
 
                 manager.adopt_recorded_layouts(&grants_legacy)
                     .map_err(crate::ipc::IpcError::internal)?;
+                manager.adopt_recorded_plugins(&grants_legacy)
+                    .map_err(crate::ipc::IpcError::internal)?;
                 manager
                     .adopt_recorded_pane_grants(&grants_legacy)
                     .map_err(crate::ipc::IpcError::internal)
@@ -6336,6 +6348,8 @@ impl DaemonServer {
                 tracing::warn!(%error, "Could not adopt the pane grants handed over at commit");
             }
         }
+
+        self.start_plugins().await?;
 
         // Both platform listeners share this call site: unix binds the socket path, every other
         // platform binds a loopback TCP port. This runs before the readiness signal below: a
@@ -6575,6 +6589,41 @@ impl DaemonServer {
     }
 
     /// Serves `PaneGrant`; the gate above already refused Add/Remove from anyone but the owner.
+    async fn start_plugins(&self) -> Result<(), String> {
+        for status in self.plugins.list().await? {
+            if !status.enabled { continue; }
+            let service = Arc::clone(&self.session_service);
+            let views = Arc::clone(&self.plugins.views);
+            let events = self.remote_event_tx.clone();
+            let name = status.manifest.name.clone();
+            self.plugins.start(status.manifest, Arc::clone(&self.pane_grants), move |request| {
+                let service = Arc::clone(&service);
+                let views = Arc::clone(&views);
+                let events = events.clone();
+                let name = name.clone();
+                async move {
+                    match request {
+                        DaemonRequest::GetCapabilities => Ok(serde_json::json!({"capabilities":["blockPluginsV1"]})),
+                        DaemonRequest::ListSessions => Ok(serde_json::json!({"sessions":service.session_router.list_sessions().await})),
+                        DaemonRequest::Write { session_id, data } => {
+                            service.write_session_input(&session_id, data).await.map_err(|e| e.to_string())?;
+                            Ok(serde_json::json!({"type":"writeOk"}))
+                        },
+                        DaemonRequest::PluginRender { view, html } => {
+                            let document = super::plugins::block_document(&name, &html)?;
+                            views.write().insert((name.clone(), view.clone()), document);
+                            let _ = events.send(DaemonRemoteEvent { event: "PluginViewChanged".into(),
+                                payload: serde_json::json!({"plugin":name,"view":view}) });
+                            Ok(serde_json::json!({"type":"renderOk"}))
+                        },
+                        _ => Err("unsupported plugin request".into()),
+                    }
+                }
+            }).await?;
+        }
+        Ok(())
+    }
+
     async fn handle_panes(&self, request: super::layout::PaneAction) -> DaemonResponse {
         let live = self.session_router.list_sessions().await.into_iter().collect();
         let layouts = Arc::clone(&self.layouts);
@@ -7733,6 +7782,62 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::Panes { request }) => self.handle_panes(request).await,
+                Ok(DaemonRequest::PluginsList) => match self.plugins.list().await {
+                    Ok(plugins) => DaemonResponse::PluginsOk { plugins },
+                    Err(error) => daemon_error(error),
+                },
+                Ok(DaemonRequest::PluginSetEnabled { name, enabled }) => {
+                    let changed_name = name.clone();
+                    match self.plugins.approve(name, enabled).await {
+                        Ok(()) => match self.start_plugins().await {
+                            Ok(()) => match self.plugins.list().await {
+                                Ok(plugins) => {
+                                    let _ = self.remote_event_tx.send(DaemonRemoteEvent { event: "PluginViewChanged".into(),
+                                        payload: serde_json::json!({"plugin":changed_name}) });
+                                    DaemonResponse::PluginsOk { plugins }
+                                },
+                                Err(error) => daemon_error(error),
+                            },
+                            Err(error) => daemon_error(error),
+                        },
+                        Err(error) => daemon_error(error),
+                    }
+                },
+                Ok(DaemonRequest::PluginRender { .. }) => daemon_error("Plugin render requires stdio identity"),
+                Ok(DaemonRequest::PluginView { plugin, view }) => {
+                    match self.plugins.views.read().get(&(plugin, view)).cloned() {
+                        Some(document) => DaemonResponse::PluginViewOk { document },
+                        None => daemon_error("Plugin view unavailable"),
+                    }
+                },
+                Ok(DaemonRequest::PluginAttach { plugin, window }) => {
+                    let enabled = self.plugins.list().await.map(|list| list.into_iter()
+                        .any(|s| s.enabled && s.manifest.name == plugin));
+                    match enabled {
+                        Ok(true) => {
+                            let layouts = Arc::clone(&self.layouts);
+                            let window = window.unwrap_or_else(|| "main".into());
+                            let changed_window = window.clone();
+                            match crate::ipc::run_blocking(move || {
+                                let mut store = layouts.lock();
+                                let revision = store.get(&window).map_err(crate::ipc::IpcError::internal)?.revision;
+                                store.apply(&window, revision, super::layout::Intent::AddTabWithSession {
+                                    tab_id: uuid::Uuid::new_v4().to_string(), label: plugin.clone(),
+                                    content: super::layout::Content::Plugin { plugin, view: "main".into() }, activate: true,
+                                }).map_err(|e| crate::ipc::IpcError::internal(format!("{e:?}")))
+                            }).await {
+                                Ok(view) => {
+                                    let _ = self.remote_event_tx.send(DaemonRemoteEvent { event: "LayoutChanged".into(),
+                                        payload: serde_json::json!({"window":changed_window,"revision":view.revision}) });
+                                    DaemonResponse::LayoutOk { view }
+                                },
+                                Err(error) => daemon_error(error.to_string()),
+                            }
+                        },
+                        Ok(false) => daemon_error("Plugin is not enabled"),
+                        Err(error) => daemon_error(error),
+                    }
+                },
                 Ok(request @ (DaemonRequest::OnboardingGet | DaemonRequest::OnboardingSet { .. })) => {
                     let registry = Arc::clone(&self.onboarding);
                     match crate::ipc::run_blocking(move || {
@@ -8206,6 +8311,7 @@ impl DaemonServer {
                     capabilities.push(crate::script::CAPABILITY.into());
                     capabilities.push("detachedPanesV1".into());
                     capabilities.push("terminalOscEffectsV1".into());
+                    capabilities.push("blockPluginsV1".into());
                     capabilities.push("foregroundCommandV1".into());
                     #[cfg(feature = "local-split-qa")]
                     capabilities.push("sizeOwnershipQaV1".into());
@@ -8849,6 +8955,10 @@ impl DaemonServer {
                     reason: "Session transfer unsupported on non-Unix".to_string(),
                 },
                 Ok(DaemonRequest::CommitHandover { .. }) => {
+                    if let Err(error) = self.plugins.stop_all().await {
+                        tracing::error!(%error, "Plugin teardown failed before handover commit");
+                        break;
+                    }
                     let manager = Arc::clone(&self.handover_manager);
                     let service = Arc::clone(&self.terminal_service);
                     // Injected reply loss (tests / QA): before the decision is recorded the
@@ -8856,6 +8966,9 @@ impl DaemonServer {
                     let fault = manager.commit_fault();
                     if fault == Some(super::handover::CommitFault::DropReplyBeforeRecord) {
                         tracing::warn!("Injected fault: CommitHandoverOk dropped before the decision");
+                        if let Err(error) = self.start_plugins().await {
+                            tracing::error!(%error, "Plugin resume failed before unrecorded handover");
+                        }
                         break;
                     }
                     match crate::ipc::run_blocking(move || {
@@ -8872,7 +8985,11 @@ impl DaemonServer {
                             crate::daemon::qa_producers::note_authority_stage("predecessor-committed", &self.handover_manager).await;
                             DaemonResponse::CommitHandoverOk
                         }
-                        Err(e) => handover_failure_response(None, e.to_string()),
+                        Err(e) => {
+                            // An I/O error may follow a durable decision. Do not restart
+                            // here: only a confirmed abort can safely resume the predecessor.
+                            handover_failure_response(None, e.to_string())
+                        },
                     }
                 }
                 Ok(DaemonRequest::AbortHandover) => {
@@ -8885,6 +9002,9 @@ impl DaemonServer {
                     }).await {
                         Ok(()) => {
                             self.handover_manager.clear_transferred_locals();
+                            if let Err(error) = self.start_plugins().await {
+                                tracing::error!(%error, "Plugin resume failed after confirmed handover abort");
+                            }
                             #[cfg(all(unix, feature = "local-split-qa", feature = "native-terminal"))]
                             crate::daemon::qa_producers::note_authority_stage("predecessor-aborted", &self.handover_manager).await;
                             let resumed = self
@@ -9695,6 +9815,10 @@ impl DaemonServer {
                 }
                 // The successor waits for our instance lock, so it must be running before we
                 // release it. No session is live here, so the exit cannot cost a terminal.
+                if let Err(error) = self.plugins.stop_all().await {
+                    tracing::error!(%error, "Idle daemon restart aborted: plugin teardown failed");
+                    return DaemonResponse::UpgradeUnsupported;
+                }
                 let mut successor = std::process::Command::new(&exe);
                 successor
                     .arg("--daemon")
@@ -9719,6 +9843,9 @@ impl DaemonServer {
                     }
                     Err(error) => {
                         tracing::warn!(%error, live_sessions, "Idle daemon restart failed to spawn a successor");
+                        if let Err(error) = self.start_plugins().await {
+                            tracing::error!(%error, "Failed to resume plugins after idle restart failure");
+                        }
                         DaemonResponse::UpgradeUnsupported
                     }
                 }

@@ -48,6 +48,7 @@ export type OnboardingState = {
   version: 1;
   completedSteps: OnboardingStepId[];
   dismissed: boolean;
+  updatedAt?: number;
 };
 
 export type PermissionKey = "fullDiskAccess" | "accessibility" | "notifications";
@@ -124,6 +125,8 @@ export function loadOnboardingState(
           version: 1,
           completedSteps: filteredSteps,
           dismissed: Boolean(parsed.dismissed),
+          ...(Number.isSafeInteger(parsed.updatedAt) && parsed.updatedAt >= 0
+            ? { updatedAt: parsed.updatedAt } : {}),
         };
       } else {
         isAbsent = true;
@@ -165,6 +168,9 @@ export function saveOnboardingState(
   if (!storage) return;
   try {
     storage.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(state));
+    if (storage === browserStorage()) {
+      window.dispatchEvent(new Event("ferryx:onboarding-changed"));
+    }
     if (storage === browserStorage() && typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
       persistence = persistence.then(async () => {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -205,6 +211,7 @@ export function markOnboardingStepsCompleted(
   const next: OnboardingState = {
     ...current,
     completedSteps,
+    updatedAt: Math.floor(Date.now() / 1000),
   };
   saveOnboardingState(next, storage);
   return next;
@@ -217,6 +224,7 @@ export function dismissOnboarding(
   const next: OnboardingState = {
     ...current,
     dismissed: true,
+    updatedAt: Math.floor(Date.now() / 1000),
   };
   saveOnboardingState(next, storage);
   return next;

@@ -7,6 +7,21 @@ use super::json_store_path;
 
 pub const LEGACY_JSON_MIGRATION_KEY: &str = "legacy_json_import";
 
+pub fn migrate_to_v4(conn: &mut Connection) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| format!("Begin onboarding migration: {e}"))?;
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS account_onboarding (
+            user_id TEXT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+            completed_steps TEXT NOT NULL,
+            dismissed INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );",
+    ).map_err(|e| format!("Create account onboarding: {e}"))?;
+    tx.pragma_update(None, "user_version", 4)
+        .map_err(|e| format!("Set onboarding schema version: {e}"))?;
+    tx.commit().map_err(|e| format!("Commit onboarding migration: {e}"))
+}
+
 pub fn is_legacy_migration_applied(conn: &Connection) -> Result<bool, String> {
     let mut stmt = conn
         .prepare("SELECT 1 FROM schema_migrations WHERE migration_key = ?1")
