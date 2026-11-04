@@ -174,6 +174,23 @@ mod tests {
     }
 
     #[test]
+    fn active_checkout_and_nested_surface_metadata_are_migrated() {
+        let session = serde_json::json!({"activeWorkspaceId":"w","workspaces":{"w":{
+            "activeWorktreePath":"/checkout", "layout":{"tabs":[
+                {"id":"browser","kind":"browser","browser":{"browserId":"surface","url":"https://example.org","profileId":"profile"}},
+                {"id":"file","kind":"file","file":{"path":"/file","backendSessionId":"pty","workspaceId":"w","previewId":"preview"}},
+                {"id":"changes","kind":"changes","changes":{"workspaceId":"w","worktreePath":"/checkout","worktree":null}}
+            ]}
+        }}});
+        let (layout, _) = convert(&session).unwrap();
+        assert_eq!(layout.scope.as_deref(), Some(scope_key("w", Some("/checkout")).as_str()));
+        let json = serde_json::to_value(layout).unwrap();
+        assert_eq!(json["tabs"][0]["paneTree"]["content"]["browserId"], "surface");
+        assert_eq!(json["tabs"][1]["paneTree"]["content"]["previewId"], "preview");
+        assert_eq!(json["tabs"][2]["paneTree"]["content"]["worktreePath"], "/checkout");
+    }
+
+    #[test]
     fn historical_visual_ids_are_scoped_by_workspace_worktree_and_tab() {
         let session = serde_json::json!({"activeWorkspaceId":"w","workspaces":{
             "w":{"layout":repeated_ids(),"worktreeLayouts":{"/parked":repeated_ids()}},
