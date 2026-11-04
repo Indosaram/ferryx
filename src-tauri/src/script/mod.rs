@@ -69,6 +69,8 @@ fn load(registry: &Registry, host: &tokio::runtime::Handle, effects: control::Ho
     let effect_host = host.clone();
     let effect_identity = identity.clone();
     let effect_sequence = std::cell::Cell::new(0_u64);
+    let initializing = std::rc::Rc::new(std::cell::Cell::new(true));
+    let effect_initializing = initializing.clone();
     let vm = vm::Vm::with_host(identity, std::rc::Rc::new(now), move |message, startup| {
         let id = format!("{log_identity}/init-log/{}", sequence.get());
         sequence.set(sequence.get() + 1);
@@ -83,7 +85,7 @@ fn load(registry: &Registry, host: &tokio::runtime::Handle, effects: control::Ho
         let id = format!("{effect_identity}/effect/{}", effect_sequence.get());
         effect_sequence.set(effect_sequence.get() + 1);
         let registry = effect_registry.clone();
-        if name != "read" && !blocking(&effect_host, move || registry.store.lock().claim(&id, u64::MAX, now()))? {
+        if effect_initializing.get() && name != "read" && !blocking(&effect_host, move || registry.store.lock().claim(&id, u64::MAX, now()))? {
             return Ok(serde_json::Value::Null);
         }
         effects(name, value)
@@ -91,6 +93,7 @@ fn load(registry: &Registry, host: &tokio::runtime::Handle, effects: control::Ho
     {
         let _execution = registry.execution.lock();
         vm.load(&source).map_err(|error| error.to_string())?;
+        initializing.set(false);
     }
     Ok(Some(vm))
 }
