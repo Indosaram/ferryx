@@ -188,6 +188,21 @@ fn prompt_changed_event(frame: &str) -> Option<DaemonRemoteEvent> {
 mod prompt_changed_event_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn osc_effects_notify_reaches_existing_desktop_stream() {
+        let server = DaemonServer::new();
+        let mut desktop = server.remote_event_tx.subscribe();
+        let hub = server.terminal_service.output_hub();
+        let _output = hub.register_session("osc-notify-pane");
+        assert!(hub.enable_program_status("osc-notify-pane"));
+        hub.publish("osc-notify-pane", b"\x1b]777;notify;Build;done\x07".to_vec());
+        let event = desktop.try_recv().expect("synchronous OSC publication");
+        assert_eq!(event.event, "TerminalOscEffect");
+        assert_eq!(event.payload, serde_json::json!({
+            "sessionId": "osc-notify-pane", "kind": {"type": "Notify", "title": "Build", "body": "done"}
+        }));
+    }
+
     #[test]
     fn a_malformed_prompt_frame_is_not_relayed_as_null() {
         assert!(prompt_changed_event("{not json").is_none());
@@ -8101,7 +8116,9 @@ impl DaemonServer {
                         let path = get_persistent_lock_path()
                             .and_then(|path| path.parent().map(|p| p.join("terminal-osc52-write.json")))
                             .ok_or_else(|| crate::ipc::IpcError::internal("persistent data directory unavailable"))?;
-                        let temp = path.with_extension("json.tmp");
+                        let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+                        fs::create_dir_all(path.parent().ok_or_else(|| crate::ipc::IpcError::internal("invalid preference path"))?)
+                            .map_err(crate::ipc::IpcError::internal)?;
                         fs::write(&temp, if enabled { b"true".as_slice() } else { b"false".as_slice() })
                             .and_then(|()| fs::rename(&temp, &path))
                             .map_err(crate::ipc::IpcError::internal)?;
