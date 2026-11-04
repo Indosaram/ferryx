@@ -356,6 +356,7 @@ fn new_windows_are_never_opened_natively() {
 }
 
 #[test]
+#[cfg(feature = "desktop")]
 fn fallback_reports_unavailable_without_platform_api() {
     let app = tauri::test::mock_app();
     let webview = tauri::WebviewWindowBuilder::new(&app, "bridge-fallback", Default::default())

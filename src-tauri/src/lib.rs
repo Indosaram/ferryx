@@ -3198,7 +3198,7 @@ pub fn run() {
 /// managed as the app's daemon client, exactly as `create_app` manages the real one; it records
 /// every request it receives on any connection. After the handler runs, a control Ping through
 /// the same client proves the fake daemon is reachable, so an empty pre-ping log is meaningful.
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "desktop"))]
 mod quit_path_tests {
     use super::*;
     use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
