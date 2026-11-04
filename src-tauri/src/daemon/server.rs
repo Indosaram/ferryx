@@ -8916,6 +8916,9 @@ impl DaemonServer {
                     let fault = manager.commit_fault();
                     if fault == Some(super::handover::CommitFault::DropReplyBeforeRecord) {
                         tracing::warn!("Injected fault: CommitHandoverOk dropped before the decision");
+                        if let Err(error) = self.start_plugins().await {
+                            tracing::error!(%error, "Plugin resume failed before unrecorded handover");
+                        }
                         break;
                     }
                     match crate::ipc::run_blocking(move || {
