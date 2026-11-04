@@ -3497,8 +3497,6 @@ mod qa_split_producers {
         }
 
         fn session_details() -> DaemonSessionDetails {
-            foreground_command: None,
-            agent: None,
             let mut details = DaemonSessionDetails::new(crate::daemon::protocol::DaemonSessionDetailsParams {
                 session_id: "session-1".into(),
                 workspace_id: Some("ws-1".into()),
