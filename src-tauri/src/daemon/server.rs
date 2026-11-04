@@ -5236,16 +5236,21 @@ impl DaemonServer {
                                     error.to_string(),
                                 )),
                             };
-                            (id, observation)
+                            let command = snapshot.as_ref().ok()
+                                .and_then(|snapshot| snapshot.foreground_command(&session));
+                            (id, observation, command)
                         })
                         .collect::<Vec<_>>())
                 })
                 .await;
                 match observations {
                     Ok(observations) => {
-                        for (id, observation) in observations {
+                        for (id, observation, command) in observations {
                             match observation {
                                 Ok(observed) => {
+                                    if observed.is_some() {
+                                        server.agent_states.publish_foreground_command(&id, command);
+                                    }
                                     let observation = observed.map(|observed| observed.foreground);
                                     let alone_after = observed
                                         .filter(|observed| observed.shell_alone)
@@ -9980,7 +9985,9 @@ impl DaemonServer {
             .and_then(|subscription| subscription.snapshot.as_ref())
         {
             let msg = DaemonStreamMessage::AgentState {
-                foreground_command: None,
+                foreground_command: agent_state_rx.as_ref()
+                    .and_then(|subscription| subscription.foreground_command(&session_id))
+                    .map(Cow::Owned),
                 session_id: Cow::Borrowed(&snapshot.session_id),
                 state: Cow::Borrowed(&snapshot.state),
                 agent: snapshot.agent.as_deref().map(Cow::Borrowed),
@@ -10044,7 +10051,7 @@ impl DaemonServer {
                             match report {
                                 Ok(report) if report.state.session_id == session_id => {
                                     let msg = DaemonStreamMessage::AgentState {
-                                        foreground_command: None,
+                                        foreground_command: report.foreground_command.map(Cow::Owned),
                                         session_id: Cow::Borrowed(&session_id),
                                         state: Cow::Borrowed(&report.state.state),
                                         agent: report.state.agent.as_deref().map(Cow::Borrowed),
@@ -10073,7 +10080,7 @@ impl DaemonServer {
                                     if let Some(subscription) = agent_state_rx.as_mut() {
                                         if let Some(current) = subscription.resynchronize(&session_id) {
                                             let msg = DaemonStreamMessage::AgentState {
-                                                foreground_command: None,
+                                                foreground_command: subscription.foreground_command(&session_id).map(Cow::Owned),
                                                 session_id: Cow::Borrowed(&session_id),
                                                 state: Cow::Borrowed(&current.state),
                                                 agent: current.agent.as_deref().map(Cow::Borrowed),
