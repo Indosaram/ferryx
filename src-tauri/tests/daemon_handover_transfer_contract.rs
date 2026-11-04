@@ -811,6 +811,7 @@ async fn a_session_exported_to_a_slow_successor_survives_and_returns_on_abort() 
     let transfer_resp = client1
         .send_request(&DaemonRequest::TransferSessions {
             handover_socket_path: handover_sock_path.to_string_lossy().into_owned(),
+            session_cont: false,
         })
         .await
         .expect("TransferSessions request");
@@ -1038,6 +1039,7 @@ async fn before_commit_hello_names_the_predecessor_and_the_candidate_accepts_not
     match client1
         .send_request(&DaemonRequest::TransferSessions {
             handover_socket_path: handover_sock_path.to_string_lossy().into_owned(),
+            session_cont: true,
         })
         .await
         .expect("TransferSessions")
@@ -1752,6 +1754,7 @@ async fn deliver_one_session_short(
     });
     let request = DaemonRequest::TransferSessions {
         handover_socket_path: own_path.to_string_lossy().into_owned(),
+        session_cont: false,
     };
     let answer = forward_line(up_write, up_lines, &serde_json::to_string(&request).unwrap()).await;
     match serde_json::from_str::<DaemonResponse>(&answer).expect("TransferSessions answer") {
@@ -1802,7 +1805,7 @@ async fn forward_lossy_connection(
     while let Ok(Some(line)) = lines.next_line().await {
         let request: DaemonRequest = serde_json::from_str(&line).expect("successor request");
         let reply = match request {
-            DaemonRequest::TransferSessions { handover_socket_path } => {
+            DaemonRequest::TransferSessions { handover_socket_path, .. } => {
                 seen.lock().unwrap().push("transferSessions".into());
                 deliver_one_session_short(
                     &mut up_write,
