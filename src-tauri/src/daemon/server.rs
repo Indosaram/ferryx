@@ -8341,6 +8341,8 @@ impl DaemonServer {
                     capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_LAUNCH_CAPABILITY.into());
                     capabilities.push(crate::daemon::pane_grants::PANE_GRANTS_CAPABILITY.into());
+                    #[cfg(windows)]
+                    capabilities.push("windowsOwnerPipesV1".into());
                     capabilities.push("screenHashV1".into());
                     capabilities.push("scrollbackBudgetV1".into());
                     capabilities.push("sizeOwnershipV1".into());
