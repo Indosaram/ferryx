@@ -200,3 +200,70 @@ export function hydrateLayout(view: LayoutView, state: WorkspaceState, scope = l
   result.tabGroupLayout = group(saved.tabGroupLayout);
   return normalizeLayout(result);
 }
+
+export function intentForAction(sync: LayoutSync, action: WorkspaceAction, before: WorkspaceState, after: WorkspaceState): LayoutIntent | null {
+  const scope = layoutScope(before);
+  const node = (tab: string, leaf: string) => sync.nodeId(scope, tab, leaf);
+  const content = (tab: string, leaf?: string): DaemonContent => {
+    const panes = after.layout.layoutsByTabId[tab];
+    const id = leaf ?? panes.activeLeafId;
+    const pane = panes.contentsByLeafId?.[id] ?? { kind: "terminal" as const, sessionId: panes.sessionIdsByLeafId[id] };
+    return daemonContent(pane, after);
+  };
+  switch (action.type) {
+    case "ADD_TAB_WITH_SESSION": return { type: action.type, tabId: action.tab.id,
+      label: action.tab.label, activate: action.activate !== false, content: content(action.tab.id) };
+    case "CLOSE_TAB": case "ACTIVATE_TAB": case "REORDER_TAB": case "RENAME_TAB":
+    case "SET_TAB_PINNED": case "SET_PANE_RATIO": case "SET_TAB_GROUP_RATIO":
+    case "EQUALIZE_TAB_GROUP_RUN": case "EQUALIZE_PANE_RUN": case "EQUALIZE_PANES":
+      return { ...action };
+    case "SPLIT_PANE": return { type: action.type, tabId: action.tabId,
+      targetNodeId: node(action.tabId, action.targetLeafId ?? before.layout.layoutsByTabId[action.tabId].activeLeafId),
+      dir: action.direction, first: action.position === "first", content: content(action.tabId, action.newLeafId) };
+    case "MOVE_TAB_TO_GROUP": return { ...action, targetIndex: action.targetIndex ?? Number.MAX_SAFE_INTEGER };
+    case "MOVE_TAB_TO_SPLIT": return { type: action.type, sourceTabId: action.sourceTabId,
+      targetGroupId: action.targetGroupId, dir: action.direction, first: action.position === "first" };
+    case "MOVE_TAB_TO_PANE_SPLIT": return { type: action.type, sourceTabId: action.sourceTabId,
+      targetTabId: action.targetTabId, targetNodeId: node(action.targetTabId, action.targetLeafId),
+      dir: action.direction, first: action.position === "first" };
+    case "DETACH_PANE_TO_TAB": return { type: action.type, sourceTabId: action.sourceTabId,
+      nodeId: node(action.sourceTabId, action.leafId), tabId: action.newTab.id, label: action.newTab.label,
+      targetGroupId: action.targetGroupId ?? before.layout.focusedGroupId ?? "main" };
+    case "CLOSE_PANE": case "FOCUS_PANE": case "TOGGLE_PANE_EXPANDED":
+      return { type: action.type, tabId: action.tabId, nodeId: node(action.tabId, action.leafId) };
+    case "SWAP_PANES": return { type: action.type, tabId: action.tabId,
+      sourceNodeId: node(action.tabId, action.sourceLeafId), targetNodeId: node(action.tabId, action.targetLeafId) };
+    case "UPDATE_FILE_TAB": {
+      const pane = before.layout.layoutsByTabId[action.tabId];
+      return { type: action.type, tabId: action.tabId, nodeId: node(action.tabId, pane.activeLeafId),
+        ...content(action.tabId), line: action.line, col: action.col };
+    }
+    case "UPDATE_BROWSER_TAB": {
+      if (action.updates.url === undefined) return null;
+      const pane = before.layout.layoutsByTabId[action.tabId];
+      return { type: action.type, tabId: action.tabId, nodeId: node(action.tabId, pane.activeLeafId), url: action.updates.url };
+    }
+    default: return null;
+  }
+}
+
+/** The protocol currently addresses only the root layout. Never apply a parked
+ * workspace gesture to that root merely because tab ids happen to coincide. */
+export function ownsDaemonRoot(state: WorkspaceState, view = layoutSync.current()): boolean {
+  if (!view) return false;
+  const parked = view.layout.parkedLayouts ?? {};
+  return !Object.hasOwn(parked, layoutScope(state));
+}
+
+export function rehydrateWorkspace(state: WorkspaceState, view = layoutSync.current()): WorkspaceState {
+  if (!view) return state;
+  const saved = view.layout.parkedLayouts?.[layoutScope(state)] ?? view.layout;
+  const layout = hydrateLayout({ ...view, layout: saved }, state);
+  const worktreeLayouts = { ...state.worktreeLayouts };
+  for (const [scope, parked] of Object.entries(saved.parkedLayouts ?? {})) {
+    const [workspace, path] = JSON.parse(scope) as [string, string | null];
+    if (workspace !== state.workspaceId || path === null) continue;
+    worktreeLayouts[path] = hydrateLayout({ ...view, layout: parked }, { ...state, layout: worktreeLayouts[path] ?? state.layout }, scope);
+  }
+  return { ...state, layout, worktreeLayouts };
+}
