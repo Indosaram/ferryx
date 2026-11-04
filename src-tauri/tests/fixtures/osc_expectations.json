@@ -1,5 +1,5 @@
 [
-  {"name":"cwd", "input":"\u001b]7;file://shell-host/tmp\u001b\\", "cwd":"/tmp", "events":[]},
+  {"name":"cwd", "input":"\u001b]7;file://shell-host/tmp\u001b\\", "cwd":"/tmp", "windowsInput":"\u001b]7;file://shell-host/C:/Temp\u001b\\", "windowsCwd":"C:\\Temp", "events":[]},
   {"name":"notify9", "input":"\u001b]9;done\u0007", "events":[{"type":"Notify","title":"","body":"done"}]},
   {"name":"progress9", "input":"\u001b]9;4;1;50\u0007", "events":[]},
   {"name":"notify777", "input":"\u001b]777;notify;Build;done\u001b\\", "events":[{"type":"Notify","title":"Build","body":"done"}]},
