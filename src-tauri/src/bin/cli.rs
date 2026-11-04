@@ -38,6 +38,9 @@ fn main() {
     if group == Some("api") {
         std::process::exit(run_api_cli(&args));
     }
+    if group == Some("script") {
+        std::process::exit(ferryx_lib::script::run_cli(&args));
+    }
     if group == Some("integrations") {
         std::process::exit(ferryx_lib::cli::integrations::run_integrations_cli(&args));
     }
