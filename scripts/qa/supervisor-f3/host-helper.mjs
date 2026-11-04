@@ -285,10 +285,24 @@ async function openGuiBundle({ profile, bundleId, agent, specPath }) {
   return { bundle, bundleId, opened: true };
 }
 
+/**
+ * The live environment of a process this user owns, as `KEY=VALUE` entries: /proc/<pid>/environ
+ * on Linux, `ps -E` on macOS (entries split on spaces, so only space-free values compare). Windows
+ * offers no unprivileged read; it reports unchecked.
+ */
+async function processEnv({ pid }) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw fail('PID_REFUSED', `not a pid: ${pid}`);
+  if (WIN) return { checked: false, reason: 'no unprivileged environment read on Windows', entries: [] };
+  if (!MAC) return { checked: true, entries: readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').filter(Boolean) };
+  const out = (await run('/bin/ps', ['-E', '-ww', '-o', 'command=', '-p', String(pid)])).trim();
+  if (!out) throw fail('PROCESS_GONE', `pid ${pid} is not running`);
+  return { checked: true, entries: out.split(' ').filter((word) => /^[A-Z_][A-Z0-9_]*=/.test(word)) };
+}
+
 const METHODS = {
   identity, daemon, 'write-wrappers': writeWrappers, 'spawn-owned': spawnOwned, 'await-exit': awaitExit,
   cleanup, 'read-b64': readB64, 'list-files': listFiles, 'remove-owned-dir': removeOwnedDir, 'free-port': freePort,
-  'serve-status': serveStatus, 'serve-add': serveAdd, 'serve-remove': serveRemove, 'open-gui-bundle': openGuiBundle,
+  'serve-status': serveStatus, 'serve-add': serveAdd, 'serve-remove': serveRemove, 'open-gui-bundle': openGuiBundle, 'process-env': processEnv,
 };
 
 if (process.argv.includes('--rpc')) {

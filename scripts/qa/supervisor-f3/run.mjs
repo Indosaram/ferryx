@@ -6,10 +6,16 @@
 //   bun scripts/qa/supervisor-f3/run.mjs --config <f3.json> --revision <40-hex> --evidence <new dir>
 //   bun scripts/qa/supervisor-f3/run.mjs --validate <evidence dir>
 //
+// --smoke proves the transport only: the session host comes up and each desktop lane runs to
+// its GUI launch, the live GUI env check and one MahoRD frame, then stops. A smoke run is
+// recorded as such and never passes.
+//
 // Topology: the session host (`sessionHost`, session.mjs; omarchy on Linux by default) runs the
 // run-owned relay with its embedded account service behind a run-owned `tailscale serve` HTTPS
 // endpoint, and an isolated candidate daemon holding the fixture panes. The macOS and Windows
 // desktops join the same account through that relay and the iPhone signs in to it in Safari.
+// `config.lanes` narrows the run (an all-local run: one machine is control host, session host
+// and desktop, relay on loopback); every lane left out is blocked, so F3 cannot pass on it.
 //
 // Exit: 0 pass, 1 fail, 2 blocked, 5 usage, 130 interrupted. Evidence: <evidence>/run.json,
 // verdict.json, manifest.json, <lane>/**. --validate re-reads every artifact from disk.
@@ -19,12 +25,12 @@ import { join, resolve } from 'node:path';
 import { EXIT, LANES, RUN_SCHEMA, scenariosForLane } from './contract.mjs';
 import { runDesktopLane } from './desktop-lane.mjs';
 import { runIphoneLane } from './iphone-lane.mjs';
-import { configProblems } from './seams.mjs';
+import { configProblems, runLanes as selectedLanes } from './seams.mjs';
 import { startSession } from './session.mjs';
 import { LaneBlocked, markNotRun, newLane } from './steps.mjs';
 import { controlIdentity, manifestFiles, verifyEvidence } from './verify.mjs';
 
-const USAGE = 'usage: run.mjs --config <f3.json> --revision <40-hex> --evidence <new dir> | --validate <evidence dir>';
+const USAGE = 'usage: run.mjs --config <f3.json> --revision <40-hex> --evidence <new dir> [--smoke] | --validate <evidence dir>';
 function parseArgs(argv) {
   const opts = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -34,6 +40,7 @@ function parseArgs(argv) {
       case '--revision': opts.revision = value(); break;
       case '--evidence': opts.evidence = value(); break;
       case '--validate': opts.validate = value(); break;
+      case '--smoke': opts.smoke = true; break;
       default: throw new Error(`unknown argument ${argv[i]}`);
     }
   }
@@ -75,10 +82,14 @@ async function runLanes({ config, run, lanes, session, shared, signal }) {
     else session.receipt.failure = { code: error.code ?? 'SESSION_HOST', detail: String(error.detail ?? error.stack ?? error).slice(0, 4000) };
     return;
   }
+  const inRun = (name) => run.lanes.includes(name);
+  // A lane left out never records the facts the others wait for; release those gates now.
+  for (const name of ['macos', 'windows']) if (!inRun(name)) shared.desktopDone(name);
+  if (!inRun('iphone')) shared.phoneAnswersSettled();
   await Promise.allSettled([
-    runDesktopLane(lanes.windows, { host: config.hosts.windows, run, shared, signal }),
-    runDesktopLane(lanes.macos, { host: config.hosts.macos, run, shared, signal }),
-    runIphoneLane(lanes.iphone, { device: config.iphone, run, shared }),
+    inRun('windows') && runDesktopLane(lanes.windows, { host: config.hosts.windows, run, shared, signal }),
+    inRun('macos') && runDesktopLane(lanes.macos, { host: config.hosts.macos, run, shared, signal }),
+    inRun('iphone') && runIphoneLane(lanes.iphone, { device: config.iphone, run, shared }),
   ]);
 }
 
@@ -97,7 +108,8 @@ async function main() {
   const controller = new AbortController();
   process.on('SIGINT', () => controller.abort(new Error('interrupted')));
   const runId = `f3-${new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)}-${randomUUID().slice(0, 6)}`;
-  const run = { runId, revision: opts.revision, evidenceDir, signal: controller.signal, mahordExecutable: config.mahordExecutable, tesseract: config.tesseract, sshExecutable: config.sshExecutable };
+  const run = { runId, revision: opts.revision, evidenceDir, signal: controller.signal, mahordExecutable: config.mahordExecutable, tesseract: config.tesseract, sshExecutable: config.sshExecutable,
+    lanes: selectedLanes(config), smoke: opts.smoke === true };
   const lanes = Object.fromEntries(LANES.map((name) => [name, newLane(name, evidenceDir)]));
   const startedAt = new Date().toISOString();
   const session = newLane('session', evidenceDir);
@@ -114,17 +126,22 @@ async function main() {
   const cause = session.receipt.blocked ?? session.receipt.failure;
   for (const name of LANES) {
     if (lanes[name].receipt.steps.length > 0) continue;
+    if (!run.lanes.includes(name)) {
+      lanes[name].receipt.blocked = { code: 'LANE_NOT_IN_RUN', detail: `config.lanes ${JSON.stringify(run.lanes)} leaves out ${name}`, at: new Date().toISOString() };
+      markNotRun(lanes[name], scenariosForLane(name), 'LANE_NOT_IN_RUN');
+      continue;
+    }
     lanes[name].receipt.blocked = { code: 'SESSION_HOST_UNAVAILABLE', detail: `the session host ${config.sessionHost.hostId} did not provide the relay, daemon and fixture panes: ${JSON.stringify(cause)}`, at: new Date().toISOString() };
     markNotRun(lanes[name], scenariosForLane(name), 'SESSION_HOST_UNAVAILABLE');
   }
-  const receipt = { schema: RUN_SCHEMA, runId, revision: opts.revision, startedAt, finishedAt: new Date().toISOString(), config: opts.config, control, error: runError,
+  const receipt = { schema: RUN_SCHEMA, runId, revision: opts.revision, smoke: run.smoke, lanesInRun: run.lanes, startedAt, finishedAt: new Date().toISOString(), config: opts.config, control, error: runError,
     session: { ...session.receipt, finishedAt: new Date().toISOString() },
     lanes: Object.fromEntries(LANES.map((name) => [name, { ...lanes[name].receipt, finishedAt: new Date().toISOString() }])), cross: crossChecks(shared, lanes) };
   writeFileSync(join(evidenceDir, 'run.json'), `${JSON.stringify(receipt, null, 2)}\n`);
   const verdict = verifyEvidence(evidenceDir, { withManifest: false });
   writeFileSync(join(evidenceDir, 'verdict.json'), `${JSON.stringify(verdict, null, 2)}\n`);
   writeFileSync(join(evidenceDir, 'manifest.json'), `${JSON.stringify({ runId, revision: opts.revision, files: manifestFiles(evidenceDir) }, null, 2)}\n`);
-  process.stdout.write(`${JSON.stringify({ f3: { runId, verdict: verdict.verdict, exitCode: verdict.exitCode, evidence: evidenceDir } })}\n`);
+  process.stdout.write(`${JSON.stringify({ f3: { runId, smoke: run.smoke, verdict: verdict.verdict, exitCode: verdict.exitCode, evidence: evidenceDir } })}\n`);
   return controller.signal.aborted ? EXIT.INTERRUPTED : verdict.exitCode;
 }
 

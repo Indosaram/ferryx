@@ -1,6 +1,7 @@
 // Pure seams of the F3 run, kept apart so the harness self-tests exercise them with no host,
 // device or daemon: daemon reply checking, the run-owned gateway port, the iPhone page-script
 // channel, and the checks behind the session-row, rules-line and phone-answer steps.
+import { LANES } from './contract.mjs';
 import { StepFailed } from './steps.mjs';
 
 /**
@@ -161,39 +162,58 @@ const REQUIRED_SESSION_HOST = ['hostId', 'platform', 'sshDestination', 'bun', 'h
 const isPort = (value) => Number.isSafeInteger(value) && value >= 1024 && value <= 65535;
 
 /**
+ * The lanes this run drives: `config.lanes`, or all of them. A lane left out is recorded
+ * blocked (LANE_NOT_IN_RUN), so a partial run can never pass F3.
+ */
+export const runLanes = (config) => config?.lanes ?? [...LANES];
+
+/**
  * Every problem of an F3 config, empty when it can run. The session host (relay, fixture daemon,
  * fixture panes) is its own block: Linux behind `tailscale serve` (`relayFront.kind`
- * `tailscale-serve`: public HTTPS port -> loopback relay port) or any host serving an operator
- * PEM itself (`tls`). Its hostId names its machine token, so it must differ from the desktops'.
+ * `tailscale-serve`: public HTTPS port -> loopback relay port), any host serving an operator
+ * PEM itself (`tls`), or `loopback`: an all-local run where the control host, the session host
+ * and every desktop in the run are one machine (`sshDestination` "local") and the relay is
+ * plain HTTP on 127.0.0.1, which only a run without the iPhone may use (iOS push needs HTTPS).
+ * Its hostId names its machine token, so it must differ from the desktops'.
  */
 export function configProblems(config) {
+  const lanes = runLanes(config);
+  if (!Array.isArray(lanes) || lanes.length === 0 || new Set(lanes).size !== lanes.length || lanes.some((name) => !LANES.includes(name))) {
+    return [`lanes ${JSON.stringify(config?.lanes)} must be distinct names from ${LANES.join(', ')}`];
+  }
+  const desktops = ['macos', 'windows'].filter((name) => lanes.includes(name));
   const missing = [];
-  for (const name of ['macos', 'windows']) for (const key of REQUIRED_DESKTOP) if (config?.hosts?.[name]?.[key] === undefined) missing.push(`hosts.${name}.${key}`);
+  for (const name of desktops) for (const key of REQUIRED_DESKTOP) if (config?.hosts?.[name]?.[key] === undefined) missing.push(`hosts.${name}.${key}`);
   for (const key of REQUIRED_SESSION_HOST) if (config?.sessionHost?.[key] === undefined) missing.push(`sessionHost.${key}`);
-  for (const key of ['serial', 'driverEndpoint']) if (!config?.iphone?.[key]) missing.push(`iphone.${key}`);
+  if (lanes.includes('iphone')) for (const key of ['serial', 'driverEndpoint']) if (!config?.iphone?.[key]) missing.push(`iphone.${key}`);
   for (const key of ['mahordExecutable', 'tesseract', 'ownerEmail', 'relayOrigin']) if (!config?.[key]) missing.push(key);
   if (missing.length) return [`missing ${missing.join(', ')}`];
   const problems = [];
   let origin;
   try { origin = new URL(config.relayOrigin); } catch { return [`relayOrigin ${config.relayOrigin} is not a URL`]; }
-  // iOS Web Push needs a secure context: the phone loads the relay over HTTPS with a name the
-  // certificate covers, never plain HTTP to a tailnet address.
-  if (origin.protocol !== 'https:' || /^\d+\.\d+\.\d+\.\d+$/.test(origin.hostname) || origin.hostname === 'localhost') {
+  const host = config.sessionHost;
+  const front = host.relayFront;
+  const originPort = Number(origin.port || (origin.protocol === 'http:' ? 80 : 443));
+  if (front?.kind === 'loopback') {
+    if (origin.protocol !== 'http:' || origin.hostname !== '127.0.0.1' || !isPort(originPort) || origin.pathname !== '/') problems.push(`relayOrigin ${config.relayOrigin} must be http://127.0.0.1:<port> for a loopback relay`);
+    if (lanes.includes('iphone')) problems.push('a loopback relay cannot serve the iPhone lane (iOS push needs an HTTPS origin)');
+    const remote = [['sessionHost', host], ...desktops.map((name) => [`hosts.${name}`, config.hosts[name]])].filter(([, h]) => h.sshDestination !== 'local');
+    if (remote.length) problems.push(`a loopback relay needs every host on the control host: ${remote.map(([key]) => `${key}.sshDestination`).join(', ')} must be "local"`);
+  } else if (origin.protocol !== 'https:' || /^\d+\.\d+\.\d+\.\d+$/.test(origin.hostname) || origin.hostname === 'localhost') {
+    // iOS Web Push needs a secure context: the phone loads the relay over HTTPS with a name the
+    // certificate covers, never plain HTTP to a tailnet address.
     problems.push(`relayOrigin ${config.relayOrigin} must be https:// with a DNS name the relay certificate covers (iOS push needs a secure context)`);
   }
-  const originPort = Number(origin.port || 443);
-  const host = config.sessionHost;
-  if (['macos', 'windows'].some((name) => config.hosts[name].hostId === host.hostId)) problems.push(`sessionHost.hostId ${host.hostId} must differ from the desktop hostIds`);
+  if (desktops.some((name) => config.hosts[name].hostId === host.hostId)) problems.push(`sessionHost.hostId ${host.hostId} must differ from the desktop hostIds`);
   if (!['linux', 'darwin', 'win32'].includes(host.platform)) problems.push(`sessionHost.platform ${host.platform} is not linux, darwin or win32`);
-  const front = host.relayFront;
   if (front?.kind === 'tailscale-serve') {
     if (!isPort(front.publicPort) || !isPort(front.backendPort) || front.publicPort === front.backendPort) problems.push('sessionHost.relayFront needs distinct publicPort and backendPort in 1024..65535');
     if (front.publicPort !== originPort) problems.push(`relayOrigin port ${originPort} is not sessionHost.relayFront.publicPort ${front.publicPort}`);
     if (host.platform === 'win32') problems.push('sessionHost.relayFront tailscale-serve is supported on linux and darwin session hosts only');
   } else if (front?.kind === 'tls') {
     if (!front.cert || !front.key) problems.push('sessionHost.relayFront tls needs cert and key (PEM paths on the session host)');
-  } else {
-    problems.push('sessionHost.relayFront.kind must be tailscale-serve or tls');
+  } else if (front?.kind !== 'loopback') {
+    problems.push('sessionHost.relayFront.kind must be tailscale-serve, tls or loopback');
   }
   return problems;
 }
@@ -203,6 +223,20 @@ export const relayListenPort = (config) => {
   const front = config.sessionHost.relayFront;
   return front.kind === 'tailscale-serve' ? front.backendPort : Number(new URL(config.relayOrigin).port || 443);
 };
+
+/**
+ * Problems of a live process environment (`KEY=VALUE` entries as the OS reports them) against
+ * the isolated env the run gave it; empty when every key holds exactly the run's value. A
+ * GUI that runs with the owner's HOME or data dir is never driven.
+ */
+export function envProblems(entries, expected) {
+  const seen = new Map();
+  for (const entry of entries ?? []) {
+    const at = String(entry).indexOf('=');
+    if (at > 0) seen.set(entry.slice(0, at), entry.slice(at + 1));
+  }
+  return Object.entries(expected).filter(([key, value]) => seen.get(key) !== value).map(([key, value]) => `${key} is ${JSON.stringify(seen.get(key) ?? null)}, not ${JSON.stringify(value)}`);
+}
 
 /** A path on `host`, joined with that host's separator. */
 export const remotePath = (host, ...parts) => parts.join(host.platform === 'win32' ? '\\' : '/');

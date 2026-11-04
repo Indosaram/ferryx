@@ -24,9 +24,12 @@ export function startSession({ config, run, lane }) {
   const helper = rpc(host.hostHelper);
   let agent = null;
   const relayRoot = remotePath(host, host.worktree, '.native-qa', `${run.runId}-relay`);
+  // Its own profile name, so a session host that is also a desktop of the run (all-local) never
+  // collides with that desktop's `.native-qa/<runId>` profile in a shared worktree.
+  const sessionRunId = `${run.runId}-session`;
   const originUrl = new URL(config.relayOrigin);
   const origin = originUrl.origin;
-  const tokens = new Map([[config.hosts.macos.hostId, 'macos'], [config.hosts.windows.hostId, 'windows'], [host.hostId, 'session']]
+  const tokens = new Map([...['macos', 'windows'].filter((name) => run.lanes.includes(name)).map((name) => [config.hosts[name].hostId, name]), [host.hostId, 'session']]
     .map(([hostId, name]) => [hostId, `f3-${run.runId}-${name}`]));
   const desktopsSaw = latch();
   const shared = {
@@ -94,7 +97,7 @@ export function startSession({ config, run, lane }) {
     // The fixture daemon: the session host's own isolated candidate, prepared and launched by the
     // native agent with exact-pid receipts and the build stamp checked against its manifest.
     agent = rpc(host.remoteAgent);
-    setup = await agent.call('prepare', { worktreeRoot: host.worktreeRoot, worktree: host.worktree, runId: run.runId, operationId: `f3-${run.runId}`,
+    setup = await agent.call('prepare', { worktreeRoot: host.worktreeRoot, worktree: host.worktree, runId: sessionRunId, operationId: `f3-${run.runId}`,
       binary: host.binary, uiDist: host.uiDist, manifest: host.buildManifest });
     Object.assign(lane.receipt.candidate, { stamp: setup.candidate, binarySha256: setup.binarySha256, uiSha256: setup.uiSha256 });
     if (typeof setup.candidate !== 'string' || !setup.candidate.startsWith(`${run.revision}+`)) throw new StepFailed('CANDIDATE_STAMP', `${host.hostId} candidate stamp ${setup.candidate} is not ${run.revision}+<patch>`);
@@ -102,7 +105,7 @@ export function startSession({ config, run, lane }) {
     const gatewayPort = gatewayPortFor(host.hostId, await helper.call('free-port', {}));
     const env = { ...setup.env, FERRYX_RELAY_URL: origin, FERRYX_MACHINE_TOKEN: shared.machineToken(host.hostId), FERRYX_ACCOUNT_ORIGIN: origin, FERRYX_QA_GATEWAY_PORT: String(gatewayPort) };
     setup.env = env;
-    daemon = await agent.call('spawn-daemon', { setup, runId: run.runId, operationId: `f3-${run.runId}`, hostId: host.hostId, timeoutMs: 120_000 });
+    daemon = await agent.call('spawn-daemon', { setup, runId: sessionRunId, operationId: `f3-${run.runId}`, hostId: host.hostId, timeoutMs: 120_000 });
     lane.write('daemon', 'daemon-launch.json', daemon);
     const exchange = async (label, frames, deadlineMs) => {
       const replies = await helper.call('daemon', { profile: setup.profile, frames, deadlineMs });

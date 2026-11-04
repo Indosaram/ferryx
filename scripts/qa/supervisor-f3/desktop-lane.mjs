@@ -22,7 +22,7 @@ import { join } from 'node:path';
 import { connectNativeMahord, rpcProcess } from '../fixtures/native-configured-adapters.mjs';
 import { LaneBlocked, StepFailed, markNotRun, runStep, stopExact, until } from './steps.mjs';
 import { scenariosForLane } from './contract.mjs';
-import { acceptedReply, configureGateway, decisionsNamingNonce, gatewayPortFor, globalRetryRule, namesNonce, rowFocusVerdict, rpcCommand, rulesLineText, typedInto, uniqueSession } from './seams.mjs';
+import { acceptedReply, configureGateway, decisionsNamingNonce, envProblems, gatewayPortFor, globalRetryRule, namesNonce, rowFocusVerdict, rpcCommand, rulesLineText, typedInto, uniqueSession } from './seams.mjs';
 
 /** OCR words with boxes (tesseract TSV) of one PNG on the control host. */
 async function ocr(tesseract, pngPath) {
@@ -59,6 +59,9 @@ function locate(read, phrase, { below = -1 } = {}) {
   }
   return null;
 }
+
+/** The isolated-profile keys a live GUI process must carry with exactly the run's values. */
+const ISOLATED_ENV = ['FERRYX_QA_ISOLATED', 'FERRYX_QA_RUN_ID', 'FERRYX_DATA_DIR', 'FERRYX_RUNTIME_DIR', 'FERRYX_SESSION_DIR', 'HOME'];
 
 export async function runDesktopLane(lane, { host, run, shared, signal }) {
   const ids = scenariosForLane(lane.name);
@@ -115,6 +118,21 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
 
     // 2. GUI through MahoRD only (the same launcher path native-configured-adapters uses).
     gui = await launchGui({ agent, helper, mahord, setup, host, run, lane });
+    // Nothing is clicked or typed until the live GUI process is proven to run on this run's
+    // isolated profile (never the owner's HOME or data dir).
+    const isolated = Object.fromEntries(ISOLATED_ENV.map((key) => [key, setup.env[key]]));
+    const live = await helper.call('process-env', { pid: gui.pid });
+    const envIssues = live.checked ? envProblems(live.entries, isolated) : [];
+    lane.write('gui-receipt', 'gui-env.json', { pid: gui.pid, checked: live.checked, reason: live.reason ?? null, expected: isolated, problems: envIssues });
+    if (envIssues.length) throw new StepFailed('GUI_ENV_NOT_ISOLATED', envIssues.join('; '));
+    if (run.smoke) {
+      // Transport smoke: one real frame and its OCR, then the lane stops and cleans up.
+      const shot = lane.write('screenshot', 'smoke/first-frame.png', await mahord.screenshot(signal));
+      const read = await ocr(run.tesseract, join(run.evidenceDir, shot.path));
+      lane.write('ocr', 'smoke/first-frame.ocr.tsv', read.tsv);
+      lane.receipt.smoke = { guiPid: gui.pid, guiEnvChecked: live.checked, frame: shot, ocrWords: read.words.length };
+      return;
+    }
     // A frame: real MahoRD pixels plus their OCR. Attached to a step only when `step` is given,
     // so a polled frame attaches exactly the frame its assertion read (see `keep`).
     const frame = async (name, step) => {
@@ -158,7 +176,8 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     await runStep(lane, 'F3-D2', async (step) => {
       const prompt = shared.prompt;
       const token = shared.promptToken;
-      if (lane.name === 'windows') {
+      // One desktop types the prompt: Windows when it is in the run, else macOS.
+      if (lane.name === (run.lanes.includes('windows') ? 'windows' : 'macos')) {
         const { read } = await frame('before-prompt', step);
         const box = locate(read, 'Tell the supervisor');
         if (!box) throw new StepFailed('COMPOSER_NOT_FOUND', 'the composer placeholder is not on screen');
@@ -304,6 +323,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     // F3-D5: each decision the phone answered (F3-P1, F3-P2; their nonces recorded by the iPhone
     // lane) is gone from this desktop's panel read and from its screen. Waits for the phone.
     await runStep(lane, 'F3-D5', async (step) => {
+      if (!run.lanes.includes('iphone')) throw new LaneBlocked('LANE_NOT_IN_RUN', 'no iPhone lane in this run answers a decision');
       await shared.phoneAnswersDone;
       const answers = shared.phoneAnswers;
       step.assert('phone-answered-card', answers.length > 0 && answers.every((a) => Number.isInteger(a.nonce)), { answers });

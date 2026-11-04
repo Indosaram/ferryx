@@ -84,6 +84,10 @@ Ordering:
    - Delivery itself is proven, never assumed: the banner in the device accessibility tree, the tap that opens the new card, and the push store read before and after.
 5. **Config.** Copy `scripts/qa/supervisor-f3/config.example.json` outside the repository and fill every value. A missing field is a usage error (exit 5).
 
+## All-local lane run (one machine)
+
+A single desktop lane can run self-contained on its own machine: that machine is the control host, the session host and the desktop. Start from `config.mac-local.example.json`: `lanes: ["macos"]`, every host `sshDestination: "local"` (helpers run as direct children), `mahordAddress: "127.0.0.1"` against the machine's own MahoRD host, and `relayFront: {"kind": "loopback"}` with `relayOrigin: "http://127.0.0.1:<port>"`. The session daemon uses its own `.native-qa/<runId>-session` profile, so it shares the worktree with the desktop lane safely. Lanes left out are recorded blocked (`LANE_NOT_IN_RUN`), so such a run never passes F3 as a whole; it proves that lane. A loopback relay refuses the iPhone lane (iOS push needs HTTPS). Windows uses the same shape with `lanes: ["windows"]` and win32 paths. Before any MahoRD input the lane checks the live GUI process environment (`ps -E` on macOS, `/proc/<pid>/environ` on Linux; Windows reports it unchecked) against the run's isolated profile (`GUI_ENV_NOT_ISOLATED`). `--smoke` stops each desktop lane after the GUI launch, that env check and one frame plus its OCR; the validator always fails a smoke run.
+
 ## Command sequence (control host)
 
 ```

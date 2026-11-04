@@ -143,6 +143,7 @@ export function validateRun(run, extraErrors = []) {
   const control = controlDefect(run?.control, run?.revision);
   if (control) errors.push(control);
   if (run?.error) errors.push(`runner error: ${run.error}`);
+  if (run?.smoke === true) errors.push('smoke run: proves the transport only, never F3');
   for (const name of LANES) {
     for (const leak of cleanupLeaks(run?.lanes?.[name])) errors.push(`${name} cleanup leak: ${JSON.stringify(leak).slice(0, 400)}`);
   }

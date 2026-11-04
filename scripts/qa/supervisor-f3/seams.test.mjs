@@ -2,9 +2,9 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import {
-  PRODUCTION_GATEWAY_PORT, acceptedReply, configProblems, configureGateway, decisionsNamingNonce, gatewayBound, gatewayPortFor,
+  PRODUCTION_GATEWAY_PORT, acceptedReply, configProblems, configureGateway, decisionsNamingNonce, envProblems, gatewayBound, gatewayPortFor,
   globalRetryRule, guiBundleFiles, namesNonce, pageToScreen, relayListenPort, remotePath, rowFocusVerdict, rpcCommand, rulesLineText,
-  sameServeConfig, serveAddedProblems, typedInto, uniqueSession, webContextFrom, webPageChannel,
+  runLanes, sameServeConfig, serveAddedProblems, typedInto, uniqueSession, webContextFrom, webPageChannel,
 } from './seams.mjs';
 import { LANE_SCHEMA, RUN_SCHEMA, SCENARIOS, validateRun } from './contract.mjs';
 
@@ -207,7 +207,7 @@ describe('session host config', () => {
     expect(configProblems(reused).join()).toContain('must differ from the desktop hostIds');
     const front = example();
     front.sessionHost.relayFront = { kind: 'plain' };
-    expect(configProblems(front).join()).toContain('tailscale-serve or tls');
+    expect(configProblems(front).join()).toContain('tailscale-serve, tls or loopback');
   });
 
   test('an IP or plain-HTTP origin is refused; a self-served PEM listens on the origin port', () => {
@@ -229,6 +229,77 @@ describe('session host config', () => {
     expect(rpcCommand(win, 'C:\\h\\x.mjs', '/usr/bin/ssh')[1].at(-1)).toBe(`powershell.exe -NoProfile -NonInteractive -Command "& 'C:\\b\\bun.exe' 'C:\\h\\x.mjs' --rpc"`);
     expect(remotePath(linux, '/w', '.native-qa', 'r')).toBe('/w/.native-qa/r');
     expect(remotePath(win, 'C:\\w', 'r')).toBe('C:\\w\\r');
+  });
+});
+
+describe('all-local run', () => {
+  const local = () => JSON.parse(readFileSync(new URL('./config.mac-local.example.json', import.meta.url), 'utf8'));
+  const full = () => JSON.parse(readFileSync(new URL('./config.example.json', import.meta.url), 'utf8'));
+
+  test('the shipped mac-local example runs only the macOS lane on a loopback relay, all hosts local', () => {
+    const config = local();
+    expect(configProblems(config)).toEqual([]);
+    expect(runLanes(config)).toEqual(['macos']);
+    expect(relayListenPort(config)).toBe(47960);
+    expect(rpcCommand(config.sessionHost, '/h/x.mjs')).toEqual([config.sessionHost.bun, ['/h/x.mjs', '--rpc']]);
+    expect(rpcCommand(config.hosts.macos, '/h/x.mjs')[0]).toBe(config.hosts.macos.bun);
+    expect(runLanes(full())).toEqual(['macos', 'windows', 'iphone']);
+  });
+
+  test('a lane left out needs no config block; the same shape serves a Windows-only run', () => {
+    const win = local();
+    win.lanes = ['windows'];
+    win.hosts = { windows: { ...win.hosts.macos, hostId: 'maho-win', platform: 'win32' } };
+    win.sessionHost = { ...win.sessionHost, hostId: 'maho-win-session', platform: 'win32' };
+    expect(configProblems(win)).toEqual([]);
+  });
+
+  test('a loopback relay refuses the iPhone, a remote host, a non-loopback or https origin', () => {
+    const phone = local();
+    phone.lanes = ['macos', 'iphone'];
+    phone.iphone = { serial: 's', driverEndpoint: 'http://127.0.0.1:8100' };
+    expect(configProblems(phone).join()).toContain('cannot serve the iPhone lane');
+    const remote = local();
+    remote.hosts.macos.sshDestination = 'maho-mac';
+    expect(configProblems(remote).join()).toContain('hosts.macos.sshDestination must be "local"');
+    for (const origin of ['http://100.68.224.49:47960', 'https://127.0.0.1:47960', 'http://localhost:47960', 'http://127.0.0.1']) {
+      const bad = local();
+      bad.relayOrigin = origin;
+      expect(configProblems(bad).join()).toContain('must be http://127.0.0.1:<port>');
+    }
+  });
+
+  test('a plain-HTTP origin is still refused for every other front', () => {
+    const config = full();
+    config.relayOrigin = 'http://127.0.0.1:47930';
+    expect(configProblems(config).join()).toContain('must be https://');
+  });
+
+  test('unknown, duplicate or empty lanes are refused', () => {
+    for (const lanes of [[], ['macos', 'macos'], ['linux']]) {
+      const config = local();
+      config.lanes = lanes;
+      expect(configProblems(config).join()).toContain('must be distinct names');
+    }
+  });
+
+  test('a live GUI env is isolated only when every run key holds exactly the run value', () => {
+    const expected = { HOME: '/w/.native-qa/r/home', FERRYX_QA_ISOLATED: '1' };
+    expect(envProblems(['PATH=/usr/bin', 'HOME=/w/.native-qa/r/home', 'FERRYX_QA_ISOLATED=1'], expected)).toEqual([]);
+    expect(envProblems(['HOME=/Users/owner', 'FERRYX_QA_ISOLATED=1'], expected).join()).toContain('HOME is "/Users/owner"');
+    expect(envProblems(['HOME=/w/.native-qa/r/home'], expected).join()).toContain('FERRYX_QA_ISOLATED is null');
+  });
+
+  test('a smoke run never passes, and a lane left out blocks its scenarios', () => {
+    const rev = 'b'.repeat(40);
+    const session = { schema: LANE_SCHEMA, lane: 'session', blocked: null, failure: null, machine: { id: 'm' }, candidate: { headRevision: rev, clean: true, stamp: `${rev}+e3b0` }, steps: [], cleanup: [] };
+    const base = { schema: RUN_SCHEMA, revision: rev, control: { hostname: 'c', head: rev, clean: true, scripts: [{ path: 'a', sha256: 'c'.repeat(64) }] }, session, cross: [] };
+    const out = { schema: LANE_SCHEMA, blocked: { code: 'LANE_NOT_IN_RUN' }, steps: [], cleanup: [] };
+    const verdict = validateRun({ ...base, lanes: { macos: out, windows: out, iphone: out } });
+    expect(verdict.verdict).toBe('blocked');
+    const smoke = validateRun({ ...base, smoke: true, lanes: { macos: out, windows: out, iphone: out } });
+    expect(smoke.verdict).toBe('fail');
+    expect(smoke.errors.join()).toContain('smoke run');
   });
 });
 
