@@ -13,6 +13,13 @@ fn bad() -> mlua::Error { mlua::Error::runtime("BAD_ARGUMENT") }
 fn text(value: Value) -> mlua::Result<String> {
     match value { Value::String(s) => Ok(s.to_str()?.to_owned()), _ => Err(bad()) }
 }
+fn integer(value: Value) -> mlua::Result<u64> {
+    match value {
+        Value::Integer(value) if value >= 0 => Ok(value as u64),
+        Value::Number(value) if value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value < u64::MAX as f64 => Ok(value as u64),
+        _ => Err(bad()),
+    }
+}
 pub fn chord(keys: &str) -> Result<String, String> {
     let keys = keys.to_ascii_lowercase();
     let mut parts: Vec<_> = keys.split('+').collect();
@@ -78,7 +85,7 @@ fn validate(lua: &Lua, name: &str, args: mlua::MultiValue) -> mlua::Result<serde
         "notify" => serde_json::json!({"title":text(next()?)?,"body":text(next()?)?}),
         "read" => {
             let session = text(next()?)?;
-            let Value::Integer(lines) = next()? else { return Err(bad()); };
+            let lines = integer(next()?)?;
             if !(1..=10_000).contains(&lines) { return Err(bad()); }
             serde_json::json!({"session":session,"lines":lines})
         }
@@ -92,8 +99,7 @@ fn validate(lua: &Lua, name: &str, args: mlua::MultiValue) -> mlua::Result<serde
         }
         "layout" => {
             let window = text(next()?)?;
-            let Value::Integer(revision) = next()? else { return Err(bad()); };
-            if revision < 0 { return Err(bad()); }
+            let revision = integer(next()?)?;
             let Value::Table(intent) = next()? else { return Err(bad()); };
             let intent: crate::daemon::layout::Intent = lua.from_value(Value::Table(intent)).map_err(|_| bad())?;
             serde_json::json!({"window":window,"revision":revision,"intent":intent})
