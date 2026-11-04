@@ -554,7 +554,11 @@ pub(crate) fn observe_with_snapshot(
 /// A display name only: never return arguments, even when they contain credentials.
 fn command_basename(command: &str) -> Option<String> {
     let token = command_tokens(command).first().copied()?;
-    let name = token.trim_matches('"').rsplit(['/', '\\']).next()?;
+    basename(token.trim_matches('"'))
+}
+
+fn basename(argv0: &str) -> Option<String> {
+    let name = argv0.rsplit(['/', '\\']).next()?;
     (!name.is_empty()).then(|| name.to_string())
 }
 
@@ -582,9 +586,33 @@ mod platform {
         let process = snapshot.processes.iter()
             .filter(|p| p.pgid == Some(group))
             .min_by_key(|p| (p.pid != Some(group), p.pid))?;
-        let name = command_basename(&process.command);
+        let name = process.pid.and_then(process_command);
         (session.foreground_process_group().ok()? == Some(group)).then_some(name).flatten()
     }
+
+    #[cfg(target_os = "linux")]
+    fn process_command(pid: u32) -> Option<String> {
+        let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let argv0 = bytes.split(|byte| *byte == 0).next()?;
+        basename(std::str::from_utf8(argv0).ok()?)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn process_command(pid: u32) -> Option<String> {
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
+        let mut len: libc::size_t = 0;
+        let result = unsafe { libc::sysctl(mib.as_mut_ptr(), 3, std::ptr::null_mut(), &mut len, std::ptr::null_mut(), 0) };
+        if result != 0 || len == 0 { return None; }
+        let mut bytes = vec![0u8; len];
+        let result = unsafe { libc::sysctl(mib.as_mut_ptr(), 3, bytes.as_mut_ptr().cast(), &mut len, std::ptr::null_mut(), 0) };
+        if result != 0 { return None; }
+        bytes.truncate(len);
+        let (_, argv) = crate::terminal::manual_ssh::parse_procargs2(&bytes)?;
+        basename(argv.first()?)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn process_command(_: u32) -> Option<String> { None }
 
     /// One `ps` listing for the whole tick. ps is available on both macOS and Linux. Do not
     /// assume /proc exists. Both name the controlling terminal by its path below `/dev`.
