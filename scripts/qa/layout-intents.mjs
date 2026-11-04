@@ -1,6 +1,7 @@
 import net from "node:net";
 import path from "node:path";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 const runtime = process.argv[process.argv.indexOf("--runtime") + 1];
 if (!runtime || !process.argv.includes("--runtime")) throw new Error("--runtime is required");
@@ -31,6 +32,24 @@ function request(value) {
 }
 try {
   assert.equal((await request({ type: "handshake", version: 5 })).type, "handshakeOk");
+  const option = (name) => process.argv[process.argv.indexOf(name) + 1];
+  const window = process.argv.includes("--window") ? option("--window") : "ws-layout-qa";
+  if (process.argv.includes("--get")) {
+    const result = await request({ type: "layoutGet", window });
+    assert.equal(result.type, "layoutOk");
+    console.log(JSON.stringify(result.view.layout));
+  } else if (process.argv.includes("--offer")) {
+    const snapshot = JSON.parse(readFileSync(option("--offer"), "utf8"));
+    const result = await request({ type: "layoutOffer", window, snapshot });
+    assert.equal(result.type, "layoutOk");
+    console.log(JSON.stringify(result));
+  } else if (process.argv.includes("--import")) {
+    assert.ok(process.argv.includes("--revision"), "--revision is required");
+    const result = await request({ type: "layoutImport", window,
+      machineId: option("--import"), revision: Number(option("--revision")) });
+    assert.equal(result.type, "layoutImported");
+    console.log(JSON.stringify(result));
+  } else {
   let result = await request({ type: "layoutGet", window: "ws-layout-qa" });
   assert.equal(result.type, "layoutOk");
   if (result.view.layout.tabs.length) throw new Error("QA requires a fresh isolated data directory");
@@ -55,6 +74,7 @@ try {
   assert.equal(conflict.code, "LAYOUT_CONFLICT");
   assert.equal(conflict.revision, current.view.revision);
   console.log(`LAYOUT_QA_OK revision=${current.view.revision}`);
+  }
 } finally {
   socket.destroy();
 }
