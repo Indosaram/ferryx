@@ -467,6 +467,7 @@ pub struct RemoteDeleteWorktreeRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ClientControlMessage {
+    TakeSize { cols: u16, rows: u16 },
     AcknowledgeAgentOutcome,
     RemoteWrite {
         generation: String,
