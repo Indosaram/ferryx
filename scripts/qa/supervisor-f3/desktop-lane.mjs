@@ -396,6 +396,11 @@ async function launchGui({ agent, helper, mahord, setup, host, run, lane }) {
   // Handled now so a failed launch step cannot leave it rejecting unobserved; awaited below.
   receipt.catch(() => {});
   if (host.platform === 'win32') {
+    // Input sent before MahoRD has decoded its first frame is dropped (smoke try5: the first
+    // Win+R/type pass never reached the Run dialog, later passes did). Wait for that frame,
+    // the same signal the probes waited on, before the first key.
+    await until('a first MahoRD frame before input', () => mahord.screenshot(AbortSignal.timeout(30_000)).then(() => true, () => false),
+      (ok) => ok, { deadlineMs: 30_000, gapMs: 250 });
     await mahord.hotkey(['Meta', 'r'], AbortSignal.timeout(30_000));
     await mahord.hotkey(['Control', 'a'], AbortSignal.timeout(30_000));
     await mahord.type(launcherShortPath, AbortSignal.timeout(60_000));
