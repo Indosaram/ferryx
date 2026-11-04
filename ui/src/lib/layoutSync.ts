@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { normalizeLayout } from "../state/layout";
+import { createLayoutState, normalizeLayout } from "../state/layout";
+import { resolveSeam } from "../state/paneTree";
 import type { PaneNode } from "../state/paneTree";
 import type { WorkspaceState } from "../state/workspaceStore";
 import type { LayoutState, PaneContent, TabGroupLayoutNode, WorkspaceTab } from "./types";
@@ -11,9 +12,9 @@ import { currentWindowLabel } from "./windowIdentity";
 type Direction = "horizontal" | "vertical";
 export type DaemonContent =
   | { kind: "terminal"; backendSessionId: string }
-  | { kind: "file"; path: string; line: number | null; col: number | null }
-  | { kind: "browser"; url: string }
-  | { kind: "dag" } | { kind: "changes" }
+  | ({ kind: "file"; path: string; line: number | null; col: number | null } & Partial<Extract<PaneContent, { kind: "file" }>>)
+  | { kind: "browser"; url: string; browserId?: string; worktreePath?: string; profileId?: string }
+  | { kind: "dag" } | ({ kind: "changes" } & Partial<Extract<PaneContent, { kind: "changes" }>>)
   | { kind: "remoteDesktop"; hostId: string };
 export type DaemonNode =
   | { type: "leaf"; nodeId: number; content: DaemonContent }
@@ -22,6 +23,7 @@ type DaemonGroup =
   | { type: "group"; groupId: string; tabIds: string[]; activeTabId: string | null }
   | { type: "split"; dir: Direction; ratio: number; a: DaemonGroup; b: DaemonGroup };
 export type DaemonLayout = {
+  scope?: string;
   revision: number;
   tabs: { tabId: string; label: string; pinned: boolean; paneTree: DaemonNode;
     activeNodeId: number; expandedNodeId: number | null }[];
@@ -58,8 +60,9 @@ export function daemonContent(content: PaneContent, state: WorkspaceState): Daem
       if (!backendSessionId) throw new Error("Layout terminal has no admitted backend session");
       return { kind: "terminal", backendSessionId };
     }
-    case "file": return { kind: "file", path: content.path, line: content.line, col: content.col };
-    case "browser": return { kind: "browser", url: content.browser?.url ?? content.url ?? "" };
+    case "file": return { ...content };
+    case "changes": return { ...content };
+    case "browser": return { kind: "browser", ...content.browser, browserId: content.browser?.browserId ?? content.browserId, url: content.browser?.url ?? content.url ?? "" };
     case "remoteDesktop": return { kind: "remoteDesktop", hostId: content.hostId };
     default: return { kind: content.kind };
   }
@@ -123,7 +126,7 @@ export function onLayoutChanged(refresh: () => void): Promise<() => void> {
 }
 
 export function layoutScope(state: WorkspaceState): string {
-  return JSON.stringify([state.workspaceId ?? "", null]);
+  return JSON.stringify([state.workspaceId ?? "", state.activeWorktreePath ?? null]);
 }
 
 /** Reuse both the visual identity and the surface-bearing content. Reading a
@@ -169,15 +172,16 @@ export function hydrateLayout(view: LayoutView, state: WorkspaceState, scope = l
         }
         case "browser": content = createBrowserPaneContent({
           ...(old?.kind === "browser" ? old.browser : {}),
-          browserId: old?.kind === "browser" ? old.browser?.browserId ?? old.browserId ?? "" : "",
+          ...wire,
+          browserId: wire.browserId ?? (old?.kind === "browser" ? old.browser?.browserId ?? old.browserId ?? "" : ""),
           url: wire.url,
         }); break;
         case "file": content = { ...(old?.kind === "file" ? old : {
           kind: "file" as const, backendSessionId: "", workspaceId: state.workspaceId ?? null,
           previewId: `daemon-preview-${node.nodeId}` }),
-          path: wire.path, line: wire.line, col: wire.col }; break;
-        case "changes": content = old?.kind === "changes" ? old : { kind: "changes",
-          workspaceId: state.workspaceId ?? "", worktreePath: state.activeWorktreePath ?? "", worktree: null }; break;
+          ...wire, path: wire.path, line: wire.line, col: wire.col }; break;
+        case "changes": content = { kind: "changes", workspaceId: state.workspaceId ?? "",
+          worktreePath: state.activeWorktreePath ?? "", worktree: null, ...wire }; break;
         default: content = wire;
       }
       identities.contents[key] = content;
@@ -210,6 +214,11 @@ export function hydrateLayout(view: LayoutView, state: WorkspaceState, scope = l
 }
 
 export function intentForAction(sync: LayoutSync, action: WorkspaceAction, before: WorkspaceState, after: WorkspaceState): LayoutIntent | null {
+  const intent = unscopedIntentForAction(sync, action, before, after);
+  return intent ? { type: "SCOPED", scope: layoutScope(before), intent } : null;
+}
+
+function unscopedIntentForAction(sync: LayoutSync, action: WorkspaceAction, before: WorkspaceState, after: WorkspaceState): LayoutIntent | null {
   const scope = layoutScope(before);
   const node = (tab: string, leaf: string) => sync.nodeId(scope, tab, leaf);
   const content = (tab: string, leaf?: string): DaemonContent => {
@@ -221,8 +230,12 @@ export function intentForAction(sync: LayoutSync, action: WorkspaceAction, befor
   switch (action.type) {
     case "ADD_TAB_WITH_SESSION": return { type: action.type, tabId: action.tab.id,
       label: action.tab.label, activate: action.activate !== false, content: content(action.tab.id) };
-    case "CLOSE_TAB": case "ACTIVATE_TAB": case "REORDER_TAB": case "RENAME_TAB":
-    case "SET_TAB_PINNED": case "SET_PANE_RATIO": case "SET_TAB_GROUP_RATIO":
+    case "CLOSE_TAB": return { type: action.type, tabId: action.tabId,
+      replacement: action.replacement ? { tabId: action.replacement.tab.id, label: action.replacement.tab.label,
+        content: content(action.replacement.tab.id) } : null };
+    case "SET_PANE_RATIO": return { ...action, seam: action.isolated ? null : action.seam ?? resolveSeam(before.layout.layoutsByTabId[action.tabId].root, action.path) };
+    case "ACTIVATE_TAB": case "REORDER_TAB": case "RENAME_TAB":
+    case "SET_TAB_PINNED": case "SET_TAB_GROUP_RATIO":
     case "EQUALIZE_TAB_GROUP_RUN": case "EQUALIZE_PANE_RUN":
       return { ...action };
     case "SPLIT_PANE": return { type: action.type, tabId: action.tabId,
@@ -255,12 +268,8 @@ export function intentForAction(sync: LayoutSync, action: WorkspaceAction, befor
   }
 }
 
-/** The protocol currently addresses only the root layout. Never apply a parked
- * workspace gesture to that root merely because tab ids happen to coincide. */
-export function ownsDaemonRoot(state: WorkspaceState, view = layoutSync.current()): boolean {
-  if (!view) return false;
-  const parked = view.layout.parkedLayouts ?? {};
-  return !Object.prototype.hasOwnProperty.call(parked, layoutScope(state));
+export function ownsDaemonRoot(_state: WorkspaceState, view = layoutSync.current()): boolean {
+  return view !== null;
 }
 
 export function isLayoutIntentAction(action: WorkspaceAction): boolean {
@@ -272,7 +281,14 @@ export function isLayoutIntentAction(action: WorkspaceAction): boolean {
 
 export function rehydrateWorkspace(state: WorkspaceState, view = layoutSync.current()): WorkspaceState {
   if (!view) return state;
-  const saved = view.layout.parkedLayouts?.[layoutScope(state)] ?? view.layout;
+  const find = (layout: DaemonLayout, scope: string): DaemonLayout | undefined => {
+    if (layout.scope === scope || !layout.scope && scope === JSON.stringify([state.workspaceId ?? "", null])) return layout;
+    if (layout.parkedLayouts?.[scope]) return layout.parkedLayouts[scope];
+    for (const parked of Object.values(layout.parkedLayouts ?? {})) { const found = find(parked, scope); if (found) return found; }
+    return undefined;
+  };
+  const saved = find(view.layout, layoutScope(state));
+  if (!saved) return { ...state, layout: createLayoutState() };
   const layout = hydrateLayout({ ...view, layout: saved }, state);
   const worktreeLayouts = { ...state.worktreeLayouts };
   for (const [scope, parked] of Object.entries(saved.parkedLayouts ?? {})) {
