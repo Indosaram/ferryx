@@ -143,6 +143,31 @@ impl Node {
     fn equalize(&mut self) {
         if let Self::Split { ratio, a, b, .. } = self { *ratio = 0.5; a.equalize(); b.equalize(); }
     }
+    fn equalize_run(&mut self, path: &str) -> Result<(), String> {
+        let dir = match self.at(path) { Some(Self::Split { dir, .. }) => *dir, _ => return Err("Unknown split".into()) };
+        let segments: Vec<_> = path.split('.').filter(|part| !part.is_empty()).collect();
+        let mut scope = 0;
+        let mut current = &*self;
+        for (index, segment) in segments.iter().enumerate() {
+            if let Self::Split { dir: ancestor, a, b, .. } = current {
+                if *ancestor != dir { scope = index + 1; }
+                current = if *segment == "first" || *segment == "a" { a } else { b };
+            }
+        }
+        fn count(node: &Node, dir: Direction) -> usize {
+            match node { Node::Split { dir: own, a, b, .. } if *own == dir => count(a, dir) + count(b, dir), _ => 1 }
+        }
+        fn apply(node: &mut Node, dir: Direction) {
+            if let Node::Split { dir: own, ratio: value, a, b } = node {
+                if *own == dir {
+                    *value = ratio(count(a, dir) as f64 / (count(a, dir) + count(b, dir)) as f64);
+                    apply(a, dir); apply(b, dir);
+                }
+            }
+        }
+        apply(self.at(&segments[..scope].join(".")).ok_or("Unknown split")?, dir);
+        Ok(())
+    }
     fn split(&mut self, id: u64, subtree: Node, dir: Direction, first: bool) -> Result<(), String> {
         let node = self.find_mut(id).ok_or("Unknown pane")?;
         let old = node.clone();
@@ -316,7 +341,7 @@ impl Layout {
                 else { return Err("Not a split".into()); }
             },
             EqualizeTabGroupRun { path } => self.tab_group_layout.at(&path).ok_or("Unknown split")?.equalize(),
-            EqualizePaneRun { tab_id, path } => self.tab(&tab_id)?.pane_tree.at(&path).ok_or("Unknown split")?.equalize(),
+            EqualizePaneRun { tab_id, path } => self.tab(&tab_id)?.pane_tree.equalize_run(&path)?,
             EqualizePanes { tab_id } => self.tab(&tab_id)?.pane_tree.equalize(),
             SwapPanes { tab_id, source_node_id, target_node_id } => {
                 let root = &mut self.tab(&tab_id)?.pane_tree;
