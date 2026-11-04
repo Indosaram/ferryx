@@ -14,6 +14,11 @@ fn main() {
     if let Some(code) = ferryx_lib::ssh::password::run_askpass() {
         std::process::exit(code);
     }
+    // Agent lifecycle hooks run this once per event, so a ferryx-cli-only install reports agent
+    // state too. It is an internal entry point, not a CLI group, and never fails: it exits 0.
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == ferryx_lib::cli::agent_hook::AGENT_HOOK_SUBCOMMAND) {
+        std::process::exit(ferryx_lib::cli::agent_hook::run(std::env::args_os().skip(2)));
+    }
     let args: Vec<String> = std::env::args().collect();
     if args
         .get(1)
