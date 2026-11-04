@@ -551,6 +551,20 @@ pub(crate) fn observe_with_snapshot(
     platform::observe_with_snapshot(session, snapshot)
 }
 
+/// A display name only: never return arguments, even when they contain credentials.
+fn command_basename(command: &str) -> Option<String> {
+    let token = command_tokens(command).first().copied()?;
+    let name = token.trim_matches('"').rsplit(['/', '\\']).next()?;
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+impl ProcessSnapshot {
+    /// Derived metadata, rebuilt after handover/restart from the surviving PTY.
+    pub(crate) fn foreground_command(&self, session: &PtySession) -> Option<String> {
+        platform::foreground_command(session, self)
+    }
+}
+
 #[cfg(unix)]
 mod platform {
     use super::*;
@@ -561,6 +575,15 @@ mod platform {
         /// The controlling terminal as `ps` names it (`pts/3`, `ttys002`; `?` or `??` for none).
         tty: Option<String>,
         command: String,
+    }
+
+    pub(super) fn foreground_command(session: &PtySession, snapshot: &ProcessSnapshot) -> Option<String> {
+        let group = session.foreground_process_group().ok()??;
+        let process = snapshot.processes.iter()
+            .filter(|p| p.pgid == Some(group))
+            .min_by_key(|p| (p.pid != Some(group), p.pid))?;
+        let name = command_basename(&process.command);
+        (session.foreground_process_group().ok()? == Some(group)).then_some(name).flatten()
     }
 
     /// One `ps` listing for the whole tick. ps is available on both macOS and Linux. Do not
@@ -784,6 +807,25 @@ mod platform {
         /// Creation time as a UTC FILETIME, `None` when Windows did not report one.
         #[serde(rename = "Created")]
         created: Option<i64>,
+    }
+
+    pub(super) fn foreground_command(session: &PtySession, snapshot: &ProcessSnapshot) -> Option<String> {
+        let mut pid = session.pid()?;
+        // ConPTY has no foreground group. Siblings are ambiguous: report unknown.
+        let mut visited = Vec::new();
+        loop {
+            if visited.contains(&pid) { return None; }
+            visited.push(pid);
+            let mut children = snapshot.processes.iter().filter(|p| p.parent == pid);
+            match (children.next(), children.next()) {
+                (Some(child), None) => pid = child.pid,
+                (None, _) => break,
+                _ => return None,
+            }
+        }
+        let process = snapshot.processes.iter().find(|p| p.pid == pid)?;
+        process.command.as_deref().and_then(command_basename)
+            .or_else(|| command_basename(&process.name))
     }
 
     /// The `Win32_Process` columns [`Process`] reads. `CreationDate` goes out as a FILETIME so
@@ -1361,6 +1403,9 @@ mod platform {
 #[cfg(not(any(unix, windows)))]
 mod platform {
     use super::*;
+    pub(super) fn foreground_command(_: &PtySession, _: &ProcessSnapshot) -> Option<String> {
+        None
+    }
     pub(super) fn observe_with_snapshot(
         _: &PtySession,
         _: &ProcessSnapshot,
@@ -1372,6 +1417,38 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foreground_name_never_contains_arguments() {
+        assert_eq!(command_basename("/tmp/qa/long-runner --password=x").as_deref(), Some("long-runner"));
+        assert_eq!(command_basename(r#""C:\Program Files\timeout.exe" /t 30"#).as_deref(), Some("timeout.exe"));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn foreground_command_of_real_pty() {
+        use portable_pty::CommandBuilder;
+        let manager = crate::terminal::PtyManager::new();
+        #[cfg(unix)]
+        let mut command = CommandBuilder::new("sleep");
+        #[cfg(unix)]
+        command.arg("30");
+        #[cfg(windows)]
+        let mut command = CommandBuilder::new("timeout.exe");
+        #[cfg(windows)]
+        command.args(["/t", "30", "/nobreak"]);
+        let (id, output) = manager.spawn(command, 80, 24).unwrap();
+        let session = manager.get_session(&id).unwrap();
+        let name = crate::ipc::run_blocking(move || {
+            Ok(capture_process_snapshot()?.foreground_command(&session))
+        }).await.unwrap();
+        manager.close_session(&id).await.unwrap();
+        drop(output);
+        #[cfg(unix)]
+        assert_eq!(name.as_deref(), Some("sleep"));
+        #[cfg(windows)]
+        assert_eq!(name.as_deref(), Some("timeout.exe"));
+    }
 
     /// Waits for a marker the pane itself emits, so no assertion rests on a delay.
     #[cfg(unix)]
