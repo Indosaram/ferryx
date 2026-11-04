@@ -83,6 +83,61 @@ static ENGINES: LazyLock<Mutex<HashMap<String, Engine>>> = LazyLock::new(Default
 /// two engines on one profile dir, and the second fails CEF initialization.
 static LAUNCHING: Mutex<()> = Mutex::new(());
 static TABS: LazyLock<Mutex<HashMap<String, Tab>>> = LazyLock::new(Default::default);
+/// An engine told to quit (its last tab closed) whose process may still run: Chromium refuses
+/// a profile dir another live engine holds, so the next engine of that profile waits for it.
+struct Exiting {
+    child: Arc<Mutex<Child>>,
+    /// Gets a message (or is dropped) once the process is gone.
+    exited: std::sync::mpsc::Receiver<()>,
+}
+
+static EXITING: LazyLock<Mutex<HashMap<String, Exiting>>> = LazyLock::new(Default::default);
+/// How long a quitting engine gets before the next engine of its profile ends it.
+const PREVIOUS_ENGINE_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often the exit watcher checks a quitting engine.
+const EXIT_POLL: Duration = Duration::from_millis(100);
+
+/// How the profile's previous engine was out of the way of a new one.
+#[derive(Debug, PartialEq, Eq)]
+enum PreviousEngine {
+    None,
+    Exited,
+    Killed,
+}
+
+/// Tells `child` (the profile's engine, stdin already closed) to quit: a watcher reaps it so no
+/// zombie is left, and the profile's next launch waits for it (see [`end_previous_engine`]).
+fn begin_exit(profile: &str, child: Child) {
+    let child = Arc::new(Mutex::new(child));
+    let (exited, receiver) = std::sync::mpsc::channel();
+    EXITING.lock().insert(profile.to_string(), Exiting { child: child.clone(), exited: receiver });
+    // Polls instead of `wait()` so the launcher can take the child to kill it.
+    let _ = std::thread::Builder::new().name("cef-engine-exit".into()).spawn(move || loop {
+        if !matches!(child.lock().try_wait(), Ok(None)) {
+            let _ = exited.send(());
+            return;
+        }
+        std::thread::sleep(EXIT_POLL);
+    });
+}
+
+/// Makes sure the profile's previous engine is gone: waits up to `timeout` for it to quit, then
+/// kills it. Blocking; runs under [`LAUNCHING`].
+fn end_previous_engine(profile: &str, timeout: Duration) -> PreviousEngine {
+    let Some(previous) = EXITING.lock().remove(profile) else {
+        return PreviousEngine::None;
+    };
+    if previous.exited.recv_timeout(timeout).is_ok()
+        || matches!(previous.child.lock().try_wait(), Ok(Some(_)) | Err(_))
+    {
+        return PreviousEngine::Exited;
+    }
+    tracing::warn!(%profile, "the previous Chromium engine did not quit in time; ending it");
+    let mut child = previous.child.lock();
+    let _ = child.kill();
+    let _ = child.wait();
+    PreviousEngine::Killed
+}
 
 /// A DevTools call waiting for its answer: the profile whose engine runs it, and the waiter.
 struct PendingDevtools {
@@ -223,6 +278,22 @@ pub fn is_running(profile: &str) -> bool {
     ENGINES.lock().contains_key(profile)
 }
 
+/// A debug build appends these whitespace-separated Chromium switches to the engine command
+/// line (QA: `--remote-debugging-port` for a CDP virtual authenticator,
+/// `--use-fake-device-for-media-stream`); release builds ignore it.
+pub const DEBUG_ENGINE_ARGS_ENV: &str = "FERRYX_ENGINE_EXTRA_ARGS";
+
+/// The Chromium switches in a [`DEBUG_ENGINE_ARGS_ENV`] value: its whitespace-separated
+/// tokens that start with `--`; anything else is dropped.
+fn debug_engine_args(value: Option<&str>) -> Vec<String> {
+    value
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter(|token| token.starts_with("--"))
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Starts the profile's engine when it is not running, without opening a tab.
 /// Blocking: run it through `run_blocking`.
 pub fn ensure_running(launch: &EngineLaunch<'_>, profile: &str, sink: EventSink) -> Result<(), BrowserError> {
@@ -235,6 +306,7 @@ pub fn ensure_running(launch: &EngineLaunch<'_>, profile: &str, sink: EventSink)
     }
     start_once(
         || is_running(profile),
+        || end_previous_engine(profile, PREVIOUS_ENGINE_EXIT_TIMEOUT),
         || {
             let failed = |error: std::io::Error| BrowserError::CreateFailed(format!("CEF engine: {error}"));
             let mut command = Command::new(launch.engine_dir.join(ENGINE_EXE));
@@ -244,20 +316,26 @@ pub fn ensure_running(launch: &EngineLaunch<'_>, profile: &str, sink: EventSink)
                 command.env("FERRYX_CEF_CACHE", cache_dir);
             }
             platform::configure(&mut command, launch.parent);
+            if cfg!(debug_assertions) {
+                command.args(debug_engine_args(std::env::var(DEBUG_ENGINE_ARGS_ENV).ok().as_deref()));
+            }
             start(command, profile, launch.parent, sink).map_err(failed)
         },
     )
 }
 
-/// Runs `start` unless `running`, with no other engine launch in between (see [`LAUNCHING`]).
-fn start_once(
+/// Runs `start` unless `running`, with no other engine launch in between (see [`LAUNCHING`]),
+/// after `end_previous` has the profile's quitting engine (if any) out of the way.
+fn start_once<P>(
     running: impl Fn() -> bool,
+    end_previous: impl FnOnce() -> P,
     start: impl FnOnce() -> Result<(), BrowserError>,
 ) -> Result<(), BrowserError> {
     let _launching = LAUNCHING.lock();
     if running() {
         return Ok(());
     }
+    end_previous();
     start()
 }
 
@@ -445,12 +523,10 @@ pub fn close(browser_id: &str) -> bool {
     send(&tab.profile, &EngineCommand::Close { tab: browser_id.to_string() });
     let last = !TABS.lock().values().any(|other| other.profile == tab.profile);
     if last {
-        // Dropping stdin tells the engine to quit; a thread waits for it so no zombie is left.
-        if let Some(Engine { mut child, stdin, .. }) = ENGINES.lock().remove(&tab.profile) {
+        // Dropping stdin tells the engine to quit.
+        if let Some(Engine { child, stdin, .. }) = ENGINES.lock().remove(&tab.profile) {
             drop(stdin);
-            let _ = std::thread::Builder::new()
-                .name("cef-engine-exit".into())
-                .spawn(move || child.wait());
+            begin_exit(&tab.profile, child);
         }
     }
     true
@@ -684,6 +760,63 @@ mod tests {
     }
 
     #[test]
+    fn debug_engine_args_keep_only_switches() {
+        let value = " --remote-debugging-port=9222  stray\t--use-fake-device-for-media-stream -x ";
+        assert_eq!(
+            debug_engine_args(Some(value)),
+            ["--remote-debugging-port=9222", "--use-fake-device-for-media-stream"]
+        );
+        assert!(debug_engine_args(None).is_empty());
+        assert!(debug_engine_args(Some("  \t ")).is_empty());
+    }
+
+    /// A stand-in process for an engine told to quit: one that exits at once, or one that
+    /// ignores the quit and keeps running.
+    fn quitting_engine(exits: bool) -> Child {
+        #[cfg(target_os = "windows")]
+        let mut command = {
+            let mut command = Command::new("cmd");
+            command.args(["/C", if exits { "exit 0" } else { "ping -n 60 127.0.0.1 >NUL" }]);
+            command
+        };
+        #[cfg(not(target_os = "windows"))]
+        let mut command = {
+            let mut command = Command::new("sh");
+            command.args(["-c", if exits { "exit 0" } else { "exec sleep 60" }]);
+            command
+        };
+        command.stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("stand-in engine starts")
+    }
+
+    /// A new engine of a profile goes after that profile's quitting engine: none, one that
+    /// exited, and one that ignored the quit (killed once the wait is over).
+    #[test]
+    fn a_new_engine_ends_the_previous_one_of_its_profile_first() {
+        assert_eq!(end_previous_engine("exit-none", Duration::ZERO), PreviousEngine::None);
+
+        begin_exit("exit-done", quitting_engine(true));
+        assert_eq!(end_previous_engine("exit-done", Duration::from_secs(30)), PreviousEngine::Exited);
+        assert!(!EXITING.lock().contains_key("exit-done"));
+
+        begin_exit("exit-stuck", quitting_engine(false));
+        let child = EXITING.lock().get("exit-stuck").map(|exiting| exiting.child.clone()).expect("registered");
+        assert_eq!(end_previous_engine("exit-stuck", Duration::ZERO), PreviousEngine::Killed);
+        assert!(matches!(child.lock().try_wait(), Ok(Some(_))));
+        assert_eq!(end_previous_engine("exit-stuck", Duration::ZERO), PreviousEngine::None);
+    }
+
+    /// The previous engine is ended only when a new one is about to start, under the launch
+    /// lock: a running engine is reused and its profile's quitting engine left alone.
+    #[test]
+    fn a_running_engine_skips_ending_the_previous_one() {
+        let ended = std::sync::atomic::AtomicUsize::new(0);
+        start_once(|| true, || ended.fetch_add(1, Ordering::SeqCst), || Ok(())).expect("reuse");
+        assert_eq!(ended.load(Ordering::SeqCst), 0);
+        start_once(|| false, || ended.fetch_add(1, Ordering::SeqCst), || Ok(())).expect("start");
+        assert_eq!(ended.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn devtools_answers_map_to_results_and_typed_failures() {
         assert_eq!(
             devtools_answer("Runtime.evaluate", true, r#"{"result":{"value":1}}"#).unwrap(),
@@ -902,6 +1035,7 @@ mod tests {
                     barrier.wait();
                     start_once(
                         || running.load(Ordering::SeqCst),
+                        || (),
                         || {
                             started.fetch_add(1, Ordering::SeqCst);
                             // Widen the window between the check and the registration.

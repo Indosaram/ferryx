@@ -11,10 +11,28 @@
 // marked `skipped` or a missing `extension` fails, so a dropped engine bundle cannot pass.
 // It must also carry every daily-browser gap its platform runs (summary.daily.<gap>.checks,
 // scripts/browser-qa/daily-scenarios.mjs), so a scenario that never started cannot pass.
+// A CDP-audit summary (scenario "cdp", gha-cdp-audit.mjs) must carry every check of
+// CDP_REQUIRED as `true`; a missing section or check fails, and `informational` cannot excuse one.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
 import { expectedDailyGaps } from "./daily-scenarios.mjs";
+
+/** The checks a CDP-audit summary must report true, per section; per-OS extras below. */
+export const CDP_REQUIRED = {
+  agent_cards: ["pair_card_shown", "pair_approved_by_click", "grant_card_shown", "grant_approved_by_click", "pipe_list", "pipe_observe_refs", "pipe_act_applied", "mcp_initialize", "mcp_tools_list", "mcp_snapshot_refs", "mcp_act_applied", "capture_webview", "capture_chromium", "app_alive_after_capture"],
+  passkeys: ["cdp_connected", "virtual_authenticator_added", "create_resolved", "get_resolved", "one_credential_listed"],
+  media: ["prompt_shown", "block_denies", "block_remembered", "reset_clears", "prompt_after_reset", "allow_grants", "allow_remembered", "prompt_after_second_reset"],
+  download: ["download_started", "paused_by_click", "size_stable_while_paused", "resumed_by_click", "completed", "sha256_matches"],
+  import: ["chrome_profile_seeded", "source_detected", "bookmarks_imported", "history_imported", "passwords_imported", "bitwarden_json_imported", "bitwarden_csv_imported"],
+};
+// Windows cannot decrypt Chrome's app-bound (v20) cookies (its elevation service rejects any
+// caller but Chrome): the import must report the cookie as needing sign-in and apply nothing.
+const CDP_REQUIRED_BY_PLATFORM = {
+  linux: { download: ["disk_full_reported"], import: ["cookies_imported"] },
+  darwin: { import: ["cookies_imported"] },
+  win32: { import: ["v20_cookie_seen", "v20_cookie_reported", "v20_cookie_not_applied"] },
+};
 
 /** Every summary.json at or below `dir`. */
 function summaries(dir) {
@@ -46,6 +64,7 @@ export function collectChecks(node, path = []) {
 
 /** Coverage failures of a full UI-audit summary: the sections that must have run. */
 export function missingCoverage(summary) {
+  if (summary?.scenario === "cdp") return missingCdpChecks(summary);
   if (summary?.scenario !== "full") return [];
   const missing = [];
   if (!summary.engine || summary.engine.skipped) missing.push(`engine skipped: ${summary.engine?.skipped ?? "no engine section"}`);
@@ -53,6 +72,24 @@ export function missingCoverage(summary) {
   for (const gap of expectedDailyGaps(summary.platform)) {
     const record = summary.daily?.[gap];
     if (!record?.checks || !Object.keys(record.checks).length) missing.push(`daily ${gap} did not run`);
+  }
+  return missing;
+}
+
+/** Every required CDP check that is absent or not exactly `true`. */
+export function missingCdpChecks(summary) {
+  const extra = CDP_REQUIRED_BY_PLATFORM[summary.platform] ?? {};
+  const missing = [];
+  for (const [section, names] of Object.entries(CDP_REQUIRED)) {
+    const checks = summary[section]?.checks;
+    if (!checks || typeof checks !== "object") {
+      missing.push(`${section}: section missing`);
+      continue;
+    }
+    for (const name of [...names, ...(extra[section] ?? [])]) {
+      if (!(name in checks)) missing.push(`${section}.${name} missing`);
+      else if (checks[name] !== true) missing.push(`${section}.${name} = ${JSON.stringify(checks[name])}`);
+    }
   }
   return missing;
 }

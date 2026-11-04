@@ -13787,6 +13787,8 @@ mod instance_lock_deadline_tests {
         drop(held_again);
 
         // 4. Predecessor releases WITHIN deadline: successor acquires successfully.
+        // The waiter retries every 200ms, so the window must leave room for several
+        // retries after the release even when the releasing thread is scheduled late.
         let held_third = try_lock_file(open_secure_lock_file(&path).unwrap()).unwrap();
         let release_thread = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -13794,7 +13796,7 @@ mod instance_lock_deadline_tests {
         });
         let acquired = lock_file_with_optional_wait(
             &path,
-            Some(std::time::Instant::now() + std::time::Duration::from_millis(400)),
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(5)),
         );
         assert!(
             acquired.is_ok(),

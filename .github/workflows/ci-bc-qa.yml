@@ -15,6 +15,7 @@ on:
   push:
     branches:
       - 'ci/bc-qa*'
+      - 'ci/f4-ci-cdp*'
 
 permissions:
   contents: read
@@ -26,6 +27,7 @@ concurrency:
 jobs:
   ui-audit:
     name: UI audit (${{ matrix.os_name }})
+    if: ${{ !startsWith(github.ref_name, 'ci/f4-ci-cdp') }}
     runs-on: ${{ matrix.platform }}
     timeout-minutes: 180
     strategy:
@@ -358,6 +360,7 @@ jobs:
 
   wayland:
     name: Wayland fallback (cage, headless)
+    if: ${{ !startsWith(github.ref_name, 'ci/f4-ci-cdp') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     env:
@@ -525,3 +528,306 @@ jobs:
       - name: Fail on false summary checks
         shell: bash
         run: bun scripts/browser-qa/check-summary.mjs "$RUNNER_TEMP/ui-audit-wayland"
+
+  # G4 passkeys, G5 media prompts, G7 downloads, G12 import, G14 agent cards/pipe/MCP/capture
+  # (scripts/browser-qa/gha-cdp-audit.mjs). Needs the Chromium engine: a failed bundle fails the job.
+  cdp-audit:
+    name: CDP audit (${{ matrix.os_name }})
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-24.04
+            os_name: linux
+          - platform: macos-15
+            os_name: macos
+          - platform: windows-2022
+            os_name: windows
+    env:
+      CEF_PATH: ${{ github.workspace }}/../cef-sdk
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+    steps:
+      - name: 'Checkout repository (submodules: recursive)'
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: Install Linux system dependencies
+        if: matrix.os_name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libasound2-dev \
+            clang \
+            libclang-dev \
+            libpipewire-0.3-dev \
+            libspa-0.2-dev \
+            libdbus-1-dev \
+            libva-dev \
+            libdrm-dev \
+            libgbm-dev \
+            libegl-dev \
+            libgl-dev \
+            libxcb1-dev \
+            libxcb-shm0-dev \
+            libxcb-randr0-dev \
+            libxcb-xfixes0-dev \
+            libx11-dev \
+            libxext-dev \
+            libxrandr-dev \
+            libxfixes-dev \
+            libxtst-dev \
+            libxi-dev \
+            libevdev-dev \
+            libudev-dev \
+            cmake ninja-build pkg-config xvfb xdotool x11-utils openbox imagemagick \
+            dbus-x11 mesa-vulkan-drivers libvulkan1 fonts-dejavu-core tesseract-ocr \
+            libnss3 libatk-bridge2.0-0 libxkbcommon0 libxcomposite1 libxdamage1 \
+            libcups2 libpango-1.0-0 libasound2t64
+
+      - name: Free disk (Linux)
+        if: matrix.os_name == 'linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Allow unprivileged user namespaces (Chromium engine sandbox, Linux)
+        if: matrix.os_name == 'linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Install cliclick and tesseract (macOS)
+        if: matrix.os_name == 'macos'
+        run: brew install cliclick tesseract imagemagick || echo "brew install incomplete; summary.json records what OCR had"
+
+      - name: Install tesseract (Windows)
+        if: matrix.os_name == 'windows'
+        run: choco install tesseract -y --no-progress || echo "tesseract unavailable; the audit records OCR as unavailable"
+
+      # The runner's desktop is 1024x768, narrower than the 1280px audit window: the store's
+      # 'Add to Chrome' and Chrome's install dialog land off screen. Widen the display first.
+      - name: Set display resolution 1920x1080 (Windows)
+        if: matrix.os_name == 'windows'
+        shell: pwsh
+        run: |
+          try { Set-DisplayResolution -Width 1920 -Height 1080 -Force -ErrorAction Stop } catch { Write-Host "Set-DisplayResolution failed: $_" }
+          Add-Type -AssemblyName System.Windows.Forms
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          Write-Host "primary screen now $($b.Width)x$($b.Height)"
+
+      - name: Use Strawberry Perl for vendored OpenSSL (Windows)
+        if: matrix.os_name == 'windows'
+        shell: bash
+        run: echo "OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe" >> "$GITHUB_ENV"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./src-tauri -> target
+            ./crates/ferryx-browser-engine -> target
+          shared-key: bc-qa-${{ matrix.os_name }}-v1
+          save-if: ${{ !startsWith(github.ref_name, 'ci/f4-') }}
+
+      - name: Install Node/Bun dependencies
+        shell: bash
+        run: |
+          bun install --frozen-lockfile || bun install
+          bun install --cwd ui --frozen-lockfile || bun install --cwd ui
+
+      - name: Build Frontend UI
+        run: bun run --cwd ui build
+
+      # Branches with the default remote-desktop feature link the pinned FFmpeg SDK that
+      # .cargo/config.toml points FFMPEG_DIR at; older trees have no fetch script.
+      - name: Fetch FFmpeg SDK (remote-desktop, when the tree has it)
+        shell: bash
+        run: |
+          if [ -f scripts/fetch-ffmpeg.mjs ]; then bun scripts/fetch-ffmpeg.mjs; else echo "no scripts/fetch-ffmpeg.mjs in this tree"; fi
+
+      - name: Build debug app
+        shell: bash
+        run: cargo build --manifest-path src-tauri/Cargo.toml --bin ferryx --features tauri/custom-protocol
+
+      - name: Preserve dependency cache even if the audit step fails
+        shell: bash
+        run: echo "CACHE_ON_FAILURE=true" >> "$GITHUB_ENV"
+
+      # Chromium engine checks need the Linux engine bundle, which only trees with
+      # crates/ferryx-browser-engine/src/engine/linux_sandbox.rs can build. Failure here only
+      # skips the engine steps; the UI audit still runs.
+      - name: Bundle the Chromium engine (Linux, when supported)
+        if: matrix.os_name == 'linux'
+        continue-on-error: true
+        timeout-minutes: 45
+        shell: bash
+        run: |
+          if [ ! -f crates/ferryx-browser-engine/src/engine/linux_sandbox.rs ]; then
+            echo "this tree has no Linux engine; engine checks are skipped"
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/engine-out"
+          bash scripts/browser-qa/bundle-engine-retry.sh "$RUNNER_TEMP/engine-out"
+          ls -la "$RUNNER_TEMP/engine-out"
+          zip=$(ls "$RUNNER_TEMP"/engine-out/engine-linux-*.zip | head -1)
+          echo "FERRYX_UI_AUDIT_ENGINE_ZIP=$zip" >> "$GITHUB_ENV"
+          # The unpacked bundle beside the zip, for the drag-mask run (FERRYX_CEF_ENGINE_DIR).
+          dir="$RUNNER_TEMP/engine-out/engine-linux-x86_64"
+          if [ -x "$dir/ferryx_engine" ]; then echo "FERRYX_UI_AUDIT_ENGINE_DIR=$dir" >> "$GITHUB_ENV"; fi
+
+      - name: Setup Ninja (engine build, macOS/Windows)
+        if: matrix.os_name != 'linux'
+        continue-on-error: true
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      # After the app build: the MSVC environment only has to reach the engine's CMake build.
+      - name: MSVC developer environment (engine build, Windows)
+        if: matrix.os_name == 'windows'
+        continue-on-error: true
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Drop Git coreutils link.exe (shadows the MSVC linker in bash, Windows)
+        if: matrix.os_name == 'windows'
+        continue-on-error: true
+        shell: bash
+        run: rm -f /usr/bin/link.exe && (which link.exe || true)
+
+      # Failure here only skips the drag-mask run; the UI audit still runs.
+      - name: Bundle the Chromium engine (macOS)
+        if: matrix.os_name == 'macos'
+        continue-on-error: true
+        timeout-minutes: 60
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/engine-out"
+          bash scripts/browser-qa/bundle-engine-retry.sh "$RUNNER_TEMP/engine-out"
+          # Ad-hoc signature so the helper apps inside the bundle launch on the runner.
+          codesign --force --deep -s - "$RUNNER_TEMP/engine-out/ferryx_engine.app" || true
+          ls -la "$RUNNER_TEMP/engine-out"
+          if [ -x "$RUNNER_TEMP/engine-out/ferryx_engine.app/Contents/MacOS/ferryx_engine" ]; then
+            echo "FERRYX_UI_AUDIT_ENGINE_DIR=$RUNNER_TEMP/engine-out" >> "$GITHUB_ENV"
+            # The archive the app installs: ferryx_engine.app at its root, as release-engine.mjs zips it.
+            zip="$RUNNER_TEMP/engine-zip/engine-macos-aarch64.zip"
+            mkdir -p "$(dirname "$zip")"
+            ditto -c -k --keepParent --norsrc "$RUNNER_TEMP/engine-out/ferryx_engine.app" "$zip"
+            ls -la "$zip"
+            echo "FERRYX_UI_AUDIT_ENGINE_ZIP=$zip" >> "$GITHUB_ENV"
+          fi
+
+      - name: Bundle the Chromium engine (Windows)
+        if: matrix.os_name == 'windows'
+        continue-on-error: true
+        timeout-minutes: 60
+        shell: bash
+        env:
+          # A short path keeps the libcef_dll_wrapper object paths under MAX_PATH.
+          CEF_PATH: C:/cef-sdk
+        run: |
+          mkdir -p "$RUNNER_TEMP/engine-out"
+          bash scripts/browser-qa/bundle-engine-retry.sh "$RUNNER_TEMP/engine-out"
+          exe=$(find "$(cygpath -u "$RUNNER_TEMP")/engine-out" -name ferryx_engine.exe | head -1)
+          echo "engine exe: ${exe:-<none>}"
+          if [ -n "$exe" ]; then
+            echo "FERRYX_UI_AUDIT_ENGINE_DIR=$(cygpath -w "$(dirname "$exe")")" >> "$GITHUB_ENV"
+            # The archive the app installs: the engine dir's contents at its root.
+            zip="$(cygpath -u "$RUNNER_TEMP")/engine-zip/engine-windows-x86_64.zip"
+            mkdir -p "$(dirname "$zip")"
+            (cd "$(dirname "$exe")" && 7z a -tzip -mx=5 "$(cygpath -w "$zip")" . > /dev/null)
+            ls -la "$zip"
+            echo "FERRYX_UI_AUDIT_ENGINE_ZIP=$(cygpath -w "$zip")" >> "$GITHUB_ENV"
+          fi
+
+      - name: Require the engine bundle
+        shell: bash
+        run: |
+          if [ -z "${FERRYX_UI_AUDIT_ENGINE_DIR:-}" ]; then echo "no Chromium engine bundle: the CDP audit needs it"; exit 1; fi
+          echo "engine dir: $FERRYX_UI_AUDIT_ENGINE_DIR"
+
+      - name: Run CDP audit (Linux, Xvfb + openbox, 5 MiB tmpfs for disk full)
+        if: matrix.os_name == 'linux'
+        timeout-minutes: 75
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/cdp-audit"
+          mkdir -p "$out"
+          sudo mkdir -p /mnt/ferryx-full
+          sudo mount -t tmpfs -o size=5m,uid=$(id -u),gid=$(id -g),mode=0755 tmpfs /mnt/ferryx-full
+          df -h /mnt/ferryx-full
+          # The password vault needs a Secret Service (gnome-keyring, unlocked below).
+          sudo apt-get install -y --no-install-recommends gnome-keyring
+          (google-chrome --version || true)
+          export DISPLAY=:97
+          Xvfb :97 -screen 0 1920x1080x24 -nolisten tcp > "$out/xvfb.log" 2>&1 &
+          for i in $(seq 1 50); do xdpyinfo > /dev/null 2>&1 && break; sleep 0.2; done
+          dbus-run-session -- bash -c '
+            openbox > "$1/openbox.log" 2>&1 &
+            sleep 2
+            # The password vault keeps its key in the Secret Service: a login keyring unlocked
+            # with a throwaway password, as the UI audit does (run 41804862351: vault unavailable).
+            eval "$(printf "ferryx-qa-keyring" | gnome-keyring-daemon --unlock --components=secrets)"
+            export GNOME_KEYRING_CONTROL SSH_AUTH_SOCK
+            echo "gnome-keyring: ${GNOME_KEYRING_CONTROL:-not started}" > "$1/keyring.log"
+            bun scripts/browser-qa/gha-cdp-audit.mjs --binary src-tauri/target/debug/ferryx --out "$1" --engine-dir "$FERRYX_UI_AUDIT_ENGINE_DIR" --disk-full-dir /mnt/ferryx-full
+          ' bash "$out" || echo "cdp driver exited non-zero: $?"
+
+      - name: Run CDP audit (macOS)
+        if: matrix.os_name == 'macos'
+        timeout-minutes: 75
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/cdp-audit"
+          mkdir -p "$out"
+          bun scripts/browser-qa/gha-cdp-audit.mjs --binary src-tauri/target/debug/ferryx --out "$out" --engine-dir "$FERRYX_UI_AUDIT_ENGINE_DIR" || echo "cdp driver exited non-zero: $?"
+
+      - name: Run CDP audit (Windows)
+        if: matrix.os_name == 'windows'
+        timeout-minutes: 75
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/cdp-audit"
+          mkdir -p "$out"
+          bun scripts/browser-qa/gha-cdp-audit.mjs --binary src-tauri/target/debug/ferryx.exe --out "$out" --engine-dir "$FERRYX_UI_AUDIT_ENGINE_DIR" || echo "cdp driver exited non-zero: $?"
+
+      - name: Upload CDP audit artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdp-audit-${{ matrix.os_name }}
+          path: ${{ runner.temp }}/cdp-audit/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail on false or missing CDP checks
+        shell: bash
+        run: |
+          bun test scripts/browser-qa/check-summary.test.mjs
+          bun scripts/browser-qa/check-summary.mjs "$RUNNER_TEMP/cdp-audit"

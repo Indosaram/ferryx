@@ -80,6 +80,12 @@ export function ImportBrowserDataDialog({ open, onOpenChange, profiles, defaultP
     setPasswordFile(null);
   }, [source]);
 
+  // Results describe the last import; a new source, profile, format or file starts a new one.
+  useEffect(() => {
+    setResults(null);
+    setRunError(null);
+  }, [sourceId, profileId, passwordFormat, passwordFile]);
+
   const fromPasswordFile = sourceId === PASSWORD_FILE_SOURCE;
   const needsPasswordCsv = Boolean(source?.passwordsNeedFile && types.has("passwords"));
   const canRun =
