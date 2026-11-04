@@ -204,6 +204,7 @@ describe("onboarding exports and constants", () => {
     expect(ONBOARDING_STEP_ORDER).toEqual([
       "intro",
       "features",
+      "import",
       "agents",
       "enroll",
       "skills",
@@ -566,6 +567,7 @@ describe("pendingOnboardingSteps", () => {
     };
     expect(pendingOnboardingSteps(state, ctx)).toEqual([
       "features",
+      "import",
       "project",
     ]);
   });
@@ -583,7 +585,7 @@ describe("pendingOnboardingSteps", () => {
       projectCount: 1,
       accountLinked: true,
     };
-    expect(pendingOnboardingSteps(state, ctx)).toEqual(["cli"]);
+    expect(pendingOnboardingSteps(state, ctx)).toEqual(["import", "cli"]);
   });
 
   it("returns empty when all steps completed or satisfied", () => {
@@ -599,7 +601,7 @@ describe("pendingOnboardingSteps", () => {
       projectCount: 1,
       accountLinked: true,
     };
-    expect(pendingOnboardingSteps(state, ctx)).toEqual([]);
+    expect(pendingOnboardingSteps(state, ctx)).toEqual(["import"]);
   });
 });
 
@@ -667,6 +669,7 @@ describe("wizardSteps", () => {
     expect(wizardSteps(ctx)).toEqual([
       "intro",
       "features",
+      "import",
       "agents",
       "enroll",
       "skills",
@@ -704,6 +707,7 @@ describe("wizardSteps", () => {
     expect(wizardSteps(ctx)).toEqual([
       "intro",
       "features",
+      "import",
       "agents",
       "enroll",
       "skills",
@@ -862,11 +866,11 @@ describe("shouldAutoOpenOnboarding", () => {
       projectCount: 1,
       accountLinked: true,
     };
-    expect(pendingOnboardingSteps(state, satisfiedCtx)).toEqual([]);
+    expect(pendingOnboardingSteps(state, satisfiedCtx)).toEqual(["import"]);
     expect(shouldAutoOpenOnboarding(state, satisfiedCtx)).toBe(false);
 
     const notInstalledCtx = { ...satisfiedCtx, cli: cliNotInstalled };
-    expect(pendingOnboardingSteps(state, notInstalledCtx)).toEqual(["cli"]);
+    expect(pendingOnboardingSteps(state, notInstalledCtx)).toEqual(["import", "cli"]);
     expect(shouldAutoOpenOnboarding(state, notInstalledCtx)).toBe(false);
   });
 
@@ -904,7 +908,7 @@ describe("features step", () => {
       completedSteps: ["intro", "agents", "project"],
       dismissed: false,
     };
-    expect(pendingOnboardingSteps(upgraded, satisfiedCtx)).toEqual(["features"]);
+    expect(pendingOnboardingSteps(upgraded, satisfiedCtx)).toEqual(["features", "import"]);
     expect(satisfiedOnboardingSteps(upgraded, satisfiedCtx)).toEqual([
       "intro",
       "agents",
@@ -921,7 +925,7 @@ describe("features step", () => {
       ["features"],
       createMockStorage(),
     );
-    expect(pendingOnboardingSteps(doneState, satisfiedCtx)).toEqual([]);
+    expect(pendingOnboardingSteps(doneState, satisfiedCtx)).toEqual(["import"]);
     expect(satisfiedOnboardingSteps(doneState, satisfiedCtx)).toContain(
       "features",
     );
@@ -933,7 +937,7 @@ describe("features step", () => {
       completedSteps: ["intro", "agents", "project"],
       dismissed: false,
     };
-    expect(pendingOnboardingSteps(upgraded, satisfiedCtx)).toEqual(["features"]);
+    expect(pendingOnboardingSteps(upgraded, satisfiedCtx)).toEqual(["features", "import"]);
     expect(shouldAutoOpenOnboarding(upgraded, satisfiedCtx)).toBe(false);
 
     const fresh: OnboardingState = {
@@ -987,7 +991,7 @@ describe("phone step", () => {
       dismissed: false,
     };
     const unpaired = { ...ctx, pairedDeviceCount: 0 };
-    expect(pendingOnboardingSteps(state, unpaired)).toEqual(["phone"]);
+    expect(pendingOnboardingSteps(state, unpaired)).toEqual(["import", "phone"]);
     expect(shouldAutoOpenOnboarding(state, unpaired)).toBe(false);
   });
 });
@@ -1014,7 +1018,7 @@ describe("try step", () => {
       completedSteps: ["intro", "features", "agents", "cli", "project"],
       dismissed: false,
     };
-    expect(pendingOnboardingSteps(state, ctx)).toEqual([]);
+    expect(pendingOnboardingSteps(state, ctx)).toEqual(["import"]);
     expect(shouldAutoOpenOnboarding(state, ctx)).toBe(false);
     expect(satisfiedOnboardingSteps(state, ctx)).not.toContain("try");
     expect(
@@ -1054,12 +1058,12 @@ describe("supervisor step", () => {
 
   it("is pending when setup is unfinished but never forces the wizard open", () => {
     const notReady = { ...ctx, supervisorReady: false };
-    expect(pendingOnboardingSteps(finished, notReady)).toEqual(["supervisor"]);
+    expect(pendingOnboardingSteps(finished, notReady)).toEqual(["import", "supervisor"]);
     expect(shouldAutoOpenOnboarding(finished, notReady)).toBe(false);
   });
 
   it("never nags when the daemon does not report setup", () => {
-    expect(pendingOnboardingSteps(finished, { ...ctx, supervisorReady: null })).toEqual([]);
+    expect(pendingOnboardingSteps(finished, { ...ctx, supervisorReady: null })).toEqual(["import"]);
   });
 
   it("loads a persisted supervisor completion", () => {
