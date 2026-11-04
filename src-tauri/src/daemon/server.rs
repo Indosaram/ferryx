@@ -1814,7 +1814,6 @@ type AgentStateIngressReport = (
 /// Agents whose built-in herdr reporter Ferryx accepts on the agent-state socket. Every pane gets
 /// `HERDR_ENV`, so any herdr-aware agent may report there; only an agent named here, and measured
 /// to send the `pane.report_agent` envelope, is turned into state. crush: `internal/herdr/client.go`.
-#[cfg(any(unix, test))]
 const HERDR_REPORTING_AGENTS: &[&str] = &["crush"];
 
 /// Translates one herdr `pane.report_agent` request into Ferryx's agent-state report.
@@ -1823,7 +1822,6 @@ const HERDR_REPORTING_AGENTS: &[&str] = &["crush"];
 /// non-empty `agent_session_id` is the provider session the agent resumes with. `pane.release_agent`
 /// carries no state and is not translated: publishing `idle` on release would replace the retained
 /// provider session, and the foreground watcher already releases a pane whose agent exited.
-#[cfg(any(unix, test))]
 fn translate_herdr_report(line: &str) -> Option<AgentStateReport> {
     let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     if value.get("method")?.as_str()? != "pane.report_agent" {
@@ -1863,7 +1861,6 @@ fn translate_herdr_report(line: &str) -> Option<AgentStateReport> {
 /// reporting pane's own (`FERRYX_SESSION_ID`), the same trust an `agentState` line has on this
 /// owner-only socket; the hub accepts it only for the open goal bound to that session.
 /// (`sessionId`, `eventId`, `body`), or `None` for any other line.
-#[cfg(unix)]
 fn supervisor_report_line(line: &str) -> Option<(String, String, String)> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1881,7 +1878,6 @@ fn supervisor_report_line(line: &str) -> Option<(String, String, String)> {
 /// The reply line a herdr client reads, and discards, after each request it sends. Any `pane.*`
 /// request is answered, including ones Ferryx does not translate, so the client never waits out
 /// its timeout. Lines without a `method` are Ferryx's own reports, which expect no reply.
-#[cfg(any(unix, test))]
 fn herdr_response_line(line: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     if !value.get("method")?.as_str()?.starts_with("pane.") {
@@ -4517,7 +4513,6 @@ impl DaemonServer {
     }
 
     /// Parses one herdr `pane.report_agent` line from a known herdr-reporting agent.
-    #[cfg(any(unix, test))]
     fn parse_herdr_report(line: &str) -> Option<AgentStateIngressReport> {
         translate_herdr_report(line).and_then(Self::admit_agent_state_report)
     }
