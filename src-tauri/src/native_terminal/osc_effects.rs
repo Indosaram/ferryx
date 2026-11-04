@@ -26,6 +26,7 @@ pub(super) struct Effects {
     pub muted: bool,
     pub pending: Vec<OscEffect>,
     pub last_effect: Option<std::time::Instant>,
+    pub cwd: Option<String>,
 }
 
 #[repr(C)]
@@ -106,11 +107,20 @@ unsafe extern "C" fn deny_read(_terminal: GhosttyTerminal, _userdata: *mut c_voi
     // The documented default on return without replying is denial. No clipboard data is read.
 }
 
+unsafe extern "C" fn pwd(terminal: GhosttyTerminal, userdata: *mut c_void) {
+    if userdata.is_null() { return; }
+    let Some(handle) = NonNull::new(terminal) else { return; };
+    // SAFETY: pinned context outlives all registered callbacks.
+    let ctx = unsafe { &*(userdata as *const TerminalContext) };
+    ctx.osc_effects.lock().cwd = cwd(handle);
+}
+
 pub(super) fn register(handle: NonNull<GhosttyTerminalImpl>) -> Result<(), NativeTerminalError> {
     let limit = MAX_CLIPBOARD_BYTES;
     let result = unsafe { ghostty_terminal_set(handle.as_ptr(), GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES, &limit as *const _ as *const c_void) };
     NativeTerminalError::from_c_result(result, "set clipboard limit")?;
     for (option, callback) in [
+        (GHOSTTY_TERMINAL_OPT_PWD_CHANGED, pwd as *const c_void),
         (GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION, notification as *const c_void),
         (GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, clipboard as *const c_void),
         (GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ, deny_read as *const c_void),
@@ -126,7 +136,7 @@ pub(super) fn register(handle: NonNull<GhosttyTerminalImpl>) -> Result<(), Nativ
 }
 
 pub(super) fn unregister(handle: NonNull<GhosttyTerminalImpl>) {
-    for option in [GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ] {
+    for option in [GHOSTTY_TERMINAL_OPT_PWD_CHANGED, GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ] {
         unsafe { ghostty_terminal_set(handle.as_ptr(), option, std::ptr::null()); }
     }
 }
@@ -147,7 +157,9 @@ pub fn parse_cwd(text: &str) -> Option<String> {
     let path = if text.starts_with("file://") {
         let uri = url::Url::parse(text).ok()?;
         if uri.query().is_some() || uri.fragment().is_some() { return None; }
-        percent_encoding::percent_decode_str(uri.path()).decode_utf8().ok()?.into_owned()
+        let mut local = uri;
+        local.set_host(None).ok()?;
+        local.to_file_path().ok()?.to_string_lossy().into_owned()
     } else {
         text.to_string()
     };
