@@ -36,7 +36,7 @@ import { homedir, hostname } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { readAppends } from './f1-agent-link.mjs';
+import { paneAlive, readAppends } from './f1-agent-link.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
 const PANE = join(dirname(SELF), 'f1-pane.mjs');
@@ -363,6 +363,15 @@ function argvOf(pid) {
 }
 
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; } };
+const procState = (pid) => { try { return readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /s, '')[0] ?? null; } catch { return null; } };
+const cmdlineBytes = (pid) => { try { return readFileSync(`/proc/${pid}/cmdline`).length; } catch { return null; } };
+// A pane's teardown observation: liveness by paneAlive, with the raw proc facts recorded.
+function paneProbe(pid) {
+  const exists = alive(pid);
+  const state = exists ? procState(pid) : null;
+  const bytes = exists ? cmdlineBytes(pid) : null;
+  return { exists, procState: state, cmdlineBytes: bytes, live: paneAlive({ exists, procState: state, cmdlineBytes: bytes }) };
+}
 
 async function teardown(reason) {
   try { state.watcher?.close(); } catch { /* closed */ }
@@ -389,11 +398,12 @@ async function teardown(reason) {
   for (const name of state.logDir && existsSync(state.logDir) ? readdirSync(state.logDir) : []) {
     const pid = Number(name.match(/^pane-(\d+)\.jsonl$/)?.[1]);
     if (!Number.isInteger(pid)) continue;
-    const live = alive(pid);
+    const probe = paneProbe(pid);
+    const live = probe.live;
     const argv = live ? argvOf(pid) : null;
     const ours = live && Boolean(argv?.includes(PANE) && argv?.includes(state.logDir));
     if (ours) { try { process.kill(pid, 'SIGTERM'); } catch { /* raced its exit */ } }
-    panes.push({ pid, aliveAtTeardown: live, signalled: ours, argv });
+    panes.push({ pid, aliveAtTeardown: live, signalled: ours, argv, procState: probe.procState, exiting: probe.exists && !probe.live });
   }
   try { state.server?.stop(true); } catch { /* stopped */ }
   // Small enough for one JSONL reply line: pane logs were already streamed as pane events.
@@ -439,11 +449,12 @@ async function orphanTeardown(reason) {
   for (const name of state.logDir && existsSync(state.logDir) ? readdirSync(state.logDir) : []) {
     const pid = Number(name.match(/^pane-(\d+)\.jsonl$/)?.[1]);
     if (!Number.isInteger(pid)) continue;
-    const live = alive(pid);
+    const probe = paneProbe(pid);
+    const live = probe.live;
     const argv = live ? argvOf(pid) : null;
     const ours = live && Boolean(argv?.includes(PANE) && argv?.includes(state.logDir));
     if (ours) { try { process.kill(pid, 'SIGTERM'); } catch { /* raced its exit */ } }
-    panes.push({ pid, aliveAtTeardown: live, signalled: ours, argv });
+    panes.push({ pid, aliveAtTeardown: live, signalled: ours, argv, procState: probe.procState, exiting: probe.exists && !probe.live });
   }
   return { reason, orphan: true, runRoot: state.runRoot, daemons, panes, outage: readProxyState().outage, served: readJsonl(join(state.agentDir, 'served.jsonl')).length };
 }

@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, watch } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AgentChannel, backoffDelay, readAppends, RECONNECT_BUDGET_MS } from './f1-agent-link.mjs';
+import { AgentChannel, backoffDelay, paneAlive, readAppends, RECONNECT_BUDGET_MS } from './f1-agent-link.mjs';
 import { agentLinkArgs } from './f1-acceptance.mjs';
 
 const AGENT = join(dirname(fileURLToPath(import.meta.url)), 'f1-host-agent.mjs');
@@ -275,7 +275,23 @@ function linkArgChecks(check) {
   check('f1-agent-link-args', cases.every((entry) => entry.ok), { cases, first, later });
 }
 
+// Teardown liveness (run qa-mw21i6yv-1cwdj-1: four outage panes that had just logged
+// stdin-closed were probed with an empty cmdline and counted alive and foreign).
+function paneAliveChecks(check) {
+  const cases = [
+    ['gone', paneAlive({ exists: false }), false],
+    ['running', paneAlive({ exists: true, procState: 'S', cmdlineBytes: 120 }), true],
+    ['zombie', paneAlive({ exists: true, procState: 'Z', cmdlineBytes: 0 }), false],
+    ['dead-state', paneAlive({ exists: true, procState: 'X', cmdlineBytes: 0 }), false],
+    ['mid-exit-empty-cmdline', paneAlive({ exists: true, procState: 'S', cmdlineBytes: 0 }), false],
+    ['no-proc-existence-decides', paneAlive({ exists: true, procState: null, cmdlineBytes: null }), true],
+    ['cmdline-unreadable-not-exiting', paneAlive({ exists: true, procState: 'R', cmdlineBytes: null }), true],
+  ].map(([label, got, expected]) => ({ label, got, expected, ok: got === expected }));
+  check('f1-pane-teardown-liveness', cases.every((entry) => entry.ok), cases);
+}
+
 export async function f1LinkUnitChecks(check, stateRoot) {
+  paneAliveChecks(check);
   appendChecks(check);
   linkArgChecks(check);
   await channelChecks(check);

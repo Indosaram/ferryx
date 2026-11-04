@@ -33,6 +33,17 @@ export function readAppends(bytes, offset) {
   return { lines, end: last + 1, truncated: false };
 }
 
+// Pane liveness at teardown (same rule as the F4 fix cfd4431ad): a zombie (state Z) is not
+// alive, and neither is a process mid-exit, whose /proc/<pid>/cmdline the kernel empties once
+// its address space is released; it can never run user code again. `procState` and
+// `cmdlineBytes` are null where /proc is unavailable (non-Linux): then existence alone decides.
+export function paneAlive({ exists, procState = null, cmdlineBytes = null }) {
+  if (!exists) return false;
+  if (procState === 'Z' || procState === 'X') return false;
+  if (procState !== null && cmdlineBytes === 0) return false;
+  return true;
+}
+
 export class AgentChannel {
   // connect({ after, attempt, onLine }) -> Promise<{ link: { send(line), closed: Promise, close() }, attached }>
   //   attempt 0 is the first link; onLine(json, raw) must be called for every agent stdout line.
