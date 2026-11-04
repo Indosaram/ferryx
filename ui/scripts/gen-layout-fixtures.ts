@@ -9,12 +9,15 @@ const initial = () => {
   state = layoutReducer(state, { type: "SPLIT_PANE", tabId: "one", targetLeafId: "leaf-init", newLeafId: "second", sessionId: "pty-second", direction: "horizontal" });
   return state;
 };
+const withFile = () => createLayoutState([{ kind: "file", id: "file", label: "file", path: "old", backendSessionId: "pty-file", line: null, col: null, workspaceId: null, previewId: "preview-file" }], "file");
 function project(state: LayoutState) {
   const tree = (node: PaneNode, content: Record<string, PaneContent>): unknown => node.type === "split"
     ? { type: "split", dir: node.direction, ratio: node.ratio, a: tree(node.first, content), b: tree(node.second, content) }
     : { type: "leaf", content: content[node.leafId]?.kind === "browser"
         ? { kind: "browser", url: (content[node.leafId] as Extract<PaneContent, { kind: "browser" }>).browser.url }
-        : { kind: "terminal", backendSessionId: (content[node.leafId] as Extract<PaneContent, { kind: "terminal" }>)?.sessionId ?? "" } };
+        : content[node.leafId]?.kind === "file"
+          ? (() => { const file = content[node.leafId] as Extract<PaneContent, { kind: "file" }>; return { kind: "file", path: file.path, line: file.line, col: file.col }; })()
+          : { kind: "terminal", backendSessionId: (content[node.leafId] as Extract<PaneContent, { kind: "terminal" }>)?.sessionId ?? "" } };
   return state.tabs.map((tab) => ({ tabId: tab.id, label: "customLabel" in tab ? tab.customLabel ?? tab.label : tab.label, pinned: tab.pinned ?? false,
     paneTree: tree(state.layoutsByTabId[tab.id].root, state.layoutsByTabId[tab.id].contentsByLeafId ?? {}) }));
 }
@@ -42,6 +45,8 @@ const pairs: { action: LayoutAction; intent: Record<string, unknown>; prepare?: 
     action: { type: "SET_TAB_GROUP_RATIO", path: "", ratio: 0.7 }, intent: { type: "SET_TAB_GROUP_RATIO", path: "", ratio: 0.7 } },
   { prepare: (state) => layoutReducer(state, { type: "MOVE_TAB_TO_SPLIT", sourceTabId: "two", targetGroupId: group, direction: "vertical" }),
     action: { type: "EQUALIZE_TAB_GROUP_RUN", path: "" }, intent: { type: "EQUALIZE_TAB_GROUP_RUN", path: "" } },
+  { prepare: withFile, action: { type: "UPDATE_FILE_TAB", tabId: "file", path: "new", line: 10, col: 3 },
+    intent: { type: "UPDATE_FILE_TAB", tabId: "file", nodeId: 1, path: "new", line: 10, col: 3 } },
 ];
 const cases = pairs.map(({ action, intent, prepare }) => {
   const before = prepare ? prepare(initial()) : initial();
