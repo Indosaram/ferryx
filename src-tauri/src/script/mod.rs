@@ -73,7 +73,10 @@ fn worker(registry: Registry, host: &tokio::runtime::Handle, receive: mpsc::Rece
             Ok(())
         })
     }).map_err(|error| error.to_string())?;
-    vm.load(&source).map_err(|error| error.to_string())?;
+    {
+        let _execution = registry.execution.lock();
+        vm.load(&source).map_err(|error| error.to_string())?;
+    }
     loop {
         match receive.recv_timeout(vm.next_wait()) {
             Ok(Request::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
