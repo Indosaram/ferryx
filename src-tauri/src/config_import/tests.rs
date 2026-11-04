@@ -114,7 +114,8 @@ fn imported_settings_reach_native_terminal_overrides() {
         scrollback: preview.settings.scrollback, cursor_style: preview.settings.cursor_style,
         theme: Some(theme), ..Default::default()
     };
-    let base = crate::terminal::cached_terminal_preferences();
+    let dir = tempfile::tempdir().unwrap();
+    let base = crate::terminal::load_terminal_preferences_from_path(&dir.path().join("absent"));
     let effective = apply_terminal_preference_overrides(&base, &overrides);
     assert_eq!(effective.font_family, "Menlo");
     assert_eq!(effective.font_size, 16.0);
