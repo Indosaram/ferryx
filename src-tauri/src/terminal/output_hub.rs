@@ -747,8 +747,7 @@ pub mod retained_history;
 #[path = "vt_state.rs"]
 pub mod vt_state;
 
-#[path = "vt_stream.rs"]
-pub mod vt_stream;
+pub use super::vt_stream;
 
 pub struct SessionHub {
     exit_status: ExitStatusSlot,
@@ -770,6 +769,8 @@ pub struct SessionHub {
     /// Headless parser fed with every published chunk. `None` only when the parser could not be
     /// created, in which case full attaches fall back to retained replay.
     pub(crate) screen: Option<parking_lot::Mutex<super::screen_mirror::ScreenMirror>>,
+    /// Turns iTerm2 inline images into Kitty graphics before anything retains or forwards them.
+    inline_images: vt_stream::InlineImageRewriter,
 }
 
 impl SessionHub {
@@ -1082,6 +1083,7 @@ impl TerminalOutputHub {
             ended: false,
             published_bytes: 0,
             screen: super::screen_mirror::ScreenMirror::new(80, 24).map(parking_lot::Mutex::new),
+            inline_images: vt_stream::InlineImageRewriter::new(),
         };
         let hub = Arc::new(RwLock::new(hub));
         spawn_screen_compression(&hub);
@@ -1102,6 +1104,8 @@ impl TerminalOutputHub {
             available_from_sequence: sequence + 1,
         };
         hub.buffer.gap_floor = sequence + 1;
+        // Output after a gap never continues an inline file that started before it.
+        hub.inline_images = vt_stream::InlineImageRewriter::new();
         const GAP_SEAM: &[u8] = b"\r\n\x1b[0m\x1b[33m[Ferryx: output stream gap - some terminal output was missed]\x1b[0m\r\n";
         hub.buffer.retained.push(sequence, GAP_SEAM);
         let seam = OutputChunk {
@@ -1162,6 +1166,7 @@ impl TerminalOutputHub {
         }?;
 
         let mut hub = session_hub.write();
+        let chunk_bytes = hub.inline_images.rewrite(chunk_bytes);
         let chunk = hub
             .buffer
             .push_with_read_timestamp(chunk_bytes, metrics_read_unix_micros)?;
@@ -1532,6 +1537,7 @@ impl TerminalOutputHub {
             ended: false,
             published_bytes: 0,
             screen: screen.map(parking_lot::Mutex::new),
+            inline_images: vt_stream::InlineImageRewriter::new(),
         };
 
         let hub = Arc::new(RwLock::new(hub));

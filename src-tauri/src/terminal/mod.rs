@@ -57,6 +57,7 @@ pub mod service;
 pub mod session;
 pub mod shell;
 pub mod suspension;
+pub mod vt_stream;
 #[cfg(windows)]
 pub use suspension::windows::install_ownership_verifier;
 

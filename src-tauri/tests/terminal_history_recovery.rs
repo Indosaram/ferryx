@@ -107,11 +107,19 @@ fn reconnect_inside_discarded_osc_consumes_live_payload_without_visible_base64()
     let hub = TerminalOutputHub::new(64);
     drop(hub.register_session("oversized-osc"));
     hub.publish("oversized-osc", b"BEFORE\r\n\x1b]1337;File=inline=1:".to_vec()).unwrap();
-    hub.publish("oversized-osc", vec![b'Q'; 4096]).unwrap();
-    let snapshot = hub.subscribe_with_sequence("oversized-osc", None).unwrap().snapshot;
+    // An unterminated inline file is held by the hub until its terminator decides whether it
+    // becomes a Kitty image or is dropped, so nothing of it is published yet.
+    assert!(hub.publish("oversized-osc", vec![b'Q'; 4096]).is_none());
+    let attachment = hub.subscribe_with_sequence("oversized-osc", None).unwrap();
     let mut restored = NativeTerminal::new(80, 24).unwrap();
-    restored.feed(&snapshot.history).unwrap();
-    restored.feed(b"QUJDQUJDQUJD\x07AFTER\r\n").unwrap();
+    restored.feed(&attachment.snapshot.history).unwrap();
+    // The live continuation is what the hub forwards, never the raw PTY bytes: inline
+    // files are rewritten (or dropped whole) before they reach any subscriber.
+    let mut receiver = attachment.receiver;
+    hub.publish("oversized-osc", b"QUJDQUJDQUJD\x07AFTER\r\n".to_vec()).unwrap();
+    while let Ok(chunk) = receiver.try_recv() {
+        restored.feed(&chunk.bytes).unwrap();
+    }
     let actual = restored.render_snapshot().unwrap();
     let text: String = (0..24).map(|row| actual.row_text(row)).collect();
     assert!(text.contains("BEFORE"));
