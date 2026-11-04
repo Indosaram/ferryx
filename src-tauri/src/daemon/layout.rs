@@ -409,7 +409,7 @@ impl Layout {
                     None
                 }
                 if find(self, &scope).is_none() {
-                    self.parked_layouts.insert(scope.clone(), Layout { scope: Some(scope.clone()), ..Layout::default() });
+                    self.parked_layouts.insert(scope.clone(), Layout { machine_id: self.machine_id.clone(), scope: Some(scope.clone()), ..Layout::default() });
                 }
                 let target = find(self, &scope).ok_or("Unknown scope")?;
                 target.apply(*intent)?;
@@ -773,6 +773,14 @@ impl Store {
         let mut ids = Vec::new(); ordered(&next.tab_group_layout, &mut ids);
         next.tabs.sort_by_key(|tab| ids.iter().position(|id| id == &tab.tab_id).unwrap_or(usize::MAX));
         next.revision = next.revision.checked_add(1).ok_or_else(|| ApplyError::Invalid("Revision exhausted".into()))?;
+        fn stamp(layout: &mut Layout, machine: &str, revision: u64) {
+            layout.machine_id = machine.into();
+            layout.revision = revision;
+            for parked in layout.parked_layouts.values_mut() { stamp(parked, machine, revision); }
+        }
+        let machine = next.machine_id.clone();
+        let revision = next.revision;
+        stamp(&mut next, &machine, revision);
         if self.layouts.len() > 32 { return Err(ApplyError::Invalid("Window limit exceeded".into())); }
         let mut count = 0;
         fn count_nodes(node: &Node, count: &mut usize) {
@@ -918,13 +926,12 @@ mod foreign_snapshot {
         let offered = target.get("main").unwrap().layout;
         assert!(offered.tabs.is_empty());
         assert_eq!(offered.foreign_offers[&foreign.machine_id], foreign);
-        let local = populated(&mut Store::new(tempfile::tempdir().unwrap().path().into()));
         target.apply("main", 0, Intent::AddTabWithSession { tab_id: "local".into(), label: "local".into(),
             content: Content::Dag, activate: true }).unwrap();
         let before = target.get("main").unwrap().layout.tabs;
         target.adopt(BTreeMap::from([("main".into(), foreign)])).unwrap();
         assert_eq!(target.get("main").unwrap().layout.tabs, before);
-        assert!(!local.tabs.is_empty());
+
     }
 }
 
