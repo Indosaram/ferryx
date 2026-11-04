@@ -889,13 +889,19 @@ pub struct RemoteGatewayState {
         RwLock<Option<Arc<dyn ferryx_hub::supervisor::panel_contract::RuleStore>>>,
     /// The app-transcript requests running now, one flight per request id.
     pub(crate) supervisor_flights: ferryx_hub::supervisor::transcript::Flights,
-    /// The agent-stamp writer thread, kept so a test fixture can end it before its directory goes.
-    #[cfg(test)]
+    /// The agent-stamp writer thread. It writes into the machine journal's directory, so the
+    /// gateway ends and joins it when dropped rather than leaving it running past its owner.
     agent_stamp_writer: parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>,
     /// Test-only hub directory whose archive `POST /api/v1/supervisor/adopt-archived` adopts
     /// from; production reads the daemon's hub directory.
     #[cfg(test)]
     pub(crate) supervisor_test_hub_dir: RwLock<Option<std::path::PathBuf>>,
+}
+
+impl Drop for RemoteGatewayState {
+    fn drop(&mut self) {
+        self.finish_agent_stamp_writer();
+    }
 }
 
 impl RemoteGatewayState {
@@ -907,13 +913,8 @@ impl RemoteGatewayState {
         let workspaces = Arc::clone(&sessions.workspace_service);
         self.workspace_registry = workspaces.registry.clone();
         self.session_backend = sessions.clone();
-        let stamp_writer = install_agent_stamp_persistence(&self.agent_events, &workspaces);
-        #[cfg(test)]
-        {
-            *self.agent_stamp_writer.lock() = stamp_writer;
-        }
-        #[cfg(not(test))]
-        drop(stamp_writer);
+        *self.agent_stamp_writer.lock() =
+            install_agent_stamp_persistence(&self.agent_events, &workspaces);
         self.machine_services = Some(Arc::new(crate::daemon::MachineServices {
             sessions,
             workspaces,
@@ -923,9 +924,8 @@ impl RemoteGatewayState {
 
     /// Ends the agent-stamp writer after it has written everything queued, and waits for it. The
     /// writer batches for `AGENT_STAMP_WRITE_WINDOW` and writes into the machine journal's
-    /// directory, so a test that removes that directory calls this first. Publishes after it are
-    /// not persisted.
-    #[cfg(test)]
+    /// directory, so dropping the gateway calls this, and a test that removes that directory
+    /// while the gateway lives calls it first. Publishes after it are not persisted.
     pub(crate) fn finish_agent_stamp_writer(&self) {
         self.agent_events.clear_stamp_sink();
         if let Some(writer) = self.agent_stamp_writer.lock().take() {
@@ -1122,7 +1122,6 @@ impl RemoteGatewayState {
             #[cfg(test)]
             supervisor_test_rules: RwLock::new(None),
             supervisor_flights: Default::default(),
-            #[cfg(test)]
             agent_stamp_writer: parking_lot::Mutex::new(None),
             #[cfg(test)]
             supervisor_test_hub_dir: RwLock::new(None),

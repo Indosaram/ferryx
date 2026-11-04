@@ -379,8 +379,7 @@ impl AgentEventBus {
     }
 
     /// Drops the installed stamp sink, which closes the writer's queue so the writer drains what
-    /// it holds and ends. A test fixture calls it to retire the writer before its directory goes.
-    #[cfg(test)]
+    /// it holds and ends. The gateway calls it to retire the writer when it is dropped.
     pub(crate) fn clear_stamp_sink(&self) {
         *self.stamp_sink.lock() = None;
     }
