@@ -9,6 +9,7 @@ pub fn parse(source: &str) -> Result<Preview, String> {
         let accepted = match key {
             "font-family" if !value.is_empty() => { out.settings.font_family = Some(value.into()); true }
             "font-size" => out.settings.number(key, value),
+            "scrollback-limit-lines" => out.settings.number("scrollback", value),
             // Ghostty scrollback-limit is bytes, not lines. Do not silently reinterpret it.
             "cursor-style" if ["bar", "block", "underline"].contains(&value) => {
                 out.settings.cursor_style = Some(value.into()); true
