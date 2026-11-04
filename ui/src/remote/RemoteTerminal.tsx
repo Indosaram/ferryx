@@ -2081,6 +2081,14 @@ export function RemoteTerminal({
   return (
     <div className={`flex min-h-0 flex-col overflow-hidden bg-terminal text-chat-foreground ${embedded ? "h-full flex-1" : "h-[100dvh]"}`}>
       <div className={`flex shrink-0 items-center border-b border-chat-header-border bg-chat-header px-2 ${showTitleBar ? "h-11 justify-between" : "min-h-7 justify-end"} ${showKeyDock && !showTitleBar ? "[@media(pointer:coarse)]:min-h-11" : ""}`}>
+        {!createLocalSocket ? <button type="button" className="px-2 text-xs" onClick={() => {
+          const socket = socketRef.current;
+          const geometry = lastSentGeometryRef.current;
+          if (!socket || socket.readyState !== 1 || !geometry) return;
+          if (machineTransport && machineGenerationRef.current === null) return;
+          socket.send(JSON.stringify({ type: "takeSize", ...geometry,
+            ...(machineTransport ? { generation: machineGenerationRef.current } : {}) }));
+        }}>Take size</button> : null}
         {showTitleBar ? (
           <div className="flex min-w-0 items-center gap-2">
             {onBack ? (
