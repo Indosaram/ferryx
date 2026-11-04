@@ -5,6 +5,55 @@ use super::*;
 use crate::daemon::control::{ControlFailure, ControlReply, ControlRequest};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+/// Exercise actual Windows peer discovery, parent walking and both dispatch surfaces. The
+/// PowerShell child is a pane descendant, not a synthetic PeerClass passed to the policy.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_pipe_pane_descendant_cannot_write_other_pane_or_retire_owner() {
+    use crate::daemon::{supervisor_peer::SystemProcs, windows_pipe};
+    let root = tempfile::tempdir().unwrap();
+    let server = Arc::new(DaemonServer::new_with_paths(
+        Some(root.path().join("config")), Some(root.path().join("auth")),
+    ));
+    server.terminal_service.pty_manager().pane_registry()
+        .insert("pane-a", std::process::id(), &SystemProcs);
+    for control in [false, true] {
+        let channel = format!("test-{}", uuid::Uuid::new_v4());
+        let mut listener = windows_pipe::Listener::bind(&channel).unwrap();
+        let name = windows_pipe::name(&channel).unwrap();
+        let short_name = name.strip_prefix(r"\\.\pipe\").unwrap();
+        let request = if control {
+            serde_json::json!({"op":"RetireWhenIdle"})
+        } else {
+            serde_json::to_value(DaemonRequest::Write { session_id: "pane-b".into(), data: b"x".to_vec() }).unwrap()
+        };
+        let script = format!(
+            "$p=[System.IO.Pipes.NamedPipeClientStream]::new('.', '{short_name}', [System.IO.Pipes.PipeDirection]::InOut); $p.Connect(5000); $w=[System.IO.StreamWriter]::new($p); $w.AutoFlush=$true; $w.WriteLine('{}'); $r=[System.IO.StreamReader]::new($p); $r.ReadLine(); $p.Dispose()",
+            request.to_string().replace('\'', "''"),
+        );
+        let child = tokio::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
+            .spawn().unwrap();
+        let handler = Arc::clone(&server);
+        let serving = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap();
+            let (origin, ancestry) = windows_pipe::identity(&stream).await;
+            if control {
+                handler.handle_control_connection_with_origin(stream, None, origin, ancestry).await;
+            } else {
+                handler.handle_client_with_origin(stream, origin, ancestry).await;
+            }
+        });
+        let output = tokio::time::timeout(Duration::from_secs(15), child.wait_with_output()).await.unwrap().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(reply["code"], "FORBIDDEN", "{reply}");
+        if !control { assert_eq!(reply["details"]["reason"], "PANE_GRANT_REQUIRED", "{reply}"); }
+        tokio::time::timeout(Duration::from_secs(5), serving).await.unwrap().unwrap();
+    }
+}
+
 /// One request line as handle_client expects it from this server. On loopback transports
 /// (Windows) the first frame must carry the server's transport token as "token"; Unix
 /// authenticates by socket ownership and sends the bare request.
