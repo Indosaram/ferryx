@@ -15,6 +15,24 @@ pub enum LayoutReply {
     Unsupported,
 }
 
+#[tauri::command]
+pub async fn cmd_panes(
+    window: WebviewWindow,
+    manager: State<'_, Arc<RemoteGatewayManager>>,
+    request: crate::daemon::layout::PaneAction,
+) -> Result<crate::daemon::layout::DetachedRegistry, IpcError> {
+    let request = match request {
+        crate::daemon::layout::PaneAction::Attach { session, window: None, split } => crate::daemon::layout::PaneAction::Attach { session, window: Some(window.label().into()), split },
+        request => request,
+    };
+    let client = manager.daemon_client().ok_or_else(|| IpcError::internal("Layout daemon unavailable"))?;
+    match client.send_request(DaemonRequest::Panes { request }).await? {
+        DaemonResponse::PanesOk { detached } => Ok(detached),
+        DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
+        _ => Err(IpcError::internal("Unexpected pane response")),
+    }
+}
+
 fn reply(response: DaemonResponse) -> Result<LayoutReply, IpcError> {
     match response {
         DaemonResponse::LayoutOk { view } => Ok(LayoutReply::Ready { view }),
