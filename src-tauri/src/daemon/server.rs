@@ -2286,9 +2286,6 @@ pub struct DaemonServer {
     /// RetirementGuard drops, the handler notifies .0 ("parked") and waits on .1 ("release").
     #[cfg(test)]
     close_park: std::sync::OnceLock<Arc<(tokio::sync::Notify, tokio::sync::Notify)>>,
-    /// Test-only pane child pids counted alongside the live sessions' (`supervisor_peer`).
-    #[cfg(test)]
-    pub(crate) test_pane_pids: Mutex<std::collections::HashSet<u32>>,
     /// Which foreground process group reported each session's transient OSC 7501 records.
     protocol_reporters: Arc<crate::terminal::foreground::ProtocolReporters>,
 }
@@ -4201,8 +4198,6 @@ impl DaemonServer {
             _catalog_fixture: catalog_fixture,
             #[cfg(test)]
             close_park: std::sync::OnceLock::new(),
-            #[cfg(test)]
-            test_pane_pids: Mutex::new(std::collections::HashSet::new()),
             protocol_reporters,
         }
     }
@@ -6309,7 +6304,7 @@ impl DaemonServer {
         let origin = super::supervisor_peer::PeerOrigin::Unknown;
         #[cfg(not(unix))]
         let origin = super::supervisor_peer::PeerOrigin::TokenAuthenticated;
-        self.handle_client_with_origin(stream, origin).await
+        self.handle_client_with_origin(stream, origin, None).await
     }
 
     /// Serves one owner-socket connection whose peer pid the kernel reported, so supervisor
@@ -6318,51 +6313,60 @@ impl DaemonServer {
     pub async fn handle_unix_client(self: Arc<Self>, stream: tokio::net::UnixStream) {
         use std::os::unix::io::AsRawFd;
         let pid = super::supervisor_peer::peer_pid(stream.as_raw_fd());
-        // The pid is bound to its process start time now, so a reused pid is noticed later.
-        let origin = tokio::task::spawn_blocking(move || super::supervisor_peer::identify(pid))
-            .await
-            .unwrap_or(super::supervisor_peer::PeerOrigin::Unknown);
-        self.handle_client_with_origin(stream, origin).await
+        // The pid is bound to its process start time now, so a reused pid is noticed later, and
+        // its parent chain is walked once here; each gated request re-reads only the peer.
+        let (origin, ancestry) = tokio::task::spawn_blocking(move || {
+            let origin = super::supervisor_peer::identify(pid);
+            let ancestry = super::supervisor_peer::Ancestry::at_accept(
+                origin,
+                &super::supervisor_peer::SystemProcs,
+            );
+            (origin, ancestry)
+        })
+        .await
+        .unwrap_or((super::supervisor_peer::PeerOrigin::Unknown, None));
+        self.handle_client_with_origin(stream, origin, ancestry).await
     }
 
     /// Why this connection's peer may not change the supervisor, or `None`. The process-table
-    /// reads run on a blocking thread, never on a Tokio worker.
+    /// reads run on a blocking thread, never on a Tokio worker; `ancestry` is the connection's
+    /// parent chain from accept (refreshed in place when it no longer fits the peer).
     async fn supervisor_peer_refusal(
         &self,
         origin: super::supervisor_peer::PeerOrigin,
+        ancestry: &mut Option<super::supervisor_peer::Ancestry>,
     ) -> Option<String> {
         use super::supervisor_peer::PeerOrigin;
         if matches!(origin, PeerOrigin::TokenAuthenticated | PeerOrigin::Unknown) {
             return super::supervisor_peer::refusal(
                 origin,
-                &super::supervisor_peer::PaneSet::default(),
+                ancestry,
+                &super::supervisor_peer::PaneRegistry::default(),
                 &super::supervisor_peer::SystemProcs,
             );
         }
-        let pane_pids: Vec<u32> = self
-            .terminal_service
-            .list_sessions()
-            .into_iter()
-            .filter_map(|id| self.terminal_service.get_session(&id)?.pid())
-            .collect();
-        #[cfg(test)]
-        let pane_pids: Vec<u32> = pane_pids
-            .into_iter()
-            .chain(self.test_pane_pids.lock().iter().copied())
-            .collect();
-        tokio::task::spawn_blocking(move || {
-            let table = super::supervisor_peer::SystemProcs;
-            let panes = super::supervisor_peer::PaneSet::of(pane_pids, &table);
-            super::supervisor_peer::refusal(origin, &panes, &table)
+        let panes = Arc::clone(self.terminal_service.pty_manager().pane_registry());
+        let mut cached = ancestry.take();
+        let (refusal, cached) = tokio::task::spawn_blocking(move || {
+            let refusal = super::supervisor_peer::refusal(
+                origin,
+                &mut cached,
+                &panes,
+                &super::supervisor_peer::SystemProcs,
+            );
+            (refusal, cached)
         })
         .await
-        .unwrap_or_else(|error| Some(format!("the peer check failed: {error}")))
+        .unwrap_or_else(|error| (Some(format!("the peer check failed: {error}")), None));
+        *ancestry = cached;
+        refusal
     }
 
     pub async fn handle_client_with_origin<S>(
         self: Arc<Self>,
         stream: S,
         origin: super::supervisor_peer::PeerOrigin,
+        ancestry: Option<super::supervisor_peer::Ancestry>,
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
@@ -6373,6 +6377,7 @@ impl DaemonServer {
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
         let mut abort_rx = self.handover_manager.subscribe_client_abort();
+        let mut ancestry = ancestry;
         // Set once the connection has presented this boot's transport token. Unix inherits the
         // socket's ownership boundary and never needs the check.
         #[cfg(not(unix))]
@@ -6462,7 +6467,7 @@ impl DaemonServer {
                                 if !matches!(request, super::protocol::SupervisorSetupAction::Status)
                         );
                     let peer_refusal = if owner_decision {
-                        self.supervisor_peer_refusal(origin).await.map(|message| DaemonResponse::Error {
+                        self.supervisor_peer_refusal(origin, &mut ancestry).await.map(|message| DaemonResponse::Error {
                             code: Some(super::supervisor_peer::FORBIDDEN.into()),
                             message,
                             details: None,
@@ -6471,7 +6476,7 @@ impl DaemonServer {
                         None
                     };
                     let pause_peer_refusal = if matches!(req.as_ref(), Ok(DaemonRequest::SupervisorSetPaused { .. })) {
-                        self.supervisor_peer_refusal(origin).await
+                        self.supervisor_peer_refusal(origin, &mut ancestry).await
                     } else {
                         None
                     };

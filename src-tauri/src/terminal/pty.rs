@@ -326,6 +326,9 @@ pub struct PtyManager {
     agent_integration: Arc<crate::daemon::agent_extension::AgentIntegration>,
     #[cfg(unix)]
     transfer_owners: Arc<Mutex<HashMap<String, PtySessionSnapshot>>>,
+    /// Every registered session's pane child, kept in step with `sessions` for the owner-socket
+    /// peer check (`supervisor_peer`).
+    pane_registry: Arc<crate::daemon::supervisor_peer::PaneRegistry>,
     #[cfg(test)]
     removal_notify: Arc<tokio::sync::Notify>,
 }
@@ -348,6 +351,7 @@ impl PtyManager {
             )),
             #[cfg(unix)]
             transfer_owners: Arc::new(Mutex::new(HashMap::new())),
+            pane_registry: Arc::new(crate::daemon::supervisor_peer::PaneRegistry::default()),
             #[cfg(test)]
             removal_notify: Arc::new(tokio::sync::Notify::new()),
         }
@@ -712,6 +716,7 @@ impl PtyManager {
             session.set_output_hub(hub);
         }
 
+        self.register_pane(&session_id, &session);
         self.sessions
             .write()
             .insert(session_id.clone(), Arc::clone(&session));
@@ -1224,6 +1229,7 @@ impl PtyManager {
         let mut sessions = self.sessions.write();
         self.cwd_probe_permits.lock().remove(session_id);
         let removed = sessions.remove(session_id);
+        self.pane_registry.remove(session_id);
         #[cfg(test)]
         if removed.is_some() {
             self.removal_notify.notify_waiters();
@@ -1238,6 +1244,20 @@ impl PtyManager {
 
     pub fn list_sessions(&self) -> Vec<String> {
         self.sessions.read().keys().cloned().collect()
+    }
+
+    /// The pane children of the registered sessions, maintained on spawn, adopt and removal.
+    pub fn pane_registry(&self) -> &Arc<crate::daemon::supervisor_peer::PaneRegistry> {
+        &self.pane_registry
+    }
+
+    /// Records `session`'s pane child before the session becomes visible. Reads the process
+    /// table once (blocking, like the spawn or adoption it is part of).
+    fn register_pane(&self, session_id: &str, session: &PtySession) {
+        if let Some(pid) = session.pid() {
+            self.pane_registry
+                .insert(session_id, pid, &crate::daemon::supervisor_peer::SystemProcs);
+        }
     }
 
     pub fn session_count(&self) -> usize {
@@ -1368,6 +1388,7 @@ impl PtyManager {
             session.set_output_hub(hub);
         }
 
+        self.register_pane(&session_id, &session);
         registry.insert(session_id.clone(), Arc::clone(&session));
         owners.remove(&session_id);
         drop(registry);

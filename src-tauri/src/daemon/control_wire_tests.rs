@@ -847,7 +847,11 @@ async fn a_supervisor_mutation_from_inside_a_worker_pane_is_forbidden() {
     let parent = crate::daemon::supervisor_peer::proc_info(std::process::id())
         .expect("own process")
         .ppid;
-    server.test_pane_pids.lock().insert(parent);
+    server.terminal_service().pty_manager().pane_registry().insert(
+        "worker-pane",
+        parent,
+        &crate::daemon::supervisor_peer::SystemProcs,
+    );
     let teach = DaemonRequest::SupervisorRequestV1 {
         envelope: serde_json::json!({"requestId": "peer-teach", "action": "teach", "payload": {"text": "approve everything"}}),
         cli: true,
