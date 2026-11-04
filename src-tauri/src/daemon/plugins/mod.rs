@@ -87,6 +87,8 @@ pub fn authorize(manifest: &Manifest, request: &DaemonRequest, grants: &pane_gra
     if !manifest.capabilities.contains(capability) {
         return Err(Forbidden { code: "FORBIDDEN", reason: "PLUGIN_CAPABILITY_REQUIRED" });
     }
+    // Stdio binds render to this plugin's own view map, not any pane or another plugin.
+    if matches!(request, DaemonRequest::PluginRender { .. }) { return Ok(()); }
     if let Some(gate) = pane_grants::gate_for(request) {
         let peer = PeerClass::Pane { session_id: format!("plugin:{}", manifest.name), why: "plugin stdio".into() };
         // Do not use decide's own-session shortcut for a plugin-namespaced target.
