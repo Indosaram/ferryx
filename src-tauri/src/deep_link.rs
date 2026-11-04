@@ -47,11 +47,9 @@ pub fn ferryx_links<'a>(urls: impl IntoIterator<Item = &'a str>) -> Vec<String> 
 
 /// Whether `arg` is a ferryx:// link (scheme compared case-insensitively, as URL schemes are).
 pub fn is_ferryx_link(arg: &str) -> bool {
-    let prefix_len = DEEP_LINK_SCHEME.len() + 3;
-    arg.get(..prefix_len).is_some_and(|prefix| {
-        prefix[..DEEP_LINK_SCHEME.len()].eq_ignore_ascii_case(DEEP_LINK_SCHEME)
-            && &prefix[DEEP_LINK_SCHEME.len()..] == "://"
-    })
+    arg.get(..DEEP_LINK_SCHEME.len())
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case(DEEP_LINK_SCHEME))
+        && arg.get(DEEP_LINK_SCHEME.len()..DEEP_LINK_SCHEME.len() + 3) == Some("://")
 }
 
 /// Whether the single-instance plugin may run. Isolated QA profiles (FERRYX_RUNTIME_DIR or
@@ -164,6 +162,7 @@ mod tests {
     #[test]
     fn non_ascii_prefix_is_not_a_link_and_does_not_panic() {
         assert!(!is_ferryx_link("ferryé://x"));
+        assert!(!is_ferryx_link("ferréé://x"));
         assert!(!is_ferryx_link("ferr"));
     }
 
