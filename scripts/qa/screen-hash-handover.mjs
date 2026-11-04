@@ -3,8 +3,7 @@
 import net from 'node:net';
 import { once } from 'node:events';
 import { createInterface } from 'node:readline';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
-import { watch } from 'node:fs';
+import { mkdtemp, mkdir, rm, readFile, watch } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -81,13 +80,14 @@ async function fill(client, index) {
 
 async function handover(client, sessions) {
   const before = await Promise.all(sessions.map(sessionId => client.call({ type: 'describeScreenHash', sessionId })));
-  // Subscribe to the socket replacement before triggering upgrade; no polling or fixed sleeps.
-  const watcher = watch(runtime);
+  // Owner publication follows authority adoption. Queue filesystem events before upgrading.
+  const stopWatching = new AbortController();
+  const watcher = watch(runtime, { signal: AbortSignal.any([signal, stopWatching.signal]) });
   const replacement = (async () => {
-    for await (const [event, name] of (async function* () {
-      while (true) yield await once(watcher, 'change', { signal });
-    })()) {
-      if (event !== 'rename' || String(name) !== 'daemon.sock') continue;
+    for await (const { filename } of watcher) {
+      if (String(filename) !== 'owner.json') continue;
+      const owner = JSON.parse(await readFile(join(runtime, 'owner.json'), 'utf8'));
+      if (owner.pid === client.pid) continue;
       const next = await connection();
       if (next.pid !== client.pid) return next;
       next.close();
@@ -107,7 +107,7 @@ async function handover(client, sessions) {
     }
     console.log(`HASH_EQUAL=true RETAINED=10000 SESSIONS=${sessions.length}`);
     return next;
-  } finally { watcher.close(); }
+  } finally { stopWatching.abort(); }
 }
 
 let client;
