@@ -62,7 +62,7 @@ impl Settings {
     }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn cmd_config_import(format: String, bytes: Vec<u8>) -> Result<Preview, String> {
     // No file access, command execution, or settings mutation; the UI confirms a preview.
     crate::ipc::run_blocking(move || parse(&format, &bytes).map_err(crate::ipc::IpcError::internal))

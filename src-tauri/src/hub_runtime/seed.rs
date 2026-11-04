@@ -159,7 +159,7 @@ pub(crate) async fn seed_owner_memory(
 /// (`OMON_WORKSPACE_ROOT`), else `<home>/.ferryx/hub/workspace`. Every bot session runs
 /// under it, with or without a persona.
 fn hub_workspace(configured_root: Option<String>, home: &Path) -> PathBuf {
-    ferryx_hub::meta::omo_client::workspace_root_from(configured_root, Some(home))
+    configured_root.filter(|value| !value.trim().is_empty()).map(PathBuf::from)
         .unwrap_or_else(|| home.join(".ferryx").join("hub").join("workspace"))
 }
 
