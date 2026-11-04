@@ -321,13 +321,22 @@ pub mod sys {
             // so the job forbids breakaway: a pane's descendants cannot leave it.
             Some(unsafe { OwnedHandle::from_raw_handle(job) })
         });
-        let assigned = job.as_ref().is_some_and(|job| {
+        // `None` when assigned; otherwise the OS error of the failed call (0: no job exists).
+        let failure = match job.as_ref() {
             // SAFETY: both handles are valid for the call; the caller keeps `process` open.
-            unsafe { AssignProcessToJobObject(job.as_raw_handle(), process) != 0 }
-        });
-        if !assigned && still_running(process) {
-            tracing::warn!("a pane could not be placed in the pane job; supervisor changes are refused from now on");
-            ADOPTION_FAILED.store(true, Ordering::SeqCst);
+            Some(job) => (unsafe { AssignProcessToJobObject(job.as_raw_handle(), process) } == 0)
+                // SAFETY: reads this thread's last-error value, set by the failed call just above.
+                .then(|| unsafe { GetLastError() }),
+            None => Some(0),
+        };
+        if let Some(os_error) = failure {
+            if still_running(process) {
+                tracing::warn!(
+                    os_error,
+                    "a pane could not be placed in the pane job; supervisor changes are refused from now on"
+                );
+                ADOPTION_FAILED.store(true, Ordering::SeqCst);
+            }
         }
     }
 
