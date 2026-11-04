@@ -578,4 +578,17 @@ mod target_tests {
         };
         assert_eq!(format_notification(&request).target, None);
     }
+
+    #[test]
+    fn terminal_osc_content_reaches_notification_service_model() {
+        let request = DispatchNotificationRequest {
+            source: NotificationSource::TerminalOsc,
+            terminal_title: Some("Build".into()),
+            agent_label: Some("done".into()),
+            ..Default::default()
+        };
+        let content = format_notification(&request);
+        assert_eq!((content.title.as_str(), content.body.as_str()), ("Build", "done"));
+        assert_eq!(serde_json::to_value(request.source).unwrap(), "terminalOsc");
+    }
 }
