@@ -118,6 +118,7 @@ remote-desktop = [
 iroh-direct = ["dep:iroh"]
 
 [dependencies]
+plist = "1.10"
 mlua = { version = "0.12", features = ["luau"] }
 cpu-time = "1"
 ferryx-hub = { path = "../crates/ferryx-hub" }

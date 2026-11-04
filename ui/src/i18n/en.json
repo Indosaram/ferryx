@@ -1,4 +1,16 @@
 {
+  "settings": {
+    "import": {
+      "title": "Import",
+      "description": "Preview settings from Ghostty, iTerm2 or a static WezTerm table. Commands, includes, keybindings and scripts are never run. Named themes and dynamic Lua are skipped; use explicit colors.",
+      "format": "Terminal format",
+      "file": "Configuration file",
+      "preview": "Settings preview",
+      "skipped": "Skipped",
+      "apply": "Apply imported settings",
+      "applied": "Applied"
+    }
+  },
   "plugins": {
     "title": "Block plugins",
     "consent": "Enabled plugins run as your user. Enable only executables you trust. Changed commands or permissions require fresh approval.",
@@ -23,6 +35,11 @@
       "finishWithoutAccount": "Finish without signing in"
     },
     "step": {
+      "import": {
+        "title": "Import",
+        "heading": "Bring your terminal settings",
+        "lede": "Optionally import an existing configuration, or skip to keep the defaults."
+      },
       "enroll": {
         "title": "Enroll",
         "heading": "Add another machine",

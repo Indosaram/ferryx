@@ -27,6 +27,10 @@ use crate::terminal::{
 #[serde(rename_all = "camelCase")]
 pub struct TerminalOverridesRequest {
     #[serde(default)]
+    pub cursor_style: Option<String>,
+    #[serde(default)]
+    pub theme: Option<crate::terminal::TerminalThemeColors>,
+    #[serde(default)]
     pub font_family: Option<String>,
     #[serde(default)]
     pub font_size: Option<f32>,
@@ -45,6 +49,8 @@ pub struct TerminalOverridesRequest {
 impl From<TerminalOverridesRequest> for TerminalPreferenceOverrides {
     fn from(request: TerminalOverridesRequest) -> Self {
         Self {
+            cursor_style: request.cursor_style,
+            theme: request.theme,
             font_family: request.font_family,
             font_size: request.font_size,
             macos_option_as_alt: request.macos_option_as_alt,

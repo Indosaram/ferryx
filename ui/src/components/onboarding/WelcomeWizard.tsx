@@ -15,6 +15,7 @@ import { AccountStep } from "./AccountStep";
 import { AgentsCliStep } from "./AgentsCliStep";
 import { CliStep } from "./CliStep";
 import { FeaturesStep } from "./FeaturesStep";
+import { ImportSection } from "../settings/ImportSection";
 import { FirstProjectStep } from "./FirstProjectStep";
 import { IntroStep } from "./IntroStep";
 import { PhoneStep } from "./PhoneStep";
@@ -196,6 +197,8 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
         return <IntroStep steps={steps} />;
       case "features":
         return <FeaturesStep isMac={isMac} />;
+      case "import":
+        return <ImportSection />;
       case "agents":
         return <AgentsCliStep agents={agents} />;
       case "cli":
