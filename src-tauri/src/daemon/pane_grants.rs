@@ -156,6 +156,7 @@ pub fn gate_for(request: &DaemonRequest) -> Option<Gate> {
             PaneGrantAction::Add { .. } | PaneGrantAction::Remove { .. } => Some(Gate::OwnerOnly),
         },
         DaemonRequest::SetAgentIntegration { .. }
+        | DaemonRequest::LayoutApply { .. }
         | DaemonRequest::RegisterWorkspace { .. }
         | DaemonRequest::UnregisterWorkspace { .. }
         | DaemonRequest::SaveSession { .. }
@@ -451,6 +452,18 @@ mod tests {
         );
         // The grant is directional.
         assert_eq!(check(&pane("b"), &write("a"), &grants), Err(PANE_GRANT_REQUIRED));
+    }
+
+    #[test]
+    fn layout_intents_require_admin_but_reads_do_not() {
+        let grants = PaneGrants::default();
+        let request = DaemonRequest::LayoutApply { window: "main".into(), base_revision: 0,
+            intent: crate::daemon::layout::Intent::CloseTab { tab_id: "other-pane".into() } };
+        assert_eq!(check(&pane("a"), &request, &grants), Err(OWNER_ACTION_REQUIRED));
+        assert_eq!(check(&PeerClass::Owner, &request, &grants), Ok(()));
+        assert_eq!(check(&pane("a"), &DaemonRequest::LayoutGet { window: "main".into() }, &grants), Ok(()));
+        grants.add(grant("a", "*", &[GrantOp::Admin])).unwrap();
+        assert_eq!(check(&pane("a"), &request, &grants), Ok(()));
     }
 
     #[test]

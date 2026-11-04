@@ -2046,6 +2046,37 @@ async fn run_delivery_shortfall_case(shortfall: DeliveryShortfall) {
 /// Rex todo 5: a cross-pane grant the owner added on the predecessor is served by the successor
 /// after a v5 handover (it rides the commit decision record) and is saved in its store.
 #[tokio::test]
+async fn layout_survives_handover() {
+    use ferryx_lib::daemon::layout::{Content, Intent};
+    let mut daemons = PrivateDaemons::with_v5_flag(None);
+    let socket = daemons.socket();
+    let d1 = daemons.launch(None).await;
+    let mut predecessor = TestDaemonClient::connect(&socket, daemons.pid(d1)).await.unwrap();
+    let repo = daemons.repo();
+    predecessor.register_workspace("layout-contract", &repo).await.unwrap();
+    let session = predecessor.spawn_with_shell("layout-contract", "layout-contract", 80, 24, Some("/bin/sh"), Some(&repo)).await.unwrap();
+    let before = match predecessor.send_request(&DaemonRequest::LayoutApply {
+        window: "main".into(), base_revision: 0,
+        intent: Intent::AddTabWithSession { tab_id: "tab-a".into(), label: "A".into(),
+            content: Content::Terminal { backend_session_id: session }, activate: true },
+    }).await.unwrap() {
+        DaemonResponse::LayoutOk { view } => view.layout,
+        other => panic!("Expected layout, got {other:?}"),
+    };
+    let legacy = match predecessor.send_request(&DaemonRequest::PrepareHandover).await.unwrap() {
+        DaemonResponse::PrepareHandoverOk { legacy_socket_path, .. } => legacy_socket_path,
+        other => panic!("Expected prepared handover, got {other:?}"),
+    };
+    let d2 = daemons.launch(Some(Path::new(&legacy))).await;
+    let mut successor = TestDaemonClient::connect(&socket, daemons.pid(d2)).await.unwrap();
+    match successor.send_request(&DaemonRequest::LayoutGet { window: "main".into() }).await.unwrap() {
+        DaemonResponse::LayoutOk { view } => assert_eq!(view.layout, before),
+        other => panic!("Expected layout, got {other:?}"),
+    }
+    assert!(daemons.children[d1].try_wait().unwrap().is_none(), "predecessor was never killed");
+}
+
+#[tokio::test]
 async fn grants_survive_handover() {
     use ferryx_lib::daemon::pane_grants::{GrantOp, PaneGrant, PaneGrantAction};
     let mut daemons = PrivateDaemons::with_v5_flag(None);
