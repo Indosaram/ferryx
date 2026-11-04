@@ -784,10 +784,14 @@ impl DaemonSessionService {
         let pending = {
             let mut states = self.size_ownerships.lock();
             let Some(state) = states.get_mut(id) else { return Ok(()); };
+            let previous = state.clone();
             if !state.detach(client) { return Ok(()); }
             let (cols, rows) = state.applied;
             let generation = self.terminal_service.remote().details(id).map(|d| d.generation).unwrap_or(0);
-            let pending = self.terminal_service.resize_operation(id, generation, cols, rows).map_err(|e| e.to_string())?;
+            let pending = match self.terminal_service.resize_operation(id, generation, cols, rows) {
+                Ok(pending) => pending,
+                Err(error) => { *state = previous; return Err(error.to_string()); }
+            };
             self.publish_size_owner(id, state);
             pending
         };
