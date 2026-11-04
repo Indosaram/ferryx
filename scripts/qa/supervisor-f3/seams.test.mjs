@@ -2,8 +2,8 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import {
-  PRODUCTION_GATEWAY_PORT, acceptedReply, configProblems, configureGateway, decisionsNamingNonce, envProblems, gatewayBound, gatewayPortFor,
-  globalRetryRule, guiBundleFiles, namesNonce, pageToScreen, relayListenPort, remotePath, rowFocusVerdict, rpcCommand, rulesLineText,
+  PRODUCTION_GATEWAY_PORT, acceptedReply, configProblems, configureGateway, decisionsNamingNonce, gatewayBound, gatewayPortFor,
+  globalRetryRule, guiBundleFiles, isolationProblems, namesNonce, pageToScreen, relayListenPort, remotePath, rowFocusVerdict, rpcCommand, rulesLineText,
   runLanes, sameServeConfig, serveAddedProblems, typedInto, uniqueSession, webContextFrom, webPageChannel,
 } from './seams.mjs';
 import { LANE_SCHEMA, RUN_SCHEMA, SCENARIOS, validateRun } from './contract.mjs';
@@ -283,11 +283,16 @@ describe('all-local run', () => {
     }
   });
 
-  test('a live GUI env is isolated only when every run key holds exactly the run value', () => {
-    const expected = { HOME: '/w/.native-qa/r/home', FERRYX_QA_ISOLATED: '1' };
-    expect(envProblems(['PATH=/usr/bin', 'HOME=/w/.native-qa/r/home', 'FERRYX_QA_ISOLATED=1'], expected)).toEqual([]);
-    expect(envProblems(['HOME=/Users/owner', 'FERRYX_QA_ISOLATED=1'], expected).join()).toContain('HOME is "/Users/owner"');
-    expect(envProblems(['HOME=/w/.native-qa/r/home'], expected).join()).toContain('FERRYX_QA_ISOLATED is null');
+  test('a live GUI is isolated only by its own env and open files, never the owner\'s', () => {
+    const want = { expected: { HOME: '/w/.native-qa/r/home', FERRYX_QA_ISOLATED: '1' }, profile: '/w/.native-qa/r', ownerRoots: ['/Users/o/Library/Application Support/Ferryx', '/Users/o/.ferryx'] };
+    const held = ['/w/.native-qa/r/evidence/gui-stdout.log', '/w/.native-qa/r/data/ferryx.db'];
+    expect(isolationProblems({ env: null, openPaths: held }, want)).toEqual([]);
+    expect(isolationProblems({ env: ['PATH=/usr/bin', 'HOME=/w/.native-qa/r/home', 'FERRYX_QA_ISOLATED=1'], openPaths: held }, want)).toEqual([]);
+    expect(isolationProblems({ env: ['HOME=/Users/o', 'FERRYX_QA_ISOLATED=1'], openPaths: held }, want).join()).toContain('HOME is "/Users/o"');
+    expect(isolationProblems({ env: null, openPaths: [...held, '/Users/o/Library/Application Support/Ferryx/state.db'] }, want).join()).toContain("owner's files");
+    // The launcher's own log fds under evidence/ prove nothing about the GUI's env.
+    expect(isolationProblems({ env: null, openPaths: ['/w/.native-qa/r/evidence/gui-stdout.log'] }, want).join()).toContain('holds nothing open under');
+    expect(isolationProblems({ env: null, openPaths: ['/w/.native-qa/rx/data/a'] }, want).join()).toContain('holds nothing open under');
   });
 
   test('a smoke run never passes, and a lane left out blocks its scenarios', () => {

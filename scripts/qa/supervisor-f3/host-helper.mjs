@@ -15,9 +15,9 @@
 // ChildProcess handle it spawned itself; it removes only the serve port it added itself.
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
-import { hostname, platform, release } from 'node:os';
+import { homedir, hostname, platform, release } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -286,23 +286,34 @@ async function openGuiBundle({ profile, bundleId, agent, specPath }) {
 }
 
 /**
- * The live environment of a process this user owns, as `KEY=VALUE` entries: /proc/<pid>/environ
- * on Linux, `ps -E` on macOS (entries split on spaces, so only space-free values compare). Windows
- * offers no unprivileged read; it reports unchecked.
+ * What a live process this user owns shows of its isolation: its environment where the OS lets
+ * another process read it (Linux /proc; macOS hides it, so `env` is null there; Windows has no
+ * unprivileged read) and the paths it holds open (Linux /proc fds, macOS lsof). `ownerRoots` are
+ * this user's real Ferryx dirs, which an isolated GUI must never hold.
  */
-async function processEnv({ pid }) {
+async function processIsolation({ pid }) {
   if (!Number.isSafeInteger(pid) || pid <= 0) throw fail('PID_REFUSED', `not a pid: ${pid}`);
-  if (WIN) return { checked: false, reason: 'no unprivileged environment read on Windows', entries: [] };
-  if (!MAC) return { checked: true, entries: readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').filter(Boolean) };
-  const out = (await run('/bin/ps', ['-E', '-ww', '-o', 'command=', '-p', String(pid)])).trim();
-  if (!out) throw fail('PROCESS_GONE', `pid ${pid} is not running`);
-  return { checked: true, entries: out.split(' ').filter((word) => /^[A-Z_][A-Z0-9_]*=/.test(word)) };
+  const home = homedir();
+  const ownerRoots = MAC ? [join(home, 'Library', 'Application Support', 'Ferryx'), join(home, '.ferryx')]
+    : WIN ? [join(process.env.APPDATA ?? join(home, 'AppData', 'Roaming'), 'Ferryx'), join(home, '.ferryx')]
+      : [join(home, '.local', 'share', 'ferryx'), join(home, '.ferryx')];
+  if (WIN) return { env: null, openPaths: [], ownerRoots, note: 'no unprivileged read of another process on Windows' };
+  if (!MAC) {
+    const fds = readdirSync(`/proc/${pid}/fd`).map((fd) => { try { return readlinkSync(`/proc/${pid}/fd/${fd}`); } catch { return null; } }).filter((p) => p?.startsWith('/'));
+    return { env: readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').filter(Boolean), openPaths: fds, ownerRoots };
+  }
+  let out = '';
+  try { out = await run('/usr/sbin/lsof', ['-n', '-P', '-p', String(pid), '-F', 'n']); } catch (error) {
+    // lsof exits 1 when it lists nothing; a gone pid is an error the caller sees.
+    if (!/exit code 1|Command failed/.test(error.message)) throw error;
+  }
+  return { env: null, openPaths: out.split('\n').filter((line) => line.startsWith('n/')).map((line) => line.slice(1)), ownerRoots };
 }
 
 const METHODS = {
   identity, daemon, 'write-wrappers': writeWrappers, 'spawn-owned': spawnOwned, 'await-exit': awaitExit,
   cleanup, 'read-b64': readB64, 'list-files': listFiles, 'remove-owned-dir': removeOwnedDir, 'free-port': freePort,
-  'serve-status': serveStatus, 'serve-add': serveAdd, 'serve-remove': serveRemove, 'open-gui-bundle': openGuiBundle, 'process-env': processEnv,
+  'serve-status': serveStatus, 'serve-add': serveAdd, 'serve-remove': serveRemove, 'open-gui-bundle': openGuiBundle, 'process-isolation': processIsolation,
 };
 
 if (process.argv.includes('--rpc')) {

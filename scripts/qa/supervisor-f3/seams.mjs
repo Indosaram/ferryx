@@ -225,17 +225,29 @@ export const relayListenPort = (config) => {
 };
 
 /**
- * Problems of a live process environment (`KEY=VALUE` entries as the OS reports them) against
- * the isolated env the run gave it; empty when every key holds exactly the run's value. A
- * GUI that runs with the owner's HOME or data dir is never driven.
+ * Problems of a live GUI process against the run's isolated profile, empty when it is proven
+ * isolated. `env` (`KEY=VALUE` entries, null when the OS hides another process's environment,
+ * as macOS does) must hold every expected key with exactly the run's value. `openPaths` (the
+ * files the process holds open) must include one inside the profile's data, runtime or home
+ * dir (the launcher's own log fds under evidence/ do not count) and none under the owner's
+ * roots. A GUI that runs on the owner's HOME or data dir is never driven.
  */
-export function envProblems(entries, expected) {
-  const seen = new Map();
-  for (const entry of entries ?? []) {
-    const at = String(entry).indexOf('=');
-    if (at > 0) seen.set(entry.slice(0, at), entry.slice(at + 1));
+export function isolationProblems({ env = null, openPaths = [] }, { expected, profile, ownerRoots = [] }) {
+  const problems = [];
+  if (Array.isArray(env)) {
+    const seen = new Map();
+    for (const entry of env) {
+      const at = String(entry).indexOf('=');
+      if (at > 0) seen.set(entry.slice(0, at), entry.slice(at + 1));
+    }
+    for (const [key, value] of Object.entries(expected)) if (seen.get(key) !== value) problems.push(`${key} is ${JSON.stringify(seen.get(key) ?? null)}, not ${JSON.stringify(value)}`);
   }
-  return Object.entries(expected).filter(([key, value]) => seen.get(key) !== value).map(([key, value]) => `${key} is ${JSON.stringify(seen.get(key) ?? null)}, not ${JSON.stringify(value)}`);
+  const under = (root, path) => path === root || path.startsWith(`${root}/`) || path.startsWith(`${root}\\`);
+  const leaked = openPaths.filter((path) => ownerRoots.some((root) => under(root, path)));
+  if (leaked.length) problems.push(`holds the owner's files open: ${leaked.slice(0, 5).join(', ')}`);
+  const isolated = ['data', 'runtime', 'home'].map((name) => `${profile}/${name}`);
+  if (!openPaths.some((path) => isolated.some((root) => under(root, path)))) problems.push(`holds nothing open under ${profile}/{data,runtime,home}`);
+  return problems;
 }
 
 /** A path on `host`, joined with that host's separator. */

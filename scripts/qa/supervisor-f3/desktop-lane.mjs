@@ -22,7 +22,7 @@ import { join } from 'node:path';
 import { connectNativeMahord, rpcProcess } from '../fixtures/native-configured-adapters.mjs';
 import { LaneBlocked, StepFailed, markNotRun, runStep, stopExact, until } from './steps.mjs';
 import { scenariosForLane } from './contract.mjs';
-import { acceptedReply, configureGateway, decisionsNamingNonce, envProblems, gatewayPortFor, globalRetryRule, namesNonce, rowFocusVerdict, rpcCommand, rulesLineText, typedInto, uniqueSession } from './seams.mjs';
+import { acceptedReply, configureGateway, decisionsNamingNonce, gatewayPortFor, isolationProblems, globalRetryRule, namesNonce, rowFocusVerdict, rpcCommand, rulesLineText, typedInto, uniqueSession } from './seams.mjs';
 
 /** OCR words with boxes (tesseract TSV) of one PNG on the control host. */
 async function ocr(tesseract, pngPath) {
@@ -119,18 +119,20 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     // 2. GUI through MahoRD only (the same launcher path native-configured-adapters uses).
     gui = await launchGui({ agent, helper, mahord, setup, host, run, lane });
     // Nothing is clicked or typed until the live GUI process is proven to run on this run's
-    // isolated profile (never the owner's HOME or data dir).
-    const isolated = Object.fromEntries(ISOLATED_ENV.map((key) => [key, setup.env[key]]));
-    const live = await helper.call('process-env', { pid: gui.pid });
-    const envIssues = live.checked ? envProblems(live.entries, isolated) : [];
-    lane.write('gui-receipt', 'gui-env.json', { pid: gui.pid, checked: live.checked, reason: live.reason ?? null, expected: isolated, problems: envIssues });
-    if (envIssues.length) throw new StepFailed('GUI_ENV_NOT_ISOLATED', envIssues.join('; '));
+    // isolated profile (never the owner's HOME or data dir), read from the process itself.
+    const isolation = { expected: Object.fromEntries(ISOLATED_ENV.map((key) => [key, setup.env[key]])), profile: setup.profile };
+    const live = await until('the live GUI on the isolated profile', () => helper.call('process-isolation', { pid: gui.pid }),
+      (seen) => isolationProblems(seen, { ...isolation, ownerRoots: seen.ownerRoots }).length === 0, { deadlineMs: 60_000, gapMs: 2_000 })
+      .catch(async (error) => { if (error.code === 'DEADLINE') return helper.call('process-isolation', { pid: gui.pid }); throw error; });
+    const isolationIssues = isolationProblems(live, { ...isolation, ownerRoots: live.ownerRoots });
+    lane.write('gui-receipt', 'gui-isolation.json', { pid: gui.pid, ...isolation, ownerRoots: live.ownerRoots, envRead: Array.isArray(live.env), openPaths: live.openPaths, problems: isolationIssues });
+    if (isolationIssues.length) throw new StepFailed('GUI_NOT_ISOLATED', isolationIssues.join('; '));
     if (run.smoke) {
       // Transport smoke: one real frame and its OCR, then the lane stops and cleans up.
       const shot = lane.write('screenshot', 'smoke/first-frame.png', await mahord.screenshot(signal));
       const read = await ocr(run.tesseract, join(run.evidenceDir, shot.path));
       lane.write('ocr', 'smoke/first-frame.ocr.tsv', read.tsv);
-      lane.receipt.smoke = { guiPid: gui.pid, guiEnvChecked: live.checked, frame: shot, ocrWords: read.words.length };
+      lane.receipt.smoke = { guiPid: gui.pid, envRead: Array.isArray(live.env), openPathsUnderProfile: live.openPaths.filter((p) => p.startsWith(`${setup.profile}/`)).length, frame: shot, ocrWords: read.words.length };
       return;
     }
     // A frame: real MahoRD pixels plus their OCR. Attached to a step only when `step` is given,
