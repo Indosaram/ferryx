@@ -8,6 +8,7 @@ pub struct Timer {
     pub due: u64,
     pub callback: Function,
     pub repeating: bool,
+    pub session: Option<String>,
 }
 
 pub struct Vm {
@@ -52,7 +53,10 @@ impl Vm {
         let sequence = Rc::new(Cell::new(0_u64));
         let timer_clock = clock.clone();
         let ferryx = lua.create_table()?;
+        lua.globals().set("ferryx", ferryx.clone())?;
+        let api = super::api::Api::install(&lua, host)?;
         for (name, repeating) in [("after", false), ("every", true)] {
+        let session = api.session.clone();
         let pending = pending.clone();
         let sequence = sequence.clone();
         let timer_clock = timer_clock.clone();
@@ -64,7 +68,7 @@ impl Vm {
             let number = sequence.get();
             sequence.set(number + 1);
             let id = format!("{identity}/{number}");
-            timers.push(Timer { id: id.clone(), period, due: timer_clock().saturating_add(period), callback, repeating });
+            timers.push(Timer { id: id.clone(), period, due: timer_clock().saturating_add(period), callback, repeating, session: session.borrow().clone() });
             Ok(id)
         })?)?;
         }
@@ -74,7 +78,6 @@ impl Vm {
             log(message, in_startup.get()).map_err(mlua::Error::runtime)
         })?)?;
         lua.globals().set("ferryx", ferryx)?;
-        let api = super::api::Api::install(&lua, host)?;
         lua.sandbox(true)?;
         Ok(Self { lua, timers, clock, startup, budget, api })
     }
@@ -126,9 +129,10 @@ impl Vm {
             let claimed = super::blocking(host, move || store.store.lock().claim(&id, period, now))?;
             if timer.repeating {
                 self.timers.borrow_mut().push(Timer { id: timer.id.clone(), period,
-                    due: now.saturating_add(period), callback: timer.callback.clone(), repeating: true });
+                    due: now.saturating_add(period), callback: timer.callback.clone(), repeating: true, session: timer.session.clone() });
             }
             if claimed {
+                *self.api.session.borrow_mut() = timer.session;
                 *self.budget.borrow_mut() = cpu_time::ThreadTime::now();
                 timer.callback.call::<()>(()).map_err(|error| error.to_string())?;
             }
