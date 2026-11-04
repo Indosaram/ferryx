@@ -27,7 +27,7 @@ fn script_api_each_host_function_accepts_valid_arguments() {
     vm.key("shift+cmd+a", "session").unwrap();
     let names: Vec<_> = calls.borrow().iter().map(|s| s.split(':').next().unwrap().to_owned()).collect();
     assert_eq!(names, ["split", "send", "read", "notify", "layout", "exec"]);
-    assert_eq!(vm.api.bindings.borrow()["cmd+shift+a"].0, true);
+    assert!(vm.api.bindings.borrow()["cmd+shift+a"].0);
     assert!(calls.borrow().last().unwrap().contains("literal;not-a-shell"));
 }
 
