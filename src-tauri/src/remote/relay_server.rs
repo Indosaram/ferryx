@@ -2080,9 +2080,10 @@ impl RelayState {
         &self,
         machine: &str,
         generation: u64,
-        registration: RegisterPairingPin,
+        mut registration: RegisterPairingPin,
     ) -> Result<(), &'static str> {
         let channels = self.inner.control_channels.lock();
+        let now = current_time_secs();
         if channels
             .get(machine)
             .is_none_or(|c| c.generation != generation)
@@ -2094,11 +2095,14 @@ impl RelayState {
                 .pairing_token
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-            || registration.expires_at <= current_time_secs()
-            || registration.expires_at > current_time_secs() + MAX_PAIRING_LEASE
+            || registration.expires_at <= now
+            || registration.expires_at > now + MAX_PAIRING_LEASE + PAIRING_CLOCK_SKEW_TOLERANCE
         {
             return Err("Invalid pairing registration");
         }
+        // The daemon computes the expiry on its own clock; the relay's clock is the one
+        // that enforces the lease.
+        registration.expires_at = registration.expires_at.min(now + MAX_PAIRING_LEASE);
         let mut pairings = self.inner.pairings.lock();
         pairings.retain(|_, p| p.registration.expires_at > current_time_secs());
         // A daemon that retries after a lost ACK re-sends the identical registration.
@@ -2372,6 +2376,9 @@ const MAX_ACTIVE_PAIRING_PINS_PER_MACHINE: usize = 5;
 /// A short numeric code is only safe as a brief lease, so the relay caps the lifetime
 /// rather than trusting the client-supplied `expires_at`.
 const MAX_PAIRING_LEASE: u64 = 600;
+/// How far a registering daemon's clock may run ahead of the relay's. A full-lease
+/// request from a slightly fast daemon is clamped to the cap instead of refused.
+const PAIRING_CLOCK_SKEW_TOLERANCE: u64 = 30;
 
 /// The bearer a device presents, trimmed. Every device-token route parses it the same way,
 /// so a token that works over HTTP also works for a socket ticket.
@@ -8181,12 +8188,14 @@ mod tests {
         assert!(state
             .register_pairing(machine, 1, registration(current_time_secs() + 86_400))
             .is_err());
-        // Exceeding the cap by one second is still rejected: the bound is the contract.
+        // Exceeding the cap by more than the clock-skew allowance is still rejected.
         assert!(state
             .register_pairing(
                 machine,
                 1,
-                registration(current_time_secs() + MAX_PAIRING_LEASE + 1)
+                registration(
+                    current_time_secs() + MAX_PAIRING_LEASE + PAIRING_CLOCK_SKEW_TOLERANCE + 1
+                )
             )
             .is_err());
         // A lease inside the cap is accepted, so the guard is not simply refusing everything.
@@ -8197,6 +8206,36 @@ mod tests {
                 registration(current_time_secs() + MAX_PAIRING_LEASE - 5)
             )
             .is_ok());
+    }
+
+    #[test]
+    fn a_full_lease_from_a_daemon_whose_clock_runs_ahead_is_accepted_and_capped() {
+        // A daemon asks for the full lease on its own clock. When that clock is a couple
+        // of seconds ahead of the relay, the expiry lands just past the relay's cap; the
+        // relay must still register the code, holding it to the cap on its own clock.
+        let state = test_state(vec![]);
+        let machine = "skewed-machine";
+        let (tx, _rx) = mpsc::channel(1);
+        state
+            .inner
+            .control_channels
+            .lock()
+            .insert(machine.to_owned(), ControlChannel { generation: 1, tx });
+        let daemon_clock_lead = 2;
+        let registration = RegisterPairingPin {
+            generation: Some(1),
+            machine_id: machine.into(),
+            pin: "246810".into(),
+            pairing_token: "skewed-pairing-token".into(),
+            expires_at: current_time_secs() + daemon_clock_lead + MAX_PAIRING_LEASE,
+        };
+        state
+            .register_pairing(machine, 1, registration)
+            .expect("a full lease from a slightly fast daemon clock must register");
+        let stored = state.inner.pairings.lock()["246810"]
+            .registration
+            .expires_at;
+        assert!(stored <= current_time_secs() + MAX_PAIRING_LEASE);
     }
 
     #[tokio::test]
