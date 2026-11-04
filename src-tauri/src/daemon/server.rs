@@ -8167,6 +8167,7 @@ impl DaemonServer {
                     capabilities.push("daemonLayoutV1".into());
                     capabilities.push("detachedPanesV1".into());
                     capabilities.push("terminalOscEffectsV1".into());
+                    capabilities.push("foregroundCommandV1".into());
                     #[cfg(feature = "local-split-qa")]
                     capabilities.push("sizeOwnershipQaV1".into());
                     #[cfg(feature = "remote-desktop")]
