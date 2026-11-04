@@ -23,6 +23,7 @@ pub mod manifest;
 pub(crate) mod owner_admission;
 // Todo 5 (rex): grants that let one Ferryx pane mutate another.
 pub mod pane_grants;
+pub mod plugins;
 pub mod protocol;
 pub mod proxy;
 // Pane-liveness QA barrier producers (handover transfer/rollback, held remote RPC).
