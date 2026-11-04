@@ -7,7 +7,7 @@
 //! hard-reload request with a structured `Unsupported` rather than silently degrading to the
 //! cached soft reload.
 
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", all(test, not(any(target_os = "macos", target_os = "linux")))))]
 use crate::ipc::error::{IpcError, IpcErrorCode};
 
 /// Which native cache-bypassing reload this build can reach.
@@ -54,7 +54,7 @@ pub fn hard_reload<R: tauri::Runtime>(webview: &tauri::Webview<R>) -> Result<(),
     }
 }
 
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", all(test, not(any(target_os = "macos", target_os = "linux")))))]
 fn unsupported_error() -> IpcError {
     IpcError::new(
         IpcErrorCode::Unsupported,
