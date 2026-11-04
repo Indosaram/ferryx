@@ -889,10 +889,11 @@ async fn drive_screen_compression(hub: Weak<RwLock<SessionHub>>, activity: Arc<t
     }
 }
 
-#[derive(Clone)]
 pub(crate) type OscEffectSink = Arc<dyn Fn(&str, crate::native_terminal::osc_effects::OscEffect) + Send + Sync>;
 
+#[derive(Clone)]
 pub struct TerminalOutputHub {
+    osc_local_session: Arc<RwLock<Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>>>,
     osc_effect_sink: Arc<RwLock<Option<OscEffectSink>>>,
     osc52_write: Arc<std::sync::atomic::AtomicBool>,
     sessions: Arc<RwLock<HashMap<String, Arc<RwLock<SessionHub>>>>>,
@@ -933,6 +934,7 @@ impl TerminalOutputHub {
             retention,
             program_status_publisher: Arc::new(RwLock::new(None)),
             osc_effect_sink: Arc::new(RwLock::new(None)),
+            osc_local_session: Arc::new(RwLock::new(None)),
             osc52_write: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
@@ -940,6 +942,10 @@ impl TerminalOutputHub {
     /// Installs where program status summary changes of opted-in sessions are published.
     pub(crate) fn set_osc_effect_sink(&self, sink: OscEffectSink) {
         *self.osc_effect_sink.write() = Some(sink);
+    }
+
+    pub(crate) fn set_osc_local_session(&self, is_local: Arc<dyn Fn(&str) -> bool + Send + Sync>) {
+        *self.osc_local_session.write() = Some(is_local);
     }
 
     pub(crate) fn set_osc52_write(&self, allowed: bool) {
@@ -1194,6 +1200,8 @@ impl TerminalOutputHub {
             sessions.get(session_id).cloned()
         }?;
 
+        let clipboard_allowed = self.osc52_write.load(std::sync::atomic::Ordering::Acquire)
+            && self.osc_local_session.read().as_ref().is_some_and(|local| local(session_id));
         let mut hub = session_hub.write();
         let chunk_bytes = hub.inline_images.rewrite(chunk_bytes);
         let chunk = hub
@@ -1201,8 +1209,7 @@ impl TerminalOutputHub {
             .push_with_read_timestamp(chunk_bytes, metrics_read_unix_micros)?;
         let ingest = hub.screen.as_ref().map(|screen| {
             let mut screen = screen.lock();
-            // The daemon sink additionally checks real local PTY ownership, never an ID prefix.
-            screen.set_osc52_write(self.osc52_write.load(std::sync::atomic::Ordering::Acquire));
+            screen.set_osc52_write(clipboard_allowed);
             screen.feed(&chunk.bytes);
             (screen.take_program_status(), screen.take_osc_effects())
         });
