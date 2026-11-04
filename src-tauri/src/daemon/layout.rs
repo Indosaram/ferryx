@@ -606,7 +606,7 @@ impl Store {
         }
         // Session ids belong to their host, even when a local id happens to match.
         disconnect(&mut imported, machine, &self.machine_id()?);
-        let target = format!("import-{}", uuid::Uuid::new_v4());
+        let target = format!("ws-{}", uuid::Uuid::new_v4().simple());
         persist(&self.path(&target)?, &imported)?;
         self.layouts.insert(target.clone(), imported);
         let view = self.get(&target)?;
@@ -828,6 +828,13 @@ impl Store {
         self.apply(window, base, match scope { Some(scope) => Intent::Scoped { scope: scope.into(), intent: Box::new(close) }, None => close })
     }
     pub fn adopt(&mut self, snapshot: Snapshot) -> Result<(), String> {
+        let machine = self.machine_id()?;
+        if snapshot.values().any(|layout| !layout.machine_id.is_empty() && layout.machine_id != machine) {
+            for (window, layout) in snapshot {
+                if layout.machine_id != machine && !layout.machine_id.is_empty() { self.offer_snapshot(&window, layout)?; }
+            }
+            return Ok(());
+        }
         for (window, layout) in &snapshot { persist(&self.path(window)?, layout)?; }
         self.layouts = snapshot; Ok(())
     }
@@ -845,6 +852,80 @@ pub(super) fn persist(path: &Path, value: &Layout) -> Result<(), String> {
     #[cfg(unix)]
     std::fs::File::open(parent).and_then(|dir| dir.sync_all()).map_err(|error| error.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod foreign_snapshot {
+    use super::*;
+
+    fn populated(store: &mut Store) -> Layout {
+        store.apply("main", 0, Intent::AddTabWithSession {
+            tab_id: "tab".into(), label: "terminal".into(),
+            content: Content::Terminal { backend_session_id: "same-id".into() }, activate: true,
+        }).unwrap().layout
+    }
+
+    #[test]
+    fn newer_foreign_revision_is_offer_only_and_import_adds_window() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let mut source = Store::new(a.path().into());
+        let mut target = Store::new(b.path().into());
+        let mut foreign = populated(&mut source);
+        let local = populated(&mut target);
+        foreign.revision = 900;
+        let offered = target.offer_snapshot("main", foreign.clone()).unwrap();
+        assert_eq!(offered.layout.tabs, local.tabs);
+        assert_eq!(target.layouts.len(), 1);
+        assert_eq!(offered.layout.foreign_offers[&foreign.machine_id].revision, 900);
+        assert!(target.import_snapshot("main", &foreign.machine_id, 899).is_err());
+        let live = BTreeSet::from(["same-id".into(), "detached".into()]);
+        let before = target.detached(&live).unwrap();
+        let (window, imported) = target.import_snapshot("main", &foreign.machine_id, 900).unwrap();
+        assert_ne!(window, "main");
+        assert_eq!(target.layouts.len(), 2);
+        assert_eq!(target.get("main").unwrap().layout, offered.layout);
+        assert_eq!(target.detached(&live).unwrap(), before);
+        assert_eq!(imported.layout.tabs[0].pane_tree, Node::Leaf { node_id: 1,
+            content: Content::DisconnectedTerminal { machine_id: foreign.machine_id, backend_session_id: "same-id".into() } });
+    }
+
+    #[test]
+    fn offers_and_placeholders_survive_restart_and_handover() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let foreign = populated(&mut Store::new(a.path().into()));
+        let mut target = Store::new(b.path().into());
+        target.offer_snapshot("main", foreign.clone()).unwrap();
+        let (window, imported) = target.import_snapshot("main", &foreign.machine_id, foreign.revision).unwrap();
+        let snapshot = target.layouts.clone();
+        let mut restarted = Store::new(b.path().into());
+        restarted.load_all().unwrap();
+        assert_eq!(restarted.layouts, snapshot);
+        let mut successor = Store::new(b.path().into());
+        successor.adopt(snapshot.clone()).unwrap();
+        assert_eq!(successor.layouts, snapshot);
+        assert_eq!(successor.get(&window).unwrap().layout, imported.layout);
+    }
+
+    #[test]
+    fn foreign_disk_and_adopt_never_replace_local_tree() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let foreign = populated(&mut Store::new(a.path().into()));
+        persist(&b.path().join("layout/main.json"), &foreign).unwrap();
+        let mut target = Store::new(b.path().into());
+        let offered = target.get("main").unwrap().layout;
+        assert!(offered.tabs.is_empty());
+        assert_eq!(offered.foreign_offers[&foreign.machine_id], foreign);
+        let local = populated(&mut Store::new(tempfile::tempdir().unwrap().path().into()));
+        target.apply("main", 0, Intent::AddTabWithSession { tab_id: "local".into(), label: "local".into(),
+            content: Content::Dag, activate: true }).unwrap();
+        let before = target.get("main").unwrap().layout.tabs;
+        target.adopt(BTreeMap::from([("main".into(), foreign)])).unwrap();
+        assert_eq!(target.get("main").unwrap().layout.tabs, before);
+        assert!(!local.tabs.is_empty());
+    }
 }
 
 #[cfg(test)]
