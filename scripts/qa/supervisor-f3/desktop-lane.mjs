@@ -132,7 +132,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     // every frame, so every OCR read and every click lands on the run's own window.
     const raise = async () => {
       if (host.platform !== 'darwin') return;
-      const raised = await helper.call('activate-gui', { pid: gui.pid });
+      const raised = await helper.call('activate-gui', { pid: gui.pid, executable: gui.executable });
       if (raised.activated !== true) throw new StepFailed('GUI_NOT_FRONT', `run-owned GUI pid ${gui.pid} was not raised: ${JSON.stringify(raised)}`);
     };
     if (run.smoke) {

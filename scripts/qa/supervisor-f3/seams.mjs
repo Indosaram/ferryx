@@ -276,6 +276,24 @@ export function isolationProblems({ env = null, openPaths = [] }, { expected, pr
  */
 export const hubEnv = (host, profile) => ({ FERRYX_HUB: 'on', FERRYX_HUB_DB: remotePath(host, profile, 'data', 'hub', 'hub.sqlite'), FERRYX_HUB_QUIET_HOURS: 'off' });
 
+/**
+ * The JXA that raises exactly one run-owned macOS GUI: the process with this pid, and only when
+ * its executable is this run's candidate binary. Any other process (the owner's Ferryx, another
+ * app, a reused pid) is reported and never activated.
+ */
+export function activationScript(pid, executable) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new StepFailed('GUI_NOT_FRONT', `not a pid: ${pid}`);
+  if (typeof executable !== 'string' || !executable.startsWith('/')) throw new StepFailed('GUI_NOT_FRONT', `not an absolute executable: ${executable}`);
+  return [
+    "ObjC.import('AppKit');",
+    `const a = $.NSRunningApplication.runningApplicationWithProcessIdentifier(${pid});`,
+    `const want = ${JSON.stringify(executable)};`,
+    "const exe = a.isNil() ? null : ObjC.unwrap(a.executableURL.path);",
+    "JSON.stringify(exe === null ? { activated: false, reason: 'absent' } : exe !== want ? { activated: false, reason: 'not the run GUI', executable: exe }",
+    "  : (a.unhide, { activated: a.activateWithOptions(3) === true, executable: exe }));",
+  ].join('\n');
+}
+
 /** A path on `host`, joined with that host's separator. */
 export const remotePath = (host, ...parts) => parts.join(host.platform === 'win32' ? '\\' : '/');
 

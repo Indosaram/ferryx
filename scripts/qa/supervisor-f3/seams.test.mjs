@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import {
   PRODUCTION_GATEWAY_PORT, acceptedReply, configProblems, configureGateway, decisionsNamingNonce, gatewayBound, gatewayPortFor,
-  globalRetryRule, guiBundleFiles, hubEnv, isolationProblems, namesNonce, pageToScreen, relayListenPort, remotePath, rowFocusVerdict, rpcCommand, rulesLineText,
+  activationScript, globalRetryRule, guiBundleFiles, hubEnv, isolationProblems, namesNonce, pageToScreen, relayListenPort, remotePath, rowFocusVerdict, rpcCommand, rulesLineText,
   runLanes, sameServeConfig, serveAddedProblems, typedInto, uniqueSession, webContextFrom, webPageChannel,
 } from './seams.mjs';
 import { LANE_SCHEMA, RUN_SCHEMA, SCENARIOS, validateRun } from './contract.mjs';
@@ -308,6 +308,16 @@ describe('all-local run', () => {
     // The launcher's own log fds under evidence/ prove nothing about the GUI's env.
     expect(isolationProblems({ env: null, openPaths: ['/w/.native-qa/r/evidence/gui-stdout.log'] }, want).join()).toContain('holds nothing open under');
     expect(isolationProblems({ env: null, openPaths: ['/w/.native-qa/rx/data/a'] }, want).join()).toContain('holds nothing open under');
+  });
+
+  test('the macOS raise names one pid and activates it only when it runs the run binary', () => {
+    const script = activationScript(4242, '/w/.qa/f3-bin/gui/ferryx');
+    expect(script).toContain('runningApplicationWithProcessIdentifier(4242)');
+    expect(script).toContain('const want = "/w/.qa/f3-bin/gui/ferryx";');
+    expect(script.indexOf('exe !== want')).toBeLessThan(script.indexOf('activateWithOptions'));
+    expect(script).not.toContain('runningApplicationsWithBundleIdentifier');
+    expect(code(() => activationScript(0, '/w/ferryx'))).toBe('GUI_NOT_FRONT');
+    expect(code(() => activationScript(4242, 'ferryx'))).toBe('GUI_NOT_FRONT');
   });
 
   test('every isolated daemon runs the hub on a database inside its own profile', () => {

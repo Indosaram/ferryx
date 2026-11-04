@@ -21,7 +21,7 @@ import { homedir, hostname, platform, release } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { guiBundleFiles } from './seams.mjs';
+import { activationScript, guiBundleFiles } from './seams.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CHECKOUT = resolve(HERE, '..', '..', '..');
@@ -314,13 +314,12 @@ async function processIsolation({ pid }) {
  * macOS: brings the run-owned GUI (exact pid) to the front through NSRunningApplication, which
  * needs no accessibility grant. It only ever names the pid it is given.
  */
-async function activateGui({ pid }) {
-  if (!Number.isSafeInteger(pid) || pid <= 0) throw fail('PID_REFUSED', `not a pid: ${pid}`);
+async function activateGui({ pid, executable }) {
   if (!MAC) return { activated: false, reason: 'macOS only' };
-  const script = `ObjC.import('AppKit'); const a = $.NSRunningApplication.runningApplicationWithProcessIdentifier(${pid});`
-    + " if (a.isNil()) 'absent'; else { a.unhide; String(a.activateWithOptions(3)) + ':' + String(a.active) }";
-  const out = (await run('/usr/bin/osascript', ['-l', 'JavaScript', '-e', script])).trim();
-  return { activated: out.startsWith('true'), out };
+  // Only a candidate binary of this checkout is ever raised; the script re-checks the live
+  // process's executable before it activates anything.
+  if (!isAbsolute(executable ?? '') || !inside(CHECKOUT, executable)) throw fail('ACTIVATE_REFUSED', `${executable} is not a candidate binary of ${CHECKOUT}`);
+  return JSON.parse((await run('/usr/bin/osascript', ['-l', 'JavaScript', '-e', activationScript(pid, executable)])).trim());
 }
 
 const METHODS = {
