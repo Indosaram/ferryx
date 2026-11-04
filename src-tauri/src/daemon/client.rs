@@ -3001,6 +3001,9 @@ impl DaemonClient {
     }
 
     async fn connect_or_spawn(&self) -> Result<DaemonStream, IpcError> {
+        if super::onboarding::qa_no_daemon() {
+            return Err(IpcError::internal("Daemon disabled for onboarding QA"));
+        }
         // Fast path: if daemon is already running, connect immediately without sleep or spawn lock.
         if let Ok(stream) = self.try_connect_existing_socket().await {
             return Ok(stream);
