@@ -87,3 +87,32 @@ async fn disable_reaps_running_plugin() {
     tokio::time::timeout(Duration::from_secs(10), task).await.unwrap().unwrap().unwrap();
     assert_eq!(observed.recv().await, None);
 }
+
+#[test]
+fn plugin_content_round_trips_for_layout_recovery() {
+    let content = crate::daemon::layout::Content::Plugin { plugin: "clock".into(), view: "main".into() };
+    let bytes = serde_json::to_vec(&content).unwrap();
+    assert_eq!(serde_json::from_slice::<crate::daemon::layout::Content>(&bytes).unwrap(), content);
+}
+
+#[tokio::test(start_paused = true)]
+async fn crashed_process_restarts_at_most_three_times() {
+    let mut plugin = manifest();
+    #[cfg(unix)]
+    { plugin.command = vec!["/bin/sh".into(), "-c".into(), "exit 1".into()]; }
+    #[cfg(windows)]
+    { plugin.command = vec![std::env::var("COMSPEC").unwrap(), "/c".into(), "exit 1".into()]; }
+    let approvals = Approvals { manifests: vec![plugin.clone()] };
+    let (_stop, stopped) = watch::channel(false);
+    let (events, mut observed) = mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        supervise(plugin, &approvals, Arc::new(pane_grants::PaneGrants::default()),
+            stopped, events, |_| async { Ok(serde_json::Value::Null) }).await
+    });
+    for restart in 0..=3 {
+        assert!(matches!(observed.recv().await, Some(Event::Started(pid)) if pid > 0));
+        assert_eq!(observed.recv().await, Some(Event::Exited { restart }));
+    }
+    assert!(task.await.unwrap().is_err());
+    assert_eq!(observed.recv().await, None);
+}
