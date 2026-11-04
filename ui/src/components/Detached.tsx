@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-export function Detached() {
+export function Detached({ scope }: { scope?: string }) {
   const [sessions, setSessions] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const refresh = useCallback(async () => {
@@ -19,7 +19,7 @@ export function Detached() {
   }, [refresh]);
   const attach = async (session: string) => {
     try {
-      setSessions(await invoke<string[]>("cmd_panes", { request: { action: "attach", session, window: null, split: null } }));
+      setSessions(await invoke<string[]>("cmd_panes", { request: { action: "attach", session, window: null, split: null }, ...(scope ? { scope } : {}) }));
       setError(null);
     } catch (failure) { setError(String(failure)); }
   };
