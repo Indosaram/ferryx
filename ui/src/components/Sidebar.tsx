@@ -1,3 +1,4 @@
+import { Detached } from "./Detached";
 import {
   type DragEndEvent,
   DragOverlay,
@@ -531,6 +532,7 @@ export function Sidebar({
           renderRow={renderRow}
           reorder={reorder}
         />
+        <Detached />
 
         <div
           role="separator"
