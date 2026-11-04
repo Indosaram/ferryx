@@ -1,4 +1,12 @@
 {
+  "scripting": {
+    "title": "Scripting",
+    "description": "Run your owner-authored init.luau in the sandboxed daemon runtime. Repository scripts are never loaded.",
+    "enabled": "Enable scripting",
+    "reload": "Reload script",
+    "log": "Script log",
+    "refresh": "Refresh log"
+  },
   "plugins": {
     "title": "Block plugins",
     "consent": "Enabled plugins run as your user. Enable only executables you trust. Changed commands or permissions require fresh approval.",
