@@ -1,4 +1,4 @@
-name: ci-relink-diag
+name: ci-starve-diag
 on:
   push:
     branches: ['ci/relink-diag']
@@ -13,7 +13,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-2022]
+        variant: [all, skip-main-new]
     runs-on: ${{ matrix.os }}
+    name: gate (${{ matrix.variant }})
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
@@ -103,17 +105,14 @@ jobs:
           # and ConPTY tests run. Building the exact same command here makes the nested call a
           # no-op freshness check.
           cargo build --manifest-path src-tauri/Cargo.toml --bin ferryx-cli --example remote_grid_frame_dump
-          echo "::group::DIAG prebuild second run"
-          CARGO_LOG=cargo::core::compiler::fingerprint=info cargo build --manifest-path src-tauri/Cargo.toml --bin ferryx-cli --example remote_grid_frame_dump 2>&1 | grep -vE "LNK4099|ossl_static" | sed 's/^/DIAG2 /'
-          echo "::endgroup::"
-          echo "::group::DIAG test --no-run"
-          CARGO_LOG=cargo::core::compiler::fingerprint=info cargo test --manifest-path src-tauri/Cargo.toml --lib --no-run 2>&1 | grep -vE "LNK4099|ossl_static" | grep -E "stale|dirty|Dirty|Compiling|Finished|changed|Changed" | sed 's/^/DIAGT /'
-          echo "::endgroup::"
-          echo "::group::DIAG prebuild after test --no-run"
-          CARGO_LOG=cargo::core::compiler::fingerprint=info cargo build --manifest-path src-tauri/Cargo.toml --bin ferryx-cli --example remote_grid_frame_dump 2>&1 | grep -vE "LNK4099|ossl_static" | sed 's/^/DIAG3 /'
-          echo "::endgroup::"
-          export CARGO_LOG=cargo::core::compiler::fingerprint=info
-          cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=2 --skip native_terminal::renderer:: --skip remote::tests::test_remote_server_health_and_lifecycle --skip remote::tests::test_headless_handover_workspace_state_selects_live_session_without_desktop_selection --skip daemon::client::tests::test_client_workspace_registration_and_remote_apis --skip terminal::tests::test_spawn_startup_command_omo --skip remote::server::machine_input_cancellation_tests:: --skip remote::tests::security::sockets::a10_pending_machine_input_is_dropped_on_disconnect_and_revoke --skip terminal::tests::a_wedged_pty_does_not_block_the_async_runtime_thread --skip ssh::direct::tests::failed_probe_distinguishes_non_utf8_and_empty_stderr --skip remote::server::p19_insecure_direct_tests:: --skip daemon::server::remote_ssh_tests:: --skip ssh::helper_setup::tests::posix_upload_script_never_kills_live_daemon_and_defers_upgrade --skip ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --no-run
+          EXTRA=""
+          if [ "${{ matrix.variant }}" = skip-main-new ]; then EXTRA="--skip hub_runtime:: --skip supervisor_move:: --skip supervisor_checkpoint:: --skip daemon::supervisor_lease_client:: --skip daemon::supervisor_lease_role:: --skip account::supervisor_lease:: --skip remote::server::supervisor_api:: --skip remote::relay_server::tests::a_machine_of_another_account --skip agent_control::fence::"; fi
+          ( while true; do echo "=== SAMPLE $(date -u +%H:%M:%S)"; powershell -NoProfile -Command "\$p=Get-Process; 'count=' + \$p.Count; \$p | Group-Object Name | Sort-Object Count -Descending | Select-Object -First 10 Count,Name | Format-Table -AutoSize | Out-String -Width 200; \$p | Sort-Object CPU -Descending | Select-Object -First 15 Name,Id,CPU,WS,StartTime | Format-Table -AutoSize | Out-String -Width 200"; sleep 60; done ) > "$RUNNER_TEMP/procs.txt" 2>&1 &
+          SAMPLER=$!
+          set +e
+          cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=2 $EXTRA --skip native_terminal::renderer:: --skip remote::tests::test_remote_server_health_and_lifecycle --skip remote::tests::test_headless_handover_workspace_state_selects_live_session_without_desktop_selection --skip daemon::client::tests::test_client_workspace_registration_and_remote_apis --skip terminal::tests::test_spawn_startup_command_omo --skip remote::server::machine_input_cancellation_tests:: --skip remote::tests::security::sockets::a10_pending_machine_input_is_dropped_on_disconnect_and_revoke --skip terminal::tests::a_wedged_pty_does_not_block_the_async_runtime_thread --skip ssh::direct::tests::failed_probe_distinguishes_non_utf8_and_empty_stderr --skip remote::server::p19_insecure_direct_tests:: --skip daemon::server::remote_ssh_tests:: --skip ssh::helper_setup::tests::posix_upload_script_never_kills_live_daemon_and_defers_upgrade --skip ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection
+          rc=$?; kill $SAMPLER; sed 's/^/PROCS /' "$RUNNER_TEMP/procs.txt"; exit $rc
       # Runs AFTER the full lib step on purpose: a running sshd plus the ~/.ssh key/known_hosts
       # state measurably slowed and failed timing-bounded ssh helper tests in the full suite
       # (A/B 41665302606 vs 41665307023). The loopback test is skipped there and run alone below.
