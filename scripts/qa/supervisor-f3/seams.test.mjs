@@ -249,7 +249,7 @@ describe('all-local run', () => {
   test('a lane left out needs no config block; the same shape serves a Windows-only run', () => {
     const win = local();
     win.lanes = ['windows'];
-    win.hosts = { windows: { ...win.hosts.macos, hostId: 'maho-win', platform: 'win32' } };
+    win.hosts = { windows: { ...win.hosts.macos, hostId: 'maho-win', platform: 'win32', worktree: 'C:\\Users\\u\\ferryx-wt\\f3win' } };
     win.sessionHost = { ...win.sessionHost, hostId: 'maho-win-session', platform: 'win32' };
     expect(configProblems(win)).toEqual([]);
   });
