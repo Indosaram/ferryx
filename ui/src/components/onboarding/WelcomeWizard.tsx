@@ -172,7 +172,11 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
     switch (currentStep) {
       case "enroll":
         return <EnrollmentStep accountOrigin={accountOrigin}
-          onIssueEnrollmentCode={accountToken ? async () => (await issueEnrollmentCode(accountOrigin, accountToken)).code : undefined}
+          onIssueEnrollmentCode={accountToken ? async () => {
+            const { code } = await issueEnrollmentCode(accountOrigin, accountToken);
+            onStepCompleted("enroll");
+            return code;
+          } : undefined}
           onBack={handleBack} onDone={handleNext} />;
       case "skills":
         return <SkillsStep agents={agents} onInstalled={() => {
