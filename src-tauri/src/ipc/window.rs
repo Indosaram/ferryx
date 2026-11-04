@@ -645,6 +645,9 @@ pub async fn cmd_window_move_sessions<R: Runtime>(
     target_label: Option<String>,
     backend_session_ids: Vec<String>,
     workspace_id: Option<String>,
+    layout_intent: Option<crate::daemon::layout::Intent>,
+    layout_revision: Option<u64>,
+    manager: State<'_, std::sync::Arc<super::remote::RemoteGatewayManager>>,
 ) -> Result<WindowMoveOutcome, IpcError> {
     let plan = plan_move(
         &registry,
@@ -665,6 +668,26 @@ pub async fn cmd_window_move_sessions<R: Runtime>(
                 .collect()
         })
         .unwrap_or_default();
+    if let Some(mut intent) = layout_intent {
+        if !plan.skipped.is_empty() { return Err(IpcError::internal("A layout subtree cannot be partially transferred")); }
+        fn set_target(intent: &mut crate::daemon::layout::Intent, target: &str) -> Result<(), IpcError> {
+            match intent {
+                crate::daemon::layout::Intent::Scoped { intent, .. } => set_target(intent, target),
+                crate::daemon::layout::Intent::TransferTab { target_window, .. } => { *target_window = target.into(); Ok(()) },
+                _ => Err(IpcError::internal("Expected a subtree transfer intent")),
+            }
+        }
+        set_target(&mut intent, &target)?;
+        let client = manager.daemon_client().ok_or_else(|| IpcError::internal("Layout daemon unavailable"))?;
+        let response = client.send_request(crate::daemon::protocol::DaemonRequest::LayoutApply {
+            window: window.label().into(), base_revision: layout_revision.ok_or_else(|| IpcError::internal("Layout revision missing"))?, intent,
+        }).await?;
+        match response {
+            crate::daemon::protocol::DaemonResponse::LayoutOk { .. } => {},
+            crate::daemon::protocol::DaemonResponse::LayoutConflict { .. } => return Err(IpcError::internal("Layout changed before transfer")),
+            _ => return Err(IpcError::internal("Layout transfer failed")),
+        }
+    }
     apply_move(&app, &registry, &pending, &target, plan, workspace_id, attempt_generations)
 }
 
