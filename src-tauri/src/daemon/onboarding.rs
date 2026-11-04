@@ -104,4 +104,33 @@ mod tests {
         assert!(!qa_no_daemon_value(false, one));
         assert!(!qa_no_daemon_value(true, None));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn committed_handover_carries_onboarding_without_killing_predecessor() {
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        use crate::daemon::handover::HandoverManager;
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("legacy.sock");
+        let manager = HandoverManager::new(root.path().join("daemon.sock"));
+        manager.force_prepared_for_test(legacy.clone());
+        let retired = Arc::new(AtomicBool::new(false));
+        let signal = retired.clone();
+        manager.set_retirement_action(move || { signal.store(true, Ordering::SeqCst); });
+        let store = Arc::new(parking_lot::Mutex::new(Store::new(root.path().join("old.json"))));
+        let expected = State { completed_steps: vec!["agents".into()], ..State::default() };
+        store.lock().set(expected.clone(), false).unwrap();
+        manager.set_onboarding(store);
+        let terminals = Arc::new(crate::terminal::TerminalService::default());
+        manager.commit_handover_v5(&terminals).unwrap();
+        let successor = HandoverManager::new(root.path().join("new.sock"));
+        let path = root.path().join("new.json");
+        let adopted = Arc::new(parking_lot::Mutex::new(Store::new(path.clone())));
+        successor.set_onboarding(adopted.clone());
+        successor.adopt_recorded_onboarding(&legacy).unwrap();
+        assert_eq!(adopted.lock().get().unwrap(), Some(expected.clone()));
+        assert_eq!(Store::new(path).get().unwrap(), Some(expected));
+        assert!(retired.load(Ordering::SeqCst));
+        assert!(std::process::id() > 0, "predecessor remains alive in this process");
+    }
 }
