@@ -169,6 +169,13 @@ pub struct BrowserSessionSummary {
     /// Which engine draws the tab (`system` or `chromium`); `ferryx browser list` prints it.
     #[serde(default)]
     pub engine: BrowserEngine,
+    /// The tab's page zoom (1.0 = 100%); `ferryx browser list` prints it.
+    #[serde(default = "default_zoom_factor")]
+    pub zoom_factor: f64,
+}
+
+fn default_zoom_factor() -> f64 {
+    1.0
 }
 
 impl From<&BrowserState> for BrowserSessionSummary {
@@ -182,6 +189,7 @@ impl From<&BrowserState> for BrowserSessionSummary {
             title: state.title.clone(),
             visible: state.visible,
             engine: state.engine,
+            zoom_factor: state.zoom_factor,
         }
     }
 }

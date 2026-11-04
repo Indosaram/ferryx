@@ -3502,6 +3502,7 @@ mod tests {
                 title: Some("Example".to_string()),
                 visible: true,
                 engine: crate::browser::BrowserEngine::Chromium,
+                zoom_factor: 1.0,
             }],
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -3748,6 +3749,7 @@ mod tests {
             title: None,
             visible: true,
             engine: crate::browser::BrowserEngine::System,
+            zoom_factor: 1.0,
         };
 
         assert_eq!(
@@ -3924,6 +3926,7 @@ mod tests {
             title: None,
             visible: true,
             engine: crate::browser::BrowserEngine::System,
+            zoom_factor: 1.0,
         };
 
         assert_eq!(
@@ -4326,6 +4329,7 @@ mod tests {
             title: None,
             visible: true,
             engine: crate::browser::BrowserEngine::System,
+            zoom_factor: 1.0,
         };
 
         assert_eq!(
@@ -5195,6 +5199,7 @@ mod tests {
             title: Some("Title".into()),
             visible: true,
             engine: crate::browser::BrowserEngine::System,
+            zoom_factor: 1.0,
         };
         let summary_json = serde_json::to_string(&summary).unwrap();
         assert!(!summary_json.contains(token));

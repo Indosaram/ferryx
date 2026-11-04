@@ -1257,6 +1257,8 @@ pub async fn create_browser_session_in_window<R: tauri::Runtime>(
             };
 
             let builder = tauri::WebviewBuilder::new(label, parsed_url)
+                // OS file drops go to the page (drop zones, <input type=file>), not to Tauri's DragDrop event.
+                .disable_drag_drop_handler()
                 .user_agent(crate::browser::default_desktop_user_agent())
                 .incognito(incognito)
                 .devtools(true)

@@ -778,6 +778,7 @@ mod tests {
             title: None,
             visible: true,
             engine: crate::browser::model::BrowserEngine::System,
+            zoom_factor: 1.0,
         }
     }
 

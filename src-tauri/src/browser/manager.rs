@@ -948,6 +948,7 @@ impl BrowserManager {
                             title: s.title.clone(),
                             visible: s.visible,
                             engine: s.engine,
+                            zoom_factor: s.zoom_factor,
                         },
                     )
                 })
@@ -1148,6 +1149,21 @@ mod tests {
         assert_eq!(json[1]["engine"], "chromium");
     }
 
+    #[test]
+    fn list_sessions_reports_each_tab_zoom() {
+        // Given a tab zoomed to 125%, when the sessions are listed, then the summary carries
+        // the zoom and serializes it as `zoomFactor` (what `ferryx browser list` prints).
+        let manager = BrowserManager::new();
+        manager.register_session(create_request("zoom-default")).unwrap();
+        manager.register_session(create_request("zoom-set")).unwrap();
+        manager.set_zoom("zoom-set", 1.25).unwrap();
+        let sessions = manager.list_sessions();
+        assert_eq!(sessions[0].zoom_factor, 1.0);
+        assert_eq!(sessions[1].zoom_factor, 1.25);
+        let json = serde_json::to_value(&sessions).unwrap();
+        assert_eq!(json[1]["zoomFactor"], 1.25);
+    }
+
     fn create_request(browser_id: &str) -> CreateBrowserRequest {
         CreateBrowserRequest {
             browser_id: Some(browser_id.to_string()),
@@ -1171,6 +1187,7 @@ mod tests {
             title: None,
             visible: true,
             engine: BrowserEngine::System,
+            zoom_factor: 1.0,
         }
     }
 
