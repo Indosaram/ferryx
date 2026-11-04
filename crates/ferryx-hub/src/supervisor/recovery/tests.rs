@@ -306,28 +306,47 @@ fn four_claude_sessions() -> Vec<FleetSession> {
         .collect()
 }
 
+/// Steps the clock in 30 s passes for `total_ms`; returns the clock time of every pass that
+/// sent something, and asserts no card opened.
+async fn outage_without_card(rig: &Rig, total_ms: i64) -> Vec<i64> {
+    let mut send_times = Vec::new();
+    let mut elapsed = 0;
+    while elapsed < total_ms {
+        let before = rig.world.ops().len();
+        rig.step(30_000).await;
+        elapsed += 30_000;
+        if rig.world.ops().len() > before {
+            send_times.push(rig.clock.0.load(Ordering::SeqCst));
+        }
+        assert!(rig.opened().is_empty(), "no card while handling, at +{elapsed} ms");
+    }
+    send_times
+}
+
 #[tokio::test]
 async fn a_twenty_minute_outage_resumes_all_four_sessions_with_one_row_and_no_card() {
+    // Plan todo 4 / F1: a proxy outage exactly as long as the budget. Every retry inside it
+    // fails, and the last one started before the deadline: the next retry must still run.
     let rig = rig(four_claude_sessions(), BAD_GATEWAY);
     rig.sched.tick().await;
     rig.outbreak(BAD_GATEWAY);
     rig.sched.tick().await;
-    let mut elapsed = 0;
-    while elapsed < 18 * MIN {
-        rig.step(30_000).await;
-        elapsed += 30_000;
-        assert!(rig.opened().is_empty(), "no card while handling");
-    }
-    let failed_probes = rig.world.ops().len();
-    assert!(failed_probes >= 3, "retried on backoff, not once: {failed_probes}");
-    assert!(failed_probes <= 6, "backoff is bounded: {failed_probes}");
+    let probes = outage_without_card(&rig, BUDGET_MS).await;
+    assert_eq!(probes.len(), 4, "backoff 1, 2, 5, 10 min inside the outage: {probes:?}");
+    assert!(probes.iter().all(|at| *at < T0 + BUDGET_MS), "{probes:?}");
     rig.world.up.store(true, Ordering::SeqCst);
-    for _ in 0..200 {
+    // The next scheduled retry (10 min after the last failure) resumes everyone.
+    let mut closed_at = None;
+    for _ in 0..40 {
+        rig.step(30_000).await;
+        assert!(rig.opened().is_empty(), "no card after the outage ended");
         if rig.rows().iter().any(|row| !row.live) {
+            closed_at = Some(rig.clock.0.load(Ordering::SeqCst));
             break;
         }
-        rig.step(30_000).await;
     }
+    let closed_at = closed_at.expect("the incident closed after the outage");
+    assert!(closed_at <= T0 + 35 * MIN, "resumed at the next retry: +{} ms", closed_at - T0);
     for n in 1..=4 {
         let r = SessionRef::new("mac-2", &format!("s{n}"));
         assert!(rig.world.sends_to(&r) >= 1, "{r} was resumed");
@@ -344,6 +363,7 @@ async fn a_twenty_minute_outage_resumes_all_four_sessions_with_one_row_and_no_ca
         rows[0].evidence
     );
     assert!(rig.opened().is_empty(), "no card, no push");
+    assert!(rig.cards.resolved.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -352,21 +372,39 @@ async fn an_outage_past_the_budget_escalates_once_with_a_recommendation() {
     rig.sched.tick().await;
     rig.outbreak(BAD_GATEWAY);
     rig.sched.tick().await;
-    let mut elapsed = 0;
-    while elapsed < BUDGET_MS - 30_000 {
+    let deadline = T0 + BUDGET_MS;
+    // The budget alone never escalates: the card follows the failure of the first retry
+    // that started at or after the deadline, and only once.
+    let mut sends = Vec::new();
+    let mut card_at = None;
+    for _ in 0..120 {
+        let before = rig.world.ops().len();
         rig.step(30_000).await;
-        elapsed += 30_000;
+        let now = rig.clock.0.load(Ordering::SeqCst);
+        if rig.world.ops().len() > before {
+            sends.push(now);
+        }
+        if card_at.is_none() && !rig.opened().is_empty() {
+            card_at = Some(now);
+        }
     }
-    assert!(rig.opened().is_empty(), "nothing before the budget");
-    for _ in 0..40 {
-        rig.step(30_000).await;
-    }
+    let card_at = card_at.expect("a persistent outage escalates");
+    let first_late = *sends.iter().find(|at| **at >= deadline).expect("a post-deadline retry");
+    assert!(card_at > first_late, "card at +{} ms, before the post-deadline retry at +{} ms", card_at - T0, first_late - T0);
+    assert_eq!(
+        sends.iter().filter(|at| **at < card_at && **at >= deadline).count(),
+        1,
+        "escalated after the first post-deadline retry failed: {sends:?}"
+    );
     let opened = rig.opened();
     assert_eq!(opened.len(), 1, "{opened:?}");
-    assert!(opened[0].recommended_index < opened[0].prompt.options.len());
+    assert_eq!(opened[0].recommended_index, 0);
+    assert_eq!(opened[0].prompt.options[opened[0].recommended_index], "Keep retrying");
     assert!(!opened[0].reason.is_empty());
+    assert!(opened[0].prompt.question.contains("20 minutes"), "{:?}", opened[0].prompt.question);
     assert_eq!(rig.rows().len(), 1);
     assert_eq!(rig.rows()[0].kind, ActionKind::Escalated);
+    assert!(rig.rows()[0].summary.contains("outlasted the retry budget"), "{:?}", rig.rows());
 }
 
 #[tokio::test]
@@ -956,7 +994,10 @@ async fn the_stop_answer_interrupts_each_session_once_and_leaves_them_alone() {
     rig.sched.tick().await;
     rig.outbreak(BAD_GATEWAY);
     rig.sched.tick().await;
-    for _ in 0..46 {
+    for _ in 0..120 {
+        if !rig.opened().is_empty() {
+            break;
+        }
         rig.step(30_000).await;
     }
     let card = rig.opened().remove(0);
@@ -1064,7 +1105,7 @@ async fn budgets_and_resume_text_come_from_the_rules() {
     rig.sched.tick().await;
     rig.outbreak(BAD_GATEWAY);
     rig.sched.tick().await;
-    for _ in 0..8 {
+    for _ in 0..12 {
         rig.step(30_000).await;
     }
     let opened = rig.opened();

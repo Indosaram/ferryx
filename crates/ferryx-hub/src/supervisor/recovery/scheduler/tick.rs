@@ -42,6 +42,7 @@ fn new_incident(
         budget_from_ms: now,
         attempts: 0,
         next_at_ms,
+        failed_try_ms: None,
         succeeded: false,
         closed: false,
         escalated: None,

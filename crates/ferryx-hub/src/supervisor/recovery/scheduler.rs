@@ -22,7 +22,8 @@ mod restore;
 mod tick;
 
 /// Default retry budget of an upstream incident before it escalates (D1c), in ms. The
-/// `upstreamRetry` rule's `budgetSecs` overrides it.
+/// `upstreamRetry` rule's `budgetSecs` overrides it. Elapsed time alone never escalates: the
+/// owner is asked only once a retry that started at or after the deadline has failed.
 pub const BUDGET_MS: i64 = 20 * 60_000;
 /// Default time a resume must stay fault-free before it counts as a recovery, in ms, which is
 /// also how long a session may be missing from the fleet before it counts as gone. A spinner
@@ -117,6 +118,9 @@ struct Incident {
     budget_from_ms: i64,
     attempts: u32,
     next_at_ms: i64,
+    /// When the latest failed retry was started (sent, or tried and the send failed). The
+    /// budget escalates only once this is at or after its deadline.
+    failed_try_ms: Option<i64>,
     succeeded: bool,
     closed: bool,
     escalated: Option<SessionRef>,

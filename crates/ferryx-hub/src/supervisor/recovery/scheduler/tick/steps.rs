@@ -74,8 +74,9 @@ impl RecoveryScheduler {
             }
             // Not observed this pass: judge it when it is.
             let Some(o) = obs.get(&r) else { continue };
-            st.sent.remove(&r);
+            let Some(sent_at) = st.sent.remove(&r) else { continue };
             if faulted.contains(&r) {
+                inc.failed_try_ms = Some(sent_at);
                 inc.succeeded = false;
                 inc.done.remove(&r);
                 inc.primary = r.clone();
@@ -87,6 +88,7 @@ impl RecoveryScheduler {
                 inc.done.insert(r);
             } else {
                 // Silence is not a recovery and not a failure: the incident stays open.
+                inc.failed_try_ms = Some(sent_at);
                 inc.done.remove(&r);
                 inc.silent.insert(r.clone());
                 faulted.push(r.clone());
@@ -112,6 +114,7 @@ impl RecoveryScheduler {
             if !inc.succeeded && inc.next_at_ms <= now {
                 if let Some(o) = obs.get(&inc.primary) {
                     if !self.resume(st, o, rules, false, &mut none, now).await {
+                        inc.failed_try_ms = Some(now);
                         inc.attempts += 1;
                         inc.next_at_ms = now + backoff_ms(rules, inc.attempts as usize);
                     }
@@ -132,6 +135,8 @@ impl RecoveryScheduler {
                 if let Some(o) = obs.get(r) {
                     if self.resume(st, o, rules, false, &mut none, now).await {
                         inc.done.insert(r.clone());
+                    } else {
+                        inc.failed_try_ms = Some(now);
                     }
                 }
             }
@@ -165,7 +170,11 @@ impl RecoveryScheduler {
         // The budget is judged after this pass's probe and sweep, so a member about to be
         // swept after a confirmed probe is not "still failing". A resume still inside its
         // confirmation window has no verdict yet: the owner is asked only once it failed.
+        // Elapsed time alone never escalates: only a retry that started at or after the
+        // deadline and failed does, so an outage as long as the budget still gets the next
+        // scheduled retry (D2: a 20 minute outage recovers without a card).
         let budget = budget_ms(rules);
+        let deadline = inc.budget_from_ms.saturating_add(budget);
         let confirming = inc
             .ever
             .iter()
@@ -176,7 +185,7 @@ impl RecoveryScheduler {
                 || faulted.iter().any(|r| !inc.done.contains(r)))
             && !confirming
             && inc.escalated.is_none()
-            && now - inc.budget_from_ms >= budget
+            && inc.failed_try_ms.is_some_and(|at| at >= deadline)
         {
             let n = inc.ever.len();
             let mins = minutes(budget);
