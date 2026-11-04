@@ -39,6 +39,9 @@ pub(super) fn set_enabled(enabled: bool) -> Result<(), String> {
         Err(error) => return Err(error.to_string()),
     };
     if !value.is_object() { return Err("Settings must be an object".into()); }
+    if value.get("scripting").is_some_and(|scripting| !scripting.is_object() && !scripting.is_null()) {
+        return Err("Scripting settings must be an object".into());
+    }
     value["scripting"]["enabled"] = enabled.into();
     super::store::write(&path, &value)
 }
