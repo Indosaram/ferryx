@@ -505,7 +505,8 @@ Install safety rules enforced by the script:
 - The live bundle is renamed (never deleted) into
   `/Applications/.ferryx-previous-<ts>/` so draining daemons keep executing
   their inode and their PTY sessions.
-- After installing, trigger the UDS handover
+- After installing, from a terminal outside Ferryx (or a pane granted admin in
+  Settings > Pane access; inside a pane it answers FORBIDDEN), trigger the UDS handover
   `{"type":"upgradeBinary","newBinaryPath":"/Applications/Ferryx.app/Contents/MacOS/ferryx"}`
   before launching the GUI, then confirm `initial.ok` in
   `/tmp/rorca-<uid>/boot-trace.log`.
@@ -600,7 +601,9 @@ ops are allowed; no removal, rename or type change. The handover wire (`handover
 the same way. Any later `DAEMON_PROTOCOL_VERSION` bump must keep control v1 working, because it
 is the only way a newer app can inspect, upgrade, retire or stop an older daemon. The fixtures
 `src-tauri/tests/fixtures/control-v1.json` and `handover-v1.json` fail the suite on a breaking
-change; never edit them to make a change pass.
+change; never edit them to make a change pass. Additive code `FORBIDDEN` (rex todo 5): `Shutdown`,
+`RetireWhenIdle` and `RequestUpgrade` from a process inside a Ferryx pane without an `admin`
+grant are refused; run them from outside Ferryx (ssh shells and the desktop app are outside).
 
 ### Windows pending rule
 

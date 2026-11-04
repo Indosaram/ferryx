@@ -114,6 +114,8 @@ machine enrollment, and the separate desktop account and gateway settings.
 #    curl -fsSL https://relay.ferryx.dev/install.sh | sh -s -- --no-up
 curl -fsSL https://relay.ferryx.dev/install.sh | bash
 
+# Run `ferryx-cli up`, `pair` and `remote` from a terminal outside Ferryx, or grant the pane
+#    admin first in Settings > Pane access: inside a Ferryx pane they answer FORBIDDEN.
 # Manual path (after --no-up, or when no terminal was attached during install):
 # 2. Start the headless PTY daemon in a dedicated service or terminal;
 #    use a second terminal for step 3 while this foreground process runs.

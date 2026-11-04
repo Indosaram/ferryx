@@ -5,6 +5,7 @@ import {
   Bot,
   CreditCard,
   Globe,
+  KeyRound,
   Keyboard,
   Palette,
   Radio,
@@ -23,6 +24,7 @@ import { AppearanceSection } from "./settings/AppearanceSection";
 import { BrowserSection } from "./settings/BrowserSection";
 import { GeneralSection } from "./settings/GeneralSection";
 import { NotificationsSection } from "./settings/NotificationsSection";
+import { PaneAccessSection } from "./settings/PaneAccessSection";
 import { PermissionsSection } from "./settings/PermissionsSection";
 import { PlanSection } from "./settings/PlanSection";
 import { RemoteSection } from "./settings/RemoteSection";
@@ -58,6 +60,7 @@ const VALID_SECTIONS: readonly SectionId[] = [
   "terminal",
   "shortcuts",
   "agents",
+  "paneAccess",
   "browser",
   "notifications",
   "remote",
@@ -192,6 +195,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
             <NavButton active={section === "terminal"} icon={<TerminalSquare />} label="Terminal" onClick={() => setSection("terminal")} />
             <NavButton active={section === "shortcuts"} icon={<Keyboard />} label="Keyboard Shortcuts" onClick={() => setSection("shortcuts")} />
             <NavButton active={section === "agents"} icon={<Bot />} label="Agents" onClick={() => setSection("agents")} />
+            <NavButton active={section === "paneAccess"} icon={<KeyRound />} label="Pane access" onClick={() => setSection("paneAccess")} />
             {advancedFeatures ? (
               <>
                 <NavButton active={section === "browser"} icon={<Globe />} label="Browser" onClick={() => setSection("browser")} />
@@ -252,6 +256,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
             />
           ) : null}
           {section === "agents" ? <AgentsSection /> : null}
+          {section === "paneAccess" ? <PaneAccessSection /> : null}
           {section === "browser" ? <BrowserSection /> : null}
           {section === "notifications" ? <NotificationsSection /> : null}
           {section === "permissions" ? <PermissionsSection /> : null}

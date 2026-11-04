@@ -1993,3 +1993,52 @@ async fn run_delivery_shortfall_case(shortfall: DeliveryShortfall) {
             .expect("D1 must execute input after the refused handover");
     }
 }
+
+/// Rex todo 5: a cross-pane grant the owner added on the predecessor is served by the successor
+/// after a v5 handover (it rides the commit decision record) and is saved in its store.
+#[tokio::test]
+async fn grants_survive_handover() {
+    use ferryx_lib::daemon::pane_grants::{GrantOp, PaneGrant, PaneGrantAction};
+    let mut daemons = PrivateDaemons::with_v5_flag(None);
+    let socket_path = daemons.socket();
+    let d1 = daemons.launch(None).await;
+    let pid_d1 = daemons.pid(d1);
+    let mut client1 = TestDaemonClient::connect(&socket_path, pid_d1)
+        .await
+        .expect("connect to D1");
+    let grant = PaneGrant {
+        from: "pane-a".into(),
+        to: "pane-b".into(),
+        ops: [GrantOp::Write].into_iter().collect(),
+    };
+    // This test process runs outside every pane: it is the owner.
+    match client1
+        .send_request(&DaemonRequest::PaneGrant { request: PaneGrantAction::Add { grant: grant.clone() } })
+        .await
+        .expect("grants add on D1")
+    {
+        DaemonResponse::PaneGrantsOk { grants, .. } => assert_eq!(grants, vec![grant.clone()]),
+        other => panic!("Expected PaneGrantsOk, got {other:?}"),
+    }
+    let legacy_socket_path = match client1
+        .send_request(&DaemonRequest::PrepareHandover)
+        .await
+        .expect("PrepareHandover")
+    {
+        DaemonResponse::PrepareHandoverOk { legacy_socket_path, .. } => legacy_socket_path,
+        other => panic!("Expected PrepareHandoverOk, got {other:?}"),
+    };
+    let d2 = daemons.launch(Some(Path::new(&legacy_socket_path))).await;
+    let pid_d2 = daemons.pid(d2);
+    let mut client2 = TestDaemonClient::connect(&socket_path, pid_d2)
+        .await
+        .expect("connect to D2");
+    match client2
+        .send_request(&DaemonRequest::PaneGrant { request: PaneGrantAction::List })
+        .await
+        .expect("grants list on D2")
+    {
+        DaemonResponse::PaneGrantsOk { grants, .. } => assert_eq!(grants, vec![grant]),
+        other => panic!("Expected PaneGrantsOk, got {other:?}"),
+    }
+}

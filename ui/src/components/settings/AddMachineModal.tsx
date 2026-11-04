@@ -151,7 +151,7 @@ const METHODS: ReadonlyArray<{ value: AddMachineMethod; title: string; descripti
   {
     value: "approve",
     title: "Approve a machine",
-    description: "Enter the code a machine printed after running ferryx-cli up.",
+    description: "Enter the code a machine printed after running ferryx-cli up from a terminal outside Ferryx (or a pane granted admin).",
     Icon: ShieldCheck,
   },
   {
@@ -1339,7 +1339,7 @@ function ApproveStep({ onLookupMachineRequest, onApproveMachineRequest, onDenyMa
               onChange={(e) => setCode(e.target.value)}
             />
             <p className="text-[11px] text-muted-foreground">
-              Run <code className="font-mono">ferryx-cli up</code> on the machine; it prints this code.
+              Run <code className="font-mono">ferryx-cli up</code> on the machine from a terminal outside Ferryx (or grant the pane admin first); it prints this code.
             </p>
           </div>
           {error ? (

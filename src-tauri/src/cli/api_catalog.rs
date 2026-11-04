@@ -24,6 +24,7 @@ pub const CLI_GROUPS: &[&str] = &[
     "pair",
     "direct-trust",
     "remote",
+    "grants",
     "api",
 ];
 
@@ -437,6 +438,17 @@ pub const CATALOG: &[Command] = &[
             sub!("pair approve", &[PIN], &[]),
         ],
         exit_codes: OK_OR_FAILURE,
+    },
+    Command {
+        name: "grants",
+        summary: "List or change which Ferryx pane may act on another pane (owner only, outside a pane)",
+        output: "json",
+        subcommands: &[
+            sub!("add", &[], &[required!("--from"), required!("--to"), value!("--ops")]),
+            sub!("remove", &[], &[required!("--from"), required!("--to")]),
+            sub!("list", &[], &[]),
+        ],
+        exit_codes: DAEMON_JSON_EXIT_CODES,
     },
     Command {
         name: "api",
