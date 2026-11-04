@@ -614,3 +614,78 @@ describe("workspaceStore SESSION_BACKEND_UNAVAILABLE compare-and-set reducer", (
     });
   });
 });
+
+describe("lastBackendSessionId", () => {
+  function liveSession(id = "term-1"): TerminalSession {
+    return {
+      id,
+      cwd: "/repo",
+      workspaceId: "ws-local",
+      worktree: null,
+      backendSessionId: "pty-real",
+      lifecycle: "running",
+      incarnation: "inc-1",
+      daemonEpoch: "epoch-1",
+      recoveryKey: "key-1",
+      recoveryToken: 1,
+      agentType: "claude",
+      providerSession: { key: "session_id", id: "prov-1" },
+    };
+  }
+
+  it("keeps the real id on the PTY exit action and clears it when a new backend attaches", () => {
+    const exited = workspaceReducer(createInitialState(liveSession()), {
+      type: "SESSION_LIFECYCLE",
+      backendSessionId: "pty-real",
+      lifecycle: "exited",
+      incarnation: "inc-1",
+      daemonEpoch: "epoch-1",
+    });
+    expect(exited.sessions["term-1"]).toMatchObject({ backendSessionId: null, lastBackendSessionId: "pty-real", lifecycle: "exited" });
+    const rebound = workspaceReducer(exited, {
+      type: "REBIND_SESSION_BACKEND",
+      sessionId: "term-1",
+      backendSessionId: "pty-next",
+      incarnation: "inc-2",
+      daemonEpoch: "epoch-1",
+    });
+    expect(rebound.sessions["term-1"].backendSessionId).toBe("pty-next");
+    expect(rebound.sessions["term-1"].lastBackendSessionId).toBeUndefined();
+  });
+
+  it("keeps the real id on affirmative exit", () => {
+    const next = workspaceReducer(createInitialState(liveSession()), {
+      type: "SESSION_AFFIRMATIVE_EXIT",
+      sessionId: "term-1",
+      backendSessionId: "pty-real",
+      incarnation: "inc-1",
+      daemonEpoch: "epoch-1",
+      key: "key-1",
+      token: 1,
+    });
+    expect(next.sessions["term-1"]).toMatchObject({ backendSessionId: null, lastBackendSessionId: "pty-real" });
+  });
+
+  it("keeps the real id on confirmed absence and never retains a standby id", () => {
+    const next = workspaceReducer(createInitialState(liveSession()), {
+      type: "SESSION_CONFIRMED_ABSENT",
+      sessionId: "term-1",
+      backendSessionId: "pty-real",
+      key: "key-1",
+      token: 1,
+    });
+    expect(next.sessions["term-1"]).toMatchObject({ backendSessionId: null, lastBackendSessionId: "pty-real" });
+    const standby = workspaceReducer(createInitialState({
+      ...liveSession(),
+      backendSessionId: "standby:term-1",
+    }), {
+      type: "SESSION_LIFECYCLE",
+      backendSessionId: "standby:term-1",
+      lifecycle: "exited",
+      incarnation: "inc-1",
+      daemonEpoch: "epoch-1",
+    });
+    expect(standby.sessions["term-1"].backendSessionId).toBeNull();
+    expect(standby.sessions["term-1"].lastBackendSessionId).toBeUndefined();
+  });
+});

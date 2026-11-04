@@ -224,3 +224,118 @@ async fn a_machine_scope_events_socket_receives_the_prompt_changed_frame() {
         .unwrap();
     fixture.stop().await;
 }
+
+fn history_event(session: &str, seq: &str) -> crate::remote::reference_chat::types::ReferenceHistoryEvent {
+    use crate::remote::reference_chat::types::{ReferenceHistoryEvent, ReferenceTargetRef};
+    use crate::scoped_contracts::{Epoch, TargetRef};
+    ReferenceHistoryEvent::ReferenceHistoryChanged {
+        target: ReferenceTargetRef::without_provider_session(TargetRef {
+            host_id: "host".into(),
+            owner_id: "owner".into(),
+            epoch: Epoch(1),
+            backend_session_id: session.into(),
+        }),
+        change_seq: seq.into(),
+    }
+}
+
+async fn next_history_frame<S>(socket: &mut S) -> Value
+where
+    S: futures_util::Stream<
+            Item = Result<
+                tokio_tungstenite::tungstenite::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        > + Unpin,
+{
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let message = socket.next().await.unwrap().unwrap();
+            let Ok(text) = message.to_text() else {
+                continue;
+            };
+            let Ok(event) = serde_json::from_str::<Value>(text) else {
+                continue;
+            };
+            if event["type"] == "referenceHistoryChanged" {
+                return event;
+            }
+        }
+    })
+    .await
+    .expect("a referenceHistoryChanged frame")
+}
+
+#[tokio::test]
+async fn a_machine_only_history_frame_is_never_pushed_to_a_mirror_socket() {
+    let (fixture, token) = fixture(DeviceAccessScope::Mirror).await;
+    let state = fixture.owner.remote_state().clone();
+    let services = state.machine_services.as_ref().unwrap().clone();
+    let target = RemoteTerminalTarget {
+        machine_id: "machine".into(),
+        daemon_epoch: Epoch(1),
+        session_id: "machine-only".into(),
+    };
+    let resource = serde_json::to_string(&target).unwrap();
+    let journal_services = services.clone();
+    crate::ipc::run_blocking(move || {
+        journal_services
+            .workspaces
+            .journal
+            .begin("device", "request", "createSession", "digest", &resource)
+            .map_err(crate::ipc::IpcError::internal)
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        services.sessions.machine_only_async("machine-only").await,
+        Ok(true)
+    );
+    let mut socket = fixture.events_socket(&token).await;
+
+    state
+        .agent_events
+        .publish_reference_history(&history_event("machine-only", "1"));
+    state
+        .agent_events
+        .publish_reference_history(&history_event("desktop", "2"));
+    let pushed = next_history_frame(&mut socket).await;
+    assert_eq!(pushed["target"]["backendSessionId"], "desktop");
+    assert_eq!(pushed["changeSeq"], "2");
+    assert!(pushed.get("path").is_none());
+    assert!(pushed["target"].get("path").is_none());
+
+    drop(socket);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn a_machine_scope_events_socket_receives_the_history_frame() {
+    let (fixture, token) = fixture(DeviceAccessScope::Machine).await;
+    let state = fixture.owner.remote_state().clone();
+    let mut socket = fixture.events_socket(&token).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let message = socket.next().await.unwrap().unwrap();
+            let event: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+            if event["type"] == "inventoryInvalidated" {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the machine socket opens with an inventory boundary");
+
+    state
+        .agent_events
+        .publish_reference_history(&history_event("machine-session", "4"));
+    let pushed = next_history_frame(&mut socket).await;
+    assert_eq!(pushed["type"], "referenceHistoryChanged");
+    assert_eq!(pushed["target"]["backendSessionId"], "machine-session");
+    assert_eq!(pushed["changeSeq"], "4");
+    assert!(pushed.get("payload").is_none(), "the contract frame is not wrapped");
+    assert!(pushed.get("path").is_none());
+
+    socket.close(None).await.unwrap();
+    fixture.stop().await;
+}

@@ -20,13 +20,13 @@ import { isAbsoluteTerminalCwd } from "../lib/terminalCwd";
 import { switchDebug } from "../lib/switchDebug";
 import { withTimeout } from "../lib/withTimeout";
 import { isPairedWorkspaceId, isRemoteWorkspaceId, resolvePairedStartup } from "../lib/remoteProject";
-import { createStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON } from "../lib/sessionLifecycle";
+import { createStandbyBackendSessionId, isStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON } from "../lib/sessionLifecycle";
 import { findGroupForWorkspace, groupProjects } from "../lib/projectGrouping";
 import { hasValidProjectTarget } from "../lib/projectIdentity";
 import { getCachedSshHosts } from "../lib/sshHosts";
 import { getMigratedItem, PROJECTS_STORAGE_KEY } from "../lib/storageKeys";
 import { startSshRecovery } from "../lib/sshRecovery";
-import { canCaptureAuthoritativeProviderSession } from "../lib/agentResume";
+import { canCaptureAuthoritativeProviderSession, continuationOutcomeUnknown, continuationUnknownHeld, holdContinuationUnknown } from "../lib/agentResume";
 import { getAgentReconnectAffordance } from "../lib/agentResumeAffordance";
 import { getNativeWindowFocused } from "../lib/nativeWindowFocus";
 import { isWindowForegroundFocused } from "../lib/notificationCoordinator";
@@ -684,6 +684,8 @@ export type WorkspaceServices = {
 export type SplitPaneOptions = {
   position?: "first" | "second";
   content?: PaneContent;
+  /** Host-validated startup for the new pane. A continuation does not mutate the source pane. */
+  startup?: SpawnTerminalRequest["startup"];
 };
 
 export type TabSplitEdge = "left" | "right" | "top" | "bottom";
@@ -1880,6 +1882,13 @@ export function useWorkspaceStore({
         });
         return;
       }
+      const continueStartup = options.startup?.kind === "agentContinue" ? options.startup : null;
+      if (continueStartup && continuationUnknownHeld(continueStartup)) {
+        switchDebug("split.pane.refused.continuation-unknown", {
+          reason: `sourceLocalSessionId=${sourceLocalSessionId} mode=${continueStartup.mode}`,
+        });
+        return;
+      }
 
       const localSessionId = createId("session");
       const newLeafId = createId("leaf");
@@ -1936,8 +1945,13 @@ export function useWorkspaceStore({
           workspaceId: session.workspaceId,
           worktree: session.worktree,
           inheritFromSessionId: sourceSession.backendSessionId,
+          ...(options.startup ? { startup: options.startup } : {}),
           ...initialGridFields(grid),
         });
+        const created = stateRef.current.sessions[localSessionId];
+        if (continueStartup && created?.reconnectError && continuationOutcomeUnknown(created.reconnectError)) {
+          holdContinuationUnknown(continueStartup);
+        }
         return;
       }
 
@@ -1960,6 +1974,7 @@ export function useWorkspaceStore({
             worktree: sourceSession.worktree,
             cwd: isPaired ? sourceSession.cwd : null,
             inheritFromSessionId: sourceSession.backendSessionId,
+            ...(options.startup ? { startup: options.startup } : {}),
             ...initialGridFields(grid),
           });
           backendSessionId = result.sessionId;
@@ -1981,6 +1996,7 @@ export function useWorkspaceStore({
             workspaceId: sourceSession.workspaceId || workspaceId,
             worktree: sourceSession.worktree,
             cwd: liveCwd,
+            ...(options.startup ? { startup: options.startup } : {}),
             ...initialGridFields(grid),
           });
         }
@@ -2003,6 +2019,7 @@ export function useWorkspaceStore({
           await services.closeTerminal(backendSessionId).catch(() => undefined);
         }
       } catch (error) {
+        if (continueStartup && continuationOutcomeUnknown(error)) holdContinuationUnknown(continueStartup);
         if (backendSessionId) {
           terminalEventBus.clearSession(backendSessionId);
           await services.closeTerminal(backendSessionId).catch(() => undefined);
@@ -3911,6 +3928,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             ...session,
             lifecycle: "exited",
             backendSessionId: null,
+            ...retainedLastBackendSessionId(session),
             remoteConnectionState: undefined,
             reconnectLifecycle: "idle",
             exitCode: liveInfo.recoveryAuthority.exitCode ?? null,
@@ -3963,6 +3981,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
               lifecycle: action.lifecycle,
               exitCode: action.lifecycle === "exited" ? action.exitCode ?? null : null,
               backendSessionId: dead ? null : session.backendSessionId,
+              ...(dead ? retainedLastBackendSessionId(session) : {}),
               reconnectLifecycle: dead ? "idle" : session.reconnectLifecycle,
               ...(dead ? clearedTransportState(session) : {}),
             },
@@ -4006,6 +4025,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         lifecycle: "exited",
         exitCode: action.exitCode ?? null,
         backendSessionId: null,
+        ...retainedLastBackendSessionId(session),
         reconnectLifecycle: "idle",
         ...clearedTransportState(session),
         backendUnavailableReason: action.reason ?? null,
@@ -4031,6 +4051,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         ...session,
         lifecycle: "exited",
         backendSessionId: null,
+        ...retainedLastBackendSessionId(session),
         reconnectLifecycle: "idle",
         ...clearedTransportState(session),
         backendUnavailableReason: "absent",
@@ -4250,57 +4271,59 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         (action.clearAgent === undefined && (isSshBackendReplaced || isPairedBackendReplaced));
       const activityBySessionId = { ...state.activityBySessionId };
       if (shouldClearAgent) delete activityBySessionId[action.sessionId];
+      const nextRebind: TerminalSession = {
+        ...session,
+        backendSessionId: action.backendSessionId,
+        processState: "running",
+        exitCode: null,
+        cwd: action.cwd && isAbsoluteTerminalCwd(action.cwd) ? action.cwd : session.cwd,
+        daemonEpoch: action.daemonEpoch ?? null,
+        ...(action.incarnation != null ? { incarnation: action.incarnation } : {}),
+        recoveryKey: action.recoveryKey ?? session.recoveryKey ?? formatRecoveryKey({
+          kind: isRemoteWorkspaceId(session.workspaceId) ? "ssh" : "local",
+          frontendSessionId: action.sessionId,
+          backendSessionId: action.backendSessionId,
+          expectedIncarnation: action.incarnation ?? session.incarnation ?? null,
+        }),
+        ...(action.recoveryToken != null
+          ? { recoveryToken: action.recoveryToken }
+          : session.recoveryToken != null
+            ? { recoveryToken: session.recoveryToken + 1 }
+            : {}),
+        lastOutputSequence: null,
+        lifecycle: action.pendingAttachment ? session.lifecycle : "running",
+        reconnectLifecycle: action.pendingAttachment ? "binding" : "idle",
+        reconnectError: null,
+        backendUnavailableReason: null,
+        recoveryState: null,
+        reconnectRequestId: action.pendingAttachment ? session.reconnectRequestId : null,
+        ...(shouldClearAgent
+          ? {
+              agentType: null,
+              agentSessionId: null,
+              providerSession: null,
+            }
+          : {}),
+        ...(isSshBackendReplaced || isPairedBackendReplaced
+          ? {
+              remoteConnectionState: "connected",
+              remoteGeneration: 1,
+              remoteFailure: null,
+              remoteReplayGap: null,
+            }
+          : {
+              ...(session.remoteConnectionState !== undefined ? { remoteConnectionState: undefined } : {}),
+              ...(session.remoteFailure != null ? { remoteFailure: null } : {}),
+              ...(session.remoteReplayGap != null ? { remoteReplayGap: null } : {}),
+            }),
+      };
+      if (!isStandbyBackendSessionId(action.backendSessionId)) delete nextRebind.lastBackendSessionId;
       return {
         ...state,
         ...(shouldClearAgent ? { activityBySessionId } : {}),
         sessions: {
           ...state.sessions,
-          [action.sessionId]: {
-            ...session,
-            backendSessionId: action.backendSessionId,
-            processState: "running",
-            exitCode: null,
-            cwd: action.cwd && isAbsoluteTerminalCwd(action.cwd) ? action.cwd : session.cwd,
-            daemonEpoch: action.daemonEpoch ?? null,
-            ...(action.incarnation != null ? { incarnation: action.incarnation } : {}),
-            recoveryKey: action.recoveryKey ?? session.recoveryKey ?? formatRecoveryKey({
-              kind: isRemoteWorkspaceId(session.workspaceId) ? "ssh" : "local",
-              frontendSessionId: action.sessionId,
-              backendSessionId: action.backendSessionId,
-              expectedIncarnation: action.incarnation ?? session.incarnation ?? null,
-            }),
-            ...(action.recoveryToken != null
-              ? { recoveryToken: action.recoveryToken }
-              : session.recoveryToken != null
-                ? { recoveryToken: session.recoveryToken + 1 }
-                : {}),
-            lastOutputSequence: null,
-            lifecycle: action.pendingAttachment ? session.lifecycle : "running",
-            reconnectLifecycle: action.pendingAttachment ? "binding" : "idle",
-            reconnectError: null,
-            backendUnavailableReason: null,
-            recoveryState: null,
-            reconnectRequestId: action.pendingAttachment ? session.reconnectRequestId : null,
-            ...(shouldClearAgent
-              ? {
-                  agentType: null,
-                  agentSessionId: null,
-                  providerSession: null,
-                }
-              : {}),
-            ...(isSshBackendReplaced || isPairedBackendReplaced
-              ? {
-                  remoteConnectionState: "connected",
-                  remoteGeneration: 1,
-                  remoteFailure: null,
-                  remoteReplayGap: null,
-                }
-              : {
-                  ...(session.remoteConnectionState !== undefined ? { remoteConnectionState: undefined } : {}),
-                  ...(session.remoteFailure != null ? { remoteFailure: null } : {}),
-                  ...(session.remoteReplayGap != null ? { remoteReplayGap: null } : {}),
-                }),
-          },
+          [action.sessionId]: nextRebind,
         },
       };
     }
@@ -4644,6 +4667,17 @@ function clearedTransportState(session: TerminalSession): Partial<TerminalSessio
   };
 }
 
+/** Real backend id to publish after the pane exits. A standby id is never retained. */
+function retainedLastBackendSessionId(session: TerminalSession): { lastBackendSessionId: string } | Record<string, never> {
+  const prior = session.backendSessionId;
+  const retained = prior && !isStandbyBackendSessionId(prior)
+    ? prior
+    : session.lastBackendSessionId && !isStandbyBackendSessionId(session.lastBackendSessionId)
+      ? session.lastBackendSessionId
+      : undefined;
+  return retained ? { lastBackendSessionId: retained } : {};
+}
+
 /**
  * A session whose backend is gone cannot be producing live agent output.
  *
@@ -4970,7 +5004,18 @@ type LogicalSpawnRequest = {
   inheritFromSessionId?: string | null;
   cols?: number;
   rows?: number;
+  startup?: SpawnTerminalRequest["startup"];
 };
+
+function logicalStartup(request: LogicalSpawnRequest): SpawnTerminalRequest["startup"] {
+  if (request.startup) return request.startup;
+  return resolvePairedStartup(request.workspaceId);
+}
+
+function replayLogicalSpawn(startup: SpawnTerminalRequest["startup"], error: unknown): boolean {
+  if (startup?.kind === "agentContinue") return false;
+  return isAmbiguousRendererTransportError(error);
+}
 
 /** Geometry measurement must never block a spawn: any failure means "unavailable". */
 async function measureFor(services: WorkspaceServices, target: InitialGeometryTarget): Promise<InitialPtyGrid | null> {
@@ -4987,12 +5032,12 @@ async function spawnTerminalForLogicalAction(
   request: LogicalSpawnRequest,
 ): Promise<string> {
   const clientRequestId = createClientRequestId();
-  const startup = resolvePairedStartup(request.workspaceId);
+  const startup = logicalStartup(request);
   const stableRequest = { ...request, clientRequestId, ...(startup ? { startup } : {}) };
   try {
     return await services.spawnTerminal(stableRequest);
   } catch (error) {
-    if (!isAmbiguousRendererTransportError(error)) throw error;
+    if (!replayLogicalSpawn(startup, error)) throw error;
     return services.spawnTerminal(stableRequest);
   }
 }
@@ -5002,13 +5047,13 @@ async function spawnDetailedForLogicalAction(
   request: LogicalSpawnRequest,
 ): Promise<Awaited<ReturnType<NonNullable<WorkspaceServices["spawnTerminalDetailed"]>>>> {
   const clientRequestId = createClientRequestId();
-  const startup = resolvePairedStartup(request.workspaceId);
+  const startup = logicalStartup(request);
   const stableRequest = { ...request, clientRequestId, ...(startup ? { startup } : {}) };
   const spawnDetailed = services.spawnTerminalDetailed!;
   try {
     return await spawnDetailed(stableRequest);
   } catch (error) {
-    if (!isAmbiguousRendererTransportError(error)) throw error;
+    if (!replayLogicalSpawn(startup, error)) throw error;
     return spawnDetailed(stableRequest);
   }
 }

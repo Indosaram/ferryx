@@ -323,6 +323,12 @@ pub struct RemoteTerminalTabInfo {
     pub worktree_label: Option<String>,
     #[serde(default, alias = "session_id", skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Absent means the desktop did not say. A live registry session is never served as exited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running: Option<bool>,
+    /// Provider session of an exited agent pane. Same wire shape as a sessions-list row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session: Option<crate::daemon::protocol::AgentProviderSession>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -4188,6 +4188,105 @@ describe("App project workspace flow", () => {
       expect(result?.terminalTabs?.[2] ? "agentType" in result.terminalTabs[2] : true).toBe(false);
     });
 
+    it("publishes running false and the provider session for an exited agent pane", async () => {
+      const { deriveFocusedTerminal } = await import("./App");
+      const { fillExitedAgentTab } = await import("../../scripts/qa/fixtures/exited-agent-tab.mjs");
+      const { workspaceReducer } = await import("./state/workspaceStore");
+      const running: any = {
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
+        activeWorktreePath: "/repo/main",
+        layout: {
+          activeTabId: "tab-1",
+          tabs: [
+            { id: "tab-1", label: "claude", sessionId: "sess-exited" },
+            { id: "tab-2", label: "live", sessionId: "sess-live" },
+          ],
+          layoutsByTabId: {},
+        },
+        sessions: {
+          "sess-exited": {
+            id: "sess-exited",
+            backendSessionId: "pty-real",
+            cwd: "/repo/main",
+            lifecycle: "running",
+            incarnation: "inc-exited",
+            daemonEpoch: "epoch-exited",
+            agentType: "claude",
+            providerSession: { key: "session_id", id: "prov-exited" },
+          },
+          "sess-live": {
+            id: "sess-live",
+            backendSessionId: "pty-live",
+            cwd: "/repo/main",
+            lifecycle: "running",
+            agentType: "claude",
+            providerSession: { key: "session_id", id: "prov-live" },
+          },
+        },
+        worktrees: [{ path: "/repo/main", branch: "refs/heads/main" }],
+      };
+      const exited = workspaceReducer(running, {
+        type: "SESSION_LIFECYCLE",
+        backendSessionId: "pty-real",
+        lifecycle: "exited",
+        incarnation: "inc-exited",
+        daemonEpoch: "epoch-exited",
+      });
+      expect(exited.sessions["sess-exited"].backendSessionId).toBeNull();
+      expect(exited.sessions["sess-exited"].lastBackendSessionId).toBe("pty-real");
+      const result = deriveFocusedTerminal("orca-lite", exited);
+      expect(result?.backendSessionId).toBeNull();
+      expect(result?.terminalTabs?.[0]).toEqual(fillExitedAgentTab({
+        tabId: "tab-1",
+        label: "claude",
+        agentType: "claude",
+        worktreeLabel: "main",
+        sessionId: "pty-real",
+        providerKey: "session_id",
+        providerSessionId: "prov-exited",
+      }));
+      expect(result?.terminalTabs?.[1]).toEqual({
+        id: "tab-2",
+        label: "live",
+        worktreeLabel: "main",
+        sessionId: "pty-live",
+      });
+      expect(result?.terminalTabs?.[1] ? "running" in result.terminalTabs[1] : true).toBe(false);
+      expect(result?.terminalTabs?.[1] ? "providerSession" in result.terminalTabs[1] : true).toBe(false);
+      const standby: any = {
+        ...running,
+        layout: { ...running.layout, tabs: [{ id: "tab-standby", label: "claude", sessionId: "sess-standby" }], activeTabId: "tab-standby" },
+        sessions: {
+          "sess-standby": {
+            id: "sess-standby",
+            backendSessionId: "standby:sess-standby",
+            lastBackendSessionId: "standby:sess-standby",
+            cwd: "/repo/main",
+            lifecycle: "exited",
+            agentType: "claude",
+            providerSession: { key: "session_id", id: "prov-standby" },
+          },
+        },
+      };
+      const standbyResult = deriveFocusedTerminal("orca-lite", standby);
+      expect(standbyResult?.backendSessionId).toBeNull();
+      expect(standbyResult?.terminalTabs?.[0]?.sessionId).toBeUndefined();
+      expect(JSON.stringify(standbyResult?.terminalTabs?.[0])).not.toContain("standby:");
+      const restored = deriveFocusedTerminal("orca-lite", {
+        ...standby,
+        sessions: {
+          "sess-standby": {
+            ...standby.sessions["sess-standby"],
+            lastBackendSessionId: "pty-real",
+          },
+        },
+      });
+      expect(restored?.backendSessionId).toBeNull();
+      expect(restored?.terminalTabs?.[0]?.sessionId).toBe("pty-real");
+      expect(JSON.stringify(restored?.terminalTabs)).not.toContain("standby:");
+    });
+
     it("keeps publishing the terminal inventory with an empty focus when a browser tab is active", async () => {
       const { deriveFocusedTerminal } = await import("./App");
       const sampleState: any = {

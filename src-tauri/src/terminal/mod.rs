@@ -51,6 +51,7 @@ pub use qa_liveness::run_exact_pid_probe;
 pub mod remote;
 #[cfg(test)]
 mod remote_runtime_tests;
+pub(crate) mod continue_startup;
 pub(crate) mod resume_cwd;
 pub mod screen_mirror;
 pub mod service;

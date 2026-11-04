@@ -22,14 +22,16 @@ use super::files as reference_files;
 use super::types::REFERENCE_CHAT_ROUTE_PREFIX;
 
 /// The frozen route table, as the plan and the contract name it.
-const REFERENCE_CHAT_ROUTES: [(&str, &str); 11] = [
+const REFERENCE_CHAT_ROUTES: [(&str, &str); 13] = [
     ("GET", "history"),
+    ("GET", "payload"),
     ("GET", "screen"),
     ("GET", "prompt"),
     ("POST", "acknowledge-outcome"),
     ("POST", "submit"),
     ("POST", "stop"),
     ("POST", "answer"),
+    ("POST", "control"),
     ("POST", "files"),
     ("GET", "files"),
     ("GET", "files/00000000-0000-0000-0000-000000000000"),
@@ -313,8 +315,8 @@ async fn fixture() -> ReferenceRouteFixture {
         .expect("control token");
     // A view-only device is a Mirror-scope device, and that is the only legitimate door: a
     // Machine-scope grant is refused for anything but Control ("Machine access requires Control
-    // permission"), so a Machine-scope View pin cannot be minted at all. The reads below need
-    // only a valid token; every mutation route asks for Control and must answer this device 403.
+    // permission"), so a Machine-scope View pin cannot be minted at all. This fixture's session
+    // is machine-created, so that Mirror device is refused as if the session were unknown.
     let view_pin = state.auth_manager.create_pairing_code(DevicePermission::View);
     let (view, _) = state
         .auth_manager
@@ -357,7 +359,21 @@ async fn fixture() -> ReferenceRouteFixture {
 
 impl ReferenceRouteFixture {
     fn route(&self, suffix: &str) -> String {
-        format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{}/{suffix}", self.session_id)
+        self.route_for(&self.session_id, suffix)
+    }
+
+    fn route_for(&self, session_id: &str, suffix: &str) -> String {
+        format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/{suffix}")
+    }
+
+    /// A live pane the journal does not own, so Mirror may see it.
+    fn spawn_desktop_pane(&self) -> String {
+        let (session_id, _exit) = self
+            .state
+            .terminal_service
+            .spawn_shell(80, 24)
+            .expect("a desktop pane");
+        session_id
     }
 
     /// The read query a reference-chat read binds its target with.
@@ -444,6 +460,30 @@ impl ReferenceRouteFixture {
             "params": params,
         })
         .to_string()
+    }
+
+    /// Flat control body. The client does not wrap these fields in `params`.
+    fn control_body(&self, request_id: &str, control_id: &str, value_id: &str) -> String {
+        serde_json::json!({
+            "requestId": request_id,
+            "target": {
+                "hostId": reference_files::reference_host_id(),
+                "ownerId": self.state.reference_owner_id,
+                "epoch": self.daemon_epoch.as_str(),
+                "backendSessionId": self.session_id.as_str(),
+            },
+            "registryId": "claude",
+            "controlId": control_id,
+            "valueId": value_id,
+        })
+        .to_string()
+    }
+
+    /// The same envelope, aimed at another live pane of this gateway.
+    fn retarget(&self, envelope: &str, session_id: &str) -> String {
+        let mut value: serde_json::Value = serde_json::from_str(envelope).expect("envelope");
+        value["target"]["backendSessionId"] = serde_json::Value::String(session_id.to_string());
+        value.to_string()
     }
 
     /// Answer every cursor query the bytes seen so far contain, reporting the counts by reference.
@@ -834,8 +874,8 @@ async fn a_view_only_device_cannot_acknowledge_an_outcome() {
     let path = fixture.route("acknowledge-outcome");
     let query = fixture.read_query("", &fixture.daemon_epoch, &reference_files::reference_host_id(), &[]);
     let (status, body) = fixture.server.request("POST", &format!("{path}?{query}"), Some(&fixture.view), None).await;
-    assert_eq!(status, 403, "{body}");
-    assert!(body.contains("FORBIDDEN"), "{body}");
+    assert_eq!(status, 404, "a machine-only pane is hidden from a mirror view device: {body}");
+    assert!(body.contains("NOT_FOUND"), "{body}");
     assert_eq!(states.current(&fixture.session_id).unwrap().outcome, Some(AgentOutcome::Done));
     fixture.state.terminal_service.close_session(&fixture.session_id).await.unwrap();
     fixture.server.stop().await;
@@ -1032,7 +1072,10 @@ async fn a_target_naming_another_owner_is_refused_without_writing_or_resizing() 
     fixture.server.stop().await;
 }
 
-/// The read-only policy is retained: a view-only device may read and may not mutate.
+/// This fixture's pane is a machine-created session, so a Mirror device is refused as if the
+/// session were unknown. A view device still cannot apply a control: that route checks
+/// permission before it resolves the session. The Control requirement for a pane Mirror can
+/// see is `a_view_device_is_forbidden_from_mutating_a_mirror_visible_pane`.
 #[tokio::test]
 async fn a_view_only_device_cannot_mutate_a_reference_chat_target() {
     let fixture = fixture().await;
@@ -1051,7 +1094,8 @@ async fn a_view_only_device_cannot_mutate_a_reference_chat_target() {
             None,
         )
         .await;
-    assert_eq!(status, 200, "a view-only device may still read the pane: {body}");
+    assert_eq!(status, 404, "a machine-only pane is hidden from a mirror view device: {body}");
+    assert!(body.contains("NOT_FOUND"), "{body}");
 
     let request_id = uuid::Uuid::new_v4().to_string();
     let (status, body) = fixture
@@ -1066,8 +1110,8 @@ async fn a_view_only_device_cannot_mutate_a_reference_chat_target() {
             )),
         )
         .await;
-    assert_eq!(status, 403, "a view-only device must not type: {body}");
-    assert!(body.contains("FORBIDDEN"), "{body}");
+    assert_eq!(status, 404, "a machine-only pane is hidden before a view device can type: {body}");
+    assert!(body.contains("NOT_FOUND"), "{body}");
 
     let (status, body) = fixture
         .server
@@ -1086,10 +1130,173 @@ async fn a_view_only_device_cannot_mutate_a_reference_chat_target() {
             )),
         )
         .await;
-    assert_eq!(status, 403, "a view-only device must not stage: {body}");
+    assert_eq!(status, 404, "a machine-only pane is hidden before a view device can stage: {body}");
+    assert!(body.contains("NOT_FOUND"), "{body}");
+
+    let (status, body) = fixture
+        .server
+        .request(
+            "POST",
+            &fixture.route("control"),
+            Some(&fixture.view),
+            Some(&fixture.control_body(&uuid::Uuid::new_v4().to_string(), "model", "sonnet")),
+        )
+        .await;
+    assert_eq!(status, 403, "a view-only device must not apply a control: {body}");
     assert!(body.contains("FORBIDDEN"), "{body}");
 
     fixture.server.stop().await;
+}
+
+/// A View-permission Mirror device may read a pane the journal does not own, and every mutation
+/// route still answers that device 403. The machine-created fixture pane stays hidden (404).
+#[tokio::test]
+async fn a_view_device_is_forbidden_from_mutating_a_mirror_visible_pane() {
+    let fixture = fixture().await;
+    let desktop = fixture.spawn_desktop_pane();
+    let services = fixture.state.machine_services.as_ref().expect("machine services");
+    assert_eq!(
+        services.sessions.machine_only_async(&desktop).await,
+        Ok(false),
+        "a desktop pane is visible to Mirror"
+    );
+    assert_eq!(
+        services.sessions.machine_only_async(&fixture.session_id).await,
+        Ok(true),
+        "the fixture pane stays machine-only"
+    );
+
+    let provider = "deskpayload";
+    let path = fixture._root.path().join(format!("{provider}.jsonl"));
+    let path_text = path.display().to_string();
+    let patch = "*** Begin Patch\n*** Update File: notes.txt\n@@\n-old\n+new\n*** End Patch";
+    let transcript = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+        serde_json::json!({"timestamp":"2026-10-06T09:00:00.000Z","type":"session_meta","payload":{"id":provider,"cwd":"project","cli_version":"0.1.0"}}),
+        serde_json::json!({"timestamp":"2026-10-06T09:00:01.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}),
+        serde_json::json!({"timestamp":"2026-10-06T09:00:01.000Z","type":"event_msg","payload":{"type":"user_message","kind":"plain","message":"show the log"}}),
+        serde_json::json!({"timestamp":"2026-10-06T09:00:01.100Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"show the log"}]}}),
+        serde_json::json!({"timestamp":"2026-10-06T09:00:02.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cat log\"}","call_id":"c-out"}}),
+        serde_json::json!({"timestamp":"2026-10-06T09:00:03.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c-out","output":"log line"}}),
+        serde_json::json!({"timestamp":"2026-10-06T09:00:04.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"c-diff","input":patch}}),
+    );
+    std::fs::write(&path, transcript).expect("transcript");
+    services.sessions.publish_agent_state_for_test(
+        crate::daemon::agent_state::AgentState {
+            session_id: desktop.clone(),
+            state: "idle".into(),
+            agent: Some("codex".into()),
+            provider_session: Some(crate::daemon::protocol::AgentProviderSession {
+                launcher: None,
+                key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
+                id: provider.into(),
+                transcript_path: Some(path_text.clone()),
+            }),
+            detail: None,
+            origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
+        },
+    );
+    let query = fixture.read_query_for(
+        &desktop,
+        "codex",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[("providerSessionId", provider.to_string())],
+    );
+    let history = format!("{}?{query}", fixture.route_for(&desktop, "history"));
+    let (status, body) = fixture
+        .server
+        .request("GET", &history, Some(&fixture.view), None)
+        .await;
+    assert_eq!(status, 200, "a view device may read a mirror-visible pane: {body}");
+    assert!(!body.contains(&path_text), "history leaked a path");
+    let page: serde_json::Value = serde_json::from_str(&body).expect("history page");
+    let diff_ref = page["turns"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|turn| turn["parts"].as_array().into_iter().flatten())
+        .find_map(|part| part["patch"]["ref"].as_str().map(str::to_string))
+        .expect("diff payload ref");
+    let payload = format!(
+        "{}?{query}&ref={}",
+        fixture.route_for(&desktop, "payload"),
+        query_escape(&diff_ref)
+    );
+    let (status, body) = fixture
+        .server
+        .request("GET", &payload, Some(&fixture.view), None)
+        .await;
+    assert_eq!(status, 200, "a view device may read a payload of a mirror-visible pane: {body}");
+    assert!(!body.contains(&path_text), "payload leaked a path");
+
+    let submit = fixture.retarget(
+        &fixture.mutation(
+            &uuid::Uuid::new_v4().to_string(),
+            serde_json::json!({ "text": "never typed\n", "origin": "chat" }),
+        ),
+        &desktop,
+    );
+    assert_view_forbidden(&fixture, "POST", &fixture.route_for(&desktop, "submit"), Some(&submit), "submit").await;
+    let stage = fixture.retarget(
+        &fixture.mutation(
+            &uuid::Uuid::new_v4().to_string(),
+            serde_json::json!({
+                "name": "never-staged.txt",
+                "mediaType": "text/plain",
+                "sizeBytes": 0,
+                "contentBase64": "",
+            }),
+        ),
+        &desktop,
+    );
+    assert_view_forbidden(&fixture, "POST", &fixture.route_for(&desktop, "files"), Some(&stage), "stage").await;
+    let stop = fixture.retarget(
+        &fixture.mutation(
+            &uuid::Uuid::new_v4().to_string(),
+            serde_json::json!({ "capability": "providerInterrupt" }),
+        ),
+        &desktop,
+    );
+    assert_view_forbidden(&fixture, "POST", &fixture.route_for(&desktop, "stop"), Some(&stop), "stop").await;
+    let answer = fixture.retarget(
+        &fixture.mutation(
+            &uuid::Uuid::new_v4().to_string(),
+            serde_json::json!({
+                "promptId": "p",
+                "screenRevision": "1",
+                "answer": { "optionIndex": 0 },
+            }),
+        ),
+        &desktop,
+    );
+    assert_view_forbidden(&fixture, "POST", &fixture.route_for(&desktop, "answer"), Some(&answer), "answer").await;
+    let control = fixture.retarget(
+        &fixture.control_body(&uuid::Uuid::new_v4().to_string(), "model", "sonnet"),
+        &desktop,
+    );
+    assert_view_forbidden(&fixture, "POST", &fixture.route_for(&desktop, "control"), Some(&control), "control").await;
+    let delete = format!("{}?{query}", fixture.route_for(&desktop, &format!("files/{}", uuid::Uuid::new_v4())));
+    assert_view_forbidden(&fixture, "DELETE", &delete, None, "delete").await;
+    let acknowledge = format!("{}?{query}", fixture.route_for(&desktop, "acknowledge-outcome"));
+    assert_view_forbidden(&fixture, "POST", &acknowledge, None, "acknowledge").await;
+
+    let _ = fixture.state.terminal_service.close_session(&desktop).await;
+    fixture.server.stop().await;
+}
+
+async fn assert_view_forbidden(
+    fixture: &ReferenceRouteFixture,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    what: &str,
+) {
+    let (status, text) = fixture.server.request(method, path, Some(&fixture.view), body).await;
+    assert_eq!(status, 403, "{what} must require Control: {text}");
+    assert!(text.contains("FORBIDDEN"), "{what}: {text}");
 }
 
 /// One ordered submit: accepted, deduplicated by request id, conflicted on a changed payload —
@@ -1419,7 +1626,8 @@ async fn staged_reference_files_round_trip_on_the_owning_host() {
         .server
         .request("DELETE", &format!("{own}?{query}"), Some(&fixture.view), None)
         .await;
-    assert_eq!(status, 403, "a view-only device must not delete: {body}");
+    assert_eq!(status, 404, "a machine-only pane is hidden before a view device can delete: {body}");
+    assert!(body.contains("NOT_FOUND"), "{body}");
 
     let (status, body) = fixture
         .server
@@ -1740,6 +1948,19 @@ fn the_relay_allowlist_admits_exactly_the_reference_chat_route_table() {
     .is_ok());
     // A mutation carries its target in its own envelope body, so its query is empty.
     assert!(validate_http_query(&format!("reference-chat/{session}/submit"), None).is_ok());
+    let payload = format!("reference-chat/{session}/payload");
+    assert!(allowed_http_route(&Method::GET, &payload));
+    assert!(!allowed_http_route(&Method::POST, &payload));
+    assert!(validate_http_query(
+        &payload,
+        Some("hostId=local&ownerId=owner&epoch=1&backendSessionId=sess&registryId=codex&ref=fp1.abc")
+    )
+    .is_ok());
+    assert!(
+        validate_http_query(&payload, Some("ref=fp1.abc&repoPath=/etc/passwd")).is_err(),
+        "an unknown payload query key must be refused"
+    );
+    assert!(validate_http_query(&payload, Some("secret=1")).is_err());
 }
 
 /// A backend whose one pane shows a fixed screen and records every write it is handed.
@@ -2997,12 +3218,13 @@ async fn a_chat_submit_to_an_agent_without_a_prompt_detector_ignores_a_replay_ga
     server.stop().await;
 }
 
-/// No control router is mounted under the prefix, and an unknown suffix is not a route.
+/// An unknown suffix is not a route. Composer control is a real route (T09,
+/// `referenceComposerControlV1`) and is registered with the other suffixes above.
 #[tokio::test]
 async fn an_unknown_reference_chat_suffix_is_not_a_route() {
     let fixture = fixture().await;
     let before = fixture.geometry().await;
-    for suffix in ["control", "resize", "kill", "create"] {
+    for suffix in ["resize", "kill", "create"] {
         let (status, body) = fixture
             .server
             .request("POST", &fixture.route(suffix), Some(&fixture.control), None)
@@ -3597,7 +3819,8 @@ async fn a_staged_file_of_an_exited_session_can_still_be_deleted() {
         .server
         .request("DELETE", &own, Some(&fixture.view), None)
         .await;
-    assert_eq!(status, 403, "a view-only device still cannot delete: {body}");
+    assert_eq!(status, 404, "a closed machine-only pane stays hidden from a view device: {body}");
+    assert!(body.contains("NOT_FOUND"), "{body}");
     let foreign = fixture.read_query_naming_owner(
         &fixture.session_id,
         "codex",
@@ -3630,6 +3853,9 @@ async fn a_staged_file_of_an_exited_session_can_still_be_deleted() {
 #[tokio::test]
 async fn a_device_downgraded_from_the_desktop_can_no_longer_type() {
     let fixture = fixture().await;
+    // A Mirror device on a pane Mirror can see: the fixture pane is machine-only (NOT_FOUND for
+    // Mirror), and Machine scope cannot be lowered to View.
+    let desktop = fixture.spawn_desktop_pane();
     let pin = fixture
         .state
         .auth_manager
@@ -3660,15 +3886,515 @@ async fn a_device_downgraded_from_the_desktop_can_no_longer_type() {
         .server
         .request(
             "POST",
-            &fixture.route("submit"),
+            &fixture.route_for(&desktop, "submit"),
             Some(&phone),
-            Some(&fixture.mutation(
-                &uuid::Uuid::new_v4().to_string(),
-                serde_json::json!({ "text": "never typed\n", "origin": "chat" }),
+            Some(&fixture.retarget(
+                &fixture.mutation(
+                    &uuid::Uuid::new_v4().to_string(),
+                    serde_json::json!({ "text": "never typed\n", "origin": "chat" }),
+                ),
+                &desktop,
             )),
         )
         .await;
     assert_eq!(status, 403, "a downgraded device must not type: {body}");
     assert!(body.contains("FORBIDDEN"), "{body}");
     fixture.server.stop().await;
+}
+
+/// Control apply is machine-scoped, and an id that is not in the current cached capabilities
+/// is rejected without typing. An empty discovery cache is absence, not a guessed model.
+#[tokio::test]
+async fn control_apply_rejects_unknown_ids_and_a_foreign_host() {
+    let fixture = fixture().await;
+    assert!(allowed_http_route(
+        &Method::POST,
+        &format!("reference-chat/{}/control", fixture.session_id)
+    ));
+    let (status, body) = fixture
+        .server
+        .request("POST", &fixture.route("control"), None, Some("{}"))
+        .await;
+    assert_eq!(status, 401, "control is authenticated before the body is trusted: {body}");
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let (status, body) = fixture
+        .server
+        .request(
+            "POST",
+            &fixture.route("control"),
+            Some(&fixture.control),
+            Some(&fixture.control_body(&request_id, "model", "not-a-model")),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let result: serde_json::Value = serde_json::from_str(&body).expect("control result");
+    assert_eq!(result["ok"], true, "{body}");
+    assert_eq!(result["requestId"], request_id, "{body}");
+    assert_eq!(result["data"]["outcome"], "rejected", "{body}");
+    assert_eq!(result["data"]["code"], "UNSUPPORTED", "{body}");
+
+    let mut foreign = serde_json::from_str::<serde_json::Value>(&fixture.control_body(
+        &uuid::Uuid::new_v4().to_string(),
+        "model",
+        "sonnet",
+    ))
+    .unwrap();
+    foreign["target"]["hostId"] = serde_json::json!("not-this-host");
+    let (status, body) = fixture
+        .server
+        .request(
+            "POST",
+            &fixture.route("control"),
+            Some(&fixture.control),
+            Some(&foreign.to_string()),
+        )
+        .await;
+    assert_eq!(status, 403, "a foreign host is rejected: {body}");
+    fixture.server.stop().await;
+}
+
+fn query_escape(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// `after` is optional. A malformed anchor, or cursor together with after, is refused before
+/// a page is served.
+#[tokio::test]
+async fn history_after_rejects_malformed_anchors_and_cursor_together() {
+    let fixture = fixture().await;
+    let base = fixture.read_query(
+        "droid",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[],
+    );
+    let (status, body) = fixture
+        .server
+        .request(
+            "GET",
+            &format!("{}?{base}&after={}", fixture.route("history"), query_escape("not-json")),
+            Some(&fixture.control),
+            None,
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("INVALID_REQUEST"), "{body}");
+    assert!(body.contains("after anchor"), "{body}");
+
+    let both = format!(
+        "{}?{base}&cursor=1&cursorStream={}&after={}",
+        fixture.route("history"),
+        query_escape("stream-1"),
+        query_escape(r#"{"streamId":"stream-1","generation":"g","anchorTurnId":"t","previousTurnFingerprint":null}"#),
+    );
+    let (status, body) = fixture.server.request("GET", &both, Some(&fixture.control), None).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body.contains(super::types::REFERENCE_HISTORY_CURSOR_AND_AFTER),
+        "{body}"
+    );
+    assert!(body.contains("cursor and after"), "{body}");
+    fixture.server.stop().await;
+}
+
+/// No `after` stays a rev2 page. A matching `after` is a delta; a stale generation resets.
+#[tokio::test]
+async fn history_after_negotiates_a_delta_and_leaves_rev2_bytes_unchanged() {
+    let root = tempfile::tempdir().expect("isolated home");
+    let cwd = root.path().join("worktree");
+    std::fs::create_dir_all(&cwd).expect("cwd");
+    let session = "delta-history";
+    let backend = Arc::new(ScreenStubBackend {
+        session_id: session.into(),
+        cols: 80,
+        rows: 24,
+        screen: b"ready\r\n".to_vec(),
+        writes: std::sync::Mutex::new(Vec::new()),
+        written: None,
+        on_screen: None,
+        on_write: None,
+        worktree: Some(cwd.clone()),
+        screen_gate: None,
+        screen_seen: None,
+        fail_write: false,
+    });
+    let state = Arc::new(RemoteGatewayState::new_with_backend(
+        backend as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
+        crate::worktree::registry::WorkspaceRegistry::new(),
+    ));
+    *state.agent_history_home.write() = Some(root.path().to_path_buf());
+    let identity = r25_history_identity(&state, session).with_cwd(cwd.to_string_lossy());
+    let folder = root
+        .path()
+        .join(".omo/agent/sessions")
+        .join(super::history_omo::omo_session_folder(&cwd.to_string_lossy()));
+    std::fs::create_dir_all(&folder).expect("transcript folder");
+    let jsonl = format!(
+        "{}\n{}\n",
+        serde_json::json!({"type":"session","id":"native-delta","cwd":cwd.to_string_lossy()}),
+        serde_json::json!({"type":"message","id":"turn-delta","message":{
+            "role":"user","content":[{"type":"text","text":"hello"}]
+        }}),
+    );
+    std::fs::write(folder.join("native-delta.jsonl"), &jsonl).expect("transcript");
+    let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+    let (control, _) = state.auth_manager.exchange_pairing_code(&pin, session).expect("token");
+    let resolve = |home: &std::path::Path,
+                   identity: &super::history::ReferenceHistoryIdentity,
+                   siblings: &[super::history::ReferenceHistorySibling]| {
+        super::history::resolve_reference_history_stream(home, identity, siblings)
+    };
+    let stream = resolve(root.path(), &identity, &[]).expect("stream");
+    let query_value = serde_json::json!({
+        "hostId": identity.target.target.host_id,
+        "ownerId": identity.target.target.owner_id,
+        "epoch": identity.target.target.epoch.0.to_string(),
+        "backendSessionId": session,
+        "registryId": "omo",
+    });
+    let headers = |token: &str| {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {token}").parse().expect("bearer"));
+        headers
+    };
+    let read = |query: serde_json::Value| {
+        let state = Arc::clone(&state);
+        let headers = headers(&control);
+        async move {
+            let parsed = serde_json::from_value(query).expect("query");
+            let response = crate::remote::server::reference_chat_history_with_resolver(
+                state,
+                session.into(),
+                Ok(axum::extract::Query(parsed)),
+                headers,
+                resolve,
+            )
+            .await;
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 65_536).await.expect("body");
+            (status, bytes)
+        }
+    };
+    let (status, first) = read(query_value.clone()).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{}", String::from_utf8_lossy(&first));
+    let (status, second) = read(query_value.clone()).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(first, second, "a rev2 read is byte-identical when nothing changed");
+    let page: serde_json::Value = serde_json::from_slice(&first).expect("rev2 page");
+    assert!(page.get("mode").is_none(), "rev2 page has no mode: {page}");
+    let generation = page["generation"].as_str().expect("generation").to_string();
+    let anchor = page["turns"][0]["id"].as_str().expect("aligned turn id").to_string();
+    let mut after_query = query_value.clone();
+    after_query["after"] = serde_json::json!(serde_json::json!({
+        "streamId": stream.stream_id,
+        "generation": generation,
+        "anchorTurnId": anchor,
+        "previousTurnFingerprint": null,
+    }).to_string());
+    let (status, delta_bytes) = read(after_query).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{}", String::from_utf8_lossy(&delta_bytes));
+    let delta: serde_json::Value = serde_json::from_slice(&delta_bytes).expect("delta");
+    assert_eq!(delta["mode"], "delta", "{delta}");
+    assert_eq!(delta["generation"], generation, "{delta}");
+
+    let mut stale = query_value.clone();
+    stale["after"] = serde_json::json!(serde_json::json!({
+        "streamId": stream.stream_id,
+        "generation": "stale-generation",
+        "anchorTurnId": anchor,
+        "previousTurnFingerprint": null,
+    }).to_string());
+    let (status, reset_bytes) = read(stale).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{}", String::from_utf8_lossy(&reset_bytes));
+    let reset: serde_json::Value = serde_json::from_slice(&reset_bytes).expect("reset");
+    assert_eq!(reset["mode"], "reset", "{reset}");
+    assert_eq!(reset["reason"], "generationChanged", "{reset}");
+    assert!(reset.get("page").is_some(), "{reset}");
+}
+
+/// T14: a payload ref re-reads the native transcript. Stale generation, a missing part, an
+/// oversize body, and a caller outside the history read's scope are typed refusals. No response
+/// carries the transcript path.
+#[tokio::test]
+async fn a_payload_route_returns_the_body_and_types_stale_missing_and_oversize() {
+    let fixture = fixture().await;
+    let provider = "payloadsess";
+    let path = fixture._root.path().join(format!("{provider}.jsonl"));
+    let path_text = path.display().to_string();
+    let huge = "z".repeat(super::payload::REFERENCE_PAYLOAD_MAX_BYTES + 32);
+    let patch = "*** Begin Patch\n*** Update File: notes.txt\n@@\n-old\n+new\n*** End Patch";
+    let user = "show the log";
+    let transcript = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+        serde_json::json!({"timestamp":"2026-10-06T09:00:00.000Z","type":"session_meta","payload":{"id":provider,"cwd":"project","cli_version":"0.1.0"}}),
+        serde_json::json!({"timestamp":"2026-10-06T09:00:01.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}),
+        serde_json::json!({"timestamp":"2026-10-06T09:00:01.100Z","type":"event_msg","payload":{"type":"user_message","kind":"plain","message":user}}),
+        serde_json::json!({"timestamp":"2026-10-06T09:00:01.100Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":user}]}}),
+        serde_json::json!({"timestamp":"2026-10-06T09:00:02.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cat log\"}","call_id":"c-out"}}),
+        serde_json::json!({"timestamp":"2026-10-06T09:00:03.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c-out","output":huge}}),
+        serde_json::json!({"timestamp":"2026-10-06T09:00:04.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"c-diff","input":patch}}),
+    );
+    std::fs::write(&path, &transcript).expect("transcript");
+    fixture.state.machine_services.as_ref().expect("services").sessions.publish_agent_state_for_test(
+        crate::daemon::agent_state::AgentState {
+            session_id: fixture.session_id.clone(),
+            state: "idle".into(),
+            agent: Some("codex".into()),
+            provider_session: Some(crate::daemon::protocol::AgentProviderSession {
+                launcher: None,
+                key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
+                id: provider.into(),
+                transcript_path: Some(path_text.clone()),
+            }),
+            detail: None,
+            origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
+        },
+    );
+    let query = fixture.read_query(
+        "codex",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[("providerSessionId", provider.to_string())],
+    );
+    let (status, body) = fixture
+        .server
+        .request("GET", &format!("{}?{query}", fixture.route("history")), Some(&fixture.control), None)
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(!body.contains(&path_text), "history leaked a path");
+    let page: serde_json::Value = serde_json::from_str(&body).expect("history page");
+    let mut output_ref = None;
+    let mut diff_ref = None;
+    let turns = page["turns"].as_array().expect("turns");
+    for turn in turns {
+        for part in turn["parts"].as_array().unwrap_or(&Vec::new()) {
+            if part["kind"] == "tool" {
+                if let Some(refer) = part["outputPayload"]["ref"].as_str() {
+                    output_ref = Some(refer.to_string());
+                }
+            }
+            if part["kind"] == "diff" {
+                if let Some(refer) = part["patch"]["ref"].as_str() {
+                    diff_ref = Some(refer.to_string());
+                }
+            }
+        }
+    }
+    let output_ref = output_ref.expect("oversized output ref");
+    let diff_ref = diff_ref.expect("diff ref");
+    assert!(output_ref.starts_with("fp1."), "{output_ref}");
+    assert!(!diff_ref.contains(&path_text));
+
+    let payload = |refer: &str| format!("{}?{query}&ref={}", fixture.route("payload"), query_escape(refer));
+    let (status, body) = fixture
+        .server
+        .request("GET", &payload(&diff_ref), Some(&fixture.control), None)
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let loaded: serde_json::Value = serde_json::from_str(&body).expect("loaded");
+    assert_eq!(loaded["status"], "loaded");
+    assert_eq!(loaded["kind"], "diff");
+    assert_eq!(loaded["truncated"], false);
+    assert!(loaded["body"].as_str().is_some_and(|text| text.contains("*** Begin Patch")));
+    assert!(!body.contains(&path_text), "payload leaked a path");
+
+    let (status, body) = fixture
+        .server
+        .request("GET", &payload(&output_ref), Some(&fixture.control), None)
+        .await;
+    assert_eq!(status, 200, "an oversized payload is truncated: {body}");
+    let truncated: serde_json::Value = serde_json::from_str(&body).expect("truncated");
+    assert_eq!(truncated["status"], "truncated");
+    assert_eq!(truncated["truncated"], true);
+    assert_eq!(truncated["cap"], serde_json::json!(super::payload::REFERENCE_PAYLOAD_MAX_BYTES));
+    assert_eq!(truncated["byteLength"], serde_json::json!(huge.len()));
+    assert_eq!(
+        truncated["body"].as_str().map(str::len),
+        Some(super::payload::REFERENCE_PAYLOAD_MAX_BYTES)
+    );
+    assert!(!body.contains(&path_text));
+
+    let forged = super::payload::reference_payload_ref_for_missing_part(&diff_ref);
+    let (status, body) = fixture
+        .server
+        .request("GET", &payload(&forged), Some(&fixture.control), None)
+        .await;
+    assert_eq!(status, 404, "a missing part is not found: {body}");
+    assert!(body.contains("NOT_FOUND"), "{body}");
+    assert!(!body.contains(&path_text));
+
+    let rewritten = transcript.replace(user, "show the log now");
+    std::fs::write(&path, rewritten).expect("rewrite");
+    let (status, body) = fixture
+        .server
+        .request("GET", &payload(&diff_ref), Some(&fixture.control), None)
+        .await;
+    assert_eq!(status, 410, "a stale generation is expired: {body}");
+    assert!(body.contains("TARGET_EXPIRED"), "{body}");
+    assert!(!body.contains(&path_text));
+
+    let (status, missing_body) = fixture
+        .server
+        .request("GET", &payload("fp1.not-a-ref"), Some(&fixture.control), None)
+        .await;
+    assert_eq!(status, 400, "an unbound ref is not a path lookup: {missing_body}");
+    assert!(missing_body.contains("INVALID_REQUEST"), "{missing_body}");
+
+    let (status, body) = fixture
+        .server
+        .request("GET", &payload("/etc/passwd"), Some(&fixture.control), None)
+        .await;
+    assert_eq!(status, 400, "a path is not a ref: {body}");
+    assert!(body.contains("INVALID_REQUEST"), "{body}");
+    assert!(!body.contains("root:"));
+
+    let (status, body) = fixture.server.request("GET", &payload(&diff_ref), None, None).await;
+    assert_eq!(status, 401, "{body}");
+    assert!(body.contains("UNAUTHORIZED"), "{body}");
+
+    let foreign = fixture.read_query(
+        "codex",
+        &fixture.daemon_epoch,
+        "not-this-host",
+        &[("providerSessionId", provider.to_string()), ("ref", diff_ref.clone())],
+    );
+    let (status, body) = fixture
+        .server
+        .request("GET", &format!("{}?{foreign}", fixture.route("payload")), Some(&fixture.control), None)
+        .await;
+    assert_eq!(status, 403, "a foreign host is out of scope: {body}");
+    assert!(body.contains("FORBIDDEN"), "{body}");
+    fixture.server.stop().await;
+}
+
+/// A machine-created session is hidden from Mirror the same way an unknown session is, and a
+/// Machine device still reads and controls it.
+#[tokio::test]
+async fn a_mirror_device_cannot_see_a_machine_only_session() {
+    let fixture = fixture().await;
+    let services = fixture.state.machine_services.as_ref().expect("machine services");
+    assert_eq!(
+        services.sessions.machine_only_async(&fixture.session_id).await,
+        Ok(true),
+        "the fixture session is the machine-created one"
+    );
+    let mirror_pin = fixture
+        .state
+        .auth_manager
+        .create_pairing_code(DevicePermission::Control);
+    let (mirror, mirror_device) = fixture
+        .state
+        .auth_manager
+        .exchange_pairing_code(&mirror_pin, "reference-route-mirror")
+        .expect("mirror control token");
+    assert_eq!(mirror_device.access_scope, DeviceAccessScope::Mirror);
+
+    let query = fixture.read_query(
+        "droid",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[],
+    );
+    let unknown = uuid::Uuid::new_v4().to_string();
+    let unknown_query = fixture.read_query_for(
+        &unknown,
+        "droid",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[],
+    );
+    let hidden_history = format!("{}?{query}", fixture.route("history"));
+    let unknown_history = format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{unknown}/history?{unknown_query}");
+    let (hidden_status, hidden_body) = fixture
+        .server
+        .request("GET", &hidden_history, Some(&mirror), None)
+        .await;
+    let (unknown_status, unknown_body) = fixture
+        .server
+        .request("GET", &unknown_history, Some(&mirror), None)
+        .await;
+    assert_eq!(hidden_status, 404, "{hidden_body}");
+    assert_eq!(hidden_status, unknown_status, "{unknown_body}");
+    assert_eq!(error_code(&hidden_body), error_code(&unknown_body));
+    assert_eq!(error_code(&hidden_body), "NOT_FOUND");
+    assert_eq!(error_message(&hidden_body), error_message(&unknown_body));
+
+    let hidden_payload = format!("{}?{query}&ref=fp1.not-a-ref", fixture.route("payload"));
+    let unknown_payload = format!(
+        "{REFERENCE_CHAT_ROUTE_PREFIX}/{unknown}/payload?{unknown_query}&ref=fp1.not-a-ref"
+    );
+    let (hidden_status, hidden_body) = fixture
+        .server
+        .request("GET", &hidden_payload, Some(&mirror), None)
+        .await;
+    let (unknown_status, unknown_body) = fixture
+        .server
+        .request("GET", &unknown_payload, Some(&mirror), None)
+        .await;
+    assert_eq!(hidden_status, unknown_status, "{hidden_body} vs {unknown_body}");
+    assert_eq!(error_code(&hidden_body), error_code(&unknown_body));
+    assert_eq!(error_message(&hidden_body), error_message(&unknown_body));
+
+    let hidden_control = fixture.control_body(&uuid::Uuid::new_v4().to_string(), "model", "sonnet");
+    let unknown_control = hidden_control.replace(&fixture.session_id, &unknown);
+    let (hidden_status, hidden_body) = fixture
+        .server
+        .request("POST", &fixture.route("control"), Some(&mirror), Some(&hidden_control))
+        .await;
+    let (unknown_status, unknown_body) = fixture
+        .server
+        .request(
+            "POST",
+            &format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{unknown}/control"),
+            Some(&mirror),
+            Some(&unknown_control),
+        )
+        .await;
+    assert_eq!(hidden_status, unknown_status, "{hidden_body} vs {unknown_body}");
+    assert_eq!(error_code(&hidden_body), error_code(&unknown_body));
+    assert_eq!(error_message(&hidden_body), error_message(&unknown_body));
+    assert_eq!(error_code(&hidden_body), "NOT_FOUND");
+
+    let (status, body) = fixture
+        .server
+        .request("GET", &hidden_history, Some(&fixture.control), None)
+        .await;
+    assert_eq!(status, 200, "a machine device still reads the pane: {body}");
+    let (_status, body) = fixture
+        .server
+        .request("GET", &hidden_payload, Some(&fixture.control), None)
+        .await;
+    assert!(!body.contains("no live session has that id"), "{body}");
+    let (_status, body) = fixture
+        .server
+        .request("POST", &fixture.route("control"), Some(&fixture.control), Some(&hidden_control))
+        .await;
+    assert!(!body.contains("no live session has that id"), "{body}");
+    fixture.server.stop().await;
+}
+
+fn error_code(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value["error"]["code"].as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+fn error_message(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value["error"]["message"].as_str().map(str::to_string))
+        .unwrap_or_default()
 }

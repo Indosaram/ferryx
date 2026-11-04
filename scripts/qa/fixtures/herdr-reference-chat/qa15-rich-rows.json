@@ -1,0 +1,32 @@
+{
+  "schema": "herdr-reference-chat/qa15-rich-rows/1",
+  "provider": "claude",
+  "rows": [
+    {
+      "callId": "toolu_01",
+      "status": "completed"
+    },
+    {
+      "callId": "toolu_qa15_open",
+      "status": "unverifiable"
+    }
+  ],
+  "payloads": {
+    "opaque-output-qa15": {
+      "kind": "success",
+      "byteLength": 11,
+      "digest": "sha256:recorded",
+      "truncated": false
+    },
+    "qa15-foreign-ref": {
+      "kind": "expired",
+      "code": "TARGET_EXPIRED"
+    },
+    "qa15-oversize": {
+      "kind": "truncated",
+      "truncated": true,
+      "code": "PAYLOAD_TOO_LARGE"
+    },
+    "note": "Live refs are outputPayload.ref values minted by payload.rs bind_reference_payload_refs, not these placeholders."
+  }
+}

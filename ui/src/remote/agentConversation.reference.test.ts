@@ -6,6 +6,9 @@ import {
   fenceReferenceHistory,
   isReferenceHistoryCurrent,
   parseReferenceHistoryPage,
+  parseReferenceAgentContinueStartup,
+  parseReferenceHistoryChanged,
+  parseReferenceHistoryDeltaResponse,
   referenceHistoryCursorForStream,
   referenceHistoryDisposition,
   referenceHistoryErrorIsIdentity,
@@ -595,5 +598,164 @@ describe("reference history fetch", () => {
     for (const code of ["MALFORMED_RESPONSE", "NETWORK_ERROR", "REQUEST_FAILED", "UNSUPPORTED"]) {
       expect(referenceHistoryErrorIsIdentity(code)).toBe(false);
     }
+  });
+});
+
+describe("revision 3 wire contract", () => {
+  it("accepts a rev2 page unchanged when rev3 fields are absent", () => {
+    const body = nativeBody({
+      turns: [{ role: "assistant", parts: [{ kind: "thinking", text: "hmm" }] }],
+    });
+    const page = parseReferenceHistoryPage(body);
+    expect(page).toEqual(body);
+    expect(page.composer).toBeUndefined();
+    expect(page.turns[0]?.id).toBeUndefined();
+    expect(JSON.stringify(page)).not.toContain("callId");
+  });
+
+  it("round-trips rev3 optional fields and omits ones that were absent", () => {
+    const body = nativeBody({
+      turns: [
+        {
+          role: "assistant",
+          id: "turn-1",
+          meta: { provider: "claude", model: "opus", usage: { inputTokens: 3 } },
+          parts: [
+            {
+              kind: "tool",
+              name: "read",
+              summary: "s",
+              input: "i",
+              output: "o",
+              callId: "call-1",
+              status: "unverifiable",
+              outputPayload: { ref: "out-1", byteLength: 4, digest: "abc", truncated: false },
+            },
+            {
+              kind: "taskResult",
+              tasks: [{ id: "task-1", title: "audit", status: "running", result: "live", parentCallId: "call-9" }],
+            },
+            {
+              kind: "diff",
+              patch: { ref: "patch-1", byteLength: 12, digest: "def", truncated: true },
+            },
+          ],
+        },
+      ],
+      composer: {
+        models: null,
+        options: [],
+        slashCommands: [{ name: "model", description: null }],
+        followUp: { queue: true, steer: false },
+      },
+    });
+    const page = parseReferenceHistoryPage(body);
+    expect(page).toEqual(body);
+    expect(page.turns[0]?.meta?.usage?.outputTokens).toBeUndefined();
+
+    expect(
+      parseReferenceHistoryChanged({
+        type: "referenceHistoryChanged",
+        target: { hostId: "host-a", ownerId: "owner-a", epoch: "1", backendSessionId: "sess-1" },
+        changeSeq: "7",
+      }),
+    ).toEqual({
+      type: "referenceHistoryChanged",
+      target: { target: { hostId: "host-a", ownerId: "owner-a", epoch: "1", backendSessionId: "sess-1" } },
+      changeSeq: "7",
+    });
+
+    const delta = {
+      mode: "delta",
+      source: "claude-transcript",
+      generation: "gen-3",
+      replaceFromTurnId: "turn-1",
+      turns: [{ role: "assistant", parts: [] }],
+      nextAnchor: {
+        streamId: "dev:ino",
+        generation: "gen-3",
+        anchorTurnId: "turn-1",
+        previousTurnFingerprint: null,
+      },
+      tailOpen: false,
+    };
+    expect(parseReferenceHistoryDeltaResponse(delta)).toEqual(delta);
+    expect(
+      parseReferenceHistoryDeltaResponse({
+        mode: "reset",
+        reason: "unalignedTurns",
+        page: nativeBody(),
+      }).mode,
+    ).toBe("reset");
+    expect(
+      parseReferenceAgentContinueStartup({
+        kind: "agentContinue",
+        agentType: "codex",
+        providerSession: { key: "session_id", id: "native-1" },
+        mode: "resume",
+      }),
+    ).toMatchObject({ kind: "agentContinue", mode: "resume", agentType: "codex" });
+  });
+
+  it("refuses malformed rev3 values", () => {
+    const pages = [
+      nativeBody({ turns: [{ role: "assistant", parts: [{ kind: "tool", name: "read", summary: "s", input: "i", output: "o", status: "pending" }] }] }),
+      nativeBody({ turns: [{ role: "assistant", parts: [{ kind: "tool", name: "read", summary: "s", input: "i", output: "o", status: "mystery" }] }] }),
+      nativeBody({ turns: [{ role: "assistant", parts: [{ kind: "taskResult", tasks: [{ id: "t", title: "t", status: "unknown", result: "x" }] }] }] }),
+      nativeBody({ turns: [{ role: "assistant", parts: [{ kind: "diff" }] }] }),
+      nativeBody({ turns: [{ role: "assistant", meta: { provider: "not-a-provider" }, parts: [] }] }),
+      nativeBody({ turns: [{ role: "assistant", meta: { provider: "claude", usage: { inputTokens: 1.5 } }, parts: [] }] }),
+      nativeBody({ composer: { models: { current: null, choices: [], apply: "guess" }, options: [], slashCommands: [], followUp: { queue: false, steer: false } } }),
+    ];
+    for (const body of pages) {
+      expect(() => parseReferenceHistoryPage(body)).toThrowError(ReferenceHistoryFetchError);
+    }
+    expect(() => parseReferenceHistoryChanged({ type: "referenceHistoryChanged", changeSeq: 1 })).toThrowError(
+      ReferenceHistoryFetchError,
+    );
+    expect(() =>
+      parseReferenceHistoryDeltaResponse({ mode: "reset", reason: "stale", page: nativeBody() }),
+    ).toThrowError(ReferenceHistoryFetchError);
+    expect(() =>
+      parseReferenceHistoryDeltaResponse({
+        mode: "delta",
+        source: "claude-transcript",
+        generation: "g",
+        replaceFromTurnId: "t",
+        turns: [],
+        nextAnchor: { streamId: "s", generation: "g", anchorTurnId: "t" },
+        tailOpen: false,
+      }),
+    ).toThrowError(/previousTurnFingerprint/);
+    expect(() =>
+      parseReferenceAgentContinueStartup({ kind: "agentResume", agentType: "claude", mode: "fork" }),
+    ).toThrowError(ReferenceHistoryFetchError);
+  });
+
+  it("accepts a cancelled tool status and refuses an unknown status", () => {
+    const body = nativeBody({
+      turns: [
+        {
+          role: "assistant",
+          parts: [{ kind: "tool", name: "read", summary: "s", input: "i", output: "o", status: "cancelled" }],
+        },
+      ],
+    });
+    expect(parseReferenceHistoryPage(body).turns[0]?.parts[0]).toMatchObject({
+      kind: "tool",
+      status: "cancelled",
+    });
+    expect(() =>
+      parseReferenceHistoryPage(
+        nativeBody({
+          turns: [
+            {
+              role: "assistant",
+              parts: [{ kind: "tool", name: "read", summary: "s", input: "i", output: "o", status: "not-a-status" }],
+            },
+          ],
+        }),
+      ),
+    ).toThrowError(ReferenceHistoryFetchError);
   });
 });

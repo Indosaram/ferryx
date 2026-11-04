@@ -6934,6 +6934,16 @@ impl DaemonServer {
                         Err(SpawnError::InvalidAgentResume(message)) => {
                             DaemonResponse::AgentResumeInvalid { message }
                         }
+                        Err(SpawnError::ContinueUnsupported) => DaemonResponse::Error {
+                            message: crate::terminal::continue_startup::AGENT_CONTINUE_UNSUPPORTED.into(),
+                            code: Some(crate::terminal::continue_startup::AGENT_CONTINUE_UNSUPPORTED.into()),
+                            details: None,
+                        },
+                        Err(SpawnError::ContinueConflict { existing_session_id }) => DaemonResponse::Error {
+                            message: crate::terminal::continue_startup::AGENT_CONTINUE_CONFLICT.into(),
+                            code: Some(crate::terminal::continue_startup::AGENT_CONTINUE_CONFLICT.into()),
+                            details: Some(serde_json::json!({ "existingSessionId": existing_session_id })),
+                        },
                         Err(SpawnError::Structured(error)) => DaemonResponse::Error {
                             message: error.message,
                             code: Some(error.code.to_string()),
@@ -7771,6 +7781,9 @@ impl DaemonServer {
                     capabilities.push(crate::hub_runtime::SUPERVISOR_ENGINE_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_LAUNCH_CAPABILITY.into());
+                    capabilities.push(crate::daemon::protocol::TERMINAL_CONTINUE_CAPABILITY.into());
+                    capabilities.push(crate::remote::reference_chat::REFERENCE_HISTORY_DELTA_V1.into());
+                    capabilities.push(crate::remote::reference_chat::REFERENCE_PAYLOAD_V1.into());
                     #[cfg(feature = "remote-desktop")]
                     capabilities.push(crate::daemon::protocol::REMOTE_DESKTOP_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }

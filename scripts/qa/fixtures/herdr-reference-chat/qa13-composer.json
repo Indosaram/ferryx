@@ -1,0 +1,54 @@
+{
+  "schema": "herdr-reference-chat/qa13-composer/1",
+  "claude": {
+    "models": {
+      "current": "claude-sonnet",
+      "choices": [
+        {
+          "id": "claude-sonnet",
+          "label": "Sonnet",
+          "efforts": [
+            "low",
+            "high"
+          ]
+        }
+      ],
+      "apply": "command"
+    },
+    "options": [
+      {
+        "id": "effort",
+        "label": "Effort",
+        "values": [
+          "low",
+          "high"
+        ],
+        "current": "low",
+        "apply": "command"
+      }
+    ],
+    "slashCommands": [
+      {
+        "name": "compact",
+        "description": null
+      }
+    ],
+    "followUp": {
+      "queue": true,
+      "steer": false
+    }
+  },
+  "accepted": {
+    "outcome": "accepted",
+    "retryable": false
+  },
+  "rejected": {
+    "outcome": "rejected",
+    "retryable": false
+  },
+  "unknown": {
+    "outcome": "outcome-unknown",
+    "retryable": false
+  }
+}
+

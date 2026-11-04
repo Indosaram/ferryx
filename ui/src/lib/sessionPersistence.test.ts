@@ -1988,6 +1988,22 @@ describe("host boot time as exit evidence for local sessions", () => {
   it("treats a local session whose daemon started before boot as process-absent", () => {
     const saved = serializeWorkspaceState("default", "/workspace/main", omoState("default", PRE_BOOT));
     expectProcessAbsent(deserializeWorkspaceState("default", saved, [], { hostBootMs: BOOT_MS }));
+    expect(deserializeWorkspaceState("default", saved, [], { hostBootMs: BOOT_MS })?.sessions["sess-1"].lastBackendSessionId).toBe("backend-1");
+  });
+
+  it("persists a real last backend id and never a standby id", () => {
+    const state = omoState("default", PRE_BOOT);
+    state.sessions["sess-1"] = {
+      ...state.sessions["sess-1"],
+      backendSessionId: null,
+      lifecycle: "exited",
+      lastBackendSessionId: "pty-real",
+    };
+    const saved = serializeWorkspaceState("default", "/workspace/main", state);
+    expect(saved.workspaces.default.terminalSessions["sess-1"].lastBackendSessionId).toBe("pty-real");
+    state.sessions["sess-1"] = { ...state.sessions["sess-1"], lastBackendSessionId: "standby:sess-1" };
+    const dropped = serializeWorkspaceState("default", "/workspace/main", state);
+    expect(dropped.workspaces.default.terminalSessions["sess-1"].lastBackendSessionId).toBeUndefined();
   });
 
   it("wins regardless of inventory shape (null and authoritative empty)", () => {

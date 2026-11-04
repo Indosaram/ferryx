@@ -23,6 +23,15 @@ export type RemoteTerminalTabInfo = {
   workspaceId?: string | null;
   /** Epoch of the session this pane mirrors, when the machine declares one. */
   daemonEpoch?: string | number | null;
+  /** Absent for a live published pane. False is an exited desktop pane. */
+  running?: boolean;
+  /** Provider session published for an exited agent pane. Same shape as a sessions-list row. */
+  providerSession?: {
+    key: "session_id" | "conversation_id";
+    id: string;
+    transcriptPath?: string;
+    launcher?: "mhc";
+  };
 };
 
 export type RemoteTerminalItem = {
@@ -145,6 +154,11 @@ function safeContextText(value: unknown): string | null {
   return text;
 }
 
+function publishableRemoteSessionId(id: string | null | undefined): string | null {
+  if (!id || id.startsWith("standby:")) return null;
+  return id;
+}
+
 function safeEpoch(value: unknown): string | number | null {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value !== "string") return null;
@@ -155,7 +169,7 @@ function safeEpoch(value: unknown): string | number | null {
 function terminal(value: unknown): RemoteTerminalItem | null {
   const item = record(value);
   const sessionId = safeContextText(item?.sessionId);
-  if (!item || !sessionId || item.running === false) return null;
+  if (!item || !sessionId) return null;
   return {
     sessionId,
     running: item.running !== false,
@@ -192,6 +206,8 @@ function tabItem(value: unknown): RemoteTerminalTabInfo | null {
   const worktreeLabel = safeContextText(item?.worktreeLabel ?? item?.worktree_label) ?? undefined;
   const sessionId = safeContextText(item?.sessionId ?? item?.session_id) ?? undefined;
   const daemonEpoch = safeEpoch(item?.daemonEpoch ?? item?.daemon_epoch);
+  const providerSession = publishedTabProviderSession(item?.providerSession ?? item?.provider_session);
+  const running = item?.running === false ? false : item?.running === true ? true : undefined;
   return {
     id,
     label,
@@ -201,6 +217,33 @@ function tabItem(value: unknown): RemoteTerminalTabInfo | null {
     ...(worktreeLabel ? { worktreeLabel } : {}),
     ...(sessionId ? { sessionId } : {}),
     ...(daemonEpoch !== null ? { daemonEpoch } : {}),
+    ...(running !== undefined ? { running } : {}),
+    ...(providerSession ? { providerSession } : {}),
+  };
+}
+
+function publishedTabProviderSession(value: unknown): RemoteTerminalTabInfo["providerSession"] {
+  const item = record(value);
+  if (!item) return undefined;
+  const key = item.key === "session_id" || item.key === "conversation_id" ? item.key : null;
+  if (typeof item.id !== "string") return undefined;
+  const id = item.id.trim();
+  if (!key || id.length === 0 || id.length > 128) return undefined;
+  for (const char of id) {
+    const code = char.charCodeAt(0);
+    if (code <= 0x1f || code === 0x7f) return undefined;
+  }
+  const transcriptPath = typeof item.transcriptPath === "string"
+    ? item.transcriptPath
+    : typeof item.transcript_path === "string"
+      ? item.transcript_path
+      : undefined;
+  const launcher = item.launcher === "mhc" ? "mhc" as const : undefined;
+  return {
+    key,
+    id,
+    ...(transcriptPath ? { transcriptPath } : {}),
+    ...(launcher ? { launcher } : {}),
   };
 }
 
@@ -309,23 +352,37 @@ export function normalizeRemoteWorkspaceState(value: unknown): RemoteWorkspaceMo
   const declaredSessionId = safeContextText(
     declaredContext.sessionId ?? state.activeSessionId ?? state.focusedSessionId,
   );
-  const declaredSession = declaredSessionId
-    ? terminal(sessionRows.find((item) => item.sessionId === declaredSessionId)) ?? {
-        sessionId: declaredSessionId,
-        running: true,
+  const selectableSessionId = publishableRemoteSessionId(declaredSessionId);
+  const terminalTabs = tabItems(
+    declaredContext.terminalTabs ?? declaredContext.tabs ?? state.terminalTabs ?? state.tabs,
+  );
+  const activeTabId = safeContextText(
+    declaredContext.tabId ?? declaredContext.activeTabId ?? state.activeTabId ?? state.tabId,
+  );
+  const declaredTab = selectableSessionId
+    ? terminalTabs.find((tab) => tab.sessionId === selectableSessionId)
+    : undefined;
+  const declaredSession: RemoteTerminalItem | null = selectableSessionId
+    ? terminal(sessionRows.find((item) => item.sessionId === selectableSessionId)) ?? {
+        sessionId: selectableSessionId,
+        running: declaredTab?.running === false ? false : true,
+      }
+    : null;
+  const focusedPublishedTab = !selectableSessionId && activeTabId
+    ? terminalTabs.find((tab) => tab.id === activeTabId)
+    : undefined;
+  const focusedPublishedSessionId = publishableRemoteSessionId(focusedPublishedTab?.sessionId);
+  const focusedPublishedTerminal: RemoteTerminalItem | null = focusedPublishedSessionId
+    ? {
+        sessionId: focusedPublishedSessionId,
+        running: focusedPublishedTab?.running !== false,
       }
     : null;
   const legacySingleSession =
     !hasExplicitTerminalDeclaration && sessionRows.length === 1 ? terminal(sessionRows[0]) : null;
-  const activeTerminal = explicitTerminal ?? declaredSession ?? legacySingleSession;
-  const activeTabId = safeContextText(
-    declaredContext.tabId ?? declaredContext.activeTabId ?? state.activeTabId ?? state.tabId,
-  );
+  const activeTerminal = explicitTerminal ?? declaredSession ?? focusedPublishedTerminal ?? legacySingleSession;
   const declaredEpoch =
     activeTerminal?.daemonEpoch ?? safeEpoch(declaredContext.daemonEpoch ?? state.daemonEpoch);
-  const terminalTabs = tabItems(
-    declaredContext.terminalTabs ?? declaredContext.tabs ?? state.terminalTabs ?? state.tabs,
-  );
   const activeWorkspaceId = workspaceId ?? safeContextText(activeTerminal?.workspaceId);
   const activeWorktreeSlug = worktreeSlug;
   const activeWorktreeLabel =

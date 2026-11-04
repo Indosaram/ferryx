@@ -42,6 +42,12 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde_json::Value;
 
+use super::history_parse::{
+    reference_apply_native_tool_status, reference_assign_result_status, reference_bounded_tool_input,
+    reference_diff_part, reference_native_model, reference_native_patch_body, reference_native_tool_status,
+    reference_note_turn_meta, reference_push_orphan_result, reference_stamp_tool_call,
+    reference_usage_from_object,
+};
 use super::types::{
     ReferenceHistoryParser, ReferenceNativeHistoryKind, ReferencePart, ReferenceSkillActivity,
     ReferenceSkillEvidence, ReferenceSkillStatus, ReferenceTurn, ReferenceTurnRole,
@@ -156,7 +162,7 @@ pub fn parse_reference_gjc_history(text: &str) -> Vec<ReferenceTurn> {
             if let Some(summary) = summary {
                 turns.push(user_turn(
                     timestamp(&record),
-                    vec![ReferencePart::Compact { text: summary.to_string() }],
+                    vec![ReferencePart::Compact { text: summary.to_string() , id: None}],
                 ));
             }
             continue;
@@ -192,14 +198,14 @@ pub fn parse_reference_gjc_history(text: &str) -> Vec<ReferenceTurn> {
                         .join(" "),
                     None => prompt,
                 };
-                let mut parts = vec![ReferencePart::Text { text: asked, phase: None }];
+                let mut parts = vec![ReferencePart::Text { text: asked, phase: None , id: None}];
                 if let Some(invocation) = &invocation {
                     parts.extend(
                         invocation
                             .skills
                             .iter()
                             .cloned()
-                            .map(|skill| ReferencePart::Skill { skill }),
+                            .map(|skill| ReferencePart::Skill { skill, id: None }),
                     );
                 }
                 turns.push(user_turn(ts, parts));
@@ -212,15 +218,36 @@ pub fn parse_reference_gjc_history(text: &str) -> Vec<ReferenceTurn> {
                 if let Some(ended_at) = ts {
                     turns[at].ended_at = Some(ended_at);
                 }
+                reference_note_turn_meta(
+                    &mut turns[at],
+                    ReferenceNativeHistoryKind::Gjc,
+                    reference_native_model(message.get("model")),
+                    message.get("usage").and_then(reference_usage_from_object),
+                );
                 for block in blocks {
-                    if let Some(part) = assistant_block(block) {
+                    if let Some(mut part) = assistant_block(block) {
                         let index = turns[at].parts.len();
-                        if let (ReferencePart::Tool { .. }, Some(id)) =
-                            (&part, block.get("id").and_then(Value::as_str))
-                        {
-                            pending.push(PendingTool { id: id.to_string(), turn: at, part: index });
+                        if let Some(id) = block.get("id").and_then(Value::as_str) {
+                            if matches!(part, ReferencePart::Tool { .. }) {
+                                reference_stamp_tool_call(&mut part, id);
+                                if let Some(raw) = block.get("status").and_then(Value::as_str) {
+                                    reference_apply_native_tool_status(&mut part, raw);
+                                }
+                                pending.push(PendingTool { id: id.to_string(), turn: at, part: index });
+                            }
+                        } else if matches!(part, ReferencePart::Tool { .. }) {
+                            reference_stamp_tool_call(&mut part, "");
+                            if let Some(raw) = block.get("status").and_then(Value::as_str) {
+                                reference_apply_native_tool_status(&mut part, raw);
+                            }
                         }
+                        let patch_body = block.get("name").and_then(Value::as_str).and_then(|name| {
+                            reference_native_patch_body(name, block.get("arguments").unwrap_or(&Value::Null))
+                        });
                         turns[at].parts.push(part);
+                        if let Some(body) = patch_body {
+                            turns[at].parts.push(reference_diff_part(&body));
+                        }
                     }
                 }
                 // a provider can place a result beside its call in the same assistant record
@@ -232,7 +259,7 @@ pub fn parse_reference_gjc_history(text: &str) -> Vec<ReferenceTurn> {
                     if let Some(error) = error.filter(|error| !error.is_empty()) {
                         turns[at]
                             .parts
-                            .push(ReferencePart::Text { text: format!("Error: {error}"), phase: None });
+                            .push(ReferencePart::Text { text: format!("Error: {error}"), phase: None , id: None});
                     }
                 }
                 settled = message.get("stopReason").and_then(Value::as_str) == Some("stop");
@@ -266,6 +293,8 @@ fn user_turn(started_at: Option<String>, parts: Vec<ReferencePart>) -> Reference
         source: None,
         parts,
         abandoned: None,
+    
+        id: None, meta: None,
     }
 }
 
@@ -286,6 +315,8 @@ fn assistant_turn(turns: &mut Vec<ReferenceTurn>, started_at: Option<String>, se
         source: None,
         parts: Vec::new(),
         abandoned: None,
+    
+        id: None, meta: None,
     });
     turns.len() - 1
 }
@@ -295,7 +326,7 @@ fn assistant_block(block: &Value) -> Option<ReferencePart> {
     match block.get("type").and_then(Value::as_str)? {
         "text" => {
             let text = block.get("text").and_then(Value::as_str)?;
-            (!text.is_empty()).then(|| ReferencePart::Text { text: text.to_string(), phase: None })
+            (!text.is_empty()).then(|| ReferencePart::Text { text: text.to_string(), phase: None , id: None})
         }
         "thinking" => {
             let thinking = block
@@ -303,7 +334,7 @@ fn assistant_block(block: &Value) -> Option<ReferencePart> {
                 .and_then(Value::as_str)
                 .or_else(|| block.get("text").and_then(Value::as_str))
                 .unwrap_or("");
-            (!thinking.is_empty()).then(|| ReferencePart::Thinking { text: thinking.to_string() })
+            (!thinking.is_empty()).then(|| ReferencePart::Thinking { text: thinking.to_string() , id: None})
         }
         "toolCall" => {
             let name = block.get("name").and_then(Value::as_str)?;
@@ -320,13 +351,19 @@ fn assistant_block(block: &Value) -> Option<ReferencePart> {
             Some(ReferencePart::Tool {
                 name: name.to_string(),
                 summary,
-                input: serde_json::to_string_pretty(&input).unwrap_or_else(|_| "{}".to_string()),
+                input: reference_bounded_tool_input(
+                    name,
+                    &input,
+                    serde_json::to_string_pretty(&input).unwrap_or_else(|_| "{}".to_string()),
+                ),
                 output: String::new(),
                 error: None,
                 skill: None,
                 output_ref: None,
                 output_size: None,
                 images: Vec::new(),
+            
+                id: None, call_id: None, status: None, output_payload: Box::new(None),
             })
         }
         _ => None, // an unsupported transcript block is intentionally ignored
@@ -335,7 +372,7 @@ fn assistant_block(block: &Value) -> Option<ReferencePart> {
 
 /// Fold every tool result a record carries into the call it answers.
 fn fold_message_results(
-    turns: &mut [ReferenceTurn],
+    turns: &mut Vec<ReferenceTurn>,
     pending: &mut Vec<PendingTool>,
     message: &serde_json::Map<String, Value>,
 ) {
@@ -362,19 +399,21 @@ fn fold_message_results(
         };
         let output = result_text(result.get("content"));
         let is_error = result.get("isError").and_then(Value::as_bool) == Some(true);
-        fold_result(turns, pending, id, &output, is_error);
+        fold_result(turns, pending, id, &output, is_error, result.get("status").and_then(Value::as_str));
     }
 }
 
 /// Give one tool part the output of the result that answers it, cut to what a page carries.
 fn fold_result(
-    turns: &mut [ReferenceTurn],
+    turns: &mut Vec<ReferenceTurn>,
     pending: &mut Vec<PendingTool>,
     id: &str,
     output: &str,
     is_error: bool,
+    native_status: Option<&str>,
 ) {
     let Some(at) = pending.iter().position(|tool| tool.id == id) else {
+        reference_push_orphan_result(turns, None, id, output.to_string(), is_error);
         return;
     };
     let tool = pending.remove(at);
@@ -387,6 +426,7 @@ fn fold_result(
         error,
         output_ref,
         output_size,
+        status,
         ..
     } = part
     else {
@@ -407,6 +447,12 @@ fn fold_result(
     }
     if is_error {
         *error = Some(true);
+    }
+    reference_assign_result_status(status, is_error);
+    if let Some(raw) = native_status {
+        if let Some(mapped) = reference_native_tool_status(raw) {
+            *status = Some(mapped);
+        }
     }
 }
 
@@ -433,6 +479,8 @@ fn notice_part(record: &Value) -> Option<ReferencePart> {
     Some(ReferencePart::Notice {
         text,
         source: record.get("customType").and_then(Value::as_str).map(str::to_string),
+    
+        id: None,
     })
 }
 
@@ -648,6 +696,7 @@ fn legacy_skill_pattern() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::types::ReferenceToolStatus;
 
     /// Fixtures live beside the family they pin, in this module's `fixtures/gjc/`.
     /// `include_str!` binds the bytes at compile time, so a fixture edit is a rebuild.
@@ -687,13 +736,13 @@ mod tests {
             ]
         );
         assert_eq!(turns[0].started_at.as_deref(), Some("2026-10-06T09:00:01.000Z"));
-        assert_eq!(turns[0].parts, vec![ReferencePart::Text { text: "터미널 주소좀 줘봐".into(), phase: None }]);
+        assert_eq!(turns[0].parts, vec![ReferencePart::Text { text: "터미널 주소좀 줘봐".into(), phase: None , id: None}]);
         // the assistant records merge while the one before them did not stop for good, and
         // the last recorded activity — not the next user's timestamp — ends the turn
         assert_eq!(turns[1].started_at.as_deref(), Some("2026-10-06T09:00:02.000Z"));
         assert_eq!(turns[1].ended_at.as_deref(), Some("2026-10-06T09:00:05.000Z"));
         assert_eq!(turns[1].parts.len(), 4);
-        assert_eq!(turns[1].parts[0], ReferencePart::Thinking { text: "internal reasoning stays private".into() });
+        assert_eq!(turns[1].parts[0], ReferencePart::Thinking { text: "internal reasoning stays private".into() , id: None});
         assert!(matches!(turns[1].parts[3], ReferencePart::Text { ref text, .. } if text == "http://100.123.228.51:7317"));
         // a result placed beside its call in the same assistant record folds into that call
         let ReferencePart::Tool { name, summary, output, .. } = tool_part(&turns[1], "read") else {
@@ -717,8 +766,8 @@ mod tests {
         assert_eq!(*output_ref, None);
         assert_eq!(*output_size, None);
         // the image-only user record is skipped, not an empty turn; the plain string prompt reads
-        assert_eq!(turns[2].parts, vec![ReferencePart::Text { text: "plain string prompt".into(), phase: None }]);
-        assert_eq!(turns[3].parts, vec![ReferencePart::Text { text: "Ack.".into(), phase: None }]);
+        assert_eq!(turns[2].parts, vec![ReferencePart::Text { text: "plain string prompt".into(), phase: None , id: None}]);
+        assert_eq!(turns[3].parts, vec![ReferencePart::Text { text: "Ack.".into(), phase: None , id: None}]);
         // the title, session and header_patch records are chrome, not turns
         let rendered = serde_json::to_string(&turns).expect("turns serialize");
         assert!(!rendered.contains("GJC reference chat parity"));
@@ -734,12 +783,12 @@ mod tests {
             turns.iter().map(|turn| turn.role).collect::<Vec<_>>(),
             vec![ReferenceTurnRole::User, ReferenceTurnRole::Assistant, ReferenceTurnRole::User]
         );
-        assert_eq!(turns[0].parts, vec![ReferencePart::Text { text: "run the checks".into(), phase: None }]);
-        assert_eq!(turns[1].parts[0], ReferencePart::Thinking { text: "thinking about it".into() });
-        assert_eq!(turns[1].parts[1], ReferencePart::Text { text: "Starting now.".into(), phase: None });
+        assert_eq!(turns[0].parts, vec![ReferencePart::Text { text: "run the checks".into(), phase: None , id: None}]);
+        assert_eq!(turns[1].parts[0], ReferencePart::Thinking { text: "thinking about it".into() , id: None});
+        assert_eq!(turns[1].parts[1], ReferencePart::Text { text: "Starting now.".into(), phase: None , id: None});
         // the failed request is an error line, not an empty answer
-        assert_eq!(turns[1].parts[2], ReferencePart::Text { text: "Error: 401 Authentication Failed".into(), phase: None });
-        assert_eq!(turns[2].parts, vec![ReferencePart::Text { text: "retry".into(), phase: None }]);
+        assert_eq!(turns[1].parts[2], ReferencePart::Text { text: "Error: 401 Authentication Failed".into(), phase: None , id: None});
+        assert_eq!(turns[2].parts, vec![ReferencePart::Text { text: "retry".into(), phase: None , id: None}]);
     }
 
     #[test]
@@ -759,11 +808,11 @@ mod tests {
         let rendered = serde_json::to_string(&turns).expect("turns serialize");
         assert!(!rendered.contains("first question"), "the reset dropped the turns before it");
         assert!(!rendered.contains("first answer"));
-        assert_eq!(turns[0].parts, vec![ReferencePart::Text { text: "after the reset".into(), phase: None }]);
-        assert_eq!(turns[1].parts, vec![ReferencePart::Text { text: "fresh answer".into(), phase: None }]);
-        assert_eq!(turns[2].parts, vec![ReferencePart::Compact { text: "Folded the earlier debugging session.".into() }]);
+        assert_eq!(turns[0].parts, vec![ReferencePart::Text { text: "after the reset".into(), phase: None , id: None}]);
+        assert_eq!(turns[1].parts, vec![ReferencePart::Text { text: "fresh answer".into(), phase: None , id: None}]);
+        assert_eq!(turns[2].parts, vec![ReferencePart::Compact { text: "Folded the earlier debugging session.".into() , id: None}]);
         assert_eq!(turns[2].started_at.as_deref(), Some("2026-10-06T11:05:00.000Z"));
-        assert_eq!(turns[3].parts, vec![ReferencePart::Text { text: "carry on".into(), phase: None }]);
+        assert_eq!(turns[3].parts, vec![ReferencePart::Text { text: "carry on".into(), phase: None , id: None}]);
     }
 
     #[test]
@@ -813,7 +862,9 @@ mod tests {
             turns[0].parts,
             vec![ReferencePart::Notice {
                 text: "Background job bg_1 has completed.\nPASS all".into(),
-                source: Some("async-result".into())
+                source: Some("async-result".into()),
+            
+                id: None,
             }]
         );
         assert_eq!(turns[0].role, ReferenceTurnRole::User);
@@ -834,7 +885,7 @@ mod tests {
         .join("\n");
         let turns = parse(&text);
         assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0].parts, vec![ReferencePart::Notice { text: "shown".into(), source: None }]);
+        assert_eq!(turns[0].parts, vec![ReferencePart::Notice { text: "shown".into(), source: None , id: None}]);
     }
 
     #[test]
@@ -875,9 +926,9 @@ mod tests {
         // the skill is the text
         assert_eq!(
             user.parts[0],
-            ReferencePart::Text { text: "/skill:delegate-web".into(), phase: None }
+            ReferencePart::Text { text: "/skill:delegate-web".into(), phase: None , id: None}
         );
-        let ReferencePart::Skill { skill } = &user.parts[1] else {
+        let ReferencePart::Skill { skill , id: None} = &user.parts[1] else {
             panic!("the second part is the skill chip");
         };
         assert_eq!(skill.name, "delegate-web");
@@ -955,7 +1006,7 @@ mod tests {
         let string_answer = r#"{"type":"message","message":{"role":"assistant","content":"done"}}"#;
         let turns = parse(string_answer);
         assert_eq!(turns.len(), 1, "a string answer is a turn");
-        assert_eq!(turns[0].parts, vec![ReferencePart::Text { text: "done".into(), phase: None }]);
+        assert_eq!(turns[0].parts, vec![ReferencePart::Text { text: "done".into(), phase: None , id: None}]);
     }
 
     // rs-history-other-2
@@ -974,7 +1025,7 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert_eq!(
             turns[0].parts[0],
-            ReferencePart::Text { text: "ship 2026.10.7".into(), phase: None }
+            ReferencePart::Text { text: "ship 2026.10.7".into(), phase: None , id: None}
         );
         assert!(matches!(turns[0].parts.get(1), Some(ReferencePart::Skill { .. })));
     }
@@ -1075,12 +1126,12 @@ mod tests {
         // content of that stop message still belongs to the turn it closes: [Tool, Thinking, Text].
         assert_eq!(turns[1].parts.len(), 3);
         assert!(matches!(&turns[1].parts[0], ReferencePart::Tool { name, .. } if name.as_str() == "read"));
-        assert_eq!(turns[1].parts[1], ReferencePart::Thinking { text: "done".into() });
+        assert_eq!(turns[1].parts[1], ReferencePart::Thinking { text: "done".into() , id: None});
         assert_eq!(
             turns[1].parts[2],
-            ReferencePart::Text { text: "The full review.".into(), phase: None }
+            ReferencePart::Text { text: "The full review.".into(), phase: None , id: None}
         );
-        assert_eq!(turns[2].parts, vec![ReferencePart::Text { text: "Nothing new to do.".into(), phase: None }]);
+        assert_eq!(turns[2].parts, vec![ReferencePart::Text { text: "Nothing new to do.".into(), phase: None , id: None}]);
     }
 
     #[test]
@@ -1094,10 +1145,10 @@ mod tests {
             .join("\n");
         let turns = parse(&text);
         assert_eq!(turns.len(), count);
-        assert_eq!(turns[0].parts, vec![ReferencePart::Text { text: "m0".into(), phase: None }]);
+        assert_eq!(turns[0].parts, vec![ReferencePart::Text { text: "m0".into(), phase: None , id: None}]);
         assert_eq!(
             turns[count - 1].parts,
-            vec![ReferencePart::Text { text: format!("m{}", count - 1), phase: None }]
+            vec![ReferencePart::Text { text: format!("m{}", count - 1), phase: None , id: None}]
         );
     }
 
@@ -1160,5 +1211,21 @@ mod tests {
             Some("gjc-transcript"),
             "the manifest names the reader this module implements"
         );
+    }
+
+    #[test]
+    fn native_work_gjc_maps_result_status_and_ignores_prose() {
+        let text = [
+            r#"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"usage 9 status failed"}]}}"#,
+            r#"{"type":"message","message":{"role":"assistant","model":"gjc-model","usage":{"input":6,"output":7},"content":[{"type":"toolCall","id":"c1","name":"Edit","arguments":{"old_string":"a","new_string":"b"}}]}}"#,
+            r#"{"type":"message","message":{"role":"toolResult","toolCallId":"c1","isError":true,"status":"failed","content":"no"}}"#,
+        ]
+        .join("\n");
+        let turns = parse(&text);
+        assert!(turns[0].meta.is_none());
+        assert_eq!(turns[1].meta.as_ref().unwrap().usage.as_ref().unwrap().input_tokens, Some(6));
+        let ReferencePart::Tool { status, .. } = turns[1].parts.iter().find(|part| matches!(part, ReferencePart::Tool { .. })).unwrap() else { unreachable!() };
+        assert_eq!(*status, Some(ReferenceToolStatus::Failed));
+        assert!(turns[1].parts.iter().any(|part| matches!(part, ReferencePart::Diff { .. })));
     }
 }

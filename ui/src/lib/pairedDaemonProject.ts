@@ -1,6 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { remoteHostStore, type RemoteHostStore } from "../state/remoteHostStore";
 import { decodeMachineJson, decodePairedProject, decodeU64, type DiscoveredRepositories } from "./pairedDaemonContracts";
+import type { AgentContinueStartup } from "./tauri";
 import type { AgentProviderSession } from "./types";
 
 export interface PairedHostContext { readonly hostId: string; readonly generation: string }
@@ -12,7 +13,7 @@ export interface DeleteWorktreeRequest extends Omit<CreateWorktreeRequest, "base
 export interface CreateSessionRequest {
   requestId: string; workspaceId: string; worktree: WorktreeIdentity | null; cols: number; rows: number;
   inheritFromSessionId: string | null; cwdRelative: string | null;
-  startup: { kind: "shell" } | { kind: "agentResume"; agentType: string; providerSession: AgentProviderSession };
+  startup: { kind: "shell" } | { kind: "agentResume"; agentType: string; providerSession: AgentProviderSession } | AgentContinueStartup;
 }
 export interface CloseSessionRequest { requestId: string; daemonEpoch: string }
 export type PairedHostOperation =
@@ -127,6 +128,7 @@ export function createPairedDaemonProjectAdapter(
     if (operation.kind === "capabilities") negotiated = undefined;
     const host = current();
     if (operation.kind !== "capabilities" && (!negotiated || !negotiated.capabilities.includes(requiredCapability[operation.kind]))) return invalid("UNSUPPORTED_CAPABILITY");
+    if (operation.kind === "createSession" && operation.request.startup.kind === "agentContinue" && !(negotiated && negotiated.capabilities.includes("terminalContinueV1"))) return invalid("UNSUPPORTED_CAPABILITY");
     if (operation.kind === "operation") json("operation", { state: "pending", requestId: operation.requestId });
     if ("workspaceId" in operation && operation.workspaceId !== undefined) remoteId(operation.workspaceId);
     if ("request" in operation) {

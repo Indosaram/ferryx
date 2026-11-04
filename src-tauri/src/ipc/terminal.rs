@@ -99,6 +99,16 @@ pub(crate) fn select_requested_cwd(requested: Option<PathBuf>) -> Option<PathBuf
     }
 }
 
+fn require_terminal_continue(supported: bool) -> Result<(), IpcError> {
+    if supported {
+        return Ok(());
+    }
+    Err(IpcError::new(
+        IpcErrorCode::AgentContinueUnsupported,
+        "terminalContinueV1 is not advertised by the owning host",
+    ))
+}
+
 /// A daemon without the agent-launch capability gets a structured refusal, never the attempt.
 fn require_agent_launch(supported: bool) -> Result<(), IpcError> {
     if supported {
@@ -952,6 +962,21 @@ fn paired_resume_startup(startup: Option<&TerminalStartup>) -> crate::remote::ma
             }
             crate::remote::machine_protocol::Startup::AgentResume {
                 agent_type: agent_type.clone(), provider_session,
+            }
+        }
+        Some(TerminalStartup::AgentContinue {
+            agent_type,
+            provider_session,
+            mode,
+        }) => {
+            let mut provider_session = provider_session.clone();
+            if crate::terminal::resume_cwd::machine_spawn_admits_agent(agent_type) {
+                provider_session.transcript_path = None;
+            }
+            crate::remote::machine_protocol::Startup::AgentContinue {
+                agent_type: agent_type.clone(),
+                provider_session,
+                mode: *mode,
             }
         }
         _ => crate::remote::machine_protocol::Startup::Shell,
@@ -4315,8 +4340,16 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
     let is_paired_workspace = request.workspace_id.starts_with("daemon:")
         || matches!(request.startup, Some(TerminalStartup::PairedDaemon { .. }));
     let spawn_result = if is_remote_workspace {
-        if request.startup.is_some() && !matches!(request.startup, Some(TerminalStartup::AgentResume { .. })) {
+        if request.startup.is_some()
+            && !matches!(
+                request.startup,
+                Some(TerminalStartup::AgentResume { .. } | TerminalStartup::AgentContinue { .. })
+            )
+        {
             return Err(crate::ssh::projects::unsupported());
+        }
+        if matches!(request.startup, Some(TerminalStartup::AgentContinue { .. })) {
+            require_terminal_continue(daemon_client.supports_terminal_continue().await)?;
         }
         let host_store_path = super::ssh::get_ssh_store_path(&app)?;
         let lookup = host_store_path.clone();
@@ -4550,7 +4583,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                             (data.remote_workspace_id, None, None)
                         }
                         Ok(other) => {
-                            if matches!(request.startup, Some(TerminalStartup::AgentResume { .. })) {
+                            if matches!(request.startup, Some(TerminalStartup::AgentResume { .. } | TerminalStartup::AgentContinue { .. })) {
                                 return Err(IpcError::internal("Remote resume workspace registration returned an unexpected response"));
                             }
                             tracing::warn!(
@@ -4561,7 +4594,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                             (remote_workspace_id.clone(), None, None)
                         }
                         Err(e) => {
-                            if matches!(request.startup, Some(TerminalStartup::AgentResume { .. })) {
+                            if matches!(request.startup, Some(TerminalStartup::AgentResume { .. } | TerminalStartup::AgentContinue { .. })) {
                                 return Err(map_client_error(&e, Some(&host_id), Some(host.generation)));
                             }
                             tracing::warn!(
@@ -4969,6 +5002,9 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         // the UI a structured UNSUPPORTED instead so it can fall back to typing the command.
         if matches!(request.startup, Some(TerminalStartup::AgentLaunch { .. })) {
             require_agent_launch(daemon_client.supports_agent_launch().await)?;
+        }
+        if matches!(request.startup, Some(TerminalStartup::AgentContinue { .. })) {
+            require_terminal_continue(daemon_client.supports_terminal_continue().await)?;
         }
         // `qa_pinned_shell` lets a QA run pin the shell; see its doc comment.
         let effective_shell = request.shell.filter(|s| !s.trim().is_empty()).or_else(|| {

@@ -331,6 +331,11 @@ export type TerminalSession = {
   worktree: WorktreeIdentity | null;
   /** Native PTY identity. This is intentionally distinct from `id`. */
   backendSessionId: string | null;
+  /**
+   * Last real backend id, kept only so an exited pane can be published for resume.
+   * Never a standby id, and not a liveness signal: attach and transport still use `backendSessionId`.
+   */
+  lastBackendSessionId?: string | null;
   /** Backing-process resource state, independent from agent activity. */
   processState?: SessionProcessState;
   lifecycle: TerminalLifecycle;
@@ -1044,6 +1049,8 @@ export interface PersistedTerminalSession {
   localSessionId?: string;
   /** v2 native PTY identity. `null` means it must be respawned on restore. */
   backendSessionId?: string | null;
+  /** Real backend id retained for publication after the pane exits. Never a standby id. */
+  lastBackendSessionId?: string | null;
   /** v1 compatibility field (v1 accidentally stored the local id here). */
   sessionId?: string;
   /** Persisted backing-process resource state. */

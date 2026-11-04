@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
   agentProviderSessionsEqual,
   agentResumeCapability,
+  buildAgentContinueStartup,
   buildResumeArgv,
   canCaptureAuthoritativeProviderSession,
   canResumeAgent,
+  continuationOutcomeUnknown,
   extractAgentProviderSession,
   getAgentResumeArgv,
   hasUnsafeProviderSessionIdChars,
@@ -14,6 +16,7 @@ import {
   normalizeSessionId,
   PROVIDER_SESSION_ID_MAX_LENGTH,
   RESUMABLE_TUI_AGENTS,
+  verifiedContinuationModes,
   type AgentSessionRef,
 } from "./agentResume";
 import type { AgentProviderSession } from "./types";
@@ -510,6 +513,53 @@ describe("agentResume adapter module", () => {
         expect(buildResumeArgv(ref)).toEqual(["claude", "--resume", "c18f-uuid-456"]);
       });
 
+    });
+  });
+
+  describe("continuation mode matrix", () => {
+    const session: AgentProviderSession = { key: "session_id", id: "native-session-1" };
+
+    it("offers fork and resume only for Claude and Codex", () => {
+      expect(verifiedContinuationModes("claude")).toEqual(["fork", "resume"]);
+      expect(verifiedContinuationModes("Codex")).toEqual(["fork", "resume"]);
+      for (const agent of ["grok", "opencode", "pi", "omp", "droid", "cline", "crush", "kimi"]) {
+        expect(verifiedContinuationModes(agent)).toEqual(["resume"]);
+      }
+      expect(verifiedContinuationModes("aider")).toEqual([]);
+      expect(verifiedContinuationModes("not-a-provider")).toEqual([]);
+    });
+
+    it("builds a startup DTO without client argv and without a stop path", () => {
+      expect(buildAgentContinueStartup("claude", session, "fork")).toEqual({
+        kind: "agentContinue",
+        agentType: "claude",
+        providerSession: session,
+        mode: "fork",
+      });
+      expect(buildAgentContinueStartup("codex", session, "resume")).toEqual({
+        kind: "agentContinue",
+        agentType: "codex",
+        providerSession: session,
+        mode: "resume",
+      });
+      expect(buildAgentContinueStartup("grok", session, "resume")).toEqual({
+        kind: "agentContinue",
+        agentType: "grok",
+        providerSession: session,
+        mode: "resume",
+      });
+      expect(buildAgentContinueStartup("grok", session, "fork")).toBeNull();
+      expect(buildAgentContinueStartup("pi", { key: "session_id", id: "pi-1" }, "resume")).toBeNull();
+      expect(buildAgentContinueStartup("pi", { key: "session_id", id: "pi-1", transcriptPath: "/repo/pi.jsonl" }, "resume")).toMatchObject({
+        kind: "agentContinue",
+        mode: "resume",
+      });
+      const startup = buildAgentContinueStartup("claude", session, "fork");
+      expect(startup).not.toHaveProperty("args");
+      expect(startup).not.toHaveProperty("argv");
+      expect(continuationOutcomeUnknown({ code: "UNKNOWN", message: "unconfirmed" })).toBe(true);
+      expect(continuationOutcomeUnknown({ code: "OPERATION_OUTCOME_UNKNOWN", message: "unconfirmed" })).toBe(true);
+      expect(continuationOutcomeUnknown({ code: "AGENT_CONTINUE_CONFLICT", message: "claimed" })).toBe(false);
     });
   });
 

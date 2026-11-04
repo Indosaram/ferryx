@@ -54,7 +54,7 @@
  * USAGE
  *   node scripts/qa/herdr-reference-chat.mjs --scenario QA-01 --case happy \
  *     --fixture-manifest <fixtures.json> --candidate-manifest <candidate.json> \
- *     --evidence-dir <dir> [--scenario ALL --case all] [--allow-host true] \
+ *     --evidence-dir <dir> [--scenario QA-12|QA-13|QA-14|QA-15|QA-16|ALL --case all] [--allow-host true] \
  *     [--device-binding-out <path>] [--browser-channel chrome] [--timeout-ms 30000]
  */
 
@@ -70,7 +70,6 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
-import { tmpdir } from "node:os";
 import {
   IsolatedGatewayError,
   OwnedProcessLedger,
@@ -117,6 +116,7 @@ import {
   writeReport,
 } from "./herdr-reference-fixtures.mjs";
 import { ptyIdentitySurvived } from "./herdr-reference-pty-identity.mjs";
+import { REV3_QA_IDS, REV3_QA_ROWS, createRev3Scenarios } from "./herdr-reference-chat-rev3.mjs";
 
 /* ==========================================================================
  * Scenario registry
@@ -712,7 +712,17 @@ function foreignEpochFor(session) {
  * credential seeded into the client store. Nothing here clears or clones a user profile:
  * the context is a fresh, isolated one.
  */
-async function openChatPage(ctx, host, session) {
+async function openChatPage(ctx, host, session, options) {
+  const settings = options || {};
+  const viewport = settings.viewport || { width: 390, height: 844 };
+  const coarse = settings.coarse !== false;
+  const apiBase = settings.apiBase || host.url;
+  const entryUrl = settings.entryUrl || apiBase;
+  // The provisioned phone token is Mirror scope. workspace/sidebar and the
+  // machine session list refuse that (workspace_api.rs authorize,
+  // MACHINE_ACCESS_REQUIRED). A caller that already holds a Machine Control
+  // bearer passes it as deviceToken; other pages keep the mirror credential.
+  const token = settings.deviceToken || readCredentialToken(host);
   if (!ctx.args.allowHost) throw blocked("browser-authorization", "driving the served UI requires --allow-host true");
   const require = createRequire(join(repoRoot, "ui", "package.json"));
   let chromium;
@@ -725,11 +735,10 @@ async function openChatPage(ctx, host, session) {
     headless: true,
     channel: ctx.args.browserChannel === "chromium-headless" ? undefined : ctx.args.browserChannel,
   });
-  const token = readCredentialToken(host);
   const context = await ctx.browser.newContext({
-    viewport: { width: 390, height: 844 },
-    isMobile: true,
-    hasTouch: true,
+    viewport,
+    isMobile: coarse,
+    hasTouch: coarse,
   });
   await context.addInitScript((seed) => {
     localStorage.setItem("ferryx_remote_hosts", JSON.stringify({
@@ -748,12 +757,12 @@ async function openChatPage(ctx, host, session) {
       activeHostId: seed.hostId,
     }));
     localStorage.setItem("ferryx_device_id_" + seed.hostId, seed.deviceId);
-  }, { hostId: host.id, base: host.url, token, deviceId: host.id + "-device" });
+  }, { hostId: host.id, base: apiBase, token, deviceId: host.id + "-device" });
   const page = await context.newPage();
   page.setDefaultTimeout(ctx.args.timeoutMs);
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
-  await page.goto(host.url, { waitUntil: "domcontentloaded" });
+  await page.goto(entryUrl, { waitUntil: "domcontentloaded" });
   await page.waitForSelector('[data-testid="mobile-chat-workspace"], [data-testid="remote-workspace-loading"]',
     { timeout: ctx.args.timeoutMs });
   // The rendered page is the evidence the JSON artifact below only names. A capture that
@@ -816,6 +825,7 @@ async function main() {
     branches: {},
     blockers: [],
     failures: [],
+    unmeasured: [],
     cleanup: null,
     overallStatus: "BLOCKED",
   };
@@ -1096,7 +1106,15 @@ async function main() {
         const startedAt = Date.now();
         try {
           const observed = await implementation[caseName](ctx);
-          result.branches[key] = { status: observed.status, ms: Date.now() - startedAt, observed: observed.observed };
+          result.branches[key] = {
+            status: observed.status,
+            ms: Date.now() - startedAt,
+            reason: observed.reason || "",
+            observed: observed.observed,
+          };
+          if (observed.status === "unmeasured") {
+            result.unmeasured.push({ scenario: row.id, case: caseName, reason: observed.reason || "" });
+          }
         } catch (error) {
           const code = error instanceof RunnerError ? error.code : EXIT.FAILED;
           const status = code === EXIT.BLOCKED ? "blocked" : "failed";
@@ -1124,13 +1142,26 @@ async function main() {
       exitCode = EXIT.BLOCKED;
       result.overallStatus = "BLOCKED";
     } else {
-      const allPass = Object.values(result.branches).every((branch) => branch.status === "pass");
+      const branches = Object.values(result.branches);
+      const allPass = branches.every((branch) => branch.status === "pass");
+      const allAccounted = branches.every((branch) => branch.status === "pass" || branch.status === "unmeasured");
+      const anyUnmeasured = branches.some((branch) => branch.status === "unmeasured");
       const expected = scenarios.length * cases.length;
       const ran = Object.keys(result.branches).length;
-      exitCode = allPass && ran === expected ? EXIT.OK : EXIT.FAILED;
-      result.overallStatus = exitCode === EXIT.OK ? "PASS" : "FAIL";
-      if (ran !== expected) {
-        result.failures.push({ scenario: "*", case: "*", reason: "selected " + expected + " branches but recorded " + ran });
+      if (allPass && ran === expected) {
+        exitCode = EXIT.OK;
+        result.overallStatus = "PASS";
+      } else if (allAccounted && anyUnmeasured && ran === expected) {
+        // A missing provider credential or device is not a pass and not a product failure.
+        // The other selected branches have already run.
+        exitCode = EXIT.BLOCKED;
+        result.overallStatus = "UNMEASURED";
+      } else {
+        exitCode = EXIT.FAILED;
+        result.overallStatus = "FAIL";
+        if (ran !== expected) {
+          result.failures.push({ scenario: "*", case: "*", reason: "selected " + expected + " branches but recorded " + ran });
+        }
       }
     }
   } catch (error) {
@@ -1197,6 +1228,12 @@ async function main() {
         result.failures.map((entry) => "  - " + entry.scenario + "/" + entry.case + ": " + entry.reason).join("\n") + "\n",
     );
   }
+  if (result.overallStatus === "UNMEASURED") {
+    process.stderr.write(
+      "UNMEASURED (" + result.unmeasured.length + "):\n" +
+        result.unmeasured.map((entry) => "  - " + entry.scenario + "/" + entry.case + ": " + entry.reason).join("\n") + "\n",
+    );
+  }
   process.stdout.write("overallStatus=" + result.overallStatus + " branches=" + Object.keys(result.branches).length + "\n");
   return exitCode;
 }
@@ -1253,7 +1290,7 @@ const failed = (reason, detail) => new RunnerError(EXIT.FAILED, reason, detail);
 function usage(message) {
   process.stderr.write(
     "USAGE ERROR: " + message + "\n\n" +
-      "  node scripts/qa/herdr-reference-chat.mjs --scenario <QA-01..QA-11|ALL> --case <happy|failure|all>\n" +
+      "  node scripts/qa/herdr-reference-chat.mjs --scenario <QA-01..QA-16|ALL> --case <happy|failure|all>\n" +
       "      --fixture-manifest <fixtures.json> --candidate-manifest <candidate.json>\n" +
       "      --evidence-dir <dir> [--allow-host true] [--browser-channel <channel>] [--timeout-ms <ms>]\n",
   );
@@ -1293,8 +1330,8 @@ function parseArgs(argv) {
   if (!args.fixtureManifest) usage("--fixture-manifest is mandatory");
   if (!args.candidateManifest) usage("--candidate-manifest is mandatory");
   if (!args.evidenceDir) usage("--evidence-dir is mandatory");
-  if (args.scenario !== "ALL" && !REFERENCE_QA_IDS.includes(args.scenario)) {
-    usage("--scenario must be one of " + REFERENCE_QA_IDS.join(", ") + " or ALL");
+  if (args.scenario !== "ALL" && !REFERENCE_QA_IDS.includes(args.scenario) && !REV3_QA_IDS.includes(args.scenario)) {
+    usage("--scenario must be one of " + REFERENCE_QA_IDS.concat(REV3_QA_IDS).join(", ") + " or ALL");
   }
   if (!["happy", "failure", "all"].includes(args.caseName)) usage("--case must be happy, failure or all");
   if (!Number.isFinite(args.timeoutMs) || args.timeoutMs <= 0) usage("--timeout-ms must be a positive integer");
@@ -1307,8 +1344,8 @@ function selectedCases(args) {
 }
 
 function selectedScenarios(args) {
-  if (args.scenario === "ALL") return REFERENCE_QA_SCENARIOS.slice();
-  const row = scenarioById(args.scenario);
+  if (args.scenario === "ALL") return REFERENCE_QA_SCENARIOS.concat(REV3_QA_ROWS);
+  const row = scenarioById(args.scenario) || REV3_QA_ROWS.find((entry) => entry.id === args.scenario);
   assert(row, "unknown scenario " + args.scenario);
   return [row];
 }
@@ -1444,7 +1481,10 @@ function createContext(args, fixtureRaw, candidateRaw, fixture, candidate, ledge
       return path;
     },
     recordFile(name, bytes) {
-      const path = join(tmpdir(), "ferryx-reference-chat", randomUUID(), name);
+      // Same screenshots directory the rev3 lanes write under this run's evidence dir
+      // (openEvidence in herdr-reference-chat-rev3.mjs). A fixed temp directory is not
+      // removed by teardown, so the bytes are written here directly.
+      const path = join(evidenceDir, "screenshots", name);
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, bytes);
       artifacts.push({ name, path });
@@ -2198,6 +2238,18 @@ scenario("QA-05", {
     return { status: "pass", observed: report };
   },
 });
+
+const rev3Scenarios = createRev3Scenarios({
+  blocked,
+  failed,
+  blockedCode: EXIT.BLOCKED,
+  localContext,
+  openChatPage,
+  mutationEnvelope,
+});
+for (const [id, implementation] of Object.entries(rev3Scenarios)) {
+  scenario(id, implementation);
+}
 
 /* Run only when this file IS the program. The typed-refusal and control helpers above are
    exported so the neighbouring regression suite can import them; importing must never start a

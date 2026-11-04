@@ -49,10 +49,17 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde_json::{Map, Value};
 
+use super::history_parse::{
+    reference_apply_native_tool_status, reference_assign_result_status, reference_bounded_tool_input,
+    reference_diff_part, reference_native_model, reference_native_patch_body, reference_native_tool_status,
+    reference_finalize_work_status, reference_native_task_status, reference_note_turn_meta,
+    reference_parent_call_id, reference_push_orphan_result,
+    reference_stamp_tool_call, reference_usage_from_object,
+};
 use super::types::{
     ReferenceHistoryParser, ReferenceImageRef, ReferenceNativeHistoryKind, ReferencePart,
     ReferenceSkillActivity, ReferenceSkillEvidence, ReferenceSkillStatus, ReferenceTaskResult,
-    ReferenceTaskStatus, ReferenceTurn, ReferenceTurnRole,
+    ReferenceTurn, ReferenceTurnRole,
 };
 
 /// The family this lane reads. A lane handles exactly one kind; `Unavailable` is an error,
@@ -196,6 +203,7 @@ struct PiToolResult {
     id: String,
     text: String,
     error: bool,
+    status: Option<String>,
     /// The media types of the inline images the result held; omp never uses them.
     images: Vec<String>,
 }
@@ -250,7 +258,7 @@ fn parse_records_from(
         if let Some(tasks) = omo_task_results(entry, &state.task_titles) {
             state
                 .turns
-                .push(user_turn(timestamp, vec![ReferencePart::TaskResult { tasks }]));
+                .push(user_turn(timestamp, vec![ReferencePart::TaskResult { tasks, id: None }]));
             continue;
         }
 
@@ -261,7 +269,7 @@ fn parse_records_from(
             if !summary.trim().is_empty() {
                 state
                     .turns
-                    .push(user_turn(timestamp, vec![ReferencePart::Compact { text: summary.to_string() }]));
+                    .push(user_turn(timestamp, vec![ReferencePart::Compact { text: summary.to_string() , id: None}]));
             }
             continue;
         }
@@ -298,14 +306,14 @@ fn parse_records_from(
             };
             // The request is the user's text, and each skill the runtime loaded rides it as its
             // own part, in the order the envelope named them (`transcript-records.ts:259`).
-            let mut parts = vec![ReferencePart::Text { text: asked, phase: None }];
+            let mut parts = vec![ReferencePart::Text { text: asked, phase: None , id: None}];
             if let Some(invocation) = &invocation {
                 parts.extend(
                     invocation
                         .skills
                         .iter()
                         .cloned()
-                        .map(|skill| ReferencePart::Skill { skill }),
+                        .map(|skill| ReferencePart::Skill { skill, id: None }),
                 );
             }
             state.turns.push(user_turn(timestamp, parts));
@@ -321,6 +329,12 @@ fn parse_records_from(
                 // last recorded assistant activity, never the next user's timestamp
                 state.turns[turn_index].ended_at = Some(timestamp.to_string());
             }
+            reference_note_turn_meta(
+                &mut state.turns[turn_index],
+                ReferenceNativeHistoryKind::Omp,
+                reference_native_model(message.get("model")),
+                message.get("usage").and_then(reference_usage_from_object),
+            );
             for block in blocks {
                 let block = record(block);
                 match block.get("type").and_then(Value::as_str) {
@@ -330,6 +344,8 @@ fn parse_records_from(
                             state.turns[turn_index].parts.push(ReferencePart::Text {
                                 text: text.to_string(),
                                 phase: None,
+                            
+                                id: None,
                             });
                         }
                     }
@@ -342,7 +358,7 @@ fn parse_records_from(
                         if !thinking.is_empty() {
                             state.turns[turn_index]
                                 .parts
-                                .push(ReferencePart::Thinking { text: thinking.to_string() });
+                                .push(ReferencePart::Thinking { text: thinking.to_string() , id: None});
                         }
                     }
                     Some("toolCall") => {
@@ -362,10 +378,12 @@ fn parse_records_from(
                             .map(str::to_string)
                             .unwrap_or_else(|| tool_summary(name, &input));
                         let summary = summary.chars().take(120).collect::<String>();
+                        let rendered = serde_json::to_string_pretty(&arguments).unwrap_or_default();
+                        let patch_body = reference_native_patch_body(name, &arguments);
                         state.turns[turn_index].parts.push(ReferencePart::Tool {
                             name: name.to_string(),
                             summary,
-                            input: serde_json::to_string_pretty(&arguments).unwrap_or_default(),
+                            input: reference_bounded_tool_input(name, &arguments, rendered),
                             output: String::new(),
                             error: None,
                             // `invokedSkill` belongs to another family's branch
@@ -374,10 +392,26 @@ fn parse_records_from(
                             output_ref: None,
                             output_size: None,
                             images: Vec::new(),
+                        
+                            id: None, call_id: None, status: None, output_payload: Box::new(None),
                         });
                         if let Some(id) = block.get("id").and_then(Value::as_str) {
+                            if let Some(part) = state.turns[turn_index].parts.last_mut() {
+                                reference_stamp_tool_call(part, id);
+                                if let Some(raw) = block.get("status").and_then(Value::as_str) {
+                                    reference_apply_native_tool_status(part, raw);
+                                }
+                            }
                             let part_index = state.turns[turn_index].parts.len() - 1;
                             state.pending.insert(id.to_string(), (turn_index, part_index));
+                        } else if let Some(part) = state.turns[turn_index].parts.last_mut() {
+                            reference_stamp_tool_call(part, "");
+                            if let Some(raw) = block.get("status").and_then(Value::as_str) {
+                                reference_apply_native_tool_status(part, raw);
+                            }
+                        }
+                        if let Some(body) = patch_body {
+                            state.turns[turn_index].parts.push(reference_diff_part(&body));
                         }
                     }
                     // unsupported transcript parts are intentionally ignored
@@ -396,6 +430,8 @@ fn parse_records_from(
                     state.turns[turn_index].parts.push(ReferencePart::Text {
                         text: format!("Error: {error}"),
                         phase: None,
+                    
+                        id: None,
                     });
                 }
             }
@@ -415,6 +451,7 @@ fn parse_records_from(
             turns = turns.split_off(turns.len() - max_turns);
         }
     }
+    reference_finalize_work_status(&mut turns, false);
     turns
 }
 
@@ -432,6 +469,8 @@ fn assistant_turn_index(state: &mut OmpState, timestamp: Option<&str>) -> usize 
         source: None,
         parts: Vec::new(),
         abandoned: None,
+    
+        id: None, meta: None,
     });
     state.turns.len() - 1
 }
@@ -446,6 +485,8 @@ fn user_turn(timestamp: Option<&str>, parts: Vec<ReferencePart>) -> ReferenceTur
         source: None,
         parts,
         abandoned: None,
+    
+        id: None, meta: None,
     }
 }
 
@@ -453,6 +494,7 @@ fn user_turn(timestamp: Option<&str>, parts: Vec<ReferencePart>) -> ReferenceTur
 fn apply_results(state: &mut OmpState, message: &Map<String, Value>) {
     for result in pi_results(message) {
         let Some(position) = state.pending.get(&result.id).copied() else {
+            reference_push_orphan_result(&mut state.turns, None, &result.id, result.text.clone(), result.error);
             continue;
         };
         state.pending.remove(&result.id);
@@ -468,6 +510,7 @@ fn apply_results(state: &mut OmpState, message: &Map<String, Value>) {
             output_ref,
             output_size,
             images,
+            status,
             ..
         }) = part
         {
@@ -481,6 +524,12 @@ fn apply_results(state: &mut OmpState, message: &Map<String, Value>) {
             );
             if result.error {
                 *error = Some(true);
+            }
+            reference_assign_result_status(status, result.error);
+            if let Some(raw) = result.status.as_deref() {
+                if let Some(mapped) = reference_native_tool_status(raw) {
+                    *status = Some(mapped);
+                }
             }
             if TOOL_IMAGES && !result.images.is_empty() {
                 // ported verbatim, `transcript-records.ts:237-240`: addressed by the call it
@@ -639,6 +688,7 @@ fn pi_results(message: &Map<String, Value>) -> Vec<PiToolResult> {
             id: id.to_string(),
             text: result_text(block.get("content")),
             error: block.get("isError").and_then(Value::as_bool) == Some(true),
+            status: block.get("status").and_then(Value::as_str).map(str::to_string),
             images,
         });
     }
@@ -685,7 +735,7 @@ fn pi_notice(entry: &Map<String, Value>) -> Option<ReferencePart> {
         return None;
     }
     let source = entry.get("customType").and_then(Value::as_str).map(str::to_string);
-    Some(ReferencePart::Notice { text: text.to_string(), source })
+    Some(ReferencePart::Notice { text: text.to_string(), source , id: None})
 }
 
 /// The summaries OmO's `task` calls gave their tasks, by task id
@@ -761,10 +811,8 @@ fn omo_task_results(
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .or_else(|| label(task.get("model")));
-            let status = match status.as_str() {
-                "completed" => ReferenceTaskStatus::Completed,
-                "cancelled" | "canceled" | "aborted" => ReferenceTaskStatus::Cancelled,
-                _ => ReferenceTaskStatus::Failed,
+            let Some(status) = reference_native_task_status(&status) else {
+                continue;
             };
             let result_length = result.chars().count();
             let cut = result_length > TASK_RESULT_MAX;
@@ -792,6 +840,8 @@ fn omo_task_results(
                         .or_else(|| amount(task.get("tokens"))),
                     result,
                     result_cut: cut.then_some(true),
+                
+                    parent_call_id: reference_parent_call_id(&Value::Object(task.clone())),
                 },
             );
         }
@@ -1047,7 +1097,7 @@ mod tests {
             ]
         );
         match &assistant.parts[0] {
-            ReferencePart::Thinking { text } => assert_eq!(text, "I should read the directory"),
+            ReferencePart::Thinking { text, .. } => assert_eq!(text, "I should read the directory"),
             other => panic!("expected thinking, got {:?}", other.kind()),
         }
         assert_eq!(text_of(&assistant.parts[1]), "Listing now.");
@@ -1108,7 +1158,7 @@ mod tests {
         assert_eq!(output, "started");
 
         let tasks = match &turns[2].parts[0] {
-            ReferencePart::TaskResult { tasks } => tasks,
+            ReferencePart::TaskResult { tasks , id: None} => tasks,
             other => panic!("expected a task result, got {:?}", other.kind()),
         };
         assert_eq!(tasks.len(), 2);
@@ -1133,7 +1183,7 @@ mod tests {
         assert_eq!(tasks[1].result, "compile error");
 
         match &turns[3].parts[0] {
-            ReferencePart::Notice { text, source } => {
+            ReferencePart::Notice { text, source , ..} => {
                 assert_eq!(text, "context compacted");
                 assert_eq!(source.as_deref(), Some("system-notice"));
             }
@@ -1156,14 +1206,15 @@ mod tests {
                 ReferencePartKind::Tool,
                 ReferencePartKind::Tool,
                 ReferencePartKind::Tool,
+                ReferencePartKind::Tool,
                 ReferencePartKind::Text,
                 ReferencePartKind::Text,
                 ReferencePartKind::Text,
             ],
-            "the empty text block, the unknown block and the image-only user part add nothing"
+            "the empty text block, the unknown block and the image-only user part add nothing; the unmatched result stays an explicit orphan"
         );
         match &assistant.parts[0] {
-            ReferencePart::Thinking { text } => assert_eq!(text, "via the text field"),
+            ReferencePart::Thinking { text, .. } => assert_eq!(text, "via the text field"),
             other => panic!("expected thinking, got {:?}", other.kind()),
         }
         let (name, summary, _, output, error) = tool_of(&assistant.parts[1]);
@@ -1175,9 +1226,15 @@ mod tests {
         let (name, summary, input, _, _) = tool_of(&assistant.parts[3]);
         assert_eq!((name, summary), ("weird", "weird"));
         assert!(input.starts_with('['), "input was {input}");
-        assert_eq!(text_of(&assistant.parts[4]), "partial");
-        assert_eq!(text_of(&assistant.parts[5]), "Error: 401 unauthorized");
-        assert_eq!(text_of(&assistant.parts[6]), "final answer");
+        let (name, _, _, output, error) = tool_of(&assistant.parts[4]);
+        assert_eq!((name, output, error), ("tool_result", "orphan", false));
+        match &assistant.parts[4] {
+            ReferencePart::Tool { call_id, .. } => assert_eq!(call_id.as_deref(), Some("never-seen")),
+            other => panic!("expected the orphan result, got {:?}", other.kind()),
+        }
+        assert_eq!(text_of(&assistant.parts[5]), "partial");
+        assert_eq!(text_of(&assistant.parts[6]), "Error: 401 unauthorized");
+        assert_eq!(text_of(&assistant.parts[7]), "final answer");
         assert_eq!(assistant.started_at.as_deref(), Some("2026-10-06T04:00:02.000Z"));
         assert_eq!(assistant.ended_at.as_deref(), Some("2026-10-06T04:00:08.000Z"));
     }
@@ -1214,7 +1271,7 @@ mod tests {
         assert_eq!(text_of(&turns[2].parts[0]), "ship 2026.10.7");
         // the skill the runtime loaded rides the request as its own part
         assert_eq!(turns[0].parts.len(), 2, "the request then the chip");
-        let ReferencePart::Skill { skill } = &turns[0].parts[1] else {
+        let ReferencePart::Skill { skill , ..} = &turns[0].parts[1] else {
             panic!("the second part is the skill chip, got {:?}", turns[0].parts[1].kind());
         };
         assert_eq!(skill.name, "code-review");
@@ -1226,7 +1283,7 @@ mod tests {
         );
         // the legacy envelope form chips the same way
         assert_eq!(turns[2].parts.len(), 2);
-        let ReferencePart::Skill { skill } = &turns[2].parts[1] else {
+        let ReferencePart::Skill { skill , id: None} = &turns[2].parts[1] else {
             panic!("the legacy envelope's chip is the second part");
         };
         assert_eq!(skill.name, "release");
@@ -1310,6 +1367,26 @@ mod tests {
     }
 
     #[test]
+    fn native_work_omp_parent_usage_and_diff() {
+        let text = concat!(
+            r#"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"usage 9 status failed"}]}}"#,
+            "\n",
+            r#"{"type":"message","message":{"role":"assistant","model":"omp-model","usage":{"input":8,"output":9,"cacheWrite":1},"content":[{"type":"toolCall","id":"c1","name":"edit","arguments":{"old_string":"a","new_string":"b"}}]}}"#,
+            "\n",
+            r#"{"type":"custom_message","customType":"omo-senpi:wake","display":false,"details":[{"customType":"senpi-task.completion","details":[{"task_id":"st","status":"cancelled","parentCallId":"c1","final_response":"stopped"}]}]}"#,
+            "\n",
+        );
+        let turns = parse(text);
+        assert!(turns[0].meta.is_none());
+        assert_eq!(turns[1].meta.as_ref().unwrap().model.as_deref(), Some("omp-model"));
+        assert_eq!(turns[1].meta.as_ref().unwrap().usage.as_ref().unwrap().cache_write_tokens, Some(1));
+        assert!(turns[1].parts.iter().any(|part| matches!(part, ReferencePart::Diff { .. })));
+        let ReferencePart::TaskResult { tasks, .. } = turns.iter().find_map(|turn| turn.parts.iter().find(|part| matches!(part, ReferencePart::TaskResult { .. }))).unwrap() else { unreachable!() };
+        assert_eq!(tasks[0].status, ReferenceTaskStatus::Cancelled);
+        assert_eq!(tasks[0].parent_call_id.as_deref(), Some("c1"));
+    }
+
+    #[test]
     fn omp_parser_refuses_another_family() {
         for kind in [
             ReferenceNativeHistoryKind::Claude,
@@ -1373,5 +1450,75 @@ mod tests {
         assert_eq!(text_of(&turns[1].parts[0]), "first answer");
         assert_eq!(text_of(&turns[2].parts[0]), "woken by a monitor");
         assert_eq!(turns[1].ended_at.as_deref(), Some("2026-10-06T07:00:02.000Z"));
+    }
+
+    fn omp_wake(status: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "custom_message",
+                "customType": "omo-senpi:wake",
+                "display": false,
+                "timestamp": "2026-10-06T08:00:00.000Z",
+                "details": [{
+                    "customType": "senpi-task.completion",
+                    "details": [{ "task_id": "st-x", "status": status, "final_response": "out" }]
+                }]
+            })
+        )
+    }
+
+    fn omp_only_task(text: &str) -> Option<ReferenceTaskStatus> {
+        parse(text).into_iter().find_map(|turn| {
+            turn.parts.into_iter().find_map(|part| match part {
+                ReferencePart::TaskResult { tasks, .. } => Some(tasks[0].status),
+                _ => None,
+            })
+        })
+    }
+
+    #[test]
+    fn omp_unknown_task_word_is_omitted_not_failed() {
+        assert_eq!(omp_only_task(&omp_wake("mystery")), None);
+        let tool = concat!(
+            r#"{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"c-unk","name":"bash","arguments":{"command":"echo"},"status":"mystery"}]}}"#,
+            "\n",
+        );
+        let turns = parse(tool);
+        let ReferencePart::Tool { status, .. } = &turns[0].parts[0] else { panic!("{:?}", turns) };
+        assert_eq!(*status, None);
+    }
+
+    #[test]
+    fn omp_unfinished_task_in_a_closed_stream_is_unverifiable() {
+        assert_eq!(omp_only_task(&omp_wake("running")), Some(ReferenceTaskStatus::Unverifiable));
+    }
+
+    #[test]
+    fn omp_open_tail_task_is_running_only_on_a_live_owning_tail() {
+        let text = omp_wake("running");
+        assert_eq!(omp_only_task(&text), Some(ReferenceTaskStatus::Unverifiable));
+        let mut turns = parse(&text);
+        crate::remote::reference_chat::history_parse::reference_finalize_work_status(&mut turns, true);
+        assert_eq!(omp_only_task_from(&turns), ReferenceTaskStatus::Running);
+    }
+
+    fn omp_only_task_from(turns: &[ReferenceTurn]) -> ReferenceTaskStatus {
+        turns.iter().find_map(|turn| {
+            turn.parts.iter().find_map(|part| match part {
+                ReferencePart::TaskResult { tasks, .. } => Some(tasks[0].status),
+                _ => None,
+            })
+        }).expect("task")
+    }
+
+    #[test]
+    fn omp_recorded_task_failure_stays_failed() {
+        assert_eq!(omp_only_task(&omp_wake("error")), Some(ReferenceTaskStatus::Failed));
+    }
+
+    #[test]
+    fn omp_recorded_task_cancel_stays_cancelled() {
+        assert_eq!(omp_only_task(&omp_wake("aborted")), Some(ReferenceTaskStatus::Cancelled));
     }
 }
