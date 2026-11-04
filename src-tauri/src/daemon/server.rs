@@ -4083,6 +4083,7 @@ impl DaemonServer {
         let plugins = Arc::new(super::plugins::registry::Registry::new(
             isolated_dir.clone().unwrap_or_else(|| get_default_session_path().parent()
                 .unwrap_or_else(|| Path::new(".")).to_path_buf()).join("plugin-approvals.json")));
+        handover_manager.set_plugin_approvals(Arc::clone(&plugins.approvals));
         // OSC 7501 summaries from every mirror this daemon answers for become Protocol states.
         let protocol_reporters =
             Arc::new(crate::terminal::foreground::ProtocolReporters::default());
@@ -6283,6 +6284,7 @@ impl DaemonServer {
             }
         }
 
+        self.plugins.restore().await?;
         if handover_from.is_none() {
             self.session_service.restore_size_ownership().await?;
             self.restore_remote_sessions_at(self.remote_sessions_path.clone())
@@ -6307,6 +6309,8 @@ impl DaemonServer {
                     .map_err(crate::ipc::IpcError::internal)?;
                 manager.adopt_recorded_layouts(&grants_legacy)
                     .map_err(crate::ipc::IpcError::internal)?;
+                manager.adopt_recorded_plugins(&grants_legacy)
+                    .map_err(crate::ipc::IpcError::internal)?;
                 manager
                     .adopt_recorded_pane_grants(&grants_legacy)
                     .map_err(crate::ipc::IpcError::internal)
@@ -6317,7 +6321,6 @@ impl DaemonServer {
             }
         }
 
-        self.plugins.restore().await?;
         self.start_plugins().await?;
 
         // Both platform listeners share this call site: unix binds the socket path, every other
@@ -8897,6 +8900,10 @@ impl DaemonServer {
                     reason: "Session transfer unsupported on non-Unix".to_string(),
                 },
                 Ok(DaemonRequest::CommitHandover { .. }) => {
+                    if let Err(error) = self.plugins.stop_all().await {
+                        tracing::error!(%error, "Plugin teardown failed before handover commit");
+                        break;
+                    }
                     let manager = Arc::clone(&self.handover_manager);
                     let service = Arc::clone(&self.terminal_service);
                     // Injected reply loss (tests / QA): before the decision is recorded the
@@ -8920,7 +8927,12 @@ impl DaemonServer {
                             crate::daemon::qa_producers::note_authority_stage("predecessor-committed", &self.handover_manager).await;
                             DaemonResponse::CommitHandoverOk
                         }
-                        Err(e) => handover_failure_response(None, e.to_string()),
+                        Err(e) => {
+                            if let Err(error) = self.start_plugins().await {
+                                tracing::error!(%error, "Plugin resume failed after rejected commit");
+                            }
+                            handover_failure_response(None, e.to_string())
+                        },
                     }
                 }
                 Ok(DaemonRequest::AbortHandover) => {
