@@ -426,6 +426,7 @@ impl LegacyPeer {
 
         if let Some(snapshot) = agent_states.snapshot.as_ref() {
             let message = DaemonStreamMessage::AgentState {
+                foreground_command: None,
                 session_id: snapshot.session_id.as_str().into(),
                 state: snapshot.state.as_str().into(),
                 agent: snapshot.agent.as_deref().map(Into::into),
@@ -470,6 +471,7 @@ impl LegacyPeer {
                 report = agent_states.receiver.recv() => match report {
                     Ok(report) if report.state.session_id == session_id => {
                         let message = DaemonStreamMessage::AgentState {
+                            foreground_command: None,
                             session_id: report.state.session_id.as_str().into(),
                             state: report.state.state.as_str().into(),
                             agent: report.state.agent.as_deref().map(Into::into),
@@ -490,6 +492,7 @@ impl LegacyPeer {
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         if let Some(current) = agent_states.resynchronize(session_id) {
                             let message = DaemonStreamMessage::AgentState {
+                                foreground_command: None,
                                 session_id: current.session_id.as_str().into(), state: current.state.as_str().into(),
                                 agent: current.agent.as_deref().map(Into::into), provider_session: current.provider_session,
                                 detail: current.detail.as_deref().map(Into::into),
