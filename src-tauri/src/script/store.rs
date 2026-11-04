@@ -1,8 +1,29 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::{Path, PathBuf}, sync::Arc};
 
-pub type Registry = Arc<parking_lot::Mutex<Store>>;
+pub type Registry = Arc<Shared>;
 pub type Ledger = BTreeMap<String, u64>;
+
+pub struct Shared {
+    pub store: parking_lot::Mutex<Store>,
+    pub execution: parking_lot::Mutex<()>,
+}
+
+impl Shared {
+    pub fn load(root: &Path) -> Result<Registry, String> {
+        Ok(Arc::new(Self { store: parking_lot::Mutex::new(Store::load(root)?),
+            execution: parking_lot::Mutex::new(()) }))
+    }
+
+    pub fn freeze(&self) -> Ledger {
+        let _execution = self.execution.lock();
+        let mut store = self.store.lock();
+        store.paused = true;
+        store.ledger.clone()
+    }
+
+    pub fn resume(&self) { self.store.lock().paused = false; }
+}
 
 pub struct Store {
     pub ledger: Ledger,
