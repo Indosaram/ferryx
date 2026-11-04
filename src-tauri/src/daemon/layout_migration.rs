@@ -78,6 +78,7 @@ fn convert_workspace(workspace: &Value, id: &str, mapping: &mut BTreeMap<String,
 
 fn convert_saved(saved: &Value, workspace: &Value, scope: &str, mapping: &mut BTreeMap<String, u64>) -> Result<Layout, String> {
     let mut layout = Layout::default();
+    layout.scope = Some(scope.into());
     if let Some(tabs) = saved["tabs"].as_array() {
         for tab in tabs {
             let id = text(tab, "id").to_owned();
@@ -127,11 +128,11 @@ fn content(state: &Value, workspace: &Value, tab: &Value, visual: &str) -> Resul
     Ok(match kind {
         "file" => {
             let file = pane.get("file").unwrap_or(pane);
-            Content::File { path: file["path"].as_str().or_else(|| tab["path"].as_str()).unwrap_or("").into(), line: file["line"].as_u64(), col: file["col"].as_u64() }
+            Content::File { path: file["path"].as_str().or_else(|| tab["path"].as_str()).unwrap_or("").into(), line: file["line"].as_u64(), col: file["col"].as_u64(), ownership: metadata(pane, tab, &["backendSessionId", "workspaceId", "previewId", "remote"]) }
         },
-        "browser" => Content::Browser { url: pane["browser"]["url"].as_str().or_else(|| pane["url"].as_str()).or_else(|| tab["browser"]["url"].as_str()).unwrap_or("").into() },
+        "browser" => Content::Browser { url: pane["browser"]["url"].as_str().or_else(|| pane["url"].as_str()).or_else(|| tab["browser"]["url"].as_str()).or_else(|| tab["url"].as_str()).unwrap_or("").into(), identity: metadata(pane.get("browser").unwrap_or(pane), tab, &["browserId", "workspaceId", "worktreePath"]) },
         "dag" => Content::Dag,
-        "changes" => Content::Changes,
+        "changes" => Content::Changes { checkout: metadata(pane, tab, &["workspaceId", "worktreePath", "worktree"]) },
         "remote-desktop" | "remoteDesktop" => Content::RemoteDesktop { host_id: text(pane, "hostId").into() },
         _ => {
             let frontend = pane["sessionId"].as_str().or_else(|| state["sessionIdsByLeafId"][visual].as_str())
@@ -141,6 +142,10 @@ fn content(state: &Value, workspace: &Value, tab: &Value, visual: &str) -> Resul
             Content::Terminal { backend_session_id: backend.into() }
         },
     })
+}
+
+fn metadata(pane: &Value, tab: &Value, fields: &[&str]) -> BTreeMap<String, Value> {
+    fields.iter().filter_map(|field| pane.get(*field).or_else(|| tab.get(*field)).map(|value| ((*field).into(), value.clone()))).collect()
 }
 
 fn convert_group(tree: &Value, groups: &Value) -> Result<TabGroupLayout, String> {
