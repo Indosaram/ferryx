@@ -411,6 +411,8 @@ mod pane_liveness_adopted_ownership_tests {
         worktree: Option<WorktreeIdentity>,
         incarnation: Option<&str>,
     ) -> DaemonSessionDetails {
+        foreground_command: None,
+        agent: None,
         let mut details = DaemonSessionDetails::new(crate::daemon::protocol::DaemonSessionDetailsParams {
             session_id: "session-owned".into(),
             workspace_id: workspace_id.map(str::to_owned),
@@ -9980,6 +9982,7 @@ impl DaemonServer {
             .and_then(|subscription| subscription.snapshot.as_ref())
         {
             let msg = DaemonStreamMessage::AgentState {
+                foreground_command: None,
                 session_id: Cow::Borrowed(&snapshot.session_id),
                 state: Cow::Borrowed(&snapshot.state),
                 agent: snapshot.agent.as_deref().map(Cow::Borrowed),
@@ -10043,6 +10046,7 @@ impl DaemonServer {
                             match report {
                                 Ok(report) if report.state.session_id == session_id => {
                                     let msg = DaemonStreamMessage::AgentState {
+                                        foreground_command: None,
                                         session_id: Cow::Borrowed(&session_id),
                                         state: Cow::Borrowed(&report.state.state),
                                         agent: report.state.agent.as_deref().map(Cow::Borrowed),
@@ -10071,6 +10075,7 @@ impl DaemonServer {
                                     if let Some(subscription) = agent_state_rx.as_mut() {
                                         if let Some(current) = subscription.resynchronize(&session_id) {
                                             let msg = DaemonStreamMessage::AgentState {
+                                                foreground_command: None,
                                                 session_id: Cow::Borrowed(&session_id),
                                                 state: Cow::Borrowed(&current.state),
                                                 agent: current.agent.as_deref().map(Cow::Borrowed),
