@@ -40,6 +40,7 @@ pub(crate) mod test_support;
 pub mod agent_history;
 pub mod scoped_contracts;
 pub mod session;
+pub mod session_names;
 #[cfg(all(feature = "desktop", any(target_os = "macos", test)))]
 mod shortcut_dispatch;
 pub mod ssh;

@@ -348,6 +348,7 @@ export function serializeWorkspaceState(
     persistedTerminalSessions[id] = {
       localSessionId: sess.id,
       backendSessionId: sess.backendSessionId,
+      ...(sess.name ? { name: sess.name } : {}),
       processState: getSessionProcessState(sess),
       worktreePath: sess.worktreePath ?? sess.cwd,
       cwd: sess.cwd,
@@ -762,6 +763,7 @@ export function deserializeWorkspaceState(
       workspaceId,
       worktree: matchingWorktree ? worktreeIdentity(matchingWorktree) : null,
       backendSessionId,
+      ...(typeof sess.name === "string" && sess.name ? { name: sess.name } : {}),
       processState,
       lifecycle,
       daemonEpoch,

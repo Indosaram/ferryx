@@ -50,6 +50,7 @@ export function computeTerminalTabDisplay(
     const result = resolveTerminalTabText({
       customLabel: isTerminalTab(tab) ? tab.customLabel : undefined,
       baseLabel: tab.label,
+      sessionName: sessions[sessionId]?.name,
       activity: activity
         ? { title: activity.title, isAgent: activity.isAgent, agentType: activity.agentType }
         : undefined,

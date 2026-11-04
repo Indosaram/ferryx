@@ -12,6 +12,7 @@ import {
 import { resolveAgentLogo } from "../lib/agentIcon";
 import { agentDisplayNameForType, classifyTerminalTitleActivity, formatTabLabelFromTitle, isBareAgentTitle, normalizeTerminalTitle, parseAgentTitle } from "../lib/agentTitle";
 import { workspaceName } from "../lib/branchFilter";
+import { uniqueSessionName } from "../lib/sessionNames";
 import { browserTabIdForBrowserId, closeBrowser, createBrowser, createPopupBrowser, navigateBrowser, onBrowserStateChanged, reloadBrowser, type BrowserReloadOptions, type BrowserSessionCreatedPayload } from "../lib/browserTauri";
 import { closeTerminal, describeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalFocus, onNativeTerminalTitle, spawnTerminal, toIpcError, waitForTerminalExit, type SpawnTerminalRequest } from "../lib/tauri";
 import * as tauriIpc from "../lib/tauri";
@@ -1343,6 +1344,14 @@ export function useWorkspaceStore({
       }
       const sessionId = createId("session");
       const tabId = createId("tab");
+      // A tab opened without a label gets a readable default name, derived from the daemon's
+      // session id like `agents list` does and unique among this workspace's sessions.
+      const name = label === undefined && backendSessionId
+        ? uniqueSessionName(
+            backendSessionId,
+            Object.values(stateRef.current.sessions).flatMap((existing) => existing?.name ? [existing.name] : []),
+          )
+        : undefined;
       const session: TerminalSession = {
         id: sessionId,
         cwd: worktree.path,
@@ -1350,6 +1359,7 @@ export function useWorkspaceStore({
         workspaceId,
         worktree: worktreeIdentity(worktree),
         backendSessionId,
+        ...(name ? { name } : {}),
         ...(daemonEpoch !== null ? { daemonEpoch } : {}),
         ...(incarnation !== null ? { incarnation } : {}),
         ...(backendOverride?.attemptGeneration !== undefined
