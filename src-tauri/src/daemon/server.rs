@@ -14424,20 +14424,24 @@ mod instance_lock_deadline_tests {
         drop(held_again);
 
         // 4. Predecessor releases WITHIN deadline: successor acquires successfully.
-        let held_third = try_lock_file(open_secure_lock_file(&path).unwrap()).unwrap();
-        let release_thread = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            drop(held_third);
-        });
-        let acquired = lock_file_with_optional_wait(
+        // The predecessor releases from the successor's own pre-attempt hook, so this case
+        // cannot depend on how quickly a sleeping thread gets scheduled under test load.
+        let mut held_third = Some(try_lock_file(open_secure_lock_file(&path).unwrap()).unwrap());
+        let mut released = false;
+        let acquired = lock_file_with_optional_wait_internal(
             &path,
             Some(std::time::Instant::now() + std::time::Duration::from_millis(400)),
+            || {
+                if !released {
+                    released = true;
+                    drop(held_third.take());
+                }
+            },
         );
         assert!(
             acquired.is_ok(),
             "successor must acquire lock when predecessor releases within deadline"
         );
-        release_thread.join().unwrap();
         drop(acquired);
 
         // 5. Pre-check passes with remaining window, but delay before lock crosses deadline:
