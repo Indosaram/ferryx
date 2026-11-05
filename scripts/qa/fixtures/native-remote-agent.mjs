@@ -81,14 +81,31 @@ export function subscribeSetupProbe(target, signal, timeoutMs = 150000) {
     const enqueue = () => { chain = chain.then(inspect); };
     const watchDir = resolve(completionPath ?? markerPath, '..');
     const watcher = watch(watchDir, enqueue);
-    const poll = setInterval(enqueue, 250);
     const timer = setTimeout(() => finish(fail('Interactive setup probe completion deadline; task retained, no process killed')), timeoutMs);
-    dispose = () => { watcher.close(); clearInterval(poll); clearTimeout(timer); signal.removeEventListener('abort', abort); };
+    dispose = () => { watcher.close(); clearTimeout(timer); signal.removeEventListener('abort', abort); };
     signal.addEventListener('abort', abort, { once: true });
     if (signal.aborted) abort(); else enqueue();
   });
   promise.catch(() => {});
   return { promise, close: () => dispose() };
+}
+
+export async function stopSetupProbeWorker({ profile, worker, signal }, {
+  subscribe = subscribeSetupProbe, waitExit = waitWindowsExactPidExit, persist = persistLaunch, invoke = command,
+} = {}) {
+  const { pid, processStart } = worker.owner ?? {};
+  if (!Number.isSafeInteger(pid) || pid <= 0 || !processStart) throw fail('Setup probe worker lacks exact process identity; profile preserved');
+  const subscribed = subscribe({ completionPath: worker.completionPath, markerPath: worker.wrapperMarkerPath }, signal);
+  const exited = waitExit(pid, processStart, signal);
+  const stopped = Promise.all([exited, subscribed.promise]);
+  stopped.catch(() => {});
+  try {
+    await persist(join(profile, 'evidence', 'setup-probes', 'worker-queue', 'zzzz-stop.req.json'), { stop: true });
+    await stopped;
+    await invoke('schtasks', worker.deleteArgs, signal);
+  } finally {
+    subscribed.close();
+  }
 }
 
 export async function launchInteractiveGuiTask({ profile, signal }, { invoke = command, persist = persistLaunch } = {}) {
@@ -193,7 +210,7 @@ export async function runInteractiveSetupProbe({ profile, gui, script, signal },
     const result = await (fastFirst ? fastFirst.promise : subscribed.promise);
     fastFirst?.close();
     if (subscribe === subscribeSetupProbe && invoke === command) {
-      activeProbeWorkers.set(profile, { wrapperMarkerPath, subscribed, deleteArgs: plan.deleteArgs, taskName: plan.taskName });
+      activeProbeWorkers.set(profile, { owner: result.owner, completionPath, wrapperMarkerPath, deleteArgs: plan.deleteArgs, taskName: plan.taskName });
     }
     report.completed = true;
     report.result = result;
@@ -1252,10 +1269,10 @@ async function dispatch(method, args, signal) {
       if (live.exited) return { pid: args.pid, processStart: args.processStart, exited: true };
       if (live.processStart !== args.processStart) throw fail('PID incarnation changed before exit subscription');
       const owned = children.get(args.pid);
-      if (owned) await Promise.race([owned.exit, new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))]);
-      else if (process.platform === 'win32') {
+      if (process.platform === 'win32') {
         await waitWindowsExactPidExit(args.pid, args.processStart, signal);
-      } else {
+      } else if (owned) await Promise.race([owned.exit, new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))]);
+      else {
         // pidfd is an exact event subscription, not /proc polling. Recheck start
         // after opening pidfd so PID reuse during subscription is refused.
         await command('python3', ['-c',
@@ -1278,19 +1295,12 @@ async function dispatch(method, args, signal) {
       if (!profiles.has(args.profile)) throw fail('Unowned profile removal refused');
       const worker = activeProbeWorkers.get(args.profile);
       if (worker) {
+        await stopSetupProbeWorker({ profile: args.profile, worker, signal });
         activeProbeWorkers.delete(args.profile);
-        const workerDir = join(args.profile, 'evidence', 'setup-probes', 'worker-queue');
-        try {
-          await persistLaunch(join(workerDir, 'zzzz-stop.req.json'), { stop: true });
-          await Promise.race([worker.subscribed.promise, new Promise((r) => setTimeout(r, 5000))]);
-        } catch {} finally {
-          worker.subscribed.close();
-          try { await command('schtasks', worker.deleteArgs, signal); } catch {}
-          const tasks = pendingSetupTasks.get(args.profile);
-          if (tasks) {
-            tasks.delete(worker.taskName);
-            if (tasks.size === 0) pendingSetupTasks.delete(args.profile);
-          }
+        const tasks = pendingSetupTasks.get(args.profile);
+        if (tasks) {
+          tasks.delete(worker.taskName);
+          if (tasks.size === 0) pendingSetupTasks.delete(args.profile);
         }
       }
       const retained = pendingSetupTasks.get(args.profile);
