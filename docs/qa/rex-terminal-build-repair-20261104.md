@@ -40,16 +40,74 @@ Evidence paths below are relative to the sibling verification worktrees' shared
   standalone.rs imports worktree/naming.rs; it is now in the fingerprint
   closure, with stale-receipt regression coverage. Never rewrite only the hash.
 
-### Still open: malformed-stream seed property
+### Malformed-stream seed property: history-boundary root cause repaired
 
 Linux `verify-linux/gha3/rex-verify-linux-gate/1.log:7844-11953` records
 proptest seed `ffb19fa8fe082322db4d10035ec8c3a6ee1eac4c3b4745cd834cd5192abf0dc6`.
-The exact 4096-byte input at 115 columns, 2 rows is now a checked-in fixture
-and deterministic test. Original row 12 has a final-column `+` that is absent
-after replay; no assertion or normalization was relaxed. The actual native
-formatter/parser cause is NOT established or repaired. The new deterministic
-regression is expected to remain red until that repair; do not approve this lane
-as complete based on the other source changes.
+The exact 4096-byte input at 115 columns, 2 rows remains an unchanged checked-in
+fixture. Source tracing establishes a stale spacer head rather than a lost
+physical `+` cell:
+
+1. The input contains a wide CJK character (UTF-8 at offset 769), controls that
+   scroll rows into history, and subsequent overwrites at the left edge. At
+   this two-row height a wrapped wide character can reach active row zero with
+   its preceding spacer head already in history.
+2. Both `Terminal.writeCell` cleanup branches (`.wide` and `.spacer_tail`)
+   required `cursor.y > 0` before clearing the preceding spacer head. That
+   incorrectly equates active row zero with the first physical retained row.
+   It leaves a stale spacer head after the wide character is overwritten.
+3. `selection::screen_row_text` uses a non-rectangular, unwrapped selection;
+   native `PageListFormatter.format` deliberately extends an endpoint on a
+   spacer head to the first cell of the following row. Thus original row 12
+   reports the following row's `+` as its final character. The VT formatter,
+   using physical rows (`unwrap=false`), skips the spacer head and does not
+   emit this phantom `+`. Replaying VT therefore exposes the stale source
+   invariant rather than losing a legitimate physical cell.
+4. Native commit `216426b657b93d8fadd11d7506615f744581221e` makes
+   `cursorCellEndOfPrev` optional and uses the physical pin's `up(1)` in both
+   cleanup branches, including when the previous row is history. Only an
+   actual spacer head is cleared; real narrow text and wide spacer tails are
+   preserved. The formatter, FFI ABI, VT row/wrap/cursor serialization, and
+   existing property acceptance are unchanged.
+
+The native deterministic test constructs both wide-cell and tail overwrites
+at 115x2 after the head scrolls into history. The exact Rust fixture test now
+also requires unnormalized physical-row equality and exact grid hashes after
+SGR output, final-column pending wrap, subsequent text, and cursor rewriting;
+it additionally requires seed fixed-point equality. No mismatch is folded away.
+These are source-grounded fixes and unexecuted tests, NOT a passing runtime
+claim. The native pin and source lock are advanced together, preventing stale
+native artifact-cache reuse.
+
+Integration `ebf2150a9` was merged into the lane at `8815f82b2`; the watcher
+now retains both explicit async iteration and the UI lane's cancellation/error
+handling, alongside the short macOS socket root.
+
+### Native source transport before consolidated verification
+
+The new native commit is local and has NOT been pushed upstream. The parent
+must transport this source commit as well as the superproject revision; an
+ordinary upstream submodule fetch cannot find it yet. From the owned native
+repository (not the canonical read-only clone), create a source bundle for
+remote transfer:
+
+```sh
+git -C src-tauri/vendor/ghostty bundle create /tmp/rex-history-spacer.bundle rex/repair-history-spacer ^83fb95624b0439ee660c2679b43b38c8b63769cd
+```
+
+On each remote isolated verification worktree, first initialize the upstream
+base, then import the transferred source bundle before updating the pin:
+
+```sh
+git -C src-tauri/vendor/ghostty fetch /tmp/rex-history-spacer.bundle refs/heads/rex/repair-history-spacer
+git -C src-tauri/vendor/ghostty checkout --detach 216426b657b93d8fadd11d7506615f744581221e
+git submodule update --init --recursive
+```
+
+For a fresh remote worktree, initialize the submodule at superproject base
+`35c984684` before checking out the consolidated superproject revision; otherwise
+initialization attempts to fetch the private native commit from upstream.
+On Windows use the actual transferred bundle path instead of `/tmp/...`.
 
 ## Remote provisioning (deferred, do not run on owner's Mac)
 

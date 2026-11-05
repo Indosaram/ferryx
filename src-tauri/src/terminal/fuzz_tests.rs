@@ -135,17 +135,35 @@ fn feed_mirror(mirror: &mut ScreenMirror, bytes: &[u8]) {
 }
 
 /// Exact minimized input retained from verify-linux/gha3/rex-verify-linux-gate/1.log.
-/// Keep the acceptance assertion intact while repairing the native formatter.
+/// Keep the acceptance assertion intact across the native history-boundary repair.
 #[test]
 fn malformed_stream_seed_round_trip_regression() {
     #[derive(serde::Deserialize)]
     struct Case { cols: u16, rows: u16, chunks: Vec<Vec<u8>> }
     let case: Case = serde_json::from_str(include_str!("../../tests/fixtures/screen_mirror_malformed_round_trip.json")).unwrap();
     let mut mirror = ScreenMirror::new(case.cols, case.rows).unwrap();
-    for chunk in case.chunks { mirror.feed(&chunk); }
+    assert_eq!((case.cols, case.rows), (115, 2));
+    assert_eq!(case.chunks.iter().map(Vec::len).sum::<usize>(), 4096);
+    for chunk in &case.chunks { mirror.feed(chunk); }
     let seed = mirror.seed().unwrap();
-    let rebuilt = ScreenMirror::from_seed(&seed).unwrap();
+    let mut rebuilt = ScreenMirror::from_seed(&seed).unwrap();
     assert_eq!(without_spacer_heads(rebuilt.grid_text_for_test()), without_spacer_heads(mirror.grid_text_for_test()));
+    // The former phantom '+' must not be normalized away. Check the physical
+    // rows exactly, then exercise writes, cursor motion, SGR, and a pending wrap.
+    assert_eq!(rebuilt.grid_text_for_test(), mirror.grid_text_for_test());
+    for continuation in [
+        &b"\x1b[1;31m+\x1b[0m"[..],
+        &b"\r\n\x1b[115G+"[..],
+        &b"NEXT\x1b[1D!\r\n"[..],
+    ] {
+        mirror.feed(continuation);
+        rebuilt.feed(continuation);
+        assert_eq!(rebuilt.grid_hash(), mirror.grid_hash());
+        assert_eq!(rebuilt.grid_text_for_test(), mirror.grid_text_for_test());
+    }
+    let reseed = rebuilt.seed().unwrap();
+    let mut again = ScreenMirror::from_seed(&reseed).unwrap();
+    assert_eq!(seed_hash(&again.seed().unwrap()), seed_hash(&reseed));
 }
 
 /// Narrowest grid whose scrollback row count is bounded by `2 * MIRROR_SCROLLBACK_LINES`.
