@@ -38,31 +38,69 @@ test('clean-layout edge contract compiles and executes without ephemeral evidenc
   assert.equal(readFileSync(sentinel, 'utf8'), 'not owned by the driver');
 });
 
-for (const [os, abi, manifests] of [['windows', 'msvc', true], ['windows', 'gnu', false], ['linux', 'gnu', false]]) {
+for (const [os, abi, target, manifests] of [
+  ['windows', 'msvc', 'x86_64-pc-windows-msvc', true],
+  ['windows', 'gnu', 'x86_64-pc-windows-gnu', false],
+  ['linux', 'gnu', 'x86_64-unknown-linux-gnu', false],
+]) {
   test(`build script emits MSVC manifest arguments only for ${os}/${abi}`, t => {
     const root = owned(t);
-    // Execute the real build-script control flow; external Tauri/Ghostty builders
-    // are replaced, not the environment checks or emitted Cargo directives.
-    const source = readFileSync(join(repo, 'src-tauri/build.rs'), 'utf8').replace(
-      '#[path = "native_terminal/build_ghostty.rs"]\nmod build_ghostty;',
-      `mod build_ghostty { pub fn build_ghostty_vt() -> Result<(), String> { Ok(()) } }
+    // Execute the real build-script control flow; external Tauri/Ghostty builders are replaced,
+    // not the environment checks or emitted Cargo directives. Every `mod` the script declares has
+    // to be replaced as well: the probe compiles a copy of build.rs in a temp dir, so a module
+    // that still resolves against src-tauri/ fails with E0583 before any assertion can run.
+    // The Tauri stub reports whether the script asked it to suppress its own manifest, which is
+    // the state build.rs now selects through Attributes rather than by choosing `try_build` vs
+    // `build`.
+    const source = readFileSync(join(repo, 'src-tauri/build.rs'), 'utf8')
+      .replace(
+        '#[path = "native_terminal/build_ghostty.rs"]\nmod build_ghostty;',
+        `mod build_ghostty { pub fn build_ghostty_vt() -> Result<(), String> { Ok(()) } }
 mod tauri_build {
- pub struct Attributes; pub struct WindowsAttributes;
- impl Attributes { pub fn new() -> Self { Self } pub fn windows_attributes(self, _: WindowsAttributes) -> Self { self } }
+ pub struct Attributes { own_manifest: bool }
+ pub struct WindowsAttributes; pub struct CodegenContext;
+ impl CodegenContext { pub fn new() -> Self { Self } }
+ impl Attributes {
+  pub fn new() -> Self { Self { own_manifest: true } }
+  pub fn windows_attributes(mut self, _: WindowsAttributes) -> Self { self.own_manifest = false; self }
+  pub fn codegen(self, _: CodegenContext) -> Self { self }
+ }
  impl WindowsAttributes { pub fn new_without_app_manifest() -> Self { Self } }
- pub fn try_build(_: Attributes) -> Result<(), String> { println!("BUILDER=custom"); Ok(()) }
+ pub fn try_build(attrs: Attributes) -> Result<(), String> {
+  println!("BUILDER=custom MANIFEST={}", if attrs.own_manifest { "default" } else { "suppressed" });
+  Ok(())
+ }
  pub fn build() { println!("BUILDER=default"); }
-}`);
+}`,
+      )
+      .replace(
+        'mod build_platform;',
+        `mod build_platform { pub fn cdylib_export_link_arg(_: &str) -> Option<String> { None } }`,
+      );
     writeFileSync(join(root, 'build.rs'), source);
     const binary = join(root, 'build-probe');
     const compile = run('rustc', ['--edition=2021', join(root, 'build.rs'), '-o', binary]);
     assert.equal(compile.status, 0, compile.stderr);
-    const env = { ...process.env, OUT_DIR: root, CARGO_CFG_TARGET_OS: os, CARGO_CFG_TARGET_ENV: abi };
+    // Cargo always exports TARGET and the package's features to a build script, and build.rs reads
+    // both before its platform branches. The probe must supply them too, or it measures a panic and
+    // an early return instead of the manifest control flow.
+    const env = {
+      ...process.env,
+      OUT_DIR: root,
+      TARGET: target,
+      CARGO_CFG_TARGET_OS: os,
+      CARGO_CFG_TARGET_ENV: abi,
+      CARGO_FEATURE_DESKTOP: '1',
+    };
     delete env.CARGO_FEATURE_NATIVE_TERMINAL;
+
     const result = run(binary, [], { env });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.includes('/MANIFEST'), manifests, result.stdout);
-    assert.match(result.stdout, manifests ? /BUILDER=custom/ : /BUILDER=default/);
+    assert.match(
+      result.stdout,
+      manifests ? /BUILDER=custom MANIFEST=suppressed/ : /BUILDER=custom MANIFEST=default/,
+    );
   });
 }
 

@@ -463,7 +463,22 @@ test('pass-6 cleanup: a SIGTERM-ignoring process tree is force-reaped to the gro
     if (!reaped) { try { process.kill(grandchildPid, 'SIGKILL'); } catch { /* already gone */ } }
     try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ }
   }
-  expect(() => process.kill(-child.pid, 0)).toThrow();
+  // The group outlives its leader: force-reaping signals the group, and the kernel drops a member
+  // asynchronously. A single instantaneous probe therefore measures scheduling latency rather than
+  // teardown, and failed only when the suite ran the file alongside 68 others. Await the exact
+  // state change within a bounded window instead of assuming the kernel won the race.
+  const groupGone = await withDeadline(
+    (async () => {
+      for (;;) {
+        try { process.kill(-child.pid, 0); } catch { return true; }
+        await new Promise(resolvePromise => setTimeout(resolvePromise, 10));
+      }
+    })(),
+    5000,
+    'force-reap-group-absence',
+    { onStop: () => { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ } } },
+  );
+  expect(groupGone.timedOut).toBe(false);
   // macOS may retain a killed orphan as a zombie until launchd reaps it; kill(pid, 0)
   // reports that PID as present even though it cannot execute or hold resources.
   const grandchildState = spawnSync('ps', ['-o', 'stat=', '-p', String(grandchildPid)], { encoding: 'utf8' });

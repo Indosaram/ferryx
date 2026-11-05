@@ -96,6 +96,21 @@ function receiptsFor(p) {
   ].map((r) => ({ ...r, runId: p.runId, commitSha: p.commitSha }));
 }
 
+const CHECKSUM_TOOL = process.platform === "darwin" || spawnSync("shasum", ["--version"]).status === 0
+  ? ["shasum", ["-a", "256", "-c"]]
+  : ["sha256sum", ["-c"]];
+
+/**
+ * Verify a SHA256SUMS file with whichever of the two tools this platform ships: the BSD/macOS
+ * `shasum -a 256 -c` and the GNU `sha256sum -c` both read the same file format. Naming only
+ * `shasum` makes the check silently meaningless where it is absent (exit status undefined), which
+ * is how a Linux runner reported a pass on the tampering case while its sibling failed.
+ */
+function verifyChecksumsWithHostTool(dir) {
+  const [command, args] = CHECKSUM_TOOL;
+  return spawnSync(command, [...args, CHECKSUMS_NAME], { cwd: dir, encoding: "utf8" });
+}
+
 test("fixture asset dir: SHA256SUMS passes shasum -c, minisig verifies with the test key, SBOMs and provenance present", () => {
   const tmp = mkdtempSync(join(tmpdir(), "ferryx-provenance-"));
   try {
@@ -122,7 +137,7 @@ test("fixture asset dir: SHA256SUMS passes shasum -c, minisig verifies with the 
     assert.deepEqual(listed, expected);
     assert.ok(listed.includes(RUST_SBOM_NAME) && listed.includes(UI_SBOM_NAME) && listed.includes(PROVENANCE_NAME));
 
-    const shasum = spawnSync("shasum", ["-a", "256", "-c", CHECKSUMS_NAME], { cwd: dir, encoding: "utf8" });
+    const shasum = verifyChecksumsWithHostTool(dir);
     assert.equal(shasum.status, 0, shasum.stdout + shasum.stderr);
 
     const verify = spawnSync(MINISIGN, ["-Vm", CHECKSUMS_NAME, "-P", key.pubLine], { cwd: dir, encoding: "utf8" });
@@ -158,7 +173,7 @@ test("tampering one byte of an asset makes shasum -c and the verify CLI exit non
     bytes[0] ^= 0x01;
     writeFileSync(target, bytes);
 
-    assert.notEqual(spawnSync("shasum", ["-a", "256", "-c", CHECKSUMS_NAME], { cwd: dir }).status, 0);
+    assert.notEqual(verifyChecksumsWithHostTool(dir).status, 0);
     const bad = spawnSync(process.execPath, [SCRIPT, "verify", "--dir", dir, "--pubkey", key.publicKey], { encoding: "utf8" });
     assert.equal(bad.status, 1);
     assert.match(bad.stderr, /Checksum mismatch for Ferryx_universal\.dmg/);
@@ -330,7 +345,7 @@ test("release-local assemble publishes signed SHA256SUMS + SBOMs + provenance, a
     const publishDir = join(runDir, "publish");
     for (const name of PROVENANCE_ASSET_NAMES) assert.ok(result.files.includes(name), `${name} not published`);
     assert.ok(result.files.includes("SHA256SUMS.txt"), "legacy SHA256SUMS.txt stays for existing installers");
-    assert.equal(spawnSync("shasum", ["-a", "256", "-c", CHECKSUMS_NAME], { cwd: publishDir }).status, 0);
+    assert.equal(verifyChecksumsWithHostTool(publishDir).status, 0);
     assert.equal(spawnSync(MINISIGN, ["-Vm", CHECKSUMS_NAME, "-P", key.pubLine], { cwd: publishDir }).status, 0);
 
     // On darwin, verify ends with a Gatekeeper check the unsigned fixture DMG cannot pass; it runs
