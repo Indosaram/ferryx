@@ -1367,7 +1367,8 @@ export async function dailyWebviewBefore(ctx) {
     g8.checks.drag_in = Boolean(g8.drag.dropped);
     g8.drop_title = tab(ctx, daily.tabB)?.title ?? null;
     ctx.host.focus();
-    return { ok: g8.checks.upload_picker && g8.checks.drag_in };
+    // The failing stage goes into the step record (it was only inside daily.g8.drag before).
+    return { ok: g8.checks.upload_picker && g8.checks.drag_in, stderr: g8.checks.upload_picker ? g8.drag?.stderr : "UPLOAD_CHOOSER_FAILED: the page title never showed the picked file" };
   });
 
   if (ctx.platform !== "darwin") {
@@ -1778,7 +1779,7 @@ export async function dailyChromium(ctx) {
     g8.checks.drag_in_chromium = Boolean(g8.chromium_drag?.dropped);
     g8.chromium_drop_title = tab(ctx, created.browserId)?.title ?? null;
     ctx.host.focus();
-    return { ok: g8.checks.upload_picker_chromium && g8.checks.drag_in_chromium };
+    return { ok: g8.checks.upload_picker_chromium && g8.checks.drag_in_chromium, stderr: g8.checks.upload_picker_chromium ? (g8.chromium_drag?.stderr ?? (zone ? undefined : "DROPZONE not visible")) : "UPLOAD_CHOOSER_FAILED: the page title never showed the picked file" };
   }
 
   await run(ctx, "daily-g13-pdf-chromium", "Chromium tab: /doc.pdf renders in the PDF viewer, with 2 pages", async () => {
