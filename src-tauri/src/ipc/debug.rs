@@ -88,30 +88,32 @@ pub fn debug_sink_in_flight() -> usize {
     DEBUG_SINK_IN_FLIGHT.load(Ordering::Relaxed)
 }
 
-pub fn reset_debug_sink_metrics_for_test() {
-    DEBUG_SINK_IN_FLIGHT.store(0, Ordering::SeqCst);
-    DEBUG_SINK_DROPS.store(0, Ordering::SeqCst);
-    NATIVE_DEBUG_SEQUENCE.store(0, Ordering::SeqCst);
+pub struct SinkTaskGuard<'a> {
+    in_flight: &'a AtomicUsize,
 }
 
-pub struct SinkTaskGuard;
-
-impl SinkTaskGuard {
+impl SinkTaskGuard<'static> {
     pub fn try_acquire() -> Option<Self> {
-        let in_flight = DEBUG_SINK_IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
-        if in_flight >= MAX_CONCURRENT_SINK_TASKS {
-            DEBUG_SINK_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
-            DEBUG_SINK_DROPS.fetch_add(1, Ordering::Relaxed);
+        Self::try_acquire_with(&DEBUG_SINK_IN_FLIGHT, &DEBUG_SINK_DROPS)
+    }
+}
+
+impl<'a> SinkTaskGuard<'a> {
+    fn try_acquire_with(in_flight: &'a AtomicUsize, drops: &AtomicU64) -> Option<Self> {
+        let previous = in_flight.fetch_add(1, Ordering::SeqCst);
+        if previous >= MAX_CONCURRENT_SINK_TASKS {
+            in_flight.fetch_sub(1, Ordering::SeqCst);
+            drops.fetch_add(1, Ordering::Relaxed);
             None
         } else {
-            Some(Self)
+            Some(Self { in_flight })
         }
     }
 }
 
-impl Drop for SinkTaskGuard {
+impl Drop for SinkTaskGuard<'_> {
     fn drop(&mut self) {
-        DEBUG_SINK_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -466,6 +468,16 @@ fn append_switch_debug_entry(
     file_name: &str,
     entry: &impl Serialize,
 ) -> Result<(), IpcError> {
+    append_switch_debug_entry_with_drops(root, file_name, entry, &DEBUG_SINK_DROPS)
+}
+
+#[cfg(any(feature = "desktop", test))]
+fn append_switch_debug_entry_with_drops(
+    root: &std::path::Path,
+    file_name: &str,
+    entry: &impl Serialize,
+    drops: &AtomicU64,
+) -> Result<(), IpcError> {
     use std::fs::OpenOptions;
     use std::io::Write;
 
@@ -473,7 +485,7 @@ fn append_switch_debug_entry(
         .map_err(|error| IpcError::internal(format!("serialize switch debug entry: {error}")))?;
 
     if serialized.len() > MAX_ENTRY_BYTES {
-        DEBUG_SINK_DROPS.fetch_add(1, Ordering::Relaxed);
+        drops.fetch_add(1, Ordering::Relaxed);
         return Err(IpcError::new(
             IpcErrorCode::PayloadTooLarge,
             format!(
@@ -955,34 +967,35 @@ mod pane_liveness_diagnostics_tests {
 
     #[test]
     fn pane_liveness_diagnostics_sink_concurrency_and_drop_accounting() {
-        reset_debug_sink_metrics_for_test();
+        let in_flight = AtomicUsize::new(0);
+        let drops = AtomicU64::new(0);
         let mut guards = Vec::new();
         for _ in 0..MAX_CONCURRENT_SINK_TASKS {
-            let guard = SinkTaskGuard::try_acquire().expect("acquire slot within bound");
+            let guard = SinkTaskGuard::try_acquire_with(&in_flight, &drops).expect("acquire slot within bound");
             guards.push(guard);
         }
-        assert_eq!(debug_sink_in_flight(), MAX_CONCURRENT_SINK_TASKS);
-        assert_eq!(debug_sink_drop_count(), 0);
+        assert_eq!(in_flight.load(Ordering::SeqCst), MAX_CONCURRENT_SINK_TASKS);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
 
-        let rejected = SinkTaskGuard::try_acquire();
+        let rejected = SinkTaskGuard::try_acquire_with(&in_flight, &drops);
         assert!(rejected.is_none());
-        assert_eq!(debug_sink_drop_count(), 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
 
         drop(guards.pop());
-        assert_eq!(debug_sink_in_flight(), MAX_CONCURRENT_SINK_TASKS - 1);
+        assert_eq!(in_flight.load(Ordering::SeqCst), MAX_CONCURRENT_SINK_TASKS - 1);
 
-        let reacquired = SinkTaskGuard::try_acquire().expect("slot freed after drop");
+        let reacquired = SinkTaskGuard::try_acquire_with(&in_flight, &drops).expect("slot freed after drop");
         guards.push(reacquired);
-        assert_eq!(debug_sink_in_flight(), MAX_CONCURRENT_SINK_TASKS);
-        assert_eq!(debug_sink_drop_count(), 1);
+        assert_eq!(in_flight.load(Ordering::SeqCst), MAX_CONCURRENT_SINK_TASKS);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
 
         drop(guards);
-        assert_eq!(debug_sink_in_flight(), 0);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
     }
 
     #[test]
     fn pane_liveness_diagnostics_entry_size_bound() {
-        reset_debug_sink_metrics_for_test();
+        let drops = AtomicU64::new(0);
         let root = tempfile::tempdir().expect("owned sink root");
         let valid_entry = SwitchDebugEntry {
             run_id: "test-run".into(),
@@ -991,7 +1004,8 @@ mod pane_liveness_diagnostics_tests {
             wall_time_ms: 1000.0,
             details: serde_json::json!({"operationId": "req-1"}),
         };
-        append_switch_debug_entry(root.path(), SWITCH_DEBUG_FILE, &valid_entry).expect("append within bound");
+        append_switch_debug_entry_with_drops(root.path(), SWITCH_DEBUG_FILE, &valid_entry, &drops).expect("append within bound");
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
 
         let oversized_text = "x".repeat(MAX_ENTRY_BYTES + 100);
         let oversized_entry = SwitchDebugEntry {
@@ -1001,9 +1015,12 @@ mod pane_liveness_diagnostics_tests {
             wall_time_ms: 1001.0,
             details: serde_json::json!({"operationId": oversized_text}),
         };
-        let err = append_switch_debug_entry(root.path(), SWITCH_DEBUG_FILE, &oversized_entry);
-        assert!(err.is_err());
-        assert_eq!(debug_sink_drop_count(), 1);
+        let err = append_switch_debug_entry_with_drops(root.path(), SWITCH_DEBUG_FILE, &oversized_entry, &drops);
+        assert_eq!(err.unwrap_err().code, IpcErrorCode::PayloadTooLarge);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        let saved = std::fs::read_to_string(root.path().join(SWITCH_DEBUG_FILE)).unwrap();
+        assert_eq!(saved.lines().count(), 1);
+        assert_eq!(serde_json::from_str::<SwitchDebugEntry>(saved.trim()).unwrap(), valid_entry);
         close_cached_switch_debug_files();
         root.close().expect("remove owned sink");
     }

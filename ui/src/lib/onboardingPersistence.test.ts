@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { hydrateOnboardingState, markOnboardingStepsCompleted, loadOnboardingState, ONBOARDING_STEP_ORDER, initialWizardStepIndex } from "./onboarding";
 import { ONBOARDING_STORAGE_KEY } from "./storageKeys";
+import { withTimeout } from "./withTimeout";
 
 const ipc = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: ipc.invoke }));
@@ -22,7 +23,7 @@ it("hydrates the file or daemon winner instead of trusting the browser cache", a
   expect(initialWizardStepIndex(ONBOARDING_STEP_ORDER, state, {
     permissions: null, agents: null, cli: null, projectCount: 0,
     enrollmentReady: false, skillsReady: false,
-  })).toBe(3);
+  })).toBe(ONBOARDING_STEP_ORDER.indexOf("enroll"));
 });
 
 it("serializes completion writes before the next hydration", async () => {
@@ -38,4 +39,24 @@ it("serializes completion writes before the next hydration", async () => {
     "cmd_onboarding_set", "cmd_onboarding_set", "cmd_onboarding_get",
   ]);
   expect(loadOnboardingState().completedSteps).toEqual(["intro", "features"]);
+});
+
+it("reads the migration cache after pending writes have completed", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const saved = { version: 1, completedSteps: ["intro", "features"], dismissed: false };
+  ipc.invoke.mockImplementation(async (command: string, args: { cache?: unknown }) => {
+    if (command === "cmd_onboarding_set") {
+      await gate;
+      localStorage.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(saved));
+      return saved;
+    }
+    return args.cache;
+  });
+  markOnboardingStepsCompleted(["intro"]);
+  const hydration = hydrateOnboardingState();
+  release();
+  expect(await withTimeout(hydration, 1_000, "onboarding persistence completion")).toEqual(saved);
+  expect(ipc.invoke).toHaveBeenLastCalledWith("cmd_onboarding_get", { cache: saved });
 });
