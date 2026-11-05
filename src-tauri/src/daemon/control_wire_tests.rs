@@ -67,11 +67,43 @@ fn request_line(server: &DaemonServer, request: &DaemonRequest) -> String {
     line
 }
 
-/// Sends one data-protocol request over handle_client and returns the one-line response.
+/// Sends one data-protocol request over handle_client and returns the one-line response. The
+/// adapter stamps this process as the peer, so the request is authorized as the owner.
 async fn data_exchange(server: &Arc<DaemonServer>, request: DaemonRequest) -> DaemonResponse {
     let (client, server_side) = tokio::io::duplex(64 * 1024);
     let handler = Arc::clone(server);
     let serving = tokio::spawn(async move { handler.handle_client(server_side).await });
+    read_reply(server, request, client, serving).await
+}
+
+/// Sends one data-protocol request as a connection whose peer the daemon cannot identify.
+async fn data_exchange_from_unknown_peer(
+    server: &Arc<DaemonServer>,
+    request: DaemonRequest,
+) -> DaemonResponse {
+    let (client, server_side) = tokio::io::duplex(64 * 1024);
+    let handler = Arc::clone(server);
+    let serving = tokio::spawn(async move {
+        handler
+            .handle_client_with_origin(
+                server_side,
+                crate::daemon::supervisor_peer::PeerOrigin::Unknown,
+                None,
+            )
+            .await
+    });
+    read_reply(server, request, client, serving).await
+}
+
+async fn read_reply<C>(
+    server: &Arc<DaemonServer>,
+    request: DaemonRequest,
+    client: C,
+    serving: tokio::task::JoinHandle<()>,
+) -> DaemonResponse
+where
+    C: tokio::io::AsyncRead + tokio::io::AsyncWrite,
+{
     let (read_half, mut write_half) = tokio::io::split(client);
     write_half.write_all(request_line(server, &request).as_bytes()).await.unwrap();
     let mut line = String::new();
@@ -1009,7 +1041,7 @@ async fn a_supervisor_mutation_from_outside_the_panes_reaches_the_service() {
 async fn a_supervisor_mutation_from_an_unidentified_peer_is_forbidden() {
     let server = Arc::new(DaemonServer::new());
     for request in [pause_request(), dispatch_submit(), mcp_submit(), setup_run(), setup_adopt_all()] {
-        match data_exchange(&server, request.clone()).await {
+        match data_exchange_from_unknown_peer(&server, request.clone()).await {
             DaemonResponse::Error { code, .. } => {
                 assert_eq!(code.as_deref(), Some("FORBIDDEN"), "{request:?}")
             }
