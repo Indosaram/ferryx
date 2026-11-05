@@ -409,6 +409,13 @@ const win = {
   click(x, y) {
     return this.ps("click", ["-Hwnd", this.hwnd, "-Width", String(x), "-Height", String(y)]);
   },
+  /** Which window owns screen point (x, y); Windows only, null elsewhere. */
+  hit(x, y) {
+    const result = this.ps("hit", ["-Width", String(x), "-Height", String(y)]);
+    if (!result.ok) return null;
+    const [hwnd, className, pid, left, top, right, bottom, root] = result.stdout.trim().split(/\s+/);
+    return { hwnd: Number(hwnd), className, pid: Number(pid), rect: [Number(left), Number(top), Number(right), Number(bottom)], root: Number(root) };
+  },
   rightClick(x, y) {
     return this.ps("rclick", ["-Width", String(x), "-Height", String(y)]);
   },
@@ -466,6 +473,21 @@ public static class FxInput {
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder name, int max);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
+  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  /** Which window owns screen point (x, y): its hwnd, class, pid and rect. */
+  public static string Hit(int x, int y) {
+    var p = new POINT(); p.X = x; p.Y = y;
+    var h = WindowFromPoint(p);
+    if (h == IntPtr.Zero) return "0 none 0 0 0 0 0";
+    uint pid; GetWindowThreadProcessId(h, out pid);
+    var name = new System.Text.StringBuilder(128); GetClassName(h, name, 128);
+    RECT r; GetWindowRect(h, out r);
+    var root = GetAncestor(h, 2);
+    return ((long)h).ToString() + " " + name.ToString() + " " + pid.ToString() + " " + r.Left + " " + r.Top + " " + r.Right + " " + r.Bottom + " " + ((long)root).ToString();
+  }
   [StructLayout(LayoutKind.Sequential)] public struct GUITHREADINFO { public int cbSize; public uint flags; public IntPtr hwndActive; public IntPtr hwndFocus; public IntPtr hwndCapture; public IntPtr hwndMenuOwner; public IntPtr hwndMoveSize; public IntPtr hwndCaret; public RECT rcCaret; }
   [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint thread, ref GUITHREADINFO info);
   /** "<focus hwnd> <its process id>" of the foreground thread's keyboard focus (a child HWND of
@@ -550,6 +572,7 @@ switch ($Action) {
   "keys" { [void][FxInput]::Focus($handle); $n = [FxInput]::Chord([uint16[]]($Codes -split "," | ForEach-Object { [uint16]$_ })); if ($n -eq 0) { exit 4 } }
   "type" { [void][FxInput]::Focus($handle); $n = [FxInput]::Type($Text); if ($n -eq 0) { exit 4 } }
   "click" { $n = [FxInput]::Click($Width, $Height); if ($n -eq 0) { exit 4 } }
+  "hit" { Write-Output ([FxInput]::Hit($Width, $Height)) }
   "rclick" { [void][FxInput]::SetCursorPos($Width, $Height); $n = [FxInput]::Button($Width, $Height, 0x0008) + [FxInput]::Button($Width, $Height, 0x0010); if ($n -eq 0) { exit 4 } }
   "typeraw" { $n = [FxInput]::Type($Text); if ($n -eq 0) { exit 4 } }
   "keysraw" { $n = [FxInput]::Chord([uint16[]]($Codes -split "," | ForEach-Object { [uint16]$_ })); if ($n -eq 0) { exit 4 } }

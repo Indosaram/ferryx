@@ -1292,6 +1292,9 @@ export async function dailyWebviewBefore(ctx) {
       ? [prompt.not.left - 40, prompt.not.top + Math.round(prompt.not.height / 2)]
       : [buttons[0].left + Math.round(buttons[0].width / 2), buttons[0].top + Math.round(buttons[0].height / 2)];
     g3.save_click = { at, via: onlySentence ? "40px left of 'Not now'" : "ocr 'Save'" };
+    // Which window owns that pixel. A child webview covering the bar would name the engine's
+    // process/class here; the app's own chrome names the Ferryx window or its WRY_WEBVIEW child.
+    if (ctx.host.hit) g3.save_click_hit = ctx.host.hit(...at);
     ctx.host.click(...at);
     const vault = await until(() => (readJson(join(ctx.dirs.data, "browser-vault", "vault.json"))?.items?.length ?? 0) > 0, 10000);
     g3.checks.saved = Boolean(vault);
@@ -1562,7 +1565,10 @@ export async function dailyWebviewBefore(ctx) {
     ctx.host.focus();
     const wants = screenWords(ctx).find((word) => /^wants$/i.test(word.text));
     const allowAt = wants ? findAllowButton(ctx, wants) : null;
-    if (allowAt) ctx.host.click(...allowAt);
+    if (allowAt) {
+      if (ctx.host.hit) g6.allow_click_hit = ctx.host.hit(...allowAt);
+      ctx.host.click(...allowAt);
+    }
     const activate = await activateTab(ctx, daily.tabB, null);
     const shown = await visit(ctx, `${fixtureBase}/qa/second.html`, "SECONDTAB");
     daily.tabB = tabAt(ctx, "/qa/second.html")?.browserId ?? daily.tabB;
@@ -1798,6 +1804,7 @@ export async function dailyChromium(ctx) {
     g8.chromium_nav = await chromiumNavigate(created.browserId, `${fixtureBase}/upload.html`);
     await waitWords(ctx, ["uploadpick"], 15000);
     const pick = await clickWord(ctx, (text) => /UPLOADPICK/i.test(text), { timeout: 8000 });
+    if (pick && ctx.host.hit) g8.chromium_pick_hit = ctx.host.hit(...pick);
     // No UPLOADPICK click, no dialog: typing the path would go into the page or the address bar.
     g8.chromium_picker_answer = pick ? await answerOpenDialog(ctx, file.path) : { via: "none", stderr: "UPLOADPICK not clicked" };
     const picked = pick ? await until(() => tab(ctx, created.browserId)?.title === `picked:${file.name}:${file.size}`, 12000) : null;
