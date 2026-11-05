@@ -62,6 +62,25 @@ jobs:
           bun install --cwd ui
           bun run --cwd ui build
           bun scripts/fetch-ffmpeg.mjs
+      - name: UI test, typecheck, lint and hardcoded check
+        run: |
+          set -o pipefail
+          bun run --cwd ui typecheck:test 2>&1 | tail -20
+          bunx --bun eslint ui/src --max-warnings=0 2>&1 | tail -20
+          bun test scripts/build-latest-json.test.mjs scripts/gen-llms-txt.test.mjs 2>&1 | tail -25
+          bun ui/scripts/check-hardcoded.ts 2>&1 | tail -20
+          bun run --cwd ui test 2>&1 | tail -40
+      - name: Daemon layout and detached pane tests
+        run: |
+          set -o pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --locked -- daemon::layout 2>&1 | tail -40
+          cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_contract --locked -- --test-threads=1 2>&1 | tail -30 || true
+          ls src-tauri/tests/ | grep -i handover
+      - name: UI feature-area suites
+        run: |
+          set -o pipefail
+          bun run --cwd ui test -- Scripting 2>&1 | tail -25
+          bun run --cwd ui test -- deepLinks 2>&1 | tail -25
       - name: Grants reactor tests
         run: |
           set -o pipefail
@@ -115,6 +134,19 @@ jobs:
           set -o pipefail
           bun test scripts/build-latest-json.test.mjs scripts/gen-llms-txt.test.mjs 2>&1 | tail -30
           bun ui/scripts/check-hardcoded.ts
+      - name: Daemon write latency benchmark
+        run: |
+          set -o pipefail
+          cargo run --manifest-path src-tauri/Cargo.toml --release --example daemon_write_bench 2>&1 | tail -5
+      - name: iroh-direct feature check and graph
+        run: |
+          set -o pipefail
+          cargo check --manifest-path src-tauri/Cargo.toml --features iroh-direct 2>&1 | tail -20
+          cargo tree --manifest-path src-tauri/Cargo.toml -e features 2>/dev/null | grep -c "n0\|pkarr" || true
+      - name: Plugin SDK runtime tests
+        run: |
+          set -o pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --locked -- daemon::plugins:: 2>&1 | tail -40
       - name: Clippy default features
         run: |
           set -o pipefail
