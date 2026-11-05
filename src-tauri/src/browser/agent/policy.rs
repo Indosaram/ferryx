@@ -293,6 +293,8 @@ pub fn classify_cli(request: &BrowserCliRequest) -> Result<Classification, Autho
         R::Highlight { browser_id, .. } => {
             Classification::new(ToolId::Highlight, browser(browser_id))
         }
+        // Injects page input (a file drop), so it needs eval-level authority.
+        R::DropFiles { browser_id, .. } => Classification::new(ToolId::Eval, browser(browser_id)),
         R::RemoteAttach { .. } => Classification::new(ToolId::RemoteAttach, Target::Global),
         R::Extensions { action, .. } => {
             let tool = match action.as_str() {
@@ -955,6 +957,15 @@ mod tests {
                     duration_ms: None,
                 },
                 ToolId::Highlight,
+            ),
+            (
+                BrowserCliRequest::DropFiles {
+                    browser_id: id(),
+                    path: "/tmp/a.txt".into(),
+                    x: 1.into(),
+                    y: 1.into(),
+                },
+                ToolId::Eval,
             ),
             (
                 BrowserCliRequest::RemoteAttach {

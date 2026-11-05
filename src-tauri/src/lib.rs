@@ -28,6 +28,8 @@ pub mod host_boot;
 pub mod ipc;
 #[cfg(all(feature = "desktop", target_os = "macos"))]
 pub mod macos_file_drop;
+#[cfg(all(feature = "desktop", target_os = "linux"))]
+pub mod linux_file_drop;
 pub mod native_terminal;
 pub mod notification;
 pub mod paired_host;
@@ -1035,7 +1037,14 @@ pub(crate) fn configure_app_window<R: tauri::Runtime>(
         release_macos_window_drag_destination(window)?;
         install_macos_file_drop_destination(window)?;
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        let _ = window.set_focus();
+        if let Err(error) = crate::linux_file_drop::install(window) {
+            tracing::warn!("failed to install the Linux file drop destination: {error}");
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = window.set_focus();
     }

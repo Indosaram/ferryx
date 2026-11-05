@@ -189,6 +189,13 @@ pub enum BrowserCliCommand {
         selector: String,
         duration_ms: Option<u64>,
     },
+    /// QA probe: drops the file at `path` on the page at viewport point (`x`, `y`), CSS pixels.
+    DropFiles {
+        browser_id: String,
+        path: String,
+        x: serde_json::Number,
+        y: serde_json::Number,
+    },
     /// `extensions list` or `extensions remove <id>` (`--profile <id>`, default profile when
     /// absent).
     Extensions {
@@ -651,6 +658,25 @@ where
                 browser_id,
                 selector,
                 duration_ms,
+            })
+        }
+        Some("drop-files") => {
+            let browser_id = required_option(&args, "--browser-id")?;
+            let path = required_option(&args, "--path")?;
+            let coordinate = |name: &str| -> Result<serde_json::Number, String> {
+                required_option(&args, name)?
+                    .parse::<f64>()
+                    .ok()
+                    .and_then(serde_json::Number::from_f64)
+                    .ok_or_else(|| format!("{name} must be a number"))
+            };
+            let x = coordinate("--x")?;
+            let y = coordinate("--y")?;
+            Ok(BrowserCliCommand::DropFiles {
+                browser_id,
+                path,
+                x,
+                y,
             })
         }
         Some("cookies") => {
@@ -2154,6 +2180,17 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
             browser_id,
             selector,
             duration_ms,
+        },
+        BrowserCliCommand::DropFiles {
+            browser_id,
+            path,
+            x,
+            y,
+        } => BrowserCliRequest::DropFiles {
+            browser_id,
+            path,
+            x,
+            y,
         },
         BrowserCliCommand::Extensions { action, extension_id, profile } => {
             BrowserCliRequest::Extensions { action, extension_id, profile }
@@ -3898,6 +3935,11 @@ fn format_browser_cli_response(
             }))
             .map_err(|error| error.to_string())
         }
+        BrowserCliResponse::FilesDropped { calls } => serde_json::to_string(&serde_json::json!({
+            "type": "filesDropped",
+            "calls": calls
+        }))
+        .map_err(|error| error.to_string()),
         BrowserCliResponse::Extensions { listing } => {
             serde_json::to_string(&listing).map_err(|error| error.to_string())
         }
@@ -8880,6 +8922,65 @@ mod tests {
             ])
             .unwrap_err(),
             "--duration-ms must be an unsigned integer"
+        );
+    }
+
+    #[test]
+    fn browser_drop_files_cli_parsing_and_mapping() {
+        let command = parse_browser_cli([
+            "ferryx",
+            "browser",
+            "drop-files",
+            "--browser-id",
+            "b-1",
+            "--path",
+            "/tmp/a.txt",
+            "--x",
+            "120.5",
+            "--y",
+            "40",
+        ])
+        .expect("parse drop-files");
+        assert_eq!(
+            browser_cli_request(command),
+            BrowserCliRequest::DropFiles {
+                browser_id: "b-1".into(),
+                path: "/tmp/a.txt".into(),
+                x: serde_json::Number::from_f64(120.5).unwrap(),
+                y: serde_json::Number::from_f64(40.0).unwrap(),
+            }
+        );
+
+        assert!(
+            parse_browser_cli([
+                "ferryx",
+                "browser",
+                "drop-files",
+                "--browser-id",
+                "b-1",
+                "--x",
+                "1",
+                "--y",
+                "1"
+            ])
+            .is_err()
+        );
+        assert_eq!(
+            parse_browser_cli([
+                "ferryx",
+                "browser",
+                "drop-files",
+                "--browser-id",
+                "b-1",
+                "--path",
+                "/tmp/a.txt",
+                "--x",
+                "left",
+                "--y",
+                "1"
+            ])
+            .unwrap_err(),
+            "--x must be a number"
         );
     }
 

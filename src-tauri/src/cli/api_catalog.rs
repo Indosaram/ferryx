@@ -315,6 +315,7 @@ pub const CATALOG: &[Command] = &[
             ),
             sub!("screenshot", &[], &[BROWSER_ID, required!("--out")]),
             sub!("highlight", &[], &[BROWSER_ID, required!("--selector"), value!("--duration-ms")]),
+            sub!("drop-files", &[], &[BROWSER_ID, required!("--path"), required!("--x"), required!("--y")]),
             sub!("console", &[], &[BROWSER_ID, switch!("--errors"), switch!("--clear")]),
             sub!("errors", &[], &[BROWSER_ID, switch!("--clear")]),
             sub!("focus", &[], &[BROWSER_ID, value!("--generation"), value!("--ref")]),

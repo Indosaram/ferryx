@@ -81,7 +81,7 @@ if(p==='granted'){new Notification('ferryx-qa',{body:'ferryx qa body'});document
 <label id=pick>UPLOADPICK<input id=f type=file></label><div id=drop>DROPZONE</div>
 <script>f.addEventListener('change',()=>{const x=f.files[0];document.title=x?'picked:'+x.name+':'+x.size:'picked:none'});
 for(const t of ['dragenter','dragover'])drop.addEventListener(t,(e)=>{e.preventDefault();drop.textContent='DROPHOVER'});
-drop.addEventListener('drop',(e)=>{e.preventDefault();const x=e.dataTransfer.files[0];document.title=x?'dropped:'+x.name+':'+x.size:'dropped:none';drop.textContent='DROPPED'})</script>`;
+drop.addEventListener('drop',(e)=>{e.preventDefault();const d=e.dataTransfer,x=d.files[0];drop.dataset.info=JSON.stringify({types:[...d.types],files:d.files.length,uris:d.getData('text/uri-list')});document.title=x?'dropped:'+x.name+':'+x.size:'dropped:none';drop.textContent='DROPPED'})</script>`;
   const cookies = (request) => {
     const header = request.headers.get("cookie") ?? "";
     return page(`cookies:${header || "none"}`, "COOKIES", `<p>COOKIES:${header || "none"}</p>`);
@@ -938,6 +938,29 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
   }
 }
 
+/** The drop handler's record of the upload fixture's last drop, read through the CLI. */
+async function dropData(ctx, browserId) {
+  const read = await ctx.cliAsync("eval", "--browser-id", browserId, "--script", "document.getElementById('drop').dataset.info || null");
+  return read.ok ? read.stdout : { stderr: read.stderr };
+}
+
+/** Stage-1 probe: drops `file` on #drop through `ferryx browser drop-files` (CDP Input.dispatchDragEvent) and reads what the page got. */
+async function cdpDropProbe(ctx, browserId, file) {
+  // Clears what the real drag left (title "dropped:...", #drop's record) so only this drop can set them.
+  const at = await ctx.cliAsync("eval", "--browser-id", browserId, "--script", "(document.title = 'cdpprobe', delete document.getElementById('drop').dataset.info, JSON.stringify((r => [r.x + r.width / 2, r.y + r.height / 2])(document.getElementById('drop').getBoundingClientRect())))");
+  const point = at.ok ? parseEval(at.stdout) : null;
+  if (!Array.isArray(point)) return { verdict: "CDP_DROP_PROBE_NO_POINT", eval: { ok: at.ok, stdout: at.stdout, stderr: at.stderr } };
+  const sent = await ctx.cliAsync("drop-files", "--browser-id", browserId, "--path", file.path, "--x", String(point[0]), "--y", String(point[1]));
+  // stdout is {"type":"filesDropped","calls":[{event, ok, result|error}]}; a CDP failure still exits 0.
+  let calls = null;
+  try { calls = JSON.parse(sent.stdout).calls ?? null; } catch { calls = null; }
+  const delivered = sent.ok && Array.isArray(calls) && calls.length === 3 && calls.every((call) => call.ok);
+  const title = await until(() => (tab(ctx, browserId)?.title ?? "").startsWith("dropped:") ? tab(ctx, browserId).title : null, 5000, 500);
+  const data = await dropData(ctx, browserId);
+  const verdict = !delivered ? "CDP_DROP_REFUSED" : title === `dropped:${file.name}:${file.size}` ? "CDP_DROP_DELIVERED" : title ? "CDP_DROP_NO_FILES" : "CDP_DROP_NOT_RECEIVED";
+  return { verdict, point, sent: { ok: sent.ok, stdout: sent.stdout, stderr: sent.stderr }, calls, title, data };
+}
+
 /** The Finder icon above the selected item's blue label highlight, or null. */
 function finderSelection(ctx) {
   const image = ctx.decodePng(ctx.probeShot());
@@ -1370,9 +1393,16 @@ export async function dailyWebviewBefore(ctx) {
     if (!zone) return { ok: false, stderr: "DROPZONE not visible" };
     g8.drag = await dragFileTo(ctx, file, zone, { verify: () => until(() => tab(ctx, daily.tabB)?.title === `dropped:${file.name}:${file.size}`, 8000) });
     g8.checks.drag_in = Boolean(g8.drag.dropped);
+    // How far the drag got, read off the page: DROPHOVER = dragover reached the zone,
+    // DROPPED = the drop handler ran (with the title saying whether files arrived).
+    g8.drop_zone_text = screenWords(ctx).find((word) => /^DROP(ZONE|HOVER|PED)$/i.test(word.text))?.text ?? null;
+    // What the engine handed the page on drop (types, files.length, text/uri-list); null when
+    // the drop handler never ran. Diagnostic only: the check above still needs the file.
+    g8.webview_drop_data = await dropData(ctx, daily.tabB);
     g8.drop_title = tab(ctx, daily.tabB)?.title ?? null;
     ctx.host.focus();
-    return { ok: g8.checks.upload_picker && g8.checks.drag_in };
+    // The failing stage goes into the step record (it was only inside daily.g8.drag before).
+    return { ok: g8.checks.upload_picker && g8.checks.drag_in, stderr: g8.checks.upload_picker ? g8.drag?.stderr : "UPLOAD_CHOOSER_FAILED: the page title never showed the picked file" };
   });
 
   if (ctx.platform !== "darwin") {
@@ -1781,9 +1811,14 @@ export async function dailyChromium(ctx) {
     }, 8000);
     if (zone) g8.chromium_drag = await dragFileTo(ctx, file, zone, { verify: () => until(() => tab(ctx, created.browserId)?.title === `dropped:${file.name}:${file.size}`, 8000) });
     g8.checks.drag_in_chromium = Boolean(g8.chromium_drag?.dropped);
+    g8.chromium_drop_zone_text = screenWords(ctx).find((word) => /^DROP(ZONE|HOVER|PED)$/i.test(word.text))?.text ?? null;
+    g8.chromium_drop_data = await dropData(ctx, created.browserId);
     g8.chromium_drop_title = tab(ctx, created.browserId)?.title ?? null;
+    // Stage-1 probe, Linux only: can the engine hand the page real File objects from a CDP drop
+    // alone (no X drag)? Diagnostic: runs after the real-drag check above and changes no check.
+    if (ctx.platform === "linux" && zone) g8.chromium_cdp_drop_probe = await cdpDropProbe(ctx, created.browserId, file);
     ctx.host.focus();
-    return { ok: g8.checks.upload_picker_chromium && g8.checks.drag_in_chromium };
+    return { ok: g8.checks.upload_picker_chromium && g8.checks.drag_in_chromium, stderr: g8.checks.upload_picker_chromium ? (g8.chromium_drag?.stderr ?? (zone ? undefined : "DROPZONE not visible")) : "UPLOAD_CHOOSER_FAILED: the page title never showed the picked file" };
   }
 
   await run(ctx, "daily-g13-pdf-chromium", "Chromium tab: /doc.pdf renders in the PDF viewer, with 2 pages", async () => {
