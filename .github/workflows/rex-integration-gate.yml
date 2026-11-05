@@ -88,6 +88,12 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract --locked -- --test-threads=1 layout_survives_handover detached_survives_handover 2>&1 | tail -25
           bun run --cwd ui test -- Detached 2>&1 | tail -20
           bun scripts/release-workflow-policy.mjs 2>&1 | tail -5
+      - name: Extended fuzz and UI build
+        run: |
+          set -o pipefail
+          PROPTEST_CASES=20000 cargo test --manifest-path src-tauri/Cargo.toml --release --lib --locked -- terminal::fuzz_tests 2>&1 | tail -20
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --locked -- terminal::vt_stream::osc1337 2>&1 | tail -15
+          bun run --cwd ui build 2>&1 | tail -20
       - name: Grants reactor tests
         run: |
           set -o pipefail
