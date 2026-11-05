@@ -21,6 +21,7 @@ import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
+import { captureLocalIdentity } from './f1-process-identity.mjs';
 
 export const APPROVAL_COMMAND = 'sqlx migrate run --database-url postgres://app@db.prod.example.net:5432/app';
 
@@ -31,10 +32,12 @@ const [role, label, proxyUrl] = readFileSync(modeFile, 'utf8').trim().split(/\s+
 const logFile = join(logDir, `pane-${process.pid}.jsonl`);
 const sessionId = process.env.FERRYX_SESSION_ID ?? null;
 const socket = process.env.FERRYX_AGENT_STATE_SOCKET ?? null;
+// Only namespace-local facts belong to the pane; the outer helper writes host mappings.
+const identity = captureLocalIdentity();
 
 function record(value) {
   try {
-    appendFileSync(logFile, `${JSON.stringify({ at: new Date().toISOString(), atMs: Date.now(), pid: process.pid, label, role, sessionId, ...value })}\n`);
+    appendFileSync(logFile, `${JSON.stringify({ at: new Date().toISOString(), atMs: Date.now(), pid: process.pid, identity, label, role, sessionId, ...value })}\n`);
   } catch { /* the run root may be gone */ }
 }
 

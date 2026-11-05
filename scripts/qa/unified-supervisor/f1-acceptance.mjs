@@ -40,6 +40,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AgentChannel, backoffDelay, RECONNECT_BUDGET_MS } from './f1-agent-link.mjs';
+import { fleetTeardownClean } from './f1-process-identity.mjs';
 import { HarnessError, isInside, POSIX } from './harness.mjs';
 
 export const F1_REQUIRED_ASSERTIONS = Object.freeze([
@@ -570,7 +571,7 @@ export async function runF1Acceptance(ctx, deps) {
     evidence.teardown = receipts;
     evidence.agentLinks = agents.map((agent) => ({ agent: agent.id, state: agent.channel.state, lastOseq: agent.channel.lastOseq, links: agent.channel.links, events: agent.channel.events }));
     if (!ctx.signal.aborted && agents.length > 0) {
-      const clean = receipts.every((r) => !r.error && (r.daemons ?? []).every((d) => d.exited) && (r.panes ?? []).every((p) => !p.aliveAtTeardown || p.signalled));
+      const clean = fleetTeardownClean(receipts);
       try { clause('fleet-teardown-clean', clean, { receipts }); } catch { /* recorded late; the run fails */ }
     }
     writeEvidence();
